@@ -1,7 +1,7 @@
-# Godot Voxel Surport
-[English](https://github.com/QinZhuo/GodotVoxelSurport/blob/main/README.md) | [中文](https://github.com/QinZhuo/GodotVoxelSurport/blob/main/zh/README.md)
+# Godot Voxel Support
+[English](https://github.com/QinZhuo/GodotVoxelSupport/blob/main/README.md) | [中文](https://github.com/QinZhuo/GodotVoxelSupport/blob/main/zh/README.md)
 
-[Github](https://github.com/QinZhuo/GodotVoxelSurport) • [Asset Library](https://godotengine.org/asset-library/asset/4480)
+[Github](https://github.com/QinZhuo/GodotVoxelSupport) • [Asset Library](https://godotengine.org/asset-library/asset/4480)
 
 > MagicaVoxel large voxel model support, faster import speed, automatic material mapping
 

@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="Voxel Surport"
+config/name="Voxel Support"
 config/tags=PackedStringArray("tool")
 run/main_scene="uid://dl2c605m5it3r"
 config/features=PackedStringArray("4.5", "Forward Plus")
@@ -18,7 +18,7 @@ config/icon="uid://cgau3n3ynxu2"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/VoxelSurport/plugin.cfg")
+enabled=PackedStringArray("res://addons/VoxelSupport/plugin.cfg")
 
 [importer_defaults]
 
