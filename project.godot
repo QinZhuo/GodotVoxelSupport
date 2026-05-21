@@ -8,12 +8,16 @@
 
 config_version=5
 
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
+
 [application]
 
 config/name="Voxel Support"
 config/tags=PackedStringArray("tool")
 run/main_scene="uid://dl2c605m5it3r"
-config/features=PackedStringArray("4.5", "Forward Plus")
+config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="uid://cgau3n3ynxu2"
 
 [editor_plugins]
@@ -28,9 +32,9 @@ MagicaVoxel.With.Extensions.To.Mesh={
 "Scale": 0.1,
 "SnapToGround": false
 }
-voxel_surport.link_res.vol.array_mesh={
+voxel_support.link_res.vol.array_mesh={
 &"add_uv2": true
 }
-voxel_surport.vol.array_mesh={
+voxel_support.vol.array_mesh={
 &"add_uv2": true
 }
