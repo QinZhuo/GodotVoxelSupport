@@ -147,6 +147,7 @@ func generate_material(save_path: String = "") -> StandardMaterial3D:
 		material.metallic_texture = generate_metal_textrue(save_path)
 		material.roughness_texture = generate_rough_textrue(save_path)
 		material.emission_texture = generate_emission_textrue(save_path)
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 		if save_path:
 			material.resource_path = path
 			ResourceSaver.save(material)
@@ -164,8 +165,9 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 	if material is StandardMaterial3D:
 		material.refraction_enabled = true
 		material.refraction_scale = 0.01
-		material.emission_enabled = false
+		material.emission_enabled = false 
 		material.transparency = BaseMaterial3D.Transparency.TRANSPARENCY_ALPHA
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 		if save_path:
 			material.resource_path = path
 			ResourceSaver.save(material)
@@ -315,13 +317,14 @@ func _generate_voxel_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i,
 
 func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, size: Vector3, dir: int, surfaces: Array[SurfaceTool]):
 	var id: int = voxels[pos]
-	var uv := Vector2((id + 0.5) / 256.0, 0.5)
 
 	var surface := surfaces[0] if not voxel.materials[id].is_transparent else surfaces[1]
 
 	surface.set_normal(FaceTool.Normals[dir])
 	for point: Vector3 in FaceTool.Faces[dir]:
-		surface.set_uv(uv)
+		var u := (id + point[axis.z]) / 256.0
+		var v := point[axis.y]
+		surface.set_uv(Vector2(u, v))
 		surface.add_vertex((point * size + Vector3(pos)) * scale)
 
 	var cur_pos := pos
