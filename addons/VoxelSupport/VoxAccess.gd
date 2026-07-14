@@ -1,6 +1,6 @@
 class_name VoxAccess
 ## 加载.vox文件方法
-## 已经过大量优化 可以快速加载完大型文件 大块数据加载到buffer后再读取 不要使用FileAccess的get函数 速度很慢 
+## 已经过大量优化 可以快速加载完大型文件 大块数据加载到buffer后再读取 不要使用FileAccess的get函数 速度很慢
 
 static func Open(path: String) -> VoxAccess:
 	var time = Time.get_ticks_usec()
@@ -12,7 +12,7 @@ static func Open(path: String) -> VoxAccess:
 	if file.get_32() != 0x20584F56:
 		file.close()
 		return null
-		
+
 	var version = file.get_32()
 	var vox := VoxAccess.new(file)
 	prints("open .vox time:", (Time.get_ticks_usec() - time) / 1000.0, "ms")
@@ -23,24 +23,24 @@ static var rot_cache: Array
 static func decode_rotation(byte_value: int) -> Basis:
 	if rot_cache[byte_value] != null:
 		return rot_cache[byte_value]
-	
+
 	var row0_index = byte_value & 3
 	var row1_index = (byte_value >> 2) & 3
 	var row2_index = 3 - row0_index - row1_index
-	
+
 	var sign0 = 1 if ((byte_value >> 4) & 1) == 0 else -1
 	var sign1 = 1 if ((byte_value >> 5) & 1) == 0 else -1
 	var sign2 = 1 if ((byte_value >> 6) & 1) == 0 else -1
-	
+
 	var cols = [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
 	cols[row0_index].x = sign0
 	cols[row1_index].y = sign1
 	cols[row2_index].z = sign2
-	
+
 	var col0 = cols[0]
 	var col1 = cols[1]
 	var col2 = cols[2]
-	
+
 	var godot_col0 = Vector3(col0.x, col0.z, -col0.y)
 	var godot_col1 = Vector3(col2.x, col2.z, -col2.y)
 	var godot_col2 = Vector3(-col1.x, -col1.z, col1.y)
@@ -131,12 +131,12 @@ func read_chunk():
 					"_emit":
 						material.emission = float(attributes.get("_emit", 0))
 					"_glass":
-						material.trans = float(attributes.get("_trans", 1))
+						material.trans = float(attributes.get("_trans", 0))
 						material.rough = float(attributes.get("_rough", 0))
 					"_blend":
 						material.metal = float(attributes.get("_metal", 0))
 						material.rough = float(attributes.get("_rough", 0))
-						material.trans = float(attributes.get("_trans", 1))
+						material.trans = float(attributes.get("_trans", 0))
 					_:
 						material.metal = 0
 						material.rough = 1
@@ -150,7 +150,7 @@ func read_chunk():
 			pass
 
 	_file.seek(end)
-	
+
 func _get_32() -> int:
 	return _file.get_32()
 
