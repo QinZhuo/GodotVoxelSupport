@@ -124,6 +124,8 @@ func read_chunk():
 				var material := voxel.materials[material_id]
 				var attributes := _get_dictionary()
 				var type = attributes.get("_type", "diffuse")
+				if material_id == 1:
+					print_rich("material_", material_id, " ", "[color=#", material.color.to_html(), "]", material.color, "[/color]  ", attributes)
 				match type:
 					"_metal":
 						material.metal = float(attributes.get("_metal", 0))
@@ -131,12 +133,12 @@ func read_chunk():
 					"_emit":
 						material.emission = float(attributes.get("_emit", 0))
 					"_glass":
-						material.trans = float(attributes.get("_trans", 0))
+						material.trans = get_trans(attributes)
 						material.rough = float(attributes.get("_rough", 0))
 					"_blend":
 						material.metal = float(attributes.get("_metal", 0))
 						material.rough = float(attributes.get("_rough", 0))
-						material.trans = float(attributes.get("_trans", 0))
+						material.trans = get_trans(attributes)
 					_:
 						material.metal = 0
 						material.rough = 1
@@ -150,6 +152,14 @@ func read_chunk():
 			pass
 
 	_file.seek(end)
+
+func get_trans(attributes: Dictionary) -> float:
+	var alpha := 0.0
+	if attributes.has("_trans"):
+		alpha = float(attributes.get("_trans", 0.0))
+	elif attributes.has("_alpha"):
+		alpha = float(attributes.get("_alpha", 0.0))
+	return alpha
 
 func _get_32() -> int:
 	return _file.get_32()

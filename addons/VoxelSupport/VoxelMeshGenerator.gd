@@ -165,7 +165,7 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 	if material is StandardMaterial3D:
 		material.refraction_enabled = true
 		material.refraction_scale = 0.01
-		material.emission_enabled = false 
+		material.emission_enabled = false
 		material.transparency = BaseMaterial3D.Transparency.TRANSPARENCY_ALPHA
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 		if save_path:
@@ -177,9 +177,9 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 
 func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> ImageTexture:
 	var image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
-	for x in 256:
-		var color: Color = get_pixel.call(voxel.materials[x])
-		image.set_pixel(x, 0, color)
+	for i in mini(voxel.materials.size(), 256):
+		var color: Color = get_pixel.call(voxel.materials[i])
+		image.set_pixel(i, 0, color)
 	DirAccess.make_dir_absolute(save_path.get_basename())
 	var path := save_path.get_basename() + '/tex_' + type + '.tres'
 	var texture: ImageTexture = ResourceLoader.load(path) if FileAccess.file_exists(path) else ImageTexture.create_from_image(image)
@@ -321,9 +321,10 @@ func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, 
 	var surface := surfaces[0] if not voxel.materials[id].is_transparent else surfaces[1]
 
 	surface.set_normal(FaceTool.Normals[dir])
+	# UV采样纹素中心，避免落在边界上导致取色偏移
+	var u := (float(id) + 0.5) / 256.0
+	var v := 0.5
 	for point: Vector3 in FaceTool.Faces[dir]:
-		var u := (id + point[axis.z]) / 256.0
-		var v := point[axis.y]
 		surface.set_uv(Vector2(u, v))
 		surface.add_vertex((point * size + Vector3(pos)) * scale)
 
