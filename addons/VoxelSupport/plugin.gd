@@ -7,6 +7,7 @@ func _enter_tree():
 	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelNoopImporter.gd").new())
 	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelMeshImporter.gd").new())
 	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelMeshLibraryImporter.gd").new())
+	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelDataImporter.gd").new())
 	for importer in importers:
 		add_import_plugin(importer)
 

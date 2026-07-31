@@ -16,6 +16,65 @@ static func generate_mesh(voxel: VoxelData, options: Dictionary, path: String = 
 	prints("generate_mesh mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms", gen.mesh.get_faces().size() / 6, "face")
 	return gen.mesh
 
+
+## 运行时网格生成入口
+## 直接接受体素字典和材质数组，无需 VoxelData 实例
+## 供 VoxelRenderer / VoxelDestructible 等运行时节点使用
+## options 可包含: scale, unwrap_lightmap_uv2, uv2_texel_size (均可选)
+static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: Array, options: Dictionary = {}) -> ArrayMesh:
+	if voxels.is_empty():
+		return null
+	var gen := VoxelMeshGenerator.new(null, options, "")
+	gen.runtime_materials = materials
+	# 运行时不生成纹理材质资源，由调用方提供或使用默认材质
+	gen.materials = [options.get("material_solid", null), options.get("material_transparent", null)]
+	var time := Time.get_ticks_usec()
+	gen.start_generate_mesh(voxels)
+	var mesh := gen.wait_finished(options.get(VoxelMeshImporter.unwrap_lightmap_uv2, false), options.get(VoxelMeshImporter.uv2_texel_size, 0.2))
+	if not mesh:
+		return null
+	if options.get(VoxelMeshImporter.unwrap_lightmap_uv2, false):
+		mesh.lightmap_unwrap(Transform3D.IDENTITY, options.get(VoxelMeshImporter.uv2_texel_size, 0.2))
+	if Engine.is_editor_hint():
+		prints("generate_mesh_runtime: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
+	return mesh
+
+
+## 从材质数组生成运行时纹理材质 (StandardMaterial3D 数组，0=实体 1=透明)
+## 与编辑器导入的纹理材质等价，但完全在内存中生成，不涉及文件 IO
+## 复用与编辑器导入一致的 UV 采样方案 (纹素中心对齐材质ID)
+static func generate_textured_materials_runtime(materials: Array) -> Array:
+	var result: Array = [null, null]
+	var albedo_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	var metal_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	var rough_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	var emission_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	for i in mini(materials.size(), 256):
+		var m = materials[i]
+		if m == null:
+			continue
+		albedo_image.set_pixel(i, 0, m.color if not m.is_transparent else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans))
+		metal_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.metal))
+		rough_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.rough))
+		emission_image.set_pixel(i, 0, m.color * m.emission)
+	var solid := StandardMaterial3D.new()
+	solid.emission_enabled = true
+	solid.emission_energy_multiplier = 20
+	solid.metallic = 1
+	solid.albedo_texture = ImageTexture.create_from_image(albedo_image)
+	solid.metallic_texture = ImageTexture.create_from_image(metal_image)
+	solid.roughness_texture = ImageTexture.create_from_image(rough_image)
+	solid.emission_texture = ImageTexture.create_from_image(emission_image)
+	solid.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	result[0] = solid
+	var trans := solid.duplicate()
+	trans.refraction_enabled = true
+	trans.refraction_scale = 0.01
+	trans.emission_enabled = false
+	trans.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	result[1] = trans
+	return result
+
 static func generate_mesh_library(voxel: VoxelData, options: Dictionary, path: String = "") -> MeshLibrary:
 	var root_gen := VoxelMeshGenerator.new(voxel, options, path)
 	root_gen.generate_materials(options)
@@ -105,13 +164,15 @@ var voxel: VoxelData
 var frame_index: int
 var materials: Array[Material]
 var root_path: String
+## 运行时材质数组 (非空时优先于 voxel.materials 使用)
+var runtime_materials: Array = []
 
 
 func _init(voxel: VoxelData, options: Dictionary, path: String = "") -> void:
 	self.root_path = path
 	self.voxel = voxel
-	frame_index = options[VoxelMeshImporter.frame_index]
-	scale = options[VoxelMeshImporter.scale]
+	frame_index = options.get(VoxelMeshImporter.frame_index, 0)
+	scale = options.get(VoxelMeshImporter.scale, 0.1)
 	if scale <= 0:
 		scale = 0.01
 
@@ -177,8 +238,9 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 
 func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> ImageTexture:
 	var image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
-	for i in mini(voxel.materials.size(), 256):
-		var color: Color = get_pixel.call(voxel.materials[i])
+	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	for i in mini(mats.size(), 256):
+		var color: Color = get_pixel.call(mats[i])
 		image.set_pixel(i, 0, color)
 	DirAccess.make_dir_absolute(save_path.get_basename())
 	var path := save_path.get_basename() + '/tex_' + type + '.tres'
@@ -290,12 +352,13 @@ func _get_dir_visible_slice_voxels(slices: Dictionary, axis: Vector3i, dir: int,
 		return slice.duplicate()
 
 	var dir_slice = slices[dir_slice_index]
+	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
 	for pos: Vector3i in slice:
 		var visible := false
 		var dir_pos: Vector3i = pos + offset
 		if dir_slice.has(dir_pos):
-			var mat := voxel.materials[slice[pos]]
-			var dir_mat := voxel.materials[dir_slice[dir_pos]]
+			var mat = mats[slice[pos]]
+			var dir_mat = mats[dir_slice[dir_pos]]
 			if mat.is_transparent != dir_mat.is_transparent:
 				visible = true
 			elif mat.is_transparent and mat != dir_mat:
@@ -318,7 +381,8 @@ func _generate_voxel_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i,
 func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, size: Vector3, dir: int, surfaces: Array[SurfaceTool]):
 	var id: int = voxels[pos]
 
-	var surface := surfaces[0] if not voxel.materials[id].is_transparent else surfaces[1]
+	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	var surface := surfaces[0] if not mats[id].is_transparent else surfaces[1]
 
 	surface.set_normal(FaceTool.Normals[dir])
 	# UV采样纹素中心，避免落在边界上导致取色偏移

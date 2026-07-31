@@ -13,6 +13,10 @@ func get_voxels(frame_index: int = 0) -> Dictionary[Vector3i, int]:
 		return nodes[0].get_voxels(self, frame_index)
 	return {}
 
+## 烘焙为可序列化的运行时资源 (扁平化节点树/模型/图层)
+func to_resource(frame_index: int = 0) -> VoxelDataResource:
+	return VoxelDataResource.from_voxel_data(self, frame_index)
+
 func get_mesh(frame_index: int = 0) -> ArrayMesh:
 	if nodes.size() > 0:
 		return nodes[0].get_mesh(self, frame_index)
@@ -57,21 +61,21 @@ class VoxelModel:
 	func get_voxels():
 		return VoxelData.get_offset_voxels(voxels, offset)
 
-class VoxelMaterial:
-	var id: int
+class VoxelMaterial extends Resource:
+	@export var id: int
 
-	var color: Color
+	@export var color: Color = Color.WHITE
 
 	var is_transparent: bool:
 		get(): return trans > 0
 
-	var trans: float = 0
+	@export var trans: float = 0
 
-	var metal: float = 0
+	@export var metal: float = 0
 
-	var rough: float = 1
+	@export var rough: float = 1
 
-	var emission: float = 0
+	@export var emission: float = 0
 
 
 class VoxelNode:
