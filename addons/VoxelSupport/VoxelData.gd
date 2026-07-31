@@ -61,22 +61,6 @@ class VoxelModel:
 	func get_voxels():
 		return VoxelData.get_offset_voxels(voxels, offset)
 
-class VoxelMaterial extends Resource:
-	@export var id: int
-
-	@export var color: Color = Color.WHITE
-
-	var is_transparent: bool:
-		get(): return trans > 0
-
-	@export var trans: float = 0
-
-	@export var metal: float = 0
-
-	@export var rough: float = 1
-
-	@export var emission: float = 0
-
 
 class VoxelNode:
 	var id: int

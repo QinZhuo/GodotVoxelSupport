@@ -11,8 +11,8 @@ extends Resource
 ## 体素字典: 位置 -> 材质ID
 @export var voxels: Dictionary[Vector3i, int] = {}
 
-## 材质数组 (索引即材质ID，使用 VoxelData.VoxelMaterial)
-@export var materials: Array[Resource] = []
+## 材质数组 (索引即材质ID，使用 VoxelMaterial)
+@export var materials: Array[VoxelMaterial] = []
 
 ## 帧数量 (保留用于未来动画扩展)
 @export var frame_count: int = 1
@@ -26,7 +26,7 @@ static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> Voxe
 	var res := VoxelDataResource.new()
 	res.voxels = voxel_data.get_voxels(frame_index)
 	for mat in voxel_data.materials:
-		var new_mat := VoxelData.VoxelMaterial.new()
+		var new_mat := VoxelMaterial.new()
 		new_mat.id = mat.id
 		new_mat.color = mat.color
 		new_mat.trans = mat.trans

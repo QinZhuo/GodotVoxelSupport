@@ -55,7 +55,7 @@ func _init(file: FileAccess):
 	voxel = VoxelData.new()
 	voxel.materials.resize(256)
 	for i in voxel.materials.size():
-		voxel.materials[i] = VoxelData.VoxelMaterial.new()
+		voxel.materials[i] = VoxelMaterial.new()
 	while file.get_position() < file.get_length():
 		read_chunk()
 	voxel.check_nodes()

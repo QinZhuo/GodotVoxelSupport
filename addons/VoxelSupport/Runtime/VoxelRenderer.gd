@@ -12,7 +12,14 @@ signal mesh_updated
 ## 体素数据资源
 @export var data: VoxelDataResource:
 	set(v):
-		_set_data(v)
+		# setter 内部赋值不会递归，可直接设置底层存储
+		if data and data.changed.is_connected(_on_data_changed):
+			data.changed.disconnect(_on_data_changed)
+		data = v
+		if data:
+			data.changed.connect(_on_data_changed)
+		_materials_cache.clear()
+		_request_update()
 
 ## 体素缩放比例 (单个体素的边长，世界单位)
 @export var voxel_scale: float = 0.1:
@@ -46,16 +53,6 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if _dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor):
 		_update_mesh()
-
-
-func _set_data(v: VoxelDataResource) -> void:
-	if data and data.changed.is_connected(_on_data_changed):
-		data.changed.disconnect(_on_data_changed)
-	data = v
-	if data:
-		data.changed.connect(_on_data_changed)
-	_materials_cache.clear()
-	_request_update()
 
 
 func _on_data_changed() -> void:
