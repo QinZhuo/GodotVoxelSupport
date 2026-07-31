@@ -13,10 +13,6 @@ func get_voxels(frame_index: int = 0) -> Dictionary[Vector3i, int]:
 		return nodes[0].get_voxels(self, frame_index)
 	return {}
 
-## 烘焙为可序列化的运行时资源 (扁平化节点树/模型/图层)
-func to_resource(frame_index: int = 0) -> VoxelDataResource:
-	return VoxelDataResource.from_voxel_data(self, frame_index)
-
 func get_mesh(frame_index: int = 0) -> ArrayMesh:
 	if nodes.size() > 0:
 		return nodes[0].get_mesh(self, frame_index)

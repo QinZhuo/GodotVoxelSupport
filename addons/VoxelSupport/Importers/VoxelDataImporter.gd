@@ -27,7 +27,7 @@ func _get_save_extension():
 
 
 func _get_resource_type():
-	return "VoxelDataResource"
+	return "Resource"
 
 
 func _get_priority() -> float:
@@ -51,6 +51,6 @@ func _import(source_file, save_path, options, _platforms, gen_files):
 	var vox_access := VoxAccess.Open(source_file)
 	if not vox_access:
 		return FAILED
-	var res := vox_access.voxel.to_resource(options[frame_index])
+	var res := VoxelDataResource.from_voxel_data(vox_access.voxel, options[frame_index])
 	res.default_scale = options[scale]
 	return ResourceSaver.save(res, "%s.%s" % [save_path, _get_save_extension()])
