@@ -17,6 +17,9 @@ extends Resource
 ## 帧数量 (保留用于未来动画扩展)
 @export var frame_count: int = 1
 
+## 体素网格尺寸 (体素个数，由导入时计算)
+@export var grid_size: Vector3i = Vector3i.ZERO
+
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
@@ -25,6 +28,7 @@ extends Resource
 static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> VoxelDataResource:
 	var res := VoxelDataResource.new()
 	res.voxels = voxel_data.get_voxels(frame_index)
+	res.grid_size = Vector3i(voxel_data.size)
 	for mat in voxel_data.materials:
 		var new_mat := VoxelMaterial.new()
 		new_mat.id = mat.id

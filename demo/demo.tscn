@@ -5,7 +5,6 @@
 [ext_resource type="ArrayMesh" uid="uid://btugifwnxf3jv" path="res://demo/cars.vox" id="3_dar0o"]
 [ext_resource type="LightmapGIData" uid="uid://blw07ggnbmoku" path="res://demo/demo.lmbake" id="4_j5lb4"]
 [ext_resource type="ArrayMesh" uid="uid://gflclp0kkff2" path="res://demo/deer.vox" id="5_u10mr"]
-[ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="6_onu7k"]
 
 [sub_resource type="Environment" id="Environment_dar0o"]
 tonemap_mode = 3
@@ -44,8 +43,3 @@ interior = true
 [node name="Deer" type="MeshInstance3D" parent="." unique_id=1469930049]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -11.246269, 0, -9.452653)
 mesh = ExtResource("5_u10mr")
-
-[node name="VoxelRenderer" type="MeshInstance3D" parent="." unique_id=486371826]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12.953115, 0, 0)
-script = ExtResource("6_onu7k")
-metadata/_custom_type_script = "uid://b16tme2krsekj"
