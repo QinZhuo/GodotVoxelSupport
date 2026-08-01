@@ -323,30 +323,22 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 
 
 ## 找出所有"失稳"体素（与地面断开即悬空），返回这些体素位置的并集
-## 局部支撑检测：若传入 around_positions，只在破坏位置附近的区域做 BFS（性能优化），
-## 区域外体素假设稳定；around_positions 为空则全场景检测
-func _find_unstable_voxels(around_positions: Array = []) -> Array:
+## 找出所有"失稳"体素（与地面断开即悬空），返回这些体素位置的并集
+## 连通性支撑判断：从贴地(y==0)体素 6 方向 BFS 标记所有"与地面连通"的体素，
+## 与地面断开（完全悬空）的体素才会脱落
+## 这样：破坏底部后，上方块若左右仍连到两侧(贴地)则保持稳定；只有与地面完全断开才脱落
+## around_positions 参数保留(接口兼容)，但本算法基于全局连通性判断，保证正确性
+func _find_unstable_voxels(_around_positions: Array = []) -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	var supported: Dictionary
-	var region: AABB
-	if around_positions.is_empty():
-		# 全场景检测
-		supported = _bfs_from_ground(voxels)
-	else:
-		# 局部检测：只检查破坏位置附近的区域
-		region = _compute_region_aabb(around_positions)
-		supported = _bfs_from_ground_in_region(voxels, region)
+	# 与地面连通的所有体素（含横向支撑）
+	var supported := _bfs_from_ground(voxels)
 
-	# 与地面断开的体素 = 悬空崩塌
+	# 与地面断开的体素 = 完全悬空，脱落
 	var unstable: Array = []
 	for key in voxels:
-		var pos: Vector3i = key
-		# 局部模式下，只处理区域内的体素（区域外假设稳定）
-		if not around_positions.is_empty() and not _aabb_contains(region, pos):
-			continue
 		if not supported.has(key):
 			unstable.append(key)
 	return unstable
@@ -377,66 +369,7 @@ func _bfs_from_ground(voxels: Dictionary) -> Dictionary:
 	return supported
 
 
-## 局部 BFS：在给定 AABB 区域内从"贴地体素 或 区域边界上(连到外部稳定结构)的体素"出发标记 supported
-## 只遍历区域内的体素，大幅降低大型场景的开销
-func _bfs_from_ground_in_region(voxels: Dictionary, region: AABB) -> Dictionary:
-	var supported := {}
-	var queue: Array = []
-	var dirs := [
-		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
-		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
-		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
-	]
-	# 种子：区域内的贴地体素
-	for key in voxels:
-		var pos: Vector3i = key
-		if pos.y == 0 and _aabb_contains(region, pos):
-			supported[key] = true
-			queue.append(key)
-	# 种子：区域边界上的体素（假设与外部稳定结构连通）
-	for key in voxels:
-		var pos: Vector3i = key
-		if supported.has(key) or not _aabb_contains(region, pos):
-			continue
-		if _is_on_region_border(pos, region):
-			supported[key] = true
-			queue.append(key)
-	while not queue.is_empty():
-		var cur: Vector3i = queue.pop_front()
-		for d: Vector3i in dirs:
-			var nb := cur + d
-			if voxels.has(nb) and not supported.has(nb) and _aabb_contains(region, nb):
-				supported[nb] = true
-				queue.append(nb)
-	return supported
 
-
-## 计算破坏位置集合的 AABB 包围盒（向外扩 MARGIN 格，覆盖可能的崩塌范围）
-func _compute_region_aabb(positions: Array) -> AABB:
-	const MARGIN := 4
-	var min_pos := Vector3(99999, 99999, 99999)
-	var max_pos := Vector3(-99999, -99999, -99999)
-	for p in positions:
-		var pos: Vector3i = p
-		min_pos = min_pos.min(Vector3(pos))
-		max_pos = max_pos.max(Vector3(pos))
-	min_pos -= Vector3(MARGIN, MARGIN, MARGIN)
-	max_pos += Vector3(MARGIN, MARGIN, MARGIN)
-	return AABB(min_pos, max_pos - min_pos)
-
-
-func _aabb_contains(region: AABB, pos: Vector3i) -> bool:
-	return region.has_point(Vector3(pos))
-
-
-## 判断体素是否在 AABB 区域边界上（6 个面的外层），用于作为与外部连通的种子
-func _is_on_region_border(pos: Vector3i, region: AABB) -> bool:
-	var p := Vector3(pos)
-	var min_p := region.position
-	var max_p := region.end
-	return p.x == min_p.x or p.x == max_p.x - 1 \
-		or p.y == min_p.y or p.y == max_p.y - 1 \
-		or p.z == min_p.z or p.z == max_p.z - 1
 
 
 # ----------------------------------------------------------------------------
