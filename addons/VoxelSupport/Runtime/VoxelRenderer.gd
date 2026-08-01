@@ -2,6 +2,8 @@
 class_name VoxelRenderer
 extends MeshInstance3D
 
+const _CHUNK_GENERATOR := preload("res://addons/VoxelSupport/VoxelChunkGenerator.gd")
+
 ## 体素专属渲染器
 ## 持有 VoxelDataResource，在运行时动态生成并更新 mesh
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
@@ -33,6 +35,14 @@ signal mesh_updated
 ## 重建限流帧数：一帧内多次数据变化会被合并，最多每 N 帧重建一次 mesh
 ## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
 @export_range(1, 30) var update_throttle_frames: int = 1
+
+## 是否使用高性能 Chunk 生成器（增量重建）
+## 开启后体素按 16³ chunk 分区生成，体素变化时只重建受影响 chunk，大型动态场景性能更好
+## 默认开启，自动分块处理；关闭则使用全局生成（中小场景兼容）
+@export var use_chunk_generator: bool = true:
+	set(v):
+		use_chunk_generator = v
+		_request_update()
 
 ## 是否生成静态碰撞体 (StaticBody3D + ConcavePolygonShape3D)
 @export var generate_collision: bool = false:
@@ -132,7 +142,22 @@ func _update_mesh() -> void:
 		"material_solid": _materials_cache[0],
 		"material_transparent": _materials_cache[1],
 	}
-	var new_mesh := VoxelMeshGenerator.generate_mesh_runtime(data.voxels, data.materials, options)
+
+	var new_mesh: ArrayMesh
+	if use_chunk_generator:
+		# 高性能 chunk 生成器 + 增量重建：只重建变更体素所在的 chunk
+		var rebuild_chunks := _CHUNK_GENERATOR.chunks_for_dirty_voxels(data.dirty_voxels)
+		new_mesh = _CHUNK_GENERATOR.generate_mesh_runtime(
+			data.voxels, data.materials, options, rebuild_chunks)
+		# 给 chunk mesh 的两个表面赋材质（实心/透明）
+		if new_mesh:
+			if _materials_cache[0]:
+				new_mesh.surface_set_material(0, _materials_cache[0])
+			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
+				new_mesh.surface_set_material(1, _materials_cache[1])
+	else:
+		new_mesh = VoxelMeshGenerator.generate_mesh_runtime(data.voxels, data.materials, options)
+
 	if new_mesh:
 		mesh = new_mesh
 	else:
