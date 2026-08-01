@@ -58,16 +58,18 @@ void fragment() {
 	
 	// 计算 DDA 起始点
 	vec3 start_voxel;
+	// 射线方向归一化（用于射线-包围盒求交和偏移量）
+	vec3 ray_norm = normalize(ray_voxel);
+	
 	if (camera_inside) {
 		// 相机在内部：从相机位置开始遍历，沿射线方向向外步进
 		start_voxel = clamp(camera_pos_voxel, vec3(0.0), grid_size);
 	} else {
 		// 相机在外部：使用标准射线-包围盒求交计算起始点
 		// 比 to_front_face 更稳定，避免射线方向与体素轴接近平行时的数值问题
-		vec3 ray_dir = normalize(ray_voxel);
-		vec3 inv_dir = 1.0 / ray_dir;
+		vec3 inv_dir = 1.0 / ray_norm;
 		
-		// 射线-包围盒求交
+		// 射线-包围盒求交（slab method）
 		vec3 t_min = (vec3(0.0) - camera_pos_voxel) * inv_dir;
 		vec3 t_max = (grid_size - camera_pos_voxel) * inv_dir;
 		vec3 t1 = min(t_min, t_max);
@@ -75,12 +77,11 @@ void fragment() {
 		float t_near = max(max(t1.x, t1.y), t1.z);
 		
 		// 从相机位置沿射线方向移动 t_near 到达盒子正面
-		start_voxel = camera_pos_voxel + ray_dir * max(t_near, 0.0);
+		start_voxel = camera_pos_voxel + ray_norm * max(t_near, 0.0);
 	}
 	
 	// 在射线方向上添加微小偏移，避免精确处于体素边界上
 	// 当 start_voxel 恰好在体素边界时，t_max_step 可能为 0，导致跳过当前体素
-	vec3 ray_norm = normalize(ray_voxel);
 	start_voxel += ray_norm * 0.0001;
 	start_voxel = clamp(start_voxel, vec3(0.0), grid_size);
 	
@@ -230,7 +231,8 @@ void fragment() {
 		METALLIC = hit_pbr.x;
 		ROUGHNESS = hit_pbr.y;
 		EMISSION = hit_color.rgb * hit_pbr.z;
-		NORMAL = hit_normal;
+		// 将法线从模型空间转换到视图空间（Godot 在 fragment 中期望视图空间法线）
+		NORMAL = normalize((_MODELVIEW_MATRIX * vec4(hit_normal, 0.0)).xyz);
 		DEPTH = depth;
 	} else {
 		discard;
