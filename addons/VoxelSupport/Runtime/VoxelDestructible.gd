@@ -72,6 +72,10 @@ enum CollapseMode {
 ## 碎片池大小 (物理碎片对象池，减少创建/销毁开销)
 @export var debris_pool_size: int = 128
 
+## 落地保留碎片的最大数量 (防止长时间运行内存/节点无限增长)
+## 超过上限时，最早落地的碎片会被回收释放
+@export_range(0, 1000) var max_settled_debris: int = 200
+
 ## 整体健康度 (<=0 时触发完全破坏，-1 表示不启用健康度系统)
 @export var health: float = -1.0
 
@@ -87,9 +91,14 @@ var damage_map: Dictionary[Vector3i, float] = {}
 var _debris_root: Node3D = null
 var _debris_pool: Array[RigidBody3D] = []          # 物理碎片对象池 (空闲)
 var _settled_debris: Array[RigidBody3D] = []       # 已落地保留的碎片
-var _debris_mesh_cache: Dictionary = {}            # material_id -> BoxMesh
-var _multimesh_cache: Dictionary = {}              # material_id -> MultiMesh
-var _multimesh_instances: Dictionary = {}          # material_id -> MultiMeshInstance3D
+var _active_debris: Array[RigidBody3D] = []        # 仍在运动的物理碎片 (供 _settle 遍历)
+var _debris_mesh_cache: Dictionary = {}            # "mat_id:size" -> BoxMesh
+
+# 异步崩塌 mesh 生成状态
+var _collapse_task_id := -1
+var _collapse_blocks_data: Array = []              # 每个元素的块信息 {voxels, min, max, center}
+var _collapse_results: Array = []                  # 后台生成的 mesh arrays (与 _collapse_blocks_data 对应)
+var _collapse_pending := false
 
 const _DEBRIS_ROOT_NAME := "_VoxelDebris"
 
@@ -432,8 +441,46 @@ func _spawn_collapse_blocks(positions: Array, mat_map: Dictionary) -> void:
 		return
 	# 将悬空体素按 6 方向连通分量分组
 	var blocks := _partition_connected_blocks(positions)
+
+	# 快照每个块的体素 + 包围盒信息，后台线程生成 mesh 数据（避免主线程卡顿）
+	_collapse_blocks_data = []
+	_collapse_results = []
+	_collapse_pending = false
 	for block in blocks:
-		_spawn_collapse_block(block, mat_map)
+		var block_voxels: Dictionary[Vector3i, int] = {}
+		var min_pos := Vector3(99999, 99999, 99999)
+		var max_pos := Vector3(-99999, -99999, -99999)
+		for p in block:
+			var pos: Vector3i = p
+			block_voxels[pos] = mat_map.get(pos, -1)
+			min_pos = min_pos.min(Vector3(pos))
+			max_pos = max_pos.max(Vector3(pos))
+		_collapse_blocks_data.append({
+			"voxels": block_voxels,
+			"min": min_pos,
+			"max": max_pos,
+		})
+
+	# 材质深拷贝快照（子线程只读，避免与主线程冲突）
+	var mat_snapshot: Array = data.materials.duplicate(true)
+	var scale := voxel_scale
+	# 启动后台生成任务（生成所有块的 mesh arrays）
+	if _collapse_task_id >= 0:
+		WorkerThreadPool.wait_for_task_completion(_collapse_task_id)
+	_collapse_task_id = WorkerThreadPool.add_task(
+		_collapse_gen_worker.bind(_collapse_blocks_data, mat_snapshot, scale))
+
+
+## 后台线程：为所有崩塌块生成 mesh arrays
+func _collapse_gen_worker(blocks_data: Array, materials: Array, scale: float) -> void:
+	var results: Array = []
+	var options := {"scale": scale}
+	for bd in blocks_data:
+		var arrays: Variant = _CHUNK_GEN.generate_arrays_runtime(
+			bd["voxels"] as Dictionary[Vector3i, int], materials, options)
+		results.append(arrays)
+	_collapse_results = results
+	_collapse_pending = true
 
 
 ## 将体素位置集合按 6 方向连通性分组
@@ -467,36 +514,28 @@ func _partition_connected_blocks(positions: Array) -> Array:
 	return result
 
 
-## 生成一个整块刚体：用 VoxelChunkGenerator 生成与掉落前一致的贪婪合并 mesh，从质心下落
-## body 位于 _debris_root 原点，mesh/碰撞用体素绝对坐标，保证整块与掉落前外观一致
-func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
-	if block.is_empty():
-		return
-	# 用块的体素构建临时数据并生成贪婪合并 mesh（与原体素块外观完全一致）
-	var block_voxels: Dictionary[Vector3i, int] = {}
-	for p in block:
-		var pos: Vector3i = p
-		block_voxels[pos] = mat_map.get(pos, -1)
-	var options := {"scale": voxel_scale}
-	var arrays: Variant = _CHUNK_GEN.generate_arrays_runtime(block_voxels, data.materials, options)
-	if arrays == null:
+## 主线程：用后台生成的 mesh arrays 构建整块刚体（body 位于 _debris_root 原点）
+## mesh/碰撞用体素绝对坐标，保证整块与掉落前外观一致
+func _build_collapse_body(bd: Dictionary, arrays: Variant) -> void:
+	if arrays == null or bd.is_empty():
 		return
 	var arr_mesh: ArrayMesh = _CHUNK_GEN.build_mesh_from_arrays(arrays as Dictionary)
+	if arr_mesh == null:
+		return
 	# 给整块 mesh 赋材质（复用与原体素一致的纹理材质，保证颜色正确）
 	_apply_mesh_materials(arr_mesh)
 
-	# 计算块包围盒质心（用于下落旋转中心）
-	var min_pos := Vector3(99999, 99999, 99999)
-	var max_pos := Vector3(-99999, -99999, -99999)
-	for p in block:
-		var pos: Vector3i = p
-		min_pos = min_pos.min(Vector3(pos))
-		max_pos = max_pos.max(Vector3(pos))
-	var center := (min_pos + max_pos) * 0.5 + Vector3(0.5, 0.5, 0.5)  # 块中心（体素空间）
+	# 块信息
+	var min_pos: Vector3 = bd["min"]
+	var max_pos: Vector3 = bd["max"]
+	var block_voxels: Dictionary[Vector3i, int] = bd["voxels"]
+	var block: Array = []
+	for p in block_voxels:
+		block.append(p)
 
 	var body := RigidBody3D.new()
 	# 整块质量 = 块内体素质量之和（材质质量影响塌落物理表现）
-	var block_mass := _compute_block_mass(block, mat_map)
+	var block_mass := _compute_block_mass(block, _to_mat_map(block_voxels))
 	body.mass = maxf(block_mass, 0.01)
 	# 组合碰撞形状：每个体素一个独立的 shape owner + BoxShape，偏移到体素绝对位置（相对 body 原点）
 	for p in block:
@@ -522,6 +561,14 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 	body.set_meta("_born_ms", Time.get_ticks_msec())
 	_debris_root.add_child(body)
 	debris_count += 1
+
+
+## 把 block_voxels(Dictionary[Vector3i,int]) 转成 mat_map 形式（pos -> mat_id）
+func _to_mat_map(block_voxels: Dictionary) -> Dictionary:
+	var m := {}
+	for key in block_voxels:
+		m[key] = block_voxels[key]
+	return m
 
 
 ## 计算块的质量（块内体素质量之和）
@@ -599,6 +646,8 @@ func _spawn_physics_debris(pos: Vector3i, mat_id: int, is_collapse: bool) -> voi
 	# 记录出生时间，用于出生保护期（避免刚生成就被误判冻结）
 	body.set_meta("_born_ms", Time.get_ticks_msec())
 	_debris_root.add_child(body)
+	if not _active_debris.has(body):
+		_active_debris.append(body)
 	debris_count += 1
 
 
@@ -622,36 +671,74 @@ func _acquire_debris_body(box_size: float) -> RigidBody3D:
 			if body.shape_owner_get_shape_count(owner) > 0:
 				var shape: BoxShape3D = body.shape_owner_get_shape(owner, 0)
 				shape.size = Vector3(box_size, box_size, box_size)
+	# 重置物理状态（可能从落地保留/池中复用，需解除冻结并唤醒）
+	body.freeze = false
 	body.sleeping = false
 	return body
 
 
-## 物理碎片落地后转静态保留（由 _process 每帧检查）
+## 物理碎片落地后转静态保留 + 轮询异步崩塌 mesh（由 _process 每帧检查）
 func _process(_delta: float) -> void:
 	super._process(_delta)
 	if Engine.is_editor_hint():
 		return
+	# 轮询崩塌 mesh 异步生成结果，完成后创建整块刚体
+	_poll_collapse_task()
 	_settle_resting_debris()
 
 
+## 轮询后台崩塌 mesh 生成，完成则创建整块刚体
+func _poll_collapse_task() -> void:
+	if _collapse_task_id < 0:
+		return
+	if not WorkerThreadPool.is_task_completed(_collapse_task_id):
+		return
+	WorkerThreadPool.wait_for_task_completion(_collapse_task_id)
+	_collapse_task_id = -1
+	if not _collapse_pending:
+		return
+	var blocks_data := _collapse_blocks_data
+	var results := _collapse_results
+	_collapse_blocks_data = []
+	_collapse_results = []
+	_collapse_pending = false
+	for i in mini(blocks_data.size(), results.size()):
+		_build_collapse_body(blocks_data[i], results[i])
+
+
 ## 检查物理碎片：落地后（物理引擎判定睡眠）转静态保留，不再被清除
+## 只遍历活跃碎片集合（_active_debris），避免每帧扫描所有子节点（含已落地/粒子）
 ## 用 RigidBody.sleeping（物理引擎在接触静止后自动判定）而非速度阈值，
 ## 避免碎片在空中（刚生成速度慢）被误判为静止而冻结
 func _settle_resting_debris() -> void:
-	if _debris_root == null:
-		return
-	for child in _debris_root.get_children():
-		if child is RigidBody3D:
-			var rb := child as RigidBody3D
-			# 出生保护期：刚生成的碎片（<0.5秒）不冻结，确保物理有时间作用下落
-			if rb.has_meta("_born_ms") and Time.get_ticks_msec() - rb.get_meta("_born_ms") < 500:
-				continue
-			if rb.sleeping and rb.linear_velocity.length() < debris_rest_threshold:
-				# 落地静止 → 转静态保留，并放到已落地列表
-				rb.freeze = true
-				rb.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
-				if not _settled_debris.has(rb):
-					_settled_debris.append(rb)
+	var i := 0
+	while i < _active_debris.size():
+		var rb: RigidBody3D = _active_debris[i]
+		if not is_instance_valid(rb) or rb.get_parent() == null:
+			_active_debris.remove_at(i)
+			continue
+		var settled := false
+		# 出生保护期：刚生成的碎片（<0.5秒）不冻结，确保物理有时间作用下落
+		if rb.has_meta("_born_ms") and Time.get_ticks_msec() - rb.get_meta("_born_ms") < 500:
+			i += 1
+			continue
+		if rb.sleeping and rb.linear_velocity.length() < debris_rest_threshold:
+			# 落地静止 → 转静态保留，并放到已落地列表，移出活跃集合
+			rb.freeze = true
+			rb.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+			if not _settled_debris.has(rb):
+				_settled_debris.append(rb)
+			settled = true
+		if settled:
+			_active_debris.remove_at(i)
+		else:
+			i += 1
+	# 落地保留碎片超过上限：回收最早的（释放到对象池，控制内存）
+	if max_settled_debris > 0 and _settled_debris.size() > max_settled_debris:
+		var overflow := _settled_debris.size() - max_settled_debris
+		for k in overflow:
+			var rb: RigidBody3D = _settled_debris.pop_front()
+			_remove_physics_debris(rb)
 
 
 ## 移除碎片（落地保留的除外），释放到对象池
@@ -662,16 +749,21 @@ func _remove_physics_debris(body: Node) -> void:
 	# 已落地保留的碎片不回收
 	if _settled_debris.has(rb):
 		return
+	_active_debris.erase(rb)
 	rb.get_parent().remove_child(rb)
 	if _debris_pool.size() < debris_pool_size:
 		_debris_pool.append(rb)
 	debris_count = maxi(0, debris_count - 1)
 
 
-# --- 视觉碎片 (MultiMesh) ---
+# --- 视觉碎片 (粒子系统，纯表现) ---
 
+## 爆发碎片粒子：纯表现，GPU 粒子天然有飞出动态，无需物理/清理逻辑
 func _spawn_visual_debris_batch(positions: Array, mat_map: Dictionary, count: int) -> void:
-	var box_size := voxel_scale * debris_size_scale
+	if positions.is_empty():
+		return
+	_ensure_debris_root()
+	# 按材质分组，每组发射一个粒子系统
 	var by_mat := {}
 	for i in count:
 		var pos: Vector3i = positions[i]
@@ -679,81 +771,77 @@ func _spawn_visual_debris_batch(positions: Array, mat_map: Dictionary, count: in
 		if not by_mat.has(mat_id):
 			by_mat[mat_id] = []
 		by_mat[mat_id].append(pos)
+	# 粒子发射中心：所有碎片位置的质心
+	var center := Vector3.ZERO
+	var n := 0
+	for pos in positions:
+		center += (Vector3(pos) + Vector3(0.5, 0.5, 0.5)) * voxel_scale
+		n += 1
+	if n > 0:
+		center /= float(n)
 	for mat_id in by_mat:
 		var list: Array = by_mat[mat_id]
-		var mm := _get_multimesh(mat_id, box_size)
-		var inst := _get_multimesh_instance(mat_id)
-		for pos in list:
-			var idx := mm.instance_count
-			mm.instance_count = idx + 1
-			mm.set_instance_transform(idx, _debris_transform(pos))
-			mm.set_instance_color(idx, _get_debris_color(mat_id))
-			inst.visible = true
-			debris_count += 1
+		_spawn_debris_particles(center, mat_id, list.size())
+
+
+## 在指定位置发射一批碎片粒子（GPUParticles3D，一次性爆发）
+func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
+	if amount <= 0:
+		return
+	var particles := GPUParticles3D.new()
+	particles.name = "DebrisParticles_%d" % mat_id
+	particles.position = center
+	particles.amount = amount
+	particles.lifetime = minf(debris_lifetime, 2.0)
+	particles.explosiveness = 1.0
+	particles.one_shot = true
+	particles.local_coords = true
+
+	# 粒子材质：向外爆发 + 重力下落
+	var pm := ParticleProcessMaterial.new()
+	pm.direction = Vector3(0, 1, 0)
+	pm.spread = 180.0
+	pm.initial_velocity_min = debris_min_speed
+	pm.initial_velocity_max = debris_max_speed
+	pm.gravity = Vector3(0, -9.8 * debris_gravity_scale, 0)
+	pm.angular_velocity_min = -6.0
+	pm.angular_velocity_max = 6.0
+	# 粒子缩放=1.0，由 draw_pass mesh 尺寸决定显示大小（与原体素一致）
+	pm.scale_min = 1.0
+	pm.scale_max = 1.0
+	# 碎片用立方体 mesh，尺寸 = 原体素大小（voxel_scale），保证与原体素一致
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(voxel_scale, voxel_scale, voxel_scale)
+	if data and mat_id >= 0 and mat_id < data.materials.size():
+		var mat_res = data.materials[mat_id]
+		if mat_res:
+			var m := StandardMaterial3D.new()
+			m.albedo_color = VoxelMaterial.albedo_color(mat_res)
+			m.metallic = mat_res.metal
+			m.roughness = mat_res.rough
+			m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+			mesh.material = m
+	particles.draw_pass_1 = mesh
+	particles.process_material = pm
+
+	_debris_root.add_child(particles)
+	# 粒子发射完后自动销毁节点
 	var tree := get_tree()
 	if tree:
-		var timer := tree.create_timer(debris_lifetime)
-		timer.timeout.connect(_cleanup_visual_debris.bind(count))
+		var timer := tree.create_timer(minf(debris_lifetime, 2.0) + 0.5)
+		timer.timeout.connect(_cleanup_particles.bind(particles))
 
 
-func _debris_transform(pos: Vector3i) -> Transform3D:
-	var scale := voxel_scale * debris_size_scale
-	var origin := (Vector3(pos) + Vector3(0.5, 0.5, 0.5)) * voxel_scale
-	var basis := Basis(Vector3.RIGHT, randf_range(0, TAU)) * Basis(Vector3.UP, randf_range(0, TAU))
-	basis = basis.scaled(Vector3(scale, scale, scale))
-	return Transform3D(basis, origin)
-
-
-func _get_multimesh(mat_id: int, box_size: float) -> MultiMesh:
-	if _multimesh_cache.has(mat_id):
-		return _multimesh_cache[mat_id]
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	mm.mesh = _get_debris_mesh(mat_id, box_size)
-	_multimesh_cache[mat_id] = mm
-	return mm
-
-
-func _get_multimesh_instance(mat_id: int) -> MultiMeshInstance3D:
-	if _multimesh_instances.has(mat_id):
-		var inst: MultiMeshInstance3D = _multimesh_instances[mat_id]
-		if is_instance_valid(inst):
-			return inst
-		_multimesh_instances.erase(mat_id)
-	var inst := MultiMeshInstance3D.new()
-	inst.name = "DebrisMM_%d" % mat_id
-	inst.multimesh = _get_multimesh(mat_id, voxel_scale * debris_size_scale)
-	_debris_root.add_child(inst)
-	_multimesh_instances[mat_id] = inst
-	return inst
-
-
-func _get_debris_color(mat_id: int) -> Color:
-	if data and mat_id >= 0 and mat_id < data.materials.size():
-		var m = data.materials[mat_id]
-		if m:
-			return VoxelMaterial.albedo_color(m)
-	return Color.WHITE
-
-
-func _cleanup_visual_debris(count: int) -> void:
-	var remaining := count
-	for mat_id in _multimesh_cache:
-		var mm: MultiMesh = _multimesh_cache[mat_id]
-		if mm.instance_count <= 0:
-			continue
-		var remove_n := mini(mm.instance_count, remaining)
-		mm.instance_count -= remove_n
-		debris_count = maxi(0, debris_count - remove_n)
-		remaining -= remove_n
-		if remaining <= 0:
-			break
+func _cleanup_particles(p: Node) -> void:
+	if p and is_instance_valid(p):
+		p.queue_free()
 
 
 func _get_debris_mesh(mat_id: int, size: float) -> Mesh:
-	if _debris_mesh_cache.has(mat_id):
-		return _debris_mesh_cache[mat_id]
+	# 缓存键包含尺寸，避免不同 size 的碎片 mesh 复用错误尺寸
+	var key := "%d:%.3f" % [mat_id, size]
+	if _debris_mesh_cache.has(key):
+		return _debris_mesh_cache[key]
 	var box := BoxMesh.new()
 	box.size = Vector3(size, size, size)
 	if data and mat_id >= 0 and mat_id < data.materials.size():
@@ -771,7 +859,7 @@ func _get_debris_mesh(mat_id: int, size: float) -> Mesh:
 			if mat_res.trans > 0:
 				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			box.material = mat
-	_debris_mesh_cache[mat_id] = box
+	_debris_mesh_cache[key] = box
 	return box
 
 
@@ -781,6 +869,5 @@ func _clear_debris() -> void:
 			child.queue_free()
 	debris_count = 0
 	_settled_debris.clear()
+	_active_debris.clear()
 	_debris_mesh_cache.clear()
-	_multimesh_cache.clear()
-	_multimesh_instances.clear()
