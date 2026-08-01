@@ -23,6 +23,10 @@ extends Resource
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
+## 本次变更涉及的体素集合（由修改方法记录，供增量更新/外部查询）
+## 调用 clear_dirty_voxels() 清空
+var dirty_voxels: Dictionary[Vector3i, int] = {}
+
 
 ## 从 VoxelData 构造 (编辑器导入时使用)
 static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> VoxelDataResource:
@@ -81,8 +85,10 @@ func get_voxel(pos: Vector3i) -> int:
 func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 	if material_id < 0:
 		voxels.erase(pos)
+		dirty_voxels[pos] = -1
 	else:
 		voxels[pos] = material_id
+		dirty_voxels[pos] = material_id
 	if notify:
 		emit_changed()
 
@@ -90,6 +96,7 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 ## 移除指定位置的体素
 func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
 	voxels.erase(pos)
+	dirty_voxels[pos] = -1
 	if notify:
 		emit_changed()
 
@@ -111,6 +118,8 @@ func get_voxel_count() -> int:
 
 ## 清空所有体素
 func clear(notify: bool = true) -> void:
+	for pos in voxels:
+		dirty_voxels[pos] = -1
 	voxels.clear()
 	if notify:
 		emit_changed()
@@ -120,8 +129,32 @@ func clear(notify: bool = true) -> void:
 func merge(other: VoxelDataResource, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
 	for pos in other.voxels:
 		voxels[pos + offset] = other.voxels[pos]
+		dirty_voxels[pos + offset] = other.voxels[pos]
 	if notify:
 		emit_changed()
+
+
+## 清空变更追踪集合（在完成一次网格重建后调用）
+func clear_dirty_voxels() -> void:
+	dirty_voxels.clear()
+
+
+## 计算本次变更体素的包围盒 (AABB)，用于区域重建判断；无变更返回 null
+func get_dirty_voxels_aabb() -> AABB:
+	if dirty_voxels.is_empty():
+		return AABB()
+	var min_pos := Vector3i(999999, 999999, 999999)
+	var max_pos := Vector3i(-999999, -999999, -999999)
+	for pos_key in dirty_voxels:
+		var pos: Vector3i = pos_key
+		min_pos.x = mini(min_pos.x, pos.x)
+		min_pos.y = mini(min_pos.y, pos.y)
+		min_pos.z = mini(min_pos.z, pos.z)
+		max_pos.x = maxi(max_pos.x, pos.x)
+		max_pos.y = maxi(max_pos.y, pos.y)
+		max_pos.z = maxi(max_pos.z, pos.z)
+	var extents := (max_pos - min_pos + Vector3i(1, 1, 1))
+	return AABB(Vector3(min_pos), Vector3(extents))
 
 
 ## 移除球形范围内的所有体素 (用于破坏系统)
@@ -133,6 +166,7 @@ func remove_voxels_in_sphere(center: Vector3, radius: float, notify: bool = true
 		if (Vector3(pos) - center).length_squared() <= radius_sq:
 			removed.append(pos)
 			voxels.erase(pos)
+			dirty_voxels[pos] = -1
 	if notify and not removed.is_empty():
 		emit_changed()
 	return removed
@@ -146,6 +180,7 @@ func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
 		if aabb.has_point(Vector3(pos)):
 			removed.append(pos)
 			voxels.erase(pos)
+			dirty_voxels[pos] = -1
 	if notify and not removed.is_empty():
 		emit_changed()
 	return removed

@@ -345,12 +345,22 @@ func _generate_dir_face(task) -> void:
 		if slices.has(slice_index):
 			var slice_voxels_visible = _get_dir_visible_slice_voxels(slices, axis, task.dir, slice_index)
 			if slice_voxels_visible.size() > 0:
-				var slice = slices[slice_index]
+				# 只遍历该切片中非空体素的局部边界范围，而非整个网格 AABB
 				var pos: Vector3i
 				pos[axis.x] = slice_index
-				for y in range(pos_min[axis.y], pos_max[axis.y] + 1):
+				var local_min_y := pos_min[axis.y]
+				var local_max_y := pos_max[axis.y]
+				var local_min_z := pos_min[axis.z]
+				var local_max_z := pos_max[axis.z]
+				# 根据可见体素集合收缩边界（稀疏场景收益显著）
+				for p: Vector3i in slice_voxels_visible:
+					if p[axis.y] < local_min_y: local_min_y = p[axis.y]
+					if p[axis.y] > local_max_y: local_max_y = p[axis.y]
+					if p[axis.z] < local_min_z: local_min_z = p[axis.z]
+					if p[axis.z] > local_max_z: local_max_z = p[axis.z]
+				for y in range(local_min_y, local_max_y + 1):
 					pos[axis.y] = y
-					for z in range(pos_min[axis.z], pos_max[axis.z] + 1):
+					for z in range(local_min_z, local_max_z + 1):
 						pos[axis.z] = z
 						if slice_voxels_visible.has(pos):
 							_generate_voxel_dir_face(slice_voxels_visible, axis, pos, task.dir, surfaces)

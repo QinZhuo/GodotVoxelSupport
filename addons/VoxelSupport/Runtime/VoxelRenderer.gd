@@ -30,6 +30,10 @@ signal mesh_updated
 ## 数据变化时是否自动重新生成 mesh
 @export var auto_update: bool = true
 
+## 重建限流帧数：一帧内多次数据变化会被合并，最多每 N 帧重建一次 mesh
+## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
+@export_range(1, 30) var update_throttle_frames: int = 1
+
 ## 是否生成静态碰撞体 (StaticBody3D + ConcavePolygonShape3D)
 @export var generate_collision: bool = false:
 	set(v):
@@ -42,6 +46,7 @@ signal mesh_updated
 var _dirty: bool = false
 var _materials_cache: Array = []
 var _collision_body: StaticBody3D = null
+var _update_counter: int = 0
 
 const _COLLISION_BODY_NAME := "_VoxelRendererCollision"
 
@@ -51,8 +56,14 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	if _dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor):
-		_update_mesh()
+	if not (_dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor)):
+		return
+	# 限流：合并帧内多次变更，最多每 update_throttle_frames 帧重建一次
+	_update_counter += 1
+	if _update_counter < update_throttle_frames:
+		return
+	_update_counter = 0
+	_update_mesh()
 
 
 func _on_data_changed() -> void:
@@ -132,6 +143,8 @@ func _update_mesh() -> void:
 	else:
 		_clear_collision()
 
+	# 重建完成，清空变更追踪
+	data.clear_dirty_voxels()
 	mesh_updated.emit()
 
 
