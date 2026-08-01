@@ -93,9 +93,15 @@ func _build_target() -> void:
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
-	# 支撑强度系数：让正常墙体稳定站立，同时破坏底部后（连接点减少）能断裂
-	# 薄墙贴地 48 点需撑整墙(约1152)，系数需 ≥24；破坏后连接点大幅减少，重量超承载即断
+	# 崩塌判定规则：默认连通性（与地面断开即脱）；可切换分级脱落（承载超载才脱）
+	_target.collapse_rule = VoxelDestructible.CollapseRule.RULE_CONNECTED
+	# 支撑强度系数：接触面单点承载重量。值越大越难断裂
+	# 分级规则下：承载能力 = Σ(接触体素硬度) × 系数；承载需求 = Σ(块内材质质量)
+	# 薄墙底部 48 接触点硬度5×系数需 ≥ 整墙重量(约1152)才稳定，此处设 25 便于对比
 	_target.collapse_support_strength = 25.0
+	# 分级规则参数（承载超载才脱落）
+	_target.segmented_use_mass = true
+	_target.segmented_use_hardness = true
 	# 连接破坏反馈信号（具体表现由游戏实现，这里仅记录用于 HUD 展示）
 	if not _target.voxel_hardened.is_connected(_on_voxel_hardened):
 		_target.voxel_hardened.connect(_on_voxel_hardened)
@@ -199,6 +205,8 @@ var _prev_r := false
 var _prev_b := false
 var _prev_s := false
 var _prev_l := false
+var _prev_3 := false
+var _prev_4 := false
 var _saved_data: Variant = null
 
 
@@ -212,6 +220,8 @@ func _handle_input() -> void:
 	var key_b := Input.is_key_pressed(KEY_B)
 	var key_s := Input.is_key_pressed(KEY_S)
 	var key_l := Input.is_key_pressed(KEY_L)
+	var key3 := Input.is_key_pressed(KEY_3)
+	var key4 := Input.is_key_pressed(KEY_4)
 
 	# 左键按下瞬间：球形破坏 (按住不重复触发)
 	if left and not _prev_left:
@@ -249,6 +259,11 @@ func _handle_input() -> void:
 		# 先清空碎片（避免旧碎片残留），再重建体素
 		_target.damage_map.clear()
 		_target.data.load_data(_saved_data)
+	# 3/4 按下瞬间：切换崩塌判定规则 (连通性 / 分级脱落)
+	if key3 and not _prev_3:
+		_target.collapse_rule = VoxelDestructible.CollapseRule.RULE_CONNECTED
+	if key4 and not _prev_4:
+		_target.collapse_rule = VoxelDestructible.CollapseRule.RULE_SEGMENTED
 
 	_prev_left = left
 	_prev_right = right
@@ -259,6 +274,8 @@ func _handle_input() -> void:
 	_prev_b = key_b
 	_prev_s = key_s
 	_prev_l = key_l
+	_prev_3 = key3
+	_prev_4 = key4
 
 
 ## 鼠标指向 → 体素空间坐标 (通过射线与体素数据的 DDA)
@@ -276,6 +293,7 @@ func _update_hud() -> void:
 	if _hud == null:
 		return
 	var mode_name := "物理 (RigidBody)" if _target.debris_mode == VoxelDestructible.DebrisMode.DEBRIS_PHYSICS else "视觉 (MultiMesh)"
+	var rule_name := "连通性(断开即脱)" if _target.collapse_rule == VoxelDestructible.CollapseRule.RULE_CONNECTED else "分级脱落(承载超载)"
 	_hud.text = """FPS: %d
 体素总数: %d
 碎片数: %d
@@ -283,21 +301,20 @@ func _update_hud() -> void:
 上次崩塌体素数: %d
 破坏耗时: %.2f ms
 Mesh生成: %.2f ms
+崩塌规则: %s
 材质 硬度/质量: 内%d/%.1f 外%d/%.1f 底%d/%.1f
 """ % [Engine.get_frames_per_second(), _target.data.voxels.size(),
 		_target.debris_count, _target.last_damage_count,
 		_target.last_collapse_count, _target.last_damage_time_ms,
-		_target.last_mesh_gen_time_ms, _get_hardness(1), _get_mass(1),
+		_target.last_mesh_gen_time_ms, rule_name, _get_hardness(1), _get_mass(1),
 		_get_hardness(2), _get_mass(2), _get_hardness(3), _get_mass(3)]
 	_mode_label.text = """碎片模式: %s  (按 1=物理 2=视觉)
-[鼠标左键] 球形破坏(伤害1)
-[鼠标右键] 单体破坏
-[空格] 射线破坏
+崩塌规则: %s  (按 3=连通 4=分级)
+[鼠标左键] 球形破坏(伤害1)  [鼠标右键] 单体破坏  [空格] 射线破坏
 [B] 破坏底部支撑(触发整体崩塌)
-[S] 存档当前体素  [L] 读档重建
-[R] 重置
-硬度需多次点击才摧毁，悬空体会崩塌掉落
-""" % mode_name
+[S] 存档当前体素  [L] 读档重建  [R] 重置
+分级脱落: 块重量(质量和) > 接触面承载(硬度和×系数) 才脱落
+""" % [mode_name, rule_name]
 
 
 func _get_hardness(mat_id: int) -> int:

@@ -27,6 +27,18 @@ extends Resource
 ## 调用 clear_dirty_voxels() 清空
 var dirty_voxels: Dictionary[Vector3i, int] = {}
 
+## 6 方向邻居偏移（上下左右前后），连通性 BFS/泛洪共用
+const NEIGHBORS_6: Array[Vector3i] = [
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+	Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+	Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+]
+
+
+## 返回 6 方向偏移数组（公开静态访问器，供外部遍历邻居时使用）
+static func get_neighbor_dirs() -> Array[Vector3i]:
+	return NEIGHBORS_6
+
 
 ## 从 VoxelData 构造 (编辑器导入时使用)
 static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> VoxelDataResource:
@@ -322,3 +334,121 @@ func load_data(data: Variant) -> void:
 				var pos := Vector3i(int(vox[0]), int(vox[1]), int(vox[2]))
 				voxels[pos] = int(vox[3])
 	emit_changed()
+
+
+# ----------------------------------------------------------------------------
+# 连通性 / 连接度 API（公开、只读、泛化，供游戏复用实现自定义逻辑）
+# ----------------------------------------------------------------------------
+# 元素反应等自定义玩法应由游戏自己实现，插件只提供这些底层查询能力。
+# 例如"水+火反应"：游戏可在 voxel_damaged 信号里用 find_connected / connectivity
+# 找出影响范围，再按材质组合自行实现反应效果。
+
+## 从种子体素位置集合出发，6 方向泛洪标记所有连通的体素，返回位置集合 (Dictionary 作 Set)
+## seeds 可为单个 Vector3i 或 Array[Vector3i]；返回 {pos: true} 可直接用 has() 判断
+## 若 restrict 提供，则只允许在 restrict 集合内扩散（用于只分析某子集内部的连通性）
+static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
+	var result := {}
+	if seeds == null:
+		return result
+	# 归一化种子为数组
+	var seed_list: Array = []
+	if seeds is Vector3i:
+		seed_list.append(seeds)
+	elif seeds is Array:
+		seed_list = seeds
+	for s in seed_list:
+		var pos: Vector3i = s
+		if pos in result:
+			continue
+		if not restrict.is_empty() and not restrict.has(pos):
+			continue
+		result[pos] = true
+		var queue: Array = [pos]
+		while not queue.is_empty():
+			var cur: Vector3i = queue.pop_front()
+			for d: Vector3i in NEIGHBORS_6:
+				var nb := cur + d
+				if nb in result:
+					continue
+				if not restrict.is_empty() and not restrict.has(nb):
+					continue
+				result[nb] = true
+				queue.append(nb)
+	return result
+
+
+## 找出某个体素所在的整个连通块（6 方向连通），返回该连通块的位置集合
+## 用于悬空判断、反应波及范围等
+func find_connected(pos: Vector3i) -> Dictionary:
+	if not has_voxel(pos):
+		return {}
+	return flood_fill(pos, voxels)
+
+
+## 将一组位置按 6 方向连通性分组，返回 Array[Array[Vector3i]]
+## 每组的体素两两 6 方向连通，组与组之间不连通。用于分块塌落、分块破坏等
+static func partition_connected(positions: Array) -> Array:
+	var result: Array = []
+	if positions.is_empty():
+		return result
+	var all_pos := {}
+	for p in positions:
+		all_pos[p] = true
+	var visited := {}
+	for key in all_pos:
+		if key in visited:
+			continue
+		var block: Array = []
+		var queue: Array = [key]
+		visited[key] = true
+		while not queue.is_empty():
+			var cur: Vector3i = queue.pop_front()
+			block.append(cur)
+			for d: Vector3i in NEIGHBORS_6:
+				var nb := cur + d
+				if nb in visited or not all_pos.has(nb):
+					continue
+				visited[nb] = true
+				queue.append(nb)
+		result.append(block)
+	return result
+
+
+## 某个体素的连接度：相邻的实体素数量 (0-6)
+## 可用于薄弱点判断、支撑接触面积估算等
+func connectivity(pos: Vector3i) -> int:
+	var count := 0
+	for d: Vector3i in NEIGHBORS_6:
+		if has_voxel(pos + d):
+			count += 1
+	return count
+
+
+## 返回某体素的所有相邻实体素位置数组 (6 方向)
+func neighbors(pos: Vector3i) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	for d: Vector3i in NEIGHBORS_6:
+		var nb := pos + d
+		if has_voxel(nb):
+			result.append(nb)
+	return result
+
+
+## 找出"悬空"体素：与贴地(y==0)体素 6 方向连通判定，完全断开的返回
+## 这是分级脱落的底座：先全局判定哪些与地面断开
+func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
+	var src := voxels_set if not voxels_set.is_empty() else voxels
+	if src.is_empty():
+		return {}
+	# 种子 = 贴地(y==0)体素
+	var seeds: Array = []
+	for key in src:
+		var pos: Vector3i = key
+		if pos.y == 0:
+			seeds.append(key)
+	var supported := flood_fill(seeds, src)
+	var unsupported := {}
+	for key in src:
+		if not supported.has(key):
+			unsupported[key] = true
+	return unsupported
