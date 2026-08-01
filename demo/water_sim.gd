@@ -16,6 +16,7 @@ const GRID_Z := 16
 const MAT_SOLID := 1      # 地形/容器壁（实心）
 const MAT_WATER := 2      # 水
 const MAT_EMISSIVE := 3   # 发光装饰
+const MAT_GLASS := 4      # 半透明玻璃（管道壁，便于观察管内水流）
 
 ## 每秒生成的水滴数（受上限约束）
 @export_range(0.0, 60.0) var drip_rate: float = 20.0
@@ -88,8 +89,8 @@ func _build_terrain() -> void:
 
 	var water := VoxelMaterial.new()
 	water.id = MAT_WATER
-	water.color = Color(0.25, 0.55, 0.9, 0.85)
-	water.trans = 0.15
+	water.color = Color(0.25, 0.55, 0.9)
+	water.trans = 0.35
 	water.rough = 0.05
 	_data.add_material(water)
 
@@ -98,6 +99,14 @@ func _build_terrain() -> void:
 	emissive.color = Color(0.3, 0.75, 1.0)
 	emissive.emission = 0.4
 	_data.add_material(emissive)
+
+	# 半透明玻璃材质：管道壁用，便于从外部观察管内水流的逐格推进
+	var glass := VoxelMaterial.new()
+	glass.id = MAT_GLASS
+	glass.color = Color(0.75, 0.85, 0.95)  # 浅蓝白
+	glass.trans = 0.75  # alpha = 1 - 0.75 = 0.25 (75% 透明，玻璃感)
+	glass.rough = 0.1
+	_data.add_material(glass)
 
 	# 地面（整体）
 	for x in GRID_X:
@@ -189,7 +198,8 @@ func _build_walls_only(a: Vector3i, b: Vector3i, mat: int) -> void:
 
 ## 构建一段回流水管道外壁（空心方柱，中心留 1 格水通道）
 ## 管道沿 x 或 y 方向延伸，位于 z 方向单列 (z=a.z 附近)
-func _build_pipe_outer(a: Vector3i, b: Vector3i, mat: int = MAT_SOLID) -> void:
+## 默认用半透明玻璃材质 (MAT_GLASS)，便于从外部观察管内水流的逐格推进
+func _build_pipe_outer(a: Vector3i, b: Vector3i, mat: int = MAT_GLASS) -> void:
 	var z := a.z
 	# 管道若沿 x 方向延伸 (a.x != b.x)
 	if a.x != b.x:

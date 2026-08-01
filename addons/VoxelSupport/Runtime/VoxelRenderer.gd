@@ -77,6 +77,8 @@ var _generation_id := 0
 # 材质快照缓存：材质对象深拷贝较昂贵，仅在材质变化时重建一次，供子线程安全读取
 var _materials_snapshot: Array = []
 var _materials_snapshot_dirty: bool = true
+# 异步任务运行期间收到新变更时置位，任务完成后重新触发更新（保证数据始终最新且不并发）
+var _pending_retrigger: bool = false
 
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
@@ -90,13 +92,18 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	# 异步任务完成后，轮询并应用结果（在主线程执行，保证安全）
-	if _has_pending and _task_id >= 0 and WorkerThreadPool.is_task_completed(_task_id):
+	if _task_id >= 0 and WorkerThreadPool.is_task_completed(_task_id):
 		WorkerThreadPool.wait_for_task_completion(_task_id)
 		_task_id = -1
 		var arrays := _pending_arrays
 		_pending_arrays = null
 		_has_pending = false
 		_build_and_apply_mesh(arrays)
+		# 若任务运行期间有新变更，立即重新生成（用最新数据）
+		if _pending_retrigger:
+			_pending_retrigger = false
+			_dirty = true
+			_update_mesh()
 
 	if not (_dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor)):
 		return
@@ -105,6 +112,10 @@ func _process(_delta: float) -> void:
 	if _update_counter < update_throttle_frames:
 		return
 	_update_counter = 0
+	# 若上一个异步任务仍在运行，标记"待更新"并等待其完成后自动重触发，避免并发任务堆积
+	if _task_id >= 0:
+		_pending_retrigger = true
+		return
 	_update_mesh()
 
 
@@ -197,11 +208,10 @@ func _update_mesh() -> void:
 
 
 ## 异步路径：后台线程生成网格数据，完成后在 _process 轮询应用
+## 主线程绝不阻塞：旧任务未完成时直接启动新任务覆盖，子线程完成后检查 gen_id 丢弃过期结果
 func _update_mesh_async() -> void:
-	# 若上一轮异步任务仍在运行，等待其结束（限流已保证频率不会过高）
-	if _task_id >= 0:
-		WorkerThreadPool.wait_for_task_completion(_task_id)
-		_task_id = -1
+	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
+	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
 	# 快照本次要生成的体素数据（子线程只读，避免与主线程写入竞争）
 	# voxels 为 Dictionary[Vector3i,int]，浅拷贝只复制哈希表 (值类型 key/value)，开销小
