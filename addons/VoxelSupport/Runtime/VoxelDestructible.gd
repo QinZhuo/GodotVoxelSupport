@@ -41,6 +41,11 @@ enum CollapseMode {
 ## 崩塌掉落模式
 @export var collapse_mode: CollapseMode = CollapseMode.COLLAPSE_DEBRIS
 
+## 支撑强度系数：单个支撑接触体素能承受的重量
+## 支撑强度分析用：块重量 > 支撑点数 × 该系数 时，判定支撑不足而断裂崩塌
+## 值越小越容易断裂（需更多支撑），实心结构建议较高以保证稳定
+@export var collapse_support_strength: float = 15.0
+
 ## 逐体素健康度系统开关：关闭时忽略材质硬度，一击即碎
 @export var use_voxel_health: bool = true
 
@@ -286,75 +291,103 @@ func _after_removal(removed: Array) -> void:
 # ----------------------------------------------------------------------------
 
 ## 检测并处理悬空体素（与地面/支撑断开的体素），崩塌成整块刚体掉落
+## 支持"支撑强度分析"：与主结构/地面只有少量接触、重量超出支撑能力的块也会自动断裂崩塌
 func _trigger_collapse() -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
-	var detached := _find_detached_voxels()
-	if detached.is_empty():
+	var unstable := _find_unstable_voxels()
+	if unstable.is_empty():
 		return
 	# 崩塌前反馈信号
-	voxels_about_to_collapse.emit(detached)
-	last_collapse_count = detached.size()
+	voxels_about_to_collapse.emit(unstable)
+	last_collapse_count = unstable.size()
 
-	# 崩塌的悬空体素转成"整块刚体"掉落（按连通块分组，而非散成小碎片）
-	# 先移除（否则仍会留在 mesh 中），再生成整块刚体
-	var mat_map := _collect_voxel_materials(detached)
-	data.remove_voxels(detached)
+	# 崩塌的悬空/支撑不足体素转成"整块刚体"掉落（按连通块分组）
+	var mat_map := _collect_voxel_materials(unstable)
+	data.remove_voxels(unstable)
 	if not Engine.is_editor_hint():
-		_spawn_collapse_blocks(detached, mat_map)
+		_spawn_collapse_blocks(unstable, mat_map)
 	# 崩塌也算破坏，发信号
-	voxel_damaged.emit(detached, true)
+	voxel_damaged.emit(unstable, true)
 
 
-## 洪水填充(BFS) 从"贴地的体素"出发标记与地面连通的体素，未被标记的即为悬空(孤立)
-## 贴地 = 位于地面(y==0)
-## 关键：BFS 遍历 6 方向（含上下），从地面种子出发，一次识别所有与地面断开的悬空体素
-func _find_detached_voxels() -> Array:
+## 找出所有"失稳"体素（与地面断开 + 支撑不足的块），返回这些体素位置的并集
+## 通过支撑强度分析：对每个连通块，计算重量 vs 支撑接触点，
+## 无支撑（完全悬空）或支撑不足（重量超出支撑能力）的块判定为失稳
+func _find_unstable_voxels() -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	# 种子 = 贴地的体素 (y==0 且存在)
-	var seeds: Array = []
-	for key in voxels:
-		var pos: Vector3i = key
-		if pos.y == 0:
-			seeds.append(pos)
+	# 把所有体素按 6 方向连通分量分组
+	var blocks := _partition_all_connected_blocks(voxels)
 
-	# 没有任何贴地体素时，说明所有剩余体素都悬空，全部返回
-	if seeds.is_empty():
-		var all_detached: Array = []
-		for key in voxels:
-			all_detached.append(key)
-		return all_detached
+	# 每个块独立判定稳定性
+	var unstable_set := {}
+	for block in blocks:
+		if _is_block_unstable(block, voxels):
+			for p in block:
+				unstable_set[p] = true
 
-	# BFS 从地面种子出发，6 方向标记与地面连通的体素
-	var connected := {}
-	var queue: Array = []
-	for seed in seeds:
-		if not connected.has(seed):
-			connected[seed] = true
-			queue.append(seed)
+	var unstable: Array = []
+	for key in unstable_set:
+		unstable.append(key)
+	return unstable
+
+
+## 判定一个连通块是否失稳（无支撑 或 支撑不足）
+func _is_block_unstable(block: Array, all_voxels: Dictionary) -> bool:
+	if block.is_empty():
+		return false
+	var block_set := {}
+	for p in block:
+		block_set[p] = true
+
+	var total_mass := 0.0
+	var support_points := 0
+	for p in block:
+		var pos: Vector3i = p
+		total_mass += _get_material_mass(all_voxels[pos])
+		# 支撑接触点：该体素下方是地面(y==0) 或下方是"外部块"体素(不在本块且存在)
+		var below := pos + Vector3i(0, -1, 0)
+		var has_external_support := all_voxels.has(below) and not block_set.has(below)
+		if below.y < 0 or has_external_support:
+			support_points += 1
+
+	# 无任何支撑接触 → 完全悬空，失稳
+	if support_points == 0:
+		return true
+	# 有支撑但支撑能力 < 块质量 → 支撑不足，失稳断裂
+	var support_capacity := float(support_points) * collapse_support_strength
+	return total_mass > support_capacity
+
+
+## 把所有体素按 6 方向连通性分组为连通块
+func _partition_all_connected_blocks(voxels: Dictionary) -> Array:
+	var blocks: Array = []
+	var visited := {}
 	var dirs := [
 		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
 		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
 	]
-	while not queue.is_empty():
-		var cur: Vector3i = queue.pop_front()
-		for d: Vector3i in dirs:
-			var nb := cur + d
-			if voxels.has(nb) and not connected.has(nb):
-				connected[nb] = true
-				queue.append(nb)
-
-	# 未被标记的体素 = 悬空
-	var detached: Array = []
 	for key in voxels:
-		var pos: Vector3i = key
-		if not connected.has(pos):
-			detached.append(pos)
-	return detached
+		var start: Vector3i = key
+		if visited.has(start):
+			continue
+		var block: Array = []
+		var queue: Array = [start]
+		visited[start] = true
+		while not queue.is_empty():
+			var cur: Vector3i = queue.pop_front()
+			block.append(cur)
+			for d: Vector3i in dirs:
+				var nb := cur + d
+				if voxels.has(nb) and not visited.has(nb):
+					visited[nb] = true
+					queue.append(nb)
+		blocks.append(block)
+	return blocks
 
 
 # ----------------------------------------------------------------------------
@@ -462,6 +495,9 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 	var center := (min_pos + max_pos) * 0.5 + Vector3(0.5, 0.5, 0.5)  # 块中心（体素空间）
 
 	var body := RigidBody3D.new()
+	# 整块质量 = 块内体素质量之和（材质质量影响塌落物理表现）
+	var block_mass := _compute_block_mass(block, mat_map)
+	body.mass = maxf(block_mass, 0.01)
 	# 组合碰撞形状：每个体素一个独立的 shape owner + BoxShape，偏移到体素绝对位置（相对 body 原点）
 	for p in block:
 		var pos: Vector3i = p
@@ -478,7 +514,7 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 	body.add_child(mesh_inst)
 
 	body.position = Vector3.ZERO
-	# 整块从质心缓慢下落，带轻微随机旋转
+	# 整块从质心缓慢下落，带轻微随机旋转；质量越大越"沉重"
 	body.linear_velocity = Vector3(randf_range(-0.3, 0.3), -debris_min_speed * 0.5, randf_range(-0.3, 0.3))
 	body.angular_velocity = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1))
 	body.gravity_scale = debris_gravity_scale
@@ -486,6 +522,24 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 	body.set_meta("_born_ms", Time.get_ticks_msec())
 	_debris_root.add_child(body)
 	debris_count += 1
+
+
+## 计算块的质量（块内体素质量之和）
+func _compute_block_mass(block: Array, mat_map: Dictionary) -> float:
+	var total := 0.0
+	for p in block:
+		var pos: Vector3i = p
+		var mat_id: int = mat_map.get(pos, -1)
+		total += _get_material_mass(mat_id)
+	return total
+
+
+func _get_material_mass(mat_id: int) -> float:
+	if data and mat_id >= 0 and mat_id < data.materials.size():
+		var m = data.materials[mat_id]
+		if m:
+			return m.mass
+	return 1.0
 
 
 ## 给整块 mesh 赋材质：复用与原体素一致的纹理材质 (VoxelMeshGenerator 生成的 PBR 材质)

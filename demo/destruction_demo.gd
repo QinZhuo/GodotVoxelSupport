@@ -87,6 +87,8 @@ func _build_target() -> void:
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
+	# 支撑强度：让正常墙体稳定站立，破坏后支撑不足才断裂
+	_target.collapse_support_strength = 40.0
 	# 连接破坏反馈信号（具体表现由游戏实现，这里仅记录用于 HUD 展示）
 	if not _target.voxel_hardened.is_connected(_on_voxel_hardened):
 		_target.voxel_hardened.connect(_on_voxel_hardened)
@@ -110,6 +112,7 @@ func _create_demo_cube_data() -> VoxelDataResource:
 	solid.color = Color(0.55, 0.45, 0.35)
 	solid.rough = 0.9
 	solid.hardness = 3.0  # 内部泥土：较硬，需 3 次伤害才摧毁
+	solid.mass = 1.0      # 泥土：中等质量
 	data.add_material(solid)
 	var metal := VoxelMaterial.new()
 	metal.id = 2
@@ -117,12 +120,14 @@ func _create_demo_cube_data() -> VoxelDataResource:
 	metal.metal = 0.8
 	metal.rough = 0.3
 	metal.hardness = 5.0  # 外层金属：很硬，需 5 次伤害
+	metal.mass = 2.0      # 金属：较重，支撑要求高
 	data.add_material(metal)
 	var accent := VoxelMaterial.new()
 	accent.id = 3
 	accent.color = Color(0.9, 0.4, 0.3)
 	accent.rough = 0.6
 	accent.hardness = 1.0  # 底部红色：易碎，一击即碎
+	accent.mass = 0.5      # 底部：较轻
 	data.add_material(accent)
 
 	# 填充墙体体素（薄墙：z 只有 2 格厚，x 长，y 高）
@@ -256,11 +261,12 @@ func _update_hud() -> void:
 上次崩塌体素数: %d
 破坏耗时: %.2f ms
 Mesh生成: %.2f ms
-材质硬度: 内%d 外%d 底%d
+材质 硬度/质量: 内%d/%.1f 外%d/%.1f 底%d/%.1f
 """ % [Engine.get_frames_per_second(), _target.data.voxels.size(),
 		_target.debris_count, _target.last_damage_count,
 		_target.last_collapse_count, _target.last_damage_time_ms,
-		_target.last_mesh_gen_time_ms, _get_hardness(1), _get_hardness(2), _get_hardness(3)]
+		_target.last_mesh_gen_time_ms, _get_hardness(1), _get_mass(1),
+		_get_hardness(2), _get_mass(2), _get_hardness(3), _get_mass(3)]
 	_mode_label.text = """碎片模式: %s  (按 1=物理 2=视觉)
 [鼠标左键] 球形破坏(伤害1)
 [鼠标右键] 单体破坏
@@ -277,6 +283,14 @@ func _get_hardness(mat_id: int) -> int:
 		if m:
 			return int(m.hardness)
 	return 1
+
+
+func _get_mass(mat_id: int) -> float:
+	if _target.data and mat_id >= 0 and mat_id < _target.data.materials.size():
+		var m = _target.data.materials[mat_id]
+		if m:
+			return m.mass
+	return 1.0
 
 
 ## 反馈信号：体素受伤但未摧毁（材质硬度未达）
