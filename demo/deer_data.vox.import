@@ -1,0 +1,16 @@
+[remap]
+
+importer="voxel_data"
+type="Resource"
+uid="uid://dwlsmke33vkb6"
+path="res://.godot/imported/deer_data.vox-5eb8944a9906d3c3be9bd8059cf88fe4.res"
+
+[deps]
+
+source_file="res://demo/deer_data.vox"
+dest_files=["res://.godot/imported/deer_data.vox-5eb8944a9906d3c3be9bd8059cf88fe4.res"]
+
+[params]
+
+mesh/frame_index=0
+mesh/scale=0.1
