@@ -32,19 +32,21 @@ static func generate_mesh_runtime(
 
 	# 合并所有 chunk 的面片
 	var all_solid_verts := PackedVector3Array()
+	var all_solid_normals := PackedVector3Array()
 	var all_solid_uvs := PackedVector2Array()
 	var all_solid_idxs := PackedInt32Array()
 	var all_trans_verts := PackedVector3Array()
+	var all_trans_normals := PackedVector3Array()
 	var all_trans_uvs := PackedVector2Array()
 	var all_trans_idxs := PackedInt32Array()
 
 	for ck in chunk_keys:
 		_generate_chunk_into(voxels, aligned, scale, ck,
-			all_solid_verts, all_solid_uvs, all_solid_idxs,
-			all_trans_verts, all_trans_uvs, all_trans_idxs)
+			all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs,
+			all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs)
 
-	return _merge_meshes(all_solid_verts, all_solid_uvs, all_solid_idxs,
-		all_trans_verts, all_trans_uvs, all_trans_idxs)
+	return _merge_meshes(all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs,
+		all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs)
 
 
 ## 根据变更体素集合，计算需要重建的 chunk（增量重建核心）
@@ -87,8 +89,8 @@ static func _unique(arr: Array[Vector3i]) -> Array[Vector3i]:
 
 ## 生成单个 chunk 的面片并追加到全局数组
 static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3i,
-		solid_verts: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
-		trans_verts: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array) -> void:
+		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
+		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array) -> void:
 	var chunk_origin := chunk * CHUNK_SIZE
 
 	for x in CHUNK_SIZE:
@@ -108,8 +110,8 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 					var visible := n_id < 0 or (is_trans != n_trans) or (mat_id != n_id)
 					if not visible:
 						continue
-					_add_face(solid_verts, solid_uvs, solid_idxs,
-						trans_verts, trans_uvs, trans_idxs,
+					_add_face(solid_verts, solid_normals, solid_uvs, solid_idxs,
+						trans_verts, trans_normals, trans_uvs, trans_idxs,
 						pos, mat_id, face_idx, scale, is_trans)
 
 
@@ -125,61 +127,50 @@ const _DIRS: Array[Vector3i] = [
 	Vector3i(0, 0, 1),  Vector3i(0, 0, -1),  # front, back
 ]
 
-# 每个面的 4 个角（单位立方体局部坐标）
-const _FACE_CORNERS: Array = [
-	[Vector3(0, 1, 0), Vector3(1, 1, 0), Vector3(1, 1, 1), Vector3(0, 1, 1)],  # top
-	[Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, 0, 0), Vector3(0, 0, 0)],  # bottom
-	[Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 1), Vector3(0, 1, 0)],  # left
-	[Vector3(1, 0, 1), Vector3(1, 0, 0), Vector3(1, 1, 0), Vector3(1, 1, 1)],  # right
-	[Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, 1, 1), Vector3(0, 1, 1)],  # front
-	[Vector3(1, 0, 0), Vector3(0, 0, 0), Vector3(0, 1, 0), Vector3(1, 1, 0)],  # back
-]
-
 
 ## 添加一个面（两个三角形，6 顶点）
+## 与 VoxelMeshGenerator 共用 FaceTool.Faces 面片数据，确保法线/缠绕方向完全一致
 static func _add_face(
-		solid_verts: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
-		trans_verts: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
+		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
+		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
 		pos: Vector3i, mat_id: int, face_idx: int, scale: float, is_trans: bool) -> void:
-	var corners: Array = _FACE_CORNERS[face_idx]
-	# 当前表面顶点基数
-	var base := solid_verts.size() if not is_trans else trans_verts.size()
+	var normal: Vector3 = FaceTool.Normals[face_idx]
 	var u := (float(mat_id) + 0.5) / 256.0
-	# 三角形 0-1-2 和 0-2-3（每面 6 个顶点，两个三角形）
-	var tri := [[0, 1, 2], [0, 2, 3]]
-	for t in tri:
-		for k in 3:
-			var corner: Vector3 = corners[t[k]]
-			var world_pos := (Vector3(pos) + corner) * scale
-			if is_trans:
-				trans_verts.append(world_pos)
-				trans_uvs.append(Vector2(u, 0.0))
-				trans_idxs.append(base + trans_verts.size() - 1)
-			else:
-				solid_verts.append(world_pos)
-				solid_uvs.append(Vector2(u, 0.0))
-				solid_idxs.append(base + solid_verts.size() - 1)
+	# FaceTool.Faces[face_idx] 已按 CCW 拆好 6 个顶点（两个三角形）
+	for point: Vector3 in FaceTool.Faces[face_idx]:
+		var world_pos := (Vector3(pos) + point) * scale
+		if is_trans:
+			trans_verts.append(world_pos)
+			trans_normals.append(normal)
+			trans_uvs.append(Vector2(u, 0.0))
+			trans_idxs.append(trans_verts.size() - 1)
+		else:
+			solid_verts.append(world_pos)
+			solid_normals.append(normal)
+			solid_uvs.append(Vector2(u, 0.0))
+			solid_idxs.append(solid_verts.size() - 1)
 
 
-static func _merge_meshes(solid_verts: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
-		trans_verts: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array) -> ArrayMesh:
+static func _merge_meshes(solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
+		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array) -> ArrayMesh:
 	var result := ArrayMesh.new()
 	var has_any := false
 	if not solid_idxs.is_empty():
-		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _make_arrays(solid_verts, solid_uvs, solid_idxs))
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _make_arrays(solid_verts, solid_normals, solid_uvs, solid_idxs))
 		has_any = true
 	if not trans_idxs.is_empty():
-		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _make_arrays(trans_verts, trans_uvs, trans_idxs))
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _make_arrays(trans_verts, trans_normals, trans_uvs, trans_idxs))
 		has_any = true
 	if not has_any:
 		return null
 	return result
 
 
-static func _make_arrays(verts: PackedVector3Array, uvs: PackedVector2Array, idxs: PackedInt32Array) -> Array:
+static func _make_arrays(verts: PackedVector3Array, normals: PackedVector3Array, uvs: PackedVector2Array, idxs: PackedInt32Array) -> Array:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_INDEX] = idxs
 	return arrays
