@@ -26,8 +26,8 @@ const MAT_EMISSIVE := 3   # 发光装饰
 ## 水体素数量上限（防止水无限累积导致 mesh 过大卡死）
 @export_range(500, 8000) var max_water_voxels: int = 3000
 
-## 水滴生成点（高架水源池上方）
-var _drop_pos := Vector3i(7, 16, 7)
+## 水滴生成点（高架池前侧瀑布落水口上方，让水从高处直接落下形成持续瀑布）
+var _drop_pos := Vector3i(7, 14, 10)
 
 var _data: VoxelDataResource
 var _renderer: VoxelRenderer
@@ -62,6 +62,8 @@ func _process(delta: float) -> void:
 	# 更新水体
 	var t0 := Time.get_ticks_usec()
 	_update_water()
+	# 回流泵：把底部收集池的水抽回高架池顶，形成持续循环（水永远不会静止）
+	_recycle_water()
 	_gen_time = (Time.get_ticks_usec() - t0) / 1000.0
 
 	# 批量修改后一次性通知 VoxelRenderer 重建 mesh
@@ -102,18 +104,25 @@ func _build_terrain() -> void:
 		for z in GRID_Z:
 			_data.voxels[Vector3i(x, 0, z)] = MAT_SOLID
 
-	# ---- 高架水源池 (x:5..9, z:5..10, 水面 y:12)，支撑柱 ----
+	# ---- 高架水源池 (x:5..9, z:5..9)，前侧 (z:10) 中间段 x:6..8 开放为落水槽，形成第一级瀑布 ----
 	_build_container(Vector3i(5, 4, 5), Vector3i(9, 8, 10), MAT_SOLID)
-	# 高架池底（y:8 实心，水存在其上方 y:9..12）
+	# 高架池底（y:8 实心，水存在其上方；落水槽 x:6..8, z:10 处不建底，让瀑布贯通到地面）
 	for x in range(5, 10):
 		for z in range(5, 11):
+			if z == 10 and x >= 6 and x <= 8:
+				continue  # 落水槽处留空
 			_data.voxels[Vector3i(x, 8, z)] = MAT_SOLID
-	# 高架池壁（到 y:13）
-	_build_walls_only(Vector3i(5, 9, 5), Vector3i(9, 13, 10), MAT_SOLID)
-	# 高架池前侧留缺口 (z:10 一侧在 y:12..13 开放)，形成第一级瀑布落水口
-	for x in range(6, 9):
-		_data.voxels.erase(Vector3i(x, 12, 10))
-		_data.voxels.erase(Vector3i(x, 13, 10))
+	# 高架池四壁 y:9..12：后壁 z=5、左壁 x=5、右壁 x=9、前壁 z=10 (仅转角 x:5, x:9)
+	for y in range(9, 13):
+		for x in range(5, 10):
+			_data.voxels[Vector3i(x, y, 5)] = MAT_SOLID
+		for z in range(5, 11):
+			_data.voxels[Vector3i(5, y, z)] = MAT_SOLID
+			_data.voxels[Vector3i(9, y, z)] = MAT_SOLID
+	# 前壁 z:10 仅在转角 x:5, x:9 实心；中间段 x:6..8 开放为落水槽 (y:9..13 全空)
+	for y in range(9, 14):
+		_data.voxels[Vector3i(5, y, 10)] = MAT_SOLID
+		_data.voxels[Vector3i(9, y, 10)] = MAT_SOLID
 
 	# ---- 第一级瀑布落点：地面蓄水池A (x:5..9 下方, z:5..10)，承接瀑布 ----
 	_build_container(Vector3i(5, 1, 5), Vector3i(9, 3, 10), MAT_SOLID)
@@ -250,10 +259,11 @@ func _update_hud() -> void:
 顶点: %d
 体素总数: %d
 水体素: %d
-水体更新: %.2f ms
+水模拟耗时: %.2f ms
+Mesh生成耗时: %.2f ms
 体素缩放: %.2f
 """ % [Engine.get_frames_per_second(), 1000.0 / maxf(Engine.get_frames_per_second(), 0.001),
-		tri, verts, _data.voxels.size(), _water_count, _gen_time, voxel_scale]
+		tri, verts, _data.voxels.size(), _water_count, _gen_time, _renderer.last_mesh_gen_time_ms, voxel_scale]
 
 
 # ----------------------------------------------------------------------------
@@ -300,8 +310,8 @@ func _update_water() -> void:
 		if moved:
 			continue
 
-		# 3. 水平扩散：向相邻空位铺平（水面摊平）
-		#    平地水会铺开到空位直到铺满，铺满后无空位可扩散即自然稳定
+		# 3. 水平流动：优先向"目标下方为空"的方向（下坡/悬崖），水流有明确向下的趋势
+		#    只有目标下方为空时才流动，避免在高位无方向地来回晃动
 		var dirs := [
 			Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 			Vector3i(0, 0, 1), Vector3i(0, 0, -1),
@@ -309,7 +319,7 @@ func _update_water() -> void:
 		dirs.shuffle()
 		for d: Vector3i in dirs:
 			var side: Vector3i = pos + d
-			if _is_empty(side):
+			if _is_empty(side) and _is_empty(side + Vector3i(0, -1, 0)):
 				moves[pos] = side
 				moved = true
 				break
@@ -320,6 +330,55 @@ func _update_water() -> void:
 		if _data.get_voxel(from) == MAT_WATER and _is_empty(to):
 			_data.voxels.erase(from)
 			_data.voxels[to] = MAT_WATER
+
+
+## 回流泵：将系统中"最低层"的水抽回高架池顶，形成持续水循环
+## 不依赖某个池满水，只要水量足够就从最底部抽水，保证水永远在流动
+func _recycle_water() -> void:
+	# 收集所有水的位置
+	var water_positions: Array[Vector3i] = []
+	for pos in _data.voxels:
+		if _data.voxels[pos] == MAT_WATER:
+			water_positions.append(pos)
+
+	# 水量过少时仅靠水滴即可，暂不回流（避免泵把少量水抽空导致观感断裂）
+	if water_positions.size() < 20:
+		return
+
+	# 优先抽"最低层"的水（y 最小的），让水从高处源源不断补下，形成连续瀑布
+	water_positions.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.y != b.y:
+			return a.y < b.y
+		if a.x != b.x:
+			return a.x < b.x
+		return a.z < b.z)
+
+	# 抽水量：总量的 1/6，最少 1 格，最多不超过 20（避免一帧抽太多影响观感）
+	@warning_ignore("integer_division")
+	var pump := clampi(water_positions.size() / 6, 1, 20)
+	for i in mini(pump, water_positions.size()):
+		# 回流到高架池内部水面（优先找池内空位），数量不变仅位置改变
+		var target := _find_recycle_target()
+		if target == Vector3i(-1, -1, -1):
+			continue  # 找不到空位则不抽，避免水量流失
+		_data.voxels.erase(water_positions[i])
+		_data.voxels[target] = MAT_WATER
+
+
+## 找一个可放置回流水的空位：优先在"瀑布落水槽"顶部 (高架池前侧 x:6..8, y:12..13, z:10)，
+## 让回流的水从落水槽直接落下形成瀑布，而不是放回池内蓄水（避免池内高位晃动）
+func _find_recycle_target() -> Vector3i:
+	# 落水槽顶部 (x:6..8, y:13..12, z:10) 找空位，水从顶部开始下落
+	for y in range(13, 11, -1):
+		for x in range(6, 9):
+			var p := Vector3i(x, y, 10)
+			if _in_bounds(p) and _data.get_voxel(p) < 0:
+				return p
+	# 池顶生成点附近兜底
+	var t := _drop_pos + Vector3i(randi_range(-1, 1), 0, randi_range(-1, 1))
+	if _in_bounds(t) and _data.get_voxel(t) < 0:
+		return t
+	return Vector3i(-1, -1, -1)
 
 
 func _is_empty(pos: Vector3i) -> bool:

@@ -78,6 +78,9 @@ var _generation_id := 0
 var _materials_snapshot: Array = []
 var _materials_snapshot_dirty: bool = true
 
+## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
+var last_mesh_gen_time_ms: float = 0.0
+
 const _COLLISION_BODY_NAME := "_VoxelRendererCollision"
 
 
@@ -223,7 +226,9 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 	var options := {
 		"scale": voxel_scale,
 	}
+	var t0 := Time.get_ticks_usec()
 	var arrays: Variant = _CHUNK_GENERATOR.generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
+	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	# 仅在 gen_id 仍有效时写入结果（避免覆盖更新的任务）
 	if gen_id == _generation_id:
 		_pending_arrays = arrays
@@ -238,7 +243,9 @@ func _update_mesh_sync() -> void:
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = _CHUNK_GENERATOR.chunks_for_dirty_voxels(data.dirty_voxels)
+	var t0 := Time.get_ticks_usec()
 	var arrays := _CHUNK_GENERATOR.generate_arrays_runtime(data.voxels, data.materials, options, rebuild_chunks)
+	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	_build_and_apply_mesh(arrays)
 
 
