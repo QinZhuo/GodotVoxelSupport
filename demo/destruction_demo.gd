@@ -28,9 +28,33 @@ var _camera: Camera3D
 
 
 func _ready() -> void:
+	_setup_ground()
 	_build_target()
 	_setup_camera()
 	_setup_controls_hud()
+
+
+## 创建地面（StaticBody3D 平面碰撞），让破坏/崩塌的碎片有落点
+func _setup_ground() -> void:
+	var static_body := StaticBody3D.new()
+	static_body.name = "Ground"
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(60, 0.5, 60)
+	var owner_id := static_body.create_shape_owner(static_body)
+	static_body.shape_owner_add_shape(owner_id, shape)
+	static_body.position = Vector3(0, -0.5, 0)
+	add_child(static_body)
+
+	# 地面可视化（半透明灰）
+	var mesh_inst := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(60, 0.5, 60)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.35, 0.35, 0.4, 0.8)
+	mesh_inst.mesh = box
+	mesh_inst.material_override = mat
+	mesh_inst.position = Vector3(0, -0.5, 0)
+	add_child(mesh_inst)
 
 
 func _process(_delta: float) -> void:
@@ -59,6 +83,15 @@ func _build_target() -> void:
 	_target.spawn_debris_on_damage = true
 	_target.max_debris_per_hit = 40
 	_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
+	# 逐体素健康度 + 悬空崩塌
+	_target.use_voxel_health = true
+	_target.damage_per_voxel = 1.0
+	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
+	# 连接破坏反馈信号（具体表现由游戏实现，这里仅记录用于 HUD 展示）
+	if not _target.voxel_hardened.is_connected(_on_voxel_hardened):
+		_target.voxel_hardened.connect(_on_voxel_hardened)
+	if not _target.voxels_about_to_collapse.is_connected(_on_voxels_collapse):
+		_target.voxels_about_to_collapse.connect(_on_voxels_collapse)
 	# 居中摆放（按数据源包围盒）
 	var bounds: AABB = data.get_voxels_aabb()
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
@@ -71,17 +104,20 @@ func _create_demo_cube_data() -> VoxelDataResource:
 	solid.id = 1
 	solid.color = Color(0.55, 0.45, 0.35)
 	solid.rough = 0.9
+	solid.hardness = 3.0  # 内部泥土：较硬，需 3 次伤害才摧毁
 	data.add_material(solid)
 	var metal := VoxelMaterial.new()
 	metal.id = 2
 	metal.color = Color(0.7, 0.7, 0.8)
 	metal.metal = 0.8
 	metal.rough = 0.3
+	metal.hardness = 5.0  # 外层金属：很硬，需 5 次伤害
 	data.add_material(metal)
 	var accent := VoxelMaterial.new()
 	accent.id = 3
 	accent.color = Color(0.9, 0.4, 0.3)
 	accent.rough = 0.6
+	accent.hardness = 1.0  # 底部红色：易碎，一击即碎
 	data.add_material(accent)
 
 	# 填充立方体体素
@@ -203,14 +239,38 @@ func _update_hud() -> void:
 体素总数: %d
 碎片数: %d
 上次破坏体素数: %d
+上次崩塌体素数: %d
 破坏耗时: %.2f ms
 Mesh生成: %.2f ms
+材质硬度: 内%d 外%d 底%d
 """ % [Engine.get_frames_per_second(), _target.data.voxels.size(),
 		_target.debris_count, _target.last_damage_count,
-		_target.last_damage_time_ms, _target.last_mesh_gen_time_ms]
+		_target.last_collapse_count, _target.last_damage_time_ms,
+		_target.last_mesh_gen_time_ms, _get_hardness(1), _get_hardness(2), _get_hardness(3)]
 	_mode_label.text = """碎片模式: %s  (按 1=物理 2=视觉)
-[鼠标左键] 球形破坏
+[鼠标左键] 球形破坏(伤害1)
 [鼠标右键] 单体破坏
 [空格] 射线破坏
 [R] 重置
+硬度需多次点击才摧毁，悬空体会崩塌掉落
 """ % mode_name
+
+
+func _get_hardness(mat_id: int) -> int:
+	if _target.data and mat_id >= 0 and mat_id < _target.data.materials.size():
+		var m = _target.data.materials[mat_id]
+		if m:
+			return int(m.hardness)
+	return 1
+
+
+## 反馈信号：体素受伤但未摧毁（材质硬度未达）
+func _on_voxel_hardened(_pos: Vector3i, _remaining: float) -> void:
+	# 示例：此处可触发受击特效/音效，具体由游戏实现
+	pass
+
+
+## 反馈信号：悬空体素即将崩塌掉落前
+func _on_voxels_collapse(_positions: Array) -> void:
+	# 示例：此处可触发崩塌尘埃/震动，具体由游戏实现
+	pass

@@ -207,8 +207,13 @@ func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
 	return _remove_voxels(get_voxels_in_box(aabb), notify)
 
 
+## 批量移除指定位置的体素 (公开接口，供破坏/崩塌等系统调用)
+func remove_voxels(positions: Array, notify: bool = true) -> Array:
+	return _remove_voxels(positions, notify)
+
+
 ## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
-func _remove_voxels(positions: Array[Vector3i], notify: bool = true) -> Array[Vector3i]:
+func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
 	for pos in positions:

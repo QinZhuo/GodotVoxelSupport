@@ -18,6 +18,11 @@ extends Resource
 
 @export var emission: float = 0
 
+## 硬度：破坏该材质的单个体素所需的总伤害 (>=0)
+## 体素健康度系统使用，伤害累积达到 hardness 才真正移除该体素
+## 值越大越难破坏 (0 表示一击即碎，如玻璃/泡沫)
+@export var hardness: float = 1.0
+
 
 ## 是否透明 (统一判定，供网格生成/着色使用)
 func is_transparent() -> bool:
