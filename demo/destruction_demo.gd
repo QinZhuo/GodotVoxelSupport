@@ -93,8 +93,9 @@ func _build_target() -> void:
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
-	# 支撑强度：让正常墙体稳定站立，破坏后支撑不足才断裂
-	_target.collapse_support_strength = 40.0
+	# 支撑强度系数：让正常墙体稳定站立，同时破坏底部后（连接点减少）能断裂
+	# 薄墙贴地 48 点需撑整墙(约1152)，系数需 ≥24；破坏后连接点大幅减少，重量超承载即断
+	_target.collapse_support_strength = 25.0
 	# 连接破坏反馈信号（具体表现由游戏实现，这里仅记录用于 HUD 展示）
 	if not _target.voxel_hardened.is_connected(_on_voxel_hardened):
 		_target.voxel_hardened.connect(_on_voxel_hardened)

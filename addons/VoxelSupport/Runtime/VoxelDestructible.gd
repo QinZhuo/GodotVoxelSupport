@@ -41,9 +41,9 @@ enum CollapseMode {
 ## 崩塌掉落模式
 @export var collapse_mode: CollapseMode = CollapseMode.COLLAPSE_DEBRIS
 
-## 支撑强度系数：单个支撑接触体素能承受的重量
-## 支撑强度分析用：块重量 > 支撑点数 × 该系数 时，判定支撑不足而断裂崩塌
-## 值越小越容易断裂（需更多支撑），实心结构建议较高以保证稳定
+## 支撑强度系数：连接/接触的单个支撑体素能承受的重量
+## 悬空块断裂判定 = 块重量 > 连接点承载强度(连接体素硬度 × 该系数)
+## 值越大，同等硬度的支撑能承受越重的悬空块；越小越易断裂
 @export var collapse_support_strength: float = 15.0
 
 ## 逐体素健康度系统开关：关闭时忽略材质硬度，一击即碎
@@ -320,83 +320,49 @@ func _trigger_collapse() -> void:
 	voxel_damaged.emit(unstable, true)
 
 
-## 找出所有"失稳"体素（与地面断开 + 支撑不足的块），返回这些体素位置的并集
-## 通过支撑强度分析：对每个连通块，计算重量 vs 支撑接触点，
-## 无支撑（完全悬空）或支撑不足（重量超出支撑能力）的块判定为失稳
+## 找出所有"失稳"体素（与地面断开即悬空），返回这些体素位置的并集
+## 最简支撑判断：从贴地体素 6 方向 BFS 标记与地面连通的体素，
+## 与地面断开的体素即为悬空（崩塌）。横向连接也传递支撑，保证运行速度
 func _find_unstable_voxels() -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	# 把所有体素按 6 方向连通分量分组
-	var blocks := _partition_all_connected_blocks(voxels)
+	# 与地面连通的所有体素（含横向支撑）
+	var supported := _bfs_from_ground(voxels)
 
-	# 每个块独立判定稳定性
-	var unstable_set := {}
-	for block in blocks:
-		if _is_block_unstable(block, voxels):
-			for p in block:
-				unstable_set[p] = true
-
+	# 与地面断开的体素 = 悬空崩塌
 	var unstable: Array = []
-	for key in unstable_set:
-		unstable.append(key)
+	for key in voxels:
+		var pos: Vector3i = key
+		if not supported.has(pos):
+			unstable.append(pos)
 	return unstable
 
 
-## 判定一个连通块是否失稳（无支撑 或 支撑不足）
-func _is_block_unstable(block: Array, all_voxels: Dictionary) -> bool:
-	if block.is_empty():
-		return false
-	var block_set := {}
-	for p in block:
-		block_set[p] = true
-
-	var total_mass := 0.0
-	var support_points := 0
-	for p in block:
-		var pos: Vector3i = p
-		total_mass += _get_material_mass(all_voxels[pos])
-		# 支撑接触点：该体素下方是地面(y==0) 或下方是"外部块"体素(不在本块且存在)
-		var below := pos + Vector3i(0, -1, 0)
-		var has_external_support := all_voxels.has(below) and not block_set.has(below)
-		if below.y < 0 or has_external_support:
-			support_points += 1
-
-	# 无任何支撑接触 → 完全悬空，失稳
-	if support_points == 0:
-		return true
-	# 有支撑但支撑能力 < 块质量 → 支撑不足，失稳断裂
-	var support_capacity := float(support_points) * collapse_support_strength
-	return total_mass > support_capacity
-
-
-## 把所有体素按 6 方向连通性分组为连通块
-func _partition_all_connected_blocks(voxels: Dictionary) -> Array:
-	var blocks: Array = []
-	var visited := {}
+## 从贴地(y==0)体素出发，6 方向 BFS 标记所有与地面连通的体素
+## 横向连接也传递支撑，因此正常横向支撑结构能保持稳定
+func _bfs_from_ground(voxels: Dictionary) -> Dictionary:
+	var supported := {}
+	var queue: Array = []
 	var dirs := [
 		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
 		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
 	]
 	for key in voxels:
-		var start: Vector3i = key
-		if visited.has(start):
-			continue
-		var block: Array = []
-		var queue: Array = [start]
-		visited[start] = true
-		while not queue.is_empty():
-			var cur: Vector3i = queue.pop_front()
-			block.append(cur)
-			for d: Vector3i in dirs:
-				var nb := cur + d
-				if voxels.has(nb) and not visited.has(nb):
-					visited[nb] = true
-					queue.append(nb)
-		blocks.append(block)
-	return blocks
+		var pos: Vector3i = key
+		if pos.y == 0:
+			supported[key] = true
+			queue.append(key)
+	while not queue.is_empty():
+		var cur: Vector3i = queue.pop_front()
+		for d: Vector3i in dirs:
+			var nb := cur + d
+			if voxels.has(nb) and not supported.has(nb):
+				supported[nb] = true
+				queue.append(nb)
+	return supported
 
 
 # ----------------------------------------------------------------------------
