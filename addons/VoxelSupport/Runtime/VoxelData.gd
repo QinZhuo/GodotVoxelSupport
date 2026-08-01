@@ -1,5 +1,5 @@
 @tool
-class_name VoxelDataResource
+class_name VoxelData
 extends Resource
 
 ## 可序列化的体素数据资源
@@ -36,8 +36,8 @@ const NEIGHBORS_6: Array[Vector3i] = [
 
 
 ## 从 VoxData 构造 (编辑器导入时使用)
-static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0) -> VoxelDataResource:
-	var res := VoxelDataResource.new()
+static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0) -> VoxelData:
+	var res := VoxelData.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 	
 	# 重新映射体素坐标到 [0, grid_size) 范围
@@ -129,7 +129,7 @@ func clear(notify: bool = true) -> void:
 
 
 ## 合并另一个资源中的体素 (可带偏移)
-func merge(other: VoxelDataResource, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
+func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
 	for pos in other.voxels:
 		voxels[pos + offset] = other.voxels[pos]
 		dirty_voxels[pos + offset] = other.voxels[pos]

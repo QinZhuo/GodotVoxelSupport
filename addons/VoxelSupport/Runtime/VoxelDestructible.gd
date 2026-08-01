@@ -5,7 +5,7 @@ extends VoxelRenderer
 ## 动态体素破坏系统
 ## 继承 VoxelRenderer，在渲染基础上提供体素破坏能力
 ## 支持球形/盒形/单体素/射线破坏 + 逐体素健康度 + 悬空崩塌 + 碎片系统
-## 破坏直接修改 VoxelDataResource，自动触发 mesh 重新生成
+## 破坏直接修改 VoxelData，自动触发 mesh 重新生成
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
 signal voxel_damaged(positions: Array, spawn_debris: bool)      ## 体素被移除时 (含崩塌)

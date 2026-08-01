@@ -12,9 +12,9 @@ extends Node
 ## 破坏半径 (体素单位)
 @export var damage_radius: float = 1.8
 
-## 可选的数据源：指定任意 VoxelDataResource 作为破坏对象的数据源
+## 可选的数据源：指定任意 VoxelData 作为破坏对象的数据源
 ## 不设置时使用内置的 10x8x10 立方体演示数据
-@export var voxel_data_source: VoxelDataResource:
+@export var voxel_data_source: VoxelData:
 	set(v):
 		voxel_data_source = v
 		if is_inside_tree():
@@ -77,8 +77,8 @@ func _build_target() -> void:
 	_target.name = "DestructibleVoxels"
 	add_child(_target)
 
-	# 确定数据源：优先使用用户指定的 VoxelDataResource，否则用内置立方体
-	var data: VoxelDataResource
+	# 确定数据源：优先使用用户指定的 VoxelData，否则用内置立方体
+	var data: VoxelData
 	if voxel_data_source != null:
 		data = voxel_data_source
 	else:
@@ -113,8 +113,8 @@ const WALL_HGT := 12   # 高
 const WALL_THK := 2    # 薄
 
 ## 创建内置演示墙体数据 (长 x 高 x 薄，便于测试崩塌掉落)
-func _create_demo_cube_data() -> VoxelDataResource:
-	var data := VoxelDataResource.new()
+func _create_demo_cube_data() -> VoxelData:
+	var data := VoxelData.new()
 	var solid := VoxelMaterial.new()
 	solid.id = 1
 	solid.color = Color(0.55, 0.45, 0.35)

@@ -3,7 +3,7 @@ class_name VoxelRenderer
 extends MeshInstance3D
 
 ## 体素专属渲染器
-## 持有 VoxelDataResource，在运行时动态生成并更新 mesh
+## 持有 VoxelData，在运行时动态生成并更新 mesh
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
 ## 提供与编辑器导入等价的纹理材质 (基于材质ID的UV采样)
 ## 支持异步网格生成：体素数据在后台线程生成，主线程不阻塞
@@ -11,7 +11,7 @@ extends MeshInstance3D
 signal mesh_updated
 
 ## 体素数据资源
-@export var data: VoxelDataResource:
+@export var data: VoxelData:
 	set(v):
 		# setter 内部赋值不会递归，可直接设置底层存储
 		if data and data.changed.is_connected(_on_data_changed):
@@ -144,7 +144,7 @@ func regenerate_materials() -> void:
 
 
 ## 获取当前体素数据
-func get_data() -> VoxelDataResource:
+func get_data() -> VoxelData:
 	return data
 
 

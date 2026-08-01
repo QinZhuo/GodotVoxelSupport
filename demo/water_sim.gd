@@ -2,7 +2,7 @@ extends Node
 ## 体素水流循环模拟演示（大型复杂场景）
 ## 展示：高架水源 → 第一级瀑布 → 蓄水池A → 溢流通道 → 蓄水池B → 第二级瀑布 → 底部收集池 → 循环
 ## 使用元胞自动机式的水模拟规则（重力下落、下坡流动、落差溢流）
-## 渲染：VoxelRenderer + 动态 VoxelDataResource + HUD 性能监控
+## 渲染：VoxelRenderer + 动态 VoxelData + HUD 性能监控
 
 ## 体素缩放（单个体素世界边长）
 @export var voxel_scale: float = 0.3
@@ -29,7 +29,7 @@ const MAT_EMISSIVE := 3   # 发光装饰
 ## 水滴生成点（高架池前侧瀑布落水口上方，让水从高处直接落下形成持续瀑布）
 var _drop_pos := Vector3i(7, 14, 10)
 
-var _data: VoxelDataResource
+var _data: VoxelData
 var _renderer: VoxelRenderer
 var _drip_accum: float = 0.0
 var _frame: int = 0
@@ -74,7 +74,7 @@ func _process(delta: float) -> void:
 # 地形构建（多级瀑布循环场景）
 # ----------------------------------------------------------------------------
 func _build_terrain() -> void:
-	_data = VoxelDataResource.new()
+	_data = VoxelData.new()
 	_data.grid_size = Vector3i(GRID_X, GRID_Y, GRID_Z)
 
 	# 材质：统一封装的 add_material 自动按材质 ID 对齐数组索引
