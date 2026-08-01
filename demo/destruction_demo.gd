@@ -97,7 +97,12 @@ func _build_target() -> void:
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
 
 
-## 创建内置演示立方体数据 (10x8x10，含多种材质)
+## 墙体尺寸：长(x) x 高(y) x 厚(z) [体素]
+const WALL_LEN := 24   # 长
+const WALL_HGT := 12   # 高
+const WALL_THK := 2    # 薄
+
+## 创建内置演示墙体数据 (长 x 高 x 薄，便于测试崩塌掉落)
 func _create_demo_cube_data() -> VoxelDataResource:
 	var data := VoxelDataResource.new()
 	var solid := VoxelMaterial.new()
@@ -120,13 +125,13 @@ func _create_demo_cube_data() -> VoxelDataResource:
 	accent.hardness = 1.0  # 底部红色：易碎，一击即碎
 	data.add_material(accent)
 
-	# 填充立方体体素
-	for x in range(10):
-		for y in range(8):
-			for z in range(10):
+	# 填充墙体体素（薄墙：z 只有 2 格厚，x 长，y 高）
+	for x in range(WALL_LEN):
+		for y in range(WALL_HGT):
+			for z in range(WALL_THK):
 				var mat_id: int = solid.id
-				# 外层用金属色，内部用泥土色，边缘用红色
-				if x == 0 or x == 9 or z == 0 or z == 9:
+				# 两端(x=0/LEN-1) 和 两薄面(z=0/THK-1) 用金属色，底部用红色，内部用泥土
+				if x == 0 or x == WALL_LEN - 1 or z == 0 or z == WALL_THK - 1:
 					mat_id = metal.id
 				elif y == 0:
 					mat_id = accent.id
@@ -141,9 +146,12 @@ func _setup_camera() -> void:
 		_camera = Camera3D.new()
 		_camera.name = "Camera3D"
 		add_child(_camera)
-	_camera.global_position = Vector3(0, 3, 12)
-	_camera.look_at(Vector3(0, 1.5, 0))
-	_camera.fov = 65
+	# 相机侧看整面高墙：墙全局中心 (0, 半高, 0)，前方拉远看到整面
+	var half_h := WALL_HGT * voxel_scale * 0.5
+	var half_l := WALL_LEN * voxel_scale * 0.5
+	_camera.global_position = Vector3(0, half_h * 1.6, half_l * 1.8)
+	_camera.look_at(Vector3(0, half_h, 0))
+	_camera.fov = 70
 
 
 func _setup_controls_hud() -> void:
@@ -176,6 +184,7 @@ var _prev_space := false
 var _prev_1 := false
 var _prev_2 := false
 var _prev_r := false
+var _prev_b := false
 
 
 func _handle_input() -> void:
@@ -185,6 +194,7 @@ func _handle_input() -> void:
 	var key1 := Input.is_key_pressed(KEY_1)
 	var key2 := Input.is_key_pressed(KEY_2)
 	var key_r := Input.is_key_pressed(KEY_R)
+	var key_b := Input.is_key_pressed(KEY_B)
 
 	# 左键按下瞬间：球形破坏 (按住不重复触发)
 	if left and not _prev_left:
@@ -211,6 +221,9 @@ func _handle_input() -> void:
 		_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
 	if key2 and not _prev_2:
 		_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_VISUAL
+	# B 按下瞬间：破坏底部整层支撑，触发上方结构整体崩塌掉落
+	if key_b and not _prev_b:
+		_target.damage_box(AABB(Vector3(-1, -0.5, -1), Vector3(WALL_LEN + 2, 1.5, WALL_THK + 2)))
 
 	_prev_left = left
 	_prev_right = right
@@ -218,6 +231,7 @@ func _handle_input() -> void:
 	_prev_1 = key1
 	_prev_2 = key2
 	_prev_r = key_r
+	_prev_b = key_b
 
 
 ## 鼠标指向 → 体素空间坐标 (通过射线与体素数据的 DDA)
@@ -251,6 +265,7 @@ Mesh生成: %.2f ms
 [鼠标左键] 球形破坏(伤害1)
 [鼠标右键] 单体破坏
 [空格] 射线破坏
+[B] 破坏底部支撑(触发整体崩塌)
 [R] 重置
 硬度需多次点击才摧毁，悬空体会崩塌掉落
 """ % mode_name

@@ -283,7 +283,7 @@ func _after_removal(removed: Array) -> void:
 # 悬空检测 + 崩塌掉落
 # ----------------------------------------------------------------------------
 
-## 检测并处理悬空体素（与地面/支撑断开的体素），崩塌成动态碎片掉落
+## 检测并处理悬空体素（与地面/支撑断开的体素），崩塌成整块刚体掉落
 func _trigger_collapse() -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
@@ -294,36 +294,39 @@ func _trigger_collapse() -> void:
 	voxels_about_to_collapse.emit(detached)
 	last_collapse_count = detached.size()
 
-	# 崩塌的悬空体素转成动态碎片掉落
+	# 崩塌的悬空体素转成"整块刚体"掉落（按连通块分组，而非散成小碎片）
+	# 先移除（否则仍会留在 mesh 中），再生成整块刚体
 	var mat_map := _collect_voxel_materials(detached)
 	data.remove_voxels(detached)
 	if not Engine.is_editor_hint():
-		_spawn_falling_debris(detached, mat_map)
+		_spawn_collapse_blocks(detached, mat_map)
 	# 崩塌也算破坏，发信号
 	voxel_damaged.emit(detached, true)
 
 
-## 洪水填充(BFS)：从"有支撑"的体素出发标记连通体素，未被标记的即为悬空(孤立)
-## 有支撑 = 位于地面(y==0) 或 正下方有体素
+## 洪水填充(BFS) 从"贴地的体素"出发标记与地面连通的体素，未被标记的即为悬空(孤立)
+## 贴地 = 位于地面(y==0)
+## 关键：BFS 遍历 6 方向（含上下），从地面种子出发，一次识别所有与地面断开的悬空体素
 func _find_detached_voxels() -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	# 找到所有"有支撑"的体素作为 BFS 种子
+	# 种子 = 贴地的体素 (y==0 且存在)
 	var seeds: Array = []
-	var is_supported := {}
 	for key in voxels:
 		var pos: Vector3i = key
-		var below: Vector3i = pos + Vector3i(0, -1, 0)
-		if pos.y == 0 or voxels.has(below):
+		if pos.y == 0:
 			seeds.append(pos)
-			is_supported[pos] = true
 
+	# 没有任何贴地体素时，说明所有剩余体素都悬空，全部返回
 	if seeds.is_empty():
-		return []
+		var all_detached: Array = []
+		for key in voxels:
+			all_detached.append(key)
+		return all_detached
 
-	# BFS 从所有种子出发，标记可达（与支撑连通的）体素
+	# BFS 从地面种子出发，6 方向标记与地面连通的体素
 	var connected := {}
 	var queue: Array = []
 	for seed in seeds:
@@ -333,6 +336,7 @@ func _find_detached_voxels() -> Array:
 	var dirs := [
 		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
 	]
 	while not queue.is_empty():
 		var cur: Vector3i = queue.pop_front()
@@ -344,7 +348,8 @@ func _find_detached_voxels() -> Array:
 
 	# 未被标记的体素 = 悬空
 	var detached: Array = []
-	for pos in voxels:
+	for key in voxels:
+		var pos: Vector3i = key
 		if not connected.has(pos):
 			detached.append(pos)
 	return detached
@@ -384,7 +389,96 @@ func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary) -> void
 		_spawn_visual_debris_batch(positions, mat_map, count)
 
 
-## 崩塌掉落的悬空体素 → 动态碎片 (带重力，落地保留)
+## 崩塌掉落的悬空体素 → 按连通块分组，每个块作为一个整块刚体塌落
+## 避免悬空体素"整体消失"，而是作为完整块从原位置落下
+func _spawn_collapse_blocks(positions: Array, mat_map: Dictionary) -> void:
+	_ensure_debris_root()
+	if positions.is_empty():
+		return
+	# 将悬空体素按 6 方向连通分量分组
+	var blocks := _partition_connected_blocks(positions)
+	for block in blocks:
+		_spawn_collapse_block(block, mat_map)
+
+
+## 将体素位置集合按 6 方向连通性分组
+func _partition_connected_blocks(positions: Array) -> Array:
+	var result: Array = []
+	var visited := {}
+	var all_pos := {}
+	for p in positions:
+		all_pos[p] = true
+	var dirs := [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+	]
+	for key in all_pos:
+		var start: Vector3i = key
+		if visited.has(start):
+			continue
+		var block: Array = []
+		var queue: Array = [start]
+		visited[start] = true
+		while not queue.is_empty():
+			var cur: Vector3i = queue.pop_front()
+			block.append(cur)
+			for d: Vector3i in dirs:
+				var nb := cur + d
+				if all_pos.has(nb) and not visited.has(nb):
+					visited[nb] = true
+					queue.append(nb)
+		result.append(block)
+	return result
+
+
+## 生成一个整块刚体：组合 BoxShape 碰撞 + ArrayMesh 显示，从质心下落
+func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
+	if block.is_empty():
+		return
+	# 计算块包围盒质心
+	var min_pos := Vector3(99999, 99999, 99999)
+	var max_pos := Vector3(-99999, -99999, -99999)
+	for p in block:
+		var pos: Vector3i = p
+		min_pos = min_pos.min(Vector3(pos))
+		max_pos = max_pos.max(Vector3(pos))
+	var center := (min_pos + max_pos) * 0.5 + Vector3(0.5, 0.5, 0.5)  # 块中心（体素空间）
+	var center_world := center * voxel_scale
+
+	var body := RigidBody3D.new()
+	# 组合碰撞形状：每个体素一个独立的 shape owner + BoxShape，偏移到相对质心的位置
+	for p in block:
+		var pos: Vector3i = p
+		var shape := BoxShape3D.new()
+		shape.size = Vector3(voxel_scale, voxel_scale, voxel_scale)
+		var oid := body.create_shape_owner(body)
+		body.shape_owner_add_shape(oid, shape)
+		body.shape_owner_set_transform(oid, Transform3D.IDENTITY.translated(
+			(Vector3(pos) + Vector3(0.5, 0.5, 0.5) - center) * voxel_scale))
+
+	# 整块显示：每个体素一个 MeshInstance3D 子节点 (BoxMesh，相对质心偏移)
+	# 注意：使用多个 MeshInstance 而非 SurfaceTool 合并，避免 Godot 4 API 差异且更可靠
+	for p in block:
+		var pos: Vector3i = p
+		var mat_id: int = mat_map.get(pos, -1)
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.mesh = _get_debris_mesh(mat_id, voxel_scale)
+		mesh_inst.position = (Vector3(pos) + Vector3(0.5, 0.5, 0.5) - center) * voxel_scale
+		body.add_child(mesh_inst)
+
+	body.position = center_world
+	# 整块从质心缓慢下落，带轻微随机旋转
+	body.linear_velocity = Vector3(randf_range(-0.3, 0.3), -debris_min_speed * 0.5, randf_range(-0.3, 0.3))
+	body.angular_velocity = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1))
+	body.gravity_scale = debris_gravity_scale
+	body.sleeping = false
+	body.set_meta("_born_ms", Time.get_ticks_msec())
+	_debris_root.add_child(body)
+	debris_count += 1
+
+
+## 崩塌掉落的悬空体素 → 动态碎片 (带重力，落地保留)  [兼容：散碎片模式，非默认]
 func _spawn_falling_debris(positions: Array, mat_map: Dictionary) -> void:
 	_ensure_debris_root()
 	var count := mini(positions.size(), max_debris_per_hit)
@@ -422,6 +516,10 @@ func _spawn_physics_debris(pos: Vector3i, mat_id: int, is_collapse: bool) -> voi
 		body.angular_velocity = Vector3(randf_range(-5, 5), randf_range(-5, 5), randf_range(-5, 5))
 	body.gravity_scale = debris_gravity_scale
 	body.visible = true
+	# 设置速度会自动唤醒 RigidBody；显式清除睡眠确保物理启动
+	body.sleeping = false
+	# 记录出生时间，用于出生保护期（避免刚生成就被误判冻结）
+	body.set_meta("_born_ms", Time.get_ticks_msec())
 	_debris_root.add_child(body)
 	debris_count += 1
 
@@ -465,12 +563,17 @@ func _settle_resting_debris() -> void:
 	if _debris_root == null:
 		return
 	for child in _debris_root.get_children():
-		if child is RigidBody3D and child.sleeping and child.linear_velocity.length() < debris_rest_threshold:
-			# 落地静止 → 转静态保留，并放到已落地列表
-			child.freeze = true
-			child.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
-			if not _settled_debris.has(child):
-				_settled_debris.append(child)
+		if child is RigidBody3D:
+			var rb := child as RigidBody3D
+			# 出生保护期：刚生成的碎片（<0.5秒）不冻结，确保物理有时间作用下落
+			if rb.has_meta("_born_ms") and Time.get_ticks_msec() - rb.get_meta("_born_ms") < 500:
+				continue
+			if rb.sleeping and rb.linear_velocity.length() < debris_rest_threshold:
+				# 落地静止 → 转静态保留，并放到已落地列表
+				rb.freeze = true
+				rb.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+				if not _settled_debris.has(rb):
+					_settled_debris.append(rb)
 
 
 ## 移除碎片（落地保留的除外），释放到对象池
@@ -552,7 +655,7 @@ func _get_debris_color(mat_id: int) -> Color:
 	if data and mat_id >= 0 and mat_id < data.materials.size():
 		var m = data.materials[mat_id]
 		if m:
-			return m.color
+			return VoxelMaterial.albedo_color(m)
 	return Color.WHITE
 
 
@@ -578,9 +681,17 @@ func _get_debris_mesh(mat_id: int, size: float) -> Mesh:
 	if data and mat_id >= 0 and mat_id < data.materials.size():
 		var mat_res = data.materials[mat_id]
 		if mat_res:
+			# 碎片材质复用原体素材质的完整 PBR 属性 (颜色/金属/粗糙/自发光)，
+			# 保证光照下颜色与原体素块一致
 			var mat := StandardMaterial3D.new()
-			mat.albedo_color = mat_res.color
+			mat.albedo_color = VoxelMaterial.albedo_color(mat_res)
+			mat.metallic = mat_res.metal
+			mat.roughness = mat_res.rough
+			mat.emission_enabled = mat_res.emission > 0.0
+			mat.emission = VoxelMaterial.emission_color(mat_res)
 			mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+			if mat_res.trans > 0:
+				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			box.material = mat
 	_debris_mesh_cache[mat_id] = box
 	return box
