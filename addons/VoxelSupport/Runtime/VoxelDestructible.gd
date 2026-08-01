@@ -784,7 +784,8 @@ func _spawn_visual_debris_batch(positions: Array, mat_map: Dictionary, count: in
 		_spawn_debris_particles(center, mat_id, list.size())
 
 
-## 在指定位置发射一批碎片粒子（GPUParticles3D，一次性爆发）
+## 在指定位置发射一批碎片粒子（GPUParticles3D，粒子碰撞只支持 GPU 版本）
+## 用 ParticleProcessMaterial.collision_friction/bounce 精确控制落地停住不滑动
 func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 	if amount <= 0:
 		return
@@ -792,36 +793,46 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 	particles.name = "DebrisParticles_%d" % mat_id
 	particles.position = center
 	particles.amount = amount
-	particles.lifetime = minf(debris_lifetime, 2.0)
+	# 粒子停留时间较长（至少 4 秒），配合慢速淡出慢慢消失
+	particles.lifetime = maxf(debris_lifetime, 4.0)
 	particles.explosiveness = 1.0
 	particles.one_shot = true
 	particles.local_coords = true
+	# 碰撞仅在 visibility_aabb 区域内发生，扩大以覆盖粒子运动范围
+	particles.visibility_aabb = AABB(Vector3(-8, -4, -8), Vector3(16, 16, 16))
 
-	# 粒子材质：向外爆发 + 重力下落 + 碰撞（落地停在表面，雪花堆积）
+	# 粒子材质：碰撞(刚体) + 高摩擦(落地停住) + 无弹性(不反弹)
 	var pm := ParticleProcessMaterial.new()
-	# 粒子与场景中的 GPUParticlesCollision* 交互，撞到表面后停住堆积，保留一段时间
 	pm.collision_mode = ParticleProcessMaterial.COLLISION_RIGID
+	# 关键：collision_friction(摩擦) 与 collision_bounce(弹性) 是正确属性名
+	pm.collision_friction = 1.0  # 最大摩擦：粒子落地后原地停住，不沿地面滑动
+	pm.collision_bounce = 0.0    # 无弹性：落地不反弹
+
+	# 粒子运动：主要向上喷发 + 强重力快速落地，减少水平位移
 	pm.direction = Vector3(0, 1, 0)
-	pm.spread = 180.0
-	pm.initial_velocity_min = debris_min_speed
-	pm.initial_velocity_max = debris_max_speed
-	pm.gravity = Vector3(0, -9.8 * debris_gravity_scale, 0)
+	pm.spread = 45.0
+	pm.initial_velocity_min = debris_min_speed * 0.8
+	pm.initial_velocity_max = debris_max_speed * 0.8
+	pm.gravity = Vector3(0, -20.0 * debris_gravity_scale, 0)
 	pm.angular_velocity_min = -6.0
 	pm.angular_velocity_max = 6.0
-	# 粒子缩放=1.0，由 draw_pass mesh 尺寸决定显示大小（与原体素一致）
+	# 粒子大小 = 原体素大小
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
-	# 淡出：粒子生命周期内 alpha 从 1 渐变到 0，慢慢透明消失而非瞬间消失
+
+	# 淡出：从生命周期 50% 开始慢慢渐变到透明，过程平缓，而非瞬间消失
 	var fade := Gradient.new()
-	fade.offsets = PackedFloat32Array([0.0, 0.7, 1.0])
+	fade.offsets = PackedFloat32Array([0.0, 0.5, 0.75, 1.0])
 	fade.colors = PackedColorArray([
-		Color(1, 1, 1, 1),  # 初始不透明
-		Color(1, 1, 1, 1),  # 大部分时间保持
-		Color(1, 1, 1, 0),  # 末期完全透明
+		Color(1, 1, 1, 1),   # 初始不透明
+		Color(1, 1, 1, 1),   # 前一半保持不透明
+		Color(1, 1, 1, 0.4), # 从 50% 开始慢慢变透明
+		Color(1, 1, 1, 0),   # 末期完全透明
 	])
 	var ramp := GradientTexture1D.new()
 	ramp.gradient = fade
 	pm.color_initial_ramp = ramp
+	particles.process_material = pm
 	# 碎片用立方体 mesh，尺寸 = 原体素大小（voxel_scale），保证与原体素一致
 	var mesh := BoxMesh.new()
 	mesh.size = Vector3(voxel_scale, voxel_scale, voxel_scale)
@@ -835,13 +846,12 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 			m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 			mesh.material = m
 	particles.draw_pass_1 = mesh
-	particles.process_material = pm
 
 	_debris_root.add_child(particles)
-	# 粒子发射完后自动销毁节点
+	# 粒子发射完并淡出后自动销毁节点（留足够时间让淡出完整播放）
 	var tree := get_tree()
 	if tree:
-		var timer := tree.create_timer(minf(debris_lifetime, 2.0) + 0.5)
+		var timer := tree.create_timer(particles.lifetime + 0.5)
 		timer.timeout.connect(_cleanup_particles.bind(particles))
 
 
