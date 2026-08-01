@@ -54,14 +54,7 @@ func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null)
 	# 先记录每个体素的材质ID，再移除 (移除后无法读取)
 	var mat_map := _collect_voxel_materials_in_sphere(center, radius)
 	var removed := data.remove_voxels_in_sphere(center, radius)
-	if not removed.is_empty():
-		voxel_damaged.emit(removed, do_spawn)
-		if do_spawn and not Engine.is_editor_hint():
-			_spawn_debris_with_materials(removed, mat_map)
-		if health >= 0:
-			health -= float(removed.size()) * 0.5
-			if health <= 0:
-				destroy_all()
+	_on_voxels_removed(removed, mat_map, do_spawn)
 	return removed
 
 
@@ -72,14 +65,7 @@ func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	var mat_map := _collect_voxel_materials_in_box(aabb)
 	var removed := data.remove_voxels_in_box(aabb)
-	if not removed.is_empty():
-		voxel_damaged.emit(removed, do_spawn)
-		if do_spawn and not Engine.is_editor_hint():
-			_spawn_debris_with_materials(removed, mat_map)
-		if health >= 0:
-			health -= float(removed.size()) * 0.5
-			if health <= 0:
-				destroy_all()
+	_on_voxels_removed(removed, mat_map, do_spawn)
 	return removed
 
 
@@ -90,15 +76,21 @@ func damage_voxel(pos: Vector3i, spawn_debris: Variant = null) -> bool:
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	var mat_id := data.get_voxel(pos)
 	data.remove_voxel(pos)
-	voxel_damaged.emit([pos], do_spawn)
+	_on_voxels_removed([pos], {pos: mat_id}, do_spawn)
+	return true
+
+
+## 统一的破坏后处理：发射信号、生成碎片、扣减健康度
+func _on_voxels_removed(removed: Array, mat_map: Dictionary, do_spawn: bool) -> void:
+	if removed.is_empty():
+		return
+	voxel_damaged.emit(removed, do_spawn)
 	if do_spawn and not Engine.is_editor_hint():
-		var mat_map := {pos: mat_id}
-		_spawn_debris_with_materials([pos], mat_map)
+		_spawn_debris_with_materials(removed, mat_map)
 	if health >= 0:
-		health -= 0.5
+		health -= float(removed.size()) * 0.5
 		if health <= 0:
 			destroy_all()
-	return true
 
 
 ## 射线检测破坏 (从原点沿方向射线，命中第一个体素并移除)

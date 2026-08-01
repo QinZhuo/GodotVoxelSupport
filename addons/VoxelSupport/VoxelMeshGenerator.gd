@@ -13,7 +13,7 @@ static func generate_mesh(voxel: VoxelData, options: Dictionary, path: String = 
 		return null
 	if options[VoxelMeshImporter.unwrap_lightmap_uv2]:
 		gen.mesh.lightmap_unwrap(Transform3D.IDENTITY, options[VoxelMeshImporter.uv2_texel_size])
-	prints("generate_mesh mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms", gen.mesh.get_faces().size() / 6, "face")
+	print_verbose("generate_mesh mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms", gen.mesh.get_faces().size() / 6, "face")
 	return gen.mesh
 
 
@@ -36,7 +36,7 @@ static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: 
 	if options.get(VoxelMeshImporter.unwrap_lightmap_uv2, false):
 		mesh.lightmap_unwrap(Transform3D.IDENTITY, options.get(VoxelMeshImporter.uv2_texel_size, 0.2))
 	if Engine.is_editor_hint():
-		prints("generate_mesh_runtime: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
+		print_verbose("generate_mesh_runtime: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
 	return mesh
 
 
@@ -50,10 +50,10 @@ static func generate_textured_materials_runtime(materials: Array) -> Array:
 	var rough_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
 	var emission_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
 	for i in mini(materials.size(), 256):
-		var m = materials[i]
+		var m: VoxelMaterial = materials[i]
 		if m == null:
 			continue
-		albedo_image.set_pixel(i, 0, m.color if m.trans <= 0 else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans))
+		albedo_image.set_pixel(i, 0, m.color if not m.is_transparent else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans))
 		metal_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.metal))
 		rough_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.rough))
 		emission_image.set_pixel(i, 0, m.color * m.emission)
@@ -137,8 +137,8 @@ static func generate_mesh_library(voxel: VoxelData, options: Dictionary, path: S
 		var i := voxel_mesh_library.find_item_by_name(old_mesh.resource_name)
 		if i < 0:
 			DirAccess.remove_absolute(old_mesh.resource_path)
-			printerr("delete ", old_mesh.resource_path)
-	prints("generate_mesh_library mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
+			print_verbose("delete ", old_mesh.resource_path)
+	print_verbose("generate_mesh_library mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
 	return voxel_mesh_library
 
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
@@ -357,11 +357,11 @@ func _get_dir_visible_slice_voxels(slices: Dictionary, axis: Vector3i, dir: int,
 		var visible := false
 		var dir_pos: Vector3i = pos + offset
 		if dir_slice.has(dir_pos):
-			var mat = mats[slice[pos]]
-			var dir_mat = mats[dir_slice[dir_pos]]
-			if (mat.trans > 0) != (dir_mat.trans > 0):
+			var mat: VoxelMaterial = mats[slice[pos]]
+			var dir_mat: VoxelMaterial = mats[dir_slice[dir_pos]]
+			if mat.is_transparent != dir_mat.is_transparent:
 				visible = true
-			elif mat.trans > 0 and mat != dir_mat:
+			elif mat.is_transparent and mat != dir_mat:
 				visible = true
 		else:
 			visible = true
@@ -382,7 +382,7 @@ func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, 
 	var id: int = voxels[pos]
 
 	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	var surface := surfaces[0] if mats[id].trans <= 0 else surfaces[1]
+	var surface := surfaces[0] if not mats[id].is_transparent else surfaces[1]
 
 	surface.set_normal(FaceTool.Normals[dir])
 	# UV采样纹素中心，避免落在边界上导致取色偏移

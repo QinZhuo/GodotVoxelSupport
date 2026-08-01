@@ -18,15 +18,16 @@ func get_mesh(frame_index: int = 0) -> ArrayMesh:
 		return nodes[0].get_mesh(self, frame_index)
 	return null
 
-func check_nodes():
+func check_nodes() -> Dictionary:
+	# 当 .vox 无场景图(scene graph)时，为每个 model 建一个帧节点，确保能取到体素
 	if nodes.size() == 0 and models.size() > 0:
 		var node := VoxelNode.new()
 		nodes[0] = node
 		for i in models.size():
 			var frame := VoxelFrame.new()
-			frame.model_id = 0
+			frame.model_id = i
 			node.frames[i] = frame
-			return nodes
+	return nodes
 
 
 func _to_string() -> String:
@@ -123,7 +124,7 @@ class VoxelNode:
 			for i in models.size():
 				var mesh: ArrayMesh = models[i][0].mesh
 				if mesh.get_surface_count() <= face:
-					break
+					continue
 				var transform: Transform3D = models[i][1]
 				surface.append_from(mesh, face, transform)
 			surface.commit(result_mesh)
@@ -134,7 +135,6 @@ class VoxelNode:
 	func get_voxels(voxel: VoxelData, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
 		var voxels: Dictionary[Vector3i, int]
 		var models := get_models(voxel, frame_index, center)
-		var half_step = Vector3(0.5, 0.5, 0.5);
 		for i in models.size():
 			var model: VoxelModel = models[i][0]
 			var transform: Transform3D = models[i][1]

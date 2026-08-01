@@ -15,7 +15,7 @@ static func Open(path: String) -> VoxAccess:
 
 	var version = file.get_32()
 	var vox := VoxAccess.new(file)
-	prints("open .vox time:", (Time.get_ticks_usec() - time) / 1000.0, "ms")
+	print_verbose("open .vox time: ", (Time.get_ticks_usec() - time) / 1000.0, "ms, version: ", version)
 	file.close()
 	return vox
 
@@ -125,7 +125,7 @@ func read_chunk():
 				var attributes := _get_dictionary()
 				var type = attributes.get("_type", "diffuse")
 				if material_id == 1:
-					print_rich("material_", material_id, " ", "[color=#", material.color.to_html(), "]", material.color, "[/color]  ", attributes)
+					print_rich("material_", material_id, " ", "[color=#", material.color.to_html(), "]", material.color, "[/color]  类型: ", type, " 属性: ", attributes)
 				match type:
 					"_metal":
 						material.metal = float(attributes.get("_metal", 0))
@@ -164,7 +164,7 @@ func get_trans(attributes: Dictionary) -> float:
 func _get_32() -> int:
 	return _file.get_32()
 
-func _get_string(length) -> String:
+func _get_string(length: int) -> String:
 	return _file.get_buffer(length).get_string_from_ascii()
 
 func _get_dictionary() -> Dictionary[String, String]:
