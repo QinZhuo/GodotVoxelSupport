@@ -10,9 +10,6 @@ extends Resource
 @export var color: Color = Color.WHITE
 
 ## 透明度 (0=不透明, >0=透明)
-var is_transparent: bool:
-	get(): return trans > 0
-
 @export var trans: float = 0
 
 @export var metal: float = 0

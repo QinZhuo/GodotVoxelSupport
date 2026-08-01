@@ -53,7 +53,7 @@ static func generate_textured_materials_runtime(materials: Array) -> Array:
 		var m: VoxelMaterial = materials[i]
 		if m == null:
 			continue
-		albedo_image.set_pixel(i, 0, m.color if not m.is_transparent else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans))
+		albedo_image.set_pixel(i, 0, m.color if m.trans <= 0 else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans))
 		metal_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.metal))
 		rough_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.rough))
 		emission_image.set_pixel(i, 0, m.color * m.emission)
@@ -252,7 +252,7 @@ func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> 
 	return texture
 
 func generate_albedo_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.color if not m.is_transparent else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans), save_path, "albedo")
+	return _generate_texture(func(m: VoxelMaterial): return m.color if m.trans <= 0 else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans), save_path, "albedo")
 
 func generate_metal_textrue(save_path: String = "") -> ImageTexture:
 	return _generate_texture(func(m: VoxelMaterial): return Color.from_hsv(0, 0, m.metal), save_path, "metal")
@@ -359,9 +359,9 @@ func _get_dir_visible_slice_voxels(slices: Dictionary, axis: Vector3i, dir: int,
 		if dir_slice.has(dir_pos):
 			var mat: VoxelMaterial = mats[slice[pos]]
 			var dir_mat: VoxelMaterial = mats[dir_slice[dir_pos]]
-			if mat.is_transparent != dir_mat.is_transparent:
+			if (mat.trans > 0) != (dir_mat.trans > 0):
 				visible = true
-			elif mat.is_transparent and mat != dir_mat:
+			elif mat.trans > 0 and mat != dir_mat:
 				visible = true
 		else:
 			visible = true
@@ -382,7 +382,7 @@ func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, 
 	var id: int = voxels[pos]
 
 	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	var surface := surfaces[0] if not mats[id].is_transparent else surfaces[1]
+	var surface := surfaces[0] if mats[id].trans <= 0 else surfaces[1]
 
 	surface.set_normal(FaceTool.Normals[dir])
 	# UV采样纹素中心，避免落在边界上导致取色偏移
