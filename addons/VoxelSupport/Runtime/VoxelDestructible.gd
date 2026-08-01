@@ -820,18 +820,18 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
 
-	# 淡出：从生命周期 50% 开始慢慢渐变到透明，过程平缓，而非瞬间消失
+	# 淡出：alpha_curve(GradientTexture1D) 控制粒子 alpha 随时间变化，
+	# 从生命周期 50% 开始慢慢渐变到透明，过程平缓而非瞬间消失
 	var fade := Gradient.new()
-	fade.offsets = PackedFloat32Array([0.0, 0.5, 0.75, 1.0])
+	fade.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
 	fade.colors = PackedColorArray([
-		Color(1, 1, 1, 1),   # 初始不透明
-		Color(1, 1, 1, 1),   # 前一半保持不透明
-		Color(1, 1, 1, 0.4), # 从 50% 开始慢慢变透明
-		Color(1, 1, 1, 0),   # 末期完全透明
+		Color(1, 1, 1, 1),  # 初始不透明
+		Color(1, 1, 1, 1),  # 前一半保持不透明
+		Color(1, 1, 1, 0),  # 末期完全透明
 	])
-	var ramp := GradientTexture1D.new()
-	ramp.gradient = fade
-	pm.color_initial_ramp = ramp
+	var alpha_tex := GradientTexture1D.new()
+	alpha_tex.gradient = fade
+	pm.alpha_curve = alpha_tex
 	particles.process_material = pm
 	# 碎片用立方体 mesh，尺寸 = 原体素大小（voxel_scale），保证与原体素一致
 	var mesh := BoxMesh.new()
@@ -844,6 +844,8 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 			m.metallic = mat_res.metal
 			m.roughness = mat_res.rough
 			m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+			# 启用透明度：让 alpha_curve 淡出能真正生效（否则 alpha 被忽略，粒子不透明）
+			m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			mesh.material = m
 	particles.draw_pass_1 = mesh
 
