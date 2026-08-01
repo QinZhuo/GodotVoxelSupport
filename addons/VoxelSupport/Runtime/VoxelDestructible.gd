@@ -26,12 +26,6 @@ enum CollapseMode {
 	COLLAPSE_DEBRIS, ## 悬空体素转成动态碎片掉落
 }
 
-## 崩塌判定模式
-enum CollapseRule {
-	RULE_CONNECTED,    ## 仅连通性：与地面完全断开才脱落（最简，速度快）
-	RULE_SEGMENTED,    ## 分级脱落：连通断开 + 承载超载才脱落（接触面承载强度）
-}
-
 ## 破坏时是否生成碎片
 @export var spawn_debris_on_damage: bool = true
 
@@ -47,24 +41,9 @@ enum CollapseRule {
 ## 崩塌掉落模式
 @export var collapse_mode: CollapseMode = CollapseMode.COLLAPSE_DEBRIS
 
-## 崩塌判定规则
-## RULE_CONNECTED：只按连通性（与地面断开即脱），最简最快
-## RULE_SEGMENTED：连通断开 + 承载超载才脱（分级），需配合下面两个系数
-## 判定 = 悬空块总重量(mass之和) > 接触面承载强度(连接体素硬度之和 × 系数)
-@export var collapse_rule: CollapseRule = CollapseRule.RULE_CONNECTED
-
-## 支撑强度系数：单个支撑体素(接触面连接体素)能承受的重量
-## 承载能力 = Σ(接触面连接体素的 hardness) × 该系数
-## 值越大，同等硬度的支撑能撑住越重的悬空块；越小越易断裂
+## 支撑强度系数（保留字段）：语义为"连接/接触的单个支撑体素能承受的重量"
+## 当前连通性判定（与地面断开即脱）不使用该值；仅作扩展预留，游戏可据此自定义分级逻辑
 @export var collapse_support_strength: float = 15.0
-
-## 分级脱落是否统计材质质量(mass)：关闭时每个体素按重量 1 计（仅按连接数分级）
-## 开启时重量 = 材质 mass 之和（重型材质更易压断薄支撑）
-@export var segmented_use_mass: bool = true
-
-## 分级脱落是否统计连接体素硬度(hardness)：关闭时每个连接体素强度按 1 计（仅按接触面个数分级）
-## 开启时承载能力 = Σ(hardness × 系数)（高硬度支撑更不易断）
-@export var segmented_use_hardness: bool = true
 
 ## 逐体素健康度系统开关：关闭时忽略材质硬度，一击即碎
 @export var use_voxel_health: bool = true
@@ -347,72 +326,17 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 ## 与地面断开（完全悬空）的体素才会脱落
 ## 这样：破坏底部后，上方块若左右仍连到两侧(贴地)则保持稳定；只有与地面完全断开才脱落
 ## around_positions 参数保留(接口兼容)，但本算法基于全局连通性判断，保证正确性
-##
-## 分级脱落(RULE_SEGMENTED)：在连通断开基础上，再按"接触面承载强度"判定
-##   - 悬空块按 6 方向连通分组
-##   - 承载需求 = Σ(块内体素重量)，重量 = 材质 mass（若 segmented_use_mass）否则按 1
-##   - 接触面 = 块中与 supported 集合相邻的体素（支撑连接点）
-##   - 承载能力 = Σ(接触体素 hardness) × collapse_support_strength
-##       （若 segmented_use_hardness）否则按接触体素数 × 系数
-##   - 块超载(需求 > 能力)才脱落，否则保持稳定（防止"单点相连不断"的误判）
 func _find_unstable_voxels(_around_positions: Array = []) -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	# 先按连通性判定：与地面断开的体素（完全悬空）
+	# 与地面断开的体素 = 完全悬空，全部脱落
 	var unstable_set: Dictionary = data.find_unsupported(voxels)
-	if unstable_set.is_empty():
-		return []
-
-	if collapse_rule == CollapseRule.RULE_SEGMENTED:
-		# 分级脱落：还需 supported 集合判定接触面
-		var seeds: Array = []
-		for key in voxels:
-			var pos: Vector3i = key
-			if pos.y == 0:
-				seeds.append(key)
-		var supported: Dictionary = data.flood_fill(seeds, voxels)
-		return _apply_segmented_rule(unstable_set, supported)
-	# RULE_CONNECTED：全部连通断开的体素都脱落
 	var unstable: Array = []
 	for key in unstable_set:
 		unstable.append(key)
 	return unstable
-
-
-## 分级脱落：对连通断开的悬空块按"接触面承载强度"过滤
-## unstable_set 为连通断开的集合；supported 为与地面连通的集合
-func _apply_segmented_rule(unstable_set: Dictionary, supported: Dictionary) -> Array:
-	var unstable_keys: Array = []
-	for key in unstable_set:
-		unstable_keys.append(key)
-	# 悬空体素按连通块分组
-	var blocks: Array = data.partition_connected(unstable_keys)
-	var result: Array = []
-	for block in blocks:
-		if _block_should_collapse(block, supported):
-			result.append_array(block)
-	return result
-
-
-## 单个悬空块是否超载脱落：承载需求 > 承载能力
-## block 为悬空块体素位置数组；supported 为与地面连通的支撑集合 {pos:true}
-func _block_should_collapse(block: Array, supported: Dictionary) -> bool:
-	var demand := 0.0   # 承载需求 = 块总重量
-	var capacity := 0.0 # 承载能力 = 接触面连接体素承载强度
-	for p in block:
-		var pos: Vector3i = p
-		# 需求：块内每个体素的重量
-		var mat_id: int = data.get_voxel(pos)
-		demand += _get_material_mass(mat_id) if segmented_use_mass else 1.0
-		# 能力：接触面 = 与该悬空块相邻的 supported 体素（真正的支撑连接点）
-		for d: Vector3i in VoxelDataResource.get_neighbor_dirs():
-			var nb := pos + d
-			if supported.has(nb):
-				var nb_mat: int = data.get_voxel(nb)
-				capacity += _get_material_hardness(nb_mat) if segmented_use_hardness else 1.0
-	return demand > capacity * collapse_support_strength
 
 
 

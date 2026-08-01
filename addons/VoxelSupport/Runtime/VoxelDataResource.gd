@@ -35,11 +35,6 @@ const NEIGHBORS_6: Array[Vector3i] = [
 ]
 
 
-## 返回 6 方向偏移数组（公开静态访问器，供外部遍历邻居时使用）
-static func get_neighbor_dirs() -> Array[Vector3i]:
-	return NEIGHBORS_6
-
-
 ## 从 VoxelData 构造 (编辑器导入时使用)
 static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> VoxelDataResource:
 	var res := VoxelDataResource.new()
