@@ -47,28 +47,15 @@ static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: 
 ## 材质→颜色采样公式统一在 VoxelMaterial 中
 static func generate_textured_materials_runtime(materials: Array) -> Array:
 	var result: Array = [null, null]
-	var albedo_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
-	var metal_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
-	var rough_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
-	var emission_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
-	for i in mini(materials.size(), 256):
-		var m: VoxelMaterial = materials[i]
-		if m == null:
-			continue
-		# 采样公式统一在 VoxelMaterial 中，避免与编辑器纹理生成两套实现漂移
-		# 使用静态方法，保证对 placeholder 实例(编辑器导入资源)也可安全调用
-		albedo_image.set_pixel(i, 0, VoxelMaterial.albedo_color(m))
-		metal_image.set_pixel(i, 0, VoxelMaterial.metal_color(m))
-		rough_image.set_pixel(i, 0, VoxelMaterial.rough_color(m))
-		emission_image.set_pixel(i, 0, VoxelMaterial.emission_color(m))
+	var images := _build_channel_images(materials)
 	var solid := StandardMaterial3D.new()
 	solid.emission_enabled = true
 	solid.emission_energy_multiplier = 20
 	solid.metallic = 1
-	solid.albedo_texture = ImageTexture.create_from_image(albedo_image)
-	solid.metallic_texture = ImageTexture.create_from_image(metal_image)
-	solid.roughness_texture = ImageTexture.create_from_image(rough_image)
-	solid.emission_texture = ImageTexture.create_from_image(emission_image)
+	solid.albedo_texture = ImageTexture.create_from_image(images["albedo"])
+	solid.metallic_texture = ImageTexture.create_from_image(images["metal"])
+	solid.roughness_texture = ImageTexture.create_from_image(images["rough"])
+	solid.emission_texture = ImageTexture.create_from_image(images["emission"])
 	solid.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	result[0] = solid
 	var trans := solid.duplicate()
@@ -78,6 +65,28 @@ static func generate_textured_materials_runtime(materials: Array) -> Array:
 	trans.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	result[1] = trans
 	return result
+
+
+## 从材质数组统一生成 4 张 256x1 材质通道图 (albedo/metal/rough/emission)
+## 采样公式统一在 VoxelMaterial 中，编辑器文件纹理与运行时内存纹理共用
+## 使用静态方法采样，保证对 placeholder 实例(编辑器导入资源)也可安全调用
+static func _build_channel_images(materials: Array) -> Dictionary:
+	var albedo_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	var metal_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	var rough_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	var emission_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	for i in mini(materials.size(), 256):
+		var m: VoxelMaterial = materials[i]
+		if m == null:
+			continue
+		albedo_image.set_pixel(i, 0, VoxelMaterial.albedo_color(m))
+		metal_image.set_pixel(i, 0, VoxelMaterial.metal_color(m))
+		rough_image.set_pixel(i, 0, VoxelMaterial.rough_color(m))
+		emission_image.set_pixel(i, 0, VoxelMaterial.emission_color(m))
+	return {
+		"albedo": albedo_image, "metal": metal_image,
+		"rough": rough_image, "emission": emission_image,
+	}
 
 static func generate_mesh_library(voxel: VoxelData, options: Dictionary, path: String = "") -> MeshLibrary:
 	var root_gen := VoxelMeshGenerator.new(voxel, options, path)
@@ -180,18 +189,6 @@ func _init(voxel: VoxelData, options: Dictionary, path: String = "") -> void:
 	if scale <= 0:
 		scale = 0.01
 
-func change_mesh_scale(scale: float):
-	if mesh:
-		var mesh_tool = MeshDataTool.new()
-		var new_mesh = ArrayMesh.new()
-		for si in mesh.get_surface_count():
-			mesh_tool.create_from_surface(mesh, si)
-			for i in mesh_tool.get_vertex_count():
-				mesh_tool.set_vertex(i, mesh_tool.get_vertex(i) * scale)
-			mesh_tool.commit_to_surface(new_mesh, si)
-		mesh = new_mesh
-
-
 func generate_materials(options: Dictionary) -> Array[Material]:
 	materials.resize(2)
 	var path := root_path if options[VoxelMeshImporter.import_materials_textures] else ""
@@ -241,11 +238,10 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 	return material
 
 func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> ImageTexture:
-	var image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
+	# 复用统一的通道图生成，避免与运行时纹理两套采样逻辑漂移
 	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	for i in mini(mats.size(), 256):
-		var color: Color = get_pixel.call(mats[i])
-		image.set_pixel(i, 0, color)
+	var images := _build_channel_images(mats)
+	var image: Image = images[type]
 	DirAccess.make_dir_absolute(save_path.get_basename())
 	var path := save_path.get_basename() + '/tex_' + type + '.tres'
 	var texture: ImageTexture = ResourceLoader.load(path) if FileAccess.file_exists(path) else ImageTexture.create_from_image(image)
@@ -399,8 +395,8 @@ func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, 
 	var surface := surfaces[0] if mats[id].trans <= 0 else surfaces[1]
 
 	surface.set_normal(FaceTool.Normals[dir])
-	# UV采样纹素中心，避免落在边界上导致取色偏移
-	var u := (float(id) + 0.5) / 256.0
+	# UV采样纹素中心，避免落在边界上导致取色偏移 (统一公式见 VoxelMaterial.uv_for_id)
+	var u := VoxelMaterial.uv_for_id(id)
 	var v := 0.5
 	for point: Vector3 in FaceTool.Faces[dir]:
 		surface.set_uv(Vector2(u, v))

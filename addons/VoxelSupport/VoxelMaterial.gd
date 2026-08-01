@@ -79,3 +79,13 @@ static func rough_color(m: VoxelMaterial) -> Color:
 ## 自发光颜色
 static func emission_color(m: VoxelMaterial) -> Color:
 	return m.color * m.emission
+
+
+# ----------------------------------------------------------------------------
+# UV 采样
+# ----------------------------------------------------------------------------
+
+## 材质ID → 纹理采样 U 坐标 (纹素中心对齐，避免落在边界导致取色偏移)
+## 所有网格生成器统一使用，保证与 256x1 材质纹理的采样一致
+static func uv_for_id(mat_id: int) -> float:
+	return (float(mat_id) + 0.5) / 256.0

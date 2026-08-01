@@ -42,12 +42,15 @@ static func generate_arrays_runtime(
 	var scale: float = options.get("scale", 0.1)
 	var aligned := VoxelMaterial.align_by_id(materials)
 
+	# 一次遍历 voxels，建立"非空 chunk"哈希索引（避免逐 chunk 16³ 扫描）
+	var non_empty := _build_non_empty_chunk_index(voxels)
+
 	# 确定需要重建的 chunk（跳过完全空的 chunk）
 	var chunk_keys: Array[Vector3i] = []
 	if rebuild_chunks.is_empty():
-		chunk_keys = _all_non_empty_chunks(voxels)
+		chunk_keys = _all_non_empty_chunks_from_index(non_empty)
 	else:
-		chunk_keys = _unique_non_empty(rebuild_chunks, voxels)
+		chunk_keys = _unique_non_empty(rebuild_chunks, non_empty)
 
 	if chunk_keys.is_empty():
 		return null
@@ -104,36 +107,31 @@ static func _chunk_of(pos: Vector3i) -> Vector3i:
 	return Vector3i(floori(fx), floori(fy), floori(fz))
 
 
-## 收集所有"非空"的 chunk（空块提前终止：跳过 voxels 中不存在的 chunk）
-static func _all_non_empty_chunks(voxels) -> Array[Vector3i]:
-	var chunk_keys: Array[Vector3i] = []
+## 一次遍历 voxels，建立"非空 chunk"的哈希索引 (chunk -> true)
+## 相比逐 chunk 扫描 16³ 体素，只需一次遍历所有体素，查询变为 O(1)
+static func _build_non_empty_chunk_index(voxels) -> Dictionary:
+	var index := {}
 	for pos_key in voxels:
-		var ck := _chunk_of(pos_key)
-		if not chunk_keys.has(ck):
-			chunk_keys.append(ck)
+		index[_chunk_of(pos_key)] = true
+	return index
+
+
+## 从非空 chunk 索引收集所有非空 chunk（全量重建路径）
+static func _all_non_empty_chunks_from_index(non_empty: Dictionary) -> Array[Vector3i]:
+	var chunk_keys: Array[Vector3i] = []
+	for ck in non_empty:
+		chunk_keys.append(ck)
 	return chunk_keys
 
 
-## 从待重建 chunk 中过滤掉空 chunk（该 chunk 在 voxels 中无任何体素）
-static func _unique_non_empty(arr: Array[Vector3i], voxels) -> Array[Vector3i]:
+## 从待重建 chunk 中过滤掉空 chunk（基于非空索引 O(1) 查询，并去重）
+static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
 	for ck in arr:
 		if result.has(ck):
 			continue
-		# 空块提前终止：chunk 内无体素则跳过，避免为不存在的 chunk 分配/遍历
-		var origin := ck * CHUNK_SIZE
-		var empty := true
-		for x in CHUNK_SIZE:
-			for y in CHUNK_SIZE:
-				for z in CHUNK_SIZE:
-					if voxels.has(origin + Vector3i(x, y, z)):
-						empty = false
-						break
-				if not empty:
-					break
-			if not empty:
-				break
-		if not empty:
+		# 空块提前终止：该 chunk 在非空索引中不存在则跳过
+		if non_empty.has(ck):
 			result.append(ck)
 	return result
 
@@ -185,7 +183,7 @@ static func _add_face(
 		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
 		pos: Vector3i, mat_id: int, face_idx: int, scale: float, is_trans: bool) -> void:
 	var normal: Vector3 = FaceTool.Normals[face_idx]
-	var u := (float(mat_id) + 0.5) / 256.0
+	var u := VoxelMaterial.uv_for_id(mat_id)
 	# FaceTool.Faces[face_idx] 已按 CCW 拆好 6 个顶点（两个三角形）
 	for point: Vector3 in FaceTool.Faces[face_idx]:
 		var world_pos := (Vector3(pos) + point) * scale

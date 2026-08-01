@@ -22,6 +22,7 @@ signal mesh_updated
 		if data:
 			data.changed.connect(_on_data_changed)
 		_materials_cache.clear()
+		_materials_snapshot_dirty = true
 		_request_update()
 
 ## 体素缩放比例 (单个体素的边长，世界单位)
@@ -73,6 +74,9 @@ var _task_id := -1
 var _pending_arrays: Variant = null
 var _has_pending := false
 var _generation_id := 0
+# 材质快照缓存：材质对象深拷贝较昂贵，仅在材质变化时重建一次，供子线程安全读取
+var _materials_snapshot: Array = []
+var _materials_snapshot_dirty: bool = true
 
 const _COLLISION_BODY_NAME := "_VoxelRendererCollision"
 
@@ -123,6 +127,7 @@ func force_update() -> void:
 ## 强制重新生成纹理材质 (材质属性变化时调用)
 func regenerate_materials() -> void:
 	_materials_cache.clear()
+	_materials_snapshot_dirty = true
 	_request_update()
 
 
@@ -177,6 +182,11 @@ func _update_mesh() -> void:
 	if _materials_cache.is_empty() or _materials_cache[0] == null:
 		_materials_cache = VoxelMeshGenerator.generate_textured_materials_runtime(data.materials)
 
+	# 材质快照只在材质变化时深拷贝一次，供异步子线程安全读取 (体素变化不触发，避免每帧大对象拷贝)
+	if _materials_snapshot_dirty:
+		_materials_snapshot = data.materials.duplicate(true)
+		_materials_snapshot_dirty = false
+
 	if async_generate:
 		_update_mesh_async()
 	else:
@@ -191,8 +201,10 @@ func _update_mesh_async() -> void:
 		_task_id = -1
 
 	# 快照本次要生成的体素数据（子线程只读，避免与主线程写入竞争）
+	# voxels 为 Dictionary[Vector3i,int]，浅拷贝只复制哈希表 (值类型 key/value)，开销小
 	var snapshot_voxels := data.voxels.duplicate()
-	var snapshot_materials := data.materials.duplicate(true)
+	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
+	var snapshot_materials := _materials_snapshot
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = _CHUNK_GENERATOR.chunks_for_dirty_voxels(data.dirty_voxels)
