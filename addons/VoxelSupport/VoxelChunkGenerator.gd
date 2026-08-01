@@ -4,28 +4,50 @@ class_name VoxelChunkGenerator
 ## 相比 VoxelMeshGenerator 的全局网格生成，本生成器：
 ##   - 将体素世界划分为固定大小的 chunk，每个 chunk 独立生成网格
 ##   - 支持"增量重建"：只重新生成发生变化的 chunk，而非全量重建
+##   - 支持在后台线程生成网格数据（generate_arrays_runtime），避免阻塞主线程
+##   - 自动跳过完全空的 chunk（空块提前终止）
 ## 对大型动态场景（如水模拟、地形编辑）性能提升显著。
 
 ## 单个 chunk 的边长（体素个数），chunk 越大网格合并效率越高但增量重建粒度越粗
 const CHUNK_SIZE := 16
 
 
-## 运行时网格生成入口（全量或增量）
+## 运行时网格生成入口（全量或增量），在主线程调用
 ## 通过 rebuild_chunks 指定只重建部分 chunk；为空则全量生成
 static func generate_mesh_runtime(
 		voxels: Dictionary[Vector3i, int],
 		materials: Array,
 		options: Dictionary = {},
 		rebuild_chunks: Array[Vector3i] = []) -> ArrayMesh:
+	var arrays := generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
+	if arrays == null:
+		return null
+	return _merge_meshes(arrays as Dictionary)
+
+
+## 后台线程安全的网格数据生成入口（不创建/修改 ArrayMesh，可在子线程运行）
+## 返回一个 Dictionary 或 null：
+##   {
+##     "solid_verts": PackedVector3Array, "solid_normals": PackedVector3Array,
+##     "solid_uvs": PackedVector2Array, "solid_idxs": PackedInt32Array,
+##     "trans_verts": PackedVector3Array, "trans_normals": PackedVector3Array,
+##     "trans_uvs": PackedVector2Array, "trans_idxs": PackedInt32Array,
+##   }
+## 返回 null 表示没有任何可渲染的面（全空）
+static func generate_arrays_runtime(
+		voxels: Dictionary[Vector3i, int],
+		materials: Array,
+		options: Dictionary = {},
+		rebuild_chunks: Array[Vector3i] = []) -> Variant:
 	var scale: float = options.get("scale", 0.1)
 	var aligned := _align_materials(materials)
 
-	# 确定需要重建的 chunk
+	# 确定需要重建的 chunk（跳过完全空的 chunk）
 	var chunk_keys: Array[Vector3i] = []
 	if rebuild_chunks.is_empty():
-		chunk_keys = _all_chunks(voxels)
+		chunk_keys = _all_non_empty_chunks(voxels)
 	else:
-		chunk_keys = _unique(rebuild_chunks)
+		chunk_keys = _unique_non_empty(rebuild_chunks, voxels)
 
 	if chunk_keys.is_empty():
 		return null
@@ -45,8 +67,20 @@ static func generate_mesh_runtime(
 			all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs,
 			all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs)
 
-	return _merge_meshes(all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs,
-		all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs)
+	if all_solid_idxs.is_empty() and all_trans_idxs.is_empty():
+		return null
+
+	return {
+		"solid_verts": all_solid_verts, "solid_normals": all_solid_normals,
+		"solid_uvs": all_solid_uvs, "solid_idxs": all_solid_idxs,
+		"trans_verts": all_trans_verts, "trans_normals": all_trans_normals,
+		"trans_uvs": all_trans_uvs, "trans_idxs": all_trans_idxs,
+	}
+
+
+## 将 generate_arrays_runtime 生成的字典数据组装为 ArrayMesh（必须在主线程调用）
+static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
+	return _merge_meshes(arrays)
 
 
 ## 根据变更体素集合，计算需要重建的 chunk（增量重建核心）
@@ -70,7 +104,8 @@ static func _chunk_of(pos: Vector3i) -> Vector3i:
 	return Vector3i(floori(fx), floori(fy), floori(fz))
 
 
-static func _all_chunks(voxels) -> Array[Vector3i]:
+## 收集所有"非空"的 chunk（空块提前终止：跳过 voxels 中不存在的 chunk）
+static func _all_non_empty_chunks(voxels) -> Array[Vector3i]:
 	var chunk_keys: Array[Vector3i] = []
 	for pos_key in voxels:
 		var ck := _chunk_of(pos_key)
@@ -79,11 +114,27 @@ static func _all_chunks(voxels) -> Array[Vector3i]:
 	return chunk_keys
 
 
-static func _unique(arr: Array[Vector3i]) -> Array[Vector3i]:
+## 从待重建 chunk 中过滤掉空 chunk（该 chunk 在 voxels 中无任何体素）
+static func _unique_non_empty(arr: Array[Vector3i], voxels) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
-	for v in arr:
-		if not result.has(v):
-			result.append(v)
+	for ck in arr:
+		if result.has(ck):
+			continue
+		# 空块提前终止：chunk 内无体素则跳过，避免为不存在的 chunk 分配/遍历
+		var origin := ck * CHUNK_SIZE
+		var empty := true
+		for x in CHUNK_SIZE:
+			for y in CHUNK_SIZE:
+				for z in CHUNK_SIZE:
+					if voxels.has(origin + Vector3i(x, y, z)):
+						empty = false
+						break
+				if not empty:
+					break
+			if not empty:
+				break
+		if not empty:
+			result.append(ck)
 	return result
 
 
@@ -151,15 +202,19 @@ static func _add_face(
 			solid_idxs.append(solid_verts.size() - 1)
 
 
-static func _merge_meshes(solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
-		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array) -> ArrayMesh:
+## 将生成的网格数据组装为 ArrayMesh（必须在主线程调用，会修改 ArrayMesh）
+static func _merge_meshes(arrays: Dictionary) -> ArrayMesh:
 	var result := ArrayMesh.new()
 	var has_any := false
+	var solid_idxs: PackedInt32Array = arrays.get("solid_idxs", PackedInt32Array())
+	var trans_idxs: PackedInt32Array = arrays.get("trans_idxs", PackedInt32Array())
 	if not solid_idxs.is_empty():
-		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _make_arrays(solid_verts, solid_normals, solid_uvs, solid_idxs))
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,
+			_make_arrays(arrays.get("solid_verts"), arrays.get("solid_normals"), arrays.get("solid_uvs"), solid_idxs))
 		has_any = true
 	if not trans_idxs.is_empty():
-		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _make_arrays(trans_verts, trans_normals, trans_uvs, trans_idxs))
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,
+			_make_arrays(arrays.get("trans_verts"), arrays.get("trans_normals"), arrays.get("trans_uvs"), trans_idxs))
 		has_any = true
 	if not has_any:
 		return null
