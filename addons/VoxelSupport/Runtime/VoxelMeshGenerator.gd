@@ -3,7 +3,7 @@ class_name VoxelMeshGenerator
 ## 会将数据分为6个方向 并多线程计算网格
 
 
-static func generate_mesh(voxel: VoxelData, options: Dictionary, path: String = "") -> ArrayMesh:
+static func generate_mesh(voxel: VoxData, options: Dictionary, path: String = "") -> ArrayMesh:
 	var gen := VoxelMeshGenerator.new(voxel, options, path)
 	gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
@@ -18,7 +18,7 @@ static func generate_mesh(voxel: VoxelData, options: Dictionary, path: String = 
 
 
 ## 运行时网格生成入口
-## 直接接受体素字典和材质数组，无需 VoxelData 实例
+## 直接接受体素字典和材质数组，无需 VoxData 实例
 ## 供 VoxelRenderer / VoxelDestructible 等运行时节点使用
 ## options 可包含: scale, unwrap_lightmap_uv2, uv2_texel_size (均可选)
 static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: Array, options: Dictionary = {}) -> ArrayMesh:
@@ -88,7 +88,7 @@ static func _build_channel_images(materials: Array) -> Dictionary:
 		"rough": rough_image, "emission": emission_image,
 	}
 
-static func generate_mesh_library(voxel: VoxelData, options: Dictionary, path: String = "") -> MeshLibrary:
+static func generate_mesh_library(voxel: VoxData, options: Dictionary, path: String = "") -> MeshLibrary:
 	var root_gen := VoxelMeshGenerator.new(voxel, options, path)
 	root_gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
@@ -173,7 +173,7 @@ var slice_voxels: Array[Dictionary]
 var scale: float = 1
 var tasks: Array
 var mesh: ArrayMesh
-var voxel: VoxelData
+var voxel: VoxData
 var frame_index: int
 var materials: Array[Material]
 var root_path: String
@@ -181,7 +181,7 @@ var root_path: String
 var runtime_materials: Array = []
 
 
-func _init(voxel: VoxelData, options: Dictionary, path: String = "") -> void:
+func _init(voxel: VoxData, options: Dictionary, path: String = "") -> void:
 	self.root_path = path
 	self.voxel = voxel
 	frame_index = options.get(VoxelMeshImporter.frame_index, 0)

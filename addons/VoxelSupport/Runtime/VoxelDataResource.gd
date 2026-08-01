@@ -5,7 +5,7 @@ extends Resource
 ## 可序列化的体素数据资源
 ## 用于运行时动态渲染、修改和破坏体素
 ## 可由 VoxelRenderer / VoxelDestructible 节点使用
-## 与 VoxelData 不同，此资源专为序列化和运行时使用设计
+## 与 VoxData 不同，此资源专为序列化和运行时使用设计
 ## 注: 直接使用 Resource 内置的 changed 信号 (通过 emit_changed() 发射)
 
 ## 体素字典: 位置 -> 材质ID
@@ -35,8 +35,8 @@ const NEIGHBORS_6: Array[Vector3i] = [
 ]
 
 
-## 从 VoxelData 构造 (编辑器导入时使用)
-static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> VoxelDataResource:
+## 从 VoxData 构造 (编辑器导入时使用)
+static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0) -> VoxelDataResource:
 	var res := VoxelDataResource.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 	

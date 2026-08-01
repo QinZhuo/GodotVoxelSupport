@@ -52,7 +52,7 @@ func _init(file: FileAccess):
 	if not rot_cache.size():
 		rot_cache.resize(256)
 	_file = file
-	voxel = VoxelData.new()
+	voxel = VoxData.new()
 	voxel.materials.resize(256)
 	for i in voxel.materials.size():
 		voxel.materials[i] = VoxelMaterial.new()
@@ -60,7 +60,7 @@ func _init(file: FileAccess):
 		read_chunk()
 	voxel.check_nodes()
 
-var voxel: VoxelData
+var voxel: VoxData
 var _file: FileAccess
 
 func read_chunk():
@@ -70,7 +70,7 @@ func read_chunk():
 	var end := _file.get_position() + size
 	match id:
 		"SIZE":
-			var model := VoxelData.VoxelModel.new()
+			var model := VoxData.VoxelModel.new()
 			voxel.models.append(model)
 			var x := _get_32()
 			var y := _get_32()
@@ -143,7 +143,7 @@ func read_chunk():
 						material.metal = 0
 						material.rough = 1
 		"LAYR":
-			var layer := VoxelData.VoxelLayer.new()
+			var layer := VoxData.VoxelLayer.new()
 			layer.id = _get_32()
 			layer.isVisible = _get_dictionary().get('_hidden', '0') != '1'
 			voxel.layers[layer.id] = layer
@@ -174,8 +174,8 @@ func _get_dictionary() -> Dictionary[String, String]:
 		dictionary[key] = _get_string(_get_32())
 	return dictionary
 
-func _get_node() -> VoxelData.VoxelNode:
-	var node := VoxelData.VoxelNode.new()
+func _get_node() -> VoxData.VoxelNode:
+	var node := VoxData.VoxelNode.new()
 	node.id = _get_32()
 	var attributes := _get_dictionary()
 	if attributes.has("_name"):

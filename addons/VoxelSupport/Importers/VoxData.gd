@@ -1,4 +1,4 @@
-class_name VoxelData
+class_name VoxData
 
 var models: Array[VoxelModel]
 
@@ -56,7 +56,7 @@ class VoxelModel:
 		return str(voxels.size(), ' ', size)
 
 	func get_voxels():
-		return VoxelData.get_offset_voxels(voxels, offset)
+		return VoxData.get_offset_voxels(voxels, offset)
 
 
 class VoxelNode:
@@ -72,7 +72,7 @@ class VoxelNode:
 
 	var models: Array[Array]
 
-	func get_name(voxel: VoxelData, frame_index: int = 0, is_root: bool = true) -> String:
+	func get_name(voxel: VoxData, frame_index: int = 0, is_root: bool = true) -> String:
 		if name:
 			return name
 		for i in child_nodes:
@@ -99,7 +99,7 @@ class VoxelNode:
 				frames[index] = VoxelFrame.new()
 			return frames[index]
 
-	func get_models(voxel: VoxelData, frame_index: int, ignore_trans: bool = false) -> Array:
+	func get_models(voxel: VoxData, frame_index: int, ignore_trans: bool = false) -> Array:
 		if layerId in voxel.layers and not voxel.layers[layerId].isVisible:
 			return models
 		models.clear()
@@ -115,7 +115,7 @@ class VoxelNode:
 		return models
 
 	const MaxSurface = 2
-	func get_mesh(voxel: VoxelData, frame_index: int) -> ArrayMesh:
+	func get_mesh(voxel: VoxData, frame_index: int) -> ArrayMesh:
 		var result_mesh = ArrayMesh.new()
 		var surface := SurfaceTool.new()
 		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -132,7 +132,7 @@ class VoxelNode:
 		return result_mesh
 
 
-	func get_voxels(voxel: VoxelData, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
+	func get_voxels(voxel: VoxData, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
 		var voxels: Dictionary[Vector3i, int]
 		var models := get_models(voxel, frame_index, center)
 		for i in models.size():
@@ -157,7 +157,7 @@ class VoxelFrame:
 		get(): return Transform3D(rotation if rotation else Quaternion.IDENTITY,
 			position if position else Vector3.ZERO)
 
-	func merge_models(voxel: VoxelData, models: Array[Array], ignore_trans: bool):
+	func merge_models(voxel: VoxData, models: Array[Array], ignore_trans: bool):
 		if model_id >= 0:
 			var model := voxel.models[model_id]
 			models.append([model, Transform3D.IDENTITY.translated(model.offset)])
