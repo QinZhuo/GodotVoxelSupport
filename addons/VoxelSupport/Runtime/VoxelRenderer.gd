@@ -2,8 +2,6 @@
 class_name VoxelRenderer
 extends MeshInstance3D
 
-const _CHUNK_GENERATOR := preload("res://addons/VoxelSupport/VoxelChunkGenerator.gd")
-
 ## 体素专属渲染器
 ## 持有 VoxelDataResource，在运行时动态生成并更新 mesh
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
@@ -220,7 +218,7 @@ func _update_mesh_async() -> void:
 	var snapshot_materials := _materials_snapshot
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
-		rebuild_chunks = _CHUNK_GENERATOR.chunks_for_dirty_voxels(data.dirty_voxels)
+		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 	var gen_id := _generation_id + 1
 	_generation_id = gen_id
 
@@ -237,7 +235,7 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 		"scale": voxel_scale,
 	}
 	var t0 := Time.get_ticks_usec()
-	var arrays: Variant = _CHUNK_GENERATOR.generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
+	var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
 	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	# 仅在 gen_id 仍有效时写入结果（避免覆盖更新的任务）
 	if gen_id == _generation_id:
@@ -252,9 +250,9 @@ func _update_mesh_sync() -> void:
 	}
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
-		rebuild_chunks = _CHUNK_GENERATOR.chunks_for_dirty_voxels(data.dirty_voxels)
+		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 	var t0 := Time.get_ticks_usec()
-	var arrays := _CHUNK_GENERATOR.generate_arrays_runtime(data.voxels, data.materials, options, rebuild_chunks)
+	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.voxels, data.materials, options, rebuild_chunks)
 	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	_build_and_apply_mesh(arrays)
 
@@ -263,7 +261,7 @@ func _update_mesh_sync() -> void:
 func _build_and_apply_mesh(arrays: Variant) -> void:
 	var new_mesh: ArrayMesh
 	if arrays != null and arrays is Dictionary and not arrays.is_empty():
-		new_mesh = _CHUNK_GENERATOR.build_mesh_from_arrays(arrays as Dictionary)
+		new_mesh = VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
 		# 给 chunk mesh 的两个表面赋材质（实心/透明）
 		if new_mesh and _materials_cache.size() >= 2:
 			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:

@@ -2,8 +2,6 @@
 class_name VoxelDestructible
 extends VoxelRenderer
 
-const _CHUNK_GEN := preload("res://addons/VoxelSupport/VoxelChunkGenerator.gd")
-
 ## 动态体素破坏系统
 ## 继承 VoxelRenderer，在渲染基础上提供体素破坏能力
 ## 支持球形/盒形/单体素/射线破坏 + 逐体素健康度 + 悬空崩塌 + 碎片系统
@@ -466,7 +464,7 @@ func _collapse_gen_worker(blocks_data: Array, materials: Array, scale: float) ->
 	var results: Array = []
 	var options := {"scale": scale}
 	for bd in blocks_data:
-		var arrays: Variant = _CHUNK_GEN.generate_arrays_runtime(
+		var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(
 			bd["voxels"] as Dictionary[Vector3i, int], materials, options)
 		results.append(arrays)
 	_collapse_results = results
@@ -509,7 +507,7 @@ func _partition_connected_blocks(positions: Array) -> Array:
 func _build_collapse_body(bd: Dictionary, arrays: Variant) -> void:
 	if arrays == null or bd.is_empty():
 		return
-	var arr_mesh: ArrayMesh = _CHUNK_GEN.build_mesh_from_arrays(arrays as Dictionary)
+	var arr_mesh: ArrayMesh = VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
 	if arr_mesh == null:
 		return
 	# 给整块 mesh 赋材质（复用与原体素一致的纹理材质，保证颜色正确）
