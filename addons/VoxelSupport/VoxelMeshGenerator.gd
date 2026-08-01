@@ -25,7 +25,8 @@ static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: 
 	if voxels.is_empty():
 		return null
 	var gen := VoxelMeshGenerator.new(null, options, "")
-	gen.runtime_materials = materials
+	# 统一对齐材质数组：确保"材质数组索引 == 材质ID"，避免内部 mats[id] 越界
+	gen.runtime_materials = _align_materials(materials)
 	# 运行时不生成纹理材质资源，由调用方提供或使用默认材质
 	gen.materials = [options.get("material_solid", null), options.get("material_transparent", null)]
 	var time := Time.get_ticks_usec()
@@ -38,6 +39,20 @@ static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: 
 	if Engine.is_editor_hint():
 		print_verbose("generate_mesh_runtime: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
 	return mesh
+
+
+## 对齐材质数组：将传入的材质数组转换为"索引 == 材质ID"的对齐数组
+## 这样体素中存储的材质ID可以直接作为数组索引访问，避免越界
+static func _align_materials(materials: Array) -> Array:
+	var aligned: Array = []
+	for mat in materials:
+		if mat == null:
+			continue
+		var mat_id: int = mat.id
+		while aligned.size() <= mat_id:
+			aligned.append(null)
+		aligned[mat_id] = mat
+	return aligned
 
 
 ## 从材质数组生成运行时纹理材质 (StandardMaterial3D 数组，0=实体 1=透明)

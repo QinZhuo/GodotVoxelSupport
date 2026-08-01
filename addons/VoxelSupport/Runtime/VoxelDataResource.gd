@@ -151,11 +151,50 @@ func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
 	return removed
 
 
-## 获取材质 (索引越界返回 null)
-func get_material(index: int) -> Resource:
+## 添加材质，自动按材质 ID 对齐数组索引（体素存的 ID 即可直接作数组索引）
+## 索引 0 保留为占位；索引 = 材质 ID 处存放该材质
+## 若该 ID 位置已有材质，则覆盖
+func add_material(mat: VoxelMaterial, notify: bool = false) -> VoxelMaterial:
+	if mat == null:
+		return null
+	# 确保数组长度足够容纳索引 id
+	while materials.size() <= mat.id:
+		materials.append(null)
+	materials[mat.id] = mat
+	if notify:
+		emit_changed()
+	return mat
+
+
+## 获取材质 (按材质 ID / 数组索引，越界返回 null)
+func get_material(index: int) -> VoxelMaterial:
 	if index >= 0 and index < materials.size():
 		return materials[index]
 	return null
+
+
+## 按材质 ID 查找材质（数组可能未对齐时也能找到）
+func get_material_by_id(mat_id: int) -> VoxelMaterial:
+	if mat_id >= 0 and mat_id < materials.size() and materials[mat_id] != null \
+			and materials[mat_id].id == mat_id:
+		return materials[mat_id]
+	# 数组未对齐时，遍历查找
+	for mat in materials:
+		if mat != null and mat.id == mat_id:
+			return mat
+	return null
+
+
+## 获取按材质 ID 对齐的材质数组（用于 VoxelMeshGenerator，保证索引==ID）
+func get_aligned_materials() -> Array[VoxelMaterial]:
+	var aligned: Array[VoxelMaterial] = []
+	for mat in materials:
+		if mat == null:
+			continue
+		while aligned.size() <= mat.id:
+			aligned.append(null)
+		aligned[mat.id] = mat
+	return aligned
 
 
 ## 获取所有材质的浅拷贝 (用于 VoxelMeshGenerator)
