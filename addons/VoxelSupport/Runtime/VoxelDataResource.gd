@@ -55,6 +55,8 @@ static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> Voxe
 		res.voxels = raw_voxels
 		res.grid_size = Vector3i(voxel_data.size)
 	
+	# 材质数组按材质 ID 对齐存储，确保 res.voxels 中的材质ID能直接作为数组索引
+	# (体素值 = 材质ID = data.materials 数组索引，这是 VoxelMeshGenerator 的约定)
 	for mat in voxel_data.materials:
 		var new_mat := VoxelMaterial.new()
 		new_mat.id = mat.id
@@ -63,7 +65,10 @@ static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> Voxe
 		new_mat.metal = mat.metal
 		new_mat.rough = mat.rough
 		new_mat.emission = mat.emission
-		res.materials.append(new_mat)
+		# 确保数组长度足够容纳索引 id
+		while res.materials.size() <= mat.id:
+			res.materials.append(null)
+		res.materials[mat.id] = new_mat
 	return res
 
 
