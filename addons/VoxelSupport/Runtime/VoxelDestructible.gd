@@ -797,8 +797,10 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 	particles.one_shot = true
 	particles.local_coords = true
 
-	# 粒子材质：向外爆发 + 重力下落
+	# 粒子材质：向外爆发 + 重力下落 + 碰撞（落地停在表面，雪花堆积）
 	var pm := ParticleProcessMaterial.new()
+	# 粒子与场景中的 GPUParticlesCollision* 交互，撞到表面后停住堆积，保留一段时间
+	pm.collision_mode = ParticleProcessMaterial.COLLISION_RIGID
 	pm.direction = Vector3(0, 1, 0)
 	pm.spread = 180.0
 	pm.initial_velocity_min = debris_min_speed
@@ -809,6 +811,17 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int) -> void:
 	# 粒子缩放=1.0，由 draw_pass mesh 尺寸决定显示大小（与原体素一致）
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
+	# 淡出：粒子生命周期内 alpha 从 1 渐变到 0，慢慢透明消失而非瞬间消失
+	var fade := Gradient.new()
+	fade.offsets = PackedFloat32Array([0.0, 0.7, 1.0])
+	fade.colors = PackedColorArray([
+		Color(1, 1, 1, 1),  # 初始不透明
+		Color(1, 1, 1, 1),  # 大部分时间保持
+		Color(1, 1, 1, 0),  # 末期完全透明
+	])
+	var ramp := GradientTexture1D.new()
+	ramp.gradient = fade
+	pm.color_initial_ramp = ramp
 	# 碎片用立方体 mesh，尺寸 = 原体素大小（voxel_scale），保证与原体素一致
 	var mesh := BoxMesh.new()
 	mesh.size = Vector3(voxel_scale, voxel_scale, voxel_scale)

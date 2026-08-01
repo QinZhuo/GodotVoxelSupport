@@ -56,6 +56,12 @@ func _setup_ground() -> void:
 	mesh_inst.position = Vector3(0, -0.5, 0)
 	add_child(mesh_inst)
 
+	# 粒子碰撞体：顶面与地面(y=0)对齐，碎片粒子落地后停在地面表面（雪花堆积效果）
+	var coll := GPUParticlesCollisionBox3D.new()
+	coll.size = Vector3(60, 2, 60)
+	coll.position = Vector3(0, -1.0, 0)  # 中心 y=-1，顶面 y=0 = 地面
+	add_child(coll)
+
 
 func _process(_delta: float) -> void:
 	_handle_input()
