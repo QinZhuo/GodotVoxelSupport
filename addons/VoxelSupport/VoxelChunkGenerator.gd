@@ -9,7 +9,7 @@ class_name VoxelChunkGenerator
 ## 对大型动态场景（如水模拟、地形编辑）性能提升显著。
 
 ## 单个 chunk 的边长（体素个数），chunk 越大网格合并效率越高但增量重建粒度越粗
-const CHUNK_SIZE := 16
+const CHUNK_SIZE := 32
 
 
 ## 运行时网格生成入口（全量或增量），在主线程调用
