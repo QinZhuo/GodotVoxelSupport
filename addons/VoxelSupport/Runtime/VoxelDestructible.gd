@@ -2,6 +2,8 @@
 class_name VoxelDestructible
 extends VoxelRenderer
 
+const _CHUNK_GEN := preload("res://addons/VoxelSupport/VoxelChunkGenerator.gd")
+
 ## 动态体素破坏系统
 ## 继承 VoxelRenderer，在渲染基础上提供体素破坏能力
 ## 支持球形/盒形/单体素/射线破坏 + 逐体素健康度 + 悬空崩塌 + 碎片系统
@@ -432,11 +434,25 @@ func _partition_connected_blocks(positions: Array) -> Array:
 	return result
 
 
-## 生成一个整块刚体：组合 BoxShape 碰撞 + ArrayMesh 显示，从质心下落
+## 生成一个整块刚体：用 VoxelChunkGenerator 生成与掉落前一致的贪婪合并 mesh，从质心下落
+## body 位于 _debris_root 原点，mesh/碰撞用体素绝对坐标，保证整块与掉落前外观一致
 func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 	if block.is_empty():
 		return
-	# 计算块包围盒质心
+	# 用块的体素构建临时数据并生成贪婪合并 mesh（与原体素块外观完全一致）
+	var block_voxels: Dictionary[Vector3i, int] = {}
+	for p in block:
+		var pos: Vector3i = p
+		block_voxels[pos] = mat_map.get(pos, -1)
+	var options := {"scale": voxel_scale}
+	var arrays: Variant = _CHUNK_GEN.generate_arrays_runtime(block_voxels, data.materials, options)
+	if arrays == null:
+		return
+	var arr_mesh: ArrayMesh = _CHUNK_GEN.build_mesh_from_arrays(arrays as Dictionary)
+	# 给整块 mesh 赋材质（复用与原体素一致的纹理材质，保证颜色正确）
+	_apply_mesh_materials(arr_mesh)
+
+	# 计算块包围盒质心（用于下落旋转中心）
 	var min_pos := Vector3(99999, 99999, 99999)
 	var max_pos := Vector3(-99999, -99999, -99999)
 	for p in block:
@@ -444,10 +460,9 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 		min_pos = min_pos.min(Vector3(pos))
 		max_pos = max_pos.max(Vector3(pos))
 	var center := (min_pos + max_pos) * 0.5 + Vector3(0.5, 0.5, 0.5)  # 块中心（体素空间）
-	var center_world := center * voxel_scale
 
 	var body := RigidBody3D.new()
-	# 组合碰撞形状：每个体素一个独立的 shape owner + BoxShape，偏移到相对质心的位置
+	# 组合碰撞形状：每个体素一个独立的 shape owner + BoxShape，偏移到体素绝对位置（相对 body 原点）
 	for p in block:
 		var pos: Vector3i = p
 		var shape := BoxShape3D.new()
@@ -455,19 +470,14 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 		var oid := body.create_shape_owner(body)
 		body.shape_owner_add_shape(oid, shape)
 		body.shape_owner_set_transform(oid, Transform3D.IDENTITY.translated(
-			(Vector3(pos) + Vector3(0.5, 0.5, 0.5) - center) * voxel_scale))
+			(Vector3(pos) + Vector3(0.5, 0.5, 0.5)) * voxel_scale))
 
-	# 整块显示：每个体素一个 MeshInstance3D 子节点 (BoxMesh，相对质心偏移)
-	# 注意：使用多个 MeshInstance 而非 SurfaceTool 合并，避免 Godot 4 API 差异且更可靠
-	for p in block:
-		var pos: Vector3i = p
-		var mat_id: int = mat_map.get(pos, -1)
-		var mesh_inst := MeshInstance3D.new()
-		mesh_inst.mesh = _get_debris_mesh(mat_id, voxel_scale)
-		mesh_inst.position = (Vector3(pos) + Vector3(0.5, 0.5, 0.5) - center) * voxel_scale
-		body.add_child(mesh_inst)
+	# 整块显示：贪婪合并 mesh（顶点为体素绝对坐标，与 body 原点对齐）
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.mesh = arr_mesh
+	body.add_child(mesh_inst)
 
-	body.position = center_world
+	body.position = Vector3.ZERO
 	# 整块从质心缓慢下落，带轻微随机旋转
 	body.linear_velocity = Vector3(randf_range(-0.3, 0.3), -debris_min_speed * 0.5, randf_range(-0.3, 0.3))
 	body.angular_velocity = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1))
@@ -476,6 +486,20 @@ func _spawn_collapse_block(block: Array, mat_map: Dictionary) -> void:
 	body.set_meta("_born_ms", Time.get_ticks_msec())
 	_debris_root.add_child(body)
 	debris_count += 1
+
+
+## 给整块 mesh 赋材质：复用与原体素一致的纹理材质 (VoxelMeshGenerator 生成的 PBR 材质)
+## 保证崩塌整块与原体素块颜色/材质完全一致
+var _block_mat_cache: Array = []
+
+func _apply_mesh_materials(arr_mesh: ArrayMesh) -> void:
+	if arr_mesh == null:
+		return
+	if _block_mat_cache.is_empty():
+		_block_mat_cache = VoxelMeshGenerator.generate_textured_materials_runtime(data.materials)
+	for i in arr_mesh.get_surface_count():
+		if i < _block_mat_cache.size() and _block_mat_cache[i] != null:
+			arr_mesh.surface_set_material(i, _block_mat_cache[i])
 
 
 ## 崩塌掉落的悬空体素 → 动态碎片 (带重力，落地保留)  [兼容：散碎片模式，非默认]
