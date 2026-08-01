@@ -265,3 +265,60 @@ func get_materials_array() -> Array:
 ## 触发 changed 信号 (批量修改后手动调用)
 func notify_changed() -> void:
 	emit_changed()
+
+
+# ----------------------------------------------------------------------------
+# 存档 / 重建
+# ----------------------------------------------------------------------------
+
+## 将体素数据和材质序列化为可 JSON 保存的结构
+## 返回 Dictionary，可配合 JSON.stringify 保存到磁盘；load_data 可完整重建
+## 格式：
+##   {
+##     "grid_size": [x, y, z],
+##     "materials": [{ "id", "color", "trans", "metal", "rough", "emission", "hardness", "mass" }, ...],
+##     "voxels": [[x, y, z, mat_id], ...],
+##   }
+func save_data() -> Dictionary:
+	var data := {}
+	data["grid_size"] = [grid_size.x, grid_size.y, grid_size.z]
+	# 材质序列化（保留非 null 材质，材质自身负责存档）
+	var mats := []
+	for mat in materials:
+		if mat == null:
+			continue
+		mats.append(mat.save_data())
+	data["materials"] = mats
+	# 体素序列化
+	var voxel_list := []
+	for pos_key in voxels:
+		var pos: Vector3i = pos_key
+		voxel_list.append([pos.x, pos.y, pos.z, voxels[pos_key]])
+	data["voxels"] = voxel_list
+	return data
+
+
+## 从 save_data() 返回的数据重建体素和材质（先清空当前内容）
+func load_data(data: Variant) -> void:
+	clear()
+	if data == null or not data is Dictionary:
+		return
+	# 材质重建（材质自身负责从数据恢复）
+	materials = []
+	if data.has("materials"):
+		for mat_data in data["materials"]:
+			var mat: VoxelMaterial = VoxelMaterial.load_data(mat_data)
+			if mat != null:
+				while materials.size() <= mat.id:
+					materials.append(null)
+				materials[mat.id] = mat
+	# 网格尺寸
+	if data.has("grid_size") and data["grid_size"] is Array and data["grid_size"].size() >= 3:
+		grid_size = Vector3i(int(data["grid_size"][0]), int(data["grid_size"][1]), int(data["grid_size"][2]))
+	# 体素重建
+	if data.has("voxels"):
+		for vox in data["voxels"]:
+			if vox is Array and vox.size() >= 4:
+				var pos := Vector3i(int(vox[0]), int(vox[1]), int(vox[2]))
+				voxels[pos] = int(vox[3])
+	emit_changed()

@@ -285,9 +285,10 @@ func _get_material_hardness(mat_id: int) -> float:
 
 
 ## 破坏后的统一处理：崩塌检测 + 整体健康度扣减
+## removed 为本次破坏移除的体素位置，用于局部支撑检测（只在破坏位置附近做 BFS）
 func _after_removal(removed: Array) -> void:
-	# 触发悬空崩塌
-	_trigger_collapse()
+	# 触发悬空崩塌（局部检测：只检查破坏位置附近的悬空）
+	_trigger_collapse(removed)
 	# 整体健康度扣减
 	if health >= 0:
 		health -= float(removed.size()) * 0.5
@@ -300,11 +301,12 @@ func _after_removal(removed: Array) -> void:
 # ----------------------------------------------------------------------------
 
 ## 检测并处理悬空体素（与地面/支撑断开的体素），崩塌成整块刚体掉落
-## 支持"支撑强度分析"：与主结构/地面只有少量接触、重量超出支撑能力的块也会自动断裂崩塌
-func _trigger_collapse() -> void:
+## 局部支撑检测：只检查"破坏位置附近"的悬空，避免每次破坏都全场景 BFS
+## around_positions 为本次破坏移除的体素位置；为空则做全场景检测
+func _trigger_collapse(around_positions: Array = []) -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
-	var unstable := _find_unstable_voxels()
+	var unstable := _find_unstable_voxels(around_positions)
 	if unstable.is_empty():
 		return
 	# 崩塌前反馈信号
@@ -321,22 +323,32 @@ func _trigger_collapse() -> void:
 
 
 ## 找出所有"失稳"体素（与地面断开即悬空），返回这些体素位置的并集
-## 最简支撑判断：从贴地体素 6 方向 BFS 标记与地面连通的体素，
-## 与地面断开的体素即为悬空（崩塌）。横向连接也传递支撑，保证运行速度
-func _find_unstable_voxels() -> Array:
+## 局部支撑检测：若传入 around_positions，只在破坏位置附近的区域做 BFS（性能优化），
+## 区域外体素假设稳定；around_positions 为空则全场景检测
+func _find_unstable_voxels(around_positions: Array = []) -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	# 与地面连通的所有体素（含横向支撑）
-	var supported := _bfs_from_ground(voxels)
+	var supported: Dictionary
+	var region: AABB
+	if around_positions.is_empty():
+		# 全场景检测
+		supported = _bfs_from_ground(voxels)
+	else:
+		# 局部检测：只检查破坏位置附近的区域
+		region = _compute_region_aabb(around_positions)
+		supported = _bfs_from_ground_in_region(voxels, region)
 
 	# 与地面断开的体素 = 悬空崩塌
 	var unstable: Array = []
 	for key in voxels:
 		var pos: Vector3i = key
-		if not supported.has(pos):
-			unstable.append(pos)
+		# 局部模式下，只处理区域内的体素（区域外假设稳定）
+		if not around_positions.is_empty() and not _aabb_contains(region, pos):
+			continue
+		if not supported.has(key):
+			unstable.append(key)
 	return unstable
 
 
@@ -363,6 +375,68 @@ func _bfs_from_ground(voxels: Dictionary) -> Dictionary:
 				supported[nb] = true
 				queue.append(nb)
 	return supported
+
+
+## 局部 BFS：在给定 AABB 区域内从"贴地体素 或 区域边界上(连到外部稳定结构)的体素"出发标记 supported
+## 只遍历区域内的体素，大幅降低大型场景的开销
+func _bfs_from_ground_in_region(voxels: Dictionary, region: AABB) -> Dictionary:
+	var supported := {}
+	var queue: Array = []
+	var dirs := [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+	]
+	# 种子：区域内的贴地体素
+	for key in voxels:
+		var pos: Vector3i = key
+		if pos.y == 0 and _aabb_contains(region, pos):
+			supported[key] = true
+			queue.append(key)
+	# 种子：区域边界上的体素（假设与外部稳定结构连通）
+	for key in voxels:
+		var pos: Vector3i = key
+		if supported.has(key) or not _aabb_contains(region, pos):
+			continue
+		if _is_on_region_border(pos, region):
+			supported[key] = true
+			queue.append(key)
+	while not queue.is_empty():
+		var cur: Vector3i = queue.pop_front()
+		for d: Vector3i in dirs:
+			var nb := cur + d
+			if voxels.has(nb) and not supported.has(nb) and _aabb_contains(region, nb):
+				supported[nb] = true
+				queue.append(nb)
+	return supported
+
+
+## 计算破坏位置集合的 AABB 包围盒（向外扩 MARGIN 格，覆盖可能的崩塌范围）
+func _compute_region_aabb(positions: Array) -> AABB:
+	const MARGIN := 4
+	var min_pos := Vector3(99999, 99999, 99999)
+	var max_pos := Vector3(-99999, -99999, -99999)
+	for p in positions:
+		var pos: Vector3i = p
+		min_pos = min_pos.min(Vector3(pos))
+		max_pos = max_pos.max(Vector3(pos))
+	min_pos -= Vector3(MARGIN, MARGIN, MARGIN)
+	max_pos += Vector3(MARGIN, MARGIN, MARGIN)
+	return AABB(min_pos, max_pos - min_pos)
+
+
+func _aabb_contains(region: AABB, pos: Vector3i) -> bool:
+	return region.has_point(Vector3(pos))
+
+
+## 判断体素是否在 AABB 区域边界上（6 个面的外层），用于作为与外部连通的种子
+func _is_on_region_border(pos: Vector3i, region: AABB) -> bool:
+	var p := Vector3(pos)
+	var min_p := region.position
+	var max_p := region.end
+	return p.x == min_p.x or p.x == max_p.x - 1 \
+		or p.y == min_p.y or p.y == max_p.y - 1 \
+		or p.z == min_p.z or p.z == max_p.z - 1
 
 
 # ----------------------------------------------------------------------------

@@ -99,3 +99,40 @@ static func emission_color(m: VoxelMaterial) -> Color:
 ## 所有网格生成器统一使用，保证与 256x1 材质纹理的采样一致
 static func uv_for_id(mat_id: int) -> float:
 	return (float(mat_id) + 0.5) / 256.0
+
+
+# ----------------------------------------------------------------------------
+# 存档 / 重建
+# ----------------------------------------------------------------------------
+
+## 序列化材质为可 JSON 保存的结构（材质自身负责自己的存档）
+func save_data() -> Dictionary:
+	return {
+		"id": id,
+		"color": [color.r, color.g, color.b, color.a],
+		"trans": trans,
+		"metal": metal,
+		"rough": rough,
+		"emission": emission,
+		"hardness": hardness,
+		"mass": mass,
+	}
+
+
+## 从序列化数据重建材质属性（静态：需新建材质实例）
+## 返回新的 VoxelMaterial，数据无效时返回 null
+static func load_data(data: Variant) -> VoxelMaterial:
+	if data == null or not data is Dictionary:
+		return null
+	var mat := VoxelMaterial.new()
+	mat.id = int(data.get("id", 0))
+	if data.has("color") and data["color"] is Array and data["color"].size() >= 4:
+		var c: Array = data["color"]
+		mat.color = Color(float(c[0]), float(c[1]), float(c[2]), float(c[3]))
+	mat.trans = float(data.get("trans", 0.0))
+	mat.metal = float(data.get("metal", 0.0))
+	mat.rough = float(data.get("rough", 1.0))
+	mat.emission = float(data.get("emission", 0.0))
+	mat.hardness = float(data.get("hardness", 1.0))
+	mat.mass = float(data.get("mass", 1.0))
+	return mat

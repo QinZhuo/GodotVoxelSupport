@@ -197,6 +197,9 @@ var _prev_1 := false
 var _prev_2 := false
 var _prev_r := false
 var _prev_b := false
+var _prev_s := false
+var _prev_l := false
+var _saved_data: Variant = null
 
 
 func _handle_input() -> void:
@@ -207,6 +210,8 @@ func _handle_input() -> void:
 	var key2 := Input.is_key_pressed(KEY_2)
 	var key_r := Input.is_key_pressed(KEY_R)
 	var key_b := Input.is_key_pressed(KEY_B)
+	var key_s := Input.is_key_pressed(KEY_S)
+	var key_l := Input.is_key_pressed(KEY_L)
 
 	# 左键按下瞬间：球形破坏 (按住不重复触发)
 	if left and not _prev_left:
@@ -236,6 +241,14 @@ func _handle_input() -> void:
 	# B 按下瞬间：破坏底部整层支撑，触发上方结构整体崩塌掉落
 	if key_b and not _prev_b:
 		_target.damage_box(AABB(Vector3(-1, -0.5, -1), Vector3(WALL_LEN + 2, 1.5, WALL_THK + 2)))
+	# S 按下瞬间：存档当前体素数据（含破坏状态）
+	if key_s and not _prev_s:
+		_saved_data = _target.data.save_data()
+	# L 按下瞬间：读档，从存档重建体素数据
+	if key_l and not _prev_l and _saved_data != null:
+		# 先清空碎片（避免旧碎片残留），再重建体素
+		_target.damage_map.clear()
+		_target.data.load_data(_saved_data)
 
 	_prev_left = left
 	_prev_right = right
@@ -244,6 +257,8 @@ func _handle_input() -> void:
 	_prev_2 = key2
 	_prev_r = key_r
 	_prev_b = key_b
+	_prev_s = key_s
+	_prev_l = key_l
 
 
 ## 鼠标指向 → 体素空间坐标 (通过射线与体素数据的 DDA)
@@ -279,6 +294,7 @@ Mesh生成: %.2f ms
 [鼠标右键] 单体破坏
 [空格] 射线破坏
 [B] 破坏底部支撑(触发整体崩塌)
+[S] 存档当前体素  [L] 读档重建
 [R] 重置
 硬度需多次点击才摧毁，悬空体会崩塌掉落
 """ % mode_name
