@@ -143,6 +143,14 @@ func get_dirty_voxels_aabb() -> AABB:
 	return _bounds_to_aabb(bounds)
 
 
+## 计算全部体素的包围盒 (AABB)，用于场景摆放/居中；空体素返回零 AABB
+func get_voxels_aabb() -> AABB:
+	if voxels.is_empty():
+		return AABB()
+	var bounds := _calc_bounds(voxels)
+	return _bounds_to_aabb(bounds)
+
+
 ## 计算一组体素的包围盒 (AABB)，空集合返回 null
 static func _bounds_to_aabb(bounds: Array) -> AABB:
 	if bounds.is_empty():

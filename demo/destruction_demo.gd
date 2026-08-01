@@ -12,6 +12,14 @@ extends Node
 ## 破坏半径 (体素单位)
 @export var damage_radius: float = 1.8
 
+## 可选的数据源：指定任意 VoxelDataResource 作为破坏对象的数据源
+## 不设置时使用内置的 10x8x10 立方体演示数据
+@export var voxel_data_source: VoxelDataResource:
+	set(v):
+		voxel_data_source = v
+		if is_inside_tree():
+			_build_target()
+
 ## 可破坏对象
 var _target: VoxelDestructible
 var _hud: Label
@@ -25,17 +33,39 @@ func _ready() -> void:
 	_setup_controls_hud()
 
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	_handle_input()
 	_update_hud()
 
 
 func _build_target() -> void:
+	# 清除旧的破坏对象（避免重复重建时残留）
+	if _target and is_instance_valid(_target):
+		_target.queue_free()
+
 	_target = VoxelDestructible.new()
 	_target.name = "DestructibleVoxels"
 	add_child(_target)
 
-	# 创建体素数据：一个 10x8x10 的立方体 (含材质)
+	# 确定数据源：优先使用用户指定的 VoxelDataResource，否则用内置立方体
+	var data: VoxelDataResource
+	if voxel_data_source != null:
+		data = voxel_data_source
+	else:
+		data = _create_demo_cube_data()
+
+	_target.data = data
+	_target.voxel_scale = voxel_scale
+	_target.spawn_debris_on_damage = true
+	_target.max_debris_per_hit = 40
+	_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
+	# 居中摆放（按数据源包围盒）
+	var bounds: AABB = data.get_voxels_aabb()
+	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
+
+
+## 创建内置演示立方体数据 (10x8x10，含多种材质)
+func _create_demo_cube_data() -> VoxelDataResource:
 	var data := VoxelDataResource.new()
 	var solid := VoxelMaterial.new()
 	solid.id = 1
@@ -65,14 +95,7 @@ func _build_target() -> void:
 				elif y == 0:
 					mat_id = accent.id
 				data.voxels[Vector3i(x, y, z)] = mat_id
-
-	_target.data = data
-	_target.voxel_scale = voxel_scale
-	_target.spawn_debris_on_damage = true
-	_target.max_debris_per_hit = 40
-	_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
-	# 居中摆放
-	_target.global_position = Vector3(-(10 * voxel_scale) * 0.5, 0, 0)
+	return data
 
 
 func _setup_camera() -> void:
