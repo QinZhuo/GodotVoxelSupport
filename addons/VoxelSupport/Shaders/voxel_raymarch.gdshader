@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_front, depth_draw_opaque, diffuse_burley, specular_schlick_ggx;
+render_mode cull_disabled, depth_draw_always, diffuse_burley, specular_schlick_ggx;
 
 // 体素数据：3D纹理，R8格式，每个纹素存储材质ID（0=空，1-255=材质）
 uniform sampler3D voxel_data;
@@ -122,8 +122,10 @@ void fragment() {
 			hit_pbr = material_pbrs[id];
 
 			// 计算体素命中点的世界坐标，用于深度缓冲
+			// 体素网格空间 [0,gs] → 局部空间 [-gs/2, gs/2] → 世界空间
 			vec3 hit_pos_voxel = vec3(voxel) + 0.5;
-			vec3 hit_pos_world = (MODEL_MATRIX * vec4(hit_pos_voxel * voxel_scale, 1.0)).xyz;
+			vec3 hit_pos_local = (hit_pos_voxel - half_grid) * voxel_scale;
+			vec3 hit_pos_world = (MODEL_MATRIX * vec4(hit_pos_local, 1.0)).xyz;
 			vec4 clip_pos = PROJECTION_MATRIX * VIEW_MATRIX * vec4(hit_pos_world, 1.0);
 			hit_depth = clip_pos.z / clip_pos.w;
 

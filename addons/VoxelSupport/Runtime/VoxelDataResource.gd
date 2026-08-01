@@ -27,8 +27,34 @@ extends Resource
 ## 从 VoxelData 构造 (编辑器导入时使用)
 static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> VoxelDataResource:
 	var res := VoxelDataResource.new()
-	res.voxels = voxel_data.get_voxels(frame_index)
-	res.grid_size = Vector3i(voxel_data.size)
+	var raw_voxels := voxel_data.get_voxels(frame_index)
+	
+	# 重新映射体素坐标到 [0, grid_size) 范围
+	# VoxelNode.get_voxels() 中的 transform 包含 VoxelModel.offset 平移
+	# 导致体素数据范围在 [offset, offset + size) 之间
+	# 需要重新映射到 [0, size) 以匹配 grid_size
+	if not raw_voxels.is_empty():
+		var min_pos := Vector3i(999999, 999999, 999999)
+		var max_pos := Vector3i(-999999, -999999, -999999)
+		for pos in raw_voxels:
+			min_pos.x = mini(min_pos.x, pos.x)
+			min_pos.y = mini(min_pos.y, pos.y)
+			min_pos.z = mini(min_pos.z, pos.z)
+			max_pos.x = maxi(max_pos.x, pos.x)
+			max_pos.y = maxi(max_pos.y, pos.y)
+			max_pos.z = maxi(max_pos.z, pos.z)
+		
+		# 重新映射：将所有体素位置减去 min_pos
+		for pos_key in raw_voxels.keys():
+			var pos: Vector3i = pos_key
+			var new_pos: Vector3i = pos - min_pos
+			res.voxels[new_pos] = raw_voxels[pos_key]
+		
+		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
+	else:
+		res.voxels = raw_voxels
+		res.grid_size = Vector3i(voxel_data.size)
+	
 	for mat in voxel_data.materials:
 		var new_mat := VoxelMaterial.new()
 		new_mat.id = mat.id
