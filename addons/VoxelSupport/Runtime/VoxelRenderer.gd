@@ -236,7 +236,7 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 	if arrays != null and arrays is Dictionary and not arrays.is_empty():
 		new_mesh = _CHUNK_GENERATOR.build_mesh_from_arrays(arrays as Dictionary)
 		# 给 chunk mesh 的两个表面赋材质（实心/透明）
-		if new_mesh:
+		if new_mesh and _materials_cache.size() >= 2:
 			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
 				new_mesh.surface_set_material(0, _materials_cache[0])
 			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:

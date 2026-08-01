@@ -56,10 +56,11 @@ static func generate_textured_materials_runtime(materials: Array) -> Array:
 		if m == null:
 			continue
 		# 采样公式统一在 VoxelMaterial 中，避免与编辑器纹理生成两套实现漂移
-		albedo_image.set_pixel(i, 0, m.albedo_color())
-		metal_image.set_pixel(i, 0, m.metal_color())
-		rough_image.set_pixel(i, 0, m.rough_color())
-		emission_image.set_pixel(i, 0, m.emission_color())
+		# 使用静态方法，保证对 placeholder 实例(编辑器导入资源)也可安全调用
+		albedo_image.set_pixel(i, 0, VoxelMaterial.albedo_color(m))
+		metal_image.set_pixel(i, 0, VoxelMaterial.metal_color(m))
+		rough_image.set_pixel(i, 0, VoxelMaterial.rough_color(m))
+		emission_image.set_pixel(i, 0, VoxelMaterial.emission_color(m))
 	var solid := StandardMaterial3D.new()
 	solid.emission_enabled = true
 	solid.emission_energy_multiplier = 20
@@ -255,16 +256,16 @@ func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> 
 	return texture
 
 func generate_albedo_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.albedo_color(), save_path, "albedo")
+	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.albedo_color(m), save_path, "albedo")
 
 func generate_metal_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.metal_color(), save_path, "metal")
+	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.metal_color(m), save_path, "metal")
 
 func generate_rough_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.rough_color(), save_path, "rough")
+	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.rough_color(m), save_path, "rough")
 
 func generate_emission_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.emission_color(), save_path, "emission")
+	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.emission_color(m), save_path, "emission")
 
 
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:

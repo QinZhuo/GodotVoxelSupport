@@ -59,22 +59,23 @@ static func find_by_id(materials: Array, mat_id: int) -> VoxelMaterial:
 # ----------------------------------------------------------------------------
 
 ## 反照率颜色 (透明材质：用 1-trans 作为 alpha)
-func albedo_color() -> Color:
-	if trans <= 0:
-		return color
-	return Color(color.r, color.g, color.b, 1 - trans)
+## 设计为静态方法：可对 placeholder 实例(编辑器导入的资源)也安全调用
+static func albedo_color(m: VoxelMaterial) -> Color:
+	if m.trans <= 0:
+		return m.color
+	return Color(m.color.r, m.color.g, m.color.b, 1 - m.trans)
 
 
 ## 金属度灰度
-func metal_color() -> Color:
-	return Color.from_hsv(0, 0, metal)
+static func metal_color(m: VoxelMaterial) -> Color:
+	return Color.from_hsv(0, 0, m.metal)
 
 
 ## 粗糙度灰度
-func rough_color() -> Color:
-	return Color.from_hsv(0, 0, rough)
+static func rough_color(m: VoxelMaterial) -> Color:
+	return Color.from_hsv(0, 0, m.rough)
 
 
 ## 自发光颜色
-func emission_color() -> Color:
-	return color * emission
+static func emission_color(m: VoxelMaterial) -> Color:
+	return m.color * m.emission
