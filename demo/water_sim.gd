@@ -95,8 +95,8 @@ func _build_terrain() -> void:
 
 	var emissive := VoxelMaterial.new()
 	emissive.id = MAT_EMISSIVE
-	emissive.color = Color(0.2, 0.8, 1.0)
-	emissive.emission = 2.0
+	emissive.color = Color(0.3, 0.75, 1.0)
+	emissive.emission = 0.4
 	_data.add_material(emissive)
 
 	# 地面（整体）
@@ -128,32 +128,36 @@ func _build_terrain() -> void:
 	_build_container(Vector3i(5, 1, 5), Vector3i(9, 3, 10), MAT_SOLID)
 
 	# ---- 蓄水池A 溢流缺口 → 通道 → 蓄水池B（更低）----
-	# 隔断 (x:10, y:1..2 实心)，在 y:3 中间 (z:7..8) 留缺口让水溢流
-	for y in range(1, 3):
+	# 蓄水池A (x:5..9) 与通道 (x:11..15) 之间用低矮隔断 x:10 (仅 y:1)，
+	# y:2 层在 z:7..8 处开口，水蓄到 y:2 后从缺口流入通道
+	for y in range(1, 2):
 		for z in range(5, 11):
 			_data.voxels[Vector3i(10, y, z)] = MAT_SOLID
-	# 溢流通道（x:11..15, 地面层），两壁
-	_build_walls_only(Vector3i(11, 1, 5), Vector3i(15, 2, 10), MAT_SOLID)
-	# 通道末端低一级 → 蓄水池B (x:16..20, 更深的池，y 从 0 起)
-	_build_container(Vector3i(16, 1, 5), Vector3i(20, 4, 10), MAT_SOLID)
+	# 蓄水池A 右壁 x:9 在 y:2 中间段 (z:6..9) 开放，与隔断缺口对齐，水可水平流入通道
+	for z in range(6, 10):
+		_data.voxels.erase(Vector3i(9, 2, z))
+	# 溢流通道（x:11..15, 地面层），两侧壁 (z:5, z:10) 建到 y:2
+	for y in range(1, 3):
+		for x in range(11, 16):
+			_data.voxels[Vector3i(x, y, 5)] = MAT_SOLID
+			_data.voxels[Vector3i(x, y, 10)] = MAT_SOLID
+	# 通道末端 → 蓄水池B (x:16..20)
+	_build_container(Vector3i(16, 1, 5), Vector3i(20, 3, 10), MAT_SOLID)
 
 	# ---- 蓄水池B 溢流 → 第二级瀑布 → 底部收集池 ----
-	# 蓄水池B 前侧 (x:20) 在 y:3..4 开放形成第二级瀑布
-	for y in range(3, 5):
+	# 蓄水池B 前侧 (x:20) 在 y:2..3 开放形成第二级瀑布
+	for y in range(2, 4):
 		for z in range(6, 9):
 			_data.voxels.erase(Vector3i(20, y, z))
 	# 第二级瀑布落点：底部收集池 (x:21..25)
-	_build_container(Vector3i(21, 1, 5), Vector3i(25, 3, 10), MAT_SOLID)
+	_build_container(Vector3i(21, 1, 5), Vector3i(25, 2, 10), MAT_SOLID)
 
-	# ---- 侧边回流通道：底部收集池 → 上升回流到高架水源（形成循环）----
-	# 简化：不做真实泵送，用发光条标示"回流方向"（装饰），水最终在收集池
-	# 发光装饰条：沿回流路径
-	for x in range(27, 34):
-		_data.voxels[Vector3i(x, 4, 7)] = MAT_EMISSIVE
-	for y in range(5, 13):
-		_data.voxels[Vector3i(33, y, 7)] = MAT_EMISSIVE
-	for x in range(8, 33):
-		_data.voxels[Vector3i(x, 13, 7)] = MAT_EMISSIVE
+	# ---- 侧边回流管道：底部收集池 → 上升回流到高架水源（水沿管道逐格上移，可见回流）----
+	# 管道外壁：底段 x:27..33 y:2..4 水平，垂直段 x:33 y:2..13，顶段 x:8..33 y:13..14
+	# 管道内部走水（MAT_WATER），回流泵沿管道逐格上移
+	_build_pipe_outer(Vector3i(27, 2, 7), Vector3i(33, 4, 7))   # 底段水平管
+	_build_pipe_outer(Vector3i(33, 2, 7), Vector3i(33, 13, 7))  # 垂直上升管
+	_build_pipe_outer(Vector3i(8, 13, 7), Vector3i(33, 14, 7))  # 顶段水平管
 
 	# ---- 预置静态水体（各池少量初始水，展示水在动）----
 	_fill_water(6, 8, 9, 11, 6, 9, MAT_WATER)   # 高架水源池少量水
@@ -181,6 +185,30 @@ func _build_walls_only(a: Vector3i, b: Vector3i, mat: int) -> void:
 		for z in range(a.z, b.z + 1):
 			_data.voxels[Vector3i(a.x, y, z)] = mat
 			_data.voxels[Vector3i(b.x, y, z)] = mat
+
+
+## 构建一段回流水管道外壁（空心方柱，中心留 1 格水通道）
+## 管道沿 x 或 y 方向延伸，位于 z 方向单列 (z=a.z 附近)
+func _build_pipe_outer(a: Vector3i, b: Vector3i, mat: int = MAT_SOLID) -> void:
+	var z := a.z
+	# 管道若沿 x 方向延伸 (a.x != b.x)
+	if a.x != b.x:
+		for x in range(a.x, b.x + 1):
+			for y in range(a.y, b.y + 1):
+				_data.voxels[Vector3i(x, y, z - 1)] = mat
+				_data.voxels[Vector3i(x, y, z + 1)] = mat
+			# 管道两端封口 (y 方向上下壁)
+			_data.voxels[Vector3i(x, a.y - 1, z)] = mat
+			_data.voxels[Vector3i(x, b.y + 1, z)] = mat
+	# 管道若沿 y 方向延伸 (a.y != b.y)
+	elif a.y != b.y:
+		for y in range(a.y, b.y + 1):
+			for x in range(a.x, b.x + 1):
+				_data.voxels[Vector3i(x, y, z - 1)] = mat
+				_data.voxels[Vector3i(x, y, z + 1)] = mat
+			# 管道两端封口 (x 方向左右壁)
+			_data.voxels[Vector3i(a.x - 1, y, z)] = mat
+			_data.voxels[Vector3i(b.x + 1, y, z)] = mat
 
 
 ## 填充一个 AABB 区域为指定材质
@@ -253,17 +281,23 @@ func _update_hud() -> void:
 			tri += idxs.size() / 3
 			var varr: PackedVector3Array = mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
 			verts += varr.size()
+	# 统计回流管道中的水体素数量
+	var recycle_count := 0
+	for cell: Vector3i in _PIPE_PATH:
+		if _data.get_voxel(cell) == MAT_WATER:
+			recycle_count += 1
 	_hud_label.text = """FPS: %d
 帧耗时: %.2f ms
 三角形: %d
 顶点: %d
 体素总数: %d
 水体素: %d
+回流中水体素: %d
 水模拟耗时: %.2f ms
 Mesh生成耗时: %.2f ms
 体素缩放: %.2f
 """ % [Engine.get_frames_per_second(), 1000.0 / maxf(Engine.get_frames_per_second(), 0.001),
-		tri, verts, _data.voxels.size(), _water_count, _gen_time, _renderer.last_mesh_gen_time_ms, voxel_scale]
+		tri, verts, _data.voxels.size(), _water_count, recycle_count, _gen_time, _renderer.last_mesh_gen_time_ms, voxel_scale]
 
 
 # ----------------------------------------------------------------------------
@@ -286,6 +320,9 @@ func _update_water() -> void:
 	var moves: Dictionary = {}   # key: from(Vector3i), value: to(Vector3i)
 	for pos in _data.voxels:
 		if _data.voxels[pos] != MAT_WATER:
+			continue
+		# 回流管道内的水由 _advance_pipe_water 专管（模拟泵送），不参与常规物理模拟
+		if _is_pipe_cell(pos):
 			continue
 
 		# 1. 重力：正下方为空则下落
@@ -310,8 +347,9 @@ func _update_water() -> void:
 		if moved:
 			continue
 
-		# 3. 水平流动：优先向"目标下方为空"的方向（下坡/悬崖），水流有明确向下的趋势
-		#    只有目标下方为空时才流动，避免在高位无方向地来回晃动
+		# 3. 水平流动：先向"目标下方为空"的方向流（下坡/悬崖，有明确向下趋势），
+		#    若无下坡方向，再向普通空位流（含池壁缺口，使水能溢流到下一层）
+		#    双缓冲机制保证同一帧所有水同时移动，不会来回振荡
 		var dirs := [
 			Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 			Vector3i(0, 0, 1), Vector3i(0, 0, -1),
@@ -320,6 +358,15 @@ func _update_water() -> void:
 		for d: Vector3i in dirs:
 			var side: Vector3i = pos + d
 			if _is_empty(side) and _is_empty(side + Vector3i(0, -1, 0)):
+				moves[pos] = side
+				moved = true
+				break
+		if moved:
+			continue
+		# 无下坡方向时，向普通空位流动（池壁缺口溢流、水面铺平）
+		for d: Vector3i in dirs:
+			var side: Vector3i = pos + d
+			if _is_empty(side):
 				moves[pos] = side
 				moved = true
 				break
@@ -332,52 +379,117 @@ func _update_water() -> void:
 			_data.voxels[to] = MAT_WATER
 
 
-## 回流泵：将系统中"最低层"的水抽回高架池顶，形成持续水循环
-## 不依赖某个池满水，只要水量足够就从最底部抽水，保证水永远在流动
+## 回流泵：把"底部收集池"的水泵入回流管道，水沿管道逐格上升回到高架池顶，形成可见回流水流
+## 只在收集池水位足够高时泵水，保证低层各池能正常蓄水（不会一落就被抽空）
 func _recycle_water() -> void:
-	# 收集所有水的位置
-	var water_positions: Array[Vector3i] = []
-	for pos in _data.voxels:
-		if _data.voxels[pos] == MAT_WATER:
-			water_positions.append(pos)
+	# 收集"底部收集池"区域 (x:21..25, z:5..10) 的水
+	var collect_positions: Array[Vector3i] = []
+	for x in range(21, 26):
+		for y in range(1, 6):
+			for z in range(5, 11):
+				var p := Vector3i(x, y, z)
+				if _data.get_voxel(p) == MAT_WATER:
+					collect_positions.append(p)
 
-	# 水量过少时仅靠水滴即可，暂不回流（避免泵把少量水抽空导致观感断裂）
-	if water_positions.size() < 20:
+	# 收集池水位不够高时不回流，让水在低层正常聚集（避免下落后立即被抽走而"消失"）
+	if collect_positions.size() < 8:
 		return
 
-	# 优先抽"最低层"的水（y 最小的），让水从高处源源不断补下，形成连续瀑布
-	water_positions.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+	# 先推进管道内的水（沿管道路径逐格上移，形成可见回流水流）
+	_advance_pipe_water()
+
+	# 泵入新水：优先抽收集池中最低层的水，放入管道底段起点
+	collect_positions.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
 		if a.y != b.y:
 			return a.y < b.y
 		if a.x != b.x:
 			return a.x < b.x
 		return a.z < b.z)
 
-	# 抽水量：总量的 1/6，最少 1 格，最多不超过 20（避免一帧抽太多影响观感）
 	@warning_ignore("integer_division")
-	var pump := clampi(water_positions.size() / 6, 1, 20)
-	for i in mini(pump, water_positions.size()):
-		# 回流到高架池内部水面（优先找池内空位），数量不变仅位置改变
-		var target := _find_recycle_target()
+	var pump := clampi(collect_positions.size() / 12, 1, 6)
+	for i in mini(pump, collect_positions.size()):
+		# 管道底段起点 (x:27..33, y:3, z:7) 找空位放入水
+		var target := _find_pipe_entry()
 		if target == Vector3i(-1, -1, -1):
-			continue  # 找不到空位则不抽，避免水量流失
-		_data.voxels.erase(water_positions[i])
+			continue  # 管道入口已满则不泵入，避免水量流失
+		_data.voxels.erase(collect_positions[i])
 		_data.voxels[target] = MAT_WATER
 
 
-## 找一个可放置回流水的空位：优先在"瀑布落水槽"顶部 (高架池前侧 x:6..8, y:12..13, z:10)，
-## 让回流的水从落水槽直接落下形成瀑布，而不是放回池内蓄水（避免池内高位晃动）
+## 回流管道格集合（快速查询，判断某位置是否在回流管道内）
+var _pipe_cells: Dictionary = {}
+var _pipe_cells_built: bool = false
+
+
+## 判断位置是否在回流管道内（供水模拟跳过管道水）
+func _is_pipe_cell(pos: Vector3i) -> bool:
+	if not _pipe_cells_built:
+		for cell: Vector3i in _PIPE_PATH:
+			_pipe_cells[cell] = true
+		_pipe_cells_built = true
+	return _pipe_cells.has(pos)
+
+
+## 回流管道路径（中心线点序列），水沿此路径逐格上移
+const _PIPE_PATH: Array[Vector3i] = [
+	Vector3i(27, 3, 7), Vector3i(28, 3, 7), Vector3i(29, 3, 7), Vector3i(30, 3, 7),
+	Vector3i(31, 3, 7), Vector3i(32, 3, 7), Vector3i(33, 3, 7),
+	Vector3i(33, 4, 7), Vector3i(33, 5, 7), Vector3i(33, 6, 7), Vector3i(33, 7, 7),
+	Vector3i(33, 8, 7), Vector3i(33, 9, 7), Vector3i(33, 10, 7), Vector3i(33, 11, 7),
+	Vector3i(33, 12, 7), Vector3i(33, 13, 7),
+	Vector3i(32, 13, 7), Vector3i(31, 13, 7), Vector3i(30, 13, 7), Vector3i(29, 13, 7),
+	Vector3i(28, 13, 7), Vector3i(27, 13, 7), Vector3i(26, 13, 7), Vector3i(25, 13, 7),
+	Vector3i(24, 13, 7), Vector3i(23, 13, 7), Vector3i(22, 13, 7), Vector3i(21, 13, 7),
+	Vector3i(20, 13, 7), Vector3i(19, 13, 7), Vector3i(18, 13, 7), Vector3i(17, 13, 7),
+	Vector3i(16, 13, 7), Vector3i(15, 13, 7), Vector3i(14, 13, 7), Vector3i(13, 13, 7),
+	Vector3i(12, 13, 7), Vector3i(11, 13, 7), Vector3i(10, 13, 7), Vector3i(9, 13, 7),
+	Vector3i(8, 13, 7),
+]
+
+
+## 沿回流管道逐格推进水（传送带效果）：每个管道格的水移到下一个管道格，末尾水落入高架池落水槽
+func _advance_pipe_water() -> void:
+	var path := _PIPE_PATH
+	# 从路径末尾往前处理，避免覆盖未移动的水
+	for i in range(path.size() - 1, -1, -1):
+		var cell: Vector3i = path[i]
+		if _data.get_voxel(cell) != MAT_WATER:
+			continue
+		if i == path.size() - 1:
+			# 路径末尾：落入高架池落水槽（x:6..8, y:12..13, z:10）
+			var target := _find_recycle_target()
+			if target == Vector3i(-1, -1, -1):
+				continue
+			_data.voxels.erase(cell)
+			_data.voxels[target] = MAT_WATER
+		else:
+			# 移到下一个管道格
+			var next_cell: Vector3i = path[i + 1]
+			if _data.get_voxel(next_cell) == MAT_WATER:
+				continue  # 下一个格已有水，堵住
+			_data.voxels.erase(cell)
+			_data.voxels[next_cell] = MAT_WATER
+
+
+## 管道入口找空位（泵入新水的位置）：优先入口 path[0]（x:27），
+## 若入口被占则沿管道向下找最近空位，让水从入口依次推进
+func _find_pipe_entry() -> Vector3i:
+	# 底段 path[0..6] 沿 x 方向
+	for i in range(0, 7):
+		var p: Vector3i = _PIPE_PATH[i]
+		if _data.get_voxel(p) < 0:
+			return p
+	return Vector3i(-1, -1, -1)
+
+
+## 找回流路径末尾的落水点（高架池落水槽 x:6..8, y:13..12, z:10 找空位）
 func _find_recycle_target() -> Vector3i:
-	# 落水槽顶部 (x:6..8, y:13..12, z:10) 找空位，水从顶部开始下落
 	for y in range(13, 11, -1):
 		for x in range(6, 9):
 			var p := Vector3i(x, y, 10)
 			if _in_bounds(p) and _data.get_voxel(p) < 0:
 				return p
-	# 池顶生成点附近兜底
-	var t := _drop_pos + Vector3i(randi_range(-1, 1), 0, randi_range(-1, 1))
-	if _in_bounds(t) and _data.get_voxel(t) < 0:
-		return t
 	return Vector3i(-1, -1, -1)
 
 
