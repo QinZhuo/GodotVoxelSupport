@@ -430,7 +430,7 @@ func neighbors(pos: Vector3i) -> Array[Vector3i]:
 
 
 ## 找出"悬空"体素：与贴地(y==0)体素 6 方向连通判定，完全断开的返回
-## 这是分级脱落的底座：先全局判定哪些与地面断开
+## 这是崩塌检测的底座：全量判定哪些与地面断开
 func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 	var src := voxels_set if not voxels_set.is_empty() else voxels
 	if src.is_empty():
@@ -447,3 +447,53 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 		if not supported.has(key):
 			unsupported[key] = true
 	return unsupported
+
+
+## 找出"悬空"体素（局部增量检测）：只检查 removed 体素 6 邻范围内可能失稳的体素
+## 破坏只可能让"紧邻被移除体素"的体素失去支撑，因此无需全量 BFS
+## 判据与全局 find_unsupported 一致：体素稳定 ⟺ 其连通分量内含贴地(y==0)体素
+## 对每个候选体素 BFS 其连通分量，检查分量内是否含 y==0 体素：
+##   含 → 该分量稳定；不含 → 整个连通分量失稳
+## 返回失稳体素位置集合 {pos: true}
+func find_unsupported_around(removed: Array) -> Dictionary:
+	var voxels_dict: Dictionary = voxels
+	if removed.is_empty() or voxels_dict.is_empty():
+		return {}
+	# 候选体素 = removed 的 6 邻中仍存在的体素（只有它们可能新增失稳）
+	var candidates := {}
+	for r in removed:
+		var rp: Vector3i = r
+		for d: Vector3i in NEIGHBORS_6:
+			var nb := rp + d
+			if voxels_dict.has(nb):
+				candidates[nb] = true
+	if candidates.is_empty():
+		return {}
+	var unstable := {}
+	var visited := {}
+	for start_key in candidates:
+		var start: Vector3i = start_key
+		if start in visited:
+			continue
+		# BFS 整个 start 所在连通分量（在全量体素中扩散），检查是否含贴地体素
+		var touches_ground := false
+		var block: Array = []
+		var queue: Array = [start]
+		visited[start] = true
+		while not queue.is_empty():
+			var cur: Vector3i = queue.pop_front()
+			block.append(cur)
+			if cur.y == 0:
+				touches_ground = true
+				# 已确认稳定，无需再扩散该分量；但需清空 visited 标记以便跳过后续
+				# （visited 已标记本分量所有已入队体素，后续 start 会 continue，正确跳过）
+			for d: Vector3i in NEIGHBORS_6:
+				var nb := cur + d
+				if nb in visited or not voxels_dict.has(nb):
+					continue
+				visited[nb] = true
+				queue.append(nb)
+		if not touches_ground:
+			for p in block:
+				unstable[p] = true
+	return unstable

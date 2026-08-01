@@ -41,6 +41,11 @@ enum CollapseMode {
 ## 崩塌掉落模式
 @export var collapse_mode: CollapseMode = CollapseMode.COLLAPSE_DEBRIS
 
+## 局部增量崩塌检测：只检查破坏位置 6 邻附近可能失稳的体素
+## 开启后破坏调用传入破坏位置，大幅减少每次崩塌检测的 BFS 范围（适合中频破坏+中型场景）
+## 关闭则每次全量遍历所有体素判定（结果最精确，适合小型场景/低频）
+@export var local_collapse: bool = true
+
 ## 支撑强度系数（保留字段）：语义为"连接/接触的单个支撑体素能承受的重量"
 ## 当前连通性判定（与地面断开即脱）不使用该值；仅作扩展预留，游戏可据此自定义分级逻辑
 @export var collapse_support_strength: float = 15.0
@@ -106,6 +111,9 @@ func _ready() -> void:
 	super._ready()
 	if not Engine.is_editor_hint():
 		_ensure_debris_root()
+		# 延迟一帧：确保外部在 _ready 前赋值的 data 已就绪，做一次初始全量稳定性校验
+		# 使场景进入静态稳定状态（清除初始悬空结构），之后破坏由局部检测负责
+		call_deferred("validate_stability")
 
 
 func _exit_tree() -> void:
@@ -302,41 +310,80 @@ func _after_removal(removed: Array) -> void:
 ## 检测并处理悬空体素（与地面/支撑断开的体素），崩塌成整块刚体掉落
 ## 局部支撑检测：只检查"破坏位置附近"的悬空，避免每次破坏都全场景 BFS
 ## around_positions 为本次破坏移除的体素位置；为空则做全场景检测
+## 级联崩塌：崩塌掉落的体素也是"被移除"，会再次触发局部检测，连锁反应直到无更多失稳
 func _trigger_collapse(around_positions: Array = []) -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
-	var unstable := _find_unstable_voxels(around_positions)
-	if unstable.is_empty():
+	# 级联循环：本次破坏 + 每次崩塌移除都可能让更远的体素失稳
+	var check_positions := around_positions
+	var total_unstable: Array = []
+	var iteration_guard := 64  # 防止极端情况下死循环（大场景连锁可调高）
+	while iteration_guard > 0:
+		iteration_guard -= 1
+		var unstable := _find_unstable_voxels(check_positions)
+		if unstable.is_empty():
+			break
+		total_unstable.append_array(unstable)
+		# 崩塌的悬空体素转成"整块刚体"掉落（按连通块分组）
+		var mat_map := _collect_voxel_materials(unstable)
+		data.remove_voxels(unstable)
+		if not Engine.is_editor_hint():
+			_spawn_collapse_blocks(unstable, mat_map)
+		# 本次崩塌移除的体素作为下一轮局部检测的破坏位置（连锁）
+		check_positions = unstable
+	if total_unstable.is_empty():
 		return
-	# 崩塌前反馈信号
-	voxels_about_to_collapse.emit(unstable)
-	last_collapse_count = unstable.size()
-
-	# 崩塌的悬空/支撑不足体素转成"整块刚体"掉落（按连通块分组）
-	var mat_map := _collect_voxel_materials(unstable)
-	data.remove_voxels(unstable)
-	if not Engine.is_editor_hint():
-		_spawn_collapse_blocks(unstable, mat_map)
+	# 崩塌前反馈信号（一次性汇总）
+	voxels_about_to_collapse.emit(total_unstable)
+	last_collapse_count = total_unstable.size()
 	# 崩塌也算破坏，发信号
-	voxel_damaged.emit(unstable, true)
+	voxel_damaged.emit(total_unstable, true)
 
 
 ## 找出所有"失稳"体素，返回这些体素位置的并集
 ## 连通性支撑判断：从贴地(y==0)体素 6 方向 BFS 标记所有"与地面连通"的体素，
 ## 与地面断开（完全悬空）的体素才会脱落
 ## 这样：破坏底部后，上方块若左右仍连到两侧(贴地)则保持稳定；只有与地面完全断开才脱落
-## around_positions 参数保留(接口兼容)，但本算法基于全局连通性判断，保证正确性
-func _find_unstable_voxels(_around_positions: Array = []) -> Array:
+## around_positions 为本次破坏移除的体素位置：
+##   - 局部增量(local_collapse=true)：只检查破坏位置 6 邻附近可能失稳的体素，
+##     避免每次破坏都全量 BFS，适合中频破坏 + 中型场景
+##   - 全量检测(local_collapse=false)：全局遍历，结果最精确，适合小型场景/低频
+## around_positions 为空时回退全量检测
+func _find_unstable_voxels(around_positions: Array = []) -> Array:
 	var voxels: Dictionary = data.voxels
 	if voxels.is_empty():
 		return []
 
-	# 与地面断开的体素 = 完全悬空，全部脱落
-	var unstable_set: Dictionary = data.find_unsupported(voxels)
+	var unstable_set: Dictionary
+	if local_collapse and not around_positions.is_empty():
+		unstable_set = data.find_unsupported_around(around_positions)
+	else:
+		unstable_set = data.find_unsupported(voxels)
+
 	var unstable: Array = []
 	for key in unstable_set:
 		unstable.append(key)
 	return unstable
+
+
+## 全量校验当前场景的悬空体素并触发崩塌（局部检测的初始化）
+## 局部检测只关注破坏点附近，无法发现"初始就悬空"的结构（如浮岛装饰）
+## 在加载关卡/读取存档后调用一次，确保场景进入静态稳定状态
+## 之后破坏导致的失稳由局部检测负责
+func validate_stability() -> void:
+	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
+		return
+	var unstable := _find_unstable_voxels([])  # 空 around → 全量检测
+	if unstable.is_empty():
+		return
+	# 与 _trigger_collapse 一致：移除 + 崩塌掉落 + 发信号
+	var mat_map := _collect_voxel_materials(unstable)
+	data.remove_voxels(unstable)
+	if not Engine.is_editor_hint():
+		_spawn_collapse_blocks(unstable, mat_map)
+	voxels_about_to_collapse.emit(unstable)
+	voxel_damaged.emit(unstable, true)
+	last_collapse_count = unstable.size()
 
 
 

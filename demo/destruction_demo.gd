@@ -93,6 +93,8 @@ func _build_target() -> void:
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
+	# 局部增量崩塌检测：只检查破坏位置附近，避免每次破坏全量 BFS（中型场景性能关键）
+	_target.local_collapse = true
 	# 支撑强度系数（扩展预留，当前连通性判定不使用）
 	_target.collapse_support_strength = 25.0
 	# 连接破坏反馈信号（具体表现由游戏实现，这里仅记录用于 HUD 展示）
@@ -248,6 +250,8 @@ func _handle_input() -> void:
 		# 先清空碎片（避免旧碎片残留），再重建体素
 		_target.damage_map.clear()
 		_target.data.load_data(_saved_data)
+		# 读档重建后做一次全量稳定性校验，使场景回到静态稳定（局部检测依赖此前提）
+		_target.validate_stability()
 
 	_prev_left = left
 	_prev_right = right
@@ -275,6 +279,7 @@ func _update_hud() -> void:
 	if _hud == null:
 		return
 	var mode_name := "物理 (RigidBody)" if _target.debris_mode == VoxelDestructible.DebrisMode.DEBRIS_PHYSICS else "视觉 (MultiMesh)"
+	var collapse_method := "局部增量" if _target.local_collapse else "全量"
 	_hud.text = """FPS: %d
 体素总数: %d
 碎片数: %d
@@ -282,11 +287,12 @@ func _update_hud() -> void:
 上次崩塌体素数: %d
 破坏耗时: %.2f ms
 Mesh生成: %.2f ms
+崩塌检测: %s
 材质 硬度/质量: 内%d/%.1f 外%d/%.1f 底%d/%.1f
 """ % [Engine.get_frames_per_second(), _target.data.voxels.size(),
 		_target.debris_count, _target.last_damage_count,
 		_target.last_collapse_count, _target.last_damage_time_ms,
-		_target.last_mesh_gen_time_ms, _get_hardness(1), _get_mass(1),
+		_target.last_mesh_gen_time_ms, collapse_method, _get_hardness(1), _get_mass(1),
 		_get_hardness(2), _get_mass(2), _get_hardness(3), _get_mass(3)]
 	_mode_label.text = """碎片模式: %s  (按 1=物理 2=视觉)
 [鼠标左键] 球形破坏(伤害1)  [鼠标右键] 单体破坏  [空格] 射线破坏
