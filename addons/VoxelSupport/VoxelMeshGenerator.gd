@@ -26,7 +26,7 @@ static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: 
 		return null
 	var gen := VoxelMeshGenerator.new(null, options, "")
 	# 统一对齐材质数组：确保"材质数组索引 == 材质ID"，避免内部 mats[id] 越界
-	gen.runtime_materials = _align_materials(materials)
+	gen.runtime_materials = VoxelMaterial.align_by_id(materials)
 	# 运行时不生成纹理材质资源，由调用方提供或使用默认材质
 	gen.materials = [options.get("material_solid", null), options.get("material_transparent", null)]
 	var time := Time.get_ticks_usec()
@@ -41,23 +41,10 @@ static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: 
 	return mesh
 
 
-## 对齐材质数组：将传入的材质数组转换为"索引 == 材质ID"的对齐数组
-## 这样体素中存储的材质ID可以直接作为数组索引访问，避免越界
-static func _align_materials(materials: Array) -> Array:
-	var aligned: Array = []
-	for mat in materials:
-		if mat == null:
-			continue
-		var mat_id: int = mat.id
-		while aligned.size() <= mat_id:
-			aligned.append(null)
-		aligned[mat_id] = mat
-	return aligned
-
-
 ## 从材质数组生成运行时纹理材质 (StandardMaterial3D 数组，0=实体 1=透明)
 ## 与编辑器导入的纹理材质等价，但完全在内存中生成，不涉及文件 IO
 ## 复用与编辑器导入一致的 UV 采样方案 (纹素中心对齐材质ID)
+## 材质→颜色采样公式统一在 VoxelMaterial 中
 static func generate_textured_materials_runtime(materials: Array) -> Array:
 	var result: Array = [null, null]
 	var albedo_image := Image.create(256, 1, false, Image.FORMAT_RGBA8)
@@ -68,10 +55,11 @@ static func generate_textured_materials_runtime(materials: Array) -> Array:
 		var m: VoxelMaterial = materials[i]
 		if m == null:
 			continue
-		albedo_image.set_pixel(i, 0, m.color if m.trans <= 0 else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans))
-		metal_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.metal))
-		rough_image.set_pixel(i, 0, Color.from_hsv(0, 0, m.rough))
-		emission_image.set_pixel(i, 0, m.color * m.emission)
+		# 采样公式统一在 VoxelMaterial 中，避免与编辑器纹理生成两套实现漂移
+		albedo_image.set_pixel(i, 0, m.albedo_color())
+		metal_image.set_pixel(i, 0, m.metal_color())
+		rough_image.set_pixel(i, 0, m.rough_color())
+		emission_image.set_pixel(i, 0, m.emission_color())
 	var solid := StandardMaterial3D.new()
 	solid.emission_enabled = true
 	solid.emission_energy_multiplier = 20
@@ -267,16 +255,16 @@ func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> 
 	return texture
 
 func generate_albedo_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.color if m.trans <= 0 else Color(m.color.r, m.color.g, m.color.b, 1 - m.trans), save_path, "albedo")
+	return _generate_texture(func(m: VoxelMaterial): return m.albedo_color(), save_path, "albedo")
 
 func generate_metal_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return Color.from_hsv(0, 0, m.metal), save_path, "metal")
+	return _generate_texture(func(m: VoxelMaterial): return m.metal_color(), save_path, "metal")
 
 func generate_rough_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return Color.from_hsv(0, 0, m.rough), save_path, "rough")
+	return _generate_texture(func(m: VoxelMaterial): return m.rough_color(), save_path, "rough")
 
 func generate_emission_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return m.color * m.emission, save_path, "emission")
+	return _generate_texture(func(m: VoxelMaterial): return m.emission_color(), save_path, "emission")
 
 
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:

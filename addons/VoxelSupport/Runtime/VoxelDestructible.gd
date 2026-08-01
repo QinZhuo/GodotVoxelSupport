@@ -52,7 +52,7 @@ func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null)
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	# 先记录每个体素的材质ID，再移除 (移除后无法读取)
-	var mat_map := _collect_voxel_materials_in_sphere(center, radius)
+	var mat_map := _collect_voxel_materials(data.get_voxels_in_sphere(center, radius))
 	var removed := data.remove_voxels_in_sphere(center, radius)
 	_on_voxels_removed(removed, mat_map, do_spawn)
 	return removed
@@ -63,7 +63,7 @@ func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var mat_map := _collect_voxel_materials_in_box(aabb)
+	var mat_map := _collect_voxel_materials(data.get_voxels_in_box(aabb))
 	var removed := data.remove_voxels_in_box(aabb)
 	_on_voxels_removed(removed, mat_map, do_spawn)
 	return removed
@@ -152,9 +152,7 @@ func destroy_all(spawn_debris: Variant = null) -> void:
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	var positions: Array = data.get_positions()
 	# 先收集所有体素的材质ID
-	var mat_map := {}
-	for pos in positions:
-		mat_map[pos] = data.get_voxel(pos)
+	var mat_map := _collect_voxel_materials(positions)
 	if do_spawn and not Engine.is_editor_hint():
 		_spawn_debris_with_materials(positions, mat_map)
 	data.clear()
@@ -174,26 +172,14 @@ func _ensure_debris_root() -> void:
 		add_child(_debris_root, false, Node.INTERNAL_MODE_BACK)
 
 
-## 收集球形范围内体素的材质ID (不移除)
-func _collect_voxel_materials_in_sphere(center: Vector3, radius: float) -> Dictionary:
+## 收集指定位置集合的材质ID (不移除)
+## 供各破坏方法统一使用，避免重复的"范围筛选 + 材质收集"逻辑
+func _collect_voxel_materials(positions: Array) -> Dictionary:
 	var mat_map := {}
 	if not data:
 		return mat_map
-	var radius_sq := radius * radius
-	for pos in data.voxels:
-		if (Vector3(pos) - center).length_squared() <= radius_sq:
-			mat_map[pos] = data.voxels[pos]
-	return mat_map
-
-
-## 收集盒形范围内体素的材质ID (不移除)
-func _collect_voxel_materials_in_box(aabb: AABB) -> Dictionary:
-	var mat_map := {}
-	if not data:
-		return mat_map
-	for pos in data.voxels:
-		if aabb.has_point(Vector3(pos)):
-			mat_map[pos] = data.voxels[pos]
+	for pos in positions:
+		mat_map[pos] = data.voxels[pos]
 	return mat_map
 
 

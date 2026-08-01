@@ -40,7 +40,7 @@ static func generate_arrays_runtime(
 		options: Dictionary = {},
 		rebuild_chunks: Array[Vector3i] = []) -> Variant:
 	var scale: float = options.get("scale", 0.1)
-	var aligned := _align_materials(materials)
+	var aligned := VoxelMaterial.align_by_id(materials)
 
 	# 确定需要重建的 chunk（跳过完全空的 chunk）
 	var chunk_keys: Array[Vector3i] = []
@@ -167,15 +167,14 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 
 
 static func _get_mat(materials, mat_id: int):
-	if mat_id < 0 or mat_id >= materials.size():
-		return null
-	return materials[mat_id]
+	return VoxelMaterial.find_by_id(materials, mat_id)
 
 
+# 6 个面的方向向量（与 FaceTool.Normals 同一组方向，统一数据源）
 const _DIRS: Array[Vector3i] = [
-	Vector3i(0, 1, 0),  Vector3i(0, -1, 0),  # top, bottom
-	Vector3i(-1, 0, 0), Vector3i(1, 0, 0),   # left, right
-	Vector3i(0, 0, 1),  Vector3i(0, 0, -1),  # front, back
+	Vector3i(FaceTool.Normals[0]), Vector3i(FaceTool.Normals[1]),
+	Vector3i(FaceTool.Normals[2]), Vector3i(FaceTool.Normals[3]),
+	Vector3i(FaceTool.Normals[4]), Vector3i(FaceTool.Normals[5]),
 ]
 
 
@@ -229,15 +228,3 @@ static func _make_arrays(verts: PackedVector3Array, normals: PackedVector3Array,
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_INDEX] = idxs
 	return arrays
-
-
-static func _align_materials(materials: Array) -> Array:
-	var aligned: Array = []
-	for mat in materials:
-		if mat == null:
-			continue
-		var mat_id: int = mat.id
-		while aligned.size() <= mat_id:
-			aligned.append(null)
-		aligned[mat_id] = mat
-	return aligned

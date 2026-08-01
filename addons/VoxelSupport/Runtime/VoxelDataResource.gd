@@ -38,15 +38,9 @@ static func from_voxel_data(voxel_data: VoxelData, frame_index: int = 0) -> Voxe
 	# 导致体素数据范围在 [offset, offset + size) 之间
 	# 需要重新映射到 [0, size) 以匹配 grid_size
 	if not raw_voxels.is_empty():
-		var min_pos := Vector3i(999999, 999999, 999999)
-		var max_pos := Vector3i(-999999, -999999, -999999)
-		for pos in raw_voxels:
-			min_pos.x = mini(min_pos.x, pos.x)
-			min_pos.y = mini(min_pos.y, pos.y)
-			min_pos.z = mini(min_pos.z, pos.z)
-			max_pos.x = maxi(max_pos.x, pos.x)
-			max_pos.y = maxi(max_pos.y, pos.y)
-			max_pos.z = maxi(max_pos.z, pos.z)
+		var bounds := _calc_bounds(raw_voxels)
+		var min_pos: Vector3i = bounds[0]
+		var max_pos: Vector3i = bounds[1]
 		
 		# 重新映射：将所有体素位置减去 min_pos
 		for pos_key in raw_voxels.keys():
@@ -145,9 +139,27 @@ func clear_dirty_voxels() -> void:
 func get_dirty_voxels_aabb() -> AABB:
 	if dirty_voxels.is_empty():
 		return AABB()
+	var bounds := _calc_bounds(dirty_voxels)
+	return _bounds_to_aabb(bounds)
+
+
+## 计算一组体素的包围盒 (AABB)，空集合返回 null
+static func _bounds_to_aabb(bounds: Array) -> AABB:
+	if bounds.is_empty():
+		return AABB()
+	var min_pos: Vector3i = bounds[0]
+	var max_pos: Vector3i = bounds[1]
+	var extents := (max_pos - min_pos + Vector3i(1, 1, 1))
+	return AABB(Vector3(min_pos), Vector3(extents))
+
+
+## 计算体素集合的 min/max 坐标范围，返回 [min_pos, max_pos]；空集合返回空数组
+static func _calc_bounds(voxels: Dictionary) -> Array:
+	if voxels.is_empty():
+		return []
 	var min_pos := Vector3i(999999, 999999, 999999)
 	var max_pos := Vector3i(-999999, -999999, -999999)
-	for pos_key in dirty_voxels:
+	for pos_key in voxels:
 		var pos: Vector3i = pos_key
 		min_pos.x = mini(min_pos.x, pos.x)
 		min_pos.y = mini(min_pos.y, pos.y)
@@ -155,37 +167,48 @@ func get_dirty_voxels_aabb() -> AABB:
 		max_pos.x = maxi(max_pos.x, pos.x)
 		max_pos.y = maxi(max_pos.y, pos.y)
 		max_pos.z = maxi(max_pos.z, pos.z)
-	var extents := (max_pos - min_pos + Vector3i(1, 1, 1))
-	return AABB(Vector3(min_pos), Vector3(extents))
+	return [min_pos, max_pos]
+
+
+## 查询球形范围内的所有体素位置 (只读，不修改)
+func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	var radius_sq := radius * radius
+	for pos in voxels:
+		if (Vector3(pos) - center).length_squared() <= radius_sq:
+			result.append(pos)
+	return result
+
+
+## 查询盒形范围内的所有体素位置 (只读，不修改)
+func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	for pos in voxels:
+		if aabb.has_point(Vector3(pos)):
+			result.append(pos)
+	return result
 
 
 ## 移除球形范围内的所有体素 (用于破坏系统)
 func remove_voxels_in_sphere(center: Vector3, radius: float, notify: bool = true) -> Array[Vector3i]:
-	var removed: Array[Vector3i] = []
-	var radius_sq := radius * radius
-	var keys := voxels.keys()
-	for pos in keys:
-		if (Vector3(pos) - center).length_squared() <= radius_sq:
-			removed.append(pos)
-			voxels.erase(pos)
-			dirty_voxels[pos] = -1
-	if notify and not removed.is_empty():
-		emit_changed()
-	return removed
+	return _remove_voxels(get_voxels_in_sphere(center, radius), notify)
 
 
 ## 移除盒形范围内的所有体素 (用于破坏系统)
 func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
-	var removed: Array[Vector3i] = []
-	var keys := voxels.keys()
-	for pos in keys:
-		if aabb.has_point(Vector3(pos)):
-			removed.append(pos)
-			voxels.erase(pos)
-			dirty_voxels[pos] = -1
-	if notify and not removed.is_empty():
+	return _remove_voxels(get_voxels_in_box(aabb), notify)
+
+
+## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
+func _remove_voxels(positions: Array[Vector3i], notify: bool = true) -> Array[Vector3i]:
+	if positions.is_empty():
+		return []
+	for pos in positions:
+		voxels.erase(pos)
+		dirty_voxels[pos] = -1
+	if notify:
 		emit_changed()
-	return removed
+	return positions
 
 
 ## 添加材质，自动按材质 ID 对齐数组索引（体素存的 ID 即可直接作数组索引）
@@ -212,26 +235,13 @@ func get_material(index: int) -> VoxelMaterial:
 
 ## 按材质 ID 查找材质（数组可能未对齐时也能找到）
 func get_material_by_id(mat_id: int) -> VoxelMaterial:
-	if mat_id >= 0 and mat_id < materials.size() and materials[mat_id] != null \
-			and materials[mat_id].id == mat_id:
-		return materials[mat_id]
-	# 数组未对齐时，遍历查找
-	for mat in materials:
-		if mat != null and mat.id == mat_id:
-			return mat
-	return null
+	return VoxelMaterial.find_by_id(materials, mat_id)
 
 
 ## 获取按材质 ID 对齐的材质数组（用于 VoxelMeshGenerator，保证索引==ID）
-func get_aligned_materials() -> Array[VoxelMaterial]:
-	var aligned: Array[VoxelMaterial] = []
-	for mat in materials:
-		if mat == null:
-			continue
-		while aligned.size() <= mat.id:
-			aligned.append(null)
-		aligned[mat.id] = mat
-	return aligned
+## 内部可能含 null 空位，因此返回通用 Array（typed array 不允许 null）
+func get_aligned_materials() -> Array:
+	return VoxelMaterial.align_by_id(materials)
 
 
 ## 获取所有材质的浅拷贝 (用于 VoxelMeshGenerator)
