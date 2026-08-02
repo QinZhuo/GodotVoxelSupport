@@ -500,6 +500,15 @@ func load_data(data: Variant) -> void:
 	emit_changed()
 
 
+## 获取指定 chunk 内的所有体素位置（基于 chunk 索引加速查询）
+## 返回 Array[Vector3i]（体素位置列表），空 chunk 返回空数组
+func get_chunk_voxels(chunk_key: Vector3i) -> Array:
+	_build_chunk_index_if_dirty()
+	if _chunk_index.has(chunk_key):
+		return _chunk_index[chunk_key].duplicate()
+	return []
+
+
 # ----------------------------------------------------------------------------
 # 连通性 / 连接度 API（公开、只读、泛化，供游戏复用实现自定义逻辑）
 # ----------------------------------------------------------------------------

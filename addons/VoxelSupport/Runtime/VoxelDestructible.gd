@@ -78,6 +78,14 @@ enum CollapseMode {
 ## 超过上限时，最早落地的碎片会被回收释放
 @export_range(0, 500) var max_settled_debris: int = 50
 
+## 最大活跃碎片数（物理碎片总数超过此值时，回收最早生成的碎片）
+## 防止连续破坏时碎片数量无限增长导致物理引擎过载
+@export var max_active_debris: int = 200
+
+## 碎片回收扫描间隔（帧数），每 N 帧执行一次碎片落地检测
+## 减少每帧遍历所有碎片的开销
+@export_range(1, 60) var debris_settle_interval: int = 3
+
 ## 整体健康度 (<=0 时触发完全破坏，-1 表示不启用健康度系统)
 @export var health: float = -1.0
 
@@ -98,6 +106,9 @@ var _debris_pool: Array[RigidBody3D] = []          # 物理碎片对象池 (空�
 var _settled_debris: Array[RigidBody3D] = []       # 已落地保留的碎片
 var _active_debris: Array[RigidBody3D] = []        # 仍在运动的物理碎片 (供 _settle 遍历)
 var _debris_mesh_cache: Dictionary = {}            # "mat_id:size" -> BoxMesh
+
+# 碎片回收帧计数器（减少每帧遍历开销）
+var _debris_settle_counter: int = 0
 
 # 异步崩塌 mesh 生成状态
 var _collapse_task_id := -1
@@ -650,6 +661,10 @@ func _spawn_falling_debris(positions: Array, mat_map: Dictionary) -> void:
 # --- 物理碎片 (RigidBody) + 对象池 + 落地保留 ---
 
 func _spawn_physics_debris(pos: Vector3i, mat_id: int, is_collapse: bool) -> void:
+	# 活跃碎片数超限时，回收最早生成的碎片，防止物理引擎过载
+	if debris_count >= max_active_debris:
+		_recycle_oldest_active_debris()
+	
 	var box_size := voxel_scale * debris_size_scale
 	var body := _acquire_debris_body(box_size)
 	var mesh_inst := body.get_node_or_null("MeshInstance3D") as MeshInstance3D
@@ -678,6 +693,16 @@ func _spawn_physics_debris(pos: Vector3i, mat_id: int, is_collapse: bool) -> voi
 	if not _active_debris.has(body):
 		_active_debris.append(body)
 	debris_count += 1
+
+
+## 回收最早生成的活跃碎片（超限时调用），释放到对象池
+func _recycle_oldest_active_debris() -> void:
+	if _active_debris.is_empty():
+		return
+	# 从最早添加的碎片开始回收（前面的是最早的）
+	var oldest := _active_debris.pop_front()
+	if oldest and is_instance_valid(oldest):
+		_remove_physics_debris(oldest)
 
 
 ## 从对象池获取或创建物理碎片 (池化，减少 GC)
@@ -712,7 +737,13 @@ func _process(_delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 	_poll_collapse_task()
-	_settle_resting_debris()
+	
+	# 按间隔执行碎片落地检测，减少每帧遍历所有碎片物理体的开销
+	_debris_settle_counter += 1
+	if _debris_settle_counter >= debris_settle_interval:
+		_debris_settle_counter = 0
+		_settle_resting_debris()
+	
 	# 优先处理级联崩塌（每帧一个层级）
 	if not _cascade_check_positions.is_empty():
 		_process_cascade_level(_cascade_check_positions)

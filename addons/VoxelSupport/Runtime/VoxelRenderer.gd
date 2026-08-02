@@ -555,12 +555,17 @@ func _clear_chunk_collisions() -> void:
 
 
 ## 将 per-chunk 网格数据应用到子 MeshInstance3D
+## 注意：chunk_arrays 中可能包含空 chunk（空字典），用于清空已无体素的 chunk mesh
 func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
 
-	# 只更新 chunk_arrays 中存在的 chunk — 每个 chunk 是独立 MeshInstance3D，
-	# 没被重建的 chunk 保持原样，不受影响。
+	# 收集本次重建涉及的所有 chunk key（含空 chunk）
+	var rebuilt_keys: Array[Vector3i] = []
 	for ck in chunk_arrays:
+		rebuilt_keys.append(ck)
+
+	# 处理所有重建的 chunk
+	for ck in rebuilt_keys:
 		var arrays = chunk_arrays[ck]
 		# 获取或创建该 chunk 的子 MeshInstance3D
 		var chunk_mesh: MeshInstance3D
@@ -592,6 +597,22 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 
 		# Per-chunk 碰撞体
 		_update_chunk_collision(ck, has_mesh)
+
+	# 【修复】检查是否有 chunk 在重建后变为空但未被清理
+	# 遍历所有已存在的 chunk mesh，如果不在本次重建列表中且已无体素，清空其 mesh
+	for ck in _chunk_meshes.keys():
+		if rebuilt_keys.has(ck):
+			continue  # 已在本轮重建中处理
+		# 检查该 chunk 是否已无体素
+		if data:
+			var has_voxels := false
+			# 快速检查：用 VoxelData 的 chunk 索引加速查询
+			var chunk_positions: Array = data.get_chunk_voxels(ck)
+			if chunk_positions and not chunk_positions.is_empty():
+				has_voxels = true
+			if not has_voxels:
+				_chunk_meshes[ck].mesh = null
+				_remove_chunk_collision(ck)
 
 	# 清理变更追踪
 	if data:
