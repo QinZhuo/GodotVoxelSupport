@@ -79,6 +79,8 @@ var damage_map: Dictionary[Vector3i, float] = {}
 var _queued_damage_batches: Array[Dictionary] = []
 
 var _debris_root: Node3D = null
+var _falling_chunk_root: Node3D = null
+var _falling_chunk_id: int = 0
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
 ## 级联崩塌状态：逐帧处理，每帧只处理一个级联层级
@@ -368,6 +370,7 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 
 
 ## 全场景级联崩塌检测（同步完成所有层级）
+## 统一使用整块物理体掉落（FallingChunk），而非粒子碎片
 func _process_full_cascade() -> void:
 	var check_positions: Array = []
 	var total_unstable: Array = []
@@ -378,35 +381,72 @@ func _process_full_cascade() -> void:
 		if unstable.is_empty():
 			break
 		total_unstable.append_array(unstable)
-		var mat_map := _collect_voxel_materials(unstable)
-		data.remove_voxels(unstable)
-		if not Engine.is_editor_hint():
-			_spawn_debris_with_materials(unstable, mat_map)
 		check_positions = unstable
 	if total_unstable.is_empty():
 		return
+
+	# 按连通性分组，每组生成一个 FallingChunk
+	var groups := VoxelData.partition_connected(total_unstable)
+	# 收集每组体素的材质ID（在移除前）
+	var group_materials: Array[Dictionary] = []
+	for group in groups:
+		var mat_map: Dictionary = {}
+		for pos in group:
+			mat_map[pos] = data.voxels[pos]
+		group_materials.append(mat_map)
+	data.remove_voxels(total_unstable)
+	if not Engine.is_editor_hint():
+		for i in range(groups.size()):
+			_spawn_falling_chunk(groups[i], group_materials[i])
+
 	voxels_about_to_collapse.emit(total_unstable)
 	last_collapse_count = total_unstable.size()
 	voxel_damaged.emit(total_unstable, true)
 
 
 ## 处理一个级联层级（局部检测）
+## 改为在同一帧内完成所有级联层级，避免建筑一层一层"消失"的视觉效果
+## 失稳体素整块转为独立的 FallingChunk 物理体掉落，而非粒子
 func _process_cascade_level(around_positions: Array) -> void:
-	var unstable := _find_unstable_voxels(around_positions)
-	if unstable.is_empty():
-		# 当前层级无失稳 → 级联结束
+	var all_unstable: Array = []
+	var queue: Array = around_positions.duplicate()
+	var guard := 64  # 防止无限循环
+
+	while not queue.is_empty() and guard > 0:
+		guard -= 1
+		var unstable := _find_unstable_voxels(queue)
+		if unstable.is_empty():
+			break
+		all_unstable.append_array(unstable)
+		queue = unstable
+
+	if all_unstable.is_empty():
 		_finalize_cascade()
 		return
 
-	# 移除失稳体素 + 生成粒子碎片
-	var mat_map := _collect_voxel_materials(unstable)
-	data.remove_voxels(unstable)
-	if not Engine.is_editor_hint():
-		_spawn_debris_with_materials(unstable, mat_map)
+	# 按连通性分组：同一组的体素作为一个整体掉落
+	var groups := VoxelData.partition_connected(all_unstable)
 
-	# 累积到总数，准备下一帧再检查下一层级
-	_cascade_total.append_array(unstable)
-	_cascade_check_positions = unstable
+	# 收集每组体素的材质ID（在移除前，_spawn_falling_chunk 需要读取）
+	var group_materials: Array[Dictionary] = []
+	for group in groups:
+		var mat_map: Dictionary = {}
+		for pos in group:
+			mat_map[pos] = data.voxels[pos]
+		group_materials.append(mat_map)
+
+	# 从原始数据中移除所有失稳体素
+	data.remove_voxels(all_unstable)
+
+	# 每组生成一个 FallingChunk 物理体
+	if not Engine.is_editor_hint():
+		for i in range(groups.size()):
+			_spawn_falling_chunk(groups[i], group_materials[i])
+
+	# 累积并完成级联（发信号）
+	_cascade_total.append_array(all_unstable)
+	_cascade_check_positions = []
+	_finalize_cascade()
 
 
 ## 完成级联、发信号
@@ -418,6 +458,108 @@ func _finalize_cascade() -> void:
 	voxel_damaged.emit(_cascade_total, true)
 	_cascade_total = []
 	_cascade_check_positions = []
+
+
+## 确保崩塌掉落块根节点存在
+func _ensure_falling_chunk_root() -> void:
+	if not _falling_chunk_root:
+		_falling_chunk_root = Node3D.new()
+		_falling_chunk_root.name = "_FallingChunks"
+		add_child(_falling_chunk_root, false, Node.INTERNAL_MODE_BACK)
+
+
+## 生成一个崩塌掉落块（整块物理体）
+## 将一组连通体素创建为独立的 VoxelDestructible，包裹在 RigidBody3D 中掉落
+## 体素位置偏移到居中，使 RigidBody3D 位于块的中心
+## mat_map: 体素位置 -> 材质ID 的映射（在调用前已从 data 中收集，因为 data 可能在调用前已移除体素）
+func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
+	if group.is_empty():
+		return
+
+	_ensure_falling_chunk_root()
+
+	# 1. 计算体素边界和中心
+	var voxel_min := Vector3i(group[0])
+	var voxel_max := Vector3i(group[0])
+	for pos in group:
+		var p: Vector3i = pos
+		voxel_min = Vector3i(min(voxel_min.x, p.x), min(voxel_min.y, p.y), min(voxel_min.z, p.z))
+		voxel_max = Vector3i(max(voxel_max.x, p.x), max(voxel_max.y, p.y), max(voxel_max.z, p.z))
+
+	var voxel_center := (Vector3(voxel_min) + Vector3(voxel_max)) * 0.5 + Vector3(0.5, 0.5, 0.5)
+	var world_center := voxel_center * voxel_scale
+
+	# 2. 创建新的 VoxelData（偏移体素位置使中心对齐到原点）
+	# 使用提前收集的 mat_map 而非 data.voxels（体素可能已被移除）
+	var new_data := VoxelData.new()
+	for pos in group:
+		var p: Vector3i = pos
+		var offset_p := p - Vector3i(voxel_center)
+		new_data.voxels[offset_p] = mat_map.get(p, 0)
+	# 复制材质
+	for m in data.materials:
+		if m:
+			new_data.add_material(m)
+
+	# 3. 创建新的 VoxelDestructible（只负责渲染，不参与破坏逻辑）
+	var chunk := VoxelDestructible.new()
+	chunk.name = "FallingChunk_%d" % _falling_chunk_id
+	_falling_chunk_id += 1
+	chunk.data = new_data
+	chunk.voxel_scale = voxel_scale
+	chunk.collapse_mode = CollapseMode.COLLAPSE_NONE
+	chunk.health = -1
+	chunk.spawn_debris_on_damage = false
+
+	# 4. 创建 RigidBody3D 作为物理体
+	# 注意：不能使用 global_position，因为 body 尚未加入场景树
+	# body 将作为 _falling_chunk_root 的子节点，而 _falling_chunk_root 位于当前节点原点
+	# 所以 body.position = world_center 即可达到正确位置
+	var body := RigidBody3D.new()
+	body.name = chunk.name + "_Body"
+	body.position = world_center
+	body.gravity_scale = 1.0
+	body.mass = maxf(group.size() * 0.5, 1.0)
+	body.continuous_cd = true
+
+	# 5. VoxelDestructible 作为子节点（体素已居中，位置为 0）
+	body.add_child(chunk)
+	chunk.owner = body
+
+	# 6. 添加碰撞形状（盒体包围整个块）
+	var block_size := Vector3(voxel_max - voxel_min) + Vector3.ONE
+	var shape := BoxShape3D.new()
+	shape.size = block_size * voxel_scale
+	var col := CollisionShape3D.new()
+	col.shape = shape
+	body.add_child(col)
+	col.owner = body
+
+	# 7. 添加到场景
+	_falling_chunk_root.add_child(body)
+	body.owner = _falling_chunk_root
+
+	# 8. 定时清理：15 秒后自动移除
+	var timer := Timer.new()
+	timer.wait_time = 15.0
+	timer.one_shot = true
+	timer.timeout.connect(_cleanup_falling_chunk.bind(body))
+	body.add_child(timer)
+	timer.owner = body
+	timer.start()
+
+
+## 清理已停稳或超时的掉落块
+func _cleanup_falling_chunk(body: RigidBody3D) -> void:
+	if body and is_instance_valid(body):
+		body.queue_free()
+
+
+## 清理所有掉落块
+func _clear_falling_chunks() -> void:
+	if _falling_chunk_root:
+		for child in _falling_chunk_root.get_children():
+			child.queue_free()
 
 
 ## 找出所有"失稳"体素，返回这些体素位置的并集
@@ -449,17 +591,26 @@ func _find_unstable_voxels(around_positions: Array = []) -> Array:
 ## 局部检测只关注破坏点附近，无法发现"初始就悬空"的结构（如浮岛装饰）
 ## 在加载关卡/读取存档后调用一次，确保场景进入静态稳定状态
 ## 之后破坏导致的失稳由局部检测负责
+## 统一使用整块物理体掉落（FallingChunk），而非粒子碎片
 func validate_stability() -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
 	var unstable := _find_unstable_voxels([])  # 空 around → 全量检测
 	if unstable.is_empty():
 		return
-	# 与 _trigger_collapse 一致：移除 + 崩塌掉落 + 发信号
-	var mat_map := _collect_voxel_materials(unstable)
+	# 按连通性分组，每组生成一个 FallingChunk
+	var groups := VoxelData.partition_connected(unstable)
+	# 收集每组体素的材质ID（在移除前）
+	var group_materials: Array[Dictionary] = []
+	for group in groups:
+		var mat_map: Dictionary = {}
+		for pos in group:
+			mat_map[pos] = data.voxels[pos]
+		group_materials.append(mat_map)
 	data.remove_voxels(unstable)
 	if not Engine.is_editor_hint():
-		_spawn_debris_with_materials(unstable, mat_map)
+		for i in range(groups.size()):
+			_spawn_falling_chunk(groups[i], group_materials[i])
 	voxels_about_to_collapse.emit(unstable)
 	voxel_damaged.emit(unstable, true)
 	last_collapse_count = unstable.size()
@@ -486,7 +637,9 @@ func _collect_voxel_materials(positions: Array) -> Dictionary:
 
 
 ## 生成碎片粒子（全部使用 GPU 粒子系统，无物理碰撞体）
-func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary) -> void:
+## 在指定位置发射碎片粒子
+## is_collapse=true 时，粒子向下坠落（崩塌效果），否则向上喷发（爆炸效果）
+func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary, is_collapse: bool = false) -> void:
 	if positions.is_empty():
 		return
 	_ensure_debris_root()
@@ -513,7 +666,7 @@ func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary) -> void
 		var list: Array = by_mat[mat_id]
 		# 获取材质的 mass，用于调整粒子运动表现
 		var mat_mass: float = _get_material_mass(mat_id)
-		_spawn_debris_particles(center, mat_id, list.size(), mat_mass)
+		_spawn_debris_particles(center, mat_id, list.size(), mat_mass, is_collapse)
 
 
 ## 获取材质的质量
@@ -528,7 +681,8 @@ func _get_material_mass(mat_id: int) -> float:
 ## 在指定位置发射一批碎片粒子（GPUParticles3D）
 ## 粒子碰撞自然落地，无 RigidBody 物理开销
 ## 粒子运动受材质 mass 影响：重物飞得近/落得快，轻物飞得远/飘得久
-func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass: float = 1.0) -> void:
+## is_collapse=true 时粒子向下坠落（崩塌效果），false 时向上喷发（爆炸效果）
+func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass: float = 1.0, is_collapse: bool = false) -> void:
 	if amount <= 0:
 		return
 	# mass 影响因子：质量越大，速度越慢、重力越大、喷发角度越小
@@ -555,16 +709,27 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	# 粒子运动受 mass 影响：
 	# - 重物 (mass 大)：速度慢、重力大、喷发角度小（向下坠）
 	# - 轻物 (mass 小)：速度快、重力小、喷发角度大（四处飞散）
-	pm.direction = Vector3(0, 1, 0)
-	# 重物喷发角度小（更集中向下），轻物角度大（更扩散）
-	pm.spread = 45.0 * (1.0 + 0.3 / mass_factor)
-	pm.initial_velocity_min = debris_min_speed * 0.8 * mass_factor
-	pm.initial_velocity_max = debris_max_speed * 0.8 * mass_factor
-	# 重力与质量成正比：重物受重力影响更大，落得更快
-	pm.gravity = Vector3(0, -20.0 * debris_gravity_scale * mass_factor, 0)
-	# 重物自旋更慢（惯性大），轻物自旋更快
-	pm.angular_velocity_min = -6.0 * mass_factor
-	pm.angular_velocity_max = 6.0 * mass_factor
+	# 方向模式：
+	# - 崩塌 (is_collapse=true)：向下坠落，窄扩散，像石块塌落
+	# - 爆炸 (is_collapse=false)：向上喷发，宽扩散，像爆炸碎片
+	if is_collapse:
+		# 崩塌模式：粒子向下坠落，窄扩散，低速度
+		pm.direction = Vector3(0, -1, 0)
+		pm.spread = 15.0
+		pm.initial_velocity_min = 1.0
+		pm.initial_velocity_max = 3.0
+		pm.gravity = Vector3(0, -9.8 * mass_factor, 0)
+		pm.angular_velocity_min = -3.0
+		pm.angular_velocity_max = 3.0
+	else:
+		# 爆炸模式：粒子向上喷发，宽扩散，高速度
+		pm.direction = Vector3(0, 1, 0)
+		pm.spread = 45.0 * (1.0 + 0.3 / mass_factor)
+		pm.initial_velocity_min = debris_min_speed * 0.8 * mass_factor
+		pm.initial_velocity_max = debris_max_speed * 0.8 * mass_factor
+		pm.gravity = Vector3(0, -20.0 * debris_gravity_scale * mass_factor, 0)
+		pm.angular_velocity_min = -6.0 * mass_factor
+		pm.angular_velocity_max = 6.0 * mass_factor
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
 
@@ -636,10 +801,10 @@ func _process(_delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 
-	# 优先处理级联崩塌（每帧一个层级）
+	# 处理级联崩塌（安全兜底，正常情况下级联已在 _trigger_collapse 中完成）
 	if not _cascade_check_positions.is_empty():
 		_process_cascade_level(_cascade_check_positions)
-	# 无级联任务时，处理普通破坏批次（每帧一个）
+	# 处理普通破坏批次（每帧一个）
 	_process_destruction_pipeline()
 
 
