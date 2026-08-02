@@ -543,9 +543,9 @@ static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 		if not restrict.is_empty() and not restrict.has(pos):
 			continue
 		result[pos] = true
-		var queue: Array = [pos]
-		while not queue.is_empty():
-			var cur: Vector3i = queue.pop_front()
+		var stack: Array = [pos]
+		while not stack.is_empty():
+			var cur: Vector3i = stack.pop_back()
 			for d: Vector3i in NEIGHBORS_6:
 				var nb := cur + d
 				if nb in result:
@@ -553,7 +553,7 @@ static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 				if not restrict.is_empty() and not restrict.has(nb):
 					continue
 				result[nb] = true
-				queue.append(nb)
+				stack.append(nb)
 	return result
 
 
@@ -579,17 +579,17 @@ static func partition_connected(positions: Array) -> Array:
 		if key in visited:
 			continue
 		var block: Array = []
-		var queue: Array = [key]
+		var stack: Array = [key]
 		visited[key] = true
-		while not queue.is_empty():
-			var cur: Vector3i = queue.pop_front()
+		while not stack.is_empty():
+			var cur: Vector3i = stack.pop_back()
 			block.append(cur)
 			for d: Vector3i in NEIGHBORS_6:
 				var nb := cur + d
 				if nb in visited or not all_pos.has(nb):
 					continue
 				visited[nb] = true
-				queue.append(nb)
+				stack.append(nb)
 		result.append(block)
 	return result
 
@@ -676,19 +676,19 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 		return {}
 
 	# 支撑传播：从候选体素向上检查支撑链
-	# 处理顺序：按 y 坐标从低到高（FIFO 队列保证候选体素先入队，先处理）
+	# 处理顺序：按 y 坐标从低到高（栈保证候选体素先入栈，先处理）
 	# 失稳判断：体素不稳定 ⟺ 其 5 个下方位全无支撑体素
 	#   一个体素提供支撑的前提是：它本身稳定（不在 unstable 中）
 	#   这样连锁失稳会自然向上传播：下层失稳 → 上层失去支撑 → 上层也失稳
 	var unstable := {}
 	var visited := {}
-	var queue: Array = []
+	var stack: Array = []
 	for c in candidates:
 		visited[c] = true
-		queue.append(c)
+		stack.append(c)
 
-	while not queue.is_empty():
-		var cur: Vector3i = queue.pop_front()
+	while not stack.is_empty():
+		var cur: Vector3i = stack.pop_back()
 
 		# 贴地体素永远稳定
 		if cur.y == 0:
@@ -710,7 +710,7 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 				var nb := cur + d
 				if voxels_dict.has(nb) and not visited.has(nb):
 					visited[nb] = true
-					queue.append(nb)
+					stack.append(nb)
 			# 【关键修复】水平邻居：4 个同 Y 层方向
 			# 不检查水平方向时，浮空平台的外围体素不会被检测到
 			# 因为它们不在 removed 的 UPPER_5 范围内，也不在失稳体素的 UPPER_5 范围内
@@ -718,6 +718,6 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 				var nb := cur + d
 				if voxels_dict.has(nb) and not visited.has(nb):
 					visited[nb] = true
-					queue.append(nb)
+					stack.append(nb)
 
 	return unstable

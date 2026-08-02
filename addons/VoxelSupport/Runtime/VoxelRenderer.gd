@@ -517,6 +517,8 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 ## 批次完成清理：当所有任务都完成后执行
 ## 清除空 chunk、清空脏体素追踪、处理 _pending_retrigger
 func _on_batch_complete() -> void:
+	var t_start := Time.get_ticks_usec()
+
 	# 清理空 chunk（不在重建列表中且已无体素的）
 	var cleared_count := 0
 	for ck in _chunk_meshes.keys():
@@ -526,12 +528,11 @@ func _on_batch_complete() -> void:
 				# 避免重复清理已为空的 mesh
 				if _chunk_meshes[ck].mesh != null:
 					cleared_count += 1
-					print("[诊断] Chunk %s 不在重建列表且已无体素，清除旧 Mesh" % ck)
 					_chunk_meshes[ck].mesh = null
 					_remove_chunk_collision(ck)
 
-	if cleared_count > 0:
-		print("[诊断] 本轮共清除 %d 个空 Chunk Mesh" % cleared_count)
+	# 更新 apply 耗时
+	last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0
 
 	# 处理 _pending_retrigger：任务运行期间有新变更
 	if _pending_retrigger:
@@ -543,6 +544,9 @@ func _on_batch_complete() -> void:
 		# 无待处理变更，清空脏体素追踪
 		if data:
 			data.clear_dirty_voxels()
+
+	# 批次完成信号（外部依赖此信号感知场景更新完毕）
+	mesh_updated.emit()
 
 
 ## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）

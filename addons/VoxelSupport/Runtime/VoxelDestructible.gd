@@ -289,22 +289,14 @@ func _after_removal(removed: Array) -> void:
 			if not Engine.is_editor_hint():
 				# 按连通性分组，每组生成一个物理体掉落
 				var stress_groups := VoxelData.partition_connected(stress_removed)
-				var group_count := 0
+				# 为每组构建材质映射
+				var stress_group_materials: Array[Dictionary] = []
 				for sgroup in stress_groups:
-					if group_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-						# 超出限制的用粒子代替
-						var remaining: Array = []
-						for j in range(group_count, stress_groups.size()):
-							remaining.append_array(stress_groups[j])
-						if not remaining.is_empty():
-							_spawn_debris_with_materials(remaining, _collect_voxel_materials(remaining))
-						break
-					# 收集该组的材质映射
 					var sgroup_mat_map: Dictionary = {}
 					for pos in sgroup:
 						sgroup_mat_map[pos] = stress_mat_map.get(pos, 0)
-					_spawn_falling_chunk(sgroup, sgroup_mat_map)
-					group_count += 1
+					stress_group_materials.append(sgroup_mat_map)
+				_spawn_falling_chunks_from_groups(stress_groups, stress_group_materials)
 			removed.append_array(stress_removed)
 
 	_trigger_collapse(removed)
@@ -391,9 +383,41 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 		_process_full_cascade()
 		return
 
-	# 局部检测：设置待处理队列，下一帧 _process 开始逐级处理
-	# 每帧只处理一个级联层级，产生自然的连锁崩塌延迟
-	_cascade_check_positions = around_positions
+	# 局部检测：合并到待处理队列（不覆盖已有级联，避免新破坏导致正在进行的级联丢失）
+	# 去重：避免同一位置被多次检查
+	if _cascade_check_positions.is_empty():
+		_cascade_check_positions = around_positions.duplicate()
+	else:
+		# 已有级联正在处理，合并新位置
+		var existing: Dictionary = {}
+		for pos in _cascade_check_positions:
+			existing[pos] = true
+		for pos in around_positions:
+			if not existing.has(pos):
+				_cascade_check_positions.append(pos)
+				existing[pos] = true
+
+
+## 从连通分组中生成物理掉落体（统一入口，消除代码重复）
+## group_materials: Array[Dictionary]，每个元素是 {pos: mat_id} 映射
+## 返回实际生成的掉落体数量
+func _spawn_falling_chunks_from_groups(groups: Array, group_materials: Array[Dictionary]) -> int:
+	var spawned_count := 0
+	for i in range(groups.size()):
+		if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
+			# 超出限制的组用粒子代替
+			var remaining: Array = []
+			for j in range(i, groups.size()):
+				remaining.append_array(groups[j])
+			if not remaining.is_empty():
+				var remaining_mat_map: Dictionary = {}
+				for pos in remaining:
+					remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
+				_spawn_debris_with_materials(remaining, remaining_mat_map)
+			break
+		_spawn_falling_chunk(groups[i], group_materials[i])
+		spawned_count += 1
+	return spawned_count
 
 
 ## 全场景级联崩塌检测（同步完成所有层级）
@@ -419,25 +443,11 @@ func _process_full_cascade() -> void:
 	for group in groups:
 		var mat_map: Dictionary = {}
 		for pos in group:
-			mat_map[pos] = data.voxels[pos]
+			mat_map[pos] = data.get_voxel(pos)
 		group_materials.append(mat_map)
 	data.remove_voxels(total_unstable)
 	if not Engine.is_editor_hint():
-		var spawned_count := 0
-		for i in range(groups.size()):
-			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-				# 超出限制的组用粒子代替
-				var remaining: Array = []
-				for j in range(i, groups.size()):
-					remaining.append_array(groups[j])
-				if not remaining.is_empty():
-					var remaining_mat_map: Dictionary = {}
-					for pos in remaining:
-						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
-					_spawn_debris_with_materials(remaining, remaining_mat_map)
-				break
-			_spawn_falling_chunk(groups[i], group_materials[i])
-			spawned_count += 1
+		_spawn_falling_chunks_from_groups(groups, group_materials)
 
 	voxels_about_to_collapse.emit(total_unstable)
 	last_collapse_count = total_unstable.size()
@@ -473,28 +483,15 @@ func _process_cascade_level() -> void:
 	for group in groups:
 		var mat_map: Dictionary = {}
 		for pos in group:
-			mat_map[pos] = data.voxels[pos]
+			mat_map[pos] = data.get_voxel(pos)
 		group_materials.append(mat_map)
 
 	# 移除失稳体素
 	data.remove_voxels(unstable)
 
-	# 生成物理体（每帧限制数量）
+	# 生成物理体（每帧限制数量，使用统一入口）
 	if not Engine.is_editor_hint():
-		var spawned_count := 0
-		for i in range(groups.size()):
-			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-				var remaining: Array = []
-				for j in range(i, groups.size()):
-					remaining.append_array(groups[j])
-				if not remaining.is_empty():
-					var remaining_mat_map: Dictionary = {}
-					for pos in remaining:
-						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
-					_spawn_debris_with_materials(remaining, remaining_mat_map)
-				break
-			_spawn_falling_chunk(groups[i], group_materials[i])
-			spawned_count += 1
+		_spawn_falling_chunks_from_groups(groups, group_materials)
 
 	# 累积级联结果
 	_cascade_total.append_array(unstable)
@@ -694,24 +691,11 @@ func validate_stability() -> void:
 	for group in groups:
 		var mat_map: Dictionary = {}
 		for pos in group:
-			mat_map[pos] = data.voxels[pos]
+			mat_map[pos] = data.get_voxel(pos)
 		group_materials.append(mat_map)
 	data.remove_voxels(unstable)
 	if not Engine.is_editor_hint():
-		var spawned_count := 0
-		for i in range(groups.size()):
-			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-				var remaining: Array = []
-				for j in range(i, groups.size()):
-					remaining.append_array(groups[j])
-				if not remaining.is_empty():
-					var remaining_mat_map: Dictionary = {}
-					for pos in remaining:
-						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
-					_spawn_debris_with_materials(remaining, remaining_mat_map)
-				break
-			_spawn_falling_chunk(groups[i], group_materials[i])
-			spawned_count += 1
+		_spawn_falling_chunks_from_groups(groups, group_materials)
 	voxels_about_to_collapse.emit(unstable)
 	voxel_damaged.emit(unstable, true)
 	last_collapse_count = unstable.size()
@@ -733,7 +717,8 @@ func _collect_voxel_materials(positions: Array) -> Dictionary:
 	if not data:
 		return mat_map
 	for pos in positions:
-		mat_map[pos] = data.voxels[pos]
+		# 使用 get_voxel 安全访问，不存在时返回 -1（类型化字典直接 [] 访问缺失键会抛异常）
+		mat_map[pos] = data.get_voxel(pos)
 	return mat_map
 
 
@@ -748,7 +733,7 @@ func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary, is_coll
 	# 按材质分组，每组发射一个粒子系统
 	var by_mat := {}
 	for i in range(count):
-		var pos: Vector3i = positions[i] if i < positions.size() else positions[0]
+		var pos: Vector3i = positions[i]
 		var mat_id: int = mat_map.get(pos, -1)
 		if not by_mat.has(mat_id):
 			by_mat[mat_id] = []
