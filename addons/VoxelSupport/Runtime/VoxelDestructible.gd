@@ -75,8 +75,10 @@ var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 ## 逐体素累计伤害 (位置 -> 累计伤害)
 var damage_map: Dictionary[Vector3i, float] = {}
 
-## 延迟移除队列：每帧处理一个批次，将破坏逻辑分摊到多帧
-var _queued_damage_batches: Array[Dictionary] = []
+## 延迟移除状态：同一帧内多次伤害的位置合并去重，下一帧统一处理
+## key: Vector3i 体素位置，value: 是否生成碎片（任意一次伤害要求生成则生成）
+var _pending_removed: Dictionary = {}  # key: Vector3i(pos), value: bool(spawn_debris)
+var _pending_spawn_debris: bool = false
 
 var _debris_root: Node3D = null
 var _falling_chunk_root: Node3D = null
@@ -125,12 +127,11 @@ func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null)
 	var mat_map := _collect_voxel_materials(positions)
 	# 1. 即时：更新 damage_map
 	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
-	# 2. 队列：实际移除 + 崩塌 + 碎片生成在下一帧统一处理
+	# 2. 合并去重：同一帧内多次伤害相同位置只处理一次
 	if not removed.is_empty():
-		_queued_damage_batches.append({
-			"removed": removed,
-			"spawn_debris": do_spawn,
-		})
+		for pos in removed:
+			_pending_removed[pos] = true
+		_pending_spawn_debris = _pending_spawn_debris or do_spawn
 	return removed
 
 
@@ -144,10 +145,9 @@ func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	var mat_map := _collect_voxel_materials(positions)
 	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
 	if not removed.is_empty():
-		_queued_damage_batches.append({
-			"removed": removed,
-			"spawn_debris": do_spawn,
-		})
+		for pos in removed:
+			_pending_removed[pos] = true
+		_pending_spawn_debris = _pending_spawn_debris or do_spawn
 	return removed
 
 
@@ -159,10 +159,9 @@ func damage_voxel(pos: Vector3i, spawn_debris: Variant = null) -> bool:
 	var mat_map := _collect_voxel_materials([pos])
 	var removed := _apply_damage_immediate([pos], mat_map, damage_per_voxel)
 	if not removed.is_empty():
-		_queued_damage_batches.append({
-			"removed": removed,
-			"spawn_debris": do_spawn,
-		})
+		for p in removed:
+			_pending_removed[p] = true
+		_pending_spawn_debris = _pending_spawn_debris or do_spawn
 	return not removed.is_empty()
 
 
@@ -911,16 +910,17 @@ func _process(_delta: float) -> void:
 		_freeze_sleeping_chunks()
 
 
-## 延迟破坏管道：每帧处理一个批次，将破坏逻辑分摊到多帧
-## 每个批次执行：收集材质 → data.remove_voxels → 崩塌检测 → 碎片生成 → 应力传播
+## 延迟破坏管道：每帧处理所有累积的待移除体素（去重合并后）
+## 同一帧内多次伤害相同位置合并去重，仅执行一次移除 + 崩塌检测 + 碎片生成
 func _process_destruction_pipeline() -> void:
-	if _queued_damage_batches.is_empty():
+	if _pending_removed.is_empty():
 		return
 
-	# 每帧只处理一个批次
-	var batch: Dictionary = _queued_damage_batches.pop_front()
-	var removed: Array = batch["removed"]
-	var do_spawn: bool = batch["spawn_debris"]
+	# 提取所有待移除位置（去重后的唯一键）
+	var removed: Array = _pending_removed.keys()
+	var do_spawn: bool = _pending_spawn_debris
+	_pending_removed.clear()
+	_pending_spawn_debris = false
 
 	if removed.is_empty():
 		return
