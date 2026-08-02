@@ -56,12 +56,9 @@ enum CollapseMode {
 ## 整体健康度 (<=0 时触发完全破坏，-1 表示不启用健康度系统)
 @export var health: float = -1.0
 
-## 应力传播（裂纹扩散）开关
-## 开启后破坏体素会向邻居传播应力，当应力超过材质的连接强度时，邻居也会断裂
+## 应力传播（裂纹扩散）距离（步数），即裂纹最多扩散多少层
+## 破坏体素时，应力向邻居传播，当应力超过材质的 connection_strength 时，邻居也会断裂
 ## 产生更真实的渐进裂纹扩散效果
-@export var stress_propagation: bool = true
-
-## 应力传播距离（步数），即裂纹最多扩散多少层
 @export_range(1, 10) var stress_max_steps: int = 3
 
 ## 每次破坏产生的应力大小（与材质 connection_strength 比较决定是否断裂）
@@ -271,8 +268,8 @@ func _get_material_hardness(mat_id: int) -> float:
 ## 破坏后的统一处理：崩塌检测 + 应力传播 + 整体健康度扣减
 ## 在 _process 延迟处理中调用（每帧一个批次）
 func _after_removal(removed: Array) -> void:
-	# 应力传播：裂纹扩散
-	if stress_propagation and not removed.is_empty():
+	# 应力传播：裂纹扩散（始终启用）
+	if not removed.is_empty():
 		var stress_removed := _propagate_stress(removed)
 		if not stress_removed.is_empty():
 			# 应力传播移除的体素先移除，再触发崩塌

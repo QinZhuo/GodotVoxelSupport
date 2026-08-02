@@ -472,13 +472,13 @@ func _handle_input(_delta: float) -> void:
 		damage_radius = maxf(damage_radius - 1.0, 1.0)
 		_log_perf_line("破坏半径: %.1f" % damage_radius)
 
-	# 1/2: 切换应力传播模式 (原碎片模式切换已移除，碎片现统一使用粒子系统)
+	# 1/2: 调整应力传播强度
 	if key_1 and not _prev_1:
-		_target.stress_propagation = true
-		_log_perf_line("应力传播: 开启")
+		_target.stress_force = mini(_target.stress_force + 5.0, 50.0)
+		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_target.stress_force, _target.stress_max_steps])
 	if key_2 and not _prev_2:
-		_target.stress_propagation = false
-		_log_perf_line("应力传播: 关闭")
+		_target.stress_force = maxf(_target.stress_force - 5.0, 5.0)
+		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_target.stress_force, _target.stress_max_steps])
 
 	# R: 重置
 	if key_r and not _prev_r:
@@ -677,7 +677,7 @@ func _update_hud() -> void:
 	_hud.text = """===== 体素性能监控 =====
 FPS: %d  |  帧: %d
 体素总数: %d  |  已破坏: %d
-Chunk数: %d  |  应力传播: %s
+Chunk数: %d  |  应力: %.0f(步数%d)
 
 [网格重建耗时] 评价: %s(%s)
 当前: %.1f ms  |  平均: %.1f ms
@@ -703,7 +703,7 @@ Chunk数: %d  |  应力传播: %s
 """ % [
 		Engine.get_frames_per_second(), _frame_count,
 		vc, destroyed,
-		chunk_count, "开" if _target.stress_propagation else "关",
+		chunk_count, _target.stress_force, _target.stress_max_steps,
 		perf_rating, perf_rating_color,
 		mgt, avg_mgt,
 		min_mgt, max_mgt,
@@ -724,7 +724,7 @@ Chunk数: %d  |  应力传播: %s
 [左键]球形 [右键]单体 [空格]射线
 [C]连续开关 [V]切换模式 [T]日志开关
 [+/-]半径  [R]重置 [B]崩底
-[1]应力开 [2]应力关  [S]存档 [L]读档
+[1]应力+ [2]应力-  [S]存档 [L]读档
 结构: %dx%dx%d  |  外壳: %d  |  楼层: %d
 """ % [
 		mode_name, dm_name, "开" if _continuous_mode else "关",
