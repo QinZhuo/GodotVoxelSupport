@@ -90,6 +90,8 @@ var _materials_snapshot_dirty: bool = true
 var _pending_retrigger: bool = false
 # Per-chunk 模式：每个非空 chunk 对应一个子 MeshInstance3D
 var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
+# Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
+var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
@@ -381,11 +383,19 @@ func _clear_collision() -> void:
 		_collision_body = null
 
 
-## 清理所有 chunk 子 MeshInstance3D
+## 清理所有 chunk 子 MeshInstance3D 及关联碰撞体
 func _clear_chunk_meshes() -> void:
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()
 	_chunk_meshes.clear()
+	_clear_chunk_collisions()
+
+
+## 清理所有 per-chunk 碰撞体
+func _clear_chunk_collisions() -> void:
+	for ck in _chunk_collisions:
+		_chunk_collisions[ck].queue_free()
+	_chunk_collisions.clear()
 
 
 ## 将 per-chunk 网格数据应用到子 MeshInstance3D
@@ -407,6 +417,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 			_chunk_meshes[ck] = chunk_mesh
 
 		# 构建 mesh
+		var has_mesh := false
 		if arrays is Dictionary and not arrays.is_empty():
 			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
 			if new_mesh and _materials_cache.size() >= 2:
@@ -415,6 +426,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 				if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
 					new_mesh.surface_set_material(1, _materials_cache[1])
 			chunk_mesh.mesh = new_mesh
+			has_mesh = new_mesh != null
 		else:
 			# chunk 已空，清空 mesh 但保留节点（后续可能重新获得体素）
 			chunk_mesh.mesh = null
@@ -422,7 +434,65 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 		# 定位到 chunk 原点（使用局部坐标后，只需偏移 chunk 原点）
 		chunk_mesh.position = Vector3(ck) * chunk_scale
 
+		# Per-chunk 碰撞体
+		_update_chunk_collision(ck, has_mesh)
+
 	# 清理变更追踪
 	if data:
 		data.clear_dirty_voxels()
 	mesh_updated.emit()
+
+
+## 更新单个 chunk 的碰撞体（Per-chunk StaticBody3D + ConcavePolygonShape3D）
+func _update_chunk_collision(ck: Vector3i, has_mesh: bool) -> void:
+	if generate_collision and has_mesh:
+		# 获取或创建 StaticBody3D
+		var body: StaticBody3D
+		if _chunk_collisions.has(ck):
+			body = _chunk_collisions[ck]
+		else:
+			body = StaticBody3D.new()
+			body.name = "Collision_%d_%d_%d" % [ck.x, ck.y, ck.z]
+			add_child(body)
+			_chunk_collisions[ck] = body
+
+		# 位置与对应 MeshInstance3D 对齐
+		var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
+		body.position = Vector3(ck) * chunk_scale
+
+		# 从 chunk mesh 提取 faces 构建碰撞形状
+		var chunk_mesh: MeshInstance3D = _chunk_meshes.get(ck)
+		if chunk_mesh and chunk_mesh.mesh:
+			var faces := chunk_mesh.mesh.get_faces()
+			if faces.size() > 0:
+				# 复用或更新 CollisionShape3D
+				var shape_node: CollisionShape3D
+				if body.get_child_count() > 0 and body.get_child(0) is CollisionShape3D:
+					shape_node = body.get_child(0)
+					# 复用 ConcavePolygonShape3D，只更新 faces
+					if shape_node.shape is ConcavePolygonShape3D:
+						shape_node.shape.set_faces(faces)
+					else:
+						var new_shape := ConcavePolygonShape3D.new()
+						new_shape.set_faces(faces)
+						shape_node.shape = new_shape
+				else:
+					shape_node = CollisionShape3D.new()
+					var new_shape := ConcavePolygonShape3D.new()
+					new_shape.set_faces(faces)
+					shape_node.shape = new_shape
+					body.add_child(shape_node)
+			else:
+				# 有 mesh 但无顶点，移除碰撞体
+				_remove_chunk_collision(ck)
+		else:
+			_remove_chunk_collision(ck)
+	else:
+		_remove_chunk_collision(ck)
+
+
+## 移除单个 chunk 的碰撞体
+func _remove_chunk_collision(ck: Vector3i) -> void:
+	if _chunk_collisions.has(ck):
+		_chunk_collisions[ck].queue_free()
+		_chunk_collisions.erase(ck)
