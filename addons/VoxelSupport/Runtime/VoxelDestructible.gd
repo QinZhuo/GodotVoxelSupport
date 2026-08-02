@@ -87,6 +87,12 @@ var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 var _cascade_check_positions: Array = []  # 待检查的体素位置（下一级联层级）
 var _cascade_total: Array = []            # 所有级联累积的失稳体素
 
+## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
+const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
+
+## 掉落块落地静置检测帧计数器
+var _sleep_check_counter: int = 0
+
 const _DEBRIS_ROOT_NAME := "_VoxelDebris"
 
 
@@ -277,9 +283,26 @@ func _after_removal(removed: Array) -> void:
 			# 应力传播移除的体素先移除，再触发崩塌
 			var stress_mat_map := _collect_voxel_materials(stress_removed)
 			data.remove_voxels(stress_removed)
-			# 应力传播的碎片也在同一批生成
+			# 应力传播的断裂体素：连通的转为物理体掉落，散落的用粒子
 			if not Engine.is_editor_hint():
-				_spawn_debris_with_materials(stress_removed, stress_mat_map)
+				# 按连通性分组，每组生成一个物理体掉落
+				var stress_groups := VoxelData.partition_connected(stress_removed)
+				var group_count := 0
+				for sgroup in stress_groups:
+					if group_count >= MAX_FALLING_CHUNKS_PER_FRAME:
+						# 超出限制的用粒子代替
+						var remaining: Array = []
+						for j in range(group_count, stress_groups.size()):
+							remaining.append_array(stress_groups[j])
+						if not remaining.is_empty():
+							_spawn_debris_with_materials(remaining, _collect_voxel_materials(remaining))
+						break
+					# 收集该组的材质映射
+					var sgroup_mat_map: Dictionary = {}
+					for pos in sgroup:
+						sgroup_mat_map[pos] = stress_mat_map.get(pos, 0)
+					_spawn_falling_chunk(sgroup, sgroup_mat_map)
+					group_count += 1
 			removed.append_array(stress_removed)
 
 	_trigger_collapse(removed)
@@ -396,8 +419,21 @@ func _process_full_cascade() -> void:
 		group_materials.append(mat_map)
 	data.remove_voxels(total_unstable)
 	if not Engine.is_editor_hint():
+		var spawned_count := 0
 		for i in range(groups.size()):
+			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
+				# 超出限制的组用粒子代替
+				var remaining: Array = []
+				for j in range(i, groups.size()):
+					remaining.append_array(groups[j])
+				if not remaining.is_empty():
+					var remaining_mat_map: Dictionary = {}
+					for pos in remaining:
+						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
+					_spawn_debris_with_materials(remaining, remaining_mat_map)
+				break
 			_spawn_falling_chunk(groups[i], group_materials[i])
+			spawned_count += 1
 
 	voxels_about_to_collapse.emit(total_unstable)
 	last_collapse_count = total_unstable.size()
@@ -438,15 +474,37 @@ func _process_cascade_level(around_positions: Array) -> void:
 	# 从原始数据中移除所有失稳体素
 	data.remove_voxels(all_unstable)
 
-	# 每组生成一个 FallingChunk 物理体
+	# 每组生成一个 FallingChunk 物理体（防止一帧生成过多物理体）
 	if not Engine.is_editor_hint():
+		var spawned_count := 0
 		for i in range(groups.size()):
+			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
+				# 超出限制的组用粒子代替
+				var remaining: Array = []
+				for j in range(i, groups.size()):
+					remaining.append_array(groups[j])
+				if not remaining.is_empty():
+					# 重新收集剩余体素的材质
+					var remaining_mat_map: Dictionary = {}
+					for pos in remaining:
+						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
+					_spawn_debris_with_materials(remaining, remaining_mat_map)
+				break
 			_spawn_falling_chunk(groups[i], group_materials[i])
+			spawned_count += 1
 
 	# 累积并完成级联（发信号）
 	_cascade_total.append_array(all_unstable)
 	_cascade_check_positions = []
 	_finalize_cascade()
+
+
+## 当体素已被移除后，从已收集的材质映射中查找原始材质ID
+func _find_original_mat(pos: Vector3i, group_materials: Array[Dictionary], start_idx: int) -> int:
+	for i in range(start_idx, group_materials.size()):
+		if group_materials[i].has(pos):
+			return group_materials[i][pos]
+	return 0
 
 
 ## 完成级联、发信号
@@ -539,14 +597,8 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	_falling_chunk_root.add_child(body)
 	body.owner = _falling_chunk_root
 
-	# 8. 定时清理：15 秒后自动移除
-	var timer := Timer.new()
-	timer.wait_time = 15.0
-	timer.one_shot = true
-	timer.timeout.connect(_cleanup_falling_chunk.bind(body))
-	body.add_child(timer)
-	timer.owner = body
-	timer.start()
+	# 8. 连接落地检测：落地后静置一段时间自动冻结（节省物理开销，不掉落块不消失）
+	body.body_entered.connect(_on_chunk_landed.bind(body))
 
 
 ## 清理已停稳或超时的掉落块
@@ -555,11 +607,44 @@ func _cleanup_falling_chunk(body: RigidBody3D) -> void:
 		body.queue_free()
 
 
-## 清理所有掉落块
+## 手动清理所有掉落块（用于场景重置等）
 func _clear_falling_chunks() -> void:
 	if _falling_chunk_root:
 		for child in _falling_chunk_root.get_children():
 			child.queue_free()
+
+
+## 落地检测：掉落块碰触地面/其他物体时触发
+## 启动一个短延迟后检测物理体是否已静止，静止则冻结以节省物理开销
+func _on_chunk_landed(_body: Node, chunk_body: RigidBody3D) -> void:
+	if not chunk_body or not is_instance_valid(chunk_body):
+		return
+	# 延迟 0.5 秒后检测是否静止
+	var tree := get_tree()
+	if not tree:
+		return
+	var timer := tree.create_timer(0.5)
+	timer.timeout.connect(_try_freeze_chunk.bind(chunk_body))
+
+
+## 尝试冻结已静止的掉落块（不消失，只冻结物理模拟节省性能）
+func _try_freeze_chunk(body: RigidBody3D) -> void:
+	if not body or not is_instance_valid(body):
+		return
+	if body.sleeping:
+		body.freeze = true
+		body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+
+
+## 定期检测所有掉落块，将长时间静止的块冻结
+func _freeze_sleeping_chunks() -> void:
+	if not _falling_chunk_root:
+		return
+	for child in _falling_chunk_root.get_children():
+		var body := child as RigidBody3D
+		if body and not body.freeze and body.sleeping:
+			body.freeze = true
+			body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 
 
 ## 找出所有"失稳"体素，返回这些体素位置的并集
@@ -609,8 +694,20 @@ func validate_stability() -> void:
 		group_materials.append(mat_map)
 	data.remove_voxels(unstable)
 	if not Engine.is_editor_hint():
+		var spawned_count := 0
 		for i in range(groups.size()):
+			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
+				var remaining: Array = []
+				for j in range(i, groups.size()):
+					remaining.append_array(groups[j])
+				if not remaining.is_empty():
+					var remaining_mat_map: Dictionary = {}
+					for pos in remaining:
+						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
+					_spawn_debris_with_materials(remaining, remaining_mat_map)
+				break
 			_spawn_falling_chunk(groups[i], group_materials[i])
+			spawned_count += 1
 	voxels_about_to_collapse.emit(unstable)
 	voxel_damaged.emit(unstable, true)
 	last_collapse_count = unstable.size()
@@ -806,6 +903,12 @@ func _process(_delta: float) -> void:
 		_process_cascade_level(_cascade_check_positions)
 	# 处理普通破坏批次（每帧一个）
 	_process_destruction_pipeline()
+
+	# 每 120 帧（约 2 秒）检测一次掉落块是否已静止，冻结以节省物理开销
+	_sleep_check_counter += 1
+	if _sleep_check_counter >= 120:
+		_sleep_check_counter = 0
+		_freeze_sleeping_chunks()
 
 
 ## 延迟破坏管道：每帧处理一个批次，将破坏逻辑分摊到多帧
