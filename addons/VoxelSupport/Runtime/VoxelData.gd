@@ -64,6 +64,13 @@ const UPPER_5: Array[Vector3i] = [
 	Vector3i(0, 1, 1),    # 前上方
 ]
 
+## 4 个水平邻居偏移（同 Y 层，用于失稳级联的水平传播）
+## 修复浮空平台的外围体素未被检测到的问题
+const HORIZONTAL_4: Array[Vector3i] = [
+	Vector3i(1, 0, 0),  Vector3i(-1, 0, 0),
+	Vector3i(0, 0, 1),  Vector3i(0, 0, -1),
+]
+
 
 ## 从 VoxData 构造 (编辑器导入时使用)
 static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0) -> VoxelData:
@@ -697,8 +704,17 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 
 		if not has_support:
 			unstable[cur] = true
-			# 连锁失稳：检查该体素的上方位邻居
+			# 连锁失稳：检查该体素的上方位邻居 + 水平邻居（同 Y 层）
+			# 上方位邻居：正上方 + 斜上方（y+1）
 			for d: Vector3i in UPPER_5:
+				var nb := cur + d
+				if voxels_dict.has(nb) and not visited.has(nb):
+					visited[nb] = true
+					queue.append(nb)
+			# 【关键修复】水平邻居：4 个同 Y 层方向
+			# 不检查水平方向时，浮空平台的外围体素不会被检测到
+			# 因为它们不在 removed 的 UPPER_5 范围内，也不在失稳体素的 UPPER_5 范围内
+			for d: Vector3i in HORIZONTAL_4:
 				var nb := cur + d
 				if voxels_dict.has(nb) and not visited.has(nb):
 					visited[nb] = true
