@@ -86,6 +86,8 @@ var _falling_chunk_id: int = 0
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
 ## 级联崩塌状态：逐帧处理，每帧只处理一个级联层级
+## 存放当前层级的待检查体素位置，处理完后自动设置为下一级的位置
+## 为空时表示没有待处理的级联
 var _cascade_check_positions: Array = []  # 待检查的体素位置（下一级联层级）
 var _cascade_total: Array = []            # 所有级联累积的失稳体素
 
@@ -274,6 +276,7 @@ func _get_material_hardness(mat_id: int) -> float:
 
 ## 破坏后的统一处理：崩塌检测 + 应力传播 + 整体健康度扣减
 ## 在 _process 延迟处理中调用（每帧一个批次）
+## 应力传播是轻量 BFS（邻域检查），直接同步执行，无需异步
 func _after_removal(removed: Array) -> void:
 	# 应力传播：裂纹扩散（始终启用）
 	if not removed.is_empty():
@@ -317,6 +320,7 @@ func _after_removal(removed: Array) -> void:
 
 ## 应力传播：从被移除的体素出发，向邻居传播应力
 ## 若邻居体素材质的 connection_strength 不足以承受应力，则断裂
+## 轻量 BFS，直接同步执行，无需异步（邻域检查量级远小于数据快照开销）
 ## 返回所有因应力传播而断裂的体素位置
 func _propagate_stress(removed: Array) -> Array:
 	if not data or removed.is_empty():
@@ -382,13 +386,14 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 		return
 
 	# 全场景检测（around_positions 为空）：同步完成所有级联层级
-	# 仅在 validate_stability 等初始化场景调用，后续破坏由局部检测负责
+	# 仅在 validate_stability 等初始化场景调用
 	if around_positions.is_empty():
 		_process_full_cascade()
 		return
 
-	# 局部检测：只处理一个级联层级
-	_process_cascade_level(around_positions)
+	# 局部检测：设置待处理队列，下一帧 _process 开始逐级处理
+	# 每帧只处理一个级联层级，产生自然的连锁崩塌延迟
+	_cascade_check_positions = around_positions
 
 
 ## 全场景级联崩塌检测（同步完成所有层级）
@@ -439,30 +444,31 @@ func _process_full_cascade() -> void:
 	voxel_damaged.emit(total_unstable, true)
 
 
-## 处理一个级联层级（局部检测）
-## 改为在同一帧内完成所有级联层级，避免建筑一层一层"消失"的视觉效果
-## 失稳体素整块转为独立的 FallingChunk 物理体掉落，而非粒子
-func _process_cascade_level(around_positions: Array) -> void:
-	var all_unstable: Array = []
-	var queue: Array = around_positions.duplicate()
-	var guard := 64  # 防止无限循环
+## 处理一个级联层级（逐帧处理，每帧只处理一级）
+## 从 _cascade_check_positions 中找出失稳体素，移除并生成物理掉落
+## 若还有下一级失稳体素，设置 _cascade_check_positions 供下一帧继续处理
+## 产生自然的连锁崩塌延迟效果
+func _process_cascade_level() -> void:
+	if _cascade_check_positions.is_empty():
+		return
 
-	while not queue.is_empty() and guard > 0:
-		guard -= 1
-		var unstable := _find_unstable_voxels(queue)
-		if unstable.is_empty():
-			break
-		all_unstable.append_array(unstable)
-		queue = unstable
+	# 取出当前层级的待检查位置，清空队列（如果还有下一级会在下面重新设置）
+	var queue: Array = _cascade_check_positions
+	_cascade_check_positions = []
 
-	if all_unstable.is_empty():
+	# 只处理一个层级
+	var unstable := _find_unstable_voxels(queue)
+	if unstable.is_empty():
 		_finalize_cascade()
 		return
 
-	# 按连通性分组：同一组的体素作为一个整体掉落
-	var groups := VoxelData.partition_connected(all_unstable)
+	# 设置下一级要检查的位置（当前失稳体素作为下一级的检查起点）
+	_cascade_check_positions = unstable
 
-	# 收集每组体素的材质ID（在移除前，_spawn_falling_chunk 需要读取）
+	# 按连通性分组
+	var groups := VoxelData.partition_connected(unstable)
+
+	# 收集材质快照（在移除前）
 	var group_materials: Array[Dictionary] = []
 	for group in groups:
 		var mat_map: Dictionary = {}
@@ -470,20 +476,18 @@ func _process_cascade_level(around_positions: Array) -> void:
 			mat_map[pos] = data.voxels[pos]
 		group_materials.append(mat_map)
 
-	# 从原始数据中移除所有失稳体素
-	data.remove_voxels(all_unstable)
+	# 移除失稳体素
+	data.remove_voxels(unstable)
 
-	# 每组生成一个 FallingChunk 物理体（防止一帧生成过多物理体）
+	# 生成物理体（每帧限制数量）
 	if not Engine.is_editor_hint():
 		var spawned_count := 0
 		for i in range(groups.size()):
 			if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-				# 超出限制的组用粒子代替
 				var remaining: Array = []
 				for j in range(i, groups.size()):
 					remaining.append_array(groups[j])
 				if not remaining.is_empty():
-					# 重新收集剩余体素的材质
 					var remaining_mat_map: Dictionary = {}
 					for pos in remaining:
 						remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
@@ -492,10 +496,11 @@ func _process_cascade_level(around_positions: Array) -> void:
 			_spawn_falling_chunk(groups[i], group_materials[i])
 			spawned_count += 1
 
-	# 累积并完成级联（发信号）
-	_cascade_total.append_array(all_unstable)
-	_cascade_check_positions = []
-	_finalize_cascade()
+	# 累积级联结果
+	_cascade_total.append_array(unstable)
+	# 注意：不移除 _cascade_check_positions，它已被设置为下一级的检查位置
+	# 如果有下一级，下一帧 _process 会继续处理
+	# 如果没有下一级，_finalize_cascade 会在下次 _process_cascade_level 被调用时触发
 
 
 ## 当体素已被移除后，从已收集的材质映射中查找原始材质ID
@@ -897,9 +902,9 @@ func _process(_delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 
-	# 处理级联崩塌（安全兜底，正常情况下级联已在 _trigger_collapse 中完成）
+	# 处理级联崩塌（每帧一个层级，产生自然的连锁崩塌延迟）
 	if not _cascade_check_positions.is_empty():
-		_process_cascade_level(_cascade_check_positions)
+		_process_cascade_level()
 	# 处理普通破坏批次（每帧一个）
 	_process_destruction_pipeline()
 
@@ -931,7 +936,7 @@ func _process_destruction_pipeline() -> void:
 	# 1. 实际移除体素（触发 mesh 脏标记 → 下一帧 _process 自动重建）
 	data.remove_voxels(removed)
 
-	# 2. 应力传播 + 崩塌检测 + 处理
+	# 2. 应力传播 + 崩塌检测 + 处理（同步，轻量 BFS）
 	_after_removal(removed)
 
 	# 3. 生成粒子碎片（使用第 0 步收集的材质快照）
