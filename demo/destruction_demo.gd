@@ -391,10 +391,12 @@ func _setup_camera() -> void:
 	var center := world * 0.5
 	var world_center := _target.global_position + center
 	var max_dim := maxf(world.x, maxf(world.y, world.z))
-	_camera.global_position = world_center + Vector3(-center.x * 0.7, center.y * 0.2, center.z * 1.0)
-	_camera.look_at(world_center)
-	_camera.fov = 70
-	_camera.far = max_dim * 3.0
+	# 将相机置于建筑外部斜上方，确保能看清整体结构
+	var dist := max_dim * 0.7
+	_camera.global_position = world_center + Vector3(-dist * 0.6, dist * 0.5, dist * 0.8)
+	_camera.look_at(world_center, Vector3.UP)
+	_camera.fov = 65
+	_camera.far = max_dim * 4.0
 
 
 func _setup_hud() -> void:
@@ -557,7 +559,7 @@ func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
 				var local_origin := _target.to_local(origin)
 				var local_dir := _target.global_transform.basis.inverse() * forward
 				var t0 := Time.get_ticks_usec()
-				_target.damage_ray(local_origin / voxel_scale, local_dir, 80.0)
+				_target.damage_ray(local_origin / voxel_scale, local_dir, 1000.0)
 				var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 				_damage_times.append(elapsed)
 				if _damage_times.size() > 100:
@@ -582,7 +584,7 @@ func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
 		var local_origin := _target.to_local(origin)
 		var local_dir := _target.global_transform.basis.inverse() * forward
 		var t0 := Time.get_ticks_usec()
-		_target.damage_ray(local_origin / voxel_scale, local_dir, 80.0)
+		_target.damage_ray(local_origin / voxel_scale, local_dir, 1000.0)
 		var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 		_damage_times.append(elapsed)
 		if _damage_times.size() > 100:
@@ -597,7 +599,7 @@ func _mouse_to_voxel() -> Vector3i:
 	var dir := _camera.project_ray_normal(get_viewport().get_mouse_position())
 	var local_origin := _target.to_local(from)
 	var local_dir := _target.global_transform.basis.inverse() * dir
-	return _target.raycast_voxel(local_origin / voxel_scale, local_dir, 80.0)
+	return _target.raycast_voxel(local_origin / voxel_scale, local_dir, 1000.0)
 
 
 func _update_hud() -> void:
