@@ -1,19 +1,18 @@
 class_name VoxelChunkGenerator
-## 高性能体素网格生成器（Chunk 分区 + 增量重建）
+## 高性能体素网格生成器（Chunk 分区）
 ##
-## 相比 VoxelMeshGenerator 的全局网格生成，本生成器：
-##   - 将体素世界划分为固定大小的 chunk，每个 chunk 独立生成网格
-##   - 支持"增量重建"：只重新生成发生变化的 chunk，而非全量重建
-##   - 支持在后台线程生成网格数据（generate_arrays_runtime），避免阻塞主线程
-##   - 自动跳过完全空的 chunk（空块提前终止）
+## 将体素世界划分为固定大小的 chunk，每个 chunk 独立生成网格。
+## 生成时始终输出所有非空 chunk 的完整 mesh，避免增量重建导致数据丢失。
+## 支持在后台线程生成网格数据（generate_arrays_runtime），避免阻塞主线程。
+## 自动跳过完全空的 chunk（空块提前终止）。
 ## 对大型动态场景（如水模拟、地形编辑）性能提升显著。
 
 ## 单个 chunk 的边长（体素个数），chunk 越大网格合并效率越高但增量重建粒度越粗
 const CHUNK_SIZE := 32
 
 
-## 运行时网格生成入口（全量或增量），在主线程调用
-## 通过 rebuild_chunks 指定只重建部分 chunk；为空则全量生成
+## 运行时网格生成入口，在主线程调用
+## 始终生成所有非空 chunk，确保输出完整 mesh。rebuild_chunks 参数保留用于 API 兼容。
 static func generate_mesh_runtime(
 		voxels: Dictionary[Vector3i, int],
 		materials: Array,
@@ -45,12 +44,10 @@ static func generate_arrays_runtime(
 	# 一次遍历 voxels，建立"非空 chunk"哈希索引（避免逐 chunk 16³ 扫描）
 	var non_empty := _build_non_empty_chunk_index(voxels)
 
-	# 确定需要重建的 chunk（跳过完全空的 chunk）
-	var chunk_keys: Array[Vector3i] = []
-	if rebuild_chunks.is_empty():
-		chunk_keys = _all_non_empty_chunks_from_index(non_empty)
-	else:
-		chunk_keys = _unique_non_empty(rebuild_chunks, non_empty)
+	# 必须重建所有非空 chunk，确保输出的 mesh 包含完整场景。
+	# 增量重建（只重建部分 chunk）会导致其他 chunk 的数据丢失，
+	# 因为生成的 mesh 会完全替换之前的 mesh。
+	var chunk_keys: Array[Vector3i] = _all_non_empty_chunks_from_index(non_empty)
 
 	if chunk_keys.is_empty():
 		return null
@@ -87,13 +84,40 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 
 
 ## 根据变更体素集合，计算需要重建的 chunk（增量重建核心）
+## 当体素在 chunk 边界发生变化时，相邻 chunk 也需要重建，
+## 因为相邻 chunk 中边界体素的面可见性依赖于该体素的存在状态。
 static func chunks_for_dirty_voxels(dirty_voxels: Dictionary) -> Array[Vector3i]:
 	var chunk_keys: Array[Vector3i] = []
+	var added := {}
 	for pos_key in dirty_voxels:
 		var ck := _chunk_of(pos_key)
-		if not chunk_keys.has(ck):
+		if not added.has(ck):
 			chunk_keys.append(ck)
+			added[ck] = true
+		# 检查该体素是否位于 chunk 的 6 个边界面上
+		# 如果是，需要同时重建相邻 chunk，确保边界面的可见性正确
+		var p: Vector3i = pos_key
+		var local_pos := p - ck * CHUNK_SIZE
+		# 6 方向：如果在边界（local == 0 或 local == CHUNK_SIZE-1），相邻 chunk 也需要重建
+		if local_pos.x == 0:
+			_add_chunk(ck + Vector3i(-1, 0, 0), chunk_keys, added)
+		elif local_pos.x == CHUNK_SIZE - 1:
+			_add_chunk(ck + Vector3i(1, 0, 0), chunk_keys, added)
+		if local_pos.y == 0:
+			_add_chunk(ck + Vector3i(0, -1, 0), chunk_keys, added)
+		elif local_pos.y == CHUNK_SIZE - 1:
+			_add_chunk(ck + Vector3i(0, 1, 0), chunk_keys, added)
+		if local_pos.z == 0:
+			_add_chunk(ck + Vector3i(0, 0, -1), chunk_keys, added)
+		elif local_pos.z == CHUNK_SIZE - 1:
+			_add_chunk(ck + Vector3i(0, 0, 1), chunk_keys, added)
 	return chunk_keys
+
+
+static func _add_chunk(ck: Vector3i, chunk_keys: Array, added: Dictionary) -> void:
+	if not added.has(ck):
+		chunk_keys.append(ck)
+		added[ck] = true
 
 
 # ----------------------------------------------------------------------------
