@@ -31,9 +31,12 @@ var dirty_voxels: Dictionary[Vector3i, int] = {}
 const CHUNK_SIZE := 32
 
 ## Chunk 索引缓存：{chunk_key: Array[Vector3i]}，用于快速空间查询
-## 数据变更时自动失效，首次查询时重建
+## 采用"实时增量维护"策略：
+##   - 首次查询时全量构建一次（_chunk_index_built = true）
+##   - 之后每次体素增删都只增量更新对应 chunk 的列表，索引始终保持与 voxels 同步
+##   - 避免"任意变更即全量重建 O(全部体素)"导致的周期卡顿（大型场景关键）
 var _chunk_index: Dictionary = {}
-var _chunk_index_dirty: bool = true
+var _chunk_index_built: bool = false
 
 ## 6 方向邻居偏移（上下左右前后），连通性 BFS/泛洪共用
 const NEIGHBORS_6: Array[Vector3i] = [
@@ -113,22 +116,26 @@ func get_voxel(pos: Vector3i) -> int:
 
 ## 设置指定位置的体素 (material_id < 0 时移除)
 func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
-	_invalidate_chunk_index()
 	if material_id < 0:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1
+		_chunk_index_remove(pos)
 	else:
+		# 若该位置原本已有体素，先移除旧索引，再添加新索引（避免重复）
+		if voxels.has(pos):
+			_chunk_index_remove(pos)
 		voxels[pos] = material_id
 		dirty_voxels[pos] = material_id
+		_chunk_index_add(pos)
 	if notify:
 		emit_changed()
 
 
 ## 移除指定位置的体素
 func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
-	_invalidate_chunk_index()
 	voxels.erase(pos)
 	dirty_voxels[pos] = -1
+	_chunk_index_remove(pos)
 	if notify:
 		emit_changed()
 
@@ -150,20 +157,24 @@ func get_voxel_count() -> int:
 
 ## 清空所有体素
 func clear(notify: bool = true) -> void:
-	_invalidate_chunk_index()
 	for pos in voxels:
 		dirty_voxels[pos] = -1
 	voxels.clear()
+	_chunk_index.clear()
+	_chunk_index_built = true  # 空索引即已构建
 	if notify:
 		emit_changed()
 
 
 ## 合并另一个资源中的体素 (可带偏移)
 func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
-	_invalidate_chunk_index()
 	for pos in other.voxels:
-		voxels[pos + offset] = other.voxels[pos]
-		dirty_voxels[pos + offset] = other.voxels[pos]
+		var dst := pos + offset
+		if voxels.has(dst):
+			_chunk_index_remove(dst)
+		voxels[dst] = other.voxels[pos]
+		dirty_voxels[dst] = other.voxels[pos]
+		_chunk_index_add(dst)
 	if notify:
 		emit_changed()
 
@@ -229,26 +240,52 @@ static func _chunk_of(pos: Vector3i) -> Vector3i:
 	)
 
 
-## 构建 chunk 索引：{chunk_key: Array[Vector3i]}
-func _build_chunk_index() -> void:
+## 全量构建 chunk 索引：{chunk_key: Array[Vector3i]}（首次查询时调用一次）
+func _build_chunk_index_full() -> void:
 	_chunk_index.clear()
 	for pos in voxels:
 		var ck := _chunk_of(pos)
 		if not _chunk_index.has(ck):
 			_chunk_index[ck] = []
 		_chunk_index[ck].append(pos)
-	_chunk_index_dirty = false
+	_chunk_index_built = true
 
 
-## 懒构建：仅在脏时重建
+## 确保索引已构建（首次查询时全量构建一次；之后由增量维护保持同步，无需重建）
 func _build_chunk_index_if_dirty() -> void:
-	if _chunk_index_dirty:
-		_build_chunk_index()
+	if not _chunk_index_built:
+		_build_chunk_index_full()
 
 
-## 标记索引失效（体素数据变更时调用）
-func _invalidate_chunk_index() -> void:
-	_chunk_index_dirty = true
+## 增量：添加体素到对应 chunk 的索引列表（由 set_voxel/merge 在写入 voxels 后调用）
+## 需在 voxels[pos] 已写入后调用，且仅当索引已构建时
+func _chunk_index_add(pos: Vector3i) -> void:
+	if not _chunk_index_built:
+		return
+	var ck := _chunk_of(pos)
+	if not _chunk_index.has(ck):
+		_chunk_index[ck] = []
+	_chunk_index[ck].append(pos)
+
+
+## 增量：从对应 chunk 的索引列表移除体素（由 remove_* 在擦除 voxels 后调用）
+## 仅当索引已构建时有效；chunk 不存在则忽略
+func _chunk_index_remove(pos: Vector3i) -> void:
+	if not _chunk_index_built:
+		return
+	var ck := _chunk_of(pos)
+	if _chunk_index.has(ck):
+		var list: Array = _chunk_index[ck]
+		list.erase(pos)
+		if list.is_empty():
+			_chunk_index.erase(ck)
+
+
+## 标记 chunk 索引失效（供外部绕过 set_voxel/remove_* 直接修改 voxels 后调用）
+## 下次空间查询（get_voxels_in_sphere / get_voxels_in_box）会全量重建一次
+## 正常破坏流程无需调用（内部已增量维护），仅当游戏直接操作 voxels 字典时使用
+func invalidate_chunk_index() -> void:
+	_chunk_index_built = false
 
 
 ## 获取与球体重叠的 chunk 列表
@@ -352,10 +389,10 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
-	_invalidate_chunk_index()
 	for pos in positions:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1
+		_chunk_index_remove(pos)
 	if notify:
 		emit_changed()
 	return positions
@@ -458,6 +495,8 @@ func load_data(data: Variant) -> void:
 			if vox is Array and vox.size() >= 4:
 				var pos := Vector3i(int(vox[0]), int(vox[1]), int(vox[2]))
 				voxels[pos] = int(vox[3])
+	# load_data 直接写入 voxels（绕过增量维护），标记索引失效，下次查询时全量重建
+	_chunk_index_built = false
 	emit_changed()
 
 
