@@ -7,6 +7,11 @@ extends MeshInstance3D
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
 ## 提供与编辑器导入等价的纹理材质 (基于材质ID的UV采样)
 ## 支持异步网格生成：体素数据在后台线程生成，主线程不阻塞
+## 
+## 两种渲染模式（通过 use_chunk_generator 切换）：
+## - Per-chunk 模式（默认）：每个非空 chunk 对应一个子 MeshInstance3D，体素变化时只增量重建
+##   受影响 chunk，大型场景性能更好
+## - 组合模式：所有体素合并为一个 ArrayMesh，适合中小场景
 
 signal mesh_updated
 
@@ -21,12 +26,16 @@ signal mesh_updated
 			data.changed.connect(_on_data_changed)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
+		_clear_chunk_meshes()
 		_request_update()
 
 ## 体素缩放比例 (单个体素的边长，世界单位)
 @export var voxel_scale: float = 0.1:
 	set(v):
 		voxel_scale = v
+		# Voxel scale 变化会影响 chunk mesh 的位置，需要重建
+		if not _chunk_meshes.is_empty():
+			_clear_chunk_meshes()
 		_request_update()
 
 ## 数据变化时是否自动重新生成 mesh
@@ -36,12 +45,13 @@ signal mesh_updated
 ## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
 @export_range(1, 30) var update_throttle_frames: int = 1
 
-## 是否使用高性能 Chunk 生成器（增量重建）
-## 开启后体素按 16³ chunk 分区生成，体素变化时只重建受影响 chunk，大型动态场景性能更好
-## 默认开启，自动分块处理；关闭则使用全局生成（中小场景兼容）
+## 是否使用 Per-chunk 模式（增量重建）
+## 开启后每个非空 chunk 对应一个子 MeshInstance3D，体素变化时只重建受影响 chunk
+## 关闭则使用全局生成（所有体素合并为一个 ArrayMesh），适合中小场景
 @export var use_chunk_generator: bool = true:
 	set(v):
 		use_chunk_generator = v
+		_clear_chunk_meshes()
 		_request_update()
 
 ## 是否异步生成网格（后台线程生成，避免阻塞主线程，对大型场景体验更佳）
@@ -51,6 +61,7 @@ signal mesh_updated
 		async_generate = v
 		if not v:
 			_cancel_async()
+		_clear_chunk_meshes()
 		_request_update()
 
 ## 是否生成静态碰撞体 (StaticBody3D + ConcavePolygonShape3D)
@@ -77,6 +88,8 @@ var _materials_snapshot: Array = []
 var _materials_snapshot_dirty: bool = true
 # 异步任务运行期间收到新变更时置位，任务完成后重新触发更新（保证数据始终最新且不并发）
 var _pending_retrigger: bool = false
+# Per-chunk 模式：每个非空 chunk 对应一个子 MeshInstance3D
+var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
@@ -96,10 +109,21 @@ func _process(_delta: float) -> void:
 		var arrays := _pending_arrays
 		_pending_arrays = null
 		_has_pending = false
+
+		# 保存脏体素（_build_and_apply_mesh 会清空），用于 _pending_retrigger 重建
+		var saved_dirty: Dictionary = {}
+		if _pending_retrigger and data:
+			saved_dirty = data.dirty_voxels.duplicate()
+
 		_build_and_apply_mesh(arrays)
+
 		# 若任务运行期间有新变更，立即重新生成（用最新数据）
 		if _pending_retrigger:
 			_pending_retrigger = false
+			# 恢复脏体素，让增量重建能正确找到需要重建的 chunk
+			if data and not saved_dirty.is_empty():
+				for pos in saved_dirty:
+					data.dirty_voxels[pos] = saved_dirty[pos]
 			_dirty = true
 			_update_mesh()
 
@@ -169,6 +193,7 @@ func get_voxel(pos: Vector3i) -> int:
 
 func _exit_tree() -> void:
 	_cancel_async()
+	_clear_chunk_meshes()
 
 
 ## 取消尚未完成的异步网格生成任务
@@ -186,6 +211,7 @@ func _update_mesh() -> void:
 	if not data:
 		_cancel_async()
 		mesh = null
+		_clear_chunk_meshes()
 		_clear_collision()
 		mesh_updated.emit()
 		return
@@ -225,19 +251,38 @@ func _update_mesh_async() -> void:
 	_has_pending = false
 	_pending_arrays = null
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
-	_task_id = WorkerThreadPool.add_task(_generate_worker.bind(snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id))
+	# 将 use_chunk_generator 和 voxel_scale 作为参数传入，避免子线程访问节点属性
+	_task_id = WorkerThreadPool.add_task(_generate_worker.bind(
+		snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale))
 
 
 ## 后台工作线程入口：生成网格数据并写入结果缓冲
 ## 主线程通过 _process 轮询 WorkerThreadPool.is_task_completed 后读取，保证线程安全
-func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Array, gen_id: int) -> void:
-	var options := {
-		"scale": voxel_scale,
-	}
-	var t0 := Time.get_ticks_usec()
-	var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
-	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
-	# 仅在 gen_id 仍有效时写入结果（避免覆盖更新的任务）
+func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Array, gen_id: int,
+		use_chunk: bool, scale: float) -> void:
+	var options := {"scale": scale}
+
+	# 增量重建路径：每个 chunk 的顶点使用局部坐标，生成独立子 MeshInstance3D
+	if use_chunk:
+		var t0 := Time.get_ticks_usec()
+		var chunk_arrays: Dictionary
+		if rebuild_chunks.is_empty():
+			# 无脏体素时全量生成所有非空 chunk（初始构建或切换模式后）
+			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
+				voxels, materials, options)
+		else:
+			chunk_arrays = VoxelChunkGenerator.generate_chunks_arrays_runtime(
+				voxels, materials, options, rebuild_chunks)
+		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		if gen_id == _generation_id:
+			_pending_arrays = chunk_arrays
+			_has_pending = true
+		return
+
+	# 全量重建路径：所有体素合并为一个 ArrayMesh
+	var t1 := Time.get_ticks_usec()
+	var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, options)
+	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
 	if gen_id == _generation_id:
 		_pending_arrays = arrays
 		_has_pending = true
@@ -248,17 +293,36 @@ func _update_mesh_sync() -> void:
 	var options := {
 		"scale": voxel_scale,
 	}
-	var rebuild_chunks: Array[Vector3i] = []
+
+	# Per-chunk 增量重建
 	if use_chunk_generator:
-		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
-	var t0 := Time.get_ticks_usec()
-	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.voxels, data.materials, options, rebuild_chunks)
-	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		var rebuild_chunks: Array[Vector3i] = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
+		var t0 := Time.get_ticks_usec()
+		var chunk_arrays: Dictionary
+		if rebuild_chunks.is_empty():
+			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
+				data.voxels, data.materials, options)
+		else:
+			chunk_arrays = VoxelChunkGenerator.generate_chunks_arrays_runtime(
+				data.voxels, data.materials, options, rebuild_chunks)
+		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		_build_and_apply_chunk_meshes(chunk_arrays)
+		return
+
+	# 全量重建（组合模式）
+	var t1 := Time.get_ticks_usec()
+	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.voxels, data.materials, options)
+	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
 	_build_and_apply_mesh(arrays)
 
 
 ## 将网格数据组装为 ArrayMesh 并应用到节点（必须主线程）
 func _build_and_apply_mesh(arrays: Variant) -> void:
+	# 检测是否为 per-chunk 字典（key 为 Vector3i）
+	if arrays is Dictionary and _is_chunk_arrays_result(arrays):
+		_build_and_apply_chunk_meshes(arrays as Dictionary)
+		return
+
 	var new_mesh: ArrayMesh
 	if arrays != null and arrays is Dictionary and not arrays.is_empty():
 		new_mesh = VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
@@ -271,6 +335,9 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 
 	if new_mesh:
 		mesh = new_mesh
+		# 切换到组合模式时清理旧的 chunk meshes
+		if not _chunk_meshes.is_empty():
+			_clear_chunk_meshes()
 	else:
 		mesh = null
 
@@ -283,6 +350,14 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 	if data:
 		data.clear_dirty_voxels()
 	mesh_updated.emit()
+
+
+## 判断是否为 per-chunk 结果字典（key 为 Vector3i 类型）
+static func _is_chunk_arrays_result(arrays: Dictionary) -> bool:
+	if arrays.is_empty():
+		return false
+	var first_key = arrays.keys()[0]
+	return first_key is Vector3i
 
 
 func _update_collision() -> void:
@@ -304,3 +379,50 @@ func _clear_collision() -> void:
 	if _collision_body:
 		_collision_body.queue_free()
 		_collision_body = null
+
+
+## 清理所有 chunk 子 MeshInstance3D
+func _clear_chunk_meshes() -> void:
+	for ck in _chunk_meshes:
+		_chunk_meshes[ck].queue_free()
+	_chunk_meshes.clear()
+
+
+## 将 per-chunk 网格数据应用到子 MeshInstance3D
+func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
+	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
+
+	# 只更新 chunk_arrays 中存在的 chunk — 每个 chunk 是独立 MeshInstance3D，
+	# 没被重建的 chunk 保持原样，不受影响。
+	for ck in chunk_arrays:
+		var arrays = chunk_arrays[ck]
+		# 获取或创建该 chunk 的子 MeshInstance3D
+		var chunk_mesh: MeshInstance3D
+		if _chunk_meshes.has(ck):
+			chunk_mesh = _chunk_meshes[ck]
+		else:
+			chunk_mesh = MeshInstance3D.new()
+			chunk_mesh.name = "Chunk_%d_%d_%d" % [ck.x, ck.y, ck.z]
+			add_child(chunk_mesh)
+			_chunk_meshes[ck] = chunk_mesh
+
+		# 构建 mesh
+		if arrays is Dictionary and not arrays.is_empty():
+			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
+			if new_mesh and _materials_cache.size() >= 2:
+				if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
+					new_mesh.surface_set_material(0, _materials_cache[0])
+				if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
+					new_mesh.surface_set_material(1, _materials_cache[1])
+			chunk_mesh.mesh = new_mesh
+		else:
+			# chunk 已空，清空 mesh 但保留节点（后续可能重新获得体素）
+			chunk_mesh.mesh = null
+
+		# 定位到 chunk 原点（使用局部坐标后，只需偏移 chunk 原点）
+		chunk_mesh.position = Vector3(ck) * chunk_scale
+
+	# 清理变更追踪
+	if data:
+		data.clear_dirty_voxels()
+	mesh_updated.emit()

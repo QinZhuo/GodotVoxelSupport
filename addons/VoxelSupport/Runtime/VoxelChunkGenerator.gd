@@ -83,6 +83,65 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 	return _merge_meshes(arrays)
 
 
+## 为指定的 chunk 列表生成网格数据（增量重建路径）
+## 每个 chunk 的顶点使用局部坐标（相对于 chunk 原点），方便直接放到独立 MeshInstance3D
+## 返回 {chunk_key: {solid_verts, solid_normals, ...}}，空 chunk 不在结果中
+static func generate_chunks_arrays_runtime(
+		voxels: Dictionary[Vector3i, int],
+		materials: Array,
+		options: Dictionary = {},
+		chunk_keys: Array[Vector3i] = []) -> Dictionary:
+	var scale: float = options.get("scale", 0.1)
+	var aligned := VoxelMaterial.align_by_id(materials)
+	var result := {}
+
+	for ck in chunk_keys:
+		var arrays := _generate_single_chunk_arrays(voxels, aligned, scale, ck)
+		if arrays != null:
+			result[ck] = arrays
+
+	return result
+
+
+## 生成所有非空 chunk 的 per-chunk 网格数据（初始构建或全量增量重建）
+## 等价于先获取所有非空 chunk 再调用 generate_chunks_arrays_runtime
+static func generate_all_chunks_arrays_runtime(
+		voxels: Dictionary[Vector3i, int],
+		materials: Array,
+		options: Dictionary = {}) -> Dictionary:
+	var non_empty := _build_non_empty_chunk_index(voxels)
+	var chunk_keys := _all_non_empty_chunks_from_index(non_empty)
+	return generate_chunks_arrays_runtime(voxels, materials, options, chunk_keys)
+
+
+## 生成单个 chunk 的网格数据（顶点使用局部坐标）
+static func _generate_single_chunk_arrays(
+		voxels, materials, scale: float, chunk: Vector3i) -> Dictionary:
+	var solid_verts := PackedVector3Array()
+	var solid_normals := PackedVector3Array()
+	var solid_uvs := PackedVector2Array()
+	var solid_idxs := PackedInt32Array()
+	var trans_verts := PackedVector3Array()
+	var trans_normals := PackedVector3Array()
+	var trans_uvs := PackedVector2Array()
+	var trans_idxs := PackedInt32Array()
+
+	_generate_chunk_into(voxels, materials, scale, chunk,
+		solid_verts, solid_normals, solid_uvs, solid_idxs,
+		trans_verts, trans_normals, trans_uvs, trans_idxs,
+		true)  # use_local_space = true
+
+	if solid_idxs.is_empty() and trans_idxs.is_empty():
+		return {}
+
+	return {
+		"solid_verts": solid_verts, "solid_normals": solid_normals,
+		"solid_uvs": solid_uvs, "solid_idxs": solid_idxs,
+		"trans_verts": trans_verts, "trans_normals": trans_normals,
+		"trans_uvs": trans_uvs, "trans_idxs": trans_idxs,
+	}
+
+
 ## 根据变更体素集合，计算需要重建的 chunk（增量重建核心）
 ## 当体素在 chunk 边界发生变化时，相邻 chunk 也需要重建，
 ## 因为相邻 chunk 中边界体素的面可见性依赖于该体素的存在状态。
@@ -161,10 +220,13 @@ static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Ar
 
 
 ## 生成单个 chunk 的面片并追加到全局数组
+## use_local_space=true 时顶点使用 chunk 局部坐标（适合独立 MeshInstance3D）
 static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3i,
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
-		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array) -> void:
+		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
+		use_local_space: bool = false) -> void:
 	var chunk_origin := chunk * CHUNK_SIZE
+	var origin_offset := Vector3(chunk_origin) * scale if use_local_space else Vector3.ZERO
 
 	for x in CHUNK_SIZE:
 		for y in CHUNK_SIZE:
@@ -185,7 +247,7 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 						continue
 					_add_face(solid_verts, solid_normals, solid_uvs, solid_idxs,
 						trans_verts, trans_normals, trans_uvs, trans_idxs,
-						pos, mat_id, face_idx, scale, is_trans)
+						pos, mat_id, face_idx, scale, is_trans, origin_offset)
 
 
 static func _get_mat(materials, mat_id: int):
@@ -201,16 +263,18 @@ const _DIRS: Array[Vector3i] = [
 
 
 ## 添加一个面（两个三角形，6 顶点）
+## origin_offset 用于将顶点偏移到局部坐标（per-chunk mesh 使用）
 ## 与 VoxelMeshGenerator 共用 FaceTool.Faces 面片数据，确保法线/缠绕方向完全一致
 static func _add_face(
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
 		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
-		pos: Vector3i, mat_id: int, face_idx: int, scale: float, is_trans: bool) -> void:
+		pos: Vector3i, mat_id: int, face_idx: int, scale: float, is_trans: bool,
+		origin_offset: Vector3 = Vector3.ZERO) -> void:
 	var normal: Vector3 = FaceTool.Normals[face_idx]
 	var u := VoxelMaterial.uv_for_id(mat_id)
 	# FaceTool.Faces[face_idx] 已按 CCW 拆好 6 个顶点（两个三角形）
 	for point: Vector3 in FaceTool.Faces[face_idx]:
-		var world_pos := (Vector3(pos) + point) * scale
+		var world_pos := (Vector3(pos) + point) * scale - origin_offset
 		if is_trans:
 			trans_verts.append(world_pos)
 			trans_normals.append(normal)
