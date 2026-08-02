@@ -172,11 +172,9 @@ func _process(_delta: float) -> void:
 			if _pending_retrigger and data:
 				saved_dirty = data.dirty_voxels.duplicate()
 
-			var t_apply := Time.get_ticks_usec()
 			_build_and_apply_mesh(arrays)
-			var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
-			last_apply_time_ms = apply_ms
-			_record_perf_stats(affected_count, gen_time_ms, apply_ms)
+			# _build_and_apply_mesh 内部已设置 last_apply_time_ms
+			_record_perf_stats(affected_count, gen_time_ms, last_apply_time_ms)
 
 			# 若任务运行期间有新变更，立即重新生成（用最新数据）
 			if _pending_retrigger:
@@ -389,56 +387,17 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 		print("[诊断] 任务 gen_id=%d 被丢弃，当前 _generation_id=%d" % [gen_id, _generation_id])
 
 
-## P1: 并行生成多个 chunk 的网格数据（使用 WorkerThreadPool.add_group_task）
-## 在子线程中调用，返回 {chunk_key: {solid_verts, ...}} 
+## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）
+## 注意：此函数在工作线程内调用，禁止使用 add_group_task 等嵌套线程池调用
 static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scale: float,
 		chunk_keys: Array[Vector3i]) -> Dictionary:
-	var count := chunk_keys.size()
-	# 少量 chunk 时直接串行，避免线程池调度开销
-	if count <= 4:
-		var aligned := VoxelMaterial.align_by_id(materials)
-		var result := {}
-		for ck in chunk_keys:
-			var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, ck)
-			if not arr.is_empty():
-				result[ck] = arr
-		return result
-
-	# 并行路径：使用 add_group_task 分发到多个线程
 	var aligned := VoxelMaterial.align_by_id(materials)
-	# 预分配结果数组，每个 slot 对应一个 chunk
-	var results: Array = []
-	results.resize(count)
-
-	# 分发到线程池，callable 会收到 task_index (0..count-1) 作为第一个参数
-	var group_id := WorkerThreadPool.add_group_task(
-		_chunk_gen_worker.bind(voxels, aligned, scale, results, chunk_keys),
-		count, false)
-	WorkerThreadPool.wait_for_group_task_completion(group_id)
-
-	# 收集结果
-	var chunk_arrays := {}
-	var empty_count := 0
-	for i in range(count):
-		var arr: Dictionary = results[i] as Dictionary
-		if arr != null and not arr.is_empty():
-			chunk_arrays[chunk_keys[i]] = arr
-		else:
-			empty_count += 1
-	if empty_count > 0:
-		print("[诊断] 并行生成: %d 个 Chunk 中 %d 个为空（快照中已无体素）" % [count, empty_count])
-	return chunk_arrays
-
-
-## 单个 chunk 的并行生成任务（由 WorkerThreadPool.add_group_task 调用）
-## Godot 4.7+ API: callable 收到 task_index (int) 作为第一个参数
-static func _chunk_gen_worker(task_index: int, voxels: Dictionary, aligned_materials: Array,
-		scale: float, results: Array, chunk_keys: Array[Vector3i]) -> void:
-	var ck := chunk_keys[task_index]
-	# 调用 ChunkGenerator 生成单个 chunk 的网格数据
-	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned_materials, scale, ck)
-	# 写入预分配数组的对应 slot（每个线程写不同 slot，无需互斥锁）
-	results[task_index] = arr if arr else {}
+	var result := {}
+	for ck in chunk_keys:
+		var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, ck)
+		if not arr.is_empty():
+			result[ck] = arr
+	return result
 
 
 ## 同步路径：主线程直接生成并应用（兼容模式）
@@ -471,10 +430,9 @@ func _update_mesh_sync() -> void:
 		last_solid_vertices = sv; last_trans_vertices = tv
 		last_solid_triangles = sv / 3; last_trans_triangles = tv / 3
 		last_total_chunks = chunk_arrays.size()
-		var t_apply := Time.get_ticks_usec()
 		_build_and_apply_chunk_meshes(chunk_arrays)
-		var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
-		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, apply_ms)
+		# _build_and_apply_chunk_meshes 内部在 mesh_updated 前设置了 last_apply_time_ms
+		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, last_apply_time_ms)
 		return
 
 	# 全量重建（组合模式）
@@ -488,10 +446,9 @@ func _update_mesh_sync() -> void:
 		last_trans_triangles = last_trans_vertices / 3
 		last_total_chunks = 1
 		last_rebuild_affected_count = 1
-	var t_apply2 := Time.get_ticks_usec()
 	_build_and_apply_mesh(arrays)
-	var apply_ms2 := (Time.get_ticks_usec() - t_apply2) / 1000.0
-	_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, apply_ms2)
+	# _build_and_apply_mesh 内部已设置 last_apply_time_ms
+	_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, last_apply_time_ms)
 
 
 ## 将网格数据组装为 ArrayMesh 并应用到节点（必须主线程）
@@ -501,6 +458,7 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 		_build_and_apply_chunk_meshes(arrays as Dictionary)
 		return
 
+	var t0 := Time.get_ticks_usec()
 	var new_mesh: ArrayMesh
 	if arrays != null and arrays is Dictionary and not arrays.is_empty():
 		new_mesh = VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
@@ -527,6 +485,8 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 	# 重建完成，清空变更追踪
 	if data:
 		data.clear_dirty_voxels()
+	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
+	last_apply_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	mesh_updated.emit()
 
 
@@ -577,6 +537,7 @@ func _clear_chunk_collisions() -> void:
 ## 将 per-chunk 网格数据应用到子 MeshInstance3D
 ## 注意：chunk_arrays 中可能包含空 chunk（空字典），用于清空已无体素的 chunk mesh
 func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
+	var t_start := Time.get_ticks_usec()
 	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
 
 	# 收集本次重建涉及的所有 chunk key
@@ -652,6 +613,8 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 	# 清理变更追踪
 	if data:
 		data.clear_dirty_voxels()
+	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
+	last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0
 	mesh_updated.emit()
 
 
