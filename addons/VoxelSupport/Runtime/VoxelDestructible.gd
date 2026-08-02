@@ -90,6 +90,9 @@ var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 ## 逐体素累计伤害 (位置 -> 累计伤害)
 var damage_map: Dictionary[Vector3i, float] = {}
 
+## 延迟移除队列：每帧处理一个批次，将破坏逻辑分摊到多帧
+var _queued_damage_batches: Array[Dictionary] = []
+
 var _debris_root: Node3D = null
 var _debris_pool: Array[RigidBody3D] = []          # 物理碎片对象池 (空闲)
 var _settled_debris: Array[RigidBody3D] = []       # 已落地保留的碎片
@@ -124,33 +127,42 @@ func _exit_tree() -> void:
 
 ## 球形破坏: 对中心点半径内的体素造成伤害
 ## center 为体素空间坐标 (1单位 = 1体素)，radius 单位同上
-## 返回实际被移除(彻底摧毁)的体素位置数组
+## 仅更新 damage_map（即时），实际移除在下一帧统一处理
+## 返回被判定为应移除的体素位置数组（基于累计伤害）
 func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var t0 := Time.get_ticks_usec()
 	var positions := data.get_voxels_in_sphere(center, radius)
 	var mat_map := _collect_voxel_materials(positions)
-	var removed := _apply_damage(positions, mat_map, damage_per_voxel, do_spawn)
+	# 1. 即时：更新 damage_map
+	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
+	# 2. 即时：伤害范围内的碎片
+	_damage_debris_in_sphere(center, radius)
+	# 3. 队列：实际移除 + 崩塌 + 碎片生成在下一帧统一处理
 	if not removed.is_empty():
-		_after_removal(removed)
-	last_damage_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		_queued_damage_batches.append({
+			"removed": removed,
+			"spawn_debris": do_spawn,
+		})
 	return removed
 
 
 ## 盒形破坏
+## 仅更新 damage_map（即时），实际移除在下一帧统一处理
 func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var t0 := Time.get_ticks_usec()
 	var positions := data.get_voxels_in_box(aabb)
 	var mat_map := _collect_voxel_materials(positions)
-	var removed := _apply_damage(positions, mat_map, damage_per_voxel, do_spawn)
+	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
+	_damage_debris_in_box(aabb)
 	if not removed.is_empty():
-		_after_removal(removed)
-	last_damage_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		_queued_damage_batches.append({
+			"removed": removed,
+			"spawn_debris": do_spawn,
+		})
 	return removed
 
 
@@ -160,9 +172,12 @@ func damage_voxel(pos: Vector3i, spawn_debris: Variant = null) -> bool:
 		return false
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	var mat_map := _collect_voxel_materials([pos])
-	var removed := _apply_damage([pos], mat_map, damage_per_voxel, do_spawn)
+	var removed := _apply_damage_immediate([pos], mat_map, damage_per_voxel)
 	if not removed.is_empty():
-		_after_removal(removed)
+		_queued_damage_batches.append({
+			"removed": removed,
+			"spawn_debris": do_spawn,
+		})
 	return not removed.is_empty()
 
 
@@ -239,11 +254,11 @@ func repair(amount: float) -> void:
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
 
-## 对一组体素应用伤害，返回实际被彻底移除的体素
-## 若开启逐体素健康度，累计伤害达到材质 hardness 才移除；否则一击即碎
-func _apply_damage(positions: Array, mat_map: Dictionary, damage: float, do_spawn: bool) -> Array:
+## 即时伤害应用：只更新 damage_map，不实际移除体素
+## 返回应被移除的体素位置（基于累计伤害判断）
+## 实际移除在 _process 中逐帧处理
+func _apply_damage_immediate(positions: Array, mat_map: Dictionary, damage: float) -> Array:
 	var removed: Array = []
-	var damaged_but_alive: Array = []
 	for pos in positions:
 		var mat_id: int = mat_map.get(pos, -1)
 		if not use_voxel_health:
@@ -255,28 +270,12 @@ func _apply_damage(positions: Array, mat_map: Dictionary, damage: float, do_spaw
 			continue
 		var cur: float = float(damage_map.get(pos, 0.0)) + damage
 		if cur >= hardness:
-			# 伤害足够，摧毁体素
 			damage_map.erase(pos)
 			removed.append(pos)
 		else:
 			damage_map[pos] = cur
-			damaged_but_alive.append([pos, hardness - cur])
-
-	# 实际移除已摧毁的体素
-	if not removed.is_empty():
-		data.remove_voxels(removed)
-
-	# 发出"受伤但未摧毁"反馈
-	for entry in damaged_but_alive:
-		voxel_hardened.emit(entry[0], entry[1])
-
-	# 生成碎片 (仅对已移除的体素)
-	if do_spawn and not Engine.is_editor_hint() and not removed.is_empty():
-		var removed_map := {}
-		for pos in removed:
-			removed_map[pos] = mat_map.get(pos, -1)
-		_spawn_debris_with_materials(removed, removed_map)
-
+			# 发出"受伤但未摧毁"反馈
+			voxel_hardened.emit(pos, hardness - cur)
 	last_damage_count = removed.size()
 	return removed
 
@@ -290,11 +289,9 @@ func _get_material_hardness(mat_id: int) -> float:
 
 
 ## 破坏后的统一处理：崩塌检测 + 整体健康度扣减
-## removed 为本次破坏移除的体素位置，用于局部支撑检测（只在破坏位置附近做 BFS）
+## 在 _process 延迟处理中调用（每帧一个批次）
 func _after_removal(removed: Array) -> void:
-	# 触发悬空崩塌（局部检测：只检查破坏位置附近的悬空）
 	_trigger_collapse(removed)
-	# 整体健康度扣减
 	if health >= 0:
 		health -= float(removed.size()) * 0.5
 		if health <= 0:
@@ -547,6 +544,7 @@ func _build_collapse_body(bd: Dictionary, arrays: Variant) -> void:
 	body.gravity_scale = debris_gravity_scale
 	body.sleeping = false
 	body.set_meta("_born_ms", Time.get_ticks_msec())
+	body.set_meta("_debris_hp", debris_hit_points)
 	_debris_root.add_child(body)
 	debris_count += 1
 
@@ -633,6 +631,7 @@ func _spawn_physics_debris(pos: Vector3i, mat_id: int, is_collapse: bool) -> voi
 	body.sleeping = false
 	# 记录出生时间，用于出生保护期（避免刚生成就被误判冻结）
 	body.set_meta("_born_ms", Time.get_ticks_msec())
+	body.set_meta("_debris_hp", debris_hit_points)
 	_debris_root.add_child(body)
 	if not _active_debris.has(body):
 		_active_debris.append(body)
@@ -665,14 +664,15 @@ func _acquire_debris_body(box_size: float) -> RigidBody3D:
 	return body
 
 
-## 物理碎片落地后转静态保留 + 轮询异步崩塌 mesh（由 _process 每帧检查）
+## 物理碎片落地后转静态保留 + 轮询异步崩塌 mesh + 延迟破坏（由 _process 每帧检查）
 func _process(_delta: float) -> void:
 	super._process(_delta)
 	if Engine.is_editor_hint():
 		return
-	# 轮询崩塌 mesh 异步生成结果，完成后创建整块刚体
 	_poll_collapse_task()
 	_settle_resting_debris()
+	# 每帧处理一个延迟破坏批次
+	_process_destruction_pipeline()
 
 
 ## 轮询后台崩塌 mesh 生成，完成则创建整块刚体
@@ -727,6 +727,97 @@ func _settle_resting_debris() -> void:
 		for k in overflow:
 			var rb: RigidBody3D = _settled_debris.pop_front()
 			_remove_physics_debris(rb)
+
+
+## 延迟破坏管道：每帧处理一个批次，将破坏逻辑分摊到多帧
+## 每个批次执行：data.remove_voxels → 崩塌检测 → 碎片生成
+func _process_destruction_pipeline() -> void:
+	if _queued_damage_batches.is_empty():
+		return
+
+	# 每帧只处理一个批次
+	var batch: Dictionary = _queued_damage_batches.pop_front()
+	var removed: Array = batch["removed"]
+	var do_spawn: bool = batch["spawn_debris"]
+
+	if removed.is_empty():
+		return
+
+	# 1. 实际移除体素（触发 mesh 脏标记 → 下一帧 _process 自动重建）
+	data.remove_voxels(removed)
+
+	# 2. 崩塌检测 + 悬空掉落
+	_after_removal(removed)
+
+	# 3. 生成碎片
+	if do_spawn and not Engine.is_editor_hint():
+		var mat_map := _collect_voxel_materials(removed)
+		_spawn_debris_with_materials(removed, mat_map)
+
+	# 4. 信号
+	voxel_damaged.emit(removed, do_spawn)
+
+
+# ----------------------------------------------------------------------------
+# 碎片血量系统：破坏时检查范围内的碎片，移除0血量碎片
+# ----------------------------------------------------------------------------
+
+## 碎片初始血量（被再次击中时扣减，归零则消失）
+@export var debris_hit_points: float = 1.0
+
+## 球形范围内伤害碎片
+func _damage_debris_in_sphere(center: Vector3, radius: float) -> void:
+	if not _debris_root:
+		return
+	var radius_sq := radius * radius
+	var to_remove: Array[RigidBody3D] = []
+	for child in _debris_root.get_children():
+		var rb := child as RigidBody3D
+		if not rb or not is_instance_valid(rb):
+			continue
+		# 用世界坐标距离判断
+		var dist_sq := (rb.global_position - center).length_squared()
+		if dist_sq > radius_sq:
+			continue
+		var hp := rb.get_meta("_debris_hp", debris_hit_points)
+		hp -= 1.0
+		if hp <= 0.0:
+			to_remove.append(rb)
+		else:
+			rb.set_meta("_debris_hp", hp)
+	for rb in to_remove:
+		_remove_debris_entirely(rb)
+
+
+## 盒形范围内伤害碎片
+func _damage_debris_in_box(aabb: AABB) -> void:
+	if not _debris_root:
+		return
+	var to_remove: Array[RigidBody3D] = []
+	for child in _debris_root.get_children():
+		var rb := child as RigidBody3D
+		if not rb or not is_instance_valid(rb):
+			continue
+		if not aabb.has_point(rb.global_position):
+			continue
+		var hp := rb.get_meta("_debris_hp", debris_hit_points)
+		hp -= 1.0
+		if hp <= 0.0:
+			to_remove.append(rb)
+		else:
+			rb.set_meta("_debris_hp", hp)
+	for rb in to_remove:
+		_remove_debris_entirely(rb)
+
+
+## 彻底移除碎片（从活跃/已落地/对象池中清除）
+func _remove_debris_entirely(rb: RigidBody3D) -> void:
+	if not rb or not is_instance_valid(rb):
+		return
+	_active_debris.erase(rb)
+	_settled_debris.erase(rb)
+	rb.queue_free()
+	debris_count = maxi(0, debris_count - 1)
 
 
 ## 移除碎片（落地保留的除外），释放到对象池
