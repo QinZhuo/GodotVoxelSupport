@@ -146,6 +146,7 @@ func _process(_delta: float) -> void:
 
 		# 检查结果是否有效（gen_id 匹配，避免使用过期结果）
 		var gen_id := result.get("gen_id", -1) if result else -1
+		print("[诊断] 异步任务完成 gen_id=%d 当前=%d _pending_retrigger=%s" % [gen_id, _generation_id, str(_pending_retrigger)])
 		if gen_id == _generation_id:
 			var arrays = result.get("arrays")
 			var gen_time_ms := result.get("gen_time_ms", 0.0) as float
@@ -155,6 +156,8 @@ func _process(_delta: float) -> void:
 			var total_chunks := result.get("total_chunks", 0) as int
 
 			# 在主线程更新统计信息（避免子线程写入节点属性的竞态条件）
+			# 【修复】在 _build_and_apply_mesh 之前设置所有统计信息，确保
+			# mesh_updated 信号触发时外部读取的数据已是本轮结果
 			last_mesh_gen_time_ms = gen_time_ms
 			last_solid_vertices = sv
 			last_trans_vertices = tv
@@ -162,6 +165,7 @@ func _process(_delta: float) -> void:
 			last_trans_triangles = tv / 3
 			last_total_chunks = total_chunks
 			last_rebuild_affected_count = affected_count
+			last_rebuild_chunk_count = affected_count
 
 			# 保存脏体素（_build_and_apply_mesh 会清空），用于 _pending_retrigger 重建
 			var saved_dirty: Dictionary = {}
@@ -171,11 +175,13 @@ func _process(_delta: float) -> void:
 			var t_apply := Time.get_ticks_usec()
 			_build_and_apply_mesh(arrays)
 			var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
+			last_apply_time_ms = apply_ms
 			_record_perf_stats(affected_count, gen_time_ms, apply_ms)
 
 			# 若任务运行期间有新变更，立即重新生成（用最新数据）
 			if _pending_retrigger:
 				_pending_retrigger = false
+				print("[诊断] 触发 Retrigger: 恢复脏体素=%d 启动新任务" % saved_dirty.size())
 				# 恢复脏体素，让增量重建能正确找到需要重建的 chunk
 				if data and not saved_dirty.is_empty():
 					for pos in saved_dirty:
@@ -192,6 +198,8 @@ func _process(_delta: float) -> void:
 	_update_counter = 0
 	# 若上一个异步任务仍在运行，标记"待更新"并等待其完成后自动重触发，避免并发任务堆积
 	if _task_id >= 0:
+		if not _pending_retrigger:
+			print("[诊断] 设置 _pending_retrigger（任务运行中数据又变化，等待完成后重建）")
 		_pending_retrigger = true
 		return
 	_update_mesh()
@@ -326,11 +334,15 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 		var affected_count := rebuild_chunks.size()
 		if rebuild_chunks.is_empty():
 			# 无脏体素时全量生成所有非空 chunk（初始构建或切换模式后）
+			if gen_id <= 1:
+				print("[诊断] 初始全量构建（gen_id=%d）..." % gen_id)
 			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
 				voxels, materials, {"scale": scale})
 			affected_count = chunk_arrays.size()
+			print("[诊断] 全量构建完成: %d 个非空 Chunk" % affected_count)
 		else:
 			# P1: 并行生成多个 chunk
+			print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
 			chunk_arrays = _generate_chunks_parallel(voxels, materials, scale, rebuild_chunks)
 		var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 		# 统计顶点/三角形数
@@ -372,6 +384,9 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 	if gen_id == _generation_id:
 		_pending_result = result
 		_has_pending = true
+	else:
+		# 诊断：任务结果因 gen_id 不匹配被丢弃（说明主线程已启动新任务覆盖）
+		print("[诊断] 任务 gen_id=%d 被丢弃，当前 _generation_id=%d" % [gen_id, _generation_id])
 
 
 ## P1: 并行生成多个 chunk 的网格数据（使用 WorkerThreadPool.add_group_task）
@@ -403,10 +418,15 @@ static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scal
 
 	# 收集结果
 	var chunk_arrays := {}
+	var empty_count := 0
 	for i in range(count):
 		var arr: Dictionary = results[i] as Dictionary
 		if arr != null and not arr.is_empty():
 			chunk_arrays[chunk_keys[i]] = arr
+		else:
+			empty_count += 1
+	if empty_count > 0:
+		print("[诊断] 并行生成: %d 个 Chunk 中 %d 个为空（快照中已无体素）" % [count, empty_count])
 	return chunk_arrays
 
 
@@ -559,12 +579,16 @@ func _clear_chunk_collisions() -> void:
 func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
 
-	# 收集本次重建涉及的所有 chunk key（含空 chunk）
+	# 收集本次重建涉及的所有 chunk key
 	var rebuilt_keys: Array[Vector3i] = []
 	for ck in chunk_arrays:
 		rebuilt_keys.append(ck)
 
+	# 诊断：记录重建规模
+	print("[诊断] 重建 Chunk=%d 已有Mesh=%d" % [rebuilt_keys.size(), _chunk_meshes.size()])
+
 	# 处理所有重建的 chunk
+	var cleared_count := 0
 	for ck in rebuilt_keys:
 		var arrays = chunk_arrays[ck]
 		# 获取或创建该 chunk 的子 MeshInstance3D
@@ -577,9 +601,16 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 			add_child(chunk_mesh)
 			_chunk_meshes[ck] = chunk_mesh
 
+		# 【修复】检查当前数据中该 chunk 是否已无体素（异步任务快照滞后导致）
+		# 如果 chunk 在快照中还有体素，但当前数据中已被完全破坏，清空其 mesh
+		var has_voxels_in_data := false
+		if data:
+			var current_voxels: Array = data.get_chunk_voxels(ck)
+			has_voxels_in_data = not current_voxels.is_empty()
+
 		# 构建 mesh
 		var has_mesh := false
-		if arrays is Dictionary and not arrays.is_empty():
+		if arrays is Dictionary and not arrays.is_empty() and has_voxels_in_data:
 			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
 			if new_mesh and _materials_cache.size() >= 2:
 				if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
@@ -589,7 +620,10 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 			chunk_mesh.mesh = new_mesh
 			has_mesh = new_mesh != null
 		else:
-			# chunk 已空，清空 mesh 但保留节点（后续可能重新获得体素）
+			# chunk 已空或当前数据中已无体素，清空 mesh 但保留节点
+			if not has_voxels_in_data and arrays is Dictionary and not arrays.is_empty():
+				cleared_count += 1
+				print("[诊断] Chunk %s 快照有体素但当前数据已空，清除 Mesh" % ck)
 			chunk_mesh.mesh = null
 
 		# 定位到 chunk 原点（使用局部坐标后，只需偏移 chunk 原点）
@@ -598,21 +632,22 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 		# Per-chunk 碰撞体
 		_update_chunk_collision(ck, has_mesh)
 
-	# 【修复】检查是否有 chunk 在重建后变为空但未被清理
+	# 检查是否有 chunk 在重建后变为空但未被清理（不在 rebuilt_keys 中的）
 	# 遍历所有已存在的 chunk mesh，如果不在本次重建列表中且已无体素，清空其 mesh
 	for ck in _chunk_meshes.keys():
 		if rebuilt_keys.has(ck):
 			continue  # 已在本轮重建中处理
 		# 检查该 chunk 是否已无体素
 		if data:
-			var has_voxels := false
-			# 快速检查：用 VoxelData 的 chunk 索引加速查询
 			var chunk_positions: Array = data.get_chunk_voxels(ck)
-			if chunk_positions and not chunk_positions.is_empty():
-				has_voxels = true
-			if not has_voxels:
+			if chunk_positions.is_empty():
+				cleared_count += 1
+				print("[诊断] Chunk %s 不在重建列表且已无体素，清除旧 Mesh" % ck)
 				_chunk_meshes[ck].mesh = null
 				_remove_chunk_collision(ck)
+
+	if cleared_count > 0:
+		print("[诊断] 本轮共清除 %d 个空 Chunk Mesh" % cleared_count)
 
 	# 清理变更追踪
 	if data:

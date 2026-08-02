@@ -724,14 +724,10 @@ Chunk数: %d  |  碎片数: %d
 		shell_thickness, floor_count,
 	]
 
-	# 性能日志显示（仅当开关打开时，且每帧只做简单字符串拼接）
+	# 性能日志仅在 Godot 控制台输出（不再显示在 UI 中）
+	# 日志由 _log_perf_line 统一管理，自动打印到控制台
 	if _show_perf_log and _perf_log_label:
-		_perf_log_label.text = "=== 性能日志 (%d帧) ===\n" % _frame_count
-		_perf_log_label.text += "当前体素: %d | 已破坏: %d | 重建: %.1fms\n" % [vc, destroyed, mgt]
-		_perf_log_label.text += "重建Chunk: %d | 三角: %d | 应用: %.1fms\n" % [rebuild_chunks, total_tris, apply_time]
-		_perf_log_label.text += "--- 时间线 ---\n"
-		for line in _perf_log:
-			_perf_log_label.text += line + "\n"
+		_perf_log_label.text = "日志已输出到 Godot 控制台\n按 T 切换显示"
 
 
 ## 重新计算统计缓存（仅在数据变化时调用）
