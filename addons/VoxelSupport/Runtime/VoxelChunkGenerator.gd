@@ -219,7 +219,8 @@ static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Ar
 	return result
 
 
-## 生成单个 chunk 的面片并追加到全局数组
+## 生成单个 chunk 的面片并追加到全局数组（贪婪网格）
+## 使用贪婪网格算法：将相邻同材质面合并为更大的四边形，大幅减少三角形数。
 ## use_local_space=true 时顶点使用 chunk 局部坐标（适合独立 MeshInstance3D）
 static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3i,
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
@@ -228,26 +229,90 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 	var chunk_origin := chunk * CHUNK_SIZE
 	var origin_offset := Vector3(chunk_origin) * scale if use_local_space else Vector3.ZERO
 
-	for x in CHUNK_SIZE:
-		for y in CHUNK_SIZE:
-			for z in CHUNK_SIZE:
-				var pos := chunk_origin + Vector3i(x, y, z)
-				var mat_id: int = voxels.get(pos, -1)
-				if mat_id < 0:
-					continue
-				var mat = _get_mat(materials, mat_id)
-				var is_trans: bool = mat != null and mat.trans > 0
-				for face_idx in 6:
-					var dir: Vector3i = _DIRS[face_idx]
-					var n_id: int = voxels.get(pos + dir, -1)
-					var n_mat = _get_mat(materials, n_id)
-					var n_trans: bool = n_mat != null and n_mat.trans > 0
-					var visible := n_id < 0 or (is_trans != n_trans) or (mat_id != n_id)
-					if not visible:
+	# 对每个面方向独立处理
+	for face_idx in 6:
+		var dir: Vector3i = _DIRS[face_idx]
+		var axis_info: Dictionary = _FACE_AXES[face_idx]
+		var perp := axis_info.perp as int
+		var u_axis := axis_info.u as int
+		var v_axis := axis_info.v as int
+
+		# 1. 收集该方向所有可见面，按切片 (perp轴) 分组
+		# slices[slice_key] = { Vector2i(u,v): mat_id }
+		var slices := {}
+		for x in CHUNK_SIZE:
+			for y in CHUNK_SIZE:
+				for z in CHUNK_SIZE:
+					var pos := chunk_origin + Vector3i(x, y, z)
+					var mat_id: int = voxels.get(pos, -1)
+					if mat_id < 0:
 						continue
-					_add_face(solid_verts, solid_normals, solid_uvs, solid_idxs,
-						trans_verts, trans_normals, trans_uvs, trans_idxs,
-						pos, mat_id, face_idx, scale, is_trans, origin_offset)
+					# 检查邻面是否可见
+					var n_id: int = voxels.get(pos + dir, -1)
+					if n_id >= 0:
+						var mat = _get_mat(materials, mat_id)
+						var n_mat = _get_mat(materials, n_id)
+						var is_trans: bool = mat != null and mat.trans > 0
+						var n_trans: bool = n_mat != null and n_mat.trans > 0
+						if is_trans == n_trans and mat_id == n_id:
+							continue  # 相同材质且透明度一致 → 内部面，不可见
+					# 可见面
+					var slice_key := pos[perp]
+					var uv := Vector2i(pos[u_axis], pos[v_axis])
+					if not slices.has(slice_key):
+						slices[slice_key] = {}
+					slices[slice_key][uv] = mat_id
+
+		# 2. 使用共享贪婪合并器处理每个切片
+		for slice_key in slices:
+			var grid: Dictionary = slices[slice_key]
+			var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge(grid)
+			for rect in rects:
+				# 生成一个合并后的大四边形
+				var pos := Vector3i.ZERO
+				pos[perp] = slice_key
+				pos[u_axis] = rect.position.x
+				pos[v_axis] = rect.position.y
+				var size := Vector3i(1, 1, 1)
+				size[u_axis] = rect.size.x
+				size[v_axis] = rect.size.y
+
+				_add_greedy_face(
+					solid_verts, solid_normals, solid_uvs, solid_idxs,
+					trans_verts, trans_normals, trans_uvs, trans_idxs,
+					pos, rect.value, face_idx, scale, size,
+					materials, origin_offset)
+
+
+## 添加一个贪婪合并后的面（大四边形，2 三角形）
+## size 控制面的大小（体素单位），用于合并相邻面
+## 与 VoxelMeshGenerator 的缩放方案一致：point * size + pos
+static func _add_greedy_face(
+		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
+		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
+		pos: Vector3i, mat_id: int, face_idx: int, scale: float, size: Vector3i,
+		materials, origin_offset: Vector3) -> void:
+	var normal: Vector3 = FaceTool.Normals[face_idx]
+	var u := VoxelMaterial.uv_for_id(mat_id)
+
+	# 判断是否透明
+	var mat = _get_mat(materials, mat_id)
+	var is_trans: bool = mat != null and mat.trans > 0
+
+	# 顶点位置：pos + point * size
+	# 与 VoxelMeshGenerator._generate_size_dir_face 一致
+	for point: Vector3 in FaceTool.Faces[face_idx]:
+		var world_pos := (Vector3(pos) + point * Vector3(size)) * scale - origin_offset
+		if is_trans:
+			trans_verts.append(world_pos)
+			trans_normals.append(normal)
+			trans_uvs.append(Vector2(u, 0.0))
+			trans_idxs.append(trans_verts.size() - 1)
+		else:
+			solid_verts.append(world_pos)
+			solid_normals.append(normal)
+			solid_uvs.append(Vector2(u, 0.0))
+			solid_idxs.append(solid_verts.size() - 1)
 
 
 static func _get_mat(materials, mat_id: int):
@@ -259,6 +324,17 @@ const _DIRS: Array[Vector3i] = [
 	Vector3i(FaceTool.Normals[0]), Vector3i(FaceTool.Normals[1]),
 	Vector3i(FaceTool.Normals[2]), Vector3i(FaceTool.Normals[3]),
 	Vector3i(FaceTool.Normals[4]), Vector3i(FaceTool.Normals[5]),
+]
+
+# 每个面的轴向信息：{perp(切片轴), u(水平轴), v(垂直轴)}
+# 用于贪婪网格的 2D 扫描合并
+const _FACE_AXES: Array[Dictionary] = [
+	{perp=0, u=1, v=2},  # +X
+	{perp=0, u=1, v=2},  # -X
+	{perp=1, u=0, v=2},  # +Y
+	{perp=1, u=0, v=2},  # -Y
+	{perp=2, u=0, v=1},  # +Z
+	{perp=2, u=0, v=1},  # -Z
 ]
 
 

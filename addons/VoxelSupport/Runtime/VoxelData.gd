@@ -27,6 +27,14 @@ extends Resource
 ## 调用 clear_dirty_voxels() 清空
 var dirty_voxels: Dictionary[Vector3i, int] = {}
 
+## Chunk 大小（与 VoxelChunkGenerator 保持一致，用于空间查询分块加速）
+const CHUNK_SIZE := 32
+
+## Chunk 索引缓存：{chunk_key: Array[Vector3i]}，用于快速空间查询
+## 数据变更时自动失效，首次查询时重建
+var _chunk_index: Dictionary = {}
+var _chunk_index_dirty: bool = true
+
 ## 6 方向邻居偏移（上下左右前后），连通性 BFS/泛洪共用
 const NEIGHBORS_6: Array[Vector3i] = [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
@@ -105,6 +113,7 @@ func get_voxel(pos: Vector3i) -> int:
 
 ## 设置指定位置的体素 (material_id < 0 时移除)
 func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
+	_invalidate_chunk_index()
 	if material_id < 0:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1
@@ -117,6 +126,7 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 
 ## 移除指定位置的体素
 func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
+	_invalidate_chunk_index()
 	voxels.erase(pos)
 	dirty_voxels[pos] = -1
 	if notify:
@@ -140,6 +150,7 @@ func get_voxel_count() -> int:
 
 ## 清空所有体素
 func clear(notify: bool = true) -> void:
+	_invalidate_chunk_index()
 	for pos in voxels:
 		dirty_voxels[pos] = -1
 	voxels.clear()
@@ -149,6 +160,7 @@ func clear(notify: bool = true) -> void:
 
 ## 合并另一个资源中的体素 (可带偏移)
 func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
+	_invalidate_chunk_index()
 	for pos in other.voxels:
 		voxels[pos + offset] = other.voxels[pos]
 		dirty_voxels[pos + offset] = other.voxels[pos]
@@ -204,22 +216,120 @@ static func _calc_bounds(voxels: Dictionary) -> Array:
 	return [min_pos, max_pos]
 
 
+# ----------------------------------------------------------------------------
+# Chunk 索引加速（空间查询）
+# ----------------------------------------------------------------------------
+
+## 体素坐标 → chunk key
+static func _chunk_of(pos: Vector3i) -> Vector3i:
+	return Vector3i(
+		pos.x / CHUNK_SIZE,
+		pos.y / CHUNK_SIZE,
+		pos.z / CHUNK_SIZE
+	)
+
+
+## 构建 chunk 索引：{chunk_key: Array[Vector3i]}
+func _build_chunk_index() -> void:
+	_chunk_index.clear()
+	for pos in voxels:
+		var ck := _chunk_of(pos)
+		if not _chunk_index.has(ck):
+			_chunk_index[ck] = []
+		_chunk_index[ck].append(pos)
+	_chunk_index_dirty = false
+
+
+## 懒构建：仅在脏时重建
+func _build_chunk_index_if_dirty() -> void:
+	if _chunk_index_dirty:
+		_build_chunk_index()
+
+
+## 标记索引失效（体素数据变更时调用）
+func _invalidate_chunk_index() -> void:
+	_chunk_index_dirty = true
+
+
+## 获取与球体重叠的 chunk 列表
+func _get_chunks_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
+	if radius <= 0:
+		return []
+	# 球体包围盒
+	var center_v := Vector3i(center)
+	var r_ceil := ceili(radius)
+	var min_pos := center_v - Vector3i(r_ceil, r_ceil, r_ceil)
+	var max_pos := center_v + Vector3i(r_ceil, r_ceil, r_ceil)
+	var min_ck := _chunk_of(min_pos)
+	var max_ck := _chunk_of(max_pos)
+	var result: Array[Vector3i] = []
+	for x in range(min_ck.x, max_ck.x + 1):
+		for y in range(min_ck.y, max_ck.y + 1):
+			for z in range(min_ck.z, max_ck.z + 1):
+				var ck := Vector3i(x, y, z)
+				# 快速检查：chunk 的 AABB 是否与球体相交
+				var chunk_origin := Vector3(ck * CHUNK_SIZE)
+				var chunk_center := chunk_origin + Vector3(CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5)
+				var chunk_radius := Vector3(CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5).length()
+				if (chunk_center - center).length() <= radius + chunk_radius:
+					result.append(ck)
+	return result
+
+
+## 获取与盒体重叠的 chunk 列表
+func _get_chunks_in_box(aabb: AABB) -> Array[Vector3i]:
+	if aabb.size.length_squared() <= 0:
+		return []
+	var min_pos := Vector3i(aabb.position)
+	var max_pos := Vector3i(aabb.position + aabb.size)
+	var min_ck := _chunk_of(min_pos)
+	var max_ck := _chunk_of(max_pos)
+	var result: Array[Vector3i] = []
+	for x in range(min_ck.x, max_ck.x + 1):
+		for y in range(min_ck.y, max_ck.y + 1):
+			for z in range(min_ck.z, max_ck.z + 1):
+				result.append(Vector3i(x, y, z))
+	return result
+
+
 ## 查询球形范围内的所有体素位置 (只读，不修改)
+## 使用 Chunk 索引加速：先找出与球体重叠的 chunk，再只查询这些 chunk 内的体素
 func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
+	if voxels.is_empty():
+		return result
 	var radius_sq := radius * radius
-	for pos in voxels:
-		if (Vector3(pos) - center).length_squared() <= radius_sq:
-			result.append(pos)
+	# 获取与球体重叠的 chunk
+	var overlap_chunks := _get_chunks_in_sphere(center, radius)
+	if overlap_chunks.is_empty():
+		return result
+	# 只查询这些 chunk 内的体素
+	_build_chunk_index_if_dirty()
+	for ck in overlap_chunks:
+		var positions: Array = _chunk_index.get(ck, [])
+		for pos in positions:
+			if (Vector3(pos) - center).length_squared() <= radius_sq:
+				result.append(pos)
 	return result
 
 
 ## 查询盒形范围内的所有体素位置 (只读，不修改)
+## 使用 Chunk 索引加速：先找出与盒体重叠的 chunk，再只查询这些 chunk 内的体素
 func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
-	for pos in voxels:
-		if aabb.has_point(Vector3(pos)):
-			result.append(pos)
+	if voxels.is_empty():
+		return result
+	# 获取与盒体重叠的 chunk
+	var overlap_chunks := _get_chunks_in_box(aabb)
+	if overlap_chunks.is_empty():
+		return result
+	# 只查询这些 chunk 内的体素
+	_build_chunk_index_if_dirty()
+	for ck in overlap_chunks:
+		var positions: Array = _chunk_index.get(ck, [])
+		for pos in positions:
+			if aabb.has_point(Vector3(pos)):
+				result.append(pos)
 	return result
 
 
@@ -242,6 +352,7 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
+	_invalidate_chunk_index()
 	for pos in positions:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1

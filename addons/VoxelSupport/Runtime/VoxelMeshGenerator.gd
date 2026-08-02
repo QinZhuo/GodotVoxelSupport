@@ -330,25 +330,20 @@ func _generate_dir_face(task) -> void:
 		if slices.has(slice_index):
 			var slice_voxels_visible = _get_dir_visible_slice_voxels(slices, axis, task.dir, slice_index)
 			if slice_voxels_visible.size() > 0:
-				# 只遍历该切片中非空体素的局部边界范围，而非整个网格 AABB
-				var pos: Vector3i
-				pos[axis.x] = slice_index
-				var local_min_y := pos_min[axis.y]
-				var local_max_y := pos_max[axis.y]
-				var local_min_z := pos_min[axis.z]
-				var local_max_z := pos_max[axis.z]
-				# 根据可见体素集合收缩边界（稀疏场景收益显著）
+				# 转换为 2D 网格，使用共享贪婪合并器
+				var grid := {}
 				for p: Vector3i in slice_voxels_visible:
-					if p[axis.y] < local_min_y: local_min_y = p[axis.y]
-					if p[axis.y] > local_max_y: local_max_y = p[axis.y]
-					if p[axis.z] < local_min_z: local_min_z = p[axis.z]
-					if p[axis.z] > local_max_z: local_max_z = p[axis.z]
-				for y in range(local_min_y, local_max_y + 1):
-					pos[axis.y] = y
-					for z in range(local_min_z, local_max_z + 1):
-						pos[axis.z] = z
-						if slice_voxels_visible.has(pos):
-							_generate_voxel_dir_face(slice_voxels_visible, axis, pos, task.dir, surfaces)
+					grid[Vector2i(p[axis.y], p[axis.z])] = slice_voxels_visible[p]
+				var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge(grid)
+				for rect in rects:
+					var pos: Vector3i
+					pos[axis.x] = slice_index
+					pos[axis.y] = rect.position.x
+					pos[axis.z] = rect.position.y
+					var size: Vector3 = Vector3.ONE
+					size[axis.y] = rect.size.x
+					size[axis.z] = rect.size.y
+					_generate_size_dir_face(slice_voxels_visible, axis, pos, size, task.dir, surfaces)
 	task.meshes = [surfaces[0].commit(), surfaces[1].commit()]
 
 
@@ -379,15 +374,6 @@ func _get_dir_visible_slice_voxels(slices: Dictionary, axis: Vector3i, dir: int,
 			voxels[pos] = slice[pos]
 	return voxels
 
-func _generate_voxel_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, dir: int, surfaces: Array[SurfaceTool]) -> void:
-	var length: int = _get_max_length(voxels, pos, axis.y)
-	var width: int = _get_max_width(voxels, pos, axis.z, axis.y, length)
-	var size: Vector3 = Vector3.ONE
-	size[axis.y] = length
-	size[axis.z] = width
-	_generate_size_dir_face(voxels, axis, pos, size, dir, surfaces)
-
-
 func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, size: Vector3, dir: int, surfaces: Array[SurfaceTool]):
 	var id: int = voxels[pos]
 
@@ -411,28 +397,3 @@ func _generate_size_dir_face(voxels: Dictionary, axis: Vector3i, pos: Vector3i, 
 			voxels.erase(cur_pos)
 			cur_pos[axis.z] += 1
 		cur_pos[axis.y] += 1
-
-
-func _get_max_length(voxels: Dictionary, pos: Vector3i, axis: int, max_length: int = -1) -> int:
-	var value: int = voxels[pos]
-	var cur_pos: Vector3i = pos
-	cur_pos[axis] += 1
-	var size := 1
-
-	while voxels.has(cur_pos) and voxels[cur_pos] == value:
-		cur_pos[axis] += 1
-		size += 1
-		if max_length > 0 and size >= max_length:
-			break
-	return size
-
-func _get_max_width(voxels: Dictionary, pos: Vector3i, width_axis: int, length_axis: int, length: int) -> int:
-	var value: int = voxels[pos]
-	var cur_pos: Vector3i = pos
-	cur_pos[width_axis] += 1
-	var size := 1
-
-	while voxels.has(cur_pos) and voxels[cur_pos] == value and _get_max_length(voxels, cur_pos, length_axis, length) >= length:
-		cur_pos[width_axis] += 1
-		size += 1
-	return size
