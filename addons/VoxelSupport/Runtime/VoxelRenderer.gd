@@ -96,6 +96,60 @@ var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
 
+## 性能追踪：上次生成的顶点数/三角形数
+var last_solid_vertices: int = 0
+var last_trans_vertices: int = 0
+var last_solid_triangles: int = 0
+var last_trans_triangles: int = 0
+var last_total_chunks: int = 0
+
+## 性能追踪：最近一次重建的 chunk 数量与耗时明细
+var last_rebuild_chunk_count: int = 0      ## 本次重建的 chunk 数
+var last_rebuild_affected_count: int = 0   ## 受影响的 chunk 数（含相邻边界）
+var last_mesh_gen_time_slice_ms: float = 0.0  ## 生成阶段耗时（不含 apply）
+var last_apply_time_ms: float = 0.0        ## 应用到场景的耗时 (ms)
+
+## 累计性能统计（滚动窗口，最近 N 帧）
+var perf_stats: Dictionary = {
+	"chunk_counts": [],       # 每次重建的 chunk 数
+	"gen_times": [],          # 每次生成耗时
+	"apply_times": [],        # 每次应用耗时
+	"total_triangles": [],    # 每次三角形总数
+	"max_samples": 200,       # 最大采样数
+	"total_gen_time": 0.0,    # 累计生成耗时
+	"total_apply_time": 0.0,  # 累计应用耗时
+	"sample_count": 0,        # 采样次数
+}
+
+## 记录一次性能统计采样
+func _record_perf_stats(chunk_count: int, gen_time_ms: float, apply_time_ms: float) -> void:
+	last_rebuild_chunk_count = chunk_count
+	last_mesh_gen_time_slice_ms = gen_time_ms
+	last_apply_time_ms = apply_time_ms
+	
+	var stats := perf_stats
+	var max_s := stats["max_samples"] as int
+	var cc := stats["chunk_counts"] as Array
+	var gt := stats["gen_times"] as Array
+	var at_arr := stats["apply_times"] as Array
+	var tt := stats["total_triangles"] as Array
+	
+	cc.append(chunk_count)
+	gt.append(gen_time_ms)
+	at_arr.append(apply_time_ms)
+	tt.append(last_solid_triangles + last_trans_triangles)
+	
+	# 限制滚动窗口大小
+	while cc.size() > max_s: cc.pop_front()
+	while gt.size() > max_s: gt.pop_front()
+	while at_arr.size() > max_s: at_arr.pop_front()
+	while tt.size() > max_s: tt.pop_front()
+	
+	stats["total_gen_time"] = stats["total_gen_time"] as float + gen_time_ms
+	stats["total_apply_time"] = stats["total_apply_time"] as float + apply_time_ms
+	stats["sample_count"] = stats["sample_count"] as int + 1
+
+
 const _COLLISION_BODY_NAME := "_VoxelRendererCollision"
 
 
@@ -117,7 +171,10 @@ func _process(_delta: float) -> void:
 		if _pending_retrigger and data:
 			saved_dirty = data.dirty_voxels.duplicate()
 
+		var t_apply := Time.get_ticks_usec()
 		_build_and_apply_mesh(arrays)
+		var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
+		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, apply_ms)
 
 		# 若任务运行期间有新变更，立即重新生成（用最新数据）
 		if _pending_retrigger:
@@ -268,14 +325,27 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 	if use_chunk:
 		var t0 := Time.get_ticks_usec()
 		var chunk_arrays: Dictionary
+		var affected_count := rebuild_chunks.size()
 		if rebuild_chunks.is_empty():
 			# 无脏体素时全量生成所有非空 chunk（初始构建或切换模式后）
 			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
 				voxels, materials, options)
+			affected_count = chunk_arrays.size()
 		else:
 			chunk_arrays = VoxelChunkGenerator.generate_chunks_arrays_runtime(
 				voxels, materials, options, rebuild_chunks)
 		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		# 统计顶点/三角形数
+		var sv := 0; var tv := 0
+		for ck in chunk_arrays:
+			var arr = chunk_arrays[ck]
+			if arr is Dictionary:
+				sv += arr.get("solid_verts", PackedVector3Array()).size()
+				tv += arr.get("trans_verts", PackedVector3Array()).size()
+		last_solid_vertices = sv; last_trans_vertices = tv
+		last_solid_triangles = sv / 3; last_trans_triangles = tv / 3
+		last_total_chunks = chunk_arrays.size()
+		last_rebuild_affected_count = affected_count
 		if gen_id == _generation_id:
 			_pending_arrays = chunk_arrays
 			_has_pending = true
@@ -285,6 +355,13 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 	var t1 := Time.get_ticks_usec()
 	var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, options)
 	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
+	if arrays is Dictionary:
+		last_solid_vertices = arrays.get("solid_verts", PackedVector3Array()).size()
+		last_trans_vertices = arrays.get("trans_verts", PackedVector3Array()).size()
+		last_solid_triangles = last_solid_vertices / 3
+		last_trans_triangles = last_trans_vertices / 3
+		last_total_chunks = 1
+		last_rebuild_affected_count = 1
 	if gen_id == _generation_id:
 		_pending_arrays = arrays
 		_has_pending = true
@@ -299,23 +376,48 @@ func _update_mesh_sync() -> void:
 	# Per-chunk 增量重建
 	if use_chunk_generator:
 		var rebuild_chunks: Array[Vector3i] = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
+		last_rebuild_affected_count = rebuild_chunks.size()
 		var t0 := Time.get_ticks_usec()
 		var chunk_arrays: Dictionary
 		if rebuild_chunks.is_empty():
 			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
 				data.voxels, data.materials, options)
+			last_rebuild_affected_count = chunk_arrays.size()
 		else:
 			chunk_arrays = VoxelChunkGenerator.generate_chunks_arrays_runtime(
 				data.voxels, data.materials, options, rebuild_chunks)
 		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		# 统计顶点/三角形数
+		var sv := 0; var tv := 0
+		for ck in chunk_arrays:
+			var arr = chunk_arrays[ck]
+			if arr is Dictionary:
+				sv += arr.get("solid_verts", PackedVector3Array()).size()
+				tv += arr.get("trans_verts", PackedVector3Array()).size()
+		last_solid_vertices = sv; last_trans_vertices = tv
+		last_solid_triangles = sv / 3; last_trans_triangles = tv / 3
+		last_total_chunks = chunk_arrays.size()
+		var t_apply := Time.get_ticks_usec()
 		_build_and_apply_chunk_meshes(chunk_arrays)
+		var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
+		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, apply_ms)
 		return
 
 	# 全量重建（组合模式）
 	var t1 := Time.get_ticks_usec()
 	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.voxels, data.materials, options)
 	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
+	if arrays is Dictionary:
+		last_solid_vertices = arrays.get("solid_verts", PackedVector3Array()).size()
+		last_trans_vertices = arrays.get("trans_verts", PackedVector3Array()).size()
+		last_solid_triangles = last_solid_vertices / 3
+		last_trans_triangles = last_trans_vertices / 3
+		last_total_chunks = 1
+		last_rebuild_affected_count = 1
+	var t_apply2 := Time.get_ticks_usec()
 	_build_and_apply_mesh(arrays)
+	var apply_ms2 := (Time.get_ticks_usec() - t_apply2) / 1000.0
+	_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, apply_ms2)
 
 
 ## 将网格数据组装为 ArrayMesh 并应用到节点（必须主线程）
