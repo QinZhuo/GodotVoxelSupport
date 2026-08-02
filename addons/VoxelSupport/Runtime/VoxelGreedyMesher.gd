@@ -15,20 +15,16 @@ class RectInfo:
 	var position: Vector2i
 	var size: Vector2i
 	var value: int
-	
+
 	func _init(p: Vector2i, s: Vector2i, v: int):
 		position = p
 		size = s
 		value = v
 
+
 ## 对 2D 网格执行贪婪合并
-##
 ## grid: Dictionary[Vector2i, int] — UV坐标到材质ID的映射
 ## 返回: Array[RectInfo] — 合并后的矩形列表
-##
-## 算法：从左上到右下扫描网格，对每个未处理的单元格，
-## 向右扩展找到最大宽度，再向下扩展找到最大高度，
-## 生成一个矩形并标记所有单元格为已处理。
 static func greedy_merge(grid: Dictionary) -> Array[RectInfo]:
 	var result: Array[RectInfo] = []
 	var processed := {}
@@ -62,7 +58,7 @@ static func _find_largest_rect(grid: Dictionary, processed: Dictionary, seed: Ve
 	while true:
 		var row_valid := true
 		for u in width:
-			var test := seed + Vector2i(u, height)
+			var test := Vector2i(seed.x + u, seed.y + height)
 			if not grid.has(test) or processed.has(test) or grid[test] != value:
 				row_valid = false
 				break

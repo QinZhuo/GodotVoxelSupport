@@ -256,9 +256,10 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 						var n_trans: bool = n_mat != null and n_mat.trans > 0
 						if is_trans == n_trans and mat_id == n_id:
 							continue  # 相同材质且透明度一致 → 内部面，不可见
-					# 可见面
-					var slice_key := pos[perp]
-					var uv := Vector2i(pos[u_axis], pos[v_axis])
+					# 可见面（使用局部坐标）
+					var local_pos := Vector3i(x, y, z)
+					var slice_key := local_pos[perp]
+					var uv := Vector2i(local_pos[u_axis], local_pos[v_axis])
 					if not slices.has(slice_key):
 						slices[slice_key] = {}
 					slices[slice_key][uv] = mat_id
@@ -268,11 +269,11 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 			var grid: Dictionary = slices[slice_key]
 			var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge(grid)
 			for rect in rects:
-				# 生成一个合并后的大四边形
-				var pos := Vector3i.ZERO
-				pos[perp] = slice_key
-				pos[u_axis] = rect.position.x
-				pos[v_axis] = rect.position.y
+				# 重建世界坐标（局部坐标 + chunk_origin 偏移）
+				var pos := chunk_origin
+				pos[perp] += slice_key
+				pos[u_axis] += rect.position.x
+				pos[v_axis] += rect.position.y
 				var size := Vector3i(1, 1, 1)
 				size[u_axis] = rect.size.x
 				size[v_axis] = rect.size.y
