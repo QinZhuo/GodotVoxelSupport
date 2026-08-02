@@ -28,7 +28,7 @@ enum CollapseMode {
 @export var spawn_debris_on_damage: bool = true
 
 ## 单次破坏生成的最大碎片数量 (性能保护)
-@export var max_debris_per_hit: int = 64
+@export var max_debris_per_hit: int = 16
 
 ## 碎片模式
 @export var debris_mode: DebrisMode = DebrisMode.DEBRIS_PHYSICS:
@@ -76,7 +76,7 @@ enum CollapseMode {
 
 ## 落地保留碎片的最大数量 (防止长时间运行内存/节点无限增长)
 ## 超过上限时，最早落地的碎片会被回收释放
-@export_range(0, 1000) var max_settled_debris: int = 200
+@export_range(0, 500) var max_settled_debris: int = 50
 
 ## 整体健康度 (<=0 时触发完全破坏，-1 表示不启用健康度系统)
 @export var health: float = -1.0
@@ -302,37 +302,81 @@ func _after_removal(removed: Array) -> void:
 # 悬空检测 + 崩塌掉落
 # ----------------------------------------------------------------------------
 
+## 级联崩塌状态：逐帧处理，每帧只处理一个级联层级
+var _cascade_check_positions: Array = []  # 待检查的体素位置（下一级联层级）
+var _cascade_total: Array = []            # 所有级联累积的失稳体素
+
+
 ## 检测并处理悬空体素（与地面/支撑断开的体素），崩塌成整块刚体掉落
 ## 局部支撑检测：只检查"破坏位置附近"的悬空，避免每次破坏都全场景 BFS
 ## around_positions 为本次破坏移除的体素位置；为空则做全场景检测
 ## 级联崩塌：崩塌掉落的体素也是"被移除"，会再次触发局部检测，连锁反应直到无更多失稳
+## 每次调用只处理一个级联层级，剩余工作由 _process 在后续帧继续处理
 func _trigger_collapse(around_positions: Array = []) -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
-	# 级联循环：本次破坏 + 每次崩塌移除都可能让更远的体素失稳
-	var check_positions := around_positions
+
+	# 全场景检测（around_positions 为空）：同步完成所有级联层级
+	# 仅在 validate_stability 等初始化场景调用，后续破坏由局部检测负责
+	if around_positions.is_empty():
+		_process_full_cascade()
+		return
+
+	# 局部检测：只处理一个级联层级
+	_process_cascade_level(around_positions)
+
+
+## 全场景级联崩塌检测（同步完成所有层级）
+func _process_full_cascade() -> void:
+	var check_positions: Array = []
 	var total_unstable: Array = []
-	var iteration_guard := 64  # 防止极端情况下死循环（大场景连锁可调高）
-	while iteration_guard > 0:
-		iteration_guard -= 1
+	var guard := 64
+	while guard > 0:
+		guard -= 1
 		var unstable := _find_unstable_voxels(check_positions)
 		if unstable.is_empty():
 			break
 		total_unstable.append_array(unstable)
-		# 崩塌的悬空体素转成"整块刚体"掉落（按连通块分组）
 		var mat_map := _collect_voxel_materials(unstable)
 		data.remove_voxels(unstable)
 		if not Engine.is_editor_hint():
 			_spawn_collapse_blocks(unstable, mat_map)
-		# 本次崩塌移除的体素作为下一轮局部检测的破坏位置（连锁）
 		check_positions = unstable
 	if total_unstable.is_empty():
 		return
-	# 崩塌前反馈信号（一次性汇总）
 	voxels_about_to_collapse.emit(total_unstable)
 	last_collapse_count = total_unstable.size()
-	# 崩塌也算破坏，发信号
 	voxel_damaged.emit(total_unstable, true)
+
+
+## 处理一个级联层级（局部检测）
+func _process_cascade_level(around_positions: Array) -> void:
+	var unstable := _find_unstable_voxels(around_positions)
+	if unstable.is_empty():
+		# 当前层级无失稳 → 级联结束
+		_finalize_cascade()
+		return
+
+	# 移除失稳体素 + 生成崩塌块
+	var mat_map := _collect_voxel_materials(unstable)
+	data.remove_voxels(unstable)
+	if not Engine.is_editor_hint():
+		_spawn_collapse_blocks(unstable, mat_map)
+
+	# 累积到总数，准备下一帧再检查下一层级
+	_cascade_total.append_array(unstable)
+	_cascade_check_positions = unstable
+
+
+## 完成级联、发信号
+func _finalize_cascade() -> void:
+	if _cascade_total.is_empty():
+		return
+	voxels_about_to_collapse.emit(_cascade_total)
+	last_collapse_count = _cascade_total.size()
+	voxel_damaged.emit(_cascade_total, true)
+	_cascade_total = []
+	_cascade_check_positions = []
 
 
 ## 找出所有"失稳"体素，返回这些体素位置的并集
@@ -544,7 +588,6 @@ func _build_collapse_body(bd: Dictionary, arrays: Variant) -> void:
 	body.gravity_scale = debris_gravity_scale
 	body.sleeping = false
 	body.set_meta("_born_ms", Time.get_ticks_msec())
-	body.set_meta("_debris_hp", debris_hit_points)
 	_debris_root.add_child(body)
 	debris_count += 1
 
@@ -631,7 +674,6 @@ func _spawn_physics_debris(pos: Vector3i, mat_id: int, is_collapse: bool) -> voi
 	body.sleeping = false
 	# 记录出生时间，用于出生保护期（避免刚生成就被误判冻结）
 	body.set_meta("_born_ms", Time.get_ticks_msec())
-	body.set_meta("_debris_hp", debris_hit_points)
 	_debris_root.add_child(body)
 	if not _active_debris.has(body):
 		_active_debris.append(body)
@@ -671,7 +713,10 @@ func _process(_delta: float) -> void:
 		return
 	_poll_collapse_task()
 	_settle_resting_debris()
-	# 每帧处理一个延迟破坏批次
+	# 优先处理级联崩塌（每帧一个层级）
+	if not _cascade_check_positions.is_empty():
+		_process_cascade_level(_cascade_check_positions)
+	# 无级联任务时，处理普通破坏批次（每帧一个）
 	_process_destruction_pipeline()
 
 
@@ -730,7 +775,7 @@ func _settle_resting_debris() -> void:
 
 
 ## 延迟破坏管道：每帧处理一个批次，将破坏逻辑分摊到多帧
-## 每个批次执行：data.remove_voxels → 崩塌检测 → 碎片生成
+## 每个批次执行：收集材质 → data.remove_voxels → 崩塌检测 → 碎片生成
 func _process_destruction_pipeline() -> void:
 	if _queued_damage_batches.is_empty():
 		return
@@ -743,15 +788,17 @@ func _process_destruction_pipeline() -> void:
 	if removed.is_empty():
 		return
 
+	# 0. 先在移除前收集材质快照（避免移除后 data.voxels 中找不到）
+	var mat_map := _collect_voxel_materials(removed) if do_spawn and not Engine.is_editor_hint() else {}
+
 	# 1. 实际移除体素（触发 mesh 脏标记 → 下一帧 _process 自动重建）
 	data.remove_voxels(removed)
 
 	# 2. 崩塌检测 + 悬空掉落
 	_after_removal(removed)
 
-	# 3. 生成碎片
-	if do_spawn and not Engine.is_editor_hint():
-		var mat_map := _collect_voxel_materials(removed)
+	# 3. 生成碎片（使用第 0 步收集的材质快照）
+	if do_spawn and not Engine.is_editor_hint() and not mat_map.is_empty():
 		_spawn_debris_with_materials(removed, mat_map)
 
 	# 4. 信号
@@ -759,13 +806,10 @@ func _process_destruction_pipeline() -> void:
 
 
 # ----------------------------------------------------------------------------
-# 碎片血量系统：破坏时检查范围内的碎片，移除0血量碎片
+# 碎片移除：破坏时检查范围内的碎片，击中即消失
 # ----------------------------------------------------------------------------
 
-## 碎片初始血量（被再次击中时扣减，归零则消失）
-@export var debris_hit_points: float = 1.0
-
-## 球形范围内伤害碎片
+## 球形范围内移除碎片（被破坏波及即消失，无血量管理）
 func _damage_debris_in_sphere(center: Vector3, radius: float) -> void:
 	if not _debris_root:
 		return
@@ -775,21 +819,13 @@ func _damage_debris_in_sphere(center: Vector3, radius: float) -> void:
 		var rb := child as RigidBody3D
 		if not rb or not is_instance_valid(rb):
 			continue
-		# 用世界坐标距离判断
-		var dist_sq := (rb.global_position - center).length_squared()
-		if dist_sq > radius_sq:
-			continue
-		var hp := rb.get_meta("_debris_hp", debris_hit_points)
-		hp -= 1.0
-		if hp <= 0.0:
+		if (rb.global_position - center).length_squared() <= radius_sq:
 			to_remove.append(rb)
-		else:
-			rb.set_meta("_debris_hp", hp)
 	for rb in to_remove:
 		_remove_debris_entirely(rb)
 
 
-## 盒形范围内伤害碎片
+## 盒形范围内移除碎片（被破坏波及即消失，无血量管理）
 func _damage_debris_in_box(aabb: AABB) -> void:
 	if not _debris_root:
 		return
@@ -798,14 +834,8 @@ func _damage_debris_in_box(aabb: AABB) -> void:
 		var rb := child as RigidBody3D
 		if not rb or not is_instance_valid(rb):
 			continue
-		if not aabb.has_point(rb.global_position):
-			continue
-		var hp := rb.get_meta("_debris_hp", debris_hit_points)
-		hp -= 1.0
-		if hp <= 0.0:
+		if aabb.has_point(rb.global_position):
 			to_remove.append(rb)
-		else:
-			rb.set_meta("_debris_hp", hp)
 	for rb in to_remove:
 		_remove_debris_entirely(rb)
 
