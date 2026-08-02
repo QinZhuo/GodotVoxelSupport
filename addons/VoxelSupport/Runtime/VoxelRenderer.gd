@@ -168,6 +168,10 @@ func _process(_delta: float) -> void:
 			last_rebuild_chunk_count = affected_count
 
 			# 保存脏体素（_build_and_apply_mesh 会清空），用于 _pending_retrigger 重建
+			# 【修复】始终执行 _build_and_apply_mesh，即使 _pending_retrigger=true
+			# _build_and_apply_chunk_meshes 内部已有 has_voxels_in_data 检查，
+			# 能正确处理快照滞后：当前数据已空的 chunk 会被清除 Mesh，
+			# 非空 chunk 会应用最近可用数据，避免"原mesh还显示着"的问题
 			var saved_dirty: Dictionary = {}
 			if _pending_retrigger and data:
 				saved_dirty = data.dirty_voxels.duplicate()
@@ -180,7 +184,7 @@ func _process(_delta: float) -> void:
 			if _pending_retrigger:
 				_pending_retrigger = false
 				print("[诊断] 触发 Retrigger: 恢复脏体素=%d 启动新任务" % saved_dirty.size())
-				# 恢复脏体素，让增量重建能正确找到需要重建的 chunk
+				# 恢复应用期间被清空的脏体素（T2 变更），让增量重建包含这些变更
 				if data and not saved_dirty.is_empty():
 					for pos in saved_dirty:
 						data.dirty_voxels[pos] = saved_dirty[pos]
