@@ -1,16 +1,16 @@
 extends Node
-## 体素破坏系统演示场景
+## 体素破坏系统演示场景 - 小房子测试
 ## 展示：
-##   - 可破坏的体素立方体 (VoxelDestructible)
+##   - 可破坏的体素小房子 (地板+墙壁+天花板) (VoxelDestructible)
 ##   - 鼠标左键球形破坏 / 右键单体破坏 / 空格射线破坏
 ##   - 按键切换碎片模式 (物理/视觉 MultiMesh)
 ##   - HUD 监控统计 (碎片数/移除体素数/破坏耗时)
 
-## 体素缩放
-@export var voxel_scale: float = 0.4
+## 体素缩放 (0.1 = 10cm 每体素，适合细致场景)
+@export var voxel_scale: float = 0.1
 
-## 破坏半径 (体素单位)
-@export var damage_radius: float = 1.8
+## 破坏半径 (体素单位，7.0 = 0.7m 世界空间)
+@export var damage_radius: float = 7.0
 
 ## 可选的数据源：指定任意 VoxelData 作为破坏对象的数据源
 ## 不设置时使用内置的 10x8x10 立方体演示数据
@@ -36,10 +36,11 @@ func _ready() -> void:
 
 ## 创建地面（StaticBody3D 平面碰撞），让破坏/崩塌的碎片有落点
 func _setup_ground() -> void:
+	var ground_size := maxf(HOUSE_LEN, HOUSE_WID) * voxel_scale * 2.5
 	var static_body := StaticBody3D.new()
 	static_body.name = "Ground"
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(60, 0.5, 60)
+	shape.size = Vector3(ground_size, 0.5, ground_size)
 	var owner_id := static_body.create_shape_owner(static_body)
 	static_body.shape_owner_add_shape(owner_id, shape)
 	static_body.position = Vector3(0, -0.5, 0)
@@ -48,7 +49,7 @@ func _setup_ground() -> void:
 	# 地面可视化（半透明灰）
 	var mesh_inst := MeshInstance3D.new()
 	var box := BoxMesh.new()
-	box.size = Vector3(60, 0.5, 60)
+	box.size = Vector3(ground_size, 0.5, ground_size)
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.35, 0.35, 0.4, 0.8)
 	mesh_inst.mesh = box
@@ -58,7 +59,7 @@ func _setup_ground() -> void:
 
 	# 粒子碰撞体：顶面与地面(y=0)对齐，碎片粒子落地后停在地面表面（雪花堆积效果）
 	var coll := GPUParticlesCollisionBox3D.new()
-	coll.size = Vector3(60, 2, 60)
+	coll.size = Vector3(ground_size, 2, ground_size)
 	coll.position = Vector3(0, -1.0, 0)  # 中心 y=-1，顶面 y=0 = 地面
 	add_child(coll)
 
@@ -107,48 +108,88 @@ func _build_target() -> void:
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
 
 
-## 墙体尺寸：长(x) x 高(y) x 厚(z) [体素]
-const WALL_LEN := 24   # 长
-const WALL_HGT := 12   # 高
-const WALL_THK := 2    # 薄
+## 小房子尺寸 [体素] (外壳尺寸，含墙壁厚度)
+const HOUSE_LEN := 42   # x 方向长度 (4.2m)
+const HOUSE_HGT := 32   # y 方向高度 (3.2m)
+const HOUSE_WID := 42   # z 方向宽度 (4.2m)
+const WALL_THK := 1     # 墙壁厚度 (10cm)
 
-## 创建内置演示墙体数据 (长 x 高 x 薄，便于测试崩塌掉落)
+## 创建小房子测试数据 (地板 + 墙壁 + 天花板，内部中空)
 func _create_demo_cube_data() -> VoxelData:
 	var data := VoxelData.new()
 	var solid := VoxelMaterial.new()
 	solid.id = 1
-	solid.color = Color(0.55, 0.45, 0.35)
+	solid.color = Color(0.55, 0.45, 0.35)  # 泥土色 - 地板/天花板
 	solid.rough = 0.9
-	solid.hardness = 3.0  # 内部泥土：较硬，需 3 次伤害才摧毁
-	solid.mass = 1.0      # 泥土：中等质量
+	solid.hardness = 3.0  # 较硬，需 3 次伤害
+	solid.mass = 1.0
 	data.add_material(solid)
 	var metal := VoxelMaterial.new()
 	metal.id = 2
-	metal.color = Color(0.7, 0.7, 0.8)
+	metal.color = Color(0.7, 0.7, 0.8)    # 金属灰 - 墙壁
 	metal.metal = 0.8
 	metal.rough = 0.3
-	metal.hardness = 5.0  # 外层金属：很硬，需 5 次伤害
-	metal.mass = 2.0      # 金属：较重，支撑要求高
+	metal.hardness = 5.0  # 很硬，需 5 次伤害
+	metal.mass = 2.0
 	data.add_material(metal)
 	var accent := VoxelMaterial.new()
 	accent.id = 3
-	accent.color = Color(0.9, 0.4, 0.3)
+	accent.color = Color(0.9, 0.4, 0.3)   # 红色 - 墙角装饰
 	accent.rough = 0.6
-	accent.hardness = 1.0  # 底部红色：易碎，一击即碎
-	accent.mass = 0.5      # 底部：较轻
+	accent.hardness = 1.0  # 易碎，一击即碎
+	accent.mass = 0.5
 	data.add_material(accent)
 
-	# 填充墙体体素（薄墙：z 只有 2 格厚，x 长，y 高）
-	for x in range(WALL_LEN):
-		for y in range(WALL_HGT):
-			for z in range(WALL_THK):
-				var mat_id: int = solid.id
-				# 两端(x=0/LEN-1) 和 两薄面(z=0/THK-1) 用金属色，底部用红色，内部用泥土
-				if x == 0 or x == WALL_LEN - 1 or z == 0 or z == WALL_THK - 1:
-					mat_id = metal.id
-				elif y == 0:
-					mat_id = accent.id
-				data.voxels[Vector3i(x, y, z)] = mat_id
+	# 地板: y=0, 全部 x,z
+	for x in range(HOUSE_LEN):
+		for z in range(HOUSE_WID):
+			data.voxels[Vector3i(x, 0, z)] = solid.id
+
+	# 天花板: y=HOUSE_HGT-1, 全部 x,z
+	var ceil_y := HOUSE_HGT - 1
+	for x in range(HOUSE_LEN):
+		for z in range(HOUSE_WID):
+			data.voxels[Vector3i(x, ceil_y, z)] = solid.id
+
+	# 四周墙壁: y=1 到 y=HOUSE_HGT-2
+	var wall_top := HOUSE_HGT - 2
+	for y in range(1, wall_top + 1):
+		# 前墙 (z=0) 和后墙 (z=HOUSE_WID-1)
+		for x in range(HOUSE_LEN):
+			data.voxels[Vector3i(x, y, 0)] = metal.id
+			data.voxels[Vector3i(x, y, HOUSE_WID - 1)] = metal.id
+		# 左墙 (x=0) 和右墙 (x=HOUSE_LEN-1)
+		for z in range(HOUSE_WID):
+			data.voxels[Vector3i(0, y, z)] = metal.id
+			data.voxels[Vector3i(HOUSE_LEN - 1, y, z)] = metal.id
+
+	# 墙角装饰 (红色)
+	for y in range(1, wall_top + 1):
+		data.voxels[Vector3i(0, y, 0)] = accent.id
+		data.voxels[Vector3i(0, y, HOUSE_WID - 1)] = accent.id
+		data.voxels[Vector3i(HOUSE_LEN - 1, y, 0)] = accent.id
+		data.voxels[Vector3i(HOUSE_LEN - 1, y, HOUSE_WID - 1)] = accent.id
+
+	# 门洞: 在前墙 (z=0) 中间位置，宽 4 高 6
+	var door_x_start := HOUSE_LEN / 2 - 2
+	var door_h := 6
+	for y in range(0, door_h):
+		for x in range(door_x_start, door_x_start + 4):
+			data.voxels.erase(Vector3i(x, y, 0))
+
+	# 窗户: 在右墙 (x=HOUSE_LEN-1) 上开两个小窗
+	var win_y_start := 10
+	var win_h := 5
+	var win_w := 4
+	# 窗户1
+	for y in range(win_y_start, win_y_start + win_h):
+		for z in range(10, 10 + win_w):
+			data.voxels.erase(Vector3i(HOUSE_LEN - 1, y, z))
+	# 窗户2
+	for y in range(win_y_start, win_y_start + win_h):
+		for z in range(HOUSE_WID - 10 - win_w, HOUSE_WID - 10):
+			data.voxels.erase(Vector3i(HOUSE_LEN - 1, y, z))
+
 	return data
 
 
@@ -159,11 +200,11 @@ func _setup_camera() -> void:
 		_camera = Camera3D.new()
 		_camera.name = "Camera3D"
 		add_child(_camera)
-	# 相机侧看整面高墙：墙全局中心 (0, 半高, 0)，前方拉远看到整面
-	var half_h := WALL_HGT * voxel_scale * 0.5
-	var half_l := WALL_LEN * voxel_scale * 0.5
-	_camera.global_position = Vector3(0, half_h * 1.6, half_l * 1.8)
-	_camera.look_at(Vector3(0, half_h, 0))
+	# 相机从斜上方俯瞰小房子，看到整个房子 + 门洞 + 窗户
+	var house_world := Vector3(HOUSE_LEN, HOUSE_HGT, HOUSE_WID) * voxel_scale
+	var center := house_world * 0.5
+	_camera.global_position = Vector3(center.x * 0.5, center.y * 1.8, center.z * 2.2)
+	_camera.look_at(center)
 	_camera.fov = 70
 
 
@@ -239,9 +280,9 @@ func _handle_input() -> void:
 		_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
 	if key2 and not _prev_2:
 		_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_VISUAL
-	# B 按下瞬间：破坏底部整层支撑，触发上方结构整体崩塌掉落
+	# B 按下瞬间：破坏前墙底部整层支撑，触发上方结构整体崩塌掉落
 	if key_b and not _prev_b:
-		_target.damage_box(AABB(Vector3(-1, -0.5, -1), Vector3(WALL_LEN + 2, 1.5, WALL_THK + 2)))
+		_target.damage_box(AABB(Vector3(0, 0, 0), Vector3(HOUSE_LEN, 1.5, 1.5)))
 	# S 按下瞬间：存档当前体素数据（含破坏状态）
 	if key_s and not _prev_s:
 		_saved_data = _target.data.save_data()
@@ -296,9 +337,9 @@ Mesh生成: %.2f ms
 		_get_hardness(2), _get_mass(2), _get_hardness(3), _get_mass(3)]
 	_mode_label.text = """碎片模式: %s  (按 1=物理 2=视觉)
 [鼠标左键] 球形破坏(伤害1)  [鼠标右键] 单体破坏  [空格] 射线破坏
-[B] 破坏底部支撑(触发整体崩塌)
+[B] 破坏前墙底部(触发整面墙崩塌)
 [S] 存档当前体素  [L] 读档重建  [R] 重置
-硬度需多次点击才摧毁，悬空体(与地面断开)会崩塌掉落
+小房子: 42x32x42 体素 @ 0.1m  |  门洞+窗户  |  墙壁硬度5/地板硬度3
 """ % mode_name
 
 
