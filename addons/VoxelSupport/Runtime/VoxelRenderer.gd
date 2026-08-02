@@ -299,14 +299,14 @@ func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
-	# 快照本次要生成的体素数据（子线程只读，避免与主线程写入竞争）
-	# voxels 为 Dictionary[Vector3i,int]，浅拷贝只复制哈希表 (值类型 key/value)，开销小
-	var snapshot_voxels := data.voxels.duplicate()
-	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
-	var snapshot_materials := _materials_snapshot
+	# 【高效快照】只复制脏 Chunk 的体素，而非全量 data.voxels.duplicate()
+	# 对于大型场景（数十万体素），全量 duplicate 每次几毫秒，增量快照大幅降低此开销
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
+	var snapshot_voxels: Dictionary = _copy_dirty_chunk_voxels(data, rebuild_chunks)
+	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
+	var snapshot_materials := _materials_snapshot
 	var gen_id := _generation_id + 1
 	_generation_id = gen_id
 
@@ -316,6 +316,25 @@ func _update_mesh_async() -> void:
 	# 将 use_chunk_generator 和 voxel_scale 作为参数传入，避免子线程访问节点属性
 	_task_id = WorkerThreadPool.add_task(_generate_worker.bind(
 		snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale))
+
+
+## 【高效快照】只复制脏 Chunk 区域的体素数据，避免全量 duplicate
+## 对于大型场景（数十万体素），大幅降低快照开销
+## 参数 rebuild_chunks 为需要重建的 chunk key 列表
+## 返回 Dictionary[Vector3i, int] 只包含这些 chunk 内的体素
+static func _copy_dirty_chunk_voxels(data: VoxelData, rebuild_chunks: Array[Vector3i]) -> Dictionary:
+	if rebuild_chunks.is_empty():
+		# 无脏 chunk 时全量复制（初始构建或切换模式后需要全量数据）
+		return data.voxels.duplicate()
+	
+	var result: Dictionary = {}
+	for ck in rebuild_chunks:
+		# 从 chunk 索引获取体素列表
+		var positions: Array = data.get_chunk_voxels(ck)
+		for pos in positions:
+			var pos_key: Vector3i = pos
+			result[pos_key] = data.voxels.get(pos_key, -1)
+	return result
 
 
 ## 后台工作线程入口：生成网格数据并写入结果缓冲
@@ -378,13 +397,10 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 			"gen_id": gen_id,
 		}
 
-	# 原子写入结果（仅此一处写入节点属性，且在主线程轮询完成后才读取）
-	if gen_id == _generation_id:
-		_pending_result = result
-		_has_pending = true
-	else:
-		# 诊断：任务结果因 gen_id 不匹配被丢弃（说明主线程已启动新任务覆盖）
-		print("[诊断] 任务 gen_id=%d 被丢弃，当前 _generation_id=%d" % [gen_id, _generation_id])
+	# 【线程安全修复】不再在工作线程中读取 _generation_id（节点属性，跨线程不安全）
+	# 改为始终写入结果，由主线程在轮询时根据 gen_id 判断是否丢弃
+	_pending_result = result
+	_has_pending = true
 
 
 ## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）

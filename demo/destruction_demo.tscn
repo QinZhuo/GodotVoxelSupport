@@ -18,6 +18,9 @@ ambient_light_source = 3
 ambient_light_sky_contribution = 0.7
 reflected_light_source = 3
 tonemap_mode = 2
+ssr_enabled = true
+ssao_enabled = true
+fog_enabled = true
 
 [node name="DestructionDemo" type="Node3D" unique_id=898500326]
 script = ExtResource("1_destruction")

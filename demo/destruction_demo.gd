@@ -193,12 +193,11 @@ func _build_target() -> void:
 	_target.async_generate = true
 	_target.spawn_debris_on_damage = true
 	_target.max_debris_per_hit = 40
-	_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
+	# 碎片系统已改为纯粒子实现，无物理碰撞体
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
 	_target.local_collapse = true
-	_target.collapse_support_strength = 25.0
 
 	if not _target.voxel_hardened.is_connected(_on_voxel_hardened):
 		_target.voxel_hardened.connect(_on_voxel_hardened)
@@ -225,11 +224,16 @@ func _create_large_structure_data() -> VoxelData:
 	var t := shell_thickness
 
 	# 材质定义
+	# 物理属性说明：
+	#   hardness       → 抗直接打击（需要多少伤害才能破坏）
+	#   connection_strength → 抗应力传播（裂纹扩散阻力）
+	#   mass           → 碎片粒子表现（重物飞得近/落得快，轻物飞得远/飘得久）
 	var concrete := VoxelMaterial.new()
 	concrete.id = 1
 	concrete.color = Color(0.45, 0.45, 0.5)
 	concrete.rough = 0.9
 	concrete.hardness = 4.0
+	concrete.connection_strength = 12.0
 	concrete.mass = 1.5
 	data.add_material(concrete)
 
@@ -239,6 +243,7 @@ func _create_large_structure_data() -> VoxelData:
 	metal.metal = 0.8
 	metal.rough = 0.3
 	metal.hardness = 6.0
+	metal.connection_strength = 20.0
 	metal.mass = 2.0
 	data.add_material(metal)
 
@@ -248,6 +253,7 @@ func _create_large_structure_data() -> VoxelData:
 	glass.trans = 0.6
 	glass.rough = 0.1
 	glass.hardness = 0.5
+	glass.connection_strength = 2.0
 	glass.mass = 0.3
 	data.add_material(glass)
 
@@ -256,6 +262,7 @@ func _create_large_structure_data() -> VoxelData:
 	accent.color = Color(0.9, 0.3, 0.2)
 	accent.rough = 0.5
 	accent.hardness = 1.0
+	accent.connection_strength = 8.0
 	accent.mass = 0.5
 	data.add_material(accent)
 
@@ -465,11 +472,13 @@ func _handle_input(_delta: float) -> void:
 		damage_radius = maxf(damage_radius - 1.0, 1.0)
 		_log_perf_line("破坏半径: %.1f" % damage_radius)
 
-	# 1/2: 切换碎片模式
+	# 1/2: 切换应力传播模式 (原碎片模式切换已移除，碎片现统一使用粒子系统)
 	if key_1 and not _prev_1:
-		_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
+		_target.stress_propagation = true
+		_log_perf_line("应力传播: 开启")
 	if key_2 and not _prev_2:
-		_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_VISUAL
+		_target.stress_propagation = false
+		_log_perf_line("应力传播: 关闭")
 
 	# R: 重置
 	if key_r and not _prev_r:
@@ -661,14 +670,14 @@ func _update_hud() -> void:
 		perf_rating = "良好"
 		perf_rating_color = "浅绿"
 
-	var mode_name := "物理" if _target.debris_mode == VoxelDestructible.DebrisMode.DEBRIS_PHYSICS else "视觉"
+	var mode_name := "粒子"
 	var collapse_method := "局部增量" if _target.local_collapse else "全量"
 	var dm_name := "球形" if _damage_mode == DamageMode.SPHERE else "射线"
 
 	_hud.text = """===== 体素性能监控 =====
 FPS: %d  |  帧: %d
 体素总数: %d  |  已破坏: %d
-Chunk数: %d  |  碎片数: %d
+Chunk数: %d  |  应力传播: %s
 
 [网格重建耗时] 评价: %s(%s)
 当前: %.1f ms  |  平均: %.1f ms
@@ -687,14 +696,14 @@ Chunk数: %d  |  碎片数: %d
 上次崩塌体素数: %d
 
 [体素坍缩]
-崩塌检测: %s  |  支撑强度: %.0f
+崩塌检测: %s  |  支撑强度: 无(粒子系统)
 
 [时间线: 近%d帧网格重建耗时趋势]
 %s
 """ % [
 		Engine.get_frames_per_second(), _frame_count,
 		vc, destroyed,
-		chunk_count, _target.debris_count,
+		chunk_count, "开" if _target.stress_propagation else "关",
 		perf_rating, perf_rating_color,
 		mgt, avg_mgt,
 		min_mgt, max_mgt,
@@ -706,7 +715,7 @@ Chunk数: %d  |  碎片数: %d
 		avg_dt,
 		_target.last_damage_count,
 		_target.last_collapse_count,
-		collapse_method, _target.collapse_support_strength,
+		collapse_method,
 		_mesh_gen_times.size(), chart,
 	]
 
@@ -715,7 +724,7 @@ Chunk数: %d  |  碎片数: %d
 [左键]球形 [右键]单体 [空格]射线
 [C]连续开关 [V]切换模式 [T]日志开关
 [+/-]半径  [R]重置 [B]崩底
-[1]物理碎片 [2]视觉碎片  [S]存档 [L]读档
+[1]应力开 [2]应力关  [S]存档 [L]读档
 结构: %dx%dx%d  |  外壳: %d  |  楼层: %d
 """ % [
 		mode_name, dm_name, "开" if _continuous_mode else "关",
@@ -807,22 +816,6 @@ func _recompute_chart() -> void:
 		chart += line + "\n"
 	chart += "      " + ("%.0f" % c_min).rpad(10) + ("%.0fms" % c_max) + "\n"
 	_cached_chart = chart
-
-
-func _get_hardness(mat_id: int) -> int:
-	if _target.data and mat_id >= 0 and mat_id < _target.data.materials.size():
-		var m = _target.data.materials[mat_id]
-		if m:
-			return int(m.hardness)
-	return 1
-
-
-func _get_mass(mat_id: int) -> float:
-	if _target.data and mat_id >= 0 and mat_id < _target.data.materials.size():
-		var m = _target.data.materials[mat_id]
-		if m:
-			return m.mass
-	return 1.0
 
 
 func _on_voxel_hardened(_pos: Vector3i, _remaining: float) -> void:

@@ -24,9 +24,15 @@ extends Resource
 @export var hardness: float = 1.0
 
 ## 质量：单个体素的质量 (>=0)
-## 悬空崩塌时，整块刚体的质量 = 块内体素质量之和；材质越重，塌落时越"沉重"
-## 同时用于支撑强度分析：质量越大，越需要更多支撑，越易因支撑不足而断裂
+## 悬空崩塌时，整块刚体的质量 = 块内体素质量之和；材质越重，越需要更多支撑
 @export var mass: float = 1.0
+
+## 连接强度：体素与相邻体素之间的连接强度（受力传导能力）
+## 应力传播（裂纹扩散）系统使用：每次破坏产生应力，向邻居传播
+## 当应力 > 材质的 connection_strength 时，该体素也会断裂（裂纹扩散）
+## 值越大，该材质越不容易被"震裂"（如钢铁 > 玻璃 > 泡沫）
+## 默认值 10.0，对应应力传播系统默认的 stress_force=15.0
+@export var connection_strength: float = 10.0
 
 
 ## 是否透明 (统一判定，供网格生成/着色使用)
@@ -116,6 +122,7 @@ func save_data() -> Dictionary:
 		"emission": emission,
 		"hardness": hardness,
 		"mass": mass,
+		"connection_strength": connection_strength,
 	}
 
 
@@ -135,4 +142,5 @@ static func load_data(data: Variant) -> VoxelMaterial:
 	mat.emission = float(data.get("emission", 0.0))
 	mat.hardness = float(data.get("hardness", 1.0))
 	mat.mass = float(data.get("mass", 1.0))
+	mat.connection_strength = float(data.get("connection_strength", 10.0))
 	return mat
