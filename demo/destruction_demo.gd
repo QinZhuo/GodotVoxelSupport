@@ -68,6 +68,18 @@ var _mesh_gen_times: Array[float] = []
 var _damage_times: Array[float] = []
 var _collapse_counts: Array[int] = []
 var _voxel_counts: Array[int] = []
+
+## 性能统计缓存（避免每帧重算）
+var _cached_avg_mgt: float = 0.0
+var _cached_min_mgt: float = 0.0
+var _cached_max_mgt: float = 0.0
+var _cached_avg_dt: float = 0.0
+var _cached_high_mgt_count: int = 0
+var _cached_under_200_count: int = 0
+var _cached_under_500_count: int = 0
+var _cached_chart: String = ""
+var _stats_dirty: bool = true
+var _chart_dirty: bool = true
 var _frame_count: int = 0
 var _continuous_counter: int = 0
 var _last_log_time: int = 0
@@ -177,6 +189,8 @@ func _build_target() -> void:
 
 	_target.data = data
 	_target.voxel_scale = voxel_scale
+	_target.use_chunk_generator = true
+	_target.async_generate = true
 	_target.spawn_debris_on_damage = true
 	_target.max_debris_per_hit = 40
 	_target.debris_mode = VoxelDestructible.DebrisMode.DEBRIS_PHYSICS
@@ -581,29 +595,40 @@ func _update_hud() -> void:
 	if _hud == null:
 		return
 
-	# 收集性能统计数据
+	# 收集最新数据（仅当有变化时才标记脏）
 	var mgt := _target.last_mesh_gen_time_ms
-	_mesh_gen_times.append(mgt)
-	if _mesh_gen_times.size() > 200:
-		_mesh_gen_times.pop_front()
+	if _mesh_gen_times.is_empty() or mgt != _mesh_gen_times.back():
+		_stats_dirty = true
+		_chart_dirty = true
+		_mesh_gen_times.append(mgt)
+		if _mesh_gen_times.size() > 200:
+			_mesh_gen_times.pop_front()
 
 	var vc := _target.data.voxels.size()
-	_voxel_counts.append(vc)
-	if _voxel_counts.size() > 200:
-		_voxel_counts.pop_front()
+	if _voxel_counts.is_empty() or vc != _voxel_counts.back():
+		_voxel_counts.append(vc)
+		if _voxel_counts.size() > 200:
+			_voxel_counts.pop_front()
 
-	# 计算统计值
-	var avg_mgt := 0.0
-	var min_mgt := 0.0
-	var max_mgt := 0.0
-	if not _mesh_gen_times.is_empty():
-		avg_mgt = _average(_mesh_gen_times)
-		min_mgt = _mesh_gen_times.min()
-		max_mgt = _mesh_gen_times.max()
+	# 仅当数据变化时重算统计值
+	if _stats_dirty:
+		_stats_dirty = false
+		_recompute_stats()
 
-	var avg_dt := 0.0
-	if not _damage_times.is_empty():
-		avg_dt = _average(_damage_times)
+	# 仅每 10 帧重生成柱状图（字符串操作开销较大）
+	if _chart_dirty and _frame_count % 10 == 0:
+		_chart_dirty = false
+		_recompute_chart()
+
+	# 读取缓存值
+	var avg_mgt := _cached_avg_mgt
+	var min_mgt := _cached_min_mgt
+	var max_mgt := _cached_max_mgt
+	var avg_dt := _cached_avg_dt
+	var high_mgt_count := _cached_high_mgt_count
+	var under_200_count := _cached_under_200_count
+	var under_500_count := _cached_under_500_count
+	var chart := _cached_chart
 
 	var initial_voxels := _voxel_counts[0] if not _voxel_counts.is_empty() else 0
 	var destroyed := initial_voxels - vc
@@ -617,19 +642,6 @@ func _update_hud() -> void:
 	var affected_chunks := _target.last_rebuild_affected_count
 	var mesh_gen_slice := _target.last_mesh_gen_time_slice_ms
 	var apply_time := _target.last_apply_time_ms
-
-	# 每秒网格重建次数统计
-	var recent_mgt := _mesh_gen_times.slice(maxi(0, _mesh_gen_times.size() - 60))
-	var high_mgt_count := 0
-	var under_200_count := 0
-	var under_500_count := 0
-	for t in recent_mgt:
-		if t > 1000:
-			high_mgt_count += 1
-		if t <= 200:
-			under_200_count += 1
-		if t <= 500:
-			under_500_count += 1
 
 	# Chunk 生成效率
 	var avg_chunk_gen_ms := 0.0
@@ -648,30 +660,6 @@ func _update_hud() -> void:
 	elif avg_mgt > 100:
 		perf_rating = "良好"
 		perf_rating_color = "浅绿"
-
-	# 生成 ASCII 柱状图（最近60帧的网格重建时间分布）
-	var chart := ""
-	var chart_width := 50
-	var chart_data := _mesh_gen_times.slice(maxi(0, _mesh_gen_times.size() - chart_width))
-	if chart_data.size() > 0:
-		var c_max: float = chart_data.max()
-		c_max = maxf(c_max, 1.0)
-		var c_min: float = chart_data.min()
-		# 柱状图：每行表示一个时间区间
-		var thresholds: Array[float] = [c_max * 0.8, c_max * 0.6, c_max * 0.4, c_max * 0.2, 0.0]
-		var labels: Array[String] = ["800%+ ", "600%+ ", "400%+ ", "200%+ ", "min  "]
-		for row in 5:
-			var line: String = labels[row]
-			var th: float = thresholds[row]
-			for v in chart_data:
-				if v >= th:
-					line += "█"
-				elif row + 1 < thresholds.size() and v >= thresholds[row + 1]:
-					line += "▓"
-				else:
-					line += "░"
-			chart += line + "\n"
-		chart += "      " + ("%.0f" % c_min).rpad(10) + ("%.0fms" % c_max) + "\n"
 
 	var mode_name := "物理" if _target.debris_mode == VoxelDestructible.DebrisMode.DEBRIS_PHYSICS else "视觉"
 	var collapse_method := "局部增量" if _target.local_collapse else "全量"
@@ -719,7 +707,7 @@ Chunk数: %d  |  碎片数: %d
 		_target.last_damage_count,
 		_target.last_collapse_count,
 		collapse_method, _target.collapse_support_strength,
-		chart_data.size(), chart,
+		_mesh_gen_times.size(), chart,
 	]
 
 	_mode_label.text = """碎片: %s  |  模式: %s  |  连续: %s
@@ -736,7 +724,7 @@ Chunk数: %d  |  碎片数: %d
 		shell_thickness, floor_count,
 	]
 
-	# 性能日志显示
+	# 性能日志显示（仅当开关打开时，且每帧只做简单字符串拼接）
 	if _show_perf_log and _perf_log_label:
 		_perf_log_label.text = "=== 性能日志 (%d帧) ===\n" % _frame_count
 		_perf_log_label.text += "当前体素: %d | 已破坏: %d | 重建: %.1fms\n" % [vc, destroyed, mgt]
@@ -746,13 +734,83 @@ Chunk数: %d  |  碎片数: %d
 			_perf_log_label.text += line + "\n"
 
 
-func _average(arr: Array) -> float:
-	if arr.is_empty():
-		return 0.0
+## 重新计算统计缓存（仅在数据变化时调用）
+func _recompute_stats() -> void:
+	if _mesh_gen_times.is_empty():
+		_cached_avg_mgt = 0.0
+		_cached_min_mgt = 0.0
+		_cached_max_mgt = 0.0
+		_cached_high_mgt_count = 0
+		_cached_under_200_count = 0
+		_cached_under_500_count = 0
+		return
+
 	var sum := 0.0
-	for v in arr:
+	var min_val := _mesh_gen_times[0]
+	var max_val := _mesh_gen_times[0]
+	var high_count := 0
+	var under_200 := 0
+	var under_500 := 0
+	# 单次遍历计算所有统计指标
+	var start_idx := maxi(0, _mesh_gen_times.size() - 60)
+	for i in _mesh_gen_times.size():
+		var v := _mesh_gen_times[i]
 		sum += v
-	return sum / arr.size()
+		if v < min_val: min_val = v
+		if v > max_val: max_val = v
+		if i >= start_idx:
+			if v > 1000: high_count += 1
+			if v <= 200: under_200 += 1
+			if v <= 500: under_500 += 1
+
+	_cached_avg_mgt = sum / _mesh_gen_times.size()
+	_cached_min_mgt = min_val
+	_cached_max_mgt = max_val
+	_cached_high_mgt_count = high_count
+	_cached_under_200_count = under_200
+	_cached_under_500_count = under_500
+
+	# 计算破坏平均耗时
+	if not _damage_times.is_empty():
+		var dsum := 0.0
+		for v in _damage_times:
+			dsum += v
+		_cached_avg_dt = dsum / _damage_times.size()
+
+
+## 重新生成柱状图（每 10 帧调用一次）
+func _recompute_chart() -> void:
+	if _mesh_gen_times.is_empty():
+		_cached_chart = ""
+		return
+
+	var chart_width := 50
+	var chart_data := _mesh_gen_times.slice(maxi(0, _mesh_gen_times.size() - chart_width))
+	if chart_data.is_empty():
+		_cached_chart = ""
+		return
+
+	var c_max: float = chart_data.max()
+	c_max = maxf(c_max, 1.0)
+	var c_min: float = chart_data.min()
+	var thresholds: Array[float] = [c_max * 0.8, c_max * 0.6, c_max * 0.4, c_max * 0.2, 0.0]
+	var labels: Array[String] = ["800%+ ", "600%+ ", "400%+ ", "200%+ ", "min  "]
+
+	var chart := ""
+	for row in 5:
+		var line: String = labels[row]
+		var th: float = thresholds[row]
+		var next_th: float = thresholds[row + 1] if row + 1 < thresholds.size() else -1.0
+		for v in chart_data:
+			if v >= th:
+				line += "█"
+			elif next_th >= 0 and v >= next_th:
+				line += "▓"
+			else:
+				line += "░"
+		chart += line + "\n"
+	chart += "      " + ("%.0f" % c_min).rpad(10) + ("%.0fms" % c_max) + "\n"
+	_cached_chart = chart
 
 
 func _get_hardness(mat_id: int) -> int:

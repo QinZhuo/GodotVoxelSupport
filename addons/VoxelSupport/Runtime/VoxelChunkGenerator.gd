@@ -96,7 +96,7 @@ static func generate_chunks_arrays_runtime(
 	var result := {}
 
 	for ck in chunk_keys:
-		var arrays := _generate_single_chunk_arrays(voxels, aligned, scale, ck)
+		var arrays := _generate_single_chunk_arrays_impl(voxels, aligned, scale, ck)
 		if arrays != null:
 			result[ck] = arrays
 
@@ -114,8 +114,17 @@ static func generate_all_chunks_arrays_runtime(
 	return generate_chunks_arrays_runtime(voxels, materials, options, chunk_keys)
 
 
-## 生成单个 chunk 的网格数据（顶点使用局部坐标）
-static func _generate_single_chunk_arrays(
+## 生成单个 chunk 的网格数据（线程安全，可在子线程调用）
+## materials 参数应为已对齐的材质数组（通过 VoxelMaterial.align_by_id 预先对齐）
+## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
+static func generate_single_chunk_array(
+		voxels: Dictionary, aligned_materials: Array, scale: float, chunk_key: Vector3i) -> Dictionary:
+	var result := _generate_single_chunk_arrays_impl(voxels, aligned_materials, scale, chunk_key)
+	return result if result else {}
+
+
+## 生成单个 chunk 的网格数据（顶点使用局部坐标）- 内部实现
+static func _generate_single_chunk_arrays_impl(
 		voxels, materials, scale: float, chunk: Vector3i) -> Dictionary:
 	var solid_verts := PackedVector3Array()
 	var solid_normals := PackedVector3Array()

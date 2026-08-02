@@ -454,7 +454,7 @@ func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary) -> void
 	_ensure_debris_root()
 	var count := mini(positions.size(), max_debris_per_hit)
 	if debris_mode == DebrisMode.DEBRIS_PHYSICS:
-		for i in count:
+		for i in range(count):
 			var pos: Vector3i = positions[i]
 			var mat_id: int = mat_map.get(pos, -1)
 			_spawn_physics_debris(pos, mat_id, false)
@@ -637,7 +637,7 @@ func _spawn_falling_debris(positions: Array, mat_map: Dictionary) -> void:
 	_ensure_debris_root()
 	var count := mini(positions.size(), max_debris_per_hit)
 	if debris_mode == DebrisMode.DEBRIS_PHYSICS:
-		for i in count:
+		for i in range(count):
 			var pos: Vector3i = positions[i]
 			var mat_id: int = mat_map.get(pos, -1)
 			# 崩塌碎片带重力，落地后保留
@@ -874,7 +874,7 @@ func _spawn_visual_debris_batch(positions: Array, mat_map: Dictionary, count: in
 	_ensure_debris_root()
 	# 按材质分组，每组发射一个粒子系统
 	var by_mat := {}
-	for i in count:
+	for i in range(count):
 		var pos: Vector3i = positions[i]
 		var mat_id: int = mat_map.get(pos, -1)
 		if not by_mat.has(mat_id):

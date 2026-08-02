@@ -80,7 +80,7 @@ var _update_counter: int = 0
 
 # 异步网格生成状态
 var _task_id := -1
-var _pending_arrays: Variant = null
+var _pending_result: Dictionary = {}  # 包含 arrays 和所有统计信息的字典，由子线程写入，主线程读取
 var _has_pending := false
 var _generation_id := 0
 # 材质快照缓存：材质对象深拷贝较昂贵，仅在材质变化时重建一次，供子线程安全读取
@@ -109,42 +109,20 @@ var last_rebuild_affected_count: int = 0   ## 受影响的 chunk 数（含相邻
 var last_mesh_gen_time_slice_ms: float = 0.0  ## 生成阶段耗时（不含 apply）
 var last_apply_time_ms: float = 0.0        ## 应用到场景的耗时 (ms)
 
-## 累计性能统计（滚动窗口，最近 N 帧）
+## 累计性能统计（简化版 - 仅保留必要统计，避免数组操作开销）
 var perf_stats: Dictionary = {
-	"chunk_counts": [],       # 每次重建的 chunk 数
-	"gen_times": [],          # 每次生成耗时
-	"apply_times": [],        # 每次应用耗时
-	"total_triangles": [],    # 每次三角形总数
-	"max_samples": 200,       # 最大采样数
 	"total_gen_time": 0.0,    # 累计生成耗时
 	"total_apply_time": 0.0,  # 累计应用耗时
 	"sample_count": 0,        # 采样次数
 }
 
-## 记录一次性能统计采样
+## 记录一次性能统计采样（轻量级，仅累加数值，不维护数组）
 func _record_perf_stats(chunk_count: int, gen_time_ms: float, apply_time_ms: float) -> void:
 	last_rebuild_chunk_count = chunk_count
 	last_mesh_gen_time_slice_ms = gen_time_ms
 	last_apply_time_ms = apply_time_ms
 	
 	var stats := perf_stats
-	var max_s := stats["max_samples"] as int
-	var cc := stats["chunk_counts"] as Array
-	var gt := stats["gen_times"] as Array
-	var at_arr := stats["apply_times"] as Array
-	var tt := stats["total_triangles"] as Array
-	
-	cc.append(chunk_count)
-	gt.append(gen_time_ms)
-	at_arr.append(apply_time_ms)
-	tt.append(last_solid_triangles + last_trans_triangles)
-	
-	# 限制滚动窗口大小
-	while cc.size() > max_s: cc.pop_front()
-	while gt.size() > max_s: gt.pop_front()
-	while at_arr.size() > max_s: at_arr.pop_front()
-	while tt.size() > max_s: tt.pop_front()
-	
 	stats["total_gen_time"] = stats["total_gen_time"] as float + gen_time_ms
 	stats["total_apply_time"] = stats["total_apply_time"] as float + apply_time_ms
 	stats["sample_count"] = stats["sample_count"] as int + 1
@@ -162,29 +140,48 @@ func _process(_delta: float) -> void:
 	if _task_id >= 0 and WorkerThreadPool.is_task_completed(_task_id):
 		WorkerThreadPool.wait_for_task_completion(_task_id)
 		_task_id = -1
-		var arrays := _pending_arrays
-		_pending_arrays = null
+		var result := _pending_result
+		_pending_result = {}
 		_has_pending = false
 
-		# 保存脏体素（_build_and_apply_mesh 会清空），用于 _pending_retrigger 重建
-		var saved_dirty: Dictionary = {}
-		if _pending_retrigger and data:
-			saved_dirty = data.dirty_voxels.duplicate()
+		# 检查结果是否有效（gen_id 匹配，避免使用过期结果）
+		var gen_id := result.get("gen_id", -1) if result else -1
+		if gen_id == _generation_id:
+			var arrays = result.get("arrays")
+			var gen_time_ms := result.get("gen_time_ms", 0.0) as float
+			var sv := result.get("solid_vertices", 0) as int
+			var tv := result.get("trans_vertices", 0) as int
+			var affected_count := result.get("affected_count", 0) as int
+			var total_chunks := result.get("total_chunks", 0) as int
 
-		var t_apply := Time.get_ticks_usec()
-		_build_and_apply_mesh(arrays)
-		var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
-		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, apply_ms)
+			# 在主线程更新统计信息（避免子线程写入节点属性的竞态条件）
+			last_mesh_gen_time_ms = gen_time_ms
+			last_solid_vertices = sv
+			last_trans_vertices = tv
+			last_solid_triangles = sv / 3
+			last_trans_triangles = tv / 3
+			last_total_chunks = total_chunks
+			last_rebuild_affected_count = affected_count
 
-		# 若任务运行期间有新变更，立即重新生成（用最新数据）
-		if _pending_retrigger:
-			_pending_retrigger = false
-			# 恢复脏体素，让增量重建能正确找到需要重建的 chunk
-			if data and not saved_dirty.is_empty():
-				for pos in saved_dirty:
-					data.dirty_voxels[pos] = saved_dirty[pos]
-			_dirty = true
-			_update_mesh()
+			# 保存脏体素（_build_and_apply_mesh 会清空），用于 _pending_retrigger 重建
+			var saved_dirty: Dictionary = {}
+			if _pending_retrigger and data:
+				saved_dirty = data.dirty_voxels.duplicate()
+
+			var t_apply := Time.get_ticks_usec()
+			_build_and_apply_mesh(arrays)
+			var apply_ms := (Time.get_ticks_usec() - t_apply) / 1000.0
+			_record_perf_stats(affected_count, gen_time_ms, apply_ms)
+
+			# 若任务运行期间有新变更，立即重新生成（用最新数据）
+			if _pending_retrigger:
+				_pending_retrigger = false
+				# 恢复脏体素，让增量重建能正确找到需要重建的 chunk
+				if data and not saved_dirty.is_empty():
+					for pos in saved_dirty:
+						data.dirty_voxels[pos] = saved_dirty[pos]
+				_dirty = true
+				_update_mesh()
 
 	if not (_dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor)):
 		return
@@ -262,7 +259,7 @@ func _cancel_async() -> void:
 		_task_id = -1
 	_generation_id += 1
 	_has_pending = false
-	_pending_arrays = null
+	_pending_result = {}
 
 
 func _update_mesh() -> void:
@@ -308,7 +305,7 @@ func _update_mesh_async() -> void:
 	_generation_id = gen_id
 
 	_has_pending = false
-	_pending_arrays = null
+	_pending_result = {}
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
 	# 将 use_chunk_generator 和 voxel_scale 作为参数传入，避免子线程访问节点属性
 	_task_id = WorkerThreadPool.add_task(_generate_worker.bind(
@@ -317,9 +314,10 @@ func _update_mesh_async() -> void:
 
 ## 后台工作线程入口：生成网格数据并写入结果缓冲
 ## 主线程通过 _process 轮询 WorkerThreadPool.is_task_completed 后读取，保证线程安全
+## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
 func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Array, gen_id: int,
 		use_chunk: bool, scale: float) -> void:
-	var options := {"scale": scale}
+	var result: Dictionary = {}
 
 	# 增量重建路径：每个 chunk 的顶点使用局部坐标，生成独立子 MeshInstance3D
 	if use_chunk:
@@ -329,12 +327,12 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 		if rebuild_chunks.is_empty():
 			# 无脏体素时全量生成所有非空 chunk（初始构建或切换模式后）
 			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
-				voxels, materials, options)
+				voxels, materials, {"scale": scale})
 			affected_count = chunk_arrays.size()
 		else:
-			chunk_arrays = VoxelChunkGenerator.generate_chunks_arrays_runtime(
-				voxels, materials, options, rebuild_chunks)
-		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
+			# P1: 并行生成多个 chunk
+			chunk_arrays = _generate_chunks_parallel(voxels, materials, scale, rebuild_chunks)
+		var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 		# 统计顶点/三角形数
 		var sv := 0; var tv := 0
 		for ck in chunk_arrays:
@@ -342,29 +340,85 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 			if arr is Dictionary:
 				sv += arr.get("solid_verts", PackedVector3Array()).size()
 				tv += arr.get("trans_verts", PackedVector3Array()).size()
-		last_solid_vertices = sv; last_trans_vertices = tv
-		last_solid_triangles = sv / 3; last_trans_triangles = tv / 3
-		last_total_chunks = chunk_arrays.size()
-		last_rebuild_affected_count = affected_count
-		if gen_id == _generation_id:
-			_pending_arrays = chunk_arrays
-			_has_pending = true
-		return
+		result = {
+			"arrays": chunk_arrays,
+			"gen_time_ms": gen_time_ms,
+			"solid_vertices": sv,
+			"trans_vertices": tv,
+			"total_chunks": chunk_arrays.size(),
+			"affected_count": affected_count,
+			"gen_id": gen_id,
+		}
+	else:
+		# 全量重建路径：所有体素合并为一个 ArrayMesh
+		var t1 := Time.get_ticks_usec()
+		var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, {"scale": scale})
+		var gen_time_ms := (Time.get_ticks_usec() - t1) / 1000.0
+		var sv := 0; var tv := 0
+		if arrays is Dictionary:
+			sv = arrays.get("solid_verts", PackedVector3Array()).size()
+			tv = arrays.get("trans_verts", PackedVector3Array()).size()
+		result = {
+			"arrays": arrays,
+			"gen_time_ms": gen_time_ms,
+			"solid_vertices": sv,
+			"trans_vertices": tv,
+			"total_chunks": 1,
+			"affected_count": 1,
+			"gen_id": gen_id,
+		}
 
-	# 全量重建路径：所有体素合并为一个 ArrayMesh
-	var t1 := Time.get_ticks_usec()
-	var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, options)
-	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
-	if arrays is Dictionary:
-		last_solid_vertices = arrays.get("solid_verts", PackedVector3Array()).size()
-		last_trans_vertices = arrays.get("trans_verts", PackedVector3Array()).size()
-		last_solid_triangles = last_solid_vertices / 3
-		last_trans_triangles = last_trans_vertices / 3
-		last_total_chunks = 1
-		last_rebuild_affected_count = 1
+	# 原子写入结果（仅此一处写入节点属性，且在主线程轮询完成后才读取）
 	if gen_id == _generation_id:
-		_pending_arrays = arrays
+		_pending_result = result
 		_has_pending = true
+
+
+## P1: 并行生成多个 chunk 的网格数据（使用 WorkerThreadPool.add_group_task）
+## 在子线程中调用，返回 {chunk_key: {solid_verts, ...}} 
+static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scale: float,
+		chunk_keys: Array[Vector3i]) -> Dictionary:
+	var count := chunk_keys.size()
+	# 少量 chunk 时直接串行，避免线程池调度开销
+	if count <= 4:
+		var aligned := VoxelMaterial.align_by_id(materials)
+		var result := {}
+		for ck in chunk_keys:
+			var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, ck)
+			if not arr.is_empty():
+				result[ck] = arr
+		return result
+
+	# 并行路径：使用 add_group_task 分发到多个线程
+	var aligned := VoxelMaterial.align_by_id(materials)
+	# 预分配结果数组，每个 slot 对应一个 chunk
+	var results: Array = []
+	results.resize(count)
+
+	# 分发到线程池，callable 会收到 task_index (0..count-1) 作为第一个参数
+	var group_id := WorkerThreadPool.add_group_task(
+		_chunk_gen_worker.bind(voxels, aligned, scale, results, chunk_keys),
+		count, false)
+	WorkerThreadPool.wait_for_group_task_completion(group_id)
+
+	# 收集结果
+	var chunk_arrays := {}
+	for i in range(count):
+		var arr: Dictionary = results[i] as Dictionary
+		if arr != null and not arr.is_empty():
+			chunk_arrays[chunk_keys[i]] = arr
+	return chunk_arrays
+
+
+## 单个 chunk 的并行生成任务（由 WorkerThreadPool.add_group_task 调用）
+## Godot 4.7+ API: callable 收到 task_index (int) 作为第一个参数
+static func _chunk_gen_worker(task_index: int, voxels: Dictionary, aligned_materials: Array,
+		scale: float, results: Array, chunk_keys: Array[Vector3i]) -> void:
+	var ck := chunk_keys[task_index]
+	# 调用 ChunkGenerator 生成单个 chunk 的网格数据
+	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned_materials, scale, ck)
+	# 写入预分配数组的对应 slot（每个线程写不同 slot，无需互斥锁）
+	results[task_index] = arr if arr else {}
 
 
 ## 同步路径：主线程直接生成并应用（兼容模式）
