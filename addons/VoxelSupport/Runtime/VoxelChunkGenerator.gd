@@ -182,6 +182,19 @@ static func chunks_for_dirty_voxels(dirty_voxels: Dictionary) -> Array[Vector3i]
 	return chunk_keys
 
 
+## 从体素数据中提取所有非空 chunk 的键列表
+## 用于初始全量构建时分块独立线程处理，避免单线程全量生成
+static func get_all_non_empty_chunk_keys(voxels: Dictionary) -> Array[Vector3i]:
+	var chunk_keys: Array[Vector3i] = []
+	var added := {}
+	for pos_key in voxels:
+		var ck := _chunk_of(pos_key)
+		if not added.has(ck):
+			chunk_keys.append(ck)
+			added[ck] = true
+	return chunk_keys
+
+
 static func _add_chunk(ck: Vector3i, chunk_keys: Array, added: Dictionary) -> void:
 	if not added.has(ck):
 		chunk_keys.append(ck)

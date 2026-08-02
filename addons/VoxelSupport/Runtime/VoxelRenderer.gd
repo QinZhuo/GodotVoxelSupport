@@ -275,10 +275,20 @@ func _update_mesh_async() -> void:
 			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 				snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale)))
 	elif use_chunk_generator and rebuild_chunks.is_empty():
-		# 无脏体素时全量构建（初始构建或切换模式后）
-		_pending_task_count = 1
-		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale)))
+		# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
+		# 而不是等所有 chunk 生成完毕再一起显示
+		var all_chunks := VoxelChunkGenerator.get_all_non_empty_chunk_keys(snapshot_voxels)
+		if all_chunks.is_empty():
+			# 没有非空 chunk，使用单任务路径（空场景）
+			_pending_task_count = 1
+			_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
+				snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale)))
+		else:
+			print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
+			_pending_task_count = all_chunks.size()
+			for ck in all_chunks:
+				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
+					snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale)))
 	else:
 		# 单任务路径（非 chunk 模式）：保持原有逻辑不变
 		_pending_task_count = 1
