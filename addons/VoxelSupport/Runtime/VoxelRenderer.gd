@@ -78,10 +78,9 @@ var _materials_cache: Array = []
 var _collision_body: StaticBody3D = null
 var _update_counter: int = 0
 
-# 异步网格生成状态
-var _task_id := -1
-var _pending_result: Dictionary = {}  # 包含 arrays 和所有统计信息的字典，由子线程写入，主线程读取
-var _has_pending := false
+# 异步网格生成状态（多任务并行，每个任务独立处理）
+var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
+var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
 var _generation_id := 0
 # 材质快照缓存：材质对象深拷贝较昂贵，仅在材质变化时重建一次，供子线程安全读取
 var _materials_snapshot: Array = []
@@ -136,60 +135,8 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	# 异步任务完成后，轮询并应用结果（在主线程执行，保证安全）
-	if _task_id >= 0 and WorkerThreadPool.is_task_completed(_task_id):
-		WorkerThreadPool.wait_for_task_completion(_task_id)
-		_task_id = -1
-		var result := _pending_result
-		_pending_result = {}
-		_has_pending = false
-
-		# 检查结果是否有效（gen_id 匹配，避免使用过期结果）
-		var gen_id := result.get("gen_id", -1) if result else -1
-		print("[诊断] 异步任务完成 gen_id=%d 当前=%d _pending_retrigger=%s" % [gen_id, _generation_id, str(_pending_retrigger)])
-		if gen_id == _generation_id:
-			var arrays = result.get("arrays")
-			var gen_time_ms := result.get("gen_time_ms", 0.0) as float
-			var sv := result.get("solid_vertices", 0) as int
-			var tv := result.get("trans_vertices", 0) as int
-			var affected_count := result.get("affected_count", 0) as int
-			var total_chunks := result.get("total_chunks", 0) as int
-
-			# 在主线程更新统计信息（避免子线程写入节点属性的竞态条件）
-			# 【修复】在 _build_and_apply_mesh 之前设置所有统计信息，确保
-			# mesh_updated 信号触发时外部读取的数据已是本轮结果
-			last_mesh_gen_time_ms = gen_time_ms
-			last_solid_vertices = sv
-			last_trans_vertices = tv
-			last_solid_triangles = sv / 3
-			last_trans_triangles = tv / 3
-			last_total_chunks = total_chunks
-			last_rebuild_affected_count = affected_count
-			last_rebuild_chunk_count = affected_count
-
-			# 保存脏体素（_build_and_apply_mesh 会清空），用于 _pending_retrigger 重建
-			# 【修复】始终执行 _build_and_apply_mesh，即使 _pending_retrigger=true
-			# _build_and_apply_chunk_meshes 内部已有 has_voxels_in_data 检查，
-			# 能正确处理快照滞后：当前数据已空的 chunk 会被清除 Mesh，
-			# 非空 chunk 会应用最近可用数据，避免"原mesh还显示着"的问题
-			var saved_dirty: Dictionary = {}
-			if _pending_retrigger and data:
-				saved_dirty = data.dirty_voxels.duplicate()
-
-			_build_and_apply_mesh(arrays)
-			# _build_and_apply_mesh 内部已设置 last_apply_time_ms
-			_record_perf_stats(affected_count, gen_time_ms, last_apply_time_ms)
-
-			# 若任务运行期间有新变更，立即重新生成（用最新数据）
-			if _pending_retrigger:
-				_pending_retrigger = false
-				print("[诊断] 触发 Retrigger: 恢复脏体素=%d 启动新任务" % saved_dirty.size())
-				# 恢复应用期间被清空的脏体素（T2 变更），让增量重建包含这些变更
-				if data and not saved_dirty.is_empty():
-					for pos in saved_dirty:
-						data.dirty_voxels[pos] = saved_dirty[pos]
-				_dirty = true
-				_update_mesh()
+	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
+	# 这里只处理限流和启动新任务
 
 	if not (_dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor)):
 		return
@@ -199,7 +146,7 @@ func _process(_delta: float) -> void:
 		return
 	_update_counter = 0
 	# 若上一个异步任务仍在运行，标记"待更新"并等待其完成后自动重触发，避免并发任务堆积
-	if _task_id >= 0:
+	if _pending_task_count > 0:
 		if not _pending_retrigger:
 			print("[诊断] 设置 _pending_retrigger（任务运行中数据又变化，等待完成后重建）")
 		_pending_retrigger = true
@@ -264,12 +211,11 @@ func _exit_tree() -> void:
 
 ## 取消尚未完成的异步网格生成任务
 func _cancel_async() -> void:
-	if _task_id >= 0:
-		WorkerThreadPool.wait_for_task_completion(_task_id)
-		_task_id = -1
+	for tid in _task_ids:
+		WorkerThreadPool.wait_for_task_completion(tid)
+	_task_ids.clear()
+	_pending_task_count = 0
 	_generation_id += 1
-	_has_pending = false
-	_pending_result = {}
 
 
 func _update_mesh() -> void:
@@ -297,7 +243,7 @@ func _update_mesh() -> void:
 		_update_mesh_sync()
 
 
-## 异步路径：后台线程生成网格数据，完成后在 _process 轮询应用
+## 异步路径：后台线程生成网格数据，完成后通过 call_deferred 直接传递结果到主线程
 ## 主线程绝不阻塞：旧任务未完成时直接启动新任务覆盖，子线程完成后检查 gen_id 丢弃过期结果
 func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
@@ -314,12 +260,30 @@ func _update_mesh_async() -> void:
 	var gen_id := _generation_id + 1
 	_generation_id = gen_id
 
-	_has_pending = false
-	_pending_result = {}
+	_task_ids.clear()
+	_pending_task_count = 0
+
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
 	# 将 use_chunk_generator 和 voxel_scale 作为参数传入，避免子线程访问节点属性
-	_task_id = WorkerThreadPool.add_task(_generate_worker.bind(
-		snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale))
+	#
+	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
+	if use_chunk_generator and not rebuild_chunks.is_empty():
+		# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
+		print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
+		_pending_task_count = rebuild_chunks.size()
+		for ck in rebuild_chunks:
+			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
+				snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale)))
+	elif use_chunk_generator and rebuild_chunks.is_empty():
+		# 无脏体素时全量构建（初始构建或切换模式后）
+		_pending_task_count = 1
+		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
+			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale)))
+	else:
+		# 单任务路径（非 chunk 模式）：保持原有逻辑不变
+		_pending_task_count = 1
+		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
+			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale)))
 
 
 ## 【高效快照】只复制脏 Chunk 区域的体素数据，避免全量 duplicate
@@ -401,10 +365,174 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 			"gen_id": gen_id,
 		}
 
-	# 【线程安全修复】不再在工作线程中读取 _generation_id（节点属性，跨线程不安全）
-	# 改为始终写入结果，由主线程在轮询时根据 gen_id 判断是否丢弃
-	_pending_result = result
-	_has_pending = true
+	# 使用 call_deferred 将结果传回主线程（线程安全，仅排队到主线程消息队列，不直接操作 Node 属性）
+	call_deferred("_on_thread_result", result)
+
+
+## 单 chunk 工作线程入口：每个脏 chunk 独立一个线程任务，真正并行处理
+## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
+## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
+func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vector3i,
+		gen_id: int, scale: float) -> void:
+	var t0 := Time.get_ticks_usec()
+	var aligned := VoxelMaterial.align_by_id(materials)
+	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, chunk_key)
+	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
+
+	# 统计顶点数
+	var sv := 0
+	var tv := 0
+	if not arr.is_empty():
+		sv = arr.get("solid_verts", PackedVector3Array()).size()
+		tv = arr.get("trans_verts", PackedVector3Array()).size()
+
+	# 构建结果字典（包含 chunk_key 供 _apply_single_chunk_result 识别单个 chunk）
+	var result: Dictionary = {
+		"arrays": {},
+		"chunk_key": chunk_key,
+		"gen_time_ms": gen_time_ms,
+		"solid_vertices": sv,
+		"trans_vertices": tv,
+		"total_chunks": 1 if not arr.is_empty() else 0,
+		"affected_count": 1,
+		"gen_id": gen_id,
+	}
+	if not arr.is_empty():
+		result["arrays"][chunk_key] = arr
+
+	# 使用 call_deferred 将结果传回主线程
+	call_deferred("_on_thread_result", result)
+
+
+## 主线程结果处理入口（通过 call_deferred 从工作线程调用）
+## 检查 gen_id 有效性，应用结果，递减计数器，全部完成后执行批次清理
+func _on_thread_result(result: Dictionary) -> void:
+	# 丢弃过期结果（gen_id 不匹配说明是旧批次）
+	var gen_id = result.get("gen_id", -1)
+	if gen_id != _generation_id:
+		return
+	
+	# 应用结果
+	_apply_single_chunk_result(result)
+	
+	# 递减任务计数器，全部完成后执行批次清理
+	_pending_task_count -= 1
+	if _pending_task_count <= 0:
+		_pending_task_count = 0  # 防止负数
+		_on_batch_complete()
+
+
+## 应用单个 chunk 的异步结果（在主线程 _process 中调用）
+## 根据 result 中是否包含 chunk_key 区分：
+## - 有 chunk_key：单个 chunk 的结果，直接更新对应子 MeshInstance3D
+## - 无 chunk_key：全量结果（来自 _generate_worker），委托 _build_and_apply_mesh 处理
+func _apply_single_chunk_result(result: Dictionary) -> void:
+	var arrays = result.get("arrays", {})
+	var chunk_key: Vector3i = result.get("chunk_key", Vector3i(-999, -999, -999))
+	var gen_id = result.get("gen_id", -1)
+	var gen_time_ms = result.get("gen_time_ms", 0.0) as float
+
+	# 更新统计信息
+	last_mesh_gen_time_ms = gen_time_ms
+	last_solid_vertices = result.get("solid_vertices", 0)
+	last_trans_vertices = result.get("trans_vertices", 0)
+	last_solid_triangles = last_solid_vertices / 3
+	last_trans_triangles = last_trans_vertices / 3
+	last_total_chunks = result.get("total_chunks", 0)
+	last_rebuild_affected_count = 1
+	last_rebuild_chunk_count = 1
+
+	# 单 chunk 结果（来自 _generate_chunk_worker）
+	if chunk_key.x != -999:
+		var arr = arrays.get(chunk_key, {})
+		var has_voxels_in_data := false
+		if data:
+			var current_voxels: Array = data.get_chunk_voxels(chunk_key)
+			has_voxels_in_data = not current_voxels.is_empty()
+
+		# 获取或创建该 chunk 的子 MeshInstance3D
+		var chunk_mesh: MeshInstance3D
+		if _chunk_meshes.has(chunk_key):
+			chunk_mesh = _chunk_meshes[chunk_key]
+		else:
+			chunk_mesh = MeshInstance3D.new()
+			chunk_mesh.name = "Chunk_%d_%d_%d" % [chunk_key.x, chunk_key.y, chunk_key.z]
+			add_child(chunk_mesh)
+			_chunk_meshes[chunk_key] = chunk_mesh
+
+		# 构建或清空 mesh
+		var has_mesh := false
+		if arr is Dictionary and not arr.is_empty() and has_voxels_in_data:
+			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr as Dictionary)
+			if new_mesh and _materials_cache.size() >= 2:
+				if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
+					new_mesh.surface_set_material(0, _materials_cache[0])
+				if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
+					new_mesh.surface_set_material(1, _materials_cache[1])
+			chunk_mesh.mesh = new_mesh
+			has_mesh = new_mesh != null
+		else:
+			# chunk 已空或当前数据中已无体素，清空 mesh
+			if not has_voxels_in_data and arr is Dictionary and not arr.is_empty():
+				print("[诊断] Chunk %s 快照有体素但当前数据已空，清除 Mesh" % chunk_key)
+			chunk_mesh.mesh = null
+
+		# 定位到 chunk 原点
+		var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
+		chunk_mesh.position = Vector3(chunk_key) * chunk_scale
+
+		# Per-chunk 碰撞体
+		_update_chunk_collision(chunk_key, has_mesh)
+
+		# 记录性能
+		_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
+	else:
+		# 全量结果（来自 _generate_worker，初始全量构建或非 chunk 模式）
+		# 注意：_build_and_apply_mesh 会清空 data.dirty_voxels，
+		# 如果 _pending_retrigger 为 true，需要保存脏体素以便后续恢复
+		var saved_dirty: Dictionary = {}
+		if _pending_retrigger and data:
+			saved_dirty = data.dirty_voxels.duplicate()
+
+		_build_and_apply_mesh(arrays)
+
+		# 恢复脏体素（用于 _on_batch_complete 中的 retrigger 逻辑）
+		if _pending_retrigger and data and not saved_dirty.is_empty():
+			for pos in saved_dirty:
+				data.dirty_voxels[pos] = saved_dirty[pos]
+
+		_record_perf_stats(last_rebuild_affected_count, gen_time_ms, last_apply_time_ms)
+
+
+## 批次完成清理：当所有任务都完成后执行
+## 清除空 chunk、清空脏体素追踪、处理 _pending_retrigger
+func _on_batch_complete() -> void:
+	# 清理空 chunk（不在重建列表中且已无体素的）
+	var cleared_count := 0
+	for ck in _chunk_meshes.keys():
+		if data:
+			var chunk_positions: Array = data.get_chunk_voxels(ck)
+			if chunk_positions.is_empty():
+				# 避免重复清理已为空的 mesh
+				if _chunk_meshes[ck].mesh != null:
+					cleared_count += 1
+					print("[诊断] Chunk %s 不在重建列表且已无体素，清除旧 Mesh" % ck)
+					_chunk_meshes[ck].mesh = null
+					_remove_chunk_collision(ck)
+
+	if cleared_count > 0:
+		print("[诊断] 本轮共清除 %d 个空 Chunk Mesh" % cleared_count)
+
+	# 处理 _pending_retrigger：任务运行期间有新变更
+	if _pending_retrigger:
+		_pending_retrigger = false
+		print("[诊断] 触发 Retrigger: 启动新任务")
+		_dirty = true
+		_update_mesh()
+	else:
+		# 无待处理变更，清空脏体素追踪
+		if data:
+			data.clear_dirty_voxels()
 
 
 ## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）
