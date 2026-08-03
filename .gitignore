@@ -16,3 +16,4 @@ mono_crash.*.json
 /test
 /addons/TweenAnimation
 /addons/DEVFramework
+.opencode

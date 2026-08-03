@@ -145,12 +145,8 @@ func _process(_delta: float) -> void:
 	if _update_counter < update_throttle_frames:
 		return
 	_update_counter = 0
-	# 若上一个异步任务仍在运行，标记"待更新"并等待其完成后自动重触发，避免并发任务堆积
-	if _pending_task_count > 0:
-		if not _pending_retrigger:
-			print("[诊断] 设置 _pending_retrigger（任务运行中数据又变化，等待完成后重建）")
-		_pending_retrigger = true
-		return
+	# 即使旧任务仍在运行，也直接启动新任务
+	# 旧任务完成后会因 gen_id 不匹配自动丢弃结果，不会影响新任务计数
 	_update_mesh()
 
 
@@ -257,6 +253,8 @@ func _update_mesh_async() -> void:
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
+		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
+		data.clear_dirty_voxels()
 	var snapshot_voxels: Dictionary = data.voxels
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
@@ -501,35 +499,18 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 
 
 ## 批次完成清理：当所有任务都完成后执行
-## 清除空 chunk、清空脏体素追踪、处理 _pending_retrigger
+## 处理 _pending_retrigger 并发出 mesh_updated 信号
+## 空 Chunk 清理已在 _apply_single_chunk_result 中增量完成，无需全量遍历
 func _on_batch_complete() -> void:
-	var t_start := Time.get_ticks_usec()
-
-	# 清理空 chunk（不在重建列表中且已无体素的）
-	var cleared_count := 0
-	for ck in _chunk_meshes.keys():
-		if data:
-			var chunk_positions: Array = data.get_chunk_voxels(ck)
-			if chunk_positions.is_empty():
-				# 避免重复清理已为空的 mesh
-				if _chunk_meshes[ck].mesh != null:
-					cleared_count += 1
-					_chunk_meshes[ck].mesh = null
-					_remove_chunk_collision(ck)
-
-	# 更新 apply 耗时
-	last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0
-
-	# 处理 _pending_retrigger：任务运行期间有新变更
+	# 处理 _pending_retrigger（极少情况下被外部设置）
 	if _pending_retrigger:
 		_pending_retrigger = false
 		print("[诊断] 触发 Retrigger: 启动新任务")
 		_dirty = true
 		_update_mesh()
 	else:
-		# 无待处理变更，清空脏体素追踪
-		if data:
-			data.clear_dirty_voxels()
+		# 脏体素追踪已在 _update_mesh_async 启动任务时清除，无需重复清理
+		pass
 
 	# 批次完成信号（外部依赖此信号感知场景更新完毕）
 	mesh_updated.emit()
