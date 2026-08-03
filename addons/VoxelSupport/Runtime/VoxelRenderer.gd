@@ -259,6 +259,8 @@ func _update_mesh_async() -> void:
 	var snapshot_materials := _materials_snapshot
 	var gen_id := _generation_id + 1
 	_generation_id = gen_id
+	# 渲染居中偏移（体素单位），子线程无权访问节点，随任务参数传入
+	var render_offset: Vector3 = data.center_offset if data else Vector3.ZERO
 
 	_task_ids.clear()
 	_pending_task_count = 0
@@ -273,7 +275,7 @@ func _update_mesh_async() -> void:
 		_pending_task_count = rebuild_chunks.size()
 		for ck in rebuild_chunks:
 			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-				snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale)))
+				snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
 	elif use_chunk_generator and rebuild_chunks.is_empty():
 		# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
 		# 而不是等所有 chunk 生成完毕再一起显示
@@ -282,18 +284,18 @@ func _update_mesh_async() -> void:
 			# 没有非空 chunk，使用单任务路径（空场景）
 			_pending_task_count = 1
 			_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-				snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale)))
+				snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
 		else:
 			print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
 			_pending_task_count = all_chunks.size()
 			for ck in all_chunks:
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-					snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale)))
+					snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
 	else:
 		# 单任务路径（非 chunk 模式）：保持原有逻辑不变
 		_pending_task_count = 1
 		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale)))
+			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
 
 
 ## 【高效快照】只复制脏 Chunk 区域的体素数据，避免全量 duplicate
@@ -319,7 +321,7 @@ static func _copy_dirty_chunk_voxels(data: VoxelData, rebuild_chunks: Array[Vect
 ## 主线程通过 _process 轮询 WorkerThreadPool.is_task_completed 后读取，保证线程安全
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
 func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Array, gen_id: int,
-		use_chunk: bool, scale: float) -> void:
+		use_chunk: bool, scale: float, offset: Vector3 = Vector3.ZERO) -> void:
 	var result: Dictionary = {}
 
 	# 增量重建路径：每个 chunk 的顶点使用局部坐标，生成独立子 MeshInstance3D
@@ -332,13 +334,13 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 			if gen_id <= 1:
 				print("[诊断] 初始全量构建（gen_id=%d）..." % gen_id)
 			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
-				voxels, materials, {"scale": scale})
+				voxels, materials, {"scale": scale, "offset": offset})
 			affected_count = chunk_arrays.size()
 			print("[诊断] 全量构建完成: %d 个非空 Chunk" % affected_count)
 		else:
 			# P1: 并行生成多个 chunk
 			print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
-			chunk_arrays = _generate_chunks_parallel(voxels, materials, scale, rebuild_chunks)
+			chunk_arrays = _generate_chunks_parallel(voxels, materials, scale, rebuild_chunks, offset)
 		var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 		# 统计顶点/三角形数
 		var sv := 0; var tv := 0
@@ -359,7 +361,7 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 	else:
 		# 全量重建路径：所有体素合并为一个 ArrayMesh
 		var t1 := Time.get_ticks_usec()
-		var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, {"scale": scale})
+		var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, {"scale": scale, "offset": offset})
 		var gen_time_ms := (Time.get_ticks_usec() - t1) / 1000.0
 		var sv := 0; var tv := 0
 		if arrays is Dictionary:
@@ -383,10 +385,10 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 ## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
 func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vector3i,
-		gen_id: int, scale: float) -> void:
+		gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO) -> void:
 	var t0 := Time.get_ticks_usec()
 	var aligned := VoxelMaterial.align_by_id(materials)
-	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, chunk_key)
+	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, chunk_key, offset)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 
 	# 统计顶点数
@@ -552,11 +554,11 @@ func _on_batch_complete() -> void:
 ## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）
 ## 注意：此函数在工作线程内调用，禁止使用 add_group_task 等嵌套线程池调用
 static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scale: float,
-		chunk_keys: Array[Vector3i]) -> Dictionary:
+		chunk_keys: Array[Vector3i], offset: Vector3 = Vector3.ZERO) -> Dictionary:
 	var aligned := VoxelMaterial.align_by_id(materials)
 	var result := {}
 	for ck in chunk_keys:
-		var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, ck)
+		var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, ck, offset)
 		if not arr.is_empty():
 			result[ck] = arr
 	return result
@@ -566,6 +568,7 @@ static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scal
 func _update_mesh_sync() -> void:
 	var options := {
 		"scale": voxel_scale,
+		"offset": data.center_offset if data else Vector3.ZERO,
 	}
 
 	# Per-chunk 增量重建

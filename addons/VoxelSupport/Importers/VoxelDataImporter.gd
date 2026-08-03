@@ -8,6 +8,7 @@ extends EditorImportPlugin
 
 const frame_index := "mesh/frame_index"
 const scale := "mesh/scale"
+const center := "mesh/center"
 
 
 func _get_importer_name():
@@ -44,6 +45,10 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			name = scale,
 			default_value = 0.1,
 		},
+		{
+			name = center,
+			default_value = true,
+		},
 	]
 
 
@@ -51,6 +56,6 @@ func _import(source_file, save_path, options, _platforms, gen_files):
 	var vox_access := VoxAccess.Open(source_file)
 	if not vox_access:
 		return FAILED
-	var res := VoxelData.from_voxel_data(vox_access.voxel, options[frame_index])
+	var res := VoxelData.from_voxel_data(vox_access.voxel, options[frame_index], options[center])
 	res.default_scale = options[scale]
 	return ResourceSaver.save(res, "%s.%s" % [save_path, _get_save_extension()])

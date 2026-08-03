@@ -23,6 +23,13 @@ extends Resource
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
+## 居中偏移 (体素单位，运行时渲染时叠加到网格顶点)
+## 导入时若 center 选项开启，自动计算使模型左右前后居中(X/Z)、上下贴底(Y=0)
+## 与 mesh 导入的居中策略一致，数据坐标仍保持在 [0, grid_size) 范围内
+## 运行时渲染: 网格顶点 = (体素坐标 + center_offset) * voxel_scale
+## 该偏移不影响破坏/查询逻辑 (它们基于原始数据坐标)
+@export var center_offset: Vector3 = Vector3.ZERO
+
 ## 本次变更涉及的体素集合（由修改方法记录，供增量更新/外部查询）
 ## 调用 clear_dirty_voxels() 清空
 var dirty_voxels: Dictionary[Vector3i, int] = {}
@@ -73,7 +80,8 @@ const HORIZONTAL_4: Array[Vector3i] = [
 
 
 ## 从 VoxData 构造 (编辑器导入时使用)
-static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0) -> VoxelData:
+## center 为 true 时，记录居中偏移使渲染时模型中心对齐原点 (与 mesh 导入行为一致)
+static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: bool = true) -> VoxelData:
 	var res := VoxelData.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 	
@@ -113,6 +121,13 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0) -> VoxelD
 		new_mat.rough = src.rough
 		new_mat.emission = src.emission
 		res.materials[i] = new_mat
+
+	# 居中偏移：与 mesh 导入行为一致 —— 左右前后(X/Z)居中，上下(Y)不居中(底部贴原点)
+	# 网格顶点 = (体素坐标 + center_offset) * voxel_scale
+	# X/Z 偏移 = -(grid_size/2) floor，Y 偏移恒为 0，使模型水平居中且竖立于原点
+	if center:
+		var half_grid := (Vector3(res.grid_size) / 2.0).floor()
+		res.center_offset = Vector3(-half_grid.x, 0.0, -half_grid.z)
 	return res
 
 

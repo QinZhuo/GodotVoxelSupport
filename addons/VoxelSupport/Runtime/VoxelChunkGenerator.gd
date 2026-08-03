@@ -39,6 +39,7 @@ static func generate_arrays_runtime(
 		options: Dictionary = {},
 		rebuild_chunks: Array[Vector3i] = []) -> Variant:
 	var scale: float = options.get("scale", 0.1)
+	var offset: Vector3 = options.get("offset", Vector3.ZERO)
 	var aligned := VoxelMaterial.align_by_id(materials)
 
 	# 一次遍历 voxels，建立"非空 chunk"哈希索引（避免逐 chunk 16³ 扫描）
@@ -65,7 +66,8 @@ static func generate_arrays_runtime(
 	for ck in chunk_keys:
 		_generate_chunk_into(voxels, aligned, scale, ck,
 			all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs,
-			all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs)
+			all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs,
+			false, offset)
 
 	if all_solid_idxs.is_empty() and all_trans_idxs.is_empty():
 		return null
@@ -92,11 +94,12 @@ static func generate_chunks_arrays_runtime(
 		options: Dictionary = {},
 		chunk_keys: Array[Vector3i] = []) -> Dictionary:
 	var scale: float = options.get("scale", 0.1)
+	var offset: Vector3 = options.get("offset", Vector3.ZERO)
 	var aligned := VoxelMaterial.align_by_id(materials)
 	var result := {}
 
 	for ck in chunk_keys:
-		var arrays := _generate_single_chunk_arrays_impl(voxels, aligned, scale, ck)
+		var arrays := _generate_single_chunk_arrays_impl(voxels, aligned, scale, ck, true, offset)
 		if arrays != null:
 			result[ck] = arrays
 
@@ -118,14 +121,16 @@ static func generate_all_chunks_arrays_runtime(
 ## materials 参数应为已对齐的材质数组（通过 VoxelMaterial.align_by_id 预先对齐）
 ## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
 static func generate_single_chunk_array(
-		voxels: Dictionary, aligned_materials: Array, scale: float, chunk_key: Vector3i) -> Dictionary:
-	var result := _generate_single_chunk_arrays_impl(voxels, aligned_materials, scale, chunk_key)
+		voxels: Dictionary, aligned_materials: Array, scale: float, chunk_key: Vector3i,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	var result := _generate_single_chunk_arrays_impl(voxels, aligned_materials, scale, chunk_key, true, offset)
 	return result if result else {}
 
 
 ## 生成单个 chunk 的网格数据（顶点使用局部坐标）- 内部实现
 static func _generate_single_chunk_arrays_impl(
-		voxels, materials, scale: float, chunk: Vector3i) -> Dictionary:
+		voxels, materials, scale: float, chunk: Vector3i,
+		use_local_space: bool = true, offset: Vector3 = Vector3.ZERO) -> Dictionary:
 	var solid_verts := PackedVector3Array()
 	var solid_normals := PackedVector3Array()
 	var solid_uvs := PackedVector2Array()
@@ -138,7 +143,7 @@ static func _generate_single_chunk_arrays_impl(
 	_generate_chunk_into(voxels, materials, scale, chunk,
 		solid_verts, solid_normals, solid_uvs, solid_idxs,
 		trans_verts, trans_normals, trans_uvs, trans_idxs,
-		true)  # use_local_space = true
+		use_local_space, offset)
 
 	if solid_idxs.is_empty() and trans_idxs.is_empty():
 		return {}
@@ -244,6 +249,7 @@ static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Ar
 ## 生成单个 chunk 的面片并追加到全局数组（贪婪网格）- 优化版
 ## 使用贪婪网格算法：将相邻同材质面合并为更大的四边形，大幅减少三角形数。
 ## use_local_space=true 时顶点使用 chunk 局部坐标（适合独立 MeshInstance3D）
+## offset: 渲染偏移（体素单位，最终乘以 scale 叠加到顶点），用于导入居中显示
 ##
 ## 性能优化说明：
 ## 原方案：对每个面（6次）独立扫描整个 32³ 空间 → 6 × 32³ = 196,608 次字典查找
@@ -252,7 +258,7 @@ static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Ar
 static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3i,
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
 		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
-		use_local_space: bool = false) -> void:
+		use_local_space: bool = false, offset: Vector3 = Vector3.ZERO) -> void:
 	var chunk_origin := chunk * CHUNK_SIZE
 	var origin_offset := Vector3(chunk_origin) * scale if use_local_space else Vector3.ZERO
 
@@ -328,7 +334,7 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 					solid_verts, solid_normals, solid_uvs, solid_idxs,
 					trans_verts, trans_normals, trans_uvs, trans_idxs,
 					pos, rect.value, face_idx, scale, size,
-					materials, origin_offset)
+					materials, origin_offset, offset)
 
 
 ## 添加一个贪婪合并后的面（大四边形，2 三角形）
@@ -338,7 +344,7 @@ static func _add_greedy_face(
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
 		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
 		pos: Vector3i, mat_id: int, face_idx: int, scale: float, size: Vector3i,
-		materials, origin_offset: Vector3) -> void:
+		materials, origin_offset: Vector3, offset: Vector3 = Vector3.ZERO) -> void:
 	var normal: Vector3 = FaceTool.Normals[face_idx]
 	var u := VoxelMaterial.uv_for_id(mat_id)
 
@@ -348,8 +354,9 @@ static func _add_greedy_face(
 
 	# 顶点位置：pos + point * size
 	# 与 VoxelMeshGenerator._generate_size_dir_face 一致
+	# offset 为渲染居中偏移（体素单位），换算为世界单位后叠加到最终顶点
 	for point: Vector3 in FaceTool.Faces[face_idx]:
-		var world_pos := (Vector3(pos) + point * Vector3(size)) * scale - origin_offset
+		var world_pos := (Vector3(pos) + point * Vector3(size)) * scale - origin_offset + offset * scale
 		if is_trans:
 			trans_verts.append(world_pos)
 			trans_normals.append(normal)
