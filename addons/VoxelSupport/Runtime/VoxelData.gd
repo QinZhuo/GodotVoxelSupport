@@ -411,12 +411,17 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
+	var _diag_t0 := Time.get_ticks_usec()
 	for pos in positions:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1
 		_chunk_index_remove(pos)
 	if notify:
 		emit_changed()
+	# 诊断：批量移除超过 100 体素时打印耗时
+	var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+	if _t_ms > 2.0:
+		print("[诊断] VoxelData._remove_voxels: %d 体素, 耗时 %.2f ms" % [positions.size(), _t_ms])
 	return positions
 
 
@@ -673,6 +678,7 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 ## 
 ## 返回失稳体素位置集合 {pos: true}
 func find_unsupported_around(removed: Array) -> Dictionary:
+	var _diag_t0 := Time.get_ticks_usec()
 	var voxels_dict: Dictionary = voxels
 	if removed.is_empty() or voxels_dict.is_empty():
 		return {}
@@ -734,5 +740,10 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 				if voxels_dict.has(nb) and not visited.has(nb):
 					visited[nb] = true
 					stack.append(nb)
+
+	# 诊断：检查量级较大时打印耗时
+	var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+	if _t_ms > 1.0:
+		print("[诊断] VoxelData.find_unsupported_around: 起点%d, 候选%d, 失稳%d, 耗时%.2f ms" % [removed.size(), candidates.size(), unstable.size(), _t_ms])
 
 	return unstable

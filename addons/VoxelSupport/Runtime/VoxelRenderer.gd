@@ -370,8 +370,13 @@ func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vec
 		gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO) -> void:
 	var t0 := Time.get_ticks_usec()
 	var aligned := VoxelMaterial.align_by_id(materials)
+	var _align_time := (Time.get_ticks_usec() - t0) / 1000.0
 	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, chunk_key, offset)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
+
+	# 诊断：每 chunk 生成耗时 > 5ms 时打印（含 align_by_id 开销）
+	if gen_time_ms > 5.0:
+		print("[诊断] _generate_chunk_worker: Chunk%s, align=%.2fms, 总=%.2fms" % [chunk_key, _align_time, gen_time_ms])
 
 	# 统计顶点数
 	var sv := 0
@@ -401,6 +406,7 @@ func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vec
 ## 主线程结果处理入口（通过 call_deferred 从工作线程调用）
 ## 检查 gen_id 有效性，应用结果，递减计数器，全部完成后执行批次清理
 func _on_thread_result(result: Dictionary) -> void:
+	var _diag_t0 := Time.get_ticks_usec()
 	# 丢弃过期结果（gen_id 不匹配说明是旧批次）
 	var gen_id = result.get("gen_id", -1)
 	if gen_id != _generation_id:
@@ -415,12 +421,18 @@ func _on_thread_result(result: Dictionary) -> void:
 		_pending_task_count = 0  # 防止负数
 		_on_batch_complete()
 
+	if _pending_task_count >= 0:
+		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+		if _t_ms > 0.5:
+			print("[诊断] _on_thread_result: 剩余%d任务, 应用耗时%.2f ms" % [_pending_task_count, _t_ms])
+
 
 ## 应用单个 chunk 的异步结果（在主线程 _process 中调用）
 ## 根据 result 中是否包含 chunk_key 区分：
 ## - 有 chunk_key：单个 chunk 的结果，直接更新对应子 MeshInstance3D
 ## - 无 chunk_key：全量结果（来自 _generate_worker），委托 _build_and_apply_mesh 处理
 func _apply_single_chunk_result(result: Dictionary) -> void:
+	var _diag_t0 := Time.get_ticks_usec()
 	var arrays = result.get("arrays", {})
 	var chunk_key: Vector3i = result.get("chunk_key", Vector3i(-999, -999, -999))
 	var gen_id = result.get("gen_id", -1)
@@ -440,8 +452,11 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 	if chunk_key.x != -999:
 		var arr = arrays.get(chunk_key, {})
 		var has_voxels_in_data := false
+		var _t_get_chunk := 0.0
 		if data:
+			var _t1 := Time.get_ticks_usec()
 			var current_voxels: Array = data.get_chunk_voxels(chunk_key)
+			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
 			has_voxels_in_data = not current_voxels.is_empty()
 
 		# 获取或创建该 chunk 的子 MeshInstance3D
@@ -502,6 +517,11 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 				data.dirty_voxels[pos] = saved_dirty[pos]
 
 		_record_perf_stats(last_rebuild_affected_count, gen_time_ms, last_apply_time_ms)
+
+	# 诊断：单 chunk 应用耗时 > 1ms 时打印
+	var _t_apply_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+	if _t_apply_ms > 1.0 and chunk_key.x != -999:
+		print("[诊断] _apply_single_chunk_result: Chunk%s, get_chunk=%.2fms, 总=%.2fms" % [chunk_key, _t_get_chunk, _t_apply_ms])
 
 
 ## 批次完成清理：当所有任务都完成后执行

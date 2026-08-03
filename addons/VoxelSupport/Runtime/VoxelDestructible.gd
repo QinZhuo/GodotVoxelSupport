@@ -67,6 +67,9 @@ enum CollapseMode {
 ## 应力衰减系数（每传播一步应力的衰减比例）
 @export_range(0.0, 1.0) var stress_decay: float = 0.5
 
+## 诊断模式开关：开启后在输出面板打印详细的帧耗时分布，用于定位性能瓶颈
+@export var diag_enabled: bool = false
+
 ## 监控统计
 var last_damage_count: int = 0     ## 最近一次破坏实际移除的体素数
 var last_damage_time_ms: float = 0 ## 最近一次破坏耗时 (ms)
@@ -278,13 +281,19 @@ func _get_material_hardness(mat_id: int) -> float:
 ## 在 _process 延迟处理中调用（每帧一个批次）
 ## 应力传播是轻量 BFS（邻域检查），直接同步执行，无需异步
 func _after_removal(removed: Array) -> void:
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
+	var _stress_count := 0
+
 	# 应力传播：裂纹扩散（始终启用）
 	if not removed.is_empty():
 		var stress_removed := _propagate_stress(removed)
+		_stress_count = stress_removed.size()
 		if not stress_removed.is_empty():
 			# 应力传播移除的体素先移除，再触发崩塌
 			var stress_mat_map := _collect_voxel_materials(stress_removed)
+			var _diag_t1 := Time.get_ticks_usec() if diag_enabled else 0
 			data.remove_voxels(stress_removed)
+			var _diag_t2 := Time.get_ticks_usec() if diag_enabled else 0
 			# 应力传播的断裂体素：连通的转为物理体掉落，散落的用粒子
 			if not Engine.is_editor_hint():
 				# 按连通性分组，每组生成一个物理体掉落
@@ -296,14 +305,26 @@ func _after_removal(removed: Array) -> void:
 					for pos in sgroup:
 						sgroup_mat_map[pos] = stress_mat_map.get(pos, 0)
 					stress_group_materials.append(sgroup_mat_map)
+				var _diag_t3 := Time.get_ticks_usec() if diag_enabled else 0
 				_spawn_falling_chunks_from_groups(stress_groups, stress_group_materials)
+				if diag_enabled:
+					var _t_spawn := (Time.get_ticks_usec() - _diag_t3) / 1000.0
+					print("[诊断] 应力传播掉落: %d组, 生成耗时%.2f ms" % [stress_groups.size(), _t_spawn])
 			removed.append_array(stress_removed)
+			if diag_enabled:
+				var _t_remove_stress := (_diag_t2 - _diag_t1) / 1000.0
+				print("[诊断] 应力传播: 移除%d体素, 移除耗时%.2f ms, 分组%d" % [stress_removed.size(), _t_remove_stress, stress_groups.size() if not Engine.is_editor_hint() else 0])
 
 	_trigger_collapse(removed)
 	if health >= 0:
 		health -= float(removed.size()) * 0.5
 		if health <= 0:
 			destroy_all()
+
+	if diag_enabled:
+		var _t_total := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+		if _t_total > 1.0:
+			print("[诊断] _after_removal: 总% d体素(应力%d), 总耗时%.2f ms" % [removed.size(), _stress_count, _t_total])
 
 
 # ----------------------------------------------------------------------------
@@ -318,6 +339,7 @@ func _propagate_stress(removed: Array) -> Array:
 	if not data or removed.is_empty():
 		return []
 
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 	var all_removed: Dictionary = {}
 	for p in removed:
 		all_removed[p] = true
@@ -350,6 +372,11 @@ func _propagate_stress(removed: Array) -> Array:
 					stress_removed.append(nb)
 					next_layer.append(nb)
 		current_layer = next_layer
+
+	if diag_enabled:
+		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+		if _t_ms > 0.5:
+			print("[诊断] _propagate_stress: 起点%d, 结果%d, 耗时%.2f ms" % [removed.size(), stress_removed.size(), _t_ms])
 
 	return stress_removed
 
@@ -462,12 +489,15 @@ func _process_cascade_level() -> void:
 	if _cascade_check_positions.is_empty():
 		return
 
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
+
 	# 取出当前层级的待检查位置，清空队列（如果还有下一级会在下面重新设置）
 	var queue: Array = _cascade_check_positions
 	_cascade_check_positions = []
 
 	# 只处理一个层级
 	var unstable := _find_unstable_voxels(queue)
+	var _diag_t1 := Time.get_ticks_usec() if diag_enabled else 0
 	if unstable.is_empty():
 		_finalize_cascade()
 		return
@@ -477,6 +507,7 @@ func _process_cascade_level() -> void:
 
 	# 按连通性分组
 	var groups := VoxelData.partition_connected(unstable)
+	var _diag_t2 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 收集材质快照（在移除前）
 	var group_materials: Array[Dictionary] = []
@@ -485,18 +516,31 @@ func _process_cascade_level() -> void:
 		for pos in group:
 			mat_map[pos] = data.get_voxel(pos)
 		group_materials.append(mat_map)
+	var _diag_t3 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 移除失稳体素
 	data.remove_voxels(unstable)
+	var _diag_t4 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 生成物理体（每帧限制数量，使用统一入口）
 	if not Engine.is_editor_hint():
 		_spawn_falling_chunks_from_groups(groups, group_materials)
+	var _diag_t5 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 累积级联结果
 	_cascade_total.append_array(unstable)
 	# 注意：不移除 _cascade_check_positions，它已被设置为下一级的检查位置
 	# 如果有下一级，下一帧 _process 会继续处理
+
+	if diag_enabled:
+		var _t_total := (_diag_t5 - _diag_t0) / 1000.0
+		var _t_find := (_diag_t1 - _diag_t0) / 1000.0
+		var _t_group := (_diag_t2 - _diag_t1) / 1000.0
+		var _t_mat := (_diag_t3 - _diag_t2) / 1000.0
+		var _t_remove := (_diag_t4 - _diag_t3) / 1000.0
+		var _t_spawn := (_diag_t5 - _diag_t4) / 1000.0
+		if _t_total > 1.0:
+			print("[诊断] 级联层级: %d体素, %d组, 总%.2fms | 检测%.2f | 分组%.2f | 材质%.2f | 移除%.2f | 生成%.2f" % [unstable.size(), groups.size(), _t_total, _t_find, _t_group, _t_mat, _t_remove, _t_spawn])
 	# 如果没有下一级，_finalize_cascade 会在下次 _process_cascade_level 被调用时触发
 
 
@@ -534,6 +578,8 @@ func _ensure_falling_chunk_root() -> void:
 func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
+
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
 	_ensure_falling_chunk_root()
 
@@ -597,6 +643,11 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	# 7. 添加到场景
 	_falling_chunk_root.add_child(body)
 	body.owner = _falling_chunk_root
+
+	if diag_enabled:
+		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+		if _t_ms > 1.0:
+			print("[诊断] _spawn_falling_chunk: %d体素, 耗时%.2f ms" % [group.size(), _t_ms])
 
 	# 8. 连接落地检测：落地后静置一段时间自动冻结（节省物理开销，不掉落块不消失）
 	body.body_entered.connect(_on_chunk_landed.bind(body))
@@ -883,13 +934,20 @@ func _clear_debris() -> void:
 # ----------------------------------------------------------------------------
 
 func _process(_delta: float) -> void:
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 	super._process(_delta)
 	if Engine.is_editor_hint():
 		return
 
 	# 处理级联崩塌（每帧一个层级，产生自然的连锁崩塌延迟）
 	if not _cascade_check_positions.is_empty():
+		var _t1 := Time.get_ticks_usec() if diag_enabled else 0
 		_process_cascade_level()
+		if diag_enabled:
+			var _dt := (Time.get_ticks_usec() - _t1) / 1000.0
+			if _dt > 1.0:
+				print("[诊断] _process_cascade_level 耗时: %.2f ms, 队列大小: %d" % [_dt, _cascade_check_positions.size()])
+
 	# 处理普通破坏批次（每帧一个）
 	_process_destruction_pipeline()
 
@@ -899,12 +957,19 @@ func _process(_delta: float) -> void:
 		_sleep_check_counter = 0
 		_freeze_sleeping_chunks()
 
+	if diag_enabled:
+		var _total_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+		if _total_ms > 3.0:
+			print("[诊断] VoxelDestructible._process 总耗时: %.2f ms" % _total_ms)
+
 
 ## 延迟破坏管道：每帧处理所有累积的待移除体素（去重合并后）
 ## 同一帧内多次伤害相同位置合并去重，仅执行一次移除 + 崩塌检测 + 碎片生成
 func _process_destruction_pipeline() -> void:
 	if _pending_removed.is_empty():
 		return
+
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 提取所有待移除位置（去重后的唯一键）
 	var removed: Array = _pending_removed.keys()
@@ -917,16 +982,29 @@ func _process_destruction_pipeline() -> void:
 
 	# 0. 先在移除前收集材质快照（避免移除后 data.voxels 中找不到）
 	var mat_map := _collect_voxel_materials(removed) if do_spawn and not Engine.is_editor_hint() else {}
+	var _diag_t1 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 1. 实际移除体素（触发 mesh 脏标记 → 下一帧 _process 自动重建）
 	data.remove_voxels(removed)
+	var _diag_t2 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 2. 应力传播 + 崩塌检测 + 处理（同步，轻量 BFS）
 	_after_removal(removed)
+	var _diag_t3 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 3. 生成粒子碎片（使用第 0 步收集的材质快照）
 	if do_spawn and not Engine.is_editor_hint() and not mat_map.is_empty():
 		_spawn_debris_with_materials(removed, mat_map)
+	var _diag_t4 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 4. 信号
 	voxel_damaged.emit(removed, do_spawn)
+
+	if diag_enabled:
+		var _t_total := (_diag_t4 - _diag_t0) / 1000.0
+		var _t_collect := (_diag_t1 - _diag_t0) / 1000.0
+		var _t_remove := (_diag_t2 - _diag_t1) / 1000.0
+		var _t_after := (_diag_t3 - _diag_t2) / 1000.0
+		var _t_debris := (_diag_t4 - _diag_t3) / 1000.0
+		if _t_total > 1.0:
+			print("[诊断] 破坏管道: 共%d体素, 总%.2fms | 收集材质%.2f | 移除%.2f | 应力/崩塌%.2f | 粒子%.2f" % [removed.size(), _t_total, _t_collect, _t_remove, _t_after, _t_debris])
