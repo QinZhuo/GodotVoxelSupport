@@ -295,9 +295,10 @@ func _after_removal(removed: Array) -> void:
 			data.remove_voxels(stress_removed)
 			var _diag_t2 := Time.get_ticks_usec() if diag_enabled else 0
 			# 应力传播的断裂体素：连通的转为物理体掉落，散落的用粒子
+			var stress_groups := []
 			if not Engine.is_editor_hint():
 				# 按连通性分组，每组生成一个物理体掉落
-				var stress_groups := VoxelData.partition_connected(stress_removed)
+				stress_groups = VoxelData.partition_connected(stress_removed)
 				# 为每组构建材质映射
 				var stress_group_materials: Array[Dictionary] = []
 				for sgroup in stress_groups:

@@ -433,6 +433,7 @@ func _on_thread_result(result: Dictionary) -> void:
 ## - 无 chunk_key：全量结果（来自 _generate_worker），委托 _build_and_apply_mesh 处理
 func _apply_single_chunk_result(result: Dictionary) -> void:
 	var _diag_t0 := Time.get_ticks_usec()
+	var _t_get_chunk := 0.0
 	var arrays = result.get("arrays", {})
 	var chunk_key: Vector3i = result.get("chunk_key", Vector3i(-999, -999, -999))
 	var gen_id = result.get("gen_id", -1)
@@ -452,7 +453,6 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 	if chunk_key.x != -999:
 		var arr = arrays.get(chunk_key, {})
 		var has_voxels_in_data := false
-		var _t_get_chunk := 0.0
 		if data:
 			var _t1 := Time.get_ticks_usec()
 			var current_voxels: Array = data.get_chunk_voxels(chunk_key)
