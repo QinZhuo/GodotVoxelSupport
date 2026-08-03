@@ -454,7 +454,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			add_child(chunk_mesh)
 			_chunk_meshes[chunk_key] = chunk_mesh
 
-		# 构建或清空 mesh
+		# 构建或清空 mesh，同时清理空 chunk 节点防止累积
 		var has_mesh := false
 		if arr is Dictionary and not arr.is_empty() and has_voxels_in_data:
 			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr as Dictionary)
@@ -465,18 +465,24 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 					new_mesh.surface_set_material(1, _materials_cache[1])
 			chunk_mesh.mesh = new_mesh
 			has_mesh = new_mesh != null
-		else:
-			# chunk 已空或当前数据中已无体素，清空 mesh
-			if not has_voxels_in_data and arr is Dictionary and not arr.is_empty():
-				print("[诊断] Chunk %s 快照有体素但当前数据已空，清除 Mesh" % chunk_key)
+		elif not has_voxels_in_data:
+			# chunk 已无体素，清除 mesh 并移除节点防止累积
 			chunk_mesh.mesh = null
+			chunk_mesh.queue_free()
+			_chunk_meshes.erase(chunk_key)
+		else:
+			# has_voxels_in_data 为 true 但 arr 为空（竞态：生成后体素被重新添加）
+			# 保留已有 mesh，等待下一帧重建
+			has_mesh = chunk_mesh.mesh != null
 
-		# 定位到 chunk 原点
-		var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
-		chunk_mesh.position = Vector3(chunk_key) * chunk_scale
-
-		# Per-chunk 碰撞体
-		_update_chunk_collision(chunk_key, has_mesh)
+		# Per-chunk 碰撞体：
+		# - 有体素数据时按正常流程更新
+		# - 节点已被清理时直接移除碰撞体
+		if has_voxels_in_data or _chunk_meshes.has(chunk_key):
+			chunk_mesh.position = Vector3(chunk_key) * (voxel_scale * VoxelChunkGenerator.CHUNK_SIZE)
+			_update_chunk_collision(chunk_key, has_mesh)
+		else:
+			_remove_chunk_collision(chunk_key)
 
 		# 记录性能
 		_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
@@ -710,18 +716,22 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 					new_mesh.surface_set_material(1, _materials_cache[1])
 			chunk_mesh.mesh = new_mesh
 			has_mesh = new_mesh != null
-		else:
-			# chunk 已空或当前数据中已无体素，清空 mesh 但保留节点
-			if not has_voxels_in_data and arrays is Dictionary and not arrays.is_empty():
-				cleared_count += 1
-				print("[诊断] Chunk %s 快照有体素但当前数据已空，清除 Mesh" % ck)
+		elif not has_voxels_in_data:
+			# chunk 已无体素，清除 mesh 并移除节点防止累积
 			chunk_mesh.mesh = null
+			_chunk_meshes.erase(ck)
+			chunk_mesh.queue_free()
+		else:
+			# has_voxels_in_data 为 true 但 arrays 为空（竞态：生成后体素被重新添加）
+			# 保留已有 mesh，等待下一帧重建
+			has_mesh = chunk_mesh.mesh != null
 
-		# 定位到 chunk 原点（使用局部坐标后，只需偏移 chunk 原点）
-		chunk_mesh.position = Vector3(ck) * chunk_scale
-
-		# Per-chunk 碰撞体
-		_update_chunk_collision(ck, has_mesh)
+		# Per-chunk 碰撞体（节点被清理时不执行）
+		if has_voxels_in_data or _chunk_meshes.has(ck):
+			chunk_mesh.position = Vector3(ck) * chunk_scale
+			_update_chunk_collision(ck, has_mesh)
+		else:
+			_remove_chunk_collision(ck)
 
 	# 检查是否有 chunk 在重建后变为空但未被清理（不在 rebuilt_keys 中的）
 	# 遍历所有已存在的 chunk mesh，如果不在本次重建列表中且已无体素，清空其 mesh
@@ -734,7 +744,8 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 			if chunk_positions.is_empty():
 				cleared_count += 1
 				print("[诊断] Chunk %s 不在重建列表且已无体素，清除旧 Mesh" % ck)
-				_chunk_meshes[ck].mesh = null
+				_chunk_meshes[ck].queue_free()
+				_chunk_meshes.erase(ck)
 				_remove_chunk_collision(ck)
 
 	if cleared_count > 0:
