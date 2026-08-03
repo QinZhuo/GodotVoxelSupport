@@ -20,9 +20,13 @@ run/main_scene="uid://dl2c605m5it3r"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="uid://bryfxjjoaavmu"
 
+[dev_framework]
+
+mcp/port=8933
+
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/VoxelSupport/plugin.cfg")
+enabled=PackedStringArray("res://addons/DEVFramework/plugin.cfg", "res://addons/TweenAnimation/plugin.cfg", "res://addons/VoxelSupport/plugin.cfg")
 
 [importer_defaults]
 
