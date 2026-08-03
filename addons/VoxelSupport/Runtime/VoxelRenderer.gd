@@ -249,12 +249,15 @@ func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
-	# 【高效快照】只复制脏 Chunk 的体素，而非全量 data.voxels.duplicate()
-	# 对于大型场景（数十万体素），全量 duplicate 每次几毫秒，增量快照大幅降低此开销
+	# 【零拷贝方案】直接传递 data.voxels 引用，避免快照拷贝开销
+	# 子线程只做单键查询 voxels.get(pos, -1)，不遍历迭代器
+	# 主线程在此期间只做 erase()（不移除 hash 表，不触发扩容）
+	# 风险：子线程可能读到刚被移除的体素，但下一帧重建会自动纠正
+	# 对于连续破坏场景，一帧的微小不一致视觉上不可见
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
-	var snapshot_voxels: Dictionary = _copy_dirty_chunk_voxels(data, rebuild_chunks)
+	var snapshot_voxels: Dictionary = data.voxels
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	var gen_id := _generation_id + 1
@@ -296,25 +299,6 @@ func _update_mesh_async() -> void:
 		_pending_task_count = 1
 		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
-
-
-## 【高效快照】只复制脏 Chunk 区域的体素数据，避免全量 duplicate
-## 对于大型场景（数十万体素），大幅降低快照开销
-## 参数 rebuild_chunks 为需要重建的 chunk key 列表
-## 返回 Dictionary[Vector3i, int] 只包含这些 chunk 内的体素
-static func _copy_dirty_chunk_voxels(data: VoxelData, rebuild_chunks: Array[Vector3i]) -> Dictionary:
-	if rebuild_chunks.is_empty():
-		# 无脏 chunk 时全量复制（初始构建或切换模式后需要全量数据）
-		return data.voxels.duplicate()
-	
-	var result: Dictionary = {}
-	for ck in rebuild_chunks:
-		# 从 chunk 索引获取体素列表
-		var positions: Array = data.get_chunk_voxels(ck)
-		for pos in positions:
-			var pos_key: Vector3i = pos
-			result[pos_key] = data.voxels.get(pos_key, -1)
-	return result
 
 
 ## 后台工作线程入口：生成网格数据并写入结果缓冲

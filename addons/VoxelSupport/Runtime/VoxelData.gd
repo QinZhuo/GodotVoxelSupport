@@ -35,7 +35,7 @@ extends Resource
 var dirty_voxels: Dictionary[Vector3i, int] = {}
 
 ## Chunk 大小（与 VoxelChunkGenerator 保持一致，用于空间查询分块加速）
-const CHUNK_SIZE := 32
+const CHUNK_SIZE := 16
 
 ## Chunk 索引缓存：{chunk_key: Array[Vector3i]}，用于快速空间查询
 ## 采用"实时增量维护"策略：
