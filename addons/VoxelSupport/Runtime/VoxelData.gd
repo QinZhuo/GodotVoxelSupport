@@ -591,6 +591,37 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 	return _remove_voxels(positions, notify)
 
 
+## 批量设置体素为同一材质（公开接口，供水模拟等高频动态系统使用）。
+## 相比逐个 set_voxel：只 emit_changed 一次，且一次性维护 chunk 索引 / 支撑缓存，
+## 并填充 dirty_voxels，让 VoxelRenderer 走增量重建（只重建受影响 chunk），
+## 而不是绕开框架直接改 voxels 字典（那会强制全量重建 + 缓存失效）。
+## 语义与 set_voxel 一致：material_id < 0 视为批量移除；已存在体素被覆盖时支撑图不变。
+func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void:
+	if positions.is_empty():
+		return
+	if material_id < 0:
+		_remove_voxels(positions, notify)
+		return
+	# 新位置（原本为空）单独收集，供支撑缓存增量添加
+	var new_positions: Array = []
+	for p in positions:
+		var pos: Vector3i = p
+		if voxels.has(pos):
+			# 覆盖已存在的体素：体素仍存在，支撑图不发生变化（同 merge 语义），
+			# 仅 chunk 索引需要先移除再重加，避免同一位置重复入列表。
+			_chunk_index_remove(pos)
+		else:
+			new_positions.append(pos)
+		voxels[pos] = material_id
+		dirty_voxels[pos] = material_id
+		_chunk_index_add(pos)
+	if not new_positions.is_empty():
+		for p in new_positions:
+			_support_cache_on_add(p)
+	if notify:
+		emit_changed()
+
+
 ## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():

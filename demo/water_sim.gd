@@ -267,7 +267,7 @@ Mesh生成耗时: %.2f ms
 func _spawn_drop() -> void:
 	var pos := _drop_pos + Vector3i(randi_range(-1, 1), 0, randi_range(-1, 1))
 	if _in_bounds(pos) and _data.get_voxel(pos) < 0:
-		_data.voxels[pos] = MAT_WATER
+		_data.set_voxel(pos, MAT_WATER)
 		_water_count += 1
 
 
@@ -330,11 +330,18 @@ func _update_water() -> void:
 				break
 
 	# 第二步：统一应用移动（所有水的目标基于第一步快照，冲突目标由较晚写入者覆盖，可接受）
+	# 用框架批量接口而非直接改 voxels 字典：批量接口会维护 dirty_voxels，
+	# 让 VoxelRenderer 走增量重建（只重建受影响 chunk）+ 支撑/索引缓存保持正确。
+	var from_list: Array = []
+	var to_list: Array = []
 	for from in moves:
 		var to: Vector3i = moves[from]
 		if _data.get_voxel(from) == MAT_WATER and _is_empty(to):
-			_data.voxels.erase(from)
-			_data.voxels[to] = MAT_WATER
+			from_list.append(from)
+			to_list.append(to)
+	if not from_list.is_empty():
+		_data.remove_voxels(from_list, false)
+		_data.set_voxels(to_list, MAT_WATER)
 
 
 func _is_empty(pos: Vector3i) -> bool:
