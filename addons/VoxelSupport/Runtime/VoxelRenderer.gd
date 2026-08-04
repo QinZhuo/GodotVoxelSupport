@@ -252,15 +252,15 @@ func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
-	# 【快照方案】将 data.voxels 深拷贝为独立快照传给子线程，
-	# 避免子线程读取主线程正在改写(增/删体素)的字典造成数据竞态（块随机显示/隐藏的根因）。
-	# 仅当网格确实需要重建时才拷贝，且只在体素变更帧触发，全帧拷贝仅一次。
+	# 【分块快照方案】不深拷贝整个世界字典，而是为每个需要重建的 chunk 提取其
+	# 局部体素切片（chunk 内部 + 1 体素外缘）。每个子线程只读取自己那个私有的小快照，
+	# 主线程后续增删 data.voxels 不与之冲突，杜绝数据竞态（块随机显示/隐藏的根因），
+	# 同时避免整世界深拷贝的性能与内存开销。
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
 		data.clear_dirty_voxels()
-	var snapshot_voxels: Dictionary = data.voxels.duplicate(true)
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	var gen_id := _generation_id + 1
@@ -275,31 +275,37 @@ func _update_mesh_async() -> void:
 	# 将 use_chunk_generator 和 voxel_scale 作为参数传入，避免子线程访问节点属性
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
-	if use_chunk_generator and not rebuild_chunks.is_empty():
-		# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
-		print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
-		_pending_task_count = rebuild_chunks.size()
-		for ck in rebuild_chunks:
-			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-				snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
-	elif use_chunk_generator and rebuild_chunks.is_empty():
-		# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
-		# 而不是等所有 chunk 生成完毕再一起显示
-		var all_chunks := VoxelChunkGenerator.get_all_non_empty_chunk_keys(snapshot_voxels)
-		if all_chunks.is_empty():
-			# 没有非空 chunk，使用单任务路径（空场景）
-			_pending_task_count = 1
-			_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-				snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
+	if use_chunk_generator:
+		# chunk 模式：每个任务只处理一个 chunk，为其提取私有的局部体素切片
+		# 单任务路径（全量/空场景）仅当没有可拆分 chunk 时兜底使用，需要完整体素
+		if rebuild_chunks.is_empty():
+			# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
+			# 而不是等所有 chunk 生成完毕再一起显示
+			var all_chunks := VoxelChunkGenerator.get_all_non_empty_chunk_keys(data.voxels)
+			if all_chunks.is_empty():
+				# 没有非空 chunk，使用单任务路径（空场景），此时无体素无竞态
+				_pending_task_count = 1
+				_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
+					{}, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
+			else:
+				print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
+				_pending_task_count = all_chunks.size()
+				for ck in all_chunks:
+					var slice_voxels := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
+					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
+						slice_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
 		else:
-			print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
-			_pending_task_count = all_chunks.size()
-			for ck in all_chunks:
+			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
+			print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
+			_pending_task_count = rebuild_chunks.size()
+			for ck in rebuild_chunks:
+				var slice_voxels := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-					snapshot_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
+					slice_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
 	else:
-		# 单任务路径（非 chunk 模式）：保持原有逻辑不变
+		# 单任务路径（非 chunk 模式）：需要整个世界体素，深拷贝一次快照
 		_pending_task_count = 1
+		var snapshot_voxels: Dictionary = data.voxels.duplicate(true)
 		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
 

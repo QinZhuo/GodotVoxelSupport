@@ -11,6 +11,24 @@ class_name VoxelChunkGenerator
 const CHUNK_SIZE := 16
 
 
+## 提取单个 chunk 及其 1 体素外缘(shell) 的体素快照（绝对坐标键）
+## 网格生成只需要该 chunk 内部 + 跨界面的相邻体素，无需拷贝整个世界的体素字典。
+## 返回独立的 Dictionary，供子线程安全读取（主线程后续增删不会影响它）。
+## halo_voxels: 外扩层数，默认 1（跨界面的面可见性需要紧邻体素）
+static func slice_chunk(voxels: Dictionary, chunk: Vector3i, halo_voxels: int = 1) -> Dictionary:
+	var origin := chunk * CHUNK_SIZE
+	var slice := {}
+	var lo := origin - Vector3i(halo_voxels, halo_voxels, halo_voxels)
+	var hi := origin + Vector3i(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE) + Vector3i(halo_voxels - 1, halo_voxels - 1, halo_voxels - 1)
+	for x in range(lo.x, hi.x + 1):
+		for y in range(lo.y, hi.y + 1):
+			for z in range(lo.z, hi.z + 1):
+				var p := Vector3i(x, y, z)
+				if voxels.has(p):
+					slice[p] = voxels[p]
+	return slice
+
+
 ## 运行时网格生成入口，在主线程调用
 ## 始终生成所有非空 chunk，确保输出完整 mesh。rebuild_chunks 参数保留用于 API 兼容。
 static func generate_mesh_runtime(
