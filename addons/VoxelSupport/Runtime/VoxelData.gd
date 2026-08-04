@@ -326,6 +326,15 @@ func _ensure_support_cache() -> void:
 		_build_support_cache()
 
 
+## 预热查询缓存（chunk 索引 + 支撑缓存），把首次全量构建从"第一次破坏"推迟到"加载完成后"。
+## 批量直接写入 voxels（如 demo 直接改 dict、load_data 重建）会绕过 set_voxel 的增量维护，
+## 导致首个 get_voxels_in_sphere/remove + 失稳检测在主线程触发两次整字典 O(N) 构建 → 首次破坏卡顿。
+## 在初始体素填充完毕后调用一次即可，之后由 set/remove 增量维护保持同步。
+func warm_up_cache() -> void:
+	_build_chunk_index_if_dirty()
+	_ensure_support_cache()
+
+
 ## 增量：体素被设置后更新支撑缓存（需在 voxels[pos] 写入后调用）
 ## 1) pos 自身计数重算 2) pos 成为其 UPPER_5 邻居的新支撑，邻居计数 +1
 func _support_cache_on_add(pos: Vector3i) -> void:

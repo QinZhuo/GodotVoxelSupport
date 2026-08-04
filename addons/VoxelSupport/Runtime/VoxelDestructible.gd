@@ -126,6 +126,8 @@ func _ready() -> void:
 		# 延迟一帧：确保外部在 _ready 前赋值的 data 已就绪，做一次初始全量稳定性校验
 		# 使场景进入静态稳定状态（清除初始悬空结构），之后破坏由局部检测负责
 		call_deferred("validate_stability")
+		# 预热 chunk 索引与支撑缓存，避免首次破坏时在主线程全量构建导致卡顿
+		call_deferred("_prewarm_caches")
 
 
 func _exit_tree() -> void:
@@ -853,6 +855,15 @@ func validate_stability() -> void:
 	voxels_about_to_collapse.emit(unstable)
 	voxel_damaged.emit(unstable, true)
 	last_collapse_count = unstable.size()
+
+
+## 预热 chunk 索引与支撑缓存（延迟到初始构建完成后执行）。
+## 批量直接写入 voxels 的场景会绕过 set_voxel 的增量维护，首次破坏会触发
+## 整字典全量构建造成卡顿，这里在加载后提前构建一次，破坏时直接复用。
+func _prewarm_caches() -> void:
+	if not data:
+		return
+	data.warm_up_cache()
 
 
 # ----------------------------------------------------------------------------
