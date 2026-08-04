@@ -473,18 +473,31 @@ func _get_chunks_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var max_pos := center_v + Vector3i(r_ceil, r_ceil, r_ceil)
 	var min_ck := _chunk_of(min_pos)
 	var max_ck := _chunk_of(max_pos)
+	var radius_sq := int(radius * radius)
 	var result: Array[Vector3i] = []
 	for x in range(min_ck.x, max_ck.x + 1):
 		for y in range(min_ck.y, max_ck.y + 1):
 			for z in range(min_ck.z, max_ck.z + 1):
 				var ck := Vector3i(x, y, z)
-				# 快速检查：chunk 的 AABB 是否与球体相交
-				var chunk_origin := Vector3(ck * CHUNK_SIZE)
-				var chunk_center := chunk_origin + Vector3(CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5)
-				var chunk_radius := Vector3(CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5, CHUNK_SIZE * 0.5).length()
-				if (chunk_center - center).length() <= radius + chunk_radius:
+				# 整型平方距离：体素中心(整数)到 chunk AABB 的最小距离平方。
+				# 逐轴取区间最近距离，避免 Vector3.length() 浮点开销。
+				var c_origin := ck * CHUNK_SIZE
+				var d_x := _axis_dist_sq(center_v.x, c_origin.x, c_origin.x + CHUNK_SIZE - 1)
+				var d_y := _axis_dist_sq(center_v.y, c_origin.y, c_origin.y + CHUNK_SIZE - 1)
+				var d_z := _axis_dist_sq(center_v.z, c_origin.z, c_origin.z + CHUNK_SIZE - 1)
+				if d_x + d_y + d_z <= radius_sq:
 					result.append(ck)
 	return result
+
+
+## 计算整数坐标点 p 到区间 [lo, hi]（含端点）的最近距离平方
+static func _axis_dist_sq(p: int, lo: int, hi: int) -> int:
+	var d := 0
+	if p < lo:
+		d = lo - p
+	elif p > hi:
+		d = p - hi
+	return d * d
 
 
 ## 获取与盒体重叠的 chunk 列表
@@ -688,6 +701,13 @@ func get_chunk_voxels(chunk_key: Vector3i) -> Array:
 	if _chunk_index.has(chunk_key):
 		return _chunk_index[chunk_key].duplicate()
 	return []
+
+
+## O(1) 判断指定 chunk 是否含体素（基于 chunk 索引，不复制列表）
+## 相比 get_chunk_voxels().is_empty() 省去整组列表复制，用于高频逐 chunk 应用场景
+func has_chunk(chunk_key: Vector3i) -> bool:
+	_build_chunk_index_if_dirty()
+	return _chunk_index.has(chunk_key)
 
 
 # ----------------------------------------------------------------------------

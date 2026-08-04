@@ -546,9 +546,8 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 		var has_voxels_in_data := false
 		if data:
 			var _t1 := Time.get_ticks_usec()
-			var current_voxels: Array = data.get_chunk_voxels(chunk_key)
+			has_voxels_in_data = data.has_chunk(chunk_key)
 			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
-			has_voxels_in_data = not current_voxels.is_empty()
 
 		# 获取或创建该 chunk 的子 MeshInstance3D
 		var chunk_mesh: MeshInstance3D

@@ -88,6 +88,9 @@ var _falling_chunk_root: Node3D = null
 var _falling_chunk_id: int = 0
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
+## 粒子淡出渐变共用资源（生命周期末渐隐）。所有粒子共用同一份，破坏瞬间省 Gradient/GradientTexture1D 创建。
+var _particle_fade_gradient: GradientTexture1D = null
+
 ## 掉落块材质缓存：同一份 data.materials 只需生成一次材质，避免每个掉落块重复生成
 var _chunk_materials_cache: Array = []
 var _chunk_materials_cache_src: Array = []
@@ -109,9 +112,6 @@ const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 
 ## 掉落块落地静置检测时间累计 (秒)
 var _sleep_check_counter: float = 0.0
-
-## 已冻结掉落块 -> 冻结时刻 (msec)，用于超时清理
-var _frozen_chunk_times: Dictionary = {}
 
 ## 所有掉落块 -> 生成时刻 (msec)，用于生命周期上限/超时清理（含未冻结仍在掉落的块）
 var _chunk_spawn_times: Dictionary = {}
@@ -718,7 +718,6 @@ func _clear_falling_chunks() -> void:
 	if _falling_chunk_root:
 		for child in _falling_chunk_root.get_children():
 			child.queue_free()
-	_frozen_chunk_times.clear()
 	_chunk_spawn_times.clear()
 
 
@@ -762,7 +761,6 @@ func _freeze_sleeping_chunks() -> void:
 		if not body.freeze and body.sleeping:
 			body.freeze = true
 			body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-			_frozen_chunk_times[body] = now
 
 	# 2. 收集所有存活块，按生成时刻排序（最老在前）
 	var alive: Array = []
@@ -802,7 +800,6 @@ func _freeze_sleeping_chunks() -> void:
 	for body in _chunk_spawn_times.keys():
 		if not is_instance_valid(body):
 			_chunk_spawn_times.erase(body)
-			_frozen_chunk_times.erase(body)
 
 
 ## 找出所有"失稳"体素，返回这些体素位置的并集
@@ -976,17 +973,8 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
 
-	# 淡出：从生命周期 50% 开始慢慢渐变到透明
-	var fade := Gradient.new()
-	fade.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
-	fade.colors = PackedColorArray([
-		Color(1, 1, 1, 1),
-		Color(1, 1, 1, 1),
-		Color(1, 1, 1, 0),
-	])
-	var alpha_tex := GradientTexture1D.new()
-	alpha_tex.gradient = fade
-	pm.alpha_curve = alpha_tex
+	# 淡出：从生命周期 50% 开始慢慢渐变到透明（共用缓存资源，避免每次破坏都新建 Gradient/GradientTexture1D）
+	pm.alpha_curve = _get_particle_fade_gradient()
 	particles.process_material = pm
 
 	# 碎片用立方体 mesh，尺寸 = 原体素大小
@@ -999,6 +987,23 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	if tree:
 		var timer := tree.create_timer(particles.lifetime + 0.5)
 		timer.timeout.connect(_cleanup_particles.bind(particles))
+
+
+## 获取粒子淡出渐变（按需创建一次并缓存复用）
+func _get_particle_fade_gradient() -> GradientTexture1D:
+	if _particle_fade_gradient:
+		return _particle_fade_gradient
+	var fade := Gradient.new()
+	fade.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	fade.colors = PackedColorArray([
+		Color(1, 1, 1, 1),
+		Color(1, 1, 1, 1),
+		Color(1, 1, 1, 0),
+	])
+	var alpha_tex := GradientTexture1D.new()
+	alpha_tex.gradient = fade
+	_particle_fade_gradient = alpha_tex
+	return alpha_tex
 
 
 ## 获取粒子的立方体 mesh（缓存按材质 ID 复用）
