@@ -332,13 +332,21 @@ func _update_water() -> void:
 	# 第二步：统一应用移动（所有水的目标基于第一步快照，冲突目标由较晚写入者覆盖，可接受）
 	# 用框架批量接口而非直接改 voxels 字典：批量接口会维护 dirty_voxels，
 	# 让 VoxelRenderer 走增量重建（只重建受影响 chunk）+ 支撑/索引缓存保持正确。
+	# 【关键】必须用 claimed 记录本帧已被占用的目标：若两个水同时想移入同一格，
+	# 只有先者搬入，后者原地不动（不搬走 source），否则后者的 source 会被删除、
+	# 却没有新 position 写入 → 每帧丢水，永远攒不起来。
+	var claimed: Dictionary = {}   # 本帧已分配的目标位置 -> true
 	var from_list: Array = []
 	var to_list: Array = []
 	for from in moves:
 		var to: Vector3i = moves[from]
-		if _data.get_voxel(from) == MAT_WATER and _is_empty(to):
-			from_list.append(from)
-			to_list.append(to)
+		if _data.get_voxel(from) != MAT_WATER:
+			continue
+		if not _is_empty(to) or claimed.has(to):
+			continue  # 目标被占用/本帧已被分配：保持原位，不搬走 source
+		claimed[to] = true
+		from_list.append(from)
+		to_list.append(to)
 	if not from_list.is_empty():
 		_data.remove_voxels(from_list, false)
 		_data.set_voxels(to_list, MAT_WATER)

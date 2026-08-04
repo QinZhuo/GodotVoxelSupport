@@ -67,9 +67,6 @@ enum CollapseMode {
 ## 应力衰减系数（每传播一步应力的衰减比例）
 @export_range(0.0, 1.0) var stress_decay: float = 0.5
 
-## 诊断模式开关：开启后在输出面板打印详细的帧耗时分布，用于定位性能瓶颈
-@export var diag_enabled: bool = false
-
 ## 监控统计
 var last_damage_count: int = 0     ## 最近一次破坏实际移除的体素数
 var last_damage_time_ms: float = 0 ## 最近一次破坏耗时 (ms)
