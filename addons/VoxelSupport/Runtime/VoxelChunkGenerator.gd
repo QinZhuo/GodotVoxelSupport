@@ -32,7 +32,7 @@ static func slice_chunk(voxels: Dictionary, chunk: Vector3i, halo_voxels: int = 
 ## 运行时网格生成入口，在主线程调用
 ## 始终生成所有非空 chunk，确保输出完整 mesh。rebuild_chunks 参数保留用于 API 兼容。
 static func generate_mesh_runtime(
-		voxels: Dictionary[Vector3i, int],
+		voxels: Dictionary,
 		materials: Array,
 		options: Dictionary = {},
 		rebuild_chunks: Array[Vector3i] = []) -> ArrayMesh:
@@ -52,7 +52,7 @@ static func generate_mesh_runtime(
 ##   }
 ## 返回 null 表示没有任何可渲染的面（全空）
 static func generate_arrays_runtime(
-		voxels: Dictionary[Vector3i, int],
+		voxels: Dictionary,
 		materials: Array,
 		options: Dictionary = {},
 		rebuild_chunks: Array[Vector3i] = []) -> Variant:
@@ -107,7 +107,7 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 ## 每个 chunk 的顶点使用局部坐标（相对于 chunk 原点），方便直接放到独立 MeshInstance3D
 ## 返回 {chunk_key: {solid_verts, solid_normals, ...}}，空 chunk 不在结果中
 static func generate_chunks_arrays_runtime(
-		voxels: Dictionary[Vector3i, int],
+		voxels: Dictionary,
 		materials: Array,
 		options: Dictionary = {},
 		chunk_keys: Array[Vector3i] = []) -> Dictionary:
@@ -127,7 +127,7 @@ static func generate_chunks_arrays_runtime(
 ## 生成所有非空 chunk 的 per-chunk 网格数据（初始构建或全量增量重建）
 ## 等价于先获取所有非空 chunk 再调用 generate_chunks_arrays_runtime
 static func generate_all_chunks_arrays_runtime(
-		voxels: Dictionary[Vector3i, int],
+		voxels: Dictionary,
 		materials: Array,
 		options: Dictionary = {}) -> Dictionary:
 	var non_empty := _build_non_empty_chunk_index(voxels)
