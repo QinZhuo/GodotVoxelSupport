@@ -602,11 +602,10 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
 
-	# 数量上限守卫：超过 max_falling_chunks 时不再生成新的物理块（避免突增瞬间超限）。
-	# 体素此时已被移除，若不退化会"凭空消失"（既无掉落块也无碎片），故转用粒子碎片兜底。
+	# 数量上限守卫：超过 max_falling_chunks 时先清除最老的物理块腾出名额，
+	# 保证新块必定生成（避免体素被移除后"凭空消失"——既无掉落块也无碎片）。
 	if _falling_chunk_root and _falling_chunk_root.get_child_count() >= int(max_falling_chunks):
-		_spawn_debris_with_materials(group, mat_map, true)
-		return
+		_evict_oldest_falling_chunks(1)
 
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
@@ -715,6 +714,30 @@ func _get_cached_chunk_materials() -> Array:
 func _cleanup_falling_chunk(body: RigidBody3D) -> void:
 	if body and is_instance_valid(body):
 		body.queue_free()
+
+
+## 数量上限时剔除最老的掉落块，腾出名额给新块（保证新块必生成）。
+## 只移除 count 个，避免一次性清空导致大规模级联时块突然全部消失。
+func _evict_oldest_falling_chunks(count: int) -> void:
+	if count <= 0 or not _falling_chunk_root:
+		return
+	var alive: Array = []
+	for child in _falling_chunk_root.get_children():
+		if child is RigidBody3D and is_instance_valid(child):
+			alive.append(child)
+	if alive.is_empty():
+		return
+	alive.sort_custom(func(a, b): return _chunk_spawn_times.get(a, 0) < _chunk_spawn_times.get(b, 0))
+	for body in alive:
+		if count <= 0:
+			break
+		if is_instance_valid(body):
+			_cleanup_falling_chunk(body)
+			count -= 1
+	# 清理已失效引用，避免字典残留
+	for body in _chunk_spawn_times.keys():
+		if not is_instance_valid(body):
+			_chunk_spawn_times.erase(body)
 
 
 ## 手动清理所有掉落块（用于场景重置等）
