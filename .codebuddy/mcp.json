@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "devframework-godot-mcp": {
+    "devframework": {
       "url": "http://127.0.0.1:8933/mcp"
     }
   }
