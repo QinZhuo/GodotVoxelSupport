@@ -477,8 +477,8 @@ func invalidate_chunk_index() -> void:
 func _get_chunks_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	if radius <= 0:
 		return []
-	# 球体包围盒
-	var center_v := Vector3i(center)
+	# 球体包围盒（使用 floori 统一向下取整，与 get_voxels_in_sphere 保持一致）
+	var center_v := Vector3i(floori(center.x), floori(center.y), floori(center.z))
 	var r_ceil := ceili(radius)
 	var min_pos := center_v - Vector3i(r_ceil, r_ceil, r_ceil)
 	var max_pos := center_v + Vector3i(r_ceil, r_ceil, r_ceil)
