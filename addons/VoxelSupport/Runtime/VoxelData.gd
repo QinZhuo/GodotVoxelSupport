@@ -207,8 +207,10 @@ func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = tr
 	for pos in other.voxels:
 		var dst := pos + offset
 		if voxels.has(dst):
+			# 覆盖已存在的体素：体素仍存在，支撑图不发生变化，
+			# 不能调用 _support_cache_on_remove（会误删自身条目并扣减 UPPER_5 邻居计数）。
+			# 但材质可能变化，chunk 索引需要重建。
 			_chunk_index_remove(dst)
-			_support_cache_on_remove(dst)
 		else:
 			new_positions.append(dst)
 		voxels[dst] = other.voxels[pos]

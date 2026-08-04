@@ -88,6 +88,10 @@ var _falling_chunk_root: Node3D = null
 var _falling_chunk_id: int = 0
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
+## 掉落块材质缓存：同一份 data.materials 只需生成一次材质，避免每个掉落块重复生成
+var _chunk_materials_cache: Array = []
+var _chunk_materials_cache_src: Array = []
+
 ## 级联崩塌状态：逐帧处理，每帧只处理一个级联层级
 ## 存放当前层级的待检查体素位置，处理完后自动设置为下一级的位置
 ## 为空时表示没有待处理的级联
@@ -97,8 +101,17 @@ var _cascade_total: Array = []            # 所有级联累积的失稳体素
 ## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
 const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 
+## 掉落块最大存活数量（超出后最早冻结的块被移除，防止长时间破坏后物理体无限堆积拖慢帧率）
+@export_range(20, 2000) var max_falling_chunks: int = 200
+
+## 掉落块冻结后的最长保留时间（秒），到期后自动移除（已经落地静止，视觉任务完成）
+@export_range(1.0, 60.0) var falling_chunk_cleanup_time: float = 6.0
+
 ## 掉落块落地静置检测帧计数器
 var _sleep_check_counter: int = 0
+
+## 已冻结掉落块 -> 冻结时刻 (msec)，用于超时清理
+var _frozen_chunk_times: Dictionary = {}
 
 const _DEBRIS_ROOT_NAME := "_VoxelDebris"
 
@@ -606,8 +619,8 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 		var p: Vector3i = pos
 		local_voxels[p - Vector3i(voxel_center)] = int(mat_map.get(p, 0))
 
-	# 3. 一次生成静态网格 + 材质
-	var chunk_materials := VoxelMeshGenerator.generate_textured_materials_runtime(data.materials)
+	# 3. 一次生成静态网格 + 材质（材质按 data.materials 实例缓存，重复利用）
+	var chunk_materials := _get_cached_chunk_materials()
 	var mesh := VoxelChunkGenerator.generate_mesh_runtime(local_voxels, data.materials, {"scale": voxel_scale, "offset": Vector3.ZERO})
 	if mesh and chunk_materials.size() >= 2:
 		if mesh.get_surface_count() > 0 and chunk_materials[0]:
@@ -658,6 +671,15 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	body.body_entered.connect(_on_chunk_landed.bind(body))
 
 
+## 获取（并缓存）掉落块共用材质。同一 data.materials 实例在生命周期内稳定，只需生成一次。
+func _get_cached_chunk_materials() -> Array:
+	if _chunk_materials_cache_src == data.materials and not _chunk_materials_cache.is_empty():
+		return _chunk_materials_cache
+	_chunk_materials_cache = VoxelMeshGenerator.generate_textured_materials_runtime(data.materials)
+	_chunk_materials_cache_src = data.materials
+	return _chunk_materials_cache
+
+
 ## 清理已停稳或超时的掉落块
 func _cleanup_falling_chunk(body: RigidBody3D) -> void:
 	if body and is_instance_valid(body):
@@ -669,6 +691,7 @@ func _clear_falling_chunks() -> void:
 	if _falling_chunk_root:
 		for child in _falling_chunk_root.get_children():
 			child.queue_free()
+	_frozen_chunk_times.clear()
 
 
 ## 落地检测：掉落块碰触地面/其他物体时触发
@@ -694,14 +717,56 @@ func _try_freeze_chunk(body: RigidBody3D) -> void:
 
 
 ## 定期检测所有掉落块，将长时间静止的块冻结
+## 同时做生命周期清理：超时的冻结块移除，超出最大数量的最早冻结块移除，
+## 防止大量破坏后物理体+网格无限堆积拖慢帧率（用户反馈的帧率下降问题）
 func _freeze_sleeping_chunks() -> void:
 	if not _falling_chunk_root:
 		return
+	var now := Time.get_ticks_msec()
+	var frozen_list: Array = []
 	for child in _falling_chunk_root.get_children():
 		var body := child as RigidBody3D
-		if body and not body.freeze and body.sleeping:
+		if not body:
+			continue
+		if body.freeze:
+			# 已冻结：仅在首次冻结时记录时间
+			frozen_list.append(body)
+			if not _frozen_chunk_times.has(body):
+				_frozen_chunk_times[body] = now
+		elif body.sleeping:
 			body.freeze = true
 			body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			_frozen_chunk_times[body] = now
+			frozen_list.append(body)
+
+	# 1. 超时清理：冻结超过 falling_chunk_cleanup_time 的块移除
+	var cleanup_ms := int(falling_chunk_cleanup_time * 1000.0)
+	for body in frozen_list:
+		if not is_instance_valid(body):
+			continue
+		var t: int = _frozen_chunk_times.get(body, now)
+		if now - t >= cleanup_ms:
+			_cleanup_falling_chunk(body)
+			_frozen_chunk_times.erase(body)
+			continue
+
+	# 2. 数量上限清理：超出 max_falling_chunks 时，按冻结先后移除最老的
+	var frozen_count := 0
+	for child in _falling_chunk_root.get_children():
+		if child is RigidBody3D and child.freeze:
+			frozen_count += 1
+	var overflow := frozen_count - int(max_falling_chunks)
+	if overflow > 0:
+		var oldest: Array = _frozen_chunk_times.keys()
+		oldest.sort_custom(func(a, b): return _frozen_chunk_times[a] < _frozen_chunk_times[b])
+		var removed := 0
+		for body in oldest:
+			if removed >= overflow:
+				break
+			if is_instance_valid(body) and body.freeze:
+				_cleanup_falling_chunk(body)
+				_frozen_chunk_times.erase(body)
+				removed += 1
 
 
 ## 找出所有"失稳"体素，返回这些体素位置的并集

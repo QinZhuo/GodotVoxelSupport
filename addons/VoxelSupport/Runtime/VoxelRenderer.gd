@@ -252,17 +252,15 @@ func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
-	# 【零拷贝方案】直接传递 data.voxels 引用，避免快照拷贝开销
-	# 子线程只做单键查询 voxels.get(pos, -1)，不遍历迭代器
-	# 主线程在此期间只做 erase()（不移除 hash 表，不触发扩容）
-	# 风险：子线程可能读到刚被移除的体素，但下一帧重建会自动纠正
-	# 对于连续破坏场景，一帧的微小不一致视觉上不可见
+	# 【快照方案】将 data.voxels 深拷贝为独立快照传给子线程，
+	# 避免子线程读取主线程正在改写(增/删体素)的字典造成数据竞态（块随机显示/隐藏的根因）。
+	# 仅当网格确实需要重建时才拷贝，且只在体素变更帧触发，全帧拷贝仅一次。
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
 		data.clear_dirty_voxels()
-	var snapshot_voxels: Dictionary = data.voxels
+	var snapshot_voxels: Dictionary = data.voxels.duplicate(true)
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	var gen_id := _generation_id + 1
