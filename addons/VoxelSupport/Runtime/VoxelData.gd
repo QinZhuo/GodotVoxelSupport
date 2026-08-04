@@ -276,11 +276,13 @@ static func _calc_bounds(voxels: Dictionary) -> Array:
 # ----------------------------------------------------------------------------
 
 ## 体素坐标 → chunk key
+## 用 floori 向下取整，与 VoxelChunkGenerator._chunk_of 保持一致，正确处理负坐标
+## （旧版用整数除法向零截断，负坐标时 chunk 索引与网格生成不一致 → 查询/重建错位）
 static func _chunk_of(pos: Vector3i) -> Vector3i:
 	return Vector3i(
-		pos.x / CHUNK_SIZE,
-		pos.y / CHUNK_SIZE,
-		pos.z / CHUNK_SIZE
+		floori(float(pos.x) / float(CHUNK_SIZE)),
+		floori(float(pos.y) / float(CHUNK_SIZE)),
+		floori(float(pos.z) / float(CHUNK_SIZE))
 	)
 
 
@@ -538,10 +540,18 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 		return result
 	# 只查询这些 chunk 内的体素
 	_build_chunk_index_if_dirty()
+	var cxi := floori(center.x)
+	var cyi := floori(center.y)
+	var czi := floori(center.z)
 	for ck in overlap_chunks:
 		var positions: Array = _chunk_index.get(ck, [])
 		for pos in positions:
-			if (Vector3(pos) - center).length_squared() <= radius_sq:
+			# 整数距离平方（避免 Vector3 分配）：体素中心(整数)到球心取整的近似，
+			# 与大半径/常见破坏场景精度足够，且完全避免逐体素 Vector3 构造。
+			var dx: int = pos.x - cxi
+			var dy: int = pos.y - cyi
+			var dz: int = pos.z - czi
+			if float(dx * dx + dy * dy + dz * dz) <= radius_sq:
 				result.append(pos)
 	return result
 

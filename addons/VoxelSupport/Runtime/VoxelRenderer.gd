@@ -184,7 +184,14 @@ func mark_dirty() -> void:
 
 
 ## 立即强制重新生成 mesh
+## 若仍有异步任务在运行，不直接启动新批次（否则 _update_mesh_async 会在 worker
+## 读取共享切片时再次修改切片缓存 → 数据竞态），而是置位 retrigger，等当前批次
+## 完成后由 _on_batch_complete 自动触发重建，保证共享切片引用安全。
 func force_update() -> void:
+	_dirty = true
+	if _pending_task_count > 0:
+		_pending_retrigger = true
+		return
 	_dirty = false
 	_update_mesh()
 
@@ -279,6 +286,9 @@ func _update_mesh_async() -> void:
 		data.clear_dirty_voxels()
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
+	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
+	# （生成器内部要求"数组索引==材质ID"，对齐后可 O(1) 按 ID 取材质）
+	var aligned_materials := VoxelMaterial.align_by_id(snapshot_materials)
 	var gen_id := _generation_id + 1
 	_generation_id = gen_id
 	# 渲染居中偏移（体素单位），子线程无权访问节点，随任务参数传入
@@ -309,7 +319,7 @@ func _update_mesh_async() -> void:
 				for ck in all_chunks:
 					var slice_voxels := _get_chunk_slice(ck)
 					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-						slice_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
+						slice_voxels, aligned_materials, ck, gen_id, voxel_scale, render_offset)))
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
 			print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
@@ -317,7 +327,7 @@ func _update_mesh_async() -> void:
 			for ck in rebuild_chunks:
 				var slice_voxels := _get_chunk_slice(ck)
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-					slice_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
+					slice_voxels, aligned_materials, ck, gen_id, voxel_scale, render_offset)))
 	else:
 		# 单任务路径（非 chunk 模式）：需要整个世界体素，深拷贝一次快照
 		_pending_task_count = 1
@@ -327,16 +337,17 @@ func _update_mesh_async() -> void:
 
 
 ## 获取（并缓存）chunk 的局部体素切片快照。
-## 已缓存则复用缓存，避免每次重建都对整世界大字典做 17³=4913 次 has() 扫描；
-## 未缓存则从当前数据构建一次并存入缓存。
-## 返回独立副本（duplicate(false)，值类型键值即完整拷贝），供子线程安全读取，
-## 主线程随后仍可继续增量修改缓存，无数据竞态。
+## 已缓存则直接复用缓存引用，避免每次重建都对整世界大字典做 17³=4913 次 has() 扫描，
+## 也避免每次派发复制整份切片字典（中大场景多 chunk 重建时省下大量主线程拷贝）。
+## 线程安全依据：切片缓存仅在 _update_mesh_async 派发前由主线程写入/修改，
+## 任务运行期间（worker 只读切片）主线程不会再次修改缓存（_pending_task_count>0 时
+## 新变更只置 retrigger，待批次完成后才启动新批次），因此共享引用无数据竞态。
 func _get_chunk_slice(ck: Vector3i) -> Dictionary:
 	if _chunk_slice_cache.has(ck):
-		return _chunk_slice_cache[ck].duplicate(false)
+		return _chunk_slice_cache[ck]
 	var slice := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
 	_chunk_slice_cache[ck] = slice
-	return slice.duplicate(false)
+	return slice
 
 
 ## 按脏体素增量维护切片缓存（在 clear_dirty_voxels 之前调用）。
@@ -455,17 +466,16 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 ## 单 chunk 工作线程入口：每个脏 chunk 独立一个线程任务，真正并行处理
 ## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
+## materials 参数为已按 ID 对齐的材质数组（主线程派发时一次对齐，worker 复用避免重复开销）
 func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vector3i,
 		gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO) -> void:
 	var t0 := Time.get_ticks_usec()
-	var aligned := VoxelMaterial.align_by_id(materials)
-	var _align_time := (Time.get_ticks_usec() - t0) / 1000.0
-	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, chunk_key, offset)
+	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, materials, scale, chunk_key, offset)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 
-	# 诊断：每 chunk 生成耗时 > 5ms 时打印（含 align_by_id 开销）
+	# 诊断：每 chunk 生成耗时 > 5ms 时打印
 	if gen_time_ms > 5.0:
-		print("[诊断] _generate_chunk_worker: Chunk%s, align=%.2fms, 总=%.2fms" % [chunk_key, _align_time, gen_time_ms])
+		print("[诊断] _generate_chunk_worker: Chunk%s, 总=%.2fms" % [chunk_key, gen_time_ms])
 
 	# 统计顶点数
 	var sv := 0
