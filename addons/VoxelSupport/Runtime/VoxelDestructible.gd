@@ -602,8 +602,10 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
 
-	# 数量上限守卫：超过 max_falling_chunks 时不再生成新的物理块（避免突增瞬间超限）
+	# 数量上限守卫：超过 max_falling_chunks 时不再生成新的物理块（避免突增瞬间超限）。
+	# 体素此时已被移除，若不退化会"凭空消失"（既无掉落块也无碎片），故转用粒子碎片兜底。
 	if _falling_chunk_root and _falling_chunk_root.get_child_count() >= int(max_falling_chunks):
+		_spawn_debris_with_materials(group, mat_map, true)
 		return
 
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
