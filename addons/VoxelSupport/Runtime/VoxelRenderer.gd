@@ -94,6 +94,11 @@ var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 # Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
 var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 
+# 持久切片缓存：chunk_key -> {pos: mat_id}（chunk 内部 + 1 体素外缘快照）
+# 由脏体素增量维护，避免每次重建都扫描 17³ 区域 + 对整世界大字典做 has() 查询。
+# 派发任务时 duplicate(false) 交给子线程（值类型，浅拷贝即独立），主线程可安全继续改缓存。
+var _chunk_slice_cache: Dictionary = {}
+
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
 
@@ -152,8 +157,16 @@ func _process(_delta: float) -> void:
 	if _update_counter < update_throttle_frames:
 		return
 	_update_counter = 0
-	# 即使旧任务仍在运行，也直接启动新任务
-	# 旧任务完成后会因 gen_id 不匹配自动丢弃结果，不会影响新任务计数
+
+	# 若有尚未完成的异步任务，不启动新批次：直接启动新批次会递增 gen_id，
+	# 导致上一批次的 chunk 修复结果被丢弃（gen_id 不匹配），而上一批次的脏体素
+	# 又已在其派发时被清除，这些 chunk 的重建将永久丢失 → 界面残留被破坏面的"幽灵面"。
+	# 改为置位 retrigger，等当前批次全部完成后在 _on_batch_complete 中重新触发，
+	# 保证每个脏 chunk 最终都得到一次应用。
+	if _pending_task_count > 0:
+		_pending_retrigger = true
+		return
+
 	_update_mesh()
 
 
@@ -259,6 +272,9 @@ func _update_mesh_async() -> void:
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
+		# 先按脏体素增量更新切片缓存（须在 clear_dirty_voxels 之前），
+		# 之后派发时直接复用缓存切片，避免每次都对整世界大字典做 17³ 扫描。
+		_apply_dirty_to_slice_cache(data.dirty_voxels)
 		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
 		data.clear_dirty_voxels()
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
@@ -291,7 +307,7 @@ func _update_mesh_async() -> void:
 				print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
 				_pending_task_count = all_chunks.size()
 				for ck in all_chunks:
-					var slice_voxels := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
+					var slice_voxels := _get_chunk_slice(ck)
 					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 						slice_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
 		else:
@@ -299,7 +315,7 @@ func _update_mesh_async() -> void:
 			print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
 			_pending_task_count = rebuild_chunks.size()
 			for ck in rebuild_chunks:
-				var slice_voxels := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
+				var slice_voxels := _get_chunk_slice(ck)
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 					slice_voxels, snapshot_materials, ck, gen_id, voxel_scale, render_offset)))
 	else:
@@ -308,6 +324,68 @@ func _update_mesh_async() -> void:
 		var snapshot_voxels: Dictionary = data.voxels.duplicate(true)
 		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset)))
+
+
+## 获取（并缓存）chunk 的局部体素切片快照。
+## 已缓存则复用缓存，避免每次重建都对整世界大字典做 17³=4913 次 has() 扫描；
+## 未缓存则从当前数据构建一次并存入缓存。
+## 返回独立副本（duplicate(false)，值类型键值即完整拷贝），供子线程安全读取，
+## 主线程随后仍可继续增量修改缓存，无数据竞态。
+func _get_chunk_slice(ck: Vector3i) -> Dictionary:
+	if _chunk_slice_cache.has(ck):
+		return _chunk_slice_cache[ck].duplicate(false)
+	var slice := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
+	_chunk_slice_cache[ck] = slice
+	return slice.duplicate(false)
+
+
+## 按脏体素增量维护切片缓存（在 clear_dirty_voxels 之前调用）。
+## 对每个变更位置，把增删同步到所有"切片范围覆盖该位置"的 chunk 缓存，
+## 从而避免下次重建时对同一 chunk 重新扫描整个 17³ 区域。
+## 体素位于 chunk 边界时会影响相邻 chunk 的切片（外缘 1 体素），因此候选为
+## 自身 chunk + 边界方向相邻 chunk（每轴至多 2 个，至多 8 个 chunk）。
+func _apply_dirty_to_slice_cache(dirty: Dictionary) -> void:
+	if dirty.is_empty():
+		return
+	for pos_key in dirty:
+		var p: Vector3i = pos_key
+		var mat_id: int = dirty[pos_key]
+		for ck in _candidate_slice_chunks(p):
+			if _chunk_slice_cache.has(ck):
+				if mat_id < 0:
+					var s: Dictionary = _chunk_slice_cache[ck]
+					s.erase(p)
+					if s.is_empty():
+						_chunk_slice_cache.erase(ck)
+				else:
+					_chunk_slice_cache[ck][p] = mat_id
+
+
+## 找出所有"切片范围覆盖位置 p"的 chunk key（自身 + 边界相邻，至多 8 个）
+static func _candidate_slice_chunks(p: Vector3i) -> Array[Vector3i]:
+	var CS := VoxelChunkGenerator.CHUNK_SIZE
+	var c0 := Vector3i(floori(float(p.x) / float(CS)), floori(float(p.y) / float(CS)), floori(float(p.z) / float(CS)))
+	var xs := [c0.x]
+	var ys := [c0.y]
+	var zs := [c0.z]
+	if posmod(p.x, CS) == 0:
+		xs.append(c0.x - 1)
+	elif posmod(p.x, CS) == CS - 1:
+		xs.append(c0.x + 1)
+	if posmod(p.y, CS) == 0:
+		ys.append(c0.y - 1)
+	elif posmod(p.y, CS) == CS - 1:
+		ys.append(c0.y + 1)
+	if posmod(p.z, CS) == 0:
+		zs.append(c0.z - 1)
+	elif posmod(p.z, CS) == CS - 1:
+		zs.append(c0.z + 1)
+	var result: Array[Vector3i] = []
+	for x in xs:
+		for y in ys:
+			for z in zs:
+				result.append(Vector3i(x, y, z))
+	return result
 
 
 ## 后台工作线程入口：生成网格数据并写入结果缓冲
@@ -693,6 +771,7 @@ func _clear_chunk_meshes() -> void:
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()
 	_chunk_meshes.clear()
+	_chunk_slice_cache.clear()
 	_clear_chunk_collisions()
 
 

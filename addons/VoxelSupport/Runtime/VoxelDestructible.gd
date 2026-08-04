@@ -626,16 +626,7 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 		var p: Vector3i = pos
 		local_voxels[p - Vector3i(voxel_center)] = int(mat_map.get(p, 0))
 
-	# 3. 一次生成静态网格 + 材质（材质按 data.materials 实例缓存，重复利用）
-	var chunk_materials := _get_cached_chunk_materials()
-	var mesh := VoxelChunkGenerator.generate_mesh_runtime(local_voxels, data.materials, {"scale": voxel_scale, "offset": Vector3.ZERO})
-	if mesh and chunk_materials.size() >= 2:
-		if mesh.get_surface_count() > 0 and chunk_materials[0]:
-			mesh.surface_set_material(0, chunk_materials[0])
-		if mesh.get_surface_count() > 1 and chunk_materials[1]:
-			mesh.surface_set_material(1, chunk_materials[1])
-
-	# 4. 创建 RigidBody3D 作为物理体
+	# 3. 创建 RigidBody3D 作为物理体
 	# 注意：不能使用 global_position，因为 body 尚未加入场景树
 	# body 将作为 _falling_chunk_root 的子节点，而 _falling_chunk_root 位于当前节点原点
 	# 所以 body.position = world_center 即可达到正确位置
@@ -647,15 +638,7 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	body.mass = maxf(group.size() * 0.5, 1.0)
 	body.continuous_cd = true
 
-	# 5. 静态网格子节点（快速渲染）
-	if mesh:
-		var mi := MeshInstance3D.new()
-		mi.name = "Mesh"
-		mi.mesh = mesh
-		body.add_child(mi)
-		mi.owner = body
-
-	# 6. 添加碰撞形状（盒体包围整个块）
+	# 4. 添加碰撞形状（盒体包围整个块）
 	var block_size := Vector3(voxel_max - voxel_min) + Vector3.ONE
 	var shape := BoxShape3D.new()
 	shape.size = block_size * voxel_scale
@@ -665,7 +648,7 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	body.add_child(col)
 	col.owner = body
 
-	# 7. 添加到场景
+	# 5. 添加到场景（先于 mesh：mesh 由后台线程生成后异步挂载）
 	_falling_chunk_root.add_child(body)
 	body.owner = _falling_chunk_root
 	# 记录生成时刻，供生命周期上限/超时清理（覆盖所有掉落块，含未冻结的）
@@ -674,10 +657,45 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if diag_enabled:
 		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
 		if _t_ms > 1.0:
-			print("[诊断] _spawn_falling_chunk: %d体素, 耗时%.2f ms" % [group.size(), _t_ms])
+			print("[诊断] _spawn_falling_chunk: %d体素(物理体), 耗时%.2f ms" % [group.size(), _t_ms])
 
-	# 8. 连接落地检测：落地后静置一段时间自动冻结（节省物理开销，不掉落块不消失）
+	# 6. 连接落地检测：落地后静置一段时间自动冻结（节省物理开销，不掉落块不消失）
 	body.body_entered.connect(_on_chunk_landed.bind(body))
+
+	# 7. 异步生成静态网格：后台线程生成数组，主线程组装 ArrayMesh 后挂载
+	# 避免级联破坏时在主线程同步生成大量掉落块 mesh（最大主线程阻塞点）
+	var materials_snapshot: Array = data.materials.duplicate(false) if data else []
+	var spawn_scale := voxel_scale
+	WorkerThreadPool.add_task(_falling_chunk_mesh_worker.bind(local_voxels, materials_snapshot, spawn_scale, body))
+
+
+## 后台线程入口：为掉落块生成网格数组（线程安全，不触碰 ArrayMesh/节点）
+## 完成后 call_deferred 回主线程 _on_falling_chunk_mesh_result 组装 ArrayMesh
+func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D) -> void:
+	var arrays := VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
+	call_deferred("_on_falling_chunk_mesh_result", body, arrays)
+
+
+## 主线程：把后台生成的数组组装为 ArrayMesh 并挂载到掉落块
+func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant) -> void:
+	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
+		return
+	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
+		return
+	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
+	if mesh == null:
+		return
+	var chunk_materials := _get_cached_chunk_materials()
+	if chunk_materials.size() >= 2:
+		if mesh.get_surface_count() > 0 and chunk_materials[0]:
+			mesh.surface_set_material(0, chunk_materials[0])
+		if mesh.get_surface_count() > 1 and chunk_materials[1]:
+			mesh.surface_set_material(1, chunk_materials[1])
+	var mi := MeshInstance3D.new()
+	mi.name = "Mesh"
+	mi.mesh = mesh
+	body.add_child(mi)
+	mi.owner = body
 
 
 ## 获取（并缓存）掉落块共用材质。同一 data.materials 实例在生命周期内稳定，只需生成一次。
