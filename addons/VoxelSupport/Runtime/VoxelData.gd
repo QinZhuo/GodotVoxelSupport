@@ -45,6 +45,13 @@ const CHUNK_SIZE := 16
 var _chunk_index: Dictionary = {}
 var _chunk_index_built: bool = false
 
+## 支撑图增量缓存：pos -> 其 LOWER_5 中存在的实体素数 (0-5)
+## 由 set_voxel/remove_voxel/remove_voxels/merge 增量维护，供 find_unsupported_around 使用
+## 失稳判断从"每次扫描 LOWER_5 的 5 次字典查询"降为 O(1) 读计数
+## 缓存构建开关：首次使用时全量构建一次（_support_cache_built），之后增量同步
+var _support_cache: Dictionary = {}
+var _support_cache_built: bool = false
+
 ## 6 方向邻居偏移（上下左右前后），连通性 BFS/泛洪共用
 const NEIGHBORS_6: Array[Vector3i] = [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
@@ -142,13 +149,16 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1
 		_chunk_index_remove(pos)
+		_support_cache_on_remove(pos)
 	else:
 		# 若该位置原本已有体素，先移除旧索引，再添加新索引（避免重复）
 		if voxels.has(pos):
 			_chunk_index_remove(pos)
+			_support_cache_on_remove(pos)
 		voxels[pos] = material_id
 		dirty_voxels[pos] = material_id
 		_chunk_index_add(pos)
+		_support_cache_on_add(pos)
 	if notify:
 		emit_changed()
 
@@ -158,6 +168,7 @@ func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
 	voxels.erase(pos)
 	dirty_voxels[pos] = -1
 	_chunk_index_remove(pos)
+	_support_cache_on_remove(pos)
 	if notify:
 		emit_changed()
 
@@ -184,19 +195,28 @@ func clear(notify: bool = true) -> void:
 	voxels.clear()
 	_chunk_index.clear()
 	_chunk_index_built = true  # 空索引即已构建
+	_support_cache.clear()
+	_support_cache_built = true  # 空缓存即已构建
 	if notify:
 		emit_changed()
 
 
 ## 合并另一个资源中的体素 (可带偏移)
 func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
+	var new_positions: Array = []
 	for pos in other.voxels:
 		var dst := pos + offset
 		if voxels.has(dst):
 			_chunk_index_remove(dst)
+			_support_cache_on_remove(dst)
+		else:
+			new_positions.append(dst)
 		voxels[dst] = other.voxels[pos]
 		dirty_voxels[dst] = other.voxels[pos]
 		_chunk_index_add(dst)
+	if not new_positions.is_empty():
+		for p in new_positions:
+			_support_cache_on_add(p)
 	if notify:
 		emit_changed()
 
@@ -279,6 +299,104 @@ func _build_chunk_index_if_dirty() -> void:
 		_build_chunk_index_full()
 
 
+# ----------------------------------------------------------------------------
+# 支撑图增量缓存（供 find_unsupported_around 失稳检测 O(1) 读计数）
+# ----------------------------------------------------------------------------
+
+## 全量构建支撑缓存：对每个实体素统计其 LOWER_5 中存在的邻居数
+## 首次调用失稳检测前执行一次，之后由 set/remove 增量同步
+func _build_support_cache() -> void:
+	_support_cache.clear()
+	for pos_key in voxels:
+		var pos: Vector3i = pos_key
+		var count := 0
+		for d: Vector3i in LOWER_5:
+			if voxels.has(pos + d):
+				count += 1
+		if count > 0:
+			_support_cache[pos] = count
+	_support_cache_built = true
+
+
+## 确保支撑缓存已构建
+func _ensure_support_cache() -> void:
+	if not _support_cache_built:
+		_build_support_cache()
+
+
+## 增量：体素被设置后更新支撑缓存（需在 voxels[pos] 写入后调用）
+## 1) pos 自身计数重算 2) pos 成为其 UPPER_5 邻居的新支撑，邻居计数 +1
+func _support_cache_on_add(pos: Vector3i) -> void:
+	if not _support_cache_built:
+		return
+	# pos 自身计数
+	var count := 0
+	for d: Vector3i in LOWER_5:
+		if voxels.has(pos + d):
+			count += 1
+	if count > 0:
+		_support_cache[pos] = count
+	# pos 支撑其 UPPER_5 邻居
+	for d: Vector3i in UPPER_5:
+		var nb := pos + d
+		if voxels.has(nb):
+			_support_cache[nb] = _support_cache.get(nb, 0) + 1
+
+
+## 增量：体素被移除后更新支撑缓存（需在 voxels.erase(pos) 后调用）
+## 1) pos 自身删除 2) 其 UPPER_5 邻居失去一个支撑，计数 -1（降到 0 可删键）
+func _support_cache_on_remove(pos: Vector3i) -> void:
+	if not _support_cache_built:
+		return
+	_support_cache.erase(pos)
+	for d: Vector3i in UPPER_5:
+		var nb := pos + d
+		if voxels.has(nb):
+			var c: int = _support_cache.get(nb, 0) - 1
+			if c > 0:
+				_support_cache[nb] = c
+			else:
+				_support_cache.erase(nb)
+
+
+## 批量：体素被批量移除后更新支撑缓存（比逐个 _support_cache_on_remove 更高效）
+## 先收集所有受影响邻居（被删体素的 UPPER_5），避免重复增减
+func _support_cache_on_remove_batch(positions: Array) -> void:
+	if not _support_cache_built or positions.is_empty():
+		return
+	# 待删集合（用于判断邻居是否仍存在）
+	var remove_set := {}
+	for p in positions:
+		remove_set[p] = true
+		_support_cache.erase(p)
+	# 受影响邻居 = 所有被删体素的 UPPER_5 中未被删且仍存在的体素
+	var affected := {}
+	for p in positions:
+		var pos: Vector3i = p
+		for d: Vector3i in UPPER_5:
+			var nb := pos + d
+			if voxels.has(nb) and not remove_set.has(nb):
+				affected[nb] = true
+	# 逐受影响邻居重算计数（重算比递增更稳，避免多次删同一个邻居）
+	for nb_key in affected:
+		var nb: Vector3i = nb_key
+		var count := 0
+		for d: Vector3i in LOWER_5:
+			var lower := nb + d
+			if voxels.has(lower) and not remove_set.has(lower):
+				count += 1
+		if count > 0:
+			_support_cache[nb] = count
+		else:
+			_support_cache.erase(nb)
+
+
+## 使支撑缓存失效（批量直接改 voxels 时调用，如 load_data/clear/from_voxel_data 重建）
+func invalidate_support_cache() -> void:
+	_support_cache_built = false
+	_support_cache.clear()
+
+
 ## 增量：添加体素到对应 chunk 的索引列表（由 set_voxel/merge 在写入 voxels 后调用）
 ## 需在 voxels[pos] 已写入后调用，且仅当索引已构建时
 func _chunk_index_add(pos: Vector3i) -> void:
@@ -301,6 +419,38 @@ func _chunk_index_remove(pos: Vector3i) -> void:
 		list.erase(pos)
 		if list.is_empty():
 			_chunk_index.erase(ck)
+
+
+## 批量：从 chunk 索引移除一批体素（按 chunk 分组后单次过滤）
+## 替代逐个 _chunk_index_remove()，避免大批量时 list.erase() 的 O(N) 累积开销
+func _chunk_index_remove_batch(positions: Array) -> void:
+	if not _chunk_index_built or positions.is_empty():
+		return
+	# 按 chunk 分组待移除位置（用字典作集合去重）
+	var by_chunk := {}
+	for p in positions:
+		var ck := _chunk_of(p)
+		if not by_chunk.has(ck):
+			by_chunk[ck] = {}
+		by_chunk[ck][p] = true
+	# 对每个涉及的 chunk，用一次遍历过滤掉所有待移除位置
+	for ck in by_chunk:
+		if not _chunk_index.has(ck):
+			continue
+		var remove_set: Dictionary = by_chunk[ck]
+		var list: Array = _chunk_index[ck]
+		if list.size() == remove_set.size():
+			# 整个 chunk 都要删，直接移除 chunk 键
+			_chunk_index.erase(ck)
+			continue
+		var keep: Array = []
+		for i in range(list.size()):
+			if not remove_set.has(list[i]):
+				keep.append(list[i])
+		if keep.is_empty():
+			_chunk_index.erase(ck)
+		else:
+			_chunk_index[ck] = keep
 
 
 ## 标记 chunk 索引失效（供外部绕过 set_voxel/remove_* 直接修改 voxels 后调用）
@@ -415,7 +565,8 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	for pos in positions:
 		voxels.erase(pos)
 		dirty_voxels[pos] = -1
-		_chunk_index_remove(pos)
+	_chunk_index_remove_batch(positions)
+	_support_cache_on_remove_batch(positions)
 	if notify:
 		emit_changed()
 	# 诊断：批量移除超过 100 体素时打印耗时
@@ -524,6 +675,7 @@ func load_data(data: Variant) -> void:
 				voxels[pos] = int(vox[3])
 	# load_data 直接写入 voxels（绕过增量维护），标记索引失效，下次查询时全量重建
 	_chunk_index_built = false
+	invalidate_support_cache()
 	emit_changed()
 
 
@@ -683,6 +835,9 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 	if removed.is_empty() or voxels_dict.is_empty():
 		return {}
 
+	# 确保支撑缓存已构建（首次调用全量构建一次，之后由 set/remove 增量维护）
+	_ensure_support_cache()
+
 	# 候选体素 = removed 的 5 个上方位邻居中仍存在的体素
 	# 这些体素可能因为失去下方支撑而失稳
 	var candidates := {}
@@ -696,50 +851,48 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 	if candidates.is_empty():
 		return {}
 
-	# 支撑传播：从候选体素向上检查支撑链
-	# 处理顺序：按 y 坐标从低到高（栈保证候选体素先入栈，先处理）
-	# 失稳判断：体素不稳定 ⟺ 其 5 个下方位全无支撑体素
-	#   一个体素提供支撑的前提是：它本身稳定（不在 unstable 中）
-	#   这样连锁失稳会自然向上传播：下层失稳 → 上层失去支撑 → 上层也失稳
+	# 失稳传播（增量支撑图，O(1) 读计数）：
+	#   - 缓存 _support_cache 已反映"removed 已从 voxels 移除"的事实（调用方先
+	#     remove_voxels 再检测），因此候选体素的缓存计数已扣减其失去的下方支撑
+	#   - 传播中失稳的体素仍存在于 voxels（尚未真正移除），不能用缓存直接扣，
+	#     因此用 local_dec 记录"被几个失稳邻居夺走的支撑数"
+	#   - 有效支撑 = 缓存计数 - local_dec；<= 0 且 y>0 则失稳
 	var unstable := {}
-	var visited := {}
+	var local_dec := {}
 	var stack: Array = []
 	for c in candidates:
-		visited[c] = true
 		stack.append(c)
 
 	while not stack.is_empty():
 		var cur: Vector3i = stack.pop_back()
 
+		# 已判定失稳则跳过（避免重复处理）
+		if unstable.has(cur):
+			continue
 		# 贴地体素永远稳定
 		if cur.y == 0:
 			continue
 
-		# 检查是否有支撑：5 个下方位中，存在且自身稳定的体素
-		var has_support := false
-		for d: Vector3i in LOWER_5:
-			var lower := cur + d
-			if voxels_dict.has(lower) and not unstable.has(lower):
-				has_support = true
-				break
+		# 有效支撑数 = 缓存计数 - 被失稳邻居夺走的支撑
+		var effective: int = _support_cache.get(cur, 0) - local_dec.get(cur, 0)
+		if effective > 0:
+			continue
 
-		if not has_support:
-			unstable[cur] = true
-			# 连锁失稳：检查该体素的上方位邻居 + 水平邻居（同 Y 层）
-			# 上方位邻居：正上方 + 斜上方（y+1）
-			for d: Vector3i in UPPER_5:
-				var nb := cur + d
-				if voxels_dict.has(nb) and not visited.has(nb):
-					visited[nb] = true
-					stack.append(nb)
-			# 【关键修复】水平邻居：4 个同 Y 层方向
-			# 不检查水平方向时，浮空平台的外围体素不会被检测到
-			# 因为它们不在 removed 的 UPPER_5 范围内，也不在失稳体素的 UPPER_5 范围内
-			for d: Vector3i in HORIZONTAL_4:
-				var nb := cur + d
-				if voxels_dict.has(nb) and not visited.has(nb):
-					visited[nb] = true
-					stack.append(nb)
+		# 失稳
+		unstable[cur] = true
+		# 连锁失稳：夺走其 UPPER_5 邻居的一个支撑
+		for d: Vector3i in UPPER_5:
+			var nb := cur + d
+			if voxels_dict.has(nb) and not unstable.has(nb):
+				local_dec[nb] = local_dec.get(nb, 0) + 1
+				stack.append(nb)
+		# 【关键修复】水平邻居：4 个同 Y 层方向
+		# 不检查水平方向时，浮空平台的外围体素不会被检测到
+		# 因为它们不在 removed 的 UPPER_5 范围内，也不在失稳体素的 UPPER_5 范围内
+		for d: Vector3i in HORIZONTAL_4:
+			var nb := cur + d
+			if voxels_dict.has(nb) and not unstable.has(nb):
+				stack.append(nb)
 
 	# 诊断：检查量级较大时打印耗时
 	var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0

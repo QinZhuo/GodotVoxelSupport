@@ -87,6 +87,8 @@ var _materials_snapshot: Array = []
 var _materials_snapshot_dirty: bool = true
 # 异步任务运行期间收到新变更时置位，任务完成后重新触发更新（保证数据始终最新且不并发）
 var _pending_retrigger: bool = false
+# 批次全部完成待处理标志：置位后下一帧 _process 执行 _on_batch_complete（避免主线程尖峰）
+var _batch_complete_pending: bool = false
 # Per-chunk 模式：每个非空 chunk 对应一个子 MeshInstance3D
 var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 # Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
@@ -137,6 +139,11 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
 	# 这里只处理限流和启动新任务
+
+	# 延迟批次完成：全部异步任务完成后，在下一帧处理剩余收尾逻辑，避免主线程尖峰
+	if _batch_complete_pending:
+		_batch_complete_pending = false
+		_on_batch_complete()
 
 	if not (_dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor)):
 		return
@@ -404,7 +411,9 @@ func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vec
 
 
 ## 主线程结果处理入口（通过 call_deferred 从工作线程调用）
-## 检查 gen_id 有效性，应用结果，递减计数器，全部完成后执行批次清理
+## 检查 gen_id 有效性，应用结果，递减计数器，全部完成后延迟到下一帧做批次清理
+## 延迟批处理避免"最后一个任务完成"瞬间在主线程做重活（_on_batch_complete 可能触发
+## 新任务启动/emit 信号），防止偶发帧尖峰（曾观测到 83ms 主线程 spike）
 func _on_thread_result(result: Dictionary) -> void:
 	var _diag_t0 := Time.get_ticks_usec()
 	# 丢弃过期结果（gen_id 不匹配说明是旧批次）
@@ -415,11 +424,11 @@ func _on_thread_result(result: Dictionary) -> void:
 	# 应用结果
 	_apply_single_chunk_result(result)
 	
-	# 递减任务计数器，全部完成后执行批次清理
+	# 递减任务计数器，全部完成后延迟到下一帧执行批次清理
 	_pending_task_count -= 1
 	if _pending_task_count <= 0:
 		_pending_task_count = 0  # 防止负数
-		_on_batch_complete()
+		_batch_complete_pending = true
 
 	if _pending_task_count >= 0:
 		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0

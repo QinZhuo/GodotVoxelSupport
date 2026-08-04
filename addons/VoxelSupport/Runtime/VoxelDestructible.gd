@@ -482,29 +482,30 @@ func _process_full_cascade() -> void:
 	voxel_damaged.emit(total_unstable, true)
 
 
-## 处理一个级联层级（逐帧处理，每帧只处理一级）
-## 从 _cascade_check_positions 中找出失稳体素，移除并生成物理掉落
-## 若还有下一级失稳体素，设置 _cascade_check_positions 供下一帧继续处理
-## 产生自然的连锁崩塌延迟效果
+## 处理级联崩塌（逐帧，但每帧"一次"完成整条传播链）
+## 从 _cascade_check_positions 出发，单轮找出所有级联失稳体素并统一移除
+##
+## 性能优化（合并级联层级）：
+##   旧实现每帧只处理一个级联层级，把 unstable 设为下一级检查点，导致 BFS 多轮重复
+##   扫描（每轮 10-13ms），5 级级联 = 50-65ms 链式阻塞。
+##   find_unsupported_around() 内部已用支撑图把连锁失稳"单轮递归传播"到终结，
+##   因此这里一次调用即可获得全部失稳体素，无需分帧多轮。丢掉的逐帧"层级延迟"
+##   换来了显著的确定性性能提升。
 func _process_cascade_level() -> void:
 	if _cascade_check_positions.is_empty():
 		return
 
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
-	# 取出当前层级的待检查位置，清空队列（如果还有下一级会在下面重新设置）
+	# 取出当前待检查位置，清空队列（处理完即终结本次级联）
 	var queue: Array = _cascade_check_positions
 	_cascade_check_positions = []
 
-	# 只处理一个层级
 	var unstable := _find_unstable_voxels(queue)
 	var _diag_t1 := Time.get_ticks_usec() if diag_enabled else 0
 	if unstable.is_empty():
 		_finalize_cascade()
 		return
-
-	# 设置下一级要检查的位置（当前失稳体素作为下一级的检查起点）
-	_cascade_check_positions = unstable
 
 	# 按连通性分组
 	var groups := VoxelData.partition_connected(unstable)
@@ -528,10 +529,9 @@ func _process_cascade_level() -> void:
 		_spawn_falling_chunks_from_groups(groups, group_materials)
 	var _diag_t5 := Time.get_ticks_usec() if diag_enabled else 0
 
-	# 累积级联结果
+	# 累积级联结果并直接终结（find 已包含全部传播链）
 	_cascade_total.append_array(unstable)
-	# 注意：不移除 _cascade_check_positions，它已被设置为下一级的检查位置
-	# 如果有下一级，下一帧 _process 会继续处理
+	_finalize_cascade()
 
 	if diag_enabled:
 		var _t_total := (_diag_t5 - _diag_t0) / 1000.0
@@ -541,8 +541,7 @@ func _process_cascade_level() -> void:
 		var _t_remove := (_diag_t4 - _diag_t3) / 1000.0
 		var _t_spawn := (_diag_t5 - _diag_t4) / 1000.0
 		if _t_total > 1.0:
-			print("[诊断] 级联层级: %d体素, %d组, 总%.2fms | 检测%.2f | 分组%.2f | 材质%.2f | 移除%.2f | 生成%.2f" % [unstable.size(), groups.size(), _t_total, _t_find, _t_group, _t_mat, _t_remove, _t_spawn])
-	# 如果没有下一级，_finalize_cascade 会在下次 _process_cascade_level 被调用时触发
+			print("[诊断] 级联(合并): %d体素, %d组, 总%.2fms | 检测%.2f | 分组%.2f | 材质%.2f | 移除%.2f | 生成%.2f" % [unstable.size(), groups.size(), _t_total, _t_find, _t_group, _t_mat, _t_remove, _t_spawn])
 
 
 ## 当体素已被移除后，从已收集的材质映射中查找原始材质ID
@@ -573,9 +572,14 @@ func _ensure_falling_chunk_root() -> void:
 
 
 ## 生成一个崩塌掉落块（整块物理体）
-## 将一组连通体素创建为独立的 VoxelDestructible，包裹在 RigidBody3D 中掉落
+## 将一组连通体素创建为一个"轻量静态 MeshInstance3D" + RigidBody3D 掉落
 ## 体素位置偏移到居中，使 RigidBody3D 位于块的中心
 ## mat_map: 体素位置 -> 材质ID 的映射（在调用前已从 data 中收集，因为 data 可能在调用前已移除体素）
+##
+## 轻量化说明：掉落块只需静态渲染 + 刚体物理，不需要任何后期破坏/修改能力。
+## 因此用"一次性生成的 ArrayMesh + MeshInstance3D"替代完整的 VoxelDestructible
+## （后者携带异步网格生成管线、材质缓存、级联崩塌逻辑等重资产），大幅降低每个
+## 掉落块的创建开销，减轻大规模级联时的主线程压力。
 func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
@@ -595,48 +599,48 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	var voxel_center := (Vector3(voxel_min) + Vector3(voxel_max)) * 0.5 + Vector3(0.5, 0.5, 0.5)
 	var world_center := voxel_center * voxel_scale
 
-	# 2. 创建新的 VoxelData（偏移体素位置使中心对齐到原点）
+	# 2. 构建偏移到居中的体素字典（供一次性生成静态 mesh）
 	# 使用提前收集的 mat_map 而非 data.voxels（体素可能已被移除）
-	var new_data := VoxelData.new()
+	var local_voxels: Dictionary[Vector3i, int] = {}
 	for pos in group:
 		var p: Vector3i = pos
-		var offset_p := p - Vector3i(voxel_center)
-		new_data.voxels[offset_p] = mat_map.get(p, 0)
-	# 复制材质
-	for m in data.materials:
-		if m:
-			new_data.add_material(m)
+		local_voxels[p - Vector3i(voxel_center)] = int(mat_map.get(p, 0))
 
-	# 3. 创建新的 VoxelDestructible（只负责渲染，不参与破坏逻辑）
-	var chunk := VoxelDestructible.new()
-	chunk.name = "FallingChunk_%d" % _falling_chunk_id
-	_falling_chunk_id += 1
-	chunk.data = new_data
-	chunk.voxel_scale = voxel_scale
-	chunk.collapse_mode = CollapseMode.COLLAPSE_NONE
-	chunk.health = -1
-	chunk.spawn_debris_on_damage = false
+	# 3. 一次生成静态网格 + 材质
+	var chunk_materials := VoxelMeshGenerator.generate_textured_materials_runtime(data.materials)
+	var mesh := VoxelChunkGenerator.generate_mesh_runtime(local_voxels, data.materials, {"scale": voxel_scale, "offset": Vector3.ZERO})
+	if mesh and chunk_materials.size() >= 2:
+		if mesh.get_surface_count() > 0 and chunk_materials[0]:
+			mesh.surface_set_material(0, chunk_materials[0])
+		if mesh.get_surface_count() > 1 and chunk_materials[1]:
+			mesh.surface_set_material(1, chunk_materials[1])
 
 	# 4. 创建 RigidBody3D 作为物理体
 	# 注意：不能使用 global_position，因为 body 尚未加入场景树
 	# body 将作为 _falling_chunk_root 的子节点，而 _falling_chunk_root 位于当前节点原点
 	# 所以 body.position = world_center 即可达到正确位置
 	var body := RigidBody3D.new()
-	body.name = chunk.name + "_Body"
+	body.name = "FallingChunk_%d_Body" % _falling_chunk_id
+	_falling_chunk_id += 1
 	body.position = world_center
 	body.gravity_scale = 1.0
 	body.mass = maxf(group.size() * 0.5, 1.0)
 	body.continuous_cd = true
 
-	# 5. VoxelDestructible 作为子节点（体素已居中，位置为 0）
-	body.add_child(chunk)
-	chunk.owner = body
+	# 5. 静态网格子节点（快速渲染）
+	if mesh:
+		var mi := MeshInstance3D.new()
+		mi.name = "Mesh"
+		mi.mesh = mesh
+		body.add_child(mi)
+		mi.owner = body
 
 	# 6. 添加碰撞形状（盒体包围整个块）
 	var block_size := Vector3(voxel_max - voxel_min) + Vector3.ONE
 	var shape := BoxShape3D.new()
 	shape.size = block_size * voxel_scale
 	var col := CollisionShape3D.new()
+	col.name = "CollisionShape3D"
 	col.shape = shape
 	body.add_child(col)
 	col.owner = body
@@ -940,7 +944,7 @@ func _process(_delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 
-	# 处理级联崩塌（每帧一个层级，产生自然的连锁崩塌延迟）
+	# 处理级联崩塌（单轮完成整条传播链，find_unsupported_around 内部已递归传播全部失稳）
 	if not _cascade_check_positions.is_empty():
 		var _t1 := Time.get_ticks_usec() if diag_enabled else 0
 		_process_cascade_level()
