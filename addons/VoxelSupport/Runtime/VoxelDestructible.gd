@@ -124,7 +124,10 @@ func _ready() -> void:
 		# 使场景进入静态稳定状态（清除初始悬空结构），之后破坏由局部检测负责
 		call_deferred("validate_stability")
 		# 预热 chunk 索引与支撑缓存，避免首次破坏时在主线程全量构建导致卡顿
-		call_deferred("_prewarm_caches")
+		# 但对于已禁用崩塌（COLLAPSE_NONE）的节点（如地面），prewarm 是纯浪费
+		# 1000×1000×50体素的全量构建会阻塞主线程数秒，导致加载屏幕卡死在60%
+		if collapse_mode != CollapseMode.COLLAPSE_NONE:
+			call_deferred("_prewarm_caches")
 
 
 func _exit_tree() -> void:
