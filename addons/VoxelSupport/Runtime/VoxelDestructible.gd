@@ -101,22 +101,20 @@ var _cascade_total: Array = []            # 所有级联累积的失稳体素
 ## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
 const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 
-## 掉落块物理体大小阈值（体素数）：连通组体素数 <= 该值时转 GPU 粒子破碎，
-## > 该值则生成精确碰撞的物理掉落体。
-## 理由：小块（<=8 体素）物理碰撞细节肉眼难辨，转粒子零物理开销且视觉更自然；
-## 大块保留物理体以支持堆叠/滚动，并用符合体素形状的复杂碰撞。
-@export_range(2, 64) var debris_threshold: int = 8
+## 掉落块分档阈值（按体素数自动选择表现方式）：
+##   <= debris_threshold（32）           → GPU 粒子破碎（零物理开销，视觉自然）
+##   <= box_threshold（256）             → BoxShape3D 包围盒碰撞（物理开销低，中小块够用）
+##   >  box_threshold（256）             → ConvexPolygonShape3D 凸包碰撞（贴合大块轮廓）
+## 理由：小块物理碰撞细节肉眼难辨，转粒子更自然；中小块 Box 足够；大块用凸包贴合轮廓
+@export_range(2, 128) var debris_threshold: int = 32
 
-## 掉落块碰撞方案：
-## 0 = BoxShape3D 包围盒（最快，物理开销最低；贴合度差，空心块会填满）
-## 1 = ConvexPolygonShape3D 凸包（更贴合体素轮廓；物理开销略高，适合需要精确堆叠/滚动的场景）
-## 可运行时切换，用于性能/表现对比测试
-enum FallingCollision { BOX, CONVEX }
-@export var falling_collision: FallingCollision = FallingCollision.CONVEX
+## Box/凸包分界阈值（体素数）：<= 该值用 Box，> 该值用凸包
+@export_range(32, 1024) var box_threshold: int = 256
 
 ## 物理掉落体对象池大小：同时最多存在的活动 RigidBody3D 数量。
 ## 池复用消除创建/销毁开销，同时作为物理体数量的软上限（池满的新块转粒子，优雅降级）。
-@export_range(8, 128) var falling_chunk_pool_size: int = 32
+## 设大些避免大崩塌时过早降级（大块转粒子会损失"整块碎裂"的物理感）。
+@export_range(8, 512) var falling_chunk_pool_size: int = 64
 
 ## 掉落块最大存活数量（超出后最早冻结的块被移除，防止长时间破坏后物理体无限堆积拖慢帧率）
 @export_range(20, 2000) var max_falling_chunks: int = 200
@@ -469,8 +467,8 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 ## 从连通分组中生成掉落体（统一入口，消除代码重复）
 ## group_materials: Array[Dictionary]，每个元素是 {pos: mat_id} 映射
 ## 分流规则：
-##   - 组体素数 <= debris_threshold → GPU 粒子破碎（零物理开销，视觉自然）
-##   - 组体素数 >  debris_threshold → 精确碰撞物理体（对象池取用）
+##   - 组体素数 <= debris_threshold（16）→ GPU 粒子破碎（零物理开销，视觉自然）
+##   - 组体素数 >  debris_threshold      → 物理体（Box 或凸包，见 _on_falling_chunk_mesh_result）
 ## 返回实际生成的物理掉落体数量
 func _spawn_falling_chunks_from_groups(groups: Array, group_materials: Array[Dictionary]) -> int:
 	var spawned_count := 0
@@ -642,9 +640,9 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
 
-	# 池容量守卫：活动物理体已满时本块转粒子（优雅降级）
+	# 池容量守卫：活动物理体已满时本块转"整块碎裂"粒子（保留块形状散开，而非消失）
 	if _body_pool_total.size() >= int(falling_chunk_pool_size) and _body_pool.is_empty():
-		_spawn_debris_with_materials(group, mat_map, true)
+		_spawn_chunk_break_debris(group, mat_map)
 		return
 
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
@@ -710,9 +708,9 @@ func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scal
 
 
 ## 主线程：把后台生成的数组组装为 ArrayMesh 并挂载到掉落块
-## 碰撞方案由 falling_collision 控制：
-##   BOX   → BoxShape3D 包围盒（最快，物理开销最低）
-##   CONVEX→ ConvexPolygonShape3D 凸包（更贴合体素轮廓，物理开销略高）
+## 碰撞方案按块体素数自动选择：
+##   <= box_threshold（64）→ BoxShape3D 包围盒（物理开销低，中小块够用）
+##   >  box_threshold（64）→ ConvexPolygonShape3D 凸包（贴合大块轮廓）
 func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
@@ -733,8 +731,8 @@ func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_vox
 	body.add_child(mi)
 	mi.owner = body
 
-	# 按配置选择碰撞方案
-	if falling_collision == FallingCollision.CONVEX:
+	# 按体素数自动选碰撞方案：大块（>box_threshold）用凸包贴合轮廓，中小块用 Box 降低物理开销
+	if local_voxels.size() > int(box_threshold):
 		# 凸包碰撞：从 mesh 生成（clean 去除退化面，simplify 减少顶点）
 		var shape := mesh.create_convex_shape(true, true)
 		if shape:
@@ -1030,6 +1028,41 @@ func _collect_voxel_materials(positions: Array) -> Dictionary:
 	return mat_map
 
 
+## 整块碎裂粒子：当物理体池已满、大块无法生成物理体时，
+## 把整块转成"从块包围盒范围发射"的粒子，保留"整块碎裂散开"的视觉，
+## 而非从质心一点发射导致"大块突然消失"。
+## 粒子数量按块大小比例（不受 max_debris_per_hit 限制，避免大块只剩几个粒子）
+func _spawn_chunk_break_debris(positions: Array, mat_map: Dictionary) -> void:
+	if positions.is_empty():
+		return
+	_ensure_debris_root()
+
+	# 计算块包围盒（世界单位）
+	var min_v := Vector3(positions[0]) * voxel_scale
+	var max_v := min_v
+	for pos in positions:
+		var p: Vector3 = (Vector3(pos) + Vector3(0.5, 0.5, 0.5)) * voxel_scale
+		min_v = Vector3(minf(min_v.x, p.x), minf(min_v.y, p.y), minf(min_v.z, p.z))
+		max_v = Vector3(maxf(max_v.x, p.x), maxf(max_v.y, p.y), maxf(max_v.z, p.z))
+	var center := (min_v + max_v) * 0.5
+	var emission_size := max_v - min_v
+
+	# 按材质分组（大块不再截断粒子数，按块大小比例）
+	var by_mat := {}
+	for pos in positions:
+		var mat_id: int = mat_map.get(pos, -1)
+		if not by_mat.has(mat_id):
+			by_mat[mat_id] = []
+		by_mat[mat_id].append(pos)
+
+	for mat_id in by_mat:
+		var list: Array = by_mat[mat_id]
+		var mat_mass: float = _get_material_mass(mat_id)
+		# 粒子数量 = 该材质体素数（上限保护，避免超大块粒子爆炸）
+		var amount := mini(list.size(), 600)
+		_spawn_debris_particles(center, mat_id, amount, mat_mass, true, emission_size)
+
+
 ## 生成碎片粒子（全部使用 GPU 粒子系统，无物理碰撞体）
 ## 在指定位置发射碎片粒子
 ## is_collapse=true 时，粒子向下坠落（崩塌效果），否则向上喷发（爆炸效果）
@@ -1076,7 +1109,8 @@ func _get_material_mass(mat_id: int) -> float:
 ## 粒子碰撞自然落地，无 RigidBody 物理开销
 ## 粒子运动受材质 mass 影响：重物飞得近/落得快，轻物飞得远/飘得久
 ## is_collapse=true 时粒子向下坠落（崩塌效果），false 时向上喷发（爆炸效果）
-func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass: float = 1.0, is_collapse: bool = false) -> void:
+## emission_size: 若提供，粒子从该尺寸的盒形范围发射（模拟"整块碎裂散开"而非质心一点）
+func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass: float = 1.0, is_collapse: bool = false, emission_size: Vector3 = Vector3.ZERO) -> void:
 	if amount <= 0:
 		return
 	# mass 影响因子：质量越大，速度越慢、重力越大、喷发角度越小
@@ -1092,7 +1126,8 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	particles.one_shot = true
 	particles.local_coords = true
 	# 碰撞仅在 visibility_aabb 区域内发生，扩大以覆盖粒子运动范围
-	particles.visibility_aabb = AABB(Vector3(-8, -4, -8), Vector3(16, 16, 16))
+	var half_extent := maxf(emission_size.length(), 8.0)
+	particles.visibility_aabb = AABB(Vector3(-half_extent, -4, -half_extent), Vector3(half_extent * 2, 16 + half_extent, half_extent * 2))
 
 	# 粒子材质：碰撞(刚体) + 高摩擦(落地停住) + 无弹性(不反弹)
 	var pm := ParticleProcessMaterial.new()
@@ -1126,6 +1161,11 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 		pm.angular_velocity_max = 6.0 * mass_factor
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
+
+	# 发射范围：若提供 emission_size，粒子从盒形范围发射（模拟整块碎裂散开）
+	if emission_size.length() > 0.001:
+		pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+		pm.emission_box_extents = emission_size * 0.5
 
 	# 淡出：从生命周期 50% 开始慢慢渐变到透明（共用缓存资源，避免每次破坏都新建 Gradient/GradientTexture1D）
 	pm.alpha_curve = _get_particle_fade_gradient()

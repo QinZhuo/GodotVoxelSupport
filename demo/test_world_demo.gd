@@ -79,7 +79,6 @@ var _prev_3 := false
 var _prev_4 := false
 var _prev_5 := false
 var _prev_6 := false
-var _prev_7 := false
 var _prev_space := false
 
 ## 原生可用性（用于 HUD 显示）
@@ -168,8 +167,6 @@ func _build_target() -> void:
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
 	_target.local_collapse = true
-	# 掉落块碰撞方案（按键7切换）：0=Box 1=凸包
-	_target.falling_collision = _collision_mode()
 
 	var bounds: AABB = data.get_voxels_aabb()
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
@@ -191,12 +188,10 @@ func _build_target() -> void:
 var _culling_state := true
 var _superchunk_state := 0
 var _async_state := true
-var _collision_state := 1  # 0=Box 1=凸包
 
 func _culling_mode() -> bool: return _culling_state
 func _superchunk_mode() -> int: return _superchunk_state
 func _async_mode() -> bool: return _async_state
-func _collision_mode() -> int: return _collision_state
 
 
 ## 创建大型测试世界：多栋建筑 + 地面
@@ -373,7 +368,6 @@ func _handle_input(delta: float) -> void:
 	var key_3 := Input.is_key_pressed(KEY_3)
 	var key_5 := Input.is_key_pressed(KEY_5)
 	var key_6 := Input.is_key_pressed(KEY_6)
-	var key_7 := Input.is_key_pressed(KEY_7)
 	var left := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	var space := Input.is_key_pressed(KEY_SPACE)
 
@@ -399,11 +393,6 @@ func _handle_input(delta: float) -> void:
 	if key_6 and not _prev_6:
 		_rebuild_for_test()
 		print("[测试] 场景重置")
-	# 掉落块碰撞方案（0=Box 1=凸包）
-	if key_7 and not _prev_7:
-		_collision_state = 1 if _collision_state == 0 else 0
-		_rebuild_for_test()
-		print("[测试] 掉落块碰撞: %s" % ("凸包" if _collision_state == 1 else "Box包围盒"))
 
 	# 破坏
 	if left:
@@ -416,7 +405,6 @@ func _handle_input(delta: float) -> void:
 	_prev_3 = key_3
 	_prev_5 = key_5
 	_prev_6 = key_6
-	_prev_7 = key_7
 	_prev_space = space
 
 
@@ -515,15 +503,14 @@ func _update_hud() -> void:
 	_hud.text = """===== 体素优化测试场 =====
 FPS: %d
 原生加速: %s
-模式: culling=%s superchunk=%d async=%s 碰撞=%s
+模式: culling=%s superchunk=%d async=%s
 Chunk数: %d  |  draw call: %d
 体素: %d
-[1]视锥 [2]超级块 [3]异步 [5]环绕 [6]重置 [7]碰撞
+[1]视锥 [2]超级块 [3]异步 [5]环绕 [6]重置
 左键破坏 空格射线""" % [
 		Engine.get_frames_per_second(),
 		"ON" if _native_available else "OFF",
 		"ON" if _culling_state else "OFF", _superchunk_state, "ON" if _async_state else "OFF",
-		"凸包" if _collision_state == 1 else "Box",
 		chunk_count, draw_calls,
 		t.data.get_voxel_count() if t and t.data else 0,
 	]
