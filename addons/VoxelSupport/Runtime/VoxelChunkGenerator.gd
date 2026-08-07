@@ -33,7 +33,7 @@ const _HALO_DIRS: Array[int] = [
 ## 返回独立的 Dictionary，供子线程安全读取（主线程后续增删不会影响它）。
 ## halo_voxels: 外扩层数，默认 1（跨界面的面可见性需要紧邻体素）
 static func slice_chunk(voxels: Dictionary, chunk: Vector3i, halo_voxels: int = 1) -> Dictionary:
-	var origin := chunk * CHUNK_SIZE
+	var origin := VoxelChunk.origin_of(chunk)
 	var slice := {}
 	var lo := origin - Vector3i(halo_voxels, halo_voxels, halo_voxels)
 	var hi := origin + Vector3i(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE) + Vector3i(halo_voxels - 1, halo_voxels - 1, halo_voxels - 1)
@@ -331,7 +331,7 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 static func _halo_from_dict(voxels: Dictionary, chunk: Vector3i) -> PackedInt32Array:
 	var halo := PackedInt32Array()
 	halo.resize(HALO_VOLUME)
-	var origin := chunk * CHUNK_SIZE
+	var origin := VoxelChunk.origin_of(chunk)
 	for z in HALO_SIZE:
 		for y in HALO_SIZE:
 			for x in HALO_SIZE:
@@ -350,7 +350,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
 		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
 		use_local_space: bool = false, offset: Vector3 = Vector3.ZERO) -> void:
-	var chunk_origin := chunk * CHUNK_SIZE
+	var chunk_origin := VoxelChunk.origin_of(chunk)
 	var origin_offset := Vector3(chunk_origin) * scale if use_local_space else Vector3.ZERO
 
 	# 预计算材质透明标志（数组索引==材质ID，O(1) 查询）。

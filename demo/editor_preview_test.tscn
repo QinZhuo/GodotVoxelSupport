@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://bqmqvr64ubgsf"]
+
+[ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="1_renderer"]
+[ext_resource type="Resource" uid="uid://dwlsmke33vkb6" path="res://demo/deer_data.vox" id="2_deer"]
+
+[node name="EditorPreview" type="Node3D" unique_id=742351933]
+
+[node name="Deer" type="MeshInstance3D" parent="." unique_id=294394719]
+script = ExtResource("1_renderer")
+data = ExtResource("2_deer")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1742044818]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 12, 10)

@@ -14,6 +14,11 @@ extends Resource
 ## 新方案：非空 chunk 各持一块 PackedInt32Array(16³)，值 = 材质ID（0=空）。
 ##         体素读写 = 1 次 chunk 字典查询 + 1 次数组下标；稀疏性只存在于 chunk 层。
 ##         网格生成使用 18³ 密集"光环缓冲"，邻居读取全为数组下标、无越界检查。
+##
+## 【统一材质契约】（全项目权威，见 VoxelMaterial.gd）
+##   - 材质ID 0 = 空/空气：既没有体素也没有材质
+##   - 存储值 == 材质ID（0 = 空），无任何 +1/-1 编码偏移
+##   - 对齐后材质数组索引 == 材质ID，索引 0 恒为 null 占位
 
 ## 材质数组 (索引即材质ID，使用 VoxelMaterial)
 @export var materials: Array[VoxelMaterial] = []
@@ -222,7 +227,7 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 	var halo := PackedInt32Array()
 	halo.resize(HALO_VOLUME)
-	var origin := chunk * CHUNK_SIZE
+	var origin := VoxelChunk.origin_of(chunk)
 	# 只遍历 27 个邻居 chunk 与光环的重叠区，避免逐体素世界坐标换算
 	for nz in 3:
 		for ny in 3:
@@ -231,7 +236,7 @@ func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 				var buf = _chunk_buffers.get(nck)
 				if buf == null:
 					continue
-				var n_origin := nck * CHUNK_SIZE
+				var n_origin := VoxelChunk.origin_of(nck)
 				var lo := Vector3i(
 					maxi(origin.x - HALO, n_origin.x),
 					maxi(origin.y - HALO, n_origin.y),
@@ -256,7 +261,7 @@ func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
 	var out := {}
 	for ck: Vector3i in _chunk_buffers:
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				out[origin + _local_from_index(i)] = buf[i]
@@ -291,7 +296,7 @@ func get_positions() -> Array:
 	var out: Array = []
 	for ck: Vector3i in _chunk_buffers:
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				out.append(origin + _local_from_index(i))
@@ -331,7 +336,7 @@ func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
 func clear(notify: bool = true) -> void:
 	for ck: Vector3i in _chunk_buffers:
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				dirty_voxels[origin + _local_from_index(i)] = -1
@@ -344,16 +349,22 @@ func clear(notify: bool = true) -> void:
 
 
 ## 合并另一个资源中的体素 (可带偏移)
+## 直接遍历 other 的 chunk 密集缓冲（单趟，避免 get_positions+get_voxel 两趟扫描）
 func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
 	var new_positions: Array = []
-	for pos: Vector3i in other.get_positions():
-		var dst := pos + offset
-		var src_mat: int = other.get_voxel(pos)
-		if not has_voxel(dst):
-			# 新位置：支撑图需要增量添加（覆盖已存在的体素时支撑图不变化）
-			new_positions.append(dst)
-		_write_buffer_impl(dst, src_mat, false)
-		dirty_voxels[dst] = src_mat
+	for ck: Vector3i in other._chunk_buffers:
+		var buf = other._chunk_buffers[ck]
+		var o_origin: Vector3i = VoxelChunk.origin_of(ck)
+		for i in CHUNK_VOLUME:
+			var mat_id: int = buf[i]
+			if mat_id <= 0:
+				continue
+			var dst: Vector3i = o_origin + VoxelChunk.local_from_index(i) + offset
+			if not has_voxel(dst):
+				# 新位置：支撑图需要增量添加（覆盖已存在的体素时支撑图不变化）
+				new_positions.append(dst)
+			_write_buffer_impl(dst, mat_id, false)
+			dirty_voxels[dst] = mat_id
 	if not new_positions.is_empty():
 		for p in new_positions:
 			_support_cache_on_add(p)
@@ -378,11 +389,11 @@ func get_dirty_voxels_aabb() -> AABB:
 func get_voxels_aabb() -> AABB:
 	if _voxel_count == 0:
 		return AABB()
-	var min_pos := Vector3i(999999, 999999, 999999)
-	var max_pos := Vector3i(-999999, -999999, -999999)
+	var min_pos := Vector3i.MAX
+	var max_pos := Vector3i.MIN
 	for ck: Vector3i in _chunk_buffers:
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				var pos := origin + _local_from_index(i)
@@ -409,8 +420,8 @@ static func _bounds_to_aabb(bounds: Array) -> AABB:
 static func _calc_bounds(voxels: Dictionary) -> Array:
 	if voxels.is_empty():
 		return []
-	var min_pos := Vector3i(999999, 999999, 999999)
-	var max_pos := Vector3i(-999999, -999999, -999999)
+	var min_pos := Vector3i.MAX
+	var max_pos := Vector3i.MIN
 	for pos_key in voxels:
 		var pos: Vector3i = pos_key
 		min_pos.x = mini(min_pos.x, pos.x)
@@ -445,7 +456,7 @@ func _get_chunks_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 				var ck := Vector3i(x, y, z)
 				# 整型平方距离：体素中心(整数)到 chunk AABB 的最小距离平方。
 				# 逐轴取区间最近距离，避免 Vector3.length() 浮点开销。
-				var c_origin := ck * CHUNK_SIZE
+				var c_origin := VoxelChunk.origin_of(ck)
 				var d_x := _axis_dist_sq(center_v.x, c_origin.x, c_origin.x + CHUNK_SIZE - 1)
 				var d_y := _axis_dist_sq(center_v.y, c_origin.y, c_origin.y + CHUNK_SIZE - 1)
 				var d_z := _axis_dist_sq(center_v.z, c_origin.z, c_origin.z + CHUNK_SIZE - 1)
@@ -497,7 +508,7 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 		if not _chunk_buffers.has(ck):
 			continue
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for z in CHUNK_SIZE:
 			for y in CHUNK_SIZE:
 				for x in CHUNK_SIZE:
@@ -527,7 +538,7 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 		if not _chunk_buffers.has(ck):
 			continue
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for z in CHUNK_SIZE:
 			for y in CHUNK_SIZE:
 				for x in CHUNK_SIZE:
@@ -557,11 +568,11 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 ## 批量设置体素为同一材质（公开接口，供水模拟等高频动态系统使用）。
 ## 相比逐个 set_voxel：只 emit_changed 一次，且一次性维护支撑缓存，
 ## 并填充 dirty_voxels，让 VoxelRenderer 走增量重建（只重建受影响 chunk）。
-## 语义与 set_voxel 一致：material_id < 0 视为批量移除；已存在体素被覆盖时支撑图不变。
+## 语义与 set_voxel 一致：material_id <= 0（含 0=空）视为批量移除；已存在体素被覆盖时支撑图不变。
 func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void:
 	if positions.is_empty():
 		return
-	if material_id < 0:
+	if material_id <= 0:
 		_remove_voxels(positions, notify)
 		return
 	# 新位置（原本为空）单独收集，供支撑缓存增量添加
@@ -624,14 +635,16 @@ func add_material(mat: VoxelMaterial, notify: bool = false) -> VoxelMaterial:
 	return mat
 
 
-## 获取材质 (按材质 ID / 数组索引，越界返回 null)
+## 获取材质 (按对齐数组下标 == 材质ID 直接访问，越界/空位返回 null)
+## 前提：materials 保持"索引 == 材质ID"对齐（add_material / 导入保证）。索引 0 = 空。
 func get_material(index: int) -> VoxelMaterial:
 	if index >= 0 and index < materials.size():
 		return materials[index]
 	return null
 
 
-## 按材质 ID 查找材质（数组可能未对齐时也能找到）
+## 按材质 ID 查找材质（对外鲁棒接口：即使传入未对齐数组也能找到；id<=0/不存在返回 null）
+## 生成器内部一律走对齐数组直接下标（见 VoxelMaterial.align_by_id），不需要此接口
 func get_material_by_id(mat_id: int) -> VoxelMaterial:
 	return VoxelMaterial.find_by_id(materials, mat_id)
 
@@ -662,7 +675,7 @@ func _serialize_voxels() -> Array:
 	var voxel_list := []
 	for ck: Vector3i in _chunk_buffers:
 		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
+		var origin := VoxelChunk.origin_of(ck)
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				var p := origin + _local_from_index(i)
@@ -685,7 +698,7 @@ func _deserialize_voxels(voxel_list: Variant) -> void:
 # _chunk_buffers 非 @export，通过隐藏 storage 属性在此序列化（编辑器不可见，随资源保存）。
 
 ## 声明隐藏的 storage 属性（PROPERTY_USAGE_STORAGE：不显示在编辑器，但随资源保存/加载）
-func _get_property_list() -> Array:
+func _get_property_list() -> Array[Dictionary]:
 	return [{
 		"name": "voxel_data_payload",
 		"type": TYPE_STRING,
@@ -741,8 +754,9 @@ func save_data() -> Dictionary:
 
 ## 从 save_data() 返回的数据重建体素和材质（先清空当前内容）
 func load_data(data: Variant) -> void:
-	clear()
+	clear(false)
 	if data == null or not data is Dictionary:
+		emit_changed()
 		return
 	# 材质重建（材质自身负责从数据恢复）
 	materials = []
@@ -770,7 +784,7 @@ func get_chunk_voxels(chunk_key: Vector3i) -> Array:
 	if buf == null:
 		return []
 	var result: Array = []
-	var origin := chunk_key * CHUNK_SIZE
+	var origin := VoxelChunk.origin_of(chunk_key)
 	for i in CHUNK_VOLUME:
 		if buf[i] > 0:
 			result.append(origin + _local_from_index(i))
