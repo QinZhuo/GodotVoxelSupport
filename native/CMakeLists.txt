@@ -37,7 +37,10 @@ if(APPLE)
     )
 endif()
 
-# 将编译产物输出到项目内的 native/bin（Godot 通过 .gdextension 引用）
+# 将编译产物输出到项目内的 native/bin（开发目录）
+# 发布前需手动复制到 addons/VoxelSupport/native/bin/（插件分发目录）：
+#   cp native/bin/libvoxelnative.dylib addons/VoxelSupport/native/bin/libvoxelnative.macos.debug.arm64.dylib
+# 或直接跑 GitHub Actions（.github/workflows/build.yml）自动构建全平台并打包
 set_target_properties(voxelnative PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin

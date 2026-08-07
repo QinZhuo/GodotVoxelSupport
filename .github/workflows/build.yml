@@ -69,21 +69,21 @@ jobs:
         shell: bash
         run: cmake --build native/build --config Release -j 4
 
-      # 产物重命名为 .gdextension 声明的文件名（macos/windows/linux 各自命名规则）
+      # 产物重命名为 .gdextension 声明的文件名，并放入插件的发布目录 addons/VoxelSupport/native/bin
       - name: Rename artifacts
         shell: bash
         run: |
-          mkdir -p dist/native/bin
-          cp native/voxelnative.gdextension dist/voxelnative.gdextension
+          mkdir -p dist/addons/VoxelSupport/native/bin
+          cp addons/VoxelSupport/native/voxelnative.gdextension dist/addons/VoxelSupport/native/voxelnative.gdextension
           if [ "${{ matrix.target }}" = "macos" ]; then
-            cp native/bin/libvoxelnative.dylib dist/native/bin/libvoxelnative.macos.debug.${{ matrix.arch }}.dylib
-            cp native/bin/libvoxelnative.dylib dist/native/bin/libvoxelnative.macos.release.${{ matrix.arch }}.dylib
+            cp native/bin/libvoxelnative.dylib dist/addons/VoxelSupport/native/bin/libvoxelnative.macos.debug.${{ matrix.arch }}.dylib
+            cp native/bin/libvoxelnative.dylib dist/addons/VoxelSupport/native/bin/libvoxelnative.macos.release.${{ matrix.arch }}.dylib
           elif [ "${{ matrix.target }}" = "windows" ]; then
-            cp native/bin/voxelnative.dll dist/native/bin/voxelnative.windows.debug.x86_64.dll
-            cp native/bin/voxelnative.dll dist/native/bin/voxelnative.windows.release.x86_64.dll
+            cp native/bin/voxelnative.dll dist/addons/VoxelSupport/native/bin/voxelnative.windows.debug.x86_64.dll
+            cp native/bin/voxelnative.dll dist/addons/VoxelSupport/native/bin/voxelnative.windows.release.x86_64.dll
           else
-            cp native/bin/libvoxelnative.so dist/native/bin/libvoxelnative.linux.debug.x86_64.so
-            cp native/bin/libvoxelnative.so dist/native/bin/libvoxelnative.linux.release.x86_64.so
+            cp native/bin/libvoxelnative.so dist/addons/VoxelSupport/native/bin/libvoxelnative.linux.debug.x86_64.so
+            cp native/bin/libvoxelnative.so dist/addons/VoxelSupport/native/bin/libvoxelnative.linux.release.x86_64.so
           fi
 
       - uses: actions/upload-artifact@v4
@@ -91,33 +91,48 @@ jobs:
           name: voxelnative-${{ matrix.artifact }}
           path: dist/
 
-  # 汇总所有平台产物为一个完整插件包
+  # 汇总所有平台产物为一个完整插件包（用户下载 addons/VoxelSupport/ 即可使用）
   package:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Package
+      - name: Assemble complete addon
         run: |
-          mkdir -p release
-          # 各平台产物合并（download-artifact 会合并目录，直接复制即可）
-          cp -r artifacts/* release/
-          ls -la release/native/bin/
+          # 复制插件全部内容（GDScript + 各平台二进制）
+          rm -rf release
+          mkdir -p release/addons/VoxelSupport
+          cp -r addons/VoxelSupport/Importers release/addons/VoxelSupport/
+          cp -r addons/VoxelSupport/Runtime release/addons/VoxelSupport/
+          cp -r addons/VoxelSupport/Shaders release/addons/VoxelSupport/
+          cp addons/VoxelSupport/plugin.cfg addons/VoxelSupport/plugin.gd release/addons/VoxelSupport/
+          cp addons/VoxelSupport/icon.png release/addons/VoxelSupport/ 2>/dev/null || true
+          # 合并各平台编译产物
+          mkdir -p release/addons/VoxelSupport/native
+          cp addons/VoxelSupport/native/voxelnative.gdextension release/addons/VoxelSupport/native/
+          cp -r artifacts/addons/VoxelSupport/native/bin release/addons/VoxelSupport/native/
+          echo "=== 最终插件包结构 ==="
+          find release -type f | sort
+          echo "=== bin 目录 ==="
+          ls -la release/addons/VoxelSupport/native/bin/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: voxelnative-all-platforms
+          name: voxel-support-addon
           path: release/
 
-      # 打 tag 时自动发布 GitHub Release（可选）
+      # 打 tag 时自动发布 GitHub Release（完整插件包）
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/voxelnative.gdextension
-            release/native/bin/*
+            release/addons/VoxelSupport/**/*
