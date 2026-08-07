@@ -98,11 +98,6 @@ var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 # Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
 var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 
-# 持久切片缓存：chunk_key -> {pos: mat_id}（chunk 内部 + 1 体素外缘快照）
-# 由脏体素增量维护，避免每次重建都扫描 17³ 区域 + 对整世界大字典做 has() 查询。
-# 派发任务时 duplicate(false) 交给子线程（值类型，浅拷贝即独立），主线程可安全继续改缓存。
-var _chunk_slice_cache: Dictionary = {}
-
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
 
@@ -276,22 +271,13 @@ func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
-	# 【分块快照方案】不深拷贝整个世界字典，而是为每个需要重建的 chunk 提取其
-	# 局部体素切片（chunk 内部 + 1 体素外缘）。每个子线程只读取自己那个私有的小快照，
-	# 主线程后续增删 data.voxels 不与之冲突，杜绝数据竞态（块随机显示/隐藏的根因），
-	# 同时避免整世界深拷贝的性能与内存开销。
+	# 【密集光环快照方案】不为每个 chunk 提取字典切片，而是让 VoxelData 直接从其
+	# dense chunk 缓冲构建 18³ 密集"光环"（chunk + 1 体素外缘，PackedInt32Array 深拷贝）。
+	# 每个子线程只读取自己那个私有的光环快照，主线程后续增删 data 不与之冲突，
+	# 杜绝数据竞态（块随机显示/隐藏的根因），同时避免整世界深拷贝与字典切片扫描。
 	var rebuild_chunks: Array[Vector3i] = []
 	if use_chunk_generator:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
-		if rebuild_chunks.is_empty():
-			# 无脏体素追踪（外部直接改 data.voxels 字典 + notify_changed，如水模拟）：
-			# 切片缓存可能已过期，必须失效，让下方全量构建重新从 data.voxels 切片，
-			# 否则会复用初始构建时的旧切片 → 画面不更新。
-			_chunk_slice_cache.clear()
-		else:
-			# 有脏体素追踪：先按脏体素增量更新切片缓存（须在 clear_dirty_voxels 之前），
-			# 之后派发时直接复用缓存切片，避免每次都对整世界大字典做 17³ 扫描。
-			_apply_dirty_to_slice_cache(data.dirty_voxels)
 		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
 		data.clear_dirty_voxels()
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
@@ -312,12 +298,12 @@ func _update_mesh_async() -> void:
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
 	if use_chunk_generator:
-		# chunk 模式：每个任务只处理一个 chunk，为其提取私有的局部体素切片
+		# chunk 模式：每个任务只处理一个 chunk，为其提取私有的密集光环快照
 		# 单任务路径（全量/空场景）仅当没有可拆分 chunk 时兜底使用，需要完整体素
 		if rebuild_chunks.is_empty():
 			# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
 			# 而不是等所有 chunk 生成完毕再一起显示
-			var all_chunks := VoxelChunkGenerator.get_all_non_empty_chunk_keys(data.voxels)
+			var all_chunks := data.get_all_chunk_keys()
 			if all_chunks.is_empty():
 				# 没有非空 chunk，使用单任务路径（空场景），此时无体素无竞态
 				_pending_task_count = 1
@@ -328,87 +314,24 @@ func _update_mesh_async() -> void:
 					print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
 				_pending_task_count = all_chunks.size()
 				for ck in all_chunks:
-					var slice_voxels := _get_chunk_slice(ck)
+					var halo := data.get_chunk_halo(ck)
 					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-						slice_voxels, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+						halo, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
 			if diag_enabled:
 				print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
 			_pending_task_count = rebuild_chunks.size()
 			for ck in rebuild_chunks:
-				var slice_voxels := _get_chunk_slice(ck)
+				var halo := data.get_chunk_halo(ck)
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-					slice_voxels, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+					halo, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 	else:
-		# 单任务路径（非 chunk 模式）：需要整个世界体素，深拷贝一次快照
+		# 单任务路径（非 chunk 模式）：需要整个世界体素，做一次字典快照
 		_pending_task_count = 1
-		var snapshot_voxels: Dictionary = data.voxels.duplicate(true)
+		var snapshot_voxels: Dictionary = data.get_voxels_dict_snapshot()
 		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset, diag_enabled)))
-
-
-## 获取（并缓存）chunk 的局部体素切片快照。
-## 已缓存则直接复用缓存引用，避免每次重建都对整世界大字典做 17³=4913 次 has() 扫描，
-## 也避免每次派发复制整份切片字典（中大场景多 chunk 重建时省下大量主线程拷贝）。
-## 线程安全依据：切片缓存仅在 _update_mesh_async 派发前由主线程写入/修改，
-## 任务运行期间（worker 只读切片）主线程不会再次修改缓存（_pending_task_count>0 时
-## 新变更只置 retrigger，待批次完成后才启动新批次），因此共享引用无数据竞态。
-func _get_chunk_slice(ck: Vector3i) -> Dictionary:
-	if _chunk_slice_cache.has(ck):
-		return _chunk_slice_cache[ck]
-	var slice := VoxelChunkGenerator.slice_chunk(data.voxels, ck)
-	_chunk_slice_cache[ck] = slice
-	return slice
-
-
-## 按脏体素增量维护切片缓存（在 clear_dirty_voxels 之前调用）。
-## 对每个变更位置，把增删同步到所有"切片范围覆盖该位置"的 chunk 缓存，
-## 从而避免下次重建时对同一 chunk 重新扫描整个 17³ 区域。
-## 体素位于 chunk 边界时会影响相邻 chunk 的切片（外缘 1 体素），因此候选为
-## 自身 chunk + 边界方向相邻 chunk（每轴至多 2 个，至多 8 个 chunk）。
-func _apply_dirty_to_slice_cache(dirty: Dictionary) -> void:
-	if dirty.is_empty():
-		return
-	for pos_key in dirty:
-		var p: Vector3i = pos_key
-		var mat_id: int = dirty[pos_key]
-		for ck in _candidate_slice_chunks(p):
-			if _chunk_slice_cache.has(ck):
-				if mat_id < 0:
-					var s: Dictionary = _chunk_slice_cache[ck]
-					s.erase(p)
-					if s.is_empty():
-						_chunk_slice_cache.erase(ck)
-				else:
-					_chunk_slice_cache[ck][p] = mat_id
-
-
-## 找出所有"切片范围覆盖位置 p"的 chunk key（自身 + 边界相邻，至多 8 个）
-static func _candidate_slice_chunks(p: Vector3i) -> Array[Vector3i]:
-	var CS := VoxelChunkGenerator.CHUNK_SIZE
-	var c0 := Vector3i(floori(float(p.x) / float(CS)), floori(float(p.y) / float(CS)), floori(float(p.z) / float(CS)))
-	var xs := [c0.x]
-	var ys := [c0.y]
-	var zs := [c0.z]
-	if posmod(p.x, CS) == 0:
-		xs.append(c0.x - 1)
-	elif posmod(p.x, CS) == CS - 1:
-		xs.append(c0.x + 1)
-	if posmod(p.y, CS) == 0:
-		ys.append(c0.y - 1)
-	elif posmod(p.y, CS) == CS - 1:
-		ys.append(c0.y + 1)
-	if posmod(p.z, CS) == 0:
-		zs.append(c0.z - 1)
-	elif posmod(p.z, CS) == CS - 1:
-		zs.append(c0.z + 1)
-	var result: Array[Vector3i] = []
-	for x in xs:
-		for y in ys:
-			for z in zs:
-				result.append(Vector3i(x, y, z))
-	return result
 
 
 ## 后台工作线程入口：生成网格数据并写入结果缓冲
@@ -482,13 +405,14 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 ## 单 chunk 工作线程入口：每个脏 chunk 独立一个线程任务，真正并行处理
 ## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
+## halo 为 VoxelData.get_chunk_halo 的 18³ 密集快照（独立深拷贝，无数据竞态）
 ## materials 参数为已按 ID 对齐的材质数组（主线程派发时一次对齐，worker 复用避免重复开销）
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
-func _generate_chunk_worker(voxels: Dictionary, materials: Array, chunk_key: Vector3i,
+func _generate_chunk_worker(halo: PackedInt32Array, materials: Array, chunk_key: Vector3i,
 		gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO,
 		diag_enabled: bool = false) -> void:
 	var t0 := Time.get_ticks_usec()
-	var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, materials, scale, chunk_key, offset)
+	var arr := VoxelChunkGenerator.generate_single_chunk_dense(halo, materials, scale, chunk_key, offset)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 
 	# 诊断：每 chunk 生成耗时 > 5ms 时打印（仅诊断模式开启时）
@@ -681,19 +605,22 @@ func _update_mesh_sync() -> void:
 		"offset": data.center_offset if data else Vector3.ZERO,
 	}
 
-	# Per-chunk 增量重建
+	# Per-chunk 增量重建（同步版，密集光环直连生成）
 	if use_chunk_generator:
 		var rebuild_chunks: Array[Vector3i] = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 		last_rebuild_affected_count = rebuild_chunks.size()
 		var t0 := Time.get_ticks_usec()
-		var chunk_arrays: Dictionary
-		if rebuild_chunks.is_empty():
-			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
-				data.voxels, data.materials, options)
-			last_rebuild_affected_count = chunk_arrays.size()
-		else:
-			chunk_arrays = VoxelChunkGenerator.generate_chunks_arrays_runtime(
-				data.voxels, data.materials, options, rebuild_chunks)
+		var chunk_keys: Array[Vector3i] = rebuild_chunks
+		if chunk_keys.is_empty():
+			chunk_keys = data.get_all_chunk_keys()
+			last_rebuild_affected_count = chunk_keys.size()
+		var aligned := VoxelMaterial.align_by_id(data.materials)
+		var chunk_arrays: Dictionary = {}
+		for ck in chunk_keys:
+			var arr := VoxelChunkGenerator.generate_single_chunk_dense(
+				data.get_chunk_halo(ck), aligned, options["scale"], ck, options["offset"])
+			if not arr.is_empty():
+				chunk_arrays[ck] = arr
 		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 		# 统计顶点/三角形数
 		var sv := 0; var tv := 0
@@ -712,7 +639,7 @@ func _update_mesh_sync() -> void:
 
 	# 全量重建（组合模式）
 	var t1 := Time.get_ticks_usec()
-	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.voxels, data.materials, options)
+	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.get_voxels_dict_snapshot(), data.materials, options)
 	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
 	if arrays is Dictionary:
 		last_solid_vertices = arrays.get("solid_verts", PackedVector3Array()).size()
@@ -799,7 +726,6 @@ func _clear_chunk_meshes() -> void:
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()
 	_chunk_meshes.clear()
-	_chunk_slice_cache.clear()
 	_clear_chunk_collisions()
 
 

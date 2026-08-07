@@ -9,6 +9,23 @@ class_name VoxelChunkGenerator
 
 ## 单个 chunk 的边长（体素个数），chunk 越大网格合并效率越高但增量重建粒度越粗
 const CHUNK_SIZE := 16
+const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+## 外缘层数（跨界面的面可见性需要紧邻体素），与 VoxelData.HALO 一致
+const HALO := 1
+## 含外缘的光环缓冲边长（18）
+const HALO_SIZE := CHUNK_SIZE + HALO * 2
+const HALO_VOLUME := HALO_SIZE * HALO_SIZE * HALO_SIZE
+
+# 6 个面在光环缓冲中的邻居下标偏移（对应 FaceTool.Normals 顺序）
+# 光环下标 = x + y*HALO_SIZE + z*HALO_SIZE*HALO_SIZE，故 ±X=±1, ±Y=±HS, ±Z=±HS²
+const _HALO_DIRS: Array[int] = [
+	HALO_SIZE,               # +Y (0, 1, 0)
+	-HALO_SIZE,              # -Y (0,-1, 0)
+	-1,                      # -X (-1,0, 0)
+	1,                       # +X ( 1,0, 0)
+	HALO_SIZE * HALO_SIZE,   # +Z (0, 0, 1)
+	-HALO_SIZE * HALO_SIZE,  # -Z (0, 0,-1)
+]
 
 
 ## 提取单个 chunk 及其 1 体素外缘(shell) 的体素快照（绝对坐标键）
@@ -145,6 +162,39 @@ static func generate_single_chunk_array(
 	return result if result else {}
 
 
+## 从"光环缓冲"生成单个 chunk 的网格数据（密集数组版，性能关键路径）
+## halo 为 18³ 密集缓冲（值 = 材质ID + 1，0 = 空），由 VoxelData.get_chunk_halo 提供。
+## 覆盖 chunk 内部 + 1 体素外缘，所有邻居读取均为数组下标且无越界检查。
+## 线程安全：halo 是独立的深拷贝，子线程只读。
+## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
+static func generate_single_chunk_dense(
+		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	var solid_verts := PackedVector3Array()
+	var solid_normals := PackedVector3Array()
+	var solid_uvs := PackedVector2Array()
+	var solid_idxs := PackedInt32Array()
+	var trans_verts := PackedVector3Array()
+	var trans_normals := PackedVector3Array()
+	var trans_uvs := PackedVector2Array()
+	var trans_idxs := PackedInt32Array()
+
+	_generate_chunk_dense_into(halo, aligned_materials, scale, chunk_key,
+		solid_verts, solid_normals, solid_uvs, solid_idxs,
+		trans_verts, trans_normals, trans_uvs, trans_idxs,
+		true, offset)
+
+	if solid_idxs.is_empty() and trans_idxs.is_empty():
+		return {}
+
+	return {
+		"solid_verts": solid_verts, "solid_normals": solid_normals,
+		"solid_uvs": solid_uvs, "solid_idxs": solid_idxs,
+		"trans_verts": trans_verts, "trans_normals": trans_normals,
+		"trans_uvs": trans_uvs, "trans_idxs": trans_idxs,
+	}
+
+
 ## 生成单个 chunk 的网格数据（顶点使用局部坐标）- 内部实现
 static func _generate_single_chunk_arrays_impl(
 		voxels, materials, scale: float, chunk: Vector3i,
@@ -264,16 +314,42 @@ static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Ar
 	return result
 
 
-## 生成单个 chunk 的面片并追加到全局数组（贪婪网格）- 优化版
-## 使用贪婪网格算法：将相邻同材质面合并为更大的四边形，大幅减少三角形数。
+## 生成单个 chunk 的面片并追加到全局数组（贪婪网格）
 ## use_local_space=true 时顶点使用 chunk 局部坐标（适合独立 MeshInstance3D）
 ## offset: 渲染偏移（体素单位，最终乘以 scale 叠加到顶点），用于导入居中显示
-##
-## 性能优化说明：
-## 原方案：对每个面（6次）独立扫描整个 32³ 空间 → 6 × 32³ = 196,608 次字典查找
-## 优化方案：单次扫描所有填充位置，同时检查6个面的可见性 → 32³ + 6 × filled_count 次查找
-## 对半填充 Chunk 提升约 33%，对稀疏 Chunk 提升可达 50%+
+## 字典版入口：先把 chunk 区域（18³）转换成分片独立的光环缓冲，再统一走密集核心。
+## 兼容旧调用方（落块生成 / 非 chunk 渲染模式 / 导入路径），渲染主路径请用 dense 版本。
 static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3i,
+		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
+		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
+		use_local_space: bool = false, offset: Vector3 = Vector3.ZERO) -> void:
+	var halo := _halo_from_dict(voxels, chunk)
+	_generate_chunk_dense_into(halo, materials, scale, chunk,
+		solid_verts, solid_normals, solid_uvs, solid_idxs,
+		trans_verts, trans_normals, trans_uvs, trans_idxs,
+		use_local_space, offset)
+
+
+## 从稀疏字典构建 18³ 光环缓冲（值 = 材质ID + 1，0 = 空）
+static func _halo_from_dict(voxels: Dictionary, chunk: Vector3i) -> PackedInt32Array:
+	var halo := PackedInt32Array()
+	halo.resize(HALO_VOLUME)
+	var origin := chunk * CHUNK_SIZE
+	for z in HALO_SIZE:
+		for y in HALO_SIZE:
+			for x in HALO_SIZE:
+				var p := origin + Vector3i(x - HALO, y - HALO, z - HALO)
+				var v: int = voxels.get(p, -1)
+				if v >= 0:
+					halo[x + y * HALO_SIZE + z * HALO_SIZE * HALO_SIZE] = v + 1
+	return halo
+
+
+## 从 18³ 密集光环缓冲生成单个 chunk 的面片（性能关键路径）
+## 单次扫描 16³，每体素 6 方向可见性全部为数组下标读取（无字典哈希、无越界检查）。
+## 使用贪婪网格算法：将相邻同材质面合并为更大的四边形，大幅减少三角形数。
+## use_local_space=true 时顶点使用 chunk 局部坐标（适合独立 MeshInstance3D）
+static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale: float, chunk: Vector3i,
 		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
 		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
 		use_local_space: bool = false, offset: Vector3 = Vector3.ZERO) -> void:
@@ -286,42 +362,41 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 	for i in 6:
 		slices_by_face.append({})
 
-	# 单次遍历：扫描所有位置，同时检查6个面的可见性
-	# 相比原方案（每面独立扫描），减少 5/6 的空位置字典查找开销
-	for x in CHUNK_SIZE:
+	# 单次遍历 16³：光环下标覆盖 6 邻，全部为数组读取
+	for z in CHUNK_SIZE:
 		for y in CHUNK_SIZE:
-			for z in CHUNK_SIZE:
-				var pos := chunk_origin + Vector3i(x, y, z)
-				var mat_id: int = voxels.get(pos, -1)
-				if mat_id < 0:
+			for x in CHUNK_SIZE:
+				var idx := (x + HALO) + (y + HALO) * HALO_SIZE + (z + HALO) * HALO_SIZE * HALO_SIZE
+				var v: int = halo[idx]
+				if v <= 0:
 					continue
-				
-				var local_pos := Vector3i(x, y, z)
+
+				var mat_id := v - 1
 				var mat = _get_mat(materials, mat_id)
 				var is_trans: bool = mat != null and mat.trans > 0
-				
+
 				# 一次检查所有6个面
 				for face_idx in 6:
-					var dir: Vector3i = _DIRS[face_idx]
-					var n_id: int = voxels.get(pos + dir, -1)
-					
+					var nv: int = halo[idx + _HALO_DIRS[face_idx]]
+
 					var visible := false
-					if n_id < 0:
+					if nv <= 0:
 						visible = true
 					else:
-						var n_mat = _get_mat(materials, n_id)
+						var n_mat_id := nv - 1
+						var n_mat = _get_mat(materials, n_mat_id)
 						var n_trans: bool = n_mat != null and n_mat.trans > 0
-						if is_trans != n_trans or mat_id != n_id:
+						if is_trans != n_trans or mat_id != n_mat_id:
 							visible = true
-					
+
 					if visible:
 						var axis_info: Dictionary = _FACE_AXES[face_idx]
 						var perp := axis_info.perp as int
 						var u_axis := axis_info.u as int
 						var v_axis := axis_info.v as int
-						var slice_key := local_pos[perp]
-						var uv := Vector2i(local_pos[u_axis], local_pos[v_axis])
-						
+						var slice_key := _axis_val(x, y, z, perp)
+						var uv := Vector2i(_axis_val(x, y, z, u_axis), _axis_val(x, y, z, v_axis))
+
 						var slices: Dictionary = slices_by_face[face_idx]
 						if not slices.has(slice_key):
 							slices[slice_key] = {}
@@ -353,6 +428,15 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 					trans_verts, trans_normals, trans_uvs, trans_idxs,
 					pos, rect.value, face_idx, scale, size,
 					materials, origin_offset, offset)
+
+
+## 取局部坐标在指定轴上的值
+static func _axis_val(x: int, y: int, z: int, axis: int) -> int:
+	if axis == 0:
+		return x
+	elif axis == 1:
+		return y
+	return z
 
 
 ## 添加一个贪婪合并后的面（大四边形，2 三角形）
@@ -391,48 +475,18 @@ static func _get_mat(materials, mat_id: int):
 	return VoxelMaterial.find_by_id(materials, mat_id)
 
 
-# 6 个面的方向向量（与 FaceTool.Normals 同一组方向，统一数据源）
-const _DIRS: Array[Vector3i] = [
-	Vector3i(FaceTool.Normals[0]), Vector3i(FaceTool.Normals[1]),
-	Vector3i(FaceTool.Normals[2]), Vector3i(FaceTool.Normals[3]),
-	Vector3i(FaceTool.Normals[4]), Vector3i(FaceTool.Normals[5]),
-]
-
 # 每个面的轴向信息：{perp(切片轴), u(水平轴), v(垂直轴)}
-# 用于贪婪网格的 2D 扫描合并
+# 用于贪婪网格的 2D 扫描合并。
+# 直接从 FaceTool.SliceAxis 派生（与 VoxelMeshGenerator 同一权威数据源），
+# 保证与 FaceTool.Normals/Faces/_HALO_DIRS 的索引顺序 [+Y,-Y,-X,+X,+Z,-Z] 一致。
 const _FACE_AXES: Array[Dictionary] = [
-	{perp=0, u=1, v=2},  # +X
-	{perp=0, u=1, v=2},  # -X
-	{perp=1, u=0, v=2},  # +Y
-	{perp=1, u=0, v=2},  # -Y
-	{perp=2, u=0, v=1},  # +Z
-	{perp=2, u=0, v=1},  # -Z
+	{perp=FaceTool.SliceAxis[0].x, u=FaceTool.SliceAxis[0].y, v=FaceTool.SliceAxis[0].z},  # +Y Top
+	{perp=FaceTool.SliceAxis[1].x, u=FaceTool.SliceAxis[1].y, v=FaceTool.SliceAxis[1].z},  # -Y Bottom
+	{perp=FaceTool.SliceAxis[2].x, u=FaceTool.SliceAxis[2].y, v=FaceTool.SliceAxis[2].z},  # -X Left
+	{perp=FaceTool.SliceAxis[3].x, u=FaceTool.SliceAxis[3].y, v=FaceTool.SliceAxis[3].z},  # +X Right
+	{perp=FaceTool.SliceAxis[4].x, u=FaceTool.SliceAxis[4].y, v=FaceTool.SliceAxis[4].z},  # +Z Front
+	{perp=FaceTool.SliceAxis[5].x, u=FaceTool.SliceAxis[5].y, v=FaceTool.SliceAxis[5].z},  # -Z Back
 ]
-
-
-## 添加一个面（两个三角形，6 顶点）
-## origin_offset 用于将顶点偏移到局部坐标（per-chunk mesh 使用）
-## 与 VoxelMeshGenerator 共用 FaceTool.Faces 面片数据，确保法线/缠绕方向完全一致
-static func _add_face(
-		solid_verts: PackedVector3Array, solid_normals: PackedVector3Array, solid_uvs: PackedVector2Array, solid_idxs: PackedInt32Array,
-		trans_verts: PackedVector3Array, trans_normals: PackedVector3Array, trans_uvs: PackedVector2Array, trans_idxs: PackedInt32Array,
-		pos: Vector3i, mat_id: int, face_idx: int, scale: float, is_trans: bool,
-		origin_offset: Vector3 = Vector3.ZERO) -> void:
-	var normal: Vector3 = FaceTool.Normals[face_idx]
-	var u := VoxelMaterial.uv_for_id(mat_id)
-	# FaceTool.Faces[face_idx] 已按 CCW 拆好 6 个顶点（两个三角形）
-	for point: Vector3 in FaceTool.Faces[face_idx]:
-		var world_pos := (Vector3(pos) + point) * scale - origin_offset
-		if is_trans:
-			trans_verts.append(world_pos)
-			trans_normals.append(normal)
-			trans_uvs.append(Vector2(u, 0.0))
-			trans_idxs.append(trans_verts.size() - 1)
-		else:
-			solid_verts.append(world_pos)
-			solid_normals.append(normal)
-			solid_uvs.append(Vector2(u, 0.0))
-			solid_idxs.append(solid_verts.size() - 1)
 
 
 ## 将生成的网格数据组装为 ArrayMesh（必须在主线程调用，会修改 ArrayMesh）

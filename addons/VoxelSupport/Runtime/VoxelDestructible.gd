@@ -458,7 +458,7 @@ func _spawn_falling_chunks_from_groups(groups: Array, group_materials: Array[Dic
 			if not remaining.is_empty():
 				var remaining_mat_map: Dictionary = {}
 				for pos in remaining:
-					remaining_mat_map[pos] = data.voxels.get(pos, -1) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
+					remaining_mat_map[pos] = data.get_voxel(pos) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
 				_spawn_debris_with_materials(remaining, remaining_mat_map)
 			break
 		_spawn_falling_chunk(groups[i], group_materials[i])
@@ -838,15 +838,14 @@ func _freeze_sleeping_chunks() -> void:
 ##   - 全量检测(local_collapse=false)：全局遍历，结果最精确，适合小型场景/低频
 ## around_positions 为空时回退全量检测
 func _find_unstable_voxels(around_positions: Array = []) -> Array:
-	var voxels: Dictionary = data.voxels
-	if voxels.is_empty():
+	if data.is_empty():
 		return []
 
 	var unstable_set: Dictionary
 	if local_collapse and not around_positions.is_empty():
 		unstable_set = data.find_unsupported_around(around_positions)
 	else:
-		unstable_set = data.find_unsupported(voxels)
+		unstable_set = data.find_unsupported()
 
 	var unstable: Array = []
 	for key in unstable_set:

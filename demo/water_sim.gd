@@ -100,7 +100,7 @@ func _build_terrain() -> void:
 	# 地面（整体）
 	for x in GRID_X:
 		for z in GRID_Z:
-			_data.voxels[Vector3i(x, 0, z)] = MAT_SOLID
+			_data.set_voxel(Vector3i(x, 0, z), MAT_SOLID)
 
 	# ---- 高架水源池 (x:5..9, z:5..9)，前侧 (z:10) 中间段 x:6..8 开放为落水槽，形成第一级瀑布 ----
 	_build_container(Vector3i(5, 4, 5), Vector3i(9, 8, 10), MAT_SOLID)
@@ -109,18 +109,18 @@ func _build_terrain() -> void:
 		for z in range(5, 11):
 			if z == 10 and x >= 6 and x <= 8:
 				continue  # 落水槽处留空
-			_data.voxels[Vector3i(x, 8, z)] = MAT_SOLID
+			_data.set_voxel(Vector3i(x, 8, z), MAT_SOLID)
 	# 高架池四壁 y:9..12：后壁 z=5、左壁 x=5、右壁 x=9、前壁 z=10 (仅转角 x:5, x:9)
 	for y in range(9, 13):
 		for x in range(5, 10):
-			_data.voxels[Vector3i(x, y, 5)] = MAT_SOLID
+			_data.set_voxel(Vector3i(x, y, 5), MAT_SOLID)
 		for z in range(5, 11):
-			_data.voxels[Vector3i(5, y, z)] = MAT_SOLID
-			_data.voxels[Vector3i(9, y, z)] = MAT_SOLID
+			_data.set_voxel(Vector3i(5, y, z), MAT_SOLID)
+			_data.set_voxel(Vector3i(9, y, z), MAT_SOLID)
 	# 前壁 z:10 仅在转角 x:5, x:9 实心；中间段 x:6..8 开放为落水槽 (y:9..13 全空)
 	for y in range(9, 14):
-		_data.voxels[Vector3i(5, y, 10)] = MAT_SOLID
-		_data.voxels[Vector3i(9, y, 10)] = MAT_SOLID
+		_data.set_voxel(Vector3i(5, y, 10), MAT_SOLID)
+		_data.set_voxel(Vector3i(9, y, 10), MAT_SOLID)
 
 	# ---- 第一级瀑布落点：地面蓄水池A (x:5..9 下方, z:5..10)，承接瀑布 ----
 	_build_container(Vector3i(5, 1, 5), Vector3i(9, 3, 10), MAT_SOLID)
@@ -130,15 +130,15 @@ func _build_terrain() -> void:
 	# y:2 层在 z:7..8 处开口，水蓄到 y:2 后从缺口流入通道
 	for y in range(1, 2):
 		for z in range(5, 11):
-			_data.voxels[Vector3i(10, y, z)] = MAT_SOLID
+			_data.set_voxel(Vector3i(10, y, z), MAT_SOLID)
 	# 蓄水池A 右壁 x:9 在 y:2 中间段 (z:6..9) 开放，与隔断缺口对齐，水可水平流入通道
 	for z in range(6, 10):
-		_data.voxels.erase(Vector3i(9, 2, z))
+		_data.remove_voxel(Vector3i(9, 2, z))
 	# 溢流通道（x:11..15, 地面层），两侧壁 (z:5, z:10) 建到 y:2
 	for y in range(1, 3):
 		for x in range(11, 16):
-			_data.voxels[Vector3i(x, y, 5)] = MAT_SOLID
-			_data.voxels[Vector3i(x, y, 10)] = MAT_SOLID
+			_data.set_voxel(Vector3i(x, y, 5), MAT_SOLID)
+			_data.set_voxel(Vector3i(x, y, 10), MAT_SOLID)
 	# 通道末端 → 蓄水池B (x:16..20)
 	_build_container(Vector3i(16, 1, 5), Vector3i(20, 3, 10), MAT_SOLID)
 
@@ -146,7 +146,7 @@ func _build_terrain() -> void:
 	# 蓄水池B 前侧 (x:20) 在 y:2..3 开放形成第二级瀑布
 	for y in range(2, 4):
 		for z in range(6, 9):
-			_data.voxels.erase(Vector3i(20, y, z))
+			_data.remove_voxel(Vector3i(20, y, z))
 	# 第二级瀑布落点：底部收集池 (x:21..25)
 	_build_container(Vector3i(21, 1, 5), Vector3i(25, 2, 10), MAT_SOLID)
 
@@ -162,7 +162,7 @@ func _build_container(a: Vector3i, b: Vector3i, mat: int) -> void:
 	# 底
 	for x in range(a.x, b.x + 1):
 		for z in range(a.z, b.z + 1):
-			_data.voxels[Vector3i(x, a.y - 1, z)] = mat
+			_data.set_voxel(Vector3i(x, a.y - 1, z), mat)
 	# 四壁
 	_build_walls_only(a, b, mat)
 
@@ -171,11 +171,11 @@ func _build_container(a: Vector3i, b: Vector3i, mat: int) -> void:
 func _build_walls_only(a: Vector3i, b: Vector3i, mat: int) -> void:
 	for y in range(a.y, b.y + 1):
 		for x in range(a.x, b.x + 1):
-			_data.voxels[Vector3i(x, y, a.z)] = mat
-			_data.voxels[Vector3i(x, y, b.z)] = mat
+			_data.set_voxel(Vector3i(x, y, a.z), mat)
+			_data.set_voxel(Vector3i(x, y, b.z), mat)
 		for z in range(a.z, b.z + 1):
-			_data.voxels[Vector3i(a.x, y, z)] = mat
-			_data.voxels[Vector3i(b.x, y, z)] = mat
+			_data.set_voxel(Vector3i(a.x, y, z), mat)
+			_data.set_voxel(Vector3i(b.x, y, z), mat)
 
 
 ## 填充一个 AABB 区域为指定材质
@@ -185,7 +185,7 @@ func _fill_water(min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max
 			for z in range(min_z, max_z + 1):
 				var pos := Vector3i(x, y, z)
 				if _in_bounds(pos) and _data.get_voxel(pos) < 0:
-					_data.voxels[pos] = mat
+					_data.set_voxel(pos, mat)
 					_water_count += 1
 
 
@@ -258,7 +258,7 @@ func _update_hud() -> void:
 Mesh生成耗时: %.2f ms
 体素缩放: %.2f
 """ % [Engine.get_frames_per_second(), 1000.0 / maxf(Engine.get_frames_per_second(), 0.001),
-		tri, verts, _data.voxels.size(), _water_count, _gen_time, _renderer.last_mesh_gen_time_ms, voxel_scale]
+		tri, verts, _data.get_voxel_count(), _water_count, _gen_time, _renderer.last_mesh_gen_time_ms, voxel_scale]
 
 
 # ----------------------------------------------------------------------------
@@ -279,8 +279,8 @@ func _update_water() -> void:
 
 	# 第一步：收集所有水，计算移动计划 (from -> to)
 	var moves: Dictionary = {}   # key: from(Vector3i), value: to(Vector3i)
-	for pos in _data.voxels:
-		if _data.voxels[pos] != MAT_WATER:
+	for pos: Vector3i in _data.get_positions():
+		if _data.get_voxel(pos) != MAT_WATER:
 			continue
 
 		# 1. 重力：正下方为空则下落
@@ -362,5 +362,5 @@ func _in_bounds(pos: Vector3i) -> bool:
 
 
 func _move_water(from: Vector3i, to: Vector3i) -> void:
-	_data.voxels.erase(from)
-	_data.voxels[to] = MAT_WATER
+	_data.remove_voxel(from, false)
+	_data.set_voxel(to, MAT_WATER, false)

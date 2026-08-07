@@ -7,9 +7,13 @@ extends Resource
 ## 可由 VoxelRenderer / VoxelDestructible 节点使用
 ## 与 VoxData 不同，此资源专为序列化和运行时使用设计
 ## 注: 直接使用 Resource 内置的 changed 信号 (通过 emit_changed() 发射)
-
-## 体素字典: 位置 -> 材质ID
-@export var voxels: Dictionary[Vector3i, int] = {}
+##
+## 【存储方案】chunk 分区密集缓冲（性能关键）
+## 旧方案：整个世界用 Dictionary[Vector3i, int]，每个体素一个 Vector3i 哈希键，
+##         邻居查询/切片/网格生成全部命中字典哈希 → 大型场景慢一个量级。
+## 新方案：非空 chunk 各持一块 PackedInt32Array(16³)，值 = 材质ID + 1（0=空）。
+##         体素读写 = 1 次 chunk 字典查询 + 1 次数组下标；稀疏性只存在于 chunk 层。
+##         网格生成使用 18³ 密集"光环缓冲"，邻居读取全为数组下标、无越界检查。
 
 ## 材质数组 (索引即材质ID，使用 VoxelMaterial)
 @export var materials: Array[VoxelMaterial] = []
@@ -34,16 +38,24 @@ extends Resource
 ## 调用 clear_dirty_voxels() 清空
 var dirty_voxels: Dictionary[Vector3i, int] = {}
 
-## Chunk 大小（与 VoxelChunkGenerator 保持一致，用于空间查询分块加速）
+## Chunk 大小（与 VoxelChunkGenerator 保持一致）
 const CHUNK_SIZE := 16
+const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+## 单个 z 切片面积（线性化步长：x + y*CS + z*CHUNK_SLICE）
+const CHUNK_SLICE := CHUNK_SIZE * CHUNK_SIZE
 
-## Chunk 索引缓存：{chunk_key: Array[Vector3i]}，用于快速空间查询
-## 采用"实时增量维护"策略：
-##   - 首次查询时全量构建一次（_chunk_index_built = true）
-##   - 之后每次体素增删都只增量更新对应 chunk 的列表，索引始终保持与 voxels 同步
-##   - 避免"任意变更即全量重建 O(全部体素)"导致的周期卡顿（大型场景关键）
-var _chunk_index: Dictionary = {}
-var _chunk_index_built: bool = false
+## 外缘层数（网格生成时跨界面的面可见性需要紧邻体素）
+const HALO := 1
+## 含外缘的光环缓冲边长（18）
+const HALO_SIZE := CHUNK_SIZE + HALO * 2
+const HALO_VOLUME := HALO_SIZE * HALO_SIZE * HALO_SIZE
+
+## chunk key -> 密集缓冲 (PackedInt32Array, 16³)。值 = 材质ID + 1，0 = 空。
+## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
+var _chunk_buffers: Dictionary = {}
+
+## 体素总数（增量维护，O(1) 查询，供 HUD 等高频读取）
+var _voxel_count: int = 0
 
 ## 支撑图增量缓存：pos -> 其 LOWER_5 中存在的实体素数 (0-5)
 ## 由 set_voxel/remove_voxel/remove_voxels/merge 增量维护，供 find_unsupported_around 使用
@@ -91,7 +103,7 @@ const HORIZONTAL_4: Array[Vector3i] = [
 static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: bool = true) -> VoxelData:
 	var res := VoxelData.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
-	
+
 	# 重新映射体素坐标到 [0, grid_size) 范围
 	# VoxelNode.get_voxels() 中的 transform 包含 VoxelModel.offset 平移
 	# 导致体素数据范围在 [offset, offset + size) 之间
@@ -100,18 +112,16 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: b
 		var bounds := _calc_bounds(raw_voxels)
 		var min_pos: Vector3i = bounds[0]
 		var max_pos: Vector3i = bounds[1]
-		
+
 		# 重新映射：将所有体素位置减去 min_pos
 		for pos_key in raw_voxels.keys():
 			var pos: Vector3i = pos_key
-			var new_pos: Vector3i = pos - min_pos
-			res.voxels[new_pos] = raw_voxels[pos_key]
-		
+			res._write_buffer_impl(pos - min_pos, raw_voxels[pos_key], false)
+
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
 	else:
-		res.voxels = raw_voxels
 		res.grid_size = Vector3i(voxel_data.size)
-	
+
 	# 材质数组：voxel_data.materials 是固定长度数组，其数组索引 i 即材质 ID (体素值)
 	# 因此直接按索引 i 复制到 res.materials，保证"体素值 = data.materials 索引"的约定
 	# 注意：不能用 mat.id，因为 VoxAccess 未给每个材质设置不同的 id（默认全为0）
@@ -138,26 +148,185 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: b
 	return res
 
 
+# ----------------------------------------------------------------------------
+# 核心存储原语（chunk 密集缓冲）
+# ----------------------------------------------------------------------------
+
+## 体素坐标 → chunk key（floori 向下取整，正确处理负坐标）
+static func _chunk_of(pos: Vector3i) -> Vector3i:
+	return Vector3i(
+		floori(float(pos.x) / float(CHUNK_SIZE)),
+		floori(float(pos.y) / float(CHUNK_SIZE)),
+		floori(float(pos.z) / float(CHUNK_SIZE))
+	)
+
+
+## chunk 内局部坐标 → 缓冲下标（线性化：x + y*CS + z*CS²，覆盖 0..CHUNK_VOLUME-1）
+static func _buf_index(local: Vector3i) -> int:
+	return local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SLICE
+
+
+## 缓冲下标 → chunk 内局部坐标
+static func _local_from_index(i: int) -> Vector3i:
+	return Vector3i(
+		i % CHUNK_SIZE,
+		(i / CHUNK_SIZE) % CHUNK_SIZE,
+		i / CHUNK_SLICE
+	)
+
+
+## 写入体素缓冲（核心原语）。不追踪 dirty_voxels / 不触发信号（由调用方处理）。
+## check_empty=true 时，若写入后该 chunk 缓冲全空则移除 chunk 键（回收内存）。
+func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
+	var ck := _chunk_of(pos)
+	var buf = _chunk_buffers.get(ck)
+	if buf == null:
+		buf = PackedInt32Array()
+		buf.resize(CHUNK_VOLUME)
+		_chunk_buffers[ck] = buf
+	var idx := _buf_index(pos - ck * CHUNK_SIZE)
+	var cur: int = buf[idx]
+	if mat_id < 0:
+		if cur > 0:
+			buf[idx] = 0
+			_voxel_count -= 1
+			if check_empty:
+				_maybe_erase_empty_chunk(ck)
+	else:
+		if cur <= 0:
+			_voxel_count += 1
+		buf[idx] = mat_id + 1
+
+
+## 若 chunk 缓冲已全空则移除该 chunk 键（仅当 check_empty 需要时调用）
+func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
+	var buf = _chunk_buffers.get(ck)
+	if buf == null:
+		return
+	for i in CHUNK_VOLUME:
+		if buf[i] > 0:
+			return
+	_chunk_buffers.erase(ck)
+
+
+## 构建期/读档批量填充 {pos: mat_id}，不追踪 dirty_voxels、不触发信号。
+## 适合一次性生成大量静态体素（demo 场景构建、外部数据导入）。
+## 绕过增量维护，故使支撑缓存失效，下次失稳检测时全量重建。
+func load_voxels_dict(dict: Dictionary) -> void:
+	for pos_key in dict:
+		_write_buffer_impl(pos_key, dict[pos_key], false)
+	invalidate_support_cache()
+
+
+## 获取所有非空 chunk key
+func get_all_chunk_keys() -> Array[Vector3i]:
+	var keys: Array[Vector3i] = []
+	for ck: Vector3i in _chunk_buffers:
+		keys.append(ck)
+	return keys
+
+
+## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID + 1，0 = 空）。
+## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立的深拷贝，无数据竞态）。
+## 邻居读取全为数组下标且无越界检查（光环含完整 6 邻）。
+func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
+	var halo := PackedInt32Array()
+	halo.resize(HALO_VOLUME)
+	var origin := chunk * CHUNK_SIZE
+	# 只遍历 27 个邻居 chunk 与光环的重叠区，避免逐体素世界坐标换算
+	for nz in 3:
+		for ny in 3:
+			for nx in 3:
+				var nck := chunk + Vector3i(nx - HALO, ny - HALO, nz - HALO)
+				var buf = _chunk_buffers.get(nck)
+				if buf == null:
+					continue
+				var n_origin := nck * CHUNK_SIZE
+				var lo := Vector3i(
+					maxi(origin.x - HALO, n_origin.x),
+					maxi(origin.y - HALO, n_origin.y),
+					maxi(origin.z - HALO, n_origin.z))
+				var hi := Vector3i(
+					mini(origin.x + CHUNK_SIZE, n_origin.x + CHUNK_SIZE),
+					mini(origin.y + CHUNK_SIZE, n_origin.y + CHUNK_SIZE),
+					mini(origin.z + CHUNK_SIZE, n_origin.z + CHUNK_SIZE)) - Vector3i.ONE
+				if lo.x > hi.x or lo.y > hi.y or lo.z > hi.z:
+					continue
+				for pz in range(lo.z, hi.z + 1):
+					for py in range(lo.y, hi.y + 1):
+						for px in range(lo.x, hi.x + 1):
+							var lidx := (px - origin.x + HALO) + (py - origin.y + HALO) * HALO_SIZE + (pz - origin.z + HALO) * HALO_SIZE * HALO_SIZE
+							var nidx := (px - n_origin.x) + (py - n_origin.y) * CHUNK_SIZE + (pz - n_origin.z) * CHUNK_SLICE
+							halo[lidx] = buf[nidx]
+	return halo
+
+
+## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 旧式外部代码）
+func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
+	var out := {}
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				out[origin + _local_from_index(i)] = buf[i] - 1
+	return out
+
+
+# ----------------------------------------------------------------------------
+# 基本访问
+# ----------------------------------------------------------------------------
+
 ## 获取指定位置的体素材质ID，不存在返回 -1
 func get_voxel(pos: Vector3i) -> int:
-	return voxels.get(pos, -1)
+	var ck := _chunk_of(pos)
+	var buf = _chunk_buffers.get(ck)
+	if buf == null:
+		return -1
+	var v: int = buf[_buf_index(pos - ck * CHUNK_SIZE)]
+	return v - 1 if v > 0 else -1
+
+
+## 是否存在体素
+func has_voxel(pos: Vector3i) -> bool:
+	var ck := _chunk_of(pos)
+	var buf = _chunk_buffers.get(ck)
+	if buf == null:
+		return false
+	return buf[_buf_index(pos - ck * CHUNK_SIZE)] > 0
+
+
+## 获取所有体素位置
+func get_positions() -> Array:
+	var out: Array = []
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				out.append(origin + _local_from_index(i))
+	return out
+
+
+## 获取体素数量 (O(1))
+func get_voxel_count() -> int:
+	return _voxel_count
+
+
+## 是否完全没有体素
+func is_empty() -> bool:
+	return _chunk_buffers.is_empty()
 
 
 ## 设置指定位置的体素 (material_id < 0 时移除)
 func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 	if material_id < 0:
-		voxels.erase(pos)
-		dirty_voxels[pos] = -1
-		_chunk_index_remove(pos)
-		_support_cache_on_remove(pos)
-	else:
-		# 若该位置原本已有体素，先移除旧索引，再添加新索引（避免重复）
-		if voxels.has(pos):
-			_chunk_index_remove(pos)
-			_support_cache_on_remove(pos)
-		voxels[pos] = material_id
-		dirty_voxels[pos] = material_id
-		_chunk_index_add(pos)
+		remove_voxel(pos, notify)
+		return
+	var existed := has_voxel(pos)
+	_write_buffer_impl(pos, material_id, false)
+	dirty_voxels[pos] = material_id
+	if not existed:
 		_support_cache_on_add(pos)
 	if notify:
 		emit_changed()
@@ -165,38 +334,21 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 
 ## 移除指定位置的体素
 func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
-	voxels.erase(pos)
-	dirty_voxels[pos] = -1
-	_chunk_index_remove(pos)
-	_support_cache_on_remove(pos)
-	if notify:
-		emit_changed()
-
-
-## 是否存在体素
-func has_voxel(pos: Vector3i) -> bool:
-	return voxels.has(pos)
-
-
-## 获取所有体素位置
-func get_positions() -> Array:
-	return voxels.keys()
-
-
-## 获取体素数量
-func get_voxel_count() -> int:
-	return voxels.size()
+	_remove_voxels([pos], notify)
 
 
 ## 清空所有体素
 func clear(notify: bool = true) -> void:
-	for pos in voxels:
-		dirty_voxels[pos] = -1
-	voxels.clear()
-	_chunk_index.clear()
-	_chunk_index_built = true  # 空索引即已构建
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				dirty_voxels[origin + _local_from_index(i)] = -1
+	_chunk_buffers.clear()
+	_voxel_count = 0
 	_support_cache.clear()
-	_support_cache_built = true  # 空缓存即已构建
+	_support_cache_built = true
 	if notify:
 		emit_changed()
 
@@ -204,18 +356,14 @@ func clear(notify: bool = true) -> void:
 ## 合并另一个资源中的体素 (可带偏移)
 func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
 	var new_positions: Array = []
-	for pos in other.voxels:
+	for pos: Vector3i in other.get_positions():
 		var dst := pos + offset
-		if voxels.has(dst):
-			# 覆盖已存在的体素：体素仍存在，支撑图不发生变化，
-			# 不能调用 _support_cache_on_remove（会误删自身条目并扣减 UPPER_5 邻居计数）。
-			# 但材质可能变化，chunk 索引需要重建。
-			_chunk_index_remove(dst)
-		else:
+		var src_mat: int = other.get_voxel(pos)
+		if not has_voxel(dst):
+			# 新位置：支撑图需要增量添加（覆盖已存在的体素时支撑图不变化）
 			new_positions.append(dst)
-		voxels[dst] = other.voxels[pos]
-		dirty_voxels[dst] = other.voxels[pos]
-		_chunk_index_add(dst)
+		_write_buffer_impl(dst, src_mat, false)
+		dirty_voxels[dst] = src_mat
 	if not new_positions.is_empty():
 		for p in new_positions:
 			_support_cache_on_add(p)
@@ -238,10 +386,23 @@ func get_dirty_voxels_aabb() -> AABB:
 
 ## 计算全部体素的包围盒 (AABB)，用于场景摆放/居中；空体素返回零 AABB
 func get_voxels_aabb() -> AABB:
-	if voxels.is_empty():
+	if _voxel_count == 0:
 		return AABB()
-	var bounds := _calc_bounds(voxels)
-	return _bounds_to_aabb(bounds)
+	var min_pos := Vector3i(999999, 999999, 999999)
+	var max_pos := Vector3i(-999999, -999999, -999999)
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				var pos := origin + _local_from_index(i)
+				min_pos.x = mini(min_pos.x, pos.x)
+				min_pos.y = mini(min_pos.y, pos.y)
+				min_pos.z = mini(min_pos.z, pos.z)
+				max_pos.x = maxi(max_pos.x, pos.x)
+				max_pos.y = maxi(max_pos.y, pos.y)
+				max_pos.z = maxi(max_pos.z, pos.z)
+	return _bounds_to_aabb([min_pos, max_pos])
 
 
 ## 计算一组体素的包围盒 (AABB)，空集合返回 null
@@ -272,206 +433,8 @@ static func _calc_bounds(voxels: Dictionary) -> Array:
 
 
 # ----------------------------------------------------------------------------
-# Chunk 索引加速（空间查询）
+# 空间查询（基于 chunk 密集缓冲扫描，数组下标而非字典哈希）
 # ----------------------------------------------------------------------------
-
-## 体素坐标 → chunk key
-## 用 floori 向下取整，与 VoxelChunkGenerator._chunk_of 保持一致，正确处理负坐标
-## （旧版用整数除法向零截断，负坐标时 chunk 索引与网格生成不一致 → 查询/重建错位）
-static func _chunk_of(pos: Vector3i) -> Vector3i:
-	return Vector3i(
-		floori(float(pos.x) / float(CHUNK_SIZE)),
-		floori(float(pos.y) / float(CHUNK_SIZE)),
-		floori(float(pos.z) / float(CHUNK_SIZE))
-	)
-
-
-## 全量构建 chunk 索引：{chunk_key: Array[Vector3i]}（首次查询时调用一次）
-func _build_chunk_index_full() -> void:
-	_chunk_index.clear()
-	for pos in voxels:
-		var ck := _chunk_of(pos)
-		if not _chunk_index.has(ck):
-			_chunk_index[ck] = []
-		_chunk_index[ck].append(pos)
-	_chunk_index_built = true
-
-
-## 确保索引已构建（首次查询时全量构建一次；之后由增量维护保持同步，无需重建）
-func _build_chunk_index_if_dirty() -> void:
-	if not _chunk_index_built:
-		_build_chunk_index_full()
-
-
-# ----------------------------------------------------------------------------
-# 支撑图增量缓存（供 find_unsupported_around 失稳检测 O(1) 读计数）
-# ----------------------------------------------------------------------------
-
-## 全量构建支撑缓存：对每个实体素统计其 LOWER_5 中存在的邻居数
-## 首次调用失稳检测前执行一次，之后由 set/remove 增量同步
-func _build_support_cache() -> void:
-	_support_cache.clear()
-	for pos_key in voxels:
-		var pos: Vector3i = pos_key
-		var count := 0
-		for d: Vector3i in LOWER_5:
-			if voxels.has(pos + d):
-				count += 1
-		if count > 0:
-			_support_cache[pos] = count
-	_support_cache_built = true
-
-
-## 确保支撑缓存已构建
-func _ensure_support_cache() -> void:
-	if not _support_cache_built:
-		_build_support_cache()
-
-
-## 预热查询缓存（chunk 索引 + 支撑缓存），把首次全量构建从"第一次破坏"推迟到"加载完成后"。
-## 批量直接写入 voxels（如 demo 直接改 dict、load_data 重建）会绕过 set_voxel 的增量维护，
-## 导致首个 get_voxels_in_sphere/remove + 失稳检测在主线程触发两次整字典 O(N) 构建 → 首次破坏卡顿。
-## 在初始体素填充完毕后调用一次即可，之后由 set/remove 增量维护保持同步。
-func warm_up_cache() -> void:
-	_build_chunk_index_if_dirty()
-	_ensure_support_cache()
-
-
-## 增量：体素被设置后更新支撑缓存（需在 voxels[pos] 写入后调用）
-## 1) pos 自身计数重算 2) pos 成为其 UPPER_5 邻居的新支撑，邻居计数 +1
-func _support_cache_on_add(pos: Vector3i) -> void:
-	if not _support_cache_built:
-		return
-	# pos 自身计数
-	var count := 0
-	for d: Vector3i in LOWER_5:
-		if voxels.has(pos + d):
-			count += 1
-	if count > 0:
-		_support_cache[pos] = count
-	# pos 支撑其 UPPER_5 邻居
-	for d: Vector3i in UPPER_5:
-		var nb := pos + d
-		if voxels.has(nb):
-			_support_cache[nb] = _support_cache.get(nb, 0) + 1
-
-
-## 增量：体素被移除后更新支撑缓存（需在 voxels.erase(pos) 后调用）
-## 1) pos 自身删除 2) 其 UPPER_5 邻居失去一个支撑，计数 -1（降到 0 可删键）
-func _support_cache_on_remove(pos: Vector3i) -> void:
-	if not _support_cache_built:
-		return
-	_support_cache.erase(pos)
-	for d: Vector3i in UPPER_5:
-		var nb := pos + d
-		if voxels.has(nb):
-			var c: int = _support_cache.get(nb, 0) - 1
-			if c > 0:
-				_support_cache[nb] = c
-			else:
-				_support_cache.erase(nb)
-
-
-## 批量：体素被批量移除后更新支撑缓存（比逐个 _support_cache_on_remove 更高效）
-## 先收集所有受影响邻居（被删体素的 UPPER_5），避免重复增减
-func _support_cache_on_remove_batch(positions: Array) -> void:
-	if not _support_cache_built or positions.is_empty():
-		return
-	# 待删集合（用于判断邻居是否仍存在）
-	var remove_set := {}
-	for p in positions:
-		remove_set[p] = true
-		_support_cache.erase(p)
-	# 受影响邻居 = 所有被删体素的 UPPER_5 中未被删且仍存在的体素
-	var affected := {}
-	for p in positions:
-		var pos: Vector3i = p
-		for d: Vector3i in UPPER_5:
-			var nb := pos + d
-			if voxels.has(nb) and not remove_set.has(nb):
-				affected[nb] = true
-	# 逐受影响邻居重算计数（重算比递增更稳，避免多次删同一个邻居）
-	for nb_key in affected:
-		var nb: Vector3i = nb_key
-		var count := 0
-		for d: Vector3i in LOWER_5:
-			var lower := nb + d
-			if voxels.has(lower) and not remove_set.has(lower):
-				count += 1
-		if count > 0:
-			_support_cache[nb] = count
-		else:
-			_support_cache.erase(nb)
-
-
-## 使支撑缓存失效（批量直接改 voxels 时调用，如 load_data/clear/from_voxel_data 重建）
-func invalidate_support_cache() -> void:
-	_support_cache_built = false
-	_support_cache.clear()
-
-
-## 增量：添加体素到对应 chunk 的索引列表（由 set_voxel/merge 在写入 voxels 后调用）
-## 需在 voxels[pos] 已写入后调用，且仅当索引已构建时
-func _chunk_index_add(pos: Vector3i) -> void:
-	if not _chunk_index_built:
-		return
-	var ck := _chunk_of(pos)
-	if not _chunk_index.has(ck):
-		_chunk_index[ck] = []
-	_chunk_index[ck].append(pos)
-
-
-## 增量：从对应 chunk 的索引列表移除体素（由 remove_* 在擦除 voxels 后调用）
-## 仅当索引已构建时有效；chunk 不存在则忽略
-func _chunk_index_remove(pos: Vector3i) -> void:
-	if not _chunk_index_built:
-		return
-	var ck := _chunk_of(pos)
-	if _chunk_index.has(ck):
-		var list: Array = _chunk_index[ck]
-		list.erase(pos)
-		if list.is_empty():
-			_chunk_index.erase(ck)
-
-
-## 批量：从 chunk 索引移除一批体素（按 chunk 分组后单次过滤）
-## 替代逐个 _chunk_index_remove()，避免大批量时 list.erase() 的 O(N) 累积开销
-func _chunk_index_remove_batch(positions: Array) -> void:
-	if not _chunk_index_built or positions.is_empty():
-		return
-	# 按 chunk 分组待移除位置（用字典作集合去重）
-	var by_chunk := {}
-	for p in positions:
-		var ck := _chunk_of(p)
-		if not by_chunk.has(ck):
-			by_chunk[ck] = {}
-		by_chunk[ck][p] = true
-	# 对每个涉及的 chunk，用一次遍历过滤掉所有待移除位置
-	for ck in by_chunk:
-		if not _chunk_index.has(ck):
-			continue
-		var remove_set: Dictionary = by_chunk[ck]
-		var list: Array = _chunk_index[ck]
-		if list.size() == remove_set.size():
-			# 整个 chunk 都要删，直接移除 chunk 键
-			_chunk_index.erase(ck)
-			continue
-		var keep: Array = []
-		for i in range(list.size()):
-			if not remove_set.has(list[i]):
-				keep.append(list[i])
-		if keep.is_empty():
-			_chunk_index.erase(ck)
-		else:
-			_chunk_index[ck] = keep
-
-
-## 标记 chunk 索引失效（供外部绕过 set_voxel/remove_* 直接修改 voxels 后调用）
-## 下次空间查询（get_voxels_in_sphere / get_voxels_in_box）会全量重建一次
-## 正常破坏流程无需调用（内部已增量维护），仅当游戏直接操作 voxels 字典时使用
-func invalidate_chunk_index() -> void:
-	_chunk_index_built = false
-
 
 ## 获取与球体重叠的 chunk 列表
 func _get_chunks_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
@@ -528,51 +491,61 @@ func _get_chunks_in_box(aabb: AABB) -> Array[Vector3i]:
 
 
 ## 查询球形范围内的所有体素位置 (只读，不修改)
-## 使用 Chunk 索引加速：先找出与球体重叠的 chunk，再只查询这些 chunk 内的体素
+## 先找出与球体重叠的 chunk，再只扫描这些 chunk 的密集缓冲
 func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
-	if voxels.is_empty():
+	if _chunk_buffers.is_empty():
 		return result
 	var radius_sq := radius * radius
-	# 获取与球体重叠的 chunk
 	var overlap_chunks := _get_chunks_in_sphere(center, radius)
 	if overlap_chunks.is_empty():
 		return result
-	# 只查询这些 chunk 内的体素
-	_build_chunk_index_if_dirty()
 	var cxi := floori(center.x)
 	var cyi := floori(center.y)
 	var czi := floori(center.z)
 	for ck in overlap_chunks:
-		var positions: Array = _chunk_index.get(ck, [])
-		for pos in positions:
-			# 整数距离平方（避免 Vector3 分配）：体素中心(整数)到球心取整的近似，
-			# 与大半径/常见破坏场景精度足够，且完全避免逐体素 Vector3 构造。
-			var dx: int = pos.x - cxi
-			var dy: int = pos.y - cyi
-			var dz: int = pos.z - czi
-			if float(dx * dx + dy * dy + dz * dz) <= radius_sq:
-				result.append(pos)
+		if not _chunk_buffers.has(ck):
+			continue
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for z in CHUNK_SIZE:
+			for y in CHUNK_SIZE:
+				for x in CHUNK_SIZE:
+					if buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE] <= 0:
+						continue
+					var px := origin.x + x
+					var py := origin.y + y
+					var pz := origin.z + z
+					var dx: int = px - cxi
+					var dy: int = py - cyi
+					var dz: int = pz - czi
+					if float(dx * dx + dy * dy + dz * dz) <= radius_sq:
+						result.append(Vector3i(px, py, pz))
 	return result
 
 
 ## 查询盒形范围内的所有体素位置 (只读，不修改)
-## 使用 Chunk 索引加速：先找出与盒体重叠的 chunk，再只查询这些 chunk 内的体素
+## 先找出与盒体重叠的 chunk，再只扫描这些 chunk 的密集缓冲
 func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
-	if voxels.is_empty():
+	if _chunk_buffers.is_empty():
 		return result
-	# 获取与盒体重叠的 chunk
 	var overlap_chunks := _get_chunks_in_box(aabb)
 	if overlap_chunks.is_empty():
 		return result
-	# 只查询这些 chunk 内的体素
-	_build_chunk_index_if_dirty()
 	for ck in overlap_chunks:
-		var positions: Array = _chunk_index.get(ck, [])
-		for pos in positions:
-			if aabb.has_point(Vector3(pos)):
-				result.append(pos)
+		if not _chunk_buffers.has(ck):
+			continue
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for z in CHUNK_SIZE:
+			for y in CHUNK_SIZE:
+				for x in CHUNK_SIZE:
+					if buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE] <= 0:
+						continue
+					var pos := origin + Vector3i(x, y, z)
+					if aabb.has_point(Vector3(pos)):
+						result.append(pos)
 	return result
 
 
@@ -592,9 +565,8 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 
 
 ## 批量设置体素为同一材质（公开接口，供水模拟等高频动态系统使用）。
-## 相比逐个 set_voxel：只 emit_changed 一次，且一次性维护 chunk 索引 / 支撑缓存，
-## 并填充 dirty_voxels，让 VoxelRenderer 走增量重建（只重建受影响 chunk），
-## 而不是绕开框架直接改 voxels 字典（那会强制全量重建 + 缓存失效）。
+## 相比逐个 set_voxel：只 emit_changed 一次，且一次性维护支撑缓存，
+## 并填充 dirty_voxels，让 VoxelRenderer 走增量重建（只重建受影响 chunk）。
 ## 语义与 set_voxel 一致：material_id < 0 视为批量移除；已存在体素被覆盖时支撑图不变。
 func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void:
 	if positions.is_empty():
@@ -606,15 +578,10 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 	var new_positions: Array = []
 	for p in positions:
 		var pos: Vector3i = p
-		if voxels.has(pos):
-			# 覆盖已存在的体素：体素仍存在，支撑图不发生变化（同 merge 语义），
-			# 仅 chunk 索引需要先移除再重加，避免同一位置重复入列表。
-			_chunk_index_remove(pos)
-		else:
+		if not has_voxel(pos):
 			new_positions.append(pos)
-		voxels[pos] = material_id
+		_write_buffer_impl(pos, material_id, false)
 		dirty_voxels[pos] = material_id
-		_chunk_index_add(pos)
 	if not new_positions.is_empty():
 		for p in new_positions:
 			_support_cache_on_add(p)
@@ -627,10 +594,21 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
 	var _diag_t0 := Time.get_ticks_usec()
+	var touched: Dictionary = {}
 	for pos in positions:
-		voxels.erase(pos)
 		dirty_voxels[pos] = -1
-	_chunk_index_remove_batch(positions)
+		var ck := _chunk_of(pos)
+		var buf = _chunk_buffers.get(ck)
+		if buf == null:
+			continue
+		var idx := _buf_index(pos - ck * CHUNK_SIZE)
+		if buf[idx] > 0:
+			buf[idx] = 0
+			_voxel_count -= 1
+			touched[ck] = true
+	# 批量移除后统一回收被清空的 chunk 键（避免逐体素 4096 扫描）
+	for ck in touched:
+		_maybe_erase_empty_chunk(ck)
 	_support_cache_on_remove_batch(positions)
 	if notify:
 		emit_changed()
@@ -708,9 +686,13 @@ func save_data() -> Dictionary:
 	data["materials"] = mats
 	# 体素序列化
 	var voxel_list := []
-	for pos_key in voxels:
-		var pos: Vector3i = pos_key
-		voxel_list.append([pos.x, pos.y, pos.z, voxels[pos_key]])
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				var p := origin + _local_from_index(i)
+				voxel_list.append([p.x, p.y, p.z, buf[i] - 1])
 	data["voxels"] = voxel_list
 	return data
 
@@ -737,27 +719,137 @@ func load_data(data: Variant) -> void:
 		for vox in data["voxels"]:
 			if vox is Array and vox.size() >= 4:
 				var pos := Vector3i(int(vox[0]), int(vox[1]), int(vox[2]))
-				voxels[pos] = int(vox[3])
-	# load_data 直接写入 voxels（绕过增量维护），标记索引失效，下次查询时全量重建
-	_chunk_index_built = false
+				_write_buffer_impl(pos, int(vox[3]), false)
+	# load_data 直接写入缓冲（绕过增量维护），使支撑缓存失效，下次查询时全量重建
 	invalidate_support_cache()
 	emit_changed()
 
 
-## 获取指定 chunk 内的所有体素位置（基于 chunk 索引加速查询）
+## 获取指定 chunk 内的所有体素位置（基于密集缓冲扫描）
 ## 返回 Array[Vector3i]（体素位置列表），空 chunk 返回空数组
 func get_chunk_voxels(chunk_key: Vector3i) -> Array:
-	_build_chunk_index_if_dirty()
-	if _chunk_index.has(chunk_key):
-		return _chunk_index[chunk_key].duplicate()
-	return []
+	var buf = _chunk_buffers.get(chunk_key)
+	if buf == null:
+		return []
+	var result: Array = []
+	var origin := chunk_key * CHUNK_SIZE
+	for i in CHUNK_VOLUME:
+		if buf[i] > 0:
+			result.append(origin + _local_from_index(i))
+	return result
 
 
-## O(1) 判断指定 chunk 是否含体素（基于 chunk 索引，不复制列表）
-## 相比 get_chunk_voxels().is_empty() 省去整组列表复制，用于高频逐 chunk 应用场景
+## O(1) 判断指定 chunk 是否含体素（基于 chunk 缓冲字典，不扫描）
 func has_chunk(chunk_key: Vector3i) -> bool:
-	_build_chunk_index_if_dirty()
-	return _chunk_index.has(chunk_key)
+	return _chunk_buffers.has(chunk_key)
+
+
+# ----------------------------------------------------------------------------
+# 支撑图增量缓存（供 find_unsupported_around 失稳检测 O(1) 读计数）
+# ----------------------------------------------------------------------------
+
+## 全量构建支撑缓存：对每个实体素统计其 LOWER_5 中存在的邻居数
+## 首次调用失稳检测前执行一次，之后由 set/remove 增量同步
+func _build_support_cache() -> void:
+	_support_cache.clear()
+	for pos: Vector3i in get_positions():
+		var count := 0
+		for d: Vector3i in LOWER_5:
+			if has_voxel(pos + d):
+				count += 1
+		if count > 0:
+			_support_cache[pos] = count
+	_support_cache_built = true
+
+
+## 确保支撑缓存已构建
+func _ensure_support_cache() -> void:
+	if not _support_cache_built:
+		_build_support_cache()
+
+
+## 预热查询缓存（支撑缓存）：把首次全量构建从"第一次破坏"推迟到"加载完成后"。
+## 在初始体素填充完毕后调用一次即可，之后由 set/remove 增量维护保持同步。
+func warm_up_cache() -> void:
+	_ensure_support_cache()
+
+
+## 增量：体素被设置后更新支撑缓存（需在 voxels[pos] 写入后调用）
+## 1) pos 自身计数重算 2) pos 成为其 UPPER_5 邻居的新支撑，邻居计数 +1
+func _support_cache_on_add(pos: Vector3i) -> void:
+	if not _support_cache_built:
+		return
+	# pos 自身计数
+	var count := 0
+	for d: Vector3i in LOWER_5:
+		if has_voxel(pos + d):
+			count += 1
+	if count > 0:
+		_support_cache[pos] = count
+	# pos 支撑其 UPPER_5 邻居
+	for d: Vector3i in UPPER_5:
+		var nb := pos + d
+		if has_voxel(nb):
+			_support_cache[nb] = _support_cache.get(nb, 0) + 1
+
+
+## 增量：体素被移除后更新支撑缓存（需在 voxels.erase(pos) 后调用）
+## 1) pos 自身删除 2) 其 UPPER_5 邻居失去一个支撑，计数 -1（降到 0 可删键）
+func _support_cache_on_remove(pos: Vector3i) -> void:
+	if not _support_cache_built:
+		return
+	_support_cache.erase(pos)
+	for d: Vector3i in UPPER_5:
+		var nb := pos + d
+		if has_voxel(nb):
+			var c: int = _support_cache.get(nb, 0) - 1
+			if c > 0:
+				_support_cache[nb] = c
+			else:
+				_support_cache.erase(nb)
+
+
+## 批量：体素被批量移除后更新支撑缓存（比逐个 _support_cache_on_remove 更高效）
+## 先收集所有受影响邻居（被删体素的 UPPER_5），避免重复增减
+func _support_cache_on_remove_batch(positions: Array) -> void:
+	if not _support_cache_built or positions.is_empty():
+		return
+	# 待删集合（用于判断邻居是否仍存在）
+	var remove_set := {}
+	for p in positions:
+		remove_set[p] = true
+		_support_cache.erase(p)
+	# 受影响邻居 = 所有被删体素的 UPPER_5 中未被删且仍存在的体素
+	var affected := {}
+	for p in positions:
+		var pos: Vector3i = p
+		for d: Vector3i in UPPER_5:
+			var nb := pos + d
+			if has_voxel(nb) and not remove_set.has(nb):
+				affected[nb] = true
+	# 逐受影响邻居重算计数（重算比递增更稳，避免多次删同一个邻居）
+	for nb_key in affected:
+		var nb: Vector3i = nb_key
+		var count := 0
+		for d: Vector3i in LOWER_5:
+			var lower := nb + d
+			if has_voxel(lower) and not remove_set.has(lower):
+				count += 1
+		if count > 0:
+			_support_cache[nb] = count
+		else:
+			_support_cache.erase(nb)
+
+
+## 使支撑缓存失效（批量直接改体素时调用，如 load_data/clear/from_voxel_data 重建）
+func invalidate_support_cache() -> void:
+	_support_cache_built = false
+	_support_cache.clear()
+
+
+## 兼容存根：chunk 索引已由密集缓冲取代，无需外部失效。
+func invalidate_chunk_index() -> void:
+	pass
 
 
 # ----------------------------------------------------------------------------
@@ -770,7 +862,8 @@ func has_chunk(chunk_key: Vector3i) -> bool:
 ## 从种子体素位置集合出发，6 方向泛洪标记所有连通的体素，返回位置集合 (Dictionary 作 Set)
 ## seeds 可为单个 Vector3i 或 Array[Vector3i]；返回 {pos: true} 可直接用 has() 判断
 ## 若 restrict 提供，则只允许在 restrict 集合内扩散（用于只分析某子集内部的连通性）
-static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
+## 否则以"实体素"（密集缓冲查询）为扩散边界
+func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 	var result := {}
 	if seeds == null:
 		return result
@@ -786,6 +879,8 @@ static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 			continue
 		if not restrict.is_empty() and not restrict.has(pos):
 			continue
+		if restrict.is_empty() and not has_voxel(pos):
+			continue
 		result[pos] = true
 		var stack: Array = [pos]
 		while not stack.is_empty():
@@ -795,6 +890,8 @@ static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 				if nb in result:
 					continue
 				if not restrict.is_empty() and not restrict.has(nb):
+					continue
+				if restrict.is_empty() and not has_voxel(nb):
 					continue
 				result[nb] = true
 				stack.append(nb)
@@ -806,7 +903,7 @@ static func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 func find_connected(pos: Vector3i) -> Dictionary:
 	if not has_voxel(pos):
 		return {}
-	return flood_fill(pos, voxels)
+	return flood_fill(pos)
 
 
 ## 将一组位置按 6 方向连通性分组，返回 Array[Array[Vector3i]]
@@ -838,7 +935,7 @@ static func partition_connected(positions: Array) -> Array:
 	return result
 
 
-## 某个体素的连接度：相邻的实体素数量 (0-6)
+## 某个体素的连接度：相邻的实体素数 (0-6)
 ## 可用于薄弱点判断、支撑接触面积估算等
 func connectivity(pos: Vector3i) -> int:
 	var count := 0
@@ -860,51 +957,60 @@ func neighbors(pos: Vector3i) -> Array[Vector3i]:
 
 ## 找出"悬空"体素：与贴地(y==0)体素 6 方向连通判定，完全断开的返回
 ## 这是崩塌检测的底座：全量判定哪些与地面断开
+## voxels_set 提供时只在该集合内判定（子集场景）；否则基于全部实体素
 func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
-	var src := voxels_set if not voxels_set.is_empty() else voxels
-	if src.is_empty():
+	if voxels_set.is_empty() and _voxel_count == 0:
 		return {}
 	# 种子 = 贴地(y==0)体素
 	var seeds: Array = []
-	for key in src:
-		var pos: Vector3i = key
-		if pos.y == 0:
-			seeds.append(key)
-	var supported := flood_fill(seeds, src)
+	if voxels_set.is_empty():
+		for pos: Vector3i in get_positions():
+			if pos.y == 0:
+				seeds.append(pos)
+	else:
+		for key in voxels_set:
+			var pos: Vector3i = key
+			if pos.y == 0:
+				seeds.append(key)
+	var supported := flood_fill(seeds, voxels_set)
 	var unsupported := {}
-	for key in src:
-		if not supported.has(key):
-			unsupported[key] = true
+	if voxels_set.is_empty():
+		for pos: Vector3i in get_positions():
+			if not supported.has(pos):
+				unsupported[pos] = true
+	else:
+		for key in voxels_set:
+			if not supported.has(key):
+				unsupported[key] = true
 	return unsupported
 
 
 ## 找出"悬空"体素（支撑图局部检测）：只检查 removed 体素上方可能失稳的体素
-## 
+##
 ## 原理（支撑图 / Support Graph）：
 ##   体素稳定 ⟺ 其 5 个下方位（LOWER_5）中至少有一个体素存在且稳定
 ##   贴地体素 (y==0) 永远稳定
-## 
+##
 ## 失稳传播：
 ##   破坏移除体素 R → 检查 R 的 5 个上方位（UPPER_5）中存在的体素 C
 ##   → 若 C 所有 5 个下方位都没有体素支撑 → C 失稳
 ##   → 递归检查 C 的上方位（连锁失稳）
-## 
+##
 ## 与旧 BFS 方案对比：
 ##   - 旧方案：从候选体素 6 方向 BFS 遍历整个连通分量检查是否贴地（O(场景大小)）
 ##   - 新方案：只沿支撑链向上传播，不遍历连通分量（O(失稳体素数)）
 ##   对于大场景（10万+体素），新方案速度提升 100~1000 倍
-## 
+##
 ## 精度差异：
 ##   - 旧方案：6 方向连通性，体素可透过侧向路径连接地面
 ##   - 新方案：仅检查下方 5 个位置的支撑，侧向路径不支撑
 ##   对于典型建筑场景（墙体/地板/天花板），差异极小
 ##   对于"浮空平台侧向连接墙壁"等特殊结构，新方案更保守（更多体素可能失稳）
-## 
+##
 ## 返回失稳体素位置集合 {pos: true}
 func find_unsupported_around(removed: Array) -> Dictionary:
 	var _diag_t0 := Time.get_ticks_usec()
-	var voxels_dict: Dictionary = voxels
-	if removed.is_empty() or voxels_dict.is_empty():
+	if removed.is_empty() or _chunk_buffers.is_empty():
 		return {}
 
 	# 确保支撑缓存已构建（首次调用全量构建一次，之后由 set/remove 增量维护）
@@ -917,7 +1023,7 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 		var rp: Vector3i = r
 		for d: Vector3i in UPPER_5:
 			var nb := rp + d
-			if voxels_dict.has(nb):
+			if has_voxel(nb):
 				candidates[nb] = true
 
 	if candidates.is_empty():
@@ -955,7 +1061,7 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 		# 连锁失稳：夺走其 UPPER_5 邻居的一个支撑
 		for d: Vector3i in UPPER_5:
 			var nb := cur + d
-			if voxels_dict.has(nb) and not unstable.has(nb):
+			if has_voxel(nb) and not unstable.has(nb):
 				local_dec[nb] = local_dec.get(nb, 0) + 1
 				stack.append(nb)
 		# 【关键修复】水平邻居：4 个同 Y 层方向
@@ -963,7 +1069,7 @@ func find_unsupported_around(removed: Array) -> Dictionary:
 		# 因为它们不在 removed 的 UPPER_5 范围内，也不在失稳体素的 UPPER_5 范围内
 		for d: Vector3i in HORIZONTAL_4:
 			var nb := cur + d
-			if voxels_dict.has(nb) and not unstable.has(nb):
+			if has_voxel(nb) and not unstable.has(nb):
 				stack.append(nb)
 
 	# 诊断：检查量级较大时打印耗时

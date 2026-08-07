@@ -20,6 +20,10 @@ run/main_scene="uid://dl2c605m5it3r"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="uid://bryfxjjoaavmu"
 
+[autoload]
+
+DevMCP="*res://addons/DEVFramework/MCP/MCPDevServer.gd"
+
 [dev_framework]
 
 mcp/port=8933

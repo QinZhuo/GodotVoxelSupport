@@ -166,7 +166,7 @@ func _process(delta: float) -> void:
 	# 每 60 帧（约1秒）记录一次详细性能日志
 	if _frame_count % 60 == 0 and _perf_log.size() < MAX_PERF_LOG - 10:
 		var mgt := _target.last_mesh_gen_time_ms
-		var vc := _target.data.voxels.size()
+		var vc := _target.data.get_voxel_count()
 		var rebuild_chunks := _target.last_rebuild_chunk_count
 		var total_tris := _target.last_solid_triangles + _target.last_trans_triangles
 		var apply_time := _target.last_apply_time_ms
@@ -273,12 +273,12 @@ func _create_large_structure_data() -> VoxelData:
 	# 地板: y=0, 整个底面
 	for x in range(S.x):
 		for z in range(S.z):
-			data.voxels[Vector3i(x, 0, z)] = concrete.id
+			data.set_voxel(Vector3i(x, 0, z), concrete.id)
 
 	# 天花板: y=S.y-1
 	for x in range(S.x):
 		for z in range(S.z):
-			data.voxels[Vector3i(x, S.y - 1, z)] = metal.id
+			data.set_voxel(Vector3i(x, S.y - 1, z), metal.id)
 
 	# 四周墙壁 (厚度 t)
 	for y in range(1, S.y - 1):
@@ -288,13 +288,13 @@ func _create_large_structure_data() -> VoxelData:
 				var z_pos := thick
 				var z_end := S.z - 1 - thick
 				if z_pos < S.z:
-					data.voxels[Vector3i(x, y, z_pos)] = metal.id
+					data.set_voxel(Vector3i(x, y, z_pos), metal.id)
 				if z_end >= 0 and z_end != z_pos:
-					data.voxels[Vector3i(x, y, z_end)] = metal.id
+					data.set_voxel(Vector3i(x, y, z_end), metal.id)
 		# 左墙 (x=0) 和右墙 (x=S.x-1)
 		for z in range(t, S.z - t):
-			data.voxels[Vector3i(0, y, z)] = metal.id
-			data.voxels[Vector3i(S.x - 1, y, z)] = metal.id
+			data.set_voxel(Vector3i(0, y, z), metal.id)
+			data.set_voxel(Vector3i(S.x - 1, y, z), metal.id)
 
 	# --- 2. 内部楼层地板 ---
 	for floor in range(1, floor_count):
@@ -305,7 +305,7 @@ func _create_large_structure_data() -> VoxelData:
 		for fy in range(floor_y, mini(floor_y + t, S.y - 1)):
 			for x in range(t, S.x - t):
 				for z in range(t, S.z - t):
-					data.voxels[Vector3i(x, fy, z)] = concrete.id
+					data.set_voxel(Vector3i(x, fy, z), concrete.id)
 
 	# --- 3. 内部隔墙 ---
 	if internal_wall_interval > 0:
@@ -323,7 +323,7 @@ func _create_large_structure_data() -> VoxelData:
 							is_floor = true
 							break
 					if not is_floor:
-						data.voxels[Vector3i(wx, y, z)] = accent.id
+						data.set_voxel(Vector3i(wx, y, z), accent.id)
 			# Z 方向隔墙
 			for wz in range(internal_wall_interval, S.z - t, internal_wall_interval):
 				if wz >= S.z - t:
@@ -336,7 +336,7 @@ func _create_large_structure_data() -> VoxelData:
 							is_floor = true
 							break
 					if not is_floor:
-						data.voxels[Vector3i(x, y, wz)] = accent.id
+						data.set_voxel(Vector3i(x, y, wz), accent.id)
 
 	# --- 4. 窗户 (前墙和后墙) ---
 	var win_interval := maxi(15, S.x / 8)
@@ -351,13 +351,13 @@ func _create_large_structure_data() -> VoxelData:
 		# 前墙窗户 (z=0 处)
 		for y in range(win_y_start, win_y_start + win_h):
 			for x in range(wx, wx + win_w):
-				if data.voxels.has(Vector3i(x, y, 0)):
-					data.voxels.erase(Vector3i(x, y, 0))
+				if data.has_voxel(Vector3i(x, y, 0)):
+					data.remove_voxel(Vector3i(x, y, 0))
 		# 后墙窗户 (z=S.z-1 处)
 		for y in range(win_y_start, win_y_start + win_h):
 			for x in range(wx, wx + win_w):
-				if data.voxels.has(Vector3i(x, y, S.z - 1)):
-					data.voxels.erase(Vector3i(x, y, S.z - 1))
+				if data.has_voxel(Vector3i(x, y, S.z - 1)):
+					data.remove_voxel(Vector3i(x, y, S.z - 1))
 
 	# --- 5. 门洞 (前墙底部) ---
 	var door_w := 6
@@ -365,16 +365,16 @@ func _create_large_structure_data() -> VoxelData:
 	var door_x := S.x / 2 - door_w / 2
 	for y in range(0, door_h):
 		for x in range(door_x, door_x + door_w):
-			data.voxels.erase(Vector3i(x, y, 0))
+			data.remove_voxel(Vector3i(x, y, 0))
 
 	# 侧墙门洞
 	for y in range(0, door_h):
 		for z in range(S.z / 2 - door_w / 2, S.z / 2 + door_w / 2):
-			data.voxels.erase(Vector3i(0, y, z))
-			data.voxels.erase(Vector3i(S.x - 1, y, z))
+			data.remove_voxel(Vector3i(0, y, z))
+			data.remove_voxel(Vector3i(S.x - 1, y, z))
 
 	_perf_log.append("[生成] 结构尺寸: %dx%dx%d = ~%d 体素" % [S.x, S.y, S.z, S.x * S.y * S.z])
-	_perf_log.append("[生成] 实际体素数: %d" % data.voxels.size())
+	_perf_log.append("[生成] 实际体素数: %d" % data.get_voxel_count())
 
 	return data
 
@@ -495,7 +495,7 @@ func _handle_input(_delta: float) -> void:
 	# S/L: 存档/读档
 	if key_s and not _prev_s:
 		_saved_data = _target.data.save_data()
-		_log_perf_line("存档 (%d 体素)" % _target.data.voxels.size())
+		_log_perf_line("存档 (%d 体素)" % _target.data.get_voxel_count())
 	if key_l and not _prev_l and _saved_data != null:
 		_target.damage_map.clear()
 		_target.data.load_data(_saved_data)
@@ -615,7 +615,7 @@ func _update_hud() -> void:
 		if _mesh_gen_times.size() > 200:
 			_mesh_gen_times.pop_front()
 
-	var vc := _target.data.voxels.size()
+	var vc := _target.data.get_voxel_count()
 	if _voxel_counts.is_empty() or vc != _voxel_counts.back():
 		_voxel_counts.append(vc)
 		if _voxel_counts.size() > 200:
