@@ -126,6 +126,11 @@ var _chunk_arrays_cache: Dictionary = {}
 var _dirty_superchunks: Dictionary = {}
 # 超级块合并期间需要清理的空超级块（全空则移除节点）
 var _empty_superchunks: Dictionary = {}
+# 超级块重建限流：_rebuild_dirty_superchunks 由同步调用改为入队，_process 帧尾限量执行，
+# 纳入 GPU 忙检测（add_surface_from_arrays 同步上传，避免破坏时整块重建造成 Metal fence 超时）
+var _superchunk_rebuild_scheduled: bool = false
+# 每帧最多重建的超级块数
+var _superchunk_rebuild_per_frame: int = 1
 
 # 异步网格生成状态（多任务并行，每个任务独立处理）
 var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
@@ -680,11 +685,11 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			has_voxels_in_data = data.has_chunk(chunk_key)
 			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
 
-		# 超级块合并模式：chunk 数据存入缓存，标记超级块为脏，统一合并重建
+		# 超级块合并模式：chunk 数据存入缓存，标记超级块为脏，帧尾限量重建
 		if superchunk_size > 0:
 			_store_chunk_array(chunk_key, arr if (arr is Dictionary and not arr.is_empty() and has_voxels_in_data) else {})
 			_mark_superchunk_dirty(chunk_key)
-			_rebuild_dirty_superchunks()
+			_schedule_superchunk_rebuild()
 			_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
 			return
 
@@ -834,22 +839,49 @@ func _mark_superchunk_dirty(ck: Vector3i) -> void:
 	_dirty_superchunks[sk] = true
 
 
-## 重建所有脏超级块：把组内各 chunk 数组合并为一个 ArrayMesh 并挂载
-## 在主线程调用（异步结果应用时），只处理被标记的超级块，避免全量合并
-func _rebuild_dirty_superchunks() -> void:
+## 排期超级块重建（入队）：把当前脏超级块集合登记，帧尾限量重建。
+## 取代原同步 _rebuild_dirty_superchunks（破坏时整块 add_surface_from_arrays 同步 GPU 上传
+## 会造成 Metal fence 超时），改为帧尾限量 + GPU 忙检测。
+func _schedule_superchunk_rebuild() -> void:
 	if _dirty_superchunks.is_empty():
 		return
-	var t0 := Time.get_ticks_usec()
-	var dirty := _dirty_superchunks.keys()
-	_dirty_superchunks.clear()
+	if not _superchunk_rebuild_scheduled:
+		_superchunk_rebuild_scheduled = true
+		call_deferred("_process_superchunk_rebuild_queue")
 
+
+## 帧尾限量重建脏超级块（GPU 忙感知）
+## 与 chunk 构建队列（_process_mesh_build_queue）同一套节流思路：
+## 每帧限量 + 忙时暂停，避免一帧大量 ArrayMesh 上传造成 Metal fence 超时
+func _process_superchunk_rebuild_queue() -> void:
+	_superchunk_rebuild_scheduled = false
+	if _dirty_superchunks.is_empty():
+		return
+	# GPU 忙检测：忙时暂停，下帧 _process 会重新排期（scheduled 已置 false）
+	if _last_frame_delta > _gpu_busy_threshold_ms / 1000.0:
+		if diag_enabled:
+			print("[诊断] GPU忙(帧%.1fms), 暂停超级块重建" % (_last_frame_delta * 1000.0))
+		return
+	var t0 := Time.get_ticks_usec()
+	var rebuilt := 0
+	var dirty := _dirty_superchunks.keys()
 	for sk in dirty:
+		if rebuilt >= _superchunk_rebuild_per_frame:
+			break
+		_dirty_superchunks.erase(sk)
 		var sck: Vector3i = sk
 		var merged := _merge_superchunk_arrays(sck)
 		_apply_superchunk_mesh(sck, merged)
-
-	if diag_enabled:
-		print("[诊断] 超级块合并: %d 块, 耗时 %.2f ms" % [dirty.size(), (Time.get_ticks_usec() - t0) / 1000.0])
+		rebuilt += 1
+		# 自适应：单块合并耗时高时提前停止（合并涉及大量顶点拷贝）
+		if (Time.get_ticks_usec() - t0) / 1000.0 > 3.0:
+			break
+	# 还有剩余：下帧继续
+	if not _dirty_superchunks.is_empty():
+		_superchunk_rebuild_scheduled = true
+		call_deferred("_process_superchunk_rebuild_queue")
+	if diag_enabled and rebuilt > 0:
+		print("[诊断] 超级块合并: %d 块, 耗时%.2f ms, 剩余%d" % [rebuilt, (Time.get_ticks_usec() - t0) / 1000.0, _dirty_superchunks.size()])
 
 
 ## 合并超级块内所有 chunk 的网格数组为单个数组集
@@ -979,7 +1011,7 @@ func _prune_superchunk_cache(rebuilt: Dictionary) -> void:
 		var sk := _superchunk_key_of(ck)
 		_dirty_superchunks[sk] = true
 	if not to_prune.is_empty():
-		_rebuild_dirty_superchunks()
+		_schedule_superchunk_rebuild()
 
 
 ## 批次完成清理：当所有任务都完成后执行
@@ -1164,7 +1196,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 			else:
 				_chunk_arrays_cache.erase(ck3)
 			_mark_superchunk_dirty(ck3)
-		_rebuild_dirty_superchunks()
+		_schedule_superchunk_rebuild()
 		# 清空不再存在的 chunk 缓存（重建列表外的）
 		_prune_superchunk_cache(chunk_arrays)
 		last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0

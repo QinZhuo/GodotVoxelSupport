@@ -43,7 +43,7 @@ extends Node
 
 ## 超级块合并渲染（0=关闭=每chunk独立mesh；4=每4³=64chunk合并为一个mesh，draw call 大减）
 ## 注意：合并后 GPU 视锥剔除粒度变粗，环绕相机时可能更慢；适合超大型静态世界/移动端
-@export var superchunk_size: int = 0
+@export var superchunk_size: int = 4
 
 ## 可选的数据源
 @export var voxel_data_source: VoxelData:
