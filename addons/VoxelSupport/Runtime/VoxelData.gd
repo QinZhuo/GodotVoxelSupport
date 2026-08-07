@@ -38,17 +38,13 @@ extends Resource
 ## 调用 clear_dirty_voxels() 清空
 var dirty_voxels: Dictionary[Vector3i, int] = {}
 
-## Chunk 大小（与 VoxelChunkGenerator 保持一致）
-const CHUNK_SIZE := 16
-const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-## 单个 z 切片面积（线性化步长：x + y*CS + z*CHUNK_SLICE）
-const CHUNK_SLICE := CHUNK_SIZE * CHUNK_SIZE
-
-## 外缘层数（网格生成时跨界面的面可见性需要紧邻体素）
-const HALO := 1
-## 含外缘的光环缓冲边长（18）
-const HALO_SIZE := CHUNK_SIZE + HALO * 2
-const HALO_VOLUME := HALO_SIZE * HALO_SIZE * HALO_SIZE
+## Chunk 几何常量唯一权威源见 VoxelChunk，此处全部派生别名防止漂移
+const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
+const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
+const CHUNK_SLICE := VoxelChunk.CHUNK_SLICE
+const HALO := VoxelChunk.HALO
+const HALO_SIZE := VoxelChunk.HALO_SIZE
+const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 
 ## chunk key -> 密集缓冲 (PackedInt32Array, 16³)。值 = 材质ID + 1，0 = 空。
 ## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
@@ -154,25 +150,17 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: b
 
 ## 体素坐标 → chunk key（floori 向下取整，正确处理负坐标）
 static func _chunk_of(pos: Vector3i) -> Vector3i:
-	return Vector3i(
-		floori(float(pos.x) / float(CHUNK_SIZE)),
-		floori(float(pos.y) / float(CHUNK_SIZE)),
-		floori(float(pos.z) / float(CHUNK_SIZE))
-	)
+	return VoxelChunk.chunk_of(pos)
 
 
 ## chunk 内局部坐标 → 缓冲下标（线性化：x + y*CS + z*CS²，覆盖 0..CHUNK_VOLUME-1）
 static func _buf_index(local: Vector3i) -> int:
-	return local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SLICE
+	return VoxelChunk.buf_index(local.x, local.y, local.z)
 
 
 ## 缓冲下标 → chunk 内局部坐标
 static func _local_from_index(i: int) -> Vector3i:
-	return Vector3i(
-		i % CHUNK_SIZE,
-		(i / CHUNK_SIZE) % CHUNK_SIZE,
-		i / CHUNK_SLICE
-	)
+	return VoxelChunk.local_from_index(i)
 
 
 ## 写入体素缓冲（核心原语）。不追踪 dirty_voxels / 不触发信号（由调用方处理）。
@@ -247,9 +235,9 @@ func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 					maxi(origin.y - HALO, n_origin.y),
 					maxi(origin.z - HALO, n_origin.z))
 				var hi := Vector3i(
-					mini(origin.x + CHUNK_SIZE, n_origin.x + CHUNK_SIZE),
-					mini(origin.y + CHUNK_SIZE, n_origin.y + CHUNK_SIZE),
-					mini(origin.z + CHUNK_SIZE, n_origin.z + CHUNK_SIZE)) - Vector3i.ONE
+					mini(origin.x + CHUNK_SIZE + HALO, n_origin.x + CHUNK_SIZE),
+					mini(origin.y + CHUNK_SIZE + HALO, n_origin.y + CHUNK_SIZE),
+					mini(origin.z + CHUNK_SIZE + HALO, n_origin.z + CHUNK_SIZE)) - Vector3i.ONE
 				if lo.x > hi.x or lo.y > hi.y or lo.z > hi.z:
 					continue
 				for pz in range(lo.z, hi.z + 1):

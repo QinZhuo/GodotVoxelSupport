@@ -8,13 +8,13 @@ class_name VoxelChunkGenerator
 ## 对大型动态场景（如水模拟、地形编辑）性能提升显著。
 
 ## 单个 chunk 的边长（体素个数），chunk 越大网格合并效率越高但增量重建粒度越粗
-const CHUNK_SIZE := 16
-const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-## 外缘层数（跨界面的面可见性需要紧邻体素），与 VoxelData.HALO 一致
-const HALO := 1
-## 含外缘的光环缓冲边长（18）
-const HALO_SIZE := CHUNK_SIZE + HALO * 2
-const HALO_VOLUME := HALO_SIZE * HALO_SIZE * HALO_SIZE
+## Chunk 几何常量唯一权威源见 VoxelChunk，此处全部派生别名防止漂移
+const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
+const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
+const CHUNK_SLICE := VoxelChunk.CHUNK_SLICE
+const HALO := VoxelChunk.HALO
+const HALO_SIZE := VoxelChunk.HALO_SIZE
+const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 
 # 6 个面在光环缓冲中的邻居下标偏移（对应 FaceTool.Normals 顺序）
 # 光环下标 = x + y*HALO_SIZE + z*HALO_SIZE*HALO_SIZE，故 ±X=±1, ±Y=±HS, ±Z=±HS²
@@ -279,10 +279,7 @@ static func _add_chunk(ck: Vector3i, chunk_keys: Array, added: Dictionary) -> vo
 # ----------------------------------------------------------------------------
 
 static func _chunk_of(pos: Vector3i) -> Vector3i:
-	var fx := float(pos.x) / float(CHUNK_SIZE)
-	var fy := float(pos.y) / float(CHUNK_SIZE)
-	var fz := float(pos.z) / float(CHUNK_SIZE)
-	return Vector3i(floori(fx), floori(fy), floori(fz))
+	return VoxelChunk.chunk_of(pos)
 
 
 ## 一次遍历 voxels，建立"非空 chunk"的哈希索引 (chunk -> true)
@@ -341,7 +338,7 @@ static func _halo_from_dict(voxels: Dictionary, chunk: Vector3i) -> PackedInt32A
 				var p := origin + Vector3i(x - HALO, y - HALO, z - HALO)
 				var v: int = voxels.get(p, -1)
 				if v >= 0:
-					halo[x + y * HALO_SIZE + z * HALO_SIZE * HALO_SIZE] = v + 1
+					halo[VoxelChunk.halo_index(x, y, z)] = v + 1
 	return halo
 
 
@@ -454,7 +451,7 @@ static func _axis_val(x: int, y: int, z: int, axis: int) -> int:
 ## 新建一个 16×16 密集切面网格（全 0，行优先，下标 = u + v*CHUNK_SIZE）
 static func _new_slice_grid() -> PackedInt32Array:
 	var g := PackedInt32Array()
-	g.resize(CHUNK_SIZE * CHUNK_SIZE)
+	g.resize(CHUNK_SLICE)
 	return g
 
 
