@@ -143,6 +143,22 @@ var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 # Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
 var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 
+# GPU 上传限流队列：异步结果先缓存数组数据，_process 帧尾批量构建 mesh（平滑 GPU 上传，
+# 避免连续破坏时一帧大量 ArrayMesh 创建导致 Metal fence 超时）
+# key: chunk_key -> {arrays: Dictionary, has_voxels: bool}
+var _mesh_build_queue: Dictionary = {}
+# 每帧最多构建的 chunk 数（GPU 上传限流）
+var _mesh_build_per_frame: int = 2
+# 帧尾构建是否已排期（防重复 call_deferred）
+var _mesh_build_scheduled: bool = false
+# GPU 忙检测：上一帧渲染耗时超过此阈值(ms)时暂停本帧构建，避免 ArrayMesh
+# add_surface_from_arrays 的同步 GPU 上传在 GPU 满载时 Metal fence wait() 超时
+var _gpu_busy_threshold_ms: float = 25.0
+# 上一帧 _delta（秒），GPU 忙检测用（帧耗时大 = GPU/渲染压力高）
+var _last_frame_delta: float = 0.0
+# 是否已开启 render time 测量（需 _ready 中调用一次 viewport_set_measure_render_time）
+var _measure_render_time_enabled: bool = false
+
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
 
@@ -183,9 +199,15 @@ const _COLLISION_BODY_NAME := "_VoxelRendererCollision"
 
 func _ready() -> void:
 	_request_update()
+	# 开启 viewport render time 测量，供 GPU 忙检测使用（_process_mesh_build_queue 用）
+	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
+	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
+	_measure_render_time_enabled = false
 
 
 func _process(_delta: float) -> void:
+	# 记录上一帧耗时，供 GPU 忙检测使用（_process_mesh_build_queue）
+	_last_frame_delta = _delta
 	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
 	# 这里只处理限流和启动新任务
 
@@ -195,6 +217,12 @@ func _process(_delta: float) -> void:
 		_cull_check_counter = 0
 		if _pending_task_count == 0:
 			_process_deferred_chunks()
+
+	# GPU 上传限流：帧尾批量构建队列中的 chunk mesh（避免与渲染/崩塌竞争 GPU）
+	# call_deferred 确保在帧末尾执行（本帧渲染已提交），且队列处理不阻塞主循环
+	if not _mesh_build_queue.is_empty() and not _mesh_build_scheduled:
+		_mesh_build_scheduled = true
+		call_deferred("_process_mesh_build_queue")
 
 	# 延迟批次完成：全部异步任务完成后，在下一帧处理剩余收尾逻辑，避免主线程尖峰
 	if _batch_complete_pending:
@@ -660,47 +688,12 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
 			return
 
-		# 获取或创建该 chunk 的子 MeshInstance3D
-		var chunk_mesh: MeshInstance3D
-		if _chunk_meshes.has(chunk_key):
-			chunk_mesh = _chunk_meshes[chunk_key]
-		else:
-			chunk_mesh = MeshInstance3D.new()
-			chunk_mesh.name = "Chunk_%d_%d_%d" % [chunk_key.x, chunk_key.y, chunk_key.z]
-			add_child(chunk_mesh)
-			_chunk_meshes[chunk_key] = chunk_mesh
-
-		# 构建或清空 mesh，同时清理空 chunk 节点防止累积
-		var has_mesh := false
-		if arr is Dictionary and not arr.is_empty() and has_voxels_in_data:
-			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr as Dictionary)
-			if new_mesh and _materials_cache.size() >= 2:
-				if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
-					new_mesh.surface_set_material(0, _materials_cache[0])
-				if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
-					new_mesh.surface_set_material(1, _materials_cache[1])
-			chunk_mesh.mesh = new_mesh
-			has_mesh = new_mesh != null
-		elif not has_voxels_in_data:
-			# chunk 已无体素，清除 mesh 并移除节点防止累积
-			chunk_mesh.mesh = null
-			chunk_mesh.queue_free()
-			_chunk_meshes.erase(chunk_key)
-		else:
-			# has_voxels_in_data 为 true 但 arr 为空（竞态：生成后体素被重新添加）
-			# 保留已有 mesh，等待下一帧重建
-			has_mesh = chunk_mesh.mesh != null
-
-		# Per-chunk 碰撞体：
-		# - 有体素数据时按正常流程更新
-		# - 节点已被清理时直接移除碰撞体
-		if has_voxels_in_data or _chunk_meshes.has(chunk_key):
-			chunk_mesh.position = Vector3(chunk_key) * (voxel_scale * VoxelChunkGenerator.CHUNK_SIZE)
-			_update_chunk_collision(chunk_key, has_mesh)
-		else:
-			_remove_chunk_collision(chunk_key)
-
-		# 记录性能
+		# 非超级块模式：入队待构建（GPU 上传限流，_process 每帧批量处理）
+		# 避免连续破坏时一帧大量 ArrayMesh 创建 + GPU 上传 → Metal fence 超时
+		_mesh_build_queue[chunk_key] = {
+			"arrays": arr if (arr is Dictionary and not arr.is_empty() and has_voxels_in_data) else {},
+			"has_voxels": has_voxels_in_data,
+		}
 		_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
 	else:
 		# 全量结果（来自 _generate_worker，初始全量构建或非 chunk 模式）
@@ -723,6 +716,94 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 	var _t_apply_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
 	if diag_enabled and _t_apply_ms > 1.0 and chunk_key.x != -999:
 		print("[诊断] _apply_single_chunk_result: Chunk%s, get_chunk=%.2fms, 总=%.2fms" % [chunk_key, _t_get_chunk, _t_apply_ms])
+
+
+# GPU 上传限流（批量构建队列）
+# 用 call_deferred 在帧尾执行，避开渲染循环内的 GPU 竞争；每帧限量构建。
+
+## 每帧从构建队列取一批 chunk 构建 mesh（GPU 上传限流）。
+## 连续破坏时大量异步结果回主线程，若每帧全部立即 build_mesh_from_arrays（同步 GPU 上传），
+## Metal 驱动 fence 等待会超时。改为帧尾限量构建，把 GPU 上传摊平到多帧。
+func _process_mesh_build_queue() -> void:
+	_mesh_build_scheduled = false
+	if _mesh_build_queue.is_empty():
+		return
+
+	# GPU 忙检测：上一帧渲染耗时（_delta）过高时暂停本帧构建，把同步 GPU 上传（ArrayMesh
+	# add_surface_from_arrays → Metal fence wait）避开 GPU 满载时刻，消除 wait() 超时。
+	# 用帧时长而非 RenderingServer 测量 API（后者在部分驱动上返回 0 不可靠）。
+	# 注意：忙时不 call_deferred 自续排（会与 _process 的排期叠加成 call_deferred 堆积，
+	# 导致消息队列爆炸 → 进程退出），只清空 scheduled 标记，让 _process 下一帧自然重新排期。
+	if _last_frame_delta > _gpu_busy_threshold_ms / 1000.0:
+		# GPU 忙：本帧不构建，下帧 _process 会重新排期（scheduled 已置 false）
+		if diag_enabled:
+			print("[诊断] GPU忙(帧%.1fms), 暂停mesh构建" % (_last_frame_delta * 1000.0))
+		return
+
+	var t0 := Time.get_ticks_usec()
+	var built := 0
+	var keys := _mesh_build_queue.keys()
+	# 优先处理已有 mesh 的 chunk（保证破坏面及时更新），再处理新 chunk
+	keys.sort_custom(func(a, b):
+		return _chunk_meshes.has(a) and not _chunk_meshes.has(b))
+	for ck in keys:
+		if built >= _mesh_build_per_frame:
+			break
+		var entry: Dictionary = _mesh_build_queue[ck]
+		_mesh_build_queue.erase(ck)
+		_apply_built_chunk(ck, entry)
+		built += 1
+		# 自适应：若本帧构建已超 3ms，提前停止避免帧尖峰
+		if (Time.get_ticks_usec() - t0) / 1000.0 > 3.0:
+			break
+	# 若还有剩余，下帧继续
+	if not _mesh_build_queue.is_empty():
+		_mesh_build_scheduled = true
+		call_deferred("_process_mesh_build_queue")
+	if diag_enabled and built > 0:
+		print("[诊断] GPU上传批处理: %d chunk, 耗时%.2f ms, 剩余%d" % [
+			built, (Time.get_ticks_usec() - t0) / 1000.0, _mesh_build_queue.size()])
+
+
+## 应用单个待构建 chunk（构建 mesh + 挂载节点 + 更新碰撞）
+func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
+	var arr: Dictionary = entry["arrays"]
+	var has_voxels_in_data: bool = entry["has_voxels"]
+
+	# 获取或创建该 chunk 的子 MeshInstance3D
+	var chunk_mesh: MeshInstance3D
+	if _chunk_meshes.has(chunk_key):
+		chunk_mesh = _chunk_meshes[chunk_key]
+	else:
+		chunk_mesh = MeshInstance3D.new()
+		chunk_mesh.name = "Chunk_%d_%d_%d" % [chunk_key.x, chunk_key.y, chunk_key.z]
+		add_child(chunk_mesh)
+		_chunk_meshes[chunk_key] = chunk_mesh
+
+	var has_mesh := false
+	if not arr.is_empty() and has_voxels_in_data:
+		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
+		if new_mesh and _materials_cache.size() >= 2:
+			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
+				new_mesh.surface_set_material(0, _materials_cache[0])
+			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
+				new_mesh.surface_set_material(1, _materials_cache[1])
+		chunk_mesh.mesh = new_mesh
+		has_mesh = new_mesh != null
+	elif not has_voxels_in_data:
+		# chunk 已无体素，清除 mesh 并移除节点防止累积
+		chunk_mesh.mesh = null
+		chunk_mesh.queue_free()
+		_chunk_meshes.erase(chunk_key)
+	else:
+		# 竞态：生成后体素被重新添加，保留已有 mesh
+		has_mesh = chunk_mesh.mesh != null
+
+	if has_voxels_in_data or _chunk_meshes.has(chunk_key):
+		chunk_mesh.position = Vector3(chunk_key) * (voxel_scale * VoxelChunkGenerator.CHUNK_SIZE)
+		_update_chunk_collision(chunk_key, has_mesh)
+	else:
+		_remove_chunk_collision(chunk_key)
 
 
 # ----------------------------------------------------------------------------
@@ -1051,6 +1132,7 @@ func _clear_collision() -> void:
 ## 清理所有 chunk 子 MeshInstance3D 及关联碰撞体
 func _clear_chunk_meshes() -> void:
 	_deferred_chunks.clear()
+	_mesh_build_queue.clear()
 	_clear_superchunk_state()
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()

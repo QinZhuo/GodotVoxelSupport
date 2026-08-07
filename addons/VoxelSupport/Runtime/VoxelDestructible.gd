@@ -101,6 +101,10 @@ var _cascade_total: Array = []            # 所有级联累积的失稳体素
 ## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
 const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 
+## 单个掉落体最大体素数：超大崩塌（数万体素）会被拆分为多个掉落体，
+## 避免单块 ArrayMesh 一次性上传超大 buffer → Metal fence wait() 超时
+const MAX_FALLING_GROUP_VOXELS: int = 4096
+
 ## 掉落块分档阈值（按体素数自动选择表现方式）：
 ##   <= debris_threshold（32）           → GPU 粒子破碎（零物理开销，视觉自然）
 ##   <= box_threshold（256）             → BoxShape3D 包围盒碰撞（物理开销低，中小块够用）
@@ -132,6 +136,21 @@ var _chunk_spawn_times: Dictionary = {}
 var _body_pool: Array[RigidBody3D] = []
 ## 池中所有已创建的 RigidBody3D（含使用中），用于池容量管理
 var _body_pool_total: Array[RigidBody3D] = []
+
+## 待生成掉落体队列：大面积崩塌时超出单帧上限的物理组暂存于此，
+## 由 _process 每帧限量生成，把 GPU/物理负载摊平到多帧（消除 Metal fence 洪峰）
+var _pending_falling_groups: Array = []
+var _pending_falling_materials: Array[Dictionary] = []
+## 每帧最多从待生成队列生成多少个掉落体（与 MAX_FALLING_CHUNKS_PER_FRAME 一致）
+var _pending_build_per_frame: int = 10
+
+## 掉落体 mesh 结果队列：后台线程生成完 arrays 后，若 GPU 忙则暂存于此，
+## 由 _process 帧尾限量组装 ArrayMesh（add_surface_from_arrays 同步 GPU 上传，
+## 避免 GPU 满载时 Metal fence wait() 超时）。元素: {body, arrays, local_voxels}
+var _pending_mesh_results: Array[Dictionary] = []
+## 每帧最多组装的掉落体 mesh 数
+var _mesh_apply_per_frame: int = 2
+## GPU 忙检测与阈值继承自父类 VoxelRenderer（_measure_render_time_enabled / _gpu_busy_threshold_ms）
 
 const _DEBRIS_ROOT_NAME := "_VoxelDebris"
 
@@ -487,21 +506,93 @@ func _spawn_falling_chunks_from_groups(groups: Array, group_materials: Array[Dic
 			physics_materials.append(group_materials[i])
 
 	# 大块：物理体（受单帧上限和池容量约束）
+	# 超大组先按空间拆分（避免单个 ArrayMesh 上传超大 buffer → Metal fence 超时），
+	# 超出单帧上限的组**跨帧排队**生成（而非同帧转粒子 → 避免 GPU/物理洪峰）
+	var physics_groups_split: Array = []
+	var physics_materials_split: Array[Dictionary] = []
 	for i in range(physics_groups.size()):
+		var split_groups := _split_oversized_group(physics_groups[i])
+		if split_groups.size() == 1:
+			physics_groups_split.append(split_groups[0])
+			physics_materials_split.append(physics_materials[i])
+		else:
+			# 按子组切分材质映射
+			for sg in split_groups:
+				var sub_mat: Dictionary = {}
+				for pos in sg:
+					sub_mat[pos] = physics_materials[i].get(pos, 0)
+				physics_groups_split.append(sg)
+				physics_materials_split.append(sub_mat)
+
+	var leftover: Array = []
+	var leftover_mats: Array[Dictionary] = []
+	for i in range(physics_groups_split.size()):
 		if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-			# 超出单帧上限的组用粒子代替
-			var remaining: Array = []
-			for j in range(i, physics_groups.size()):
-				remaining.append_array(physics_groups[j])
-			if not remaining.is_empty():
-				var remaining_mat_map: Dictionary = {}
-				for pos in remaining:
-					remaining_mat_map[pos] = data.get_voxel(pos) if data.has_voxel(pos) else _find_original_mat(pos, physics_materials, i)
-				_spawn_debris_with_materials(remaining, remaining_mat_map, true)
-			break
-		_spawn_falling_chunk(physics_groups[i], physics_materials[i])
-		spawned_count += 1
+			# 排到待生成队列，由 _process 每帧限量继续生成
+			leftover.append(physics_groups_split[i])
+			leftover_mats.append(physics_materials_split[i])
+		else:
+			_spawn_falling_chunk(physics_groups_split[i], physics_materials_split[i])
+			spawned_count += 1
+	if not leftover.is_empty():
+		_pending_falling_groups.append_array(leftover)
+		_pending_falling_materials.append_array(leftover_mats)
 	return spawned_count
+
+
+## 超大掉落体组分拆：单组体素数超过 MAX_FALLING_GROUP_VOXELS 时按空间切片拆为多个子组，
+## 每个子组生成独立掉落体（mesh 上传量受控，物理分布更自然）。
+## 返回子组数组；未超限时返回含原组的单元素数组。
+func _split_oversized_group(group: Array) -> Array:
+	if group.size() <= MAX_FALLING_GROUP_VOXELS:
+		return [group]
+	# 计算包围盒，选择最长轴做切片，尽量保持子组空间紧凑
+	var min_p := Vector3i(group[0])
+	var max_p := min_p
+	for pos in group:
+		var p: Vector3i = pos
+		min_p = Vector3i(mini(min_p.x, p.x), mini(min_p.y, p.y), mini(min_p.z, p.z))
+		max_p = Vector3i(maxi(max_p.x, p.x), maxi(max_p.y, p.y), maxi(max_p.z, p.z))
+	# 找到最长轴
+	var ext := max_p - min_p
+	var axis := 0
+	if ext.y > ext.x:
+		axis = 1
+	if ext.z > ext[axis]:
+		axis = 2
+	# 沿最长轴切成 ceil(size/MAX) 段，体素按坐标分桶
+	var range_len := maxf(ext[axis] + 1, 1.0)
+	var segments := ceili(group.size() / float(MAX_FALLING_GROUP_VOXELS))
+	var buckets: Array = []
+	buckets.resize(segments)
+	for i in segments:
+		buckets[i] = []
+	for pos in group:
+		var p: Vector3i = pos
+		var t := (p[axis] - min_p[axis]) / range_len
+		var idx := mini(int(t * segments), segments - 1)
+		buckets[idx].append(pos)
+	# 去掉空桶
+	var result: Array = []
+	for b in buckets:
+		if not (b as Array).is_empty():
+			result.append(b)
+	return result
+
+
+## 每帧从待生成队列限量生成掉落体（把大面积崩塌的 GPU/物理负载摊平到多帧）
+## 由 VoxelDestructible._process 帧尾调用
+func _process_pending_falling_groups() -> void:
+	if _pending_falling_groups.is_empty():
+		return
+	var count := 0
+	while not _pending_falling_groups.is_empty() and count < _pending_build_per_frame:
+		var group: Array = _pending_falling_groups.pop_front() as Array
+		var mat_map: Dictionary = _pending_falling_materials.pop_front() as Dictionary
+		_spawn_falling_chunk(group, mat_map)
+		count += 1
+	if diag_enabled and count > 0:
+		print("[诊断] 待生成掉落体: 本帧生成%d, 剩余%d" % [count, _pending_falling_groups.size()])
 
 
 ## 全场景级联崩塌检测（同步完成所有层级）
@@ -707,16 +798,57 @@ func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scal
 	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels)
 
 
-## 主线程：把后台生成的数组组装为 ArrayMesh 并挂载到掉落块
-## 碰撞方案按块体素数自动选择：
-##   <= box_threshold（64）→ BoxShape3D 包围盒（物理开销低，中小块够用）
-##   >  box_threshold（64）→ ConvexPolygonShape3D 凸包（贴合大块轮廓）
+## 掉落体 mesh 组装入口（GPU 忙感知）：
+## GPU 空闲时立即组装 ArrayMesh；GPU 满载时结果入队，由 _process 帧尾限量组装，
+## 避免 add_surface_from_arrays 的同步 GPU 上传在 Metal 满载时 fence wait() 超时
 func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
 		return
-	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
+	if _is_gpu_busy():
+		_pending_mesh_results.append({
+			"body": body, "arrays": arrays as Dictionary, "local_voxels": local_voxels,
+		})
+		return
+	_apply_falling_chunk_mesh(body, arrays as Dictionary, local_voxels)
+
+
+## GPU 忙检测：上一帧渲染耗时（_delta）是否超过阈值
+## 用帧时长而非 RenderingServer 测量 API（部分驱动返回 0 不可靠）
+func _is_gpu_busy() -> bool:
+	return _last_frame_delta > _gpu_busy_threshold_ms / 1000.0
+
+
+## 每帧从队列限量组装掉落体 mesh（GPU 忙时积压的结果）
+## 由 VoxelDestructible._process 帧尾调用
+func _process_pending_mesh_results() -> void:
+	if _pending_mesh_results.is_empty():
+		return
+	# 组装前先确认 GPU 已恢复：仍忙则继续等（积压不丢数据）
+	if _is_gpu_busy():
+		return
+	var count := 0
+	while not _pending_mesh_results.is_empty() and count < _mesh_apply_per_frame:
+		var entry: Dictionary = _pending_mesh_results.pop_front()
+		var body: RigidBody3D = entry.get("body")
+		if body != null and is_instance_valid(body) and not body.is_queued_for_deletion():
+			_apply_falling_chunk_mesh(body, entry.get("arrays"), entry.get("local_voxels", {}))
+			count += 1
+	if diag_enabled and count > 0:
+		print("[诊断] 掉落体mesh组装: 本帧%d, 剩余%d" % [count, _pending_mesh_results.size()])
+
+
+## 主线程：把后台生成的数组组装为 ArrayMesh 并挂载到掉落块
+## 碰撞方案按块体素数自动选择：
+##   <= box_threshold（64）→ BoxShape3D 包围盒（物理开销低，中小块够用）
+##   >  box_threshold（64）→ ConvexPolygonShape3D 凸包（贴合大块轮廓）
+func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxels: Dictionary = {}) -> void:
+	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
+		return
+	if arrays == null or arrays.is_empty():
+		return
+	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays)
 	if mesh == null:
 		return
 	var chunk_materials := _get_cached_chunk_materials()
@@ -1255,6 +1387,11 @@ func _process(_delta: float) -> void:
 
 	# 处理普通破坏批次（每帧一个）
 	_process_destruction_pipeline()
+
+	# 帧尾：从待生成队列限量生成掉落体（摊平大面积崩塌的 GPU/物理负载）
+	_process_pending_falling_groups()
+	# 帧尾：GPU 忙时积压的掉落体 mesh 限量组装（add_surface_from_arrays 同步 GPU 上传）
+	_process_pending_mesh_results()
 
 # 定期检测掉落块：按时间间隔（约 1 秒）冻结静止块 + 生命周期清理（上限/超时）。
 	# 用累计时间而非固定帧数，避免帧率下降时清理频率同步下降的恶性循环。
