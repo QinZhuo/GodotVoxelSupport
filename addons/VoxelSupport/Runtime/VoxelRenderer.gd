@@ -298,7 +298,11 @@ func _update_mesh_async() -> void:
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
 	if use_chunk_generator:
-		# chunk 模式：每个任务只处理一个 chunk，为其提取私有的密集光环快照
+		# chunk 模式：每个任务只处理一个 chunk。
+		# 优化（移走主线程 halo 提取）：主线程只做一次"受影响区域"的 chunk 缓冲
+		# 深拷贝快照（引擎级 memcpy，微秒级），各子线程 worker 再从快照构建自己的
+		# 18³ halo。相比旧方案主线程逐 chunk 调用 get_chunk_halo（GDScript 循环，
+		# ~0.9ms/chunk，全量构建时主线程阻塞秒级），大幅降低主线程阻塞。
 		# 单任务路径（全量/空场景）仅当没有可拆分 chunk 时兜底使用，需要完整体素
 		if rebuild_chunks.is_empty():
 			# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
@@ -312,20 +316,20 @@ func _update_mesh_async() -> void:
 			else:
 				if diag_enabled:
 					print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
+				var snapshot: Dictionary = data.snapshot_chunks_halo(all_chunks)
 				_pending_task_count = all_chunks.size()
 				for ck in all_chunks:
-					var halo := data.get_chunk_halo(ck)
 					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-						halo, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+						snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
 			if diag_enabled:
 				print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
+			var snapshot: Dictionary = data.snapshot_chunks_halo(rebuild_chunks)
 			_pending_task_count = rebuild_chunks.size()
 			for ck in rebuild_chunks:
-				var halo := data.get_chunk_halo(ck)
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-					halo, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+					snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 	else:
 		# 单任务路径（非 chunk 模式）：需要整个世界体素，做一次字典快照
 		_pending_task_count = 1
@@ -433,13 +437,16 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 ## 单 chunk 工作线程入口：每个脏 chunk 独立一个线程任务，真正并行处理
 ## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
-## halo 为 VoxelData.get_chunk_halo 的 18³ 密集快照（独立深拷贝，无数据竞态）
+## buffers 为主线程派发时一次性构建的"受影响区域"chunk 缓冲快照（深拷贝字典），
+## worker 在子线程内据此构建自己的 18³ halo（纯只读，无数据竞态），
+## 避免主线程逐 chunk 提取 halo 造成秒级阻塞（旧方案）。
 ## materials 参数为已按 ID 对齐的材质数组（主线程派发时一次对齐，worker 复用避免重复开销）
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
-func _generate_chunk_worker(halo: PackedInt32Array, materials: Array, chunk_key: Vector3i,
+func _generate_chunk_worker(buffers: Dictionary, materials: Array, chunk_key: Vector3i,
 		gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO,
 		diag_enabled: bool = false) -> void:
 	var t0 := Time.get_ticks_usec()
+	var halo := VoxelChunkGenerator.build_halo_from_buffers(buffers, chunk_key)
 	var arr := VoxelChunkGenerator.generate_single_chunk_dense(halo, materials, scale, chunk_key, offset)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 

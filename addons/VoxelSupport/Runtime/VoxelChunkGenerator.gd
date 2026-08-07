@@ -162,6 +162,42 @@ static func generate_single_chunk_array(
 	return result if result else {}
 
 
+## 从 chunk 缓冲字典（chunk key → PackedInt32Array，密集 16³）构建单个 chunk 的 18³ 光环缓冲
+## 线程安全：buffers 必须是调用方提供的独立快照（深拷贝），子线程内只读。
+## 与 VoxelData.get_chunk_halo 语义一致，但输入为快照字典而非自身数据，
+## 供异步 worker 在子线程内直接从快照构建 halo，避免主线程逐 chunk 提取的阻塞。
+static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> PackedInt32Array:
+	var halo := PackedInt32Array()
+	halo.resize(HALO_VOLUME)
+	var origin := VoxelChunk.origin_of(chunk)
+	# 只遍历 27 个邻居 chunk 与光环的重叠区，避免逐体素世界坐标换算
+	for nz in 3:
+		for ny in 3:
+			for nx in 3:
+				var nck := chunk + Vector3i(nx - HALO, ny - HALO, nz - HALO)
+				if not buffers.has(nck):
+					continue
+				var buf: PackedInt32Array = buffers[nck]
+				var n_origin := VoxelChunk.origin_of(nck)
+				var lo := Vector3i(
+					maxi(origin.x - HALO, n_origin.x),
+					maxi(origin.y - HALO, n_origin.y),
+					maxi(origin.z - HALO, n_origin.z))
+				var hi := Vector3i(
+					mini(origin.x + CHUNK_SIZE + HALO, n_origin.x + CHUNK_SIZE),
+					mini(origin.y + CHUNK_SIZE + HALO, n_origin.y + CHUNK_SIZE),
+					mini(origin.z + CHUNK_SIZE + HALO, n_origin.z + CHUNK_SIZE)) - Vector3i.ONE
+				if lo.x > hi.x or lo.y > hi.y or lo.z > hi.z:
+					continue
+				for pz in range(lo.z, hi.z + 1):
+					for py in range(lo.y, hi.y + 1):
+						for px in range(lo.x, hi.x + 1):
+							var lidx := (px - origin.x + HALO) + (py - origin.y + HALO) * HALO_SIZE + (pz - origin.z + HALO) * HALO_SIZE * HALO_SIZE
+							var nidx := (px - n_origin.x) + (py - n_origin.y) * CHUNK_SIZE + (pz - n_origin.z) * CHUNK_SLICE
+							halo[lidx] = buf[nidx]
+	return halo
+
+
 ## 从"光环缓冲"生成单个 chunk 的网格数据（密集数组版，性能关键路径）
 ## halo 为 18³ 密集缓冲（统一材质契约：值 = 材质ID，0 = 空），由 VoxelData.get_chunk_halo 提供。
 ## 覆盖 chunk 内部 + 1 体素外缘，所有邻居读取均为数组下标且无越界检查。

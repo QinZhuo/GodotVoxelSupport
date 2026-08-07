@@ -225,35 +225,22 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 ## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立的深拷贝，无数据竞态）。
 ## 邻居读取全为数组下标且无越界检查（光环含完整 6 邻）。
 func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
-	var halo := PackedInt32Array()
-	halo.resize(HALO_VOLUME)
-	var origin := VoxelChunk.origin_of(chunk)
-	# 只遍历 27 个邻居 chunk 与光环的重叠区，避免逐体素世界坐标换算
-	for nz in 3:
-		for ny in 3:
-			for nx in 3:
-				var nck := chunk + Vector3i(nx - HALO, ny - HALO, nz - HALO)
-				var buf = _chunk_buffers.get(nck)
-				if buf == null:
-					continue
-				var n_origin := VoxelChunk.origin_of(nck)
-				var lo := Vector3i(
-					maxi(origin.x - HALO, n_origin.x),
-					maxi(origin.y - HALO, n_origin.y),
-					maxi(origin.z - HALO, n_origin.z))
-				var hi := Vector3i(
-					mini(origin.x + CHUNK_SIZE + HALO, n_origin.x + CHUNK_SIZE),
-					mini(origin.y + CHUNK_SIZE + HALO, n_origin.y + CHUNK_SIZE),
-					mini(origin.z + CHUNK_SIZE + HALO, n_origin.z + CHUNK_SIZE)) - Vector3i.ONE
-				if lo.x > hi.x or lo.y > hi.y or lo.z > hi.z:
-					continue
-				for pz in range(lo.z, hi.z + 1):
-					for py in range(lo.y, hi.y + 1):
-						for px in range(lo.x, hi.x + 1):
-							var lidx := (px - origin.x + HALO) + (py - origin.y + HALO) * HALO_SIZE + (pz - origin.z + HALO) * HALO_SIZE * HALO_SIZE
-							var nidx := (px - n_origin.x) + (py - n_origin.y) * CHUNK_SIZE + (pz - n_origin.z) * CHUNK_SLICE
-							halo[lidx] = buf[nidx]
-	return halo
+	return VoxelChunkGenerator.build_halo_from_buffers(_chunk_buffers, chunk)
+
+
+## 生成"受影响区域"的 chunk 缓冲深拷贝快照（chunk key → PackedInt32Array 独立副本）。
+## 只快照 rebuild_chunks 及其 27 邻居（构建 halo 需要），避免整世界深拷贝。
+## 主线程一次性调用，随后供各子线程 worker 从快照构建自己的 halo（线程安全只读）。
+func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
+	var needed := {}
+	for ck in rebuild_chunks:
+		for nz in 3:
+			for ny in 3:
+				for nx in 3:
+					var nck := ck + Vector3i(nx - HALO, ny - HALO, nz - HALO)
+					if _chunk_buffers.has(nck):
+						needed[nck] = _chunk_buffers[nck].duplicate()
+	return needed
 
 
 ## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 旧式外部代码）
