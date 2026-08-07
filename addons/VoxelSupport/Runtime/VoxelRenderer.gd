@@ -334,6 +334,54 @@ func _update_mesh_async() -> void:
 			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset, diag_enabled)))
 
 
+## 统一工作线程结果字典契约（#6）：全量/增量/单chunk/空场景所有生成路径
+## 都通过 _make_result 构建结果，消费方 _apply_single_chunk_result 统一按键读取。
+## chunk_key 缺省为 (-999,-999,-999) 表示"非单chunk结果"（全量结果）。
+static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: int,
+		trans_vertices: int, total_chunks: int, affected_count: int, gen_id: int,
+		chunk_key: Vector3i = Vector3i(-999, -999, -999)) -> Dictionary:
+	return {
+		"arrays": arrays,
+		"chunk_key": chunk_key,
+		"gen_time_ms": gen_time_ms,
+		"solid_vertices": solid_vertices,
+		"trans_vertices": trans_vertices,
+		"total_chunks": total_chunks,
+		"affected_count": affected_count,
+		"gen_id": gen_id,
+	}
+
+
+## 统计 chunk_arrays 字典（ck -> {solid_verts, trans_verts}）的总实心/透明顶点数
+static func _count_chunk_vertices(chunk_arrays: Dictionary) -> Vector2i:
+	var sv := 0
+	var tv := 0
+	for ck in chunk_arrays:
+		var arr = chunk_arrays[ck]
+		if arr is Dictionary:
+			sv += arr.get("solid_verts", PackedVector3Array()).size()
+			tv += arr.get("trans_verts", PackedVector3Array()).size()
+	return Vector2i(sv, tv)
+
+
+## 以顶点计数更新 last_* 统计字段（实心/透明三角形 = 顶点数 / 3）
+func _set_last_vertex_stats(solid_vertices: int, trans_vertices: int, total_chunks: int) -> void:
+	last_solid_vertices = solid_vertices
+	last_trans_vertices = trans_vertices
+	last_solid_triangles = solid_vertices / 3
+	last_trans_triangles = trans_vertices / 3
+	last_total_chunks = total_chunks
+
+
+## 从统一结果字典更新 last_* 统计字段
+func _apply_stats_from_result(result: Dictionary) -> void:
+	last_mesh_gen_time_ms = result.get("gen_time_ms", 0.0) as float
+	_set_last_vertex_stats(
+		result.get("solid_vertices", 0),
+		result.get("trans_vertices", 0),
+		result.get("total_chunks", 0))
+
+
 ## 后台工作线程入口：生成网格数据并写入结果缓冲
 ## 主线程通过 _process 轮询 WorkerThreadPool.is_task_completed 后读取，保证线程安全
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
@@ -364,21 +412,9 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 			chunk_arrays = _generate_chunks_parallel(voxels, materials, scale, rebuild_chunks, offset)
 		var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 		# 统计顶点/三角形数
-		var sv := 0; var tv := 0
-		for ck in chunk_arrays:
-			var arr = chunk_arrays[ck]
-			if arr is Dictionary:
-				sv += arr.get("solid_verts", PackedVector3Array()).size()
-				tv += arr.get("trans_verts", PackedVector3Array()).size()
-		result = {
-			"arrays": chunk_arrays,
-			"gen_time_ms": gen_time_ms,
-			"solid_vertices": sv,
-			"trans_vertices": tv,
-			"total_chunks": chunk_arrays.size(),
-			"affected_count": affected_count,
-			"gen_id": gen_id,
-		}
+		var counts := _count_chunk_vertices(chunk_arrays)
+		result = _make_result(chunk_arrays, gen_time_ms, counts.x, counts.y,
+			chunk_arrays.size(), affected_count, gen_id)
 	else:
 		# 全量重建路径：所有体素合并为一个 ArrayMesh
 		var t1 := Time.get_ticks_usec()
@@ -388,15 +424,7 @@ func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Arra
 		if arrays is Dictionary:
 			sv = arrays.get("solid_verts", PackedVector3Array()).size()
 			tv = arrays.get("trans_verts", PackedVector3Array()).size()
-		result = {
-			"arrays": arrays,
-			"gen_time_ms": gen_time_ms,
-			"solid_vertices": sv,
-			"trans_vertices": tv,
-			"total_chunks": 1,
-			"affected_count": 1,
-			"gen_id": gen_id,
-		}
+		result = _make_result(arrays, gen_time_ms, sv, tv, 1, 1, gen_id)
 
 	# 使用 call_deferred 将结果传回主线程（线程安全，仅排队到主线程消息队列，不直接操作 Node 属性）
 	call_deferred("_on_thread_result", result)
@@ -422,23 +450,17 @@ func _generate_chunk_worker(halo: PackedInt32Array, materials: Array, chunk_key:
 	# 统计顶点数
 	var sv := 0
 	var tv := 0
-	if not arr.is_empty():
+	var has_data := not arr.is_empty()
+	if has_data:
 		sv = arr.get("solid_verts", PackedVector3Array()).size()
 		tv = arr.get("trans_verts", PackedVector3Array()).size()
 
-	# 构建结果字典（包含 chunk_key 供 _apply_single_chunk_result 识别单个 chunk）
-	var result: Dictionary = {
-		"arrays": {},
-		"chunk_key": chunk_key,
-		"gen_time_ms": gen_time_ms,
-		"solid_vertices": sv,
-		"trans_vertices": tv,
-		"total_chunks": 1 if not arr.is_empty() else 0,
-		"affected_count": 1,
-		"gen_id": gen_id,
-	}
-	if not arr.is_empty():
-		result["arrays"][chunk_key] = arr
+	# 构建结果字典（统一契约 _make_result，含 chunk_key 供 _apply_single_chunk_result 识别单个 chunk）
+	var arrays := {}
+	if has_data:
+		arrays[chunk_key] = arr
+	var result := _make_result(arrays, gen_time_ms, sv, tv,
+		1 if has_data else 0, 1, gen_id, chunk_key)
 
 	# 使用 call_deferred 将结果传回主线程
 	call_deferred("_on_thread_result", result)
@@ -482,13 +504,8 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 	var gen_id = result.get("gen_id", -1)
 	var gen_time_ms = result.get("gen_time_ms", 0.0) as float
 
-	# 更新统计信息
-	last_mesh_gen_time_ms = gen_time_ms
-	last_solid_vertices = result.get("solid_vertices", 0)
-	last_trans_vertices = result.get("trans_vertices", 0)
-	last_solid_triangles = last_solid_vertices / 3
-	last_trans_triangles = last_trans_vertices / 3
-	last_total_chunks = result.get("total_chunks", 0)
+	# 更新统计信息（统一契约 _apply_stats_from_result）
+	_apply_stats_from_result(result)
 	last_rebuild_affected_count = 1
 	last_rebuild_chunk_count = 1
 
@@ -622,16 +639,9 @@ func _update_mesh_sync() -> void:
 			if not arr.is_empty():
 				chunk_arrays[ck] = arr
 		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
-		# 统计顶点/三角形数
-		var sv := 0; var tv := 0
-		for ck in chunk_arrays:
-			var arr = chunk_arrays[ck]
-			if arr is Dictionary:
-				sv += arr.get("solid_verts", PackedVector3Array()).size()
-				tv += arr.get("trans_verts", PackedVector3Array()).size()
-		last_solid_vertices = sv; last_trans_vertices = tv
-		last_solid_triangles = sv / 3; last_trans_triangles = tv / 3
-		last_total_chunks = chunk_arrays.size()
+		# 统计顶点/三角形数（统一 _count_chunk_vertices / _set_last_vertex_stats）
+		var counts := _count_chunk_vertices(chunk_arrays)
+		_set_last_vertex_stats(counts.x, counts.y, chunk_arrays.size())
 		_build_and_apply_chunk_meshes(chunk_arrays)
 		# _build_and_apply_chunk_meshes 内部在 mesh_updated 前设置了 last_apply_time_ms
 		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, last_apply_time_ms)
@@ -642,11 +652,10 @@ func _update_mesh_sync() -> void:
 	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.get_voxels_dict_snapshot(), data.materials, options)
 	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
 	if arrays is Dictionary:
-		last_solid_vertices = arrays.get("solid_verts", PackedVector3Array()).size()
-		last_trans_vertices = arrays.get("trans_verts", PackedVector3Array()).size()
-		last_solid_triangles = last_solid_vertices / 3
-		last_trans_triangles = last_trans_vertices / 3
-		last_total_chunks = 1
+		_set_last_vertex_stats(
+			arrays.get("solid_verts", PackedVector3Array()).size(),
+			arrays.get("trans_verts", PackedVector3Array()).size(),
+			1)
 		last_rebuild_affected_count = 1
 	_build_and_apply_mesh(arrays)
 	# _build_and_apply_mesh 内部已设置 last_apply_time_ms
