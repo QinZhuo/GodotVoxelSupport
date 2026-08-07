@@ -5,7 +5,7 @@
 #   - 手动触发（Actions 页面 → Run workflow）
 #   - 打 tag（v*）时自动构建并附带 release 资产
 #
-# 产物：addons/VoxelSupport/native/ 下各平台命名动态库 + voxelnative.gdextension
+# 产物：addons/VoxelSupport/Native/ 下各平台命名动态库 + voxelnative.gdextension
 # 使用者无需编译环境，下载 addons/VoxelSupport/ 文件夹即可使用。
 
 name: Build GDExtension
@@ -65,7 +65,7 @@ jobs:
             -DGODOTCPP_API_VERSION=4.7 \
             -DCMAKE_BUILD_TYPE=Release
 
-      # 产物已由 CMake 直接输出到 addons/VoxelSupport/native/（无需复制）
+      # 产物已由 CMake 直接输出到 addons/VoxelSupport/Native/（无需复制）
       - name: Build
         shell: bash
         run: cmake --build gdextension/build --config Release -j 4
@@ -74,17 +74,17 @@ jobs:
       - name: Rename artifacts
         shell: bash
         run: |
-          mkdir -p dist/addons/VoxelSupport/native
-          cp addons/VoxelSupport/native/voxelnative.gdextension dist/addons/VoxelSupport/native/voxelnative.gdextension
+          mkdir -p dist/addons/VoxelSupport/Native
+          cp addons/VoxelSupport/Native/voxelnative.gdextension dist/addons/VoxelSupport/Native/voxelnative.gdextension
           if [ "${{ matrix.target }}" = "macos" ]; then
-            cp addons/VoxelSupport/native/libvoxelnative.dylib dist/addons/VoxelSupport/native/libvoxelnative.macos.debug.${{ matrix.arch }}.dylib
-            cp addons/VoxelSupport/native/libvoxelnative.dylib dist/addons/VoxelSupport/native/libvoxelnative.macos.release.${{ matrix.arch }}.dylib
+            cp addons/VoxelSupport/Native/libvoxelnative.dylib dist/addons/VoxelSupport/Native/libvoxelnative.macos.debug.${{ matrix.arch }}.dylib
+            cp addons/VoxelSupport/Native/libvoxelnative.dylib dist/addons/VoxelSupport/Native/libvoxelnative.macos.release.${{ matrix.arch }}.dylib
           elif [ "${{ matrix.target }}" = "windows" ]; then
-            cp addons/VoxelSupport/native/voxelnative.dll dist/addons/VoxelSupport/native/voxelnative.windows.debug.x86_64.dll
-            cp addons/VoxelSupport/native/voxelnative.dll dist/addons/VoxelSupport/native/voxelnative.windows.release.x86_64.dll
+            cp addons/VoxelSupport/Native/voxelnative.dll dist/addons/VoxelSupport/Native/voxelnative.windows.debug.x86_64.dll
+            cp addons/VoxelSupport/Native/voxelnative.dll dist/addons/VoxelSupport/Native/voxelnative.windows.release.x86_64.dll
           else
-            cp addons/VoxelSupport/native/libvoxelnative.so dist/addons/VoxelSupport/native/libvoxelnative.linux.debug.x86_64.so
-            cp addons/VoxelSupport/native/libvoxelnative.so dist/addons/VoxelSupport/native/libvoxelnative.linux.release.x86_64.so
+            cp addons/VoxelSupport/Native/libvoxelnative.so dist/addons/VoxelSupport/Native/libvoxelnative.linux.debug.x86_64.so
+            cp addons/VoxelSupport/Native/libvoxelnative.so dist/addons/VoxelSupport/Native/libvoxelnative.linux.release.x86_64.so
           fi
 
       - uses: actions/upload-artifact@v4
@@ -117,13 +117,13 @@ jobs:
           cp addons/VoxelSupport/plugin.cfg addons/VoxelSupport/plugin.gd release/addons/VoxelSupport/
           cp addons/VoxelSupport/icon.png release/addons/VoxelSupport/ 2>/dev/null || true
           # 合并各平台编译产物
-          mkdir -p release/addons/VoxelSupport/native
-          cp addons/VoxelSupport/native/voxelnative.gdextension release/addons/VoxelSupport/native/
-          cp -r artifacts/addons/VoxelSupport/native/*.dylib artifacts/addons/VoxelSupport/native/*.so artifacts/addons/VoxelSupport/native/*.dll release/addons/VoxelSupport/native/ 2>/dev/null || true
+          mkdir -p release/addons/VoxelSupport/Native
+          cp addons/VoxelSupport/Native/voxelnative.gdextension release/addons/VoxelSupport/Native/
+          cp -r artifacts/addons/VoxelSupport/Native/*.dylib artifacts/addons/VoxelSupport/Native/*.so artifacts/addons/VoxelSupport/Native/*.dll release/addons/VoxelSupport/Native/ 2>/dev/null || true
           echo "=== 最终插件包结构 ==="
           find release -type f | sort
           echo "=== native 目录 ==="
-          ls -la release/addons/VoxelSupport/native/
+          ls -la release/addons/VoxelSupport/Native/
 
       - uses: actions/upload-artifact@v4
         with:

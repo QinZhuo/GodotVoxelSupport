@@ -37,14 +37,14 @@ if(APPLE)
     )
 endif()
 
-# 将编译产物直接输出到插件分发目录 addons/VoxelSupport/native/
-# （.gdextension 引用路径为 res://addons/VoxelSupport/native/xxx，编译完即就位，无需手动复制）
+# 将编译产物直接输出到插件分发目录 addons/VoxelSupport/Native/
+# （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，编译完即就位，无需手动复制）
 # 发布时需按 .gdextension 声明的文件名重命名（如 macos.debug.arm64 后缀）：
 #   macOS:    libvoxelnative.macos.debug.arm64.dylib / .release.arm64.dylib
 #   Windows:  voxelnative.windows.debug.x86_64.dll
 #   Linux:    libvoxelnative.linux.debug.x86_64.so
 set_target_properties(voxelnative PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/native
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/native
-    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/native
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
 )
