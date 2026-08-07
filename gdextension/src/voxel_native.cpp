@@ -85,6 +85,15 @@ constexpr int CHUNK_SLICE = CHUNK_SIZE * CHUNK_SIZE;
 constexpr int HALO = 1;
 constexpr int HALO_SIZE = CHUNK_SIZE + HALO * 2;
 
+// 网格整数坐标 → 64 位哈希键（顶点去重用；21 位/分量覆盖 ±100 万范围）
+inline uint64_t grid_vkey(int x, int y, int z) {
+	const uint64_t ux = uint64_t(uint32_t(x));
+	const uint64_t uy = uint64_t(uint32_t(y));
+	const uint64_t uz = uint64_t(uint32_t(z));
+	return (ux << 42) | (uy << 21) | (uz & 0x1FFFFF);
+}
+inline uint64_t grid_vkey(const Vector3i &p) { return grid_vkey(p.x, p.y, p.z); }
+
 // 6 方向邻居偏移（对应 FaceTool.Normals 顺序：+Y,-Y,-X,+X,+Z,-Z）
 constexpr int HALO_DIRS[6] = {
 	HALO_SIZE,               // +Y
@@ -178,6 +187,12 @@ Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const
 	PackedVector2Array solid_uvs, trans_uvs;
 	PackedInt32Array solid_idxs, trans_idxs;
 
+	// 顶点索引化（去重）：以 (网格整数坐标, 法线索引, 材质UV) 为键，
+	// 相邻矩形共享角点位置时复用同一顶点，显著减少顶点数（体素表面顶点可降约 2/3）。
+	// solid_cache / trans_cache: 键 -> 顶点索引
+	std::unordered_map<uint64_t, int> solid_cache;
+	std::unordered_map<uint64_t, int> trans_cache;
+
 	if (halo.size() < HALO_SIZE * HALO_SIZE * HALO_SIZE) {
 		Dictionary empty;
 		empty["solid_verts"] = solid_verts;
@@ -268,17 +283,44 @@ Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const
 
 				for (int p = 0; p < 6; ++p) {
 					const Vector3 point(FACES[face_idx][p][0], FACES[face_idx][p][1], FACES[face_idx][p][2]);
+					// 网格整数坐标（未乘 scale 的角点位置，用于顶点去重键）
+					Vector3i grid_pt(
+							pos.x + int(point.x * float(size.x)),
+							pos.y + int(point.y * float(size.y)),
+							pos.z + int(point.z * float(size.z)));
 					const Vector3 world_pos = (Vector3(pos) + point * sizef) * scale - origin_offset + offset * scale;
+
 					if (is_trans) {
-						trans_verts.append(world_pos);
-						trans_normals.append(normal);
-						trans_uvs.append(Vector2(u_uv, 0.0f));
-						trans_idxs.append(trans_verts.size() - 1);
+						// 去重键：网格坐标 + 法线索引 + 材质ID（同一面同材质才可复用）
+						uint64_t key = grid_vkey(grid_pt);
+						key = key * 31 + uint64_t(face_idx);
+						key = key * 31 + uint64_t(mat_id);
+						auto it = trans_cache.find(key);
+						if (it != trans_cache.end()) {
+							trans_idxs.append(it->second);
+						} else {
+							const int vi = trans_verts.size();
+							trans_verts.append(world_pos);
+							trans_normals.append(normal);
+							trans_uvs.append(Vector2(u_uv, 0.0f));
+							trans_idxs.append(vi);
+							trans_cache[key] = vi;
+						}
 					} else {
-						solid_verts.append(world_pos);
-						solid_normals.append(normal);
-						solid_uvs.append(Vector2(u_uv, 0.0f));
-						solid_idxs.append(solid_verts.size() - 1);
+						uint64_t key = grid_vkey(grid_pt);
+						key = key * 31 + uint64_t(face_idx);
+						key = key * 31 + uint64_t(mat_id);
+						auto it = solid_cache.find(key);
+						if (it != solid_cache.end()) {
+							solid_idxs.append(it->second);
+						} else {
+							const int vi = solid_verts.size();
+							solid_verts.append(world_pos);
+							solid_normals.append(normal);
+							solid_uvs.append(Vector2(u_uv, 0.0f));
+							solid_idxs.append(vi);
+							solid_cache[key] = vi;
+						}
 					}
 				}
 			}
