@@ -1,0 +1,90 @@
+@tool
+@icon("res://addons/TweenAnimation/icon.png")
+class_name TweenAnimation extends Node
+
+@export_tool_button("Play") var play_button := play
+
+@export_tool_button("Playback") var play_back_button := playback
+
+@export_group("Child Tween")
+@export var is_parallel: bool
+
+var cur_tween: Tween
+var is_playback: bool
+
+func _process(delta):
+	if Engine.is_editor_hint():
+		if cur_tween and cur_tween.is_running():
+			cur_tween.custom_step(delta)
+
+func reset():
+	for child: TweenAnimation in get_children():
+		child.reset()
+
+func play(reset_tween: bool = false) -> Tween:
+	if cur_tween and cur_tween.is_running():
+		cur_tween.kill()
+	if reset_tween:
+		reset()
+	cur_tween = create_tween()
+	cur_tween.set_ignore_time_scale(true)
+	is_playback = false
+	_create_tweenr(cur_tween)
+	return cur_tween
+
+func playback() -> Tween:
+	if cur_tween and cur_tween.is_running():
+		cur_tween.kill()
+	cur_tween = create_tween()
+	cur_tween.set_ignore_time_scale(true)
+	is_playback = true
+	_create_tweenr(cur_tween)
+	return cur_tween
+
+func play_loops(loops: int = 0) -> Tween:
+	play().set_loops(loops)
+	return cur_tween
+
+func play_reset() -> Tween:
+	reset()
+	return play()
+
+func play_tween(not_playback: bool) -> Tween:
+	if not_playback:
+		return play()
+	else:
+		return playback()
+
+func _create_tweenr(tween: Tween):
+	_create_child_subtween(tween)
+
+func _create_child_subtween(tween: Tween):
+	var child_count = get_child_count()
+	if child_count == 0: return
+	var index_array = range(0, child_count) if not is_playback else range(child_count - 1, -1, -1)
+	var subtween = create_tween()
+	subtween.set_ignore_time_scale(true)
+	tween.tween_subtween(subtween)
+	subtween.set_parallel(is_parallel)
+	for index in index_array:
+		var child := get_child(index)
+		if not child is TweenAnimation:
+			continue
+		var child_tween: TweenAnimation = get_child(index)
+		child_tween.is_playback = is_playback
+		child_tween._create_tweenr(subtween)
+
+static var popup_property_selector: RefCounted:
+	get():
+		if not popup_property_selector:
+			var script = GDScript.new()
+			script.source_code = "
+extends EditorScript
+var node:Node
+var callback:Callable
+func run():
+	EditorInterface.popup_property_selector(node, callback)
+			"
+			script.reload()
+			popup_property_selector = script.new()
+		return popup_property_selector
