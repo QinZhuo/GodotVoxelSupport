@@ -52,6 +52,9 @@ var _pending := {}
 var _next_req_id := 1
 ## 编辑器模式: 游戏是否处于断点暂停状态(脚本错误/断点导致主循环暂停)
 var _game_breaked := false
+## 断点暂停时仍可安全执行的工具(只读缓冲, 不依赖游戏主循环):
+## 游戏被暂停时 EngineDebugger 调试线程仍活着, 这类工具仅读本地缓冲即返回, 不会挂起。
+const _BREAK_SAFE_TOOLS := ["get_game_errors", "get_game_logs"]
 
 
 ## ------- 生命周期(autoload) -------
@@ -144,10 +147,10 @@ func _on_session_stopped(session_id: int) -> void:
 func _on_session_breaked(_session_id: int, can_debug: bool) -> void:
 	_game_breaked = true
 	LogTool.log("MCP", "游戏已进入断点暂停(调试循环=%s)。运行时工具会立即返回明确错误, 可用 debug_continue 让游戏继续。" % str(can_debug))
-	var msg := "游戏因脚本错误/断点被调试器暂停(主循环未运行)。可调用 debug_continue 让游戏继续; 若要修复脚本错误则 stop_game 后改代码重跑。"
+	var msg := "游戏被断点暂停(脚本错误/断点)。get_game_errors/get_game_logs仍可用, 先查错误; 再debug_continue继续; 要修脚本则stop_game后改代码重跑。"
 	for req_id in _pending:
 		if _pending[req_id] == null:
-			_pending[req_id] = _err(msg, "game_breaked", true, "调用 debug_continue 让游戏继续, 或 stop_game 修复脚本错误后重启")
+			_pending[req_id] = _err(msg, "game_breaked", true, "get_game_errors查错后debug_continue; 或stop_game修复重启")
 
 
 ## 游戏解除断点暂停, 恢复运行
@@ -239,22 +242,22 @@ func _register_editor_tools() -> void:
 ## -- 脚本/资源验证 --
 func _register_validate_tools() -> void:
 	_add_tool("validate_script",
-		"验证一个 GDScript 脚本的语法与可编译性(不执行)。返回是否有效及错误明细。可传 'path'(res://路径) 读取磁盘脚本, 或 'code'(源码文本)直接验证。注意: 仅存在'被当作错误的警告'(如 untyped_declaration)时会判为有效并在 warnings 中列出; 若验证的脚本 class_name 与已加载类同名(如 addons 内已加载脚本)属环境冲突, 会提示 hint。",
+		"验证GDScript脚本语法/可编译性。传path(res://)读磁盘脚本, 或传code源码。返回是否有效与错误明细。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "脚本 res:// 路径, 与 code 二选一"}, "code": {"type": "string", "description": "GDScript 源码文本, 与 path 二选一"}}},
 		_call_validate_script)
 
 	_add_tool("validate_resource",
-		"验证一个资源/场景文件能否被引擎正确加载。返回是否可加载、资源类型及错误信息。常见于排查 .tres/.tscn 资源损坏或依赖缺失。",
+		"验证资源/场景能否被引擎加载, 返回是否可加载及错误信息。排查.tres/.tscn损坏或依赖缺失。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "资源 res:// 路径"}}},
 		_call_validate_resource)
 
 	_add_tool("list_dir",
-		"列出指定 res:// 或 user:// 目录下的内容(目录/文件)。便于了解项目结构。",
+		"列出res://或user://目录下的文件/子目录。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "目录路径, 默认 res://"}, "recursive": {"type": "boolean", "description": "是否递归列出子目录, 默认 false"}}},
 		_call_list_dir)
 
 	_add_tool("classdb_query",
-		"查询 Godot 类的 API: 类的方法/属性/信号/枚举。用于 AI 写脚本前确认 Godot 原生 API 的正确用法与签名。可按关键字模糊搜索类名, 或查询指定类的成员。返回结构化 JSON。",
+		"查询Godot类API(方法/属性/信号/枚举)。search模糊搜类名, class_name查指定类成员。写脚本前确认API签名用。返回JSON。",
 		{"type": "object", "properties": {
 			"class_name": {"type": "string", "description": "要查询的类名(如 CharacterBody2D/Button), 提供后返回该类的成员清单"},
 			"search": {"type": "string", "description": "按关键字模糊搜索类名(如 'body' 匹配 CharacterBody2D/RigidBody2D 等)"},
@@ -268,7 +271,7 @@ func _register_validate_tools() -> void:
 ## -- 日志/错误 --
 func _register_log_tools() -> void:
 	_add_tool("get_logs",
-		"获取日志(print/printerr 输出)。返回日志数组(含时间戳/是否错误流)与 next 游标。游戏运行时返回游戏进程日志, 否则返回编辑器日志。增量用法: 把上次返回的 next 作为 since 参数, 只取新增日志, 节省上下文。",
+		"获取print/printerr日志, 含时间戳/错误流。返回next游标, 增量用其作since避免重复。游戏运行时返回游戏日志, 否则编辑器日志。",
 		{"type": "object", "properties": {
 			"max": {"type": "integer", "description": "最多返回条数, 默认 200"},
 			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"}
@@ -276,7 +279,7 @@ func _register_log_tools() -> void:
 		_call_get_logs)
 
 	_add_tool("get_errors",
-		"获取捕获的错误(脚本错误/assert/push_error 等), 每个错误包含信息、来源文件、行号、类型及 GDScript 栈追踪。返回 next 游标。游戏运行时返回游戏进程错误, 否则返回编辑器错误。增量用法: 把上次返回的 next 作为 since 参数, 只取新增错误。",
+		"获取捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。游戏运行时返回游戏错误, 否则编辑器错误。",
 		{"type": "object", "properties": {
 			"max": {"type": "integer", "description": "最多返回条数, 默认 100"},
 			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"}
@@ -284,7 +287,7 @@ func _register_log_tools() -> void:
 		_call_get_errors)
 
 	_add_tool("clear_errors",
-		"清空已捕获的错误缓冲区, 便于开始新一轮调试观察。游戏运行时清空游戏进程错误。",
+		"清空错误缓冲, 便于新一轮调试。游戏运行时清空游戏错误。",
 		{"type": "object", "properties": {}},
 		_call_clear_errors)
 
@@ -292,7 +295,7 @@ func _register_log_tools() -> void:
 ## -- 截图 --
 func _register_screenshot_tools() -> void:
 	_add_tool("take_screenshot",
-		"画面感知工具, 有文本化截图与真实截图两种模式。默认用 'text'(文本化截图, 推荐): 不保存图片, 直接返回运行中游戏画面的可见节点布局(名称/类型/屏幕坐标/尺寸/文本), 适合点击游玩模拟与无图像输入的AI, 大幅节省token。大部分场景都应使用此模式; 仅当需要查看具体画面表现(颜色/光影/视觉细节)时才用 capture_type='game' 真实截图(保存PNG并返回路径)。其他类型: 'editor' 编辑器视口截图, 'scene' 当前场景缩略图。真实截图默认附带 'text' 文本快照, 可用 include_text=false 关闭。",
+		"画面感知工具。默认'text'文本化截图: 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图, 省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可用include_text=false关)。'editor'编辑器视口,'scene'场景缩略图。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。",
 		{"type": "object", "properties": {
 			"capture_type": {"type": "string", "description": "模式: 'text' 文本化截图(默认, 推荐, 需游戏运行), 'game' 真实游戏截图(需游戏运行), 'editor' 编辑器视口截图, 'scene' 当前场景缩略图"},
 			"max_width": {"type": "integer", "description": "仅真实截图生效: 最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
@@ -305,22 +308,22 @@ func _register_screenshot_tools() -> void:
 ## -- 场景树 / 节点 --
 func _register_scene_tools() -> void:
 	_add_tool("get_scene_tree",
-		"获取当前正在编辑的场景的节点树结构(节点路径/名称/类型)。用于理解场景与逻辑结构。未打开场景时返回空。",
+		"获取当前编辑场景的节点树结构(路径/名称/类型)。理解场景结构用。",
 		{"type": "object", "properties": {"max_depth": {"type": "integer", "description": "最大展开深度, 默认 8"}, "include_properties": {"type": "boolean", "description": "是否附带每个节点的关键属性, 默认 false"}}},
 		_call_get_scene_tree)
 
 	_add_tool("get_node_info",
-		"获取当前编辑场景中指定节点的属性列表及当前值。输入节点名称或路径(如根节点名/子节点路径)。用于检查节点状态。",
+		"获取编辑场景中指定节点的属性及当前值。path传节点名或路径(如Main/Player)。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "节点路径(编辑场景内), 如 'Main' 或 'Main/Player'"}}},
 		_call_get_node_info)
 
 	_add_tool("set_node_property",
-		"修改当前编辑场景中指定节点的属性值(用于调试调整逻辑)。修改经 UndoRedo 提交, 用户可按 Ctrl+Z 撤销。修改仅影响内存中的场景, 不会写回 .tscn 文件直到 save_scene。",
+		"修改编辑场景中节点属性(调试用), UndoRedo提交可按Ctrl+Z撤。仅改内存, 需save_scene写回.tscn。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "节点路径(编辑场景内)"}, "property": {"type": "string", "description": "属性名"}, "value": {"description": "新值(支持数字/字符串/布尔; Vector2 等可传 '1,2' 字符串)"}}},
 		_call_set_node_property)
 
 	_add_tool("call_node_method",
-		"调用当前编辑场景中某节点的方法(用于调试触发逻辑, 如播放动画/切换状态)。参数以数组传入。",
+		"调用编辑场景中节点的方法(调试触发逻辑, 如播放动画/切换状态)。args以数组传参。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "节点路径(编辑场景内)"}, "method": {"type": "string", "description": "方法名"}, "args": {"type": "array", "description": "参数数组"}}},
 		_call_call_node_method)
 
@@ -328,12 +331,12 @@ func _register_scene_tools() -> void:
 ## -- 场景编辑 --
 func _register_scene_edit_tools() -> void:
 	_add_tool("add_node",
-		"在当前编辑场景中添加节点或实例化子场景。parent 为父节点路径(缺省根), node_type 为节点类型类名(如 Sprite2D/CharacterBody2D/Label)或子场景 res:// 路径。添加经 UndoRedo 提交, 用户可按 Ctrl+Z 移除。",
+		"在当前编辑场景添加节点或实例化子场景。node_type为类名或.tscn的res://路径。UndoRedo提交可Ctrl+Z撤。",
 		{"type": "object", "properties": {"parent": {"type": "string", "description": "父节点路径(编辑场景内), 缺省为场景根"}, "node_type": {"type": "string", "description": "节点类型类名或子场景 res:// 路径"}, "name": {"type": "string", "description": "新节点名称(可选)"}}},
 		_call_add_node)
 
 	_add_tool("save_scene",
-		"保存当前正在编辑的场景到磁盘(set_node_property/add_node 的改动需要保存后才会写回 .tscn)。",
+		"保存当前编辑场景到.tscn(set_node_property/add_node改动需save后写回)。",
 		{"type": "object", "properties": {}},
 		_call_save_scene)
 
@@ -341,17 +344,17 @@ func _register_scene_edit_tools() -> void:
 ## -- 项目信息 --
 func _register_project_tools() -> void:
 	_add_tool("get_project_info",
-		"获取 Godot 项目基本信息(项目名/Godot 版本/当前编辑场景/运行模式/插件开关等)。",
+		"项目基本信息(名称/版本/当前场景/运行模式/插件开关)。",
 		{"type": "object", "properties": {}},
 		_call_get_project_info)
 
 	_add_tool("get_project_settings",
-		"获取项目关键配置(主场景/autoload/输入映射/图层命名等), 帮助 AI 理解项目约定。",
+		"项目关键配置(主场景/autoload/输入映射/图层命名), 助理解项目约定。",
 		{"type": "object", "properties": {}},
 		_call_get_project_settings)
 
 	_add_tool("get_editor_activity",
-		"获取编辑器当前状态: 打开的场景、选中的节点、运行中的游戏、文件系统选中项等。用于 AI 与人类协作时感知用户在编辑器里做了什么, 避免踩踏改动。",
+		"编辑器状态(打开场景/选中节点/运行游戏/文件系统选中项), 感知用户在编辑器做了什么避免踩踏。",
 		{"type": "object", "properties": {}},
 		_call_get_editor_activity)
 
@@ -359,12 +362,12 @@ func _register_project_tools() -> void:
 ## -- 运行游戏 --
 func _register_run_tools() -> void:
 	_add_tool("run_game",
-		"以编辑器调试模式启动游戏(等效 F5, 自动建立 EngineDebugger 调试线)。scene 可选, 缺省用项目主场景。启动后 take_screenshot(默认text文本化截图, 或 capture_type=game 真实截图) / simulate_click / simulate_drag / simulate_key / game_eval / get_game_logs 等运行时工具经调试线可用。",
+		"以调试模式启动游戏(等效F5, 自动建EngineDebugger调试线)。scene可选缺省主场景。启动后运行时工具(take_screenshot/simulate_*/game_eval/get_game_logs等)可用。",
 		{"type": "object", "properties": {"scene": {"type": "string", "description": "要运行的场景 res:// 路径, 缺省用主场景"}}},
 		_call_run_game)
 
 	_add_tool("stop_game",
-		"停止当前运行中的游戏(等效编辑器停止运行)。",
+		"停止运行中的游戏(等效编辑器停止运行)。",
 		{"type": "object", "properties": {}},
 		_call_stop_game)
 
@@ -372,37 +375,37 @@ func _register_run_tools() -> void:
 ## -- 开发辅助(重载/求值/设置) --
 func _register_dev_tools() -> void:
 	_add_tool("reload_project",
-		"触发编辑器重新扫描项目: 重建全局类缓存(新增 class_name 立即生效) + 重扫资源文件。新脚本/新资源不生效时调用此工具。",
+		"重扫项目: 重建全局类缓存(class_name立即生效)+重扫资源。新脚本/资源不生效时调用。",
 		{"type": "object", "properties": {}},
 		_call_reload_project)
 
 	_add_tool("eval_code",
-		"在编辑器进程中执行一段 GDScript 代码(常用于查值/调工具/验证逻辑)。代码中可显式 return 返回值; print 输出会进入 get_logs。代码会被包装为挂到场景树的 Node 方法, 因此可直接使用 get_tree()/get_node() 访问场景。缩进自动归一化(tab/空格均可)。注意: 字符串内需要换行请用 char(10) 而非 '\\n'(JSON 传输会拆行导致字符串被破坏)。",
+		"在编辑器进程执行GDScript(查值/调工具/验证逻辑)。可return返回值, print进get_logs。包装为Node方法, 可用get_tree()/get_node()。缩进自动归一化。字符串内换行用char(10)勿用'\\n'(JSON会拆行)。",
 		{"type": "object", "properties": {"code": {"type": "string", "description": "要执行的 GDScript 代码(方法体内容, 缩进由服务器自动处理)"}}},
 		_call_eval_code)
 
 	_add_tool("get_global_classes",
-		"列出当前已注册的全部全局类(class_name 全局类), 含名称/脚本路径/基类。用于确认新脚本是否已进入类缓存。",
+		"列出已注册的class_name全局类(名称/脚本路径/基类), 确认新脚本进入类缓存。",
 		{"type": "object", "properties": {}},
 		_call_get_global_classes)
 
 	_add_tool("open_scene",
-		"在编辑器打开指定场景文件(res:// 路径)。",
+		"在编辑器打开场景(res://路径)。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "场景 res:// 路径"}}},
 		_call_open_scene)
 
 	_add_tool("set_main_scene",
-		"设置项目主场景(application/run/main_scene)并保存 project.godot。",
+		"设置项目主场景并保存project.godot。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "主场景 res:// 路径"}}},
 		_call_set_main_scene)
 
 	_add_tool("get_project_setting",
-		"读取任意项目设置项的值(ProjectSettings), 如 application/config/name、audio/buses/default_bus_layout 等。",
+		"读取任意项目设置项(如application/config/name)。",
 		{"type": "object", "properties": {"name": {"type": "string", "description": "设置项名称"}}},
 		_call_get_project_setting)
 
 	_add_tool("set_project_setting",
-		"修改任意项目设置项并保存(ProjectSettings)。value 传 JSON 值。",
+		"修改任意项目设置项并保存, value传JSON值。",
 		{"type": "object", "properties": {"name": {"type": "string", "description": "设置项名称"}, "value": {"description": "新值"}}},
 		_call_set_project_setting)
 
@@ -412,7 +415,7 @@ func _register_dev_tools() -> void:
 		_call_save_all)
 
 	_add_tool("reimport",
-		"重新导入指定资源文件(触发导入管线重建 .godot/imported 缓存)。资源显示异常/导入配置变更后使用。",
+		"重新导入资源(重建.godot/imported缓存), 资源显示异常/导入配置变更后使用。",
 		{"type": "object", "properties": {"path": {"type": "string", "description": "要重新导入的资源 res:// 路径"}}},
 		_call_reimport)
 
@@ -420,7 +423,7 @@ func _register_dev_tools() -> void:
 ## -- 文件操作 --
 func _register_file_tools() -> void:
 	_add_tool("read_file",
-		"读取指定路径的文件内容。支持 res:// 和 user:// 路径。返回文件内容和大小信息。",
+		"读取文件内容。支持res://和user://。返回内容与大小。",
 		{"type": "object", "properties": {
 			"path": {"type": "string", "description": "文件路径(res:// 或 user://)"},
 			"encoding": {"type": "string", "description": "编码方式, 默认 utf-8, 可选: utf-8, gbk, gb2312"}
@@ -428,7 +431,7 @@ func _register_file_tools() -> void:
 		_call_read_file)
 
 	_add_tool("write_file",
-		"写入内容到指定路径的文件。如果文件不存在会创建(自动创建缺失目录), 存在则覆盖。",
+		"写入内容到文件(不存在则创建, 含目录; 存在则覆盖)。",
 		{"type": "object", "properties": {
 			"path": {"type": "string", "description": "文件路径(res:// 或 user://)"},
 			"content": {"type": "string", "description": "要写入的内容"}
@@ -436,7 +439,7 @@ func _register_file_tools() -> void:
 		_call_write_file)
 
 	_add_tool("append_file",
-		"向指定路径的文件追加内容。如果文件不存在会创建。",
+		"追加内容到文件(不存在则创建)。",
 		{"type": "object", "properties": {
 			"path": {"type": "string", "description": "文件路径(res:// 或 user://)"},
 			"content": {"type": "string", "description": "要追加的内容"}
@@ -444,14 +447,14 @@ func _register_file_tools() -> void:
 		_call_append_file)
 
 	_add_tool("delete_file",
-		"删除指定路径的文件或空目录。",
+		"删除文件或空目录。",
 		{"type": "object", "properties": {
 			"path": {"type": "string", "description": "文件或目录路径(res:// 或 user://)"}
 		}, "required": ["path"]},
 		_call_delete_file)
 
 	_add_tool("file_exists",
-		"检查指定路径的文件或目录是否存在。",
+		"检查文件或目录是否存在。",
 		{"type": "object", "properties": {
 			"path": {"type": "string", "description": "文件或目录路径(res:// 或 user://)"}
 		}, "required": ["path"]},
@@ -727,7 +730,6 @@ func _call_validate_script(args: Dictionary) -> Dictionary:
 	var code: String = str(args.get("code", ""))
 	if path.is_empty() and code.is_empty():
 		return _fail("必须提供 path 或 code 之一")
-	var script := GDScript.new()
 	if not path.is_empty():
 		if not ResourceLoader.exists(path):
 			return _fail("脚本文件不存在: %s" % path)
@@ -736,55 +738,127 @@ func _call_validate_script(args: Dictionary) -> Dictionary:
 			return _fail("无法读取脚本文件: %s" % path)
 		code = file.get_as_text()
 		file.close()
+	var script := _make_tmp_script(code)
+	var outcome := _compile_and_collect(script)
+	# 剔除误报: GDScript.new() 临时脚本默认无路径, 引擎会因 class_name 已全局注册
+	# 且注册路径 != 本脚本路径而报 "hides a global class"——当验证对象正是该 class_name
+	# 的注册文件本身(或其修改版本)时, 此冲突并非真实语法错误, 应剔除后再判定有效性。
+	outcome.real_errors = _filter_class_conflicts(outcome.real_errors, path, code)
+	if outcome.real_errors.is_empty():
+		return _ok_json({
+			"valid": true,
+			"message": "脚本语法有效" + ("(含 %d 条可忽略警告)" % outcome.warnings.size() if outcome.warnings.size() > 0 else ""),
+			"error_latin": 0,
+			"error_text": "",
+			"warnings": outcome.warnings,
+		})
+	var text := "; ".join(outcome.real_errors)
+	return _ok_json({
+		"valid": false,
+		"message": "解析失败: %s" % text,
+		"error_line": 0,
+		"error_text": text,
+		"errors": outcome.real_errors,
+		"warnings": outcome.warnings,
+	})
+
+
+## 构造一个用于预编译的临时 GDScript(无资源路径, 不触碰 Resource 缓存)。
+func _make_tmp_script(code: String) -> GDScript:
+	var script := GDScript.new()
 	script.source_code = code
+	return script
+
+
+## 编译临时脚本并收集时的新增错误/警告。返回 {"real_errors", "warnings"}。
+func _compile_and_collect(script: GDScript) -> Dictionary:
 	var n0: int = _logger.get_error_count() if _logger else 0
-	var reload_err := script.reload()
+	script.reload()
 	var new_errs: Array = []
 	if _logger:
 		var all_entries: Array = _logger.take_errors_since(0).entries
 		var added: int = all_entries.size() - n0
 		if added > 0:
 			new_errs = all_entries.slice(maxi(0, all_entries.size() - added))
-	var real_errors: Array = []
-	var warnings: Array = []
+	var real: Array = []
+	var warns: Array = []
 	for e in new_errs:
 		var msg: String = str(e.get("message", ""))
-		if msg.contains("Warning treated as error") or msg.contains("variable type is being inferred from a Variant value"):
-			warnings.append(msg)
+		if msg.contains("Warning treated as error") or msg.contains("inferred from a Variant"):
+			warns.append(msg)
 		else:
-			real_errors.append(msg)
-	if reload_err == OK and real_errors.is_empty():
-		return _ok_json({
-			"valid": true,
-			"message": "脚本语法有效" + ("(含 %d 条可忽略警告)" % warnings.size() if warnings.size() > 0 else ""),
-			"error_latin": 0,
-			"error_text": "",
-			"warnings": warnings,
-		})
-	if real_errors.is_empty():
-		return _ok_json({
-			"valid": true,
-			"message": "脚本语法有效(仅存在被当作错误的警告, 编辑器可正常加载)",
-			"error_latin": 0,
-			"error_text": "",
-			"warnings": warnings,
-		})
-	var text := "; ".join(real_errors)
-	var hint := ""
-	if text.contains("hides a global script class"):
-		hint = " (class_name 与全局类缓存冲突: 若是新脚本, 先调用 reload_project 刷新类缓存后再试; 若验证的是已被编辑器加载的类脚本(如 addons 内), 属正常冲突)"
-	elif text.contains("Warning treated as error") or text.contains("inferred from a Variant"):
-		hint = " (存在被当作错误的警告: 可在项目设置 GDScript 警告中放宽, 或为相关变量标注显式类型)"
-	var msg := "解析失败: %s%s" % [text, hint]
-	return _ok_json({
-		"valid": false,
-		"message": msg,
-		"error_line": 0,
-		"error_text": text,
-		"hint": hint.strip_edges().trim_prefix(" (").trim_suffix(")"),
-		"errors": real_errors,
-		"warnings": warnings,
-	})
+			real.append(msg)
+	return {"real_errors": real, "warnings": warns}
+
+
+## 逐个过滤 class 冲突: 保留真实冲突, 剔除"验证该 class_name 注册文件本身"造成的误报。
+func _filter_class_conflicts(errors: Array, path: String, code: String) -> Array:
+	var kept: Array = []
+	for e in errors:
+		var msg := str(e)
+		if msg.contains("hides a global script class"):
+			var cls := _class_from_conflict(msg)
+			if not _is_class_conflict_false_positive(cls, path, code):
+				kept.append(e)
+		else:
+			kept.append(e)
+	return kept
+
+
+## 从冲突错误文本解析出冲突的 class_name(形如 "Class \"Foo\" hides a global class.")。
+func _class_from_conflict(msg: String) -> String:
+	var start := msg.find("\"")
+	if start < 0:
+		return ""
+	var end := msg.find("\"", start + 1)
+	if end < 0:
+		return ""
+	return msg.substr(start + 1, end - start - 1)
+
+
+## 判定一条 class 冲突是否为误报:
+## - 冲突的 class_name 尚未全局注册        → 缓存滞后, 误报
+## - 注册路径 == 本次被验证 path            → 验证注册文件自身, 误报
+## - 无 path 但 code 声明了同名 class_name  → 新定义源, 误报
+## - 解析不出 class_name                    → 无法判断, 保守不判误报(可能真是语法错误)
+func _is_class_conflict_false_positive(cls: String, path: String, code: String) -> bool:
+	if cls.is_empty():
+		return false
+	var reg := _global_class_path(cls)
+	if reg.is_empty():
+		return true
+	if not path.is_empty() and _same_path(reg, path):
+		return true
+	if path.is_empty() and _extract_class_name(code) == cls:
+		return true
+	return false
+
+
+## 查询一个 class_name 在全局类缓存中的注册路径(res://…); 未注册返回 ""。
+func _global_class_path(target_class: String) -> String:
+	var classes: Array = ProjectSettings.get_setting("_global_script_classes", [])
+	for c in classes:
+		if c is Dictionary and str(c.get("class", "")) == target_class:
+			return str(c.get("path", ""))
+	return ""
+
+
+## 简化路径比较(处理分隔符/大小写, 避免 Windows 盘符差异导致误判)。
+func _same_path(a: String, b: String) -> bool:
+	return a.replace("\\", "/").to_lower() == b.replace("\\", "/").to_lower()
+
+
+## 扫描脚本头部(class_name 仅允许在 extends 之前), 返回声明的类名; 未声明返回 ""。
+func _extract_class_name(code: String) -> String:
+	for line in code.split("\n"):
+		var t := line.strip_edges()
+		if t.is_empty() or t.begins_with("#") or t.begins_with("@"):
+			continue
+		if t.begins_with("class_name "):
+			return t.trim_prefix("class_name ").split(" ")[0].replace("\t", "").strip_edges()
+		if not t.begins_with("extends"):
+			break
+	return ""
 
 
 func _call_validate_resource(args: Dictionary) -> Dictionary:
@@ -1398,8 +1472,8 @@ func _call_run_game(args: Dictionary) -> Dictionary:
 	EditorInterface.play_custom_scene(scene)
 	var ready := await _wait_game_ready(15.0)
 	if not ready:
-		return _ok("已启动游戏(调试模式, 场景=%s)。但 MCP 调试线 %d 秒内未就绪, 请稍后重试运行时工具。" % [scene, int(15.0)])
-	return _ok("已启动游戏(调试模式, 场景=%s)。调试线已就绪, 已可用运行时工具: take_screenshot(默认text文本化截图, capture_type=game 真实截图) / simulate_click / simulate_drag / simulate_key / game_eval / get_game_logs / get_game_errors。" % scene)
+		return _ok("已启动游戏(场景=%s), 但调试线 %d 秒内未就绪, 稍后重试运行时工具。" % [scene, int(15.0)])
+	return _ok("已启动游戏(调试模式, 场景=%s), 运行时工具已就绪。" % scene)
 
 
 func _call_stop_game(_args: Dictionary) -> Dictionary:
@@ -1432,7 +1506,7 @@ func _call_reload_project(_args: Dictionary) -> Dictionary:
 		return _fail("编辑器文件系统不可用")
 	fs.scan_sources()
 	fs.scan()
-	return _ok("已触发项目重载: scan_sources(重建类缓存) + scan(重扫资源)。扫描将在后台进行, 新资源可能需要片刻才能生效。")
+	return _ok("已触发项目重载(重建类缓存+重扫资源), 后台进行。")
 
 
 func _call_eval_code(args: Dictionary) -> Dictionary:
@@ -1909,7 +1983,7 @@ func _register_runtime_tools() -> void:
 	_tool_handlers.clear()
 	_tool_defs.clear()
 	_add_tool("simulate_click",
-		"在游戏窗口内模拟一次鼠标左键点击(按下+释放)。坐标为游戏视口坐标。用于AI自动化测试游戏交互(按钮/UI 点击等)。",
+		"在游戏窗口模拟鼠标左键点击(按下+释放), 坐标为游戏视口坐标。自动化测试按钮/UI等交互。",
 		{"type": "object", "properties": {
 			"x": {"type": "integer", "description": "屏幕X坐标"},
 			"y": {"type": "integer", "description": "屏幕Y坐标"}
@@ -1917,7 +1991,7 @@ func _register_runtime_tools() -> void:
 		_call_simulate_click)
 
 	_add_tool("simulate_drag",
-		"在游戏窗口内模拟从起始位置拖拽到目标位置(按下->移动->释放)。用于AI测试拖拽交互。",
+		"在游戏窗口模拟拖拽(按下→移动→释放), 测试拖拽交互。",
 		{"type": "object", "properties": {
 			"from_x": {"type": "integer", "description": "起始X坐标"},
 			"from_y": {"type": "integer", "description": "起始Y坐标"},
@@ -1927,7 +2001,7 @@ func _register_runtime_tools() -> void:
 		_call_simulate_drag)
 
 	_add_tool("simulate_key",
-		"在游戏窗口内模拟一次键盘按键(按下/释放)。用于AI测试键盘交互。",
+		"在游戏窗口模拟键盘按键(按下/释放), 测试键盘交互。",
 		{"type": "object", "properties": {
 			"key": {"type": "string", "description": "按键名称, 如 'space', 'enter', 'escape', 'a'-'z', '0'-'9'"},
 			"pressed": {"type": "boolean", "description": "true=按下, false=释放, 默认 true"}
@@ -1935,7 +2009,7 @@ func _register_runtime_tools() -> void:
 		_call_simulate_key)
 
 	_add_tool("take_screenshot",
-		"画面感知工具。默认 'text'(文本化截图, 推荐): 不保存图片, 返回运行中游戏画面的可见节点布局(名称/类型/屏幕坐标/尺寸/文本), 适合点击游玩模拟与无图像输入的AI, 大幅节省token。大部分场景用此模式; 仅需查看具体画面表现时才用 capture_type='game' 真实截图(保存PNG到 user://mcp_screenshots/ 并返回路径, 附带 text 文本快照, 可用 include_text=false 关闭)。",
+		"画面感知工具。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG到user://mcp_screenshots/返回路径, 附带text快照可include_text=false关)。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game。",
 		{"type": "object", "properties": {
 			"capture_type": {"type": "string", "description": "模式: 'text' 文本化截图(默认, 推荐), 'game' 真实游戏截图(保存PNG)"},
 			"max_width": {"type": "integer", "description": "仅真实截图生效: 最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
@@ -1945,12 +2019,12 @@ func _register_runtime_tools() -> void:
 		_runtime_take_screenshot)
 
 	_add_tool("game_eval",
-		"在游戏进程中执行一段 GDScript 代码, 可访问当前游戏场景树(get_tree()/get_node()/get_viewport() 等)。常用于读取游戏运行状态/修改变量/触发逻辑。代码中可显式 return 返回值。注意: get_node() 相对路径基于 eval 脚本实例(挂在场景树 root 下), 访问场景节点请用绝对路径 /root/场景名/子路径 或 get_tree().current_scene.get_node(...)。",
+		"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。可return返回值。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。",
 		{"type": "object", "properties": {"code": {"type": "string", "description": "要执行的 GDScript 代码(方法体内容, 缩进由服务器自动处理)"}}},
 		_call_eval_code)
 
 	_add_tool("get_game_logs",
-		"获取游戏进程的日志(print/printerr 输出)。返回 next 游标, 增量用法: 把上次返回的 next 作为 since 参数, 只取新增日志, 节省上下文。",
+		"获取游戏进程的日志(print/printerr)。返回next游标, 增量用其作since避免重复。",
 		{"type": "object", "properties": {
 			"max": {"type": "integer", "description": "最多条数, 默认 200"},
 			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"}
@@ -1958,7 +2032,7 @@ func _register_runtime_tools() -> void:
 		_call_get_logs)
 
 	_add_tool("get_game_errors",
-		"获取游戏进程捕获的错误(脚本错误/assert/push_error 等), 含来源文件、行号、类型及 GDScript 栈追踪。返回 next 游标, 增量用法: 把上次返回的 next 作为 since 参数, 只取新增错误。",
+		"获取游戏进程捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。",
 		{"type": "object", "properties": {
 			"max": {"type": "integer", "description": "最多条数, 默认 100"},
 			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"}
@@ -1966,7 +2040,7 @@ func _register_runtime_tools() -> void:
 		_call_get_errors)
 
 	_add_tool("clear_game_errors",
-		"清空游戏进程的错误缓冲区。",
+		"清空游戏进程的错误缓冲。",
 		{"type": "object", "properties": {}},
 		_call_clear_errors)
 
@@ -2214,7 +2288,7 @@ func _build_game_view_snapshot(max_nodes: int) -> Dictionary:
 func _register_game_play_tools() -> void:
 	# 编辑器模式下, 运行时工具经调试线转发到游戏进程(需先 run_game 启动游戏)
 	_add_tool("simulate_click",
-		"在游戏窗口内模拟一次鼠标左键点击(按下+释放)(经调试线转发到游戏进程)。需先 run_game 启动游戏。坐标为游戏视口坐标。",
+		"在游戏窗口模拟鼠标左键点击(经调试线转发到游戏进程)。需先run_game。坐标为游戏视口坐标。",
 		{"type": "object", "properties": {
 			"x": {"type": "integer", "description": "屏幕X坐标"},
 			"y": {"type": "integer", "description": "屏幕Y坐标"}
@@ -2222,7 +2296,7 @@ func _register_game_play_tools() -> void:
 		func(args): return await _call_runtime_proxy("simulate_click", args))
 
 	_add_tool("simulate_drag",
-		"在游戏窗口内模拟从起始位置拖拽到目标位置(按下->移动->释放)(经调试线转发到游戏进程)。需先 run_game 启动游戏。",
+		"在游戏窗口模拟拖拽(按下→移动→释放),经调试线转发到游戏进程,需先run_game。",
 		{"type": "object", "properties": {
 			"from_x": {"type": "integer", "description": "起始X坐标"},
 			"from_y": {"type": "integer", "description": "起始Y坐标"},
@@ -2232,7 +2306,7 @@ func _register_game_play_tools() -> void:
 		func(args): return await _call_runtime_proxy("simulate_drag", args))
 
 	_add_tool("simulate_key",
-		"在游戏窗口内模拟一次键盘按键(按下/释放)(经调试线转发到游戏进程)。需先 run_game 启动游戏。",
+		"在游戏窗口模拟键盘按键(按下/释放)(经调试线转发到游戏进程)。需先run_game。",
 		{"type": "object", "properties": {
 			"key": {"type": "string", "description": "按键名称, 如 'space', 'enter', 'escape', 'a'-'z', '0'-'9'"},
 			"pressed": {"type": "boolean", "description": "true=按下, false=释放, 默认 true"}
@@ -2240,12 +2314,12 @@ func _register_game_play_tools() -> void:
 		func(args): return await _call_runtime_proxy("simulate_key", args))
 
 	_add_tool("game_eval",
-		"在游戏进程中执行一段 GDScript 代码(经调试线转发到游戏进程)。需先 run_game 启动游戏。可访问游戏场景树。",
+		"在游戏进程执行GDScript代码(经调试线转发)。需先run_game。可访问游戏场景树。",
 		{"type": "object", "properties": {"code": {"type": "string", "description": "要执行的 GDScript 代码"}}},
 		func(args): return await _call_game_eval_proxy(args))
 
 	_add_tool("get_game_logs",
-		"获取游戏进程的日志(经调试线转发到游戏进程)。需先 run_game 启动游戏。返回 next 游标, 增量用法: 把上次返回的 next 作为 since 参数, 只取新增日志, 节省上下文。",
+		"获取游戏进程日志(经调试线转发)。需先run_game。返回next游标,增量用其作since。",
 		{"type": "object", "properties": {
 			"max": {"type": "integer", "description": "最多条数, 默认 200"},
 			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"}
@@ -2253,7 +2327,7 @@ func _register_game_play_tools() -> void:
 		func(args): return await _call_runtime_proxy("get_game_logs", args))
 
 	_add_tool("get_game_errors",
-		"获取游戏进程捕获的错误(经调试线转发到游戏进程)。需先 run_game 启动游戏。返回 next 游标, 增量用法: 把上次返回的 next 作为 since 参数, 只取新增错误。",
+		"获取游戏进程捕获的错误(经调试线转发)。需先run_game。返回next游标,增量用其作since。",
 		{"type": "object", "properties": {
 			"max": {"type": "integer", "description": "最多条数, 默认 100"},
 			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"}
@@ -2261,12 +2335,12 @@ func _register_game_play_tools() -> void:
 		func(args): return await _call_runtime_proxy("get_game_errors", args))
 
 	_add_tool("clear_game_errors",
-		"清空游戏进程的错误缓冲区(经调试线转发到游戏进程)。需先 run_game 启动游戏。",
+		"清空游戏进程的错误缓冲(经调试线转发)。需先run_game。",
 		{"type": "object", "properties": {}},
 		func(args): return await _call_runtime_proxy("clear_game_errors", args))
 
 	_add_tool("debug_continue",
-		"让因脚本错误/断点被调试器暂停的游戏继续运行(等效编辑器 Debugger 面板的 Continue 按钮, 不转发游戏进程)。当工具报错'游戏处于断点暂停'时调用。",
+		"让因脚本错误/断点被暂停的游戏继续运行(等效Debugger面板Continue)。当工具报错'游戏处于断点暂停'时调用。",
 		{"type": "object", "properties": {}},
 		_call_debug_continue)
 
@@ -2287,11 +2361,16 @@ func _call_debug_continue(_args: Dictionary) -> Dictionary:
 func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 	if debugger_plugin == null or not debugger_plugin.has_active_session():
 		return _err("游戏未运行。请先使用 run_game 启动游戏", "game_stopped", true, "调用 run_game 启动游戏, 等待调试线就绪后重试")
-	if _game_breaked:
-		# 游戏已被调试器断点暂停(脚本错误/断点), 主循环未运行, 调用必然超时。
-		# 立即返回明确错误, 而非干等 20s; 同时让 AI 知道可以用 debug_continue 恢复。
-		return _err("游戏处于断点暂停状态(脚本错误/断点, 主循环未运行)。调用会被挂起, 请先处理:\n1) 用 get_game_errors 查看具体脚本错误并 decide 修复; 2) 调用 debug_continue 让游戏继续; 或 stop_game 修复后重启。",
-			"game_breaked", true, "调用 debug_continue 让游戏继续, 或用 get_game_errors 查看错误后修复")
+	if _game_breaked and not _BREAK_SAFE_TOOLS.has(tool_name):
+		# 断点暂停: 依赖主循环的工具必然挂起; get_game_errors/get_game_logs仍可用; 自动回查错误缓冲拼进响应。
+		var diagnose := await _fetch_recent_game_error(tool_name)
+		if diagnose != "":
+			return _err("游戏被断点暂停, 工具 %s 需要主循环无法执行。\n已自动读取错误:\n%s\n\n修正脚本后 debug_continue 继续, 或 stop_game 重启。" %
+				[tool_name, diagnose],
+				"game_breaked", true, "get_game_errors查错后debug_continue; 或stop_game修复重启")
+		return _err("游戏被断点暂停, 工具 %s 需要主循环无法执行。\n错误缓冲无内容(可能是手动断点)。get_game_errors复核后 debug_continue, 或 stop_game 重启。" %
+			tool_name,
+			"game_breaked", true, "get_game_errors复核后debug_continue; 或stop_game修复重启")
 	if not _game_ready:
 		return _err("游戏调试线尚未就绪", "transient", true, "等待游戏启动完成(可稍后重试, 或重新 run_game)")
 	var req_id := _next_req_id
@@ -2308,20 +2387,19 @@ func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 			return _normalize_wire_result(result, tool_name)
 		if not debugger_plugin.has_active_session():
 			_pending.erase(req_id)
-			return _err("游戏进程已停止/崩溃(工具 %s 的请求被取消)。请先 run_game 重启游戏。" % tool_name,
-				"game_stopped", true, "调用 run_game 重启游戏, 等待调试线就绪后重试")
+			return _err("游戏进程已停止/崩溃(工具 %s 请求被取消)。先 run_game 重启。" % tool_name,
+				"game_stopped", true, "run_game重启后重试")
 		await get_tree().process_frame
 	if _pending.has(req_id):
 		_pending.erase(req_id)
-	# 超时主因通常是: eval 代码触发运行期脚本错误(除零/访问null等)导致 _mcp_run 中止、未发回结果;
-	# 其次是死循环/卡死。自动回查游戏错误缓冲, 把真实脚本错误拼进超时响应, 而非让 AI 瞎猜。
+	# 超时主因: eval触发运行期脚本错误导致_mcp_run中止未回发, 或是死循环/卡死。自动回查错误缓冲拼进响应。
 	var diagnose := await _fetch_recent_game_error(tool_name)
 	if diagnose != "":
-		return _err("游戏进程响应超时(20s)。工具: %s。\n已自动回查游戏错误缓冲, 发现运行期脚本错误:\n%s\n\n若你的代码触发了脚本错误(如除零/访问 null 字段), 请修正后重试; 若确实无错误但仍超时, 才考虑死循环/卡死。" %
+		return _err("游戏进程响应超时(20s), 工具: %s。已发现运行期脚本错误:\n%s\n\n修正代码后重试; 若无疑错误仍超时再考虑死循环。" %
 			[tool_name, diagnose],
-			"validation", true, "查看上方脚本错误修正代码后重试; 若代码无误仍超时, stop_game 后重新 run_game")
-	return _err("游戏进程响应超时(20s)。工具: %s。游戏错误缓冲中无运行期脚本错误, 可能是死循环/卡死或游戏无响应。" % tool_name,
-		"transient", true, "检查 game_eval 代码是否含死循环; 必要时 stop_game 后重新 run_game")
+			"validation", true, "修正上方脚本错误后重试; 仍超时则stop_game后重新run_game")
+	return _err("游戏进程响应超时(20s), 工具: %s。错误缓冲无脚本错误, 可能是死循环/卡死或无响应。" % tool_name,
+		"transient", true, "查game_eval是否死循环; 必要时stop_game后重新run_game")
 
 
 ## 超时诊断: 回查游戏错误缓冲, 返回最近一条脚本错误描述(无则返回 "")
