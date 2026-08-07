@@ -656,6 +656,66 @@ func notify_changed() -> void:
 # 存档 / 重建
 # ----------------------------------------------------------------------------
 
+## 序列化所有体素为 [[x, y, z, mat_id], ...]（统一材质契约：mat_id>=1，0=空 不存在）
+## 唯一权威的体素序列化器，供 save_data()（JSON 存档）与资源持久化（_get/_set）共用
+func _serialize_voxels() -> Array:
+	var voxel_list := []
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := ck * CHUNK_SIZE
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				var p := origin + _local_from_index(i)
+				voxel_list.append([p.x, p.y, p.z, buf[i]])
+	return voxel_list
+
+
+## 从 [[x, y, z, mat_id], ...] 重建体素（绕过增量维护，需调用方 invalidate_support_cache）
+func _deserialize_voxels(voxel_list: Variant) -> void:
+	if voxel_list == null:
+		return
+	for vox in voxel_list:
+		if vox is Array and vox.size() >= 4:
+			var pos := Vector3i(int(vox[0]), int(vox[1]), int(vox[2]))
+			_write_buffer_impl(pos, int(vox[3]), false)
+
+
+# --- 资源持久化（编辑器导入 .vox 为 VoxelData 后，体素数据随资源保存/加载） ---
+# materials/grid_size/default_scale/center_offset/frame_count 已由 @export 持久化；
+# _chunk_buffers 非 @export，通过隐藏 storage 属性在此序列化（编辑器不可见，随资源保存）。
+
+## 声明隐藏的 storage 属性（PROPERTY_USAGE_STORAGE：不显示在编辑器，但随资源保存/加载）
+func _get_property_list() -> Array:
+	return [{
+		"name": "voxel_data_payload",
+		"type": TYPE_STRING,
+		"usage": PROPERTY_USAGE_STORAGE,
+	}]
+
+
+func _get(property: StringName) -> Variant:
+	if property == &"voxel_data_payload":
+		return var_to_str({
+			"grid_size": [grid_size.x, grid_size.y, grid_size.z],
+			"voxels": _serialize_voxels(),
+		})
+	return null
+
+
+func _set(property: StringName, value: Variant) -> bool:
+	if property == &"voxel_data_payload":
+		clear(false)
+		var payload: Variant = str_to_var(value)
+		if payload is Dictionary:
+			var gs: Variant = payload.get("grid_size", [0, 0, 0])
+			if gs is Array and gs.size() >= 3:
+				grid_size = Vector3i(int(gs[0]), int(gs[1]), int(gs[2]))
+			_deserialize_voxels(payload.get("voxels", null))
+		invalidate_support_cache()
+		return true
+	return false
+
+
 ## 将体素数据和材质序列化为可 JSON 保存的结构
 ## 返回 Dictionary，可配合 JSON.stringify 保存到磁盘；load_data 可完整重建
 ## 格式：
@@ -674,16 +734,8 @@ func save_data() -> Dictionary:
 			continue
 		mats.append(mat.save_data())
 	data["materials"] = mats
-	# 体素序列化
-	var voxel_list := []
-	for ck: Vector3i in _chunk_buffers:
-		var buf = _chunk_buffers[ck]
-		var origin := ck * CHUNK_SIZE
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				var p := origin + _local_from_index(i)
-				voxel_list.append([p.x, p.y, p.z, buf[i]])
-	data["voxels"] = voxel_list
+	# 体素序列化（复用唯一权威序列化器）
+	data["voxels"] = _serialize_voxels()
 	return data
 
 
@@ -704,12 +756,8 @@ func load_data(data: Variant) -> void:
 	# 网格尺寸
 	if data.has("grid_size") and data["grid_size"] is Array and data["grid_size"].size() >= 3:
 		grid_size = Vector3i(int(data["grid_size"][0]), int(data["grid_size"][1]), int(data["grid_size"][2]))
-	# 体素重建
-	if data.has("voxels"):
-		for vox in data["voxels"]:
-			if vox is Array and vox.size() >= 4:
-				var pos := Vector3i(int(vox[0]), int(vox[1]), int(vox[2]))
-				_write_buffer_impl(pos, int(vox[3]), false)
+	# 体素重建（复用唯一权威反序列化器）
+	_deserialize_voxels(data.get("voxels", null))
 	# load_data 直接写入缓冲（绕过增量维护），使支撑缓存失效，下次查询时全量重建
 	invalidate_support_cache()
 	emit_changed()
