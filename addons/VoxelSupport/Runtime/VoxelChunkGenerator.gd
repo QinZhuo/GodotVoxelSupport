@@ -390,7 +390,11 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 					else:
 						var n_mat_id := nv - 1
 						var n_trans: bool = n_mat_id < n_mats and trans_flags[n_mat_id] > 0
-						if is_trans != n_trans or mat_id != n_mat_id:
+						# 面可见性统一规则（与 FaceTool.face_visible 完全一致，热路径内联避免函数调用）：
+						# 透明类型不同 → 可见；皆透明且材质不同 → 可见；其余（含实心材质接缝）→ 不可见
+						if is_trans != n_trans:
+							visible = true
+						elif is_trans and mat_id != n_mat_id:
 							visible = true
 
 					if visible:

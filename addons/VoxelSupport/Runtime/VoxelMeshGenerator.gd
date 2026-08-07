@@ -375,12 +375,9 @@ func _get_dir_visible_slice_voxels(slices: Dictionary, axis: Vector3i, dir: int,
 		var visible := false
 		var dir_pos: Vector3i = pos + offset
 		if dir_slice.has(dir_pos):
-			var mat: VoxelMaterial = mats[slice[pos]]
-			var dir_mat: VoxelMaterial = mats[dir_slice[dir_pos]]
-			if (mat.trans > 0) != (dir_mat.trans > 0):
-				visible = true
-			elif mat.trans > 0 and mat != dir_mat:
-				visible = true
+			# 面可见性统一规则（见 FaceTool.face_visible）：
+			# 透明类型不同 → 可见；皆透明且材质不同 → 可见；实心材质接缝 → 不可见
+			visible = FaceTool.face_visible(mats[slice[pos]], mats[dir_slice[dir_pos]])
 		else:
 			visible = true
 		if visible:
