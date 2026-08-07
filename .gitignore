@@ -16,17 +16,16 @@ mono_crash.*.json
 /test
 .opencode
 
-# GDExtension 开发目录（项目根 native/：C++ 源码 + 构建产物）
-# 源码（CMakeLists.txt / src/）会提交，构建产物不入库（由 GitHub Actions 构建后发布）
-native/build/
-native/bin/*.dylib
-native/bin/*.so
-native/bin/*.dll
+# GDExtension 开发目录（项目根 gdextension/：C++ 源码 + 构建缓存）
+# 源码（CMakeLists.txt / src/）会提交，构建产物由 GitHub Actions 构建后发布
+gdextension/build/
 
 # addons/VoxelSupport/native/ 是发布目录：其中的动态库必须提交
 # （用户下载插件文件夹后直接可用，无需自己编译）
-!addons/VoxelSupport/native/bin/*.dylib
-!addons/VoxelSupport/native/bin/*.so
-!addons/VoxelSupport/native/bin/*.dll
+# 注意：CMake 产物会直接输出到 addons/VoxelSupport/native/，其中 libvoxelnative.dylib
+# 是无后缀的原始产物，可忽略；带平台后缀的重命名版（如 .macos.debug.arm64）必须提交
+addons/VoxelSupport/native/libvoxelnative.dylib
+addons/VoxelSupport/native/libvoxelnative.so
+addons/VoxelSupport/native/libvoxelnative.dll
 
 *.gdextension.uid

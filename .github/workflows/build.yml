@@ -1,12 +1,12 @@
 # 多平台 GDExtension 构建工作流
-# 在 Windows/macOS/Linux 上分别编译 libvoxelnative，并打包所有平台的二进制。
+# 在 Windows/macOS/Linux 上分别编译 libvoxelnative，并打包所有平台的二进制为完整插件。
 # 触发方式：
 #   - 推送到 main 分支
 #   - 手动触发（Actions 页面 → Run workflow）
 #   - 打 tag（v*）时自动构建并附带 release 资产
 #
-# 产物：native/bin/ 下各平台命名二进制 + 根目录 voxelnative.gdextension
-# 使用者无需编译环境，直接拷贝 native/bin + voxelnative.gdextension 即可。
+# 产物：addons/VoxelSupport/native/ 下各平台命名动态库 + voxelnative.gdextension
+# 使用者无需编译环境，下载 addons/VoxelSupport/ 文件夹即可使用。
 
 name: Build GDExtension
 
@@ -51,7 +51,7 @@ jobs:
         if: matrix.target == 'macos'
         shell: bash
         run: |
-          cmake -S native -B native/build \
+          cmake -S gdextension -B gdextension/build \
             -DGODOTCPP_API_VERSION=4.7 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
@@ -61,29 +61,30 @@ jobs:
         if: matrix.target != 'macos'
         shell: bash
         run: |
-          cmake -S native -B native/build \
+          cmake -S gdextension -B gdextension/build \
             -DGODOTCPP_API_VERSION=4.7 \
             -DCMAKE_BUILD_TYPE=Release
 
+      # 产物已由 CMake 直接输出到 addons/VoxelSupport/native/（无需复制）
       - name: Build
         shell: bash
-        run: cmake --build native/build --config Release -j 4
+        run: cmake --build gdextension/build --config Release -j 4
 
-      # 产物重命名为 .gdextension 声明的文件名，并放入插件的发布目录 addons/VoxelSupport/native/bin
+      # 按 .gdextension 声明的文件名重命名（macos/windows/linux 各自命名规则）
       - name: Rename artifacts
         shell: bash
         run: |
-          mkdir -p dist/addons/VoxelSupport/native/bin
+          mkdir -p dist/addons/VoxelSupport/native
           cp addons/VoxelSupport/native/voxelnative.gdextension dist/addons/VoxelSupport/native/voxelnative.gdextension
           if [ "${{ matrix.target }}" = "macos" ]; then
-            cp native/bin/libvoxelnative.dylib dist/addons/VoxelSupport/native/bin/libvoxelnative.macos.debug.${{ matrix.arch }}.dylib
-            cp native/bin/libvoxelnative.dylib dist/addons/VoxelSupport/native/bin/libvoxelnative.macos.release.${{ matrix.arch }}.dylib
+            cp addons/VoxelSupport/native/libvoxelnative.dylib dist/addons/VoxelSupport/native/libvoxelnative.macos.debug.${{ matrix.arch }}.dylib
+            cp addons/VoxelSupport/native/libvoxelnative.dylib dist/addons/VoxelSupport/native/libvoxelnative.macos.release.${{ matrix.arch }}.dylib
           elif [ "${{ matrix.target }}" = "windows" ]; then
-            cp native/bin/voxelnative.dll dist/addons/VoxelSupport/native/bin/voxelnative.windows.debug.x86_64.dll
-            cp native/bin/voxelnative.dll dist/addons/VoxelSupport/native/bin/voxelnative.windows.release.x86_64.dll
+            cp addons/VoxelSupport/native/voxelnative.dll dist/addons/VoxelSupport/native/voxelnative.windows.debug.x86_64.dll
+            cp addons/VoxelSupport/native/voxelnative.dll dist/addons/VoxelSupport/native/voxelnative.windows.release.x86_64.dll
           else
-            cp native/bin/libvoxelnative.so dist/addons/VoxelSupport/native/bin/libvoxelnative.linux.debug.x86_64.so
-            cp native/bin/libvoxelnative.so dist/addons/VoxelSupport/native/bin/libvoxelnative.linux.release.x86_64.so
+            cp addons/VoxelSupport/native/libvoxelnative.so dist/addons/VoxelSupport/native/libvoxelnative.linux.debug.x86_64.so
+            cp addons/VoxelSupport/native/libvoxelnative.so dist/addons/VoxelSupport/native/libvoxelnative.linux.release.x86_64.so
           fi
 
       - uses: actions/upload-artifact@v4
@@ -118,11 +119,11 @@ jobs:
           # 合并各平台编译产物
           mkdir -p release/addons/VoxelSupport/native
           cp addons/VoxelSupport/native/voxelnative.gdextension release/addons/VoxelSupport/native/
-          cp -r artifacts/addons/VoxelSupport/native/bin release/addons/VoxelSupport/native/
+          cp -r artifacts/addons/VoxelSupport/native/*.dylib artifacts/addons/VoxelSupport/native/*.so artifacts/addons/VoxelSupport/native/*.dll release/addons/VoxelSupport/native/ 2>/dev/null || true
           echo "=== 最终插件包结构 ==="
           find release -type f | sort
-          echo "=== bin 目录 ==="
-          ls -la release/addons/VoxelSupport/native/bin/
+          echo "=== native 目录 ==="
+          ls -la release/addons/VoxelSupport/native/
 
       - uses: actions/upload-artifact@v4
         with:
