@@ -330,16 +330,29 @@ func _generate_dir_face(task) -> void:
 		if slices.has(slice_index):
 			var slice_voxels_visible = _get_dir_visible_slice_voxels(slices, axis, task.dir, slice_index)
 			if slice_voxels_visible.size() > 0:
-				# 转换为 2D 网格，使用共享贪婪合并器
-				var grid := {}
-				for p: Vector3i in slice_voxels_visible:
-					grid[Vector2i(p[axis.y], p[axis.z])] = slice_voxels_visible[p]
-				var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge(grid)
+				# 转换为 2D 密集网格，使用共享贪婪合并器（快速密集版，无字典哈希）
+				var slice_cells: Dictionary = slice_voxels_visible
+				var min_u := 0x7fffffff
+				var max_u := -0x7fffffff
+				var min_v := 0x7fffffff
+				var max_v := -0x7fffffff
+				for p: Vector3i in slice_cells:
+					min_u = mini(min_u, p[axis.y])
+					max_u = maxi(max_u, p[axis.y])
+					min_v = mini(min_v, p[axis.z])
+					max_v = maxi(max_v, p[axis.z])
+				var grid_w := max_u - min_u + 1
+				var grid_h := max_v - min_v + 1
+				var grid := PackedInt32Array()
+				grid.resize(grid_w * grid_h)
+				for p: Vector3i in slice_cells:
+					grid[(p[axis.y] - min_u) + (p[axis.z] - min_v) * grid_w] = int(slice_cells[p]) + 1
+				var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge_dense(grid, grid_w, grid_h)
 				for rect in rects:
 					var pos: Vector3i
 					pos[axis.x] = slice_index
-					pos[axis.y] = rect.position.x
-					pos[axis.z] = rect.position.y
+					pos[axis.y] = rect.position.x + min_u
+					pos[axis.z] = rect.position.y + min_v
 					var size: Vector3 = Vector3.ONE
 					size[axis.y] = rect.size.x
 					size[axis.z] = rect.size.y

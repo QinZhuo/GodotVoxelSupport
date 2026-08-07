@@ -7,10 +7,7 @@ extends RefCounted
 ## VoxelChunkGenerator（运行时）共享调用。
 ##
 ## 核心算法：对一个 2D 网格中的同材质单元格进行矩形合并，降低三角形数量。
-##
-## 两个入口共享同一个密集扫描核心（greedy_merge_dense）：
-## - greedy_merge(grid: Dictionary)：兼容旧接口，先扁平化为密集数组再扫描
-## - greedy_merge_dense(grid, width, height)：性能关键路径，直接扫描密集数组
+## 只保留一条性能关键路径（greedy_merge_dense）：直接扫描密集数组。
 ##
 ## 密集扫描为经典"快速贪婪"：种子格向右扩展宽度、再逐行验证扩展高度，
 ## 合并后的格子清零标记已处理，保证每个格子至多被处理常数次 → 近似 O(n)，
@@ -26,36 +23,6 @@ class RectInfo:
 		position = p
 		size = s
 		value = v
-
-
-## 对 2D 网格执行贪婪合并（兼容旧接口）
-## grid: Dictionary[Vector2i, int] — UV坐标到材质ID的映射
-## 返回: Array[RectInfo] — 合并后的矩形列表
-static func greedy_merge(grid: Dictionary) -> Array[RectInfo]:
-	if grid.is_empty():
-		return []
-	var min_u := 0x7fffffff
-	var max_u := -0x7fffffff
-	var min_v := 0x7fffffff
-	var max_v := -0x7fffffff
-	for uv in grid:
-		var p: Vector2i = uv
-		min_u = mini(min_u, p.x)
-		max_u = maxi(max_u, p.x)
-		min_v = mini(min_v, p.y)
-		max_v = maxi(max_v, p.y)
-	var width := max_u - min_u + 1
-	var height := max_v - min_v + 1
-	var dense := PackedInt32Array()
-	dense.resize(width * height)
-	for uv in grid:
-		var p: Vector2i = uv
-		dense[(p.x - min_u) + (p.y - min_v) * width] = int(grid[uv]) + 1
-	var rects := greedy_merge_dense(dense, width, height)
-	if min_u != 0 or min_v != 0:
-		for r in rects:
-			r.position += Vector2i(min_u, min_v)
-	return rects
 
 
 ## 对密集 2D 网格执行贪婪合并（性能关键路径）
