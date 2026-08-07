@@ -350,15 +350,18 @@ func _generate_dir_face(task) -> void:
 				grid.resize(grid_w * grid_h)
 				for p: Vector3i in slice_cells:
 					grid[(p[axis.y] - min_u) + (p[axis.z] - min_v) * grid_w] = int(slice_cells[p])
-				var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge_dense(grid, grid_w, grid_h)
-				for rect in rects:
+				var merge_result := VoxelGreedyMesher.greedy_merge_dense(grid, grid_w, grid_h)
+				var m_pos: PackedInt32Array = merge_result["pos"]
+				var m_size: PackedInt32Array = merge_result["size"]
+				var n_rects: int = merge_result["val"].size()
+				for i in n_rects:
 					var pos: Vector3i
 					pos[axis.x] = slice_index
-					pos[axis.y] = rect.position.x + min_u
-					pos[axis.z] = rect.position.y + min_v
+					pos[axis.y] = m_pos[i * 2] + min_u
+					pos[axis.z] = m_pos[i * 2 + 1] + min_v
 					var size: Vector3 = Vector3.ONE
-					size[axis.y] = rect.size.x
-					size[axis.z] = rect.size.y
+					size[axis.y] = m_size[i * 2]
+					size[axis.z] = m_size[i * 2 + 1]
 					_generate_size_dir_face(slice_voxels_visible, axis, pos, size, task.dir, surfaces)
 	task.meshes = [surfaces[0].commit(), surfaces[1].commit()]
 

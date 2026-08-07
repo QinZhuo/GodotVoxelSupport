@@ -53,7 +53,7 @@ static func generate_mesh_runtime(
 		materials: Array,
 		options: Dictionary = {},
 		rebuild_chunks: Array[Vector3i] = []) -> ArrayMesh:
-	var arrays := generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
+	var arrays: Variant = generate_arrays_runtime(voxels, materials, options, rebuild_chunks)
 	if arrays == null:
 		return null
 	return _merge_meshes(arrays as Dictionary)
@@ -362,11 +362,14 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 		var mat = materials[i]
 		trans_flags[i] = 1 if mat != null and mat.trans > 0 else 0
 
-	# 预分配：6个面的可见面收集器
+	# 预分配：6个面的可见面收集器（定长 Array[16] 替代 Dictionary，消除哈希分配）
 	# slices_by_face[face_idx][slice_key] = PackedInt32Array（16×16 密集，统一材质契约：0=空，否则=材质ID）
-	var slices_by_face: Array[Dictionary] = []
+	# slice_key ∈ [0, CHUNK_SIZE)，每个元素初始为 null，首次使用才分配 grid
+	var slices_by_face: Array[Array] = []
 	for i in 6:
-		slices_by_face.append({})
+		var arr: Array = []
+		arr.resize(CHUNK_SIZE)
+		slices_by_face.append(arr)
 
 	# 单次遍历 16³：光环下标覆盖 6 邻，全部为数组读取
 	for z in CHUNK_SIZE:
@@ -406,40 +409,43 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 						var u := _axis_val(x, y, z, u_axis)
 						var vv := _axis_val(x, y, z, v_axis)
 
-						var slices: Dictionary = slices_by_face[face_idx]
-						var grid: PackedInt32Array
-						if slices.has(slice_key):
-							grid = slices[slice_key]
-						else:
-							grid = _new_slice_grid()
-							slices[slice_key] = grid
+						var slices: Array = slices_by_face[face_idx]
+						if slices[slice_key] == null:
+							slices[slice_key] = _new_slice_grid()
+						var grid: PackedInt32Array = slices[slice_key]
 						grid[u + vv * CHUNK_SIZE] = mat_id
 
-	# 处理每个面的贪婪合并（密集数组，无字典哈希）
+	# 处理每个面的贪婪合并（定长数组遍历，无字典哈希迭代）
 	for face_idx in 6:
 		var axis_info: Dictionary = _FACE_AXES[face_idx]
 		var perp := axis_info.perp as int
 		var u_axis := axis_info.u as int
 		var v_axis := axis_info.v as int
-		var slices: Dictionary = slices_by_face[face_idx]
+		var slices: Array = slices_by_face[face_idx]
 
-		for slice_key in slices:
+		for slice_key in CHUNK_SIZE:
+			if slices[slice_key] == null:
+				continue
 			var grid: PackedInt32Array = slices[slice_key]
-			var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge_dense(grid, CHUNK_SIZE, CHUNK_SIZE)
-			for rect in rects:
+			var merge_result := VoxelGreedyMesher.greedy_merge_dense(grid, CHUNK_SIZE, CHUNK_SIZE)
+			var m_pos: PackedInt32Array = merge_result["pos"]
+			var m_size: PackedInt32Array = merge_result["size"]
+			var m_val: PackedInt32Array = merge_result["val"]
+			var n_rects := m_val.size()
+			for i in n_rects:
 				# 重建世界坐标（局部坐标 + chunk_origin 偏移）
 				var pos := chunk_origin
 				pos[perp] += slice_key
-				pos[u_axis] += rect.position.x
-				pos[v_axis] += rect.position.y
+				pos[u_axis] += m_pos[i * 2]
+				pos[v_axis] += m_pos[i * 2 + 1]
 				var size := Vector3i(1, 1, 1)
-				size[u_axis] = rect.size.x
-				size[v_axis] = rect.size.y
+				size[u_axis] = m_size[i * 2]
+				size[v_axis] = m_size[i * 2 + 1]
 
 				_add_greedy_face(
 					solid_verts, solid_normals, solid_uvs, solid_idxs,
 					trans_verts, trans_normals, trans_uvs, trans_idxs,
-					pos, rect.value, face_idx, scale, size,
+					pos, m_val[i], face_idx, scale, size,
 					materials, origin_offset, offset)
 
 
