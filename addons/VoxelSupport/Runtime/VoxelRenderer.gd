@@ -77,10 +77,34 @@ signal mesh_updated
 ## 关闭（默认）时仅在单次重建超时阈值（如单 chunk 生成 >5ms）时才打印，避免刷屏
 @export var diag_enabled: bool = false
 
+## 生成调度视锥剔除：仅对视锥内（或相机附近）的 chunk 派发网格生成任务。
+## 视锥外的 chunk 延迟到可见/靠近时再生成，降低大型场景的初始构建与重建压力。
+## 渲染层的 GPU 视锥剔除由 Godot 引擎自动完成（每个 chunk 独立 MeshInstance3D），
+## 这里控制的是"CPU 侧生成调度"：不生成就无需上传 GPU，也省掉该 chunk 的生成线程。
+## 注意：关闭后所有 chunk 都生成（旧行为），内存/线程开销随世界规模线性增长。
+@export var use_frustum_culling: bool = true:
+	set(v):
+		use_frustum_culling = v
+		if not v:
+			_deferred_chunks.clear()
+		_request_update()
+
+## 视锥外仍强制生成的半径（世界单位）。相机在场景中心环视时，视锥外但很近的 chunk
+## 也应先生成，避免转头时频繁补建。默认 0 表示严格视锥剔除。
+@export var cull_radius_margin: float = 0.0
+
+## 视锥剔除的刷新间隔帧数：视锥外待建 chunk 每隔 N 帧检查一次是否进入视锥。
+## 值越大 CPU 开销越低，但进入视锥后的补建响应越慢。
+@export_range(1, 60) var cull_check_interval: int = 8
+
 var _dirty: bool = false
 var _materials_cache: Array = []
 var _collision_body: StaticBody3D = null
 var _update_counter: int = 0
+
+# 视锥外待生成的 chunk（key = chunk key，value = true），进入视锥后补建
+var _deferred_chunks: Dictionary[Vector3i, bool] = {}
+var _cull_check_counter: int = 0
 
 # 异步网格生成状态（多任务并行，每个任务独立处理）
 var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
@@ -143,6 +167,13 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
 	# 这里只处理限流和启动新任务
+
+	# 视锥外待建 chunk 周期性检查：进入视锥后补建（仅在无进行中任务时触发，避免与批次冲突）
+	_cull_check_counter += 1
+	if use_frustum_culling and _cull_check_counter >= cull_check_interval:
+		_cull_check_counter = 0
+		if _pending_task_count == 0:
+			_process_deferred_chunks()
 
 	# 延迟批次完成：全部异步任务完成后，在下一帧处理剩余收尾逻辑，避免主线程尖峰
 	if _batch_complete_pending:
@@ -265,6 +296,79 @@ func _update_mesh() -> void:
 		_update_mesh_sync()
 
 
+## 从待重建 chunk 中筛出"视锥内（或相机附近）"的部分，视锥外的加入待建队列。
+## 返回视锥内应本次生成的 chunk 列表。
+## 无相机/视锥剔除关闭时全量返回（旧行为）。
+func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
+	if not use_frustum_culling:
+		return chunks
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return chunks
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var margin := cull_radius_margin
+	var cam_pos := cam.global_position
+	var world_offset := global_position
+	var visible: Array[Vector3i] = []
+	for ck in chunks:
+		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
+		if _aabb_has_vertex_in_frustum(aabb, cam):
+			visible.append(ck)
+		elif margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin:
+			visible.append(ck)
+		else:
+			_deferred_chunks[ck] = true
+	return visible
+
+
+## chunk 的世界空间 AABB（chunk 子节点的局部坐标需加上 VoxelDestructible 的 global_position）
+static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offset: Vector3) -> AABB:
+	var origin := world_offset + Vector3(ck) * chunk_size_world
+	return AABB(origin, Vector3(chunk_size_world, chunk_size_world, chunk_size_world))
+
+
+## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
+## 使用 Godot 内置 is_position_in_frustum，保证判定与引擎渲染剔除一致
+static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
+	for i in 8:
+		var v := Vector3(
+			aabb.position.x if (i & 1) == 0 else aabb.end.x,
+			aabb.position.y if (i & 2) == 0 else aabb.end.y,
+			aabb.position.z if (i & 4) == 0 else aabb.end.z)
+		if cam.is_position_in_frustum(v):
+			return true
+	return false
+
+
+## 周期性检查待建队列：视锥外的 chunk 进入视锥（或相机靠近）后触发补建。
+## 由 _process 按 cull_check_interval 帧调用一次。
+func _process_deferred_chunks() -> void:
+	if _deferred_chunks.is_empty():
+		return
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var margin := cull_radius_margin
+	var cam_pos := cam.global_position
+	var world_offset := global_position
+	var to_build: Array[Vector3i] = []
+	for ck in _deferred_chunks:
+		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
+		if _aabb_has_vertex_in_frustum(aabb, cam):
+			to_build.append(ck)
+		elif margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin:
+			to_build.append(ck)
+	if to_build.is_empty():
+		return
+	for ck in to_build:
+		_deferred_chunks.erase(ck)
+		if data:
+			var origin := VoxelChunk.origin_of(ck)
+			data.dirty_voxels[origin] = data.get_voxel(origin)
+	_request_update()
+
+
 ## 异步路径：后台线程生成网格数据，完成后通过 call_deferred 直接传递结果到主线程
 ## 主线程绝不阻塞：旧任务未完成时直接启动新任务覆盖，子线程完成后检查 gen_id 丢弃过期结果
 func _update_mesh_async() -> void:
@@ -314,20 +418,22 @@ func _update_mesh_async() -> void:
 				_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 					{}, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset, diag_enabled)))
 			else:
+				var visible: Array[Vector3i] = _filter_frustum_chunks(all_chunks)
 				if diag_enabled:
-					print("[诊断] 全量构建 gen_id=%d: %d 个 Chunk，分块独立线程" % [gen_id, all_chunks.size()])
-				var snapshot: Dictionary = data.snapshot_chunks_halo(all_chunks)
-				_pending_task_count = all_chunks.size()
-				for ck in all_chunks:
+					print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
+				var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
+				_pending_task_count = visible.size()
+				for ck in visible:
 					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 						snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
+			var visible: Array[Vector3i] = _filter_frustum_chunks(rebuild_chunks)
 			if diag_enabled:
-				print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
-			var snapshot: Dictionary = data.snapshot_chunks_halo(rebuild_chunks)
-			_pending_task_count = rebuild_chunks.size()
-			for ck in rebuild_chunks:
+				print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
+			var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
+			_pending_task_count = visible.size()
+			for ck in visible:
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 					snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 	else:
@@ -739,6 +845,7 @@ func _clear_collision() -> void:
 
 ## 清理所有 chunk 子 MeshInstance3D 及关联碰撞体
 func _clear_chunk_meshes() -> void:
+	_deferred_chunks.clear()
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()
 	_chunk_meshes.clear()
