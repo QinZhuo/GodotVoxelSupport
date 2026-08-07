@@ -98,6 +98,16 @@ var _chunk_materials_cache_src: Array = []
 var _cascade_check_positions: Array = []  # 待检查的体素位置（下一级联层级）
 var _cascade_total: Array = []            # 所有级联累积的失稳体素
 
+## 级联分帧化：大面积崩塌（数万体素）时，单帧处理全部体素会造成主线程
+## 数百毫秒卡顿（检测+分组+材质+移除+生成 全同步）。按体素数量切块，
+## 每帧只处理 MAX_CASCADE_VOXELS_PER_FRAME 个，剩余存入待处理队列，
+## 把 1174ms 级联阻塞摊平到多帧（检测每帧重跑，天然支持传播链继续）。
+## 注意：分块检测的代价是每次 _find_unstable_voxels 都基于当前数据状态，
+## 分批处理保证正确性（移除前体素已判定失稳），只是时序上分多帧。
+const MAX_CASCADE_VOXELS_PER_FRAME: int = 4096
+## 分帧处理剩余待移除体素（尚未分组/移除的失稳体素）
+var _cascade_pending_voxels: Array = []
+
 ## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
 const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 
@@ -629,16 +639,32 @@ func _process_full_cascade() -> void:
 	voxel_damaged.emit(total_unstable, true)
 
 
-## 处理级联崩塌（逐帧，但每帧"一次"完成整条传播链）
-## 从 _cascade_check_positions 出发，单轮找出所有级联失稳体素并统一移除
+## 处理级联崩塌（分帧处理，大面积崩塌时把主线程阻塞摊平到多帧）
+## 从 _cascade_check_positions 出发，单轮找出级联失稳体素并统一移除
 ##
-## 性能优化（合并级联层级）：
-##   旧实现每帧只处理一个级联层级，把 unstable 设为下一级检查点，导致 BFS 多轮重复
-##   扫描（每轮 10-13ms），5 级级联 = 50-65ms 链式阻塞。
-##   find_unsupported_around() 内部已用支撑图把连锁失稳"单轮递归传播"到终结，
-##   因此这里一次调用即可获得全部失稳体素，无需分帧多轮。丢掉的逐帧"层级延迟"
-##   换来了显著的确定性性能提升。
+## 性能优化（合并级联层级 + 分帧切块）：
+##   - 旧实现每帧只处理一个级联层级，BFS 多轮重复扫描（每轮 10-13ms），
+##     5 级级联 = 50-65ms 链式阻塞。find_unsupported_around() 内部已用支撑图
+##     把连锁失稳"单轮递归传播"到终结，一次调用获得全部失稳体素。
+##   - 超大崩塌（数万体素）时单帧全处理仍会主线程卡顿数百 ms（检测+分组+
+##     材质+移除+生成全同步）。因此按 MAX_CASCADE_VOXELS_PER_FRAME 切块：
+##     每帧只处理一批，剩余体素存 _cascade_pending_voxels，下帧继续检测。
 func _process_cascade_level() -> void:
+	# 优先处理上帧遗留的待移除体素（已判定失稳，直接走分组/移除/生成）
+	# 注意：遗留体素可能仍超单帧上限（上一帧一次性全量放入），需再次分帧
+	if not _cascade_pending_voxels.is_empty():
+		if _cascade_pending_voxels.size() > MAX_CASCADE_VOXELS_PER_FRAME:
+			var batch: Array = _cascade_pending_voxels.slice(0, MAX_CASCADE_VOXELS_PER_FRAME)
+			_cascade_pending_voxels = _cascade_pending_voxels.slice(MAX_CASCADE_VOXELS_PER_FRAME)
+			_process_cascade_batch(batch)
+			if diag_enabled:
+				print("[诊断] 级联分帧(遗留): 本帧%d体素, 剩余%d" % [batch.size(), _cascade_pending_voxels.size()])
+			return
+		var pending: Array = _cascade_pending_voxels
+		_cascade_pending_voxels = []
+		_process_cascade_batch(pending)
+		return
+
 	if _cascade_check_positions.is_empty():
 		return
 
@@ -649,10 +675,29 @@ func _process_cascade_level() -> void:
 	_cascade_check_positions = []
 
 	var unstable := _find_unstable_voxels(queue)
-	var _diag_t1 := Time.get_ticks_usec() if diag_enabled else 0
 	if unstable.is_empty():
 		_finalize_cascade()
 		return
+
+	# 超大崩塌分帧：超过单帧上限时只处理前 MAX_CASCADE_VOXELS_PER_FRAME 个，
+	# 剩余存入待处理队列，由 _process 下一帧继续（避免单帧 1 秒级主线程卡顿）
+	if unstable.size() > MAX_CASCADE_VOXELS_PER_FRAME:
+		var batch: Array = unstable.slice(0, MAX_CASCADE_VOXELS_PER_FRAME)
+		_cascade_pending_voxels = unstable.slice(MAX_CASCADE_VOXELS_PER_FRAME)
+		_process_cascade_batch(batch)
+		if diag_enabled:
+			print("[诊断] 级联分帧: 本帧%d体素, 剩余%d" % [batch.size(), _cascade_pending_voxels.size()])
+		return
+
+	_process_cascade_batch(unstable)
+
+
+## 处理一批失稳体素：分组 → 收集材质 → 移除 → 生成掉落体
+## 供 _process_cascade_level 单帧批处理与分帧待处理队列共用
+func _process_cascade_batch(unstable: Array) -> void:
+	if unstable.is_empty():
+		return
+	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 按连通性分组
 	var groups := VoxelData.partition_connected(unstable)
@@ -676,19 +721,21 @@ func _process_cascade_level() -> void:
 		_spawn_falling_chunks_from_groups(groups, group_materials)
 	var _diag_t5 := Time.get_ticks_usec() if diag_enabled else 0
 
-	# 累积级联结果并直接终结（find 已包含全部传播链）
+	# 累积级联结果
 	_cascade_total.append_array(unstable)
-	_finalize_cascade()
+
+	# 本批处理完且无遗留 → 终结
+	if _cascade_pending_voxels.is_empty():
+		_finalize_cascade()
 
 	if diag_enabled:
 		var _t_total := (_diag_t5 - _diag_t0) / 1000.0
-		var _t_find := (_diag_t1 - _diag_t0) / 1000.0
-		var _t_group := (_diag_t2 - _diag_t1) / 1000.0
+		var _t_group := (_diag_t2 - _diag_t0) / 1000.0
 		var _t_mat := (_diag_t3 - _diag_t2) / 1000.0
 		var _t_remove := (_diag_t4 - _diag_t3) / 1000.0
 		var _t_spawn := (_diag_t5 - _diag_t4) / 1000.0
 		if _t_total > 1.0:
-			print("[诊断] 级联(合并): %d体素, %d组, 总%.2fms | 检测%.2f | 分组%.2f | 材质%.2f | 移除%.2f | 生成%.2f" % [unstable.size(), groups.size(), _t_total, _t_find, _t_group, _t_mat, _t_remove, _t_spawn])
+			print("[诊断] 级联批处理: %d体素, %d组, 总%.2fms | 分组%.2f | 材质%.2f | 移除%.2f | 生成%.2f" % [unstable.size(), groups.size(), _t_total, _t_group, _t_mat, _t_remove, _t_spawn])
 
 
 ## 当体素已被移除后，从已收集的材质映射中查找原始材质ID
@@ -1376,8 +1423,8 @@ func _process(_delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 
-	# 处理级联崩塌（单轮完成整条传播链，find_unsupported_around 内部已递归传播全部失稳）
-	if not _cascade_check_positions.is_empty():
+	# 处理级联崩塌（分帧：单帧处理一批，大面积崩塌摊平到多帧避免主线程卡顿）
+	if not _cascade_check_positions.is_empty() or not _cascade_pending_voxels.is_empty():
 		var _t1 := Time.get_ticks_usec() if diag_enabled else 0
 		_process_cascade_level()
 		if diag_enabled:
