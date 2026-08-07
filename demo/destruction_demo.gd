@@ -178,6 +178,22 @@ func _process(delta: float) -> void:
 
 
 func _build_target() -> void:
+	# 优先复用场景里预置的 DestructibleVoxels 节点（编辑器场景树可见、属性可调），
+	# 缺失时自动创建（直接拖入使用也兼容）
+	var scene_target := get_node_or_null("DestructibleVoxels") as VoxelDestructible
+	if scene_target != null:
+		_target = scene_target
+		# 若已有 data 且是用户手动赋的 VoxelData，保留它；否则生成默认结构
+		var data: VoxelData
+		if voxel_data_source != null:
+			data = voxel_data_source
+		elif _target.data != null:
+			data = _target.data
+		else:
+			data = _create_large_structure_data()
+		_configure_target(data)
+		return
+
 	if _target and is_instance_valid(_target):
 		_target.queue_free()
 
@@ -185,12 +201,16 @@ func _build_target() -> void:
 	_target.name = "DestructibleVoxels"
 	add_child(_target)
 
-	var data: VoxelData
+	var data2: VoxelData
 	if voxel_data_source != null:
-		data = voxel_data_source
+		data2 = voxel_data_source
 	else:
-		data = _create_large_structure_data()
+		data2 = _create_large_structure_data()
+	_configure_target(data2)
 
+
+## 统一配置破坏目标（场景节点与动态创建共用）
+func _configure_target(data: VoxelData) -> void:
 	_target.data = data
 	_target.voxel_scale = voxel_scale
 	_target.use_chunk_generator = true

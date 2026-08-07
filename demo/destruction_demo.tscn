@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://cvk8vskr7pvxh"]
 
 [ext_resource type="Script" uid="uid://cydvm8ccede7y" path="res://demo/destruction_demo.gd" id="1_destruction"]
+[ext_resource type="Script" uid="uid://btk6140iqqwmg" path="res://addons/VoxelSupport/Runtime/VoxelDestructible.gd" id="2_destructible"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
 sky_top_color = Color(0.15, 0.2, 0.3, 1)
@@ -24,6 +25,9 @@ fog_enabled = true
 
 [node name="DestructionDemo" type="Node3D" unique_id=898500326]
 script = ExtResource("1_destruction")
+
+[node name="DestructibleVoxels" type="MeshInstance3D" parent="." unique_id=2041247333]
+script = ExtResource("2_destructible")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=256182047]
 environment = SubResource("Environment_1")

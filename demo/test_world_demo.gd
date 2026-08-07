@@ -79,6 +79,7 @@ var _prev_3 := false
 var _prev_4 := false
 var _prev_5 := false
 var _prev_6 := false
+var _prev_7 := false
 var _prev_space := false
 
 ## 原生可用性（用于 HUD 显示）
@@ -86,9 +87,9 @@ var _native_available := false
 
 
 func _ready() -> void:
-	_setup_ground()
+	_setup_ground()  # 复用场景里已有的 Ground 节点
 	_build_target()
-	_setup_camera()
+	_setup_camera()  # 复用场景里已有的 Camera3D 节点
 	_setup_hud()
 	_native_available = NativeLoader.is_available()
 	print("[测试场] 初始化完成 world=%dx%dx%d 建筑=%dx%d 原生=%s" % [
@@ -133,39 +134,69 @@ func _process(delta: float) -> void:
 
 
 ## 构建测试目标
+## 优先使用场景里预置的 DestructibleVoxels 节点（编辑器可见可调），
+## 缺失时自动创建（方便直接拖入使用）
 func _build_target() -> void:
-	if _target and is_instance_valid(_target):
+	if _target and is_instance_valid(_target) and _target != get_node_or_null("DestructibleVoxels"):
 		_target.queue_free()
 
-	_target = VoxelDestructible.new()
-	_target.name = "DestructibleVoxels"
-	add_child(_target)
+	_target = get_node_or_null("DestructibleVoxels") as VoxelDestructible
+	if _target == null:
+		_target = VoxelDestructible.new()
+		_target.name = "DestructibleVoxels"
+		add_child(_target)
+	# 标记为可编辑（场景编辑器里可选中调参）
+	_target.owner = get_tree().edited_scene_root if Engine.is_editor_hint() else null
 
-	var data := _create_test_world_data()
+	var data: VoxelData
+	if voxel_data_source != null:
+		# 用户可在编辑器场景里给 DestructibleVoxels 的 data 属性直接赋 VoxelData 资源
+		data = voxel_data_source
+	elif _target.data != null:
+		# 场景里已预置 data（或节点属性已设）
+		data = _target.data
+	else:
+		data = _create_test_world_data()
 	_target.data = data
 	_target.voxel_scale = voxel_scale
 	_target.use_chunk_generator = true
 	_target.async_generate = _async_mode()
 	_target.superchunk_size = _superchunk_mode()
 	_target.use_frustum_culling = _culling_mode()
-	_target.spawn_debris_on_damage = false  # 测试模式关碎片减少干扰
+	_target.spawn_debris_on_damage = spawn_debris_on_damage
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
 	_target.local_collapse = true
+	# 掉落块碰撞方案（按键7切换）：0=Box 1=凸包
+	_target.falling_collision = _collision_mode()
 
 	var bounds: AABB = data.get_voxels_aabb()
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
+
+
+## 可选数据源：在编辑器里给此属性赋一个 VoxelData 资源，
+## 或直接选场景里的 DestructibleVoxels 节点设置它的 data 属性
+@export var voxel_data_source: VoxelData:
+	set(v):
+		voxel_data_source = v
+		if is_inside_tree():
+			_build_target()
+
+## 破坏时是否生成碎片粒子（测试时可按需开关）
+@export var spawn_debris_on_damage: bool = true
 
 
 ## 优化开关状态（自动测试时被切换）
 var _culling_state := true
 var _superchunk_state := 0
 var _async_state := true
+var _collision_state := 1  # 0=Box 1=凸包
 
 func _culling_mode() -> bool: return _culling_state
 func _superchunk_mode() -> int: return _superchunk_state
 func _async_mode() -> bool: return _async_state
+func _collision_mode() -> int: return _collision_state
 
 
 ## 创建大型测试世界：多栋建筑 + 地面
@@ -277,22 +308,29 @@ func _create_test_world_data() -> VoxelData:
 
 
 func _setup_ground() -> void:
-	var gs := maxf(world_size.x, world_size.z) * voxel_scale * 2.0
-	var static_body := StaticBody3D.new()
-	static_body.name = "Ground"
-	var shape := BoxShape3D.new()
-	shape.size = Vector3(gs, 0.5, gs)
-	var oid := static_body.create_shape_owner(static_body)
-	static_body.shape_owner_add_shape(oid, shape)
+	var static_body: StaticBody3D = get_node_or_null("Ground") as StaticBody3D
+	if static_body == null:
+		static_body = StaticBody3D.new()
+		static_body.name = "Ground"
+		add_child(static_body)
+	# 更新地面尺寸（对齐世界大小）
+	for i in static_body.get_shape_owners():
+		var shape := static_body.shape_owner_get_shape(i, 0) as BoxShape3D
+		if shape:
+			var gs := maxf(world_size.x, world_size.z) * voxel_scale * 2.0
+			shape.size = Vector3(gs, 0.5, gs)
 	static_body.position = Vector3(0, -0.5, 0)
-	add_child(static_body)
 
 
 func _setup_camera() -> void:
-	_camera = Camera3D.new()
-	_camera.name = "Camera3D"
-	_camera.current = true
-	add_child(_camera)
+	_camera = get_node_or_null("Camera3D") as Camera3D
+	if _camera == null:
+		_camera = Camera3D.new()
+		_camera.name = "Camera3D"
+		_camera.current = true
+		add_child(_camera)
+	else:
+		_camera.current = true
 	_camera.fov = 70
 	_camera.far = maxf(world_size.x, world_size.z) * voxel_scale * 3.0
 	var center := _get_world_center()
@@ -335,6 +373,7 @@ func _handle_input(delta: float) -> void:
 	var key_3 := Input.is_key_pressed(KEY_3)
 	var key_5 := Input.is_key_pressed(KEY_5)
 	var key_6 := Input.is_key_pressed(KEY_6)
+	var key_7 := Input.is_key_pressed(KEY_7)
 	var left := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	var space := Input.is_key_pressed(KEY_SPACE)
 
@@ -360,6 +399,11 @@ func _handle_input(delta: float) -> void:
 	if key_6 and not _prev_6:
 		_rebuild_for_test()
 		print("[测试] 场景重置")
+	# 掉落块碰撞方案（0=Box 1=凸包）
+	if key_7 and not _prev_7:
+		_collision_state = 1 if _collision_state == 0 else 0
+		_rebuild_for_test()
+		print("[测试] 掉落块碰撞: %s" % ("凸包" if _collision_state == 1 else "Box包围盒"))
 
 	# 破坏
 	if left:
@@ -372,6 +416,7 @@ func _handle_input(delta: float) -> void:
 	_prev_3 = key_3
 	_prev_5 = key_5
 	_prev_6 = key_6
+	_prev_7 = key_7
 	_prev_space = space
 
 
@@ -470,14 +515,15 @@ func _update_hud() -> void:
 	_hud.text = """===== 体素优化测试场 =====
 FPS: %d
 原生加速: %s
-模式: culling=%s superchunk=%d async=%s
+模式: culling=%s superchunk=%d async=%s 碰撞=%s
 Chunk数: %d  |  draw call: %d
 体素: %d
-[1]视锥剔除 [2]超级块 [3]异步 [5]环绕 [6]重置
+[1]视锥 [2]超级块 [3]异步 [5]环绕 [6]重置 [7]碰撞
 左键破坏 空格射线""" % [
 		Engine.get_frames_per_second(),
 		"ON" if _native_available else "OFF",
 		"ON" if _culling_state else "OFF", _superchunk_state, "ON" if _async_state else "OFF",
+		"凸包" if _collision_state == 1 else "Box",
 		chunk_count, draw_calls,
 		t.data.get_voxel_count() if t and t.data else 0,
 	]

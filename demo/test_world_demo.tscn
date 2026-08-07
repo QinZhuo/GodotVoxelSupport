@@ -1,6 +1,41 @@
-[gd_scene format=3 uid="uid://btestworld01"]
+[gd_scene load_steps=4 format=3 uid="uid://btestworld01"]
 
 [ext_resource type="Script" uid="uid://ctestworld01" path="res://demo/test_world_demo.gd" id="1_test"]
+[ext_resource type="Script" uid="uid://btk6140iqqwmg" path="res://addons/VoxelSupport/Runtime/VoxelDestructible.gd" id="2_destructible"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
+sky_top_color = Color(0.15, 0.2, 0.3, 1)
+sky_horizon_color = Color(0.5, 0.55, 0.6, 1)
+ground_bottom_color = Color(0.12, 0.12, 0.14, 1)
+ground_horizon_color = Color(0.45, 0.48, 0.5, 1)
+
+[sub_resource type="Sky" id="Sky_1"]
+sky_material = SubResource("ProceduralSkyMaterial_1")
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 2
+sky = SubResource("Sky_1")
+ambient_light_source = 3
+ambient_light_sky_contribution = 0.7
+reflected_light_source = 3
+tonemap_mode = 2
+fog_enabled = true
 
 [node name="TestWorldDemo" type="Node3D" unique_id=900001001]
 script = ExtResource("1_test")
+
+[node name="DestructibleVoxels" type="MeshInstance3D" parent="."]
+script = ExtResource("2_destructible")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_1")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.5, 0, 0.866, 0.35, 0.866, 0.35, -0.75, 0.5, 0.433, 0, 6, 0)
+light_energy = 1.2
+shadow_enabled = true
+
+[node name="Ground" type="StaticBody3D" parent="."]
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(0.9, -0.3, 0.3, 0, 0.7, 0.7, -0.4, -0.64, 0.64, -170.00427, -393.6765, -350.67572)

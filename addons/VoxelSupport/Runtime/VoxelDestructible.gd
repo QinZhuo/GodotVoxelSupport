@@ -101,6 +101,23 @@ var _cascade_total: Array = []            # 所有级联累积的失稳体素
 ## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
 const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 
+## 掉落块物理体大小阈值（体素数）：连通组体素数 <= 该值时转 GPU 粒子破碎，
+## > 该值则生成精确碰撞的物理掉落体。
+## 理由：小块（<=8 体素）物理碰撞细节肉眼难辨，转粒子零物理开销且视觉更自然；
+## 大块保留物理体以支持堆叠/滚动，并用符合体素形状的复杂碰撞。
+@export_range(2, 64) var debris_threshold: int = 8
+
+## 掉落块碰撞方案：
+## 0 = BoxShape3D 包围盒（最快，物理开销最低；贴合度差，空心块会填满）
+## 1 = ConvexPolygonShape3D 凸包（更贴合体素轮廓；物理开销略高，适合需要精确堆叠/滚动的场景）
+## 可运行时切换，用于性能/表现对比测试
+enum FallingCollision { BOX, CONVEX }
+@export var falling_collision: FallingCollision = FallingCollision.CONVEX
+
+## 物理掉落体对象池大小：同时最多存在的活动 RigidBody3D 数量。
+## 池复用消除创建/销毁开销，同时作为物理体数量的软上限（池满的新块转粒子，优雅降级）。
+@export_range(8, 128) var falling_chunk_pool_size: int = 32
+
 ## 掉落块最大存活数量（超出后最早冻结的块被移除，防止长时间破坏后物理体无限堆积拖慢帧率）
 @export_range(20, 2000) var max_falling_chunks: int = 200
 
@@ -112,6 +129,11 @@ var _sleep_check_counter: float = 0.0
 
 ## 所有掉落块 -> 生成时刻 (msec)，用于生命周期上限/超时清理（含未冻结仍在掉落的块）
 var _chunk_spawn_times: Dictionary = {}
+
+## 物理掉落体对象池：空闲的 RigidBody3D 集合（复用，避免反复创建/销毁）
+var _body_pool: Array[RigidBody3D] = []
+## 池中所有已创建的 RigidBody3D（含使用中），用于池容量管理
+var _body_pool_total: Array[RigidBody3D] = []
 
 const _DEBRIS_ROOT_NAME := "_VoxelDebris"
 
@@ -343,7 +365,7 @@ func _after_removal(removed: Array) -> void:
 	if diag_enabled:
 		var _t_total := (Time.get_ticks_usec() - _diag_t0) / 1000.0
 		if _t_total > 1.0:
-			print("[诊断] _after_removal: 总% d体素(应力%d), 总耗时%.2f ms" % [removed.size(), _stress_count, _t_total])
+			print("[诊断] _after_removal: 总%d体素(应力%d), 总耗时%.2f ms" % [removed.size(), _stress_count, _t_total])
 
 
 # ----------------------------------------------------------------------------
@@ -444,24 +466,42 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 				existing[pos] = true
 
 
-## 从连通分组中生成物理掉落体（统一入口，消除代码重复）
+## 从连通分组中生成掉落体（统一入口，消除代码重复）
 ## group_materials: Array[Dictionary]，每个元素是 {pos: mat_id} 映射
-## 返回实际生成的掉落体数量
+## 分流规则：
+##   - 组体素数 <= debris_threshold → GPU 粒子破碎（零物理开销，视觉自然）
+##   - 组体素数 >  debris_threshold → 精确碰撞物理体（对象池取用）
+## 返回实际生成的物理掉落体数量
 func _spawn_falling_chunks_from_groups(groups: Array, group_materials: Array[Dictionary]) -> int:
 	var spawned_count := 0
+	# 先处理小块（粒子）和大块（物理体）分流
+	var physics_groups: Array = []
+	var physics_materials: Array[Dictionary] = []
 	for i in range(groups.size()):
+		var group: Array = groups[i]
+		if group.size() <= debris_threshold:
+			# 小块：直接转粒子破碎
+			var mat_map: Dictionary = group_materials[i]
+			if not group.is_empty():
+				_spawn_debris_with_materials(group, mat_map, true)
+		else:
+			physics_groups.append(group)
+			physics_materials.append(group_materials[i])
+
+	# 大块：物理体（受单帧上限和池容量约束）
+	for i in range(physics_groups.size()):
 		if spawned_count >= MAX_FALLING_CHUNKS_PER_FRAME:
-			# 超出限制的组用粒子代替
+			# 超出单帧上限的组用粒子代替
 			var remaining: Array = []
-			for j in range(i, groups.size()):
-				remaining.append_array(groups[j])
+			for j in range(i, physics_groups.size()):
+				remaining.append_array(physics_groups[j])
 			if not remaining.is_empty():
 				var remaining_mat_map: Dictionary = {}
 				for pos in remaining:
-					remaining_mat_map[pos] = data.get_voxel(pos) if data.has_voxel(pos) else _find_original_mat(pos, group_materials, i)
-				_spawn_debris_with_materials(remaining, remaining_mat_map)
+					remaining_mat_map[pos] = data.get_voxel(pos) if data.has_voxel(pos) else _find_original_mat(pos, physics_materials, i)
+				_spawn_debris_with_materials(remaining, remaining_mat_map, true)
 			break
-		_spawn_falling_chunk(groups[i], group_materials[i])
+		_spawn_falling_chunk(physics_groups[i], physics_materials[i])
 		spawned_count += 1
 	return spawned_count
 
@@ -602,10 +642,10 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
 
-	# 数量上限守卫：超过 max_falling_chunks 时先清除最老的物理块腾出名额，
-	# 保证新块必定生成（避免体素被移除后"凭空消失"——既无掉落块也无碎片）。
-	if _falling_chunk_root and _falling_chunk_root.get_child_count() >= int(max_falling_chunks):
-		_evict_oldest_falling_chunks(1)
+	# 池容量守卫：活动物理体已满时本块转粒子（优雅降级）
+	if _body_pool_total.size() >= int(falling_chunk_pool_size) and _body_pool.is_empty():
+		_spawn_debris_with_materials(group, mat_map, true)
+		return
 
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
@@ -629,29 +669,16 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 		var p: Vector3i = pos
 		local_voxels[p - Vector3i(voxel_center)] = int(mat_map.get(p, 0))
 
-	# 3. 创建 RigidBody3D 作为物理体
-	# 注意：不能使用 global_position，因为 body 尚未加入场景树
-	# body 将作为 _falling_chunk_root 的子节点，而 _falling_chunk_root 位于当前节点原点
-	# 所以 body.position = world_center 即可达到正确位置
-	var body := RigidBody3D.new()
-	body.name = "FallingChunk_%d_Body" % _falling_chunk_id
-	_falling_chunk_id += 1
+	# 3. 从对象池取 RigidBody3D（复用，避免反复创建/销毁）
+	var body := _acquire_body()
 	body.position = world_center
-	body.gravity_scale = 1.0
 	body.mass = maxf(group.size() * 0.5, 1.0)
 	body.continuous_cd = true
+	body.freeze = false
+	body.gravity_scale = 1.0
+	body.sleeping = false
 
-	# 4. 添加碰撞形状（盒体包围整个块）
-	var block_size := Vector3(voxel_max - voxel_min) + Vector3.ONE
-	var shape := BoxShape3D.new()
-	shape.size = block_size * voxel_scale
-	var col := CollisionShape3D.new()
-	col.name = "CollisionShape3D"
-	col.shape = shape
-	body.add_child(col)
-	col.owner = body
-
-	# 5. 添加到场景（先于 mesh：mesh 由后台线程生成后异步挂载）
+	# 4. 添加到场景（先于 mesh：mesh 由后台线程生成后异步挂载）
 	_falling_chunk_root.add_child(body)
 	body.owner = _falling_chunk_root
 	# 记录生成时刻，供生命周期上限/超时清理（覆盖所有掉落块，含未冻结的）
@@ -662,10 +689,13 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 		if _t_ms > 1.0:
 			print("[诊断] _spawn_falling_chunk: %d体素(物理体), 耗时%.2f ms" % [group.size(), _t_ms])
 
-	# 6. 连接落地检测：落地后静置一段时间自动冻结（节省物理开销，不掉落块不消失）
+	# 5. 连接落地检测：落地后静置一段时间自动冻结（节省物理开销，不掉落块不消失）
+	# 对象池复用：连接前先断开旧连接，避免重复连接
+	for conn in body.body_entered.get_connections():
+		body.body_entered.disconnect(conn["callable"])
 	body.body_entered.connect(_on_chunk_landed.bind(body))
 
-	# 7. 异步生成静态网格：后台线程生成数组，主线程组装 ArrayMesh 后挂载
+	# 6. 异步生成静态网格：后台线程生成数组，主线程组装 ArrayMesh + 碰撞后挂载
 	# 避免级联破坏时在主线程同步生成大量掉落块 mesh（最大主线程阻塞点）
 	var materials_snapshot: Array = data.materials.duplicate(false) if data else []
 	var spawn_scale := voxel_scale
@@ -676,11 +706,14 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 ## 完成后 call_deferred 回主线程 _on_falling_chunk_mesh_result 组装 ArrayMesh
 func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D) -> void:
 	var arrays := VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
-	call_deferred("_on_falling_chunk_mesh_result", body, arrays)
+	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels)
 
 
 ## 主线程：把后台生成的数组组装为 ArrayMesh 并挂载到掉落块
-func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant) -> void:
+## 碰撞方案由 falling_collision 控制：
+##   BOX   → BoxShape3D 包围盒（最快，物理开销最低）
+##   CONVEX→ ConvexPolygonShape3D 凸包（更贴合体素轮廓，物理开销略高）
+func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
@@ -700,6 +733,43 @@ func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant) -> void:
 	body.add_child(mi)
 	mi.owner = body
 
+	# 按配置选择碰撞方案
+	if falling_collision == FallingCollision.CONVEX:
+		# 凸包碰撞：从 mesh 生成（clean 去除退化面，simplify 减少顶点）
+		var shape := mesh.create_convex_shape(true, true)
+		if shape:
+			var col := CollisionShape3D.new()
+			col.name = "CollisionShape3D"
+			col.shape = shape
+			body.add_child(col)
+			col.owner = body
+	else:
+		# Box 包围盒：用体素位置计算包围盒（最简、最快）
+		_add_box_collision(body, local_voxels)
+
+
+## Box 包围盒碰撞体：local_voxels 键为相对块中心的整数坐标，计算包围盒作为单一 Box
+## （最简碰撞方案，物理开销最低；空心块会被填满，贴合度差）
+func _add_box_collision(body: RigidBody3D, local_voxels: Dictionary) -> void:
+	var scale := voxel_scale
+	if local_voxels.is_empty():
+		return
+	var min_p := Vector3i(local_voxels.keys()[0])
+	var max_p := min_p
+	for pos_key in local_voxels:
+		var p: Vector3i = pos_key
+		min_p = Vector3i(mini(min_p.x, p.x), mini(min_p.y, p.y), mini(min_p.z, p.z))
+		max_p = Vector3i(maxi(max_p.x, p.x), maxi(max_p.y, p.y), maxi(max_p.z, p.z))
+	var size := Vector3(max_p - min_p) + Vector3.ONE
+	var shape := BoxShape3D.new()
+	shape.size = size * scale
+	var col := CollisionShape3D.new()
+	col.name = "CollisionShape3D"
+	col.shape = shape
+	col.position = (Vector3(min_p) + Vector3(size) * 0.5) * scale
+	body.add_child(col)
+	col.owner = body
+
 
 ## 获取（并缓存）掉落块共用材质。同一 data.materials 实例在生命周期内稳定，只需生成一次。
 func _get_cached_chunk_materials() -> Array:
@@ -710,10 +780,53 @@ func _get_cached_chunk_materials() -> Array:
 	return _chunk_materials_cache
 
 
-## 清理已停稳或超时的掉落块
+## 从对象池获取一个空闲 RigidBody3D（池满时新建，但受池总容量约束）
+func _acquire_body() -> RigidBody3D:
+	if not _body_pool.is_empty():
+		var body: RigidBody3D = _body_pool.pop_back()
+		# 复位：清除旧子节点（mesh/碰撞），解除冻结，复位旋转/位置
+		for child in body.get_children():
+			body.remove_child(child)
+			child.queue_free()
+		body.freeze = false
+		body.rotation = Vector3.ZERO
+		body.position = Vector3.ZERO
+		return body
+	# 池空：新建（若已达总容量上限则仍新建，由 _spawn_falling_chunk 的守卫控制降级）
+	var new_body := RigidBody3D.new()
+	new_body.name = "FallingChunk_%d_Body" % _falling_chunk_id
+	_falling_chunk_id += 1
+	new_body.gravity_scale = 1.0
+	_body_pool_total.append(new_body)
+	return new_body
+
+
+## 释放物理体回池（复用，避免反复创建/销毁）
+## 先从场景移除，复位状态后入空闲池
+func _release_body(body: RigidBody3D) -> void:
+	if body == null or not is_instance_valid(body):
+		return
+	# 断开落地检测连接（池复用：避免下次连接重复/旧引用泄漏）
+	for conn in body.body_entered.get_connections():
+		body.body_entered.disconnect(conn["callable"])
+	_chunk_spawn_times.erase(body)
+	if body.get_parent():
+		body.get_parent().remove_child(body)
+	# 复位（mesh/碰撞子节点在下次 _acquire_body 时清理）
+	body.freeze = true
+	body.sleeping = true
+	body.position = Vector3.ZERO
+	# 关键：复位旋转（落地翻滚过的 body 带着旧角度，不复位会导致下次复用角度怪异）
+	body.rotation = Vector3.ZERO
+	body.linear_velocity = Vector3.ZERO
+	body.angular_velocity = Vector3.ZERO
+	_body_pool.append(body)
+
+
+## 清理已停稳或超时的掉落块（回池复用，而非销毁）
 func _cleanup_falling_chunk(body: RigidBody3D) -> void:
 	if body and is_instance_valid(body):
-		body.queue_free()
+		_release_body(body)
 
 
 ## 数量上限时剔除最老的掉落块，腾出名额给新块（保证新块必生成）。
@@ -746,6 +859,12 @@ func _clear_falling_chunks() -> void:
 		for child in _falling_chunk_root.get_children():
 			child.queue_free()
 	_chunk_spawn_times.clear()
+	# 清空对象池（场景重置时全部销毁）
+	for body in _body_pool_total:
+		if is_instance_valid(body):
+			body.queue_free()
+	_body_pool.clear()
+	_body_pool_total.clear()
 
 
 ## 落地检测：掉落块碰触地面/其他物体时触发
