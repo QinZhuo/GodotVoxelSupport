@@ -11,7 +11,7 @@ extends Resource
 ## 【存储方案】chunk 分区密集缓冲（性能关键）
 ## 旧方案：整个世界用 Dictionary[Vector3i, int]，每个体素一个 Vector3i 哈希键，
 ##         邻居查询/切片/网格生成全部命中字典哈希 → 大型场景慢一个量级。
-## 新方案：非空 chunk 各持一块 PackedInt32Array(16³)，值 = 材质ID + 1（0=空）。
+## 新方案：非空 chunk 各持一块 PackedInt32Array(16³)，值 = 材质ID（0=空）。
 ##         体素读写 = 1 次 chunk 字典查询 + 1 次数组下标；稀疏性只存在于 chunk 层。
 ##         网格生成使用 18³ 密集"光环缓冲"，邻居读取全为数组下标、无越界检查。
 
@@ -46,7 +46,7 @@ const HALO := VoxelChunk.HALO
 const HALO_SIZE := VoxelChunk.HALO_SIZE
 const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 
-## chunk key -> 密集缓冲 (PackedInt32Array, 16³)。值 = 材质ID + 1，0 = 空。
+## chunk key -> 密集缓冲 (PackedInt32Array, 16³)。值 = 材质ID（0 = 空），材质ID 0 保留为空。
 ## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
 var _chunk_buffers: Dictionary = {}
 
@@ -121,8 +121,9 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: b
 	# 材质数组：voxel_data.materials 是固定长度数组，其数组索引 i 即材质 ID (体素值)
 	# 因此直接按索引 i 复制到 res.materials，保证"体素值 = data.materials 索引"的约定
 	# 注意：不能用 mat.id，因为 VoxAccess 未给每个材质设置不同的 id（默认全为0）
+	# 索引 0 保留为空占位（材质ID 0 = 空），不复制
 	res.materials.resize(256)
-	for i in voxel_data.materials.size():
+	for i in range(1, voxel_data.materials.size()):
 		var src: VoxelMaterial = voxel_data.materials[i]
 		if src == null:
 			continue
@@ -164,6 +165,7 @@ static func _local_from_index(i: int) -> Vector3i:
 
 
 ## 写入体素缓冲（核心原语）。不追踪 dirty_voxels / 不触发信号（由调用方处理）。
+## 统一材质契约：材质ID 0 = 空，缓冲直接存材质ID（0 = 空）。
 ## check_empty=true 时，若写入后该 chunk 缓冲全空则移除 chunk 键（回收内存）。
 func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	var ck := _chunk_of(pos)
@@ -174,7 +176,7 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 		_chunk_buffers[ck] = buf
 	var idx := _buf_index(pos - ck * CHUNK_SIZE)
 	var cur: int = buf[idx]
-	if mat_id < 0:
+	if mat_id <= 0:
 		if cur > 0:
 			buf[idx] = 0
 			_voxel_count -= 1
@@ -183,7 +185,7 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	else:
 		if cur <= 0:
 			_voxel_count += 1
-		buf[idx] = mat_id + 1
+		buf[idx] = mat_id
 
 
 ## 若 chunk 缓冲已全空则移除该 chunk 键（仅当 check_empty 需要时调用）
@@ -214,7 +216,7 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 	return keys
 
 
-## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID + 1，0 = 空）。
+## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
 ## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立的深拷贝，无数据竞态）。
 ## 邻居读取全为数组下标且无越界检查（光环含完整 6 邻）。
 func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
@@ -257,7 +259,7 @@ func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
 		var origin := ck * CHUNK_SIZE
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
-				out[origin + _local_from_index(i)] = buf[i] - 1
+				out[origin + _local_from_index(i)] = buf[i]
 	return out
 
 
@@ -272,7 +274,7 @@ func get_voxel(pos: Vector3i) -> int:
 	if buf == null:
 		return -1
 	var v: int = buf[_buf_index(pos - ck * CHUNK_SIZE)]
-	return v - 1 if v > 0 else -1
+	return v if v > 0 else -1
 
 
 ## 是否存在体素
@@ -306,9 +308,9 @@ func is_empty() -> bool:
 	return _chunk_buffers.is_empty()
 
 
-## 设置指定位置的体素 (material_id < 0 时移除)
+## 设置指定位置的体素 (material_id <= 0 时移除；0 = 空)
 func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
-	if material_id < 0:
+	if material_id <= 0:
 		remove_voxel(pos, notify)
 		return
 	var existed := has_voxel(pos)
@@ -608,10 +610,10 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 
 
 ## 添加材质，自动按材质 ID 对齐数组索引（体素存的 ID 即可直接作数组索引）
-## 索引 0 保留为占位；索引 = 材质 ID 处存放该材质
+## 统一材质契约：索引 0 保留为空（材质ID 0 = 空），索引 = 材质 ID 处存放该材质
 ## 若该 ID 位置已有材质，则覆盖
 func add_material(mat: VoxelMaterial, notify: bool = false) -> VoxelMaterial:
-	if mat == null:
+	if mat == null or mat.id <= 0:
 		return null
 	# 确保数组长度足够容纳索引 id
 	while materials.size() <= mat.id:
@@ -680,7 +682,7 @@ func save_data() -> Dictionary:
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				var p := origin + _local_from_index(i)
-				voxel_list.append([p.x, p.y, p.z, buf[i] - 1])
+				voxel_list.append([p.x, p.y, p.z, buf[i]])
 	data["voxels"] = voxel_list
 	return data
 

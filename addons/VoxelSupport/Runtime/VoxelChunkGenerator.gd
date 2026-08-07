@@ -163,7 +163,7 @@ static func generate_single_chunk_array(
 
 
 ## 从"光环缓冲"生成单个 chunk 的网格数据（密集数组版，性能关键路径）
-## halo 为 18³ 密集缓冲（值 = 材质ID + 1，0 = 空），由 VoxelData.get_chunk_halo 提供。
+## halo 为 18³ 密集缓冲（统一材质契约：值 = 材质ID，0 = 空），由 VoxelData.get_chunk_halo 提供。
 ## 覆盖 chunk 内部 + 1 体素外缘，所有邻居读取均为数组下标且无越界检查。
 ## 线程安全：halo 是独立的深拷贝，子线程只读。
 ## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
@@ -327,7 +327,7 @@ static func _generate_chunk_into(voxels, materials, scale: float, chunk: Vector3
 		use_local_space, offset)
 
 
-## 从稀疏字典构建 18³ 光环缓冲（值 = 材质ID + 1，0 = 空）
+## 从稀疏字典构建 18³ 光环缓冲（统一材质契约：值 = 材质ID，0 = 空）
 static func _halo_from_dict(voxels: Dictionary, chunk: Vector3i) -> PackedInt32Array:
 	var halo := PackedInt32Array()
 	halo.resize(HALO_VOLUME)
@@ -337,8 +337,8 @@ static func _halo_from_dict(voxels: Dictionary, chunk: Vector3i) -> PackedInt32A
 			for x in HALO_SIZE:
 				var p := origin + Vector3i(x - HALO, y - HALO, z - HALO)
 				var v: int = voxels.get(p, -1)
-				if v >= 0:
-					halo[VoxelChunk.halo_index(x, y, z)] = v + 1
+				if v > 0:
+					halo[VoxelChunk.halo_index(x, y, z)] = v
 	return halo
 
 
@@ -354,7 +354,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 	var origin_offset := Vector3(chunk_origin) * scale if use_local_space else Vector3.ZERO
 
 	# 预计算材质透明标志（数组索引==材质ID，O(1) 查询）。
-	# 避免在 16³×6 面收集循环里对每个体素/邻居调用 find_by_id（函数调用是 GDScript 热点）。
+	# 统一材质契约：体素值即材质ID（0=空），热循环只做数组下标读取，无任何函数调用/字典哈希。
 	var n_mats: int = materials.size()
 	var trans_flags := PackedByteArray()
 	trans_flags.resize(n_mats)
@@ -363,7 +363,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 		trans_flags[i] = 1 if mat != null and mat.trans > 0 else 0
 
 	# 预分配：6个面的可见面收集器
-	# slices_by_face[face_idx][slice_key] = PackedInt32Array（16×16 密集，0=空，否则=材质ID+1）
+	# slices_by_face[face_idx][slice_key] = PackedInt32Array（16×16 密集，统一材质契约：0=空，否则=材质ID）
 	var slices_by_face: Array[Dictionary] = []
 	for i in 6:
 		slices_by_face.append({})
@@ -377,7 +377,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 				if v <= 0:
 					continue
 
-				var mat_id := v - 1
+				var mat_id := v
 				var is_trans: bool = mat_id < n_mats and trans_flags[mat_id] > 0
 
 				# 一次检查所有6个面
@@ -388,7 +388,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 					if nv <= 0:
 						visible = true
 					else:
-						var n_mat_id := nv - 1
+						var n_mat_id := nv
 						var n_trans: bool = n_mat_id < n_mats and trans_flags[n_mat_id] > 0
 						# 面可见性统一规则（与 FaceTool.face_visible 完全一致，热路径内联避免函数调用）：
 						# 透明类型不同 → 可见；皆透明且材质不同 → 可见；其余（含实心材质接缝）→ 不可见
@@ -413,7 +413,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 						else:
 							grid = _new_slice_grid()
 							slices[slice_key] = grid
-						grid[u + vv * CHUNK_SIZE] = mat_id + 1
+						grid[u + vv * CHUNK_SIZE] = mat_id
 
 	# 处理每个面的贪婪合并（密集数组，无字典哈希）
 	for face_idx in 6:
@@ -470,8 +470,8 @@ static func _add_greedy_face(
 	var normal: Vector3 = FaceTool.Normals[face_idx]
 	var u := VoxelMaterial.uv_for_id(mat_id)
 
-	# 判断是否透明
-	var mat = _get_mat(materials, mat_id)
+	# 判断是否透明（统一材质契约：materials 已按 id 对齐，直接下标；越界防御性视为不透明）
+	var mat = materials[mat_id] if mat_id < materials.size() else null
 	var is_trans: bool = mat != null and mat.trans > 0
 
 	# 顶点位置：pos + point * size
@@ -489,10 +489,6 @@ static func _add_greedy_face(
 			solid_normals.append(normal)
 			solid_uvs.append(Vector2(u, 0.0))
 			solid_idxs.append(solid_verts.size() - 1)
-
-
-static func _get_mat(materials, mat_id: int):
-	return VoxelMaterial.find_by_id(materials, mat_id)
 
 
 # 每个面的轴向信息：{perp(切片轴), u(水平轴), v(垂直轴)}

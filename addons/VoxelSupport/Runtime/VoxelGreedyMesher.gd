@@ -26,9 +26,9 @@ class RectInfo:
 
 
 ## 对密集 2D 网格执行贪婪合并（性能关键路径）
-## grid: PackedInt32Array，行优先。0 = 空，否则 = 材质ID + 1（规避材质 ID 0 与空冲突）
+## grid: PackedInt32Array，行优先。统一材质契约：0 = 空，否则 = 材质ID（id 0 保留为空）
 ## width/height: 网格宽高
-## 返回: Array[RectInfo]，rect.value 为真实材质ID（已减 1）
+## 返回: Array[RectInfo]，rect.value 为材质ID（与 grid 存储值一致）
 static func greedy_merge_dense(grid: PackedInt32Array, width: int, height: int) -> Array[RectInfo]:
 	var g := grid.duplicate()
 	var result: Array[RectInfo] = []
@@ -53,7 +53,7 @@ static func greedy_merge_dense(grid: PackedInt32Array, width: int, height: int) 
 						break
 				if extend:
 					h += 1
-			result.append(RectInfo.new(Vector2i(u, v), Vector2i(w, h), c - 1))
+			result.append(RectInfo.new(Vector2i(u, v), Vector2i(w, h), c))
 			# 清零标记已处理，保证每个格子至多被合并一次
 			for y in h:
 				var base := u + (v + y) * width

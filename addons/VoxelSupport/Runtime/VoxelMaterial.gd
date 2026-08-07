@@ -43,14 +43,20 @@ func is_transparent() -> bool:
 # ----------------------------------------------------------------------------
 # 材质数组对齐：确保"数组索引 == 材质ID"，体素中存的材质ID可直接作数组索引
 # 供 VoxelMeshGenerator / VoxelChunkGenerator 等所有网格生成器统一使用
+#
+# 统一材质契约（全项目唯一权威）：
+#   - 材质ID 0 保留为空/空气：既没有体素也没有材质
+#   - 体素存储值 == 材质ID（0 = 空），不存在任何 +1/-1 编码偏移
+#   - 对齐后数组索引 == 材质ID，索引 0 恒为 null（空占位）
 # ----------------------------------------------------------------------------
 
 ## 将任意材质数组转换为"索引 == 材质ID"的对齐数组
 ## 非 null 材质按其 id 放入对应索引，未填充的位置为 null
+## 材质 id <= 0（空）被跳过，保证索引 0 恒为 null = 空占位
 static func align_by_id(materials: Array) -> Array:
 	var aligned: Array = []
 	for mat in materials:
-		if mat == null:
+		if mat == null or mat.id <= 0:
 			continue
 		var mat_id: int = mat.id
 		while aligned.size() <= mat_id:
@@ -59,9 +65,11 @@ static func align_by_id(materials: Array) -> Array:
 	return aligned
 
 
-## 按材质ID获取材质（数组可能未对齐时也能找到），越界/不存在返回 null
+## 按材质ID获取材质（数组可能未对齐时也能找到），越界/不存在/id<=0(空) 返回 null
 static func find_by_id(materials: Array, mat_id: int) -> VoxelMaterial:
-	if mat_id >= 0 and mat_id < materials.size() and materials[mat_id] != null:
+	if mat_id <= 0:
+		return null
+	if mat_id < materials.size() and materials[mat_id] != null:
 		return materials[mat_id]
 	for mat in materials:
 		if mat != null and mat.id == mat_id:

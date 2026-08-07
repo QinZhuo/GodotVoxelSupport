@@ -281,6 +281,9 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 
 	slice_voxels = [ {}, {}, {}]
 	for pos in voxels:
+		# 统一材质契约：材质ID 0 = 空（空气），跳过不参与网格与包围盒
+		if voxels[pos] <= 0:
+			continue
 		pos_min.x = min(pos_min.x, pos.x)
 		pos_min.y = min(pos_min.y, pos.y)
 		pos_min.z = min(pos_min.z, pos.z)
@@ -346,7 +349,7 @@ func _generate_dir_face(task) -> void:
 				var grid := PackedInt32Array()
 				grid.resize(grid_w * grid_h)
 				for p: Vector3i in slice_cells:
-					grid[(p[axis.y] - min_u) + (p[axis.z] - min_v) * grid_w] = int(slice_cells[p]) + 1
+					grid[(p[axis.y] - min_u) + (p[axis.z] - min_v) * grid_w] = int(slice_cells[p])
 				var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge_dense(grid, grid_w, grid_h)
 				for rect in rects:
 					var pos: Vector3i
