@@ -356,8 +356,17 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 	var chunk_origin := chunk * CHUNK_SIZE
 	var origin_offset := Vector3(chunk_origin) * scale if use_local_space else Vector3.ZERO
 
+	# 预计算材质透明标志（数组索引==材质ID，O(1) 查询）。
+	# 避免在 16³×6 面收集循环里对每个体素/邻居调用 find_by_id（函数调用是 GDScript 热点）。
+	var n_mats: int = materials.size()
+	var trans_flags := PackedByteArray()
+	trans_flags.resize(n_mats)
+	for i in n_mats:
+		var mat = materials[i]
+		trans_flags[i] = 1 if mat != null and mat.trans > 0 else 0
+
 	# 预分配：6个面的可见面收集器
-	# slices_by_face[face_idx][slice_key] = { Vector2i(u,v): mat_id }
+	# slices_by_face[face_idx][slice_key] = PackedInt32Array（16×16 密集，0=空，否则=材质ID+1）
 	var slices_by_face: Array[Dictionary] = []
 	for i in 6:
 		slices_by_face.append({})
@@ -372,8 +381,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 					continue
 
 				var mat_id := v - 1
-				var mat = _get_mat(materials, mat_id)
-				var is_trans: bool = mat != null and mat.trans > 0
+				var is_trans: bool = mat_id < n_mats and trans_flags[mat_id] > 0
 
 				# 一次检查所有6个面
 				for face_idx in 6:
@@ -384,8 +392,7 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 						visible = true
 					else:
 						var n_mat_id := nv - 1
-						var n_mat = _get_mat(materials, n_mat_id)
-						var n_trans: bool = n_mat != null and n_mat.trans > 0
+						var n_trans: bool = n_mat_id < n_mats and trans_flags[n_mat_id] > 0
 						if is_trans != n_trans or mat_id != n_mat_id:
 							visible = true
 
@@ -395,14 +402,19 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 						var u_axis := axis_info.u as int
 						var v_axis := axis_info.v as int
 						var slice_key := _axis_val(x, y, z, perp)
-						var uv := Vector2i(_axis_val(x, y, z, u_axis), _axis_val(x, y, z, v_axis))
+						var u := _axis_val(x, y, z, u_axis)
+						var vv := _axis_val(x, y, z, v_axis)
 
 						var slices: Dictionary = slices_by_face[face_idx]
-						if not slices.has(slice_key):
-							slices[slice_key] = {}
-						slices[slice_key][uv] = mat_id
+						var grid: PackedInt32Array
+						if slices.has(slice_key):
+							grid = slices[slice_key]
+						else:
+							grid = _new_slice_grid()
+							slices[slice_key] = grid
+						grid[u + vv * CHUNK_SIZE] = mat_id + 1
 
-	# 处理每个面的贪婪合并
+	# 处理每个面的贪婪合并（密集数组，无字典哈希）
 	for face_idx in 6:
 		var axis_info: Dictionary = _FACE_AXES[face_idx]
 		var perp := axis_info.perp as int
@@ -411,8 +423,8 @@ static func _generate_chunk_dense_into(halo: PackedInt32Array, materials, scale:
 		var slices: Dictionary = slices_by_face[face_idx]
 
 		for slice_key in slices:
-			var grid: Dictionary = slices[slice_key]
-			var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge(grid)
+			var grid: PackedInt32Array = slices[slice_key]
+			var rects: Array[VoxelGreedyMesher.RectInfo] = VoxelGreedyMesher.greedy_merge_dense(grid, CHUNK_SIZE, CHUNK_SIZE)
 			for rect in rects:
 				# 重建世界坐标（局部坐标 + chunk_origin 偏移）
 				var pos := chunk_origin
@@ -437,6 +449,13 @@ static func _axis_val(x: int, y: int, z: int, axis: int) -> int:
 	elif axis == 1:
 		return y
 	return z
+
+
+## 新建一个 16×16 密集切面网格（全 0，行优先，下标 = u + v*CHUNK_SIZE）
+static func _new_slice_grid() -> PackedInt32Array:
+	var g := PackedInt32Array()
+	g.resize(CHUNK_SIZE * CHUNK_SIZE)
+	return g
 
 
 ## 添加一个贪婪合并后的面（大四边形，2 三角形）
