@@ -28,6 +28,15 @@ extends RefCounted
 ##   val[i] = 材质ID
 ##   三个数组等长，第 i 个矩形 = (u, v, w, h, val[i])
 static func greedy_merge_dense(grid: PackedInt32Array, width: int, height: int) -> Dictionary:
+	# 原生加速路径：GDExtension (C++) 已加载时优先调用（约 10 倍以上提速）。
+	# 未加载（无编译产物/平台不匹配/版本不兼容）时自动回退到下方纯 GDScript 实现。
+	if NativeLoader.is_available():
+		return NativeLoader.merge_dense(grid, width, height)
+	return _greedy_merge_dense_gd(grid, width, height)
+
+
+## 纯 GDScript 兜底实现（与原生版算法完全一致，保证无原生库也能运行）
+static func _greedy_merge_dense_gd(grid: PackedInt32Array, width: int, height: int) -> Dictionary:
 	var pos_arr := PackedInt32Array()
 	var size_arr := PackedInt32Array()
 	var val_arr := PackedInt32Array()

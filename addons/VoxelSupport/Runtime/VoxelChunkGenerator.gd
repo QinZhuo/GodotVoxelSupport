@@ -206,6 +206,32 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 static func generate_single_chunk_dense(
 		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
 		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	# 原生加速路径：GDExtension (C++) 已加载时优先调用（网格生成主循环 ~10 倍提速）
+	if NativeLoader.is_available():
+		var trans_flags := _build_trans_flags(aligned_materials)
+		var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
+		if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
+			return {}
+		return result
+	# 纯 GDScript 兜底路径
+	return _generate_single_chunk_dense_gd(halo, aligned_materials, scale, chunk_key, offset)
+
+
+## 从对齐材质数组构建透明标志数组（PackedByteArray，索引=材质ID，1=透明）
+## 供原生 generate_chunk_dense 使用（C++ 跨语言读 VoxelMaterial 属性较慢，预计算传入）
+static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:
+	var flags := PackedByteArray()
+	flags.resize(aligned_materials.size())
+	for i in aligned_materials.size():
+		var mat = aligned_materials[i]
+		flags[i] = 1 if mat != null and mat.trans > 0 else 0
+	return flags
+
+
+## 纯 GDScript 兜底实现（与原生版算法完全一致）
+static func _generate_single_chunk_dense_gd(
+		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
 	var solid_verts := PackedVector3Array()
 	var solid_normals := PackedVector3Array()
 	var solid_uvs := PackedVector2Array()

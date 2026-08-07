@@ -597,7 +597,20 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	# 批量移除后统一回收被清空的 chunk 键（避免逐体素 4096 扫描）
 	for ck in touched:
 		_maybe_erase_empty_chunk(ck)
-	_support_cache_on_remove_batch(positions)
+	if NativeLoader.is_available():
+		# 原生加速：支撑缓存增量更新（C++ 返回增量 delta，避免全量深拷贝 143 万条）
+		var delta: Dictionary = NativeLoader.update_support_cache_remove(_support_cache, _chunk_buffers, positions)
+		for p in delta["removed"]:
+			_support_cache.erase(p)
+		var updated: Dictionary = delta["updated"]
+		for nb in updated:
+			var count: int = updated[nb]
+			if count > 0:
+				_support_cache[nb] = count
+			else:
+				_support_cache.erase(nb)
+	else:
+		_support_cache_on_remove_batch(positions)
 	if notify:
 		emit_changed()
 	# 诊断：批量移除超过 100 体素时打印耗时
@@ -1048,6 +1061,24 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 ##
 ## 返回失稳体素位置集合 {pos: true}
 func find_unsupported_around(removed: Array) -> Dictionary:
+	var _diag_t0 := Time.get_ticks_usec()
+	if removed.is_empty() or _chunk_buffers.is_empty():
+		return {}
+
+	# 确保支撑缓存已构建（首次调用全量构建一次，之后由 set/remove 增量维护）
+	_ensure_support_cache()
+
+	# 原生加速路径：GDExtension (C++) 已加载时优先调用（失稳检测 ~10 倍提速）。
+	# 传入 _chunk_buffers / _support_cache 快照（C++ 侧只读，无副作用）
+	if NativeLoader.is_available():
+		var result: Dictionary = NativeLoader.find_unsupported_around(_chunk_buffers, _support_cache, removed)
+		return result
+	# 纯 GDScript 兜底路径
+	return _find_unsupported_around_gd(removed)
+
+
+## 纯 GDScript 兜底实现（与原生版算法完全一致）
+func _find_unsupported_around_gd(removed: Array) -> Dictionary:
 	var _diag_t0 := Time.get_ticks_usec()
 	if removed.is_empty() or _chunk_buffers.is_empty():
 		return {}

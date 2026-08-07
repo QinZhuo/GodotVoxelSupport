@@ -15,3 +15,10 @@ data_*/
 mono_crash.*.json
 /test
 .opencode
+
+# GDExtension 构建产物（编译出的动态库不入库，由 GitHub Actions 构建后发布）
+native/build/
+native/bin/*.dylib
+native/bin/*.so
+native/bin/*.dll
+*.gdextension.uid
