@@ -14,7 +14,5 @@ export_presets.cfg
 data_*/
 mono_crash.*.json
 /test
-/addons/TweenAnimation
-/addons/DEVFramework
 .opencode
 /.trae
