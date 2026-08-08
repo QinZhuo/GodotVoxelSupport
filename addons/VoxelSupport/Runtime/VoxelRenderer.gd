@@ -32,10 +32,26 @@ enum VisibilityMode {
 		data = v
 		if data:
 			data.changed.connect(_on_data_changed)
+		if data and data_stream:
+			data.set_stream(data_stream)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
 		_clear_chunk_meshes()
 		_request_update()
+
+## 数据层磁盘流（VoxelStream / VoxelFileStream）。
+## 设置后 STREAMING 模式不仅卸载网格，还按距离把 chunk 数据写回磁盘并释放内存
+## （数据层磁盘流式）。卸载/补建由 _process_streaming 驱动（data.unload_chunk /
+## data.preload_chunk），保证破坏/编辑/网格生成始终能看到磁盘上已持久化的数据。
+## 也可直接配置 VoxelData.stream；此处提供节点级快捷入口。
+@export var data_stream: VoxelStream:
+	set(v):
+		# setter 内部赋值不会递归，可直接设置底层存储
+		if data_stream == v:
+			return
+		data_stream = v
+		if data:
+			data.set_stream(v)
 
 ## 体素缩放比例 (单个体素的边长，世界单位)
 @export var voxel_scale: float = 0.1:
@@ -73,6 +89,11 @@ enum VisibilityMode {
 @export var visibility_mode: VisibilityMode = VisibilityMode.FRUSTUM:
 	set(v):
 		visibility_mode = v
+		# 同步流式启用状态：运行时切换 STREAMING 立即生效（原只在 _ready 设置一次，
+		# demo 在 _ready 之后才设 STREAMING 会导致流式从不启用）
+		_streaming_enabled = v == VisibilityMode.STREAMING
+		if _streaming_enabled and unload_distance <= 0.0:
+			unload_distance = view_distance * 1.5
 		if v == VisibilityMode.FULL:
 			_deferred_chunks.clear()
 			# 全量模式下补建被卸载的网格
@@ -205,6 +226,9 @@ func _ready() -> void:
 	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
 	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
 	_measure_render_time_enabled = false
+	# 数据层磁盘流式：编辑器加载顺序不定，_ready 兜底把 stream 挂到 data
+	if data and data_stream and data.stream != data_stream:
+		data.set_stream(data_stream)
 	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认 = view*1.5）
 	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
 	if _streaming_enabled and unload_distance <= 0.0:
@@ -370,6 +394,9 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var world_offset := global_position
 	var kept: Array[Vector3i] = []
 	for ck in chunks:
+		# 无数据的空 chunk：无需流式网格管理（不建不卸，且不占用 streamed_out 字典）
+		if data and not data.has_chunk(ck):
+			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 		if cam_pos.distance_to(aabb.get_center()) > unload_distance:
 			_streamed_out_chunks[ck] = true
@@ -485,11 +512,16 @@ func _process_streaming() -> void:
 	var load_d := view_distance
 	var unload_d := unload_distance
 
-	# 1. 卸载：距离 > unload_d 的已建 chunk 网格释放
-	# 【每帧限量】卸载分批进行，避免一次 queue_free 大量节点造成掉帧
+	# 1. 卸载：距离 > unload_d 的 chunk 释放（网格 + 数据层，含未建网格的）
+	# 【每帧限量】卸载分批进行，避免一次 queue_free 大量节点造成掉帧。
+	# 数据层磁盘流式：遍历数据层内存 chunk（覆盖已建网格与仅数据在内存的 chunk），
+	# 远距统一调用 _unload_chunk → data.unload_chunk 写盘并释放数据内存。
 	var unloaded := 0
 	if unload_d > 0.0:
-		for ck in _chunk_meshes.keys():
+		var loaded_chunks: Array = []
+		if data:
+			loaded_chunks = data.get_loaded_chunk_keys()
+		for ck in loaded_chunks:
 			if unloaded >= _stream_per_frame:
 				break
 			var ck3: Vector3i = ck
@@ -505,6 +537,12 @@ func _process_streaming() -> void:
 	# 每帧最多 _stream_per_frame 个同步生成（~1ms/chunk），主线程可接受。
 	var reloaded := 0
 	if load_d > 0.0:
+		# 清理 streamed_out 中无数据的残留键（数据已清空的 chunk 无需流式管理，
+		# 否则字典随相机移动持续膨胀）
+		if data:
+			for ck_clean in _streamed_out_chunks.keys():
+				if not data.has_chunk(ck_clean):
+					_streamed_out_chunks.erase(ck_clean)
 		for ck in _streamed_out_chunks:
 			if reloaded >= _stream_per_frame:
 				break
@@ -512,6 +550,9 @@ func _process_streaming() -> void:
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 			if cam_pos.distance_to(aabb.get_center()) <= load_d:
 				_streamed_out_chunks.erase(ck3)
+				if data and data.is_streaming():
+					# 数据层磁盘流式：先把 chunk 数据从磁盘读回内存，再生成网格
+					data.preload_chunk(ck3)
 				_rebuild_single_chunk_direct(ck3)
 				reloaded += 1
 	if reloaded > 0:
@@ -541,9 +582,6 @@ func _rebuild_single_chunk_direct(ck: Vector3i) -> void:
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
-
-
-## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
 func _unload_chunk(ck: Vector3i) -> void:
 	var mi: MeshInstance3D = _chunk_meshes.get(ck)
 	if mi != null and is_instance_valid(mi):
@@ -553,6 +591,9 @@ func _unload_chunk(ck: Vector3i) -> void:
 	_mesh_build_queue.erase(ck)
 	_stream_force_build.erase(ck)
 	_streamed_out_chunks[ck] = true
+	# 数据层磁盘流式：卸载 chunk 数据（修改过的写盘、变空的清盘、未修改丢弃，释放内存）
+	if data and data.is_streaming():
+		data.unload_chunk(ck)
 	# 记录性能/内存释放（诊断）
 	if diag_enabled:
 		print("[诊断] 流式卸载: Chunk%s" % ck)
@@ -817,6 +858,14 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 
 	# 单 chunk 结果（来自 _generate_chunk_worker）
 	if chunk_key.x != -999:
+		# 流式：该 chunk 已被卸载（数据层已释放），丢弃过期结果。
+		# 网格统一由 _process_streaming 按距离补建，避免卸载后的旧网格/旧数据复活。
+		if _streamed_out_chunks.has(chunk_key):
+			_pending_task_count -= 1
+			if _pending_task_count <= 0:
+				_pending_task_count = 0
+				_batch_complete_pending = true
+			return
 		var arr = arrays.get(chunk_key, {})
 		var has_voxels_in_data := false
 		if data:

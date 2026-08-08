@@ -126,6 +126,23 @@ func _build_world() -> void:
 		data.set_voxels(b_positions, roof_mat.id)
 
 	_target.data = data
+	# 数据层磁盘流式：chunk 数据按需写盘/读盘（目录 user://voxel_demo_stream）。
+	# 启用后 STREAMING 模式不仅卸载网格，还按距离把 chunk 数据写回磁盘并释放内存，
+	# 相机靠近时再从磁盘读回。内存占用随可见区域而非整个世界增长。
+	var stream := VoxelFileStream.new()
+	stream.directory = "user://voxel_demo_stream"
+	# 演示场景每次运行从零开始：清空旧流数据目录（避免上一次的残留 chunk 干扰）
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(stream.directory))
+	var cleanup := DirAccess.open(stream.directory)
+	if cleanup:
+		cleanup.list_dir_begin()
+		var fn := cleanup.get_next()
+		while fn != "":
+			if not cleanup.current_is_dir():
+				cleanup.remove(fn)
+			fn = cleanup.get_next()
+		cleanup.list_dir_end()
+	_target.data_stream = stream
 	_target.voxel_scale = voxel_scale
 	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
 	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
@@ -246,8 +263,15 @@ func _update_hud() -> void:
 	var fps := Engine.get_frames_per_second()
 	var chunk_meshes := _target._chunk_meshes.size()
 	var streamed := _target._streamed_out_chunks.size()
+	var data_loaded := 0
+	var data_unloaded := 0
+	if _target.data != null:
+		data_loaded = _target.data.get_loaded_chunk_keys().size()
+		if _target.data.is_streaming():
+			data_unloaded = _target.data.get_unloaded_chunk_keys().size()
 	var draw := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 	_hud.text = "FPS: %d    DrawCalls: %d\n" % [fps, draw] + \
-			"网格数: %d    流式已卸载: %d\n" % [chunk_meshes, streamed] + \
+			"网格数: %d    流式网格卸载: %d\n" % [chunk_meshes, streamed] + \
+			"数据层: 内存%d  磁盘%d\n" % [data_loaded, data_unloaded] + \
 			"相机位置: (%d, %d, %d)" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)] + \
 			"\n\nWASD移动  Q/E升降  空格加速\n1流式开关  2视锥开关  3超级块"
