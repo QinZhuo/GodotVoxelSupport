@@ -41,10 +41,6 @@ extends Node
 ## 连续模式：每 N 帧执行一次破坏 (值越小越快)
 @export var continuous_interval: int = 3
 
-## 超级块合并渲染（0=关闭=每chunk独立mesh；4=每4³=64chunk合并为一个mesh，draw call 大减）
-## 注意：合并后 GPU 视锥剔除粒度变粗，环绕相机时可能更慢；适合超大型静态世界/移动端
-@export var superchunk_size: int = 4
-
 ## 可选的数据源
 @export var voxel_data_source: VoxelData:
 	set(v):
@@ -215,8 +211,6 @@ func _configure_target(data: VoxelData) -> void:
 	_target.voxel_scale = voxel_scale
 	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
 	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
-	# 超级块合并渲染：默认开启（4×4×4=64 chunk/块），大幅减少 draw call
-	_target.superchunk_size = superchunk_size
 	_target.spawn_debris_on_damage = true
 	_target.max_debris_per_hit = 40
 	# 碎片系统已改为纯粒子实现，无物理碰撞体

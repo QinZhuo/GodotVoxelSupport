@@ -112,18 +112,6 @@ var _cull_check_counter: int = 0
 ## 关闭（默认）时仅在单次重建超时阈值（如单 chunk 生成 >5ms）时才打印，避免刷屏
 @export var diag_enabled: bool = false
 
-## 超级块合并渲染（Superchunk Batching）：把相邻 N×N×N 个 chunk 合并为一个
-## MeshInstance3D，大幅减少 draw call 数量（GPU 提交次数）。
-## 例如 superchunk_size=4 → 每 4×4×4=64 个 chunk 合成 1 个 mesh，
-## 1183 chunk → ~19 个 draw call（对比 per-chunk 的 1183 个）。
-## 破坏时仍只重建受影响超级块（增量生成管线不变，仅渲染挂载时合并）。
-## 0 = 关闭（每 chunk 独立 MeshInstance3D，旧行为）
-@export_range(0, 8, 1) var superchunk_size: int = 0:
-	set(v):
-		superchunk_size = v
-		_clear_chunk_meshes()
-		_request_update()
-
 var _dirty: bool = false
 var _materials_cache: Array = []
 var _collision_body: StaticBody3D = null
@@ -131,20 +119,6 @@ var _update_counter: int = 0
 
 # 视锥外待生成的 chunk（key = chunk key，value = true），进入视锥后补建
 var _deferred_chunks: Dictionary[Vector3i, bool] = {}
-
-# 超级块合并渲染状态：超级块 key -> MeshInstance3D
-var _superchunk_meshes: Dictionary = {}
-# chunk key -> 该 chunk 的网格数组（超级块合并模式缓存，供合并时读取）
-var _chunk_arrays_cache: Dictionary = {}
-# 待重建的超级块 key 集合（每次有 chunk 更新时标记，随后统一合并）
-var _dirty_superchunks: Dictionary = {}
-# 超级块合并期间需要清理的空超级块（全空则移除节点）
-var _empty_superchunks: Dictionary = {}
-# 超级块重建限流：_rebuild_dirty_superchunks 由同步调用改为入队，_process 帧尾限量执行，
-# 纳入 GPU 忙检测（add_surface_from_arrays 同步上传，避免破坏时整块重建造成 Metal fence 超时）
-var _superchunk_rebuild_scheduled: bool = false
-# 每帧最多重建的超级块数（提高可加快补建；配合下方 3ms 时间预算 + GPU 忙检测兜底防超时）
-var _superchunk_rebuild_per_frame: int = 8
 
 # 流式加载每帧限量：相机移动跨越边界时，卸载/补建分批进行，
 # 避免一次处理几十个 chunk（queue_free + 重建 + GPU 上传）造成掉帧
@@ -498,64 +472,35 @@ func _process_streaming() -> void:
 	var world_offset := global_position
 	var load_d := view_distance
 	var unload_d := unload_distance
-	# 超级块模式下，补建 1 个 chunk 会触发其所在超级块（64 chunk）合并重建。
-	# 重建队列每帧最多处理 _superchunk_rebuild_per_frame 个（已提高到 8），
-	# 因此补建限量保持与重建上限一致，避免"补建慢、重建快"的瓶颈错位。
-	var reload_limit := _stream_reload_per_frame
-	if superchunk_size > 0 and reload_limit > _superchunk_rebuild_per_frame:
-		reload_limit = _superchunk_rebuild_per_frame
 
 	# 1. 卸载：距离 > unload_d 的已建 chunk 网格释放
 	# 【每帧限量】卸载分批进行，避免一次 queue_free 大量节点造成掉帧
 	var unloaded := 0
 	if unload_d > 0.0:
-		if superchunk_size > 0:
-			# 超级块模式：整块卸载（含所有 chunk 数据缓存）
-			var sk_list: Array = _superchunk_meshes.keys()
-			for sk in sk_list:
-				if unloaded >= _stream_unload_per_frame:
-					break
-				var sck: Vector3i = sk
-				var center := world_offset + Vector3(sck) * (chunk_size_world * float(superchunk_size)) \
-						+ Vector3.ONE * (chunk_size_world * float(superchunk_size) * 0.5)
-				if cam_pos.distance_to(center) > unload_d:
-					_unload_superchunk(sck)
-					unloaded += 1
-		else:
-			for ck in _chunk_meshes.keys():
-				if unloaded >= _stream_unload_per_frame:
-					break
-				var ck3: Vector3i = ck
-				var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
-				if cam_pos.distance_to(aabb.get_center()) > unload_d:
-					_unload_chunk(ck3)
-					unloaded += 1
+		for ck in _chunk_meshes.keys():
+			if unloaded >= _stream_unload_per_frame:
+				break
+			var ck3: Vector3i = ck
+			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
+			if cam_pos.distance_to(aabb.get_center()) > unload_d:
+				_unload_chunk(ck3)
+				unloaded += 1
 
 	# 2. 重新加载：已卸载但距离 < load_d 的 chunk 补建
-	# 【每帧限量】补建分批进行，避免相机移动跨越边界时一次重建几十个 chunk
-	# 造成掉帧。每帧最多补建 STREAM_RELOAD_PER_FRAME 个，剩余下帧继续。
-	# 超级块模式下补建会触发超级块整块合并（64 chunk），因此流式补建每帧只处理
-	# 1 个 chunk（_stream_reload_per_frame 在超级块模式降为 1），把超级块重建摊平。
+	# 【每帧限量】补建分批进行，避免相机移动跨越边界时一次重建几十个 chunk 造成掉帧。
+	# 补建同步生成单 chunk 数组直接入 GPU 限流队列（绕过异步 pipeline 串行 + 视锥延迟），
+	# 由 _process_mesh_build_queue 帧尾限量构建——补建不再受"每批完成后才下一批"限制。
 	var reloaded := 0
 	if load_d > 0.0:
 		for ck in _streamed_out_chunks:
-			if reloaded >= reload_limit:
+			if reloaded >= _stream_reload_per_frame:
 				break
 			var ck3: Vector3i = ck
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 			if cam_pos.distance_to(aabb.get_center()) <= load_d:
 				_streamed_out_chunks.erase(ck3)
-				if superchunk_size > 0:
-					var sk := _superchunk_key_of(ck3)
-					_dirty_superchunks[sk] = true
-					_schedule_superchunk_rebuild()
-				else:
-					# 流式补建：同步生成单 chunk 数组，直接入 GPU 限流队列。
-					# 绕过异步 pipeline（_pending_task_count 串行 + 视锥延迟），
-					# 补建由 _process_mesh_build_queue 帧尾限量构建——补建不再
-					# 受"每批完成后才下一批"限制，移动时网格快速出现。
-					if data:
-						_rebuild_single_chunk_direct(ck3)
+				if data:
+					_rebuild_single_chunk_direct(ck3)
 				reloaded += 1
 	if reloaded > 0:
 		_request_update()
@@ -596,27 +541,6 @@ func _unload_chunk(ck: Vector3i) -> void:
 	# 记录性能/内存释放（诊断）
 	if diag_enabled:
 		print("[诊断] 流式卸载: Chunk%s" % ck)
-
-
-## 卸载整个超级块网格（超级块模式）：释放 mesh + chunk 数据缓存
-func _unload_superchunk(sck: Vector3i) -> void:
-	var mi: MeshInstance3D = _superchunk_meshes.get(sck)
-	if mi != null and is_instance_valid(mi):
-		mi.queue_free()
-	_superchunk_meshes.erase(sck)
-	_empty_superchunks.erase(sck)
-	_dirty_superchunks.erase(sck)
-	# 清空该超级块内所有 chunk 的网格数组缓存（释放大内存）
-	var to_erase: Array[Vector3i] = []
-	for ck in _chunk_arrays_cache:
-		var ck3: Vector3i = ck
-		if _superchunk_key_of(ck3) == sck:
-			to_erase.append(ck3)
-			_streamed_out_chunks[ck3] = true
-	for ck in to_erase:
-		_chunk_arrays_cache.erase(ck)
-	if diag_enabled:
-		print("[诊断] 流式卸载: SuperChunk%s" % sck)
 
 
 ## 异步路径：后台线程生成网格数据，完成后通过 call_deferred 直接传递结果到主线程
@@ -885,15 +809,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			has_voxels_in_data = data.has_chunk(chunk_key)
 			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
 
-		# 超级块合并模式：chunk 数据存入缓存，标记超级块为脏，帧尾限量重建
-		if superchunk_size > 0:
-			_store_chunk_array(chunk_key, arr if (arr is Dictionary and not arr.is_empty() and has_voxels_in_data) else {})
-			_mark_superchunk_dirty(chunk_key)
-			_schedule_superchunk_rebuild()
-			_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
-			return
-
-		# 非超级块模式：入队待构建（GPU 上传限流，_process 每帧批量处理）
+		# 入队待构建（GPU 上传限流，_process 每帧批量处理）
 		# 避免连续破坏时一帧大量 ArrayMesh 创建 + GPU 上传 → Metal fence 超时
 		_mesh_build_queue[chunk_key] = {
 			"arrays": arr if (arr is Dictionary and not arr.is_empty() and has_voxels_in_data) else {},
@@ -1010,208 +926,6 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	else:
 		_remove_chunk_collision(chunk_key)
 
-
-# ----------------------------------------------------------------------------
-# 超级块合并渲染（Superchunk Batching）
-# ----------------------------------------------------------------------------
-
-## chunk key → 超级块 key（将每 superchunk_size 个 chunk 划为一组）
-func _superchunk_key_of(ck: Vector3i) -> Vector3i:
-	var s := superchunk_size
-	return Vector3i(
-		floori(float(ck.x) / s),
-		floori(float(ck.y) / s),
-		floori(float(ck.z) / s))
-
-
-## 缓存 chunk 网格数组（超级块合并模式）
-## 空数组表示该 chunk 无体素（合并时跳过）
-func _store_chunk_array(ck: Vector3i, arr: Dictionary) -> void:
-	if arr.is_empty():
-		_chunk_arrays_cache.erase(ck)
-	else:
-		_chunk_arrays_cache[ck] = arr
-
-
-## 标记 chunk 所在超级块为脏（待合并重建）
-func _mark_superchunk_dirty(ck: Vector3i) -> void:
-	var sk := _superchunk_key_of(ck)
-	_dirty_superchunks[sk] = true
-
-
-## 排期超级块重建（入队）：把当前脏超级块集合登记，帧尾限量重建。
-## 取代原同步 _rebuild_dirty_superchunks（破坏时整块 add_surface_from_arrays 同步 GPU 上传
-## 会造成 Metal fence 超时），改为帧尾限量 + GPU 忙检测。
-func _schedule_superchunk_rebuild() -> void:
-	if _dirty_superchunks.is_empty():
-		return
-	if not _superchunk_rebuild_scheduled:
-		_superchunk_rebuild_scheduled = true
-		call_deferred("_process_superchunk_rebuild_queue")
-
-
-## 帧尾限量重建脏超级块（GPU 忙感知）
-## 与 chunk 构建队列（_process_mesh_build_queue）同一套节流思路：
-## 每帧限量 + 忙时暂停，避免一帧大量 ArrayMesh 上传造成 Metal fence 超时
-func _process_superchunk_rebuild_queue() -> void:
-	_superchunk_rebuild_scheduled = false
-	if _dirty_superchunks.is_empty():
-		return
-	# GPU 忙检测：忙时暂停，下帧 _process 会重新排期（scheduled 已置 false）
-	if _last_frame_delta > _gpu_busy_threshold_ms / 1000.0:
-		if diag_enabled:
-			print("[诊断] GPU忙(帧%.1fms), 暂停超级块重建" % (_last_frame_delta * 1000.0))
-		return
-	var t0 := Time.get_ticks_usec()
-	var rebuilt := 0
-	var dirty := _dirty_superchunks.keys()
-	for sk in dirty:
-		if rebuilt >= _superchunk_rebuild_per_frame:
-			break
-		_dirty_superchunks.erase(sk)
-		var sck: Vector3i = sk
-		var merged := _merge_superchunk_arrays(sck)
-		_apply_superchunk_mesh(sck, merged)
-		rebuilt += 1
-		# 自适应：单块合并耗时高时提前停止（合并涉及大量顶点拷贝）
-		if (Time.get_ticks_usec() - t0) / 1000.0 > 3.0:
-			break
-	# 还有剩余：下帧继续
-	if not _dirty_superchunks.is_empty():
-		_superchunk_rebuild_scheduled = true
-		call_deferred("_process_superchunk_rebuild_queue")
-	if diag_enabled and rebuilt > 0:
-		print("[诊断] 超级块合并: %d 块, 耗时%.2f ms, 剩余%d" % [rebuilt, (Time.get_ticks_usec() - t0) / 1000.0, _dirty_superchunks.size()])
-
-
-## 合并超级块内所有 chunk 的网格数组为单个数组集
-## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或空字典
-func _merge_superchunk_arrays(sck: Vector3i) -> Dictionary:
-	var solid_verts := PackedVector3Array()
-	var solid_normals := PackedVector3Array()
-	var solid_uvs := PackedVector2Array()
-	var solid_idxs := PackedInt32Array()
-	var trans_verts := PackedVector3Array()
-	var trans_normals := PackedVector3Array()
-	var trans_uvs := PackedVector2Array()
-	var trans_idxs := PackedInt32Array()
-
-	var s := superchunk_size
-	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
-	# 超级块在局部坐标中的偏移：超级块原点对应的世界偏移（chunk 原点 × chunk 尺度）
-	var base_offset := Vector3(sck) * (chunk_scale * float(s))
-
-	for ck in _chunk_arrays_cache:
-		var ck3: Vector3i = ck
-		if _superchunk_key_of(ck3) != sck:
-			continue
-		var arr: Dictionary = _chunk_arrays_cache[ck3]
-		# 该 chunk 相对超级块原点的偏移（世界单位）
-		var chunk_offset := Vector3(ck3) * chunk_scale - base_offset
-
-		var sv: PackedVector3Array = arr.get("solid_verts", PackedVector3Array())
-		var svn: PackedVector3Array = arr.get("solid_normals", PackedVector3Array())
-		var suv: PackedVector2Array = arr.get("solid_uvs", PackedVector2Array())
-		var sidx: PackedInt32Array = arr.get("solid_idxs", PackedInt32Array())
-		var tv: PackedVector3Array = arr.get("trans_verts", PackedVector3Array())
-		var tvn: PackedVector3Array = arr.get("trans_normals", PackedVector3Array())
-		var tuv: PackedVector2Array = arr.get("trans_uvs", PackedVector2Array())
-		var tidx: PackedInt32Array = arr.get("trans_idxs", PackedInt32Array())
-
-		# 顶点平移（chunk 局部坐标 → 超级块局部坐标）
-		var solid_base := solid_verts.size()
-		for i in sv.size():
-			solid_verts.append(sv[i] + chunk_offset)
-		for i in svn.size():
-			solid_normals.append(svn[i])
-		for i in suv.size():
-			solid_uvs.append(suv[i])
-		for i in sidx.size():
-			solid_idxs.append(sidx[i] + solid_base)
-
-		var trans_base := trans_verts.size()
-		for i in tv.size():
-			trans_verts.append(tv[i] + chunk_offset)
-		for i in tvn.size():
-			trans_normals.append(tvn[i])
-		for i in tuv.size():
-			trans_uvs.append(tuv[i])
-		for i in tidx.size():
-			trans_idxs.append(tidx[i] + trans_base)
-
-	if solid_idxs.is_empty() and trans_idxs.is_empty():
-		return {}
-
-	return {
-		"solid_verts": solid_verts, "solid_normals": solid_normals,
-		"solid_uvs": solid_uvs, "solid_idxs": solid_idxs,
-		"trans_verts": trans_verts, "trans_normals": trans_normals,
-		"trans_uvs": trans_uvs, "trans_idxs": trans_idxs,
-	}
-
-
-## 将合并后的超级块数组挂载为 MeshInstance3D（或移除空块）
-func _apply_superchunk_mesh(sck: Vector3i, merged: Dictionary) -> void:
-	var has_data := not merged.is_empty()
-	var superchunk_mesh: MeshInstance3D
-	if _superchunk_meshes.has(sck):
-		superchunk_mesh = _superchunk_meshes[sck]
-
-	if not has_data:
-		# 超级块内所有 chunk 都空了：移除节点
-		if superchunk_mesh:
-			superchunk_mesh.queue_free()
-			_superchunk_meshes.erase(sck)
-		return
-
-	if superchunk_mesh == null:
-		superchunk_mesh = MeshInstance3D.new()
-		superchunk_mesh.name = "SuperChunk_%d_%d_%d" % [sck.x, sck.y, sck.z]
-		add_child(superchunk_mesh)
-		_superchunk_meshes[sck] = superchunk_mesh
-
-	var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(merged)
-	if new_mesh and _materials_cache.size() >= 2:
-		if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
-			new_mesh.surface_set_material(0, _materials_cache[0])
-		if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
-			new_mesh.surface_set_material(1, _materials_cache[1])
-	superchunk_mesh.mesh = new_mesh
-	# 关键：超级块节点位置 = 超级块世界原点偏移。
-	# 合并顶点为"超级块局部坐标"（chunk 偏移已减 base_offset），
-	# 因此节点必须平移 base_offset 才能落回世界正确位置，
-	# 否则所有超级块都重叠在世界原点，只有靠近原点的一小块正常显示。
-	var s := superchunk_size
-	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
-	superchunk_mesh.position = Vector3(sck) * (chunk_scale * float(s))
-
-
-## 清理超级块合并状态（数据/节点重置时调用）
-func _clear_superchunk_state() -> void:
-	for sck in _superchunk_meshes:
-		_superchunk_meshes[sck].queue_free()
-	_superchunk_meshes.clear()
-	_chunk_arrays_cache.clear()
-	_dirty_superchunks.clear()
-	_empty_superchunks.clear()
-
-
-## 清理重建列表外、且数据中已无体素的 chunk 缓存（避免脏数据残留导致幽灵面）
-func _prune_superchunk_cache(rebuilt: Dictionary) -> void:
-	if not data:
-		return
-	var to_prune: Array = []
-	for ck in _chunk_arrays_cache:
-		if rebuilt.has(ck):
-			continue
-		if not data.has_chunk(ck):
-			to_prune.append(ck)
-	for ck in to_prune:
-		_chunk_arrays_cache.erase(ck)
-		var sk := _superchunk_key_of(ck)
-		_dirty_superchunks[sk] = true
-	if not to_prune.is_empty():
-		_schedule_superchunk_rebuild()
 
 
 ## 批次完成清理：当所有任务都完成后执行
@@ -1365,7 +1079,6 @@ func _clear_collision() -> void:
 func _clear_chunk_meshes() -> void:
 	_deferred_chunks.clear()
 	_mesh_build_queue.clear()
-	_clear_superchunk_state()
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()
 	_chunk_meshes.clear()
@@ -1384,26 +1097,6 @@ func _clear_chunk_collisions() -> void:
 func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 	var t_start := Time.get_ticks_usec()
 	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
-
-	# 超级块合并模式：所有 chunk 数据入缓存，合并重建（增量路径也会走到这）
-	if superchunk_size > 0:
-		for ck in chunk_arrays:
-			var ck3: Vector3i = ck
-			var arr = chunk_arrays[ck3]
-			# 空 chunk 需要清缓存（可能被破坏清空）
-			if arr is Dictionary and not arr.is_empty():
-				_chunk_arrays_cache[ck3] = arr
-			else:
-				_chunk_arrays_cache.erase(ck3)
-			_mark_superchunk_dirty(ck3)
-		_schedule_superchunk_rebuild()
-		# 清空不再存在的 chunk 缓存（重建列表外的）
-		_prune_superchunk_cache(chunk_arrays)
-		last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0
-		if data:
-			data.clear_dirty_voxels()
-		mesh_updated.emit()
-		return
 
 	# 收集本次重建涉及的所有 chunk key
 	var rebuilt_keys: Array[Vector3i] = []

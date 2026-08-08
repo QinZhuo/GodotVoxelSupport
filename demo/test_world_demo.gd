@@ -3,9 +3,8 @@ extends Node
 ##
 ## 目标：在大型场景下测试所有优化方向的效果：
 ##   1. 可见性模式 (visibility_mode)              —— FULL/FRUSTUM/STREAMING
-##   2. 超级块合并 (superchunk_size)               —— 减少 draw call
-##   3. 原生加速 (NativeLoader)                    —— GDExtension C++ 热路径
-##   4. 崩塌检测 (find_unsupported)                —— 失稳算法
+##   2. 原生加速 (NativeLoader)                    —— GDExtension C++ 热路径
+##   3. 崩塌检测 (find_unsupported)                —— 失稳算法
 ##
 ## 场景：大型建筑群（多栋高层建筑 + 地面层），chunk 数远超单建筑 demo
 ## 提供自动测试模式：自动切换各优化组合并测 FPS，输出对比结果
@@ -79,7 +78,6 @@ var _auto_combos: Array = []
 
 ## 上一帧按键
 var _prev_1 := false
-var _prev_2 := false
 var _prev_5 := false
 var _prev_6 := false
 var _prev_space := false
@@ -124,11 +122,10 @@ func _process(delta: float) -> void:
 			var combo: Dictionary = _auto_combos[_auto_combos.size() - 1]
 			_test_results.append({
 				"visibility": combo["visibility"],
-				"superchunk": combo["superchunk"],
 				"fps": avg,
 			})
-			print("[测试] visibility=%s superchunk=%d → %.1f FPS" % [
-				["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]], combo["superchunk"], avg])
+			print("[测试] visibility=%s → %.1f FPS" % [
+				["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]], avg])
 			_auto_fps_sum = 0.0
 			_auto_frame = 0
 			_advance_auto_test()
@@ -163,7 +160,6 @@ func _build_target() -> void:
 	_target.data = data
 	_target.voxel_scale = voxel_scale
 	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
-	_target.superchunk_size = _superchunk_mode()
 	_target.visibility_mode = _visibility_mode()
 	_target.view_distance = view_distance
 	_target.unload_distance = unload_distance
@@ -191,11 +187,9 @@ func _build_target() -> void:
 
 ## 优化开关状态（自动测试时被切换）
 var _visibility_state := 1  # 0=FULL, 1=FRUSTUM, 2=STREAMING
-var _superchunk_state := 0
 
 func _visibility_mode() -> VoxelRenderer.VisibilityMode:
 	return _visibility_state as VoxelRenderer.VisibilityMode
-func _superchunk_mode() -> int: return _superchunk_state
 
 
 ## 创建大型测试世界：多栋建筑 + 地面
@@ -376,7 +370,6 @@ func _setup_hud() -> void:
 
 func _handle_input(delta: float) -> void:
 	var key_1 := Input.is_key_pressed(KEY_1)
-	var key_2 := Input.is_key_pressed(KEY_2)
 	var key_5 := Input.is_key_pressed(KEY_5)
 	var key_6 := Input.is_key_pressed(KEY_6)
 	var left := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
@@ -387,11 +380,6 @@ func _handle_input(delta: float) -> void:
 		_visibility_state = (_visibility_state + 1) % 3
 		_rebuild_for_test()
 		print("[测试] 可见性: %s" % ["FULL", "FRUSTUM", "STREAMING"][_visibility_state])
-	# 超级块
-	if key_2 and not _prev_2:
-		_superchunk_state = (_superchunk_state + 2) % 6  # 0,2,4
-		_rebuild_for_test()
-		print("[测试] 超级块大小: %d" % _superchunk_state)
 	# 环绕
 	if key_5 and not _prev_5:
 		_orbit_active = not _orbit_active
@@ -407,7 +395,6 @@ func _handle_input(delta: float) -> void:
 		_ray_damage()
 
 	_prev_1 = key_1
-	_prev_2 = key_2
 	_prev_5 = key_5
 	_prev_6 = key_6
 	_prev_space = space
@@ -442,7 +429,7 @@ func _ray_damage() -> void:
 # 自动测试
 # ----------------------------------------------------------------------------
 
-## 启动自动测试：遍历所有优化组合测 FPS
+## 启动自动测试：遍历所有可见性模式测 FPS
 func _start_auto_test() -> void:
 	_auto_testing = true
 	_auto_frame = 0
@@ -450,10 +437,9 @@ func _start_auto_test() -> void:
 	_test_results.clear()
 	_auto_combos = []
 	for vis in [0, 1, 2]:
-		for superchunk in [0, 2, 4]:
-			_auto_combos.append({
-				"visibility": vis, "superchunk": superchunk,
-			})
+		_auto_combos.append({
+			"visibility": vis,
+		})
 	print("[测试] 自动测试开始，共 %d 组组合" % _auto_combos.size())
 	_advance_auto_test()
 
@@ -465,12 +451,10 @@ func _advance_auto_test() -> void:
 		return
 	var combo: Dictionary = _auto_combos.pop_front()
 	_visibility_state = combo["visibility"]
-	_superchunk_state = combo["superchunk"]
 	_rebuild_for_test()
 	_auto_frame = 0
 	_auto_fps_sum = 0.0
-	print("[测试] 开始组合: visibility=%s superchunk=%d" % [
-		["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]], combo["superchunk"]])
+	print("[测试] 开始组合: visibility=%s" % ["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]])
 
 
 ## 完成自动测试
@@ -481,8 +465,8 @@ func _finish_auto_test() -> void:
 	print("原生加速: %s" % ("ON" if _native_available else "OFF (GDScript 回退)"))
 	print("-----------------------------------")
 	for r in _test_results:
-		print("visibility=%-9s superchunk=%-3d → %6.1f FPS" % [
-			["FULL", "FRUSTUM", "STREAMING"][r["visibility"]], r["superchunk"], r["fps"]])
+		print("visibility=%-9s → %6.1f FPS" % [
+			["FULL", "FRUSTUM", "STREAMING"][r["visibility"]], r["fps"]])
 	print("===================================")
 	# 找出最优组合
 	var best: Dictionary = _test_results[0] if not _test_results.is_empty() else {}
@@ -490,15 +474,15 @@ func _finish_auto_test() -> void:
 		if r["fps"] > best["fps"]:
 			best = r
 	if not best.is_empty():
-		print("[测试] 最优组合: visibility=%s superchunk=%d → %.1f FPS" % [
-			["FULL", "FRUSTUM", "STREAMING"][best["visibility"]], best["superchunk"], best["fps"]])
+		print("[测试] 最优组合: visibility=%s → %.1f FPS" % [
+			["FULL", "FRUSTUM", "STREAMING"][best["visibility"]], best["fps"]])
 
 
 func _update_hud() -> void:
 	if not _hud:
 		return
 	var t := _target
-	var chunk_count := t._superchunk_meshes.size() if t.superchunk_size > 0 else t._chunk_meshes.size()
+	var chunk_count := t._chunk_meshes.size()
 	var draw_calls := 0
 	for c in t.get_children():
 		if c is MeshInstance3D and c.mesh != null and c.visible:
@@ -506,14 +490,14 @@ func _update_hud() -> void:
 	_hud.text = """===== 体素优化测试场 =====
 FPS: %d
 原生加速: %s
-模式: visibility=%s superchunk=%d
+模式: visibility=%s
 Chunk数: %d  |  draw call: %d
 体素: %d
-[1]可见性 [2]超级块 [5]环绕 [6]重置
+[1]可见性 [5]环绕 [6]重置
 左键破坏 空格射线""" % [
 		Engine.get_frames_per_second(),
 		"ON" if _native_available else "OFF",
-		["FULL", "FRUSTUM", "STREAMING"][_visibility_state], _superchunk_state,
+		["FULL", "FRUSTUM", "STREAMING"][_visibility_state],
 		chunk_count, draw_calls,
 		t.data.get_voxel_count() if t and t.data else 0,
 	]

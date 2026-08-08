@@ -44,14 +44,12 @@ var _speed: float = 20.0
 const SPEED_BASE := 20.0
 const SPEED_FAST := 60.0
 
-## 流式/可见性/超级块开关状态
+## 流式/可见性开关状态
 var _stream_state := true
-var _superchunk_state := 0  # 流式加载建议 0（per-chunk），避免超级块整块重建
 
 ## 上一帧按键状态（边沿触发）
 var _prev_1 := false
 var _prev_2 := false
-var _prev_3 := false
 
 
 func _ready() -> void:
@@ -131,9 +129,6 @@ func _build_world() -> void:
 	_target.voxel_scale = voxel_scale
 	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
 	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
-	# 流式加载按 chunk 粒度工作，与超级块合并（64 chunk 粒度）冲突：
-	# 补建 1 个 chunk 会触发整个超级块合并 → 卡顿。流式 demo 用 per-chunk 模式。
-	_target.superchunk_size = 0
 	# 可见性：流式模式（距离加载/卸载）
 	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 	_target.view_distance = view_distance
@@ -211,10 +206,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				if event.pressed and not _prev_2:
 					_toggle_streaming()
 				_prev_2 = event.pressed
-			KEY_3:
-				if event.pressed and not _prev_3:
-					_cycle_superchunk()
-				_prev_3 = event.pressed
 
 
 func _process(delta: float) -> void:
@@ -241,26 +232,19 @@ func _toggle_streaming() -> void:
 	print("[流式Demo] 流式加载: %s" % ("ON" if _stream_state else "OFF"))
 
 
-func _cycle_superchunk() -> void:
-	_superchunk_state = (_superchunk_state + 2) % 6  # 0,2,4
-	_target.superchunk_size = _superchunk_state
-	_update_mode_label()
-	print("[流式Demo] 超级块大小: %d" % _superchunk_state)
-
-
 func _update_mode_label() -> void:
 	if _mode_label == null:
 		return
 	var vis_names := ["FULL", "FRUSTUM", "STREAMING"]
 	var vis_name: String = vis_names[_target.visibility_mode]
-	_mode_label.text = "可见性:%s  超级块:%d" % [vis_name, _superchunk_state]
+	_mode_label.text = "可见性: %s" % vis_name
 
 
 func _update_hud() -> void:
 	if _hud == null or _target == null:
 		return
 	var fps := Engine.get_frames_per_second()
-	var chunk_meshes := _target._superchunk_meshes.size() if _target.superchunk_size > 0 else _target._chunk_meshes.size()
+	var chunk_meshes := _target._chunk_meshes.size()
 	var streamed := _target._streamed_out_chunks.size()
 	var draw := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 	_hud.text = "FPS: %d    DrawCalls: %d\n" % [fps, draw] + \
