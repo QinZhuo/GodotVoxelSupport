@@ -91,6 +91,14 @@ var _falling_chunk_root: Node3D = null
 var _falling_chunk_id: int = 0
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
+## 粒子对象池：空闲的 GPUParticles3D 集合（复用，避免每次破坏新建节点）。
+## 池上限防无限膨胀：池满时新粒子仍新建（超出直接丢，靠池上限自然限流）。
+var _particle_pool: Array[GPUParticles3D] = []
+## 粒子池上限（超过此数量不再缓存空闲节点，直接销毁）
+const PARTICLE_POOL_MAX: int = 64
+## 当前存活粒子系统数（用于调试/诊断）
+var _active_particle_count: int = 0
+
 ## 粒子淡出渐变共用资源（生命周期末渐隐）。所有粒子共用同一份，破坏瞬间省 Gradient/GradientTexture1D 创建。
 var _particle_fade_gradient: GradientTexture1D = null
 
@@ -1336,8 +1344,22 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	# mass 影响因子：质量越大，速度越慢、重力越大、喷发角度越小
 	# 用 1/sqrt(mass) 使效果平滑：mass=0.5→速度×1.41, mass=2.0→速度×0.71
 	var mass_factor := 1.0 / sqrt(mat_mass)
-	var particles := GPUParticles3D.new()
-	particles.name = "DebrisParticles_%d" % mat_id
+
+	# 【粒子池化】优先复用空闲粒子节点，避免每次破坏新建 GPUParticles3D 节点
+	# （大崩塌一帧创建几十个粒子系统的开销来源）
+	var particles: GPUParticles3D
+	if not _particle_pool.is_empty():
+		particles = _particle_pool.pop_back()
+	else:
+		particles = GPUParticles3D.new()
+		particles.name = "DebrisParticles"
+	# 池中节点回池时已移除父节点，取出后统一挂载（避免重复 add_child）
+	if not particles.is_inside_tree():
+		_ensure_debris_root()
+		_debris_root.add_child(particles)
+	particles.visible = true
+	_active_particle_count += 1
+
 	particles.position = center
 	particles.amount = amount
 	# 粒子停留时间：重物落地快，生命周期缩短；轻物飘得久
@@ -1345,6 +1367,7 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	particles.explosiveness = 1.0
 	particles.one_shot = true
 	particles.local_coords = true
+	particles.restart()
 	# 碰撞仅在 visibility_aabb 区域内发生，扩大以覆盖粒子运动范围
 	var half_extent := maxf(emission_size.length(), 8.0)
 	particles.visibility_aabb = AABB(Vector3(-half_extent, -4, -half_extent), Vector3(half_extent * 2, 16 + half_extent, half_extent * 2))
@@ -1395,12 +1418,16 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 	var mesh := _get_particle_mesh(mat_id)
 	particles.draw_pass_1 = mesh
 
-	_debris_root.add_child(particles)
-	# 粒子发射完并淡出后自动销毁节点
-	var tree := get_tree()
-	if tree:
-		var timer := tree.create_timer(particles.lifetime + 0.5)
-		timer.timeout.connect(_cleanup_particles.bind(particles))
+	# one_shot 粒子发射完自动触发 finished → 回池复用
+	# 复用前先断开旧连接，避免迟到信号重复回池
+	if particles.finished.is_connected(_on_particle_finished):
+		particles.finished.disconnect(_on_particle_finished)
+	particles.finished.connect(_on_particle_finished.bind(particles))
+
+
+## one_shot 粒子发射完成回调：回池复用
+func _on_particle_finished(gp: GPUParticles3D) -> void:
+	_cleanup_particles(gp)
 
 
 ## 获取粒子淡出渐变（按需创建一次并缓存复用）
@@ -1442,8 +1469,22 @@ func _get_particle_mesh(mat_id: int) -> Mesh:
 	return box
 
 
+## 粒子生命周期结束：回收到池中复用（避免每次破坏新建/销毁 GPUParticles3D 节点）
+## 回池时从树移除 + 断开 finished 信号，取出时统一重新挂载
 func _cleanup_particles(p: Node) -> void:
-	if p and is_instance_valid(p):
+	if p == null or not is_instance_valid(p):
+		return
+	_active_particle_count = maxi(_active_particle_count - 1, 0)
+	if p is GPUParticles3D and _particle_pool.size() < PARTICLE_POOL_MAX:
+		var gp := p as GPUParticles3D
+		gp.emitting = false
+		gp.visible = false
+		if gp.is_inside_tree():
+			gp.get_parent().remove_child(gp)
+		if gp.finished.is_connected(_on_particle_finished):
+			gp.finished.disconnect(_on_particle_finished)
+		_particle_pool.append(gp)
+	else:
 		p.queue_free()
 
 
@@ -1451,6 +1492,12 @@ func _clear_debris() -> void:
 	if _debris_root:
 		for child in _debris_root.get_children():
 			child.queue_free()
+	# 清空粒子池（场景退出时全部释放）
+	for gp in _particle_pool:
+		if is_instance_valid(gp):
+			gp.queue_free()
+	_particle_pool.clear()
+	_active_particle_count = 0
 	_particle_mesh_cache.clear()
 
 
