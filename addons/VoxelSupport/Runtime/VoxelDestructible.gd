@@ -161,6 +161,15 @@ var _body_pool: Array[RigidBody3D] = []
 ## 池中所有已创建的 RigidBody3D（含使用中），用于池容量管理
 var _body_pool_total: Array[RigidBody3D] = []
 
+## 大块掉落交替策略：相邻中块连续快速生成时，物理体与粒子破碎交替出现，
+## 防止多个中块同帧物理落地互相碰撞被推飞，同时画面表现更多样。
+## 交替条件（仅中块 + 双条件）：组体素 > 粒子阈值 且 ≤ Box阈值 且 距上次物理块
+## 中心距离 < 阈值 且 间隔 < 时间窗口。大块（>Box阈值）始终物理体，不参与交替。
+var _last_physics_chunk_time: int = 0
+var _last_physics_chunk_pos: Vector3 = Vector3.INF
+const _chunk_alternate_ms: int = 300      # 连续生成时间窗口（毫秒）
+const _chunk_alternate_dist: float = 5.0  # 相邻判定距离（世界单位，≈1-2块宽）
+
 ## 待生成掉落体队列：大面积崩塌时超出单帧上限的物理组暂存于此，
 ## 由 _process 每帧限量生成，把 GPU/物理负载摊平到多帧（消除 Metal fence 洪峰）
 var _pending_falling_groups: Array = []
@@ -795,10 +804,13 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	if group.is_empty():
 		return
 
-	# 池容量守卫：活动物理体已满时本块转"整块碎裂"粒子（保留块形状散开，而非消失）
+	# 【改进2】池满守卫：优先回收最旧物理体回池（腾出名额），而非直接转粒子。
+	# 回收成功则本块正常生成；实在无法回收（无块可逐出）才转粒子兜底。
 	if _body_pool_total.size() >= int(falling_chunk_pool_size) and _body_pool.is_empty():
-		_spawn_chunk_break_debris(group, mat_map)
-		return
+		var evicted := _evict_oldest_falling_chunks(1)
+		if evicted <= 0:
+			_spawn_chunk_break_debris(group, mat_map)
+			return
 
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
@@ -814,6 +826,21 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 
 	var voxel_center := (Vector3(voxel_min) + Vector3(voxel_max)) * 0.5 + Vector3(0.5, 0.5, 0.5)
 	var world_center := voxel_center * voxel_scale
+
+	# 【改进1】相邻中块交替：距上次物理块中心 < 阈值距离 且 连续生成（间隔 < 窗口）时，
+	# 本块转粒子破碎（交替）。**仅中块参与交替**（>粒子阈值 且 ≤Box阈值）：
+	# - 中块（32~256）：物理感弱、视觉差异小，交替表现多样且防碰撞推飞
+	# - 大块（>256）：始终物理体（重量感、整块碎裂的物理真实感），只在池满时降级
+	var now_ms := Time.get_ticks_msec()
+	var is_medium := group.size() > AUTO_PARTICLE_VOXELS and group.size() <= AUTO_BOX_VOXELS
+	var dist_to_last := world_center.distance_to(_last_physics_chunk_pos)
+	var alternate := is_medium \
+			and _last_physics_chunk_pos != Vector3.INF \
+			and dist_to_last < _chunk_alternate_dist \
+			and (now_ms - _last_physics_chunk_time) < _chunk_alternate_ms
+	if alternate:
+		_spawn_chunk_break_debris(group, mat_map)
+		return
 
 	# 2. 构建偏移到居中的体素字典（供一次性生成静态 mesh）
 	# 使用提前收集的 mat_map 而非 data.voxels（体素可能已被移除）
@@ -836,6 +863,10 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	body.owner = _falling_chunk_root
 	# 记录生成时刻，供生命周期上限/超时清理（覆盖所有掉落块，含未冻结的）
 	_chunk_spawn_times[body] = Time.get_ticks_msec()
+	# 记录块体素信息（供回收时粒子破碎），并更新交替时间戳
+	body.set_meta("local_voxels", local_voxels)
+	_last_physics_chunk_time = now_ms
+	_last_physics_chunk_pos = world_center
 
 	if diag_enabled:
 		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
@@ -1032,6 +1063,9 @@ func _acquire_body() -> RigidBody3D:
 func _release_body(body: RigidBody3D) -> void:
 	if body == null or not is_instance_valid(body):
 		return
+	# 【改进3】回收前播放粒子破碎效果：块从场景消失时"哗啦碎成粒子"，
+	# 而非凭空消失。用块自身的位置 + 记录的体素信息生成整块碎裂粒子。
+	_spawn_chunk_break_at_body(body)
 	# 断开落地检测连接（池复用：避免下次连接重复/旧引用泄漏）
 	for conn in body.body_entered.get_connections():
 		body.body_entered.disconnect(conn["callable"])
@@ -1046,7 +1080,33 @@ func _release_body(body: RigidBody3D) -> void:
 	body.rotation = Vector3.ZERO
 	body.linear_velocity = Vector3.ZERO
 	body.angular_velocity = Vector3.ZERO
+	body.remove_meta("local_voxels")
 	_body_pool.append(body)
+
+
+## 在掉落块当前位置播放"整块碎裂"粒子（回收时视觉过渡）
+## 从 body 记录的体素信息重建破碎粒子，用块中心作为发射中心
+func _spawn_chunk_break_at_body(body: RigidBody3D) -> void:
+	if body == null or not is_instance_valid(body):
+		return
+	var local_voxels: Dictionary = body.get_meta("local_voxels", {})
+	if local_voxels.is_empty():
+		return
+	# 发射中心 = 块中心（body 仍在场景中时的全局位置）
+	var center := body.global_position
+	var emission_size := Vector3(2.0, 2.0, 2.0) * voxel_scale
+	# 按材质分组发射破碎粒子
+	var by_mat := {}
+	for pos_key in local_voxels:
+		var mat_id: int = int(local_voxels[pos_key])
+		if not by_mat.has(mat_id):
+			by_mat[mat_id] = []
+		by_mat[mat_id].append(pos_key)
+	for mat_id in by_mat:
+		var list: Array = by_mat[mat_id]
+		var mat_mass: float = _get_material_mass(mat_id)
+		var amount := mini(list.size(), 200)
+		_spawn_debris_particles(center, mat_id, amount, mat_mass, true, emission_size)
 
 
 ## 清理已停稳或超时的掉落块（回池复用，而非销毁）
@@ -1057,26 +1117,30 @@ func _cleanup_falling_chunk(body: RigidBody3D) -> void:
 
 ## 数量上限时剔除最老的掉落块，腾出名额给新块（保证新块必生成）。
 ## 只移除 count 个，避免一次性清空导致大规模级联时块突然全部消失。
-func _evict_oldest_falling_chunks(count: int) -> void:
+## 返回实际逐出的数量（供调用方判断是否腾出名额成功）
+func _evict_oldest_falling_chunks(count: int) -> int:
 	if count <= 0 or not _falling_chunk_root:
-		return
+		return 0
 	var alive: Array = []
 	for child in _falling_chunk_root.get_children():
 		if child is RigidBody3D and is_instance_valid(child):
 			alive.append(child)
 	if alive.is_empty():
-		return
+		return 0
 	alive.sort_custom(func(a, b): return _chunk_spawn_times.get(a, 0) < _chunk_spawn_times.get(b, 0))
+	var evicted := 0
 	for body in alive:
 		if count <= 0:
 			break
 		if is_instance_valid(body):
 			_cleanup_falling_chunk(body)
 			count -= 1
+			evicted += 1
 	# 清理已失效引用，避免字典残留
 	for body in _chunk_spawn_times.keys():
 		if not is_instance_valid(body):
 			_chunk_spawn_times.erase(body)
+	return evicted
 
 
 ## 手动清理所有掉落块（用于场景重置等）
