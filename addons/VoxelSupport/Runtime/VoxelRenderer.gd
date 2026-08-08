@@ -97,6 +97,25 @@ signal mesh_updated
 ## 值越大 CPU 开销越低，但进入视锥后的补建响应越慢。
 @export_range(1, 60) var cull_check_interval: int = 8
 
+## 流式加载（Streaming / 距离 LOD 卸载）：
+## 超大型世界（数十万~数百万 chunk）时，一次性全建所有 chunk 网格会耗尽显存/内存。
+## 开启后按相机距离分级管理 chunk 网格：
+##   - 距离 < stream_load_distance    → 确保网格已建（视锥内或相机近处）
+##   - 距离 > stream_unload_distance  → 卸载网格（释放 ArrayMesh + 节点，保留 VoxelData 数据）
+## 数据层（VoxelData）始终全量保留，仅渲染网格按需加载/卸载，破坏逻辑不受影响。
+## 默认 0 = 关闭（全部 chunk 常驻，旧行为）。
+@export var stream_load_distance: float = 0.0
+## 卸载距离：超过此距离(世界单位)的 chunk 网格被卸载释放。需 >= stream_load_distance。
+@export var stream_unload_distance: float = 0.0
+## 流式加载的检测间隔帧数（与 cull_check_interval 同节奏即可）
+@export_range(1, 120) var stream_check_interval: int = 16
+
+## 流式加载：已卸载网格的 chunk（key → true），进入加载距离后补建
+var _streamed_out_chunks: Dictionary[Vector3i, bool] = {}
+var _stream_check_counter: int = 0
+## 是否已启用流式加载（load_distance > 0 即视为启用）
+var _streaming_enabled: bool = false
+
 ## 超级块合并渲染（Superchunk Batching）：把相邻 N×N×N 个 chunk 合并为一个
 ## MeshInstance3D，大幅减少 draw call 数量（GPU 提交次数）。
 ## 例如 superchunk_size=4 → 每 4×4×4=64 个 chunk 合成 1 个 mesh，
@@ -208,6 +227,10 @@ func _ready() -> void:
 	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
 	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
 	_measure_render_time_enabled = false
+	# 流式加载启用判定：stream_load_distance > 0 即视为启用（unload 默认 = load*2）
+	_streaming_enabled = stream_load_distance > 0.0
+	if _streaming_enabled and stream_unload_distance <= 0.0:
+		stream_unload_distance = stream_load_distance * 2.0
 
 
 func _process(_delta: float) -> void:
@@ -222,6 +245,13 @@ func _process(_delta: float) -> void:
 		_cull_check_counter = 0
 		if _pending_task_count == 0:
 			_process_deferred_chunks()
+
+	# 流式加载周期检测：按相机距离加载/卸载 chunk 网格（距离 LOD）
+	_stream_check_counter += 1
+	if _streaming_enabled and _stream_check_counter >= stream_check_interval:
+		_stream_check_counter = 0
+		if _pending_task_count == 0:
+			_process_streaming()
 
 	# GPU 上传限流：帧尾批量构建队列中的 chunk mesh（避免与渲染/崩塌竞争 GPU）
 	# call_deferred 确保在帧末尾执行（本帧渲染已提交），且队列处理不阻塞主循环
@@ -366,6 +396,12 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
+		# 流式加载：超出卸载距离的 chunk 不构建，直接标记为已流式卸载。
+		# 关键：避免大世界一次性全量构建（这是流式加载的核心收益——远处永远不生成）
+		if _streaming_enabled and stream_unload_distance > 0.0 \
+				and cam_pos.distance_to(aabb.get_center()) > stream_unload_distance:
+			_streamed_out_chunks[ck] = true
+			continue
 		if _aabb_has_vertex_in_frustum(aabb, cam):
 			visible.append(ck)
 		elif margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin:
@@ -421,6 +457,101 @@ func _process_deferred_chunks() -> void:
 			var origin := VoxelChunk.origin_of(ck)
 			data.dirty_voxels[origin] = data.get_voxel(origin)
 	_request_update()
+
+
+## 流式加载处理（距离 LOD 卸载）：
+## 按相机距离管理 chunk 网格：
+##   - 超过 stream_unload_distance 的已建 chunk → 卸载网格（释放 ArrayMesh+节点）
+##   - 已卸载但相机进入 stream_load_distance 的 chunk → 重新标记待建（补建）
+## 数据层（VoxelData）全量保留，仅渲染网格按需加载/卸载。
+func _process_streaming() -> void:
+	if not _streaming_enabled or not is_inside_tree():
+		return
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var cam_pos := cam.global_position
+	var world_offset := global_position
+	var load_d := stream_load_distance
+	var unload_d := stream_unload_distance
+
+	# 1. 卸载：距离 > unload_d 的已建 chunk 网格释放
+	var to_unload: Array[Vector3i] = []
+	if unload_d > 0.0:
+		if superchunk_size > 0:
+			# 超级块模式：整块卸载（含所有 chunk 数据缓存）
+			var sk_list: Array = _superchunk_meshes.keys()
+			for sk in sk_list:
+				var sck: Vector3i = sk
+				var center := world_offset + Vector3(sck) * (chunk_size_world * float(superchunk_size)) \
+						+ Vector3.ONE * (chunk_size_world * float(superchunk_size) * 0.5)
+				if cam_pos.distance_to(center) > unload_d:
+					_unload_superchunk(sck)
+		else:
+			for ck in _chunk_meshes.keys():
+				var ck3: Vector3i = ck
+				var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
+				if cam_pos.distance_to(aabb.get_center()) > unload_d:
+					to_unload.append(ck3)
+			for ck in to_unload:
+				_unload_chunk(ck)
+
+	# 2. 重新加载：已卸载但距离 < load_d 的 chunk 补建
+	var to_reload: Array[Vector3i] = []
+	if load_d > 0.0:
+		for ck in _streamed_out_chunks:
+			var ck3: Vector3i = ck
+			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
+			if cam_pos.distance_to(aabb.get_center()) <= load_d:
+				to_reload.append(ck3)
+		for ck in to_reload:
+			_streamed_out_chunks.erase(ck)
+			if superchunk_size > 0:
+				var sk := _superchunk_key_of(ck)
+				_dirty_superchunks[sk] = true
+				_schedule_superchunk_rebuild()
+			else:
+				if data:
+					var origin := VoxelChunk.origin_of(ck)
+					data.dirty_voxels[origin] = data.get_voxel(origin)
+	if not to_reload.is_empty():
+		_request_update()
+
+
+## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
+func _unload_chunk(ck: Vector3i) -> void:
+	var mi: MeshInstance3D = _chunk_meshes.get(ck)
+	if mi != null and is_instance_valid(mi):
+		mi.queue_free()
+	_chunk_meshes.erase(ck)
+	_remove_chunk_collision(ck)
+	_mesh_build_queue.erase(ck)
+	_streamed_out_chunks[ck] = true
+	# 记录性能/内存释放（诊断）
+	if diag_enabled:
+		print("[诊断] 流式卸载: Chunk%s" % ck)
+
+
+## 卸载整个超级块网格（超级块模式）：释放 mesh + chunk 数据缓存
+func _unload_superchunk(sck: Vector3i) -> void:
+	var mi: MeshInstance3D = _superchunk_meshes.get(sck)
+	if mi != null and is_instance_valid(mi):
+		mi.queue_free()
+	_superchunk_meshes.erase(sck)
+	_empty_superchunks.erase(sck)
+	_dirty_superchunks.erase(sck)
+	# 清空该超级块内所有 chunk 的网格数组缓存（释放大内存）
+	var to_erase: Array[Vector3i] = []
+	for ck in _chunk_arrays_cache:
+		var ck3: Vector3i = ck
+		if _superchunk_key_of(ck3) == sck:
+			to_erase.append(ck3)
+			_streamed_out_chunks[ck3] = true
+	for ck in to_erase:
+		_chunk_arrays_cache.erase(ck)
+	if diag_enabled:
+		print("[诊断] 流式卸载: SuperChunk%s" % sck)
 
 
 ## 异步路径：后台线程生成网格数据，完成后通过 call_deferred 直接传递结果到主线程

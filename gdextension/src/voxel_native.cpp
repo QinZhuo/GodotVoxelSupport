@@ -348,11 +348,13 @@ namespace {
 constexpr int CHUNK_BITS = 16;  // chunk 边长（体素）
 
 // 体素坐标 -> chunk key（向下取整，正确处理负坐标）
+// CHUNK_SIZE=16=2⁴ → 用算术右移替代 std::floor(double/16)，热路径零浮点开销。
+// C++ 有符号右移为算术右移（向负无穷），与 std::floor(double(x)/16) 语义一致。
 inline Vector3i chunk_of(const Vector3i &pos) {
 	return Vector3i(
-			int(std::floor(double(pos.x) / CHUNK_BITS)),
-			int(std::floor(double(pos.y) / CHUNK_BITS)),
-			int(std::floor(double(pos.z) / CHUNK_BITS)));
+			pos.x >> 4,
+			pos.y >> 4,
+			pos.z >> 4);
 }
 
 // 体素坐标 -> 哈希键（合并 3 个 int32 为 1 个 uint64，替代 Vector3i 哈希）

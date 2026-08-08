@@ -13,6 +13,8 @@ const CHUNK_SIZE := 16
 const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
 ## 单个 z 切片面积（缓冲线性化步长）
 const CHUNK_SLICE := CHUNK_SIZE * CHUNK_SIZE
+## CHUNK_SIZE=16=2⁴ 的移位量（chunk_of 用算术右移替代浮点除法）
+const CHUNK_SHIFT := 4
 
 ## 外缘层数（跨界面的面可见性需要紧邻体素）
 const HALO := 1
@@ -21,12 +23,15 @@ const HALO_SIZE := CHUNK_SIZE + HALO * 2
 const HALO_VOLUME := HALO_SIZE * HALO_SIZE * HALO_SIZE
 
 
-## 体素坐标 → 所在 chunk（floori 向下取整，正确处理负坐标）
+## 体素坐标 → 所在 chunk（算术右移向下取整，正确处理负坐标）
+## CHUNK_SIZE=16=2⁴ → 用 >> CHUNK_SHIFT 替代 floori(float/16)，热路径零浮点开销
+## GDScript 的 >> 对负数执行算术右移（向下取整），与 floori(float/16) 语义完全一致：
+##   例: pos=-17 → floori(-17/16)=-2, -17>>4=-2 ✓
 static func chunk_of(pos: Vector3i) -> Vector3i:
 	return Vector3i(
-		floori(float(pos.x) / float(CHUNK_SIZE)),
-		floori(float(pos.y) / float(CHUNK_SIZE)),
-		floori(float(pos.z) / float(CHUNK_SIZE))
+		pos.x >> CHUNK_SHIFT,
+		pos.y >> CHUNK_SHIFT,
+		pos.z >> CHUNK_SHIFT
 	)
 
 

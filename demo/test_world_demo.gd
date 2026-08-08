@@ -28,7 +28,8 @@ extends Node
 @export var damage_radius: float = 7.0
 
 ## 世界尺寸 [体素] (x, y, z) - 大型
-@export var world_size: Vector3i = Vector3i(400, 120, 400)
+## 600×120×600 → 世界约 60×12×60 单位（voxel_scale=0.1），足以演示流式加载
+@export var world_size: Vector3i = Vector3i(600, 120, 600)
 
 ## 建筑数量（网格排列）
 @export var buildings_x: int = 3
@@ -36,6 +37,14 @@ extends Node
 
 ## 单栋建筑尺寸
 @export var building_size: Vector3i = Vector3i(100, 100, 100)
+
+## 流式加载（距离 LOD 卸载）：相机远离的 chunk 网格自动卸载释放显存，
+## 靠近后自动重载。0 = 关闭（全部常驻）。适合超大型世界（数百单位以上）。
+## 建议: load = 相机可见距离, unload = load * 1.5 ~ 2
+## 本场景：世界 60 单位、建筑群 39 单位、相机在建筑群内环绕（距中心约 17.5）。
+## → load=25/unload=40：建筑群常驻，世界边缘（>40 单位）的空地网格卸载
+@export var stream_load_distance: float = 25.0
+@export var stream_unload_distance: float = 40.0
 
 ## 建筑间距 (体素)
 @export var building_spacing: int = 30
@@ -102,12 +111,14 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_handle_input(delta)
 
-	# 环绕相机
+	# 环绕相机（在建筑群内部/近旁环绕，视野始终有建筑，可观察流式卸载远处空地）
 	if _orbit_active:
 		_orbit_angle += delta * 0.6
 		var center := _get_world_center()
-		var dist := maxf(world_size.x, world_size.z) * voxel_scale * 0.7
-		_camera.global_position = center + Vector3(cos(_orbit_angle) * dist, 30, sin(_orbit_angle) * dist)
+		var group := Vector3(buildings_x * building_size.x + (buildings_x - 1) * building_spacing, 0,
+				buildings_z * building_size.z + (buildings_z - 1) * building_spacing) * voxel_scale
+		var dist := maxf(group.x, group.z) * 0.45
+		_camera.global_position = center + Vector3(cos(_orbit_angle) * dist, 12, sin(_orbit_angle) * dist)
 		_camera.look_at(center, Vector3.UP)
 
 	# 自动测试：每组合测 N 帧 FPS
@@ -162,6 +173,8 @@ func _build_target() -> void:
 	_target.async_generate = _async_mode()
 	_target.superchunk_size = _superchunk_mode()
 	_target.use_frustum_culling = _culling_mode()
+	_target.stream_load_distance = stream_load_distance
+	_target.stream_unload_distance = stream_unload_distance
 	_target.spawn_debris_on_damage = spawn_debris_on_damage
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
@@ -223,22 +236,25 @@ func _create_test_world_data() -> VoxelData:
 	accent.connection_strength = 8.0; accent.mass = 0.5
 	data.add_material(accent)
 
-	# 地面层（整片，含多种材质斑块）
-	var gx_max := buildings_x * building_size.x + (buildings_x - 1) * building_spacing
-	var gz_max := buildings_z * building_size.z + (buildings_z - 1) * building_spacing
-	for gz in range(gz_max):
+	# 地面层（整片覆盖全世界，含多种材质斑块）
+	# 世界中心对齐：建筑群整体居中，四周留出地面空地（流式卸载的远侧区域）
+	var group_size_x := buildings_x * building_size.x + (buildings_x - 1) * building_spacing
+	var group_size_z := buildings_z * building_size.z + (buildings_z - 1) * building_spacing
+	var offset_x := (world_size.x - group_size_x) / 2
+	var offset_z := (world_size.z - group_size_z) / 2
+	for gz in range(world_size.x):
 		for gy in ground_thickness:
-			for gx in range(gx_max):
+			for gx in range(world_size.z):
 				var mat_id := 1
 				if (gx / 50 + gz / 50) % 2 == 0:
 					mat_id = 4
 				data.set_voxel(Vector3i(gx, gy, gz), mat_id)
 
-	# 各栋建筑
+	# 各栋建筑（居中于世界）
 	for bi in buildings_x:
 		for bj in buildings_z:
-			var base_x := bi * (building_size.x + building_spacing)
-			var base_z := bj * (building_size.z + building_spacing)
+			var base_x := offset_x + bi * (building_size.x + building_spacing)
+			var base_z := offset_z + bj * (building_size.z + building_spacing)
 			var S := building_size
 			var t := shell_thickness
 
@@ -329,13 +345,18 @@ func _setup_camera() -> void:
 	_camera.fov = 70
 	_camera.far = maxf(world_size.x, world_size.z) * voxel_scale * 3.0
 	var center := _get_world_center()
-	_camera.global_position = center + Vector3(0, 40, maxf(world_size.x, world_size.z) * voxel_scale * 0.8)
+	var group := Vector3(buildings_x * building_size.x + (buildings_x - 1) * building_spacing, 0,
+			buildings_z * building_size.z + (buildings_z - 1) * building_spacing) * voxel_scale
+	var cam_dist := maxf(group.x, group.z) * 0.45
+	_camera.global_position = center + Vector3(0, 12, cam_dist)
 	_camera.look_at(center, Vector3.UP)
 
 
 func _get_world_center() -> Vector3:
-	var world := Vector3(world_size) * voxel_scale
-	return Vector3(world.x * 0.5, world.y * 0.3, world.z * 0.5)
+	# 建筑群已通过 _target.global_position 居中到世界原点
+	if _target:
+		return _target.global_position
+	return Vector3.ZERO
 
 
 func _setup_hud() -> void:
