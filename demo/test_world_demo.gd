@@ -2,20 +2,17 @@ extends Node
 ## 体素优化测试场 - 大型世界性能对比场景
 ##
 ## 目标：在大型场景下测试所有优化方向的效果：
-##   1. 视锥剔除 (use_frustum_culling)          —— 减少生成/渲染
-##   2. 超级块合并 (superchunk_size)             —— 减少 draw call
-##   3. 原生加速 (NativeLoader)                  —— GDExtension C++ 热路径
-##   4. 异步生成 (async_generate)                —— 线程并行
-##   5. 崩塌检测 (find_unsupported)              —— 失稳算法
+##   1. 可见性模式 (visibility_mode)              —— FULL/FRUSTUM/STREAMING
+##   2. 超级块合并 (superchunk_size)               —— 减少 draw call
+##   3. 原生加速 (NativeLoader)                    —— GDExtension C++ 热路径
+##   4. 崩塌检测 (find_unsupported)                —— 失稳算法
 ##
 ## 场景：大型建筑群（多栋高层建筑 + 地面层），chunk 数远超单建筑 demo
-## 提供自动测试模式：自动切换各优化开关并测 FPS，输出对比结果
+## 提供自动测试模式：自动切换各优化组合并测 FPS，输出对比结果
 ##
 ## 键位：
-##   1 : 切换 视锥剔除 开/关
+##   1 : 循环 可见性模式 (FULL/FRUSTUM/STREAMING)
 ##   2 : 循环 超级块大小 (0/2/4)
-##   3 : 切换 异步生成 开/关
-##   4 : 切换 原生加速 开/关 (需重启生效)
 ##   5 : 环绕相机 (自动测 FPS)
 ##   6 : 重置场景
 ##   左键 : 球形破坏
@@ -38,13 +35,12 @@ extends Node
 ## 单栋建筑尺寸
 @export var building_size: Vector3i = Vector3i(100, 100, 100)
 
-## 流式加载（距离 LOD 卸载）：相机远离的 chunk 网格自动卸载释放显存，
-## 靠近后自动重载。0 = 关闭（全部常驻）。适合超大型世界（数百单位以上）。
-## 建议: load = 相机可见距离, unload = load * 1.5 ~ 2
+## 可见性管理（距离 LOD）：STREAMING 时相机远离的 chunk 网格自动卸载释放显存，
+## 靠近后自动重载。FULL 全部常驻。适合超大型世界（数百单位以上）。
 ## 本场景：世界 60 单位、建筑群 39 单位、相机在建筑群内环绕（距中心约 17.5）。
-## → load=25/unload=40：建筑群常驻，世界边缘（>40 单位）的空地网格卸载
-@export var stream_load_distance: float = 25.0
-@export var stream_unload_distance: float = 40.0
+## → view=25/unload=40：建筑群常驻，世界边缘（>40 单位）的空地网格卸载
+@export var view_distance: float = 25.0
+@export var unload_distance: float = 40.0
 
 ## 建筑间距 (体素)
 @export var building_spacing: int = 30
@@ -84,8 +80,6 @@ var _auto_combos: Array = []
 ## 上一帧按键
 var _prev_1 := false
 var _prev_2 := false
-var _prev_3 := false
-var _prev_4 := false
 var _prev_5 := false
 var _prev_6 := false
 var _prev_space := false
@@ -129,13 +123,12 @@ func _process(delta: float) -> void:
 			var avg := _auto_fps_sum / auto_test_frames
 			var combo: Dictionary = _auto_combos[_auto_combos.size() - 1]
 			_test_results.append({
-				"culling": combo["culling"],
+				"visibility": combo["visibility"],
 				"superchunk": combo["superchunk"],
-				"async": combo["async"],
 				"fps": avg,
 			})
-			print("[测试] culling=%s superchunk=%d async=%s → %.1f FPS" % [
-				combo["culling"], combo["superchunk"], combo["async"], avg])
+			print("[测试] visibility=%s superchunk=%d → %.1f FPS" % [
+				["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]], combo["superchunk"], avg])
 			_auto_fps_sum = 0.0
 			_auto_frame = 0
 			_advance_auto_test()
@@ -169,12 +162,11 @@ func _build_target() -> void:
 		data = _create_test_world_data()
 	_target.data = data
 	_target.voxel_scale = voxel_scale
-	_target.use_chunk_generator = true
-	_target.async_generate = _async_mode()
+	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	_target.superchunk_size = _superchunk_mode()
-	_target.use_frustum_culling = _culling_mode()
-	_target.stream_load_distance = stream_load_distance
-	_target.stream_unload_distance = stream_unload_distance
+	_target.visibility_mode = _visibility_mode()
+	_target.view_distance = view_distance
+	_target.unload_distance = unload_distance
 	_target.spawn_debris_on_damage = spawn_debris_on_damage
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
@@ -198,13 +190,12 @@ func _build_target() -> void:
 
 
 ## 优化开关状态（自动测试时被切换）
-var _culling_state := true
+var _visibility_state := 1  # 0=FULL, 1=FRUSTUM, 2=STREAMING
 var _superchunk_state := 0
-var _async_state := true
 
-func _culling_mode() -> bool: return _culling_state
+func _visibility_mode() -> VoxelRenderer.VisibilityMode:
+	return _visibility_state as VoxelRenderer.VisibilityMode
 func _superchunk_mode() -> int: return _superchunk_state
-func _async_mode() -> bool: return _async_state
 
 
 ## 创建大型测试世界：多栋建筑 + 地面
@@ -386,27 +377,21 @@ func _setup_hud() -> void:
 func _handle_input(delta: float) -> void:
 	var key_1 := Input.is_key_pressed(KEY_1)
 	var key_2 := Input.is_key_pressed(KEY_2)
-	var key_3 := Input.is_key_pressed(KEY_3)
 	var key_5 := Input.is_key_pressed(KEY_5)
 	var key_6 := Input.is_key_pressed(KEY_6)
 	var left := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	var space := Input.is_key_pressed(KEY_SPACE)
 
-	# 视锥剔除
+	# 可见性模式循环（FULL → FRUSTUM → STREAMING）
 	if key_1 and not _prev_1:
-		_culling_state = not _culling_state
+		_visibility_state = (_visibility_state + 1) % 3
 		_rebuild_for_test()
-		print("[测试] 视锥剔除: %s" % ("ON" if _culling_state else "OFF"))
+		print("[测试] 可见性: %s" % ["FULL", "FRUSTUM", "STREAMING"][_visibility_state])
 	# 超级块
 	if key_2 and not _prev_2:
 		_superchunk_state = (_superchunk_state + 2) % 6  # 0,2,4
 		_rebuild_for_test()
 		print("[测试] 超级块大小: %d" % _superchunk_state)
-	# 异步
-	if key_3 and not _prev_3:
-		_async_state = not _async_state
-		_rebuild_for_test()
-		print("[测试] 异步生成: %s" % ("ON" if _async_state else "OFF"))
 	# 环绕
 	if key_5 and not _prev_5:
 		_orbit_active = not _orbit_active
@@ -423,7 +408,6 @@ func _handle_input(delta: float) -> void:
 
 	_prev_1 = key_1
 	_prev_2 = key_2
-	_prev_3 = key_3
 	_prev_5 = key_5
 	_prev_6 = key_6
 	_prev_space = space
@@ -465,12 +449,11 @@ func _start_auto_test() -> void:
 	_auto_fps_sum = 0.0
 	_test_results.clear()
 	_auto_combos = []
-	for culling in [false, true]:
+	for vis in [0, 1, 2]:
 		for superchunk in [0, 2, 4]:
-			for async_mode in [true, false]:
-				_auto_combos.append({
-					"culling": culling, "superchunk": superchunk, "async": async_mode,
-				})
+			_auto_combos.append({
+				"visibility": vis, "superchunk": superchunk,
+			})
 	print("[测试] 自动测试开始，共 %d 组组合" % _auto_combos.size())
 	_advance_auto_test()
 
@@ -481,14 +464,13 @@ func _advance_auto_test() -> void:
 		_finish_auto_test()
 		return
 	var combo: Dictionary = _auto_combos.pop_front()
-	_culling_state = combo["culling"]
+	_visibility_state = combo["visibility"]
 	_superchunk_state = combo["superchunk"]
-	_async_state = combo["async"]
 	_rebuild_for_test()
 	_auto_frame = 0
 	_auto_fps_sum = 0.0
-	print("[测试] 开始组合: culling=%s superchunk=%d async=%s" % [
-		combo["culling"], combo["superchunk"], combo["async"]])
+	print("[测试] 开始组合: visibility=%s superchunk=%d" % [
+		["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]], combo["superchunk"]])
 
 
 ## 完成自动测试
@@ -499,8 +481,8 @@ func _finish_auto_test() -> void:
 	print("原生加速: %s" % ("ON" if _native_available else "OFF (GDScript 回退)"))
 	print("-----------------------------------")
 	for r in _test_results:
-		print("culling=%-5s superchunk=%-3d async=%-5s → %6.1f FPS" % [
-			r["culling"], r["superchunk"], r["async"], r["fps"]])
+		print("visibility=%-9s superchunk=%-3d → %6.1f FPS" % [
+			["FULL", "FRUSTUM", "STREAMING"][r["visibility"]], r["superchunk"], r["fps"]])
 	print("===================================")
 	# 找出最优组合
 	var best: Dictionary = _test_results[0] if not _test_results.is_empty() else {}
@@ -508,8 +490,8 @@ func _finish_auto_test() -> void:
 		if r["fps"] > best["fps"]:
 			best = r
 	if not best.is_empty():
-		print("[测试] 最优组合: culling=%s superchunk=%d async=%s → %.1f FPS" % [
-			best["culling"], best["superchunk"], best["async"], best["fps"]])
+		print("[测试] 最优组合: visibility=%s superchunk=%d → %.1f FPS" % [
+			["FULL", "FRUSTUM", "STREAMING"][best["visibility"]], best["superchunk"], best["fps"]])
 
 
 func _update_hud() -> void:
@@ -524,14 +506,14 @@ func _update_hud() -> void:
 	_hud.text = """===== 体素优化测试场 =====
 FPS: %d
 原生加速: %s
-模式: culling=%s superchunk=%d async=%s
+模式: visibility=%s superchunk=%d
 Chunk数: %d  |  draw call: %d
 体素: %d
-[1]视锥 [2]超级块 [3]异步 [5]环绕 [6]重置
+[1]可见性 [2]超级块 [5]环绕 [6]重置
 左键破坏 空格射线""" % [
 		Engine.get_frames_per_second(),
 		"ON" if _native_available else "OFF",
-		"ON" if _culling_state else "OFF", _superchunk_state, "ON" if _async_state else "OFF",
+		["FULL", "FRUSTUM", "STREAMING"][_visibility_state], _superchunk_state,
 		chunk_count, draw_calls,
 		t.data.get_voxel_count() if t and t.data else 0,
 	]

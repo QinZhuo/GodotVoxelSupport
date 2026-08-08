@@ -26,8 +26,9 @@ script = ExtResource("1_test")
 
 [node name="DestructibleVoxels" type="MeshInstance3D" parent="."]
 script = ExtResource("2_destructible")
-stream_load_distance = 25.0
-stream_unload_distance = 40.0
+visibility_mode = 2
+view_distance = 25.0
+unload_distance = 40.0
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_1")

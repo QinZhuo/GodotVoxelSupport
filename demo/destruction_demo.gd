@@ -213,8 +213,8 @@ func _build_target() -> void:
 func _configure_target(data: VoxelData) -> void:
 	_target.data = data
 	_target.voxel_scale = voxel_scale
-	_target.use_chunk_generator = true
-	_target.async_generate = true
+	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
+	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	# 超级块合并渲染：默认开启（4×4×4=64 chunk/块），大幅减少 draw call
 	_target.superchunk_size = superchunk_size
 	_target.spawn_debris_on_damage = true

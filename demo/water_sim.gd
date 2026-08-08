@@ -194,9 +194,8 @@ func _setup_renderer() -> void:
 	_renderer.name = "WaterVoxels"
 	_renderer.data = _data
 	_renderer.voxel_scale = voxel_scale
-	# 高性能 chunk 生成器 + 增量重建 + 异步生成
-	_renderer.use_chunk_generator = true
-	_renderer.async_generate = true
+	# 高性能 chunk 生成器 + 增量重建 + 异步生成（CHUNK_ASYNC）
+	_renderer.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	_renderer.update_throttle_frames = 3
 	add_child(_renderer)
 	_renderer.global_position = Vector3(

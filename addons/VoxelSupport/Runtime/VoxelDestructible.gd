@@ -40,10 +40,16 @@ enum CollapseMode {
 ## 结合材质 hardness，伤害累积达到 hardness 才真正移除体素
 @export var damage_per_voxel: float = 1.0
 
-## 碎片粒子初始速度范围（基准值，受材质 mass 影响）
+## AUTO 模式分档阈值（内部常量，不暴露配置）：按体素数自动选择表现方式
+##   <= 粒子阈值        → GPU 粒子破碎（零物理开销，视觉自然）
+##   <= Box 阈值        → BoxShape3D 包围盒碰撞（物理开销低，中小块够用）
+##   >  Box 阈值        → ConvexPolygonShape3D 凸包碰撞（贴合大块轮廓）
+const AUTO_PARTICLE_VOXELS: int = 32
+const AUTO_BOX_VOXELS: int = 256
+
+## 碎片粒子初始速度范围（Vector2 = [最小, 最大]，基准值，受材质 mass 影响）
 ## 最终速度 = 基准速度 / sqrt(mass) ，重物飞得近，轻物飞得远
-@export var debris_min_speed: float = 2.0
-@export var debris_max_speed: float = 6.0
+@export var debris_speed_range: Vector2 = Vector2(2.0, 6.0)
 
 ## 碎片粒子生命周期 (秒)（基准值，受材质 mass 影响）
 ## 最终生命周期 = 基准生命周期 * (1.0 + 0.5 / mass) ，重物落地快消失快
@@ -115,15 +121,15 @@ const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
 ## 避免单块 ArrayMesh 一次性上传超大 buffer → Metal fence wait() 超时
 const MAX_FALLING_GROUP_VOXELS: int = 4096
 
-## 掉落块分档阈值（按体素数自动选择表现方式）：
-##   <= debris_threshold（32）           → GPU 粒子破碎（零物理开销，视觉自然）
-##   <= box_threshold（256）             → BoxShape3D 包围盒碰撞（物理开销低，中小块够用）
-##   >  box_threshold（256）             → ConvexPolygonShape3D 凸包碰撞（贴合大块轮廓）
-## 理由：小块物理碰撞细节肉眼难辨，转粒子更自然；中小块 Box 足够；大块用凸包贴合轮廓
-@export_range(2, 128) var debris_threshold: int = 32
+## 掉落物生成模式（统一"小块粒子/大块物理体"的分档策略）
+enum FallingMode {
+	AUTO,     ## 自动按体素数分档：小碎块转粒子，中块 Box 碰撞，大块凸包碰撞（推荐）
+	PARTICLE, ## 全部转 GPU 粒子（零物理开销，视觉最轻量）
+	PHYSICS,  ## 全部物理体（Box/凸包碰撞，保留整块碎裂的物理感）
+}
 
-## Box/凸包分界阈值（体素数）：<= 该值用 Box，> 该值用凸包
-@export_range(32, 1024) var box_threshold: int = 256
+## 掉落物生成模式（见 FallingMode）
+@export var falling_mode: FallingMode = FallingMode.AUTO
 
 ## 物理掉落体对象池大小：同时最多存在的活动 RigidBody3D 数量。
 ## 池复用消除创建/销毁开销，同时作为物理体数量的软上限（池满的新块转粒子，优雅降级）。
@@ -495,18 +501,21 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 
 ## 从连通分组中生成掉落体（统一入口，消除代码重复）
 ## group_materials: Array[Dictionary]，每个元素是 {pos: mat_id} 映射
-## 分流规则：
-##   - 组体素数 <= debris_threshold（16）→ GPU 粒子破碎（零物理开销，视觉自然）
-##   - 组体素数 >  debris_threshold      → 物理体（Box 或凸包，见 _on_falling_chunk_mesh_result）
+## 分流规则（按 falling_mode）：
+##   - AUTO + 组体素数 <= AUTO_PARTICLE_VOXELS → GPU 粒子破碎（零物理开销，视觉自然）
+##   - 其余 → 物理体（Box 或凸包，见 _on_falling_chunk_mesh_result）
 ## 返回实际生成的物理掉落体数量
 func _spawn_falling_chunks_from_groups(groups: Array, group_materials: Array[Dictionary]) -> int:
 	var spawned_count := 0
 	# 先处理小块（粒子）和大块（物理体）分流
+	# 按 falling_mode 决定：AUTO 按体素数分档，PARTICLE 全转粒子，PHYSICS 全物理体
 	var physics_groups: Array = []
 	var physics_materials: Array[Dictionary] = []
 	for i in range(groups.size()):
 		var group: Array = groups[i]
-		if group.size() <= debris_threshold:
+		var to_particle := falling_mode == FallingMode.PARTICLE \
+				or (falling_mode == FallingMode.AUTO and group.size() <= AUTO_PARTICLE_VOXELS)
+		if to_particle:
 			# 小块：直接转粒子破碎
 			var mat_map: Dictionary = group_materials[i]
 			if not group.is_empty():
@@ -840,9 +849,41 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 
 ## 后台线程入口：为掉落块生成网格数组（线程安全，不触碰 ArrayMesh/节点）
 ## 完成后 call_deferred 回主线程 _on_falling_chunk_mesh_result 组装 ArrayMesh
+## 优先走原生 dense 路径（generate_single_chunk_dense → GDExtension C++，
+## 顶点复用 + 网格生成主循环 ~10 倍提速）；块体超 HALO_SIZE 时回退 generate_arrays_runtime
 func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D) -> void:
-	var arrays := VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
+	var arrays := _generate_falling_chunk_arrays(local_voxels, materials, scale)
 	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels)
+
+
+## 生成掉落块网格数组：优先原生 dense 单 chunk 路径，超大块回退 GDScript 合并路径
+func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, scale: float) -> Variant:
+	if local_voxels.is_empty():
+		return null
+	# 判断掉落体是否超出单 chunk dense 范围（local_voxels 以 center 为中心，检查最大偏移）
+	var max_abs := 0
+	for pos_key in local_voxels:
+		var p: Vector3i = pos_key
+		max_abs = maxi(max_abs, maxi(maxi(absi(p.x), absi(p.y)), absi(p.z)))
+	# HALO_SIZE=18：可容纳 local 坐标 [-HALO, HALO_SIZE-HALO-1] = [-1, 16]，即中心±16
+	if max_abs <= VoxelChunk.HALO_SIZE - VoxelChunk.HALO - 1:
+		# 构造 18³ 密集 halo：以 center 为 chunk 原点（chunk_key=0），local 坐标 + HALO 偏移
+		var halo := PackedInt32Array()
+		halo.resize(VoxelChunk.HALO_VOLUME)
+		for pos_key in local_voxels:
+			var p: Vector3i = pos_key
+			var lx := p.x + VoxelChunk.HALO
+			var ly := p.y + VoxelChunk.HALO
+			var lz := p.z + VoxelChunk.HALO
+			if lx < 0 or ly < 0 or lz < 0 or lx >= VoxelChunk.HALO_SIZE or ly >= VoxelChunk.HALO_SIZE or lz >= VoxelChunk.HALO_SIZE:
+				return VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
+			halo[lx + ly * VoxelChunk.HALO_SIZE + lz * VoxelChunk.HALO_SIZE * VoxelChunk.HALO_SIZE] = int(local_voxels[pos_key])
+		var aligned := VoxelMaterial.align_by_id(materials)
+		var result := VoxelChunkGenerator.generate_single_chunk_dense(
+			halo, aligned, scale, Vector3i.ZERO, Vector3.ZERO)
+		if result != null and not result.is_empty():
+			return result
+	return VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
 
 
 ## 掉落体 mesh 组装入口（GPU 忙感知）：
@@ -888,8 +929,8 @@ func _process_pending_mesh_results() -> void:
 
 ## 主线程：把后台生成的数组组装为 ArrayMesh 并挂载到掉落块
 ## 碰撞方案按块体素数自动选择：
-##   <= box_threshold（64）→ BoxShape3D 包围盒（物理开销低，中小块够用）
-##   >  box_threshold（64）→ ConvexPolygonShape3D 凸包（贴合大块轮廓）
+##   <= AUTO_BOX_VOXELS → BoxShape3D 包围盒（物理开销低，中小块够用）
+##   >  AUTO_BOX_VOXELS → ConvexPolygonShape3D 凸包（贴合大块轮廓）
 func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxels: Dictionary = {}) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
@@ -910,8 +951,8 @@ func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxe
 	body.add_child(mi)
 	mi.owner = body
 
-	# 按体素数自动选碰撞方案：大块（>box_threshold）用凸包贴合轮廓，中小块用 Box 降低物理开销
-	if local_voxels.size() > int(box_threshold):
+	# 按体素数自动选碰撞方案：大块（>AUTO_BOX_VOXELS）用凸包贴合轮廓，中小块用 Box 降低物理开销
+	if local_voxels.size() > AUTO_BOX_VOXELS:
 		# 凸包碰撞：从 mesh 生成（clean 去除退化面，simplify 减少顶点）
 		var shape := mesh.create_convex_shape(true, true)
 		if shape:
@@ -1333,8 +1374,8 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 		# 爆炸模式：粒子向上喷发，宽扩散，高速度
 		pm.direction = Vector3(0, 1, 0)
 		pm.spread = 45.0 * (1.0 + 0.3 / mass_factor)
-		pm.initial_velocity_min = debris_min_speed * 0.8 * mass_factor
-		pm.initial_velocity_max = debris_max_speed * 0.8 * mass_factor
+		pm.initial_velocity_min = debris_speed_range.x * 0.8 * mass_factor
+		pm.initial_velocity_max = debris_speed_range.y * 0.8 * mass_factor
 		pm.gravity = Vector3(0, -20.0 * debris_gravity_scale * mass_factor, 0)
 		pm.angular_velocity_min = -6.0 * mass_factor
 		pm.angular_velocity_max = 6.0 * mass_factor

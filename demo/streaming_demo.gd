@@ -25,10 +25,10 @@ extends Node
 @export var world_size: Vector3i = Vector3i(500, 40, 500)
 
 ## 流式加载距离（世界单位）：相机进入此距离的 chunk 确保加载
-## 世界 100×100 单位、相机中心到边缘 50 → load=30/unload=50 使边缘在移动时卸载
-@export var stream_load_distance: float = 30.0
+## 世界 100×100 单位、相机中心到边缘 50 → view=30/unload=50 使边缘在移动时卸载
+@export var view_distance: float = 30.0
 ## 流式卸载距离：超出此距离的 chunk 网格自动卸载
-@export var stream_unload_distance: float = 50.0
+@export var unload_distance: float = 50.0
 
 ## 可破坏对象
 var _target: VoxelDestructible
@@ -44,9 +44,8 @@ var _speed: float = 20.0
 const SPEED_BASE := 20.0
 const SPEED_FAST := 60.0
 
-## 流式/视锥/超级块开关状态
+## 流式/可见性/超级块开关状态
 var _stream_state := true
-var _culling_state := true
 var _superchunk_state := 0  # 流式加载建议 0（per-chunk），避免超级块整块重建
 
 ## 上一帧按键状态（边沿触发）
@@ -130,15 +129,15 @@ func _build_world() -> void:
 
 	_target.data = data
 	_target.voxel_scale = voxel_scale
-	_target.use_chunk_generator = true
-	_target.async_generate = true
+	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
+	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	# 流式加载按 chunk 粒度工作，与超级块合并（64 chunk 粒度）冲突：
 	# 补建 1 个 chunk 会触发整个超级块合并 → 卡顿。流式 demo 用 per-chunk 模式。
 	_target.superchunk_size = 0
-	_target.use_frustum_culling = true
-	# 流式加载参数
-	_target.stream_load_distance = stream_load_distance
-	_target.stream_unload_distance = stream_unload_distance
+	# 可见性：流式模式（距离加载/卸载）
+	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
+	_target.view_distance = view_distance
+	_target.unload_distance = unload_distance
 	_target.spawn_debris_on_damage = true
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
@@ -210,7 +209,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_prev_1 = event.pressed
 			KEY_2:
 				if event.pressed and not _prev_2:
-					_toggle_culling()
+					_toggle_streaming()
 				_prev_2 = event.pressed
 			KEY_3:
 				if event.pressed and not _prev_3:
@@ -234,23 +233,12 @@ func _process(delta: float) -> void:
 
 
 func _toggle_streaming() -> void:
+	# 流式开/关：STREAMING ↔ FRUSTUM（关闭流式退回视锥剔除）
 	_stream_state = not _stream_state
-	if _stream_state:
-		_target.stream_load_distance = stream_load_distance
-		_target.stream_unload_distance = stream_unload_distance
-	else:
-		_target.stream_load_distance = 0.0
-		_target.stream_unload_distance = 0.0
-	_target._streaming_enabled = _stream_state
+	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING if _stream_state \
+			else VoxelRenderer.VisibilityMode.FRUSTUM
 	_update_mode_label()
 	print("[流式Demo] 流式加载: %s" % ("ON" if _stream_state else "OFF"))
-
-
-func _toggle_culling() -> void:
-	_culling_state = not _culling_state
-	_target.use_frustum_culling = _culling_state
-	_update_mode_label()
-	print("[流式Demo] 视锥剔除: %s" % ("ON" if _culling_state else "OFF"))
 
 
 func _cycle_superchunk() -> void:
@@ -263,10 +251,9 @@ func _cycle_superchunk() -> void:
 func _update_mode_label() -> void:
 	if _mode_label == null:
 		return
-	_mode_label.text = "流式:%s  视锥:%s  超级块:%d" % [
-		"ON" if _stream_state else "OFF",
-		"ON" if _culling_state else "OFF",
-		_superchunk_state]
+	var vis_names := ["FULL", "FRUSTUM", "STREAMING"]
+	var vis_name: String = vis_names[_target.visibility_mode]
+	_mode_label.text = "可见性:%s  超级块:%d" % [vis_name, _superchunk_state]
 
 
 func _update_hud() -> void:

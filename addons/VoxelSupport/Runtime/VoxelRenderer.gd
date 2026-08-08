@@ -6,14 +6,22 @@ extends MeshInstance3D
 ## 持有 VoxelData，在运行时动态生成并更新 mesh
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
 ## 提供与编辑器导入等价的纹理材质 (基于材质ID的UV采样)
-## 支持异步网格生成：体素数据在后台线程生成，主线程不阻塞
-## 
-## 两种渲染模式（通过 use_chunk_generator 切换）：
-## - Per-chunk 模式（默认）：每个非空 chunk 对应一个子 MeshInstance3D，体素变化时只增量重建
-##   受影响 chunk，大型场景性能更好
-## - 组合模式：所有体素合并为一个 ArrayMesh，适合中小场景
 
 signal mesh_updated
+
+## 网格生成模式
+enum MeshMode {
+	GLOBAL_MESH,  ## 所有体素合并为一个 ArrayMesh（适合中小场景，变更时全量重建）
+	CHUNK_SYNC,   ## 逐 chunk 网格，主线程同步生成（体素变化只重建受影响 chunk）
+	CHUNK_ASYNC,  ## 逐 chunk 网格，后台线程并行生成（推荐：主线程不阻塞，大型场景性能最佳）
+}
+
+## 可见性管理模式（决定哪些 chunk 生成网格）
+enum VisibilityMode {
+	FULL,      ## 全量生成所有 chunk（简单，适合中小世界，内存随世界线性增长）
+	FRUSTUM,   ## 视锥剔除：仅生成视锥内（或 view_distance 内）的 chunk，进视锥再补建
+	STREAMING, ## 流式加载：按距离生成 + 卸载，远距 chunk 网格释放（适合超大型世界）
+}
 
 ## 体素数据资源
 @export var data: VoxelData:
@@ -45,24 +53,51 @@ signal mesh_updated
 ## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
 @export_range(1, 30) var update_throttle_frames: int = 1
 
-## 是否使用 Per-chunk 模式（增量重建）
-## 开启后每个非空 chunk 对应一个子 MeshInstance3D，体素变化时只重建受影响 chunk
-## 关闭则使用全局生成（所有体素合并为一个 ArrayMesh），适合中小场景
-@export var use_chunk_generator: bool = true:
+## 网格生成模式（统一 chunk 生成与异步调度）
+## - GLOBAL_MESH：整块网格，变更全量重建（中小场景）
+## - CHUNK_SYNC ：逐 chunk，主线程同步生成
+## - CHUNK_ASYNC：逐 chunk，后台线程并行生成（推荐）
+@export var mesh_mode: MeshMode = MeshMode.CHUNK_ASYNC:
 	set(v):
-		use_chunk_generator = v
-		_clear_chunk_meshes()
-		_request_update()
-
-## 是否异步生成网格（后台线程生成，避免阻塞主线程，对大型场景体验更佳）
-## 关闭则回退为在 _process 主线程同步生成
-@export var async_generate: bool = true:
-	set(v):
-		async_generate = v
-		if not v:
+		mesh_mode = v
+		if v != MeshMode.CHUNK_ASYNC:
 			_cancel_async()
 		_clear_chunk_meshes()
 		_request_update()
+
+## 可见性管理模式（统一视锥剔除与流式加载）
+## - FULL     ：全量生成所有 chunk（中小世界）
+## - FRUSTUM  ：视锥剔除，仅生成视锥内/附近 chunk（大型世界，省生成与显存）
+## - STREAMING：流式加载，按距离生成 + 卸载远距网格（超大型世界，显存友好）
+## 注：渲染层 GPU 剔除由引擎自动完成，此选项控制 CPU 侧生成调度
+@export var visibility_mode: VisibilityMode = VisibilityMode.FRUSTUM:
+	set(v):
+		visibility_mode = v
+		if v == VisibilityMode.FULL:
+			_deferred_chunks.clear()
+			# 全量模式下补建被卸载的网格
+			for ck in _streamed_out_chunks.keys():
+				_streamed_out_chunks.erase(ck)
+				if data:
+					data.dirty_voxels[VoxelChunk.origin_of(ck)] = data.get_voxel(VoxelChunk.origin_of(ck))
+		_request_update()
+
+## 可见性加载距离（世界单位）：FRUSTUM 时视锥外仍生成的半径；STREAMING 时网格加载半径
+@export var view_distance: float = 40.0
+
+## 流式卸载距离（世界单位，仅 STREAMING）：超过此距离的 chunk 网格被卸载释放
+## 默认 0 = 自动取 view_distance * 1.5
+@export var unload_distance: float = 0.0
+
+## 可见性检查间隔（帧）：视锥/流式统一每隔 N 帧检查一次相机位置。
+## 值越大 CPU 开销越低，但进入视锥/加载距离后的补建响应越慢。
+@export_range(1, 120) var visibility_check_interval: int = 8
+
+## 流式加载：已卸载网格的 chunk（key → true），进入加载距离后补建
+var _streamed_out_chunks: Dictionary[Vector3i, bool] = {}
+## 是否已启用流式加载（visibility_mode == STREAMING）
+var _streaming_enabled: bool = false
+var _cull_check_counter: int = 0
 
 ## 是否生成静态碰撞体 (StaticBody3D + ConcavePolygonShape3D)
 @export var generate_collision: bool = false:
@@ -76,45 +111,6 @@ signal mesh_updated
 ## 诊断模式开关：开启后在输出面板打印详细的网格重建日志，用于定位性能瓶颈
 ## 关闭（默认）时仅在单次重建超时阈值（如单 chunk 生成 >5ms）时才打印，避免刷屏
 @export var diag_enabled: bool = false
-
-## 生成调度视锥剔除：仅对视锥内（或相机附近）的 chunk 派发网格生成任务。
-## 视锥外的 chunk 延迟到可见/靠近时再生成，降低大型场景的初始构建与重建压力。
-## 渲染层的 GPU 视锥剔除由 Godot 引擎自动完成（每个 chunk 独立 MeshInstance3D），
-## 这里控制的是"CPU 侧生成调度"：不生成就无需上传 GPU，也省掉该 chunk 的生成线程。
-## 注意：关闭后所有 chunk 都生成（旧行为），内存/线程开销随世界规模线性增长。
-@export var use_frustum_culling: bool = true:
-	set(v):
-		use_frustum_culling = v
-		if not v:
-			_deferred_chunks.clear()
-		_request_update()
-
-## 视锥外仍强制生成的半径（世界单位）。相机在场景中心环视时，视锥外但很近的 chunk
-## 也应先生成，避免转头时频繁补建。默认 0 表示严格视锥剔除。
-@export var cull_radius_margin: float = 0.0
-
-## 视锥剔除的刷新间隔帧数：视锥外待建 chunk 每隔 N 帧检查一次是否进入视锥。
-## 值越大 CPU 开销越低，但进入视锥后的补建响应越慢。
-@export_range(1, 60) var cull_check_interval: int = 8
-
-## 流式加载（Streaming / 距离 LOD 卸载）：
-## 超大型世界（数十万~数百万 chunk）时，一次性全建所有 chunk 网格会耗尽显存/内存。
-## 开启后按相机距离分级管理 chunk 网格：
-##   - 距离 < stream_load_distance    → 确保网格已建（视锥内或相机近处）
-##   - 距离 > stream_unload_distance  → 卸载网格（释放 ArrayMesh + 节点，保留 VoxelData 数据）
-## 数据层（VoxelData）始终全量保留，仅渲染网格按需加载/卸载，破坏逻辑不受影响。
-## 默认 0 = 关闭（全部 chunk 常驻，旧行为）。
-@export var stream_load_distance: float = 0.0
-## 卸载距离：超过此距离(世界单位)的 chunk 网格被卸载释放。需 >= stream_load_distance。
-@export var stream_unload_distance: float = 0.0
-## 流式加载的检测间隔帧数（与 cull_check_interval 同节奏即可）
-@export_range(1, 120) var stream_check_interval: int = 16
-
-## 流式加载：已卸载网格的 chunk（key → true），进入加载距离后补建
-var _streamed_out_chunks: Dictionary[Vector3i, bool] = {}
-var _stream_check_counter: int = 0
-## 是否已启用流式加载（load_distance > 0 即视为启用）
-var _streaming_enabled: bool = false
 
 ## 超级块合并渲染（Superchunk Batching）：把相邻 N×N×N 个 chunk 合并为一个
 ## MeshInstance3D，大幅减少 draw call 数量（GPU 提交次数）。
@@ -135,7 +131,6 @@ var _update_counter: int = 0
 
 # 视锥外待生成的 chunk（key = chunk key，value = true），进入视锥后补建
 var _deferred_chunks: Dictionary[Vector3i, bool] = {}
-var _cull_check_counter: int = 0
 
 # 超级块合并渲染状态：超级块 key -> MeshInstance3D
 var _superchunk_meshes: Dictionary = {}
@@ -237,10 +232,10 @@ func _ready() -> void:
 	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
 	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
 	_measure_render_time_enabled = false
-	# 流式加载启用判定：stream_load_distance > 0 即视为启用（unload 默认 = load*2）
-	_streaming_enabled = stream_load_distance > 0.0
-	if _streaming_enabled and stream_unload_distance <= 0.0:
-		stream_unload_distance = stream_load_distance * 2.0
+	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认 = view*1.5）
+	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
+	if _streaming_enabled and unload_distance <= 0.0:
+		unload_distance = view_distance * 1.5
 
 
 func _process(_delta: float) -> void:
@@ -249,19 +244,16 @@ func _process(_delta: float) -> void:
 	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
 	# 这里只处理限流和启动新任务
 
-	# 视锥外待建 chunk 周期性检查：进入视锥后补建（仅在无进行中任务时触发，避免与批次冲突）
+	# 可见性管理周期检查（视锥剔除补建 + 流式加载/卸载 统一节奏）
+	# 仅在无进行中任务时触发，避免与批次冲突
 	_cull_check_counter += 1
-	if use_frustum_culling and _cull_check_counter >= cull_check_interval:
+	if _cull_check_counter >= visibility_check_interval:
 		_cull_check_counter = 0
 		if _pending_task_count == 0:
-			_process_deferred_chunks()
-
-	# 流式加载周期检测：按相机距离加载/卸载 chunk 网格（距离 LOD）
-	_stream_check_counter += 1
-	if _streaming_enabled and _stream_check_counter >= stream_check_interval:
-		_stream_check_counter = 0
-		if _pending_task_count == 0:
-			_process_streaming()
+			if visibility_mode != VisibilityMode.FULL:
+				_process_deferred_chunks()
+			if _streaming_enabled:
+				_process_streaming()
 
 	# GPU 上传限流：帧尾批量构建队列中的 chunk mesh（避免与渲染/崩塌竞争 GPU）
 	# call_deferred 确保在帧末尾执行（本帧渲染已提交），且队列处理不阻塞主循环
@@ -384,20 +376,18 @@ func _update_mesh() -> void:
 		_materials_snapshot = data.materials.duplicate(true)
 		_materials_snapshot_dirty = false
 
-	if async_generate:
+	if mesh_mode == MeshMode.CHUNK_ASYNC:
 		_update_mesh_async()
 	else:
 		_update_mesh_sync()
 
 
-## 从待重建 chunk 中筛出"视锥内（或相机附近）"的部分，视锥外的加入待建队列。
-## 返回视锥内应本次生成的 chunk 列表。
-## 流式加载距离过滤（独立于视锥剔除，无条件生效）：
-## 超出 stream_unload_distance 的 chunk 不构建，直接标记为已流式卸载。
+## 流式加载距离过滤（仅 STREAMING 模式生效）：
+## 超出 unload_distance 的 chunk 不构建，直接标记为已流式卸载。
 ## 关键：避免大世界一次性全量构建（流式加载核心收益——远处永远不生成）。
 ## 与 _filter_frustum_chunks 组合使用：先流式过滤（距离），再视锥过滤（朝向）。
 func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
-	if not _streaming_enabled or stream_unload_distance <= 0.0:
+	if not _streaming_enabled or unload_distance <= 0.0:
 		return chunks
 	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
 	if cam == null:
@@ -408,22 +398,23 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var kept: Array[Vector3i] = []
 	for ck in chunks:
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if cam_pos.distance_to(aabb.get_center()) > stream_unload_distance:
+		if cam_pos.distance_to(aabb.get_center()) > unload_distance:
 			_streamed_out_chunks[ck] = true
 		else:
 			kept.append(ck)
 	return kept
 
 
-## 无相机/视锥剔除关闭时全量返回（旧行为）。
+## 视锥剔除过滤（FULL 模式全量返回）。FRUSTUM/STREAMING 模式仅保留视锥内或
+## view_distance 内（相机附近）的 chunk，视锥外加入待建队列延迟补建。
 func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
-	if not use_frustum_culling:
+	if visibility_mode == VisibilityMode.FULL:
 		return chunks
 	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
 	if cam == null:
 		return chunks
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
-	var margin := cull_radius_margin
+	var margin := view_distance
 	var cam_pos := cam.global_position
 	var world_offset := global_position
 	var visible: Array[Vector3i] = []
@@ -463,7 +454,7 @@ static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
 
 
 ## 周期性检查待建队列：视锥外的 chunk 进入视锥（或相机靠近）后触发补建。
-## 由 _process 按 cull_check_interval 帧调用一次。
+## 由 _process 按 visibility_check_interval 帧调用一次。
 func _process_deferred_chunks() -> void:
 	if _deferred_chunks.is_empty():
 		return
@@ -471,7 +462,7 @@ func _process_deferred_chunks() -> void:
 	if cam == null:
 		return
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
-	var margin := cull_radius_margin
+	var margin := view_distance
 	var cam_pos := cam.global_position
 	var world_offset := global_position
 	var to_build: Array[Vector3i] = []
@@ -493,8 +484,8 @@ func _process_deferred_chunks() -> void:
 
 ## 流式加载处理（距离 LOD 卸载）：
 ## 按相机距离管理 chunk 网格：
-##   - 超过 stream_unload_distance 的已建 chunk → 卸载网格（释放 ArrayMesh+节点）
-##   - 已卸载但相机进入 stream_load_distance 的 chunk → 重新标记待建（补建）
+##   - 超过 unload_distance 的已建 chunk → 卸载网格（释放 ArrayMesh+节点）
+##   - 已卸载但相机进入 view_distance 的 chunk → 重新标记待建（补建）
 ## 数据层（VoxelData）全量保留，仅渲染网格按需加载/卸载。
 func _process_streaming() -> void:
 	if not _streaming_enabled or not is_inside_tree():
@@ -505,8 +496,8 @@ func _process_streaming() -> void:
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var load_d := stream_load_distance
-	var unload_d := stream_unload_distance
+	var load_d := view_distance
+	var unload_d := unload_distance
 	# 超级块模式下，补建 1 个 chunk 会触发其所在超级块（64 chunk）合并重建。
 	# 重建队列每帧最多处理 _superchunk_rebuild_per_frame 个（已提高到 8），
 	# 因此补建限量保持与重建上限一致，避免"补建慢、重建快"的瓶颈错位。
@@ -639,7 +630,7 @@ func _update_mesh_async() -> void:
 	# 每个子线程只读取自己那个私有的光环快照，主线程后续增删 data 不与之冲突，
 	# 杜绝数据竞态（块随机显示/隐藏的根因），同时避免整世界深拷贝与字典切片扫描。
 	var rebuild_chunks: Array[Vector3i] = []
-	if use_chunk_generator:
+	if mesh_mode != MeshMode.GLOBAL_MESH:
 		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
 		data.clear_dirty_voxels()
@@ -657,10 +648,10 @@ func _update_mesh_async() -> void:
 	_pending_task_count = 0
 
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
-	# 将 use_chunk_generator 和 voxel_scale 作为参数传入，避免子线程访问节点属性
+	# 将 mesh_mode 和 voxel_scale 作为参数传入，避免子线程访问节点属性
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
-	if use_chunk_generator:
+	if mesh_mode != MeshMode.GLOBAL_MESH:
 		# chunk 模式：每个任务只处理一个 chunk。
 		# 优化（移走主线程 halo 提取）：主线程只做一次"受影响区域"的 chunk 缓冲
 		# 深拷贝快照（引擎级 memcpy，微秒级），各子线程 worker 再从快照构建自己的
@@ -675,7 +666,7 @@ func _update_mesh_async() -> void:
 				# 没有非空 chunk，使用单任务路径（空场景），此时无体素无竞态
 				_pending_task_count = 1
 				_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-					{}, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset, diag_enabled)))
+					{}, snapshot_materials, rebuild_chunks, gen_id, mesh_mode, voxel_scale, render_offset, diag_enabled)))
 			else:
 				# 先流式距离过滤（无条件，远距 chunk 不生成），再视锥过滤（朝向）
 				var after_stream: Array[Vector3i] = _filter_streamed_chunks(all_chunks)
@@ -700,11 +691,11 @@ func _update_mesh_async() -> void:
 				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 					snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 	else:
-		# 单任务路径（非 chunk 模式）：需要整个世界体素，做一次字典快照
+		# 单任务路径（全局模式）：需要整个世界体素，做一次字典快照
 		_pending_task_count = 1
 		var snapshot_voxels: Dictionary = data.get_voxels_dict_snapshot()
 		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset, diag_enabled)))
+			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, mesh_mode, voxel_scale, render_offset, diag_enabled)))
 
 
 ## 统一工作线程结果字典契约（#6）：全量/增量/单chunk/空场景所有生成路径
@@ -1263,7 +1254,7 @@ func _update_mesh_sync() -> void:
 	}
 
 	# Per-chunk 增量重建（同步版，密集光环直连生成）
-	if use_chunk_generator:
+	if mesh_mode != MeshMode.GLOBAL_MESH:
 		var rebuild_chunks: Array[Vector3i] = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
 		last_rebuild_affected_count = rebuild_chunks.size()
 		var t0 := Time.get_ticks_usec()
