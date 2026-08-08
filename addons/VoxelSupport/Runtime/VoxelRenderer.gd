@@ -502,7 +502,7 @@ func _process_streaming() -> void:
 	# 2. 重新加载：已卸载但距离 < load_d 的 chunk 补建
 	# 【每帧限量】补建分批进行，避免相机移动跨越边界时一次重建几十个 chunk 造成掉帧。
 	# 补建同步生成单 chunk 数组直接入 GPU 限流队列（绕过异步 pipeline 串行 + 视锥延迟），
-	# 由 _process_mesh_build_queue 帧尾限量构建——补建不再受"每批完成后才下一批"限制。
+	# 由统一异步 pipeline 处理（dirty_voxels → WorkerThreadPool 后台生成）。
 	var reloaded := 0
 	if load_d > 0.0:
 		for ck in _streamed_out_chunks:
@@ -512,33 +512,18 @@ func _process_streaming() -> void:
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 			if cam_pos.distance_to(aabb.get_center()) <= load_d:
 				_streamed_out_chunks.erase(ck3)
+				# 标记为"无条件构建"（距离驱动，不被视锥朝向延迟），
+				# 并标记脏体素走统一异步生成 pipeline（避免独立派发任务积压）
+				_stream_force_build[ck3] = true
 				if data:
-					_rebuild_single_chunk_direct(ck3)
+					var origin := VoxelChunk.origin_of(ck3)
+					data.dirty_voxels[origin] = data.get_voxel(origin)
 				reloaded += 1
 	if reloaded > 0:
 		_request_update()
 
 
-## 流式补建：同步生成单个 chunk 的网格数组并直接入 GPU 限流队列
-## 绕过异步 pipeline（_pending_task_count 串行等待 + 视锥朝向延迟），
-## 使补建 chunk 由 _process_mesh_build_queue 帧尾限量构建，移动时网格快速出现。
-## 单 chunk 生成走原生路径（或 GDScript 回退），耗时 ~1ms，主线程可接受。
-func _rebuild_single_chunk_direct(ck: Vector3i) -> void:
-	if not data:
-		return
-	var has_voxels := data.has_chunk(ck)
-	var arr: Dictionary = {}
-	if has_voxels:
-		# 构建该 chunk 的 18³ 光环缓冲并生成网格数组
-		var halo := data.get_chunk_halo(ck)
-		var aligned := VoxelMaterial.align_by_id(_materials_snapshot)
-		arr = VoxelChunkGenerator.generate_single_chunk_dense(
-			halo, aligned, voxel_scale, ck, data.center_offset if data else Vector3.ZERO)
-	# 直接入 GPU 限流队列（与异步结果同格式），由 _process_mesh_build_queue 帧尾构建
-	_mesh_build_queue[ck] = {
-		"arrays": arr,
-		"has_voxels": has_voxels,
-	}
+## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
