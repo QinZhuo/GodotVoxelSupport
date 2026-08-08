@@ -839,7 +839,10 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 			and dist_to_last < _chunk_alternate_dist \
 			and (now_ms - _last_physics_chunk_time) < _chunk_alternate_ms
 	if alternate:
-		_spawn_chunk_break_debris(group, mat_map)
+		# 视锥外不生成粒子（相机看不到，跳过昂贵效果）
+		# world_center 为体素世界坐标（含 target 偏移），转全局坐标判定
+		if is_world_visible(world_center + global_position):
+			_spawn_chunk_break_debris(group, mat_map)
 		return
 
 	# 2. 构建偏移到居中的体素字典（供一次性生成静态 mesh）
@@ -1086,6 +1089,7 @@ func _release_body(body: RigidBody3D) -> void:
 
 ## 在掉落块当前位置播放"整块碎裂"粒子（回收时视觉过渡）
 ## 从 body 记录的体素信息重建破碎粒子，用块中心作为发射中心
+## 视锥外不执行（相机看不到，跳过昂贵粒子效果）
 func _spawn_chunk_break_at_body(body: RigidBody3D) -> void:
 	if body == null or not is_instance_valid(body):
 		return
@@ -1094,6 +1098,9 @@ func _spawn_chunk_break_at_body(body: RigidBody3D) -> void:
 		return
 	# 发射中心 = 块中心（body 仍在场景中时的全局位置）
 	var center := body.global_position
+	# 视锥外跳过（看不到的破碎不需要粒子）
+	if not is_world_visible(center):
+		return
 	var emission_size := Vector3(2.0, 2.0, 2.0) * voxel_scale
 	# 按材质分组发射破碎粒子
 	var by_mat := {}
@@ -1339,6 +1346,11 @@ func _spawn_chunk_break_debris(positions: Array, mat_map: Dictionary) -> void:
 	var center := (min_v + max_v) * 0.5
 	var emission_size := max_v - min_v
 
+	# 视锥外跳过（相机看不到的整块碎裂，不生成粒子）
+	# center 为体素世界坐标（相对 target），转全局坐标判定
+	if not is_world_visible(center + global_position):
+		return
+
 	# 按材质分组（大块不再截断粒子数，按块大小比例）
 	var by_mat := {}
 	for pos in positions:
@@ -1380,6 +1392,11 @@ func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary, is_coll
 		n += 1
 	if n > 0:
 		center /= float(n)
+
+	# 视锥外跳过（相机看不到的破坏，不生成粒子，省 GPU）
+	# 注意：center 是局部坐标，需加 global_position 转世界坐标再判定
+	if not is_world_visible(center + global_position):
+		return
 
 	for mat_id in by_mat:
 		var list: Array = by_mat[mat_id]

@@ -427,6 +427,19 @@ static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
 	return false
 
 
+## 统一视锥可见性判定（对外统一接口）：世界坐标是否在当前相机视锥内。
+## 供粒子/破碎/掉落体等"视锥外跳过"优化使用（相机看不到的位置跳过昂贵效果）。
+## 与 _aabb_has_vertex_in_frustum 同源（is_position_in_frustum），保证判定一致。
+## 无相机/未入树时返回 true（保守：不裁剪）。
+func is_world_visible(world_pos: Vector3) -> bool:
+	if not is_inside_tree():
+		return true
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return true
+	return cam.is_position_in_frustum(world_pos)
+
+
 ## 周期性检查待建队列：视锥外的 chunk 进入视锥（或相机靠近）后触发补建。
 ## 由 _process 按 visibility_check_interval 帧调用一次。
 func _process_deferred_chunks() -> void:
