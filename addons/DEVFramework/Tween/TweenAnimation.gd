@@ -1,5 +1,5 @@
 @tool
-@icon("res://addons/TweenAnimation/icon.png")
+@icon("res://addons/DEVFramework/Tween/icon.png")
 class_name TweenAnimation extends Node
 
 @export_tool_button("Play") var play_button := play
