@@ -34,7 +34,7 @@ window/vsync/vsync_mode=0
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/DEVFramework/plugin.cfg", "res://addons/TweenAnimation/plugin.cfg", "res://addons/VoxelSupport/plugin.cfg")
+enabled=PackedStringArray("res://addons/DEVFramework/plugin.cfg", "res://addons/VoxelSupport/plugin.cfg")
 
 [importer_defaults]
 

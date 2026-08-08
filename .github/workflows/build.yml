@@ -14,7 +14,21 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # 仅当 C++ 源码/CMake/submodule/工作流文件 变化时才构建，避免无关提交浪费资源
+    paths:
+      - "gdextension/src/**"
+      - "gdextension/CMakeLists.txt"
+      - ".gitmodules"
+      - "godot-cpp/**"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
+
+concurrency:
+  group: native-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   # 每个平台独立 job，GitHub 提供原生 runner，无需交叉编译工具链
