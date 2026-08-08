@@ -25,10 +25,10 @@ extends Node
 @export var world_size: Vector3i = Vector3i(500, 40, 500)
 
 ## 流式加载距离（世界单位）：相机进入此距离的 chunk 确保加载
-## 世界 100×100 单位、相机中心到边缘 50 → view=30/unload=50 使边缘在移动时卸载
-@export var view_distance: float = 30.0
+## 世界 100×100 单位、相机中心到边缘 50 → view=80/unload=100 使边缘在移动时卸载
+@export var view_distance: float = 80
 ## 流式卸载距离：超出此距离的 chunk 网格自动卸载
-@export var unload_distance: float = 50.0
+@export var unload_distance: float = 100
 
 ## 可破坏对象
 var _target: VoxelDestructible
