@@ -771,14 +771,6 @@ func _process_cascade_batch(unstable: Array) -> void:
 			print("[诊断] 级联批处理: %d体素, %d组, 总%.2fms | 分组%.2f | 材质%.2f | 移除%.2f | 生成%.2f" % [unstable.size(), groups.size(), _t_total, _t_group, _t_mat, _t_remove, _t_spawn])
 
 
-## 当体素已被移除后，从已收集的材质映射中查找原始材质ID
-func _find_original_mat(pos: Vector3i, group_materials: Array[Dictionary], start_idx: int) -> int:
-	for i in range(start_idx, group_materials.size()):
-		if group_materials[i].has(pos):
-			return group_materials[i][pos]
-	return 0
-
-
 ## 完成级联、发信号
 func _finalize_cascade() -> void:
 	if _cascade_total.is_empty():
@@ -1235,14 +1227,15 @@ func _try_freeze_chunk(body: RigidBody3D) -> void:
 ## 定期检测所有掉落块，将长时间静止的块冻结
 ## 同时做生命周期清理（作用于所有掉落块，含未冻结仍在掉落的）：
 ##   - 超时：生成超过 falling_chunk_cleanup_time 的块移除
-##   - 数量上限：超出 max_falling_chunks 时按生成先后移除最老的
+##   - 数量上限：超出 max_falling_chunks 时按生成先后移除最老的（复用 _evict_oldest_falling_chunks）
 ## 防止大量破坏后物理体+网格无限堆积拖慢帧率（用户反馈的帧率下降问题）
 func _freeze_sleeping_chunks() -> void:
 	if not _falling_chunk_root:
 		return
 	var now := Time.get_ticks_msec()
 
-	# 1. 冻结已静止的块（物理静止 → 冻结节省模拟开销）
+	# 1. 单次遍历：冻结静止块 + 收集存活块（按生成时刻排序）
+	var alive: Array = []
 	for child in _falling_chunk_root.get_children():
 		var body := child as RigidBody3D
 		if not body:
@@ -1250,42 +1243,25 @@ func _freeze_sleeping_chunks() -> void:
 		if not body.freeze and body.sleeping:
 			body.freeze = true
 			body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-
-	# 2. 收集所有存活块，按生成时刻排序（最老在前）
-	var alive: Array = []
-	for child in _falling_chunk_root.get_children():
-		if child is RigidBody3D:
-			alive.append(child)
+		alive.append(body)
 	if alive.is_empty():
 		return
 	alive.sort_custom(func(a, b): return _chunk_spawn_times.get(a, 0) < _chunk_spawn_times.get(b, 0))
 
-	# 3. 超时清理：生成超过 falling_chunk_cleanup_time 的块移除（含未冻结的）
+	# 2. 超时清理：生成超过 falling_chunk_cleanup_time 的块移除（含未冻结的）
 	var cleanup_ms := int(falling_chunk_cleanup_time * 1000.0)
 	for body in alive:
 		if not is_instance_valid(body):
 			continue
-		var spawn_t: int = _chunk_spawn_times.get(body, 0)
-		if now - spawn_t >= cleanup_ms:
+		if now - _chunk_spawn_times.get(body, 0) >= cleanup_ms:
 			_cleanup_falling_chunk(body)
 
-	# 4. 数量上限清理：超出 max_falling_chunks 时移除最老的（含未冻结的）。
-	#    重新统计存活块（上一步已移除部分），且只对仍在场景中的块计数。
-	var live_count := 0
-	for child in _falling_chunk_root.get_children():
-		if child is RigidBody3D and is_instance_valid(child):
-			live_count += 1
-	var overflow := live_count - int(max_falling_chunks)
+	# 3. 数量上限清理：超出 max_falling_chunks 时移除最老的（复用统一逐出逻辑）
+	var overflow := alive.size() - int(max_falling_chunks)
 	if overflow > 0:
-		var removed := 0
-		for body in alive:
-			if removed >= overflow:
-				break
-			if is_instance_valid(body):
-				_cleanup_falling_chunk(body)
-				removed += 1
+		_evict_oldest_falling_chunks(overflow)
 
-	# 5. 清理已失效引用（queue_free 是延迟的，这里只清记录，避免字典残留）
+	# 4. 清理已失效引用（queue_free 是延迟的，这里只清记录，避免字典残留）
 	for body in _chunk_spawn_times.keys():
 		if not is_instance_valid(body):
 			_chunk_spawn_times.erase(body)
