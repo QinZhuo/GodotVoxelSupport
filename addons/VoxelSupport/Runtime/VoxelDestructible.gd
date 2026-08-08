@@ -10,8 +10,13 @@ extends VoxelRenderer
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
 signal voxel_damaged(positions: Array, spawn_debris: bool)      ## 体素被移除时 (含崩塌)
-signal voxel_hardened(pos: Vector3i, remaining: float)          ## 体素受伤但未摧毁 (材质硬度未达)
+signal voxel_hardened(pos: Vector3i, remaining: float)          ## 体素受伤但未摧毁 (材质硬度未达)（单发，兼容旧用法）
+signal voxel_hardened_batch(positions: Array, remaining: Dictionary) ## 批量硬化（帧尾合并发射，避免逐体素高频信号）
 signal voxels_about_to_collapse(positions: Array)               ## 悬空体素即将崩塌掉落前
+
+## 硬化反馈缓冲：pos -> remaining，_process 帧尾合并发 voxel_hardened_batch
+var _hardened_buffer: Dictionary = {}
+var _hardened_dirty: bool = false
 
 ## 崩塌掉落模式枚举
 enum CollapseMode {
@@ -353,8 +358,10 @@ func _apply_damage_immediate(positions: Array, mat_map: Dictionary, damage: floa
 			removed.append(pos)
 		else:
 			damage_map[pos] = cur
-			# 发出"受伤但未摧毁"反馈
-			voxel_hardened.emit(pos, hardness - cur)
+			# 硬化反馈累积到缓冲，_process 帧尾统一发 voxel_hardened_batch
+			# （逐体素 emit 在大破坏时一次几百次信号 → 高频，合并后一次）
+			_hardened_buffer[pos] = hardness - cur
+			_hardened_dirty = true
 	last_damage_count = removed.size()
 	return removed
 
@@ -1625,6 +1632,20 @@ func _clear_debris() -> void:
 # 主循环
 # ----------------------------------------------------------------------------
 
+## 帧尾合并发射硬化反馈信号：一次破坏几百个体素未摧毁时，
+## 避免逐体素 emit voxel_hardened（几百次信号/破坏 → 高频轰炸外部监听器），
+## 累积后统一发一次 voxel_hardened_batch（兼发兼容性单发信号到已连接监听器）。
+func _flush_hardened_signals() -> void:
+	if not _hardened_dirty:
+		return
+	_hardened_dirty = false
+	var positions: Array = _hardened_buffer.keys()
+	if positions.is_empty():
+		return
+	voxel_hardened_batch.emit(positions, _hardened_buffer)
+	_hardened_buffer.clear()
+
+
 func _process(_delta: float) -> void:
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 	super._process(_delta)
@@ -1647,6 +1668,9 @@ func _process(_delta: float) -> void:
 	_process_pending_falling_groups()
 	# 帧尾：GPU 忙时积压的掉落体 mesh 限量组装（add_surface_from_arrays 同步 GPU 上传）
 	_process_pending_mesh_results()
+
+	# 帧尾：合并发射硬化反馈（一次破坏几百个体素未摧毁时，避免逐体素高频信号）
+	_flush_hardened_signals()
 
 # 定期检测掉落块：按时间间隔（约 1 秒）冻结静止块 + 生命周期清理（上限/超时）。
 	# 用累计时间而非固定帧数，避免帧率下降时清理频率同步下降的恶性循环。
