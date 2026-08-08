@@ -63,8 +63,53 @@ extends Resource
 @export var center_offset: Vector3 = Vector3.ZERO
 
 ## 本次变更涉及的体素集合（由修改方法记录，供增量更新/外部查询）
-## 调用 clear_dirty_voxels() 清空
+## 调用 clear_dirty_voxels() 清空。
+## 注：大批量修改（_remove_voxels/set_voxels）走 chunk 级 _dirty_mesh_chunks，
+## 不再逐体素写此字典（避免大崩塌时主线程 GDScript dict 写入瓶颈）；
+## 单格 set_voxel/remove_voxel 仍记录，供 get_dirty_voxels_aabb 等精确查询。
 var dirty_voxels: Dictionary[Vector3i, int] = {}
+
+## 脏 mesh chunk（chunk 级，供渲染器增量重建）。大批量修改标记到 chunk 粒度，
+## 替代逐体素 dirty_voxels 的主线程 dict 写入瓶颈。含跨界面的边界邻居。
+var _dirty_mesh_chunks: Dictionary = {}
+
+## 标记体素所在 chunk 需要重建（含 6 个跨界面的边界邻居——面可见性依赖邻居）。
+## 大批量修改（_remove_voxels/set_voxels）走此路径；单格 set_voxel 也调用。
+func _mark_voxel_dirty(pos: Vector3i) -> void:
+	var ck := _chunk_of(pos)
+	_dirty_mesh_chunks[ck] = true
+	var local := pos - ck * CHUNK_SIZE
+	if local.x == 0:
+		_dirty_mesh_chunks[ck + Vector3i(-1, 0, 0)] = true
+	elif local.x == CHUNK_SIZE - 1:
+		_dirty_mesh_chunks[ck + Vector3i(1, 0, 0)] = true
+	if local.y == 0:
+		_dirty_mesh_chunks[ck + Vector3i(0, -1, 0)] = true
+	elif local.y == CHUNK_SIZE - 1:
+		_dirty_mesh_chunks[ck + Vector3i(0, 1, 0)] = true
+	if local.z == 0:
+		_dirty_mesh_chunks[ck + Vector3i(0, 0, -1)] = true
+	elif local.z == CHUNK_SIZE - 1:
+		_dirty_mesh_chunks[ck + Vector3i(0, 0, 1)] = true
+
+
+## 标记单个 chunk 需要重建（补建/流式加载路径用）
+func _mark_chunk_dirty(ck: Vector3i) -> void:
+	_dirty_mesh_chunks[ck] = true
+
+
+## 获取所有脏 chunk（渲染器增量重建用），并清空
+func get_dirty_chunks() -> Array[Vector3i]:
+	var keys: Array[Vector3i] = []
+	for ck in _dirty_mesh_chunks:
+		keys.append(ck)
+	_dirty_mesh_chunks.clear()
+	return keys
+
+
+## 清空脏 chunk 集合
+func clear_dirty_chunks() -> void:
+	_dirty_mesh_chunks.clear()
 
 ## Chunk 几何常量唯一权威源见 VoxelChunk，此处全部派生别名防止漂移
 const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
@@ -378,6 +423,8 @@ func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 ## 只快照 rebuild_chunks 及其 27 邻居（构建 halo 需要），避免整世界深拷贝。
 ## 主线程一次性调用，随后供各子线程 worker 从快照构建自己的 halo（线程安全只读）。
 ## 流式模式下先把相关 chunk 从磁盘载入内存，确保快照包含磁盘上的数据。
+## 快照本身由原生 C++ 完成：COW 共享 PackedInt32Array（原子 refcount，worker 只读，
+## 主线程后续写 buffers 触发写时拷贝）→ 省去逐 chunk 64KB 深拷贝（大场景快照提速）。
 func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 	if stream != null:
 		for ck in rebuild_chunks:
@@ -385,15 +432,7 @@ func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 				for ny in 3:
 					for nx in 3:
 						preload_chunk(ck + Vector3i(nx - HALO, ny - HALO, nz - HALO))
-	var needed := {}
-	for ck in rebuild_chunks:
-		for nz in 3:
-			for ny in 3:
-				for nx in 3:
-					var nck := ck + Vector3i(nx - HALO, ny - HALO, nz - HALO)
-					if _chunk_buffers.has(nck):
-						needed[nck] = _chunk_buffers[nck].duplicate()
-	return needed
+	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, rebuild_chunks)
 
 
 ## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 旧式外部代码）
@@ -497,6 +536,7 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 	var existed := has_voxel(pos)
 	_write_buffer_impl(pos, material_id, false)
 	dirty_voxels[pos] = material_id
+	_mark_voxel_dirty(pos)
 	if notify:
 		emit_changed()
 
@@ -514,6 +554,7 @@ func clear(notify: bool = true) -> void:
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
 				dirty_voxels[origin + _local_from_index(i)] = -1
+		_mark_chunk_dirty(ck)
 	_chunk_buffers.clear()
 	_chunk_voxel_counts.clear()
 	_voxel_count = 0
@@ -539,6 +580,7 @@ func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = tr
 			var dst: Vector3i = o_origin + VoxelChunk.local_from_index(i) + offset
 			_write_buffer_impl(dst, mat_id, false)
 			dirty_voxels[dst] = mat_id
+			_mark_voxel_dirty(dst)
 	if notify:
 		emit_changed()
 
@@ -746,7 +788,7 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 
 ## 批量设置体素为同一材质（公开接口，供水模拟等高频动态系统使用）。
 ## 相比逐个 set_voxel：只 emit_changed 一次，且一次性维护支撑缓存，
-## 并填充 dirty_voxels，让 VoxelRenderer 走增量重建（只重建受影响 chunk）。
+## 并标记脏 chunk，让 VoxelRenderer 走增量重建（只重建受影响 chunk）。
 ## 语义与 set_voxel 一致：material_id <= 0（含 0=空）视为批量移除；已存在体素被覆盖时支撑图不变。
 func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void:
 	if positions.is_empty():
@@ -758,6 +800,7 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 		var pos: Vector3i = p
 		_write_buffer_impl(pos, material_id, false)
 		dirty_voxels[pos] = material_id
+		_mark_voxel_dirty(pos)
 	if notify:
 		emit_changed()
 
@@ -765,7 +808,8 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 ## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
 ## 写 buffer 由原生 C++ 完成（remove_voxels_bulk，按 chunk 分组直接改 PackedInt32Array），
 ## 替代 GDScript 逐体素循环——大崩塌（每帧 4096+ 体素）主线程大幅提速。
-## GDScript 只做计数维护 + dirty 追踪（dirty_voxels 逐体素，网格重建需要精确到体素）。
+## GDScript 只做计数维护 + 标记脏 chunk（chunk 级 _mark_voxel_dirty，替代逐体素
+## dirty_voxels 的 dict 写入瓶颈；边界邻居由 _mark_voxel_dirty 一并标记）。
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
@@ -777,7 +821,7 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		for ck in _preload_ck:
 			preload_chunk(ck)
 	var _diag_t0 := Time.get_ticks_usec()
-	# 原生批量移除（C++ 按 chunk 分组改 buffer，返回修改后的 buffer + 每 chunk 移除数）
+	# 原生批量移除（C++ 按 chunk 分组改 buffer，返回修改后的 buffer + 每 chunk 移除数 + 边界掩码）
 	var res: Dictionary = NativeLoader.remove_voxels_bulk(_chunk_buffers, positions)
 	var modified_buffers: Dictionary = res["buffers"]
 	var chunk_removed: Dictionary = res["chunk_removed"]
@@ -791,9 +835,24 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		# 磁盘旧数据残留导致重载后体素"复活"）
 		_dirty_chunks[ck] = true
 		touched[ck] = true
-	# 网格重建追踪（dirty_voxels 逐体素；网格重建需要精确到体素）
-	for pos in positions:
-		dirty_voxels[pos] = -1
+	# 标记脏 chunk + 跨界面的边界邻居（用 C++ 返回的边界掩码，按 chunk 标记，
+	# 避免逐体素 7 次 dict 写入的大崩塌瓶颈）
+	var boundary: Dictionary = res["boundary"]
+	for ck in boundary:
+		_dirty_mesh_chunks[ck] = true
+		var b: int = boundary[ck]
+		if b & 1:
+			_dirty_mesh_chunks[ck + Vector3i(1, 0, 0)] = true
+		if b & 2:
+			_dirty_mesh_chunks[ck + Vector3i(-1, 0, 0)] = true
+		if b & 4:
+			_dirty_mesh_chunks[ck + Vector3i(0, 1, 0)] = true
+		if b & 8:
+			_dirty_mesh_chunks[ck + Vector3i(0, -1, 0)] = true
+		if b & 16:
+			_dirty_mesh_chunks[ck + Vector3i(0, 0, 1)] = true
+		if b & 32:
+			_dirty_mesh_chunks[ck + Vector3i(0, 0, -1)] = true
 	# 批量移除后统一回收被清空的 chunk 键（O(1) 计数判断）
 	for ck in touched:
 		_maybe_erase_empty_chunk(ck)

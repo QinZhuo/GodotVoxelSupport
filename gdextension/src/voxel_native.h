@@ -66,6 +66,14 @@ public:
 	// positions: Array[Vector3i]
 	// 返回 Array[Array[Vector3i]]，每组内两两 6 方向连通
 	static Array partition_connected(const Array &positions);
+
+	// 快照受影响区域的 chunk 缓冲（chunks + 27 邻居）。
+	// buffers: chunk key -> PackedInt32Array(16³)
+	// chunks: 需要快照的 chunk key 数组（含其邻居）
+	// 返回 Dictionary：{chunk_key: PackedInt32Array}。
+	// 用 COW 共享（PackedInt32Array 原子 refcount）：worker 只读 const，主线程后续
+	// 写 buffers 触发写时拷贝 → 省去逐 chunk duplicate 的 64KB 深拷贝（大场景快照提速）。
+	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
 };
 
 } // namespace godot

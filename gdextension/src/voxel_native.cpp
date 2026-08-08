@@ -511,21 +511,29 @@ Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Arra
 	Dictionary result;
 	Dictionary modified_buffers;
 	Dictionary chunk_removed;
+	Dictionary boundary;  // ck(Vector3i) -> 位掩码（bit0=+x,1=-x,2=+y,3=-y,4=+z,5=-z），供 GDScript 标记脏 chunk + 边界邻居
 	int removed = 0;
 	if (positions.is_empty()) {
 		result["removed"] = 0;
 		result["chunk_removed"] = chunk_removed;
 		result["buffers"] = modified_buffers;
+		result["boundary"] = boundary;
 		return result;
 	}
-	// 按 chunk 分组（local_index）
+	// 按 chunk 分组（local_index）+ 计算每 chunk 边界触及掩码
 	std::map<Vector3i, std::vector<int>> by_chunk;
+	std::map<Vector3i, int> bm;
 	for (int i = 0; i < positions.size(); ++i) {
 		const Vector3i p = positions[i];
 		const Vector3i ck = chunk_of(p);
 		const Vector3i local = p - ck * CHUNK_BITS;
 		const int idx = local.x + local.y * CHUNK_BITS + local.z * CHUNK_BITS * CHUNK_BITS;
 		by_chunk[ck].push_back(idx);
+		int b = 0;
+		if (local.x == 0) { b |= 2; } else if (local.x == CHUNK_BITS - 1) { b |= 1; }
+		if (local.y == 0) { b |= 8; } else if (local.y == CHUNK_BITS - 1) { b |= 4; }
+		if (local.z == 0) { b |= 32; } else if (local.z == CHUNK_BITS - 1) { b |= 16; }
+		bm[ck] |= b;
 	}
 	for (auto &kv : by_chunk) {
 		const Vector3i ck = kv.first;
@@ -550,9 +558,13 @@ Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Arra
 			removed += cnt;
 		}
 	}
+	for (auto &kv : bm) {
+		boundary[kv.first] = kv.second;
+	}
 	result["removed"] = removed;
 	result["chunk_removed"] = chunk_removed;
 	result["buffers"] = modified_buffers;
+	result["boundary"] = boundary;
 	return result;
 }
 
@@ -606,10 +618,32 @@ Array VoxelNative::partition_connected(const Array &positions) {
 	return result;
 }
 
+Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks) {
+	// 快照受影响区域（chunks + 27 邻居）。用 COW 共享而非逐 buffer duplicate：
+	// PackedInt32Array 是原子引用计数，worker 只读 const（ptr），主线程后续写 buffers
+	// 时触发写时拷贝 → 省去 758 次 64KB 深拷贝（大场景快照主线程提速）。
+	Dictionary needed;
+	for (int i = 0; i < chunks.size(); ++i) {
+		const Vector3i ck = chunks[i];
+		for (int nz = -1; nz <= 1; ++nz) {
+			for (int ny = -1; ny <= 1; ++ny) {
+				for (int nx = -1; nx <= 1; ++nx) {
+					const Vector3i nck(ck.x + nx, ck.y + ny, ck.z + nz);
+					if (!needed.has(nck) && buffers.has(nck)) {
+						needed[nck] = buffers[nck];
+					}
+				}
+			}
+		}
+	}
+	return needed;
+}
+
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
 }

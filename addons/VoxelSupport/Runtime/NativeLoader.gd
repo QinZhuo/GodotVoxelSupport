@@ -22,6 +22,7 @@ static var _required_methods := [
 	&"find_unsupported_around",
 	&"remove_voxels_bulk",
 	&"partition_connected",
+	&"snapshot_chunks_halo",
 ]
 
 ## 获取原生实例（懒初始化）。返回 null 表示不可用。
@@ -89,6 +90,15 @@ static func remove_voxels_bulk(buffers: Dictionary, positions: Array) -> Diction
 static func partition_connected(positions: Array) -> Array:
 	var inst := _get_instance()
 	return inst.call(&"partition_connected", positions)
+
+
+## 快照受影响区域 chunk 缓冲（转发到原生实现，动态调用）
+## buffers: chunk key -> PackedInt32Array
+## chunks: 需快照的 chunk key 数组（含 27 邻居）
+## 返回 Dictionary（COW 共享，省深拷贝）
+static func snapshot_chunks_halo(buffers: Dictionary, chunks: Array) -> Dictionary:
+	var inst := _get_instance()
+	return inst.call(&"snapshot_chunks_halo", buffers, chunks)
 
 
 ## 强制重新检测（加载失败后重试时调用）

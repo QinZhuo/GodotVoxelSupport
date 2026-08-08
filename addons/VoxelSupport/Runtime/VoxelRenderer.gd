@@ -100,7 +100,7 @@ enum VisibilityMode {
 			for ck in _streamed_out_chunks.keys():
 				_streamed_out_chunks.erase(ck)
 				if data:
-					data.dirty_voxels[VoxelChunk.origin_of(ck)] = data.get_voxel(VoxelChunk.origin_of(ck))
+					data._mark_chunk_dirty(ck)
 		_request_update()
 
 ## 可见性加载距离（世界单位）：FRUSTUM 时视锥外仍生成的半径；STREAMING 时网格加载半径
@@ -515,8 +515,7 @@ func _process_deferred_chunks() -> void:
 			# 强制构建标记：确保增量重建时不被视锥剔除拦截回 deferred
 			# （该 chunk 在视锥外但已在加载范围，必须真正构建）
 			_stream_force_build[ck] = true
-			var origin := VoxelChunk.origin_of(ck)
-			data.dirty_voxels[origin] = data.get_voxel(origin)
+			data._mark_chunk_dirty(ck)
 		built += 1
 	if built > 0:
 		_request_update()
@@ -589,7 +588,7 @@ func _process_streaming() -> void:
 				# 标脏 + 强制构建标记：交给异步批次重建（WorkerThreadPool 生成网格，
 				# 主线程不做同步网格生成 → 走近不掉帧）
 				_stream_force_build[ck3] = true
-				data.dirty_voxels[VoxelChunk.origin_of(ck3)] = data.get_voxel(VoxelChunk.origin_of(ck3))
+				data._mark_chunk_dirty(ck3)
 			reloaded += 1
 		if reloaded > 0:
 			_request_update()
@@ -639,9 +638,9 @@ func _update_mesh_async() -> void:
 	# 杜绝数据竞态（块随机显示/隐藏的根因），同时避免整世界深拷贝与字典切片扫描。
 	var rebuild_chunks: Array[Vector3i] = []
 	if mesh_mode != MeshMode.GLOBAL_MESH:
-		rebuild_chunks = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
-		# 在启动任务前清除脏体素追踪，后续新变更会重新添加，避免累积
-		data.clear_dirty_voxels()
+		# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居），
+		# 替代逐体素 dirty_voxels 的大批量追踪——大崩塌移除不再主线程逐体素写 dict
+		rebuild_chunks = data.get_dirty_chunks()
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
@@ -920,18 +919,18 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 		_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
 	else:
 		# 全量结果（来自 _generate_worker，初始全量构建或非 chunk 模式）
-		# 注意：_build_and_apply_mesh 会清空 data.dirty_voxels，
-		# 如果 _pending_retrigger 为 true，需要保存脏体素以便后续恢复
-		var saved_dirty: Dictionary = {}
+		# 注意：_build_and_apply_mesh 会清空脏 chunk 标记，
+		# 如果 _pending_retrigger 为 true，需要保存脏 chunk 以便后续恢复
+		var saved_dirty: Array = []
 		if _pending_retrigger and data:
-			saved_dirty = data.dirty_voxels.duplicate()
+			saved_dirty = data.get_dirty_chunks()
 
 		_build_and_apply_mesh(arrays)
 
-		# 恢复脏体素（用于 _on_batch_complete 中的 retrigger 逻辑）
+		# 恢复脏 chunk（用于 _on_batch_complete 中的 retrigger 逻辑）
 		if _pending_retrigger and data and not saved_dirty.is_empty():
-			for pos in saved_dirty:
-				data.dirty_voxels[pos] = saved_dirty[pos]
+			for ck in saved_dirty:
+				data._mark_chunk_dirty(ck)
 
 		_record_perf_stats(last_rebuild_affected_count, gen_time_ms, last_apply_time_ms)
 
@@ -1071,7 +1070,7 @@ func _update_mesh_sync() -> void:
 
 	# Per-chunk 增量重建（同步版，密集光环直连生成）
 	if mesh_mode != MeshMode.GLOBAL_MESH:
-		var rebuild_chunks: Array[Vector3i] = VoxelChunkGenerator.chunks_for_dirty_voxels(data.dirty_voxels)
+		var rebuild_chunks: Array[Vector3i] = data.get_dirty_chunks()
 		last_rebuild_affected_count = rebuild_chunks.size()
 		var t0 := Time.get_ticks_usec()
 		var chunk_keys: Array[Vector3i] = rebuild_chunks
@@ -1142,7 +1141,7 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 
 	# 重建完成，清空变更追踪
 	if data:
-		data.clear_dirty_voxels()
+		data.clear_dirty_chunks()
 	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
 	last_apply_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	mesh_updated.emit()
@@ -1279,7 +1278,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 
 	# 清理变更追踪
 	if data:
-		data.clear_dirty_voxels()
+		data.clear_dirty_chunks()
 	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
 	last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0
 	mesh_updated.emit()
