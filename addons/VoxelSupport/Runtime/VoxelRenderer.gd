@@ -382,6 +382,29 @@ func _update_mesh() -> void:
 
 ## 从待重建 chunk 中筛出"视锥内（或相机附近）"的部分，视锥外的加入待建队列。
 ## 返回视锥内应本次生成的 chunk 列表。
+## 流式加载距离过滤（独立于视锥剔除，无条件生效）：
+## 超出 stream_unload_distance 的 chunk 不构建，直接标记为已流式卸载。
+## 关键：避免大世界一次性全量构建（流式加载核心收益——远处永远不生成）。
+## 与 _filter_frustum_chunks 组合使用：先流式过滤（距离），再视锥过滤（朝向）。
+func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
+	if not _streaming_enabled or stream_unload_distance <= 0.0:
+		return chunks
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return chunks
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var cam_pos := cam.global_position
+	var world_offset := global_position
+	var kept: Array[Vector3i] = []
+	for ck in chunks:
+		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
+		if cam_pos.distance_to(aabb.get_center()) > stream_unload_distance:
+			_streamed_out_chunks[ck] = true
+		else:
+			kept.append(ck)
+	return kept
+
+
 ## 无相机/视锥剔除关闭时全量返回（旧行为）。
 func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	if not use_frustum_culling:
@@ -396,12 +419,6 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		# 流式加载：超出卸载距离的 chunk 不构建，直接标记为已流式卸载。
-		# 关键：避免大世界一次性全量构建（这是流式加载的核心收益——远处永远不生成）
-		if _streaming_enabled and stream_unload_distance > 0.0 \
-				and cam_pos.distance_to(aabb.get_center()) > stream_unload_distance:
-			_streamed_out_chunks[ck] = true
-			continue
 		if _aabb_has_vertex_in_frustum(aabb, cam):
 			visible.append(ck)
 		elif margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin:
@@ -603,9 +620,11 @@ func _update_mesh_async() -> void:
 				_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 					{}, snapshot_materials, rebuild_chunks, gen_id, use_chunk_generator, voxel_scale, render_offset, diag_enabled)))
 			else:
-				var visible: Array[Vector3i] = _filter_frustum_chunks(all_chunks)
+				# 先流式距离过滤（无条件，远距 chunk 不生成），再视锥过滤（朝向）
+				var after_stream: Array[Vector3i] = _filter_streamed_chunks(all_chunks)
+				var visible: Array[Vector3i] = _filter_frustum_chunks(after_stream)
 				if diag_enabled:
-					print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
+					print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 流式卸载%d, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), all_chunks.size() - after_stream.size(), visible.size(), after_stream.size() - visible.size()])
 				var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
 				_pending_task_count = visible.size()
 				for ck in visible:
@@ -613,9 +632,11 @@ func _update_mesh_async() -> void:
 						snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
-			var visible: Array[Vector3i] = _filter_frustum_chunks(rebuild_chunks)
+			# 先流式距离过滤（无条件），再视锥过滤（朝向）
+			var after_stream: Array[Vector3i] = _filter_streamed_chunks(rebuild_chunks)
+			var visible: Array[Vector3i] = _filter_frustum_chunks(after_stream)
 			if diag_enabled:
-				print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
+				print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 流式卸载%d, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), rebuild_chunks.size() - after_stream.size(), visible.size(), after_stream.size() - visible.size()])
 			var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
 			_pending_task_count = visible.size()
 			for ck in visible:
