@@ -143,10 +143,12 @@ var _deferred_chunks: Dictionary[Vector3i, bool] = {}
 
 # 流式卸载每帧限量：相机移动跨越边界时分批进行，避免一次 queue_free 大量节点
 # 造成掉帧。卸载只释放资源+写盘（便宜），限量可稍大。
-var _stream_unload_per_frame: int = 12
+var _stream_unload_per_frame: int = 24
 # 流式加载每帧限量：走近时优先补建最近的 chunk（磁盘读回 + 入异步重建）。
-# 加载涉及数据层磁盘 IO + 网格重建，限量较小保证移动平滑（与卸载对称、分帧）。
-var _stream_load_per_frame: int = 4
+# 加载标脏后由 WorkerThreadPool 异步生成 + _process_mesh_build_queue 帧尾限量构建
+# （GPU 上传限流 8 个/帧 + 3ms 预算），因此标脏量可适当放大：走近时每帧进入
+# 管线的新块多，但实际 mesh 出现仍由 GPU 限流平滑分摊，不会掉帧也不会"一帧一块"。
+var _stream_load_per_frame: int = 24
 # 流式补建待强制的 chunk：进入 load 距离后应无条件构建（距离驱动，非朝向驱动），
 # 不被 _filter_frustum_chunks 延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
@@ -556,8 +558,11 @@ func _process_streaming() -> void:
 			_unload_chunk(item[1])
 			unloaded += 1
 
-	# 2. 加载：距离 < load_d，近的优先
-	if load_d > 0.0:
+	# 2. 加载：距离 < unload_d 的 streamed_out 补建（含 load~unload 滞留区），近的优先。
+	# 【关键】之前只加载 < load_d：相机走近后距离落在 load~unload 滞留区的 chunk
+	# streamed_out 标记残留、无任何路径触发重建 → "走近不出现"。改 < unload_d 后
+	# 滞留区也补建（网格由异步重建 + GPU 限流平滑生成，不会掉帧）。
+	if unload_d > 0.0:
 		# 清理 streamed_out 中无数据的残留键（数据已清空的 chunk 无需流式管理，
 		# 否则字典随相机移动持续膨胀）
 		if data:
@@ -567,7 +572,7 @@ func _process_streaming() -> void:
 		var to_load: Array = []
 		for ck in _streamed_out_chunks:
 			var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
-			if dist <= load_d:
+			if dist <= unload_d:
 				to_load.append([dist, ck])
 		# 从近到远（距离升序）：最近的先加载
 		to_load.sort_custom(func(a, b): return a[0] < b[0])
