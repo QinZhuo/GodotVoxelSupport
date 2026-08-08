@@ -895,7 +895,34 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 ## 顶点复用 + 网格生成主循环 ~10 倍提速）；块体超 HALO_SIZE 时回退 generate_arrays_runtime
 func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D) -> void:
 	var arrays := _generate_falling_chunk_arrays(local_voxels, materials, scale)
-	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels)
+	# 【凸包后台化】在后台线程计算碰撞外壳点集（体素包围盒 8 角点，O(1) 无凸包算法），
+	# 替代主线程 create_convex_shape（实测 4096 体素块 69ms 主线程卡顿）。
+	# 传回主线程 set_points 秒完成。
+	var hull_points := _compute_hull_points(local_voxels, scale)
+	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels, hull_points)
+
+
+## 计算掉落块碰撞外壳点集：体素包围盒的 8 个角点（简化凸包）。
+## 贴合块形状（比 Box 精确），O(1) 无凸包算法开销，后台线程安全（纯数据）。
+## 返回 PackedVector3Array（世界单位，相对块中心的局部坐标）
+static func _compute_hull_points(local_voxels: Dictionary, scale: float) -> PackedVector3Array:
+	var pts := PackedVector3Array()
+	if local_voxels.is_empty():
+		return pts
+	var min_p := Vector3i(local_voxels.keys()[0])
+	var max_p := min_p
+	for pos_key in local_voxels:
+		var p: Vector3i = pos_key
+		min_p = Vector3i(mini(min_p.x, p.x), mini(min_p.y, p.y), mini(min_p.z, p.z))
+		max_p = Vector3i(maxi(max_p.x, p.x), maxi(max_p.y, p.y), maxi(max_p.z, p.z))
+	# 8 个角点（含块体素范围，贴合实际形状）
+	for i in 8:
+		var corner := Vector3(
+			min_p.x if (i & 1) == 0 else max_p.x + 1,
+			min_p.y if (i & 2) == 0 else max_p.y + 1,
+			min_p.z if (i & 4) == 0 else max_p.z + 1)
+		pts.append((corner - Vector3(0.5, 0.5, 0.5)) * scale)
+	return pts
 
 
 ## 生成掉落块网格数组：优先原生 dense 单 chunk 路径，超大块回退 GDScript 合并路径
@@ -931,7 +958,7 @@ func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, 
 ## 掉落体 mesh 组装入口（GPU 忙感知）：
 ## GPU 空闲时立即组装 ArrayMesh；GPU 满载时结果入队，由 _process 帧尾限量组装，
 ## 避免 add_surface_from_arrays 的同步 GPU 上传在 Metal 满载时 fence wait() 超时
-func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}) -> void:
+func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}, hull_points: PackedVector3Array = PackedVector3Array()) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
@@ -939,9 +966,10 @@ func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_vox
 	if _is_gpu_busy():
 		_pending_mesh_results.append({
 			"body": body, "arrays": arrays as Dictionary, "local_voxels": local_voxels,
+			"hull_points": hull_points,
 		})
 		return
-	_apply_falling_chunk_mesh(body, arrays as Dictionary, local_voxels)
+	_apply_falling_chunk_mesh(body, arrays as Dictionary, local_voxels, hull_points)
 
 
 ## GPU 忙检测：上一帧渲染耗时（_delta）是否超过阈值
@@ -963,7 +991,7 @@ func _process_pending_mesh_results() -> void:
 		var entry: Dictionary = _pending_mesh_results.pop_front()
 		var body: RigidBody3D = entry.get("body")
 		if body != null and is_instance_valid(body) and not body.is_queued_for_deletion():
-			_apply_falling_chunk_mesh(body, entry.get("arrays"), entry.get("local_voxels", {}))
+			_apply_falling_chunk_mesh(body, entry.get("arrays"), entry.get("local_voxels", {}), entry.get("hull_points", PackedVector3Array()))
 			count += 1
 	if diag_enabled and count > 0:
 		print("[诊断] 掉落体mesh组装: 本帧%d, 剩余%d" % [count, _pending_mesh_results.size()])
@@ -973,7 +1001,7 @@ func _process_pending_mesh_results() -> void:
 ## 碰撞方案按块体素数自动选择：
 ##   <= AUTO_BOX_VOXELS → BoxShape3D 包围盒（物理开销低，中小块够用）
 ##   >  AUTO_BOX_VOXELS → ConvexPolygonShape3D 凸包（贴合大块轮廓）
-func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxels: Dictionary = {}) -> void:
+func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxels: Dictionary = {}, hull_points: PackedVector3Array = PackedVector3Array()) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if arrays == null or arrays.is_empty():
@@ -995,12 +1023,23 @@ func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxe
 
 	# 按体素数自动选碰撞方案：大块（>AUTO_BOX_VOXELS）用凸包贴合轮廓，中小块用 Box 降低物理开销
 	if local_voxels.size() > AUTO_BOX_VOXELS:
-		# 凸包碰撞：从 mesh 生成（clean 去除退化面，simplify 减少顶点）
-		var shape := mesh.create_convex_shape(true, true)
-		if shape:
+		# 【凸包后台化】碰撞外壳点集由后台线程预计算（_compute_hull_points，O(1)），
+		# 此处 set_points 秒完成——替代 create_convex_shape（4096体素块实测69ms主线程卡顿）。
+		# hull_points 为空（旧路径/兼容）时回退 create_convex_shape。
+		if hull_points.is_empty():
+			var shape := mesh.create_convex_shape(true, true)
+			if shape:
+				var col := CollisionShape3D.new()
+				col.name = "CollisionShape3D"
+				col.shape = shape
+				body.add_child(col)
+				col.owner = body
+		else:
+			var convex := ConvexPolygonShape3D.new()
+			convex.set_points(hull_points)
 			var col := CollisionShape3D.new()
 			col.name = "CollisionShape3D"
-			col.shape = shape
+			col.shape = convex
 			body.add_child(col)
 			col.owner = body
 	else:
