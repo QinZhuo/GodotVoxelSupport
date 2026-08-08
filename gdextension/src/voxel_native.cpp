@@ -459,9 +459,13 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		}
 
 		// 实时统计有效支撑数（5 次 O(1) chunk 查询）
+		// 【关键】必须先 ensure_chunk(nb)：has_voxel 基于局部 chunk 缓存，
+		// 若支撑邻居所在 chunk 未加载会被误判为"不存在"，导致 effective 低估、
+		// 未破坏体素被误判失稳（过度崩塌）。传播邻居均已加载，唯独 LOWER_5 漏了。
 		int effective = 0;
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
+			ensure_chunk(nb);
 			if (has_voxel(nb) && !unstable.has(nb)) {
 				effective += 1;
 			}

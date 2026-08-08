@@ -705,6 +705,8 @@ func _process_cascade_level() -> void:
 	_cascade_check_positions = []
 
 	var unstable := _find_unstable_voxels(queue)
+	if diag_enabled:
+		print("[诊断] 级联检测: queue=%d, 检测出unstable=%d" % [queue.size(), unstable.size()])
 	if unstable.is_empty():
 		_finalize_cascade()
 		return
@@ -1281,6 +1283,8 @@ func _find_unstable_voxels(around_positions: Array = []) -> Array:
 		unstable_set = data.find_unsupported_around(around_positions)
 	else:
 		unstable_set = data.find_unsupported()
+	if diag_enabled:
+		print("[诊断] _find_unstable_voxels: around=%d, 局部=%s, 结果=%d" % [around_positions.size(), (local_collapse and not around_positions.is_empty()), unstable_set.size()])
 
 	var unstable: Array = []
 	for key in unstable_set:
