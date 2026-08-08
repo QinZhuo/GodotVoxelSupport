@@ -55,6 +55,11 @@ const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 ## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
 var _chunk_buffers: Dictionary = {}
 
+## 每 chunk 体素计数（chunk key -> int，增量维护 O(1)）。
+## 替代 _maybe_erase_empty_chunk 的 4096 全量扫描：增减体素时更新计数，
+## 归零即视为空 chunk 可擦除——消除破坏/崩塌热路径的 16³ 循环。
+var _chunk_voxel_counts: Dictionary = {}
+
 ## 体素总数（增量维护，O(1) 查询，供 HUD 等高频读取）
 var _voxel_count: int = 0
 
@@ -185,23 +190,22 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 		if cur > 0:
 			buf[idx] = 0
 			_voxel_count -= 1
+			_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - 1
 			if check_empty:
 				_maybe_erase_empty_chunk(ck)
 	else:
 		if cur <= 0:
 			_voxel_count += 1
+			_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) + 1
 		buf[idx] = mat_id
 
 
-## 若 chunk 缓冲已全空则移除该 chunk 键（仅当 check_empty 需要时调用）
+## 若 chunk 体素计数归零则移除该 chunk 键（O(1)，替代 4096 全量扫描）
 func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
-	var buf = _chunk_buffers.get(ck)
-	if buf == null:
+	if _chunk_voxel_counts.get(ck, 0) > 0:
 		return
-	for i in CHUNK_VOLUME:
-		if buf[i] > 0:
-			return
 	_chunk_buffers.erase(ck)
+	_chunk_voxel_counts.erase(ck)
 
 
 ## 构建期/读档批量填充 {pos: mat_id}，不追踪 dirty_voxels、不触发信号。
@@ -328,6 +332,7 @@ func clear(notify: bool = true) -> void:
 			if buf[i] > 0:
 				dirty_voxels[origin + _local_from_index(i)] = -1
 	_chunk_buffers.clear()
+	_chunk_voxel_counts.clear()
 	_voxel_count = 0
 	_support_cache.clear()
 	_support_cache_built = true
@@ -593,8 +598,9 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		if buf[idx] > 0:
 			buf[idx] = 0
 			_voxel_count -= 1
+			_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - 1
 			touched[ck] = true
-	# 批量移除后统一回收被清空的 chunk 键（避免逐体素 4096 扫描）
+	# 批量移除后统一回收被清空的 chunk 键（O(1) 计数判断，替代逐体素 4096 扫描）
 	for ck in touched:
 		_maybe_erase_empty_chunk(ck)
 	if NativeLoader.is_available():
