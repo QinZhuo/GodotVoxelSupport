@@ -151,6 +151,10 @@ var _superchunk_rebuild_scheduled: bool = false
 # 每帧最多重建的超级块数
 var _superchunk_rebuild_per_frame: int = 1
 
+# 流式加载每帧限量：相机移动跨越边界时，卸载/补建分批进行，
+# 避免一次处理几十个 chunk（queue_free + 重建 + GPU 上传）造成掉帧
+var _stream_unload_per_frame: int = 32
+var _stream_reload_per_frame: int = 32	
 # 异步网格生成状态（多任务并行，每个任务独立处理）
 var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
 var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
@@ -492,47 +496,62 @@ func _process_streaming() -> void:
 	var world_offset := global_position
 	var load_d := stream_load_distance
 	var unload_d := stream_unload_distance
+	# 超级块模式下，补建 1 个 chunk 会触发整个超级块（64 chunk）合并重建，
+	# 因此每帧补建限量降为 1，把超级块重建摊平到多帧（避免整块合并的帧尖峰）
+	var reload_limit := _stream_reload_per_frame
+	if superchunk_size > 0:
+		reload_limit = 1
 
 	# 1. 卸载：距离 > unload_d 的已建 chunk 网格释放
-	var to_unload: Array[Vector3i] = []
+	# 【每帧限量】卸载分批进行，避免一次 queue_free 大量节点造成掉帧
+	var unloaded := 0
 	if unload_d > 0.0:
 		if superchunk_size > 0:
 			# 超级块模式：整块卸载（含所有 chunk 数据缓存）
 			var sk_list: Array = _superchunk_meshes.keys()
 			for sk in sk_list:
+				if unloaded >= _stream_unload_per_frame:
+					break
 				var sck: Vector3i = sk
 				var center := world_offset + Vector3(sck) * (chunk_size_world * float(superchunk_size)) \
 						+ Vector3.ONE * (chunk_size_world * float(superchunk_size) * 0.5)
 				if cam_pos.distance_to(center) > unload_d:
 					_unload_superchunk(sck)
+					unloaded += 1
 		else:
 			for ck in _chunk_meshes.keys():
+				if unloaded >= _stream_unload_per_frame:
+					break
 				var ck3: Vector3i = ck
 				var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 				if cam_pos.distance_to(aabb.get_center()) > unload_d:
-					to_unload.append(ck3)
-			for ck in to_unload:
-				_unload_chunk(ck)
+					_unload_chunk(ck3)
+					unloaded += 1
 
 	# 2. 重新加载：已卸载但距离 < load_d 的 chunk 补建
-	var to_reload: Array[Vector3i] = []
+	# 【每帧限量】补建分批进行，避免相机移动跨越边界时一次重建几十个 chunk
+	# 造成掉帧。每帧最多补建 STREAM_RELOAD_PER_FRAME 个，剩余下帧继续。
+	# 超级块模式下补建会触发超级块整块合并（64 chunk），因此流式补建每帧只处理
+	# 1 个 chunk（_stream_reload_per_frame 在超级块模式降为 1），把超级块重建摊平。
+	var reloaded := 0
 	if load_d > 0.0:
 		for ck in _streamed_out_chunks:
+			if reloaded >= reload_limit:
+				break
 			var ck3: Vector3i = ck
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 			if cam_pos.distance_to(aabb.get_center()) <= load_d:
-				to_reload.append(ck3)
-		for ck in to_reload:
-			_streamed_out_chunks.erase(ck)
-			if superchunk_size > 0:
-				var sk := _superchunk_key_of(ck)
-				_dirty_superchunks[sk] = true
-				_schedule_superchunk_rebuild()
-			else:
-				if data:
-					var origin := VoxelChunk.origin_of(ck)
-					data.dirty_voxels[origin] = data.get_voxel(origin)
-	if not to_reload.is_empty():
+				_streamed_out_chunks.erase(ck3)
+				if superchunk_size > 0:
+					var sk := _superchunk_key_of(ck3)
+					_dirty_superchunks[sk] = true
+					_schedule_superchunk_rebuild()
+				else:
+					if data:
+						var origin := VoxelChunk.origin_of(ck3)
+						data.dirty_voxels[origin] = data.get_voxel(origin)
+				reloaded += 1
+	if reloaded > 0:
 		_request_update()
 
 

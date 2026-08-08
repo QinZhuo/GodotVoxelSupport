@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://cstreamdemo01"]
 
-[ext_resource type="Script" path="res://demo/streaming_demo.gd" id="1_stream"]
+[ext_resource type="Script" uid="uid://pqp5icnfm21o" path="res://demo/streaming_demo.gd" id="1_stream"]
 [ext_resource type="Script" uid="uid://btk6140iqqwmg" path="res://addons/VoxelSupport/Runtime/VoxelDestructible.gd" id="2_destructible"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
@@ -21,21 +21,23 @@ reflected_light_source = 3
 tonemap_mode = 2
 fog_enabled = true
 
-[node name="StreamingDemo" type="Node3D"]
+[node name="StreamingDemo" type="Node3D" unique_id=1214734711]
 script = ExtResource("1_stream")
+stream_load_distance = 60.0
+stream_unload_distance = 100.0
 
-[node name="DestructibleVoxels" type="MeshInstance3D" parent="."]
+[node name="DestructibleVoxels" type="MeshInstance3D" parent="." unique_id=373616168]
 script = ExtResource("2_destructible")
-stream_load_distance = 25.0
-stream_unload_distance = 45.0
+stream_load_distance = 30.0
+stream_unload_distance = 50.0
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=944907852]
 environment = SubResource("Environment_1")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=491398690]
 transform = Transform3D(-0.5, 0, 0.866, 0.35, 0.866, 0.35, -0.75, 0.5, 0.433, 0, 6, 0)
 light_energy = 1.2
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="."]
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1630899129]
 transform = Transform3D(1, 0, 0, 0, 0.866, -0.5, 0, 0.5, 0.866, 0, 30, 0)

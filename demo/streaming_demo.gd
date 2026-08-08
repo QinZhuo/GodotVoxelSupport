@@ -25,9 +25,10 @@ extends Node
 @export var world_size: Vector3i = Vector3i(500, 40, 500)
 
 ## 流式加载距离（世界单位）：相机进入此距离的 chunk 确保加载
-@export var stream_load_distance: float = 60
+## 世界 100×100 单位、相机中心到边缘 50 → load=30/unload=50 使边缘在移动时卸载
+@export var stream_load_distance: float = 30.0
 ## 流式卸载距离：超出此距离的 chunk 网格自动卸载
-@export var stream_unload_distance: float =80
+@export var stream_unload_distance: float = 50.0
 
 ## 可破坏对象
 var _target: VoxelDestructible
@@ -46,7 +47,7 @@ const SPEED_FAST := 60.0
 ## 流式/视锥/超级块开关状态
 var _stream_state := true
 var _culling_state := true
-var _superchunk_state := 2  # 0/2/4
+var _superchunk_state := 0  # 流式加载建议 0（per-chunk），避免超级块整块重建
 
 ## 上一帧按键状态（边沿触发）
 var _prev_1 := false
@@ -131,7 +132,9 @@ func _build_world() -> void:
 	_target.voxel_scale = voxel_scale
 	_target.use_chunk_generator = true
 	_target.async_generate = true
-	_target.superchunk_size = 4
+	# 流式加载按 chunk 粒度工作，与超级块合并（64 chunk 粒度）冲突：
+	# 补建 1 个 chunk 会触发整个超级块合并 → 卡顿。流式 demo 用 per-chunk 模式。
+	_target.superchunk_size = 0
 	_target.use_frustum_culling = true
 	# 流式加载参数
 	_target.stream_load_distance = stream_load_distance
