@@ -102,32 +102,6 @@ const NEIGHBORS_6: Array[Vector3i] = [
 	Vector3i(0, 1, 0), Vector3i(0, -1, 0),
 ]
 
-## 5 个下方位支撑邻居偏移（支撑图：体素稳定 ⟺ 下方任一位置有体素支撑）
-## 包括正下方 + 4 个对角下方，覆盖主要支撑方向
-const LOWER_5: Array[Vector3i] = [
-	Vector3i(0, -1, 0),   # 正下方
-	Vector3i(-1, -1, 0),  # 左下方
-	Vector3i(1, -1, 0),   # 右下方
-	Vector3i(0, -1, -1),  # 后下方
-	Vector3i(0, -1, 1),   # 前下方
-]
-
-## 5 个上方位传播偏移（与 LOWER_5 对称，用于连锁失稳传播）
-const UPPER_5: Array[Vector3i] = [
-	Vector3i(0, 1, 0),    # 正上方
-	Vector3i(-1, 1, 0),   # 左上方
-	Vector3i(1, 1, 0),    # 右上方
-	Vector3i(0, 1, -1),   # 后上方
-	Vector3i(0, 1, 1),    # 前上方
-]
-
-## 4 个水平邻居偏移（同 Y 层，用于失稳级联的水平传播）
-## 修复浮空平台的外围体素未被检测到的问题
-const HORIZONTAL_4: Array[Vector3i] = [
-	Vector3i(1, 0, 0),  Vector3i(-1, 0, 0),
-	Vector3i(0, 0, 1),  Vector3i(0, 0, -1),
-]
-
 
 ## 从 VoxData 构造 (编辑器导入时使用)
 ## center 为 true 时，记录居中偏移使渲染时模型中心对齐原点 (与 mesh 导入行为一致)
@@ -789,6 +763,8 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 
 
 ## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
+## 按 chunk 分组处理：chunk 查询 / buf 读取 / dirty 标记每 chunk 一次，
+## 替代逐体素重复（大批量崩塌移除 4096 体素时显著提速，避免每帧主线程卡顿）。
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
@@ -800,22 +776,33 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		for ck in _preload_ck:
 			preload_chunk(ck)
 	var _diag_t0 := Time.get_ticks_usec()
-	var touched: Dictionary = {}
+	# 按 chunk 分组（positions → {ck: [pos, ...]}）
+	var by_chunk: Dictionary = {}
 	for pos in positions:
-		dirty_voxels[pos] = -1
 		var ck := _chunk_of(pos)
+		var arr: Variant = by_chunk.get(ck)
+		if arr == null:
+			arr = []
+			by_chunk[ck] = arr
+		arr.append(pos)
+	var touched: Dictionary = {}
+	for ck in by_chunk:
 		var buf = _chunk_buffers.get(ck)
 		if buf == null:
 			continue
-		var idx := _buf_index(pos - ck * CHUNK_SIZE)
-		if buf[idx] > 0:
-			buf[idx] = 0
-			_voxel_count -= 1
-			_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - 1
-			touched[ck] = true
-			# 流式：批量删除同样标记写盘（否则 chunk 被流式卸载时未 dirty → 直接丢弃，
-			# 磁盘旧数据残留导致重载后体素"复活"）
-			_dirty_chunks[ck] = true
+		touched[ck] = true
+		# 流式：批量删除同样标记写盘（否则 chunk 被流式卸载时未 dirty → 直接丢弃，
+		# 磁盘旧数据残留导致重载后体素"复活"）
+		_dirty_chunks[ck] = true
+		var origin := VoxelChunk.origin_of(ck)
+		var entries: Array = by_chunk[ck]
+		for pos in entries:
+			dirty_voxels[pos] = -1
+			var idx := _buf_index(pos - origin)
+			if buf[idx] > 0:
+				buf[idx] = 0
+				_voxel_count -= 1
+				_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - 1
 	# 批量移除后统一回收被清空的 chunk 键（O(1) 计数判断，替代逐体素 4096 扫描）
 	for ck in touched:
 		_maybe_erase_empty_chunk(ck)
@@ -1168,116 +1155,29 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 	return unsupported
 
 
-## 找出"悬空"体素（支撑图局部检测）：只检查 removed 体素上方可能失稳的体素
+## 找出"悬空"体素（连通性检测，原生 C++ 实现）：只检查 removed 附近可能失稳的体素
 ##
-## 原理（支撑图 / Support Graph）：
-##   体素稳定 ⟺ 其 5 个下方位（LOWER_5）中至少有一个体素存在且稳定
-##   贴地体素 (y==0) 永远稳定
+## 算法（业界标准做法，与 Minecraft 沙砾 / Teardown 类破坏游戏一致）：
+##   体素稳定 ⟺ 与地面（y<=0）6 方向连通。
+##   破坏移除 R 后，从 R 的 6 方向邻居 + 正上方列扫描收集候选；
+##   对每个候选做局部 6 方向 BFS：若所在连通分量含地面 → 稳定；否则该分量整体悬空。
 ##
-## 失稳传播：
-##   破坏移除体素 R → 检查 R 的 5 个上方位（UPPER_5）中存在的体素 C
-##   → 若 C 所有 5 个下方位都没有体素支撑 → C 失稳
-##   → 递归检查 C 的上方位（连锁失稳）
+## 效果真实（区别于"只正下方"的一刀切）：
+##   - 台阶/斜坡：斜向通过水平+垂直连到地面 → 稳定不掉
+##   - 悬空平台（多柱支撑）：平台通过柱子连通地面 → 稳定
+##   - 外墙底部被破坏但侧连完好墙（连地面）→ 稳定；完全断连 → 掉落
 ##
-## 实现：实时查询（无预计算缓存）。
-##   破坏后 removed 已从缓冲移除（has_voxel=false），传播中失稳体素仍存在但
-##   标记于 unstable 集合——两者都不计作支撑。故有效支撑数 = LOWER_5 中
-##   "has_voxel 且不在 unstable" 的邻居数，O(5) 实时统计即可。
-##   相比旧的全量 _support_cache（143 万条，预热 5.5 秒 + 增量维护），
-##   实时查询只访问破坏点局部体素（微秒级），零预热、零维护、逻辑等价。
+## 性能（局部 + 早停）：
+##   - 只从破坏点附近候选出发，不遍历整世界
+##   - 共享 visited 去重；BFS 遇到地面提前终止（稳定分量不用遍历完）
+##   - 悬空分量必须完整遍历（需要移除），规模受破坏影响区域限制
 ##
-## 与旧 BFS 方案对比：
-##   - 旧方案：从候选体素 6 方向 BFS 遍历整个连通分量检查是否贴地（O(场景大小)）
-##   - 新方案：只沿支撑链向上传播，不遍历连通分量（O(失稳体素数)）
-##   对于大场景（10万+体素），新方案速度提升 100~1000 倍
-##
-## 精度差异：
-##   - 旧方案：6 方向连通性，体素可透过侧向路径连接地面
-##   - 新方案：仅检查下方 5 个位置的支撑，侧向路径不支撑
-##   对于典型建筑场景（墙体/地板/天花板），差异极小
-##   对于"浮空平台侧向连接墙壁"等特殊结构，新方案更保守（更多体素可能失稳）
-##
+## 实现完全在 GDExtension (C++) 中，无 GDScript 兜底。
 ## 返回失稳体素位置集合 {pos: true}
 func find_unsupported_around(removed: Array) -> Dictionary:
-	var _diag_t0 := Time.get_ticks_usec()
 	if removed.is_empty() or _chunk_buffers.is_empty():
 		return {}
-
-	# 原生加速路径：GDExtension (C++) 已加载时优先调用（失稳检测 ~10 倍提速）。
-	# C++ 侧直接查 chunk 缓冲，不依赖任何预计算缓存。
-	if NativeLoader.is_available():
-		var result: Dictionary = NativeLoader.find_unsupported_around(_chunk_buffers, removed)
-		return result
-	# 纯 GDScript 兜底路径
-	return _find_unsupported_around_gd(removed)
-
-
-## 纯 GDScript 兜底实现（与原生版算法完全一致）
-func _find_unsupported_around_gd(removed: Array) -> Dictionary:
-	var _diag_t0 := Time.get_ticks_usec()
-	if removed.is_empty() or _chunk_buffers.is_empty():
+	if not NativeLoader.is_available():
+		push_error("[VoxelData] find_unsupported_around 需要原生库 VoxelNative，未加载则无法进行崩塌检测")
 		return {}
-
-	# 候选体素 = removed 的 5 个上方位邻居中仍存在的体素
-	# 这些体素可能因为失去下方支撑而失稳
-	var candidates := {}
-	for r in removed:
-		var rp: Vector3i = r
-		for d: Vector3i in UPPER_5:
-			var nb := rp + d
-			if has_voxel(nb):
-				candidates[nb] = true
-
-	if candidates.is_empty():
-		return {}
-
-	# 失稳传播（实时支撑统计，无预计算缓存）：
-	#   - removed 已从缓冲移除 → has_voxel=false，不计作支撑
-	#   - 传播中失稳的体素标记在 unstable，不计作支撑
-	#   - 有效支撑数 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数
-	#   - <= 0 且 y>0 则失稳（贴地体素永远稳定）
-	var unstable := {}
-	var stack: Array = []
-	for c in candidates:
-		stack.append(c)
-
-	while not stack.is_empty():
-		var cur: Vector3i = stack.pop_back()
-
-		# 已判定失稳则跳过（避免重复处理）
-		if unstable.has(cur):
-			continue
-		# 贴地体素永远稳定
-		if cur.y == 0:
-			continue
-
-		# 实时统计有效支撑数（5 次 O(1) chunk 查询）
-		var effective := 0
-		for d: Vector3i in LOWER_5:
-			var nb := cur + d
-			if has_voxel(nb) and not unstable.has(nb):
-				effective += 1
-		if effective > 0:
-			continue
-
-		# 失稳
-		unstable[cur] = true
-		# 连锁失稳：其上方位邻居失去一个支撑，加入检查
-		for d: Vector3i in UPPER_5:
-			var nb := cur + d
-			if has_voxel(nb) and not unstable.has(nb):
-				stack.append(nb)
-		# 【关键修复】水平邻居：4 个同 Y 层方向
-		# 不检查水平方向时，浮空平台的外围体素不会被检测到
-		# 因为它们不在 removed 的 UPPER_5 范围内，也不在失稳体素的 UPPER_5 范围内
-		for d: Vector3i in HORIZONTAL_4:
-			var nb := cur + d
-			if has_voxel(nb) and not unstable.has(nb):
-				stack.append(nb)
-
-	# 诊断：检查量级较大时打印耗时
-	var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
-	if _t_ms > 1.0:
-		print("[诊断] VoxelData.find_unsupported_around: 起点%d, 候选%d, 失稳%d, 耗时%.2f ms" % [removed.size(), candidates.size(), unstable.size(), _t_ms])
-
-	return unstable
+	return NativeLoader.find_unsupported_around(_chunk_buffers, removed)

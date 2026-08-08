@@ -423,6 +423,10 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var world_offset := global_position
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
+		# 无数据的空 chunk：不纳入视锥管理（无体素无需构建/补建，
+		# 否则边界空邻居会被反复标 deferred → 补建空 chunk 死循环）
+		if data and not data.has_chunk(ck):
+			continue
 		# 流式补建强制的 chunk：距离驱动，无条件构建（清除标记避免重复）
 		if _stream_force_build.has(ck):
 			_stream_force_build.erase(ck)
@@ -495,6 +499,11 @@ func _process_deferred_chunks() -> void:
 	for ck in _deferred_chunks.keys():
 		if built >= _stream_load_per_frame:
 			break
+		# 已构建网格的 chunk 无需补建（从待建队列移除，避免重复重建）；
+		# 无数据的空 chunk 也无需补建（否则空重建死循环，三角=0 刷日志）
+		if _chunk_meshes.has(ck) or (data and not data.has_chunk(ck)):
+			_deferred_chunks.erase(ck)
+			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 		if not _aabb_has_vertex_in_frustum(aabb, cam):
 			if not (margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin):
@@ -599,6 +608,20 @@ func _unload_chunk(ck: Vector3i) -> void:
 		print("[诊断] 流式卸载: Chunk%s" % ck)
 
 
+## 清除单个 chunk 的渲染网格（数据层已变空、但渲染层 mesh 残留时调用）。
+## 破坏/崩塌后 chunk 内体素全被移除（has_chunk=false），增量重建时 _filter_frustum_chunks
+## 会跳过空 chunk 不派发 → 若不主动清除，旧 mesh 残留 → 视觉上"悬空块还在"（数据其实已掉）。
+func _remove_chunk_mesh(ck: Vector3i) -> void:
+	var mi: MeshInstance3D = _chunk_meshes.get(ck)
+	if mi != null and is_instance_valid(mi):
+		mi.queue_free()
+	_chunk_meshes.erase(ck)
+	_remove_chunk_collision(ck)
+	_mesh_build_queue.erase(ck)
+	_stream_force_build.erase(ck)
+	_deferred_chunks.erase(ck)
+
+
 ## 异步路径：后台线程生成网格数据，完成后通过 call_deferred 直接传递结果到主线程
 ## 主线程绝不阻塞：旧任务未完成时直接启动新任务覆盖，子线程完成后检查 gen_id 丢弃过期结果
 func _update_mesh_async() -> void:
@@ -660,6 +683,12 @@ func _update_mesh_async() -> void:
 						snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
+			# 【关键】先清除"已变空"chunk 的残留 mesh：破坏/崩塌后 chunk 内体素
+			# 全被移除（has_chunk=false），而 _filter_frustum_chunks 会跳过空 chunk
+			# 不派发重建 → 若不主动清除，旧 mesh 残留，视觉上"悬空块还在"（数据其实已掉）。
+			for ck in rebuild_chunks:
+				if _chunk_meshes.has(ck) and not data.has_chunk(ck):
+					_remove_chunk_mesh(ck)
 			# 先流式距离过滤（无条件），再视锥过滤（朝向）
 			var after_stream: Array[Vector3i] = _filter_streamed_chunks(rebuild_chunks)
 			var visible: Array[Vector3i] = _filter_frustum_chunks(after_stream)

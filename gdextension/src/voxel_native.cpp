@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace godot;
@@ -367,15 +368,15 @@ inline uint64_t vkey(int x, int y, int z) {
 }
 inline uint64_t vkey(const Vector3i &p) { return vkey(p.x, p.y, p.z); }
 
-// 5 个下方位支撑邻居偏移（LOWER_5）
+// 5 个下方位支撑邻居（LOWER_5：正下 + 4 对角，任意 1 个存在即稳定，保守不连锁）
 constexpr int LOWER_5[5][3] = {
 	{0, -1, 0}, {-1, -1, 0}, {1, -1, 0}, {0, -1, -1}, {0, -1, 1},
 };
-// 5 个上方位传播偏移（UPPER_5）
+// 5 个上方位传播偏移（失稳连锁向上传播）
 constexpr int UPPER_5[5][3] = {
 	{0, 1, 0}, {-1, 1, 0}, {1, 1, 0}, {0, 1, -1}, {0, 1, 1},
 };
-// 4 个水平邻居偏移（HORIZONTAL_4）
+// 4 个水平邻居偏移（失稳水平传播，浮空平台外围检测）
 constexpr int HORIZONTAL_4[4][3] = {
 	{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1},
 };
@@ -420,48 +421,51 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		return it->second.ptr()[buf_index(local)] > 0;
 	};
 
-	// 候选体素 = removed 的 5 个上方位邻居中仍存在的体素（先收集 chunk 再查询）
+	// ---------------------------------------------------------------------------
+	// 增量支撑图失稳检测（localized propagation，性能优先，行为与破坏 demo 既有逻辑一致）
+	//   体素稳定 ⟺ LOWER_5（正下 + 4 对角下方）中任意 1 个存在且未失稳。
+	//   破坏移除 R 后，从 R 的上方位 + 水平候选出发，只沿失稳链传播（UPPER_5 上方 + HORIZONTAL_4 水平），
+	//   不遍历整世界/整连通分量 → 连续破坏每帧局部微秒级。
+	//   保守判定（对角也算支撑）保证：破坏局部 → 局部塌，不连锁整楼。
+	//   候选含水平方向（修复球洞侧壁等"removed 水平邻居悬空"漏检：正下无且无对角 → 掉落）。
+	// ---------------------------------------------------------------------------
+	// 候选 = removed 的 UPPER_5（上方 5）+ HORIZONTAL_4（水平 4）邻居（存在）
 	std::vector<Vector3i> stack;
+	std::unordered_set<uint64_t> seed_set;
 	for (int i = 0; i < removed.size(); ++i) {
 		const Vector3i rp = removed[i];
 		ensure_chunk(rp);
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(rp.x + UPPER_5[d][0], rp.y + UPPER_5[d][1], rp.z + UPPER_5[d][2]);
 			ensure_chunk(nb);
-			if (has_voxel(nb)) {
+			const uint64_t nk = vkey(nb);
+			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
+				seed_set.insert(nk);
+				stack.push_back(nb);
+			}
+		}
+		for (int d = 0; d < 4; ++d) {
+			const Vector3i nb(rp.x + HORIZONTAL_4[d][0], rp.y + HORIZONTAL_4[d][1], rp.z + HORIZONTAL_4[d][2]);
+			ensure_chunk(nb);
+			const uint64_t nk = vkey(nb);
+			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
+				seed_set.insert(nk);
 				stack.push_back(nb);
 			}
 		}
 	}
-	if (stack.empty()) {
-		return unstable;
-	}
 
-	// 失稳传播（实时支撑统计，无预计算缓存）：
-	//   - removed 已从缓冲移除 → has_voxel=false，不计作支撑
-	//   - 传播中失稳的体素标记于 unstable，不计作支撑
-	//   - 有效支撑数 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数
-	//   - <= 0 且 y>0 则失稳（贴地体素永远稳定）
-
-	// 待处理栈（候选 + 传播新发现的邻居），unstable.has 防重复处理
-	std::vector<Vector3i> work(stack.begin(), stack.end());
-
-	while (!work.empty()) {
-		const Vector3i cur = work.back();
-		work.pop_back();
-
+	// 失稳传播（增量）：支撑 = LOWER_5 任意 1 个；removed / unstable 不计支撑；贴地(y==0)稳定
+	while (!stack.empty()) {
+		const Vector3i cur = stack.back();
+		stack.pop_back();
 		if (unstable.has(cur)) {
 			continue;
 		}
-		// 贴地体素永远稳定
 		if (cur.y == 0) {
 			continue;
 		}
-
-		// 实时统计有效支撑数（5 次 O(1) chunk 查询）
-		// 【关键】必须先 ensure_chunk(nb)：has_voxel 基于局部 chunk 缓存，
-		// 若支撑邻居所在 chunk 未加载会被误判为"不存在"，导致 effective 低估、
-		// 未破坏体素被误判失稳（过度崩塌）。传播邻居均已加载，唯独 LOWER_5 漏了。
+		// 有效支撑数 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数
 		int effective = 0;
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
@@ -473,23 +477,21 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		if (effective > 0) {
 			continue;
 		}
-
 		// 失稳
 		unstable[cur] = true;
-		// 连锁失稳：其上方位邻居失去一个支撑，加入检查
+		// 连锁失稳：上方位 5 个 + 水平 4 个
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + UPPER_5[d][0], cur.y + UPPER_5[d][1], cur.z + UPPER_5[d][2]);
 			ensure_chunk(nb);
 			if (has_voxel(nb) && !unstable.has(nb)) {
-				work.push_back(nb);
+				stack.push_back(nb);
 			}
 		}
-		// 水平邻居：4 个同 Y 层方向
 		for (int d = 0; d < 4; ++d) {
 			const Vector3i nb(cur.x + HORIZONTAL_4[d][0], cur.y + HORIZONTAL_4[d][1], cur.z + HORIZONTAL_4[d][2]);
 			ensure_chunk(nb);
 			if (has_voxel(nb) && !unstable.has(nb)) {
-				work.push_back(nb);
+				stack.push_back(nb);
 			}
 		}
 	}

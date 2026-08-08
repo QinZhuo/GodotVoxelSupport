@@ -756,7 +756,10 @@ func _process_cascade_batch(unstable: Array) -> void:
 	# 累积级联结果
 	_cascade_total.append_array(unstable)
 
-	# 本批处理完且无遗留 → 终结
+	# 本批处理完且无遗留 → 终结。
+	# 单轮级联：find_unsupported_around 内部已沿支撑链传播完整级联，
+	# 无需把 unstable 再次作为 removed 继续检测（否则配合较宽松的支撑判定
+	# 会连锁放大 → 破坏一点整楼/整行塌）。
 	if _cascade_pending_voxels.is_empty():
 		_finalize_cascade()
 

@@ -83,6 +83,8 @@ var _chart_dirty: bool = true
 var _frame_count: int = 0
 var _continuous_counter: int = 0
 var _last_log_time: int = 0
+## 上一次性能日志记录的生成耗时（避免静止时反复打印相同 last_* 值刷屏）
+var _last_perf_mgt: float = -1.0
 
 ## 上一帧状态
 var _prev_left := false
@@ -167,13 +169,16 @@ func _process(delta: float) -> void:
 	_update_hud()
 
 	# 每 60 帧（约1秒）记录一次详细性能日志
+	# 只在网格重建确实发生时打印（last_mesh_gen_time_ms 变化），静止时不再刷重复日志
 	if _frame_count % 60 == 0 and _perf_log.size() < MAX_PERF_LOG - 10:
 		var mgt := _target.last_mesh_gen_time_ms
-		var vc := _target.data.get_voxel_count()
-		var rebuild_chunks := _target.last_rebuild_chunk_count
-		var total_tris := _target.last_solid_triangles + _target.last_trans_triangles
-		var apply_time := _target.last_apply_time_ms
-		_log_perf_line("[性能] 体素=%d 重建Chunk=%d 三角=%d 生成=%.1fms 应用=%.1fms" % [vc, rebuild_chunks, total_tris, mgt, apply_time])
+		if mgt != _last_perf_mgt:
+			_last_perf_mgt = mgt
+			var vc := _target.data.get_voxel_count()
+			var rebuild_chunks := _target.last_rebuild_chunk_count
+			var total_tris := _target.last_solid_triangles + _target.last_trans_triangles
+			var apply_time := _target.last_apply_time_ms
+			_log_perf_line("[性能] 体素=%d 重建Chunk=%d 三角=%d 生成=%.1fms 应用=%.1fms" % [vc, rebuild_chunks, total_tris, mgt, apply_time])
 
 
 func _build_target() -> void:

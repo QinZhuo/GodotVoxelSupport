@@ -45,6 +45,7 @@ endif()
 #   Linux debug:   libvoxelnative.linux.debug.x86_64.so
 #   Windows debug: voxelnative.windows.debug.x86_64.dll
 set_target_properties(voxelnative PROPERTIES
+    PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native

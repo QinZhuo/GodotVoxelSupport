@@ -27,50 +27,9 @@ extends RefCounted
 ##   size[i*2] = w, size[i*2+1] = h
 ##   val[i] = 材质ID
 ##   三个数组等长，第 i 个矩形 = (u, v, w, h, val[i])
+## 实现完全在 GDExtension (C++) 中（NativeLoader.merge_dense），无 GDScript 兜底。
 static func greedy_merge_dense(grid: PackedInt32Array, width: int, height: int) -> Dictionary:
-	# 原生加速路径：GDExtension (C++) 已加载时优先调用（约 10 倍以上提速）。
-	# 未加载（无编译产物/平台不匹配/版本不兼容）时自动回退到下方纯 GDScript 实现。
-	if NativeLoader.is_available():
-		return NativeLoader.merge_dense(grid, width, height)
-	return _greedy_merge_dense_gd(grid, width, height)
-
-
-## 纯 GDScript 兜底实现（与原生版算法完全一致，保证无原生库也能运行）
-static func _greedy_merge_dense_gd(grid: PackedInt32Array, width: int, height: int) -> Dictionary:
-	var pos_arr := PackedInt32Array()
-	var size_arr := PackedInt32Array()
-	var val_arr := PackedInt32Array()
-
-	for v in height:
-		var u := 0
-		while u < width:
-			var c := grid[u + v * width]
-			if c <= 0:
-				u += 1
-				continue
-			# 向右扩展宽度
-			var w := 1
-			while u + w < width and grid[u + w + v * width] == c:
-				w += 1
-			# 向下扩展高度（每行必须连续 w 格都同材质）
-			var h := 1
-			var extend := true
-			while extend and v + h < height:
-				for k in w:
-					if grid[(u + k) + (v + h) * width] != c:
-						extend = false
-						break
-				if extend:
-					h += 1
-			pos_arr.append(u)
-			pos_arr.append(v)
-			size_arr.append(w)
-			size_arr.append(h)
-			val_arr.append(c)
-			# 清零标记已处理，保证每个格子至多被合并一次
-			for y in h:
-				var base := u + (v + y) * width
-				for x in w:
-					grid[base + x] = 0
-			u += w
-	return {"pos": pos_arr, "size": size_arr, "val": val_arr}
+	if not NativeLoader.is_available():
+		push_error("[VoxelGreedyMesher] 贪婪合并需要原生库 VoxelNative（未加载）")
+		return {}
+	return NativeLoader.merge_dense(grid, width, height)

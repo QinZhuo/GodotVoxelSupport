@@ -203,18 +203,18 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 ## 覆盖 chunk 内部 + 1 体素外缘，所有邻居读取均为数组下标且无越界检查。
 ## 线程安全：halo 是独立的深拷贝，子线程只读。
 ## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
+## 实现完全在 GDExtension (C++) 中（NativeLoader.generate_chunk_dense），无 GDScript 兜底。
 static func generate_single_chunk_dense(
 		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
 		offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	# 原生加速路径：GDExtension (C++) 已加载时优先调用（网格生成主循环 ~10 倍提速）
-	if NativeLoader.is_available():
-		var trans_flags := _build_trans_flags(aligned_materials)
-		var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
-		if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
-			return {}
-		return result
-	# 纯 GDScript 兜底路径
-	return _generate_single_chunk_dense_gd(halo, aligned_materials, scale, chunk_key, offset)
+	if not NativeLoader.is_available():
+		push_error("[VoxelChunkGenerator] chunk 网格生成需要原生库 VoxelNative（未加载）")
+		return {}
+	var trans_flags := _build_trans_flags(aligned_materials)
+	var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
+	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
+		return {}
+	return result
 
 
 ## 从对齐材质数组构建透明标志数组（PackedByteArray，索引=材质ID，1=透明）
@@ -226,35 +226,6 @@ static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:
 		var mat = aligned_materials[i]
 		flags[i] = 1 if mat != null and mat.trans > 0 else 0
 	return flags
-
-
-## 纯 GDScript 兜底实现（与原生版算法完全一致）
-static func _generate_single_chunk_dense_gd(
-		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
-		offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	var solid_verts := PackedVector3Array()
-	var solid_normals := PackedVector3Array()
-	var solid_uvs := PackedVector2Array()
-	var solid_idxs := PackedInt32Array()
-	var trans_verts := PackedVector3Array()
-	var trans_normals := PackedVector3Array()
-	var trans_uvs := PackedVector2Array()
-	var trans_idxs := PackedInt32Array()
-
-	_generate_chunk_dense_into(halo, aligned_materials, scale, chunk_key,
-		solid_verts, solid_normals, solid_uvs, solid_idxs,
-		trans_verts, trans_normals, trans_uvs, trans_idxs,
-		true, offset)
-
-	if solid_idxs.is_empty() and trans_idxs.is_empty():
-		return {}
-
-	return {
-		"solid_verts": solid_verts, "solid_normals": solid_normals,
-		"solid_uvs": solid_uvs, "solid_idxs": solid_idxs,
-		"trans_verts": trans_verts, "trans_normals": trans_normals,
-		"trans_uvs": trans_uvs, "trans_idxs": trans_idxs,
-	}
 
 
 ## 生成单个 chunk 的网格数据（顶点使用局部坐标）- 内部实现
