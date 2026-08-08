@@ -120,10 +120,9 @@ var _update_counter: int = 0
 # 视锥外待生成的 chunk（key = chunk key，value = true），进入视锥后补建
 var _deferred_chunks: Dictionary[Vector3i, bool] = {}
 
-# 流式加载每帧限量：相机移动跨越边界时，卸载/补建分批进行，
+# 流式加载每帧限量（卸载/补建共用）：相机移动跨越边界时，卸载与补建分批进行，
 # 避免一次处理几十个 chunk（queue_free + 重建 + GPU 上传）造成掉帧
-var _stream_unload_per_frame: int = 32
-var _stream_reload_per_frame: int = 32
+var _stream_per_frame: int = 8
 # 流式补建待强制的 chunk：进入 load 距离后应无条件构建（距离驱动，非朝向驱动），
 # 不被 _filter_frustum_chunks 延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
@@ -491,7 +490,7 @@ func _process_streaming() -> void:
 	var unloaded := 0
 	if unload_d > 0.0:
 		for ck in _chunk_meshes.keys():
-			if unloaded >= _stream_unload_per_frame:
+			if unloaded >= _stream_per_frame:
 				break
 			var ck3: Vector3i = ck
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
@@ -501,26 +500,44 @@ func _process_streaming() -> void:
 
 	# 2. 重新加载：已卸载但距离 < load_d 的 chunk 补建
 	# 【每帧限量】补建分批进行，避免相机移动跨越边界时一次重建几十个 chunk 造成掉帧。
-	# 补建同步生成单 chunk 数组直接入 GPU 限流队列（绕过异步 pipeline 串行 + 视锥延迟），
-	# 由统一异步 pipeline 处理（dirty_voxels → WorkerThreadPool 后台生成）。
+	# 补建同步生成单 chunk 数组直接入 GPU 限流队列（绕过异步 pipeline 的
+	# _pending_task_count 串行等待——否则补建任务积压、每帧只建几个）。
+	# 每帧最多 _stream_per_frame 个同步生成（~1ms/chunk），主线程可接受。
 	var reloaded := 0
 	if load_d > 0.0:
 		for ck in _streamed_out_chunks:
-			if reloaded >= _stream_reload_per_frame:
+			if reloaded >= _stream_per_frame:
 				break
 			var ck3: Vector3i = ck
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 			if cam_pos.distance_to(aabb.get_center()) <= load_d:
 				_streamed_out_chunks.erase(ck3)
-				# 标记为"无条件构建"（距离驱动，不被视锥朝向延迟），
-				# 并标记脏体素走统一异步生成 pipeline（避免独立派发任务积压）
-				_stream_force_build[ck3] = true
-				if data:
-					var origin := VoxelChunk.origin_of(ck3)
-					data.dirty_voxels[origin] = data.get_voxel(origin)
+				_rebuild_single_chunk_direct(ck3)
 				reloaded += 1
 	if reloaded > 0:
 		_request_update()
+
+
+## 流式补建：同步生成单个 chunk 网格数组并直接入 GPU 限流队列。
+## 绕过异步 pipeline（_pending_task_count 串行等待 + 视锥朝向延迟），
+## 补建 chunk 由 _process_mesh_build_queue 帧尾限量构建——不受"每批完成后才下一批"
+## 限制，移动时网格快速出现。单 chunk 生成走原生路径 ~1ms，主线程可接受。
+func _rebuild_single_chunk_direct(ck: Vector3i) -> void:
+	if not data:
+		return
+	var has_voxels := data.has_chunk(ck)
+	var arr: Dictionary = {}
+	if has_voxels:
+		# 构建该 chunk 的 18³ 光环缓冲并生成网格数组（原生 C++ 加速）
+		var halo := data.get_chunk_halo(ck)
+		var aligned := VoxelMaterial.align_by_id(_materials_snapshot)
+		arr = VoxelChunkGenerator.generate_single_chunk_dense(
+			halo, aligned, voxel_scale, ck, data.center_offset if data else Vector3.ZERO)
+	# 直接入 GPU 限流队列（与异步结果同格式），由 _process_mesh_build_queue 帧尾构建
+	_mesh_build_queue[ck] = {
+		"arrays": arr,
+		"has_voxels": has_voxels,
+	}
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
