@@ -148,13 +148,17 @@ var _empty_superchunks: Dictionary = {}
 # 超级块重建限流：_rebuild_dirty_superchunks 由同步调用改为入队，_process 帧尾限量执行，
 # 纳入 GPU 忙检测（add_surface_from_arrays 同步上传，避免破坏时整块重建造成 Metal fence 超时）
 var _superchunk_rebuild_scheduled: bool = false
-# 每帧最多重建的超级块数
-var _superchunk_rebuild_per_frame: int = 1
+# 每帧最多重建的超级块数（提高可加快补建；配合下方 3ms 时间预算 + GPU 忙检测兜底防超时）
+var _superchunk_rebuild_per_frame: int = 8
 
 # 流式加载每帧限量：相机移动跨越边界时，卸载/补建分批进行，
 # 避免一次处理几十个 chunk（queue_free + 重建 + GPU 上传）造成掉帧
 var _stream_unload_per_frame: int = 32
-var _stream_reload_per_frame: int = 32	
+var _stream_reload_per_frame: int = 32
+# 流式补建待强制的 chunk：进入 load 距离后应无条件构建（距离驱动，非朝向驱动），
+# 不被 _filter_frustum_chunks 延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
+# 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
+var _stream_force_build: Dictionary = {}
 # 异步网格生成状态（多任务并行，每个任务独立处理）
 var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
 var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
@@ -176,7 +180,9 @@ var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 # key: chunk_key -> {arrays: Dictionary, has_voxels: bool}
 var _mesh_build_queue: Dictionary = {}
 # 每帧最多构建的 chunk 数（GPU 上传限流）
-var _mesh_build_per_frame: int = 2
+# 流式补建直接入此队列，单 chunk 构建成本低（~1ms），提高后补建更流畅；
+# 配合 3ms 时间预算 + GPU 忙检测兜底防 Metal fence 超时
+var _mesh_build_per_frame: int = 8
 # 帧尾构建是否已排期（防重复 call_deferred）
 var _mesh_build_scheduled: bool = false
 # GPU 忙检测：上一帧渲染耗时超过此阈值(ms)时暂停本帧构建，避免 ArrayMesh
@@ -422,6 +428,11 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var world_offset := global_position
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
+		# 流式补建强制的 chunk：距离驱动，忽略朝向，无条件构建（清除标记避免重复）
+		if _stream_force_build.has(ck):
+			_stream_force_build.erase(ck)
+			visible.append(ck)
+			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 		if _aabb_has_vertex_in_frustum(aabb, cam):
 			visible.append(ck)
@@ -496,11 +507,12 @@ func _process_streaming() -> void:
 	var world_offset := global_position
 	var load_d := stream_load_distance
 	var unload_d := stream_unload_distance
-	# 超级块模式下，补建 1 个 chunk 会触发整个超级块（64 chunk）合并重建，
-	# 因此每帧补建限量降为 1，把超级块重建摊平到多帧（避免整块合并的帧尖峰）
+	# 超级块模式下，补建 1 个 chunk 会触发其所在超级块（64 chunk）合并重建。
+	# 重建队列每帧最多处理 _superchunk_rebuild_per_frame 个（已提高到 8），
+	# 因此补建限量保持与重建上限一致，避免"补建慢、重建快"的瓶颈错位。
 	var reload_limit := _stream_reload_per_frame
-	if superchunk_size > 0:
-		reload_limit = 1
+	if superchunk_size > 0 and reload_limit > _superchunk_rebuild_per_frame:
+		reload_limit = _superchunk_rebuild_per_frame
 
 	# 1. 卸载：距离 > unload_d 的已建 chunk 网格释放
 	# 【每帧限量】卸载分批进行，避免一次 queue_free 大量节点造成掉帧
@@ -547,12 +559,37 @@ func _process_streaming() -> void:
 					_dirty_superchunks[sk] = true
 					_schedule_superchunk_rebuild()
 				else:
+					# 流式补建：同步生成单 chunk 数组，直接入 GPU 限流队列。
+					# 绕过异步 pipeline（_pending_task_count 串行 + 视锥延迟），
+					# 补建由 _process_mesh_build_queue 帧尾限量构建——补建不再
+					# 受"每批完成后才下一批"限制，移动时网格快速出现。
 					if data:
-						var origin := VoxelChunk.origin_of(ck3)
-						data.dirty_voxels[origin] = data.get_voxel(origin)
+						_rebuild_single_chunk_direct(ck3)
 				reloaded += 1
 	if reloaded > 0:
 		_request_update()
+
+
+## 流式补建：同步生成单个 chunk 的网格数组并直接入 GPU 限流队列
+## 绕过异步 pipeline（_pending_task_count 串行等待 + 视锥朝向延迟），
+## 使补建 chunk 由 _process_mesh_build_queue 帧尾限量构建，移动时网格快速出现。
+## 单 chunk 生成走原生路径（或 GDScript 回退），耗时 ~1ms，主线程可接受。
+func _rebuild_single_chunk_direct(ck: Vector3i) -> void:
+	if not data:
+		return
+	var has_voxels := data.has_chunk(ck)
+	var arr: Dictionary = {}
+	if has_voxels:
+		# 构建该 chunk 的 18³ 光环缓冲并生成网格数组
+		var halo := data.get_chunk_halo(ck)
+		var aligned := VoxelMaterial.align_by_id(_materials_snapshot)
+		arr = VoxelChunkGenerator.generate_single_chunk_dense(
+			halo, aligned, voxel_scale, ck, data.center_offset if data else Vector3.ZERO)
+	# 直接入 GPU 限流队列（与异步结果同格式），由 _process_mesh_build_queue 帧尾构建
+	_mesh_build_queue[ck] = {
+		"arrays": arr,
+		"has_voxels": has_voxels,
+	}
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
@@ -563,6 +600,7 @@ func _unload_chunk(ck: Vector3i) -> void:
 	_chunk_meshes.erase(ck)
 	_remove_chunk_collision(ck)
 	_mesh_build_queue.erase(ck)
+	_stream_force_build.erase(ck)
 	_streamed_out_chunks[ck] = true
 	# 记录性能/内存释放（诊断）
 	if diag_enabled:
