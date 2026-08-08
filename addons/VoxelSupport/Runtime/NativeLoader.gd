@@ -20,7 +20,6 @@ static var _required_methods := [
 	&"greedy_merge_dense",
 	&"generate_chunk_dense",
 	&"find_unsupported_around",
-	&"update_support_cache_remove",
 ]
 
 ## 获取原生实例（懒初始化）。返回 null 表示不可用。
@@ -66,20 +65,11 @@ static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByte
 
 ## 支撑图失稳检测（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照
-## support_cache: pos(Vector3i) -> 下方支撑计数 的快照
 ## removed: 本次被移除的体素位置数组
 ## 返回失稳体素集合 Dictionary{pos(Vector3i): true}
-static func find_unsupported_around(buffers: Dictionary, support_cache: Dictionary, removed: Array) -> Dictionary:
+static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dictionary:
 	var inst := _get_instance()
-	return inst.call(&"find_unsupported_around", buffers, support_cache, removed)
-
-
-## 批量移除后计算支撑缓存增量更新（转发到原生实现，动态调用）
-## 返回 {removed: Array[Vector3i], updated: {pos: count}} 增量字典，
-## 由调用方据此原地修改 _support_cache（避免全量深拷贝 143 万条）
-static func update_support_cache_remove(support_cache: Dictionary, buffers: Dictionary, positions: Array) -> Dictionary:
-	var inst := _get_instance()
-	return inst.call(&"update_support_cache_remove", support_cache, buffers, positions)
+	return inst.call(&"find_unsupported_around", buffers, removed)
 
 
 ## 强制重新检测（加载失败后重试时调用）

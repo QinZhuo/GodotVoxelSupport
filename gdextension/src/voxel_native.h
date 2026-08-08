@@ -46,22 +46,11 @@ public:
 
 	// 支撑图失稳检测（等价于 VoxelData.find_unsupported_around）
 	// buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照（VoxelData._chunk_buffers 的深拷贝）
-	// support_cache: pos(Vector3i) -> 下方支撑计数 的快照（惰性读取，仅触及体素）
 	// removed: 本次被移除的体素位置数组（Array[Vector3i]）
 	// 返回：失稳体素位置集合 Dictionary{pos(Vector3i): true}（GDScript 直接作 Set 用）
-	// 设计为惰性加载：只收集候选及邻居涉及的局部 chunk，避免全量拷贝整世界（破坏卡顿根源）
-	static Dictionary find_unsupported_around(const Dictionary &buffers, const Dictionary &support_cache,
-			const Array &removed);
-
-	// 批量移除后计算支撑缓存增量更新（等价于 VoxelData._support_cache_on_remove_batch 的 C++ 版）
-	// support_cache: pos(Vector3i) -> 下方支撑计数 的快照（只读输入，用于判断）
-	// buffers: chunk key -> PackedInt32Array 的密集缓冲快照（用于 has_voxel 判断）
-	// positions: 被移除的体素位置数组（Array[Vector3i]）
-	// 返回增量字典 {removed: Array[Vector3i], updated: {pos: count}}，由 GDScript 侧原地应用。
-	// 设计为增量而非返回全量缓存，避免深拷贝 143 万条支撑记录（破坏卡顿的根源）。
-	// 注意：buffers 必须已反映移除后的状态（调用方先 remove 再调用本函数）
-	static Dictionary update_support_cache_remove(const Dictionary &support_cache, const Dictionary &buffers,
-			const Array &positions);
+	// 实时局部传播（无预计算缓存）：有效支撑 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数，
+	// 只访问破坏点附近体素。设计为惰性加载：只收集候选及邻居涉及的局部 chunk，避免全量拷贝整世界。
+	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed);
 };
 
 } // namespace godot

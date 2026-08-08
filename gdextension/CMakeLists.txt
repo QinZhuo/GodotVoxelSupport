@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.17)
 
 # 体素插件原生核心 (GDExtension)
 # 多平台构建：godot-cpp 官方模板同款 CMake 方案
-# 用法：
-#   cmake -S . -B build -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Release
-#   cmake --build build --config Release
+# 用法（注意：必须用 Debug 配置构建，因 .gdextension 在编辑器/F5 调试运行时
+#   加载 macos.debug.arm64 命名的库；Release 构建输出名不匹配会导致运行期加载崩溃）：
+#   cmake -S . -B build -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Debug
+#   cmake --build build
 # 平台支持：macOS(arm64/x86_64) / Windows(x86_64) / Linux(x86_64)
 #   通过 CMake 内置 -DCMAKE_OSX_ARCHITECTURES / 交叉工具链 / GitHub Actions 矩阵实现
 
@@ -39,12 +40,19 @@ endif()
 
 # 将编译产物直接输出到插件分发目录 addons/VoxelSupport/Native/
 # （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，编译完即就位，无需手动复制）
-# 发布时需按 .gdextension 声明的文件名重命名（如 macos.debug.arm64 后缀）：
-#   macOS:    libvoxelnative.macos.debug.arm64.dylib / .release.arm64.dylib
-#   Windows:  voxelnative.windows.debug.x86_64.dll
-#   Linux:    libvoxelnative.linux.debug.x86_64.so
+# 输出名与 .gdextension 声明的文件名严格一致，避免运行期加载到旧库（签名不匹配崩溃）：
+#   macOS debug:   libvoxelnative.macos.debug.arm64.dylib
+#   Linux debug:   libvoxelnative.linux.debug.x86_64.so
+#   Windows debug: voxelnative.windows.debug.x86_64.dll
 set_target_properties(voxelnative PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
 )
+if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.debug.arm64")
+elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.windows.debug.x86_64")
+elseif(UNIX AND NOT APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.linux.debug.x86_64")
+endif()

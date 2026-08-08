@@ -387,8 +387,7 @@ inline int buf_index(const Vector3i &local) {
 
 } // namespace
 
-Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Dictionary &support_cache,
-		const Array &removed) {
+Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Array &removed) {
 	// 结果：失稳体素集合
 	Dictionary unstable;
 	if (buffers.is_empty() || removed.is_empty()) {
@@ -396,7 +395,7 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 	}
 
 	// 惰性构建 chunk 缓冲查找结构：只收集候选体素及其邻居涉及的 chunk。
-	// 避免遍历整世界（143 万 support_cache + 1183 chunk 全量拷贝是灾难性开销）。
+	// 避免遍历整世界（1183 chunk 全量拷贝是灾难性开销）。
 	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
 	auto ensure_chunk = [&](const Vector3i &p) {
 		const uint64_t kk = vkey(chunk_of(p));
@@ -406,19 +405,6 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 			}
 		}
 	};
-
-	// 候选体素 = removed 的 5 个上方位邻居中仍存在的体素（先收集 chunk 再查询）
-	std::vector<Vector3i> stack;
-	{
-		for (int i = 0; i < removed.size(); ++i) {
-			const Vector3i rp = removed[i];
-			ensure_chunk(rp);
-			for (int d = 0; d < 5; ++d) {
-				const Vector3i nb(rp.x + UPPER_5[d][0], rp.y + UPPER_5[d][1], rp.z + UPPER_5[d][2]);
-				ensure_chunk(nb);
-			}
-		}
-	}
 
 	// has_voxel：局部 chunk 内查询（与 GDScript has_voxel 语义一致：值>0 表示存在）
 	auto has_voxel = [&](const Vector3i &p) -> bool {
@@ -434,11 +420,14 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		return it->second.ptr()[buf_index(local)] > 0;
 	};
 
-	// 候选体素 = removed 的 5 个上方位邻居中仍存在的体素
+	// 候选体素 = removed 的 5 个上方位邻居中仍存在的体素（先收集 chunk 再查询）
+	std::vector<Vector3i> stack;
 	for (int i = 0; i < removed.size(); ++i) {
 		const Vector3i rp = removed[i];
+		ensure_chunk(rp);
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(rp.x + UPPER_5[d][0], rp.y + UPPER_5[d][1], rp.z + UPPER_5[d][2]);
+			ensure_chunk(nb);
 			if (has_voxel(nb)) {
 				stack.push_back(nb);
 			}
@@ -448,8 +437,11 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		return unstable;
 	}
 
-	// 失稳传播（增量支撑图，O(1) 读计数）
-	std::unordered_map<uint64_t, int> local_dec;
+	// 失稳传播（实时支撑统计，无预计算缓存）：
+	//   - removed 已从缓冲移除 → has_voxel=false，不计作支撑
+	//   - 传播中失稳的体素标记于 unstable，不计作支撑
+	//   - 有效支撑数 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数
+	//   - <= 0 且 y>0 则失稳（贴地体素永远稳定）
 
 	// 待处理栈（候选 + 传播新发现的邻居），unstable.has 防重复处理
 	std::vector<Vector3i> work(stack.begin(), stack.end());
@@ -466,22 +458,25 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 			continue;
 		}
 
-		// 有效支撑数 = 缓存计数 - 被失稳邻居夺走的支撑
-		const int base = support_cache.has(cur) ? int(support_cache[cur]) : 0;
-		const int dec = local_dec.count(vkey(cur)) ? local_dec[vkey(cur)] : 0;
-		const int effective = base - dec;
+		// 实时统计有效支撑数（5 次 O(1) chunk 查询）
+		int effective = 0;
+		for (int d = 0; d < 5; ++d) {
+			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
+			if (has_voxel(nb) && !unstable.has(nb)) {
+				effective += 1;
+			}
+		}
 		if (effective > 0) {
 			continue;
 		}
 
 		// 失稳
 		unstable[cur] = true;
-		// 连锁失稳：夺走其 UPPER_5 邻居的一个支撑
+		// 连锁失稳：其上方位邻居失去一个支撑，加入检查
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + UPPER_5[d][0], cur.y + UPPER_5[d][1], cur.z + UPPER_5[d][2]);
 			ensure_chunk(nb);
 			if (has_voxel(nb) && !unstable.has(nb)) {
-				local_dec[vkey(nb)] = local_dec[vkey(nb)] + 1;
 				work.push_back(nb);
 			}
 		}
@@ -498,102 +493,8 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 	return unstable;
 }
 
-Dictionary VoxelNative::update_support_cache_remove(const Dictionary &support_cache, const Dictionary &buffers,
-		const Array &positions) {
-	// 增量更新：返回 {removed: Array[Vector3i], updated: {pos: count}} 增量字典，
-	// 避免深拷贝整个 support_cache（143 万条）。GDScript 侧据此原地修改 _support_cache。
-	Dictionary delta;
-	Array removed_arr;
-	if (positions.is_empty()) {
-		delta["removed"] = removed_arr;
-		delta["updated"] = Dictionary();
-		return delta;
-	}
-
-	// 待删集合（用于判断邻居是否仍存在）
-	std::unordered_map<uint64_t, bool> remove_set;
-	for (int i = 0; i < positions.size(); ++i) {
-		const Vector3i p = positions[i];
-		remove_set[vkey(p)] = true;
-		removed_arr.append(p);
-	}
-
-	// 将 chunk 缓冲转换为原生查找结构：只收集被删体素及其邻居可能涉及的 chunk
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
-	{
-		std::unordered_map<uint64_t, bool> need_chunk;
-		for (int i = 0; i < positions.size(); ++i) {
-			const Vector3i p = positions[i];
-			need_chunk[vkey(chunk_of(p))] = true;
-			for (int d = 0; d < 5; ++d) {
-				const Vector3i up(p.x + UPPER_5[d][0], p.y + UPPER_5[d][1], p.z + UPPER_5[d][2]);
-				need_chunk[vkey(chunk_of(up))] = true;
-				const Vector3i dn(p.x + LOWER_5[d][0], p.y + LOWER_5[d][1], p.z + LOWER_5[d][2]);
-				need_chunk[vkey(chunk_of(dn))] = true;
-			}
-		}
-		Array ckeys = buffers.keys();
-		Array cvals = buffers.values();
-		for (int i = 0; i < ckeys.size(); ++i) {
-			const Vector3i ck = ckeys[i];
-			const uint64_t kk = vkey(ck);
-			if (need_chunk.find(kk) != need_chunk.end()) {
-				chunk_bufs[kk] = cvals[i];
-			}
-		}
-	}
-
-	auto has_voxel = [&](const Vector3i &p) -> bool {
-		const Vector3i ck = chunk_of(p);
-		const auto it = chunk_bufs.find(vkey(ck));
-		if (it == chunk_bufs.end()) {
-			return false;
-		}
-		const Vector3i local = p - ck * CHUNK_BITS;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_BITS || local.y >= CHUNK_BITS || local.z >= CHUNK_BITS) {
-			return false;
-		}
-		return it->second.ptr()[buf_index(local)] > 0;
-	};
-
-	// 受影响邻居 = 所有被删体素的 UPPER_5 中未被删且仍存在的体素
-	std::unordered_map<uint64_t, bool> affected;
-	for (int i = 0; i < positions.size(); ++i) {
-		const Vector3i pos = positions[i];
-		for (int d = 0; d < 5; ++d) {
-			const Vector3i nb(pos.x + UPPER_5[d][0], pos.y + UPPER_5[d][1], pos.z + UPPER_5[d][2]);
-			const uint64_t nk = vkey(nb);
-			if (remove_set.find(nk) == remove_set.end() && has_voxel(nb)) {
-				affected[nk] = true;
-			}
-		}
-	}
-
-	// 逐受影响邻居重算计数（重算比递增更稳）
-	Dictionary updated;
-	for (const auto &kv : affected) {
-		const uint64_t k = kv.first;
-		const int x = int((k >> 42) & 0x1FFFFF);
-		const int y = int((k >> 21) & 0x1FFFFF);
-		const int z = int(k & 0x1FFFFF);
-		int count = 0;
-		for (int d = 0; d < 5; ++d) {
-			const Vector3i lower(x + LOWER_5[d][0], y + LOWER_5[d][1], z + LOWER_5[d][2]);
-			if (remove_set.find(vkey(lower)) == remove_set.end() && has_voxel(lower)) {
-				count += 1;
-			}
-		}
-		const Vector3i nb(x, y, z);
-		updated[nb] = count;
-	}
-	delta["removed"] = removed_arr;
-	delta["updated"] = updated;
-	return delta;
-}
-
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "support_cache", "removed"), &VoxelNative::find_unsupported_around);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("update_support_cache_remove", "support_cache", "buffers", "positions"), &VoxelNative::update_support_cache_remove);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 }

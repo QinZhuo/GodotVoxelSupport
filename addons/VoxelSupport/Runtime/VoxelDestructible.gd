@@ -197,14 +197,11 @@ func _ready() -> void:
 	super._ready()
 	if not Engine.is_editor_hint():
 		_ensure_debris_root()
-		# 延迟一帧：确保外部在 _ready 前赋值的 data 已就绪，做一次初始全量稳定性校验
-		# 使场景进入静态稳定状态（清除初始悬空结构），之后破坏由局部检测负责
-		call_deferred("validate_stability")
-		# 预热 chunk 索引与支撑缓存，避免首次破坏时在主线程全量构建导致卡顿
-		# 但对于已禁用崩塌（COLLAPSE_NONE）的节点（如地面），prewarm 是纯浪费
-		# 1000×1000×50体素的全量构建会阻塞主线程数秒，导致加载屏幕卡死在60%
-		if collapse_mode != CollapseMode.COLLAPSE_NONE:
-			call_deferred("_prewarm_caches")
+		# 不再做初始全量稳定性校验：浮空结构默认保持稳定，失稳只由破坏逻辑
+		# （局部检测）触发，避免打开场景时主线程全量遍历体素（百万级体素可卡数秒）。
+		# 需要主动校验时调用方手动调 validate_stability()
+		# 支撑检测采用实时局部查询（LOWER_5 邻居统计），无需预热任何缓存——
+		# 失稳传播只访问破坏点附近体素（微秒级），零初始化开销。
 
 
 func _exit_tree() -> void:
@@ -1317,15 +1314,6 @@ func validate_stability() -> void:
 	voxels_about_to_collapse.emit(unstable)
 	voxel_damaged.emit(unstable, true)
 	last_collapse_count = unstable.size()
-
-
-## 预热 chunk 索引与支撑缓存（延迟到初始构建完成后执行）。
-## 批量直接写入 voxels 的场景会绕过 set_voxel 的增量维护，首次破坏会触发
-## 整字典全量构建造成卡顿，这里在加载后提前构建一次，破坏时直接复用。
-func _prewarm_caches() -> void:
-	if not data:
-		return
-	data.warm_up_cache()
 
 
 # ----------------------------------------------------------------------------

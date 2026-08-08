@@ -107,10 +107,13 @@ var _damage_mode: int = DamageMode.SPHERE
 
 
 func _ready() -> void:
+	var _t0 := Time.get_ticks_msec()
 	_setup_ground()
 	_build_target()
 	_setup_camera()
 	_setup_hud()
+	var _t_init := Time.get_ticks_msec() - _t0
+	print("[初始化] 场景打开到 _ready 完成: %dms (批量填充改造后)" % _t_init)
 	_perf_log.append("=".repeat(60))
 	_perf_log.append("[性能测试] 超大型体素结构 %dx%dx%d 初始化完成" % [structure_size.x, structure_size.y, structure_size.z])
 	_perf_log.append("[性能测试] 外壳厚度=%d 隔墙间隔=%d 楼层数=%d" % [shell_thickness, internal_wall_interval, floor_count])
@@ -290,17 +293,28 @@ func _create_large_structure_data() -> VoxelData:
 	var floor_height := maxi(1, (S.y - 2) / floor_count)
 
 	# --- 1. 外壳 (地板、天花板、四周墙壁) ---
-	# 地板: y=0, 整个底面
+	# 地板: y=0, 整个底面（批量填充，避免逐体素 set_voxel 的哈希/信号开销）
+	var floor_positions: Array = []
+	floor_positions.resize(S.x * S.z)
+	var _i := 0
 	for x in range(S.x):
 		for z in range(S.z):
-			data.set_voxel(Vector3i(x, 0, z), concrete.id)
+			floor_positions[_i] = Vector3i(x, 0, z)
+			_i += 1
+	data.set_voxels(floor_positions, concrete.id)
 
 	# 天花板: y=S.y-1
+	var ceil_positions: Array = []
+	ceil_positions.resize(S.x * S.z)
+	_i = 0
 	for x in range(S.x):
 		for z in range(S.z):
-			data.set_voxel(Vector3i(x, S.y - 1, z), metal.id)
+			ceil_positions[_i] = Vector3i(x, S.y - 1, z)
+			_i += 1
+	data.set_voxels(ceil_positions, metal.id)
 
 	# 四周墙壁 (厚度 t)
+	var wall_positions: Array = []
 	for y in range(1, S.y - 1):
 		# 前墙 (z=0) 和后墙 (z=S.z-1)
 		for x in range(S.x):
@@ -308,13 +322,14 @@ func _create_large_structure_data() -> VoxelData:
 				var z_pos := thick
 				var z_end := S.z - 1 - thick
 				if z_pos < S.z:
-					data.set_voxel(Vector3i(x, y, z_pos), metal.id)
+					wall_positions.append(Vector3i(x, y, z_pos))
 				if z_end >= 0 and z_end != z_pos:
-					data.set_voxel(Vector3i(x, y, z_end), metal.id)
+					wall_positions.append(Vector3i(x, y, z_end))
 		# 左墙 (x=0) 和右墙 (x=S.x-1)
 		for z in range(t, S.z - t):
-			data.set_voxel(Vector3i(0, y, z), metal.id)
-			data.set_voxel(Vector3i(S.x - 1, y, z), metal.id)
+			wall_positions.append(Vector3i(0, y, z))
+			wall_positions.append(Vector3i(S.x - 1, y, z))
+	data.set_voxels(wall_positions, metal.id)
 
 	# --- 2. 内部楼层地板 ---
 	for floor in range(1, floor_count):
@@ -322,13 +337,16 @@ func _create_large_structure_data() -> VoxelData:
 		if floor_y >= S.y - 1:
 			break
 		# 楼层地板 (厚度 t)
+		var floor_pos: Array = []
 		for fy in range(floor_y, mini(floor_y + t, S.y - 1)):
 			for x in range(t, S.x - t):
 				for z in range(t, S.z - t):
-					data.set_voxel(Vector3i(x, fy, z), concrete.id)
+					floor_pos.append(Vector3i(x, fy, z))
+		data.set_voxels(floor_pos, concrete.id)
 
 	# --- 3. 内部隔墙 ---
 	if internal_wall_interval > 0:
+		var wall_pos: Array = []
 		for y in range(1, S.y - 1):
 			# X 方向隔墙
 			for wx in range(internal_wall_interval, S.x - t, internal_wall_interval):
@@ -343,7 +361,7 @@ func _create_large_structure_data() -> VoxelData:
 							is_floor = true
 							break
 					if not is_floor:
-						data.set_voxel(Vector3i(wx, y, z), accent.id)
+						wall_pos.append(Vector3i(wx, y, z))
 			# Z 方向隔墙
 			for wz in range(internal_wall_interval, S.z - t, internal_wall_interval):
 				if wz >= S.z - t:
@@ -356,7 +374,8 @@ func _create_large_structure_data() -> VoxelData:
 							is_floor = true
 							break
 					if not is_floor:
-						data.set_voxel(Vector3i(x, y, wz), accent.id)
+						wall_pos.append(Vector3i(x, y, wz))
+		data.set_voxels(wall_pos, accent.id)
 
 	# --- 4. 窗户 (前墙和后墙) ---
 	var win_interval := maxi(15, S.x / 8)
@@ -364,34 +383,30 @@ func _create_large_structure_data() -> VoxelData:
 	var win_w := 6
 	var win_y_start := 8
 	var win_count := S.x / win_interval
+	var win_positions: Array = []
 	for wi in range(win_count):
 		var wx := wi * win_interval + 4
 		if wx + win_w >= S.x - 1:
 			break
-		# 前墙窗户 (z=0 处)
+		# 前墙窗户 (z=0 处) + 后墙窗户 (z=S.z-1 处)
 		for y in range(win_y_start, win_y_start + win_h):
 			for x in range(wx, wx + win_w):
-				if data.has_voxel(Vector3i(x, y, 0)):
-					data.remove_voxel(Vector3i(x, y, 0))
-		# 后墙窗户 (z=S.z-1 处)
-		for y in range(win_y_start, win_y_start + win_h):
-			for x in range(wx, wx + win_w):
-				if data.has_voxel(Vector3i(x, y, S.z - 1)):
-					data.remove_voxel(Vector3i(x, y, S.z - 1))
+				win_positions.append(Vector3i(x, y, 0))
+				win_positions.append(Vector3i(x, y, S.z - 1))
+	data.remove_voxels(win_positions)
 
-	# --- 5. 门洞 (前墙底部) ---
+	# --- 5. 门洞 (前墙底部 + 侧墙) ---
 	var door_w := 6
 	var door_h := 8
 	var door_x := S.x / 2 - door_w / 2
+	var door_positions: Array = []
 	for y in range(0, door_h):
 		for x in range(door_x, door_x + door_w):
-			data.remove_voxel(Vector3i(x, y, 0))
-
-	# 侧墙门洞
-	for y in range(0, door_h):
+			door_positions.append(Vector3i(x, y, 0))
 		for z in range(S.z / 2 - door_w / 2, S.z / 2 + door_w / 2):
-			data.remove_voxel(Vector3i(0, y, z))
-			data.remove_voxel(Vector3i(S.x - 1, y, z))
+			door_positions.append(Vector3i(0, y, z))
+			door_positions.append(Vector3i(S.x - 1, y, z))
+	data.remove_voxels(door_positions)
 
 	_perf_log.append("[生成] 结构尺寸: %dx%dx%d = ~%d 体素" % [S.x, S.y, S.z, S.x * S.y * S.z])
 	_perf_log.append("[生成] 实际体素数: %d" % data.get_voxel_count())
@@ -519,7 +534,6 @@ func _handle_input(_delta: float) -> void:
 	if key_l and not _prev_l and _saved_data != null:
 		_target.damage_map.clear()
 		_target.data.load_data(_saved_data)
-		_target.validate_stability()
 		_log_perf_line("读档重建")
 
 	# --- 破坏执行 ---
