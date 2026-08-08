@@ -241,14 +241,16 @@ func _process(_delta: float) -> void:
 	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
 	# 这里只处理限流和启动新任务
 
-	# 可见性管理周期检查（视锥剔除补建 + 流式加载/卸载 统一节奏）
+	# 可见性管理：
+	#  - 视锥补建：每帧限量检查（走近/转向时分批平滑出现，_process_deferred_chunks 内限量）
+	#  - 流式卸载/补建：按 visibility_check_interval 帧节奏（距离管理不需要太频繁）
 	# 仅在无进行中任务时触发，避免与批次冲突
+	if _pending_task_count == 0 and visibility_mode != VisibilityMode.FULL:
+		_process_deferred_chunks()
 	_cull_check_counter += 1
 	if _cull_check_counter >= visibility_check_interval:
 		_cull_check_counter = 0
 		if _pending_task_count == 0:
-			if visibility_mode != VisibilityMode.FULL:
-				_process_deferred_chunks()
 			if _streaming_enabled:
 				_process_streaming()
 
@@ -401,12 +403,19 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 		if cam_pos.distance_to(aabb.get_center()) > unload_distance:
 			_streamed_out_chunks[ck] = true
 		else:
+			# 进入构建范围：清除旧卸载标记。
+			# 【关键】相机移动后，旧标记的 chunk 距离可能重新 < unload（如 30~50 滞留区），
+			# 若残留 streamed_out，_apply_single_chunk_result 会丢弃其网格结果 → 永不显示。
+			_streamed_out_chunks.erase(ck)
 			kept.append(ck)
 	return kept
 
 
-## 视锥剔除过滤（FULL 模式全量返回）。FRUSTUM/STREAMING 模式仅保留视锥内或
-## view_distance 内（相机附近）的 chunk，视锥外加入待建队列延迟补建。
+## 视锥剔除过滤（FULL 模式全量返回）。FRUSTUM / STREAMING 均保留视锥剔除
+## （双层优化：距离卸载 + 朝向剔除）：
+##   - 视锥内：立即构建（量受 FOV 限制，转向扫过的量可控）
+##   - 视锥外：进待建队列，由 _process_deferred_chunks 限量补建（每帧若干个），
+##     走近/转向时分批平滑出现，避免一次把大量 chunk 全部派发 → 主线程快照+生成+上传掉帧
 func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	if visibility_mode == VisibilityMode.FULL:
 		return chunks
@@ -414,20 +423,17 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	if cam == null:
 		return chunks
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
-	var margin := view_distance
 	var cam_pos := cam.global_position
 	var world_offset := global_position
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
-		# 流式补建强制的 chunk：距离驱动，忽略朝向，无条件构建（清除标记避免重复）
+		# 流式补建强制的 chunk：距离驱动，无条件构建（清除标记避免重复）
 		if _stream_force_build.has(ck):
 			_stream_force_build.erase(ck)
 			visible.append(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 		if _aabb_has_vertex_in_frustum(aabb, cam):
-			visible.append(ck)
-		elif margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin:
 			visible.append(ck)
 		else:
 			_deferred_chunks[ck] = true
@@ -467,7 +473,9 @@ func is_world_visible(world_pos: Vector3) -> bool:
 
 
 ## 周期性检查待建队列：视锥外的 chunk 进入视锥（或相机靠近）后触发补建。
-## 由 _process 按 visibility_check_interval 帧调用一次。
+## 【限量补建】每帧最多 _stream_per_frame 个（与流式卸载对称），
+## 走近/转向时避免一次把大量待建 chunk 全部标脏 → 主线程快照 + 生成 + GPU 上传掉帧。
+## 视锥内优先，其次 view_distance 半径内。由 _process 周期性调用。
 func _process_deferred_chunks() -> void:
 	if _deferred_chunks.is_empty():
 		return
@@ -478,21 +486,24 @@ func _process_deferred_chunks() -> void:
 	var margin := view_distance
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var to_build: Array[Vector3i] = []
-	for ck in _deferred_chunks:
+	var built := 0
+	for ck in _deferred_chunks.keys():
+		if built >= _stream_per_frame:
+			break
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if _aabb_has_vertex_in_frustum(aabb, cam):
-			to_build.append(ck)
-		elif margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin:
-			to_build.append(ck)
-	if to_build.is_empty():
-		return
-	for ck in to_build:
+		if not _aabb_has_vertex_in_frustum(aabb, cam):
+			if not (margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin):
+				continue
 		_deferred_chunks.erase(ck)
 		if data:
+			# 强制构建标记：确保增量重建时不被视锥剔除拦截回 deferred
+			# （该 chunk 在视锥外但已在加载范围，必须真正构建）
+			_stream_force_build[ck] = true
 			var origin := VoxelChunk.origin_of(ck)
 			data.dirty_voxels[origin] = data.get_voxel(origin)
-	_request_update()
+		built += 1
+	if built > 0:
+		_request_update()
 
 
 ## 流式加载处理（距离 LOD 卸载）：
@@ -543,18 +554,23 @@ func _process_streaming() -> void:
 			for ck_clean in _streamed_out_chunks.keys():
 				if not data.has_chunk(ck_clean):
 					_streamed_out_chunks.erase(ck_clean)
+		# 先收集进入加载距离的 chunk（快照数组），再统一处理。
+		# 不能在 for-in 遍历字典时 erase（会跳过/漏项导致部分 chunk 不补建）。
+		var to_reload: Array[Vector3i] = []
 		for ck in _streamed_out_chunks:
-			if reloaded >= _stream_per_frame:
+			if to_reload.size() >= _stream_per_frame:
 				break
 			var ck3: Vector3i = ck
 			var aabb := _chunk_world_aabb(ck3, chunk_size_world, world_offset)
 			if cam_pos.distance_to(aabb.get_center()) <= load_d:
-				_streamed_out_chunks.erase(ck3)
-				if data and data.is_streaming():
-					# 数据层磁盘流式：先把 chunk 数据从磁盘读回内存，再生成网格
-					data.preload_chunk(ck3)
-				_rebuild_single_chunk_direct(ck3)
-				reloaded += 1
+				to_reload.append(ck3)
+		for ck3 in to_reload:
+			_streamed_out_chunks.erase(ck3)
+			if data and data.is_streaming():
+				# 数据层磁盘流式：先把 chunk 数据从磁盘读回内存，再生成网格
+				data.preload_chunk(ck3)
+			_rebuild_single_chunk_direct(ck3)
+			reloaded += 1
 	if reloaded > 0:
 		_request_update()
 
