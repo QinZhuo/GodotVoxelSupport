@@ -17,7 +17,9 @@ namespace godot {
 // GDScript 侧通过 VoxelNative 调用，替代部分 GDScript 慢实现：
 //   - greedy_merge_dense:     贪婪网格合并（已完成，~11.5x）
 //   - generate_chunk_dense:   chunk 网格生成主循环（16³ 体素 × 6 方向可见性 + 贪婪合并）
-//   - find_unsupported_around: 支撑图失稳检测（待实现）
+//   - find_unsupported_around: 支撑图失稳检测（已完成）
+//   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速，GDScript 逐体素循环替代）
+//   - partition_connected:    连通分组（大崩塌掉落体分组提速）
 class VoxelNative : public RefCounted {
 	GDCLASS(VoxelNative, RefCounted)
 
@@ -51,6 +53,19 @@ public:
 	// 实时局部传播（无预计算缓存）：有效支撑 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数，
 	// 只访问破坏点附近体素。设计为惰性加载：只收集候选及邻居涉及的局部 chunk，避免全量拷贝整世界。
 	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed);
+
+	// 批量移除体素（返回修改后的 chunk buffer + 每 chunk 实际移除数）
+	// buffers: chunk key -> PackedInt32Array(16³)
+	// positions: 待移除位置数组（Array[Vector3i]）
+	// 返回 Dictionary：{removed: int 总移除数, chunk_removed: {chunk_key: count},
+	//                   buffers: {chunk_key: PackedInt32Array(修改后)} }
+	//   GDScript 用返回的 buffers 覆盖 _chunk_buffers，并据此更新计数/dirty
+	static Dictionary remove_voxels_bulk(const Dictionary &buffers, const Array &positions);
+
+	// 连通分组：positions 按 6 方向连通性分组（与 VoxelData.partition_connected 一致）
+	// positions: Array[Vector3i]
+	// 返回 Array[Array[Vector3i]]，每组内两两 6 方向连通
+	static Array partition_connected(const Array &positions);
 };
 
 } // namespace godot

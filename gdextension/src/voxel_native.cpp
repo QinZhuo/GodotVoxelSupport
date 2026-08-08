@@ -4,6 +4,7 @@
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <array>
 #include <cstdint>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -381,6 +382,11 @@ constexpr int HORIZONTAL_4[4][3] = {
 	{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1},
 };
 
+// 6 方向邻居（连通分组 / 批量移除分组共用）
+constexpr int NEIGHBORS_6[6][3] = {
+	{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+};
+
 // 世界坐标 -> chunk 缓冲下标
 inline int buf_index(const Vector3i &local) {
 	return local.x + local.y * CHUNK_BITS + local.z * CHUNK_BITS * CHUNK_BITS;
@@ -499,8 +505,111 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 	return unstable;
 }
 
+Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
+	// 批量移除体素：按 chunk 分组，把修改后的 PackedInt32Array 放回结果，供 GDScript 覆盖。
+	// 大崩塌（每帧 4096+ 体素）时替代 GDScript 逐体素循环，主线程提速。
+	Dictionary result;
+	Dictionary modified_buffers;
+	Dictionary chunk_removed;
+	int removed = 0;
+	if (positions.is_empty()) {
+		result["removed"] = 0;
+		result["chunk_removed"] = chunk_removed;
+		result["buffers"] = modified_buffers;
+		return result;
+	}
+	// 按 chunk 分组（local_index）
+	std::map<Vector3i, std::vector<int>> by_chunk;
+	for (int i = 0; i < positions.size(); ++i) {
+		const Vector3i p = positions[i];
+		const Vector3i ck = chunk_of(p);
+		const Vector3i local = p - ck * CHUNK_BITS;
+		const int idx = local.x + local.y * CHUNK_BITS + local.z * CHUNK_BITS * CHUNK_BITS;
+		by_chunk[ck].push_back(idx);
+	}
+	for (auto &kv : by_chunk) {
+		const Vector3i ck = kv.first;
+		if (!buffers.has(ck)) {
+			continue;
+		}
+		PackedInt32Array buf = buffers[ck];
+		if (buf.size() < CHUNK_BITS * CHUNK_BITS * CHUNK_BITS) {
+			continue;
+		}
+		int32_t *ptr = buf.ptrw();
+		int cnt = 0;
+		for (int idx : kv.second) {
+			if (ptr[idx] > 0) {
+				ptr[idx] = 0;
+				cnt += 1;
+			}
+		}
+		if (cnt > 0) {
+			modified_buffers[ck] = buf;
+			chunk_removed[ck] = cnt;
+			removed += cnt;
+		}
+	}
+	result["removed"] = removed;
+	result["chunk_removed"] = chunk_removed;
+	result["buffers"] = modified_buffers;
+	return result;
+}
+
+Array VoxelNative::partition_connected(const Array &positions) {
+	// 连通分组：positions 按 6 方向连通性分组（与 VoxelData.partition_connected 一致）。
+	// 只依据 positions 集合内连通（不查世界体素），供大崩塌掉落体分组使用。
+	// BFS 阶段用 std::vector 收集（避免逐体素跨语言 Array.append），最后一次性构建。
+	Array result;
+	if (positions.is_empty()) {
+		return result;
+	}
+	std::unordered_set<uint64_t> all;
+	for (int i = 0; i < positions.size(); ++i) {
+		all.insert(vkey(positions[i]));
+	}
+	std::unordered_set<uint64_t> visited;
+	std::vector<Vector3i> stack;
+	std::vector<std::vector<Vector3i>> groups;
+	for (int i = 0; i < positions.size(); ++i) {
+		const Vector3i seed = positions[i];
+		const uint64_t skey = vkey(seed);
+		if (visited.count(skey)) {
+			continue;
+		}
+		std::vector<Vector3i> group;
+		stack.clear();
+		stack.push_back(seed);
+		visited.insert(skey);
+		while (!stack.empty()) {
+			const Vector3i cur = stack.back();
+			stack.pop_back();
+			group.push_back(cur);
+			for (int d = 0; d < 6; ++d) {
+				const Vector3i nb(cur.x + NEIGHBORS_6[d][0], cur.y + NEIGHBORS_6[d][1], cur.z + NEIGHBORS_6[d][2]);
+				const uint64_t nk = vkey(nb);
+				if (all.count(nk) && !visited.count(nk)) {
+					visited.insert(nk);
+					stack.push_back(nb);
+				}
+			}
+		}
+		groups.push_back(group);
+	}
+	for (auto &g : groups) {
+		Array group_arr;
+		for (auto &p : g) {
+			group_arr.append(p);
+		}
+		result.append(group_arr);
+	}
+	return result;
+}
+
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
 }

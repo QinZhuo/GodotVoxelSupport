@@ -20,6 +20,8 @@ static var _required_methods := [
 	&"greedy_merge_dense",
 	&"generate_chunk_dense",
 	&"find_unsupported_around",
+	&"remove_voxels_bulk",
+	&"partition_connected",
 ]
 
 ## 获取原生实例（懒初始化）。返回 null 表示不可用。
@@ -70,6 +72,23 @@ static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByte
 static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dictionary:
 	var inst := _get_instance()
 	return inst.call(&"find_unsupported_around", buffers, removed)
+
+
+## 批量移除体素（转发到原生实现，动态调用）
+## buffers: chunk key -> PackedInt32Array(16³)，会被就地修改（值>0 清零）
+## positions: 待移除位置数组
+## 返回 Dictionary：{removed: int, chunk_removed: {chunk_key: count}}
+static func remove_voxels_bulk(buffers: Dictionary, positions: Array) -> Dictionary:
+	var inst := _get_instance()
+	return inst.call(&"remove_voxels_bulk", buffers, positions)
+
+
+## 连通分组（转发到原生实现，动态调用）
+## positions: Array[Vector3i]，按 6 方向连通分组
+## 返回 Array[Array[Vector3i]]
+static func partition_connected(positions: Array) -> Array:
+	var inst := _get_instance()
+	return inst.call(&"partition_connected", positions)
 
 
 ## 强制重新检测（加载失败后重试时调用）

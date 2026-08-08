@@ -763,8 +763,9 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 
 
 ## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
-## 按 chunk 分组处理：chunk 查询 / buf 读取 / dirty 标记每 chunk 一次，
-## 替代逐体素重复（大批量崩塌移除 4096 体素时显著提速，避免每帧主线程卡顿）。
+## 写 buffer 由原生 C++ 完成（remove_voxels_bulk，按 chunk 分组直接改 PackedInt32Array），
+## 替代 GDScript 逐体素循环——大崩塌（每帧 4096+ 体素）主线程大幅提速。
+## GDScript 只做计数维护 + dirty 追踪（dirty_voxels 逐体素，网格重建需要精确到体素）。
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
@@ -776,34 +777,24 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		for ck in _preload_ck:
 			preload_chunk(ck)
 	var _diag_t0 := Time.get_ticks_usec()
-	# 按 chunk 分组（positions → {ck: [pos, ...]}）
-	var by_chunk: Dictionary = {}
-	for pos in positions:
-		var ck := _chunk_of(pos)
-		var arr: Variant = by_chunk.get(ck)
-		if arr == null:
-			arr = []
-			by_chunk[ck] = arr
-		arr.append(pos)
+	# 原生批量移除（C++ 按 chunk 分组改 buffer，返回修改后的 buffer + 每 chunk 移除数）
+	var res: Dictionary = NativeLoader.remove_voxels_bulk(_chunk_buffers, positions)
+	var modified_buffers: Dictionary = res["buffers"]
+	var chunk_removed: Dictionary = res["chunk_removed"]
 	var touched: Dictionary = {}
-	for ck in by_chunk:
-		var buf = _chunk_buffers.get(ck)
-		if buf == null:
-			continue
-		touched[ck] = true
+	for ck in chunk_removed:
+		_chunk_buffers[ck] = modified_buffers[ck]  # 覆盖为修改后的 buffer
+		var cnt: int = chunk_removed[ck]
+		_voxel_count -= cnt
+		_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - cnt
 		# 流式：批量删除同样标记写盘（否则 chunk 被流式卸载时未 dirty → 直接丢弃，
 		# 磁盘旧数据残留导致重载后体素"复活"）
 		_dirty_chunks[ck] = true
-		var origin := VoxelChunk.origin_of(ck)
-		var entries: Array = by_chunk[ck]
-		for pos in entries:
-			dirty_voxels[pos] = -1
-			var idx := _buf_index(pos - origin)
-			if buf[idx] > 0:
-				buf[idx] = 0
-				_voxel_count -= 1
-				_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - 1
-	# 批量移除后统一回收被清空的 chunk 键（O(1) 计数判断，替代逐体素 4096 扫描）
+		touched[ck] = true
+	# 网格重建追踪（dirty_voxels 逐体素；网格重建需要精确到体素）
+	for pos in positions:
+		dirty_voxels[pos] = -1
+	# 批量移除后统一回收被清空的 chunk 键（O(1) 计数判断）
 	for ck in touched:
 		_maybe_erase_empty_chunk(ck)
 	if notify:
@@ -1077,32 +1068,12 @@ func find_connected(pos: Vector3i) -> Dictionary:
 
 
 ## 将一组位置按 6 方向连通性分组，返回 Array[Array[Vector3i]]
-## 每组的体素两两 6 方向连通，组与组之间不连通。用于分块塌落、分块破坏等
+## 每组的体素两两 6 方向连通，组与组之间不连通。用于分块塌落、分块破坏等。
+## 实现完全在原生 C++（partition_connected）：大崩塌掉落体分组主线程提速。
 static func partition_connected(positions: Array) -> Array:
-	var result: Array = []
 	if positions.is_empty():
-		return result
-	var all_pos := {}
-	for p in positions:
-		all_pos[p] = true
-	var visited := {}
-	for key in all_pos:
-		if key in visited:
-			continue
-		var block: Array = []
-		var stack: Array = [key]
-		visited[key] = true
-		while not stack.is_empty():
-			var cur: Vector3i = stack.pop_back()
-			block.append(cur)
-			for d: Vector3i in NEIGHBORS_6:
-				var nb := cur + d
-				if nb in visited or not all_pos.has(nb):
-					continue
-				visited[nb] = true
-				stack.append(nb)
-		result.append(block)
-	return result
+		return []
+	return NativeLoader.partition_connected(positions)
 
 
 ## 某个体素的连接度：相邻的实体素数 (0-6)
