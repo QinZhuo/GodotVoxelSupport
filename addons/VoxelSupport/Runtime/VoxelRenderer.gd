@@ -678,6 +678,14 @@ func _process_streaming() -> void:
 				to_load.append([dist, ck])
 		# 从近到远（距离升序）：最近的先加载
 		to_load.sort_custom(func(a, b): return a[0] < b[0])
+		# 异步预读：先请求后台线程加载候选涉及 region（磁盘 IO 移出主线程），
+		# 随后同步 preload 命中缓存则无 IO（未命中仅兜底，通常后台已就绪）——
+		# 根治流式移动时主线程同步读盘卡顿。
+		if data and data.is_streaming() and not to_load.is_empty():
+			var _stream_obj = data.stream
+			if _stream_obj != null and _stream_obj.has_method("request_region_load"):
+				for item in to_load:
+					_stream_obj.request_region_load(_stream_obj._region_key(item[1]))
 		var reloaded := 0
 		for item in to_load:
 			if reloaded >= _stream_load_per_frame:

@@ -48,6 +48,13 @@ var _region_cache: Dictionary = {}
 # LRU 顺序（array of region_key，开头 = 最久未用）
 var _region_order: Array = []
 
+# 异步 region 加载（读盘在后台线程，根治流式移动时主线程同步 IO 卡顿）：
+#   - _io_pending: 已提交后台加载的 region（主线程访问）
+#   - _io_results:  后台读盘完成待主线程回填（后台写 / 主线程取，用 Mutex 保护）
+var _io_mutex := Mutex.new()
+var _io_pending: Dictionary = {}
+var _io_results: Dictionary = {}
+
 
 func _region_key(chunk_key: Vector3i) -> Vector3i:
 	return Vector3i(
@@ -66,13 +73,9 @@ func _ensure_dir() -> void:
 		DirAccess.make_dir_recursive_absolute(abs)
 
 
-## 取 region 数据（读缓存命中则直接返回；否则读文件入缓存）。
-## 返回 {"chunks": {...}, "dirty": bool}，调用方可直接修改 chunks。
-func _get_region(region_key: Vector3i) -> Dictionary:
-	var entry: Variant = _region_cache.get(region_key)
-	if entry != null:
-		_touch_region(region_key)
-		return entry
+## 从文件读取 region 数据（纯函数，后台线程可安全调用，不碰缓存字典）。
+## 返回 {chunk_key: {local_index: mat_id}}（文件不存在/格式不符 → 空字典）
+func _read_region_file(region_key: Vector3i) -> Dictionary:
 	var chunks := {}
 	var path := _region_path(region_key)
 	if FileAccess.file_exists(path):
@@ -93,6 +96,66 @@ func _get_region(region_key: Vector3i) -> Dictionary:
 						chunk_data[idx] = mat
 					chunks[Vector3i(cx, cy, cz)] = chunk_data
 			f.close()
+	return chunks
+
+
+## 请求异步加载 region（后台线程读盘）。region 已在缓存返回 true；否则提交后台任务返回 false。
+## 数据就绪后由 _on_region_loaded 回填缓存，调用方可随后同步 preload（缓存命中则无 IO）。
+func request_region_load(region_key: Vector3i) -> bool:
+	if _region_cache.has(region_key):
+		return true
+	_io_mutex.lock()
+	var submitted := _io_pending.has(region_key) or _io_results.has(region_key)
+	if not submitted:
+		_io_pending[region_key] = true
+	_io_mutex.unlock()
+	if not submitted:
+		WorkerThreadPool.add_task(_io_read_worker.bind(region_key))
+	return false
+
+
+## 后台线程：读 region 文件 → 结果队列（Mutex 保护），call_deferred 回主线程
+func _io_read_worker(region_key: Vector3i) -> void:
+	var chunks := _read_region_file(region_key)
+	_io_mutex.lock()
+	_io_results[region_key] = chunks
+	_io_mutex.unlock()
+	call_deferred("_on_region_loaded", region_key)
+
+
+## 主线程：取后台结果，回填 region 缓存（并执行 LRU 驱逐）
+func _on_region_loaded(region_key: Vector3i) -> void:
+	_io_mutex.lock()
+	var chunks: Variant = _io_results.get(region_key)
+	_io_results.erase(region_key)
+	_io_pending.erase(region_key)
+	_io_mutex.unlock()
+	if _region_cache.has(region_key):
+		return  # 主线程已同步加载过
+	# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下次 request 重读
+	if (chunks is Dictionary and (chunks as Dictionary).is_empty()) and FileAccess.file_exists(_region_path(region_key)):
+		return
+	_region_cache[region_key] = {
+		"chunks": chunks if chunks is Dictionary else {},
+		"dirty": false,
+	}
+	_region_order.append(region_key)
+	if _region_order.size() > REGION_CACHE_MAX:
+		var old_key: Vector3i = _region_order.pop_front()
+		_flush_region(old_key)
+
+
+## 取 region 数据（读缓存命中则直接返回；否则读文件入缓存）。
+## 返回 {"chunks": {...}, "dirty": bool}，调用方可直接修改 chunks。
+func _get_region(region_key: Vector3i) -> Dictionary:
+	var entry: Variant = _region_cache.get(region_key)
+	if entry != null:
+		_touch_region(region_key)
+		return entry
+	var chunks := _read_region_file(region_key)
+	# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下帧重读
+	if chunks.is_empty() and FileAccess.file_exists(_region_path(region_key)):
+		return {"chunks": {}, "dirty": false}
 	entry = {"chunks": chunks, "dirty": false}
 	_region_cache[region_key] = entry
 	_region_order.append(region_key)
@@ -126,27 +189,33 @@ func _open_write(path: String) -> FileAccess:
 	return FileAccess.open(path, FileAccess.WRITE)
 
 
-## 把 region 数据写回磁盘（若 dirty），并从缓存移除
+## 把 region 数据写回磁盘（若 dirty），并从缓存移除。写盘异步化（后台线程）。
 func _flush_region(region_key: Vector3i) -> void:
 	var entry: Variant = _region_cache.get(region_key)
 	if entry == null:
 		return
-	_save_region(region_key, entry)
 	_region_cache.erase(region_key)
-
-
-func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
 	if not entry.get("dirty", false):
 		return
 	var chunks: Dictionary = entry["chunks"]
+	WorkerThreadPool.add_task(_io_write_worker.bind(region_key, chunks))
+
+
+## 后台线程写盘入口（不碰缓存字典，数据快照传入）
+func _io_write_worker(region_key: Vector3i, chunks: Dictionary) -> void:
+	_write_region_file(region_key, chunks)
+
+
+## 写 region 文件（原子写：先写临时文件再替换，避免读方读到"半写"文件损坏）。
+## chunks 为空 → 删除文件。后台线程可安全调用。
+func _write_region_file(region_key: Vector3i, chunks: Dictionary) -> void:
 	if chunks.is_empty():
-		# region 内无任何数据：删除文件
 		var path := _region_path(region_key)
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
-		entry["dirty"] = false
 		return
-	var f := _open_write(_region_path(region_key))
+	var tmp_path := _region_path(region_key) + ".tmp"
+	var f := _open_write(tmp_path)
 	if f == null:
 		push_error("[VoxelFileStream] 无法写入 region %s: %s" % [region_key, error_string(FileAccess.get_open_error())])
 		return
@@ -163,6 +232,20 @@ func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
 			f.store_32(idx)
 			f.store_32(chunk_data[idx])
 	f.close()
+	# 原子替换：读方只会看到旧文件（完整）或新文件（完整），不会读到半写文件
+	var path := _region_path(region_key)
+	var abs_tmp := ProjectSettings.globalize_path(tmp_path)
+	var abs_path := ProjectSettings.globalize_path(path)
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(abs_path)
+	DirAccess.rename_absolute(abs_tmp, abs_path)
+
+
+## 同步写回 region（存档 / flush 调用，保证立即落盘）
+func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
+	if not entry.get("dirty", false):
+		return
+	_write_region_file(region_key, entry["chunks"])
 	entry["dirty"] = false
 
 
@@ -192,7 +275,9 @@ func load_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	var buf := PackedInt32Array()
 	buf.resize(CHUNK_VOLUME)
 	for idx in chunk_data:
-		buf[idx] = chunk_data[idx]
+		# 防御：异步写/读竞态下文件损坏可能读到越界 index，跳过避免崩溃
+		if idx >= 0 and idx < CHUNK_VOLUME:
+			buf[idx] = chunk_data[idx]
 	return buf
 
 
