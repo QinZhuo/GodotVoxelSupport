@@ -325,6 +325,12 @@ func destroy_all(spawn_debris: Variant = null) -> void:
 	voxel_damaged.emit(positions, do_spawn)
 
 
+## 修复整体健康度
+func repair(amount: float) -> void:
+	if health >= 0:
+		health = max(health + amount, 0.0)
+
+
 # ----------------------------------------------------------------------------
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------

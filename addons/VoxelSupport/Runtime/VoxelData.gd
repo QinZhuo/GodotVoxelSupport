@@ -321,6 +321,16 @@ func is_streaming() -> bool:
 	return stream != null
 
 
+## chunk 是否在内存中（有密集缓冲）
+func is_chunk_loaded(chunk_key: Vector3i) -> bool:
+	return _chunk_buffers.has(chunk_key)
+
+
+## chunk 是否有数据（内存或磁盘）
+func is_chunk_persisted(chunk_key: Vector3i) -> bool:
+	return _chunk_buffers.has(chunk_key) or _persisted_chunks.has(chunk_key)
+
+
 ## 从流加载 chunk 数据到内存。已加载返回 true；流中不存在返回 false。
 ## 流式补建/网格生成前调用，保证后续读操作走内存数组。
 func preload_chunk(chunk_key: Vector3i) -> bool:
@@ -409,6 +419,13 @@ func flush() -> void:
 	stream.flush()
 
 
+## 构建期/读档批量填充 {pos: mat_id}，不追踪 dirty_voxels、不触发信号。
+## 适合一次性生成大量静态体素（demo 场景构建、外部数据导入）。
+func load_voxels_dict(dict: Dictionary) -> void:
+	for pos_key in dict:
+		_write_buffer_impl(pos_key, dict[pos_key], false)
+
+
 ## 获取所有有数据的 chunk key（内存 + 磁盘流中已持久化的）
 func get_all_chunk_keys() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
@@ -422,6 +439,18 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 				keys.append(ck)
 				seen[ck] = true
 	return keys
+
+
+## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
+## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立的深拷贝，无数据竞态）。
+## 流式模式下先确保 chunk 及其 27 邻居已加载（跨界面的面可见性需要邻居）。
+func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
+	if stream != null:
+		for nz in 3:
+			for ny in 3:
+				for nx in 3:
+					preload_chunk(chunk + Vector3i(nx - HALO, ny - HALO, nz - HALO))
+	return VoxelChunkGenerator.build_halo_from_buffers(_chunk_buffers, chunk)
 
 
 ## 生成"受影响区域"的 chunk 缓冲深拷贝快照（chunk key → PackedInt32Array 独立副本）。
@@ -467,6 +496,32 @@ func snapshot_lod1_block_chunks(block_key: Vector3i) -> Dictionary:
 # ----------------------------------------------------------------------------
 # 基本访问
 # ----------------------------------------------------------------------------
+
+## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 外部一次性读取）
+## 流式模式下合并磁盘流中已持久化但不在内存的 chunk（临时加载，不缓存）
+func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
+	var out := {}
+	var seen := {}
+	for ck: Vector3i in _chunk_buffers:
+		var buf = _chunk_buffers[ck]
+		var origin := VoxelChunk.origin_of(ck)
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				out[origin + _local_from_index(i)] = buf[i]
+		seen[ck] = true
+	if stream != null:
+		for ck: Vector3i in _persisted_chunks:
+			if seen.has(ck):
+				continue
+			var buf := _load_chunk_from_stream(ck)
+			if buf.is_empty():
+				continue
+			var origin := VoxelChunk.origin_of(ck)
+			for i in CHUNK_VOLUME:
+				if buf[i] > 0:
+					out[origin + _local_from_index(i)] = buf[i]
+	return out
+
 
 ## 获取指定位置的体素材质ID，不存在返回 -1
 ## 流式模式下若该 chunk 在磁盘上有数据则自动载入内存（保证读语义一致）
@@ -743,6 +798,16 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 	return result
 
 
+## 移除球形范围内的所有体素 (用于破坏系统)
+func remove_voxels_in_sphere(center: Vector3, radius: float, notify: bool = true) -> Array[Vector3i]:
+	return _remove_voxels(get_voxels_in_sphere(center, radius), notify)
+
+
+## 移除盒形范围内的所有体素 (用于破坏系统)
+func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
+	return _remove_voxels(get_voxels_in_box(aabb), notify)
+
+
 ## 批量移除指定位置的体素 (公开接口，供破坏/崩塌等系统调用)
 func remove_voxels(positions: Array, notify: bool = true) -> Array:
 	return _remove_voxels(positions, notify)
@@ -893,6 +958,19 @@ func add_material(mat: VoxelMaterial, notify: bool = false) -> VoxelMaterial:
 	return mat
 
 
+## 获取材质 (按对齐数组下标 == 材质ID 直接访问，越界/空位返回 null)
+## 前提：materials 保持"索引 == 材质ID"对齐（add_material / 导入保证）。索引 0 = 空。
+func get_material(index: int) -> VoxelMaterial:
+	if index >= 0 and index < materials.size():
+		return materials[index]
+	return null
+
+
+## 按材质 ID 查找材质（对外鲁棒接口：即使传入未对齐数组也能找到；id<=0/不存在返回 null）
+func get_material_by_id(mat_id: int) -> VoxelMaterial:
+	return VoxelMaterial.find_by_id(materials, mat_id)
+
+
 ## 触发 changed 信号 (批量修改后手动调用)
 func notify_changed() -> void:
 	emit_changed()
@@ -1033,6 +1111,23 @@ func load_data(data: Variant) -> void:
 	emit_changed()
 
 
+## 获取指定 chunk 内的所有体素位置（基于密集缓冲扫描）
+## 返回 Array[Vector3i]（体素位置列表），空 chunk 返回空数组
+func get_chunk_voxels(chunk_key: Vector3i) -> Array:
+	if not _chunk_buffers.has(chunk_key) and stream != null and _persisted_chunks.has(chunk_key):
+		# 流式：磁盘上的 chunk 载入内存再遍历（保证结果完整）
+		preload_chunk(chunk_key)
+	var buf = _chunk_buffers.get(chunk_key)
+	if buf == null:
+		return []
+	var result: Array = []
+	var origin := VoxelChunk.origin_of(chunk_key)
+	for i in CHUNK_VOLUME:
+		if buf[i] > 0:
+			result.append(origin + _local_from_index(i))
+	return result
+
+
 ## O(1) 判断指定 chunk 是否有数据（内存或磁盘流中）
 func has_chunk(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key) or (stream != null and _persisted_chunks.has(chunk_key))
@@ -1080,6 +1175,34 @@ func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 					continue
 				result[nb] = true
 				stack.append(nb)
+	return result
+
+
+## 找出某个体素所在的整个连通块（6 方向连通），返回该连通块的位置集合
+## 用于悬空判断、反应波及范围等
+func find_connected(pos: Vector3i) -> Dictionary:
+	if not has_voxel(pos):
+		return {}
+	return flood_fill(pos)
+
+
+## 某个体素的连接度：相邻的实体素数 (0-6)
+## 可用于薄弱点判断、支撑接触面积估算等
+func connectivity(pos: Vector3i) -> int:
+	var count := 0
+	for d: Vector3i in NEIGHBORS_6:
+		if has_voxel(pos + d):
+			count += 1
+	return count
+
+
+## 返回某体素的所有相邻实体素位置数组 (6 方向)
+func neighbors(pos: Vector3i) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	for d: Vector3i in NEIGHBORS_6:
+		var nb := pos + d
+		if has_voxel(nb):
+			result.append(nb)
 	return result
 
 

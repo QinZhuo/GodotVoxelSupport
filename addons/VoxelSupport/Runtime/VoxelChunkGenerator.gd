@@ -28,6 +28,24 @@ const _HALO_DIRS: Array[int] = [
 ]
 
 
+## 提取单个 chunk 及其 1 体素外缘(shell) 的体素快照（绝对坐标键）
+## 网格生成只需要该 chunk 内部 + 跨界面的相邻体素，无需拷贝整个世界的体素字典。
+## 返回独立的 Dictionary，供子线程安全读取（主线程后续增删不会影响它）。
+## halo_voxels: 外扩层数，默认 1（跨界面的面可见性需要紧邻体素）
+static func slice_chunk(voxels: Dictionary, chunk: Vector3i, halo_voxels: int = 1) -> Dictionary:
+	var origin := VoxelChunk.origin_of(chunk)
+	var slice := {}
+	var lo := origin - Vector3i(halo_voxels, halo_voxels, halo_voxels)
+	var hi := origin + Vector3i(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE) + Vector3i(halo_voxels - 1, halo_voxels - 1, halo_voxels - 1)
+	for x in range(lo.x, hi.x + 1):
+		for y in range(lo.y, hi.y + 1):
+			for z in range(lo.z, hi.z + 1):
+				var p := Vector3i(x, y, z)
+				if voxels.has(p):
+					slice[p] = voxels[p]
+	return slice
+
+
 ## 运行时网格生成入口，在主线程调用
 ## 始终生成所有非空 chunk，确保输出完整 mesh。rebuild_chunks 参数保留用于 API 兼容。
 static func generate_mesh_runtime(
@@ -105,6 +123,45 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 ## 为指定的 chunk 列表生成网格数据（增量重建路径）
 ## 每个 chunk 的顶点使用局部坐标（相对于 chunk 原点），方便直接放到独立 MeshInstance3D
 ## 返回 {chunk_key: {solid_verts, solid_normals, ...}}，空 chunk 不在结果中
+## 为指定的 chunk 列表生成网格数据（增量重建路径）
+## 每个 chunk 的顶点使用局部坐标（相对于 chunk 原点），方便直接放到独立 MeshInstance3D
+## 返回 {chunk_key: {solid_verts, solid_normals, ...}}，空 chunk 不在结果中
+static func generate_chunks_arrays_runtime(
+		voxels: Dictionary,
+		materials: Array,
+		options: Dictionary = {},
+		chunk_keys: Array[Vector3i] = []) -> Dictionary:
+	var scale: float = options.get("scale", 0.1)
+	var offset: Vector3 = options.get("offset", Vector3.ZERO)
+	var aligned := VoxelMaterial.align_by_id(materials)
+	var result := {}
+	for ck in chunk_keys:
+		var arrays := _generate_single_chunk_arrays_impl(voxels, aligned, scale, ck, true, offset)
+		if arrays != null:
+			result[ck] = arrays
+	return result
+
+
+## 生成所有非空 chunk 的 per-chunk 网格数据（初始构建或全量增量重建）
+static func generate_all_chunks_arrays_runtime(
+		voxels: Dictionary,
+		materials: Array,
+		options: Dictionary = {}) -> Dictionary:
+	var non_empty := _build_non_empty_chunk_index(voxels)
+	var chunk_keys := _all_non_empty_chunks_from_index(non_empty)
+	return generate_chunks_arrays_runtime(voxels, materials, options, chunk_keys)
+
+
+## 生成单个 chunk 的网格数据（线程安全，可在子线程调用）
+## materials 参数应为已对齐的材质数组（通过 VoxelMaterial.align_by_id 预先对齐）
+## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
+static func generate_single_chunk_array(
+		voxels: Dictionary, aligned_materials: Array, scale: float, chunk_key: Vector3i,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	var result := _generate_single_chunk_arrays_impl(voxels, aligned_materials, scale, chunk_key, true, offset)
+	return result if result else {}
+
+
 ## 从 chunk 缓冲字典（chunk key → PackedInt32Array，密集 16³）构建单个 chunk 的 18³ 光环缓冲
 ## 线程安全：buffers 必须是调用方提供的独立快照（深拷贝），子线程内只读。
 ## 供异步 worker 在子线程内直接从快照构建 halo，避免主线程逐 chunk 提取的阻塞。
@@ -315,6 +372,32 @@ static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:
 # ----------------------------------------------------------------------------
 # 私有实现
 # ----------------------------------------------------------------------------
+
+## 生成单个 chunk 的网格数据（顶点使用局部坐标）- 内部实现
+static func _generate_single_chunk_arrays_impl(
+		voxels, materials, scale: float, chunk: Vector3i,
+		use_local_space: bool = true, offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	var solid_verts := PackedVector3Array()
+	var solid_normals := PackedVector3Array()
+	var solid_uvs := PackedVector2Array()
+	var solid_idxs := PackedInt32Array()
+	var trans_verts := PackedVector3Array()
+	var trans_normals := PackedVector3Array()
+	var trans_uvs := PackedVector2Array()
+	var trans_idxs := PackedInt32Array()
+	_generate_chunk_into(voxels, materials, scale, chunk,
+		solid_verts, solid_normals, solid_uvs, solid_idxs,
+		trans_verts, trans_normals, trans_uvs, trans_idxs,
+		use_local_space, offset)
+	if solid_idxs.is_empty() and trans_idxs.is_empty():
+		return {}
+	return {
+		"solid_verts": solid_verts, "solid_normals": solid_normals,
+		"solid_uvs": solid_uvs, "solid_idxs": solid_idxs,
+		"trans_verts": trans_verts, "trans_normals": trans_normals,
+		"trans_uvs": trans_uvs, "trans_idxs": trans_idxs,
+	}
+
 
 static func _chunk_of(pos: Vector3i) -> Vector3i:
 	return VoxelChunk.chunk_of(pos)
