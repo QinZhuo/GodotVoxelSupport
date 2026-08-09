@@ -167,6 +167,11 @@ static func generate_single_chunk_array(
 ## 与 VoxelData.get_chunk_halo 语义一致，但输入为快照字典而非自身数据，
 ## 供异步 worker 在子线程内直接从快照构建 halo，避免主线程逐 chunk 提取的阻塞。
 static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> PackedInt32Array:
+	# 原生下沉（C++ 遍历 27 邻居 + 数组读取，worker 端 halo 构建吞吐提升）
+	var native_halo := NativeLoader.build_halo_from_buffers(buffers, chunk)
+	if native_halo.size() == HALO_VOLUME:
+		return native_halo
+	# GDScript 兜底（旧原生库/无原生时）
 	var halo := PackedInt32Array()
 	halo.resize(HALO_VOLUME)
 	var origin := VoxelChunk.origin_of(chunk)

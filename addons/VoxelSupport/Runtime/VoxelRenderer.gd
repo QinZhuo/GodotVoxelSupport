@@ -221,6 +221,10 @@ var _batch_complete_pending: bool = false
 var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 # Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
 var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
+# 碰撞重建队列：破坏后延迟重建 ConcavePolygonShape3D，每帧限量，避免连续破坏主线程卡顿
+var _collision_rebuild_queue: Dictionary[Vector3i, bool] = {}
+# 每帧最多重建的碰撞体数
+var _collision_rebuild_per_frame: int = 4
 
 # GPU 上传限流队列：异步结果先缓存数组数据，_process 帧尾批量构建 mesh（平滑 GPU 上传，
 # 避免连续破坏时一帧大量 ArrayMesh 创建导致 Metal fence 超时）
@@ -320,6 +324,18 @@ func _process(_delta: float) -> void:
 	if not _mesh_build_queue.is_empty() and not _mesh_build_scheduled:
 		_mesh_build_scheduled = true
 		call_deferred("_process_mesh_build_queue")
+
+	# 碰撞增量重建：破坏后限量重建 ConcavePolygonShape3D（延迟，避免连续破坏主线程卡顿）
+	if generate_collision and not _collision_rebuild_queue.is_empty():
+		var _built_col := 0
+		var _col_keys := _collision_rebuild_queue.keys()
+		for ck in _col_keys:
+			if _built_col >= _collision_rebuild_per_frame:
+				break
+			var hm: bool = _collision_rebuild_queue[ck]
+			_collision_rebuild_queue.erase(ck)
+			_update_chunk_collision(ck, hm)
+			_built_col += 1
 
 	# 延迟批次完成：全部异步任务完成后，在下一帧处理剩余收尾逻辑，避免主线程尖峰
 	if _batch_complete_pending:
@@ -1398,7 +1414,8 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 
 	if has_voxels_in_data or _chunk_meshes.has(chunk_key):
 		chunk_mesh.position = Vector3(chunk_key) * (voxel_scale * VoxelChunkGenerator.CHUNK_SIZE)
-		_update_chunk_collision(chunk_key, has_mesh)
+		# 碰撞增量重建：入队延迟，_process 每帧限量重建（避免连续破坏主线程卡顿）
+		_collision_rebuild_queue[chunk_key] = has_mesh
 	else:
 		_remove_chunk_collision(chunk_key)
 
@@ -1635,7 +1652,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 		# Per-chunk 碰撞体（节点被清理时不执行）
 		if has_voxels_in_data or _chunk_meshes.has(ck):
 			chunk_mesh.position = Vector3(ck) * chunk_scale
-			_update_chunk_collision(ck, has_mesh)
+			_collision_rebuild_queue[ck] = has_mesh
 		else:
 			_remove_chunk_collision(ck)
 
@@ -1716,6 +1733,7 @@ func _update_chunk_collision(ck: Vector3i, has_mesh: bool) -> void:
 
 ## 移除单个 chunk 的碰撞体
 func _remove_chunk_collision(ck: Vector3i) -> void:
+	_collision_rebuild_queue.erase(ck)
 	if _chunk_collisions.has(ck):
 		_chunk_collisions[ck].queue_free()
 		_chunk_collisions.erase(ck)

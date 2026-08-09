@@ -335,6 +335,51 @@ Dictionary VoxelNative::generate_lod1_block_dense(const PackedInt32Array &halo, 
 	return generate_dense_impl(halo, trans_flags, scale, block_key * LOD1_BLOCK_SIZE, true, offset, LOD1_BLOCK_SIZE);
 }
 
+PackedInt32Array VoxelNative::build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk) {
+	// 构建 18³ halo（中心 16³ + 1 外缘）：遍历 27 邻居 chunk 与光环的重叠区，数组下标读取。
+	// 下沉 C++ 替代 GDScript 逐体素循环（worker 端 halo 构建吞吐提升）。
+	PackedInt32Array halo;
+	halo.resize(HALO_SIZE * HALO_SIZE * HALO_SIZE);
+	const Vector3i origin = chunk * CHUNK_SIZE;
+	for (int nz = 0; nz < 3; ++nz) {
+		for (int ny = 0; ny < 3; ++ny) {
+			for (int nx = 0; nx < 3; ++nx) {
+				const Vector3i nck(chunk.x + nx - HALO, chunk.y + ny - HALO, chunk.z + nz - HALO);
+				if (!buffers.has(nck)) {
+					continue;
+				}
+				PackedInt32Array buf = buffers[nck];
+				if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) {
+					continue;
+				}
+				const int32_t *b = buf.ptr();
+				const Vector3i n_origin = nck * CHUNK_SIZE;
+				const int lo_x = std::max(origin.x - HALO, n_origin.x);
+				const int lo_y = std::max(origin.y - HALO, n_origin.y);
+				const int lo_z = std::max(origin.z - HALO, n_origin.z);
+				const int hi_x = std::min(origin.x + CHUNK_SIZE + HALO, n_origin.x + CHUNK_SIZE) - 1;
+				const int hi_y = std::min(origin.y + CHUNK_SIZE + HALO, n_origin.y + CHUNK_SIZE) - 1;
+				const int hi_z = std::min(origin.z + CHUNK_SIZE + HALO, n_origin.z + CHUNK_SIZE) - 1;
+				if (lo_x > hi_x || lo_y > hi_y || lo_z > hi_z) {
+					continue;
+				}
+				for (int z = lo_z; z <= hi_z; ++z) {
+					for (int y = lo_y; y <= hi_y; ++y) {
+						for (int x = lo_x; x <= hi_x; ++x) {
+							const int hx = x - origin.x + HALO;
+							const int hy = y - origin.y + HALO;
+							const int hz = z - origin.z + HALO;
+							const int local = (x - n_origin.x) + (y - n_origin.y) * CHUNK_SIZE + (z - n_origin.z) * CHUNK_SIZE * CHUNK_SIZE;
+							halo[hx + hy * HALO_SIZE + hz * HALO_SIZE * HALO_SIZE] = b[local];
+						}
+					}
+				}
+			}
+		}
+	}
+	return halo;
+}
+
 // ----------------------------------------------------------------------------
 // 支撑图失稳检测（对应 VoxelData.find_unsupported_around）
 // ----------------------------------------------------------------------------
@@ -737,6 +782,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);

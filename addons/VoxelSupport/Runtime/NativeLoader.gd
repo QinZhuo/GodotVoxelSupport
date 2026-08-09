@@ -74,6 +74,16 @@ static func generate_lod1_block_dense(halo: PackedInt32Array, trans_flags: Packe
 	return inst.call(&"generate_lod1_block_dense", halo, trans_flags, scale, block_key, offset)
 
 
+## 构建 chunk 的 18³ halo（原生下沉 C++）。无原生/旧库缺方法时返回空数组。
+static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return PackedInt32Array()
+	if not ClassDB.class_has_method(&"VoxelNative", &"build_halo_from_buffers", false):
+		return PackedInt32Array()
+	return inst.call(&"build_halo_from_buffers", buffers, chunk)
+
+
 ## 支撑图失稳检测（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照
 ## removed: 本次被移除的体素位置数组

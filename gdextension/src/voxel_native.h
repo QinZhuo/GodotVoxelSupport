@@ -53,6 +53,10 @@ public:
 	static Dictionary generate_lod1_block_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 			float scale, const Vector3i &block_key, const Vector3 &offset);
 
+	// 构建 chunk 的 18³ halo（中心 16³ + 1 外缘）——LOD0 网格生成 worker 用，
+	// 下沉 C++ 替代 GDScript 逐体素循环（27 邻居 × 重叠区）。
+	static PackedInt32Array build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk);
+
 	// 支撑图失稳检测（等价于 VoxelData.find_unsupported_around）
 	// buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照（VoxelData._chunk_buffers 的深拷贝）
 	// removed: 本次被移除的体素位置数组（Array[Vector3i]）
