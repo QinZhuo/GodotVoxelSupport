@@ -158,6 +158,27 @@ static func _lod1_block_of_chunk(ck: Vector3i) -> Vector3i:
 
 static func _lod1_block_center(bk: Vector3i, world_offset: Vector3, block_edge_world: float) -> Vector3:
 	return world_offset + Vector3(bk) * block_edge_world + Vector3.ONE * block_edge_world * 0.5
+
+
+## LOD0/LOD1 滞回带宽（世界单位）：LOD0 区 = block 距离 < lod0_distance + margin。
+## 统一来源，消除各处重复的 (voxel_scale * VoxelData.LOD1_EDGE) * 0.5 计算与歧义。
+func _lod0_margin() -> float:
+	return (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
+
+
+## LOD1 block 世界边长（= 64 体素 × voxel_scale）
+func _block_edge_world() -> float:
+	return voxel_scale * float(LOD1_BLOCK_EDGE)
+
+
+## block 中心到相机的距离（统一 world_offset/block_edge 来源）
+func _block_dist(bk: Vector3i, cam_pos: Vector3) -> float:
+	return cam_pos.distance_to(_lod1_block_center(bk, global_position, _block_edge_world()))
+
+
+## 是否处于 LOD0 区（block 距离 < lod0_distance + margin；lod0_distance<=0 视为不在 LOD0 区）
+func _is_lod0_zone(bk: Vector3i, cam_pos: Vector3) -> bool:
+	return lod0_distance > 0.0 and _block_dist(bk, cam_pos) < lod0_distance + _lod0_margin()
 ## LOD1 生成每帧时间预算（毫秒）：超过即停止本帧生成，平滑移动时主线程峰值
 @export_range(0.1, 50.0, 0.1) var _lod1_build_budget_ms: float = 6.0
 
@@ -455,10 +476,8 @@ func _update_mesh() -> void:
 		_materials_snapshot = data.materials.duplicate(true)
 		_materials_snapshot_dirty = false
 
-	if mesh_mode == MeshMode.CHUNK_ASYNC:
-		_update_mesh_async()
-	else:
-		_update_mesh_sync()
+	# 统一走异步生成（CHUNK_ASYNC 为唯一路径；同步渲染路径已移除简化）
+	_update_mesh_async()
 
 
 ## 流式加载距离过滤（仅 STREAMING 模式生效）：
@@ -480,8 +499,8 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	# 决策按 LOD1 block 中心距离（与 _process_lod 一致），避免 block 跨 lod0 边界时
 	# 部分 chunk 建 LOD0、部分建 LOD1 造成的重叠/空洞。
 	var lod0_d: float = lod0_distance if lod0_distance > 0.0 else unload_distance
-	var lod0_margin := (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
-	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
+	var lod0_margin := _lod0_margin()
+	var block_edge_world := _block_edge_world()
 	for ck in chunks:
 		# 无数据的空 chunk：无需流式网格管理（不建不卸，且不占用 streamed_out 字典）
 		if data and not data.has_chunk(ck):
@@ -526,7 +545,7 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	# 新进入视野的 chunk 已提前生成，避免"近处也空"。仅远处 LOD 做视锥剔除。
 	var _block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
 	var _lod0_d := lod0_distance if lod0_distance > 0.0 else 0.0
-	var _lod0_margin := (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
+	var _lod0_margin := _lod0_margin()
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		# 无数据的空 chunk：不纳入视锥管理（无体素无需构建/补建，
@@ -1008,7 +1027,7 @@ func _on_lod1_thread_result(bk: Vector3i, arr: Dictionary, gen_id: int) -> void:
 	var center := _lod1_block_center(bk, global_position, block_edge_world)
 	var dist := cam.global_position.distance_to(center)
 	var lod0_d := lod0_distance
-	var lod0_margin := (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
+	var lod0_margin := _lod0_margin()
 	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
 	if dist < lod0_d - lod0_margin or dist > unload_d + block_edge_world * 0.5:
 		return  # 已移出区间，丢弃过期结果
@@ -1525,60 +1544,8 @@ static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scal
 	return result
 
 
-## 同步路径：主线程直接生成并应用（兼容模式）
-func _update_mesh_sync() -> void:
-	var options := {
-		"scale": voxel_scale,
-		"offset": data.center_offset if data else Vector3.ZERO,
-	}
-
-	# Per-chunk 增量重建（同步版，密集光环直连生成）
-	if mesh_mode != MeshMode.GLOBAL_MESH:
-		var rebuild_chunks: Array[Vector3i] = data.get_dirty_chunks()
-		last_rebuild_affected_count = rebuild_chunks.size()
-		var t0 := Time.get_ticks_usec()
-		var chunk_keys: Array[Vector3i] = rebuild_chunks
-		if chunk_keys.is_empty():
-			chunk_keys = data.get_all_chunk_keys()
-			last_rebuild_affected_count = chunk_keys.size()
-		var aligned := VoxelMaterial.align_by_id(data.materials)
-		var chunk_arrays: Dictionary = {}
-		for ck in chunk_keys:
-			var arr := VoxelChunkGenerator.generate_single_chunk_dense(
-				data.get_chunk_halo(ck), aligned, options["scale"], ck, options["offset"])
-			if not arr.is_empty():
-				chunk_arrays[ck] = arr
-		last_mesh_gen_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
-		# 统计顶点/三角形数（统一 _count_chunk_vertices / _set_last_vertex_stats）
-		var counts := _count_chunk_vertices(chunk_arrays)
-		_set_last_vertex_stats(counts.x, counts.y, chunk_arrays.size())
-		_build_and_apply_lod0_meshes(chunk_arrays)
-		# _build_and_apply_lod0_meshes 内部在 mesh_updated 前设置了 last_apply_time_ms
-		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, last_apply_time_ms)
-		return
-
-	# 全量重建（组合模式）
-	var t1 := Time.get_ticks_usec()
-	var arrays := VoxelChunkGenerator.generate_arrays_runtime(data.get_voxels_dict_snapshot(), data.materials, options)
-	last_mesh_gen_time_ms = (Time.get_ticks_usec() - t1) / 1000.0
-	if arrays is Dictionary:
-		_set_last_vertex_stats(
-			arrays.get("solid_verts", PackedVector3Array()).size(),
-			arrays.get("trans_verts", PackedVector3Array()).size(),
-			1)
-		last_rebuild_affected_count = 1
-	_build_and_apply_mesh(arrays)
-	# _build_and_apply_mesh 内部已设置 last_apply_time_ms
-	_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, last_apply_time_ms)
-
-
-## 将网格数据组装为 ArrayMesh 并应用到节点（必须主线程）
+## 将单块(全局 GLOBAL_MESH)网格数据组装为 ArrayMesh 并应用到节点（必须主线程）
 func _build_and_apply_mesh(arrays: Variant) -> void:
-	# 检测是否为 per-chunk 字典（key 为 Vector3i）
-	if arrays is Dictionary and _is_chunk_arrays_result(arrays):
-		_build_and_apply_lod0_meshes(arrays as Dictionary)
-		return
-
 	var t0 := Time.get_ticks_usec()
 	var new_mesh: ArrayMesh
 	if arrays != null and arrays is Dictionary and not arrays.is_empty():
@@ -1609,14 +1576,6 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
 	last_apply_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
 	mesh_updated.emit()
-
-
-## 判断是否为 per-chunk 结果字典（key 为 Vector3i 类型）
-static func _is_chunk_arrays_result(arrays: Dictionary) -> bool:
-	if arrays.is_empty():
-		return false
-	var first_key = arrays.keys()[0]
-	return first_key is Vector3i
 
 
 func _update_collision() -> void:
@@ -1666,95 +1625,6 @@ func _clear_chunk_collisions() -> void:
 
 ## 将 per-chunk 网格数据应用到子 MeshInstance3D
 ## 注意：chunk_arrays 中可能包含空 chunk（空字典），用于清空已无体素的 chunk mesh
-func _build_and_apply_lod0_meshes(chunk_arrays: Dictionary) -> void:
-	var t_start := Time.get_ticks_usec()
-	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
-
-	# 收集本次重建涉及的所有 chunk key
-	var rebuilt_keys: Array[Vector3i] = []
-	for ck in chunk_arrays:
-		rebuilt_keys.append(ck)
-
-	# 诊断：记录重建规模（仅诊断模式开启时）
-	if diag_enabled:
-		print("[诊断] 重建 Chunk=%d 已有Mesh=%d" % [rebuilt_keys.size(), _lod0_meshes.size()])
-
-	# 处理所有重建的 chunk
-	var cleared_count := 0
-	for ck in rebuilt_keys:
-		var arrays = chunk_arrays[ck]
-		# 获取或创建该 chunk 的子 MeshInstance3D
-		var chunk_mesh: MeshInstance3D
-		if _lod0_meshes.has(ck):
-			chunk_mesh = _lod0_meshes[ck]
-		else:
-			chunk_mesh = MeshInstance3D.new()
-			chunk_mesh.name = "Chunk_%d_%d_%d" % [ck.x, ck.y, ck.z]
-			add_child(chunk_mesh)
-			_lod0_meshes[ck] = chunk_mesh
-
-		# 【修复】检查当前数据中该 chunk 是否已无体素（异步任务快照滞后导致）
-		# 如果 chunk 在快照中还有体素，但当前数据中已被完全破坏，清空其 mesh
-		var has_voxels_in_data := false
-		if data:
-			var current_voxels: Array = data.get_chunk_voxels(ck)
-			has_voxels_in_data = not current_voxels.is_empty()
-
-		# 构建 mesh
-		var has_mesh := false
-		if arrays is Dictionary and not arrays.is_empty() and has_voxels_in_data:
-			var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
-			if new_mesh and _materials_cache.size() >= 2:
-				if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
-					new_mesh.surface_set_material(0, _materials_cache[0])
-				if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
-					new_mesh.surface_set_material(1, _materials_cache[1])
-			chunk_mesh.mesh = new_mesh
-			has_mesh = new_mesh != null
-		elif not has_voxels_in_data:
-			# chunk 已无体素，清除 mesh 并移除节点防止累积
-			chunk_mesh.mesh = null
-			_lod0_meshes.erase(ck)
-			chunk_mesh.queue_free()
-		else:
-			# has_voxels_in_data 为 true 但 arrays 为空（竞态：生成后体素被重新添加）
-			# 保留已有 mesh，等待下一帧重建
-			has_mesh = chunk_mesh.mesh != null
-
-		# Per-chunk 碰撞体（节点被清理时不执行）
-		if has_voxels_in_data or _lod0_meshes.has(ck):
-			chunk_mesh.position = Vector3(ck) * chunk_scale
-			_collision_rebuild_queue[ck] = has_mesh
-		else:
-			_remove_chunk_collision(ck)
-
-	# 检查是否有 chunk 在重建后变为空但未被清理（不在 rebuilt_keys 中的）
-	# 遍历所有已存在的 chunk mesh，如果不在本次重建列表中且已无体素，清空其 mesh
-	for ck in _lod0_meshes.keys():
-		if rebuilt_keys.has(ck):
-			continue  # 已在本轮重建中处理
-		# 检查该 chunk 是否已无体素
-		if data:
-			var chunk_positions: Array = data.get_chunk_voxels(ck)
-			if chunk_positions.is_empty():
-				cleared_count += 1
-				if diag_enabled:
-					print("[诊断] Chunk %s 不在重建列表且已无体素，清除旧 Mesh" % ck)
-				_lod0_meshes[ck].queue_free()
-				_lod0_meshes.erase(ck)
-				_remove_chunk_collision(ck)
-
-	if diag_enabled and cleared_count > 0:
-		print("[诊断] 本轮共清除 %d 个空 Chunk Mesh" % cleared_count)
-
-	# 清理变更追踪
-	if data:
-		data.clear_dirty_chunks()
-	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
-	last_apply_time_ms = (Time.get_ticks_usec() - t_start) / 1000.0
-	mesh_updated.emit()
-
-
 ## 更新单个 chunk 的碰撞体（Per-chunk StaticBody3D + ConcavePolygonShape3D）
 func _update_chunk_collision(ck: Vector3i, has_mesh: bool) -> void:
 	if generate_collision and has_mesh:
