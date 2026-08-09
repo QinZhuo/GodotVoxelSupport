@@ -78,6 +78,8 @@ var _dirty_mesh_chunks: Dictionary = {}
 func _mark_voxel_dirty(pos: Vector3i) -> void:
 	var ck := _chunk_of(pos)
 	_dirty_mesh_chunks[ck] = true
+	# LOD0 数据变化 → 失效对应 LOD1 block（远距离低分辨率网格需重新降采样）
+	invalidate_lod1(pos)
 	var local := pos - ck * CHUNK_SIZE
 	if local.x == 0:
 		_dirty_mesh_chunks[ck + Vector3i(-1, 0, 0)] = true
@@ -96,6 +98,159 @@ func _mark_voxel_dirty(pos: Vector3i) -> void:
 ## 标记单个 chunk 需要重建（补建/流式加载路径用）
 func _mark_chunk_dirty(ck: Vector3i) -> void:
 	_dirty_mesh_chunks[ck] = true
+
+
+# ----------------------------------------------------------------------------
+# LOD 支持（简化两层级：LOD0 = 16³ 全精度 chunk；LOD1 = 16³ 大块，每格代表 2³ 体素）
+#   LOD1 block_key = LOD0 chunk_key >> LOD1_SHIFT（每 2×2×2 个 LOD0 chunk 一个 LOD1 block）
+#   LOD1 block 覆盖 32³ 体素，内部 16³ 个大格（降采样：2×2×2 体素 → 1 个大格，取非空材质）
+#   远处渲染用 LOD1（顶点为 LOD0 的 1/8），近处用 LOD0 全精度
+# ----------------------------------------------------------------------------
+const LOD1_SHIFT := 1
+## LOD1 大格边长（体素）= CHUNK_SIZE << LOD1_SHIFT = 32
+const LOD1_EDGE := CHUNK_SIZE << LOD1_SHIFT
+
+# LOD1 降采样缓存：block_key(Vector3i) -> PackedInt32Array(16³ 大格)
+var _lod1_cache: Dictionary = {}
+# 失效的 LOD1 block（LOD0 数据变化时记录，渲染器消费后重建远距离网格）
+var _lod1_invalidated: Dictionary = {}
+
+## 获取 LOD1 block（16³ 大格，每格代表 2³ 体素，取 2×2×2 中第一个非空材质）。
+## 懒生成 + 缓存；LOD0 chunk 变化时由 invalidate_lod1 失效对应 block。
+## 性能：空 block（覆盖的 8 个 LOD0 chunk 均无数据）快速返回全 0，不降采样；
+## 非空 block 直接从 chunk buffer 读取（数组下标，避开 get_voxel 的字典开销）。
+func get_lod1_block(block_key: Vector3i) -> PackedInt32Array:
+	var cached: Variant = _lod1_cache.get(block_key)
+	if cached != null:
+		return cached
+	var buf := PackedInt32Array()
+	buf.resize(CHUNK_VOLUME)
+	# 快速检查：覆盖的 2×2×2 个 LOD0 chunk 是否有数据（无则返回全 0）
+	var has_any := false
+	for cz in 2:
+		for cy in 2:
+			for cx in 2:
+				if has_chunk(block_key * 2 + Vector3i(cx, cy, cz)):
+					has_any = true
+					break
+			if has_any:
+				break
+		if has_any:
+			break
+	if has_any:
+		# 确保覆盖的 2×2×2 个 LOD0 chunk 已加载（流式下部分 chunk 可能已卸载到磁盘，
+		# 若不加载则 _read_voxel_fast 读空 → LOD1 大格缺失 → "该有体素的地方没有"）
+		for cz in 2:
+			for cy in 2:
+				for cx in 2:
+					preload_chunk(block_key * 2 + Vector3i(cx, cy, cz))
+		var origin := block_key * LOD1_EDGE
+		for lz in CHUNK_SIZE:
+			for ly in CHUNK_SIZE:
+				for lx in CHUNK_SIZE:
+					var mat := 0
+					for dz in 2:
+						for dy in 2:
+							for dx in 2:
+								var m := _read_voxel_fast(origin + Vector3i(lx * 2 + dx, ly * 2 + dy, lz * 2 + dz))
+								if m > 0:
+									mat = m
+									break
+							if mat > 0:
+								break
+						if mat > 0:
+							break
+					buf[lx + ly * CHUNK_SIZE + lz * CHUNK_SLICE] = mat
+	_lod1_cache[block_key] = buf
+	return buf
+
+
+## 直接从 chunk 密集缓冲读体素（数组下标，无 get_voxel 的字典/preload 开销）。
+## 仅用于降采样（LOD1 区数据在内存，缺失视为空）。返回 -1 表示缓冲缺失。
+func _read_voxel_fast(pos: Vector3i) -> int:
+	var ck := _chunk_of(pos)
+	var buf = _chunk_buffers.get(ck)
+	if buf == null:
+		return -1
+	var local := pos - ck * CHUNK_SIZE
+	return buf[local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SLICE]
+
+
+## 构建 LOD1 block 的 18³ 大格光环（供 LOD1 网格生成）。
+## 布局与 LOD0 的 halo 一致：中心 16³ = block 内部，6 个外缘面（x/y/z 的 0/17）
+## = 对应方向邻居 block 的边界大格（跨界面的面可见性）。大格值 = 材质ID（0 = 空）。
+func get_lod1_halo(block_key: Vector3i) -> PackedInt32Array:
+	var halo := PackedInt32Array()
+	halo.resize(HALO_VOLUME)
+	# 中心 16³ = block 内部
+	var buf := get_lod1_block(block_key)
+	for z in CHUNK_SIZE:
+		for y in CHUNK_SIZE:
+			for x in CHUNK_SIZE:
+				halo[(1 + x) + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE]
+	# +x 外缘面（halo x=17）= 邻居 (bx+1) 的 x=0 面
+	var nb_px := get_lod1_block(block_key + Vector3i(1, 0, 0))
+	for z in CHUNK_SIZE:
+		for y in CHUNK_SIZE:
+			halo[(HALO_SIZE - 1) + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_px[0 + y * CHUNK_SIZE + z * CHUNK_SLICE]
+	# -x 外缘面（halo x=0）= 邻居 (bx-1) 的 x=15 面
+	var nb_nx := get_lod1_block(block_key + Vector3i(-1, 0, 0))
+	for z in CHUNK_SIZE:
+		for y in CHUNK_SIZE:
+			halo[0 + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_nx[(CHUNK_SIZE - 1) + y * CHUNK_SIZE + z * CHUNK_SLICE]
+	# +y 外缘面（halo y=17）= 邻居 (by+1) 的 y=0 面
+	var nb_py := get_lod1_block(block_key + Vector3i(0, 1, 0))
+	for z in CHUNK_SIZE:
+		for x in CHUNK_SIZE:
+			halo[(1 + x) + (HALO_SIZE - 1) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_py[x + 0 * CHUNK_SIZE + z * CHUNK_SLICE]
+	# -y 外缘面（halo y=0）= 邻居 (by-1) 的 y=15 面
+	var nb_ny := get_lod1_block(block_key + Vector3i(0, -1, 0))
+	for z in CHUNK_SIZE:
+		for x in CHUNK_SIZE:
+			halo[(1 + x) + 0 * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_ny[x + (CHUNK_SIZE - 1) * CHUNK_SIZE + z * CHUNK_SLICE]
+	# +z 外缘面（halo z=17）= 邻居 (bz+1) 的 z=0 面
+	var nb_pz := get_lod1_block(block_key + Vector3i(0, 0, 1))
+	for y in CHUNK_SIZE:
+		for x in CHUNK_SIZE:
+			halo[(1 + x) + (1 + y) * HALO_SIZE + (HALO_SIZE - 1) * HALO_SIZE * HALO_SIZE] = nb_pz[x + y * CHUNK_SIZE + 0 * CHUNK_SLICE]
+	# -z 外缘面（halo z=0）= 邻居 (bz-1) 的 z=15 面
+	var nb_nz := get_lod1_block(block_key + Vector3i(0, 0, -1))
+	for y in CHUNK_SIZE:
+		for x in CHUNK_SIZE:
+			halo[(1 + x) + (1 + y) * HALO_SIZE + 0 * HALO_SIZE * HALO_SIZE] = nb_nz[x + y * CHUNK_SIZE + (CHUNK_SIZE - 1) * CHUNK_SLICE]
+	return halo
+
+
+## 失效体素所在 chunk 对应的 LOD1 block（LOD0 数据变化后调用）
+func invalidate_lod1(pos: Vector3i) -> void:
+	var ck := _chunk_of(pos)
+	_mark_lod1_invalid(Vector3i(ck.x >> LOD1_SHIFT, ck.y >> LOD1_SHIFT, ck.z >> LOD1_SHIFT))
+
+
+## 失效指定 LOD0 chunk 对应的 LOD1 block
+func invalidate_lod1_for_chunk(ck: Vector3i) -> void:
+	_mark_lod1_invalid(Vector3i(ck.x >> LOD1_SHIFT, ck.y >> LOD1_SHIFT, ck.z >> LOD1_SHIFT))
+
+
+## 记录 LOD1 block 失效（清缓存 + 通知渲染器重建）
+func _mark_lod1_invalid(block_key: Vector3i) -> void:
+	_lod1_cache.erase(block_key)
+	_lod1_invalidated[block_key] = true
+
+
+## 清空 LOD1 缓存
+func clear_lod1_cache() -> void:
+	_lod1_cache.clear()
+	_lod1_invalidated.clear()
+
+
+## 获取失效的 LOD1 block（渲染器 _process_lod 消费后重建），并清空
+func get_invalidated_lod1() -> Array[Vector3i]:
+	var keys: Array[Vector3i] = []
+	for k in _lod1_invalidated:
+		keys.append(k)
+	_lod1_invalidated.clear()
+	return keys
 
 
 ## 获取所有脏 chunk（渲染器增量重建用），并清空
@@ -840,6 +995,8 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	var boundary: Dictionary = res["boundary"]
 	for ck in boundary:
 		_dirty_mesh_chunks[ck] = true
+		# LOD0 数据变化 → 失效对应 LOD1 block
+		invalidate_lod1_for_chunk(ck)
 		var b: int = boundary[ck]
 		if b & 1:
 			_dirty_mesh_chunks[ck + Vector3i(1, 0, 0)] = true

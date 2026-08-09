@@ -217,6 +217,17 @@ static func generate_single_chunk_dense(
 	return result
 
 
+## 生成 LOD1 大块的网格（每格代表 2³ 体素，体素世界尺寸 = scale × 2）。
+## lod1_halo: 18³ 大格（值 = 材质ID，0 = 空），由 VoxelData.get_lod1_halo 构建。
+## block_key: LOD1 block key；网格顶点用局部坐标（大格单位 × 2×scale），
+## MeshInstance3D 位置应设为 block_key × 32 × scale（LOD1 block 覆盖 32³ 体素）。
+## 复用原生 greedy 网格生成（体素尺寸 2×scale），顶点为 LOD0 的约 1/8。
+static func generate_lod1_chunk_arrays(
+		lod1_halo: PackedInt32Array, aligned_materials: Array, scale: float, block_key: Vector3i,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	return generate_single_chunk_dense(lod1_halo, aligned_materials, scale * 2.0, block_key, offset)
+
+
 ## 从对齐材质数组构建透明标志数组（PackedByteArray，索引=材质ID，1=透明）
 ## 供原生 generate_chunk_dense 使用（C++ 跨语言读 VoxelMaterial 属性较慢，预计算传入）
 static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:

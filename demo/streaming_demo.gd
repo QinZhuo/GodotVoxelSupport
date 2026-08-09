@@ -151,6 +151,8 @@ func _build_world() -> void:
 	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 	_target.view_distance = view_distance
 	_target.unload_distance = unload_distance
+	# LOD：距离内全精度，之外用 LOD1 低分辨率大块（每格 2³ 体素，顶点约 1/8）
+	_target.lod0_distance = view_distance * 0.6
 	_target.spawn_debris_on_damage = true
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0

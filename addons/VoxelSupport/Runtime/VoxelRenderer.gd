@@ -110,9 +110,31 @@ enum VisibilityMode {
 ## 默认 0 = 自动取 view_distance * 1.5
 @export var unload_distance: float = 0.0
 
+## LOD0 距离（世界单位）：该距离内用全精度 16³ chunk，之外用 LOD1 低分辨率大块
+## （每格代表 2³ 体素，顶点约为 1/8）。默认 0 = 不启用 LOD（全部全精度）。
+## 启用时建议 < view_distance，LOD0 与 LOD1 在 [lod0, unload] 区间互补。
+@export var lod0_distance: float = 0.0:
+	set(v):
+		lod0_distance = v
+		if v <= 0.0:
+			# 关闭 LOD：清理 LOD1 网格与缓存
+			for bk in _lod1_meshes:
+				_lod1_meshes[bk].queue_free()
+			_lod1_meshes.clear()
+			_lod1_pending.clear()
+			if data:
+				data.clear_lod1_cache()
+
 ## 可见性检查间隔（帧）：视锥/流式统一每隔 N 帧检查一次相机位置。
 ## 值越大 CPU 开销越低，但进入视锥/加载距离后的补建响应越慢。
 @export_range(1, 120) var visibility_check_interval: int = 8
+
+## LOD1 渲染：LOD1 block（key -> MeshInstance3D），距离在 [lod0, unload] 区间用低分辨率大块
+var _lod1_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
+## LOD1 待生成的 block（key -> true），由 _process_lod 限量生成
+var _lod1_pending: Dictionary = {}
+## 每帧最多生成的 LOD1 网格数（降采样 + 网格生成较贵，限量保平滑）
+var _lod1_build_per_frame: int = 2
 
 ## 流式加载：已卸载网格的 chunk（key → true），进入加载距离后补建
 var _streamed_out_chunks: Dictionary[Vector3i, bool] = {}
@@ -255,6 +277,12 @@ func _process(_delta: float) -> void:
 		_process_deferred_chunks()
 	if _streaming_enabled:
 		_process_streaming()
+	# LOD1 低分辨率大块管理：每 interval 帧限量生成/移除（降低每帧遍历开销，
+	# 近处 LOD0 / 远处 LOD1 互补）；数据变化（破坏/编辑）由 get_invalidated_lod1 即时重建
+	_cull_check_counter += 1
+	if lod0_distance > 0.0 and data and _cull_check_counter >= visibility_check_interval:
+		_cull_check_counter = 0
+		_process_lod()
 
 	# GPU 上传限流：帧尾批量构建队列中的 chunk mesh（避免与渲染/崩塌竞争 GPU）
 	# call_deferred 确保在帧末尾执行（本帧渲染已提交），且队列处理不阻塞主循环
@@ -397,13 +425,28 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var cam_pos := cam.global_position
 	var world_offset := global_position
 	var kept: Array[Vector3i] = []
+	# LOD0 生成边界：启用 LOD（lod0_distance>0）时，LOD0 chunk 只在 [0, lod0] 生成，
+	# (lod0, unload] 区间由 LOD1 低分辨率大块覆盖（数据保留，网格用 _process_lod 生成）。
+	# 决策按 LOD1 block 中心距离（与 _process_lod 一致），避免 block 跨 lod0 边界时
+	# 部分 chunk 建 LOD0、部分建 LOD1 造成的重叠/空洞。
+	var lod0_d: float = lod0_distance if lod0_distance > 0.0 else unload_distance
+	var lod1_edge_world := voxel_scale * VoxelData.LOD1_EDGE
 	for ck in chunks:
 		# 无数据的空 chunk：无需流式网格管理（不建不卸，且不占用 streamed_out 字典）
 		if data and not data.has_chunk(ck):
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if cam_pos.distance_to(aabb.get_center()) > unload_distance:
+		var dist := cam_pos.distance_to(aabb.get_center())
+		if dist > unload_distance:
 			_streamed_out_chunks[ck] = true
+		elif lod0_distance > 0.0:
+			var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
+			var bcenter := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+			if cam_pos.distance_to(bcenter) > lod0_d:
+				# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 block 待生成（数据保留在内存）
+				_lod1_pending[bk] = true
+			else:
+				kept.append(ck)
 		else:
 			kept.append(ck)
 	return kept
@@ -542,9 +585,17 @@ func _process_streaming() -> void:
 	# 1. 卸载：距离 > unload_d，远的优先
 	# 数据层磁盘流式：遍历数据层内存 chunk，远距统一 _unload_chunk → 网格释放 + 数据写盘
 	if unload_d > 0.0:
+		var lod1_edge_world: float = voxel_scale * float(VoxelData.LOD1_EDGE)
 		var candidates: Array = []
 		if data:
 			for ck in data.get_loaded_chunk_keys():
+				# LOD1 区数据保留：chunk 所属 block（2×2×2 中心）仍处于 LOD1 显示区时
+				# （≤ unload_d），其数据供降采样合并，不卸载——否则 _read_voxel_fast 读空，
+				# LOD1 大格缺失 → "该有体素的地方没有"。即使 chunk 自身中心超出 unload。
+				var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
+				var bcenter := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+				if cam_pos.distance_to(bcenter) <= unload_d:
+					continue
 				var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
 				if dist > unload_d:
 					candidates.append([dist, ck])
@@ -592,6 +643,136 @@ func _process_streaming() -> void:
 			reloaded += 1
 		if reloaded > 0:
 			_request_update()
+
+
+# ----------------------------------------------------------------------------
+# LOD1 低分辨率大块渲染（简化两层级 LOD）
+#   距离 < lod0_distance：LOD0 全精度 chunk（由正常流式/视锥路径生成）
+#   距离 [lod0_distance, unload_distance]：LOD1 大块（每格 2³ 体素，顶点约 1/8）
+#   距离 > unload_distance：卸载（数据写回磁盘）
+# ----------------------------------------------------------------------------
+
+## LOD1 管理：每帧限量生成待建的 LOD1 大块 + 移除超出区间的旧 LOD1。
+## 生成包含降采样（从内存 LOD0 buffer 合并 2³ 体素）+ 网格生成，主线程开销有限（限量）。
+func _process_lod() -> void:
+	if not is_inside_tree():
+		return
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return
+	var cam_pos := cam.global_position
+	var world_offset := global_position
+	var lod1_edge_world := voxel_scale * VoxelData.LOD1_EDGE
+	var chunk_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
+
+	# 0. 处理数据变化导致的 LOD1 失效（破坏/编辑 → 移除旧网格，重新降采样生成）
+	var invalidated := data.get_invalidated_lod1()
+	for bk in invalidated:
+		_remove_lod1(bk)
+
+	# 1. 移除超出 LOD0 区的 LOD0 chunk 网格（相机远离后 >lod0 的全精度网格应消失，
+	#    由 LOD1 大块覆盖；增量重建不处理"非 dirty 但需移除"的 chunk，这里主动清理——
+	#    否则移动后旧的全精度面残留 → "有的面没消失"）
+	var remove_lod0: Array = []
+	for ck in _chunk_meshes:
+		var ccenter := world_offset + (Vector3(ck) * chunk_world + Vector3.ONE * chunk_world * 0.5)
+		if cam_pos.distance_to(ccenter) > lod0_distance:
+			remove_lod0.append(ck)
+	for ck in remove_lod0:
+		_remove_chunk_mesh(ck)
+
+	# 1. 推导需要 LOD1 的 block（从内存 chunk 主动推导，不依赖 dirty 触发——
+	#    相机移动本身不产生 dirty，若不推导则新进入 [lod0, unload] 区间的 block
+	#    不会生成 LOD1 → 空洞）
+	var needed := {}
+	for ck in data.get_loaded_chunk_keys():
+		var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
+		needed[bk] = true
+	# 并入待建集合（含 _filter_streamed_chunks 标记的）
+	for bk in _lod1_pending:
+		needed[bk] = true
+
+	# 2. 移除已超出区间的 LOD1（距离 < lod0 交给 LOD0 显示；> unload 卸载）
+	var remove_keys: Array = []
+	for bk in _lod1_meshes:
+		var center := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+		var dist := cam_pos.distance_to(center)
+		if dist < lod0_distance or dist > unload_d:
+			remove_keys.append(bk)
+	for bk in remove_keys:
+		_remove_lod1(bk)
+
+	# 3. 限量生成缺失的 LOD1（最近优先：先算距离排序，再限量）
+	var to_build: Array = []
+	for bk in needed:
+		if _lod1_meshes.has(bk):
+			continue
+		var center := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+		var dist := cam_pos.distance_to(center)
+		if dist < lod0_distance or dist > unload_d:
+			continue
+		to_build.append([dist, bk])
+	to_build.sort_custom(func(a, b): return a[0] < b[0])
+	var built := 0
+	for item in to_build:
+		if built >= _lod1_build_per_frame:
+			break
+		_build_lod1(item[1])
+		built += 1
+	_lod1_pending.clear()
+
+	# 4. 视锥内 LOD0 区未建的 chunk → 标 dirty 补建。
+	#    相机移动本身不产生 dirty，若视锥内的新区域（block 中心 <lod0，应全精度）
+	#    不在脏集合，增量重建不会派发 → 视锥内空洞（"有的面没显示"）。
+	#    LOD1 区由上面的生成逻辑覆盖（不限视锥），此处只补 LOD0 区。
+	var need_lod0_update := false
+	if cam != null:
+		for ck in data.get_loaded_chunk_keys():
+			var ccenter := world_offset + (Vector3(ck) * chunk_world + Vector3.ONE * chunk_world * 0.5)
+			if cam_pos.distance_to(ccenter) > lod0_distance:
+				continue  # LOD1 区（由 _build_lod1 覆盖）
+			if _chunk_meshes.has(ck):
+				continue
+			if not cam.is_position_in_frustum(ccenter):
+				continue
+			data._mark_chunk_dirty(ck)
+			need_lod0_update = true
+	if need_lod0_update:
+		_request_update()
+
+
+## 生成单个 LOD1 大块的网格（降采样 halo + 网格生成 + 挂载 MeshInstance3D）
+func _build_lod1(bk: Vector3i) -> void:
+	if not data:
+		return
+	var halo := data.get_lod1_halo(bk)
+	var aligned := VoxelMaterial.align_by_id(_materials_snapshot)
+	var arr := VoxelChunkGenerator.generate_lod1_chunk_arrays(
+		halo, aligned, voxel_scale, bk, data.center_offset if data else Vector3.ZERO)
+	var mi := MeshInstance3D.new()
+	mi.name = "LOD1_%d_%d_%d" % [bk.x, bk.y, bk.z]
+	add_child(mi)
+	var lod1_edge_world := voxel_scale * VoxelData.LOD1_EDGE
+	mi.position = Vector3(bk) * lod1_edge_world
+	if not arr.is_empty():
+		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
+		if new_mesh and _materials_cache.size() >= 2:
+			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
+				new_mesh.surface_set_material(0, _materials_cache[0])
+			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
+				new_mesh.surface_set_material(1, _materials_cache[1])
+		mi.mesh = new_mesh
+	_lod1_meshes[bk] = mi
+
+
+## 移除 LOD1 大块
+func _remove_lod1(bk: Vector3i) -> void:
+	var mi: MeshInstance3D = _lod1_meshes.get(bk)
+	if mi != null and is_instance_valid(mi):
+		mi.queue_free()
+	_lod1_meshes.erase(bk)
+	_lod1_pending.erase(bk)
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
@@ -1183,6 +1364,13 @@ func _clear_chunk_meshes() -> void:
 	for ck in _chunk_meshes:
 		_chunk_meshes[ck].queue_free()
 	_chunk_meshes.clear()
+	# 清理 LOD1 大块
+	for bk in _lod1_meshes:
+		_lod1_meshes[bk].queue_free()
+	_lod1_meshes.clear()
+	_lod1_pending.clear()
+	if data:
+		data.clear_lod1_cache()
 	_clear_chunk_collisions()
 
 
