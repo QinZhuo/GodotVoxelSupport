@@ -540,6 +540,19 @@ static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offse
 	return AABB(origin, Vector3(chunk_size_world, chunk_size_world, chunk_size_world))
 
 
+## 加载/生成优先级：距离 + 视线方向加权（前方优先、后方延后），返回值越小越优先。
+## 前方(相机朝向方向,dot≈+1) 加权距离≈0.5×dist 优先；后方(dot≈-1)≈1.5×dist 延后。
+## 用于流式加载/LOD1 生成排序：移动时前方地形先出现，减少"走近才加载"。
+static func _load_priority(ck: Vector3i, cam_pos: Vector3, cam_dir: Vector3, chunk_size_world: float, world_offset: Vector3) -> float:
+	var center := _chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()
+	var to_center := center - cam_pos
+	var dist := to_center.length()
+	if dist < 0.001:
+		return 0.0
+	var forward := to_center.normalized().dot(cam_dir)
+	return dist - forward * dist * 0.5
+
+
 ## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
 ## 使用 Godot 内置 is_position_in_frustum，保证判定与引擎渲染剔除一致
 static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
@@ -701,8 +714,12 @@ func _process_streaming() -> void:
 			var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
 			if dist <= unload_d:
 				to_load.append([dist, ck])
-		# 从近到远（距离升序）：最近的先加载
-		to_load.sort_custom(func(a, b): return a[0] < b[0])
+		# 加载优先级优化：距离 + 视线方向加权排序（前方优先、后方延后）——
+		# 移动时前方地形先出现，减少"走近才加载"；后方延后节省带宽/IO。
+		var _cam_dir: Vector3 = -cam.global_transform.basis.z
+		to_load.sort_custom(func(a, b):
+			return _load_priority(a[1], cam_pos, _cam_dir, chunk_size_world, world_offset) < \
+					_load_priority(b[1], cam_pos, _cam_dir, chunk_size_world, world_offset))
 		# 异步预读：先请求后台线程加载候选涉及 region（磁盘 IO 移出主线程），
 		# 随后同步 preload 命中缓存则无 IO（未命中仅兜底，通常后台已就绪）——
 		# 根治流式移动时主线程同步读盘卡顿。
@@ -830,7 +847,10 @@ func _process_lod() -> void:
 		if dist < lod0_d - lod0_margin or dist > unload_d + block_edge_world * 0.5:
 			continue
 		to_build.append([dist, bk])
-	to_build.sort_custom(func(a, b): return a[0] < b[0])
+	to_build.sort_custom(func(a, b):
+		# 加载优先级优化：距离 + 视线方向加权（前方 LOD1 先生成，移动时前方地形先就绪）
+		var _cd: Vector3 = -cam.global_transform.basis.z
+		return _lod1_load_priority(a[1], cam_pos, _cd) < _lod1_load_priority(b[1], cam_pos, _cd))
 	# 生成预算控制：快照 + 派发 WorkerThreadPool（降采样/网格生成在后台线程）。
 	if not to_build.is_empty():
 		_aligned_lod1_materials = VoxelMaterial.align_by_id(_materials_snapshot)
@@ -926,6 +946,17 @@ func _block_lod0_ready(bk: Vector3i, cam: Camera3D) -> bool:
 					if _aabb_has_vertex_in_frustum(aabb, cam):
 						return false
 	return true
+
+
+## LOD1 生成优先级：距离 + 视线方向加权（前方 block 先生成）。返回值越小越优先。
+func _lod1_load_priority(bk: Vector3i, cam_pos: Vector3, cam_dir: Vector3) -> float:
+	var center := _lod1_block_center(bk, global_position, voxel_scale * float(LOD1_BLOCK_EDGE))
+	var to_center := center - cam_pos
+	var dist := to_center.length()
+	if dist < 0.001:
+		return 0.0
+	var forward := to_center.normalized().dot(cam_dir)
+	return dist - forward * dist * 0.5
 
 
 ## 派发 LOD1 大块异步生成：快照 chunk（COW）+ WorkerThreadPool 后台降采样/网格生成。
@@ -1429,7 +1460,7 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 		chunk_mesh.mesh = new_mesh
 		has_mesh = new_mesh != null
 	elif not has_voxels_in_data:
-		# chunk 已无体素，清除 mesh 并移除节点防止累积
+		# chunk 已无体素，清除 mesh 数据并移除容器防止累积
 		chunk_mesh.mesh = null
 		chunk_mesh.queue_free()
 		_chunk_meshes.erase(chunk_key)
@@ -1443,7 +1474,6 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 		_collision_rebuild_queue[chunk_key] = has_mesh
 	else:
 		_remove_chunk_collision(chunk_key)
-
 
 
 ## 批次完成清理：当所有任务都完成后执行
