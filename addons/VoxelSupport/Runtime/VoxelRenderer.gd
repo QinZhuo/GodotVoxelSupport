@@ -1096,6 +1096,11 @@ func _update_mesh_async() -> void:
 			for i in range(_REBUILD_BATCH_LIMIT, rebuild_chunks.size()):
 				data._mark_chunk_dirty(rebuild_chunks[i])
 			rebuild_chunks.resize(_REBUILD_BATCH_LIMIT)
+			# 放回剩余 dirty 后必须重新置位：_update_mesh 开头会清 _dirty，
+			# 若不重新 _request_update，剩余 dirty 将永久卡住 → 初始构建/大批量
+			# 重建只生成第一批，其余 chunk 网格缺失（破坏demo初始只显示一个小角落、
+			# 流式demo脚底下不显示）。置位后下帧 _process 继续消费下一批。
+			_request_update()
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
