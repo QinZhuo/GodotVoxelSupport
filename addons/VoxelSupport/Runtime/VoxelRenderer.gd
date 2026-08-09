@@ -1526,11 +1526,15 @@ func _clear_lod0_meshes() -> void:
 	_deferred_chunks.clear()
 	_mesh_build_queue.clear()
 	for ck in _lod0_meshes:
-		_lod0_meshes[ck].queue_free()
+		var mi: MeshInstance3D = _lod0_meshes[ck]
+		if mi != null and is_instance_valid(mi):
+			mi.queue_free()
 	_lod0_meshes.clear()
-	# 清理 LOD1 大块
+	# 清理 LOD1 大块（值为 null 表示空大块标记，跳过）
 	for bk in _lod1_meshes:
-		_lod1_meshes[bk].queue_free()
+		var bi: MeshInstance3D = _lod1_meshes[bk]
+		if bi != null and is_instance_valid(bi):
+			bi.queue_free()
 	_lod1_meshes.clear()
 	_lod1_pending.clear()
 	if data:
@@ -1541,7 +1545,9 @@ func _clear_lod0_meshes() -> void:
 ## 清理所有 per-chunk 碰撞体
 func _clear_chunk_collisions() -> void:
 	for ck in _chunk_collisions:
-		_chunk_collisions[ck].queue_free()
+		var col = _chunk_collisions[ck]
+		if col != null and is_instance_valid(col):
+			col.queue_free()
 	_chunk_collisions.clear()
 
 
