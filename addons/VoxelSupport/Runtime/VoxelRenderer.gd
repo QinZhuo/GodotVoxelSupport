@@ -34,6 +34,7 @@ enum VisibilityMode {
 			data.changed.connect(_on_data_changed)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
+		_procedural_pending.clear()
 		_clear_lod0_meshes()
 		_request_update()
 
@@ -205,6 +206,8 @@ const STREAM_LOAD_INTERVAL := 2
 # 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
 var _stream_force_build: Dictionary = {}
+# 程序化异步生成：已提交后台任务待回填的 chunk（VoxelProceduralStream.request_chunk_async）
+var _procedural_pending: Dictionary = {}
 # 数据基准 chunk（origin shift 后）：相机 chunk 距基准超阈值时平移世界，保持 float 精度。
 var _origin_chunk: Vector3i = Vector3i.ZERO
 ## origin shift 阈值（chunk）：相机 chunk 距基准超此值触发平移。chunk 16³ × 0.1 = 1.6 世界单位，
@@ -739,27 +742,49 @@ func _process_procedural() -> void:
 	var cam_pos := cam.global_position
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var world_offset := global_position
+	# 程序化 ensure 覆盖 view 距离（LOD0+LOD1 数据均保留，避免 LOD1 重建时同步生成卡顿）
 	var load_d := view_distance
 	# origin shift：相机 chunk 远离数据基准超阈值 → 平移数据+渲染+相机
 	_check_origin_shift(cam)
-	# 距离内确保数据（生成器生成），限量每帧；未加载的标 dirty 走异步网格管线
+	var stream := data.stream as VoxelProceduralStream if data else null
+	# 1) 回填后台已生成的 chunk（ensure 与 halo/LOD1 经 preload_chunk 提交的都会回填，
+	#    避免 async_results 堆积导致数据供给停滞）
+	var applied := 0
+	if stream:
+		var results := stream.poll_all_ready(_stream_load_per_frame)
+		for r in results:
+			var ck: Vector3i = r[0]
+			var buf: PackedInt32Array = r[1]
+			data.accept_procedural_buffer(ck, buf)
+			_procedural_pending.erase(ck)
+			applied += 1
+	# 2) 距离内提交异步生成任务（限量每帧；后台线程生成，主线程只提交）
 	var r := ceili(load_d / chunk_size_world) + 1
 	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
-	var loaded := 0
-	for dz in range(-r, r + 1):
-		for dy in range(-1, 2):
-			for dx in range(-r, r + 1):
-				if loaded >= _stream_load_per_frame:
-					return
-				var ck := cam_ck + Vector3i(dx, dy, dz)
-				if data.has_chunk(ck):
-					continue
-				if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > load_d:
-					continue
-				if data.preload_chunk(ck):
-					data._mark_chunk_dirty(ck)
-					loaded += 1
-	if loaded > 0:
+	var submitted := 0
+	var exhausted := false
+	if stream:
+		for dz in range(-r, r + 1):
+			if exhausted:
+				break
+			for dy in range(-1, 2):
+				if exhausted:
+					break
+				for dx in range(-r, r + 1):
+					if submitted >= _stream_load_per_frame:
+						exhausted = true
+						break
+					var ck := cam_ck + Vector3i(dx, dy, dz)
+					if data.has_chunk(ck):
+						continue
+					if _procedural_pending.has(ck):
+						continue
+					if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > load_d:
+						continue
+					stream.request_chunk_async(ck)
+					_procedural_pending[ck] = true
+					submitted += 1
+	if applied > 0 or submitted > 0:
 		_request_update()
 	# 卸载超范围的数据+网格（程序化：未修改 chunk 丢弃可重新生成，修改的由 unload_chunk 写盘）
 	# 卸载边界与加载边界一致（view_distance），否则 50~100 之间的残留层堆积导致内存膨胀
@@ -769,6 +794,11 @@ func _process_procedural() -> void:
 		for ck in data.get_loaded_chunk_keys():
 			if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
 				_unload_chunk(ck)
+		# 取消超范围仍未完成的异步任务（避免后台白生成，结果丢弃）
+		if stream:
+			for ck in _procedural_pending.keys():
+				if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
+					_procedural_pending.erase(ck)
 
 
 ## 动态原点重定位：相机 chunk 距数据基准超阈值时，平移数据层 + 渲染层 + 相机，
@@ -830,6 +860,7 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 	_lod1_pending = _shift_keys(_lod1_pending, shift)
 	_lod1_pending_tasks = _shift_keys(_lod1_pending_tasks, shift)
 	_mesh_build_queue = _shift_keys(_mesh_build_queue, shift)
+	_procedural_pending = _shift_keys(_procedural_pending, shift)
 	var ncr: Dictionary[Vector3i, bool] = {}
 	for k in _collision_rebuild_queue:
 		ncr[Vector3i(k) + shift] = true
@@ -1368,6 +1399,14 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			var _t1 := Time.get_ticks_usec()
 			has_voxels_in_data = data.has_chunk(chunk_key)
 			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
+		# 程序化流：数据已被 LOD1 区释放（超 LOD0 区、由 LOD1 覆盖）→ 该异步结果过期丢弃。
+		# 否则释放后异步 mesh 结果回来仍建网格 → 地块"显示→消失→再显示"闪烁。
+		if data and data.stream is VoxelProceduralStream and not has_voxels_in_data:
+			_pending_task_count -= 1
+			if _pending_task_count <= 0:
+				_pending_task_count = 0
+				_batch_complete_pending = true
+			return
 
 		# 入队待构建（GPU 上传限流，_process 每帧批量处理）
 		# 避免连续破坏时一帧大量 ArrayMesh 创建 + GPU 上传 → Metal fence 超时

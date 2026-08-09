@@ -337,6 +337,11 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 		available = stream.has_chunk(chunk_key)
 	if not available:
 		return false
+	# 程序化流 + 数据不在内存（非持久化）：提交后台生成并返回 false，不在主线程同步
+	# 生成（网格/LOD1 的 halo snapshot 大量调用会卡顿）。就绪后由 accept_procedural_buffer 回填。
+	if stream is VoxelProceduralStream and not _persisted_chunks.has(chunk_key):
+		(stream as VoxelProceduralStream).request_chunk_async(chunk_key)
+		return false
 	var buf := stream.load_chunk(chunk_key)
 	if buf.is_empty():
 		_persisted_chunks.erase(chunk_key)
@@ -349,6 +354,25 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 	_chunk_voxel_counts[chunk_key] = cnt
 	_voxel_count += cnt
 	return true
+
+
+## 回填程序化异步生成结果（后台线程生成完成，主线程调用）。已存在该 chunk 则忽略。
+## 与 preload_chunk 不同：数据来自异步队列，无需再走 stream.load_chunk。
+func accept_procedural_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
+	if _chunk_buffers.has(chunk_key):
+		return
+	if buf.size() != CHUNK_VOLUME:
+		return
+	_chunk_buffers[chunk_key] = buf
+	var cnt := 0
+	for i in CHUNK_VOLUME:
+		if buf[i] > 0:
+			cnt += 1
+	_chunk_voxel_counts[chunk_key] = cnt
+	_voxel_count += cnt
+	# 数据就绪 → 标记网格重建 + 失效对应 LOD1（与 preload_chunk 后渲染器标记一致）
+	_dirty_mesh_chunks[chunk_key] = true
+	invalidate_lod1_for_chunk(chunk_key)
 
 
 ## 卸载 chunk：把内存中该 chunk 的数据按需写回磁盘（修改过的写盘、变空的清盘、

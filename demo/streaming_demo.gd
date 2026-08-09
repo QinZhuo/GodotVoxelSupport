@@ -192,6 +192,8 @@ func _build_world_file() -> void:
 func _build_world_procedural() -> void:
 	# 程序化流（子类覆写 _generate_chunk 实现生成算法）
 	var stream := ProceduralTerrainGenerator.new()
+	# 修改持久化：用户破坏的 chunk 写盘，重启后保留（跨进程验证程序化+破坏存档）
+	stream.persist_directory = "user://voxel_procedural_stream"
 	var data := VoxelData.new()
 	data.stream = stream
 	var mat := VoxelMaterial.new()

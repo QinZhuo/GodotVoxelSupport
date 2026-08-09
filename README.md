@@ -18,3 +18,42 @@ You can see the rendering effects of voxel models imported using this plugin in 
 
 ![](/images/cards.png)
 ![](/images/teapot.png)
+
+## Voxel Runtime Usage
+
+### Architecture
+- **VoxelData** — voxel storage & editing (materials, chunk buffers)
+- **VoxelStream** (`@abstract`) — persistence backend (chunk-level read/write)
+  - `VoxelFileStream` — disk region-file streaming (persist voxel worlds)
+  - `VoxelProceduralStream` (`@abstract`) — infinite procedural world; subclass and override `_generate_chunk()`
+- **VoxelRenderer** — mesh generation, LOD, streaming, collision
+- **VoxelDestructible** — extends `VoxelRenderer`: destruction, collapse, debris
+
+### Procedural infinite world
+
+```gdscript
+class_name MyWorld
+extends VoxelProceduralStream
+
+## Override the base @abstract method: return a 16³ PackedInt32Array (value = material id, 0 = empty).
+## Must be deterministic: same chunk_key → same terrain.
+func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
+	# ... generation algorithm
+
+# usage
+var stream := MyWorld.new()
+stream.persist_directory = "user://world_edits"   # optional: persist user edits
+var data := VoxelData.new()
+data.stream = stream
+# ... assign to VoxelRenderer.data
+```
+
+Features:
+- Deterministic generation, continuous across chunk borders and origin shifts
+- **Origin shift**: camera far away auto-shifts world origin to keep coordinates small (float32 precision safe)
+- **Edit persistence**: user-modified chunks are stored under `persist_directory` and survive restart
+- **Async generation**: chunk generation runs on background threads (`WorkerThreadPool`)
+
+### Streaming demo
+`res://demo/streaming_demo.tscn` — switch between disk-file stream and procedural infinite world with **key 0**.
+Controls: WASD move, Q/E up/down, Space fast, 1 streaming on/off, 2 frustum culling on/off.
