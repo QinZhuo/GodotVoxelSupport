@@ -62,6 +62,18 @@ public:
 	//   GDScript 用返回的 buffers 覆盖 _chunk_buffers，并据此更新计数/dirty
 	static Dictionary remove_voxels_bulk(const Dictionary &buffers, const Array &positions);
 
+	// 批量设置体素为同一材质（与 remove_voxels_bulk 对称，替代 set_voxels 的逐体素 GDScript 字典写）。
+	// 覆盖语义与 set_voxel 一致：旧值 0（空）→ material_id 计入新增数；旧值非 0 → 原地替换不增计数。
+	// material_id: 目标材质 ID（>0）
+	// 返回 Dictionary：{added: int 总新增数（0→非0）, chunk_set: {chunk_key: added},
+	//                   buffers: {chunk_key: PackedInt32Array(修改后)}, boundary: {chunk_key: 位掩码}}
+	//   注：chunk 不在 buffers 中（未加载/不存在）时跳过，GDScript 侧需先 preload/建空 buffer。
+	static Dictionary set_voxels_bulk(const Dictionary &buffers, const Array &positions, int material_id);
+
+	// 收集 positions 涉及的 chunk key（去重）。供流式模式 preload 使用：
+	// 避免 GDScript 逐体素计算 chunk 的字典开销（遍历在原生，返回去重 chunk 列表）。
+	static Array collect_chunks(const Array &positions);
+
 	// 连通分组：positions 按 6 方向连通性分组（与 VoxelData.partition_connected 一致）
 	// positions: Array[Vector3i]
 	// 返回 Array[Array[Vector3i]]，每组内两两 6 方向连通

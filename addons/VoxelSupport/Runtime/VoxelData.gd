@@ -112,6 +112,10 @@ const LOD1_EDGE := CHUNK_SIZE << LOD1_SHIFT
 
 # LOD1 降采样缓存：block_key(Vector3i) -> PackedInt32Array(16³ 大格)
 var _lod1_cache: Dictionary = {}
+# LRU 顺序（头部最久未用），配合容量上限驱逐，防流式长时漫游后 _lod1_cache 无界增长
+var _lod1_order: Array = []
+## LOD1 缓存容量上限：每块 16³×4B = 16KB，此值 ≈ 32MB，超限驱逐最久未用块
+const LOD1_CACHE_MAX := 2048
 # 失效的 LOD1 block（LOD0 数据变化时记录，渲染器消费后重建远距离网格）
 var _lod1_invalidated: Dictionary = {}
 
@@ -122,6 +126,7 @@ var _lod1_invalidated: Dictionary = {}
 func get_lod1_block(block_key: Vector3i) -> PackedInt32Array:
 	var cached: Variant = _lod1_cache.get(block_key)
 	if cached != null:
+		_touch_lod1(block_key)
 		return cached
 	var buf := PackedInt32Array()
 	buf.resize(CHUNK_VOLUME)
@@ -174,7 +179,30 @@ func get_lod1_block(block_key: Vector3i) -> PackedInt32Array:
 										break
 								buf[(ox + lx8) + (oy + ly8) * CHUNK_SIZE + (oz + lz8) * CHUNK_SLICE] = mat
 	_lod1_cache[block_key] = buf
+	_touch_lod1(block_key)
+	_trim_lod1_cache()
 	return buf
+
+
+## LRU touch：把 block 移到最近使用。访问频率低（每 block 生成一次），
+## 内部 Array.erase O(N)（N≤容量上限 2048）可接受。
+func _touch_lod1(block_key: Vector3i) -> void:
+	if not _lod1_order.is_empty() and _lod1_order.back() == block_key:
+		return
+	_lod1_order.erase(block_key)
+	_lod1_order.append(block_key)
+
+
+## 容量超限时驱逐最久未用的 LOD1 缓存块（防流式长时漫游内存无界增长）
+func _trim_lod1_cache() -> void:
+	if _lod1_cache.size() <= LOD1_CACHE_MAX:
+		return
+	var excess := _lod1_cache.size() - LOD1_CACHE_MAX
+	for i in excess:
+		if _lod1_order.is_empty():
+			break
+		var oldest: Variant = _lod1_order.pop_front()
+		_lod1_cache.erase(oldest)
 
 
 ## 直接从 chunk 密集缓冲读体素（数组下标，无 get_voxel 的字典/preload 开销）。
@@ -306,12 +334,14 @@ func invalidate_lod1_for_chunk(ck: Vector3i) -> void:
 ## 记录 LOD1 block 失效（清缓存 + 通知渲染器重建）
 func _mark_lod1_invalid(block_key: Vector3i) -> void:
 	_lod1_cache.erase(block_key)
+	_lod1_order.erase(block_key)
 	_lod1_invalidated[block_key] = true
 
 
 ## 清空 LOD1 缓存
 func clear_lod1_cache() -> void:
 	_lod1_cache.clear()
+	_lod1_order.clear()
 	_lod1_invalidated.clear()
 
 
@@ -1016,17 +1046,66 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 ## 相比逐个 set_voxel：只 emit_changed 一次，且一次性维护支撑缓存，
 ## 并标记脏 chunk，让 VoxelRenderer 走增量重建（只重建受影响 chunk）。
 ## 语义与 set_voxel 一致：material_id <= 0（含 0=空）视为批量移除；已存在体素被覆盖时支撑图不变。
+## 性能：走原生 C++ set_voxels_bulk（按 chunk 分组直接改 PackedInt32Array，对称 remove_voxels_bulk），
+## 替代旧的逐体素 GDScript 字典写（每体素 5~8 次哈希）；原生不可用时回退逐体素循环。
 func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void:
 	if positions.is_empty():
 		return
 	if material_id <= 0:
 		_remove_voxels(positions, notify)
 		return
-	for p in positions:
-		var pos: Vector3i = p
-		_write_buffer_impl(pos, material_id, false)
-		dirty_voxels[pos] = material_id
-		_mark_voxel_dirty(pos)
+	# 确保涉及 chunk 在内存（流式下磁盘数据先 preload，避免原生建空 buffer 覆盖旧数据）。
+	# 用原生 collect_chunks 收集去重 chunk（遍历在 C++），避免 GDScript 逐体素计算；
+	# 非流式无需 preload，原生 set_voxels_bulk 会为全新 chunk 创建空 buffer。
+	if stream != null:
+		var ck_list: Array = NativeLoader.collect_chunks(positions)
+		if ck_list.is_empty() and not positions.is_empty():
+			var need_ck := {}
+			for p in positions:
+				need_ck[_chunk_of(p)] = true
+			ck_list.assign(need_ck.keys())
+		for ck in ck_list:
+			if not _chunk_buffers.has(ck) and _persisted_chunks.has(ck):
+				preload_chunk(ck)
+	var res: Dictionary = NativeLoader.set_voxels_bulk(_chunk_buffers, positions, material_id)
+	if res.is_empty():
+		# 原生不可用/旧库缺方法 → 回退逐体素（保持行为一致）
+		for p in positions:
+			var pos: Vector3i = p
+			_write_buffer_impl(pos, material_id, false)
+			_mark_voxel_dirty(pos)
+		if notify:
+			emit_changed()
+		return
+	var modified_buffers: Dictionary = res["buffers"]
+	var chunk_set: Dictionary = res["chunk_set"]
+	for ck in chunk_set:
+		_chunk_buffers[ck] = modified_buffers[ck]
+		var cnt: int = chunk_set[ck]
+		_voxel_count += cnt
+		_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) + cnt
+		# 流式：批量写入标记写盘（否则 chunk 被流式卸载时未 dirty → 磁盘旧数据残留）
+		_dirty_chunks[ck] = true
+	# 标记脏 chunk + 跨界面的边界邻居（用 C++ 返回的边界掩码，按 chunk 标记，
+	# 避免逐体素 _mark_voxel_dirty 的多词条 dict 写入瓶颈）
+	var boundary: Dictionary = res["boundary"]
+	for ck in boundary:
+		_dirty_mesh_chunks[ck] = true
+		# LOD0 数据变化 → 失效对应 LOD1 block
+		invalidate_lod1_for_chunk(ck)
+		var b: int = boundary[ck]
+		if b & 1:
+			_dirty_mesh_chunks[ck + Vector3i(1, 0, 0)] = true
+		if b & 2:
+			_dirty_mesh_chunks[ck + Vector3i(-1, 0, 0)] = true
+		if b & 4:
+			_dirty_mesh_chunks[ck + Vector3i(0, 1, 0)] = true
+		if b & 8:
+			_dirty_mesh_chunks[ck + Vector3i(0, -1, 0)] = true
+		if b & 16:
+			_dirty_mesh_chunks[ck + Vector3i(0, 0, 1)] = true
+		if b & 32:
+			_dirty_mesh_chunks[ck + Vector3i(0, 0, -1)] = true
 	if notify:
 		emit_changed()
 

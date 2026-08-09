@@ -568,6 +568,106 @@ Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Arra
 	return result;
 }
 
+Dictionary VoxelNative::set_voxels_bulk(const Dictionary &buffers, const Array &positions, int material_id) {
+	// 批量设置体素为同一材质（对称 remove_voxels_bulk）：按 chunk 分组直接改 PackedInt32Array。
+	// 旧值 0（空）→ material_id 计入新增数；旧值非 0 → 原地替换不增计数。
+	// 大体积批量写入（水模拟/世界构建）替代 GDScript 逐体素字典写，主线程提速。
+	Dictionary result;
+	Dictionary modified_buffers;
+	Dictionary chunk_set;
+	Dictionary boundary;
+	int added = 0;
+	if (positions.is_empty() || material_id <= 0) {
+		result["added"] = 0;
+		result["chunk_set"] = chunk_set;
+		result["buffers"] = modified_buffers;
+		result["boundary"] = boundary;
+		return result;
+	}
+	// 按 chunk 分组（local_index）+ 计算每 chunk 边界触及掩码。
+	// 用 unordered_map<uint64_t>（vkey 打包）替代 std::map<Vector3i>：超大批量（数百万
+	// positions）下 map 平衡树插入 O(N log C) 是主瓶颈，哈希表摊还 O(N)。
+	std::unordered_map<uint64_t, std::vector<int>> by_chunk;
+	std::unordered_map<uint64_t, Vector3i> ck_of_key;  // 完整 ck 保留（vkey 打包有损，不可解码回负坐标）
+	std::unordered_map<uint64_t, int> bm;
+	by_chunk.reserve(positions.size() / 8);
+	for (int i = 0; i < positions.size(); ++i) {
+		const Vector3i p = positions[i];
+		const Vector3i ck = chunk_of(p);
+		const uint64_t kk = vkey(ck);
+		const Vector3i local = p - ck * CHUNK_BITS;
+		const int idx = local.x + local.y * CHUNK_BITS + local.z * CHUNK_BITS * CHUNK_BITS;
+		auto it = by_chunk.find(kk);
+		if (it == by_chunk.end()) {
+			it = by_chunk.emplace(kk, std::vector<int>()).first;
+		}
+		it->second.push_back(idx);
+		ck_of_key[kk] = ck;
+		int b = 0;
+		if (local.x == 0) { b |= 2; } else if (local.x == CHUNK_BITS - 1) { b |= 1; }
+		if (local.y == 0) { b |= 8; } else if (local.y == CHUNK_BITS - 1) { b |= 4; }
+		if (local.z == 0) { b |= 32; } else if (local.z == CHUNK_BITS - 1) { b |= 16; }
+		bm[kk] |= b;
+	}
+	for (auto &kv : by_chunk) {
+		const Vector3i ck = ck_of_key[kv.first];
+		PackedInt32Array buf;
+		if (buffers.has(ck)) {
+			buf = buffers[ck];
+		} else {
+			// 目标 chunk 不在内存（全新/未加载）：创建全 0 空 buffer 就地写入。
+			// 注意：流式下磁盘已有数据的 chunk 需由 GDScript 先 preload（collect_chunks），
+			// 否则此处建空 buffer 会覆盖磁盘旧数据。
+			buf = PackedInt32Array();
+			buf.resize(CHUNK_BITS * CHUNK_BITS * CHUNK_BITS);
+		}
+		if (buf.size() < CHUNK_BITS * CHUNK_BITS * CHUNK_BITS) {
+			continue;
+		}
+		int32_t *ptr = buf.ptrw();
+		int cnt = 0;
+		bool changed = false;
+		for (int idx : kv.second) {
+			if (ptr[idx] <= 0) {
+				cnt += 1;
+			}
+			if (ptr[idx] != material_id) {
+				ptr[idx] = material_id;
+				changed = true;
+			}
+		}
+		if (changed) {
+			modified_buffers[ck] = buf;
+			chunk_set[ck] = cnt;  // 纯替换（旧值非 0）时 cnt=0，GDScript 仅覆盖 buffer、计数不变
+			added += cnt;
+			auto it = bm.find(kv.first);
+			if (it != bm.end()) {
+				boundary[ck] = it->second;
+			}
+		}
+	}
+	result["added"] = added;
+	result["chunk_set"] = chunk_set;
+	result["buffers"] = modified_buffers;
+	result["boundary"] = boundary;
+	return result;
+}
+
+Array VoxelNative::collect_chunks(const Array &positions) {
+	// 收集 positions 涉及的 chunk key（去重）。供流式模式 preload：避免 GDScript
+	// 逐体素计算 chunk 的主线程字典开销——遍历在原生，GDScript 只拿到去重后的 chunk 列表。
+	Array result;
+	std::map<Vector3i, int> seen;
+	for (int i = 0; i < positions.size(); ++i) {
+		const Vector3i ck = chunk_of(positions[i]);
+		if (!seen.count(ck)) {
+			seen[ck] = 1;
+			result.append(ck);
+		}
+	}
+	return result;
+}
+
 Array VoxelNative::partition_connected(const Array &positions) {
 	// 连通分组：positions 按 6 方向连通性分组（与 VoxelData.partition_connected 一致）。
 	// 只依据 positions 集合内连通（不查世界体素），供大崩塌掉落体分组使用。
@@ -644,6 +744,8 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
 }

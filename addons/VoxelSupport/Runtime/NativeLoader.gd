@@ -84,6 +84,29 @@ static func remove_voxels_bulk(buffers: Dictionary, positions: Array) -> Diction
 	return inst.call(&"remove_voxels_bulk", buffers, positions)
 
 
+## 批量设置体素为同一材质（转发到原生实现，动态调用）。
+## 与原生的 set_voxels_bulk 对称 remove_voxels_bulk；该方法为【可选】能力——
+## 旧版原生库无此方法时返回空字典，GDScript 侧回退逐体素循环，不影响其他原生加速。
+## 返回 Dictionary：{added, chunk_set, buffers, boundary}
+static func set_voxels_bulk(buffers: Dictionary, positions: Array, material_id: int) -> Dictionary:
+	var inst := _get_instance()
+	if inst == null:
+		return {}
+	if not ClassDB.class_has_method(&"VoxelNative", &"set_voxels_bulk", false):
+		return {}
+	return inst.call(&"set_voxels_bulk", buffers, positions, material_id)
+
+
+## 收集 positions 涉及的 chunk key（去重，转发到原生）。可选能力，无原生时返回空数组。
+static func collect_chunks(positions: Array) -> Array:
+	var inst := _get_instance()
+	if inst == null:
+		return []
+	if not ClassDB.class_has_method(&"VoxelNative", &"collect_chunks", false):
+		return []
+	return inst.call(&"collect_chunks", positions)
+
+
 ## 连通分组（转发到原生实现，动态调用）
 ## positions: Array[Vector3i]，按 6 方向连通分组
 ## 返回 Array[Array[Vector3i]]

@@ -21,15 +21,14 @@ extends Node
 ## 体素缩放（0.2 → 世界尺寸较大，便于观察距离效果）
 @export var voxel_scale: float = 0.2
 
-## 世界尺寸 [体素] (x, y, z) —— 世界 100×8×100 单位，足够大且构建快
-@export var world_size: Vector3i = Vector3i(500, 40, 500)
+## 世界尺寸 [体素] (x, y, z) —— 超大开放世界 300×300 单位，验证流式+LOD 大场景表现
+@export var world_size: Vector3i = Vector3i(1500, 40, 1500)
 
 ## 流式加载距离（世界单位）：相机进入此距离的 chunk 确保加载
-## 世界 100×100 单位、相机中心到边缘 50 → view=30/unload=50：
-## 相机中心时边缘（~70 单位）自动卸载，走近时近处 chunk 先加载、远处先卸载
-@export var view_distance: float = 30
+## 超大场景：view=60（LOD0 视距 36），unload=100，LOD1 覆盖 [36,100]
+@export var view_distance: float = 60
 ## 流式卸载距离：超出此距离的 chunk 网格+数据自动卸载（写盘释放内存）
-@export var unload_distance: float = 50
+@export var unload_distance: float = 100
 
 ## 可破坏对象
 var _target: VoxelDestructible
@@ -91,21 +90,25 @@ func _build_world() -> void:
 	roof_mat.connection_strength = 18.0; roof_mat.mass = 1.8
 	data.add_material(roof_mat)
 
-	# 地面（整片铺满全世界，斑块纹理）——用 set_voxels 批量填充，避免逐体素 set_voxel 的哈希开销
+	# 地面（整片铺满全世界，斑块纹理）——用 set_voxels 批量填充，避免逐体素 set_voxel 的哈希开销。
+	# 超大场景分批构建（每 128 行一批），避免一次性构造上千万 Vector3i 数组撑爆内存。
+	# 走原生 set_voxels_bulk 批量路径，构建期主线程开销远小于逐体素 GDScript 写入。
 	var S := world_size
 	var ground_h := 8
-	var ground_positions: Array[Vector3i] = []
-	for gz in range(S.z):
-		for gy in range(ground_h):
-			for gx in range(S.x):
-				ground_positions.append(Vector3i(gx, gy, gz))
-	data.set_voxels(ground_positions, 1)
+	const GROUND_BATCH := 128
+	for gz0 in range(0, S.z, GROUND_BATCH):
+		var ground_positions: Array[Vector3i] = []
+		for gz in range(gz0, mini(gz0 + GROUND_BATCH, S.z)):
+			for gy in range(ground_h):
+				for gx in range(S.x):
+					ground_positions.append(Vector3i(gx, gy, gz))
+		data.set_voxels(ground_positions, 1)
 
-	# 随机散布建筑（30 栋，各 20×40×20 体素）——批量 set_voxels 加速构建
+	# 随机散布建筑（120 栋，各 20×40×20 体素）——批量 set_voxels 加速构建
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 42
 	var b_positions: Array[Vector3i] = []
-	for i in 30:
+	for i in 120:
 		var bx := 30 + rng.randi_range(0, S.x - 60)
 		var bz := 30 + rng.randi_range(0, S.z - 60)
 		var bh := 25 + rng.randi_range(0, 30)
