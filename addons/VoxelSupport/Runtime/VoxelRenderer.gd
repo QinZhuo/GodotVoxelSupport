@@ -515,7 +515,6 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var planes := cam.get_frustum()
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		# 无数据的空 chunk：不纳入视锥管理（无体素无需构建/补建，
@@ -528,7 +527,7 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 			visible.append(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if _aabb_has_vertex_in_frustum(aabb, planes):
+		if _aabb_has_vertex_in_frustum(aabb, cam):
 			visible.append(ck)
 		else:
 			_deferred_chunks[ck] = true
@@ -543,21 +542,16 @@ static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offse
 
 ## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
 ## 使用 Godot 内置 is_position_in_frustum，保证判定与引擎渲染剔除一致
-static func _aabb_has_vertex_in_frustum(aabb: AABB, planes: Array) -> bool:
-	# 正确 AABB-视锥相交测试（n-vertex 法）：仅当 AABB 完全位于某个视锥平面外侧才剔除。
-	# 旧实现逐个测 8 顶点：大块/跨视锥边缘的 chunk（如屏幕下边缘、视锥被 AABB 包裹）
-	# 8 顶点可能全在视锥外但 AABB 却被视锥穿过 → 漏判剔除 → 该处缺面。
-	# Godot 4 Plane：normal·point = d，distance_to = normal·point − d；frustum plane 法线朝外，
-	# 视锥内 distance_to < 0。
-	for p in planes:
-		var n: Vector3 = p.normal
-		var px := aabb.position.x if n.x >= 0.0 else aabb.end.x
-		var py := aabb.position.y if n.y >= 0.0 else aabb.end.y
-		var pz := aabb.position.z if n.z >= 0.0 else aabb.end.z
-		# 距该平面最近（最内侧）的顶点仍在外侧 → AABB 完全在该平面外 → 剔除
-		if n.dot(Vector3(px, py, pz)) - p.d > 0.0:
-			return false
-	return true
+static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
+	# 用 Godot 内置 is_position_in_frustum 逐个测 8 顶点（与引擎渲染剔除判定一致）。
+	for i in 8:
+		var v := Vector3(
+			aabb.position.x if (i & 1) == 0 else aabb.end.x,
+			aabb.position.y if (i & 2) == 0 else aabb.end.y,
+			aabb.position.z if (i & 4) == 0 else aabb.end.z)
+		if cam.is_position_in_frustum(v):
+			return true
+	return false
 
 
 ## chunk 是否已超出流式卸载距离（当前相机位置判定）。
@@ -605,7 +599,6 @@ func _process_deferred_chunks() -> void:
 	var margin := view_distance
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var planes := cam.get_frustum()
 	var built := 0
 	var _iter := 0
 	# 直接迭代字典（避免 keys() 分配上万数组）；每帧限量扫描（避免视锥外
@@ -622,7 +615,7 @@ func _process_deferred_chunks() -> void:
 			_deferred_chunks.erase(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if not _aabb_has_vertex_in_frustum(aabb, planes):
+		if not _aabb_has_vertex_in_frustum(aabb, cam):
 			if not (margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin):
 				continue
 		_deferred_chunks.erase(ck)
@@ -768,7 +761,6 @@ func _process_lod() -> void:
 	# 消除移动时远近分界处块反复隐藏/显示闪烁（标准 LOD 切换滞回做法）
 	var lod0_d := lod0_distance
 	var lod0_margin := lod1_edge_world * 0.5
-	var planes := cam.get_frustum()
 
 	# 0. 处理数据变化导致的 LOD1 失效（破坏/编辑 → 移除旧网格，重新降采样生成）
 	var invalidated := data.get_invalidated_lod1()
@@ -813,7 +805,7 @@ func _process_lod() -> void:
 			remove_keys.append(bk)
 		elif dist < lod0_d - lod0_margin:
 			# 只统计视锥内就绪（视锥外 chunk 不显示、无需网格，不应阻塞 LOD0 显示）
-			if _block_lod0_ready(bk, planes):
+			if _block_lod0_ready(bk, cam):
 				remove_keys.append(bk)
 				# 恢复该 block 的 LOD0 显示（步骤3.5 可能因旧就绪判定隐藏过）
 				var b4 := bk * 4
@@ -865,7 +857,7 @@ func _process_lod() -> void:
 		var center := _lod1_block_center(bk, world_offset, block_edge_world)
 		if cam_pos.distance_to(center) < lod0_d + lod0_margin:
 			# 只统计视锥内就绪：视锥外 chunk 无网格不阻塞 LOD0 显示
-			var lod0_ready := _block_lod0_ready(bk, planes)
+			var lod0_ready := _block_lod0_ready(bk, cam)
 			mi.visible = not lod0_ready
 			var b4 := bk * 4
 			for cz in 4:
@@ -909,7 +901,7 @@ func _process_lod() -> void:
 				# 用 chunk 完整 AABB 判视锥（非中心点）：屏幕边缘 chunk 中心可能在视锥外
 				# 但大部在视锥内，中心点测试漏判 → 屏幕边缘/中下方缺面
 				var aabb4 := _chunk_world_aabb(ck, _chunk_world, world_offset)
-				if not _aabb_has_vertex_in_frustum(aabb4, planes):
+				if not _aabb_has_vertex_in_frustum(aabb4, cam):
 					continue
 			# 边界带（block 中心 [lod0-margin, lod0+margin]）全向补建（不限视锥）：
 			# 保证 block 的 LOD0 全部就绪，使 LOD1 兜底切换时无重叠/空洞。
@@ -922,7 +914,7 @@ func _process_lod() -> void:
 
 ## block 的 LOD0 网格是否就绪（只统计视锥内）：视锥外的 chunk 不显示、无需网格，
 ## 若纳入会因"有数据无网格"误判未就绪 → LOD1 永兜底 + LOD0 全隐藏 → 近处低精度缺面。
-func _block_lod0_ready(bk: Vector3i, planes: Array) -> bool:
+func _block_lod0_ready(bk: Vector3i, cam: Camera3D) -> bool:
 	var b4 := bk * 4
 	var chunk_w := voxel_scale * VoxelChunk.CHUNK_SIZE
 	for cz in 4:
@@ -931,7 +923,7 @@ func _block_lod0_ready(bk: Vector3i, planes: Array) -> bool:
 				var ck := b4 + Vector3i(cx, cy, cz)
 				if data.has_chunk(ck) and not _chunk_meshes.has(ck):
 					var aabb := _chunk_world_aabb(ck, chunk_w, global_position)
-					if _aabb_has_vertex_in_frustum(aabb, planes):
+					if _aabb_has_vertex_in_frustum(aabb, cam):
 						return false
 	return true
 
