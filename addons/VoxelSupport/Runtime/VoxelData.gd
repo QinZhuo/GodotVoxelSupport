@@ -329,7 +329,13 @@ func is_chunk_loaded(chunk_key: Vector3i) -> bool:
 func preload_chunk(chunk_key: Vector3i) -> bool:
 	if _chunk_buffers.has(chunk_key):
 		return true
-	if stream == null or not _persisted_chunks.has(chunk_key):
+	if stream == null:
+		return false
+	# 数据可用性：磁盘持久化(缓存索引) 或 程序化流(任意 chunk 可生成)
+	var available := _persisted_chunks.has(chunk_key)
+	if not available and stream is VoxelProceduralStream:
+		available = stream.has_chunk(chunk_key)
+	if not available:
 		return false
 	var buf := stream.load_chunk(chunk_key)
 	if buf.is_empty():
@@ -432,6 +438,33 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 				keys.append(ck)
 				seen[ck] = true
 	return keys
+
+
+## 平移所有 chunk key（origin shift 用）：数据层坐标整体偏移，保持世界连续。
+## 相机远离时调用，使相机附近 chunk 回到小坐标，避免 float 精度损失。
+## offset = 平移的 chunk 数（世界体素 = chunk×16）。
+func shift_origin(offset: Vector3i) -> void:
+	if offset == Vector3i.ZERO:
+		return
+	_chunk_buffers = _shift_dict_keys(_chunk_buffers, offset)
+	_chunk_voxel_counts = _shift_dict_keys(_chunk_voxel_counts, offset)
+	_persisted_chunks = _shift_dict_keys(_persisted_chunks, offset)
+	_dirty_chunks = _shift_dict_keys(_dirty_chunks, offset)
+	_dirty_mesh_chunks = _shift_dict_keys(_dirty_mesh_chunks, offset)
+	var ndv: Dictionary[Vector3i, int] = {}
+	for k in dirty_voxels:
+		ndv[Vector3i(k) + offset] = dirty_voxels[k]
+	dirty_voxels = ndv
+	_lod1_invalidated = _shift_dict_keys(_lod1_invalidated, offset)
+	if stream is VoxelProceduralStream:
+		(stream as VoxelProceduralStream).shift_origin(offset)
+
+
+static func _shift_dict_keys(d: Dictionary, offset: Vector3i) -> Dictionary:
+	var nd := {}
+	for k in d:
+		nd[Vector3i(k) + offset] = d[k]
+	return nd
 
 
 ## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
@@ -1121,7 +1154,8 @@ func get_chunk_voxels(chunk_key: Vector3i) -> Array:
 	return result
 
 
-## O(1) 判断指定 chunk 是否有数据（内存或磁盘流中）
+## O(1) 判断指定 chunk 数据是否已就绪（内存已加载 / 磁盘持久化）。
+## 程序化流未加载的 chunk 返回 false（需 _process_procedural 生成后才有数据）。
 func has_chunk(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key) or (stream != null and _persisted_chunks.has(chunk_key))
 

@@ -205,6 +205,11 @@ const STREAM_LOAD_INTERVAL := 2
 # 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
 var _stream_force_build: Dictionary = {}
+# 数据基准 chunk（origin shift 后）：相机 chunk 距基准超阈值时平移世界，保持 float 精度。
+var _origin_chunk: Vector3i = Vector3i.ZERO
+## origin shift 阈值（chunk）：相机 chunk 距基准超此值触发平移。chunk 16³ × 0.1 = 1.6 世界单位，
+## 256 chunk ≈ 410 世界单位，远小于 float32 精度上限（~1677 万），安全。
+const ORIGIN_SHIFT_THRESHOLD := 256
 # 异步网格生成状态（多任务并行，每个任务独立处理）
 var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
 var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
@@ -310,7 +315,10 @@ func _process(_delta: float) -> void:
 	if visibility_mode != VisibilityMode.FULL:
 		_process_deferred_chunks()
 	if _streaming_enabled:
-		_process_streaming()
+		if data and data.stream is VoxelProceduralStream:
+			_process_procedural()   # 程序化流：按距离确保数据(生成) + origin shift
+		else:
+			_process_streaming()    # 磁盘流式：_streamed_out_chunks 驱动
 	# LOD1 低分辨率大块管理：每 interval 帧限量生成/移除（降低每帧遍历开销，
 	# 近处 LOD0 / 远处 LOD1 互补）；数据变化（破坏/编辑）由 get_invalidated_lod1 即时重建
 	_cull_check_counter += 1
@@ -719,6 +727,120 @@ func _process_streaming() -> void:
 			reloaded += 1
 		if reloaded > 0:
 			_request_update()
+
+
+## 程序化流驱动（VoxelProceduralStream）：按距离确保 chunk 数据（生成器生成，限量每帧）
+## + 动态原点重定位（origin shift，相机远离基准时平移世界，保持 float 精度）。
+## 无限世界无"磁盘流式"集合，改为主动生成相机周围缺失 chunk。
+func _process_procedural() -> void:
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return
+	var cam_pos := cam.global_position
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var world_offset := global_position
+	var load_d := view_distance
+	# origin shift：相机 chunk 远离数据基准超阈值 → 平移数据+渲染+相机
+	_check_origin_shift(cam)
+	# 距离内确保数据（生成器生成），限量每帧；未加载的标 dirty 走异步网格管线
+	var r := ceili(load_d / chunk_size_world) + 1
+	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
+	var loaded := 0
+	for dz in range(-r, r + 1):
+		for dy in range(-1, 2):
+			for dx in range(-r, r + 1):
+				if loaded >= _stream_load_per_frame:
+					return
+				var ck := cam_ck + Vector3i(dx, dy, dz)
+				if data.has_chunk(ck):
+					continue
+				if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > load_d:
+					continue
+				if data.preload_chunk(ck):
+					data._mark_chunk_dirty(ck)
+					loaded += 1
+	if loaded > 0:
+		_request_update()
+	# 卸载超范围的数据+网格（程序化：未修改 chunk 丢弃可重新生成，修改的由 unload_chunk 写盘）
+	# 卸载边界与加载边界一致（view_distance），否则 50~100 之间的残留层堆积导致内存膨胀
+	_streaming_check_tick += 1
+	if _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 0:
+		var unload_d := view_distance
+		for ck in data.get_loaded_chunk_keys():
+			if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
+				_unload_chunk(ck)
+
+
+## 动态原点重定位：相机 chunk 距数据基准超阈值时，平移数据层 + 渲染层 + 相机，
+## 使相机附近 chunk 回到小坐标，避免 float32 精度损失（无限移动世界）。
+func _check_origin_shift(cam: Camera3D) -> void:
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var cam_ck := _chunk_from_world(cam.global_position, chunk_size_world, global_position)
+	var delta := cam_ck - _origin_chunk
+	var shift := Vector3i.ZERO
+	if delta.x >= ORIGIN_SHIFT_THRESHOLD:
+		shift.x = delta.x - ORIGIN_SHIFT_THRESHOLD
+	elif delta.x <= -ORIGIN_SHIFT_THRESHOLD:
+		shift.x = delta.x + ORIGIN_SHIFT_THRESHOLD
+	if delta.y >= ORIGIN_SHIFT_THRESHOLD:
+		shift.y = delta.y - ORIGIN_SHIFT_THRESHOLD
+	elif delta.y <= -ORIGIN_SHIFT_THRESHOLD:
+		shift.y = delta.y + ORIGIN_SHIFT_THRESHOLD
+	if delta.z >= ORIGIN_SHIFT_THRESHOLD:
+		shift.z = delta.z - ORIGIN_SHIFT_THRESHOLD
+	elif delta.z <= -ORIGIN_SHIFT_THRESHOLD:
+		shift.z = delta.z + ORIGIN_SHIFT_THRESHOLD
+	if shift == Vector3i.ZERO:
+		return
+	data.shift_origin(shift)
+	_origin_chunk += shift
+	_shift_render(shift, chunk_size_world)
+	cam.global_position -= Vector3(shift) * chunk_size_world
+
+
+## origin shift 后平移渲染层：所有网格节点 key 平移 + 节点 position 更新 + 各类集合字典 key 平移。
+func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
+	var new_lod0: Dictionary[Vector3i, MeshInstance3D] = {}
+	for ck in _lod0_meshes:
+		var nck: Vector3i = ck + shift
+		var mi: MeshInstance3D = _lod0_meshes[ck]
+		if mi != null:
+			mi.position = Vector3(nck) * chunk_size_world
+		new_lod0[nck] = mi
+	_lod0_meshes = new_lod0
+	var block_edge_world := _block_edge_world()
+	var new_lod1: Dictionary[Vector3i, MeshInstance3D] = {}
+	for bk in _lod1_meshes:
+		var nbk: Vector3i = bk + shift
+		var mi: MeshInstance3D = _lod1_meshes[bk]
+		if mi != null:
+			mi.position = Vector3(nbk) * block_edge_world
+		new_lod1[nbk] = mi
+	_lod1_meshes = new_lod1
+	# 各类 chunk/block 集合字典 key 整体平移（typed dict 需 typed 构建，_shift_keys 仅普通 Dictionary）
+	var ns: Dictionary[Vector3i, bool] = {}
+	for k in _streamed_out_chunks:
+		ns[Vector3i(k) + shift] = true
+	_streamed_out_chunks = ns
+	var ndf: Dictionary[Vector3i, bool] = {}
+	for k in _deferred_chunks:
+		ndf[Vector3i(k) + shift] = true
+	_deferred_chunks = ndf
+	_stream_force_build = _shift_keys(_stream_force_build, shift)
+	_lod1_pending = _shift_keys(_lod1_pending, shift)
+	_lod1_pending_tasks = _shift_keys(_lod1_pending_tasks, shift)
+	_mesh_build_queue = _shift_keys(_mesh_build_queue, shift)
+	var ncr: Dictionary[Vector3i, bool] = {}
+	for k in _collision_rebuild_queue:
+		ncr[Vector3i(k) + shift] = true
+	_collision_rebuild_queue = ncr
+
+
+static func _shift_keys(d: Dictionary, shift: Vector3i) -> Dictionary:
+	var nd := {}
+	for k in d:
+		nd[Vector3i(k) + shift] = d[k]
+	return nd
 
 
 # ----------------------------------------------------------------------------
