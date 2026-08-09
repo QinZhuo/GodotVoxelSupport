@@ -28,24 +28,6 @@ const _HALO_DIRS: Array[int] = [
 ]
 
 
-## 提取单个 chunk 及其 1 体素外缘(shell) 的体素快照（绝对坐标键）
-## 网格生成只需要该 chunk 内部 + 跨界面的相邻体素，无需拷贝整个世界的体素字典。
-## 返回独立的 Dictionary，供子线程安全读取（主线程后续增删不会影响它）。
-## halo_voxels: 外扩层数，默认 1（跨界面的面可见性需要紧邻体素）
-static func slice_chunk(voxels: Dictionary, chunk: Vector3i, halo_voxels: int = 1) -> Dictionary:
-	var origin := VoxelChunk.origin_of(chunk)
-	var slice := {}
-	var lo := origin - Vector3i(halo_voxels, halo_voxels, halo_voxels)
-	var hi := origin + Vector3i(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE) + Vector3i(halo_voxels - 1, halo_voxels - 1, halo_voxels - 1)
-	for x in range(lo.x, hi.x + 1):
-		for y in range(lo.y, hi.y + 1):
-			for z in range(lo.z, hi.z + 1):
-				var p := Vector3i(x, y, z)
-				if voxels.has(p):
-					slice[p] = voxels[p]
-	return slice
-
-
 ## 运行时网格生成入口，在主线程调用
 ## 始终生成所有非空 chunk，确保输出完整 mesh。rebuild_chunks 参数保留用于 API 兼容。
 static func generate_mesh_runtime(
@@ -123,45 +105,6 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 ## 为指定的 chunk 列表生成网格数据（增量重建路径）
 ## 每个 chunk 的顶点使用局部坐标（相对于 chunk 原点），方便直接放到独立 MeshInstance3D
 ## 返回 {chunk_key: {solid_verts, solid_normals, ...}}，空 chunk 不在结果中
-static func generate_chunks_arrays_runtime(
-		voxels: Dictionary,
-		materials: Array,
-		options: Dictionary = {},
-		chunk_keys: Array[Vector3i] = []) -> Dictionary:
-	var scale: float = options.get("scale", 0.1)
-	var offset: Vector3 = options.get("offset", Vector3.ZERO)
-	var aligned := VoxelMaterial.align_by_id(materials)
-	var result := {}
-
-	for ck in chunk_keys:
-		var arrays := _generate_single_chunk_arrays_impl(voxels, aligned, scale, ck, true, offset)
-		if arrays != null:
-			result[ck] = arrays
-
-	return result
-
-
-## 生成所有非空 chunk 的 per-chunk 网格数据（初始构建或全量增量重建）
-## 等价于先获取所有非空 chunk 再调用 generate_chunks_arrays_runtime
-static func generate_all_chunks_arrays_runtime(
-		voxels: Dictionary,
-		materials: Array,
-		options: Dictionary = {}) -> Dictionary:
-	var non_empty := _build_non_empty_chunk_index(voxels)
-	var chunk_keys := _all_non_empty_chunks_from_index(non_empty)
-	return generate_chunks_arrays_runtime(voxels, materials, options, chunk_keys)
-
-
-## 生成单个 chunk 的网格数据（线程安全，可在子线程调用）
-## materials 参数应为已对齐的材质数组（通过 VoxelMaterial.align_by_id 预先对齐）
-## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
-static func generate_single_chunk_array(
-		voxels: Dictionary, aligned_materials: Array, scale: float, chunk_key: Vector3i,
-		offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	var result := _generate_single_chunk_arrays_impl(voxels, aligned_materials, scale, chunk_key, true, offset)
-	return result if result else {}
-
-
 ## 从 chunk 缓冲字典（chunk key → PackedInt32Array，密集 16³）构建单个 chunk 的 18³ 光环缓冲
 ## 线程安全：buffers 必须是调用方提供的独立快照（深拷贝），子线程内只读。
 ## 与 VoxelData.get_chunk_halo 语义一致，但输入为快照字典而非自身数据，
@@ -381,85 +324,6 @@ static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:
 	return flags
 
 
-## 生成单个 chunk 的网格数据（顶点使用局部坐标）- 内部实现
-static func _generate_single_chunk_arrays_impl(
-		voxels, materials, scale: float, chunk: Vector3i,
-		use_local_space: bool = true, offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	var solid_verts := PackedVector3Array()
-	var solid_normals := PackedVector3Array()
-	var solid_uvs := PackedVector2Array()
-	var solid_idxs := PackedInt32Array()
-	var trans_verts := PackedVector3Array()
-	var trans_normals := PackedVector3Array()
-	var trans_uvs := PackedVector2Array()
-	var trans_idxs := PackedInt32Array()
-
-	_generate_chunk_into(voxels, materials, scale, chunk,
-		solid_verts, solid_normals, solid_uvs, solid_idxs,
-		trans_verts, trans_normals, trans_uvs, trans_idxs,
-		use_local_space, offset)
-
-	if solid_idxs.is_empty() and trans_idxs.is_empty():
-		return {}
-
-	return {
-		"solid_verts": solid_verts, "solid_normals": solid_normals,
-		"solid_uvs": solid_uvs, "solid_idxs": solid_idxs,
-		"trans_verts": trans_verts, "trans_normals": trans_normals,
-		"trans_uvs": trans_uvs, "trans_idxs": trans_idxs,
-	}
-
-
-## 根据变更体素集合，计算需要重建的 chunk（增量重建核心）
-## 当体素在 chunk 边界发生变化时，相邻 chunk 也需要重建，
-## 因为相邻 chunk 中边界体素的面可见性依赖于该体素的存在状态。
-static func chunks_for_dirty_voxels(dirty_voxels: Dictionary) -> Array[Vector3i]:
-	var chunk_keys: Array[Vector3i] = []
-	var added := {}
-	for pos_key in dirty_voxels:
-		var ck := _chunk_of(pos_key)
-		if not added.has(ck):
-			chunk_keys.append(ck)
-			added[ck] = true
-		# 检查该体素是否位于 chunk 的 6 个边界面上
-		# 如果是，需要同时重建相邻 chunk，确保边界面的可见性正确
-		var p: Vector3i = pos_key
-		var local_pos := p - ck * CHUNK_SIZE
-		# 6 方向：如果在边界（local == 0 或 local == CHUNK_SIZE-1），相邻 chunk 也需要重建
-		if local_pos.x == 0:
-			_add_chunk(ck + Vector3i(-1, 0, 0), chunk_keys, added)
-		elif local_pos.x == CHUNK_SIZE - 1:
-			_add_chunk(ck + Vector3i(1, 0, 0), chunk_keys, added)
-		if local_pos.y == 0:
-			_add_chunk(ck + Vector3i(0, -1, 0), chunk_keys, added)
-		elif local_pos.y == CHUNK_SIZE - 1:
-			_add_chunk(ck + Vector3i(0, 1, 0), chunk_keys, added)
-		if local_pos.z == 0:
-			_add_chunk(ck + Vector3i(0, 0, -1), chunk_keys, added)
-		elif local_pos.z == CHUNK_SIZE - 1:
-			_add_chunk(ck + Vector3i(0, 0, 1), chunk_keys, added)
-	return chunk_keys
-
-
-## 从体素数据中提取所有非空 chunk 的键列表
-## 用于初始全量构建时分块独立线程处理，避免单线程全量生成
-static func get_all_non_empty_chunk_keys(voxels: Dictionary) -> Array[Vector3i]:
-	var chunk_keys: Array[Vector3i] = []
-	var added := {}
-	for pos_key in voxels:
-		var ck := _chunk_of(pos_key)
-		if not added.has(ck):
-			chunk_keys.append(ck)
-			added[ck] = true
-	return chunk_keys
-
-
-static func _add_chunk(ck: Vector3i, chunk_keys: Array, added: Dictionary) -> void:
-	if not added.has(ck):
-		chunk_keys.append(ck)
-		added[ck] = true
-
-
 # ----------------------------------------------------------------------------
 # 私有实现
 # ----------------------------------------------------------------------------
@@ -483,18 +347,6 @@ static func _all_non_empty_chunks_from_index(non_empty: Dictionary) -> Array[Vec
 	for ck in non_empty:
 		chunk_keys.append(ck)
 	return chunk_keys
-
-
-## 从待重建 chunk 中过滤掉空 chunk（基于非空索引 O(1) 查询，并去重）
-static func _unique_non_empty(arr: Array[Vector3i], non_empty: Dictionary) -> Array[Vector3i]:
-	var result: Array[Vector3i] = []
-	for ck in arr:
-		if result.has(ck):
-			continue
-		# 空块提前终止：该 chunk 在非空索引中不存在则跳过
-		if non_empty.has(ck):
-			result.append(ck)
-	return result
 
 
 ## 生成单个 chunk 的面片并追加到全局数组（贪婪网格）

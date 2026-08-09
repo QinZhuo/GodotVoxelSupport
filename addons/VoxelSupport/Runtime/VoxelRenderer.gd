@@ -69,10 +69,8 @@ enum VisibilityMode {
 ## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
 @export_range(1, 30) var update_throttle_frames: int = 1
 
-## 网格生成模式（统一 chunk 生成与异步调度）
-## - GLOBAL_MESH：整块网格，变更全量重建（中小场景）
-## - CHUNK_SYNC ：逐 chunk，主线程同步生成
-## - CHUNK_ASYNC：逐 chunk，后台线程并行生成（推荐）
+## 网格生成模式（当前唯一路径 CHUNK_ASYNC：逐 chunk 后台线程并行生成）
+## 保留枚举与 setter 以兼容外部配置；GLOBAL_MESH/CHUNK_SYNC 内部路径已移除。
 @export var mesh_mode: MeshMode = MeshMode.CHUNK_ASYNC:
 	set(v):
 		mesh_mode = v
@@ -1067,22 +1065,21 @@ func _update_mesh_async() -> void:
 	# 每个子线程只读取自己那个私有的光环快照，主线程后续增删 data 不与之冲突，
 	# 杜绝数据竞态（块随机显示/隐藏的根因），同时避免整世界深拷贝与字典切片扫描。
 	var rebuild_chunks: Array[Vector3i] = []
-	if mesh_mode != MeshMode.GLOBAL_MESH:
-		# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居），
-		# 替代逐体素 dirty_voxels 的大批量追踪——大崩塌移除不再主线程逐体素写 dict
-		rebuild_chunks = data.get_dirty_chunks()
-		# 限量批次：超过上限的放回 dirty（下帧续建）。回原点/大崩塌时 dirty 可上千，
-		# 单帧全量快照 + 派发上千 worker → 主线程阻塞（update_mesh 数百 ms → 帧率个位数）。
-		# 分批后每帧快照/派发量受限，网格经 _process_mesh_build_queue 平滑上传。
-		if rebuild_chunks.size() > _rebuild_batch_limit:
-			for i in range(_rebuild_batch_limit, rebuild_chunks.size()):
-				data._mark_chunk_dirty(rebuild_chunks[i])
-			rebuild_chunks.resize(_rebuild_batch_limit)
-			# 放回剩余 dirty 后必须重新置位：_update_mesh 开头会清 _dirty，
-			# 若不重新 _request_update，剩余 dirty 将永久卡住 → 初始构建/大批量
-			# 重建只生成第一批，其余 chunk 网格缺失（破坏demo初始只显示一个小角落、
-			# 流式demo脚底下不显示）。置位后下帧 _process 继续消费下一批。
-			_request_update()
+	# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居），
+	# 替代逐体素 dirty_voxels 的大批量追踪——大崩塌移除不再主线程逐体素写 dict
+	rebuild_chunks = data.get_dirty_chunks()
+	# 限量批次：超过上限的放回 dirty（下帧续建）。回原点/大崩塌时 dirty 可上千，
+	# 单帧全量快照 + 派发上千 worker → 主线程阻塞（update_mesh 数百 ms → 帧率个位数）。
+	# 分批后每帧快照/派发量受限，网格经 _process_mesh_build_queue 平滑上传。
+	if rebuild_chunks.size() > _rebuild_batch_limit:
+		for i in range(_rebuild_batch_limit, rebuild_chunks.size()):
+			data._mark_chunk_dirty(rebuild_chunks[i])
+		rebuild_chunks.resize(_rebuild_batch_limit)
+		# 放回剩余 dirty 后必须重新置位：_update_mesh 开头会清 _dirty，
+		# 若不重新 _request_update，剩余 dirty 将永久卡住 → 初始构建/大批量
+		# 重建只生成第一批，其余 chunk 网格缺失（破坏demo初始只显示一个小角落、
+		# 流式demo脚底下不显示）。置位后下帧 _process 继续消费下一批。
+		_request_update()
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
@@ -1100,55 +1097,39 @@ func _update_mesh_async() -> void:
 	# 将 mesh_mode 和 voxel_scale 作为参数传入，避免子线程访问节点属性
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
-	if mesh_mode != MeshMode.GLOBAL_MESH:
-		# chunk 模式：每个任务只处理一个 chunk。
-		# 优化（移走主线程 halo 提取）：主线程只做一次"受影响区域"的 chunk 缓冲
-		# 深拷贝快照（引擎级 memcpy，微秒级），各子线程 worker 再从快照构建自己的
-		# 18³ halo。相比旧方案主线程逐 chunk 调用 get_chunk_halo（GDScript 循环，
-		# ~0.9ms/chunk，全量构建时主线程阻塞秒级），大幅降低主线程阻塞。
-		# 单任务路径（全量/空场景）仅当没有可拆分 chunk 时兜底使用，需要完整体素
-		if rebuild_chunks.is_empty():
-			# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
-			# 而不是等所有 chunk 生成完毕再一起显示
-			var all_chunks := data.get_all_chunk_keys()
-			if all_chunks.is_empty():
-				# 没有非空 chunk，使用单任务路径（空场景），此时无体素无竞态
-				_pending_task_count = 1
-				_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-					{}, snapshot_materials, rebuild_chunks, gen_id, mesh_mode, voxel_scale, render_offset, diag_enabled)))
-			else:
-				# 统一可见性决策（流式距离 + 视锥/近处全向）
-				var visible: Array[Vector3i] = _filter_visible_chunks(all_chunks)
-				if diag_enabled:
-					print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
-				var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
-				_pending_task_count = visible.size()
-				for ck in visible:
-					_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-						snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
-		else:
-			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
-			# 【关键】先清除"已变空"chunk 的残留 mesh：破坏/崩塌后 chunk 内体素
-			# 全被移除（has_chunk=false），而 _filter_visible_chunks 会跳过空 chunk
-			# 不派发重建 → 若不主动清除，旧 mesh 残留，视觉上"悬空块还在"（数据其实已掉）。
-			for ck in rebuild_chunks:
-				if _lod0_meshes.has(ck) and not data.has_chunk(ck):
-					_remove_chunk_mesh(ck)
-			# 统一可见性决策（流式距离 + 视锥/近处全向）
-			var visible: Array[Vector3i] = _filter_visible_chunks(rebuild_chunks)
-			if diag_enabled:
-				print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
-			var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
-			_pending_task_count = visible.size()
-			for ck in visible:
-				_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-					snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+	# per-chunk 异步生成（唯一路径；GLOBAL_MESH 单块模式已移除简化）
+	if rebuild_chunks.is_empty():
+		# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
+		var all_chunks := data.get_all_chunk_keys()
+		if all_chunks.is_empty():
+			# 空场景：无 chunk 可生成，直接返回（无任务，pending 保持 0）
+			return
+		# 统一可见性决策（流式距离 + 视锥/近处全向）
+		var visible: Array[Vector3i] = _filter_visible_chunks(all_chunks)
+		if diag_enabled:
+			print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
+		var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
+		_pending_task_count = visible.size()
+		for ck in visible:
+			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
+				snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 	else:
-		# 单任务路径（全局模式）：需要整个世界体素，做一次字典快照
-		_pending_task_count = 1
-		var snapshot_voxels: Dictionary = data.get_voxels_dict_snapshot()
-		_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
-			snapshot_voxels, snapshot_materials, rebuild_chunks, gen_id, mesh_mode, voxel_scale, render_offset, diag_enabled)))
+		# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
+		# 【关键】先清除"已变空"chunk 的残留 mesh：破坏/崩塌后 chunk 内体素
+		# 全被移除（has_chunk=false），而 _filter_visible_chunks 会跳过空 chunk
+		# 不派发重建 → 若不主动清除，旧 mesh 残留，视觉上"悬空块还在"（数据其实已掉）。
+		for ck in rebuild_chunks:
+			if _lod0_meshes.has(ck) and not data.has_chunk(ck):
+				_remove_chunk_mesh(ck)
+		# 统一可见性决策（流式距离 + 视锥/近处全向）
+		var visible: Array[Vector3i] = _filter_visible_chunks(rebuild_chunks)
+		if diag_enabled:
+			print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
+		var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
+		_pending_task_count = visible.size()
+		for ck in visible:
+			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
+				snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 
 
 ## 统一工作线程结果字典契约（#6）：全量/增量/单chunk/空场景所有生成路径
@@ -1203,50 +1184,6 @@ func _apply_stats_from_result(result: Dictionary) -> void:
 ## 主线程通过 _process 轮询 WorkerThreadPool.is_task_completed 后读取，保证线程安全
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
-func _generate_worker(voxels: Dictionary, materials: Array, rebuild_chunks: Array, gen_id: int,
-		use_chunk: bool, scale: float, offset: Vector3 = Vector3.ZERO,
-		diag_enabled: bool = false) -> void:
-	var result: Dictionary = {}
-
-	# 增量重建路径：每个 chunk 的顶点使用局部坐标，生成独立子 MeshInstance3D
-	if use_chunk:
-		var t0 := Time.get_ticks_usec()
-		var chunk_arrays: Dictionary
-		var affected_count := rebuild_chunks.size()
-		if rebuild_chunks.is_empty():
-			# 无脏体素时全量生成所有非空 chunk（初始构建或切换模式后）
-			if diag_enabled and gen_id <= 1:
-				print("[诊断] 初始全量构建（gen_id=%d）..." % gen_id)
-			chunk_arrays = VoxelChunkGenerator.generate_all_chunks_arrays_runtime(
-				voxels, materials, {"scale": scale, "offset": offset})
-			affected_count = chunk_arrays.size()
-			if diag_enabled:
-				print("[诊断] 全量构建完成: %d 个非空 Chunk" % affected_count)
-		else:
-			# P1: 并行生成多个 chunk
-			if diag_enabled:
-				print("[诊断] 增量重建 gen_id=%d: %d 个脏 Chunk" % [gen_id, rebuild_chunks.size()])
-			chunk_arrays = _generate_chunks_parallel(voxels, materials, scale, rebuild_chunks, offset)
-		var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
-		# 统计顶点/三角形数
-		var counts := _count_chunk_vertices(chunk_arrays)
-		result = _make_result(chunk_arrays, gen_time_ms, counts.x, counts.y,
-			chunk_arrays.size(), affected_count, gen_id)
-	else:
-		# 全量重建路径：所有体素合并为一个 ArrayMesh
-		var t1 := Time.get_ticks_usec()
-		var arrays: Variant = VoxelChunkGenerator.generate_arrays_runtime(voxels, materials, {"scale": scale, "offset": offset})
-		var gen_time_ms := (Time.get_ticks_usec() - t1) / 1000.0
-		var sv := 0; var tv := 0
-		if arrays is Dictionary:
-			sv = arrays.get("solid_verts", PackedVector3Array()).size()
-			tv = arrays.get("trans_verts", PackedVector3Array()).size()
-		result = _make_result(arrays, gen_time_ms, sv, tv, 1, 1, gen_id)
-
-	# 使用 call_deferred 将结果传回主线程（线程安全，仅排队到主线程消息队列，不直接操作 Node 属性）
-	call_deferred("_on_thread_result", result)
-
-
 ## 单 chunk 工作线程入口：每个脏 chunk 独立一个线程任务，真正并行处理
 ## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
@@ -1313,9 +1250,7 @@ func _on_thread_result(result: Dictionary) -> void:
 
 
 ## 应用单个 chunk 的异步结果（在主线程 _process 中调用）
-## 根据 result 中是否包含 chunk_key 区分：
-## - 有 chunk_key：单个 chunk 的结果，直接更新对应子 MeshInstance3D
-## - 无 chunk_key：全量结果（来自 _generate_worker），委托 _build_and_apply_mesh 处理
+## 结果恒为单 chunk（per-chunk 生成），直接更新对应子 MeshInstance3D
 func _apply_single_chunk_result(result: Dictionary) -> void:
 	var _diag_t0 := Time.get_ticks_usec()
 	var _t_get_chunk := 0.0
@@ -1357,22 +1292,6 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			"has_voxels": has_voxels_in_data,
 		}
 		_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
-	else:
-		# 全量结果（来自 _generate_worker，初始全量构建或非 chunk 模式）
-		# 注意：_build_and_apply_mesh 会清空脏 chunk 标记，
-		# 如果 _pending_retrigger 为 true，需要保存脏 chunk 以便后续恢复
-		var saved_dirty: Array = []
-		if _pending_retrigger and data:
-			saved_dirty = data.get_dirty_chunks()
-
-		_build_and_apply_mesh(arrays)
-
-		# 恢复脏 chunk（用于 _on_batch_complete 中的 retrigger 逻辑）
-		if _pending_retrigger and data and not saved_dirty.is_empty():
-			for ck in saved_dirty:
-				data._mark_chunk_dirty(ck)
-
-		_record_perf_stats(last_rebuild_affected_count, gen_time_ms, last_apply_time_ms)
 
 	# 诊断：单 chunk 应用耗时 > 1ms 时打印
 	var _t_apply_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
@@ -1490,51 +1409,6 @@ func _on_batch_complete() -> void:
 
 ## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）
 ## 注意：此函数在工作线程内调用，禁止使用 add_group_task 等嵌套线程池调用
-static func _generate_chunks_parallel(voxels: Dictionary, materials: Array, scale: float,
-		chunk_keys: Array[Vector3i], offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	var aligned := VoxelMaterial.align_by_id(materials)
-	var result := {}
-	for ck in chunk_keys:
-		var arr := VoxelChunkGenerator.generate_single_chunk_array(voxels, aligned, scale, ck, offset)
-		if not arr.is_empty():
-			result[ck] = arr
-	return result
-
-
-## 将单块(全局 GLOBAL_MESH)网格数据组装为 ArrayMesh 并应用到节点（必须主线程）
-func _build_and_apply_mesh(arrays: Variant) -> void:
-	var t0 := Time.get_ticks_usec()
-	var new_mesh: ArrayMesh
-	if arrays != null and arrays is Dictionary and not arrays.is_empty():
-		new_mesh = VoxelChunkGenerator.build_mesh_from_arrays(arrays as Dictionary)
-		# 给 chunk mesh 的两个表面赋材质（实心/透明）
-		if new_mesh and _materials_cache.size() >= 2:
-			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
-				new_mesh.surface_set_material(0, _materials_cache[0])
-			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
-				new_mesh.surface_set_material(1, _materials_cache[1])
-
-	if new_mesh:
-		mesh = new_mesh
-		# 切换到组合模式时清理旧的 chunk meshes
-		if not _lod0_meshes.is_empty():
-			_clear_lod0_meshes()
-	else:
-		mesh = null
-
-	if generate_collision:
-		_update_collision()
-	else:
-		_clear_collision()
-
-	# 重建完成，清空变更追踪
-	if data:
-		data.clear_dirty_chunks()
-	# 在信号触发前更新 apply 耗时，确保外部读取的数据正确
-	last_apply_time_ms = (Time.get_ticks_usec() - t0) / 1000.0
-	mesh_updated.emit()
-
-
 func _update_collision() -> void:
 	_clear_collision()
 	if not mesh:
