@@ -110,214 +110,8 @@ const LOD1_SHIFT := 1
 ## LOD1 大格边长（体素）= CHUNK_SIZE << LOD1_SHIFT = 32
 const LOD1_EDGE := CHUNK_SIZE << LOD1_SHIFT
 
-# LOD1 降采样缓存：block_key(Vector3i) -> PackedInt32Array(16³ 大格)
-var _lod1_cache: Dictionary = {}
-# LRU 顺序（头部最久未用），配合容量上限驱逐，防流式长时漫游后 _lod1_cache 无界增长
-var _lod1_order: Array = []
-## LOD1 缓存容量上限：每块 16³×4B = 16KB，此值 ≈ 32MB，超限驱逐最久未用块
-const LOD1_CACHE_MAX := 2048
 # 失效的 LOD1 block（LOD0 数据变化时记录，渲染器消费后重建远距离网格）
 var _lod1_invalidated: Dictionary = {}
-
-## 获取 LOD1 block（16³ 大格，每格代表 2³ 体素，取 2×2×2 中第一个非空材质）。
-## 懒生成 + 缓存；LOD0 chunk 变化时由 invalidate_lod1 失效对应 block。
-## 性能：空 block（覆盖的 8 个 LOD0 chunk 均无数据）快速返回全 0，不降采样；
-## 非空 block 直接从 chunk buffer 读取（数组下标，避开 get_voxel 的字典开销）。
-func get_lod1_block(block_key: Vector3i) -> PackedInt32Array:
-	var cached: Variant = _lod1_cache.get(block_key)
-	if cached != null:
-		_touch_lod1(block_key)
-		return cached
-	var buf := PackedInt32Array()
-	buf.resize(CHUNK_VOLUME)
-	# 快速检查：覆盖的 2×2×2 个 LOD0 chunk 是否有数据（无则返回全 0）
-	var has_any := false
-	for cz in 2:
-		for cy in 2:
-			for cx in 2:
-				if has_chunk(block_key * 2 + Vector3i(cx, cy, cz)):
-					has_any = true
-					break
-			if has_any:
-				break
-		if has_any:
-			break
-	if has_any:
-		# 确保覆盖的 2×2×2 个 LOD0 chunk 已加载（流式下部分 chunk 可能已卸载到磁盘，
-		# 若不加载则读空 → LOD1 大格缺失 → "该有体素的地方没有"）
-		# 降采样直接读 chunk 密集缓冲（数组下标），避免逐体素 _read_voxel_fast 的
-		# chunk key 换算 + 字典查找开销（16³×8 次 vs 8 次）
-		var bk2 := block_key * 2
-		for cz in 2:
-			for cy in 2:
-				for cx in 2:
-					var ck := Vector3i(bk2.x + cx, bk2.y + cy, bk2.z + cz)
-					preload_chunk(ck)
-					var cbuf: PackedInt32Array = _chunk_buffers.get(ck, PackedInt32Array())
-					if cbuf.is_empty():
-						continue
-					var ox := cx * (CHUNK_SIZE >> 1)
-					var oy := cy * (CHUNK_SIZE >> 1)
-					var oz := cz * (CHUNK_SIZE >> 1)
-					for lz8 in (CHUNK_SIZE >> 1):
-						var bz := lz8 * 2
-						for ly8 in (CHUNK_SIZE >> 1):
-							var by := ly8 * 2
-							for lx8 in (CHUNK_SIZE >> 1):
-								var mat := 0
-								var bx := lx8 * 2
-								for dz in 2:
-									for dy in 2:
-										for dx in 2:
-											var m := cbuf[(bz + dz) * CHUNK_SLICE + (by + dy) * CHUNK_SIZE + (bx + dx)]
-											if m > 0:
-												mat = m
-												break
-										if mat > 0:
-											break
-									if mat > 0:
-										break
-								buf[(ox + lx8) + (oy + ly8) * CHUNK_SIZE + (oz + lz8) * CHUNK_SLICE] = mat
-	_lod1_cache[block_key] = buf
-	_touch_lod1(block_key)
-	_trim_lod1_cache()
-	return buf
-
-
-## LRU touch：把 block 移到最近使用。访问频率低（每 block 生成一次），
-## 内部 Array.erase O(N)（N≤容量上限 2048）可接受。
-func _touch_lod1(block_key: Vector3i) -> void:
-	if not _lod1_order.is_empty() and _lod1_order.back() == block_key:
-		return
-	_lod1_order.erase(block_key)
-	_lod1_order.append(block_key)
-
-
-## 容量超限时驱逐最久未用的 LOD1 缓存块（防流式长时漫游内存无界增长）
-func _trim_lod1_cache() -> void:
-	if _lod1_cache.size() <= LOD1_CACHE_MAX:
-		return
-	var excess := _lod1_cache.size() - LOD1_CACHE_MAX
-	for i in excess:
-		if _lod1_order.is_empty():
-			break
-		var oldest: Variant = _lod1_order.pop_front()
-		_lod1_cache.erase(oldest)
-
-
-## 直接从 chunk 密集缓冲读体素（数组下标，无 get_voxel 的字典/preload 开销）。
-## 仅用于降采样（LOD1 区数据在内存，缺失视为空）。返回 -1 表示缓冲缺失。
-func _read_voxel_fast(pos: Vector3i) -> int:
-	var ck := _chunk_of(pos)
-	var buf = _chunk_buffers.get(ck)
-	if buf == null:
-		return -1
-	var local := pos - ck * CHUNK_SIZE
-	return buf[local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SLICE]
-
-
-## 构建 LOD1 block 的 18³ 大格光环（供 LOD1 网格生成）。
-## 布局与 LOD0 的 halo 一致：中心 16³ = block 内部，6 个外缘面（x/y/z 的 0/17）
-## = 对应方向邻居 block 的边界大格（跨界面的面可见性）。大格值 = 材质ID（0 = 空）。
-func get_lod1_halo(block_key: Vector3i) -> PackedInt32Array:
-	var halo := PackedInt32Array()
-	halo.resize(HALO_VOLUME)
-	# 中心 16³ = block 内部
-	var buf := get_lod1_block(block_key)
-	for z in CHUNK_SIZE:
-		for y in CHUNK_SIZE:
-			for x in CHUNK_SIZE:
-				halo[(1 + x) + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE]
-	# 6 个外缘面：只降采样邻居 block 的边界 1 大格层（256 大格），
-	# 而非整块 16³ 邻居——跨界可见性只需边界层，避免首次加载时每 block
-	# 触发 7 次完整降采样（4096 大格 × 6 邻居）的主线程峰值
-	# +x 外缘面（halo x=17）= 邻居 (bx+1) 的 x=0 面（u=y, v=z）
-	var f_px := _get_lod1_face(block_key + Vector3i(1, 0, 0), 0, 0)
-	for v in CHUNK_SIZE:
-		for u in CHUNK_SIZE:
-			halo[(HALO_SIZE - 1) + (1 + u) * HALO_SIZE + (1 + v) * HALO_SIZE * HALO_SIZE] = f_px[u + v * CHUNK_SIZE]
-	# -x 外缘面（halo x=0）= 邻居 (bx-1) 的 x=15 面
-	var f_nx := _get_lod1_face(block_key + Vector3i(-1, 0, 0), 0, 1)
-	for v in CHUNK_SIZE:
-		for u in CHUNK_SIZE:
-			halo[0 + (1 + u) * HALO_SIZE + (1 + v) * HALO_SIZE * HALO_SIZE] = f_nx[u + v * CHUNK_SIZE]
-	# +y 外缘面（halo y=17）= 邻居 (by+1) 的 y=0 面（u=z, v=x）
-	var f_py := _get_lod1_face(block_key + Vector3i(0, 1, 0), 1, 0)
-	for v in CHUNK_SIZE:
-		for u in CHUNK_SIZE:
-			halo[(1 + v) + (HALO_SIZE - 1) * HALO_SIZE + (1 + u) * HALO_SIZE * HALO_SIZE] = f_py[u + v * CHUNK_SIZE]
-	# -y 外缘面（halo y=0）= 邻居 (by-1) 的 y=15 面
-	var f_ny := _get_lod1_face(block_key + Vector3i(0, -1, 0), 1, 1)
-	for v in CHUNK_SIZE:
-		for u in CHUNK_SIZE:
-			halo[(1 + v) + 0 * HALO_SIZE + (1 + u) * HALO_SIZE * HALO_SIZE] = f_ny[u + v * CHUNK_SIZE]
-	# +z 外缘面（halo z=17）= 邻居 (bz+1) 的 z=0 面（u=x, v=y）
-	var f_pz := _get_lod1_face(block_key + Vector3i(0, 0, 1), 2, 0)
-	for v in CHUNK_SIZE:
-		for u in CHUNK_SIZE:
-			halo[(1 + u) + (1 + v) * HALO_SIZE + (HALO_SIZE - 1) * HALO_SIZE * HALO_SIZE] = f_pz[u + v * CHUNK_SIZE]
-	# -z 外缘面（halo z=0）= 邻居 (bz-1) 的 z=15 面
-	var f_nz := _get_lod1_face(block_key + Vector3i(0, 0, -1), 2, 1)
-	for v in CHUNK_SIZE:
-		for u in CHUNK_SIZE:
-			halo[(1 + u) + (1 + v) * HALO_SIZE + 0 * HALO_SIZE * HALO_SIZE] = f_nz[u + v * CHUNK_SIZE]
-	return halo
-
-
-## 降采样邻居 block 的边界 1 大格层（halo 跨界可见性用）。
-## 只降采样该层（16²=256 大格）而非整块邻居，显著降低 LOD1 网格生成的
-## 主线程峰值与总降采样量。返回 16² 大格面，索引 = u + v*16。
-## axis: 面法向轴(0=x,1=y,2=z)；face: 0=低侧(0大格层)，1=高侧(15大格层)。
-func _get_lod1_face(nbk: Vector3i, axis: int, face: int) -> PackedInt32Array:
-	var face_arr := PackedInt32Array()
-	face_arr.resize(CHUNK_SIZE * CHUNK_SIZE)
-	var n2 := nbk * 2
-	var nf := n2[axis] + face
-	var nu := n2[(axis + 1) % 3]
-	var nv := n2[(axis + 2) % 3]
-	var fix_local := 0 if face == 0 else (CHUNK_SIZE - 2)
-	for cv in 2:
-		for cu in 2:
-			var ck := _vec3_from_axis(nf, nu + cu, nv + cv, axis)
-			preload_chunk(ck)
-			var cbuf: PackedInt32Array = _chunk_buffers.get(ck, PackedInt32Array())
-			if cbuf.is_empty():
-				continue
-			var ou := cu * (CHUNK_SIZE >> 1)
-			var ov := cv * (CHUNK_SIZE >> 1)
-			for lv8 in (CHUNK_SIZE >> 1):
-				var bv := lv8 * 2
-				for lu8 in (CHUNK_SIZE >> 1):
-					var bu := lu8 * 2
-					var mat := 0
-					for dv in 2:
-						for du in 2:
-							for df in 2:
-								var m := cbuf[_face_local_index(fix_local + df, bu + du, bv + dv, axis)]
-								if m > 0:
-									mat = m
-									break
-							if mat > 0:
-								break
-						if mat > 0:
-							break
-					face_arr[(ou + lu8) + (ov + lv8) * CHUNK_SIZE] = mat
-	return face_arr
-
-
-func _vec3_from_axis(f: int, u: int, v: int, axis: int) -> Vector3i:
-	match axis:
-		0: return Vector3i(f, u, v)
-		1: return Vector3i(u, f, v)
-		_: return Vector3i(u, v, f)
-
-
-## chunk 密集缓冲局部索引：固定轴局部 f + 自由轴局部 (u, v)，按 axis 重排为 (x,y,z)
-func _face_local_index(f: int, u: int, v: int, axis: int) -> int:
-	match axis:
-		0: return v * CHUNK_SLICE + u * CHUNK_SIZE + f
-		1: return v * CHUNK_SLICE + f * CHUNK_SIZE + u
-		_: return f * CHUNK_SLICE + u * CHUNK_SIZE + v
 
 
 ## 失效体素所在 chunk 对应的 LOD1 block（LOD0 数据变化后调用）
@@ -331,17 +125,13 @@ func invalidate_lod1_for_chunk(ck: Vector3i) -> void:
 	_mark_lod1_invalid(Vector3i(ck.x >> LOD1_SHIFT, ck.y >> LOD1_SHIFT, ck.z >> LOD1_SHIFT))
 
 
-## 记录 LOD1 block 失效（清缓存 + 通知渲染器重建）
+## 记录 LOD1 block 失效（通知渲染器重建）
 func _mark_lod1_invalid(block_key: Vector3i) -> void:
-	_lod1_cache.erase(block_key)
-	_lod1_order.erase(block_key)
 	_lod1_invalidated[block_key] = true
 
 
-## 清空 LOD1 缓存
+## 清空 LOD1 失效标记
 func clear_lod1_cache() -> void:
-	_lod1_cache.clear()
-	_lod1_order.clear()
 	_lod1_invalidated.clear()
 
 
@@ -362,10 +152,6 @@ func get_dirty_chunks() -> Array[Vector3i]:
 	_dirty_mesh_chunks.clear()
 	return keys
 
-
-## 清空脏 chunk 集合
-func clear_dirty_chunks() -> void:
-	_dirty_mesh_chunks.clear()
 
 ## Chunk 几何常量唯一权威源见 VoxelChunk，此处全部派生别名防止漂移
 const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
@@ -535,16 +321,6 @@ func is_streaming() -> bool:
 	return stream != null
 
 
-## chunk 是否在内存中（有密集缓冲）
-func is_chunk_loaded(chunk_key: Vector3i) -> bool:
-	return _chunk_buffers.has(chunk_key)
-
-
-## chunk 是否有数据（内存或磁盘）
-func is_chunk_persisted(chunk_key: Vector3i) -> bool:
-	return _chunk_buffers.has(chunk_key) or _persisted_chunks.has(chunk_key)
-
-
 ## 从流加载 chunk 数据到内存。已加载返回 true；流中不存在返回 false。
 ## 流式补建/网格生成前调用，保证后续读操作走内存数组。
 func preload_chunk(chunk_key: Vector3i) -> bool:
@@ -564,12 +340,6 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 	_chunk_voxel_counts[chunk_key] = cnt
 	_voxel_count += cnt
 	return true
-
-
-## 确保一批 chunk 已加载（网格生成快照前调用）
-func ensure_chunks_loaded(chunk_keys: Array) -> void:
-	for ck in chunk_keys:
-		preload_chunk(ck)
 
 
 ## 卸载 chunk：把内存中该 chunk 的数据按需写回磁盘（修改过的写盘、变空的清盘、
@@ -639,14 +409,6 @@ func flush() -> void:
 	stream.flush()
 
 
-## 构建期/读档批量填充 {pos: mat_id}，不追踪 dirty_voxels、不触发信号。
-## 适合一次性生成大量静态体素（demo 场景构建、外部数据导入）。
-## 绕过增量维护，直接写 chunk 密集缓冲（不建立支撑缓存，失稳检测实时查询）。
-func load_voxels_dict(dict: Dictionary) -> void:
-	for pos_key in dict:
-		_write_buffer_impl(pos_key, dict[pos_key], false)
-
-
 ## 获取所有有数据的 chunk key（内存 + 磁盘流中已持久化的）
 func get_all_chunk_keys() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
@@ -660,19 +422,6 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 				keys.append(ck)
 				seen[ck] = true
 	return keys
-
-
-## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
-## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立的深拷贝，无数据竞态）。
-## 邻居读取全为数组下标且无越界检查（光环含完整 6 邻）。
-## 流式模式下先确保 chunk 及其 27 邻居已加载（跨界面的面可见性需要邻居）。
-func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
-	if stream != null:
-		for nz in 3:
-			for ny in 3:
-				for nx in 3:
-					preload_chunk(chunk + Vector3i(nx - HALO, ny - HALO, nz - HALO))
-	return VoxelChunkGenerator.build_halo_from_buffers(_chunk_buffers, chunk)
 
 
 ## 生成"受影响区域"的 chunk 缓冲深拷贝快照（chunk key → PackedInt32Array 独立副本）。
@@ -713,32 +462,6 @@ func snapshot_lod1_block_chunks(block_key: Vector3i) -> Dictionary:
 					seen[ck] = true
 					cks.append(ck)
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
-
-
-## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 旧式外部代码）
-## 流式模式下合并磁盘流中已持久化但不在内存的 chunk（临时加载，不缓存）
-func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
-	var out := {}
-	var seen := {}
-	for ck: Vector3i in _chunk_buffers:
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				out[origin + _local_from_index(i)] = buf[i]
-		seen[ck] = true
-	if stream != null:
-		for ck: Vector3i in _persisted_chunks:
-			if seen.has(ck):
-				continue
-			var buf := _load_chunk_from_stream(ck)
-			if buf.is_empty():
-				continue
-			var origin := VoxelChunk.origin_of(ck)
-			for i in CHUNK_VOLUME:
-				if buf[i] > 0:
-					out[origin + _local_from_index(i)] = buf[i]
-	return out
 
 
 # ----------------------------------------------------------------------------
@@ -845,37 +568,6 @@ func clear(notify: bool = true) -> void:
 		_persisted_chunks.clear()
 	if notify:
 		emit_changed()
-
-
-## 合并另一个资源中的体素 (可带偏移)
-## 直接遍历 other 的 chunk 密集缓冲（单趟，避免 get_positions+get_voxel 两趟扫描）
-func merge(other: VoxelData, offset: Vector3i = Vector3i.ZERO, notify: bool = true) -> void:
-	for ck: Vector3i in other._chunk_buffers:
-		var buf = other._chunk_buffers[ck]
-		var o_origin: Vector3i = VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			var mat_id: int = buf[i]
-			if mat_id <= 0:
-				continue
-			var dst: Vector3i = o_origin + VoxelChunk.local_from_index(i) + offset
-			_write_buffer_impl(dst, mat_id, false)
-			dirty_voxels[dst] = mat_id
-			_mark_voxel_dirty(dst)
-	if notify:
-		emit_changed()
-
-
-## 清空变更追踪集合（在完成一次网格重建后调用）
-func clear_dirty_voxels() -> void:
-	dirty_voxels.clear()
-
-
-## 计算本次变更体素的包围盒 (AABB)，用于区域重建判断；无变更返回 null
-func get_dirty_voxels_aabb() -> AABB:
-	if dirty_voxels.is_empty():
-		return AABB()
-	var bounds := _calc_bounds(dirty_voxels)
-	return _bounds_to_aabb(bounds)
 
 
 ## 计算全部体素的包围盒 (AABB)，用于场景摆放/居中；空体素返回零 AABB
@@ -1051,16 +743,6 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 	return result
 
 
-## 移除球形范围内的所有体素 (用于破坏系统)
-func remove_voxels_in_sphere(center: Vector3, radius: float, notify: bool = true) -> Array[Vector3i]:
-	return _remove_voxels(get_voxels_in_sphere(center, radius), notify)
-
-
-## 移除盒形范围内的所有体素 (用于破坏系统)
-func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
-	return _remove_voxels(get_voxels_in_box(aabb), notify)
-
-
 ## 批量移除指定位置的体素 (公开接口，供破坏/崩塌等系统调用)
 func remove_voxels(positions: Array, notify: bool = true) -> Array:
 	return _remove_voxels(positions, notify)
@@ -1211,31 +893,6 @@ func add_material(mat: VoxelMaterial, notify: bool = false) -> VoxelMaterial:
 	return mat
 
 
-## 获取材质 (按对齐数组下标 == 材质ID 直接访问，越界/空位返回 null)
-## 前提：materials 保持"索引 == 材质ID"对齐（add_material / 导入保证）。索引 0 = 空。
-func get_material(index: int) -> VoxelMaterial:
-	if index >= 0 and index < materials.size():
-		return materials[index]
-	return null
-
-
-## 按材质 ID 查找材质（对外鲁棒接口：即使传入未对齐数组也能找到；id<=0/不存在返回 null）
-## 生成器内部一律走对齐数组直接下标（见 VoxelMaterial.align_by_id），不需要此接口
-func get_material_by_id(mat_id: int) -> VoxelMaterial:
-	return VoxelMaterial.find_by_id(materials, mat_id)
-
-
-## 获取按材质 ID 对齐的材质数组（用于 VoxelMeshGenerator，保证索引==ID）
-## 内部可能含 null 空位，因此返回通用 Array（typed array 不允许 null）
-func get_aligned_materials() -> Array:
-	return VoxelMaterial.align_by_id(materials)
-
-
-## 获取所有材质的浅拷贝 (用于 VoxelMeshGenerator)
-func get_materials_array() -> Array:
-	return materials.duplicate(false)
-
-
 ## 触发 changed 信号 (批量修改后手动调用)
 func notify_changed() -> void:
 	emit_changed()
@@ -1376,39 +1033,16 @@ func load_data(data: Variant) -> void:
 	emit_changed()
 
 
-## 获取指定 chunk 内的所有体素位置（基于密集缓冲扫描）
-## 返回 Array[Vector3i]（体素位置列表），空 chunk 返回空数组
-func get_chunk_voxels(chunk_key: Vector3i) -> Array:
-	if not _chunk_buffers.has(chunk_key) and stream != null and _persisted_chunks.has(chunk_key):
-		# 流式：磁盘上的 chunk 载入内存再遍历（保证结果完整）
-		preload_chunk(chunk_key)
-	var buf = _chunk_buffers.get(chunk_key)
-	if buf == null:
-		return []
-	var result: Array = []
-	var origin := VoxelChunk.origin_of(chunk_key)
-	for i in CHUNK_VOLUME:
-		if buf[i] > 0:
-			result.append(origin + _local_from_index(i))
-	return result
-
-
 ## O(1) 判断指定 chunk 是否有数据（内存或磁盘流中）
 func has_chunk(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key) or (stream != null and _persisted_chunks.has(chunk_key))
 
 
-## 兼容存根：chunk 索引已由密集缓冲取代，无需外部失效。
-func invalidate_chunk_index() -> void:
-	pass
-
-
 # ----------------------------------------------------------------------------
-# 连通性 / 连接度 API（公开、只读、泛化，供游戏复用实现自定义逻辑）
+# 连通性检测（崩塌支撑判定）
 # ----------------------------------------------------------------------------
-# 元素反应等自定义玩法应由游戏自己实现，插件只提供这些底层查询能力。
-# 例如"水+火反应"：游戏可在 voxel_damaged 信号里用 find_connected / connectivity
-# 找出影响范围，再按材质组合自行实现反应效果。
+# 全量支撑检测由 find_unsupported（GDScript 泛洪）与 find_unsupported_around（原生 C++）
+# 提供；批量分组由 partition_connected（原生）完成。
 
 ## 从种子体素位置集合出发，6 方向泛洪标记所有连通的体素，返回位置集合 (Dictionary 作 Set)
 ## seeds 可为单个 Vector3i 或 Array[Vector3i]；返回 {pos: true} 可直接用 has() 判断
@@ -1449,14 +1083,6 @@ func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 	return result
 
 
-## 找出某个体素所在的整个连通块（6 方向连通），返回该连通块的位置集合
-## 用于悬空判断、反应波及范围等
-func find_connected(pos: Vector3i) -> Dictionary:
-	if not has_voxel(pos):
-		return {}
-	return flood_fill(pos)
-
-
 ## 将一组位置按 6 方向连通性分组，返回 Array[Array[Vector3i]]
 ## 每组的体素两两 6 方向连通，组与组之间不连通。用于分块塌落、分块破坏等。
 ## 实现完全在原生 C++（partition_connected）：大崩塌掉落体分组主线程提速。
@@ -1464,26 +1090,6 @@ static func partition_connected(positions: Array) -> Array:
 	if positions.is_empty():
 		return []
 	return NativeLoader.partition_connected(positions)
-
-
-## 某个体素的连接度：相邻的实体素数 (0-6)
-## 可用于薄弱点判断、支撑接触面积估算等
-func connectivity(pos: Vector3i) -> int:
-	var count := 0
-	for d: Vector3i in NEIGHBORS_6:
-		if has_voxel(pos + d):
-			count += 1
-	return count
-
-
-## 返回某体素的所有相邻实体素位置数组 (6 方向)
-func neighbors(pos: Vector3i) -> Array[Vector3i]:
-	var result: Array[Vector3i] = []
-	for d: Vector3i in NEIGHBORS_6:
-		var nb := pos + d
-		if has_voxel(nb):
-			result.append(nb)
-	return result
 
 
 ## 找出"悬空"体素：与贴地(y==0)体素 6 方向连通判定，完全断开的返回

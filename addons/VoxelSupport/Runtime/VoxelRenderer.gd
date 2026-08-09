@@ -173,10 +173,6 @@ func _block_edge_world() -> float:
 func _block_dist(bk: Vector3i, cam_pos: Vector3) -> float:
 	return cam_pos.distance_to(_lod1_block_center(bk, global_position, _block_edge_world()))
 
-
-## 是否处于 LOD0 区（block 距离 < lod0_distance + margin；lod0_distance<=0 视为不在 LOD0 区）
-func _is_lod0_zone(bk: Vector3i, cam_pos: Vector3) -> bool:
-	return lod0_distance > 0.0 and _block_dist(bk, cam_pos) < lod0_distance + _lod0_margin()
 ## LOD1 生成每帧时间预算（毫秒）：超过即停止本帧生成，平滑移动时主线程峰值
 @export_range(0.1, 50.0, 0.1) var _lod1_build_budget_ms: float = 6.0
 

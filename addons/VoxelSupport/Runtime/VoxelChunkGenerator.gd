@@ -107,7 +107,6 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 ## 返回 {chunk_key: {solid_verts, solid_normals, ...}}，空 chunk 不在结果中
 ## 从 chunk 缓冲字典（chunk key → PackedInt32Array，密集 16³）构建单个 chunk 的 18³ 光环缓冲
 ## 线程安全：buffers 必须是调用方提供的独立快照（深拷贝），子线程内只读。
-## 与 VoxelData.get_chunk_halo 语义一致，但输入为快照字典而非自身数据，
 ## 供异步 worker 在子线程内直接从快照构建 halo，避免主线程逐 chunk 提取的阻塞。
 static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> PackedInt32Array:
 	# 原生下沉（C++ 遍历 27 邻居 + 数组读取，worker 端 halo 构建吞吐提升）
@@ -147,7 +146,7 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 
 
 ## 从"光环缓冲"生成单个 chunk 的网格数据（密集数组版，性能关键路径）
-## halo 为 18³ 密集缓冲（统一材质契约：值 = 材质ID，0 = 空），由 VoxelData.get_chunk_halo 提供。
+## halo 为 18³ 密集缓冲（统一材质契约：值 = 材质ID，0 = 空），由 build_halo_from_buffers 提供。
 ## 覆盖 chunk 内部 + 1 体素外缘，所有邻居读取均为数组下标且无越界检查。
 ## 线程安全：halo 是独立的深拷贝，子线程只读。
 ## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
@@ -163,17 +162,6 @@ static func generate_single_chunk_dense(
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
 		return {}
 	return result
-
-
-## 生成 LOD1 大块的网格（每格代表 2³ 体素，体素世界尺寸 = scale × 2）。
-## lod1_halo: 18³ 大格（值 = 材质ID，0 = 空），由 VoxelData.get_lod1_halo 构建。
-## block_key: LOD1 block key；网格顶点用局部坐标（大格单位 × 2×scale），
-## MeshInstance3D 位置应设为 block_key × 32 × scale（LOD1 block 覆盖 32³ 体素）。
-## 复用原生 greedy 网格生成（体素尺寸 2×scale），顶点为 LOD0 的约 1/8。
-static func generate_lod1_chunk_arrays(
-		lod1_halo: PackedInt32Array, aligned_materials: Array, scale: float, block_key: Vector3i,
-		offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	return generate_single_chunk_dense(lod1_halo, aligned_materials, scale * 2.0, block_key, offset)
 
 
 # LOD1 大块：32³ 大格（每大格 = 2³ 体素），覆盖 64³ 体素 = 4×4×4 LOD0 chunk。

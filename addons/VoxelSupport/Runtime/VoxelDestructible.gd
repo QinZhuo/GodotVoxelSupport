@@ -325,12 +325,6 @@ func destroy_all(spawn_debris: Variant = null) -> void:
 	voxel_damaged.emit(positions, do_spawn)
 
 
-## 修复整体健康度
-func repair(amount: float) -> void:
-	if health >= 0:
-		health = max(health + amount, 0.0)
-
-
 # ----------------------------------------------------------------------------
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
@@ -1188,20 +1182,6 @@ func _evict_oldest_falling_chunks(count: int) -> int:
 		if not is_instance_valid(body):
 			_chunk_spawn_times.erase(body)
 	return evicted
-
-
-## 手动清理所有掉落块（用于场景重置等）
-func _clear_falling_chunks() -> void:
-	if _falling_chunk_root:
-		for child in _falling_chunk_root.get_children():
-			child.queue_free()
-	_chunk_spawn_times.clear()
-	# 清空对象池（场景重置时全部销毁）
-	for body in _body_pool_total:
-		if is_instance_valid(body):
-			body.queue_free()
-	_body_pool.clear()
-	_body_pool_total.clear()
 
 
 ## 落地检测：掉落块碰触地面/其他物体时触发
