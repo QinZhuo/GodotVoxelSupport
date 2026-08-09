@@ -228,6 +228,139 @@ static func generate_lod1_chunk_arrays(
 	return generate_single_chunk_dense(lod1_halo, aligned_materials, scale * 2.0, block_key, offset)
 
 
+# LOD1 大块：32³ 大格（每大格 = 2³ 体素），覆盖 64³ 体素 = 4×4×4 LOD0 chunk。
+# 一次性生成整个大块网格（godot_voxel 风格大 block），降低 draw calls，无"小块合并"开销。
+const LOD1_BLOCK_SIZE := 32
+const LOD1_BLOCK_HALO := 1
+const LOD1_BLOCK_HALO_SIZE := LOD1_BLOCK_SIZE + LOD1_BLOCK_HALO * 2
+
+
+## 从 chunk 缓冲快照构建 LOD1 大块的 34³ 大格 halo（纯函数，供异步 worker，线程安全）。
+## 中心 32³ 大格 = 大块内部（降采样 2³ 体素 → 1 大格，取非空材质）；
+## 6 外缘面 = 相邻大块边界 1 大格层（跨界可见性）。
+static func build_lod1_block_halo_from_buffers(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
+	var halo := PackedInt32Array()
+	halo.resize(LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE)
+	# 中心 32³：大块覆盖 4×4×4 chunk，每 chunk 8³ 大格
+	var base_chunk := block_key * 4
+	for cz in 4:
+		for cy in 4:
+			for cx in 4:
+				var ck := base_chunk + Vector3i(cx, cy, cz)
+				var cbuf: PackedInt32Array = buffers.get(ck, PackedInt32Array())
+				if cbuf.is_empty():
+					continue
+				for lz8 in 8:
+					var bz := lz8 * 2
+					for ly8 in 8:
+						var by := ly8 * 2
+						for lx8 in 8:
+							var bx := lx8 * 2
+							var mat := 0
+							for dz in 2:
+								for dy in 2:
+									for dx in 2:
+										var m := cbuf[(bz + dz) * CHUNK_SLICE + (by + dy) * CHUNK_SIZE + (bx + dx)]
+										if m > 0:
+											mat = m
+											break
+									if mat > 0:
+										break
+								if mat > 0:
+									break
+							var lx := cx * 8 + lx8
+							var ly := cy * 8 + ly8
+							var lz := cz * 8 + lz8
+							halo[(1 + lx) + (1 + ly) * LOD1_BLOCK_HALO_SIZE + (1 + lz) * LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE] = mat
+	# 6 外缘面：相邻大块边界 1 大格层（降采样 2³ 体素）
+	var dirs: Array[Vector3i] = [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+	]
+	for d in dirs:
+		var nbk: Vector3i = block_key + d
+		var face := 0
+		if d.x != 0:
+			face = 0
+		elif d.y != 0:
+			face = 1
+		else:
+			face = 2
+		_fill_lod1_block_face(halo, buffers, nbk, face, d)
+	return halo
+
+
+## 填充大块 halo 的一个外缘面（邻居大块 nbk 的边界 1 大格层）。
+## face: 0=x, 1=y, 2=z；d: 方向（+1/-1，决定取低侧0面还是高侧31面）
+static func _fill_lod1_block_face(halo: PackedInt32Array, buffers: Dictionary, nbk: Vector3i, face: int, d: Vector3i) -> void:
+	var HS := LOD1_BLOCK_HALO_SIZE
+	var u_axis := (face + 1) % 3
+	var v_axis := (face + 2) % 3
+	# 固定轴：d>0 → 当前大块 +x 侧 halo 面 = 邻居的 0 大格层（低侧，取 +1）；
+	# d<0 → 邻居的 31 大格层（高侧，取 31）
+	var side := 1 if d[face] > 0 else 0
+	var fix_grid := 0 if side == 1 else (LOD1_BLOCK_SIZE - 1)
+	# halo 中该面的位置：d>0 → 高侧（HS-1），d<0 → 低侧（0）
+	var halo_pos := 0 if d[face] < 0 else (HS - 1)
+	# 邻居大块覆盖体素 [nbk*64, nbk*64+63]
+	for lv in LOD1_BLOCK_SIZE:
+		for lu in LOD1_BLOCK_SIZE:
+			var mat := 0
+			for dv in 2:
+				for du in 2:
+					for df in 2:
+						var vox := Vector3i(
+							nbk.x * 64 + ((fix_grid * 2 + df) if face == 0 else (lu * 2 + du)),
+							nbk.y * 64 + ((fix_grid * 2 + df) if face == 1 else (lv * 2 + dv)),
+							nbk.z * 64 + ((fix_grid * 2 + df) if face == 2 else (lv * 2 + dv)))
+						var ck := Vector3i(vox.x >> 4, vox.y >> 4, vox.z >> 4)
+						var cbuf: PackedInt32Array = buffers.get(ck, PackedInt32Array())
+						if not cbuf.is_empty():
+							var local := Vector3i(vox.x - ck.x * CHUNK_SIZE, vox.y - ck.y * CHUNK_SIZE, vox.z - ck.z * CHUNK_SIZE)
+							var m := cbuf[local.z * CHUNK_SLICE + local.y * CHUNK_SIZE + local.x]
+							if m > 0:
+								mat = m
+								break
+					if mat > 0:
+						break
+				if mat > 0:
+					break
+			# 写 halo 面：halo 坐标 = (u,v) 映射到 halo 的 (x,y,z)
+			var hx := 0
+			var hy := 0
+			var hz := 0
+			match face:
+				0:
+					hx = halo_pos
+					hy = 1 + lu
+					hz = 1 + lv
+				1:
+					hx = 1 + lu
+					hy = halo_pos
+					hz = 1 + lv
+				_:
+					hx = 1 + lu
+					hy = 1 + lv
+					hz = halo_pos
+			halo[hx + hy * HS + hz * HS * HS] = mat
+
+
+## 生成 LOD1 大块网格（一次性 32³ 大格，原生 generate_lod1_block_dense）。
+## scale = 每大格世界尺寸（= 2 × voxel_scale），MeshInstance3D 位置应设为 block_key × 64 × voxel_scale。
+static func generate_lod1_block_arrays(
+		lod1_halo: PackedInt32Array, aligned_materials: Array, scale: float, block_key: Vector3i,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	if not NativeLoader.is_available():
+		push_error("[VoxelChunkGenerator] LOD1 大块网格生成需要原生库 VoxelNative（未加载）")
+		return {}
+	var trans_flags := _build_trans_flags(aligned_materials)
+	var result: Dictionary = NativeLoader.generate_lod1_block_dense(lod1_halo, trans_flags, scale * 2.0, block_key, offset)
+	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
+		return {}
+	return result
+
+
 ## 从对齐材质数组构建透明标志数组（PackedByteArray，索引=材质ID，1=透明）
 ## 供原生 generate_chunk_dense 使用（C++ 跨语言读 VoxelMaterial 属性较慢，预计算传入）
 static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:

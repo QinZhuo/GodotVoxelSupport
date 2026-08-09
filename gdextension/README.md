@@ -26,9 +26,6 @@ godot-cpp/              # git submodule (固定 commit，克隆后需 init)
 | macOS arm64 | `libvoxelnative.macos.debug.arm64.dylib` | `libvoxelnative.macos.release.arm64.dylib` |
 | macOS x86_64 | `libvoxelnative.macos.debug.x86_64.dylib` | `libvoxelnative.macos.release.x86_64.dylib` |
 
-> CMakeLists 对 Debug 配置自动设置带平台后缀的输出名；Release 配置输出无后缀名，
-> 由 CI 重命名步骤统一处理。
-
 ## 本地构建 (Windows + MinGW 示例)
 
 ```bash
@@ -50,21 +47,3 @@ cp libvoxelnative.windows.debug.x86_64.dll voxelnative.windows.debug.x86_64.dll
 ```
 
 构建缓存目录 `gdextension/build*/` 已在 `.gitignore` 中忽略。
-
-## CI 自动构建 (GitHub Actions)
-
-工作流文件：`.github/workflows/build.yml`
-
-**触发条件**（以下任一满足时全平台构建）：
-- push 到 `main` 分支且改动命中：`gdextension/src/**`、`gdextension/CMakeLists.txt`、
-  `.gitmodules`、`godot-cpp/**`、`.github/workflows/build.yml`
-- 推送 `v*` 格式的 tag
-- Actions 页面手动 `Run workflow`
-
-**执行流程**：
-1. **build 作业**（4 平台矩阵）：Windows x86_64 / Linux x86_64 / macOS arm64 / macOS x86_64
-2. **package 作业**：汇总各平台二进制 + 完整插件目录，打包为 `voxel-support-addon`
-3. **Release**：推送 tag 时自动发布 GitHub Release（完整插件包）
-
-> 该 workflow 采用"打包 + 发布"模式（不是回写提交模式）：产物通过 GitHub Release
-> 分发，使用者下载插件包即可，无需自己编译。

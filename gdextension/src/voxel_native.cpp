@@ -181,21 +181,22 @@ void merge_slice(PackedInt32Array &grid, int width, int height,
 	}
 }
 
-} // namespace
-
-Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
-		float scale, const Vector3i &chunk, bool use_local_space, const Vector3 &offset) {
+// Generic dense volume mesh generation: size = edge length (grid units),
+// halo = (size+2)^3 (center + 1 shell). LOD0 (16) and LOD1 big-block (32) share this core.
+Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
+		float scale, const Vector3i &chunk_origin, bool use_local_space, const Vector3 &offset, int size) {
 	PackedVector3Array solid_verts, solid_normals, trans_verts, trans_normals;
 	PackedVector2Array solid_uvs, trans_uvs;
 	PackedInt32Array solid_idxs, trans_idxs;
-
-	// 顶点索引化（去重）：以 (网格整数坐标, 法线索引, 材质UV) 为键，
-	// 相邻矩形共享角点位置时复用同一顶点，显著减少顶点数（体素表面顶点可降约 2/3）。
-	// solid_cache / trans_cache: 键 -> 顶点索引
 	std::unordered_map<uint64_t, int> solid_cache;
 	std::unordered_map<uint64_t, int> trans_cache;
-
-	if (halo.size() < HALO_SIZE * HALO_SIZE * HALO_SIZE) {
+	const int size_slice = size * size;
+	const int halo_size = size + 2;
+	const int hdirs[6] = {
+		halo_size, -halo_size, -1, 1,
+		halo_size * halo_size, -halo_size * halo_size,
+	};
+	if (halo.size() < halo_size * halo_size * halo_size) {
 		Dictionary empty;
 		empty["solid_verts"] = solid_verts;
 		empty["solid_normals"] = solid_normals;
@@ -207,31 +208,21 @@ Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const
 		empty["trans_idxs"] = trans_idxs;
 		return empty;
 	}
-
 	const int32_t *h = halo.ptr();
 	const uint8_t *tflags = trans_flags.ptr();
 	const int n_mats = trans_flags.size();
-
-	const Vector3i chunk_origin = chunk * CHUNK_SIZE;
 	const Vector3 origin_offset = use_local_space ? Vector3(chunk_origin) * scale : Vector3();
-
-	// 6 个面的切片收集器：slices_by_face[face_idx][slice_key] = 16x16 grid（行优先）
-	std::array<std::array<PackedInt32Array, CHUNK_SIZE>, 6> slices;
-
-	// 单次遍历 16³：光环下标覆盖 6 邻，全部为数组读取
-	for (int z = 0; z < CHUNK_SIZE; ++z) {
-		for (int y = 0; y < CHUNK_SIZE; ++y) {
-			for (int x = 0; x < CHUNK_SIZE; ++x) {
-				const int idx = (x + HALO) + (y + HALO) * HALO_SIZE + (z + HALO) * HALO_SIZE * HALO_SIZE;
+	std::vector<std::vector<PackedInt32Array>> slices(6, std::vector<PackedInt32Array>(size));
+	for (int z = 0; z < size; ++z) {
+		for (int y = 0; y < size; ++y) {
+			for (int x = 0; x < size; ++x) {
+				const int idx = (x + 1) + (y + 1) * halo_size + (z + 1) * halo_size * halo_size;
 				const int v = h[idx];
 				if (v <= 0) continue;
-
 				const int mat_id = v;
 				const bool is_trans = mat_id < n_mats && tflags[mat_id] != 0;
-
 				for (int face_idx = 0; face_idx < 6; ++face_idx) {
-					const int nv = h[idx + HALO_DIRS[face_idx]];
-
+					const int nv = h[idx + hdirs[face_idx]];
 					bool visible = false;
 					if (nv <= 0) {
 						visible = true;
@@ -241,59 +232,48 @@ Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const
 						if (is_trans != n_trans) visible = true;
 						else if (is_trans && mat_id != n_mat_id) visible = true;
 					}
-
 					if (visible) {
 						const FaceAxes &ax = FACE_AXES[face_idx];
 						const int slice_key = axis_val(x, y, z, ax.perp);
 						const int u = axis_val(x, y, z, ax.u);
 						const int vv = axis_val(x, y, z, ax.v);
 						auto &grid = slices[face_idx][slice_key];
-						if (grid.size() == 0) grid.resize(CHUNK_SLICE);
-						grid[u + vv * CHUNK_SIZE] = mat_id;
+						if (grid.size() == 0) grid.resize(size_slice);
+						grid[u + vv * size] = mat_id;
 					}
 				}
 			}
 		}
 	}
-
-	// 处理每个面的贪婪合并
 	for (int face_idx = 0; face_idx < 6; ++face_idx) {
 		const FaceAxes &ax = FACE_AXES[face_idx];
-		for (int slice_key = 0; slice_key < CHUNK_SIZE; ++slice_key) {
+		for (int slice_key = 0; slice_key < size; ++slice_key) {
 			auto &grid = slices[face_idx][slice_key];
 			if (grid.size() == 0) continue;
-
 			std::vector<int> m_pos, m_size, m_val;
-			merge_slice(grid, CHUNK_SIZE, CHUNK_SIZE, m_pos, m_size, m_val);
-
+			merge_slice(grid, size, size, m_pos, m_size, m_val);
 			const int n_rects = (int)m_val.size();
 			for (int i = 0; i < n_rects; ++i) {
-				// 重建世界坐标（局部坐标 + chunk_origin 偏移）
 				Vector3i pos = chunk_origin;
 				pos[ax.perp] += slice_key;
 				pos[ax.u] += m_pos[i * 2];
 				pos[ax.v] += m_pos[i * 2 + 1];
-				Vector3i size(1, 1, 1);
-				size[ax.u] = m_size[i * 2];
-				size[ax.v] = m_size[i * 2 + 1];
-
+				Vector3i sz(1, 1, 1);
+				sz[ax.u] = m_size[i * 2];
+				sz[ax.v] = m_size[i * 2 + 1];
 				const int mat_id = m_val[i];
 				const bool is_trans = mat_id < n_mats && tflags[mat_id] != 0;
 				const Vector3 normal(NORMALS[face_idx][0], NORMALS[face_idx][1], NORMALS[face_idx][2]);
 				const float u_uv = (float(mat_id) + 0.5f) / 256.0f;
-				const Vector3 sizef(float(size.x), float(size.y), float(size.z));
-
+				const Vector3 sizef(float(sz.x), float(sz.y), float(sz.z));
 				for (int p = 0; p < 6; ++p) {
 					const Vector3 point(FACES[face_idx][p][0], FACES[face_idx][p][1], FACES[face_idx][p][2]);
-					// 网格整数坐标（未乘 scale 的角点位置，用于顶点去重键）
 					Vector3i grid_pt(
-							pos.x + int(point.x * float(size.x)),
-							pos.y + int(point.y * float(size.y)),
-							pos.z + int(point.z * float(size.z)));
+							pos.x + int(point.x * float(sz.x)),
+							pos.y + int(point.y * float(sz.y)),
+							pos.z + int(point.z * float(sz.z)));
 					const Vector3 world_pos = (Vector3(pos) + point * sizef) * scale - origin_offset + offset * scale;
-
 					if (is_trans) {
-						// 去重键：网格坐标 + 法线索引 + 材质ID（同一面同材质才可复用）
 						uint64_t key = grid_vkey(grid_pt);
 						key = key * 31 + uint64_t(face_idx);
 						key = key * 31 + uint64_t(mat_id);
@@ -328,7 +308,6 @@ Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const
 			}
 		}
 	}
-
 	Dictionary result;
 	result["solid_verts"] = solid_verts;
 	result["solid_normals"] = solid_normals;
@@ -339,6 +318,21 @@ Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const
 	result["trans_uvs"] = trans_uvs;
 	result["trans_idxs"] = trans_idxs;
 	return result;
+}
+
+} // namespace
+
+Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
+		float scale, const Vector3i &chunk, bool use_local_space, const Vector3 &offset) {
+	// LOD0: 16x16x16, reuse generic dense generator
+	return generate_dense_impl(halo, trans_flags, scale, chunk * CHUNK_SIZE, use_local_space, offset, CHUNK_SIZE);
+}
+
+// LOD1 big block: generate a 32x32x32 voxel-grid mesh in one pass (godot_voxel style big block).
+Dictionary VoxelNative::generate_lod1_block_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
+		float scale, const Vector3i &block_key, const Vector3 &offset) {
+	constexpr int LOD1_BLOCK_SIZE = 32;
+	return generate_dense_impl(halo, trans_flags, scale, block_key * LOD1_BLOCK_SIZE, true, offset, LOD1_BLOCK_SIZE);
 }
 
 // ----------------------------------------------------------------------------
@@ -742,6 +736,7 @@ Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Ar
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);

@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.17)
 #   cmake -S . -B build -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Debug
 #   cmake --build build
 # 平台支持：macOS(arm64/x86_64) / Windows(x86_64) / Linux(x86_64)
-#   通过 CMake 内置 -DCMAKE_OSX_ARCHITECTURES / 交叉工具链 / GitHub Actions 矩阵实现
+#   通过 CMake 内置 -DCMAKE_OSX_ARCHITECTURES / 交叉工具链实现
 
 project(voxelnative LANGUAGES CXX)
 

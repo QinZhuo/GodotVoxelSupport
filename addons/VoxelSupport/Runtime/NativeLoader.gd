@@ -66,6 +66,14 @@ static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByte
 	return inst.call(&"generate_chunk_dense", halo, trans_flags, scale, chunk, use_local_space, offset)
 
 
+## LOD1 大块网格（一次性生成 32³ 大格，godot_voxel 风格大 block）。
+## halo: 34³ 大格光环（中心 32³ + 1 外缘）；block_key: 大块 key。
+static func generate_lod1_block_dense(halo: PackedInt32Array, trans_flags: PackedByteArray,
+		scale: float, block_key: Vector3i, offset: Vector3) -> Dictionary:
+	var inst := _get_instance()
+	return inst.call(&"generate_lod1_block_dense", halo, trans_flags, scale, block_key, offset)
+
+
 ## 支撑图失稳检测（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照
 ## removed: 本次被移除的体素位置数组

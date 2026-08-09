@@ -133,8 +133,31 @@ enum VisibilityMode {
 var _lod1_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 ## LOD1 待生成的 block（key -> true），由 _process_lod 限量生成
 var _lod1_pending: Dictionary = {}
+## LOD1 异步生成：已派发待结果的 block（去重）
+var _lod1_pending_tasks: Dictionary = {}
+## LOD1 生成代数：数据变化（invalidate）时递增，丢弃旧任务过期结果
+var _lod1_generation_id: int = 0
+## 每帧一次对齐的 LOD1 材质（供所有 worker 复用）
+var _aligned_lod1_materials: Array = []
 ## 每帧最多生成的 LOD1 网格数（硬上限）
 var _lod1_build_per_frame: int = 3
+
+# LOD1 大块（godot_voxel 风格大 block）：一次性生成 32³ 大格 = 4×4×4 LOD0 chunk = 64³ 体素。
+# 大块 key = LOD0 chunk >> 2。一次生成整个大块 mesh（原生 generate_lod1_block_dense），
+# 降低 draw calls，且无"小块生成后合并"的额外开销。
+const LOD1_BLOCK_SHIFT := 2
+const LOD1_BLOCK_EDGE := 16 << LOD1_BLOCK_SHIFT  # 64 体素
+const LOD1_BLOCK_SIZE := LOD1_BLOCK_EDGE >> 1    # 32 大格
+
+static func _lod1_block_of_chunk(ck: Vector3i) -> Vector3i:
+	return Vector3i(
+			ck.x >> LOD1_BLOCK_SHIFT,
+			ck.y >> LOD1_BLOCK_SHIFT,
+			ck.z >> LOD1_BLOCK_SHIFT)
+
+
+static func _lod1_block_center(bk: Vector3i, world_offset: Vector3, block_edge_world: float) -> Vector3:
+	return world_offset + Vector3(bk) * block_edge_world + Vector3.ONE * block_edge_world * 0.5
 ## LOD1 生成每帧时间预算（毫秒）：超过即停止本帧生成，平滑移动时主线程峰值
 var _lod1_build_budget_ms: float = 6.0
 
@@ -438,7 +461,7 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	# 决策按 LOD1 block 中心距离（与 _process_lod 一致），避免 block 跨 lod0 边界时
 	# 部分 chunk 建 LOD0、部分建 LOD1 造成的重叠/空洞。
 	var lod0_d: float = lod0_distance if lod0_distance > 0.0 else unload_distance
-	var lod1_edge_world := voxel_scale * VoxelData.LOD1_EDGE
+	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
 	for ck in chunks:
 		# 无数据的空 chunk：无需流式网格管理（不建不卸，且不占用 streamed_out 字典）
 		if data and not data.has_chunk(ck):
@@ -448,10 +471,10 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 		if dist > unload_distance:
 			_streamed_out_chunks[ck] = true
 		elif lod0_distance > 0.0:
-			var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
-			var bcenter := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+			var bk := _lod1_block_of_chunk(ck)
+			var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
 			if cam_pos.distance_to(bcenter) > lod0_d:
-				# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 block 待生成（数据保留在内存）
+				# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 大块待生成（数据保留在内存）
 				_lod1_pending[bk] = true
 			else:
 				kept.append(ck)
@@ -604,15 +627,18 @@ func _process_streaming() -> void:
 	_streaming_check_tick += 1
 	if unload_d > 0.0 and _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 1:
 		var lod1_edge_world: float = voxel_scale * float(VoxelData.LOD1_EDGE)
+		var block_edge_world: float = voxel_scale * float(LOD1_BLOCK_EDGE)
+		var unload_margin: float = lod1_edge_world * 0.5
+		var unload_block_extent: float = block_edge_world * 0.5
 		var candidates: Array = []
 		if data:
 			for ck in data.get_loaded_chunk_keys():
-				# LOD1 区数据保留：chunk 所属 block（2×2×2 中心）仍处于 LOD1 显示区时
-				# （≤ unload_d），其数据供降采样合并，不卸载——否则 _read_voxel_fast 读空，
-				# LOD1 大格缺失 → "该有体素的地方没有"。即使 chunk 自身中心超出 unload。
-				var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
-				var bcenter := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
-				if cam_pos.distance_to(bcenter) <= unload_d:
+				# LOD1 区数据保留：chunk 所属 LOD1 大块中心仍处于 LOD1 显示区时
+				# （≤ unload+margin+大块半径），其数据供降采样合并，不卸载——
+				# 否则降采样读空，LOD1 大格缺失 → "该有体素的地方没有"。
+				var bk := _lod1_block_of_chunk(ck)
+				var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
+				if cam_pos.distance_to(bcenter) <= unload_d + unload_margin + unload_block_extent:
 					continue
 				var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
 				if dist > unload_d:
@@ -689,6 +715,7 @@ func _process_lod() -> void:
 	var cam_pos := cam.global_position
 	var world_offset := global_position
 	var lod1_edge_world := voxel_scale * VoxelData.LOD1_EDGE
+	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
 	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
 	# LOD0/LOD1 滞回切换带：进出 LOD0 区用不同阈值（±margin），配合 LOD1 兜底，
 	# 消除移动时远近分界处块反复隐藏/显示闪烁（标准 LOD 切换滞回做法）
@@ -697,8 +724,11 @@ func _process_lod() -> void:
 
 	# 0. 处理数据变化导致的 LOD1 失效（破坏/编辑 → 移除旧网格，重新降采样生成）
 	var invalidated := data.get_invalidated_lod1()
-	for bk in invalidated:
-		_remove_lod1(bk)
+	if not invalidated.is_empty():
+		for bk in invalidated:
+			_remove_lod1(_lod1_block_of_chunk(bk))
+		# 数据变化：递增代数，丢弃旧快照任务的过期结果
+		_lod1_generation_id += 1
 
 	# 1. 移除超出 LOD0 区的 LOD0 chunk 网格（远离后 >lod0+margin 的全精度网格应消失，
 	#    由 LOD1 大块覆盖；增量重建不处理"非 dirty 但需移除"的 chunk，这里主动清理——
@@ -708,23 +738,18 @@ func _process_lod() -> void:
 	# 避免移动分界处"移除旧→异步生成新"的真空 → 块来回隐藏显示闪烁
 	var remove_lod0: Array = []
 	for ck in _chunk_meshes:
-		# 与 _filter_streamed_chunks / LOD1 生成统一按 LOD1 block 中心距离决策：
-		# 避免 block 跨 lod0 边界时（block 中心 <lod0 但其部分 chunk 距离 >lod0）
-		# 该 chunk 既因距离超而移除 LOD0、又因 block 在 LOD0 区而不生成 LOD1 → 空洞
-		var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
-		var bcenter := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+		# 与 _filter_streamed_chunks / LOD1 生成统一按 LOD1 大块中心距离决策
+		var bk := _lod1_block_of_chunk(ck)
+		var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
 		if cam_pos.distance_to(bcenter) > lod0_d + lod0_margin and _lod1_meshes.has(bk):
 			remove_lod0.append(ck)
 	for ck in remove_lod0:
 		_remove_chunk_mesh(ck)
 
-	# 1. 推导需要 LOD1 的 block（从内存 chunk 主动推导，不依赖 dirty 触发——
-	#    相机移动本身不产生 dirty，若不推导则新进入 [lod0, unload] 区间的 block
-	#    不会生成 LOD1 → 空洞）
+	# 1. 推导需要 LOD1 的大块（从内存 chunk 主动推导，不依赖 dirty 触发）
 	var needed := {}
 	for ck in data.get_loaded_chunk_keys():
-		var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
-		needed[bk] = true
+		needed[_lod1_block_of_chunk(ck)] = true
 	# 并入待建集合（含 _filter_streamed_chunks 标记的）
 	for bk in _lod1_pending:
 		needed[bk] = true
@@ -734,18 +759,18 @@ func _process_lod() -> void:
 	#    避免 LOD0 异步生成未完成时的切换空洞/部分缺失）
 	var remove_keys: Array = []
 	for bk in _lod1_meshes:
-		var center := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+		var center := _lod1_block_center(bk, world_offset, block_edge_world)
 		var dist := cam_pos.distance_to(center)
-		if dist > unload_d:
+		if dist > unload_d + block_edge_world * 0.5:
 			remove_keys.append(bk)
 		elif dist < lod0_d - lod0_margin:
-			var b2 := bk * 2
+			var b4 := bk * 4
 			var lod0_ready := true
-			for cz in 2:
-				for cy in 2:
-					for cx in 2:
-						var ck := b2 + Vector3i(cx, cy, cz)
-						# 空 chunk（无数据，无体素）无需网格，视为就绪；
+			for cz in 4:
+				for cy in 4:
+					for cx in 4:
+						var ck := b4 + Vector3i(cx, cy, cz)
+						# 空 chunk（无数据）无需网格，视为就绪；
 						# 有数据但无网格 → 未就绪（LOD1 继续兜底）
 						if data.has_chunk(ck) and not _chunk_meshes.has(ck):
 							lod0_ready = false
@@ -766,15 +791,15 @@ func _process_lod() -> void:
 	for bk in needed:
 		if _lod1_meshes.has(bk):
 			continue
-		var center := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+		var center := _lod1_block_center(bk, world_offset, block_edge_world)
 		var dist := cam_pos.distance_to(center)
-		if dist < lod0_d - lod0_margin or dist > unload_d:
+		if dist < lod0_d - lod0_margin or dist > unload_d + block_edge_world * 0.5:
 			continue
 		to_build.append([dist, bk])
 	to_build.sort_custom(func(a, b): return a[0] < b[0])
-	# 生成预算控制：LOD1 降采样+网格生成在主线程（~3.6ms/块），移动时每帧都有新 block。
-	# 用时间预算（默认 6ms）替代硬性 3 块/帧——简单块多生成几个、复杂块少生成，
-	# 平滑限制移动时主线程峰值（避免移动时帧率骤降）。
+	# 生成预算控制：快照 + 派发 WorkerThreadPool（降采样/网格生成在后台线程）。
+	if not to_build.is_empty():
+		_aligned_lod1_materials = VoxelMaterial.align_by_id(_materials_snapshot)
 	var built := 0
 	var _lod1_budget_us := int(_lod1_build_budget_ms * 1000.0)
 	var _t_lod1 := Time.get_ticks_usec()
@@ -793,14 +818,16 @@ func _process_lod() -> void:
 	#    显示 LOD0。LOD1 区（≥ lod0+margin）恒显示（此时 LOD0 已移除）。
 	for bk in _lod1_meshes:
 		var mi: MeshInstance3D = _lod1_meshes[bk]
-		var center := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+		if mi == null:
+			continue  # 空大块（无体素）
+		var center := _lod1_block_center(bk, world_offset, block_edge_world)
 		if cam_pos.distance_to(center) < lod0_d + lod0_margin:
-			var b2 := bk * 2
+			var b4 := bk * 4
 			var lod0_ready := true
-			for cz in 2:
-				for cy in 2:
-					for cx in 2:
-						var ck := b2 + Vector3i(cx, cy, cz)
+			for cz in 4:
+				for cy in 4:
+					for cx in 4:
+						var ck := b4 + Vector3i(cx, cy, cz)
 						# 空 chunk（无数据）无需网格视为就绪；有数据但无网格 → 未就绪（LOD1 兜底）
 						if data.has_chunk(ck) and not _chunk_meshes.has(ck):
 							lod0_ready = false
@@ -810,10 +837,10 @@ func _process_lod() -> void:
 				if not lod0_ready:
 					break
 			mi.visible = not lod0_ready
-			for cz in 2:
-				for cy in 2:
-					for cx in 2:
-						var cm: Node = _chunk_meshes.get(b2 + Vector3i(cx, cy, cz))
+			for cz in 4:
+				for cy in 4:
+					for cx in 4:
+						var cm: Node = _chunk_meshes.get(b4 + Vector3i(cx, cy, cz))
 						if cm != null:
 							cm.visible = lod0_ready
 		else:
@@ -834,12 +861,12 @@ func _process_lod() -> void:
 			# 粗筛：block 中心 > lod0+margin 的 chunk 必然在 LOD1 区，跳过
 			if absi(ck.x - _cam_ck.x) > _r_ck or absi(ck.y - _cam_ck.y) > _r_ck or absi(ck.z - _cam_ck.z) > _r_ck:
 				continue
-			# 统一按 LOD1 block 中心距离判断 LOD0 区（与移除/生成一致）：
-			# block 中心 <lod0+margin → 全精度 LOD0（提前补建，覆盖滞回带，
+			# 统一按 LOD1 大块中心距离判断 LOD0 区（与移除/生成一致）：
+			# 大块中心 <lod0+margin → 全精度 LOD0（提前补建，覆盖滞回带，
 			# 使 LOD1 移除时 LOD0 已就绪），否则该 chunk 会因"距离>lod0"被跳过补建、
-			# 又因"block在LOD0区"不生成 LOD1 → 空洞
-			var bk := Vector3i(ck.x >> VoxelData.LOD1_SHIFT, ck.y >> VoxelData.LOD1_SHIFT, ck.z >> VoxelData.LOD1_SHIFT)
-			var bcenter := world_offset + (Vector3(bk) * lod1_edge_world + Vector3.ONE * lod1_edge_world * 0.5)
+			# 又因"大块在LOD0区"不生成 LOD1 → 空洞
+			var bk := _lod1_block_of_chunk(ck)
+			var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
 			var bdist := cam_pos.distance_to(bcenter)
 			if bdist > lod0_d + lod0_margin:
 				continue  # LOD1 区（由 _build_lod1 覆盖）
@@ -860,19 +887,59 @@ func _process_lod() -> void:
 		_request_update()
 
 
-## 生成单个 LOD1 大块的网格（降采样 halo + 网格生成 + 挂载 MeshInstance3D）
+## 派发 LOD1 大块异步生成：快照 chunk（COW）+ WorkerThreadPool 后台降采样/网格生成。
+## 一次性生成 32³ 大格 mesh（godot_voxel 大 block 方案），结果由 _on_lod1_thread_result 主线程挂载。
 func _build_lod1(bk: Vector3i) -> void:
 	if not data:
 		return
-	var halo := data.get_lod1_halo(bk)
-	var aligned := VoxelMaterial.align_by_id(_materials_snapshot)
-	var arr := VoxelChunkGenerator.generate_lod1_chunk_arrays(
-		halo, aligned, voxel_scale, bk, data.center_offset if data else Vector3.ZERO)
+	if _lod1_pending_tasks.has(bk):
+		return
+	var snapshot := data.snapshot_lod1_block_chunks(bk)
+	_lod1_pending_tasks[bk] = true
+	WorkerThreadPool.add_task(_lod1_worker.bind(
+		snapshot, bk, _lod1_generation_id, voxel_scale,
+		data.center_offset if data else Vector3.ZERO, _aligned_lod1_materials))
+
+
+## 工作线程：LOD1 大块降采样 halo + 一次性网格生成（线程安全，只读参数快照）。
+func _lod1_worker(buffers: Dictionary, bk: Vector3i, gen_id: int, scale: float,
+		offset: Vector3, aligned_materials: Array) -> void:
+	var halo := VoxelChunkGenerator.build_lod1_block_halo_from_buffers(buffers, bk)
+	var arr := VoxelChunkGenerator.generate_lod1_block_arrays(halo, aligned_materials, scale, bk, offset)
+	call_deferred("_on_lod1_thread_result", bk, arr, gen_id)
+
+
+## 主线程 LOD1 结果处理：校验 gen_id / 区间，然后挂载大块 MeshInstance3D
+func _on_lod1_thread_result(bk: Vector3i, arr: Dictionary, gen_id: int) -> void:
+	_lod1_pending_tasks.erase(bk)
+	if gen_id != _lod1_generation_id:
+		return
+	if _lod1_meshes.has(bk):
+		return
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return
+	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
+	var center := _lod1_block_center(bk, global_position, block_edge_world)
+	var dist := cam.global_position.distance_to(center)
+	var lod0_d := lod0_distance
+	var lod0_margin := (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
+	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
+	if dist < lod0_d - lod0_margin or dist > unload_d + block_edge_world * 0.5:
+		return  # 已移出区间，丢弃过期结果
+	if arr.is_empty():
+		_lod1_meshes[bk] = null  # 空大块：标记已处理，避免重复派发
+		return
+	_build_lod1_from_arrays(bk, arr)
+
+
+## 主线程挂载 LOD1 大块网格（一次性生成结果已就绪，仅建 mesh + 挂载）
+func _build_lod1_from_arrays(bk: Vector3i, arr: Dictionary) -> void:
 	var mi := MeshInstance3D.new()
-	mi.name = "LOD1_%d_%d_%d" % [bk.x, bk.y, bk.z]
+	mi.name = "LOD1B_%d_%d_%d" % [bk.x, bk.y, bk.z]
 	add_child(mi)
-	var lod1_edge_world := voxel_scale * VoxelData.LOD1_EDGE
-	mi.position = Vector3(bk) * lod1_edge_world
+	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
+	mi.position = Vector3(bk) * block_edge_world
 	if not arr.is_empty():
 		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
 		if new_mesh and _materials_cache.size() >= 2:
@@ -891,6 +958,7 @@ func _remove_lod1(bk: Vector3i) -> void:
 		mi.queue_free()
 	_lod1_meshes.erase(bk)
 	_lod1_pending.erase(bk)
+	_lod1_pending_tasks.erase(bk)
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks

@@ -24,6 +24,10 @@ config/icon="uid://bryfxjjoaavmu"
 
 DevMCP="*res://addons/DEVFramework/MCP/MCPDevServer.gd"
 
+[debug]
+
+settings/stdout/print_fps=true
+
 [dev_framework]
 
 mcp/port=8933

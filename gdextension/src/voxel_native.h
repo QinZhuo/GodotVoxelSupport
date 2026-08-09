@@ -46,6 +46,13 @@ public:
 	static Dictionary generate_chunk_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 			float scale, const Vector3i &chunk, bool use_local_space, const Vector3 &offset);
 
+	// LOD1 大块网格：一次性生成 32³ 大格（每大格 = 2³ 体素，世界尺寸 = scale）的大块 mesh。
+	// 参考 godot_voxel 大 block 方案：按大块一次生成（大 halo），而非"小块生成后合并"。
+	// halo: (32+2)³ 大格光环（中心 32³ + 1 外缘）；block_key: 大块 key（覆盖 32³ 大格）。
+	// 返回与 generate_chunk_dense 相同的 Dictionary（solid/trans 顶点）。
+	static Dictionary generate_lod1_block_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
+			float scale, const Vector3i &block_key, const Vector3 &offset);
+
 	// 支撑图失稳检测（等价于 VoxelData.find_unsupported_around）
 	// buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照（VoxelData._chunk_buffers 的深拷贝）
 	// removed: 本次被移除的体素位置数组（Array[Vector3i]）

@@ -691,6 +691,30 @@ func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, rebuild_chunks)
 
 
+## LOD1 大块（32³ 大格 = 4×4×4 chunk = 64³ 体素）异步生成快照：
+## 大块覆盖的 4×4×4 chunk + 外扩 2 层 chunk（halo 边界面需要），COW 共享。
+## 仅 preload 大块自身 chunk（必须）；外部从内存快照（LOD1 区数据保留，磁盘不 preload）。
+func snapshot_lod1_block_chunks(block_key: Vector3i) -> Dictionary:
+	var cks: Array[Vector3i] = []
+	var seen := {}
+	var base := block_key * 4
+	for cz in 4:
+		for cy in 4:
+			for cx in 4:
+				var ck := base + Vector3i(cx, cy, cz)
+				cks.append(ck)
+				seen[ck] = true
+				preload_chunk(ck)
+	for oz in range(-2, 6):
+		for oy in range(-2, 6):
+			for ox in range(-2, 6):
+				var ck := base + Vector3i(ox, oy, oz)
+				if not seen.has(ck) and _chunk_buffers.has(ck):
+					seen[ck] = true
+					cks.append(ck)
+	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
+
+
 ## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 旧式外部代码）
 ## 流式模式下合并磁盘流中已持久化但不在内存的 chunk（临时加载，不缓存）
 func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
