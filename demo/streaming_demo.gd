@@ -1,31 +1,39 @@
 extends Node
-## 流式加载演示场景（Streaming Demo）
+
+## 流式演示场景（Streaming Demo）——整合【磁盘文件流】与【程序化无限流】两种数据源
 ##
-## 目的：直观展示距离 LOD 卸载（Streaming）——相机远离的区域网格自动卸载释放显存，
-## 靠近后自动重载。本场景为"大地面 + 散布建筑"的开放世界，相机 WASD 自由移动。
+## 目的：直观展示距离 LOD 卸载（Streaming）与两种数据流，测试内容高度关联：
+##   - 文件流模式：手工构建的大地面+散布建筑（VoxelFileStream 磁盘流式，破坏可写盘）
+##   - 程序化模式：VoxelProceduralStream 子类（_generate_chunk 噪声地形）+ origin shift 无限世界
+## 两种模式共用同一渲染器与 LOD/流式逻辑，相机 WASD 自由移动。
 ##
 ## 操作：
 ##   WASD / 方向键   : 水平移动相机
 ##   Q / E           : 下降 / 上升
 ##   空格 / Shift    : 加速 / 减速
+##   0               : 切换 数据源（文件流 ↔ 程序化）
 ##   1               : 切换 流式加载 开/关（对比显存与 FPS）
 ##   2               : 切换 视锥剔除 开/关
-##   3               : 循环 超级块大小 0/4（对比 draw call）
 ##   Esc             : 退出
 ##
 ## 观察要点：
 ##   移动相机远离某区域 → 该区域 chunk 网格被卸载（HUD 显示卸载数增加）
 ##   走回该区域         → 网格自动重载
-##   对比开关流式前后的 FPS 与内存占用
+##   程序化模式远移     → origin shift 触发（HUD 显示基准平移），相机坐标保持小值
+
+## 数据源模式：文件流（手工世界）/ 程序化（无限世界）
+enum Mode { FILE_STREAM, PROCEDURAL }
 
 ## 体素缩放（0.2 → 世界尺寸较大，便于观察距离效果）
 @export var voxel_scale: float = 0.2
 
-## 世界尺寸 [体素] (x, y, z) —— 超大开放世界 300×300 单位，验证流式+LOD 大场景表现
+## 初始数据源（运行中可按 0 切换）
+@export var mode: Mode = Mode.FILE_STREAM
+
+## 世界尺寸 [体素] (x, y, z) —— 超大开放世界，仅文件流模式使用
 @export var world_size: Vector3i = Vector3i(1500, 40, 1500)
 
 ## 流式加载距离（世界单位）：相机进入此距离的 chunk 确保加载
-## 超大场景：view=60（LOD0 视距 36），unload=100，LOD1 覆盖 [36,100]
 @export var view_distance: float = 60
 ## 流式卸载距离：超出此距离的 chunk 网格+数据自动卸载（写盘释放内存）
 @export var unload_distance: float = 100
@@ -46,29 +54,60 @@ const SPEED_FAST := 60.0
 
 ## 流式/可见性开关状态
 var _stream_state := true
+## 当前数据源模式
+var _current_mode: Mode = Mode.FILE_STREAM
 
 ## 上一帧按键状态（边沿触发）
+var _prev_0 := false
 var _prev_1 := false
 var _prev_2 := false
 
 
 func _ready() -> void:
-	_build_world()
-	_setup_camera()
-	_setup_hud()
-	_update_mode_label()
-	print("[流式Demo] 初始化完成 world=%dx%dx%d 体素=%d" % [
-		world_size.x, world_size.y, world_size.z, _target.data.get_voxel_count()])
-
-
-## 构建世界：大面积地面 + 随机散布的建筑群（模拟开放世界）
-func _build_world() -> void:
+	_current_mode = mode
 	_target = get_node_or_null("DestructibleVoxels") as VoxelDestructible
 	if _target == null:
 		_target = VoxelDestructible.new()
 		_target.name = "DestructibleVoxels"
 		add_child(_target)
+	_setup_camera()
+	_setup_hud()
+	_rebuild_world()
+	print("[流式Demo] 初始化完成 模式=%s" % _mode_name())
 
+
+## 按当前模式重建世界（数据源切换时调用：释放旧数据 → 构建新世界 → 重置相机）
+func _rebuild_world() -> void:
+	if _target.data:
+		_target.data.flush()
+		_target.data = null
+	match _current_mode:
+		Mode.FILE_STREAM:
+			_build_world_file()
+		Mode.PROCEDURAL:
+			_build_world_procedural()
+	_reset_camera()
+	_update_mode_label()
+
+
+## 渲染器公共配置（两种模式共用同一套 LOD/流式/破坏参数）
+func _apply_renderer_config() -> void:
+	_target.voxel_scale = voxel_scale
+	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
+	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
+	_target.view_distance = view_distance
+	_target.unload_distance = unload_distance
+	# LOD：距离内全精度，之外用 LOD1 低分辨率大块（每格 2³ 体素，顶点约 1/8）
+	_target.lod0_distance = view_distance * 0.6
+	_target.spawn_debris_on_damage = true
+	_target.use_voxel_health = true
+	_target.damage_per_voxel = 1.0
+	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
+	_target.local_collapse = true
+
+
+## 文件流模式：手工构建大地面 + 随机散布建筑（VoxelFileStream 磁盘流式，破坏可写盘）
+func _build_world_file() -> void:
 	var data := VoxelData.new()
 
 	# 材质
@@ -90,9 +129,7 @@ func _build_world() -> void:
 	roof_mat.connection_strength = 18.0; roof_mat.mass = 1.8
 	data.add_material(roof_mat)
 
-	# 地面（整片铺满全世界，斑块纹理）——用 set_voxels 批量填充，避免逐体素 set_voxel 的哈希开销。
-	# 超大场景分批构建（每 128 行一批），避免一次性构造上千万 Vector3i 数组撑爆内存。
-	# 走原生 set_voxels_bulk 批量路径，构建期主线程开销远小于逐体素 GDScript 写入。
+	# 地面（整片铺满全世界，斑块纹理）——批量填充走原生 set_voxels_bulk
 	var S := world_size
 	var ground_h := 8
 	const GROUND_BATCH := 128
@@ -131,11 +168,9 @@ func _build_world() -> void:
 
 	_target.data = data
 	# 数据层磁盘流式：chunk 数据按需写盘/读盘（目录 user://voxel_demo_stream）。
-	# 启用后 STREAMING 模式不仅卸载网格，还按距离把 chunk 数据写回磁盘并释放内存，
-	# 相机靠近时再从磁盘读回。内存占用随可见区域而非整个世界增长。
 	var stream := VoxelFileStream.new()
 	stream.directory = "user://voxel_demo_stream"
-	# 演示场景每次运行从零开始：清空旧流数据目录（避免上一次的残留 chunk 干扰）
+	# 每次从零开始：清空旧流数据目录（避免上一次的残留 chunk 干扰）
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(stream.directory))
 	var cleanup := DirAccess.open(stream.directory)
 	if cleanup:
@@ -147,24 +182,26 @@ func _build_world() -> void:
 			fn = cleanup.get_next()
 		cleanup.list_dir_end()
 	_target.data.stream = stream
-	_target.voxel_scale = voxel_scale
-	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
-	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
-	# 可见性：流式模式（距离加载/卸载）
-	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
-	_target.view_distance = view_distance
-	_target.unload_distance = unload_distance
-	# LOD：距离内全精度，之外用 LOD1 低分辨率大块（每格 2³ 体素，顶点约 1/8）
-	_target.lod0_distance = view_distance * 0.6
-	_target.spawn_debris_on_damage = true
-	_target.use_voxel_health = true
-	_target.damage_per_voxel = 1.0
-	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
-	_target.local_collapse = true
-
+	_apply_renderer_config()
 	# 世界居中（target 原点 = 世界中心）
 	var bounds: AABB = data.get_voxels_aabb()
 	_target.global_position = -Vector3(bounds.size.x, 0, bounds.size.z) * voxel_scale * 0.5
+
+
+## 程序化模式：VoxelProceduralStream 子类（_generate_chunk 噪声地形）+ origin shift 无限世界
+func _build_world_procedural() -> void:
+	# 程序化流（子类覆写 _generate_chunk 实现生成算法）
+	var stream := ProceduralTerrainGenerator.new()
+	var data := VoxelData.new()
+	data.stream = stream
+	var mat := VoxelMaterial.new()
+	mat.id = 1
+	mat.color = Color(0.35, 0.55, 0.3)
+	mat.rough = 0.9
+	data.add_material(mat)
+	_target.data = data
+	_target.global_position = Vector3.ZERO
+	_apply_renderer_config()
 
 
 func _setup_camera() -> void:
@@ -176,7 +213,10 @@ func _setup_camera() -> void:
 	_camera.current = true
 	_camera.fov = 70
 	_camera.far = 3000.0
-	# 初始位置：世界中心地面之上，俯视周围
+
+
+## 模式切换后重置相机初始位置
+func _reset_camera() -> void:
 	_camera.global_position = Vector3(0, 30, 0)
 	_camera.look_at(Vector3(0, 5, 40), Vector3.UP)
 
@@ -201,6 +241,10 @@ func _setup_hud() -> void:
 	layer.add_child(_mode_label)
 
 
+func _mode_name() -> String:
+	return "文件流" if _current_mode == Mode.FILE_STREAM else "程序化"
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	# WASD / 方向键 移动
 	if event is InputEventKey:
@@ -221,6 +265,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				_speed = SPEED_FAST if event.pressed else SPEED_BASE
 			KEY_SHIFT:
 				_speed = SPEED_BASE * 0.3 if event.pressed else SPEED_BASE
+			KEY_0:
+				if event.pressed and not _prev_0:
+					_toggle_mode()
+				_prev_0 = event.pressed
 			KEY_1:
 				if event.pressed and not _prev_1:
 					_toggle_streaming()
@@ -246,6 +294,12 @@ func _process(delta: float) -> void:
 	_update_hud()
 
 
+func _toggle_mode() -> void:
+	_current_mode = Mode.PROCEDURAL if _current_mode == Mode.FILE_STREAM else Mode.FILE_STREAM
+	_rebuild_world()
+	print("[流式Demo] 切换数据源: %s" % _mode_name())
+
+
 func _toggle_streaming() -> void:
 	# 流式开/关：STREAMING ↔ FRUSTUM（关闭流式退回视锥剔除）
 	_stream_state = not _stream_state
@@ -260,7 +314,7 @@ func _update_mode_label() -> void:
 		return
 	var vis_names := ["FULL", "FRUSTUM", "STREAMING"]
 	var vis_name: String = vis_names[_target.visibility_mode]
-	_mode_label.text = "可见性: %s" % vis_name
+	_mode_label.text = "模式: %s\n可见性: %s" % [_mode_name(), vis_name]
 
 
 func _update_hud() -> void:
@@ -276,8 +330,10 @@ func _update_hud() -> void:
 		if _target.data.is_streaming():
 			data_unloaded = _target.data.get_unloaded_chunk_keys().size()
 	var draw := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
-	_hud.text = "FPS: %d    DrawCalls: %d\n" % [fps, draw] + \
+	_hud.text = "模式: %s    FPS: %d    DrawCalls: %d\n" % [_mode_name(), fps, draw] + \
 			"网格数: %d    流式网格卸载: %d\n" % [chunk_meshes, streamed] + \
 			"数据层: 内存%d  磁盘%d\n" % [data_loaded, data_unloaded] + \
-			"相机位置: (%d, %d, %d)" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)] + \
-			"\n\nWASD移动  Q/E升降  空格加速\n1流式开关  2视锥开关  3超级块"
+			"相机位置: (%d, %d, %d)\n" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)]
+	if _current_mode == Mode.PROCEDURAL:
+		_hud.text += "origin shift: %s\n" % _target._origin_chunk
+	_hud.text += "\nWASD移动 Q/E升降 空格加速\n0切换数据源 1流式开关 2视锥开关"
