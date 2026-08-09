@@ -663,8 +663,7 @@ func _process_streaming() -> void:
 				# （≤ unload+margin+大块半径），其数据供降采样合并，不卸载——
 				# 否则降采样读空，LOD1 大格缺失 → "该有体素的地方没有"。
 				var bk := _lod1_block_of_chunk(ck)
-				var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
-				if cam_pos.distance_to(bcenter) <= unload_d + unload_margin + unload_block_extent:
+				if _block_dist(bk, cam_pos) <= unload_d + unload_margin + unload_block_extent:
 					continue
 				var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
 				if dist > unload_d:
@@ -786,8 +785,7 @@ func _process_lod() -> void:
 	for ck in _lod0_meshes:
 		# 与可见性决策 / LOD1 生成统一按 LOD1 大块中心距离决策
 		var bk := _lod1_block_of_chunk(ck)
-		var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
-		if cam_pos.distance_to(bcenter) > lod0_d + lod0_margin and _lod1_meshes.has(bk):
+		if _block_dist(bk, cam_pos) > lod0_d + lod0_margin and _lod1_meshes.has(bk):
 			remove_lod0.append(ck)
 	for ck in remove_lod0:
 		_remove_chunk_mesh(ck)
@@ -805,8 +803,7 @@ func _process_lod() -> void:
 	#    避免 LOD0 异步生成未完成时的切换空洞/部分缺失）
 	var remove_keys: Array = []
 	for bk in _lod1_meshes:
-		var center := _lod1_block_center(bk, world_offset, block_edge_world)
-		var dist := cam_pos.distance_to(center)
+		var dist := _block_dist(bk, cam_pos)
 		if dist > unload_d + block_edge_world * 0.5:
 			remove_keys.append(bk)
 		elif dist < lod0_d - lod0_margin:
@@ -831,8 +828,7 @@ func _process_lod() -> void:
 	for bk in needed:
 		if _lod1_meshes.has(bk):
 			continue
-		var center := _lod1_block_center(bk, world_offset, block_edge_world)
-		var dist := cam_pos.distance_to(center)
+		var dist := _block_dist(bk, cam_pos)
 		if dist < lod0_d - lod0_margin or dist > unload_d + block_edge_world * 0.5:
 			continue
 		to_build.append([dist, bk])
@@ -863,8 +859,7 @@ func _process_lod() -> void:
 		var mi: MeshInstance3D = _lod1_meshes[bk]
 		if mi == null:
 			continue  # 空大块（无体素）
-		var center := _lod1_block_center(bk, world_offset, block_edge_world)
-		if cam_pos.distance_to(center) < lod0_d + lod0_margin:
+		if _block_dist(bk, cam_pos) < lod0_d + lod0_margin:
 			# 只统计视锥内就绪：视锥外 chunk 无网格不阻塞 LOD0 显示
 			var lod0_ready := _block_lod0_ready(bk, cam)
 			mi.visible = not lod0_ready
@@ -898,8 +893,7 @@ func _process_lod() -> void:
 			# 使 LOD1 移除时 LOD0 已就绪），否则该 chunk 会因"距离>lod0"被跳过补建、
 			# 又因"大块在LOD0区"不生成 LOD1 → 空洞
 			var bk := _lod1_block_of_chunk(ck)
-			var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
-			var bdist := cam_pos.distance_to(bcenter)
+			var bdist := _block_dist(bk, cam_pos)
 			if bdist > lod0_d + lod0_margin:
 				continue  # LOD1 区（由 _build_lod1 覆盖）
 			if _lod0_meshes.has(ck):
@@ -973,8 +967,7 @@ func _on_lod1_thread_result(bk: Vector3i, arr: Dictionary, gen_id: int) -> void:
 	if cam == null:
 		return
 	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
-	var center := _lod1_block_center(bk, global_position, block_edge_world)
-	var dist := cam.global_position.distance_to(center)
+	var dist := _block_dist(bk, cam.global_position)
 	var lod0_d := lod0_distance
 	var lod0_margin := _lod0_margin()
 	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
@@ -995,11 +988,7 @@ func _build_lod1_from_arrays(bk: Vector3i, arr: Dictionary) -> void:
 	mi.position = Vector3(bk) * block_edge_world
 	if not arr.is_empty():
 		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
-		if new_mesh and _materials_cache.size() >= 2:
-			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
-				new_mesh.surface_set_material(0, _materials_cache[0])
-			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
-				new_mesh.surface_set_material(1, _materials_cache[1])
+		_apply_materials(new_mesh)
 		mi.mesh = new_mesh
 	_lod1_meshes[bk] = mi
 
@@ -1338,6 +1327,15 @@ func _process_mesh_build_queue() -> void:
 			built, (Time.get_ticks_usec() - t0) / 1000.0, _mesh_build_queue.size()])
 
 
+## 给 ArrayMesh 的两个表面赋材质（实心/透明）。chunk/LOD1/碎片应用统一走此辅助。
+func _apply_materials(new_mesh: ArrayMesh) -> void:
+	if new_mesh and _materials_cache.size() >= 2:
+		if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
+			new_mesh.surface_set_material(0, _materials_cache[0])
+		if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
+			new_mesh.surface_set_material(1, _materials_cache[1])
+
+
 ## 应用单个待构建 chunk（构建 mesh + 挂载节点 + 更新碰撞）
 func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	var arr: Dictionary = entry["arrays"]
@@ -1356,11 +1354,7 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	var has_mesh := false
 	if not arr.is_empty() and has_voxels_in_data:
 		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
-		if new_mesh and _materials_cache.size() >= 2:
-			if new_mesh.get_surface_count() > 0 and _materials_cache[0]:
-				new_mesh.surface_set_material(0, _materials_cache[0])
-			if new_mesh.get_surface_count() > 1 and _materials_cache[1]:
-				new_mesh.surface_set_material(1, _materials_cache[1])
+		_apply_materials(new_mesh)
 		chunk_mesh.mesh = new_mesh
 		has_mesh = new_mesh != null
 	elif not has_voxels_in_data:
