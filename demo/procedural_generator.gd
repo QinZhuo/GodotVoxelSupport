@@ -1,10 +1,9 @@
 class_name ProceduralTerrainGenerator
-extends RefCounted
+extends VoxelProceduralStream
 
-## 示例程序化地形生成器（无限世界 chunk 生成器）。
+## 示例程序化地形流子类（覆写虚基类 _generate_chunk 实现生成算法）。
 ## 用 FastNoiseLite 连续噪声（世界坐标）生成高度场地形，同 chunk_key 确定性地形。
 ## 高度用**绝对体素 y** 判断：任意 y 层 chunk 按世界高度填，地形跨层连续。
-## 用法：VoxelProceduralStream.generator = ProceduralTerrainGenerator.generate_chunk
 
 static var _noise_h := FastNoiseLite.new()
 static var _noise_det := FastNoiseLite.new()
@@ -17,8 +16,9 @@ static func _static_init() -> void:
 	_noise_det.frequency = 0.08
 	_noise_det.seed = 1234
 
-## 生成 16³ chunk 缓冲（值 = 材质ID，0=空）。确定性：同 chunk_key 同地形。
-static func generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
+## 覆写虚基类：生成 16³ chunk 缓冲（值 = 材质ID，0=空）。
+## 确定性：同 chunk_key 同地形（连续噪声），origin shift 平移 chunk key 后世界连续。
+func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	var buf := PackedInt32Array()
 	buf.resize(VoxelChunk.CHUNK_VOLUME)
 	var base := chunk_key * VoxelChunk.CHUNK_SIZE

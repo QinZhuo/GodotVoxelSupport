@@ -16,9 +16,8 @@ var _move := Vector3.ZERO
 func _ready() -> void:
 	_camera = $Camera3D as Camera3D
 	_renderer = $DestructibleVoxels as VoxelRenderer
-	# 程序化流
-	var stream := VoxelProceduralStream.new()
-	stream.generator = ProceduralTerrainGenerator.generate_chunk
+	# 程序化流（子类覆写 _generate_chunk 实现生成算法）
+	var stream := ProceduralTerrainGenerator.new()
 	# 数据
 	var data := VoxelData.new()
 	data.stream = stream
