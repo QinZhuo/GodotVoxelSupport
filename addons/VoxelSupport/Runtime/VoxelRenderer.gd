@@ -36,7 +36,7 @@ enum VisibilityMode {
 			data.set_stream(data_stream)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
-		_clear_chunk_meshes()
+		_clear_lod0_meshes()
 		_request_update()
 
 ## 数据层磁盘流（VoxelStream / VoxelFileStream）。
@@ -58,8 +58,8 @@ enum VisibilityMode {
 	set(v):
 		voxel_scale = v
 		# Voxel scale 变化会影响 chunk mesh 的位置，需要重建
-		if not _chunk_meshes.is_empty():
-			_clear_chunk_meshes()
+		if not _lod0_meshes.is_empty():
+			_clear_lod0_meshes()
 		_request_update()
 
 ## 数据变化时是否自动重新生成 mesh
@@ -78,7 +78,7 @@ enum VisibilityMode {
 		mesh_mode = v
 		if v != MeshMode.CHUNK_ASYNC:
 			_cancel_async()
-		_clear_chunk_meshes()
+		_clear_lod0_meshes()
 		_request_update()
 
 ## 可见性管理模式（统一视锥剔除与流式加载）
@@ -218,7 +218,7 @@ var _pending_retrigger: bool = false
 # 批次全部完成待处理标志：置位后下一帧 _process 执行 _on_batch_complete（避免主线程尖峰）
 var _batch_complete_pending: bool = false
 # Per-chunk 模式：每个非空 chunk 对应一个子 MeshInstance3D
-var _chunk_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
+var _lod0_meshes: Dictionary[Vector3i, MeshInstance3D] = {}
 # Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
 var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 # 碰撞重建队列：破坏后延迟重建 ConcavePolygonShape3D，每帧限量，避免连续破坏主线程卡顿
@@ -424,7 +424,7 @@ func get_voxel(pos: Vector3i) -> int:
 
 func _exit_tree() -> void:
 	_cancel_async()
-	_clear_chunk_meshes()
+	_clear_lod0_meshes()
 
 
 ## 取消尚未完成的异步网格生成任务
@@ -441,7 +441,7 @@ func _update_mesh() -> void:
 	if not data:
 		_cancel_async()
 		mesh = null
-		_clear_chunk_meshes()
+		_clear_lod0_meshes()
 		_clear_collision()
 		mesh_updated.emit()
 		return
@@ -643,7 +643,7 @@ func _process_deferred_chunks() -> void:
 			break
 		# 已构建网格的 chunk 无需补建（从待建队列移除，避免重复重建）；
 		# 无数据的空 chunk 也无需补建（否则空重建死循环，三角=0 刷日志）
-		if _chunk_meshes.has(ck) or (data and not data.has_chunk(ck)):
+		if _lod0_meshes.has(ck) or (data and not data.has_chunk(ck)):
 			_deferred_chunks.erase(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
@@ -815,7 +815,7 @@ func _process_lod() -> void:
 	# 提前准备；且移除 LOD0 需对应 LOD1 已就绪（否则保留 LOD0 兜底），
 	# 避免移动分界处"移除旧→异步生成新"的真空 → 块来回隐藏显示闪烁
 	var remove_lod0: Array = []
-	for ck in _chunk_meshes:
+	for ck in _lod0_meshes:
 		# 与 _filter_streamed_chunks / LOD1 生成统一按 LOD1 大块中心距离决策
 		var bk := _lod1_block_of_chunk(ck)
 		var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
@@ -850,7 +850,7 @@ func _process_lod() -> void:
 				for cz in 4:
 					for cy in 4:
 						for cx in 4:
-							var cm: Node = _chunk_meshes.get(b4 + Vector3i(cx, cy, cz))
+							var cm: Node = _lod0_meshes.get(b4 + Vector3i(cx, cy, cz))
 							if cm != null:
 								cm.visible = true
 	for bk in remove_keys:
@@ -904,7 +904,7 @@ func _process_lod() -> void:
 			for cz in 4:
 				for cy in 4:
 					for cx in 4:
-						var cm: Node = _chunk_meshes.get(b4 + Vector3i(cx, cy, cz))
+						var cm: Node = _lod0_meshes.get(b4 + Vector3i(cx, cy, cz))
 						if cm != null:
 							cm.visible = lod0_ready
 		else:
@@ -934,7 +934,7 @@ func _process_lod() -> void:
 			var bdist := cam_pos.distance_to(bcenter)
 			if bdist > lod0_d + lod0_margin:
 				continue  # LOD1 区（由 _build_lod1 覆盖）
-			if _chunk_meshes.has(ck):
+			if _lod0_meshes.has(ck):
 				continue
 			# 近处 LOD0 区（block 中心 < lod0+margin）全向补建（不视锥剔除）：
 			# 快速转向/快速后退时新进入视野的 chunk 已提前生成，避免近处空洞。
@@ -954,7 +954,7 @@ func _block_lod0_ready(bk: Vector3i, cam: Camera3D) -> bool:
 		for cy in 4:
 			for cx in 4:
 				var ck := b4 + Vector3i(cx, cy, cz)
-				if data.has_chunk(ck) and not _chunk_meshes.has(ck):
+				if data.has_chunk(ck) and not _lod0_meshes.has(ck):
 					var aabb := _chunk_world_aabb(ck, chunk_w, global_position)
 					if _aabb_has_vertex_in_frustum(aabb, cam):
 						return false
@@ -1048,10 +1048,10 @@ func _remove_lod1(bk: Vector3i) -> void:
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
 func _unload_chunk(ck: Vector3i) -> void:
-	var mi: MeshInstance3D = _chunk_meshes.get(ck)
+	var mi: MeshInstance3D = _lod0_meshes.get(ck)
 	if mi != null and is_instance_valid(mi):
 		mi.queue_free()
-	_chunk_meshes.erase(ck)
+	_lod0_meshes.erase(ck)
 	_remove_chunk_collision(ck)
 	_mesh_build_queue.erase(ck)
 	_stream_force_build.erase(ck)
@@ -1068,10 +1068,10 @@ func _unload_chunk(ck: Vector3i) -> void:
 ## 破坏/崩塌后 chunk 内体素全被移除（has_chunk=false），增量重建时 _filter_frustum_chunks
 ## 会跳过空 chunk 不派发 → 若不主动清除，旧 mesh 残留 → 视觉上"悬空块还在"（数据其实已掉）。
 func _remove_chunk_mesh(ck: Vector3i) -> void:
-	var mi: MeshInstance3D = _chunk_meshes.get(ck)
+	var mi: MeshInstance3D = _lod0_meshes.get(ck)
 	if mi != null and is_instance_valid(mi):
 		mi.queue_free()
-	_chunk_meshes.erase(ck)
+	_lod0_meshes.erase(ck)
 	_remove_chunk_collision(ck)
 	_mesh_build_queue.erase(ck)
 	_stream_force_build.erase(ck)
@@ -1155,7 +1155,7 @@ func _update_mesh_async() -> void:
 			# 全被移除（has_chunk=false），而 _filter_frustum_chunks 会跳过空 chunk
 			# 不派发重建 → 若不主动清除，旧 mesh 残留，视觉上"悬空块还在"（数据其实已掉）。
 			for ck in rebuild_chunks:
-				if _chunk_meshes.has(ck) and not data.has_chunk(ck):
+				if _lod0_meshes.has(ck) and not data.has_chunk(ck):
 					_remove_chunk_mesh(ck)
 			# 先流式距离过滤（无条件），再视锥过滤（朝向）
 			var after_stream: Array[Vector3i] = _filter_streamed_chunks(rebuild_chunks)
@@ -1431,7 +1431,7 @@ func _process_mesh_build_queue() -> void:
 	var keys := _mesh_build_queue.keys()
 	# 优先处理已有 mesh 的 chunk（保证破坏面及时更新），再处理新 chunk
 	keys.sort_custom(func(a, b):
-		return _chunk_meshes.has(a) and not _chunk_meshes.has(b))
+		return _lod0_meshes.has(a) and not _lod0_meshes.has(b))
 	for ck in keys:
 		if built >= _mesh_build_per_frame:
 			break
@@ -1458,13 +1458,13 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 
 	# 获取或创建该 chunk 的子 MeshInstance3D
 	var chunk_mesh: MeshInstance3D
-	if _chunk_meshes.has(chunk_key):
-		chunk_mesh = _chunk_meshes[chunk_key]
+	if _lod0_meshes.has(chunk_key):
+		chunk_mesh = _lod0_meshes[chunk_key]
 	else:
 		chunk_mesh = MeshInstance3D.new()
 		chunk_mesh.name = "Chunk_%d_%d_%d" % [chunk_key.x, chunk_key.y, chunk_key.z]
 		add_child(chunk_mesh)
-		_chunk_meshes[chunk_key] = chunk_mesh
+		_lod0_meshes[chunk_key] = chunk_mesh
 
 	var has_mesh := false
 	if not arr.is_empty() and has_voxels_in_data:
@@ -1480,12 +1480,12 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 		# chunk 已无体素，清除 mesh 数据并移除容器防止累积
 		chunk_mesh.mesh = null
 		chunk_mesh.queue_free()
-		_chunk_meshes.erase(chunk_key)
+		_lod0_meshes.erase(chunk_key)
 	else:
 		# 竞态：生成后体素被重新添加，保留已有 mesh
 		has_mesh = chunk_mesh.mesh != null
 
-	if has_voxels_in_data or _chunk_meshes.has(chunk_key):
+	if has_voxels_in_data or _lod0_meshes.has(chunk_key):
 		chunk_mesh.position = Vector3(chunk_key) * (voxel_scale * VoxelChunkGenerator.CHUNK_SIZE)
 		# 碰撞增量重建：入队延迟，_process 每帧限量重建（避免连续破坏主线程卡顿）
 		_collision_rebuild_queue[chunk_key] = has_mesh
@@ -1552,8 +1552,8 @@ func _update_mesh_sync() -> void:
 		# 统计顶点/三角形数（统一 _count_chunk_vertices / _set_last_vertex_stats）
 		var counts := _count_chunk_vertices(chunk_arrays)
 		_set_last_vertex_stats(counts.x, counts.y, chunk_arrays.size())
-		_build_and_apply_chunk_meshes(chunk_arrays)
-		# _build_and_apply_chunk_meshes 内部在 mesh_updated 前设置了 last_apply_time_ms
+		_build_and_apply_lod0_meshes(chunk_arrays)
+		# _build_and_apply_lod0_meshes 内部在 mesh_updated 前设置了 last_apply_time_ms
 		_record_perf_stats(last_rebuild_affected_count, last_mesh_gen_time_ms, last_apply_time_ms)
 		return
 
@@ -1576,7 +1576,7 @@ func _update_mesh_sync() -> void:
 func _build_and_apply_mesh(arrays: Variant) -> void:
 	# 检测是否为 per-chunk 字典（key 为 Vector3i）
 	if arrays is Dictionary and _is_chunk_arrays_result(arrays):
-		_build_and_apply_chunk_meshes(arrays as Dictionary)
+		_build_and_apply_lod0_meshes(arrays as Dictionary)
 		return
 
 	var t0 := Time.get_ticks_usec()
@@ -1593,8 +1593,8 @@ func _build_and_apply_mesh(arrays: Variant) -> void:
 	if new_mesh:
 		mesh = new_mesh
 		# 切换到组合模式时清理旧的 chunk meshes
-		if not _chunk_meshes.is_empty():
-			_clear_chunk_meshes()
+		if not _lod0_meshes.is_empty():
+			_clear_lod0_meshes()
 	else:
 		mesh = null
 
@@ -1641,12 +1641,12 @@ func _clear_collision() -> void:
 
 
 ## 清理所有 chunk 子 MeshInstance3D 及关联碰撞体
-func _clear_chunk_meshes() -> void:
+func _clear_lod0_meshes() -> void:
 	_deferred_chunks.clear()
 	_mesh_build_queue.clear()
-	for ck in _chunk_meshes:
-		_chunk_meshes[ck].queue_free()
-	_chunk_meshes.clear()
+	for ck in _lod0_meshes:
+		_lod0_meshes[ck].queue_free()
+	_lod0_meshes.clear()
 	# 清理 LOD1 大块
 	for bk in _lod1_meshes:
 		_lod1_meshes[bk].queue_free()
@@ -1666,7 +1666,7 @@ func _clear_chunk_collisions() -> void:
 
 ## 将 per-chunk 网格数据应用到子 MeshInstance3D
 ## 注意：chunk_arrays 中可能包含空 chunk（空字典），用于清空已无体素的 chunk mesh
-func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
+func _build_and_apply_lod0_meshes(chunk_arrays: Dictionary) -> void:
 	var t_start := Time.get_ticks_usec()
 	var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
 
@@ -1677,7 +1677,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 
 	# 诊断：记录重建规模（仅诊断模式开启时）
 	if diag_enabled:
-		print("[诊断] 重建 Chunk=%d 已有Mesh=%d" % [rebuilt_keys.size(), _chunk_meshes.size()])
+		print("[诊断] 重建 Chunk=%d 已有Mesh=%d" % [rebuilt_keys.size(), _lod0_meshes.size()])
 
 	# 处理所有重建的 chunk
 	var cleared_count := 0
@@ -1685,13 +1685,13 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 		var arrays = chunk_arrays[ck]
 		# 获取或创建该 chunk 的子 MeshInstance3D
 		var chunk_mesh: MeshInstance3D
-		if _chunk_meshes.has(ck):
-			chunk_mesh = _chunk_meshes[ck]
+		if _lod0_meshes.has(ck):
+			chunk_mesh = _lod0_meshes[ck]
 		else:
 			chunk_mesh = MeshInstance3D.new()
 			chunk_mesh.name = "Chunk_%d_%d_%d" % [ck.x, ck.y, ck.z]
 			add_child(chunk_mesh)
-			_chunk_meshes[ck] = chunk_mesh
+			_lod0_meshes[ck] = chunk_mesh
 
 		# 【修复】检查当前数据中该 chunk 是否已无体素（异步任务快照滞后导致）
 		# 如果 chunk 在快照中还有体素，但当前数据中已被完全破坏，清空其 mesh
@@ -1714,7 +1714,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 		elif not has_voxels_in_data:
 			# chunk 已无体素，清除 mesh 并移除节点防止累积
 			chunk_mesh.mesh = null
-			_chunk_meshes.erase(ck)
+			_lod0_meshes.erase(ck)
 			chunk_mesh.queue_free()
 		else:
 			# has_voxels_in_data 为 true 但 arrays 为空（竞态：生成后体素被重新添加）
@@ -1722,7 +1722,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 			has_mesh = chunk_mesh.mesh != null
 
 		# Per-chunk 碰撞体（节点被清理时不执行）
-		if has_voxels_in_data or _chunk_meshes.has(ck):
+		if has_voxels_in_data or _lod0_meshes.has(ck):
 			chunk_mesh.position = Vector3(ck) * chunk_scale
 			_collision_rebuild_queue[ck] = has_mesh
 		else:
@@ -1730,7 +1730,7 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 
 	# 检查是否有 chunk 在重建后变为空但未被清理（不在 rebuilt_keys 中的）
 	# 遍历所有已存在的 chunk mesh，如果不在本次重建列表中且已无体素，清空其 mesh
-	for ck in _chunk_meshes.keys():
+	for ck in _lod0_meshes.keys():
 		if rebuilt_keys.has(ck):
 			continue  # 已在本轮重建中处理
 		# 检查该 chunk 是否已无体素
@@ -1740,8 +1740,8 @@ func _build_and_apply_chunk_meshes(chunk_arrays: Dictionary) -> void:
 				cleared_count += 1
 				if diag_enabled:
 					print("[诊断] Chunk %s 不在重建列表且已无体素，清除旧 Mesh" % ck)
-				_chunk_meshes[ck].queue_free()
-				_chunk_meshes.erase(ck)
+				_lod0_meshes[ck].queue_free()
+				_lod0_meshes.erase(ck)
 				_remove_chunk_collision(ck)
 
 	if diag_enabled and cleared_count > 0:
@@ -1773,7 +1773,7 @@ func _update_chunk_collision(ck: Vector3i, has_mesh: bool) -> void:
 		body.position = Vector3(ck) * chunk_scale
 
 		# 从 chunk mesh 提取 faces 构建碰撞形状
-		var chunk_mesh: MeshInstance3D = _chunk_meshes.get(ck)
+		var chunk_mesh: MeshInstance3D = _lod0_meshes.get(ck)
 		if chunk_mesh and chunk_mesh.mesh:
 			var faces := chunk_mesh.mesh.get_faces()
 			if faces.size() > 0:

@@ -267,7 +267,7 @@ func _update_hud() -> void:
 	if _hud == null or _target == null:
 		return
 	var fps := Engine.get_frames_per_second()
-	var chunk_meshes := _target._chunk_meshes.size()
+	var chunk_meshes := _target._lod0_meshes.size()
 	var streamed := _target._streamed_out_chunks.size()
 	var data_loaded := 0
 	var data_unloaded := 0
