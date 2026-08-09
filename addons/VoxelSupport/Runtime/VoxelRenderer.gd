@@ -140,7 +140,7 @@ var _lod1_generation_id: int = 0
 ## 每帧一次对齐的 LOD1 材质（供所有 worker 复用）
 var _aligned_lod1_materials: Array = []
 ## 每帧最多生成的 LOD1 网格数（硬上限）
-var _lod1_build_per_frame: int = 3
+@export_range(1, 50, 1) var _lod1_build_per_frame: int = 3
 
 # LOD1 大块（godot_voxel 风格大 block）：一次性生成 32³ 大格 = 4×4×4 LOD0 chunk = 64³ 体素。
 # 大块 key = LOD0 chunk >> 2。一次生成整个大块 mesh（原生 generate_lod1_block_dense），
@@ -159,7 +159,7 @@ static func _lod1_block_of_chunk(ck: Vector3i) -> Vector3i:
 static func _lod1_block_center(bk: Vector3i, world_offset: Vector3, block_edge_world: float) -> Vector3:
 	return world_offset + Vector3(bk) * block_edge_world + Vector3.ONE * block_edge_world * 0.5
 ## LOD1 生成每帧时间预算（毫秒）：超过即停止本帧生成，平滑移动时主线程峰值
-var _lod1_build_budget_ms: float = 6.0
+@export_range(0.1, 50.0, 0.1) var _lod1_build_budget_ms: float = 6.0
 
 ## 流式加载：已卸载网格的 chunk（key → true），进入加载距离后补建
 var _streamed_out_chunks: Dictionary[Vector3i, bool] = {}
@@ -190,7 +190,7 @@ var _deferred_chunks: Dictionary[Vector3i, bool] = {}
 
 # 流式卸载每帧限量：相机移动跨越边界时分批进行，避免一次 queue_free 大量节点
 # 造成掉帧。卸载只释放资源+写盘（便宜），限量可稍大。
-var _stream_unload_per_frame: int = 24
+@export_range(1, 200, 1) var _stream_unload_per_frame: int = 24
 # 流式检查降频：卸载/加载的"全量遍历所有 chunk + 排序"每帧做一次在大场景（数千
 # chunk）下是固定 CPU 成本。卸载仅在相机移动越界时才有意义 → 每 12 帧检查一次；
 # 加载（走近补建）需及时 → 每 4 帧检查一次。移动边界附近延迟 ≤0.2s，可接受。
@@ -201,7 +201,7 @@ const STREAM_LOAD_INTERVAL := 2
 # 加载标脏后由 WorkerThreadPool 异步生成 + _process_mesh_build_queue 帧尾限量构建
 # （GPU 上传限流 8 个/帧 + 3ms 预算），因此标脏量可适当放大：走近时每帧进入
 # 管线的新块多，但实际 mesh 出现仍由 GPU 限流平滑分摊，不会掉帧也不会"一帧一块"。
-var _stream_load_per_frame: int = 24
+@export_range(1, 200, 1) var _stream_load_per_frame: int = 24
 # 流式补建待强制的 chunk：进入 load 距离后应无条件构建（距离驱动，非朝向驱动），
 # 不被 _filter_frustum_chunks 延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
@@ -224,7 +224,7 @@ var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 # 碰撞重建队列：破坏后延迟重建 ConcavePolygonShape3D，每帧限量，避免连续破坏主线程卡顿
 var _collision_rebuild_queue: Dictionary[Vector3i, bool] = {}
 # 每帧最多重建的碰撞体数
-var _collision_rebuild_per_frame: int = 4
+@export_range(1, 100, 1) var _collision_rebuild_per_frame: int = 4
 
 # GPU 上传限流队列：异步结果先缓存数组数据，_process 帧尾批量构建 mesh（平滑 GPU 上传，
 # 避免连续破坏时一帧大量 ArrayMesh 创建导致 Metal fence 超时）
@@ -233,7 +233,10 @@ var _mesh_build_queue: Dictionary = {}
 # 每帧最多构建的 chunk 数（GPU 上传限流）
 # 流式补建直接入此队列，单 chunk 构建成本低（~1ms），提高后补建更流畅；
 # 配合 3ms 时间预算 + GPU 忙检测兜底防 Metal fence 超时
-var _mesh_build_per_frame: int = 8
+@export_range(1, 100, 1) var _mesh_build_per_frame: int = 8
+# 增量重建每帧最多处理的 dirty chunk 数：超出放回下帧续建（防回原点/大崩塌单帧
+# 快照+派发上千 worker 阻塞主线程）。值越大重建越快但帧尖峰风险越高。
+@export_range(8, 512, 8) var _rebuild_batch_limit: int = 64
 # 帧尾构建是否已排期（防重复 call_deferred）
 var _mesh_build_scheduled: bool = false
 # GPU 忙检测：上一帧渲染耗时超过此阈值(ms)时暂停本帧构建，避免 ArrayMesh
@@ -794,6 +797,8 @@ func _process_lod() -> void:
 	# 消除移动时远近分界处块反复隐藏/显示闪烁（标准 LOD 切换滞回做法）
 	var lod0_d := lod0_distance
 	var lod0_margin := lod1_edge_world * 0.5
+	# 内存 chunk 键快照：步骤1/步骤4 同帧复用，避免每帧多次分配数千元素数组
+	var loaded_chunks := data.get_loaded_chunk_keys()
 
 	# 0. 处理数据变化导致的 LOD1 失效（破坏/编辑 → 移除旧网格，重新降采样生成）
 	var invalidated := data.get_invalidated_lod1()
@@ -821,7 +826,7 @@ func _process_lod() -> void:
 
 	# 1. 推导需要 LOD1 的大块（从内存 chunk 主动推导，不依赖 dirty 触发）
 	var needed := {}
-	for ck in data.get_loaded_chunk_keys():
+	for ck in loaded_chunks:
 		needed[_lod1_block_of_chunk(ck)] = true
 	# 并入待建集合（含 _filter_streamed_chunks 标记的）
 	for bk in _lod1_pending:
@@ -916,7 +921,7 @@ func _process_lod() -> void:
 		var _chunk_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 		var _r_ck := ceili((lod0_d + lod0_margin) / _chunk_world) + 1
 		var _cam_ck := _chunk_from_world(cam_pos, _chunk_world, world_offset)
-		for ck in data.get_loaded_chunk_keys():
+		for ck in loaded_chunks:
 			# 粗筛：block 中心 > lod0+margin 的 chunk 必然在 LOD1 区，跳过
 			if absi(ck.x - _cam_ck.x) > _r_ck or absi(ck.y - _cam_ck.y) > _r_ck or absi(ck.z - _cam_ck.z) > _r_ck:
 				continue
@@ -1091,11 +1096,10 @@ func _update_mesh_async() -> void:
 		# 限量批次：超过上限的放回 dirty（下帧续建）。回原点/大崩塌时 dirty 可上千，
 		# 单帧全量快照 + 派发上千 worker → 主线程阻塞（update_mesh 数百 ms → 帧率个位数）。
 		# 分批后每帧快照/派发量受限，网格经 _process_mesh_build_queue 平滑上传。
-		const _REBUILD_BATCH_LIMIT := 64
-		if rebuild_chunks.size() > _REBUILD_BATCH_LIMIT:
-			for i in range(_REBUILD_BATCH_LIMIT, rebuild_chunks.size()):
+		if rebuild_chunks.size() > _rebuild_batch_limit:
+			for i in range(_rebuild_batch_limit, rebuild_chunks.size()):
 				data._mark_chunk_dirty(rebuild_chunks[i])
-			rebuild_chunks.resize(_REBUILD_BATCH_LIMIT)
+			rebuild_chunks.resize(_rebuild_batch_limit)
 			# 放回剩余 dirty 后必须重新置位：_update_mesh 开头会清 _dirty，
 			# 若不重新 _request_update，剩余 dirty 将永久卡住 → 初始构建/大批量
 			# 重建只生成第一批，其余 chunk 网格缺失（破坏demo初始只显示一个小角落、
