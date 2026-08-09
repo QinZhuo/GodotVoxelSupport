@@ -30,9 +30,9 @@ func _init() -> void:
 		_file_stream.directory = persist_directory
 
 
-## 虚函数：按 chunk key 生成 16³ chunk 缓冲（值 = 材质ID，0=空）。
-## 子类必须覆写实现生成算法；基类默认实现仅提示错误（抽象基类约定）。
-@abstract 
+## @abstract 虚函数：按 chunk key 生成 16³ chunk 缓冲（值 = 材质ID，0=空）。
+## 子类必须覆写实现生成算法（未覆写会编译报错）。
+@abstract
 func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array
 
 

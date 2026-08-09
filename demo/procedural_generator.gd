@@ -26,11 +26,10 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 		for x in VoxelChunk.CHUNK_SIZE:
 			var wx := base.x + x
 			var wz := base.z + z
-			# 绝对高度（体素）：大尺度地形 + 细节起伏
-			var h := _noise_h.get_noise_2d(wx, wz) * 14.0 + _noise_det.get_noise_2d(wx, wz) * 4.0 + 8.0
-			var hi := int(h)
-			if hi <= 0:
-				continue
+			# 绝对高度（体素）：大尺度地形 + 细节起伏。
+			# 抬高基准 + 限最小高度：避免噪声负值区域整列无方块 → 地表"深不见底的柱状空洞"
+			var h := _noise_h.get_noise_2d(wx, wz) * 16.0 + _noise_det.get_noise_2d(wx, wz) * 6.0 + 20.0
+			var hi := maxi(int(h), 2)
 			for y in VoxelChunk.CHUNK_SIZE:
 				var wy := base.y + y
 				if wy < hi:
