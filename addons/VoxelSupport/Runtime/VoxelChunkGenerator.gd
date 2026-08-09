@@ -242,8 +242,12 @@ const LOD1_BLOCK_HALO_SIZE := LOD1_BLOCK_SIZE + LOD1_BLOCK_HALO * 2
 
 ## 从 chunk 缓冲快照构建 LOD1 大块的 34³ 大格 halo（纯函数，供异步 worker，线程安全）。
 ## 中心 32³ 大格 = 大块内部（降采样 2³ 体素 → 1 大格，取非空材质）；
-## 6 外缘面 = 相邻大块边界 1 大格层（跨界可见性）。
+## 6 外缘面 = 相邻大块边界 1 大格层（跨界可见性）。下沉 C++，旧库回退 GDScript。
 static func build_lod1_block_halo_from_buffers(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
+	var native_halo := NativeLoader.build_lod1_block_halo_from_buffers(buffers, block_key)
+	if native_halo.size() == LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE:
+		return native_halo
+	# GDScript 兜底（旧原生库/无原生时）
 	var halo := PackedInt32Array()
 	halo.resize(LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE)
 	# 中心 32³：大块覆盖 4×4×4 chunk，每 chunk 8³ 大格

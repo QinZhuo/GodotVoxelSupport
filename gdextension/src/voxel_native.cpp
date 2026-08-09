@@ -380,6 +380,92 @@ PackedInt32Array VoxelNative::build_halo_from_buffers(const Dictionary &buffers,
 	return halo;
 }
 
+PackedInt32Array VoxelNative::build_lod1_block_halo_from_buffers(const Dictionary &buffers, const Vector3i &block_key) {
+	// 构建 LOD1 大块(32³ 大格)的 34³ halo：中心 32³ 大格（每格 = 2³ 体素，从 4×4×4 chunk 降采样）
+	// + 6 外缘面（相邻大块边界 1 大格层）。下沉 C++ 替代 GDScript 逐体素循环。
+	constexpr int BS = 32;       // 大块大格边长
+	constexpr int HS = BS + 2;   // halo 边长
+	PackedInt32Array halo;
+	halo.resize(HS * HS * HS);
+	// 中心 32³
+	const Vector3i base_chunk = block_key * 4;
+	for (int cz = 0; cz < 4; ++cz) {
+		for (int cy = 0; cy < 4; ++cy) {
+			for (int cx = 0; cx < 4; ++cx) {
+				const Vector3i ck(base_chunk.x + cx, base_chunk.y + cy, base_chunk.z + cz);
+				if (!buffers.has(ck)) continue;
+				PackedInt32Array buf = buffers[ck];
+				if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) continue;
+				const int32_t *b = buf.ptr();
+				for (int lz8 = 0; lz8 < 8; ++lz8) {
+					for (int ly8 = 0; ly8 < 8; ++ly8) {
+						for (int lx8 = 0; lx8 < 8; ++lx8) {
+							const int lx = cx * 8 + lx8;
+							const int ly = cy * 8 + ly8;
+							const int lz = cz * 8 + lz8;
+							int mat = 0;
+							for (int dz = 0; dz < 2; ++dz) {
+								for (int dy = 0; dy < 2; ++dy) {
+									for (int dx = 0; dx < 2; ++dx) {
+										const int m = b[(lx8*2+dx) + (ly8*2+dy)*CHUNK_SIZE + (lz8*2+dz)*CHUNK_SIZE*CHUNK_SIZE];
+										if (m > 0) { mat = m; break; }
+									}
+									if (mat > 0) break;
+								}
+								if (mat > 0) break;
+							}
+							halo[(1+lx) + (1+ly)*HS + (1+lz)*HS*HS] = mat;
+						}
+					}
+				}
+			}
+		}
+	}
+	// 6 外缘面：相邻大块边界 1 大格层（降采样 2³ 体素）
+	const Vector3i dirs[6] = {
+		Vector3i(1,0,0), Vector3i(-1,0,0),
+		Vector3i(0,1,0), Vector3i(0,-1,0),
+		Vector3i(0,0,1), Vector3i(0,0,-1),
+	};
+	for (int di = 0; di < 6; ++di) {
+		const Vector3i d = dirs[di];
+		const Vector3i nbk = block_key + d;
+		const int face = (d.x != 0) ? 0 : ((d.y != 0) ? 1 : 2);
+		const int fix_grid = (d[face] > 0) ? 0 : (BS - 1);
+		const int halo_pos = (d[face] < 0) ? 0 : (HS - 1);
+		for (int lv = 0; lv < BS; ++lv) {
+			for (int lu = 0; lu < BS; ++lu) {
+				int mat = 0;
+				for (int dv = 0; dv < 2; ++dv) {
+					for (int du = 0; du < 2; ++du) {
+						for (int df = 0; df < 2; ++df) {
+							const int vx = nbk.x*64 + ((face == 0) ? (fix_grid*2+df) : (lu*2+du));
+							const int vy = nbk.y*64 + ((face == 1) ? (fix_grid*2+df) : (lv*2+dv));
+							const int vz = nbk.z*64 + ((face == 2) ? (fix_grid*2+df) : (lv*2+dv));
+							const Vector3i ck(vx>>4, vy>>4, vz>>4);
+							if (!buffers.has(ck)) continue;
+							PackedInt32Array buf = buffers[ck];
+							if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) continue;
+							const int32_t *b = buf.ptr();
+							const int local = (vx - ck.x*CHUNK_SIZE) + (vy - ck.y*CHUNK_SIZE)*CHUNK_SIZE + (vz - ck.z*CHUNK_SIZE)*CHUNK_SIZE*CHUNK_SIZE;
+							const int m = b[local];
+							if (m > 0) { mat = m; break; }
+						}
+						if (mat > 0) break;
+					}
+					if (mat > 0) break;
+				}
+				int hx, hy, hz;
+				if (face == 0) { hx = halo_pos; hy = 1+lu; hz = 1+lv; }
+				else if (face == 1) { hx = 1+lu; hy = halo_pos; hz = 1+lv; }
+				else { hx = 1+lu; hy = 1+lv; hz = halo_pos; }
+				halo[hx + hy*HS + hz*HS*HS] = mat;
+			}
+		}
+	}
+	return halo;
+}
+
 // ----------------------------------------------------------------------------
 // 支撑图失稳检测（对应 VoxelData.find_unsupported_around）
 // ----------------------------------------------------------------------------
@@ -783,6 +869,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod1_block_halo_from_buffers", "buffers", "block_key"), &VoxelNative::build_lod1_block_halo_from_buffers);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);

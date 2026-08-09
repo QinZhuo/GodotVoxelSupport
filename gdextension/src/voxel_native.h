@@ -57,6 +57,10 @@ public:
 	// 下沉 C++ 替代 GDScript 逐体素循环（27 邻居 × 重叠区）。
 	static PackedInt32Array build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk);
 
+	// 构建 LOD1 大块(32³ 大格)的 34³ halo（中心 32³ 降采样 2³ 体素 + 6 外缘面），
+	// 下沉 C++ 替代 GDScript 逐体素循环（大块 halo 构建吞吐提升）。
+	static PackedInt32Array build_lod1_block_halo_from_buffers(const Dictionary &buffers, const Vector3i &block_key);
+
 	// 支撑图失稳检测（等价于 VoxelData.find_unsupported_around）
 	// buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照（VoxelData._chunk_buffers 的深拷贝）
 	// removed: 本次被移除的体素位置数组（Array[Vector3i]）

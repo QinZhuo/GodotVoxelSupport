@@ -84,6 +84,16 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 	return inst.call(&"build_halo_from_buffers", buffers, chunk)
 
 
+## 构建 LOD1 大块(32³ 大格)的 34³ halo（原生下沉 C++）。无原生/旧库缺方法时返回空数组。
+static func build_lod1_block_halo_from_buffers(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return PackedInt32Array()
+	if not ClassDB.class_has_method(&"VoxelNative", &"build_lod1_block_halo_from_buffers", false):
+		return PackedInt32Array()
+	return inst.call(&"build_lod1_block_halo_from_buffers", buffers, block_key)
+
+
 ## 支撑图失稳检测（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照
 ## removed: 本次被移除的体素位置数组

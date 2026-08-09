@@ -492,6 +492,8 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 			if cam_pos.distance_to(bcenter) > lod0_d:
 				# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 大块待生成（数据保留在内存）
 				_lod1_pending[bk] = true
+				# 流式补建强制的 chunk 落在 LOD1 区时无 LOD0 可建：清除标记避免 _stream_force_build 无界累积
+				_stream_force_build.erase(ck)
 			else:
 				kept.append(ck)
 		else:
@@ -513,6 +515,7 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var cam_pos := cam.global_position
 	var world_offset := global_position
+	var planes := cam.get_frustum()
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		# 无数据的空 chunk：不纳入视锥管理（无体素无需构建/补建，
@@ -525,7 +528,7 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 			visible.append(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if _aabb_has_vertex_in_frustum(aabb, cam):
+		if _aabb_has_vertex_in_frustum(aabb, planes):
 			visible.append(ck)
 		else:
 			_deferred_chunks[ck] = true
@@ -540,15 +543,21 @@ static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offse
 
 ## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
 ## 使用 Godot 内置 is_position_in_frustum，保证判定与引擎渲染剔除一致
-static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
-	for i in 8:
-		var v := Vector3(
-			aabb.position.x if (i & 1) == 0 else aabb.end.x,
-			aabb.position.y if (i & 2) == 0 else aabb.end.y,
-			aabb.position.z if (i & 4) == 0 else aabb.end.z)
-		if cam.is_position_in_frustum(v):
-			return true
-	return false
+static func _aabb_has_vertex_in_frustum(aabb: AABB, planes: Array) -> bool:
+	# 正确 AABB-视锥相交测试（n-vertex 法）：仅当 AABB 完全位于某个视锥平面外侧才剔除。
+	# 旧实现逐个测 8 顶点：大块/跨视锥边缘的 chunk（如屏幕下边缘、视锥被 AABB 包裹）
+	# 8 顶点可能全在视锥外但 AABB 却被视锥穿过 → 漏判剔除 → 该处缺面。
+	# Godot 4 Plane：normal·point = d，distance_to = normal·point − d；frustum plane 法线朝外，
+	# 视锥内 distance_to < 0。
+	for p in planes:
+		var n: Vector3 = p.normal
+		var px := aabb.position.x if n.x >= 0.0 else aabb.end.x
+		var py := aabb.position.y if n.y >= 0.0 else aabb.end.y
+		var pz := aabb.position.z if n.z >= 0.0 else aabb.end.z
+		# 距该平面最近（最内侧）的顶点仍在外侧 → AABB 完全在该平面外 → 剔除
+		if n.dot(Vector3(px, py, pz)) - p.d > 0.0:
+			return false
+	return true
 
 
 ## chunk 是否已超出流式卸载距离（当前相机位置判定）。
@@ -596,8 +605,15 @@ func _process_deferred_chunks() -> void:
 	var margin := view_distance
 	var cam_pos := cam.global_position
 	var world_offset := global_position
+	var planes := cam.get_frustum()
 	var built := 0
-	for ck in _deferred_chunks.keys():
+	var _iter := 0
+	# 直接迭代字典（避免 keys() 分配上万数组）；每帧限量扫描（避免视锥外
+	# 大量待建 chunk 全遍历 → 走近/转向时主线程持续高开销）
+	for ck in _deferred_chunks:
+		_iter += 1
+		if _iter > _stream_load_per_frame * 8:
+			break
 		if built >= _stream_load_per_frame:
 			break
 		# 已构建网格的 chunk 无需补建（从待建队列移除，避免重复重建）；
@@ -606,7 +622,7 @@ func _process_deferred_chunks() -> void:
 			_deferred_chunks.erase(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		if not _aabb_has_vertex_in_frustum(aabb, cam):
+		if not _aabb_has_vertex_in_frustum(aabb, planes):
 			if not (margin > 0.0 and cam_pos.distance_to(aabb.get_center()) <= margin):
 				continue
 		_deferred_chunks.erase(ck)
@@ -698,10 +714,17 @@ func _process_streaming() -> void:
 		# 随后同步 preload 命中缓存则无 IO（未命中仅兜底，通常后台已就绪）——
 		# 根治流式移动时主线程同步读盘卡顿。
 		if data and data.is_streaming() and not to_load.is_empty():
-			var _stream_obj = data.stream
+			var _stream_obj := data.stream
 			if _stream_obj != null and _stream_obj.has_method("request_region_load"):
+				# 限量预读：只对最近的 _stream_load_per_frame 个 region 发起 IO，
+				# 避免回原点/大距离瞬移时上千 region 一次性 add_task 塞满线程池
+				# （磁盘并发读 + 主线程 add_task/mutex 排队 → 帧率掉到个位数）
+				var _prefetch := 0
 				for item in to_load:
+					if _prefetch >= _stream_load_per_frame:
+						break
 					_stream_obj.request_region_load(_stream_obj._region_key(item[1]))
+					_prefetch += 1
 		var reloaded := 0
 		for item in to_load:
 			if reloaded >= _stream_load_per_frame:
@@ -745,6 +768,7 @@ func _process_lod() -> void:
 	# 消除移动时远近分界处块反复隐藏/显示闪烁（标准 LOD 切换滞回做法）
 	var lod0_d := lod0_distance
 	var lod0_margin := lod1_edge_world * 0.5
+	var planes := cam.get_frustum()
 
 	# 0. 处理数据变化导致的 LOD1 失效（破坏/编辑 → 移除旧网格，重新降采样生成）
 	var invalidated := data.get_invalidated_lod1()
@@ -788,23 +812,17 @@ func _process_lod() -> void:
 		if dist > unload_d + block_edge_world * 0.5:
 			remove_keys.append(bk)
 		elif dist < lod0_d - lod0_margin:
-			var b4 := bk * 4
-			var lod0_ready := true
-			for cz in 4:
-				for cy in 4:
-					for cx in 4:
-						var ck := b4 + Vector3i(cx, cy, cz)
-						# 空 chunk（无数据）无需网格，视为就绪；
-						# 有数据但无网格 → 未就绪（LOD1 继续兜底）
-						if data.has_chunk(ck) and not _chunk_meshes.has(ck):
-							lod0_ready = false
-							break
-					if not lod0_ready:
-						break
-				if not lod0_ready:
-					break
-			if lod0_ready:
+			# 只统计视锥内就绪（视锥外 chunk 不显示、无需网格，不应阻塞 LOD0 显示）
+			if _block_lod0_ready(bk, planes):
 				remove_keys.append(bk)
+				# 恢复该 block 的 LOD0 显示（步骤3.5 可能因旧就绪判定隐藏过）
+				var b4 := bk * 4
+				for cz in 4:
+					for cy in 4:
+						for cx in 4:
+							var cm: Node = _chunk_meshes.get(b4 + Vector3i(cx, cy, cz))
+							if cm != null:
+								cm.visible = true
 	for bk in remove_keys:
 		_remove_lod1(bk)
 
@@ -846,21 +864,10 @@ func _process_lod() -> void:
 			continue  # 空大块（无体素）
 		var center := _lod1_block_center(bk, world_offset, block_edge_world)
 		if cam_pos.distance_to(center) < lod0_d + lod0_margin:
-			var b4 := bk * 4
-			var lod0_ready := true
-			for cz in 4:
-				for cy in 4:
-					for cx in 4:
-						var ck := b4 + Vector3i(cx, cy, cz)
-						# 空 chunk（无数据）无需网格视为就绪；有数据但无网格 → 未就绪（LOD1 兜底）
-						if data.has_chunk(ck) and not _chunk_meshes.has(ck):
-							lod0_ready = false
-							break
-					if not lod0_ready:
-						break
-				if not lod0_ready:
-					break
+			# 只统计视锥内就绪：视锥外 chunk 无网格不阻塞 LOD0 显示
+			var lod0_ready := _block_lod0_ready(bk, planes)
 			mi.visible = not lod0_ready
+			var b4 := bk * 4
 			for cz in 4:
 				for cy in 4:
 					for cx in 4:
@@ -899,8 +906,10 @@ func _process_lod() -> void:
 			if bdist < lod0_d - lod0_margin:
 				# 纯 LOD0 区（无 LOD1 兜底）：只需补建视锥内的 chunk（视锥外不显示，
 				# 由视锥剔除隐藏，不生成 → 加载量小）；转向进入视锥时由本循环补建
-				var ccenter := world_offset + (Vector3(ck) * (voxel_scale * VoxelChunk.CHUNK_SIZE) + Vector3.ONE * (voxel_scale * VoxelChunk.CHUNK_SIZE) * 0.5)
-				if not cam.is_position_in_frustum(ccenter):
+				# 用 chunk 完整 AABB 判视锥（非中心点）：屏幕边缘 chunk 中心可能在视锥外
+				# 但大部在视锥内，中心点测试漏判 → 屏幕边缘/中下方缺面
+				var aabb4 := _chunk_world_aabb(ck, _chunk_world, world_offset)
+				if not _aabb_has_vertex_in_frustum(aabb4, planes):
 					continue
 			# 边界带（block 中心 [lod0-margin, lod0+margin]）全向补建（不限视锥）：
 			# 保证 block 的 LOD0 全部就绪，使 LOD1 兜底切换时无重叠/空洞。
@@ -909,6 +918,22 @@ func _process_lod() -> void:
 			need_lod0_update = true
 	if need_lod0_update:
 		_request_update()
+
+
+## block 的 LOD0 网格是否就绪（只统计视锥内）：视锥外的 chunk 不显示、无需网格，
+## 若纳入会因"有数据无网格"误判未就绪 → LOD1 永兜底 + LOD0 全隐藏 → 近处低精度缺面。
+func _block_lod0_ready(bk: Vector3i, planes: Array) -> bool:
+	var b4 := bk * 4
+	var chunk_w := voxel_scale * VoxelChunk.CHUNK_SIZE
+	for cz in 4:
+		for cy in 4:
+			for cx in 4:
+				var ck := b4 + Vector3i(cx, cy, cz)
+				if data.has_chunk(ck) and not _chunk_meshes.has(ck):
+					var aabb := _chunk_world_aabb(ck, chunk_w, global_position)
+					if _aabb_has_vertex_in_frustum(aabb, planes):
+						return false
+	return true
 
 
 ## 派发 LOD1 大块异步生成：快照 chunk（COW）+ WorkerThreadPool 后台降采样/网格生成。
@@ -1032,6 +1057,14 @@ func _update_mesh_async() -> void:
 		# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居），
 		# 替代逐体素 dirty_voxels 的大批量追踪——大崩塌移除不再主线程逐体素写 dict
 		rebuild_chunks = data.get_dirty_chunks()
+		# 限量批次：超过上限的放回 dirty（下帧续建）。回原点/大崩塌时 dirty 可上千，
+		# 单帧全量快照 + 派发上千 worker → 主线程阻塞（update_mesh 数百 ms → 帧率个位数）。
+		# 分批后每帧快照/派发量受限，网格经 _process_mesh_build_queue 平滑上传。
+		const _REBUILD_BATCH_LIMIT := 64
+		if rebuild_chunks.size() > _REBUILD_BATCH_LIMIT:
+			for i in range(_REBUILD_BATCH_LIMIT, rebuild_chunks.size()):
+				data._mark_chunk_dirty(rebuild_chunks[i])
+			rebuild_chunks.resize(_REBUILD_BATCH_LIMIT)
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
