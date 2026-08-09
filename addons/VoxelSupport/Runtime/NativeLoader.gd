@@ -27,8 +27,6 @@ static var _required_methods := [
 
 ## 获取原生实例（懒初始化）。返回 null 表示不可用。
 static func _get_instance() -> Object:
-	if _available == 0:
-		return null
 	if _inst != null and is_instance_valid(_inst):
 		return _inst
 	if not ClassDB.class_exists(&"VoxelNative"):
