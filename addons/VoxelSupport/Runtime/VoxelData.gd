@@ -139,28 +139,40 @@ func get_lod1_block(block_key: Vector3i) -> PackedInt32Array:
 			break
 	if has_any:
 		# 确保覆盖的 2×2×2 个 LOD0 chunk 已加载（流式下部分 chunk 可能已卸载到磁盘，
-		# 若不加载则 _read_voxel_fast 读空 → LOD1 大格缺失 → "该有体素的地方没有"）
+		# 若不加载则读空 → LOD1 大格缺失 → "该有体素的地方没有"）
+		# 降采样直接读 chunk 密集缓冲（数组下标），避免逐体素 _read_voxel_fast 的
+		# chunk key 换算 + 字典查找开销（16³×8 次 vs 8 次）
+		var bk2 := block_key * 2
 		for cz in 2:
 			for cy in 2:
 				for cx in 2:
-					preload_chunk(block_key * 2 + Vector3i(cx, cy, cz))
-		var origin := block_key * LOD1_EDGE
-		for lz in CHUNK_SIZE:
-			for ly in CHUNK_SIZE:
-				for lx in CHUNK_SIZE:
-					var mat := 0
-					for dz in 2:
-						for dy in 2:
-							for dx in 2:
-								var m := _read_voxel_fast(origin + Vector3i(lx * 2 + dx, ly * 2 + dy, lz * 2 + dz))
-								if m > 0:
-									mat = m
-									break
-							if mat > 0:
-								break
-						if mat > 0:
-							break
-					buf[lx + ly * CHUNK_SIZE + lz * CHUNK_SLICE] = mat
+					var ck := Vector3i(bk2.x + cx, bk2.y + cy, bk2.z + cz)
+					preload_chunk(ck)
+					var cbuf: PackedInt32Array = _chunk_buffers.get(ck, PackedInt32Array())
+					if cbuf.is_empty():
+						continue
+					var ox := cx * (CHUNK_SIZE >> 1)
+					var oy := cy * (CHUNK_SIZE >> 1)
+					var oz := cz * (CHUNK_SIZE >> 1)
+					for lz8 in (CHUNK_SIZE >> 1):
+						var bz := lz8 * 2
+						for ly8 in (CHUNK_SIZE >> 1):
+							var by := ly8 * 2
+							for lx8 in (CHUNK_SIZE >> 1):
+								var mat := 0
+								var bx := lx8 * 2
+								for dz in 2:
+									for dy in 2:
+										for dx in 2:
+											var m := cbuf[(bz + dz) * CHUNK_SLICE + (by + dy) * CHUNK_SIZE + (bx + dx)]
+											if m > 0:
+												mat = m
+												break
+										if mat > 0:
+											break
+									if mat > 0:
+										break
+								buf[(ox + lx8) + (oy + ly8) * CHUNK_SIZE + (oz + lz8) * CHUNK_SLICE] = mat
 	_lod1_cache[block_key] = buf
 	return buf
 
@@ -188,37 +200,96 @@ func get_lod1_halo(block_key: Vector3i) -> PackedInt32Array:
 		for y in CHUNK_SIZE:
 			for x in CHUNK_SIZE:
 				halo[(1 + x) + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE]
-	# +x 外缘面（halo x=17）= 邻居 (bx+1) 的 x=0 面
-	var nb_px := get_lod1_block(block_key + Vector3i(1, 0, 0))
-	for z in CHUNK_SIZE:
-		for y in CHUNK_SIZE:
-			halo[(HALO_SIZE - 1) + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_px[0 + y * CHUNK_SIZE + z * CHUNK_SLICE]
+	# 6 个外缘面：只降采样邻居 block 的边界 1 大格层（256 大格），
+	# 而非整块 16³ 邻居——跨界可见性只需边界层，避免首次加载时每 block
+	# 触发 7 次完整降采样（4096 大格 × 6 邻居）的主线程峰值
+	# +x 外缘面（halo x=17）= 邻居 (bx+1) 的 x=0 面（u=y, v=z）
+	var f_px := _get_lod1_face(block_key + Vector3i(1, 0, 0), 0, 0)
+	for v in CHUNK_SIZE:
+		for u in CHUNK_SIZE:
+			halo[(HALO_SIZE - 1) + (1 + u) * HALO_SIZE + (1 + v) * HALO_SIZE * HALO_SIZE] = f_px[u + v * CHUNK_SIZE]
 	# -x 外缘面（halo x=0）= 邻居 (bx-1) 的 x=15 面
-	var nb_nx := get_lod1_block(block_key + Vector3i(-1, 0, 0))
-	for z in CHUNK_SIZE:
-		for y in CHUNK_SIZE:
-			halo[0 + (1 + y) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_nx[(CHUNK_SIZE - 1) + y * CHUNK_SIZE + z * CHUNK_SLICE]
-	# +y 外缘面（halo y=17）= 邻居 (by+1) 的 y=0 面
-	var nb_py := get_lod1_block(block_key + Vector3i(0, 1, 0))
-	for z in CHUNK_SIZE:
-		for x in CHUNK_SIZE:
-			halo[(1 + x) + (HALO_SIZE - 1) * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_py[x + 0 * CHUNK_SIZE + z * CHUNK_SLICE]
+	var f_nx := _get_lod1_face(block_key + Vector3i(-1, 0, 0), 0, 1)
+	for v in CHUNK_SIZE:
+		for u in CHUNK_SIZE:
+			halo[0 + (1 + u) * HALO_SIZE + (1 + v) * HALO_SIZE * HALO_SIZE] = f_nx[u + v * CHUNK_SIZE]
+	# +y 外缘面（halo y=17）= 邻居 (by+1) 的 y=0 面（u=z, v=x）
+	var f_py := _get_lod1_face(block_key + Vector3i(0, 1, 0), 1, 0)
+	for v in CHUNK_SIZE:
+		for u in CHUNK_SIZE:
+			halo[(1 + v) + (HALO_SIZE - 1) * HALO_SIZE + (1 + u) * HALO_SIZE * HALO_SIZE] = f_py[u + v * CHUNK_SIZE]
 	# -y 外缘面（halo y=0）= 邻居 (by-1) 的 y=15 面
-	var nb_ny := get_lod1_block(block_key + Vector3i(0, -1, 0))
-	for z in CHUNK_SIZE:
-		for x in CHUNK_SIZE:
-			halo[(1 + x) + 0 * HALO_SIZE + (1 + z) * HALO_SIZE * HALO_SIZE] = nb_ny[x + (CHUNK_SIZE - 1) * CHUNK_SIZE + z * CHUNK_SLICE]
-	# +z 外缘面（halo z=17）= 邻居 (bz+1) 的 z=0 面
-	var nb_pz := get_lod1_block(block_key + Vector3i(0, 0, 1))
-	for y in CHUNK_SIZE:
-		for x in CHUNK_SIZE:
-			halo[(1 + x) + (1 + y) * HALO_SIZE + (HALO_SIZE - 1) * HALO_SIZE * HALO_SIZE] = nb_pz[x + y * CHUNK_SIZE + 0 * CHUNK_SLICE]
+	var f_ny := _get_lod1_face(block_key + Vector3i(0, -1, 0), 1, 1)
+	for v in CHUNK_SIZE:
+		for u in CHUNK_SIZE:
+			halo[(1 + v) + 0 * HALO_SIZE + (1 + u) * HALO_SIZE * HALO_SIZE] = f_ny[u + v * CHUNK_SIZE]
+	# +z 外缘面（halo z=17）= 邻居 (bz+1) 的 z=0 面（u=x, v=y）
+	var f_pz := _get_lod1_face(block_key + Vector3i(0, 0, 1), 2, 0)
+	for v in CHUNK_SIZE:
+		for u in CHUNK_SIZE:
+			halo[(1 + u) + (1 + v) * HALO_SIZE + (HALO_SIZE - 1) * HALO_SIZE * HALO_SIZE] = f_pz[u + v * CHUNK_SIZE]
 	# -z 外缘面（halo z=0）= 邻居 (bz-1) 的 z=15 面
-	var nb_nz := get_lod1_block(block_key + Vector3i(0, 0, -1))
-	for y in CHUNK_SIZE:
-		for x in CHUNK_SIZE:
-			halo[(1 + x) + (1 + y) * HALO_SIZE + 0 * HALO_SIZE * HALO_SIZE] = nb_nz[x + y * CHUNK_SIZE + (CHUNK_SIZE - 1) * CHUNK_SLICE]
+	var f_nz := _get_lod1_face(block_key + Vector3i(0, 0, -1), 2, 1)
+	for v in CHUNK_SIZE:
+		for u in CHUNK_SIZE:
+			halo[(1 + u) + (1 + v) * HALO_SIZE + 0 * HALO_SIZE * HALO_SIZE] = f_nz[u + v * CHUNK_SIZE]
 	return halo
+
+
+## 降采样邻居 block 的边界 1 大格层（halo 跨界可见性用）。
+## 只降采样该层（16²=256 大格）而非整块邻居，显著降低 LOD1 网格生成的
+## 主线程峰值与总降采样量。返回 16² 大格面，索引 = u + v*16。
+## axis: 面法向轴(0=x,1=y,2=z)；face: 0=低侧(0大格层)，1=高侧(15大格层)。
+func _get_lod1_face(nbk: Vector3i, axis: int, face: int) -> PackedInt32Array:
+	var face_arr := PackedInt32Array()
+	face_arr.resize(CHUNK_SIZE * CHUNK_SIZE)
+	var n2 := nbk * 2
+	var nf := n2[axis] + face
+	var nu := n2[(axis + 1) % 3]
+	var nv := n2[(axis + 2) % 3]
+	var fix_local := 0 if face == 0 else (CHUNK_SIZE - 2)
+	for cv in 2:
+		for cu in 2:
+			var ck := _vec3_from_axis(nf, nu + cu, nv + cv, axis)
+			preload_chunk(ck)
+			var cbuf: PackedInt32Array = _chunk_buffers.get(ck, PackedInt32Array())
+			if cbuf.is_empty():
+				continue
+			var ou := cu * (CHUNK_SIZE >> 1)
+			var ov := cv * (CHUNK_SIZE >> 1)
+			for lv8 in (CHUNK_SIZE >> 1):
+				var bv := lv8 * 2
+				for lu8 in (CHUNK_SIZE >> 1):
+					var bu := lu8 * 2
+					var mat := 0
+					for dv in 2:
+						for du in 2:
+							for df in 2:
+								var m := cbuf[_face_local_index(fix_local + df, bu + du, bv + dv, axis)]
+								if m > 0:
+									mat = m
+									break
+							if mat > 0:
+								break
+						if mat > 0:
+							break
+					face_arr[(ou + lu8) + (ov + lv8) * CHUNK_SIZE] = mat
+	return face_arr
+
+
+func _vec3_from_axis(f: int, u: int, v: int, axis: int) -> Vector3i:
+	match axis:
+		0: return Vector3i(f, u, v)
+		1: return Vector3i(u, f, v)
+		_: return Vector3i(u, v, f)
+
+
+## chunk 密集缓冲局部索引：固定轴局部 f + 自由轴局部 (u, v)，按 axis 重排为 (x,y,z)
+func _face_local_index(f: int, u: int, v: int, axis: int) -> int:
+	match axis:
+		0: return v * CHUNK_SLICE + u * CHUNK_SIZE + f
+		1: return v * CHUNK_SLICE + f * CHUNK_SIZE + u
+		_: return f * CHUNK_SLICE + u * CHUNK_SIZE + v
 
 
 ## 失效体素所在 chunk 对应的 LOD1 block（LOD0 数据变化后调用）
