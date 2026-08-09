@@ -515,6 +515,11 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var cam_pos := cam.global_position
 	var world_offset := global_position
+	# 近处 LOD0 区（block 中心 < lod0+margin）不视锥剔除：快速转向/快速后退时
+	# 新进入视野的 chunk 已提前生成，避免"近处也空"。仅远处 LOD 做视锥剔除。
+	var _block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
+	var _lod0_d := lod0_distance if lod0_distance > 0.0 else 0.0
+	var _lod0_margin := (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		# 无数据的空 chunk：不纳入视锥管理（无体素无需构建/补建，
@@ -526,6 +531,13 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 			_stream_force_build.erase(ck)
 			visible.append(ck)
 			continue
+		# 近处 LOD0 区：无条件构建（不视锥剔除）
+		if _lod0_d > 0.0:
+			var _bk := _lod1_block_of_chunk(ck)
+			var _bc := _lod1_block_center(_bk, world_offset, _block_edge_world)
+			if cam_pos.distance_to(_bc) <= _lod0_d + _lod0_margin:
+				visible.append(ck)
+				continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 		if _aabb_has_vertex_in_frustum(aabb, cam):
 			visible.append(ck)
@@ -915,17 +927,9 @@ func _process_lod() -> void:
 				continue  # LOD1 区（由 _build_lod1 覆盖）
 			if _chunk_meshes.has(ck):
 				continue
-			if bdist < lod0_d - lod0_margin:
-				# 纯 LOD0 区（无 LOD1 兜底）：只需补建视锥内的 chunk（视锥外不显示，
-				# 由视锥剔除隐藏，不生成 → 加载量小）；转向进入视锥时由本循环补建
-				# 用 chunk 完整 AABB 判视锥（非中心点）：屏幕边缘 chunk 中心可能在视锥外
-				# 但大部在视锥内，中心点测试漏判 → 屏幕边缘/中下方缺面
-				var aabb4 := _chunk_world_aabb(ck, _chunk_world, world_offset)
-				if not _aabb_has_vertex_in_frustum(aabb4, cam):
-					continue
-			# 边界带（block 中心 [lod0-margin, lod0+margin]）全向补建（不限视锥）：
-			# 保证 block 的 LOD0 全部就绪，使 LOD1 兜底切换时无重叠/空洞。
-			# 边界带是环形区域，块数量少，全向生成量可控。
+			# 近处 LOD0 区（block 中心 < lod0+margin）全向补建（不视锥剔除）：
+			# 快速转向/快速后退时新进入视野的 chunk 已提前生成，避免近处空洞。
+			# 视锥外的近处 chunk 由引擎视锥剔除隐藏，不渲染但不缺数据。
 			data._mark_chunk_dirty(ck)
 			need_lod0_update = true
 	if need_lod0_update:
