@@ -146,7 +146,7 @@ func _build_world() -> void:
 				cleanup.remove(fn)
 			fn = cleanup.get_next()
 		cleanup.list_dir_end()
-	_target.data_stream = stream
+	_target.data.stream = stream
 	_target.voxel_scale = voxel_scale
 	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
 	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC

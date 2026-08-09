@@ -32,26 +32,10 @@ enum VisibilityMode {
 		data = v
 		if data:
 			data.changed.connect(_on_data_changed)
-		if data and data_stream:
-			data.set_stream(data_stream)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
 		_clear_lod0_meshes()
 		_request_update()
-
-## 数据层磁盘流（VoxelStream / VoxelFileStream）。
-## 设置后 STREAMING 模式不仅卸载网格，还按距离把 chunk 数据写回磁盘并释放内存
-## （数据层磁盘流式）。卸载/补建由 _process_streaming 驱动（data.unload_chunk /
-## data.preload_chunk），保证破坏/编辑/网格生成始终能看到磁盘上已持久化的数据。
-## 也可直接配置 VoxelData.stream；此处提供节点级快捷入口。
-@export var data_stream: VoxelStream:
-	set(v):
-		# setter 内部赋值不会递归，可直接设置底层存储
-		if data_stream == v:
-			return
-		data_stream = v
-		if data:
-			data.set_stream(v)
 
 ## 体素缩放比例 (单个体素的边长，世界单位)
 @export var voxel_scale: float = 0.1:
@@ -306,9 +290,6 @@ func _ready() -> void:
 	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
 	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
 	_measure_render_time_enabled = false
-	# 数据层磁盘流式：编辑器加载顺序不定，_ready 兜底把 stream 挂到 data
-	if data and data_stream and data.stream != data_stream:
-		data.set_stream(data_stream)
 	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认 = view*1.5）
 	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
 	if _streaming_enabled and unload_distance <= 0.0:
