@@ -477,6 +477,7 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	# 决策按 LOD1 block 中心距离（与 _process_lod 一致），避免 block 跨 lod0 边界时
 	# 部分 chunk 建 LOD0、部分建 LOD1 造成的重叠/空洞。
 	var lod0_d: float = lod0_distance if lod0_distance > 0.0 else unload_distance
+	var lod0_margin := (voxel_scale * VoxelData.LOD1_EDGE) * 0.5
 	var block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
 	for ck in chunks:
 		# 无数据的空 chunk：无需流式网格管理（不建不卸，且不占用 streamed_out 字典）
@@ -489,7 +490,10 @@ func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 		elif lod0_distance > 0.0:
 			var bk := _lod1_block_of_chunk(ck)
 			var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
-			if cam_pos.distance_to(bcenter) > lod0_d:
+			# LOD0 生成边界用 lod0+margin（与步骤1/步骤4 的 LOD0 区一致，而非 lod0）：
+			# 边界带 [lod0, lod0+margin] 是 LOD0 滞回区，若不生成 LOD0 会因步骤4 标脏、
+			# 此处拦截 → LOD0 永不生成 → 近处该带永远只有 LOD1 低精度兜底（LOD0 不完备）
+			if cam_pos.distance_to(bcenter) > lod0_d + lod0_margin:
 				# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 大块待生成（数据保留在内存）
 				_lod1_pending[bk] = true
 				# 流式补建强制的 chunk 落在 LOD1 区时无 LOD0 可建：清除标记避免 _stream_force_build 无界累积
