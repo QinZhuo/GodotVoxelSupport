@@ -224,7 +224,7 @@ const STREAM_LOAD_INTERVAL := 2
 # 管线的新块多，但实际 mesh 出现仍由 GPU 限流平滑分摊，不会掉帧也不会"一帧一块"。
 @export_range(1, 200, 1) var _stream_load_per_frame: int = 24
 # 流式补建待强制的 chunk：进入 load 距离后应无条件构建（距离驱动，非朝向驱动），
-# 不被 _filter_frustum_chunks 延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
+# 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
 var _stream_force_build: Dictionary = {}
 # 异步网格生成状态（多任务并行，每个任务独立处理）
@@ -480,59 +480,10 @@ func _update_mesh() -> void:
 	_update_mesh_async()
 
 
-## 流式加载距离过滤（仅 STREAMING 模式生效）：
-## 超出 unload_distance 的 chunk 不构建，直接标记为已流式卸载。
-## 关键：避免大世界一次性全量构建（流式加载核心收益——远处永远不生成）。
-## 与 _filter_frustum_chunks 组合使用：先流式过滤（距离），再视锥过滤（朝向）。
-func _filter_streamed_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
-	if not _streaming_enabled or unload_distance <= 0.0:
-		return chunks
-	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
-	if cam == null:
-		return chunks
-	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
-	var cam_pos := cam.global_position
-	var world_offset := global_position
-	var kept: Array[Vector3i] = []
-	# LOD0 生成边界：启用 LOD（lod0_distance>0）时，LOD0 chunk 只在 [0, lod0] 生成，
-	# (lod0, unload] 区间由 LOD1 低分辨率大块覆盖（数据保留，网格用 _process_lod 生成）。
-	# 决策按 LOD1 block 中心距离（与 _process_lod 一致），避免 block 跨 lod0 边界时
-	# 部分 chunk 建 LOD0、部分建 LOD1 造成的重叠/空洞。
-	var lod0_d: float = lod0_distance if lod0_distance > 0.0 else unload_distance
-	var lod0_margin := _lod0_margin()
-	var block_edge_world := _block_edge_world()
-	for ck in chunks:
-		# 无数据的空 chunk：无需流式网格管理（不建不卸，且不占用 streamed_out 字典）
-		if data and not data.has_chunk(ck):
-			continue
-		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
-		var dist := cam_pos.distance_to(aabb.get_center())
-		if dist > unload_distance:
-			_streamed_out_chunks[ck] = true
-		elif lod0_distance > 0.0:
-			var bk := _lod1_block_of_chunk(ck)
-			var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
-			# LOD0 生成边界用 lod0+margin（与步骤1/步骤4 的 LOD0 区一致，而非 lod0）：
-			# 边界带 [lod0, lod0+margin] 是 LOD0 滞回区，若不生成 LOD0 会因步骤4 标脏、
-			# 此处拦截 → LOD0 永不生成 → 近处该带永远只有 LOD1 低精度兜底（LOD0 不完备）
-			if cam_pos.distance_to(bcenter) > lod0_d + lod0_margin:
-				# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 大块待生成（数据保留在内存）
-				_lod1_pending[bk] = true
-				# 流式补建强制的 chunk 落在 LOD1 区时无 LOD0 可建：清除标记避免 _stream_force_build 无界累积
-				_stream_force_build.erase(ck)
-			else:
-				kept.append(ck)
-		else:
-			kept.append(ck)
-	return kept
-
-
-## 视锥剔除过滤（FULL 模式全量返回）。FRUSTUM / STREAMING 均保留视锥剔除
-## （双层优化：距离卸载 + 朝向剔除）：
-##   - 视锥内：立即构建（量受 FOV 限制，转向扫过的量可控）
-##   - 视锥外：进待建队列，由 _process_deferred_chunks 限量补建（每帧若干个），
-##     走近/转向时分批平滑出现，避免一次把大量 chunk 全部派发 → 主线程快照+生成+上传掉帧
-func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
+## 统一可见性决策：流式距离过滤（超 unload 标 streamed_out、LOD1 区标 pending）
+## + 视锥/近处全向过滤（近处 LOD0 区无条件构建、视锥内构建、视锥外进 deferred 待补建）。
+## 替代原 _filter_streamed_chunks + _filter_frustum_chunks 两步过滤，消除重复遍历与判定分歧。
+func _filter_visible_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	if visibility_mode == VisibilityMode.FULL:
 		return chunks
 	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
@@ -541,27 +492,35 @@ func _filter_frustum_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	# 近处 LOD0 区（block 中心 < lod0+margin）不视锥剔除：快速转向/快速后退时
-	# 新进入视野的 chunk 已提前生成，避免"近处也空"。仅远处 LOD 做视锥剔除。
-	var _block_edge_world := voxel_scale * float(LOD1_BLOCK_EDGE)
-	var _lod0_d := lod0_distance if lod0_distance > 0.0 else 0.0
-	var _lod0_margin := _lod0_margin()
+	var lod0_d := lod0_distance if lod0_distance > 0.0 else 0.0
+	var lod0_margin := _lod0_margin()
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
-		# 无数据的空 chunk：不纳入视锥管理（无体素无需构建/补建，
-		# 否则边界空邻居会被反复标 deferred → 补建空 chunk 死循环）
+		# 无数据的空 chunk：不纳入网格管理（无体素无需构建/补建，避免补建空 chunk 死循环）
 		if data and not data.has_chunk(ck):
 			continue
+		# 流式距离层（仅 STREAMING）：超 unload 卸载；LOD1 区标 pending（数据保留，不建 LOD0）
+		if _streaming_enabled and unload_distance > 0.0:
+			var _aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
+			if cam_pos.distance_to(_aabb.get_center()) > unload_distance:
+				_streamed_out_chunks[ck] = true
+				continue
+			if lod0_d > 0.0:
+				var bk := _lod1_block_of_chunk(ck)
+				if _block_dist(bk, cam_pos) > lod0_d + lod0_margin:
+					# LOD1 区：不建 LOD0 全精度网格，标记对应 LOD1 大块待生成（数据保留）
+					_lod1_pending[bk] = true
+					_stream_force_build.erase(ck)
+					continue
 		# 流式补建强制的 chunk：距离驱动，无条件构建（清除标记避免重复）
 		if _stream_force_build.has(ck):
 			_stream_force_build.erase(ck)
 			visible.append(ck)
 			continue
-		# 近处 LOD0 区：无条件构建（不视锥剔除）
-		if _lod0_d > 0.0:
-			var _bk := _lod1_block_of_chunk(ck)
-			var _bc := _lod1_block_center(_bk, world_offset, _block_edge_world)
-			if cam_pos.distance_to(_bc) <= _lod0_d + _lod0_margin:
+		# 近处 LOD0 区（block 距离 < lod0+margin）不视锥剔除：快速转向/后退近处不空
+		if lod0_d > 0.0:
+			var bk2 := _lod1_block_of_chunk(ck)
+			if _block_dist(bk2, cam_pos) <= lod0_d + lod0_margin:
 				visible.append(ck)
 				continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
@@ -835,7 +794,7 @@ func _process_lod() -> void:
 	# 避免移动分界处"移除旧→异步生成新"的真空 → 块来回隐藏显示闪烁
 	var remove_lod0: Array = []
 	for ck in _lod0_meshes:
-		# 与 _filter_streamed_chunks / LOD1 生成统一按 LOD1 大块中心距离决策
+		# 与可见性决策 / LOD1 生成统一按 LOD1 大块中心距离决策
 		var bk := _lod1_block_of_chunk(ck)
 		var bcenter := _lod1_block_center(bk, world_offset, block_edge_world)
 		if cam_pos.distance_to(bcenter) > lod0_d + lod0_margin and _lod1_meshes.has(bk):
@@ -847,7 +806,7 @@ func _process_lod() -> void:
 	var needed := {}
 	for ck in loaded_chunks:
 		needed[_lod1_block_of_chunk(ck)] = true
-	# 并入待建集合（含 _filter_streamed_chunks 标记的）
+	# 并入待建集合（含可见性决策标记的）
 	for bk in _lod1_pending:
 		needed[bk] = true
 
@@ -1084,7 +1043,7 @@ func _unload_chunk(ck: Vector3i) -> void:
 
 
 ## 清除单个 chunk 的渲染网格（数据层已变空、但渲染层 mesh 残留时调用）。
-## 破坏/崩塌后 chunk 内体素全被移除（has_chunk=false），增量重建时 _filter_frustum_chunks
+## 破坏/崩塌后 chunk 内体素全被移除（has_chunk=false），增量重建时 _filter_visible_chunks
 ## 会跳过空 chunk 不派发 → 若不主动清除，旧 mesh 残留 → 视觉上"悬空块还在"（数据其实已掉）。
 func _remove_chunk_mesh(ck: Vector3i) -> void:
 	var mi: MeshInstance3D = _lod0_meshes.get(ck)
@@ -1158,11 +1117,10 @@ func _update_mesh_async() -> void:
 				_task_ids.append(WorkerThreadPool.add_task(_generate_worker.bind(
 					{}, snapshot_materials, rebuild_chunks, gen_id, mesh_mode, voxel_scale, render_offset, diag_enabled)))
 			else:
-				# 先流式距离过滤（无条件，远距 chunk 不生成），再视锥过滤（朝向）
-				var after_stream: Array[Vector3i] = _filter_streamed_chunks(all_chunks)
-				var visible: Array[Vector3i] = _filter_frustum_chunks(after_stream)
+				# 统一可见性决策（流式距离 + 视锥/近处全向）
+				var visible: Array[Vector3i] = _filter_visible_chunks(all_chunks)
 				if diag_enabled:
-					print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 流式卸载%d, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), all_chunks.size() - after_stream.size(), visible.size(), after_stream.size() - visible.size()])
+					print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
 				var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
 				_pending_task_count = visible.size()
 				for ck in visible:
@@ -1171,16 +1129,15 @@ func _update_mesh_async() -> void:
 		else:
 			# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
 			# 【关键】先清除"已变空"chunk 的残留 mesh：破坏/崩塌后 chunk 内体素
-			# 全被移除（has_chunk=false），而 _filter_frustum_chunks 会跳过空 chunk
+			# 全被移除（has_chunk=false），而 _filter_visible_chunks 会跳过空 chunk
 			# 不派发重建 → 若不主动清除，旧 mesh 残留，视觉上"悬空块还在"（数据其实已掉）。
 			for ck in rebuild_chunks:
 				if _lod0_meshes.has(ck) and not data.has_chunk(ck):
 					_remove_chunk_mesh(ck)
-			# 先流式距离过滤（无条件），再视锥过滤（朝向）
-			var after_stream: Array[Vector3i] = _filter_streamed_chunks(rebuild_chunks)
-			var visible: Array[Vector3i] = _filter_frustum_chunks(after_stream)
+			# 统一可见性决策（流式距离 + 视锥/近处全向）
+			var visible: Array[Vector3i] = _filter_visible_chunks(rebuild_chunks)
 			if diag_enabled:
-				print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 流式卸载%d, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), rebuild_chunks.size() - after_stream.size(), visible.size(), after_stream.size() - visible.size()])
+				print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
 			var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
 			_pending_task_count = visible.size()
 			for ck in visible:
