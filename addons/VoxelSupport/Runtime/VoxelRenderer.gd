@@ -534,14 +534,11 @@ static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offse
 ## 加载/生成优先级：距离 + 视线方向加权（前方优先、后方延后），返回值越小越优先。
 ## 前方(相机朝向方向,dot≈+1) 加权距离≈0.5×dist 优先；后方(dot≈-1)≈1.5×dist 延后。
 ## 用于流式加载/LOD1 生成排序：移动时前方地形先出现，减少"走近才加载"。
-static func _load_priority(ck: Vector3i, cam_pos: Vector3, cam_dir: Vector3, chunk_size_world: float, world_offset: Vector3) -> float:
+static func _load_priority(ck: Vector3i, cam_pos: Vector3, chunk_size_world: float, world_offset: Vector3) -> float:
+	# 只按距离（近优先）：不按朝向加权。近处快速旋转相机时各方向数据都需加载，
+	# 朝向加权会让后方延迟加载 → 旋转后后方数据未就绪（缺面）。远处仍由 LOD1 前方优先覆盖。
 	var center := _chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()
-	var to_center := center - cam_pos
-	var dist := to_center.length()
-	if dist < 0.001:
-		return 0.0
-	var forward := to_center.normalized().dot(cam_dir)
-	return dist - forward * dist * 0.5
+	return cam_pos.distance_to(center)
 
 
 ## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
@@ -705,12 +702,11 @@ func _process_streaming() -> void:
 			var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
 			if dist <= unload_d:
 				to_load.append([dist, ck])
-		# 加载优先级优化：距离 + 视线方向加权排序（前方优先、后方延后）——
-		# 移动时前方地形先出现，减少"走近才加载"；后方延后节省带宽/IO。
-		var _cam_dir: Vector3 = -cam.global_transform.basis.z
+		# 加载优先级：只按距离（近优先）——近处快速旋转相机时各方向数据都需加载，
+		# 朝向加权会让后方延迟加载 → 旋转后后方缺面。远处 LOD1 仍前方优先。
 		to_load.sort_custom(func(a, b):
-			return _load_priority(a[1], cam_pos, _cam_dir, chunk_size_world, world_offset) < \
-					_load_priority(b[1], cam_pos, _cam_dir, chunk_size_world, world_offset))
+			return _load_priority(a[1], cam_pos, chunk_size_world, world_offset) < \
+					_load_priority(b[1], cam_pos, chunk_size_world, world_offset))
 		# 异步预读：先请求后台线程加载候选涉及 region（磁盘 IO 移出主线程），
 		# 随后同步 preload 命中缓存则无 IO（未命中仅兜底，通常后台已就绪）——
 		# 根治流式移动时主线程同步读盘卡顿。
