@@ -62,11 +62,9 @@ extends Resource
 ## 该偏移不影响破坏/查询逻辑 (它们基于原始数据坐标)
 @export var center_offset: Vector3 = Vector3.ZERO
 
-## 本次变更涉及的体素集合（由修改方法记录，供增量更新/外部查询）
-## 调用 clear_dirty_voxels() 清空。
-## 注：大批量修改（_remove_voxels/set_voxels）走 chunk 级 _dirty_mesh_chunks，
-## 不再逐体素写此字典（避免大崩塌时主线程 GDScript dict 写入瓶颈）；
-## 单格 set_voxel/remove_voxel 仍记录，供 get_dirty_voxels_aabb 等精确查询。
+## 本次变更涉及的体素集合（单格 set_voxel/remove_voxel 记录；大批量修改走 chunk 级
+## _dirty_mesh_chunks，不写此字典避免大崩塌主线程 dict 写入瓶颈）。
+## 注：渲染器增量重建基于 chunk 级 _dirty_mesh_chunks，此集合无内部消费，仅对外提供。
 var dirty_voxels: Dictionary[Vector3i, int] = {}
 
 ## 脏 mesh chunk（chunk 级，供渲染器增量重建）。大批量修改标记到 chunk 粒度，
@@ -310,8 +308,8 @@ func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
 # 数据层磁盘流式（VoxelStream 接入）
 # ----------------------------------------------------------------------------
 
-## 配置数据层流（等价于设置 stream 属性，供代码动态切换）。
-## 切换逻辑见 stream setter（flush 旧流 + 恢复新流已持久化索引）。
+## 配置数据层流（等价于设置 stream 属性，供代码动态切换，触发 stream setter 的
+## flush 旧流 + 恢复新流已持久化索引逻辑）。
 func set_stream(s: VoxelStream) -> void:
 	stream = s
 
@@ -321,14 +319,9 @@ func is_streaming() -> bool:
 	return stream != null
 
 
-## chunk 是否在内存中（有密集缓冲）
+## chunk 是否在内存中（有密集缓冲）。has_chunk 的严格子集（仅内存，不含磁盘）。
 func is_chunk_loaded(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key)
-
-
-## chunk 是否有数据（内存或磁盘）
-func is_chunk_persisted(chunk_key: Vector3i) -> bool:
-	return _chunk_buffers.has(chunk_key) or _persisted_chunks.has(chunk_key)
 
 
 ## 从流加载 chunk 数据到内存。已加载返回 true；流中不存在返回 false。

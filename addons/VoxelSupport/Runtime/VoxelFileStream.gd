@@ -56,6 +56,10 @@ var _io_pending: Dictionary = {}
 var _io_results: Dictionary = {}
 
 
+# ----------------------------------------------------------------------------
+# Region 键 / 路径 / 目录
+# ----------------------------------------------------------------------------
+
 func _region_key(chunk_key: Vector3i) -> Vector3i:
 	return Vector3i(
 		chunk_key.x >> REGION_SHIFT,
@@ -72,6 +76,10 @@ func _ensure_dir() -> void:
 	if not DirAccess.dir_exists_absolute(abs):
 		DirAccess.make_dir_recursive_absolute(abs)
 
+
+# ----------------------------------------------------------------------------
+# Region 文件 IO（纯函数，后台线程可安全调用）
+# ----------------------------------------------------------------------------
 
 ## 从文件读取 region 数据（纯函数，后台线程可安全调用，不碰缓存字典）。
 ## 返回 {chunk_key: {local_index: mat_id}}（文件不存在/格式不符 → 空字典）
@@ -98,6 +106,10 @@ func _read_region_file(region_key: Vector3i) -> Dictionary:
 			f.close()
 	return chunks
 
+
+# ----------------------------------------------------------------------------
+# 异步 region 加载
+# ----------------------------------------------------------------------------
 
 ## 请求异步加载 region（后台线程读盘）。region 已在缓存返回 true；否则提交后台任务返回 false。
 ## 数据就绪后由 _on_region_loaded 回填缓存，调用方可随后同步 preload（缓存命中则无 IO）。
@@ -135,15 +147,23 @@ func _on_region_loaded(region_key: Vector3i) -> void:
 	# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下次 request 重读
 	if (chunks is Dictionary and (chunks as Dictionary).is_empty()) and FileAccess.file_exists(_region_path(region_key)):
 		return
-	_region_cache[region_key] = {
-		"chunks": chunks if chunks is Dictionary else {},
-		"dirty": false,
-	}
+	_cache_region(region_key, chunks if chunks is Dictionary else {})
+
+
+## 缓存 region 并维护 LRU（超限驱逐最久未用并异步写回）。返回缓存条目。
+func _cache_region(region_key: Vector3i, chunks: Dictionary) -> Dictionary:
+	var entry := {"chunks": chunks, "dirty": false}
+	_region_cache[region_key] = entry
 	_region_order.append(region_key)
 	if _region_order.size() > REGION_CACHE_MAX:
 		var old_key: Vector3i = _region_order.pop_front()
 		_flush_region(old_key)
+	return entry
 
+
+# ----------------------------------------------------------------------------
+# Region 缓存（LRU）
+# ----------------------------------------------------------------------------
 
 ## 取 region 数据（读缓存命中则直接返回；否则读文件入缓存）。
 ## 返回 {"chunks": {...}, "dirty": bool}，调用方可直接修改 chunks。
@@ -156,14 +176,7 @@ func _get_region(region_key: Vector3i) -> Dictionary:
 	# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下帧重读
 	if chunks.is_empty() and FileAccess.file_exists(_region_path(region_key)):
 		return {"chunks": {}, "dirty": false}
-	entry = {"chunks": chunks, "dirty": false}
-	_region_cache[region_key] = entry
-	_region_order.append(region_key)
-	# LRU 超限：写回并释放最久未用的 region
-	if _region_order.size() > REGION_CACHE_MAX:
-		var old_key: Vector3i = _region_order.pop_front()
-		_flush_region(old_key)
-	return entry
+	return _cache_region(region_key, chunks)
 
 
 ## 更新 LRU：把 region 移到末尾（最近使用）
@@ -248,6 +261,10 @@ func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
 	_write_region_file(region_key, entry["chunks"])
 	entry["dirty"] = false
 
+
+# ----------------------------------------------------------------------------
+# VoxelStream 接口实现（save/load/has/erase/get_all/flush）
+# ----------------------------------------------------------------------------
 
 func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array) -> void:
 	if buffer.is_empty():
