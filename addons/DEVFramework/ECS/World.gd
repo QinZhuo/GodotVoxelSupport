@@ -25,6 +25,9 @@ extends Node
 
 var _debug_frame := 0
 
+## 当前持有 ecs_debug capture 的 World(全局仅一个, 避免重复注册报错)。
+static var _debug_owner: World = null
+
 ## 世界初始化完成信号(ecs 已创建 + 系统已注册)。生成实体等初始化在这里做。
 signal world_ready(ecs: ECSWorld)
 
@@ -37,7 +40,25 @@ func _ready() -> void:
 		init_world()
 		world_ready.emit(ecs)
 	if EngineDebugger.is_active():
+		_register_debug_capture()
+
+
+func _exit_tree() -> void:
+	# 切换实现/销毁本世界时释放 capture, 避免残留失效回调
+	if _debug_owner == self and EngineDebugger.is_active() \
+			and EngineDebugger.has_capture("ecs_debug"):
+		EngineDebugger.unregister_message_capture("ecs_debug")
+		_debug_owner = null
+
+
+## 注册 ecs_debug 消息捕获。全局仅允许一个 World 持有: 若被其他(可能正被销毁的)World 占用则接管。
+func _register_debug_capture() -> void:
+	if _debug_owner == null or not is_instance_valid(_debug_owner) \
+			or _debug_owner == self or _debug_owner.is_queued_for_deletion():
+		if _debug_owner != self and EngineDebugger.has_capture("ecs_debug"):
+			EngineDebugger.unregister_message_capture("ecs_debug")
 		EngineDebugger.register_message_capture("ecs_debug", Callable(self, "_on_debug_req"))
+		_debug_owner = self
 
 
 func _process(delta: float) -> void:

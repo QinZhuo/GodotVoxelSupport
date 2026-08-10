@@ -78,7 +78,9 @@ func _ready() -> void:
 	_logger = MCPLogger.new()
 	OS.add_logger(_logger)
 	_register_runtime_tools()
-	EngineDebugger.register_message_capture(DEBUGGER_PREFIX, _on_debugger_message)
+	# 防御: 若本单例被实例化多次/热重载等导致 capture 已注册, 跳过而非崩溃
+	if not EngineDebugger.has_capture(DEBUGGER_PREFIX):
+		EngineDebugger.register_message_capture(DEBUGGER_PREFIX, _on_debugger_message)
 	# 通知编辑器侧桥接已就绪(仅在调试线激活时有意义, 未连接时 send_message 无害)
 	EngineDebugger.send_message(DEBUGGER_PREFIX + ":ready", [])
 
@@ -191,6 +193,8 @@ func _process(_delta: float) -> void:
 ## 关闭服务器并移除 Logger(退出时由引擎自动调用)
 func _exit_tree() -> void:
 	stop()
+	if EngineDebugger.is_active() and EngineDebugger.has_capture(DEBUGGER_PREFIX):
+		EngineDebugger.unregister_message_capture(DEBUGGER_PREFIX)
 	if _logger:
 		OS.remove_logger(_logger)
 		_logger = null
