@@ -553,16 +553,25 @@ func snapshot_lod1_block_chunks(block_key: Vector3i) -> Dictionary:
 
 ## 全量体素字典快照 {pos: mat_id}（兼容旧的非 chunk 渲染路径 / 外部一次性读取）
 ## 流式模式下合并磁盘流中已持久化但不在内存的 chunk（临时加载，不缓存）
-func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
-	var out := {}
-	var seen := {}
+## 遍历所有内存中的非空体素，调用 cb(pos: Vector3i, mat_id: int)。
+## 内部迭代统一入口：get_positions / get_voxels_dict_snapshot / get_voxels_aabb /
+## _serialize_voxels 等"全量扫非空体素"方法复用，避免重复同一嵌套循环。
+## 注：非热路径（热路径均走原生 C++）；稀疏迭代回调开销可接受。
+func _for_each_non_empty_voxel(cb: Callable) -> void:
 	for ck: Vector3i in _chunk_buffers:
 		var buf = _chunk_buffers[ck]
 		var origin := VoxelChunk.origin_of(ck)
 		for i in CHUNK_VOLUME:
 			if buf[i] > 0:
-				out[origin + _local_from_index(i)] = buf[i]
+				cb.call(origin + _local_from_index(i), buf[i])
+
+
+func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
+	var out := {}
+	var seen := {}
+	for ck: Vector3i in _chunk_buffers:
 		seen[ck] = true
+	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int): out[pos] = mat_id)
 	if stream != null:
 		for ck: Vector3i in _persisted_chunks:
 			if seen.has(ck):
@@ -610,12 +619,8 @@ func get_positions() -> Array:
 	var out: Array = []
 	var seen := {}
 	for ck: Vector3i in _chunk_buffers:
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				out.append(origin + _local_from_index(i))
 		seen[ck] = true
+	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int): out.append(pos))
 	if stream != null:
 		for ck: Vector3i in _persisted_chunks:
 			if seen.has(ck):
@@ -680,6 +685,8 @@ func clear(notify: bool = true) -> void:
 
 
 ## 计算全部体素的包围盒 (AABB)，用于场景摆放/居中；空体素返回零 AABB
+## 注：min/max 为值类型，lambda 按值捕获无法回写 → 保持内联循环（_for_each_non_empty_voxel
+## 只适合"向引用容器追加"的消费模式）。
 func get_voxels_aabb() -> AABB:
 	if _voxel_count == 0:
 		return AABB()
@@ -1038,13 +1045,8 @@ func notify_changed() -> void:
 ## 只序列化内存中的 chunk（资源持久化 / save_data 的基础序列化器）
 func _serialize_voxels() -> Array:
 	var voxel_list := []
-	for ck: Vector3i in _chunk_buffers:
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				var p := origin + _local_from_index(i)
-				voxel_list.append([p.x, p.y, p.z, buf[i]])
+	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int):
+		voxel_list.append([pos.x, pos.y, pos.z, mat_id]))
 	return voxel_list
 
 

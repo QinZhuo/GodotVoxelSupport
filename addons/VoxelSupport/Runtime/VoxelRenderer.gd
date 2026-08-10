@@ -529,6 +529,12 @@ static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offse
 	return AABB(origin, Vector3(chunk_size_world, chunk_size_world, chunk_size_world))
 
 
+## 相机到 chunk 中心的距离（统一助手：_process_streaming/_process_lod/_process_deferred_chunks/
+## _filter_visible_chunks 多处复用同一距离判定，避免重复 distance_to(_chunk_world_aabb(...))）
+static func _chunk_center_dist(ck: Vector3i, cam_pos: Vector3, chunk_size_world: float, world_offset: Vector3) -> float:
+	return cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
+
+
 ## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
 ## 使用 Godot 内置 is_position_in_frustum，保证判定与引擎渲染剔除一致
 static func _aabb_has_vertex_in_frustum(aabb: AABB, cam: Camera3D) -> bool:
@@ -558,7 +564,7 @@ static func _chunk_from_world(world_pos: Vector3, chunk_size_world: float, world
 static func _is_chunk_beyond_unload(ck: Vector3i, cam: Camera3D, chunk_size_world: float, world_offset: Vector3, unload_d: float) -> bool:
 	if cam == null or unload_d <= 0.0:
 		return false
-	return cam.global_position.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d
+	return _chunk_center_dist(ck, cam.global_position, chunk_size_world, world_offset) > unload_d
 
 
 ## 统一视锥可见性判定（对外统一接口）：世界坐标是否在当前相机视锥内。
@@ -689,7 +695,7 @@ func _process_streaming() -> void:
 						continue
 					if _pending_chunks.has(ck):
 						continue
-					if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > load_d:
+					if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > load_d:
 						continue
 					# 程序化修改过的 chunk：重新生成会覆盖用户修改 → 同步预载已存数据
 					if is_procedural and data._persisted_chunks.has(ck):
@@ -715,7 +721,7 @@ func _process_streaming() -> void:
 			var bk := _lod1_block_of_chunk(ck)
 			if _block_dist(bk, cam_pos) <= unload_d + unload_margin + unload_block_extent:
 				continue
-			var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
+			var dist: float = _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset)
 			if dist > unload_d:
 				candidates.append([dist, ck])
 		# 从远到近（距离降序）：最远的先卸载
@@ -729,7 +735,7 @@ func _process_streaming() -> void:
 		# 取消超范围仍未完成的异步请求（避免后台白做，结果回来由卸载逻辑丢弃）
 		if not _pending_chunks.is_empty():
 			for ck in _pending_chunks.keys():
-				if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
+				if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > unload_d:
 					_pending_chunks.erase(ck)
 
 	if applied > 0 or submitted > 0:

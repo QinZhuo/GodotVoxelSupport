@@ -400,16 +400,12 @@ static func _generate_single_chunk_arrays_impl(
 	}
 
 
-static func _chunk_of(pos: Vector3i) -> Vector3i:
-	return VoxelChunk.chunk_of(pos)
-
-
 ## 一次遍历 voxels，建立"非空 chunk"的哈希索引 (chunk -> true)
 ## 相比逐 chunk 扫描 16³ 体素，只需一次遍历所有体素，查询变为 O(1)
 static func _build_non_empty_chunk_index(voxels) -> Dictionary:
 	var index := {}
 	for pos_key in voxels:
-		index[_chunk_of(pos_key)] = true
+		index[VoxelChunk.chunk_of(pos_key)] = true
 	return index
 
 

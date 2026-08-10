@@ -17,30 +17,6 @@ static func generate_mesh(voxel: VoxData, options: Dictionary, path: String = ""
 	return gen.mesh
 
 
-## 运行时网格生成入口
-## 直接接受体素字典和材质数组，无需 VoxData 实例
-## 供 VoxelRenderer / VoxelDestructible 等运行时节点使用
-## options 可包含: scale, unwrap_lightmap_uv2, uv2_texel_size (均可选)
-static func generate_mesh_runtime(voxels: Dictionary[Vector3i, int], materials: Array, options: Dictionary = {}) -> ArrayMesh:
-	if voxels.is_empty():
-		return null
-	var gen := VoxelMeshGenerator.new(null, options, "")
-	# 统一对齐材质数组：确保"材质数组索引 == 材质ID"，避免内部 mats[id] 越界
-	gen.runtime_materials = VoxelMaterial.align_by_id(materials)
-	# 运行时不生成纹理材质资源，由调用方提供或使用默认材质
-	gen.materials = [options.get("material_solid", null), options.get("material_transparent", null)]
-	var time := Time.get_ticks_usec()
-	gen.start_generate_mesh(voxels)
-	var mesh := gen.wait_finished(options.get(VoxelMeshImporter.unwrap_lightmap_uv2, false), options.get(VoxelMeshImporter.uv2_texel_size, 0.2))
-	if not mesh:
-		return null
-	if options.get(VoxelMeshImporter.unwrap_lightmap_uv2, false):
-		mesh.lightmap_unwrap(Transform3D.IDENTITY, options.get(VoxelMeshImporter.uv2_texel_size, 0.2))
-	if Engine.is_editor_hint():
-		print_verbose("generate_mesh_runtime: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
-	return mesh
-
-
 ## 从材质数组生成运行时纹理材质 (StandardMaterial3D 数组，0=实体 1=透明)
 ## 与编辑器导入的纹理材质等价，但完全在内存中生成，不涉及文件 IO
 ## 复用与编辑器导入一致的 UV 采样方案 (纹素中心对齐材质ID)
