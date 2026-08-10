@@ -1050,33 +1050,51 @@ func _serialize_voxels() -> Array:
 	return voxel_list
 
 
-## 序列化"需要随资源持久化"的体素（_get 存储专用）。
-## 程序化流：只序列化用户修改过的 chunk（_dirty_chunks 未写盘的 + stream 已持久化的修改）。
-##   未修改的 chunk 由 _generate_chunk 确定性生成、无需存储——全部序列化会把 .tscn 撑成
-##   上百 MB（历史上 734 万体素 → 137MB 的灾难即由此而来）。
-## 静态数据（无流 / 文件流）：数据只存在于内存（文件流磁盘为权威），序列化全部内存体素。
-func _serialize_voxels_for_storage() -> Array:
+## 从一组 chunk key 序列化体素为 [[x, y, z, mat_id], ...]。
+## 每 chunk 取缓冲：内存优先，否则从流读取（程序化修改块存于 stream._modified /
+## 文件流存于 region 文件）。供 _serialize_voxels_for_storage（修改块集）与
+## _serialize_all_voxels（磁盘合并）两个全量入口复用同一收集循环。
+func _serialize_chunks_to_list(chunk_keys: Array) -> Array:
+	var voxel_list := []
+	for ck in chunk_keys:
+		var ck3: Vector3i = ck
+		var buf := _get_chunk_buffer_for_storage(ck3)
+		if buf.is_empty():
+			continue
+		var origin := VoxelChunk.origin_of(ck3)
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				var p := origin + _local_from_index(i)
+				voxel_list.append([p.x, p.y, p.z, buf[i]])
+	return voxel_list
+
+
+## 收集"需随资源持久化"的 chunk key（程序化流：用户修改过的 = 内存未写盘 _dirty_chunks +
+## 流已持久化的修改 get_all_chunk_keys）。非程序化流返回空（由 _serialize_voxels 全量覆盖）。
+func _collect_modified_chunk_keys() -> Array:
+	var keys := {}
 	if stream is VoxelProceduralStream:
 		var proc: VoxelProceduralStream = stream
-		var keys := {}
 		for ck in _dirty_chunks:
 			keys[ck] = true
 		for ck in proc.get_all_chunk_keys():
 			keys[ck] = true
+	var out: Array = []
+	for ck in keys:
+		out.append(ck)
+	return out
+
+
+## 序列化"需要随资源持久化"的体素（_get 存储专用）。
+## 程序化流：只序列化用户修改过的 chunk（未修改的由 _generate_chunk 确定性生成、无需存储——
+##   全部序列化会把 .tscn 撑成上百 MB（历史上 734 万体素 → 137MB 的灾难即由此而来））。
+## 静态数据（无流 / 文件流）：数据只存在于内存（文件流磁盘为权威），序列化全部内存体素。
+func _serialize_voxels_for_storage() -> Array:
+	if stream is VoxelProceduralStream:
+		var keys := _collect_modified_chunk_keys()
 		if keys.is_empty():
 			return []
-		var voxel_list := []
-		for ck in keys:
-			var ck3: Vector3i = ck
-			var buf := _get_chunk_buffer_for_storage(ck3)
-			if buf.is_empty():
-				continue
-			var origin := VoxelChunk.origin_of(ck3)
-			for i in CHUNK_VOLUME:
-				if buf[i] > 0:
-					var p := origin + _local_from_index(i)
-					voxel_list.append([p.x, p.y, p.z, buf[i]])
-		return voxel_list
+		return _serialize_chunks_to_list(keys)
 	return _serialize_voxels()
 
 
@@ -1101,20 +1119,12 @@ func _serialize_all_voxels() -> Array:
 	var voxel_list := _serialize_voxels()
 	if stream == null:
 		return voxel_list
-	var seen := {}
-	for ck in _chunk_buffers:
-		seen[ck] = true
+	# 磁盘流（VoxelFileStream）：合并已持久化但不在内存的 chunk（临时加载，不污染内存缓存）
+	var extra: Array = []
 	for ck: Vector3i in _persisted_chunks:
-		if seen.has(ck):
-			continue
-		var buf := _load_chunk_from_stream(ck)
-		if buf.is_empty():
-			continue
-		var origin := VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				var p := origin + _local_from_index(i)
-				voxel_list.append([p.x, p.y, p.z, buf[i]])
+		if not _chunk_buffers.has(ck):
+			extra.append(ck)
+	voxel_list.append_array(_serialize_chunks_to_list(extra))
 	return voxel_list
 
 
