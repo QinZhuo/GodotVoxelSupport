@@ -221,8 +221,7 @@ static func generate_single_chunk_dense(
 	return result
 
 
-# LOD1 大块：32³ 大格（每大格 = 2³ 体素），覆盖 64³ 体素 = 4×4×4 LOD0 chunk。
-# 一次性生成整个大块网格（godot_voxel 风格大 block），降低 draw calls，无"小块合并"开销。
+# LOD1 大块：32³ 大格（每大格 = 2³ 体素），覆盖 64³ 体素 = 2×2×2 LOD0 chunk（CHUNK_SIZE=32 时）。
 const LOD1_BLOCK_SIZE := 32
 const LOD1_BLOCK_HALO := 1
 const LOD1_BLOCK_HALO_SIZE := LOD1_BLOCK_SIZE + LOD1_BLOCK_HALO * 2
@@ -238,20 +237,22 @@ static func build_lod1_block_halo_from_buffers(buffers: Dictionary, block_key: V
 	# GDScript 兜底（旧原生库/无原生时）
 	var halo := PackedInt32Array()
 	halo.resize(LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE)
-	# 中心 32³：大块覆盖 4×4×4 chunk，每 chunk 8³ 大格
-	var base_chunk := block_key * 4
-	for cz in 4:
-		for cy in 4:
-			for cx in 4:
+	# 中心 32³：大块覆盖 2×2×2 chunk，每 chunk 16³ 大格（CHUNK_SIZE 自适应）
+	var sub_per_chunk := VoxelChunk.CHUNK_SIZE / 2
+	var chunks_per_block := LOD1_BLOCK_SIZE / sub_per_chunk
+	var base_chunk := block_key * chunks_per_block
+	for cz in chunks_per_block:
+		for cy in chunks_per_block:
+			for cx in chunks_per_block:
 				var ck := base_chunk + Vector3i(cx, cy, cz)
 				var cbuf: PackedInt32Array = buffers.get(ck, PackedInt32Array())
 				if cbuf.is_empty():
 					continue
-				for lz8 in 8:
+				for lz8 in sub_per_chunk:
 					var bz := lz8 * 2
-					for ly8 in 8:
+					for ly8 in sub_per_chunk:
 						var by := ly8 * 2
-						for lx8 in 8:
+						for lx8 in sub_per_chunk:
 							var bx := lx8 * 2
 							var mat := 0
 							for dz in 2:
@@ -265,9 +266,9 @@ static func build_lod1_block_halo_from_buffers(buffers: Dictionary, block_key: V
 										break
 								if mat > 0:
 									break
-							var lx := cx * 8 + lx8
-							var ly := cy * 8 + ly8
-							var lz := cz * 8 + lz8
+							var lx := cx * sub_per_chunk + lx8
+							var ly := cy * sub_per_chunk + ly8
+							var lz := cz * sub_per_chunk + lz8
 							halo[(1 + lx) + (1 + ly) * LOD1_BLOCK_HALO_SIZE + (1 + lz) * LOD1_BLOCK_HALO_SIZE * LOD1_BLOCK_HALO_SIZE] = mat
 	# 6 外缘面：相邻大块边界 1 大格层（降采样 2³ 体素）
 	var dirs: Array[Vector3i] = [
@@ -311,7 +312,7 @@ static func _fill_lod1_block_face(halo: PackedInt32Array, buffers: Dictionary, n
 							nbk.x * 64 + ((fix_grid * 2 + df) if face == 0 else (lu * 2 + du)),
 							nbk.y * 64 + ((fix_grid * 2 + df) if face == 1 else (lv * 2 + dv)),
 							nbk.z * 64 + ((fix_grid * 2 + df) if face == 2 else (lv * 2 + dv)))
-						var ck := Vector3i(vox.x >> 4, vox.y >> 4, vox.z >> 4)
+						var ck := Vector3i(vox.x >> VoxelChunk.CHUNK_SHIFT, vox.y >> VoxelChunk.CHUNK_SHIFT, vox.z >> VoxelChunk.CHUNK_SHIFT)
 						var cbuf: PackedInt32Array = buffers.get(ck, PackedInt32Array())
 						if not cbuf.is_empty():
 							var local := Vector3i(vox.x - ck.x * CHUNK_SIZE, vox.y - ck.y * CHUNK_SIZE, vox.z - ck.z * CHUNK_SIZE)

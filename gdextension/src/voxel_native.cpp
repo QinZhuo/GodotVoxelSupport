@@ -82,7 +82,8 @@ Dictionary VoxelNative::greedy_merge_dense(PackedInt32Array p_grid, int width, i
 
 namespace {
 
-constexpr int CHUNK_SIZE = 16;
+constexpr int CHUNK_SIZE = 32;
+constexpr int CHUNK_SHIFT = 5;   // 2^5 = 32（chunk_of 算术右移）
 constexpr int CHUNK_SLICE = CHUNK_SIZE * CHUNK_SIZE;
 constexpr int HALO = 1;
 constexpr int HALO_SIZE = CHUNK_SIZE + HALO * 2;
@@ -381,28 +382,32 @@ PackedInt32Array VoxelNative::build_halo_from_buffers(const Dictionary &buffers,
 }
 
 PackedInt32Array VoxelNative::build_lod1_block_halo_from_buffers(const Dictionary &buffers, const Vector3i &block_key) {
-	// 构建 LOD1 大块(32³ 大格)的 34³ halo：中心 32³ 大格（每格 = 2³ 体素，从 4×4×4 chunk 降采样）
-	// + 6 外缘面（相邻大块边界 1 大格层）。下沉 C++ 替代 GDScript 逐体素循环。
+	// 构建 LOD1 大块(32³ 大格)的 34³ halo：中心 32³ 大格（每格 = 2³ 体素，从 2×2×2 chunk 降采样）
+	// + 6 外缘面（相邻大块边界 1 大格层）。CHUNK_SIZE 自适应：
+	//   CHUNK_SIZE=16 → block 覆盖 4×4×4 chunk；CHUNK_SIZE=32 → 2×2×2 chunk（体素 64³ 不变）。
 	constexpr int BS = 32;       // 大块大格边长
 	constexpr int HS = BS + 2;   // halo 边长
+	constexpr int BLOCK_VOXELS = BS * 2;  // 大块体素边长（恒 64）
+	constexpr int SUB_PER_CHUNK = CHUNK_SIZE / 2;           // 每 chunk 大格数（16@32）
+	constexpr int CHUNKS_PER_BLOCK = BS / SUB_PER_CHUNK;    // block 覆盖 chunk 数（2@32）
 	PackedInt32Array halo;
 	halo.resize(HS * HS * HS);
 	// 中心 32³
-	const Vector3i base_chunk = block_key * 4;
-	for (int cz = 0; cz < 4; ++cz) {
-		for (int cy = 0; cy < 4; ++cy) {
-			for (int cx = 0; cx < 4; ++cx) {
+	const Vector3i base_chunk = block_key * CHUNKS_PER_BLOCK;
+	for (int cz = 0; cz < CHUNKS_PER_BLOCK; ++cz) {
+		for (int cy = 0; cy < CHUNKS_PER_BLOCK; ++cy) {
+			for (int cx = 0; cx < CHUNKS_PER_BLOCK; ++cx) {
 				const Vector3i ck(base_chunk.x + cx, base_chunk.y + cy, base_chunk.z + cz);
 				if (!buffers.has(ck)) continue;
 				PackedInt32Array buf = buffers[ck];
 				if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) continue;
 				const int32_t *b = buf.ptr();
-				for (int lz8 = 0; lz8 < 8; ++lz8) {
-					for (int ly8 = 0; ly8 < 8; ++ly8) {
-						for (int lx8 = 0; lx8 < 8; ++lx8) {
-							const int lx = cx * 8 + lx8;
-							const int ly = cy * 8 + ly8;
-							const int lz = cz * 8 + lz8;
+				for (int lz8 = 0; lz8 < SUB_PER_CHUNK; ++lz8) {
+					for (int ly8 = 0; ly8 < SUB_PER_CHUNK; ++ly8) {
+						for (int lx8 = 0; lx8 < SUB_PER_CHUNK; ++lx8) {
+							const int lx = cx * SUB_PER_CHUNK + lx8;
+							const int ly = cy * SUB_PER_CHUNK + ly8;
+							const int lz = cz * SUB_PER_CHUNK + lz8;
 							int mat = 0;
 							for (int dz = 0; dz < 2; ++dz) {
 								for (int dy = 0; dy < 2; ++dy) {
@@ -439,10 +444,10 @@ PackedInt32Array VoxelNative::build_lod1_block_halo_from_buffers(const Dictionar
 				for (int dv = 0; dv < 2; ++dv) {
 					for (int du = 0; du < 2; ++du) {
 						for (int df = 0; df < 2; ++df) {
-							const int vx = nbk.x*64 + ((face == 0) ? (fix_grid*2+df) : (lu*2+du));
-							const int vy = nbk.y*64 + ((face == 1) ? (fix_grid*2+df) : (lv*2+dv));
-							const int vz = nbk.z*64 + ((face == 2) ? (fix_grid*2+df) : (lv*2+dv));
-							const Vector3i ck(vx>>4, vy>>4, vz>>4);
+							const int vx = nbk.x*BLOCK_VOXELS + ((face == 0) ? (fix_grid*2+df) : (lu*2+du));
+							const int vy = nbk.y*BLOCK_VOXELS + ((face == 1) ? (fix_grid*2+df) : (lv*2+dv));
+							const int vz = nbk.z*BLOCK_VOXELS + ((face == 2) ? (fix_grid*2+df) : (lv*2+dv));
+							const Vector3i ck(vx>>CHUNK_SHIFT, vy>>CHUNK_SHIFT, vz>>CHUNK_SHIFT);
 							if (!buffers.has(ck)) continue;
 							PackedInt32Array buf = buffers[ck];
 							if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) continue;
@@ -472,16 +477,16 @@ PackedInt32Array VoxelNative::build_lod1_block_halo_from_buffers(const Dictionar
 
 namespace {
 
-constexpr int CHUNK_BITS = 16;  // chunk 边长（体素）
+constexpr int CHUNK_BITS = 32;  // chunk 边长（体素）
 
 // 体素坐标 -> chunk key（向下取整，正确处理负坐标）
-// CHUNK_SIZE=16=2⁴ → 用算术右移替代 std::floor(double/16)，热路径零浮点开销。
-// C++ 有符号右移为算术右移（向负无穷），与 std::floor(double(x)/16) 语义一致。
+// CHUNK_SIZE=32=2⁵ → 用算术右移替代 std::floor(double/32)，热路径零浮点开销。
+// C++ 有符号右移为算术右移（向负无穷），与 std::floor(double(x)/32) 语义一致。
 inline Vector3i chunk_of(const Vector3i &pos) {
 	return Vector3i(
-			pos.x >> 4,
-			pos.y >> 4,
-			pos.z >> 4);
+			pos.x >> 5,
+			pos.y >> 5,
+			pos.z >> 5);
 }
 
 // 体素坐标 -> 哈希键（合并 3 个 int32 为 1 个 uint64，替代 Vector3i 哈希）

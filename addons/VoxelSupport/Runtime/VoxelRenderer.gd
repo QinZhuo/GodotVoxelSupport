@@ -134,11 +134,11 @@ var _aligned_lod1_materials: Array = []
 ## 每帧最多生成的 LOD1 网格数（硬上限）
 @export_range(1, 50, 1) var _lod1_build_per_frame: int = 3
 
-# LOD1 大块（godot_voxel 风格大 block）：一次性生成 32³ 大格 = 4×4×4 LOD0 chunk = 64³ 体素。
-# 大块 key = LOD0 chunk >> 2。一次生成整个大块 mesh（原生 generate_lod1_block_dense），
-# 降低 draw calls，且无"小块生成后合并"的额外开销。
-const LOD1_BLOCK_SHIFT := 2
-const LOD1_BLOCK_EDGE := 16 << LOD1_BLOCK_SHIFT  # 64 体素
+# LOD1 大块（godot_voxel 风格大 block）：一次性生成 32³ 大格 = 2×2×2 LOD0 chunk = 64³ 体素。
+# 大块 key = LOD0 chunk >> 1（CHUNK_SIZE 自适应：32→2×2×2，16→4×4×4，体素 64³ 不变）。
+# 一次生成整个大块 mesh（原生 generate_lod1_block_dense），降低 draw calls。
+const LOD1_BLOCK_SHIFT := 1
+const LOD1_BLOCK_EDGE := VoxelChunk.CHUNK_SIZE << LOD1_BLOCK_SHIFT  # 64 体素
 const LOD1_BLOCK_SIZE := LOD1_BLOCK_EDGE >> 1    # 32 大格
 
 static func _lod1_block_of_chunk(ck: Vector3i) -> Vector3i:

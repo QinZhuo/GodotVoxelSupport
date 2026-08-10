@@ -523,16 +523,16 @@ func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, rebuild_chunks)
 
 
-## LOD1 大块（32³ 大格 = 4×4×4 chunk = 64³ 体素）异步生成快照：
-## 大块覆盖的 4×4×4 chunk + 外扩 2 层 chunk（halo 边界面需要），COW 共享。
+## LOD1 大块（32³ 大格 = 2×2×2 chunk = 64³ 体素）异步生成快照：
+## 大块覆盖的 2×2×2 chunk + 外扩 2 层 chunk（halo 边界面需要），COW 共享。
 ## 仅 preload 大块自身 chunk（必须）；外部从内存快照（LOD1 区数据保留，磁盘不 preload）。
 func snapshot_lod1_block_chunks(block_key: Vector3i) -> Dictionary:
 	var cks: Array[Vector3i] = []
 	var seen := {}
-	var base := block_key * 4
-	for cz in 4:
-		for cy in 4:
-			for cx in 4:
+	var base := block_key * 2
+	for cz in 2:
+		for cy in 2:
+			for cx in 2:
 				var ck := base + Vector3i(cx, cy, cz)
 				cks.append(ck)
 				seen[ck] = true
