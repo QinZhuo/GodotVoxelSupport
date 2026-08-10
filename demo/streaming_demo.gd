@@ -93,7 +93,6 @@ func _rebuild_world() -> void:
 ## 渲染器公共配置（两种模式共用同一套 LOD/流式/破坏参数）
 func _apply_renderer_config() -> void:
 	_target.voxel_scale = voxel_scale
-	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 	_target.view_distance = view_distance
 	_target.unload_distance = unload_distance

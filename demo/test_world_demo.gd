@@ -159,7 +159,6 @@ func _build_target() -> void:
 		data = _create_test_world_data()
 	_target.data = data
 	_target.voxel_scale = voxel_scale
-	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	_target.visibility_mode = _visibility_mode()
 	_target.view_distance = view_distance
 	_target.unload_distance = unload_distance

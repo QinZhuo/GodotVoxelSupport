@@ -217,8 +217,6 @@ func _build_target() -> void:
 func _configure_target(data: VoxelData) -> void:
 	_target.data = data
 	_target.voxel_scale = voxel_scale
-	# 网格模式：逐 chunk + 后台线程并行（推荐默认）
-	_target.mesh_mode = VoxelRenderer.MeshMode.CHUNK_ASYNC
 	_target.spawn_debris_on_damage = true
 	_target.max_debris_per_hit = 40
 	# 碎片系统已改为纯粒子实现，无物理碰撞体

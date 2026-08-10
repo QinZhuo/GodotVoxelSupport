@@ -10,12 +10,6 @@ extends MeshInstance3D
 signal mesh_updated
 
 ## 网格生成模式
-enum MeshMode {
-	GLOBAL_MESH,  ## 所有体素合并为一个 ArrayMesh（适合中小场景，变更时全量重建）
-	CHUNK_SYNC,   ## 逐 chunk 网格，主线程同步生成（体素变化只重建受影响 chunk）
-	CHUNK_ASYNC,  ## 逐 chunk 网格，后台线程并行生成（推荐：主线程不阻塞，大型场景性能最佳）
-}
-
 ## 可见性管理模式（决定哪些 chunk 生成网格）
 enum VisibilityMode {
 	FULL,      ## 全量生成所有 chunk（简单，适合中小世界，内存随世界线性增长）
@@ -53,16 +47,6 @@ enum VisibilityMode {
 ## 重建限流帧数：一帧内多次数据变化会被合并，最多每 N 帧重建一次 mesh
 ## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
 @export_range(1, 30) var update_throttle_frames: int = 1
-
-## 网格生成模式（当前唯一路径 CHUNK_ASYNC：逐 chunk 后台线程并行生成）
-## 保留枚举与 setter 以兼容外部配置；GLOBAL_MESH/CHUNK_SYNC 内部路径已移除。
-@export var mesh_mode: MeshMode = MeshMode.CHUNK_ASYNC:
-	set(v):
-		mesh_mode = v
-		if v != MeshMode.CHUNK_ASYNC:
-			_cancel_async()
-		_clear_lod0_meshes()
-		_request_update()
 
 ## 可见性管理模式（统一视锥剔除与流式加载）
 ## - FULL     ：全量生成所有 chunk（中小世界）
@@ -317,11 +301,12 @@ func _process(_delta: float) -> void:
 	# 补建标脏会在批次完成后统一重建（retrigger），不会丢失。
 	if visibility_mode != VisibilityMode.FULL:
 		_process_deferred_chunks()
-	if _streaming_enabled:
-		if data and data.stream is VoxelProceduralStream:
-			_process_procedural()   # 程序化流：按距离确保数据(生成) + origin shift
-		else:
-			_process_streaming()    # 磁盘流式：_streamed_out_chunks 驱动
+	if data and data.stream is VoxelProceduralStream:
+		# 程序化无限世界：总是按距离生成（不依赖 visibility_mode——无限世界只能按距离
+		# 生成，设 FULL/FRUSTUM 若走原分支会导致数据永不生成 → 画面空白）
+		_process_procedural()
+	elif _streaming_enabled:
+		_process_streaming()    # 磁盘流式：_streamed_out_chunks 驱动
 	# LOD1 低分辨率大块管理：每 interval 帧限量生成/移除（降低每帧遍历开销，
 	# 近处 LOD0 / 远处 LOD1 互补）；数据变化（破坏/编辑）由 get_invalidated_lod1 即时重建
 	_cull_check_counter += 1
@@ -748,10 +733,10 @@ func _process_procedural() -> void:
 	_check_origin_shift(cam)
 	var stream := data.stream as VoxelProceduralStream if data else null
 	# 1) 回填后台已生成的 chunk（ensure 与 halo/LOD1 经 preload_chunk 提交的都会回填，
-	#    避免 async_results 堆积导致数据供给停滞）
+	#    避免 async_results 堆积导致数据供给停滞；poll 批量放大以消化 halo 提交的大量任务）
 	var applied := 0
 	if stream:
-		var results := stream.poll_all_ready(_stream_load_per_frame)
+		var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 4, 64))
 		for r in results:
 			var ck: Vector3i = r[0]
 			var buf: PackedInt32Array = r[1]
@@ -1209,10 +1194,10 @@ func _update_mesh_async() -> void:
 	_pending_task_count = 0
 
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
-	# 将 mesh_mode 和 voxel_scale 作为参数传入，避免子线程访问节点属性
+	# 将 voxel_scale 等渲染参数作为任务参数传入，避免子线程访问节点属性
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
-	# per-chunk 异步生成（唯一路径；GLOBAL_MESH 单块模式已移除简化）
+	# per-chunk 异步生成（唯一网格路径）
 	if rebuild_chunks.is_empty():
 		# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
 		var all_chunks := data.get_all_chunk_keys()
