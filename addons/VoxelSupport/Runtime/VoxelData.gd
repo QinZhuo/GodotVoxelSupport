@@ -51,6 +51,10 @@ extends Resource
 		_persisted_chunks.clear()
 		# 注：不清空 _dirty_chunks —— 内存中未写盘的数据是"新数据"，切换流后
 		# 仍需持久化（卸载时写盘到新流）。只有 _persisted_chunks 从新流重建。
+		# 程序化流：把本数据层的 grid_size（体素世界尺寸）同步给流做有限范围限制。
+		# 流按此 AABB 只生成世界范围内 chunk（地面矩形地图）；无限流传 ZERO 自动关闭。
+		if stream is VoxelProceduralStream:
+			(stream as VoxelProceduralStream).set_grid_size(grid_size)
 		if stream != null:
 			for ck in stream.get_all_chunk_keys():
 				_persisted_chunks[ck] = true

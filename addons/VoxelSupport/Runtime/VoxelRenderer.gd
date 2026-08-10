@@ -770,11 +770,15 @@ func _process_procedural() -> void:
 			_procedural_pending.erase(ck)
 			applied += 1
 	# 2) 距离内提交异步生成任务（限量每帧；后台线程生成，主线程只提交）
+	# 【性能】扫描降频：全球体扫描（O((2r+1)³) 的 distance_to）不是每帧必要，
+	# 相机不动时结果不变。每 visibility_check_interval 帧全扫一次，中间帧只回填
+	# 已生成结果（poll_all_ready）。对多渲染器大场景（16 建筑 + 地表）每帧开销显著。
+	var _scan_this_frame := _streaming_check_tick % visibility_check_interval == 0
 	var r := ceili(load_d / chunk_size_world) + 1
 	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
 	var submitted := 0
 	var exhausted := false
-	if stream:
+	if stream and _scan_this_frame:
 		for dz in range(-r, r + 1):
 			if exhausted:
 				break
@@ -786,6 +790,11 @@ func _process_procedural() -> void:
 						exhausted = true
 						break
 					var ck := cam_ck + Vector3i(dx, dy, dz)
+					# 有限模板程序化流（如建筑）：只对"属于该世界"的 chunk 提交生成。
+					# 无限世界流 has_chunk 恒 true（无影响）；有限模板流覆写 has_chunk
+					# 只对覆盖范围返回 true，蓝图外 chunk 直接跳过，避免生成海量空 chunk。
+					if stream and not stream.has_chunk(ck):
+						continue
 					if data.has_chunk(ck):
 						continue
 					if _procedural_pending.has(ck):

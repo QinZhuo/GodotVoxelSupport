@@ -1,3 +1,4 @@
+@tool
 @abstract
 class_name VoxelProceduralStream
 extends VoxelStream
@@ -10,6 +11,8 @@ extends VoxelStream
 ##   - 用户破坏的 chunk：save_chunk 记录修改，覆盖程序化数据
 ##   - 可选 persist_directory：修改的 chunk 复用 VoxelFileStream 写盘，重启保留破坏
 ##   - get_all_chunk_keys：只枚举修改的（无限世界不枚举程序化全部）
+##   - 有限范围（矩形地图/建筑模板）：继承基类 VoxelStream 的范围限制能力，
+##     set_grid_size(AABB) / set_chunk_bounds(精确集合)，has_chunk 复用 is_in_generation_bounds
 ##
 ## 确定性要求：_generate_chunk 必须对同一 chunk_key 返回相同地形（如噪声 hash(chunk_key)），
 ## origin shift 平移 chunk key 后地形保持世界连续。
@@ -141,11 +144,6 @@ func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array) -> void:
 		_persisted_keys[chunk_key] = true
 
 
-## 无限世界任何 chunk 都可程序化生成（子类 _generate_chunk 覆写后）。
-func has_chunk(chunk_key: Vector3i) -> bool:
-	return true
-
-
 ## 移除 chunk（世界该处清空）：回退到程序化（清除修改记录）。
 func erase_chunk(chunk_key: Vector3i) -> void:
 	_modified.erase(chunk_key)
@@ -166,6 +164,7 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 
 
 ## 平移 chunk key（origin shift 用）：所有修改/缓存 key 加偏移，保持世界坐标连续性。
+## 范围限制同步平移（基类 shift_bounds），使有限范围随数据基准移动。
 func shift_origin(offset: Vector3i) -> void:
 	var new_modified: Dictionary = {}
 	for ck in _modified:
@@ -175,6 +174,13 @@ func shift_origin(offset: Vector3i) -> void:
 	for ck in _persisted_keys:
 		new_persisted[ck + offset] = true
 	_persisted_keys = new_persisted
+	shift_bounds(offset)
+
+
+## 该 chunk 是否属于本流可生成范围（复用具类 VoxelStream.is_in_generation_bounds）：
+##   无限世界流恒 true；矩形地图（AABB）O(1)；建筑（精确集合）查集合。
+func has_chunk(chunk_key: Vector3i) -> bool:
+	return is_in_generation_bounds(chunk_key)
 
 
 func flush() -> void:
