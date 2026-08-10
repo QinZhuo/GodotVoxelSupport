@@ -5,6 +5,14 @@ extends VoxelProceduralStream
 ## 示例程序化地形流子类（覆写虚基类 _generate_chunk 实现生成算法）。
 ## 用 FastNoiseLite 连续噪声（世界坐标）生成高度场地形，同 chunk_key 确定性地形。
 ## 高度用**绝对体素 y** 判断：任意 y 层 chunk 按世界高度填，地形跨层连续。
+##
+## 【地面底】只填充 [GROUND_FLOOR_VOXEL, 表面高度) 之间的体素：
+##   旧实现填充所有 wy < hi 的体素 → 地表以下为无限实心体，网格只生成顶面，
+##   从下方仰视时顶面被背面剔除、又无底面 → 全部"破面"透光。
+##   限定底部后，y == GROUND_FLOOR 处生成实心底面，从下方看到完整平面。
+
+## 地形底部（体素世界 y）：低于此值的体素不填充（下方为空气，形成实体地面底）
+const GROUND_FLOOR_VOXEL := 0
 
 static var _noise_h: FastNoiseLite = null
 static var _noise_det: FastNoiseLite = null
@@ -41,6 +49,7 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 			var hi := maxi(int(h), 2)
 			for y in VoxelChunk.CHUNK_SIZE:
 				var wy := base.y + y
-				if wy < hi:
+				# 只填充 [地面底, 表面) 区间：保证地形有实心底面，从下方看是完整平面
+				if wy >= GROUND_FLOOR_VOXEL and wy < hi:
 					buf[x + y * VoxelChunk.CHUNK_SIZE + z * VoxelChunk.CHUNK_SLICE] = 1
 	return buf
