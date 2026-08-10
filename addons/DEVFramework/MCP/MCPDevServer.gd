@@ -16,6 +16,10 @@ const SETTING_ENABLED := "dev_framework/mcp/enabled"
 const SETTING_PORT := "dev_framework/mcp/port"
 const SETTING_TOKEN := "dev_framework/mcp/token"
 const SETTING_MAX_MESSAGES := "dev_framework/mcp/max_messages"
+const SETTING_MAX_OUTPUT_CHARS := "dev_framework/mcp/max_output_chars"
+
+## 统一输出上限默认值(字符)。所有工具返回的 text 字段超过此值即转为明确错误提示, 防上下文/token 被撑爆。
+const DEFAULT_MAX_OUTPUT_CHARS := 90000
 
 ## 输出给 AI 的核心属性白名单(过滤编辑器内部数百项属性, 控制上下文开销)
 const CORE_PROP_NAMES := ["name", "position", "scale", "rotation", "rotation_degrees", "visible", "modulate", "process_mode", "z_index", "text", "color"]
@@ -99,6 +103,8 @@ func _call_runtime_tool_async(req_id: int, tool_name: String, args: Dictionary) 
 		result = await _tool_handlers[tool_name].call(args)
 	else:
 		result = _fail("未知运行时工具: %s" % tool_name)
+	# 统一输出上限: 与编辑器进程一致, 超限转明确错误提示后再回发(避免调试线承载巨型载荷)。
+	result = _enforce_output_cap(tool_name, result)
 	EngineDebugger.send_message(DEBUGGER_PREFIX + ":result", [req_id, result])
 
 
@@ -271,18 +277,20 @@ func _register_validate_tools() -> void:
 ## -- 日志/错误 --
 func _register_log_tools() -> void:
 	_add_tool("get_logs",
-		"获取print/printerr日志, 含时间戳/错误流。返回next游标, 增量用其作since避免重复。游戏运行时返回游戏日志, 否则编辑器日志。",
+		"获取print/printerr日志, 含时间戳/错误流。返回next游标, 增量用其作since避免重复。连续重复的同内容日志自动合并为一条(repeat 计数)以节省token。游戏运行时返回游戏日志, 否则编辑器日志。",
 		{"type": "object", "properties": {
-			"max": {"type": "integer", "description": "最多返回条数, 默认 200"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"}
+			"max": {"type": "integer", "description": "最多返回条数(合并后), 默认 200"},
+			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"},
+			"merge": {"type": "boolean", "description": "是否合并连续重复日志, 默认 true"}
 		}},
 		_call_get_logs)
 
 	_add_tool("get_errors",
-		"获取捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。游戏运行时返回游戏错误, 否则编辑器错误。",
+		"获取捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。连续重复的同位置错误自动合并为一条(repeat 计数)以节省token。游戏运行时返回游戏错误, 否则编辑器错误。",
 		{"type": "object", "properties": {
-			"max": {"type": "integer", "description": "最多返回条数, 默认 100"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"}
+			"max": {"type": "integer", "description": "最多返回条数(合并后), 默认 100"},
+			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"},
+			"merge": {"type": "boolean", "description": "是否合并连续重复错误, 默认 true"}
 		}},
 		_call_get_errors)
 
@@ -423,10 +431,9 @@ func _register_dev_tools() -> void:
 ## -- 文件操作 --
 func _register_file_tools() -> void:
 	_add_tool("read_file",
-		"读取文件内容。支持res://和user://。返回内容与大小。",
+		"读取文件内容(UTF-8)。返回内容与大小。",
 		{"type": "object", "properties": {
-			"path": {"type": "string", "description": "文件路径(res:// 或 user://)"},
-			"encoding": {"type": "string", "description": "编码方式, 默认 utf-8, 可选: utf-8, gbk, gb2312"}
+			"path": {"type": "string", "description": "文件路径(res:// 或 user://)"}
 		}, "required": ["path"]},
 		_call_read_file)
 
@@ -565,6 +572,8 @@ func _handle_jsonrpc(req: Dictionary) -> Dictionary:
 				return _jsonrpc_error(req_id, -32602, "Unknown tool: %s" % tool_name)
 			# 安全执行: 隔离 handler 运行期错误, 避免 GDScript 无 try/catch 导致协程中止、响应永不发出
 			var result := await _safe_call_handler(_tool_handlers[tool_name], arguments)
+			# 统一输出上限: 超限转明确错误提示, 避免巨型响应撑爆上下文/拷贝缓冲
+			result = _enforce_output_cap(tool_name, result)
 			if result.is_empty():
 				return _jsonrpc_error(req_id, -32603, "Internal error: 工具执行未返回结果")
 			# 记录返回信息到 MCP 日志, 便于诊断"返回异常/空"等问题。仅打印非原始数据
@@ -588,7 +597,7 @@ func _jsonrpc_error(req_id: Variant, code: int, message: String) -> Dictionary:
 ## 但参数类型防护(见 tools/call)已消除最常见的崩溃源; 此处负责把"执行中 push_error 但没崩"的
 ## 可恢复错误带上诊断文本返回, 并保证返回空字典时向上层报 internal error 而非无响应。
 func _safe_call_handler(handler: Callable, arguments: Dictionary) -> Dictionary:
-	var err_before: int = _logger.get_error_count() if _logger else 0
+	var err_before: int = _logger.get_error_cursor() if _logger else 0
 	var result: Variant = await handler.call(arguments)
 	if not (result is Dictionary):
 		return {}
@@ -617,6 +626,25 @@ func _collect_runtime_error(err_before: int) -> String:
 	var ln := str(e.get("line", ""))
 	var fn := str(e.get("function", ""))
 	return "%s  (%s:%s %s)" % [msg, f, ln, fn]
+
+
+## 统一输出上限: 所有工具(编辑器进程与游戏进程)的返回 text 不得超过上限字符。
+## 超限时不发送完整巨型 JSON, 而是返回明确错误提示(附体积与应对建议), 避免上下文/token 被撑爆。
+## 上限实时读 ProjectSettings(dev_framework/mcp/max_output_chars), 改设置无需重启即生效;
+## <=0 表示关闭上限。
+## 注意: 游标类工具(get_logs/get_errors)超限会丢失 next, AI 应调低 max/加 since 分页重试以恢复游标。
+func _enforce_output_cap(tool_name: String, result: Dictionary) -> Dictionary:
+	var cap := int(ProjectSettings.get_setting(SETTING_MAX_OUTPUT_CHARS, DEFAULT_MAX_OUTPUT_CHARS))
+	if cap <= 0:
+		return result
+	var text := str(result.get("text", ""))
+	if text.length() <= cap:
+		return result
+	# 用字符串拼接而非 % 格式化, 避免任何格式化歧义(括号包住以保证多行续行被正确解析)
+	var msg := ("工具 " + tool_name + " 返回内容超过统一输出上限(" + str(cap) + " 字符, 实际 " + str(text.length()) +
+		" 字符), 为避免耗尽上下文, 未发送完整内容。\n开头预览: " + text.left(200) +
+		"\n\n应对: 用更精确参数缩小范围后重试(如 get_logs/get_errors 调低 max 或传 since; read_file 先确认文件大小; classdb_query 用更具体类名; list_dir 关闭 recursive; get_scene_tree 减小 max_depth)。")
+	return _err(msg, "validation", true, "按提示用更精确参数(参考各工具的 max/since/merge 等)缩小范围后重试")
 
 
 ## 把工具调用结果摘要记录到 MCP 日志, 便于诊断"返回异常/空"等问题。
@@ -772,14 +800,11 @@ func _make_tmp_script(code: String) -> GDScript:
 
 ## 编译临时脚本并收集时的新增错误/警告。返回 {"real_errors", "warnings"}。
 func _compile_and_collect(script: GDScript) -> Dictionary:
-	var n0: int = _logger.get_error_count() if _logger else 0
+	var n0: int = _logger.get_error_cursor() if _logger else 0
 	script.reload()
 	var new_errs: Array = []
 	if _logger:
-		var all_entries: Array = _logger.take_errors_since(0).entries
-		var added: int = all_entries.size() - n0
-		if added > 0:
-			new_errs = all_entries.slice(maxi(0, all_entries.size() - added))
+		new_errs = _logger.take_errors_since(n0).entries
 	var real: Array = []
 	var warns: Array = []
 	for e in new_errs:
@@ -1027,53 +1052,69 @@ func _collect_dir(base: String, dirs: Array, files: Array) -> void:
 
 
 func _call_get_logs(args: Dictionary) -> Dictionary:
+	# 编辑器模式且游戏调试线活跃: 真正取游戏日志(兑现 get_logs "游戏运行时返回游戏日志" 的描述)。
+	if _mode == MODE_EDITOR and debugger_plugin != null and debugger_plugin.has_active_session():
+		return await _call_runtime_proxy("get_game_logs", args)
 	if _logger == null:
 		return _fail("日志捕获器未就绪")
 	var max: int = int(args.get("max", 200))
 	# since: 上次拉取返回的 next 游标, 增量拉取新日志以节省上下文(token)。默认 0 = 全量。
 	var since: int = int(args.get("since", 0))
+	# merge: 连续重复的同内容日志合并为一条(repeat 计数), 减少 token。默认 true。
+	var merge: bool = args.get("merge", true)
 	var result: Dictionary = _logger.take_logs_since(since)
-	var entries: Array = result.entries
-	var out: Array = []
-	var start := maxi(0, entries.size() - max)
-	for i in range(start, entries.size()):
-		var e: Dictionary = entries[i]
-		var clean: Dictionary = e.duplicate()
-		clean.message = _logger.sanitize(str(e.message))
-		out.append(clean)
+	var clean: Array = []
+	for e in result.entries:
+		var c: Dictionary = e.duplicate()
+		c.message = _logger.sanitize(str(e.message))
+		clean.append(c)
+	var merged: Array = _logger.merge_duplicates(clean) if merge else clean
+	var start := maxi(0, merged.size() - max)
+	var out: Array = merged.slice(start)
 	return _ok_json({
 		"count": out.size(),
 		"logs": out,
 		"next": int(result.get("next", 0)),
-		"hint": "将 next 作为下次调用的 since 参数即可只取新增日志",
+		"total_raw": clean.size(),
+		"hint": "将 next 作为下次调用的 since 参数即可只取新增日志。连续重复的同内容日志已合并为一条并带 repeat 计数, 可用 merge=false 关闭合并。",
 	})
 
 
 func _call_get_errors(args: Dictionary) -> Dictionary:
+	# 编辑器模式且游戏调试线活跃: 真正取游戏错误。
+	if _mode == MODE_EDITOR and debugger_plugin != null and debugger_plugin.has_active_session():
+		return await _call_runtime_proxy("get_game_errors", args)
 	if _logger == null:
 		return _fail("错误捕获器未就绪")
 	var max: int = int(args.get("max", 100))
 	var since: int = int(args.get("since", 0))
+	# merge: 连续重复的同位置错误(message/type/file/line/code 全部相同)合并为一条, 默认 true。
+	var merge: bool = args.get("merge", true)
 	var result: Dictionary = _logger.take_errors_since(since)
-	var out: Array = result.entries.duplicate()
+	var clean: Array = []
+	for e in result.entries:
+		var c: Dictionary = e.duplicate(true)
+		if c.has("message"):
+			c.message = _logger.sanitize(str(c.message))
+		clean.append(c)
+	var merged: Array = _logger.merge_duplicates(clean) if merge else clean
+	var out: Array = merged
 	if out.size() > max:
 		out = out.slice(out.size() - max)
-	var cleaned: Array = []
-	for e in out:
-		var clean: Dictionary = e.duplicate()
-		if clean.has("message"):
-			clean.message = _logger.sanitize(str(clean.message))
-		cleaned.append(clean)
 	return _ok_json({
-		"count": cleaned.size(),
-		"errors": cleaned,
+		"count": out.size(),
+		"errors": out,
 		"next": int(result.get("next", 0)),
 		"cleared": bool(result.get("cleared", false)),
-		"hint": "将 next 作为下次调用的 since 参数即可只取新增错误",
+		"total_raw": clean.size(),
+		"hint": "将 next 作为下次调用的 since 参数即可只取新增错误。连续重复的同位置错误已合并为一条并带 repeat 计数, 可用 merge=false 关闭合并。",
 	})
 
 
 func _call_clear_errors(_args: Dictionary) -> Dictionary:
+	# 编辑器模式且游戏调试线活跃: 清游戏错误(与 _call_get_errors 的"游戏优先"一致)。
+	if _mode == MODE_EDITOR and debugger_plugin != null and debugger_plugin.has_active_session():
+		return await _call_runtime_proxy("clear_game_errors", _args)
 	if _logger:
 		_logger.clear_errors()
 	return _ok("已清空错误缓冲区")
@@ -1533,8 +1574,8 @@ func _call_eval_code(args: Dictionary) -> Dictionary:
 			hint = " (class_name 与全局类冲突: 请勿在 eval_code 中声明类, 或先 reload_project)"
 		return _err("代码解析失败: %s%s\n解析详情已输出到编辑器控制台, 可用 get_logs 查看。" % [text, hint],
 			"validation", false, "修正代码后重新调用 eval")
-	# 执行前记录错误缓冲区位置, 以便捕获本次 eval 运行期错误
-	var err_before: int = _logger.get_error_count() if _logger else 0
+	# 执行前记录错误游标, 以便捕获本次 eval 运行期错误(用逻辑游标, 环形缓冲满后仍正确)
+	var err_before: int = _logger.get_error_cursor() if _logger else 0
 	var inst: Node = script.new()
 	if inst == null:
 		return _err("无法实例化求值脚本", "internal", false, "重新调用 eval, 或检查服务器日志")
@@ -1673,7 +1714,6 @@ func _call_reimport(args: Dictionary) -> Dictionary:
 
 func _call_read_file(args: Dictionary) -> Dictionary:
 	var path: String = str(args.get("path", ""))
-	var encoding: String = str(args.get("encoding", "utf-8"))
 	if path.is_empty():
 		return _fail("必须提供 path")
 	if not FileAccess.file_exists(path):
@@ -1681,18 +1721,14 @@ func _call_read_file(args: Dictionary) -> Dictionary:
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
 		return _fail("无法打开文件: %s (错误码: %d)" % [path, FileAccess.get_open_error()])
-	var content: String
-	if encoding.to_lower() == "gbk" or encoding.to_lower() == "gb2312":
-		var bytes := file.get_buffer(file.get_length())
-		content = bytes.get_string_from_utf8()
-	else:
-		content = file.get_as_text()
+	# 仅支持 UTF-8(引擎默认编码)。此前声明的 gbk/gb2312 实际未实现解码, 已移除以免误导。
+	var content := file.get_as_text()
 	var size := file.get_length()
 	file.close()
 	return _ok_json({
 		"path": path,
 		"size": size,
-		"encoding": encoding,
+		"encoding": "utf-8",
 		"content": content
 	})
 
@@ -2024,18 +2060,20 @@ func _register_runtime_tools() -> void:
 		_call_eval_code)
 
 	_add_tool("get_game_logs",
-		"获取游戏进程的日志(print/printerr)。返回next游标, 增量用其作since避免重复。",
+		"获取游戏进程的日志(print/printerr)。返回next游标, 增量用其作since避免重复。连续重复的同内容日志自动合并为一条(repeat 计数)以节省token。",
 		{"type": "object", "properties": {
-			"max": {"type": "integer", "description": "最多条数, 默认 200"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"}
+			"max": {"type": "integer", "description": "最多条数(合并后), 默认 200"},
+			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"},
+			"merge": {"type": "boolean", "description": "是否合并连续重复日志, 默认 true"}
 		}},
 		_call_get_logs)
 
 	_add_tool("get_game_errors",
-		"获取游戏进程捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。",
+		"获取游戏进程捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。连续重复的同位置错误自动合并为一条(repeat 计数)以节省token。",
 		{"type": "object", "properties": {
-			"max": {"type": "integer", "description": "最多条数, 默认 100"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"}
+			"max": {"type": "integer", "description": "最多条数(合并后), 默认 100"},
+			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"},
+			"merge": {"type": "boolean", "description": "是否合并连续重复错误, 默认 true"}
 		}},
 		_call_get_errors)
 
@@ -2319,18 +2357,20 @@ func _register_game_play_tools() -> void:
 		func(args): return await _call_game_eval_proxy(args))
 
 	_add_tool("get_game_logs",
-		"获取游戏进程日志(经调试线转发)。需先run_game。返回next游标,增量用其作since。",
+		"获取游戏进程日志(经调试线转发)。需先run_game。返回next游标,增量用其作since。连续重复的同内容日志自动合并为一条(repeat 计数)以节省token。",
 		{"type": "object", "properties": {
-			"max": {"type": "integer", "description": "最多条数, 默认 200"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"}
+			"max": {"type": "integer", "description": "最多条数(合并后), 默认 200"},
+			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的日志, 默认 0=全量"},
+			"merge": {"type": "boolean", "description": "是否合并连续重复日志, 默认 true"}
 		}},
 		func(args): return await _call_runtime_proxy("get_game_logs", args))
 
 	_add_tool("get_game_errors",
-		"获取游戏进程捕获的错误(经调试线转发)。需先run_game。返回next游标,增量用其作since。",
+		"获取游戏进程捕获的错误(经调试线转发)。需先run_game。返回next游标,增量用其作since。连续重复的同位置错误自动合并为一条(repeat 计数)以节省token。",
 		{"type": "object", "properties": {
-			"max": {"type": "integer", "description": "最多条数, 默认 100"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"}
+			"max": {"type": "integer", "description": "最多条数(合并后), 默认 100"},
+			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的错误, 默认 0=全量"},
+			"merge": {"type": "boolean", "description": "是否合并连续重复错误, 默认 true"}
 		}},
 		func(args): return await _call_runtime_proxy("get_game_errors", args))
 
@@ -2497,7 +2537,10 @@ func _precheck_eval_code(code: String) -> String:
 
 ## 静态扫描 eval 代码中被禁止的 API, 返回 "" 表示通过。
 ## 黑名单分两类: 精确成员访问(点号匹配) 与 危险类名(前缀匹配, 防绕过点号约束)。
-## 注意: 此扫描是"安全围栏", 不替代信任模型——eval 代码本身就能访问当前场景任意节点。
+## 注意: 此扫描是"事故防护围栏", 不替代信任模型——eval 代码本身就能访问当前场景任意节点。
+## 它拦不住有恶意意图的攻击者(AI 可换等价 API), 主要价值是防止"被提示注入诱导"的自动执行
+## 顺手触发危险副作用(删文件/发请求/弹 shell), 用一层廉价检查把事故概率压下去。
+## 若要强隔离必须把 eval 放进独立沙箱进程, 远超 GDScript 静态扫描的能力, 属设计取舍。
 const _EVAL_FORBIDDEN := [
 	# -- 精确成员访问(阻止系统/进程逃逸) --
 	["OS.execute", "调用系统命令"],
@@ -2508,6 +2551,7 @@ const _EVAL_FORBIDDEN := [
 	["DisplayServer.shell_open", "调用 shell"],
 	["Engine.get_main_loop", "绕过作用域访问主循环"],
 	["Engine.get_physics_frames", "读取引擎内部状态"],
+	["Engine.get_singleton", "获取 OS/DisplayServer 等单例以绕过点号黑名单"],
 	# -- 危险类名前缀(网络/文件/时间戳副作用) --
 	["HTTPRequest", "发起网络请求"],
 	["TCPServer", "监听网络端口"],

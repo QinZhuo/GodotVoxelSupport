@@ -241,6 +241,21 @@ sm.allow_self_transition(true)
 
 > 注意：`transition()` 是异步函数；适用于流程级状态管理，不用于海量短生命周期对象。
 
+### 4.6 ECS 高性能实体组件系统（`ECS/`）
+
+框架内置一套 **C++ 原生高性能 ECS**（SoA 列存储、签名增量视图、规则 DSL 批量运算、系统并行调度、生命周期钩子、Prefab / 序列化等），用于海量实体的数值逻辑与数据处理。与 Godot 场景节点配合：海量实体渲染直读、关键实体用 `Component` 桥接。
+
+```gdscript
+var world := ECSWorld.new()
+world.register_component(HealthComponent)
+var e := world.create_entity()
+world.add_component(e, HealthComponent)
+world.register_system(HealSystem.new())
+world.tick(delta)
+```
+
+**完整使用说明见 [`ECS/Readme.md`](ECS/Readme.md)**。
+
 ---
 
 ## 五、Tool 工具层

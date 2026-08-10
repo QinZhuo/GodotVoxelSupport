@@ -1,0 +1,65 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="ECSDebuggerView" type="VBoxContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="TopBar" type="HBoxContainer" parent="."]
+
+[node name="RefreshBtn" type="Button" parent="TopBar"]
+unique_name_in_owner = true
+text = "刷新"
+
+[node name="AutoCheck" type="CheckBox" parent="TopBar"]
+unique_name_in_owner = true
+text = "自动"
+button_pressed = true
+
+[node name="Split" type="HSplitContainer" parent="."]
+unique_name_in_owner = true
+size_flags_vertical = 3
+
+[node name="Left" type="VBoxContainer" parent="Split"]
+custom_minimum_size = Vector2(430, 0)
+
+[node name="SysTitle" type="Label" parent="Split/Left"]
+text = "每系统耗时 (ms)"
+theme_override_font_sizes/font_size = 14
+
+[node name="SysTree" type="Tree" parent="Split/Left"]
+unique_name_in_owner = true
+size_flags_vertical = 3
+columns = 6
+
+[node name="TopoLabel" type="Label" parent="Split/Left"]
+unique_name_in_owner = true
+autowrap_mode = 3
+
+[node name="Right" type="VBoxContainer" parent="Split"]
+
+[node name="EntityBar" type="HBoxContainer" parent="Split/Right"]
+
+[node name="EntityEdit" type="LineEdit" parent="Split/Right/EntityBar"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+placeholder_text = "实体 ID"
+
+[node name="ViewBtn" type="Button" parent="Split/Right/EntityBar"]
+unique_name_in_owner = true
+text = "查看"
+
+[node name="ESplit" type="HSplitContainer" parent="Split/Right"]
+size_flags_vertical = 3
+
+[node name="EntityList" type="Tree" parent="Split/Right/ESplit"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+
+[node name="Detail" type="VBoxContainer" parent="Split/Right/ESplit"]
+
+[node name="EntityTree" type="Tree" parent="Split/Right/ESplit/Detail"]
+unique_name_in_owner = true
+size_flags_vertical = 3
