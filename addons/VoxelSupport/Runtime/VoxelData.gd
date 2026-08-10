@@ -1035,7 +1035,7 @@ func notify_changed() -> void:
 # ----------------------------------------------------------------------------
 
 ## 序列化所有体素为 [[x, y, z, mat_id], ...]（统一材质契约：mat_id>=1，0=空 不存在）
-## 唯一权威的体素序列化器，供 save_data()（JSON 存档）与资源持久化（_get/_set）共用
+## 只序列化内存中的 chunk（资源持久化 / save_data 的基础序列化器）
 func _serialize_voxels() -> Array:
 	var voxel_list := []
 	for ck: Vector3i in _chunk_buffers:
@@ -1048,12 +1048,54 @@ func _serialize_voxels() -> Array:
 	return voxel_list
 
 
+## 序列化"需要随资源持久化"的体素（_get 存储专用）。
+## 程序化流：只序列化用户修改过的 chunk（_dirty_chunks 未写盘的 + stream 已持久化的修改）。
+##   未修改的 chunk 由 _generate_chunk 确定性生成、无需存储——全部序列化会把 .tscn 撑成
+##   上百 MB（历史上 734 万体素 → 137MB 的灾难即由此而来）。
+## 静态数据（无流 / 文件流）：数据只存在于内存（文件流磁盘为权威），序列化全部内存体素。
+func _serialize_voxels_for_storage() -> Array:
+	if stream is VoxelProceduralStream:
+		var proc: VoxelProceduralStream = stream
+		var keys := {}
+		for ck in _dirty_chunks:
+			keys[ck] = true
+		for ck in proc.get_all_chunk_keys():
+			keys[ck] = true
+		if keys.is_empty():
+			return []
+		var voxel_list := []
+		for ck in keys:
+			var ck3: Vector3i = ck
+			var buf := _get_chunk_buffer_for_storage(ck3)
+			if buf.is_empty():
+				continue
+			var origin := VoxelChunk.origin_of(ck3)
+			for i in CHUNK_VOLUME:
+				if buf[i] > 0:
+					var p := origin + _local_from_index(i)
+					voxel_list.append([p.x, p.y, p.z, buf[i]])
+		return voxel_list
+	return _serialize_voxels()
+
+
+## 取 chunk 缓冲（内存优先；未加载则从流读取——程序化流修改数据存于 stream._modified / 文件流）
+func _get_chunk_buffer_for_storage(chunk_key: Vector3i) -> PackedInt32Array:
+	var buf = _chunk_buffers.get(chunk_key)
+	if buf != null:
+		return buf
+	if stream != null:
+		return _load_chunk_from_stream(chunk_key)
+	return PackedInt32Array()
+
+
 ## 序列化所有体素（内存 + 磁盘流中已持久化的数据）。
 ## 流式模式下磁盘数据由 stream 管理，一次性全量存档时需合并；
 ## 磁盘部分临时加载，不污染内存缓存。
-## save_data()（显式存档）使用此完整版；资源持久化（_get）仍走 _serialize_voxels
-## （仅内存，避免编辑器保存触发海量 IO——流式数据本身就在磁盘上）。
+## 程序化流：未修改 chunk 可确定性重新生成，只序列化修改过的（磁盘为权威，与资源存储一致）。
+## save_data()（显式存档）使用此完整版；资源持久化（_get）走 _serialize_voxels_for_storage。
 func _serialize_all_voxels() -> Array:
+	if stream is VoxelProceduralStream:
+		return _serialize_voxels_for_storage()
 	var voxel_list := _serialize_voxels()
 	if stream == null:
 		return voxel_list
@@ -1087,6 +1129,15 @@ func _deserialize_voxels(voxel_list: Variant) -> void:
 # --- 资源持久化（编辑器导入 .vox 为 VoxelData 后，体素数据随资源保存/加载） ---
 # materials/grid_size/default_scale/center_offset/frame_count 已由 @export 持久化；
 # _chunk_buffers 非 @export，通过隐藏 storage 属性在此序列化（编辑器不可见，随资源保存）。
+#
+# 【防超大 .tscn 设计】双保险：
+#   1. 程序化流只序列化"用户修改过的 chunk"（未修改的可确定性重新生成）。
+#   2. 载荷整体 GZIP 压缩后 base64 存储（SaveTool 同款：var_to_bytes + COMPRESSION_GZIP），
+#      即使静态大模型数据也压缩到可接受体积。
+# 载荷格式固定为 GZIP 压缩（无旧版明文兼容，_decode_payload 见注释）。
+
+## 载荷压缩魔数（与 SaveTool 的 "GZIP" 头一致，用于识别压缩格式）
+const PAYLOAD_MAGIC := "GZIP"
 
 ## 声明隐藏的 storage 属性（PROPERTY_USAGE_STORAGE：不显示在编辑器，但随资源保存/加载）
 func _get_property_list() -> Array[Dictionary]:
@@ -1099,17 +1150,58 @@ func _get_property_list() -> Array[Dictionary]:
 
 func _get(property: StringName) -> Variant:
 	if property == &"voxel_data_payload":
-		return var_to_str({
-			"grid_size": [grid_size.x, grid_size.y, grid_size.z],
-			"voxels": _serialize_voxels(),
-		})
+		return _encode_payload()
 	return null
+
+
+## 编码资源载荷：{v, grid_size, voxels} → var_to_bytes → GZIP → base64 字符串。
+## 返回的是可写进 .tscn 的字符串；解码见 _decode_payload。
+func _encode_payload() -> String:
+	var data := {
+		"v": 2,
+		"grid_size": [grid_size.x, grid_size.y, grid_size.z],
+		"voxels": _serialize_voxels_for_storage(),
+	}
+	var raw := var_to_bytes(data)
+	var compressed := raw.compress(FileAccess.COMPRESSION_GZIP)
+	var out := PAYLOAD_MAGIC.to_utf8_buffer()
+	out.append_array(compressed)
+	return Marshalls.raw_to_base64(out)
+
+
+## 解码资源载荷：base64 → GZIP 解压 → 恢复 Dictionary。
+## 仅支持新版 GZIP 压缩格式（旧版 var_to_str 明文载荷不再兼容）。
+func _decode_payload(value: String) -> Variant:
+	if value.is_empty():
+		return null
+	# 新格式首字符必为 base64 字母表（[A-Za-z0-9]）；旧明文以 '{' 开头，直接报错不空转。
+	var c0 := value.unicode_at(0)
+	var is_b64 := (c0 >= 65 and c0 <= 90) or (c0 >= 97 and c0 <= 122) or (c0 >= 48 and c0 <= 57)
+	if not is_b64:
+		push_error("[VoxelData] voxel_data_payload 格式不受支持（旧版明文载荷已不再兼容，请重新导入/保存）")
+		return null
+	var raw := Marshalls.base64_to_raw(value)
+	if raw.size() < 4 or raw[0] != 0x47 or raw[1] != 0x5A:  # "GZ"
+		push_error("[VoxelData] voxel_data_payload 缺少 GZIP 压缩头，载荷无效")
+		return null
+	var decompressed := raw.slice(4).decompress_dynamic(-1, FileAccess.COMPRESSION_GZIP)
+	if decompressed.size() == 0:
+		return null
+	var data: Variant = bytes_to_var(decompressed)
+	return data if data is Dictionary else null
 
 
 func _set(property: StringName, value: Variant) -> bool:
 	if property == &"voxel_data_payload":
-		clear(false)
-		var payload: Variant = str_to_var(value)
+		# 只清内存缓冲，不动 stream 的磁盘持久化数据——场景加载时 stream 已先赋值，
+		# 若调 clear() 会走 stream.erase_chunk 误删磁盘上已持久化的修改 chunk。
+		_chunk_buffers.clear()
+		_chunk_voxel_counts.clear()
+		_voxel_count = 0
+		_dirty_chunks.clear()
+		_dirty_mesh_chunks.clear()
+		_lod1_invalidated.clear()
+		var payload: Variant = _decode_payload(str(value))
 		if payload is Dictionary:
 			var gs: Variant = payload.get("grid_size", [0, 0, 0])
 			if gs is Array and gs.size() >= 3:

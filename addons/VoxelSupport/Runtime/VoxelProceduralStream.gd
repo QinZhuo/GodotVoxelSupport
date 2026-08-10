@@ -163,6 +163,12 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 	return keys
 
 
+## 该 chunk 是否被用户修改过（破坏/编辑覆盖了程序化数据）。
+## 未修改的 chunk 由 _generate_chunk 确定性生成，无需序列化/持久化。
+func is_modified(chunk_key: Vector3i) -> bool:
+	return _modified.has(chunk_key)
+
+
 ## 平移 chunk key（origin shift 用）：所有修改/缓存 key 加偏移，保持世界坐标连续性。
 ## 范围限制同步平移（基类 shift_bounds），使有限范围随数据基准移动。
 func shift_origin(offset: Vector3i) -> void:

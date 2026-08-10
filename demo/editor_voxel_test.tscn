@@ -1,0 +1,66 @@
+[gd_scene format=3 uid="uid://dbyp02fd61ija"]
+
+[ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="1_renderer"]
+[ext_resource type="Resource" uid="uid://dwlsmke33vkb6" path="res://demo/deer_data.vox" id="2_deer"]
+[ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Runtime/VoxelMaterial.gd" id="4_rgb08"]
+[ext_resource type="Script" uid="uid://clnfkmvkg10qe" path="res://addons/VoxelSupport/Runtime/VoxelData.gd" id="5_ly2s3"]
+[ext_resource type="Script" uid="uid://bjoj5mqll8orw" path="res://demo/procedural_generator.gd" id="6_vmvxb"]
+
+[sub_resource type="Resource" id="Resource_w68vc"]
+script = ExtResource("4_rgb08")
+id = 1
+color = Color(0.35, 0.55, 0.3, 1)
+rough = 0.9
+
+[sub_resource type="Resource" id="Resource_lsd7j"]
+script = ExtResource("6_vmvxb")
+
+[sub_resource type="Resource" id="Resource_h5cn6"]
+script = ExtResource("5_ly2s3")
+materials = Array[ExtResource("4_rgb08")]([null, SubResource("Resource_w68vc")])
+stream = SubResource("Resource_lsd7j")
+voxel_data_payload = "R1pJUB+LCAAAAAAAAAqTZmBgYAZiFiBmBOIyIGaCYpAYJxCnF2WmxBdnVqUC2TJQ9SB5Biw0SA8byJz8itScYoh6EAAAViJTGWgAAAA="
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
+sky_top_color = Color(0.15, 0.2, 0.3, 1)
+sky_horizon_color = Color(0.5, 0.55, 0.6, 1)
+ground_bottom_color = Color(0.12, 0.12, 0.14, 1)
+ground_horizon_color = Color(0.45, 0.48, 0.5, 1)
+
+[sub_resource type="Sky" id="Sky_1"]
+sky_material = SubResource("ProceduralSkyMaterial_1")
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 2
+sky = SubResource("Sky_1")
+ambient_light_source = 3
+ambient_light_sky_contribution = 0.7
+reflected_light_source = 3
+tonemap_mode = 2
+
+[node name="EditorVoxelTest" type="Node3D" unique_id=1001]
+
+[node name="ProceduralWorld" type="MeshInstance3D" parent="." unique_id=1002]
+script = ExtResource("1_renderer")
+data = SubResource("Resource_h5cn6")
+voxel_scale = 0.2
+visibility_mode = 2
+unload_distance = 80.0
+lod0_distance = 24.0
+
+[node name="SampleModel" type="MeshInstance3D" parent="." unique_id=1003]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 6, 10)
+script = ExtResource("1_renderer")
+data = ExtResource("2_deer")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1004]
+environment = SubResource("Environment_1")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1005]
+transform = Transform3D(-0.5, 0, 0.866, 0.35, 0.866, 0.35, -0.75, 0.5, 0.433, 0, 6, 0)
+light_energy = 1.2
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1006]
+transform = Transform3D(0.7071, 0, -0.7071, -0.2649, 0.9272, -0.2649, 0.6556, 0.3746, 0.6556, 28, 20, 28)
+current = true
