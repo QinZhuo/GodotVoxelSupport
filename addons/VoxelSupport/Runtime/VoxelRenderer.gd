@@ -1444,19 +1444,6 @@ func _process_mesh_build_queue() -> void:
 	if _mesh_build_queue.is_empty():
 		return
 
-	# GPU 忙检测：上一帧渲染耗时（_delta）过高时暂停本帧构建，把同步 GPU 上传（ArrayMesh
-	# add_surface_from_arrays → Metal fence wait）避开 GPU 满载时刻，消除 wait() 超时。
-	# 用帧时长而非 RenderingServer 测量 API（后者在部分驱动上返回 0 不可靠）。
-	# 注意：编辑器(@tool)场景帧 delta 天然偏大（编辑器低帧率），跳过检测避免误判"GPU忙"
-	# 导致 mesh 永不构建（编辑器预览不渲染）。
-	# 忙时不 call_deferred 自续排（会与 _process 的排期叠加成 call_deferred 堆积，
-	# 导致消息队列爆炸 → 进程退出），只清空 scheduled 标记，让 _process 下一帧自然重新排期。
-	if not Engine.is_editor_hint() and _last_frame_delta > _gpu_busy_threshold_ms / 1000.0:
-		# GPU 忙：本帧不构建，下帧 _process 会重新排期（scheduled 已置 false）
-		if diag_enabled:
-			print("[诊断] GPU忙(帧%.1fms), 暂停mesh构建" % (_last_frame_delta * 1000.0))
-		return
-
 	var t0 := Time.get_ticks_usec()
 	var built := 0
 	var keys := _mesh_build_queue.keys()

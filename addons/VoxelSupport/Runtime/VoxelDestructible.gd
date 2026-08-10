@@ -971,36 +971,24 @@ func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, 
 	return VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
 
 
-## 掉落体 mesh 组装入口（GPU 忙感知）：
-## GPU 空闲时立即组装 ArrayMesh；GPU 满载时结果入队，由 _process 帧尾限量组装，
-## 避免 add_surface_from_arrays 的同步 GPU 上传在 Metal 满载时 fence wait() 超时
+## 掉落体 mesh 组装入口：
+## 结果入队，由 _process 帧尾限量组装（add_surface_from_arrays 的同步 GPU 上传
+## 摊平到多帧，避免 Metal 满载时 fence wait() 超时）。
 func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}, hull_points: PackedVector3Array = PackedVector3Array()) -> void:
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
 		return
-	if _is_gpu_busy():
-		_pending_mesh_results.append({
-			"body": body, "arrays": arrays as Dictionary, "local_voxels": local_voxels,
-			"hull_points": hull_points,
-		})
-		return
-	_apply_falling_chunk_mesh(body, arrays as Dictionary, local_voxels, hull_points)
+	_pending_mesh_results.append({
+		"body": body, "arrays": arrays as Dictionary, "local_voxels": local_voxels,
+		"hull_points": hull_points,
+	})
 
 
-## GPU 忙检测：上一帧渲染耗时（_delta）是否超过阈值
-## 用帧时长而非 RenderingServer 测量 API（部分驱动返回 0 不可靠）
-func _is_gpu_busy() -> bool:
-	return _last_frame_delta > _gpu_busy_threshold_ms / 1000.0
-
-
-## 每帧从队列限量组装掉落体 mesh（GPU 忙时积压的结果）
+## 每帧从队列限量组装掉落体 mesh（积压的结果）
 ## 由 VoxelDestructible._process 帧尾调用
 func _process_pending_mesh_results() -> void:
 	if _pending_mesh_results.is_empty():
-		return
-	# 组装前先确认 GPU 已恢复：仍忙则继续等（积压不丢数据）
-	if _is_gpu_busy():
 		return
 	var count := 0
 	while not _pending_mesh_results.is_empty() and count < _mesh_apply_per_frame:
