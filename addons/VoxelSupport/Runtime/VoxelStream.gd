@@ -50,11 +50,22 @@ func flush() -> void
 @abstract
 func get_stream_path() -> String
 
+## 异步请求 chunk 数据（后台线程加载/生成）。渲染器统一流式扫描提交后，由
+## poll_all_ready 取回结果，实现"程序化生成 / 磁盘读"两种数据源共用一套加载流程。
+## 同 key 已提交则忽略（内部去重）。
+@abstract
+func request_chunk_async(chunk_key: Vector3i) -> void
+
+## 主线程批量取回异步就绪的 chunk 数据。返回 [[chunk_key, PackedInt32Array], ...]，
+## 每项 buffer 为 CHUNK_VOLUME 长度（值 = 材质ID，0 = 空），未就绪的保持待下次轮询。
+@abstract
+func poll_all_ready(max_count: int) -> Array
+
 
 # ----------------------------------------------------------------------------
 # 【可选有限范围】所有流共有的"可生成范围"能力（非抽象，子类可直接使用）
 # ----------------------------------------------------------------------------
-# 两层判定，渲染器扫描循环高频调用（如 VoxelRenderer._process_procedural 的
+# 两层判定，渲染器扫描循环高频调用（如 VoxelRenderer._process_streaming 的
 # has_chunk 存在性判断），需保证 O(1) 且零内存分配：
 #   1) AABB 范围（_bounds_active，chunk 坐标 min/max）：矩形世界（如整张地图）的
 #      O(1) 判定——3 轴整数比较。通常由 VoxelData.grid_size 自动推导（set_grid_size）。
@@ -109,3 +120,12 @@ func shift_bounds(offset: Vector3i) -> void:
 	if _bounds_active:
 		_bounds_min += offset
 		_bounds_max += offset
+
+
+## 渲染器距离扫描的垂直半跨度（chunk 数）：dy ∈ [-span, span]。
+## 无限世界（程序化，地表以下全实心/以上全空）默认 ±1 层足够；
+## 有限世界（AABB 生效）按 grid_size 推导的世界高度覆盖全部层。
+func get_vertical_half_span() -> int:
+	if _bounds_active:
+		return maxi(absi(_bounds_max.y - _bounds_min.y), 1)
+	return 1

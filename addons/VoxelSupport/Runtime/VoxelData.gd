@@ -342,7 +342,7 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 	if not available:
 		return false
 	# 程序化流 + 数据不在内存（非持久化）：提交后台生成并返回 false，不在主线程同步
-	# 生成（网格/LOD1 的 halo snapshot 大量调用会卡顿）。就绪后由 accept_procedural_buffer 回填。
+	# 生成（网格/LOD1 的 halo snapshot 大量调用会卡顿）。就绪后由 accept_chunk_buffer 回填。
 	if stream is VoxelProceduralStream and not _persisted_chunks.has(chunk_key):
 		(stream as VoxelProceduralStream).request_chunk_async(chunk_key)
 		return false
@@ -360,9 +360,9 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 	return true
 
 
-## 回填程序化异步生成结果（后台线程生成完成，主线程调用）。已存在该 chunk 则忽略。
-## 与 preload_chunk 不同：数据来自异步队列，无需再走 stream.load_chunk。
-func accept_procedural_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
+## 回填统一异步流式结果（程序化后台生成 / 文件流 region 读盘，主线程调用）。
+## 已存在该 chunk 则忽略。与 preload_chunk 不同：数据来自异步队列，无需再走 stream.load_chunk。
+func accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
 	if _chunk_buffers.has(chunk_key):
 		return
 	if buf.size() != CHUNK_VOLUME:
@@ -1275,7 +1275,7 @@ func get_chunk_voxels(chunk_key: Vector3i) -> Array:
 
 
 ## O(1) 判断指定 chunk 数据是否已就绪（内存已加载 / 磁盘持久化）。
-## 程序化流未加载的 chunk 返回 false（需 _process_procedural 生成后才有数据）。
+## 程序化流未加载的 chunk 返回 false（需统一流式 _process_streaming 生成后才有数据）。
 func has_chunk(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key) or (stream != null and _persisted_chunks.has(chunk_key))
 

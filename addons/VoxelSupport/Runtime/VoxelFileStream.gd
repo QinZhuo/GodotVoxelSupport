@@ -55,6 +55,10 @@ var _io_mutex := Mutex.new()
 var _io_pending: Dictionary = {}
 var _io_results: Dictionary = {}
 
+# 异步 chunk 请求（统一流式接口）：chunk_key -> true。region 就绪后由 poll_all_ready
+# 取回数据并从队列移除（region 缓存命中则无需 IO，直接可取）。
+var _async_requested: Dictionary = {}
+
 
 # ----------------------------------------------------------------------------
 # Region 键 / 路径 / 目录
@@ -345,6 +349,46 @@ func flush() -> void:
 	for region_key in _region_cache:
 		var entry: Dictionary = _region_cache[region_key]
 		_save_region(region_key, entry)
+
+
+# ----------------------------------------------------------------------------
+# 统一异步接口（VoxelStream 抽象）——与 VoxelProceduralStream 共用同一套流式加载
+# ----------------------------------------------------------------------------
+
+## 异步请求 chunk 数据：先触发 region 异步读盘（后台线程），region 缓存命中则无需 IO。
+## 结果统一经 poll_all_ready 返回，主线程不阻塞。
+func request_chunk_async(chunk_key: Vector3i) -> void:
+	if _async_requested.has(chunk_key):
+		return
+	_async_requested[chunk_key] = true
+	request_region_load(_region_key(chunk_key))
+
+
+## 主线程批量取回已就绪的 chunk 数据：region 已缓存 → 直接从内存取（无磁盘 IO）。
+## 返回 [[chunk_key, PackedInt32Array], ...]，未就绪（region 还在后台读）保持待轮询。
+func poll_all_ready(max_count: int) -> Array:
+	var out: Array = []
+	for ck in _async_requested.keys():
+		if out.size() >= max_count:
+			break
+		if not _region_cache.has(_region_key(ck)):
+			continue
+		_async_requested.erase(ck)
+		var buf := load_chunk(ck)
+		if buf.is_empty():
+			continue
+		out.append([ck, buf])
+	return out
+
+
+## 该 chunk 是否已有异步请求在队列（避免重复提交，供调试/外部查询）。
+func is_chunk_pending(chunk_key: Vector3i) -> bool:
+	return _async_requested.has(chunk_key)
+
+
+## 清空异步请求队列（数据源重建/切换时调用）。
+func clear_async_state() -> void:
+	_async_requested.clear()
 
 
 ## 清空缓存（不写回，调用方需先 flush）

@@ -323,7 +323,8 @@ func _update_hud() -> void:
 		return
 	var fps := Engine.get_frames_per_second()
 	var chunk_meshes := _target._lod0_meshes.size()
-	var streamed := _target._streamed_out_chunks.size()
+	# 磁盘/修改已持久化但不在内存的 chunk 数（原 _streamed_out_chunks 已合并进统一流式）
+	var streamed := _target.data.get_unloaded_chunk_keys().size() if _target.data != null else 0
 	var data_loaded := 0
 	var data_unloaded := 0
 	if _target.data != null:

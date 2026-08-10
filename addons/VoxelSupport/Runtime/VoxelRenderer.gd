@@ -28,7 +28,7 @@ enum VisibilityMode {
 			data.changed.connect(_on_data_changed)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
-		_procedural_pending.clear()
+		_pending_chunks.clear()
 		_clear_lod0_meshes()
 		_request_update()
 
@@ -63,10 +63,9 @@ enum VisibilityMode {
 			unload_distance = view_distance * 1.5
 		if v == VisibilityMode.FULL:
 			_deferred_chunks.clear()
-			# 全量模式下补建被卸载的网格
-			for ck in _streamed_out_chunks.keys():
-				_streamed_out_chunks.erase(ck)
-				if data:
+			# 全量模式下补建已加载 chunk 的网格（卸载的由统一流式按需重载）
+			if data:
+				for ck in data.get_loaded_chunk_keys():
 					data._mark_chunk_dirty(ck)
 		_request_update()
 		# 可见性变化影响多个属性的有效性 → 刷新 Inspector（隐藏/显示条件属性）
@@ -170,8 +169,6 @@ func _block_dist(bk: Vector3i, cam_pos: Vector3) -> float:
 ## LOD1 生成每帧时间预算（毫秒）：超过即停止本帧生成，平滑移动时主线程峰值
 @export_range(0.1, 50.0, 0.1) var _lod1_build_budget_ms: float = 6.0
 
-## 流式加载：已卸载网格的 chunk（key → true），进入加载距离后补建
-var _streamed_out_chunks: Dictionary[Vector3i, bool] = {}
 ## 是否已启用流式加载（visibility_mode == STREAMING）
 var _streaming_enabled: bool = false
 var _cull_check_counter: int = 0
@@ -206,7 +203,6 @@ var _deferred_chunks: Dictionary[Vector3i, bool] = {}
 # 加载（走近补建）需及时 → 每 4 帧检查一次。移动边界附近延迟 ≤0.2s，可接受。
 var _streaming_check_tick: int = 0
 const STREAM_UNLOAD_INTERVAL := 8
-const STREAM_LOAD_INTERVAL := 2
 # 流式加载每帧限量：走近时优先补建最近的 chunk（磁盘读回 + 入异步重建）。
 # 加载标脏后由 WorkerThreadPool 异步生成 + _process_mesh_build_queue 帧尾限量构建
 # （GPU 上传限流 8 个/帧 + 3ms 预算），因此标脏量可适当放大：走近时每帧进入
@@ -216,8 +212,8 @@ const STREAM_LOAD_INTERVAL := 2
 # 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
 var _stream_force_build: Dictionary = {}
-# 程序化异步生成：已提交后台任务待回填的 chunk（VoxelProceduralStream.request_chunk_async）
-var _procedural_pending: Dictionary = {}
+# 统一流式异步请求：已提交后台任务（生成/读盘）待回填的 chunk（stream.request_chunk_async）
+var _pending_chunks: Dictionary = {}
 # 数据基准 chunk（origin shift 后）：相机 chunk 距基准超阈值时平移世界，保持 float 精度。
 var _origin_chunk: Vector3i = Vector3i.ZERO
 ## origin shift 阈值（chunk）：相机 chunk 距基准超此值触发平移。chunk 16³ × 0.1 = 1.6 世界单位，
@@ -327,12 +323,11 @@ func _process(_delta: float) -> void:
 	# 补建标脏会在批次完成后统一重建（retrigger），不会丢失。
 	if visibility_mode != VisibilityMode.FULL:
 		_process_deferred_chunks()
-	if data and data.stream is VoxelProceduralStream:
-		# 程序化无限世界：总是按距离生成（不依赖 visibility_mode——无限世界只能按距离
-		# 生成，设 FULL/FRUSTUM 若走原分支会导致数据永不生成 → 画面空白）
-		_process_procedural()
-	elif _streaming_enabled:
-		_process_streaming()    # 磁盘流式：_streamed_out_chunks 驱动
+	# 统一流式/程序化驱动：程序化无限世界总是按距离生成（不依赖 visibility_mode——
+	# 无限世界只能按距离生成，设 FULL/FRUSTUM 若不走流式会导致数据永不生成 → 画面空白）；
+	# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
+	if _streaming_enabled or (data and data.stream is VoxelProceduralStream):
+		_process_streaming()
 	# LOD1 低分辨率大块管理：每 interval 帧限量生成/移除（降低每帧遍历开销，
 	# 近处 LOD0 / 远处 LOD1 互补）；数据变化（破坏/编辑）由 get_invalidated_lod1 即时重建
 	_cull_check_counter += 1
@@ -496,11 +491,11 @@ func _filter_visible_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 		# 无数据的空 chunk：不纳入网格管理（无体素无需构建/补建，避免补建空 chunk 死循环）
 		if data and not data.has_chunk(ck):
 			continue
-		# 流式距离层（仅 STREAMING）：超 unload 卸载；LOD1 区标 pending（数据保留，不建 LOD0）
+		# 流式距离层（仅 STREAMING）：超 unload 不建网格（数据由统一流式卸载，
+		# 重进范围再按需重载）；LOD1 区标 pending（数据保留，不建 LOD0）
 		if _streaming_enabled and unload_distance > 0.0:
 			var _aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 			if cam_pos.distance_to(_aabb.get_center()) > unload_distance:
-				_streamed_out_chunks[ck] = true
 				continue
 			if lod0_d > 0.0:
 				var bk := _lod1_block_of_chunk(ck)
@@ -532,16 +527,6 @@ func _filter_visible_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 static func _chunk_world_aabb(ck: Vector3i, chunk_size_world: float, world_offset: Vector3) -> AABB:
 	var origin := world_offset + Vector3(ck) * chunk_size_world
 	return AABB(origin, Vector3(chunk_size_world, chunk_size_world, chunk_size_world))
-
-
-## 加载/生成优先级：距离 + 视线方向加权（前方优先、后方延后），返回值越小越优先。
-## 前方(相机朝向方向,dot≈+1) 加权距离≈0.5×dist 优先；后方(dot≈-1)≈1.5×dist 延后。
-## 用于流式加载/LOD1 生成排序：移动时前方地形先出现，减少"走近才加载"。
-static func _load_priority(ck: Vector3i, cam_pos: Vector3, chunk_size_world: float, world_offset: Vector3) -> float:
-	# 只按距离（近优先）：不按朝向加权。近处快速旋转相机时各方向数据都需加载，
-	# 朝向加权会让后方延迟加载 → 旋转后后方数据未就绪（缺面）。远处仍由 LOD1 前方优先覆盖。
-	var center := _chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()
-	return cam_pos.distance_to(center)
 
 
 ## AABB 是否有任意顶点在视锥内（保守：8 顶点逐一测试，任一在内则生成整个 chunk）
@@ -633,44 +618,106 @@ func _process_deferred_chunks() -> void:
 		_request_update()
 
 
-## 流式加载/卸载（距离 LOD）——参考主流体素引擎做法，按距离排序 + 分帧限量：
-##   - 卸载：距离 > unload_d 的 chunk，按距离【从远到近】排序，远的先卸载
-##   - 加载：已卸载但距离 < load_d 的 chunk，按距离【从近到远】排序，近的先加载
-## 走进时近处 chunk 先出现、远离时远处 chunk 先消失，移动时表现平滑。
-## 加载不在此同步生成网格（避免主线程卡顿），而是数据回内存 + 标脏 + force_build，
-## 交给 _update_mesh_async 异步批次重建（WorkerThreadPool 生成，GPU 上传再限量）。
+## 统一流式/程序化驱动（合并原 _process_streaming / _process_procedural）：
+## 按相机距离管理 chunk 数据与网格，数据源差异全部下沉到 VoxelStream 接口：
+##   - 程序化流（VoxelProceduralStream）：未修改 chunk 后台确定性生成（request_chunk_async），
+##     修改过的 chunk 同步预载已存数据（防止重新生成覆盖用户修改）
+##   - 文件流（VoxelFileStream）：region 异步读盘（request_region_load），chunk 数据回内存
+## 统一流程：① poll 回填异步结果 → ② 距离内扫描缺失 chunk 提交（限量/降频）→ ③ 卸载超范围。
+## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走廉价接口
+## （程序化 = is_in_generation_bounds；文件 = VoxelData 已持久化索引），
+## 不再维护 _streamed_out_chunks 渲染层注册表。
 func _process_streaming() -> void:
-	if not _streaming_enabled or not is_inside_tree():
+	if not is_inside_tree():
+		return
+	if data == null:
 		return
 	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
 	if cam == null:
 		return
-	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+	var stream: VoxelStream = data.stream
+	if stream == null:
+		return
 	var cam_pos := cam.global_position
+	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var world_offset := global_position
+	# 加载半径 = view_distance（LOD0 数据需要半径）；卸载半径 = unload_distance（保留半径）
 	var load_d := view_distance
-	var unload_d := unload_distance
+	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
+	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
+	var is_procedural := stream is VoxelProceduralStream
 
-	# 1. 卸载：距离 > unload_d，远的优先。降频检查（相机未移动时距离不变，无需全量扫描）
-	# 数据层磁盘流式：遍历数据层内存 chunk，远距统一 _unload_chunk → 网格释放 + 数据写盘
+	# 程序化无限世界：origin shift（相机 chunk 距基准超阈值 → 平移数据+渲染+相机）
+	if is_procedural:
+		_check_origin_shift(cam)
+
+	# 1) 回填后台异步结果（程序化生成 / 文件流 region 读盘），统一 poll → accept
+	var applied := 0
+	var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 4, 64))
+	for r in results:
+		var ck: Vector3i = r[0]
+		var buf: PackedInt32Array = r[1]
+		data.accept_chunk_buffer(ck, buf)
+		_pending_chunks.erase(ck)
+		applied += 1
+
+	# 2) 距离内扫描缺失 chunk 并提交（限量每帧；降频扫描，相机不动时结果不变）
 	_streaming_check_tick += 1
-	if unload_d > 0.0 and _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 1:
+	var submitted := 0
+	if _streaming_check_tick % visibility_check_interval == 0:
+		var r := ceili(load_d / chunk_size_world) + 1
+		var yspan := stream.get_vertical_half_span()
+		var exhausted := false
+		for dz in range(-r, r + 1):
+			if exhausted:
+				break
+			for dy in range(-yspan, yspan + 1):
+				if exhausted:
+					break
+				for dx in range(-r, r + 1):
+					if submitted >= _stream_load_per_frame:
+						exhausted = true
+						break
+					var ck := cam_ck + Vector3i(dx, dy, dz)
+					# 存在性统一判定（廉价，无磁盘 IO）：
+					#   程序化 = is_in_generation_bounds（无限流恒 true / 有限模板流查范围）
+					#   文件流 = VoxelData 已持久化索引（O(1)，避免 has_chunk 同步读 region）
+					var available := stream.has_chunk(ck) if is_procedural else data._persisted_chunks.has(ck)
+					if not available:
+						continue
+					if data.is_chunk_loaded(ck):
+						continue
+					if _pending_chunks.has(ck):
+						continue
+					if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > load_d:
+						continue
+					# 程序化修改过的 chunk：重新生成会覆盖用户修改 → 同步预载已存数据
+					if is_procedural and data._persisted_chunks.has(ck):
+						if data.preload_chunk(ck):
+							_stream_force_build[ck] = true
+							data._mark_chunk_dirty(ck)
+							submitted += 1
+						continue
+					# 未修改（程序化可重生成）或文件流（磁盘读）：统一异步请求
+					stream.request_chunk_async(ck)
+					_pending_chunks[ck] = true
+					submitted += 1
+
+	# 3) 卸载超范围数据+网格（程序化：未修改丢弃可重生成、修改写盘；文件：写盘/清盘）
+	#    LOD1 区数据保留（供降采样合并），否则降采样读空 → 大格缺失
+	if _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 0:
 		var lod1_edge_world: float = voxel_scale * float(VoxelData.LOD1_EDGE)
 		var block_edge_world: float = voxel_scale * float(LOD1_BLOCK_EDGE)
 		var unload_margin: float = lod1_edge_world * 0.5
 		var unload_block_extent: float = block_edge_world * 0.5
 		var candidates: Array = []
-		if data:
-			for ck in data.get_loaded_chunk_keys():
-				# LOD1 区数据保留：chunk 所属 LOD1 大块中心仍处于 LOD1 显示区时
-				# （≤ unload+margin+大块半径），其数据供降采样合并，不卸载——
-				# 否则降采样读空，LOD1 大格缺失 → "该有体素的地方没有"。
-				var bk := _lod1_block_of_chunk(ck)
-				if _block_dist(bk, cam_pos) <= unload_d + unload_margin + unload_block_extent:
-					continue
-				var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
-				if dist > unload_d:
-					candidates.append([dist, ck])
+		for ck in data.get_loaded_chunk_keys():
+			var bk := _lod1_block_of_chunk(ck)
+			if _block_dist(bk, cam_pos) <= unload_d + unload_margin + unload_block_extent:
+				continue
+			var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
+			if dist > unload_d:
+				candidates.append([dist, ck])
 		# 从远到近（距离降序）：最远的先卸载
 		candidates.sort_custom(func(a, b): return a[0] > b[0])
 		var unloaded := 0
@@ -679,146 +726,17 @@ func _process_streaming() -> void:
 				break
 			_unload_chunk(item[1])
 			unloaded += 1
+		# 取消超范围仍未完成的异步请求（避免后台白做，结果回来由卸载逻辑丢弃）
+		if not _pending_chunks.is_empty():
+			for ck in _pending_chunks.keys():
+				if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
+					_pending_chunks.erase(ck)
 
-	# 2. 加载：距离 < unload_d 的 streamed_out 补建（含 load~unload 滞留区），近的优先。
-	# 【关键】之前只加载 < load_d：相机走近后距离落在 load~unload 滞留区的 chunk
-	# streamed_out 标记残留、无任何路径触发重建 → "走近不出现"。改 < unload_d 后
-	# 滞留区也补建（网格由异步重建 + GPU 限流平滑生成，不会掉帧）。
-	# 降频检查（每 STREAM_LOAD_INTERVAL 帧一次，走近补建延迟 ≤0.1s）
-	if unload_d > 0.0 and _streaming_check_tick % STREAM_LOAD_INTERVAL == 0:
-		# 清理 streamed_out 中无数据的残留键（数据已清空的 chunk 无需流式管理，
-		# 否则字典随相机移动持续膨胀）
-		if data:
-			for ck_clean in _streamed_out_chunks.keys():
-				if not data.has_chunk(ck_clean):
-					_streamed_out_chunks.erase(ck_clean)
-		var to_load: Array = []
-		# 粗筛：只计算相机加载半径内的 chunk（避免世界累积的 streamed_out（上万）全量
-		# distance 计算 + 排序——移动时这是主线程固定成本）。远处 chunk 等相机走近
-		# 进入范围再由本循环补建。
-		var r_ck := ceili(unload_d / chunk_size_world)
-		var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
-		for ck in _streamed_out_chunks:
-			if absi(ck.x - cam_ck.x) > r_ck or absi(ck.y - cam_ck.y) > r_ck or absi(ck.z - cam_ck.z) > r_ck:
-				continue
-			var dist: float = cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center())
-			if dist <= unload_d:
-				to_load.append([dist, ck])
-		# 加载优先级：只按距离（近优先）——近处快速旋转相机时各方向数据都需加载，
-		# 朝向加权会让后方延迟加载 → 旋转后后方缺面。远处 LOD1 仍前方优先。
-		to_load.sort_custom(func(a, b):
-			return _load_priority(a[1], cam_pos, chunk_size_world, world_offset) < \
-					_load_priority(b[1], cam_pos, chunk_size_world, world_offset))
-		# 异步预读：先请求后台线程加载候选涉及 region（磁盘 IO 移出主线程），
-		# 随后同步 preload 命中缓存则无 IO（未命中仅兜底，通常后台已就绪）——
-		# 根治流式移动时主线程同步读盘卡顿。
-		if data and data.is_streaming() and not to_load.is_empty():
-			var _stream_obj := data.stream
-			if _stream_obj != null and _stream_obj.has_method("request_region_load"):
-				# 限量预读：只对最近的 _stream_load_per_frame 个 region 发起 IO，
-				# 避免回原点/大距离瞬移时上千 region 一次性 add_task 塞满线程池
-				# （磁盘并发读 + 主线程 add_task/mutex 排队 → 帧率掉到个位数）
-				var _prefetch := 0
-				for item in to_load:
-					if _prefetch >= _stream_load_per_frame:
-						break
-					_stream_obj.request_region_load(_stream_obj._region_key(item[1]))
-					_prefetch += 1
-		var reloaded := 0
-		for item in to_load:
-			if reloaded >= _stream_load_per_frame:
-				break
-			var ck3: Vector3i = item[1]
-			_streamed_out_chunks.erase(ck3)
-			if data:
-				if data.is_streaming():
-					# 数据层磁盘流式：先把 chunk 数据从磁盘读回内存
-					data.preload_chunk(ck3)
-				# 标脏 + 强制构建标记：交给异步批次重建（WorkerThreadPool 生成网格，
-				# 主线程不做同步网格生成 → 走近不掉帧）
-				_stream_force_build[ck3] = true
-				data._mark_chunk_dirty(ck3)
-			reloaded += 1
-		if reloaded > 0:
-			_request_update()
-
-
-## 程序化流驱动（VoxelProceduralStream）：按距离确保 chunk 数据（生成器生成，限量每帧）
-## + 动态原点重定位（origin shift，相机远离基准时平移世界，保持 float 精度）。
-## 无限世界无"磁盘流式"集合，改为主动生成相机周围缺失 chunk。
-func _process_procedural() -> void:
-	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
-	if cam == null:
-		return
-	var cam_pos := cam.global_position
-	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
-	var world_offset := global_position
-	# 程序化 ensure 覆盖 view 距离（LOD0+LOD1 数据均保留，避免 LOD1 重建时同步生成卡顿）
-	var load_d := view_distance
-	# origin shift：相机 chunk 远离数据基准超阈值 → 平移数据+渲染+相机
-	_check_origin_shift(cam)
-	var stream := data.stream as VoxelProceduralStream if data else null
-	# 1) 回填后台已生成的 chunk（ensure 与 halo/LOD1 经 preload_chunk 提交的都会回填，
-	#    避免 async_results 堆积导致数据供给停滞；poll 批量放大以消化 halo 提交的大量任务）
-	var applied := 0
-	if stream:
-		var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 4, 64))
-		for r in results:
-			var ck: Vector3i = r[0]
-			var buf: PackedInt32Array = r[1]
-			data.accept_procedural_buffer(ck, buf)
-			_procedural_pending.erase(ck)
-			applied += 1
-	# 2) 距离内提交异步生成任务（限量每帧；后台线程生成，主线程只提交）
-	# 【性能】扫描降频：全球体扫描（O((2r+1)³) 的 distance_to）不是每帧必要，
-	# 相机不动时结果不变。每 visibility_check_interval 帧全扫一次，中间帧只回填
-	# 已生成结果（poll_all_ready）。对多渲染器大场景（16 建筑 + 地表）每帧开销显著。
-	var _scan_this_frame := _streaming_check_tick % visibility_check_interval == 0
-	var r := ceili(load_d / chunk_size_world) + 1
-	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
-	var submitted := 0
-	var exhausted := false
-	if stream and _scan_this_frame:
-		for dz in range(-r, r + 1):
-			if exhausted:
-				break
-			for dy in range(-1, 2):
-				if exhausted:
-					break
-				for dx in range(-r, r + 1):
-					if submitted >= _stream_load_per_frame:
-						exhausted = true
-						break
-					var ck := cam_ck + Vector3i(dx, dy, dz)
-					# 有限模板程序化流（如建筑）：只对"属于该世界"的 chunk 提交生成。
-					# 无限世界流 has_chunk 恒 true（无影响）；有限模板流覆写 has_chunk
-					# 只对覆盖范围返回 true，蓝图外 chunk 直接跳过，避免生成海量空 chunk。
-					if stream and not stream.has_chunk(ck):
-						continue
-					if data.has_chunk(ck):
-						continue
-					if _procedural_pending.has(ck):
-						continue
-					if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > load_d:
-						continue
-					stream.request_chunk_async(ck)
-					_procedural_pending[ck] = true
-					submitted += 1
 	if applied > 0 or submitted > 0:
 		_request_update()
-	# 卸载超范围的数据+网格（程序化：未修改 chunk 丢弃可重新生成，修改的由 unload_chunk 写盘）
-	# 卸载边界与加载边界一致（view_distance），否则 50~100 之间的残留层堆积导致内存膨胀
-	_streaming_check_tick += 1
-	if _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 0:
-		var unload_d := view_distance
-		for ck in data.get_loaded_chunk_keys():
-			if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
-				_unload_chunk(ck)
-		# 取消超范围仍未完成的异步任务（避免后台白生成，结果丢弃）
-		if stream:
-			for ck in _procedural_pending.keys():
-				if cam_pos.distance_to(_chunk_world_aabb(ck, chunk_size_world, world_offset).get_center()) > unload_d:
-					_procedural_pending.erase(ck)
+
+
+
 
 
 ## 动态原点重定位：相机 chunk 距数据基准超阈值时，平移数据层 + 渲染层 + 相机，
@@ -868,10 +786,6 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 		new_lod1[nbk] = mi
 	_lod1_meshes = new_lod1
 	# 各类 chunk/block 集合字典 key 整体平移（typed dict 需 typed 构建，_shift_keys 仅普通 Dictionary）
-	var ns: Dictionary[Vector3i, bool] = {}
-	for k in _streamed_out_chunks:
-		ns[Vector3i(k) + shift] = true
-	_streamed_out_chunks = ns
 	var ndf: Dictionary[Vector3i, bool] = {}
 	for k in _deferred_chunks:
 		ndf[Vector3i(k) + shift] = true
@@ -880,7 +794,7 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 	_lod1_pending = _shift_keys(_lod1_pending, shift)
 	_lod1_pending_tasks = _shift_keys(_lod1_pending_tasks, shift)
 	_mesh_build_queue = _shift_keys(_mesh_build_queue, shift)
-	_procedural_pending = _shift_keys(_procedural_pending, shift)
+	_pending_chunks = _shift_keys(_pending_chunks, shift)
 	var ncr: Dictionary[Vector3i, bool] = {}
 	for k in _collision_rebuild_queue:
 		ncr[Vector3i(k) + shift] = true
@@ -1157,7 +1071,9 @@ func _remove_lod1(bk: Vector3i) -> void:
 	_lod1_pending_tasks.erase(bk)
 
 
-## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点，记录到 _streamed_out_chunks
+## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点。
+## 重载不再需要渲染层注册表：统一流式扫描用 stream.has_chunk（程序化）/VoxelData._persisted_chunks
+## （文件流）判定存在性，重进加载范围即按需重载。
 func _unload_chunk(ck: Vector3i) -> void:
 	var mi: MeshInstance3D = _lod0_meshes.get(ck)
 	if mi != null and is_instance_valid(mi):
@@ -1166,7 +1082,6 @@ func _unload_chunk(ck: Vector3i) -> void:
 	_remove_chunk_collision(ck)
 	_mesh_build_queue.erase(ck)
 	_stream_force_build.erase(ck)
-	_streamed_out_chunks[ck] = true
 	# 数据层磁盘流式：卸载 chunk 数据（修改过的写盘、变空的清盘、未修改丢弃，释放内存）
 	if data and data.is_streaming():
 		data.unload_chunk(ck)
@@ -1403,10 +1318,10 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 	if chunk_key.x != -999:
 		# 流式：结果回来时 chunk 仍超出卸载距离（相机快速远离）→ 丢弃过期结果，
 		# 避免卸载后的旧网格/旧数据复活。
-		# 注意用【当前距离】判断而非残留标记：相机重新走近（<unload）的 chunk
-		# 即使带旧 streamed_out 标记也必须应用结果，否则永久缺失。
+		# 直接按【当前距离】判断（不依赖残留标记）：相机重新走近（<unload）的 chunk
+		# 必须应用结果，否则永久缺失。
 		var cam_now := get_viewport().get_camera_3d() if is_inside_tree() else null
-		if _streamed_out_chunks.has(chunk_key) and _is_chunk_beyond_unload(
+		if _is_chunk_beyond_unload(
 				chunk_key, cam_now, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position, unload_distance):
 			_pending_task_count -= 1
 			if _pending_task_count <= 0:
