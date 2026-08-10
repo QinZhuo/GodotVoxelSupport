@@ -35,3 +35,4 @@ addons/VoxelSupport/Native/~*
 
 *.gdextension.uid
 /addons/DEVFramework/Entity/ECS/Native/~devecs.windows.debug.x86_64.dll
+/addons/DEVFramework/Entity/ECS/Native/*.TMP
