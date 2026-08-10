@@ -25,7 +25,22 @@ enum CollapseMode {
 }
 
 ## 破坏时是否生成碎片
-@export var spawn_debris_on_damage: bool = true
+@export var spawn_debris_on_damage: bool = true:
+	set(v):
+		spawn_debris_on_damage = v
+		# 影响 debris 系列属性有效性 → 刷新 Inspector 隐藏/显示
+		notify_property_list_changed()
+
+
+## Inspector 动态可见性：条件不生效时隐藏对应属性。
+func _validate_property(property: Dictionary) -> void:
+	super._validate_property(property)
+	var name: StringName = property["name"]
+	if not spawn_debris_on_damage:
+		match name:
+			&"max_debris_per_hit", &"debris_speed_range", &"debris_lifetime", &"debris_gravity_scale":
+				# 碎片关闭时碎片数量/速度/寿命/重力参数无效
+				property["usage"] = int(property["usage"]) & ~PROPERTY_USAGE_EDITOR
 
 ## 单次破坏生成的最大碎片数量 (性能保护)
 @export var max_debris_per_hit: int = 16
@@ -895,7 +910,7 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 ## 优先走原生 dense 路径（generate_single_chunk_dense → GDExtension C++，
 ## 顶点复用 + 网格生成主循环 ~10 倍提速）；块体超 HALO_SIZE 时回退 generate_arrays_runtime
 func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D) -> void:
-	var arrays := _generate_falling_chunk_arrays(local_voxels, materials, scale)
+	var arrays: Variant = _generate_falling_chunk_arrays(local_voxels, materials, scale)
 	# 【凸包后台化】在后台线程计算碰撞外壳点集（体素包围盒 8 角点，O(1) 无凸包算法），
 	# 替代主线程 create_convex_shape（实测 4096 体素块 69ms 主线程卡顿）。
 	# 传回主线程 set_points 秒完成。

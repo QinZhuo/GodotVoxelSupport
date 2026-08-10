@@ -69,6 +69,30 @@ enum VisibilityMode {
 				if data:
 					data._mark_chunk_dirty(ck)
 		_request_update()
+		# 可见性变化影响多个属性的有效性 → 刷新 Inspector（隐藏/显示条件属性）
+		notify_property_list_changed()
+
+
+## Inspector 动态可见性：条件不生效时隐藏对应属性（避免用户设置后无效）。
+## Godot 4 在 Inspector 刷新时对每个属性调用此方法，可修改 usage 隐藏。
+func _validate_property(property: Dictionary) -> void:
+	var name: StringName = property["name"]
+	var hide := false
+	match name:
+		&"view_distance", &"unload_distance", &"lod0_distance":
+			# FULL 全量模式不走流式/LOD，距离参数无效
+			hide = visibility_mode == VisibilityMode.FULL
+		&"_stream_unload_per_frame", &"_stream_load_per_frame":
+			# 流式加载/卸载限速仅 STREAMING 生效
+			hide = visibility_mode != VisibilityMode.STREAMING
+		&"_lod1_build_per_frame", &"_lod1_build_budget_ms":
+			# LOD1 生成参数仅启用 LOD（lod0_distance > 0）时生效
+			hide = lod0_distance <= 0.0
+		&"_collision_rebuild_per_frame":
+			# 碰撞重建限速仅开启碰撞（generate_collision）时生效
+			hide = not generate_collision
+	if hide:
+		property["usage"] = int(property["usage"]) & ~PROPERTY_USAGE_EDITOR
 
 ## 可见性加载距离（世界单位）：FRUSTUM 时视锥外仍生成的半径；STREAMING 时网格加载半径
 @export var view_distance: float = 40.0
@@ -91,6 +115,7 @@ enum VisibilityMode {
 			_lod1_pending.clear()
 			if data:
 				data.clear_lod1_cache()
+		notify_property_list_changed()
 
 ## 可见性检查间隔（帧）：视锥/流式统一每隔 N 帧检查一次相机位置。
 ## 值越大 CPU 开销越低，但进入视锥/加载距离后的补建响应越慢。
@@ -156,6 +181,7 @@ var _cull_check_counter: int = 0
 	set(v):
 		generate_collision = v
 		_request_update()
+		notify_property_list_changed()
 
 ## 是否在编辑器中也实时更新 (仅 @tool 模式)
 @export var update_in_editor: bool = true
