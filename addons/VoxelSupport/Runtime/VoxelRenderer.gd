@@ -265,6 +265,8 @@ var _deferred_chunks: Dictionary[Vector3i, bool] = {}
 # chunk）下是固定 CPU 成本。卸载仅在相机移动越界时才有意义 → 每 12 帧检查一次；
 # 加载（走近补建）需及时 → 每 4 帧检查一次。移动边界附近延迟 ≤0.2s，可接受。
 var _streaming_check_tick: int = 0
+# 上次流式扫描时的相机位置：移动时立即触发扫描（流式加载响应及时）
+var _last_streaming_cam_pos := Vector3()
 const STREAM_UNLOAD_INTERVAL := 8
 # 流式加载每帧限量：走近时优先补建最近的 chunk（磁盘读回 + 入异步重建）。
 # 加载标脏后由 WorkerThreadPool 异步生成 + _process_mesh_build_queue 帧尾限量构建
@@ -396,9 +398,9 @@ func _process(_delta: float) -> void:
 	if _streaming_enabled or (data and data.stream is VoxelProceduralStream):
 		_process_streaming()
 	# 多级 LOD 大块管理：每 interval 帧限量生成/移除（降低每帧遍历开销，
-	# 近处 LOD0 / 远处各粗层互补）；数据变化（破坏/编辑）由 get_invalidated_lod 即时重建
+	# 近处 LOD0 / 远处各粗层互补）；数据变化（破坏/编辑）时立即处理（不等降频周期 → 破坏重建更及时）
 	_cull_check_counter += 1
-	if lod_count > 1 and data and _cull_check_counter >= visibility_check_interval:
+	if lod_count > 1 and data and (_cull_check_counter >= visibility_check_interval or data.has_lod_invalidated()):
 		_cull_check_counter = 0
 		_process_lod()
 
@@ -728,6 +730,10 @@ func _process_streaming() -> void:
 
 	# 2) 距离内扫描缺失 chunk 并提交（限量每帧；降频扫描，相机不动时结果不变）
 	_streaming_check_tick += 1
+	# 相机位置变化 → 本帧立即扫描（不用等 visibility_check_interval），移动时新区域块生成更及时
+	if cam_pos != _last_streaming_cam_pos:
+		_streaming_check_tick = 0
+		_last_streaming_cam_pos = cam_pos
 	var submitted := 0
 	if _streaming_check_tick % visibility_check_interval == 0:
 		var r := ceili(load_d / chunk_size_world) + 1

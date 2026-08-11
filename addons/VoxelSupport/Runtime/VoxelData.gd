@@ -186,6 +186,14 @@ func get_invalidated_lod(lod: int) -> Array[Vector3i]:
 	return keys
 
 
+## 是否有失效的粗层 block 待重建（渲染器据此在数据变化时立即触发 LOD 处理，不等降频周期）
+func has_lod_invalidated() -> bool:
+	for d in _lod_invalidated:
+		if not d.is_empty():
+			return true
+	return false
+
+
 ## 获取所有脏 chunk（渲染器增量重建用），并清空
 func get_dirty_chunks() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
