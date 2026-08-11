@@ -270,9 +270,11 @@ func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
 # VoxelStream 接口实现（save/load/has/erase/get_all/flush）
 # ----------------------------------------------------------------------------
 
-func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array) -> void:
+func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> void:
+	if lod != 0:
+		return  # 文件流仅存全精度 chunk（粗层由程序化流/降采样处理）
 	if buffer.is_empty():
-		erase_chunk(chunk_key)
+		erase_chunk(chunk_key, 0)
 		return
 	# 稀疏化：只存非空体素 (local_index, mat_id)
 	var chunk_data := {}
@@ -281,14 +283,16 @@ func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array) -> void:
 		if v > 0:
 			chunk_data[i] = v
 	if chunk_data.is_empty():
-		erase_chunk(chunk_key)
+		erase_chunk(chunk_key, 0)
 		return
 	var entry := _get_region(_region_key(chunk_key))
 	entry["chunks"][chunk_key] = chunk_data
 	entry["dirty"] = true
 
 
-func load_chunk(chunk_key: Vector3i) -> PackedInt32Array:
+func load_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
+	if lod != 0:
+		return PackedInt32Array()
 	var entry := _get_region(_region_key(chunk_key))
 	var chunk_data: Variant = entry["chunks"].get(chunk_key)
 	if chunk_data == null:
@@ -302,19 +306,25 @@ func load_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	return buf
 
 
-func has_chunk(chunk_key: Vector3i) -> bool:
+func has_chunk(chunk_key: Vector3i, lod: int = 0) -> bool:
+	if lod != 0:
+		return false
 	var entry := _get_region(_region_key(chunk_key))
 	return entry["chunks"].has(chunk_key)
 
 
-func erase_chunk(chunk_key: Vector3i) -> void:
+func erase_chunk(chunk_key: Vector3i, lod: int = 0) -> void:
+	if lod != 0:
+		return
 	var entry := _get_region(_region_key(chunk_key))
 	if entry["chunks"].has(chunk_key):
 		entry["chunks"].erase(chunk_key)
 		entry["dirty"] = true
 
 
-func get_all_chunk_keys() -> Array[Vector3i]:
+func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
+	if lod != 0:
+		return []
 	var keys := {}
 	# 缓存中的 region
 	for region_key in _region_cache:
@@ -355,9 +365,11 @@ func flush() -> void:
 # 统一异步接口（VoxelStream 抽象）——与 VoxelProceduralStream 共用同一套流式加载
 # ----------------------------------------------------------------------------
 
-## 异步请求 chunk 数据：先触发 region 异步读盘（后台线程），region 缓存命中则无需 IO。
-## 结果统一经 poll_all_ready 返回，主线程不阻塞。
-func request_chunk_async(chunk_key: Vector3i) -> void:
+## 异步请求 chunk 数据（lod 仅支持 0）：先触发 region 异步读盘（后台线程），
+## region 缓存命中则无需 IO。结果统一经 poll_all_ready 返回，主线程不阻塞。
+func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
+	if lod != 0:
+		return
 	if _async_requested.has(chunk_key):
 		return
 	_async_requested[chunk_key] = true
@@ -365,7 +377,7 @@ func request_chunk_async(chunk_key: Vector3i) -> void:
 
 
 ## 主线程批量取回已就绪的 chunk 数据：region 已缓存 → 直接从内存取（无磁盘 IO）。
-## 返回 [[chunk_key, PackedInt32Array], ...]，未就绪（region 还在后台读）保持待轮询。
+## 返回 [[lod, chunk_key, PackedInt32Array], ...]（lod 恒 0），未就绪保持待轮询。
 func poll_all_ready(max_count: int) -> Array:
 	var out: Array = []
 	for ck in _async_requested.keys():
@@ -374,15 +386,17 @@ func poll_all_ready(max_count: int) -> Array:
 		if not _region_cache.has(_region_key(ck)):
 			continue
 		_async_requested.erase(ck)
-		var buf := load_chunk(ck)
+		var buf := load_chunk(ck, 0)
 		if buf.is_empty():
 			continue
-		out.append([ck, buf])
+		out.append([0, ck, buf])
 	return out
 
 
 ## 该 chunk 是否已有异步请求在队列（避免重复提交，供调试/外部查询）。
-func is_chunk_pending(chunk_key: Vector3i) -> bool:
+func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
+	if lod != 0:
+		return false
 	return _async_requested.has(chunk_key)
 
 

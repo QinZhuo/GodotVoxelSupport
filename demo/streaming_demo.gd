@@ -33,11 +33,6 @@ enum Mode { FILE_STREAM, PROCEDURAL }
 ## 世界尺寸 [体素] (x, y, z) —— 超大开放世界，仅文件流模式使用
 @export var world_size: Vector3i = Vector3i(1500, 40, 1500)
 
-## 流式加载距离（世界单位）：相机进入此距离的 chunk 确保加载
-@export var view_distance: float = 60
-## 流式卸载距离：超出此距离的 chunk 网格+数据自动卸载（写盘释放内存）
-@export var unload_distance: float = 100
-
 ## 可破坏对象
 var _target: VoxelDestructible
 var _camera: Camera3D
@@ -94,10 +89,6 @@ func _rebuild_world() -> void:
 func _apply_renderer_config() -> void:
 	_target.voxel_scale = voxel_scale
 	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
-	_target.view_distance = view_distance
-	_target.unload_distance = unload_distance
-	# LOD：距离内全精度，之外用 LOD1 低分辨率大块（每格 2³ 体素，顶点约 1/8）
-	_target.lod0_distance = view_distance * 0.6
 	_target.spawn_debris_on_damage = true
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
@@ -322,7 +313,7 @@ func _update_hud() -> void:
 	if _hud == null or _target == null:
 		return
 	var fps := Engine.get_frames_per_second()
-	var chunk_meshes := _target._lod0_meshes.size()
+	var chunk_meshes := _target._lod_meshes[0].size() if _target._lod_meshes.size() > 0 else 0
 	# 磁盘/修改已持久化但不在内存的 chunk 数（原 _streamed_out_chunks 已合并进统一流式）
 	var streamed := _target.data.get_unloaded_chunk_keys().size() if _target.data != null else 0
 	var data_loaded := 0
@@ -332,9 +323,18 @@ func _update_hud() -> void:
 		if _target.data.is_streaming():
 			data_unloaded = _target.data.get_unloaded_chunk_keys().size()
 	var draw := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+	# 各 LOD 层实际挂载的块数（null = 空块标记，不计）
+	var lod_counts := ""
+	for lv in _target._lod_meshes.size():
+		var cnt := 0
+		for bk in _target._lod_meshes[lv]:
+			if _target._lod_meshes[lv][bk] != null:
+				cnt += 1
+		lod_counts += "L%d:%d  " % [lv, cnt]
 	_hud.text = "模式: %s    FPS: %d    DrawCalls: %d\n" % [_mode_name(), fps, draw] + \
 			"网格数: %d    流式网格卸载: %d\n" % [chunk_meshes, streamed] + \
 			"数据层: 内存%d  磁盘%d\n" % [data_loaded, data_unloaded] + \
+			"LOD块数: %s\n" % lod_counts + \
 			"相机位置: (%d, %d, %d)\n" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)]
 	if _current_mode == Mode.PROCEDURAL:
 		_hud.text += "origin shift: %s\n" % _target._origin_chunk

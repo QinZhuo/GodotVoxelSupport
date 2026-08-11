@@ -1,4 +1,4 @@
-[gd_scene format=3 uid="uid://dbyp02fd61ija"]
+[gd_scene format=3 uid="uid://dk5e5u00cey4e"]
 
 [ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="1_renderer"]
 [ext_resource type="Resource" uid="uid://dwlsmke33vkb6" path="res://demo/deer_data.vox" id="2_deer"]
@@ -19,6 +19,7 @@ script = ExtResource("6_vmvxb")
 script = ExtResource("5_ly2s3")
 materials = Array[ExtResource("4_rgb08")]([null, SubResource("Resource_w68vc")])
 stream = SubResource("Resource_lsd7j")
+lod_count = 4
 voxel_data_payload = "R1pJUB+LCAAAAAAAAAqTZmBgYAZiFiBmBOIyIGaCYpAYJxCnF2WmxBdnVqUC2TJQ9SB5Biw0SA8byJz8itScYoh6EAAAViJTGWgAAAA="
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
@@ -41,15 +42,17 @@ tonemap_mode = 2
 [node name="EditorVoxelTest" type="Node3D" unique_id=1001]
 
 [node name="ProceduralWorld" type="MeshInstance3D" parent="." unique_id=1002]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 68.188805, 0, 100.457954)
 script = ExtResource("1_renderer")
 data = SubResource("Resource_h5cn6")
 voxel_scale = 0.2
 visibility_mode = 2
+view_distance = 200.0
 unload_distance = 80.0
-lod0_distance = 24.0
+lod_count = 4
 
 [node name="SampleModel" type="MeshInstance3D" parent="." unique_id=1003]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 6, 10)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 24.13226, 6, 10)
 script = ExtResource("1_renderer")
 data = ExtResource("2_deer")
 

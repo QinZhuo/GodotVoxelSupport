@@ -481,7 +481,7 @@ func _update_hud() -> void:
 	if not _hud:
 		return
 	var t := _target
-	var chunk_count := t._lod0_meshes.size()
+	var chunk_count := t._lod_meshes[0].size() if t._lod_meshes.size() > 0 else 0
 	var draw_calls := 0
 	for c in t.get_children():
 		if c is MeshInstance3D and c.mesh != null and c.visible:

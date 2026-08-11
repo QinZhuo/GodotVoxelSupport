@@ -1,4 +1,4 @@
-@tool
+﻿@tool
 class_name VoxelData
 extends Resource
 
@@ -80,8 +80,8 @@ var _dirty_mesh_chunks: Dictionary = {}
 func _mark_voxel_dirty(pos: Vector3i) -> void:
 	var ck := _chunk_of(pos)
 	_dirty_mesh_chunks[ck] = true
-	# LOD0 数据变化 → 失效对应 LOD1 block（远距离低分辨率网格需重新降采样）
-	invalidate_lod1(pos)
+	# LOD0 用户编辑 → 失效对应高层 block 并标记需降采样（编辑数据不能用纯生成器输出）
+	mark_lod_modified(pos)
 	var local := pos - ck * CHUNK_SIZE
 	if local.x == 0:
 		_dirty_mesh_chunks[ck + Vector3i(-1, 0, 0)] = true
@@ -103,46 +103,86 @@ func _mark_chunk_dirty(ck: Vector3i) -> void:
 
 
 # ----------------------------------------------------------------------------
-# LOD 支持（简化两层级：LOD0 = 16³ 全精度 chunk；LOD1 = 16³ 大块，每格代表 2³ 体素）
-#   LOD1 block_key = LOD0 chunk_key >> LOD1_SHIFT（每 2×2×2 个 LOD0 chunk 一个 LOD1 block）
-#   LOD1 block 覆盖 32³ 体素，内部 16³ 个大格（降采样：2×2×2 体素 → 1 个大格，取非空材质）
-#   远处渲染用 LOD1（顶点为 LOD0 的 1/8），近处用 LOD0 全精度
+# LOD 支持（多层级：LOD0 = CHUNK_SIZE³ 全精度 chunk；LOD i = LOD_GRID³ 大块，每格代表 2^i 体素）
+#   block_key = LOD0 chunk_key >> i（每 2^i × 2^i × 2^i 个 chunk 一个 block）
+#   block 覆盖 (LOD_GRID × 2^i)³ 体素，内部 LOD_GRID³ 个大格（降采样 2^i³ 体素 → 1 大格）
+#   层级数由 lod_count 控制（渲染器同步设置），默认 2 = 原行为（LOD0 + LOD1 2×）
 # ----------------------------------------------------------------------------
-const LOD1_SHIFT := 1
-## LOD1 大格边长（体素）= CHUNK_SIZE << LOD1_SHIFT = 32
-const LOD1_EDGE := CHUNK_SIZE << LOD1_SHIFT
+## LOD 层级数（含 LOD0）。编辑体素时按此失效所有更高层 block；1 = 仅全精度无 LOD。
+@export var lod_count: int = 2
 
-# 失效的 LOD1 block（LOD0 数据变化时记录，渲染器消费后重建远距离网格）
-var _lod1_invalidated: Dictionary = {}
+## 大块网格边长（大格数，每格 = 2^lod 体素）；恒等于 CHUNK_SIZE（与原生 32³ 网格核心一致）
+const LOD_GRID := VoxelChunk.CHUNK_SIZE
+
+# 每级失效的 block（index = lod；LOD0 数据变化时记录，渲染器消费后重建远距离网格）
+var _lod_invalidated: Array[Dictionary] = []
 
 
-## 失效体素所在 chunk 对应的 LOD1 block（LOD0 数据变化后调用）
-func invalidate_lod1(pos: Vector3i) -> void:
+## 失效体素所在 chunk 对应的所有更高层 LOD block（LOD0 数据变化后调用）。
+## 仅失效网格重建（数据回填/程序化生成也会触发，见 accept_chunk_buffer）；
+## 用户编辑额外标记 modified 用 mark_lod_modified*。
+func invalidate_lod(pos: Vector3i) -> void:
 	var ck := _chunk_of(pos)
-	_mark_lod1_invalid(Vector3i(ck.x >> LOD1_SHIFT, ck.y >> LOD1_SHIFT, ck.z >> LOD1_SHIFT))
+	for lod in range(1, maxi(lod_count, 1)):
+		_mark_lod_invalid(Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod), lod)
 
 
-## 失效指定 LOD0 chunk 对应的 LOD1 block
-func invalidate_lod1_for_chunk(ck: Vector3i) -> void:
-	_mark_lod1_invalid(Vector3i(ck.x >> LOD1_SHIFT, ck.y >> LOD1_SHIFT, ck.z >> LOD1_SHIFT))
+## 失效指定 LOD0 chunk 对应的所有更高层 LOD block（仅网格重建，不标记 modified）
+func invalidate_lod_for_chunk(ck: Vector3i) -> void:
+	for lod in range(1, maxi(lod_count, 1)):
+		_mark_lod_invalid(Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod), lod)
 
 
-## 记录 LOD1 block 失效（通知渲染器重建）
-func _mark_lod1_invalid(block_key: Vector3i) -> void:
-	_lod1_invalidated[block_key] = true
+## 用户编辑体素：失效高层 block 并标记"需降采样"（编辑影响该 block，不能用纯生成器数据），
+## 同时从独立数据层移除缓存（下次重生成时降采样合并编辑）。
+func mark_lod_modified(pos: Vector3i) -> void:
+	var ck := _chunk_of(pos)
+	for lod in range(1, maxi(lod_count, 1)):
+		var bk := Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod)
+		_mark_lod_invalid(bk, lod)
+		_mark_coarse_modified(bk, lod)
+		erase_lod_block(lod, bk)
 
 
-## 清空 LOD1 失效标记
-func clear_lod1_cache() -> void:
-	_lod1_invalidated.clear()
+## 用户编辑 chunk（批量）：标记覆盖它的所有高层 block 需降采样（同上）
+func mark_lod_modified_for_chunk(ck: Vector3i) -> void:
+	for lod in range(1, maxi(lod_count, 1)):
+		var bk := Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod)
+		_mark_lod_invalid(bk, lod)
+		_mark_coarse_modified(bk, lod)
+		erase_lod_block(lod, bk)
 
 
-## 获取失效的 LOD1 block（渲染器 _process_lod 消费后重建），并清空
-func get_invalidated_lod1() -> Array[Vector3i]:
+## 记录指定层级 block 失效（通知渲染器重建）
+func _mark_lod_invalid(block_key: Vector3i, lod: int) -> void:
+	while _lod_invalidated.size() <= lod:
+		_lod_invalidated.append({})
+	_lod_invalidated[lod][block_key] = true
+
+
+## 标记粗层 block 需降采样（编辑影响该 block，不能用纯生成器数据）
+func _mark_coarse_modified(block_key: Vector3i, lod: int) -> void:
+	if lod < 1:
+		return
+	while _coarse_modified.size() <= lod - 1:
+		_coarse_modified.append({})
+	_coarse_modified[lod - 1][block_key] = true
+
+
+## 清空所有层级失效标记
+func clear_lod_cache() -> void:
+	for d in _lod_invalidated:
+		d.clear()
+
+
+## 获取指定层级的失效 block（渲染器 _process_lod 消费后重建），并清空
+func get_invalidated_lod(lod: int) -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
-	for k in _lod1_invalidated:
-		keys.append(k)
-	_lod1_invalidated.clear()
+	if lod >= 0 and lod < _lod_invalidated.size():
+		var d := _lod_invalidated[lod]
+		for k in d:
+			keys.append(k)
+		d.clear()
 	return keys
 
 
@@ -166,6 +206,15 @@ const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 ## chunk key -> 密集缓冲 (PackedInt32Array, 16³)。值 = 材质ID（0 = 空），材质ID 0 保留为空。
 ## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
 var _chunk_buffers: Dictionary = {}
+
+## 每粗 LOD 独立数据层：_coarse_buffers[level-1] = {block_key: PackedInt32Array(LOD_GRID³ 大格)}
+## 值 = 材质ID（0=空），每格 = 2^level 体素。与 Voxel Tools 一致：各 LOD 数据块独立，
+## 未修改的粗层 block 由生成器 _generate_chunk_lod 直接生成（无需加载全部 LOD0 chunk）。
+var _coarse_buffers: Array[Dictionary] = []
+
+## 需降采样回退的粗 LOD block（编辑传播标记）：_coarse_modified[level-1] = {block_key: true}。
+## LOD0 编辑影响该 block 时标记，下次渲染走降采样（合并 LOD0 数据）而非生成器。
+var _coarse_modified: Array[Dictionary] = []
 
 ## 每 chunk 体素计数（chunk key -> int，增量维护 O(1)）。
 ## 替代 _maybe_erase_empty_chunk 的 4096 全量扫描：增减体素时更新计数，
@@ -361,22 +410,37 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 
 
 ## 回填统一异步流式结果（程序化后台生成 / 文件流 region 读盘，主线程调用）。
-## 已存在该 chunk 则忽略。与 preload_chunk 不同：数据来自异步队列，无需再走 stream.load_chunk。
-func accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
-	if _chunk_buffers.has(chunk_key):
+## 按 lod 分流：lod=0 存全精度 chunk；lod>=1 存粗层 32³ 大格数据。
+## 已存在则忽略。与 preload_chunk 不同：数据来自异步队列，无需再走 stream.load_chunk。
+func accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int = 0) -> void:
+	if lod == 0:
+		if _chunk_buffers.has(chunk_key):
+			return
+		if buf.size() != CHUNK_VOLUME:
+			return
+		_chunk_buffers[chunk_key] = buf
+		var cnt := 0
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				cnt += 1
+		_chunk_voxel_counts[chunk_key] = cnt
+		_voxel_count += cnt
+		# 数据就绪 → 标记网格重建。未修改的粗层块用独立数据层，不依赖 LOD0 回填，
+		# 无需失效（否则每回填一个 chunk 就递增渲染器全局 gen_id，作废全部在途粗层任务）；
+		# 仅"需降采样(用户编辑)"的粗层块在 LOD0 数据就绪后失效重建。
+		_dirty_mesh_chunks[chunk_key] = true
+		for lv in range(1, maxi(lod_count, 1)):
+			var bk := Vector3i(chunk_key.x >> lv, chunk_key.y >> lv, chunk_key.z >> lv)
+			if is_lod_block_modified(lv, bk):
+				_mark_lod_invalid(bk, lv)
 		return
-	if buf.size() != CHUNK_VOLUME:
+	if has_lod_block(lod, chunk_key):
 		return
-	_chunk_buffers[chunk_key] = buf
-	var cnt := 0
-	for i in CHUNK_VOLUME:
-		if buf[i] > 0:
-			cnt += 1
-	_chunk_voxel_counts[chunk_key] = cnt
-	_voxel_count += cnt
-	# 数据就绪 → 标记网格重建 + 失效对应 LOD1（与 preload_chunk 后渲染器标记一致）
+	if buf.size() != LOD_GRID * LOD_GRID * LOD_GRID:
+		return
+	set_lod_block(lod, chunk_key, buf)
+	# 数据就绪 → 标记对应 block 网格重建
 	_dirty_mesh_chunks[chunk_key] = true
-	invalidate_lod1_for_chunk(chunk_key)
 
 
 ## 卸载 chunk：把内存中该 chunk 的数据按需写回磁盘（修改过的写盘、变空的清盘、
@@ -483,7 +547,12 @@ func shift_origin(offset: Vector3i) -> void:
 	for k in dirty_voxels:
 		ndv[Vector3i(k) + offset] = dirty_voxels[k]
 	dirty_voxels = ndv
-	_lod1_invalidated = _shift_dict_keys(_lod1_invalidated, offset)
+	for i in _lod_invalidated.size():
+		_lod_invalidated[i] = _shift_dict_keys(_lod_invalidated[i], offset)
+	for i in _coarse_buffers.size():
+		_coarse_buffers[i] = _shift_dict_keys(_coarse_buffers[i], offset)
+	for i in _coarse_modified.size():
+		_coarse_modified[i] = _shift_dict_keys(_coarse_modified[i], offset)
 	if stream is VoxelProceduralStream:
 		(stream as VoxelProceduralStream).shift_origin(offset)
 
@@ -523,28 +592,145 @@ func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, rebuild_chunks)
 
 
-## LOD1 大块（32³ 大格 = 2×2×2 chunk = 64³ 体素）异步生成快照：
-## 大块覆盖的 2×2×2 chunk + 外扩 2 层 chunk（halo 边界面需要），COW 共享。
-## 仅 preload 大块自身 chunk（必须）；外部从内存快照（LOD1 区数据保留，磁盘不 preload）。
-func snapshot_lod1_block_chunks(block_key: Vector3i) -> Dictionary:
+## LOD 大块（LOD_GRID³ 大格 = 每格 2^lod 体素，覆盖 2^lod³ 个 chunk）异步生成快照：
+## 大块覆盖的 2^lod³ 个 chunk + 外扩 ±2^lod 层 chunk（halo 边界大格降采样需要），COW 共享。
+## 仅 preload 大块自身 chunk（必须）；外部从内存快照（LOD 区数据保留，磁盘不 preload）。
+## lod=1 即原 LOD1（2×2×2 chunk）。
+func snapshot_lod_block_chunks(block_key: Vector3i, lod: int) -> Dictionary:
+	var chunks_per_axis := 1 << lod
 	var cks: Array[Vector3i] = []
 	var seen := {}
-	var base := block_key * 2
-	for cz in 2:
-		for cy in 2:
-			for cx in 2:
+	var base := block_key * chunks_per_axis
+	for cz in chunks_per_axis:
+		for cy in chunks_per_axis:
+			for cx in chunks_per_axis:
 				var ck := base + Vector3i(cx, cy, cz)
 				cks.append(ck)
 				seen[ck] = true
 				preload_chunk(ck)
-	for oz in range(-2, 6):
-		for oy in range(-2, 6):
-			for ox in range(-2, 6):
+	for oz in range(-chunks_per_axis, 3 * chunks_per_axis):
+		for oy in range(-chunks_per_axis, 3 * chunks_per_axis):
+			for ox in range(-chunks_per_axis, 3 * chunks_per_axis):
 				var ck := base + Vector3i(ox, oy, oz)
 				if not seen.has(ck) and _chunk_buffers.has(ck):
 					seen[ck] = true
 					cks.append(ck)
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
+
+
+# ----------------------------------------------------------------------------
+# 每 LOD 独立数据层（Voxel Tools 式：粗 LOD block 数据独立，未修改块由生成器直接生成）
+# ----------------------------------------------------------------------------
+
+func _ensure_coarse_arrays(level: int) -> void:
+	while _coarse_buffers.size() <= level - 1:
+		_coarse_buffers.append({})
+	while _coarse_modified.size() <= level - 1:
+		_coarse_modified.append({})
+
+
+## 取指定 LOD 的数据块（level 0 = LOD0 chunk；>=1 = 粗层 32³ 大格数据）。无则返回空数组。
+func get_lod_block(level: int, key: Vector3i) -> PackedInt32Array:
+	if level == 0:
+		return _chunk_buffers.get(key, PackedInt32Array())
+	var idx := level - 1
+	if idx >= _coarse_buffers.size():
+		return PackedInt32Array()
+	return _coarse_buffers[idx].get(key, PackedInt32Array())
+
+
+func has_lod_block(level: int, key: Vector3i) -> bool:
+	if level == 0:
+		return _chunk_buffers.has(key)
+	var idx := level - 1
+	return idx < _coarse_buffers.size() and _coarse_buffers[idx].has(key)
+
+
+func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
+	if level == 0:
+		_chunk_buffers[key] = buf
+		return
+	_ensure_coarse_arrays(level)
+	_coarse_buffers[level - 1][key] = buf
+
+
+func erase_lod_block(level: int, key: Vector3i) -> void:
+	if level == 0:
+		_chunk_buffers.erase(key)
+		return
+	var idx := level - 1
+	if idx < _coarse_buffers.size():
+		_coarse_buffers[idx].erase(key)
+
+
+## 指定 LOD 层的所有数据块 key
+func get_lod_block_keys(level: int) -> Array:
+	if level == 0:
+		return _chunk_buffers.keys()
+	var idx := level - 1
+	if idx >= _coarse_buffers.size():
+		return []
+	return _coarse_buffers[idx].keys()
+
+
+## 修改过的粗层 block 写盘（stream 记录修改），再释放内存（卸载时调用）
+func flush_lod_block(level: int, key: Vector3i) -> void:
+	var buf := get_lod_block(level, key)
+	var s := stream
+	if s != null and buf.size() > 0:
+		s.save_chunk(key, buf, level)
+	erase_lod_block(level, key)
+
+
+## 该粗层 block 是否被编辑过（需降采样合并 LOD0 数据，而非纯生成器输出）
+func is_lod_block_modified(level: int, key: Vector3i) -> bool:
+	var idx := level - 1
+	return idx < _coarse_modified.size() and _coarse_modified[idx].has(key)
+
+
+## 请求异步生成/加载 chunk/block 数据（后台线程：程序化走生成器，文件流走 region 读盘）。
+## 统一带 lod 参数（0 = LOD0 chunk，>=1 = 粗层 block）。数据就绪后经 poll_all_ready 回填。
+func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
+	if has_lod_block(lod, chunk_key):
+		return
+	var s := stream
+	if s != null and s.has_method("request_chunk_async"):
+		s.request_chunk_async(chunk_key, lod)
+
+
+## 该 chunk/block 是否已有后台生成任务进行中或结果就绪（渲染器每帧预算限流用，避免重复提交）。
+## 程序化流有内部异步队列；无该方法的数据源视为无防重需求（返回 false）。
+func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
+	if has_lod_block(lod, chunk_key):
+		return true
+	var s := stream
+	if s != null and s.has_method("is_chunk_pending"):
+		return s.is_chunk_pending(chunk_key, lod)
+	return false
+
+
+## 粗 LOD 数据块快照（block 自身 + 27 邻居大格，COW 共享）：供独立数据层网格生成 worker 使用。
+func snapshot_lod_block_data(block_key: Vector3i, level: int) -> Dictionary:
+	var out := {}
+	var idx := level - 1
+	if idx >= _coarse_buffers.size():
+		return out
+	var cb: Dictionary = _coarse_buffers[idx]
+	for nz in 3:
+		for ny in 3:
+			for nx in 3:
+				var bk := block_key + Vector3i(nx - 1, ny - 1, nz - 1)
+				if cb.has(bk):
+					out[bk] = cb[bk]
+	return out
+
+
+## 主线程批量取回异步就绪的 chunk/block 数据。返回 [[lod, key, PackedInt32Array], ...]。
+func poll_all_ready(max_count: int) -> Array:
+	var s := stream
+	if s != null and s.has_method("poll_all_ready"):
+		return s.poll_all_ready(max_count)
+	return []
 
 
 # ----------------------------------------------------------------------------
@@ -676,6 +862,10 @@ func clear(notify: bool = true) -> void:
 	_chunk_voxel_counts.clear()
 	_voxel_count = 0
 	_dirty_chunks.clear()
+	for d in _coarse_buffers:
+		d.clear()
+	for d in _coarse_modified:
+		d.clear()
 	if stream != null:
 		for ck: Vector3i in _persisted_chunks:
 			stream.erase_chunk(ck)
@@ -923,8 +1113,8 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 	var boundary: Dictionary = res["boundary"]
 	for ck in boundary:
 		_dirty_mesh_chunks[ck] = true
-		# LOD0 数据变化 → 失效对应 LOD1 block
-		invalidate_lod1_for_chunk(ck)
+		# LOD0 用户批量编辑 → 失效高层 block 并标记需降采样
+		mark_lod_modified_for_chunk(ck)
 		var b: int = boundary[ck]
 		if b & 1:
 			_dirty_mesh_chunks[ck + Vector3i(1, 0, 0)] = true
@@ -977,8 +1167,8 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	var boundary: Dictionary = res["boundary"]
 	for ck in boundary:
 		_dirty_mesh_chunks[ck] = true
-		# LOD0 数据变化 → 失效对应 LOD1 block
-		invalidate_lod1_for_chunk(ck)
+		# LOD0 用户批量编辑 → 失效高层 block 并标记需降采样
+		mark_lod_modified_for_chunk(ck)
 		var b: int = boundary[ck]
 		if b & 1:
 			_dirty_mesh_chunks[ck + Vector3i(1, 0, 0)] = true
@@ -1212,7 +1402,11 @@ func _set(property: StringName, value: Variant) -> bool:
 		_voxel_count = 0
 		_dirty_chunks.clear()
 		_dirty_mesh_chunks.clear()
-		_lod1_invalidated.clear()
+		for d in _coarse_buffers:
+			d.clear()
+		for d in _coarse_modified:
+			d.clear()
+		clear_lod_cache()
 		var payload: Variant = _decode_payload(str(value))
 		if payload is Dictionary:
 			var gs: Variant = payload.get("grid_size", [0, 0, 0])

@@ -53,7 +53,8 @@ renderer.voxel_scale = 0.2
 renderer.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 renderer.view_distance = 60.0
 renderer.unload_distance = 100.0
-renderer.lod0_distance = 36.0   # LOD1 (low-res blocks) beyond this distance
+renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级 ×2 粗化），
+                         # 各层距离由 view_distance 自动等比（×2）推导
 ```
 
 ### Procedural infinite world
@@ -102,16 +103,17 @@ Related properties are **hidden in the Inspector automatically** when they have 
 
 | Property | Effective when | Hidden when |
 |---|---|---|
-| `view_distance` / `unload_distance` / `lod0_distance` | visibility_mode ≠ FULL | visibility_mode = FULL |
+| `view_distance` / `unload_distance` / `lod_count` | visibility_mode ≠ FULL | visibility_mode = FULL |
 | `_stream_load_per_frame` / `_stream_unload_per_frame` | visibility_mode = STREAMING | otherwise |
-| `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod0_distance > 0 | lod0_distance = 0 |
+| `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod_count > 1 | lod_count = 1 |
 | `_collision_rebuild_per_frame` | generate_collision = true | generate_collision = false |
 | `max_debris_per_hit` / `debris_*` | spawn_debris_on_damage = true | spawn_debris_on_damage = false |
 
 ### Common pitfalls
 
 - **Procedural world**: use `visibility_mode = STREAMING` — infinite worlds are always distance-driven (FULL/FRUSTUM previously rendered nothing; now auto-fixed)
-- `lod0_distance = 0` disables LOD1 (everything full-precision); for large worlds set ~`view_distance * 0.6`
+- `lod_count = 1` disables LOD (everything full-precision); for large worlds set `lod_count >= 2`.
+  LOD_i 半径自动 = `view_distance / 2^(lod_count-1-i)`（每级 ×2，对齐 Voxel Tools 标准做法）
 - `unload_distance = 0` falls back to `view_distance * 1.5`
 - `generate_collision` is **false by default** — enable it for physics collision
 - `voxel_scale` = world units per voxel (data coordinates are 1-voxel units); all distances are in world units

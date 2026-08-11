@@ -51,7 +51,8 @@ renderer.voxel_scale = 0.2
 renderer.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 renderer.view_distance = 60.0
 renderer.unload_distance = 100.0
-renderer.lod0_distance = 36.0   # 该距离之外用 LOD1 低分辨率大块
+renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级 ×2 粗化），
+                         # 各层距离由 view_distance 自动等比（×2）推导
 ```
 
 ### 程序化无限世界
@@ -100,16 +101,17 @@ target.damage_ray(origin, direction, max_distance)
 
 | 属性 | 生效条件 | 隐藏条件 |
 |---|---|---|
-| `view_distance` / `unload_distance` / `lod0_distance` | visibility_mode ≠ FULL | visibility_mode = FULL |
+| `view_distance` / `unload_distance` / `lod_count` | visibility_mode ≠ FULL | visibility_mode = FULL |
 | `_stream_load_per_frame` / `_stream_unload_per_frame` | visibility_mode = STREAMING | 其他 |
-| `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod0_distance > 0 | lod0_distance = 0 |
+| `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod_count > 1 | lod_count = 1 |
 | `_collision_rebuild_per_frame` | generate_collision = true | generate_collision = false |
 | `max_debris_per_hit` / `debris_*` | spawn_debris_on_damage = true | spawn_debris_on_damage = false |
 
 ### 常见易错点
 
 - **程序化世界**：使用 `visibility_mode = STREAMING` — 无限世界必然按距离驱动（FULL/FRUSTUM 曾会导致空白，已自动修复）
-- `lod0_distance = 0` 表示关闭 LOD1（全部全精度）；大世界建议设 ~`view_distance * 0.6`
+- `lod_count = 1` 表示关闭 LOD（全部全精度）；大世界设 `lod_count >= 2`。
+  LOD_i 半径自动 = `view_distance / 2^(lod_count-1-i)`（每级 ×2，对齐 Voxel Tools 标准做法）
 - `unload_distance = 0` 会自动回退到 `view_distance * 1.5`
 - `generate_collision` **默认 false** — 需要物理碰撞时开启
 - `voxel_scale` = 每个体素的世界单位（数据坐标是 1 体素单位）；所有距离参数都是世界单位

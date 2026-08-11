@@ -54,3 +54,7 @@ voxel_support.link_res.vol.array_mesh={
 voxel_support.vol.array_mesh={
 &"add_uv2": true
 }
+
+[threading]
+
+worker_pool/max_threads=8.0

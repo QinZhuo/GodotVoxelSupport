@@ -45,11 +45,41 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 			var wz := base.z + z
 			# 绝对高度（体素）：大尺度地形 + 细节起伏。
 			# 抬高基准 + 限最小高度：避免噪声负值区域整列无方块 → 地表"深不见底的柱状空洞"
-			var h := _noise_h.get_noise_2d(wx, wz) * 16.0 + _noise_det.get_noise_2d(wx, wz) * 6.0 + 20.0
-			var hi := maxi(int(h), 2)
+			var hi := _surface_height(wx, wz)
 			for y in VoxelChunk.CHUNK_SIZE:
 				var wy := base.y + y
 				# 只填充 [地面底, 表面) 区间：保证地形有实心底面，从下方看是完整平面
 				if wy >= GROUND_FLOOR_VOXEL and wy < hi:
 					buf[x + y * VoxelChunk.CHUNK_SIZE + z * VoxelChunk.CHUNK_SLICE] = 1
 	return buf
+
+
+## 覆写虚基类：生成粗 LOD block 数据（LOD_GRID³ 大格，每格 = 2^lod 体素）。
+## Voxel Tools 式独立数据层：远处粗层 block 直接按格子粒度采样地形高度，无需先加载
+## 全部 LOD0 chunk 再降采样。高度场格子实心 ⟺ 该格 y 范围与地表相交（近似中心高度）。
+func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
+	_ensure_noise()
+	var cell := 1 << lod
+	var grid := 32  # LOD_GRID
+	var buf := PackedInt32Array()
+	buf.resize(grid * grid * grid)
+	var base_voxel := block_key * (grid * cell)  # 大块体素原点
+	var half := cell >> 1
+	for lz in grid:
+		for ly in grid:
+			for lx in grid:
+				var wy := base_voxel.y + ly * cell
+				# 格子中心 xz 的地形高度（近似该 2^lod³ 区域的最大高度）
+				var wx := base_voxel.x + lx * cell + half
+				var wz := base_voxel.z + lz * cell + half
+				var hi := _surface_height(wx, wz)
+				# 格子实心 ⟺ 地表最高点高于格子底部（且格子未低于地面底）
+				if maxi(wy, GROUND_FLOOR_VOXEL) < hi:
+					buf[lx + ly * grid + lz * grid * grid] = 1
+	return buf
+
+
+## 采样 (wx, wz) 列的地形表面高度（体素 y）
+func _surface_height(wx: int, wz: int) -> int:
+	var h := _noise_h.get_noise_2d(wx, wz) * 16.0 + _noise_det.get_noise_2d(wx, wz) * 6.0 + 20.0
+	return maxi(int(h), 2)

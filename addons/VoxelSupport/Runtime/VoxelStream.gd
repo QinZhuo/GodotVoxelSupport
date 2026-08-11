@@ -18,29 +18,28 @@ extends Resource
 ##   buffer = PackedInt32Array(16³)，值 = 材质ID（0 = 空/空气）。
 ##   空 chunk（全 0）不落盘，由 VoxelData 在变空时调用 erase_chunk。
 
-## 保存单个 chunk 的体素数据到流（写盘）。
-## buffer 为 16³ PackedInt32Array（值 = 材质ID，0 = 空）。空 chunk 不会被调用。
+## 保存单个 chunk/block 的体素数据到流（写盘）。
+## buffer 为 CHUNK_VOLUME（lod=0）或 LOD_GRID³（lod>=1）长度（值 = 材质ID，0 = 空）。
+## lod 指定数据粒度：0 = 全精度 chunk；>=1 = 粗层 block（每格 2^lod 体素）。空块不会被调用。
 @abstract
-func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array) -> void
+func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> void
 
-## 从流加载单个 chunk 数据。流中不存在返回空数组 PackedInt32Array()（区分于
-## 有数据的 buffer：有数据时长度恒为 16³）。
-## 返回 PackedInt32Array(16³)（值 = 材质ID，0 = 空）。
+## 从流加载单个 chunk/block 数据。流中不存在返回空数组 PackedInt32Array()。
 @abstract
-func load_chunk(chunk_key: Vector3i) -> PackedInt32Array
+func load_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array
 
-## 流中是否存在该 chunk 的数据（已保存过）。
+## 流中是否存在该 chunk/block 的数据（已保存过）。
 ## 程序化流覆写为"是否属于本流可生成范围"（见 VoxelProceduralStream）。
 @abstract
-func has_chunk(chunk_key: Vector3i) -> bool
+func has_chunk(chunk_key: Vector3i, lod: int = 0) -> bool
 
-## 移除该 chunk 的数据（世界该处已清空，磁盘不得残留）。
+## 移除该 chunk/block 的数据（世界该处已清空，磁盘不得残留）。
 @abstract
-func erase_chunk(chunk_key: Vector3i) -> void
+func erase_chunk(chunk_key: Vector3i, lod: int = 0) -> void
 
-## 获取流中所有已保存的 chunk key（用于恢复世界索引）。
+## 获取流中所有已保存的 chunk/block key（用于恢复世界索引）。
 @abstract
-func get_all_chunk_keys() -> Array[Vector3i]
+func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]
 
 ## 刷新写入缓存（无写缓存的实现可留空）。
 @abstract
@@ -50,14 +49,14 @@ func flush() -> void
 @abstract
 func get_stream_path() -> String
 
-## 异步请求 chunk 数据（后台线程加载/生成）。渲染器统一流式扫描提交后，由
+## 异步请求 chunk/block 数据（后台线程加载/生成）。渲染器统一流式扫描提交后，由
 ## poll_all_ready 取回结果，实现"程序化生成 / 磁盘读"两种数据源共用一套加载流程。
-## 同 key 已提交则忽略（内部去重）。
+## lod 决定数据粒度（0 = LOD0 chunk，>=1 = 粗层 block）。同 key 已提交则忽略（内部去重）。
 @abstract
-func request_chunk_async(chunk_key: Vector3i) -> void
+func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void
 
-## 主线程批量取回异步就绪的 chunk 数据。返回 [[chunk_key, PackedInt32Array], ...]，
-## 每项 buffer 为 CHUNK_VOLUME 长度（值 = 材质ID，0 = 空），未就绪的保持待下次轮询。
+## 主线程批量取回异步就绪的 chunk/block 数据。
+## 返回 [[lod, chunk_key, PackedInt32Array], ...]，未就绪的保持待下次轮询。
 @abstract
 func poll_all_ready(max_count: int) -> Array
 
