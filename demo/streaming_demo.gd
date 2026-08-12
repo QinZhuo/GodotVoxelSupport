@@ -11,9 +11,7 @@ extends Node
 ##   WASD / 方向键   : 水平移动相机
 ##   Q / E           : 下降 / 上升
 ##   空格 / Shift    : 加速 / 减速
-##   0               : 切换 数据源（文件流 ↔ 程序化）
-##   1               : 切换 流式加载 开/关（对比显存与 FPS）
-##   2               : 切换 视锥剔除 开/关
+##   数字 1-4        : 切换 LOD 层数（1=仅 LOD0，2/3/4=多层）
 ##   Esc             : 退出
 ##
 ## 观察要点：
@@ -48,15 +46,8 @@ var _speed: float = 12.0
 const SPEED_BASE := 12.0
 const SPEED_FAST := 30.0
 
-## 流式/可见性开关状态
-var _stream_state := true
 ## 当前数据源模式
 var _current_mode: Mode = Mode.FILE_STREAM
-
-## 上一帧按键状态（边沿触发）
-var _prev_0 := false
-var _prev_1 := false
-var _prev_2 := false
 
 
 func _ready() -> void:
@@ -258,18 +249,18 @@ func _unhandled_input(event: InputEvent) -> void:
 				_speed = SPEED_FAST if event.pressed else SPEED_BASE
 			KEY_SHIFT:
 				_speed = SPEED_BASE * 0.3 if event.pressed else SPEED_BASE
-			KEY_0:
-				if event.pressed and not _prev_0:
-					_toggle_mode()
-				_prev_0 = event.pressed
 			KEY_1:
-				if event.pressed and not _prev_1:
-					_toggle_streaming()
-				_prev_1 = event.pressed
+				if event.pressed:
+					_target.lod_count = 1
 			KEY_2:
-				if event.pressed and not _prev_2:
-					_toggle_streaming()
-				_prev_2 = event.pressed
+				if event.pressed:
+					_target.lod_count = 2
+			KEY_3:
+				if event.pressed:
+					_target.lod_count = 3
+			KEY_4:
+				if event.pressed:
+					_target.lod_count = 4
 
 
 func _process(delta: float) -> void:
@@ -287,21 +278,6 @@ func _process(delta: float) -> void:
 	_camera.global_position.y += _move_up * _speed * minf(delta, 0.05)
 
 	_update_hud()
-
-
-func _toggle_mode() -> void:
-	_current_mode = Mode.PROCEDURAL if _current_mode == Mode.FILE_STREAM else Mode.FILE_STREAM
-	_rebuild_world()
-	print("[流式Demo] 切换数据源: %s" % _mode_name())
-
-
-func _toggle_streaming() -> void:
-	# 流式开/关：STREAMING ↔ FRUSTUM（关闭流式退回视锥剔除）
-	_stream_state = not _stream_state
-	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING if _stream_state \
-			else VoxelRenderer.VisibilityMode.FRUSTUM
-	_update_mode_label()
-	print("[流式Demo] 流式加载: %s" % ("ON" if _stream_state else "OFF"))
 
 
 func _update_mode_label() -> void:
@@ -337,8 +313,8 @@ func _update_hud() -> void:
 	_hud.text = "模式: %s    FPS: %d    DrawCalls: %d\n" % [_mode_name(), fps, draw] + \
 			"网格数: %d    流式网格卸载: %d\n" % [chunk_meshes, streamed] + \
 			"数据层: 内存%d  磁盘%d\n" % [data_loaded, data_unloaded] + \
-			"LOD块数: %s\n" % lod_counts + \
+			"LOD: %d层  %s\n" % [_target.lod_count, lod_counts] + \
 			"相机位置: (%d, %d, %d)\n" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)]
 	if _current_mode == Mode.PROCEDURAL:
 		_hud.text += "origin shift: %s\n" % _target._origin_chunk
-	_hud.text += "\nWASD移动 Q/E升降 空格加速\n0切换数据源 1流式开关 2视锥开关"
+	_hud.text += "\nWASD移动 Q/E升降 空格加速\n数字1-4: 切换LOD层数"

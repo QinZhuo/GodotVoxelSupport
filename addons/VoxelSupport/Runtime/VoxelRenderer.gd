@@ -397,10 +397,11 @@ func _process(_delta: float) -> void:
 	# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
 	if _streaming_enabled or (data and data.stream is VoxelProceduralStream):
 		_process_streaming()
-	# 多级 LOD 大块管理：每 interval 帧限量生成/移除（降低每帧遍历开销，
-	# 近处 LOD0 / 远处各粗层互补）；数据变化（破坏/编辑）时立即处理（不等降频周期 → 破坏重建更及时）
+	# LOD 管理：每 interval 帧限量生成/移除（降低每帧遍历开销，近处 LOD0 / 远处各粗层互补）。
+	# 数据变化（破坏/编辑）时立即处理（不等降频周期 → 破坏重建更及时）。
+	# 注意：lod_count=1（仅 LOD0）也必须调用——否则 LOD0 chunk mesh 永远不补建（画面空白）。
 	_cull_check_counter += 1
-	if lod_count > 1 and data and (_cull_check_counter >= visibility_check_interval or data.has_lod_invalidated()):
+	if data and (_cull_check_counter >= visibility_check_interval or data.has_lod_invalidated()):
 		_cull_check_counter = 0
 		_process_lod()
 
@@ -706,7 +707,7 @@ func _process_streaming() -> void:
 	var world_offset := global_position
 	# 加载半径 = view_distance（LOD0 数据需要半径）；卸载半径 = unload_distance（保留半径）
 	var load_d := view_distance
-	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.2
+	var unload_d := unload_distance if unload_distance > view_distance else view_distance * 1.2
 	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
 	var is_procedural := stream is VoxelProceduralStream
 
@@ -715,8 +716,9 @@ func _process_streaming() -> void:
 		_check_origin_shift(cam)
 
 	# 1) 回填后台异步结果（程序化生成 / 文件流 region 读盘），统一 poll → accept（按 lod 分流）
+	# poll 限量 = 加载预算的 2 倍：避免来回移动时每帧 accept 过多（主线程写入 + 失效开销大 → 掉帧）
 	var applied := 0
-	var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 4, 64))
+	var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 2, 32))
 	for r in results:
 		var lod: int = r[0]
 		var ck: Vector3i = r[1]
@@ -921,7 +923,7 @@ func _process_lod() -> void:
 		return
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.2
+	var unload_d := unload_distance if unload_distance > view_distance else view_distance * 1.2
 	var n_levels := maxi(lod_count, 1)
 	# 内存 chunk 键快照：多步骤同帧复用，避免每帧多次分配
 	var loaded_chunks := data.get_loaded_chunk_keys()
@@ -1620,7 +1622,7 @@ func _should_apply_lod_mesh(level: int, bk: Vector3i) -> bool:
 	var dist := _block_dist(bk, level, cam.global_position)
 	var inner := _lod_outer[level - 1] if level > 0 else 0.0
 	var margin := _lod_margin(level)
-	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.2
+	var unload_d := unload_distance if unload_distance > view_distance else view_distance * 1.2
 	return not (dist < inner - margin or dist > unload_d + edge_world * 0.5)
 
 
