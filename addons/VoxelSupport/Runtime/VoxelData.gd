@@ -1003,6 +1003,7 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var cxi := floori(center.x)
 	var cyi := floori(center.y)
 	var czi := floori(center.z)
+	var r_i := ceili(radius)
 	for ck in overlap_chunks:
 		if not _chunk_buffers.has(ck):
 			if stream != null and _persisted_chunks.has(ck):
@@ -1012,19 +1013,23 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 				continue
 		var buf = _chunk_buffers[ck]
 		var origin := VoxelChunk.origin_of(ck)
-		for z in CHUNK_SIZE:
-			for y in CHUNK_SIZE:
-				for x in CHUNK_SIZE:
-					if buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE] <= 0:
+		# 只遍历球 AABB 与 chunk 的交集（避免整 chunk 32³ 全扫，大半径下百倍提速）
+		var min_x := maxi(origin.x, cxi - r_i)
+		var max_x := mini(origin.x + CHUNK_SIZE - 1, cxi + r_i)
+		var min_y := maxi(origin.y, cyi - r_i)
+		var max_y := mini(origin.y + CHUNK_SIZE - 1, cyi + r_i)
+		var min_z := maxi(origin.z, czi - r_i)
+		var max_z := mini(origin.z + CHUNK_SIZE - 1, czi + r_i)
+		for z in range(min_z, max_z + 1):
+			for y in range(min_y, max_y + 1):
+				for x in range(min_x, max_x + 1):
+					if buf[(x - origin.x) + (y - origin.y) * CHUNK_SIZE + (z - origin.z) * CHUNK_SLICE] <= 0:
 						continue
-					var px := origin.x + x
-					var py := origin.y + y
-					var pz := origin.z + z
-					var dx: int = px - cxi
-					var dy: int = py - cyi
-					var dz: int = pz - czi
+					var dx: int = x - cxi
+					var dy: int = y - cyi
+					var dz: int = z - czi
 					if float(dx * dx + dy * dy + dz * dz) <= radius_sq:
-						result.append(Vector3i(px, py, pz))
+						result.append(Vector3i(x, y, z))
 	return result
 
 
@@ -1046,14 +1051,19 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 				continue
 		var buf = _chunk_buffers[ck]
 		var origin := VoxelChunk.origin_of(ck)
-		for z in CHUNK_SIZE:
-			for y in CHUNK_SIZE:
-				for x in CHUNK_SIZE:
-					if buf[x + y * CHUNK_SIZE + z * CHUNK_SLICE] <= 0:
+		# 只遍历盒 AABB 与 chunk 的交集（避免整 chunk 32³ 全扫）
+		var min_x := maxi(origin.x, floori(aabb.position.x))
+		var max_x := mini(origin.x + CHUNK_SIZE - 1, floori(aabb.end.x - 1))
+		var min_y := maxi(origin.y, floori(aabb.position.y))
+		var max_y := mini(origin.y + CHUNK_SIZE - 1, floori(aabb.end.y - 1))
+		var min_z := maxi(origin.z, floori(aabb.position.z))
+		var max_z := mini(origin.z + CHUNK_SIZE - 1, floori(aabb.end.z - 1))
+		for z in range(min_z, max_z + 1):
+			for y in range(min_y, max_y + 1):
+				for x in range(min_x, max_x + 1):
+					if buf[(x - origin.x) + (y - origin.y) * CHUNK_SIZE + (z - origin.z) * CHUNK_SLICE] <= 0:
 						continue
-					var pos := origin + Vector3i(x, y, z)
-					if aabb.has_point(Vector3(pos)):
-						result.append(pos)
+					result.append(Vector3i(x, y, z))
 	return result
 
 

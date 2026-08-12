@@ -272,7 +272,7 @@ const STREAM_UNLOAD_INTERVAL := 8
 # 加载标脏后由 WorkerThreadPool 异步生成 + _process_mesh_build_queue 帧尾限量构建
 # （GPU 上传限流 8 个/帧 + 3ms 预算），因此标脏量可适当放大：走近时每帧进入
 # 管线的新块多，但实际 mesh 出现仍由 GPU 限流平滑分摊，不会掉帧也不会"一帧一块"。
-@export_range(1, 200, 1) var _stream_load_per_frame: int = 24
+@export_range(1, 200, 1) var _stream_load_per_frame: int = 32
 # 流式补建待强制的 chunk：进入 load 距离后应无条件构建（距离驱动，非朝向驱动），
 # 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
@@ -301,7 +301,7 @@ var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 # 碰撞重建队列：破坏后延迟重建 ConcavePolygonShape3D，每帧限量，避免连续破坏主线程卡顿
 var _collision_rebuild_queue: Dictionary[Vector3i, bool] = {}
 # 每帧最多重建的碰撞体数
-@export_range(1, 100, 1) var _collision_rebuild_per_frame: int = 4
+@export_range(1, 100, 1) var _collision_rebuild_per_frame: int = 12
 
 # GPU 上传限流队列：异步结果先缓存数组数据，_process 帧尾批量构建 mesh（平滑 GPU 上传，
 # 避免连续破坏时一帧大量 ArrayMesh 创建导致 Metal fence 超时）
@@ -314,7 +314,7 @@ var _lod_mesh_apply_scheduled: bool = false
 # 每帧最多构建的 chunk 数（GPU 上传限流）
 # 流式补建直接入此队列，单 chunk 构建成本低（~1ms），提高后补建更流畅；
 # 配合 3ms 时间预算 + GPU 忙检测兜底防 Metal fence 超时
-@export_range(1, 100, 1) var _mesh_build_per_frame: int = 8
+@export_range(1, 100, 1) var _mesh_build_per_frame: int = 12
 # 增量重建每帧最多处理的 dirty chunk 数：超出放回下帧续建（防回原点/大崩塌单帧
 # 快照+派发上千 worker 阻塞主线程）。值越大重建越快但帧尖峰风险越高。
 @export_range(8, 512, 8) var _rebuild_batch_limit: int = 64
@@ -730,11 +730,18 @@ func _process_streaming() -> void:
 
 	# 2) 距离内扫描缺失 chunk 并提交（限量每帧；降频扫描，相机不动时结果不变）
 	_streaming_check_tick += 1
-	# 相机位置变化 → 本帧立即扫描（不用等 visibility_check_interval），移动时新区域块生成更及时
-	if cam_pos != _last_streaming_cam_pos:
-		_streaming_check_tick = 0
+	# 相机移动：用更快的扫描间隔（interval/2，默认 4 帧）而非每帧全量扫描——
+	# 保证移动响应及时，同时避免连续移动时每帧全量遍历拖慢帧率
+	var cam_moved := cam_pos != _last_streaming_cam_pos
+	if cam_moved:
 		_last_streaming_cam_pos = cam_pos
+		if _streaming_check_tick >= maxi(visibility_check_interval >> 1, 1):
+			_streaming_check_tick = 0
 	var submitted := 0
+	# 相机移动中 → 提高本帧加载吞吐（移动时更快补建，减少前方空白）
+	var load_budget := _stream_load_per_frame
+	if cam_moved:
+		load_budget = _stream_load_per_frame * 2
 	if _streaming_check_tick % visibility_check_interval == 0:
 		var r := ceili(load_d / chunk_size_world) + 1
 		var yspan := stream.get_vertical_half_span()
@@ -746,7 +753,7 @@ func _process_streaming() -> void:
 				if exhausted:
 					break
 				for dx in range(-r, r + 1):
-					if submitted >= _stream_load_per_frame:
+					if submitted >= load_budget:
 						exhausted = true
 						break
 					var ck := cam_ck + Vector3i(dx, dy, dz)
@@ -1543,19 +1550,25 @@ func _process_mesh_build_queue() -> void:
 
 	var t0 := Time.get_ticks_usec()
 	var built := 0
+	# 大量破坏（dirty 多）→ 临时提高本帧构建数/时间预算，减少连续破坏的 mesh 更新延迟感
+	var budget_n := _mesh_build_per_frame
+	var budget_ms := 3.0
+	if data and data._dirty_mesh_chunks.size() > _mesh_build_per_frame:
+		budget_n = maxi(budget_n, 24)
+		budget_ms = 8.0
 	var keys := _mesh_build_queue.keys()
 	# 优先处理已有 mesh 的 chunk（保证破坏面及时更新），再处理新 chunk
 	keys.sort_custom(func(a, b):
 		return _lod_meshes[0].has(a) and not _lod_meshes[0].has(b))
 	for ck in keys:
-		if built >= _mesh_build_per_frame:
+		if built >= budget_n:
 			break
 		var entry: Dictionary = _mesh_build_queue[ck]
 		_mesh_build_queue.erase(ck)
 		_apply_built_chunk(ck, entry)
 		built += 1
-		# 自适应：若本帧构建已超 3ms，提前停止避免帧尖峰
-		if (Time.get_ticks_usec() - t0) / 1000.0 > 3.0:
+		# 自适应：若本帧构建已超预算，提前停止避免帧尖峰（大量破坏时预算放宽）
+		if (Time.get_ticks_usec() - t0) / 1000.0 > budget_ms:
 			break
 	# 若还有剩余，下帧继续
 	if not _mesh_build_queue.is_empty():

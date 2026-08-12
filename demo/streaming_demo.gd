@@ -43,9 +43,10 @@ var _mode_label: Label
 var _move_forward := 0.0
 var _move_right := 0.0
 var _move_up := 0.0
-var _speed: float = 20.0
-const SPEED_BASE := 20.0
-const SPEED_FAST := 60.0
+var _speed: float = 12.0
+# 相机速度（与流式加载吞吐匹配：模型 300 世界，12/秒 ≈ 25 秒穿越，加载能跟上）
+const SPEED_BASE := 12.0
+const SPEED_FAST := 30.0
 
 ## 流式/可见性开关状态
 var _stream_state := true
@@ -280,8 +281,10 @@ func _process(delta: float) -> void:
 		var right := _camera.global_transform.basis.x
 		right.y = 0.0
 		right = right.normalized()
-		_camera.global_position += (fwd * _move_forward + right * _move_right) * _speed * delta
-	_camera.global_position.y += _move_up * _speed * delta
+		# delta 限幅：fps 低时避免相机一次跳超大距离（流式加载跟不上 → 前方空白）
+		var dt := minf(delta, 0.05)
+		_camera.global_position += (fwd * _move_forward + right * _move_right) * _speed * dt
+	_camera.global_position.y += _move_up * _speed * minf(delta, 0.05)
 
 	_update_hud()
 

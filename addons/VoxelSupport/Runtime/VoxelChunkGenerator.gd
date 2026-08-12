@@ -99,10 +99,14 @@ static func generate_arrays_runtime(
 	var all_trans_idxs := PackedInt32Array()
 
 	for ck in chunk_keys:
-		_generate_chunk_into(voxels, aligned, scale, ck,
-			all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs,
-			all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs,
-			false, offset)
+		# 复用原生 C++ greedy 面生成（generate_single_chunk_dense）替代 GDScript 面生成，
+		# 掉落体大块 / 大范围破坏重建的核心耗时下沉 C++（原生 chunk 局部坐标 → 合并时加 chunk 世界偏移）
+		var halo := _halo_from_dict(voxels, ck)
+		var arr := generate_single_chunk_dense(halo, aligned, scale, ck, offset)
+		if arr != null and not arr.is_empty():
+			var chunk_world := Vector3(ck) * (scale * float(VoxelChunk.CHUNK_SIZE)) + offset
+			_append_offset_arrays(all_solid_verts, all_solid_normals, all_solid_uvs, all_solid_idxs, arr, "solid", chunk_world)
+			_append_offset_arrays(all_trans_verts, all_trans_normals, all_trans_uvs, all_trans_idxs, arr, "trans", chunk_world)
 
 	if all_solid_idxs.is_empty() and all_trans_idxs.is_empty():
 		return null
@@ -118,6 +122,25 @@ static func generate_arrays_runtime(
 ## 将 generate_arrays_runtime 生成的字典数据组装为 ArrayMesh（必须在主线程调用）
 static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 	return _merge_meshes(arrays)
+
+
+## 合并原生单 chunk arrays 到全局数组（顶点加 chunk 世界偏移、index 加基准偏移）。
+## 供 generate_arrays_runtime 复用原生 greedy 面生成时拼合多 chunk。
+static func _append_offset_arrays(verts: PackedVector3Array, normals: PackedVector3Array,
+		uvs: PackedVector2Array, idxs: PackedInt32Array, arr: Dictionary, prefix: String,
+		chunk_world: Vector3) -> void:
+	var v: PackedVector3Array = arr.get(prefix + "_verts", PackedVector3Array())
+	if v.is_empty():
+		return
+	var base := verts.size()
+	for i in v.size():
+		v[i] = v[i] + chunk_world
+	verts.append_array(v)
+	normals.append_array(arr.get(prefix + "_normals", PackedVector3Array()))
+	uvs.append_array(arr.get(prefix + "_uvs", PackedVector2Array()))
+	var ind: PackedInt32Array = arr.get(prefix + "_idxs", PackedInt32Array())
+	for i in ind.size():
+		idxs.append(ind[i] + base)
 
 
 ## 为指定的 chunk 列表生成网格数据（增量重建路径）

@@ -201,8 +201,8 @@ var _pending_build_per_frame: int = 10
 ## 由 _process 帧尾限量组装 ArrayMesh（add_surface_from_arrays 同步 GPU 上传，
 ## 避免 GPU 满载时 Metal fence wait() 超时）。元素: {body, arrays, local_voxels}
 var _pending_mesh_results: Array[Dictionary] = []
-## 每帧最多组装的掉落体 mesh 数
-var _mesh_apply_per_frame: int = 2
+## 每帧最多组装的掉落体 mesh 数（连续破坏时提高，减少掉落块网格延迟感）
+var _mesh_apply_per_frame: int = 6
 ## GPU 忙检测与阈值继承自父类 VoxelRenderer（_measure_render_time_enabled / _gpu_busy_threshold_ms）
 
 const _DEBRIS_ROOT_NAME := "_VoxelDebris"
