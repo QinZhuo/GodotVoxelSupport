@@ -23,6 +23,7 @@ static var _required_methods := [
 	&"remove_voxels_bulk",
 	&"partition_connected",
 	&"snapshot_chunks_halo",
+	&"generate_arrays_native",
 ]
 
 ## 获取原生实例（懒初始化）。返回 null 表示不可用。
@@ -80,6 +81,24 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 	if not ClassDB.class_has_method(&"VoxelNative", &"build_halo_from_buffers", false):
 		return PackedInt32Array()
 	return inst.call(&"build_halo_from_buffers", buffers, chunk)
+
+
+## 稀疏体素字典 → 18³ dense halo（掉落体/大破坏 _halo_from_dict 下沉）。无原生时返回空数组。
+static func build_halo_from_voxels(voxels: Dictionary, chunk: Vector3i) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return PackedInt32Array()
+	return inst.call(&"build_halo_from_voxels", voxels, chunk)
+
+
+## 稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心全 C++：分 chunk + 原生 dense + 合并）。
+## 返回与 generate_arrays_runtime 相同的 Dictionary（solid/trans 顶点），无原生时返回空。
+static func generate_arrays_native(voxels: Dictionary, trans_flags: PackedByteArray,
+		scale: float, offset: Vector3) -> Dictionary:
+	var inst := _get_instance()
+	if inst == null:
+		return {}
+	return inst.call(&"generate_arrays_native", voxels, trans_flags, scale, offset)
 
 
 ## 构建 LOD1 大块(32³ 大格)的 34³ halo（原生下沉 C++）。无原生/旧库缺方法时返回空数组。

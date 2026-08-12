@@ -57,6 +57,13 @@ public:
 	// 下沉 C++ 替代 GDScript 逐体素循环（27 邻居 × 重叠区）。
 	static PackedInt32Array build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk);
 
+	// 稀疏体素字典 → 18³ dense halo（掉落体/大破坏的 _halo_from_dict 下沉）
+	static PackedInt32Array build_halo_from_voxels(const Dictionary &voxels, const Vector3i &chunk);
+
+	// 稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心：分 chunk + 原生 dense 面生成 + 合并，全 C++）
+	static Dictionary generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
+			float scale, const Vector3 &offset);
+
 	// 构建 LOD1 大块(32³ 大格)的 34³ halo（中心 32³ 降采样 2³ 体素 + 6 外缘面），
 	// 下沉 C++ 替代 GDScript 逐体素循环（大块 halo 构建吞吐提升）。
 	static PackedInt32Array build_lod1_block_halo_from_buffers(const Dictionary &buffers, const Vector3i &block_key);

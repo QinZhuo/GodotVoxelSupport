@@ -381,6 +381,114 @@ PackedInt32Array VoxelNative::build_halo_from_buffers(const Dictionary &buffers,
 	return halo;
 }
 
+// 稀疏体素字典 → 18³ dense halo（掉落体/大破坏的 _halo_from_dict 下沉）
+PackedInt32Array VoxelNative::build_halo_from_voxels(const Dictionary &voxels, const Vector3i &chunk) {
+	PackedInt32Array halo;
+	halo.resize(HALO_SIZE * HALO_SIZE * HALO_SIZE);
+	const Vector3i origin = chunk * CHUNK_SIZE;
+	for (int z = 0; z < HALO_SIZE; ++z) {
+		for (int y = 0; y < HALO_SIZE; ++y) {
+			for (int x = 0; x < HALO_SIZE; ++x) {
+				const Vector3i p(origin.x + x - HALO, origin.y + y - HALO, origin.z + z - HALO);
+				const Variant v = voxels.get(p, 0);
+				if (v.get_type() == Variant::INT) {
+					const int64_t m = v;
+					if (m > 0) {
+						halo[x + y * HALO_SIZE + z * HALO_SIZE * HALO_SIZE] = (int32_t)m;
+					}
+				}
+			}
+		}
+	}
+	return halo;
+}
+
+namespace {
+// 合并原生 dense arrays 到全局数组（顶点加 base 索引偏移）
+void append_arrays_native(PackedVector3Array &verts, PackedVector3Array &normals, PackedVector2Array &uvs,
+		PackedInt32Array &idxs, const Dictionary &arr, const char *prefix, int base) {
+	const PackedVector3Array v = arr[String(prefix) + "_verts"];
+	if (v.is_empty()) {
+		return;
+	}
+	for (int i = 0; i < v.size(); ++i) {
+		verts.append(v[i]);
+	}
+	normals.append_array(arr[String(prefix) + "_normals"]);
+	uvs.append_array(arr[String(prefix) + "_uvs"]);
+	const PackedInt32Array ind = arr[String(prefix) + "_idxs"];
+	for (int i = 0; i < ind.size(); ++i) {
+		idxs.append(ind[i] + base);
+	}
+}
+} // namespace
+
+// 稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心：分 chunk + 原生 dense 面生成 + 合并，全 C++）
+Dictionary VoxelNative::generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
+		float scale, const Vector3 &offset) {
+	// 1. 分 chunk：体素按 chunk key 分组；体素材质查表
+	std::unordered_map<uint64_t, std::vector<Vector3i>> chunks;
+	std::unordered_map<uint64_t, int32_t> mat_map;
+	{
+		const Array keys = voxels.keys();
+		for (int i = 0; i < keys.size(); ++i) {
+			const Vector3i p = keys[i];
+			const int64_t m = voxels[p];
+			if (m <= 0) {
+				continue;
+			}
+			const Vector3i ck(p.x >> CHUNK_SHIFT, p.y >> CHUNK_SHIFT, p.z >> CHUNK_SHIFT);
+			chunks[grid_vkey(ck)].push_back(p);
+			mat_map[grid_vkey(p)] = (int32_t)m;
+		}
+	}
+	PackedVector3Array sv, sn, tv, tn;
+	PackedVector2Array su, tu;
+	PackedInt32Array si, ti;
+	int solid_base = 0;
+	int trans_base = 0;
+	for (auto &it : chunks) {
+		auto &voxs = it.second;
+		if (voxs.empty()) {
+			continue;
+		}
+		const Vector3i ck(voxs[0].x >> CHUNK_SHIFT, voxs[0].y >> CHUNK_SHIFT, voxs[0].z >> CHUNK_SHIFT);
+		// 2. 构建 18³ halo（含邻居，查体素表）
+		PackedInt32Array halo;
+		halo.resize(HALO_SIZE * HALO_SIZE * HALO_SIZE);
+		const Vector3i origin = ck * CHUNK_SIZE;
+		for (int z = 0; z < HALO_SIZE; ++z) {
+			for (int y = 0; y < HALO_SIZE; ++y) {
+				for (int x = 0; x < HALO_SIZE; ++x) {
+					const Vector3i p(origin.x + x - HALO, origin.y + y - HALO, origin.z + z - HALO);
+					auto mit = mat_map.find(grid_vkey(p));
+					if (mit != mat_map.end() && mit->second > 0) {
+						halo[x + y * HALO_SIZE + z * HALO_SIZE * HALO_SIZE] = mit->second;
+					}
+				}
+			}
+		}
+		// 3. 原生 dense 面生成（world 坐标）+ 合并
+		const Dictionary arr = generate_dense_impl(halo, trans_flags, scale, origin, false, offset, CHUNK_SIZE);
+		append_arrays_native(sv, sn, su, si, arr, "solid", solid_base);
+		append_arrays_native(tv, tn, tu, ti, arr, "trans", trans_base);
+		solid_base = sv.size();
+		trans_base = tv.size();
+	}
+	Dictionary result;
+	if (!si.is_empty() || !ti.is_empty()) {
+		result["solid_verts"] = sv;
+		result["solid_normals"] = sn;
+		result["solid_uvs"] = su;
+		result["solid_idxs"] = si;
+		result["trans_verts"] = tv;
+		result["trans_normals"] = tn;
+		result["trans_uvs"] = tu;
+		result["trans_idxs"] = ti;
+	}
+	return result;
+}
+
 PackedInt32Array VoxelNative::build_lod1_block_halo_from_buffers(const Dictionary &buffers, const Vector3i &block_key) {
 	// 构建 LOD1 大块(32³ 大格)的 34³ halo：中心 32³ 大格（每格 = 2³ 体素，从 2×2×2 chunk 降采样）
 	// + 6 外缘面（相邻大块边界 1 大格层）。CHUNK_SIZE 自适应：
@@ -874,6 +982,8 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_voxels", "voxels", "chunk"), &VoxelNative::build_halo_from_voxels);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod1_block_halo_from_buffers", "buffers", "block_key"), &VoxelNative::build_lod1_block_halo_from_buffers);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);

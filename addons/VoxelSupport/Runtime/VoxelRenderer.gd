@@ -61,7 +61,7 @@ enum VisibilityMode {
 		# demo 在 _ready 之后才设 STREAMING 会导致流式从不启用）
 		_streaming_enabled = v == VisibilityMode.STREAMING
 		if _streaming_enabled and unload_distance <= 0.0:
-			unload_distance = view_distance * 1.5
+			unload_distance = view_distance * 1.2
 		if v == VisibilityMode.FULL:
 			_deferred_chunks.clear()
 			# 全量模式下补建已加载 chunk 的网格（卸载的由统一流式按需重载）
@@ -101,7 +101,7 @@ func _validate_property(property: Dictionary) -> void:
 		_recompute_lod_bands()
 
 ## 流式卸载距离（世界单位，仅 STREAMING）：超过此距离的 chunk 网格被卸载释放
-## 默认 0 = 自动取 view_distance * 1.5
+## 默认 0 = 自动取 view_distance * 1.2
 @export var unload_distance: float = 0.0
 
 ## LOD 层级数（含 LOD0）：1=仅全精度（默认，等价旧版 lod0_distance=0 关闭 LOD）；
@@ -376,7 +376,7 @@ func _ready() -> void:
 	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认 = view*1.5）
 	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
 	if _streaming_enabled and unload_distance <= 0.0:
-		unload_distance = view_distance * 1.5
+		unload_distance = view_distance * 1.2
 
 
 func _process(_delta: float) -> void:
@@ -706,7 +706,7 @@ func _process_streaming() -> void:
 	var world_offset := global_position
 	# 加载半径 = view_distance（LOD0 数据需要半径）；卸载半径 = unload_distance（保留半径）
 	var load_d := view_distance
-	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
+	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.2
 	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
 	var is_procedural := stream is VoxelProceduralStream
 
@@ -921,7 +921,7 @@ func _process_lod() -> void:
 		return
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
+	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.2
 	var n_levels := maxi(lod_count, 1)
 	# 内存 chunk 键快照：多步骤同帧复用，避免每帧多次分配
 	var loaded_chunks := data.get_loaded_chunk_keys()
@@ -1620,7 +1620,7 @@ func _should_apply_lod_mesh(level: int, bk: Vector3i) -> bool:
 	var dist := _block_dist(bk, level, cam.global_position)
 	var inner := _lod_outer[level - 1] if level > 0 else 0.0
 	var margin := _lod_margin(level)
-	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.5
+	var unload_d := unload_distance if unload_distance > 0.0 else view_distance * 1.2
 	return not (dist < inner - margin or dist > unload_d + edge_world * 0.5)
 
 

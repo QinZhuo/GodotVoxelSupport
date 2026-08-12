@@ -77,6 +77,14 @@ static func generate_arrays_runtime(
 	var offset: Vector3 = options.get("offset", Vector3.ZERO)
 	var aligned := VoxelMaterial.align_by_id(materials)
 
+	# 原生快路径：稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心全 C++：分 chunk + 原生
+	# dense 面生成 + 合并）。无原生（旧库）时回退下方 GDScript 多 chunk 实现。
+	if voxels is Dictionary and not voxels.is_empty() and NativeLoader.is_available():
+		var trans_flags := _build_trans_flags(aligned)
+		var native := NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
+		if native != null and not native.is_empty():
+			return native
+
 	# 一次遍历 voxels，建立"非空 chunk"哈希索引（避免逐 chunk 16³ 扫描）
 	var non_empty := _build_non_empty_chunk_index(voxels)
 
