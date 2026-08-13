@@ -27,6 +27,30 @@ static func thread_call(work: Callable) -> Variant:
 	await await_until(func(): return WorkerThreadPool.is_task_completed(task_id))
 	return data.get("result")
 
+## 在后台线程执行 work 并**实时回报进度**。
+## work 签名: func(progress: Dictionary) -> Variant, 内部周期性 progress["p"] = 0.0..1.0
+## (worker 线程只写纯数据字典, 不调用任何 GDScript 回调 → 线程安全)。
+## on_progress 在主线程每帧被回调(进度 0..1)。返回 work 的结果。
+## 示例:
+##   var result = await AsyncTool.thread_call_with_progress(
+##       func(progress):
+##           for i in 100:
+##               progress["p"] = i / 100.0
+##           return "done",
+##       func(p): print("进度 ", p))
+static func thread_call_with_progress(work: Callable, on_progress: Callable = func(_p: float): pass) -> Variant:
+	var data := {"progress": 0.0}
+	var task_id := WorkerThreadPool.add_task(func():
+		data.result = work.call(data)
+	)
+	# 主线程每帧轮询进度并回调(worker 线程只写 data 纯数据字段, 主线程读 → 安全)
+	# 优先读 work 写的 data["p"](细分进度), 回退 data["progress"]
+	while not WorkerThreadPool.is_task_completed(task_id):
+		on_progress.call(data.get("p", data.get("progress", 0.0)))
+		await Engine.get_main_loop().process_frame
+	on_progress.call(data.get("p", data.get("progress", 1.0)))
+	return data.get("result")
+
 ## 每帧 poll done() 直到返回 true
 static func await_until(done: Callable) -> void:
 	while not done.call():

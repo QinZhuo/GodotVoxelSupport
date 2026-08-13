@@ -2,7 +2,11 @@
 
 本文档说明 `addons/DEVFramework/ECS/` 高性能 ECS 框架的完整使用方法。
 
-**架构**：C++ GDExtension（`ECSCore`，SoA 列存储 / 稀疏集 / 签名视图 / 批量运算 / SIMD / 持久线程池）+ GDScript 封装层（`ECSWorld` / `ECSSystem` / 规则 DSL）。**框架强依赖原生库**（`devecs.gdextension`），缺失会明确报错，无回退。
+**架构**：C++ GDExtension（`ECSCore`，SoA 列存储 / 稀疏集 / 签名视图 / 批量运算 / SIMD / 持久线程池）+ GDScript 封装层（`ECSWorld` / `ECSSystem` / 规则 DSL）。
+
+**框架级共享原生库**：ECSCore 注册在框架统一的 C++ 共享扩展 `res://addons/DEVFramework/Native/devecs.gdextension`
+（由 `FrameworkNative` 统一懒加载，**整个 DEVFramework 的所有 C++ 内容共用这一份原生库**）。
+ECS 只声明自己的必需方法集并委托 `FrameworkNative.get_native(&"ECSCore", ...)` 加载；缺失/版本不符时明确报错，无静默回退。
 
 **定位**（与场景节点配合的三种用法）：
 - **海量实体**（1 万+）：纯 ECS 数据 + 渲染直读列，不建 Node。

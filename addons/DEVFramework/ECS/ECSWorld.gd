@@ -131,7 +131,7 @@ func _init(p_use_shared_core: bool = true) -> void:
 	else:
 		_core = ClassDB.instantiate(&"ECSCore")
 	if _core == null:
-		push_error("ECSWorld: ECSCore 原生库不可用! 请确认 devecs.gdextension 已加载(框架强依赖 C++, 无回退)。")
+		push_error("ECSWorld: ECSCore 原生库不可用! 请确认 res://addons/DEVFramework/Native/devecs.gdextension 已加载(框架强依赖 C++, 无回退)。")
 
 ## 原生实例(高级用法直接调用)
 func native() -> Object:
