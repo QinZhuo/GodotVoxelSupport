@@ -2,10 +2,13 @@ cmake_minimum_required(VERSION 3.17)
 
 # 体素插件原生核心 (GDExtension)
 # 多平台构建：godot-cpp 官方模板同款 CMake 方案
-# 用法（注意：必须用 Debug 配置构建，因 .gdextension 在编辑器/F5 调试运行时
-#   加载 macos.debug.arm64 命名的库；Release 构建输出名不匹配会导致运行期加载崩溃）：
-#   cmake -S . -B build -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Debug
-#   cmake --build build
+# 用法：
+#   Debug   （编辑器/F5 调试运行时加载 debug 命名的库）：
+#     cmake -S . -B build -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Debug
+#     cmake --build build
+#   Release （导出游戏运行时加载 release 命名的库）：
+#     cmake -S . -B build-release -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Release
+#     cmake --build build-release
 # 平台支持：macOS(arm64/x86_64) / Windows(x86_64) / Linux(x86_64)
 #   通过 CMake 内置 -DCMAKE_OSX_ARCHITECTURES / 交叉工具链实现
 
@@ -52,8 +55,14 @@ set_target_properties(voxelnative PROPERTIES
 )
 if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.debug.arm64")
+elseif(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.release.arm64")
 elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.windows.debug.x86_64")
+elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.windows.release.x86_64")
 elseif(UNIX AND NOT APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.linux.debug.x86_64")
+elseif(UNIX AND NOT APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.linux.release.x86_64")
 endif()

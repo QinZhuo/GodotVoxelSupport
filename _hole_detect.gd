@@ -35,10 +35,12 @@ static func run(node: Node3D, cam: Camera3D) -> Dictionary:
 	var holes: Array = []
 	for k in hole_keys:
 		holes.append(hole_keys[k])
+	var lod1_size: int = node._lod_meshes[1].size() if node._lod_meshes.size() > 1 else 0
+	var coarse_data_l1: int = node.data.get_lod_block_keys(1).size() if node.data else 0
 	var result := {
 		"cam": Vector3i(cam_pos), "holes_count": holes.size(), "holes": holes,
-		"lod0": node._lod_meshes[0].size(), "lod1": node._lod_meshes[1].size(),
-		"coarse_data_l1": node.data.get_lod_block_keys(1).size(),
+		"lod0": node._lod_meshes[0].size(), "lod1": lod1_size,
+		"coarse_data_l1": coarse_data_l1,
 	}
-	print("[空洞检测] count=", holes.size(), " cam=", Vector3i(cam_pos), " lod0=", node._lod_meshes[0].size(), " lod1=", node._lod_meshes[1].size())
+	print("[空洞检测] count=", holes.size(), " cam=", Vector3i(cam_pos), " lod0=", node._lod_meshes[0].size(), " lod1=", lod1_size)
 	return result

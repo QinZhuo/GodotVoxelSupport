@@ -26,6 +26,7 @@ script = ExtResource("1_destruction")
 
 [node name="DestructibleVoxels" type="MeshInstance3D" parent="." unique_id=2041247333]
 script = ExtResource("2_destructible")
+view_distance = 200.0
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=256182047]
 environment = SubResource("Environment_1")

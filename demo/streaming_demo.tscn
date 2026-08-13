@@ -23,7 +23,6 @@ fog_enabled = true
 
 [node name="StreamingDemo" type="Node3D" unique_id=1214734711]
 script = ExtResource("1_stream")
-view_distance = 200.0
 
 [node name="DestructibleVoxels" type="MeshInstance3D" parent="." unique_id=373616168]
 script = ExtResource("2_destructible")

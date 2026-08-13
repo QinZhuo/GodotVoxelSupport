@@ -60,8 +60,6 @@ enum VisibilityMode {
 		# 同步流式启用状态：运行时切换 STREAMING 立即生效（原只在 _ready 设置一次，
 		# demo 在 _ready 之后才设 STREAMING 会导致流式从不启用）
 		_streaming_enabled = v == VisibilityMode.STREAMING
-		if _streaming_enabled and unload_distance <= 0.0:
-			unload_distance = view_distance * 1.2
 		if v == VisibilityMode.FULL:
 			_deferred_chunks.clear()
 			# 全量模式下补建已加载 chunk 的网格（卸载的由统一流式按需重载）
@@ -382,8 +380,6 @@ func _ready() -> void:
 	_measure_render_time_enabled = false
 	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认 = view*1.5）
 	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
-	if _streaming_enabled and unload_distance <= 0.0:
-		unload_distance = view_distance * 1.2
 
 
 func _process(_delta: float) -> void:
@@ -565,8 +561,13 @@ func _filter_visible_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var lod0_d := _lod_outer[0] if lod_count > 1 else 0.0
+	# LOD0 显示区外边界。count=1 时 _recompute_lod_bands 会 append view_distance
+	# （lod0 带 = [0, D]，全 lod0），此处必须取 _lod_outer[0] 而非"count>1 否则 0"——
+	# 否则 count=1 时"近处 LOD0 区无条件构建"失效，所有 chunk 走视锥剔除，
+	# 视锥外 chunk 被 deferred 不建 mesh → lod0 只覆盖视锥内而非 [0, D]（"越改越近"）。
+	var lod0_d := _lod_outer[0]
 	var lod0_margin := _lod_margin(0)
+	var unload_d := _unload_d()
 	var visible: Array[Vector3i] = []
 	for ck in chunks:
 		# 无数据的空 chunk：不纳入网格管理（无体素无需构建/补建，避免补建空 chunk 死循环）
@@ -574,8 +575,8 @@ func _filter_visible_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 			continue
 		# 流式距离层（仅 STREAMING）：超 unload 不建网格（数据由统一流式卸载，
 		# 重进范围再按需重载）
-		if _streaming_enabled and unload_distance > 0.0:
-			if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > unload_distance:
+		if _streaming_enabled and unload_d > 0.0:
+			if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > unload_d:
 				continue
 		# 【关键】LOD 层级过滤：与流式模式无关（LOD 按距离用不同分辨率，正交于流式加载）。
 		# 超出 LOD0 带的 chunk 由对应粗层 block 覆盖——从一开始就决定显示哪个层级，
@@ -630,6 +631,13 @@ static func _is_chunk_beyond_unload(ck: Vector3i, cam: Camera3D, chunk_size_worl
 	if cam == null or unload_d <= 0.0:
 		return false
 	return _chunk_center_dist(ck, cam.global_position, chunk_size_world, world_offset) > unload_d
+
+
+## 统一卸载距离：unload_distance 未显式设置（<= view_distance）时回退为 view_distance * 1.2。
+## 所有距离判定（网格过滤/数据卸载/LOD 挂载/过期结果丢弃）共用此值，避免各处分歧。
+## 惰性计算：不 mutate unload_distance 字段，规避属性加载顺序导致的错误固化值。
+func _unload_d() -> float:
+	return unload_distance if unload_distance > view_distance else view_distance * 1.2
 
 
 ## 统一视锥可见性判定（对外统一接口）：世界坐标是否在当前相机视锥内。
@@ -714,7 +722,7 @@ func _process_streaming() -> void:
 	var world_offset := global_position
 	# 加载半径 = view_distance（LOD0 数据需要半径）；卸载半径 = unload_distance（保留半径）
 	var load_d := view_distance
-	var unload_d := unload_distance if unload_distance > view_distance else view_distance * 1.2
+	var unload_d := _unload_d()
 	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
 	var is_procedural := stream is VoxelProceduralStream
 
@@ -930,7 +938,7 @@ func _process_lod() -> void:
 		return
 	var cam_pos := cam.global_position
 	var world_offset := global_position
-	var unload_d := unload_distance if unload_distance > view_distance else view_distance * 1.2
+	var unload_d := _unload_d()
 	var n_levels := maxi(lod_count, 1)
 	# 内存 chunk 键快照：多步骤同帧复用，避免每帧多次分配
 	var loaded_chunks := data.get_loaded_chunk_keys()
@@ -1116,6 +1124,11 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 	var remove_lod0: Array = []
 	var coarsest := maxi(lod_count, 1) - 1
 	for ck in _lod_meshes[0]:
+		# 移除阈值统一用 lod0_d + margin（与下方补建阈值一致），消除 (lod0_d, lod0_d+margin]
+		# 重叠区间——否则该区间内 chunk 每帧"移除→补建"来回抖动，_level_finer_ready
+		# 随之在就绪/未就绪间跳变，LOD1 块可见性闪烁（lod_count=2 严重）。
+		if _block_dist(ck, 0, cam_pos) <= lod0_d + lod0_margin:
+			continue  # 仍在 LOD0 带（含滞回 margin），保留
 		var level := _chunk_render_level(ck, cam_pos)
 		if level > 0:
 			var bk := _lod_block_of_chunk(ck, level)
@@ -1124,9 +1137,8 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 			var coarse_mesh: MeshInstance3D = _lod_meshes[level].get(bk)
 			if coarse_mesh != null or _block_dist(bk, level, cam_pos) > _lod_outer[level] + _lod_margin(level):
 				remove_lod0.append(ck)
-		elif _block_dist(ck, 0, cam_pos) > lod0_d + lod0_margin:
-			# lod_count=1 时 _chunk_render_level 恒 0，需单独判定：超出 LOD0 显示区
-			# （view_distance 缩小/相机远离）且无更粗层 → 移除，否则残留旧网格
+		else:
+			# lod_count=1 无更粗层 → 超出 LOD0 显示区直接移除，否则残留旧网格
 			remove_lod0.append(ck)
 	for ck in remove_lod0:
 		_remove_chunk_mesh(ck)
@@ -1708,7 +1720,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 		# 必须应用结果，否则永久缺失。
 		var cam_now := get_viewport().get_camera_3d() if is_inside_tree() else null
 		if _is_chunk_beyond_unload(
-				chunk_key, cam_now, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position, unload_distance):
+				chunk_key, cam_now, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position, _unload_d()):
 			_pending_task_count -= 1
 			if _pending_task_count <= 0:
 				_pending_task_count = 0
@@ -1829,7 +1841,7 @@ func _should_apply_lod_mesh(level: int, bk: Vector3i) -> bool:
 		return false
 	var edge_world := _lod_block_edge_world(level)
 	var dist := _block_dist(bk, level, cam.global_position)
-	var unload_d := unload_distance if unload_distance > view_distance else view_distance * 1.2
+	var unload_d := _unload_d()
 	if _lod_rebuilding(level, bk):
 		# 失效重建的粗层 mesh：只在粗层带内替换（反映破坏）；
 		# LOD0 区内带不替换（粗层隐藏、由 LOD0 chunk mesh 反映洞），
