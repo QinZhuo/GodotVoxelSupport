@@ -129,12 +129,15 @@ var _lod_pending: Array[Dictionary] = []
 var _lod_pending_tasks: Array[Dictionary] = []
 ## 失效重建标记：破坏/编辑后 block 数据变化，保留旧 mesh 直到新 mesh 就绪替换（防重建闪烁）
 var _lod_rebuild: Array[Dictionary] = []
+## 粗层降采样空结果重试计数（key: "level_bk" → n）：降采样空多为 LOD0 数据未就绪，
+## 不设空标记（否则跳过导致洞永远），重试上限后设空标记防真空 block 循环。
+var _lod_null_retries: Dictionary = {}
 ## 各层生成代数：数据变化（invalidate）时递增，丢弃旧任务过期结果
 var _lod_generation_id: Array[int] = []
 ## 每帧一次对齐的各层材质（供所有 worker 复用）
 var _lod_materials: Array[Array] = []
 ## 每帧最多派发/挂载的粗 LOD 网格数（硬上限；mesh 由工作线程构建，挂载仅赋值，可适当调大）
-@export_range(1, 50, 1) var _lod_build_per_frame: int = 8
+@export_range(1, 200, 1) var _lod_build_per_frame: int = 64
 
 # LOD 大块（godot_voxel 风格大 block）：LOD_GRID³ 大格，每格 = 2^level 体素。
 #   level 0 = chunk（LOD_GRID = CHUNK_SIZE = 32，block key == chunk key）
@@ -167,7 +170,7 @@ func _block_dist(bk: Vector3i, level: int, cam_pos: Vector3) -> float:
 	return cam_pos.distance_to(_lod_block_center(bk, global_position, _lod_block_edge_world(level)))
 
 ## LOD1 生成每帧时间预算（毫秒）：超过即停止本帧生成，平滑移动时主线程峰值
-@export_range(0.1, 50.0, 0.1) var _lod_build_budget_ms: float = 6.0
+@export_range(0.1, 50.0, 0.1) var _lod_build_budget_ms: float = 8.0
 # 跨层共享的每帧 LOD 构建预算（避免每层各自满额 → 3 层共 9 个/帧 + 3× 时间）
 var _lod_build_this_frame: int = 0
 # 共享的后台数据生成提交预算：数量硬上限 _lod_submit_per_frame（防单帧洪峰打爆 WorkerThreadPool）。
@@ -966,15 +969,18 @@ func _process_lod() -> void:
 	var submit_budget: int = _lod_submit_per_frame
 	if data and data.stream is VoxelProceduralStream:
 		submit_budget = 40
+	# 每层独立构建预算 = 总数均分（保证近层建完前更粗层也能推进，不被近层 in-flight
+	# 队列饿死——否则 LOD1 海量候选每帧占满共享配额，LOD2 永远 0 个 → 远处空洞）。
+	var per_level_build := maxi(_lod_build_per_frame / maxi(n_levels, 1), 4)
 	for level in range(n_levels):
-		_process_lod_level(level, cam, cam_pos, cam_dir, unload_d, world_offset, loaded_chunks, submit_budget)
+		_process_lod_level(level, cam, cam_pos, cam_dir, unload_d, world_offset, loaded_chunks, submit_budget, per_level_build)
 
 
 ## 单个 LOD 层级管理：按 level 参数自动分流——
 ##   level 0 = 全精度 chunk 网格（移除超出 LOD0 带、补建带内缺失）
 ##   level >=1 = 粗层 block（覆盖 32×2^level 体素），每层严格在自身 band
 ##   （inner-margin, upper] 内生成/保留（最粗层延伸至 unload），避免多层重叠 z-fight。
-func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Vector3, unload_d: float, world_offset: Vector3, loaded_chunks: Array, submit_budget: int) -> void:
+func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Vector3, unload_d: float, world_offset: Vector3, loaded_chunks: Array, submit_budget: int, build_quota: int) -> void:
 	if level == 0:
 		_process_chunk_level(loaded_chunks, cam, cam_pos, world_offset, unload_d)
 		return
@@ -1030,14 +1036,24 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 	var to_build: Array = []
 	for bk in needed:
 		if _has_lod_mesh(level, bk) and not _lod_rebuilding(level, bk):
-			continue
+			# 空标记（null mesh）但粗层数据已就绪 → 重建 mesh（数据生成晚于首次 mesh 尝试——
+			# 否则粗层一直空标记，LOD0 移除后出现过渡空洞）。
+			if _lod_meshes[level][bk] != null or not data.has_lod_block(level, bk):
+				continue
 		var dist: float = needed[bk]
-		if dist < inner - margin or dist > upper:
+		# 数据已就绪的 block 不受内带限制：预生成/挂载 mesh（LOD0 移除后粗层直接显示，
+		# 避免移动时粗层数据就绪但 mesh 未挂载的块状空洞）
+		if not data.has_lod_block(level, bk) and (dist < inner - margin or dist > upper):
 			continue
 		# 修改过的 block 由降采样回退（_build_lod_block 处理，数据来自 LOD0）；未修改优先独立数据。
 		# 流若无粗层独立数据能力（程序化流会生成；文件流/自定义流仅实现 lod=0 → request 无效果）：
 		# request 后 is_chunk_pending 仍 false → 走 to_build 由 _build_lod_block 降采样回退（保证任意流都出 LOD）。
 		if not data.is_lod_block_modified(level, bk) and not data.has_lod_block(level, bk):
+			# 文件流：直接降采样生成（一次完成——mesh + 数据缓存同步），不等异步 request 两阶段。
+			# 异步降采样（request → 数据 → 下次帧 mesh）完成时机晚，近处粗层块长期无 mesh → 固定空洞。
+			if data.stream is VoxelFileStream:
+				to_build.append([dist, bk])
+				continue
 			var _pending := data.is_chunk_pending(bk, level)
 			if not _pending and _lod_submit_this_frame < submit_budget:
 				_lod_submit_this_frame += 1
@@ -1051,26 +1067,24 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 		to_build.append([dist, bk])
 	# 构建预算有限：先按距离粗排（用缓存的 dist，便宜），截断候选，再按加载优先级细排
 	# （避免大 to_build 时对数百 block 全量算 priority，单层可省数十 ms）。
-	if to_build.size() > _lod_build_per_frame * 8:
+	if to_build.size() > build_quota * 8:
 		to_build.sort_custom(func(a, b): return a[0] < b[0])
-		to_build = to_build.slice(0, _lod_build_per_frame * 8)
+		to_build = to_build.slice(0, build_quota * 8)
 	to_build.sort_custom(func(a, b):
 		return _lod_load_priority(a[1], level, cam_pos, cam_dir) < _lod_load_priority(b[1], level, cam_pos, cam_dir))
 	if not to_build.is_empty():
 		var aligned: Array = VoxelMaterial.align_by_id(_materials_snapshot)
 		# 用 assign 避免 typed 数组（_lod_materials 为 Array[Array]）直接赋值类型校验失败
 		_lod_materials[level].assign(aligned)
-	var _budget_us := int(_lod_build_budget_ms * 1000.0)
-	# 时间预算仅针对构建循环本身（派发 _build_lod_block 很轻），不计入前置的
-	# needed 遍历/排序耗时——否则 to_build 列表大时前置计算就超时，构建永不执行。
-	var _build_loop_start_us := Time.get_ticks_usec()
+	# 每层构建数独立计数（上限 build_quota），互不抢占——近层在途任务多时
+	# 不拖垮更粗层（否则 LOD1 海量 in-flight 占满共享配额 → LOD2 饿死 → 远处空洞）。
+	# 只在真正派发（_build_lod_block 返回 true）时计数：已 pending 的跳过调用不再耗配额。
+	var _built_this := 0
 	for item in to_build:
-		if _lod_build_this_frame >= _lod_build_per_frame:
+		if _built_this >= build_quota:
 			break
-		if Time.get_ticks_usec() - _build_loop_start_us > _budget_us:
-			break
-		_build_lod_block(level, item[1])
-		_lod_build_this_frame += 1
+		if _build_lod_block(level, item[1]):
+			_built_this += 1
 	_lod_pending[level].clear()
 	# 1d. 可见性兜底：进入内层带且内层未就绪 → 本层显示（防切换空洞）；
 	#     超出本层带且更粗层已就绪 → 隐藏本层（防远处多层重叠 z-fight）
@@ -1105,7 +1119,10 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 		var level := _chunk_render_level(ck, cam_pos)
 		if level > 0:
 			var bk := _lod_block_of_chunk(ck, level)
-			if _has_lod_mesh(level, bk) or _block_dist(bk, level, cam_pos) > _lod_outer[level] + _lod_margin(level):
+			# 粗层 mesh 已实际就绪（非空标记）才移除 LOD0：空标记（null）表示粗层数据未就绪/生成晚，
+			# 此时保留 LOD0 兜底显示，避免移动时 LOD0/LOD1 边界出现过渡空洞。
+			var coarse_mesh: MeshInstance3D = _lod_meshes[level].get(bk)
+			if coarse_mesh != null or _block_dist(bk, level, cam_pos) > _lod_outer[level] + _lod_margin(level):
 				remove_lod0.append(ck)
 		elif _block_dist(ck, 0, cam_pos) > lod0_d + lod0_margin:
 			# lod_count=1 时 _chunk_render_level 恒 0，需单独判定：超出 LOD0 显示区
@@ -1119,16 +1136,32 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 		var _chunk_world := voxel_scale * VoxelChunk.CHUNK_SIZE
 		var _r_ck := ceili((lod0_d + lod0_margin) / _chunk_world) + 1
 		var _cam_ck := _chunk_from_world(cam_pos, _chunk_world, world_offset)
-		for ck in loaded_chunks:
-			if absi(ck.x - _cam_ck.x) > _r_ck or absi(ck.y - _cam_ck.y) > _r_ck or absi(ck.z - _cam_ck.z) > _r_ck:
-				continue
-			if _lod_meshes[0].has(ck):
-				continue
-			var bdist := _block_dist(ck, 0, cam_pos)
-			if bdist > lod0_d + lod0_margin:
-				continue  # 粗 LOD 区
-			data._mark_chunk_dirty(ck)
-			need_lod0_update = true
+		if loaded_chunks.is_empty():
+			# 移动后新区域：loaded_chunks 为空（LOD0 数据未加载）→ 从相机位置推导补建。
+			# 否则 LOD0 chunk 永不被 request/加载 → 近处 LOD0 空洞固定存在。
+			for dx in range(-_r_ck, _r_ck + 1):
+				for dy in range(-_r_ck, _r_ck + 1):
+					for dz in range(-_r_ck, _r_ck + 1):
+						var ck: Vector3i = _cam_ck + Vector3i(dx, dy, dz)
+						if _lod_meshes[0].has(ck):
+							continue
+						if _block_dist(ck, 0, cam_pos) > lod0_d + lod0_margin:
+							continue
+						if not data.has_chunk(ck):
+							data.request_chunk_async(ck, 0)  # LOD0 数据加载（文件流读盘/程序化生成）
+						data._mark_chunk_dirty(ck)
+						need_lod0_update = true
+		else:
+			for ck in loaded_chunks:
+				if absi(ck.x - _cam_ck.x) > _r_ck or absi(ck.y - _cam_ck.y) > _r_ck or absi(ck.z - _cam_ck.z) > _r_ck:
+					continue
+				if _lod_meshes[0].has(ck):
+					continue
+				var bdist := _block_dist(ck, 0, cam_pos)
+				if bdist > lod0_d + lod0_margin:
+					continue  # 粗 LOD 区
+				data._mark_chunk_dirty(ck)
+				need_lod0_update = true
 	if need_lod0_update:
 		_request_update()
 
@@ -1155,7 +1188,10 @@ func _level_finer_ready(level: int, bk: Vector3i, cam: Camera3D) -> bool:
 		for j in 2:
 			for i in 2:
 				var sbk := Vector3i(bk.x * 2 + i, bk.y * 2 + j, bk.z * 2 + k)
-				if _has_lod_mesh(fine, sbk):
+				# 内层就绪判定：LOD0 chunk 无空标记（有 mesh 即就绪）；
+				# 粗层 block 的空标记（null，数据/网格未就绪）不算就绪 → 更粗层兜底显示，防过渡空洞。
+				var fine_ready: bool = _has_lod_mesh(fine, sbk) if fine == 0 else (_lod_meshes[fine].get(sbk) != null)
+				if fine_ready:
 					continue
 				if fine == 0:
 					if data.has_chunk(sbk):
@@ -1215,33 +1251,22 @@ func _lod_load_priority(bk: Vector3i, level: int, cam_pos: Vector3, cam_dir: Vec
 ## 派发粗 LOD 大块异步生成（独立数据层）：快照 block+邻居大格（COW）+ WorkerThreadPool
 ## 后台直接由大格数据生成 mesh（无需 LOD0 chunk）。修改过的 block 走降采样回退
 ## （从 LOD0 数据降采样，编辑区在近处 LOD0 通常在内存）。
-func _build_lod_block(level: int, bk: Vector3i) -> void:
+## 返回是否真正派发（已 pending / 无效 level 时 false——调用方据此决定是否消耗构建预算）。
+func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	if not data:
-		return
+		return false
 	if level < 1 or level >= _lod_pending_tasks.size():
-		return
+		return false
 	if _lod_pending_tasks[level].has(bk):
-		return
+		return false
 	_lod_pending_tasks[level][bk] = true
-	if data.is_lod_block_modified(level, bk):
-		# 修改过的 block：从 LOD0 降采样（编辑需与生成器地形合并）
-		var snapshot := data.snapshot_lod_block_chunks(bk, level)
-		WorkerThreadPool.add_task(_lod_worker_downsample.bind(
-			snapshot, bk, level, _lod_generation_id[level], voxel_scale,
-			data.center_offset if data else Vector3.ZERO, _lod_materials[level].duplicate()))
-		return
-	# 未修改：优先独立数据层（block + 邻居大格快照）；快照为空（如文件流无独立粗层数据）
-	# 或独立数据未生成 → 回退从 LOD0 降采样（保证文件流/未修改粗层也能显示）
-	var snap := data.snapshot_lod_block_data(bk, level)
-	if snap.is_empty():
-		var snapshot := data.snapshot_lod_block_chunks(bk, level)
-		WorkerThreadPool.add_task(_lod_worker_downsample.bind(
-			snapshot, bk, level, _lod_generation_id[level], voxel_scale,
-			data.center_offset if data else Vector3.ZERO, _lod_materials[level].duplicate()))
-		return
-	WorkerThreadPool.add_task(_lod_worker.bind(
-		snap, bk, level, _lod_generation_id[level], voxel_scale,
+	# 只派发（主线程轻量）：快照/降采样/mesh 全部在 worker 内完成——
+	# 数据保留在内存（_chunk_buffers/粗层大格只读），worker 一次生成完整 mesh（halo 完整——无空洞），
+	# 主线程不构造快照（不卡），每帧按数量派发全部 needed block（不饿死）。
+	WorkerThreadPool.add_task(_lod_worker_build.bind(
+		data, bk, level, _lod_generation_id[level], voxel_scale,
 		data.center_offset if data else Vector3.ZERO, _lod_materials[level].duplicate()))
+	return true
 
 
 ## 内带失效 block（LOD0 显示区）：只降采样同步粗层数据（_coarse_buffers + 持久化）。
@@ -1268,6 +1293,46 @@ func _lod_worker(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int, sca
 	var arr := VoxelChunkGenerator.generate_lod_block_arrays(halo, aligned_materials, scale, bk, offset, level)
 	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
 	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id)
+
+
+## 工作线程：粗 LOD 大块 mesh 生成（快照/降采样/mesh 全在 worker 内——主线程只轻量派发）。
+## 数据保留在内存（VoxelData 只读 COW 安全），一次生成完整 halo（边界无缺面空洞），
+## 降采样时顺带返回大格数据（buf）同步粗层缓存。
+func _lod_worker_build(vd: VoxelData, bk: Vector3i, level: int, gen_id: int, scale: float,
+		offset: Vector3, aligned_materials: Array) -> void:
+	var need_downsample := vd.is_lod_block_modified(level, bk)
+	var halo: PackedInt32Array
+	var buf := PackedInt32Array()
+	if not need_downsample:
+		var coarse_idx := level - 1
+		var coarse: Dictionary = vd._coarse_buffers[coarse_idx] if coarse_idx < vd._coarse_buffers.size() else {}
+		if not coarse.has(bk):
+			need_downsample = true
+		else:
+			for d in [Vector3i(1,0,0), Vector3i(-1,0,0), Vector3i(0,1,0), Vector3i(0,-1,0), Vector3i(0,0,1), Vector3i(0,0,-1)]:
+				if not coarse.has(bk + d):
+					need_downsample = true
+					break
+	if need_downsample:
+		# 从 LOD0 降采样（一次生成完整 halo——边界无缺面空洞）。
+		# 用纯只读快照：worker 线程内不 preload/不写 _chunk_buffers（线程安全），
+		# 数据保留在内存（LOD 区不禁用卸载）时结果完整；缺失 chunk 视为空（真空区域）。
+		var buffers := vd.snapshot_lod_block_chunks_readonly(bk, level)
+		halo = VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
+		var g := VoxelChunkGenerator.LOD_BLOCK_SIZE
+		var hs := VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
+		var off := VoxelChunkGenerator.LOD_BLOCK_HALO
+		buf.resize(g * g * g)
+		for lz in g:
+			for ly in g:
+				for lx in g:
+					buf[lx + ly * g + lz * g * g] = halo[(off + lx) + (off + ly) * hs + (off + lz) * hs * hs]
+	else:
+		var snap := vd.snapshot_lod_block_data(bk, level)
+		halo = VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers(snap, bk)
+	var arr := VoxelChunkGenerator.generate_lod_block_arrays(halo, aligned_materials, scale, bk, offset, level)
+	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
+	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id, buf)
 
 
 ## 工作线程：修改过的粗 LOD 大块降采样 halo + 一次性网格生成（线程安全，只读参数快照）。
@@ -1317,6 +1382,15 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 		data.set_lod_block(level, bk, buf)
 		if data.stream is VoxelFileStream:
 			data.stream.save_chunk(bk, buf, level)
+	else:
+		# 降采样空（LOD0 数据未就绪）：不设空标记（否则跳过→洞永远），重试计数防真空循环
+		var _rk := str(level) + "_" + str(bk)
+		var _rn: int = _lod_null_retries.get(_rk, 0)
+		if _rn >= 3:
+			_lod_null_retries.erase(_rk)
+			_lod_meshes[level][bk] = null  # 真空 block：标记空，避免重复派发
+		else:
+			_lod_null_retries[_rk] = _rn + 1
 	# 数据已同步（mesh 由 LOD0 chunk 反映），解除重建标记防重复派发
 	if level < _lod_rebuild.size():
 		_lod_rebuild[level].erase(bk)
@@ -1332,21 +1406,32 @@ func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: in
 	_lod_pending_tasks[level].erase(bk)
 	if gen_id != _lod_generation_id[level]:
 		return
-	# 同步粗层缓存（降采样回退的数据与 mesh 一致，供后续复用/持久化）
-	if buf.size() > 0 and data != null:
+	# 同步粗层缓存（降采样回退的数据与 mesh 一致，供后续复用/持久化）。
+	# 仅 mesh 非空（有实际体素）才写缓存：真空 block 若写全 0 buffer，
+	# has_lod_block=true → _process_lod_level 判"数据就绪但 mesh 空"→ 每帧重新派发
+	# → 死循环占满跨层构建预算，更粗层永远分不到（远处空洞）。
+	if buf.size() > 0 and data != null and mesh != null and mesh.get_surface_count() > 0:
 		data.set_lod_block(level, bk, buf)
 		if data.stream is VoxelFileStream:
 			data.stream.save_chunk(bk, buf, level)
 	if _lod_meshes[level].has(bk) and not _lod_rebuilding(level, bk):
 		return
 	if mesh == null or mesh.get_surface_count() == 0:
-		# 空大块：重建场景下移除旧 mesh（数据已空）；否则标记已处理避免重复派发
+		# 降采样结果为空：多为 LOD0 数据未就绪（快照空）→ 不设空标记，移除条目让后续重试。
+		# 否则空标记会让 _process_lod_level 跳过该 block，LOD0 数据就绪后也不会重建 → 洞永远。
+		# 真空 block 防循环：重试计数上限后设空标记。
 		if _lod_rebuilding(level, bk):
 			_remove_lod_mesh(level, bk)
-		else:
-			_lod_meshes[level][bk] = null
 		if level < _lod_rebuild.size():
 			_lod_rebuild[level].erase(bk)
+		var _rk := str(level) + "_" + str(bk)
+		var _rn: int = _lod_null_retries.get(_rk, 0)
+		if _rn >= 3:
+			_lod_null_retries.erase(_rk)
+			_lod_meshes[level][bk] = null  # 真空 block：标记空，避免重复派发
+			return
+		_lod_null_retries[_rk] = _rn + 1
+		_lod_meshes[level].erase(bk)  # 移除条目 → 下次 _process_lod_level 重新派发降采样
 		return
 	_lod_mesh_apply_queue.append([level, bk, mesh])
 
@@ -1366,6 +1451,7 @@ func _build_lod_from_arrays(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 		_apply_materials(mesh)
 		mi.mesh = mesh
 	_set_lod_mesh(level, bk, mi)
+	_lod_null_retries.erase(str(level) + "_" + str(bk))
 	if level < _lod_rebuild.size():
 		_lod_rebuild[level].erase(bk)
 
@@ -1381,9 +1467,10 @@ func _unload_chunk(ck: Vector3i) -> void:
 	_remove_chunk_collision(ck)
 	_mesh_build_queue.erase(ck)
 	_stream_force_build.erase(ck)
-	# 数据层磁盘流式：卸载 chunk 数据（修改过的写盘、变空的清盘、未修改丢弃，释放内存）
-	if data and data.is_streaming():
-		data.unload_chunk(ck)
+	# 数据层流式卸载（磁盘写盘/丢弃）——禁用：LOD0 chunk 数据保留内存，
+	# 粗层降采样直接从内存 _chunk_buffers 快照（数据始终就绪 → mesh 完整 → 无空洞，零写盘）。
+	# 若 data and data.is_streaming():
+	# 	data.unload_chunk(ck)
 	# 记录性能/内存释放（诊断）
 	if diag_enabled:
 		print("[诊断] 流式卸载: Chunk%s" % ck)
@@ -1750,6 +1837,10 @@ func _should_apply_lod_mesh(level: int, bk: Vector3i) -> bool:
 		var inner := _lod_outer[level - 1] if level > 0 else 0.0
 		var margin := _lod_margin(level)
 		return dist > inner - margin and dist <= unload_d + edge_world * 0.5
+	# 粗层数据已就绪：内带也挂载（mesh 预生成——LOD0 移除后粗层直接显示，防块状空洞；
+	# 可见性由 _process_lod_level 的 _level_finer_ready 控制——LOD0 就绪则隐藏本层，无重叠）
+	if data and data.has_lod_block(level, bk):
+		return dist <= unload_d + edge_world * 0.5
 	var inner := _lod_outer[level - 1] if level > 0 else 0.0
 	var margin := _lod_margin(level)
 	return not (dist < inner - margin or dist > unload_d + edge_world * 0.5)

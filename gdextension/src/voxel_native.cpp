@@ -640,8 +640,11 @@ PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dic
 				for (int dv = 0; dv < cell && mat == 0; ++dv) {
 					for (int du = 0; du < cell && mat == 0; ++du) {
 						for (int df = 0; df < cell; ++df) {
+							// 外缘面轴坐标：固定轴 = fix_grid（0 或 BS-1），另两轴分别用 lu/lv。
+							// face=0(x) 时 vy 用 lu、vz 用 lv；face=1(y) 时 vx 用 lu、vz 用 lv；
+							// face=2(z) 时 vx 用 lu、vy 用 lv。固定轴 df 采样 cell 层。
 							const int vx = nbk.x*block_voxels + ((face == 0) ? (fix_grid*cell+df) : (lu*cell+du));
-							const int vy = nbk.y*block_voxels + ((face == 1) ? (fix_grid*cell+df) : (lv*cell+dv));
+							const int vy = nbk.y*block_voxels + ((face == 1) ? (fix_grid*cell+df) : ((face == 0) ? (lu*cell+du) : (lv*cell+dv)));
 							const int vz = nbk.z*block_voxels + ((face == 2) ? (fix_grid*cell+df) : (lv*cell+dv));
 							const Vector3i ck(vx>>CHUNK_SHIFT, vy>>CHUNK_SHIFT, vz>>CHUNK_SHIFT);
 							if (!buffers.has(ck)) continue;

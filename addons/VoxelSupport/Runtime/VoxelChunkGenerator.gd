@@ -411,7 +411,7 @@ static func _fill_lod_block_face(halo: PackedInt32Array, buffers: Dictionary, nb
 					for df in cell_voxels:
 						var vox := Vector3i(
 							nbk.x * block_voxels + ((fix_grid * cell_voxels + df) if face == 0 else (lu * cell_voxels + du)),
-							nbk.y * block_voxels + ((fix_grid * cell_voxels + df) if face == 1 else (lv * cell_voxels + dv)),
+							nbk.y * block_voxels + ((fix_grid * cell_voxels + df) if face == 1 else ((lu * cell_voxels + du) if face == 0 else (lv * cell_voxels + dv))),
 							nbk.z * block_voxels + ((fix_grid * cell_voxels + df) if face == 2 else (lv * cell_voxels + dv)))
 						var ck := Vector3i(vox.x >> VoxelChunk.CHUNK_SHIFT, vox.y >> VoxelChunk.CHUNK_SHIFT, vox.z >> VoxelChunk.CHUNK_SHIFT)
 						var cbuf: PackedInt32Array = buffers.get(ck, PackedInt32Array())

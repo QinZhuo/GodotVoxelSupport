@@ -92,6 +92,22 @@ func _apply_renderer_config() -> void:
 ## 文件流模式：手工构建大地面 + 随机散布建筑（VoxelFileStream 磁盘流式，破坏可写盘）
 func _build_world_file() -> void:
 	var data := VoxelData.new()
+	# 文件流必须在 set_voxels 前绑定：否则构建的 chunk 数据只存内存不写盘，
+	# 流式卸载（相机远离）后数据丢失（磁盘无）→ 粗层降采样空 → 矩形空洞。
+	var stream := VoxelFileStream.new()
+	stream.directory = "user://voxel_demo_stream"
+	# 每次从零开始：清空旧流数据目录（避免上一次的残留 chunk 干扰）
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(stream.directory))
+	var cleanup := DirAccess.open(stream.directory)
+	if cleanup:
+		cleanup.list_dir_begin()
+		var fn := cleanup.get_next()
+		while fn != "":
+			if not cleanup.current_is_dir():
+				cleanup.remove(fn)
+			fn = cleanup.get_next()
+		cleanup.list_dir_end()
+	data.stream = stream
 
 	# 材质
 	var ground_mat := VoxelMaterial.new()
@@ -150,21 +166,6 @@ func _build_world_file() -> void:
 		data.set_voxels(b_positions, roof_mat.id)
 
 	_target.data = data
-	# 数据层磁盘流式：chunk 数据按需写盘/读盘（目录 user://voxel_demo_stream）。
-	var stream := VoxelFileStream.new()
-	stream.directory = "user://voxel_demo_stream"
-	# 每次从零开始：清空旧流数据目录（避免上一次的残留 chunk 干扰）
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(stream.directory))
-	var cleanup := DirAccess.open(stream.directory)
-	if cleanup:
-		cleanup.list_dir_begin()
-		var fn := cleanup.get_next()
-		while fn != "":
-			if not cleanup.current_is_dir():
-				cleanup.remove(fn)
-			fn = cleanup.get_next()
-		cleanup.list_dir_end()
-	_target.data.stream = stream
 	_apply_renderer_config()
 	# 世界居中（target 原点 = 世界中心）
 	var bounds: AABB = data.get_voxels_aabb()

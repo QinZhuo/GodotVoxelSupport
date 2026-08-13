@@ -102,6 +102,16 @@ func _mark_chunk_dirty(ck: Vector3i) -> void:
 	_dirty_mesh_chunks[ck] = true
 
 
+## chunk 数据就绪 → 标记依赖其 halo 的 6 个相邻 chunk 重建（边界 mesh 缝合）。
+## 否则相邻 chunk 生成 mesh 时该 chunk 数据未就绪（halo 缺数据）→ 边界外侧面缺失，
+## 该 chunk 数据就绪后也不触发重建 → 横/竖/块状空洞固定存在。
+func _mark_neighbors_dirty(chunk_key: Vector3i) -> void:
+	for dir in [Vector3i(1,0,0), Vector3i(-1,0,0), Vector3i(0,1,0), Vector3i(0,-1,0), Vector3i(0,0,1), Vector3i(0,0,-1)]:
+		var nb: Vector3i = chunk_key + dir
+		if _chunk_buffers.has(nb) and not _dirty_mesh_chunks.has(nb):
+			_dirty_mesh_chunks[nb] = true
+
+
 # ----------------------------------------------------------------------------
 # LOD 支持（多层级：LOD0 = CHUNK_SIZE³ 全精度 chunk；LOD i = LOD_GRID³ 大块，每格代表 2^i 体素）
 #   block_key = LOD0 chunk_key >> i（每 2^i × 2^i × 2^i 个 chunk 一个 block）
@@ -424,6 +434,8 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 			cnt += 1
 	_chunk_voxel_counts[chunk_key] = cnt
 	_voxel_count += cnt
+	# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合，防横/竖/块状空洞）
+	_mark_neighbors_dirty(chunk_key)
 	return true
 
 
@@ -447,6 +459,9 @@ func accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int = 
 		# 无需失效（否则每回填一个 chunk 就递增渲染器全局 gen_id，作废全部在途粗层任务）；
 		# 仅"需降采样(用户编辑)"的粗层块在 LOD0 数据就绪后失效重建。
 		_dirty_mesh_chunks[chunk_key] = true
+		# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 LOD0 chunk（边界 mesh 缝合，
+		# 否则相邻 chunk 生成时 halo 未就绪，边界缺外侧面 → 横/竖/块状空洞）
+		_mark_neighbors_dirty(chunk_key)
 		for lv in range(1, maxi(lod_count, 1)):
 			var bk := Vector3i(chunk_key.x >> lv, chunk_key.y >> lv, chunk_key.z >> lv)
 			if is_lod_block_modified(lv, bk):
@@ -636,6 +651,33 @@ func snapshot_lod_block_chunks(block_key: Vector3i, lod: int) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
 
 
+## 纯只读 chunk halo 快照（worker 线程安全）：不 preload / 不写任何状态，
+## 仅快照 _chunk_buffers 中已存在的数据（缺失 chunk 视为空——真空区域正常）。
+## 与 snapshot_lod_block_chunks 一致地外扩 ±2^lod 层收集 halo 邻居 chunk：
+## LOD halo 构建需要边界邻居数据（6 外缘面），否则 block 边界缺面 → 空洞。
+## 数据保留在内存时（LOD 区不禁用卸载）可安全在 WorkerThreadPool 内调用。
+func snapshot_lod_block_chunks_readonly(block_key: Vector3i, lod: int) -> Dictionary:
+	var chunks_per_axis := 1 << lod
+	var cks: Array[Vector3i] = []
+	var seen := {}
+	var base := block_key * chunks_per_axis
+	for cz in chunks_per_axis:
+		for cy in chunks_per_axis:
+			for cx in chunks_per_axis:
+				var ck := base + Vector3i(cx, cy, cz)
+				if _chunk_buffers.has(ck):
+					seen[ck] = true
+					cks.append(ck)
+	for oz in range(-chunks_per_axis, 3 * chunks_per_axis):
+		for oy in range(-chunks_per_axis, 3 * chunks_per_axis):
+			for ox in range(-chunks_per_axis, 3 * chunks_per_axis):
+				var ck := base + Vector3i(ox, oy, oz)
+				if not seen.has(ck) and _chunk_buffers.has(ck):
+					seen[ck] = true
+					cks.append(ck)
+	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
+
+
 # ----------------------------------------------------------------------------
 # 每 LOD 独立数据层（Voxel Tools 式：粗 LOD block 数据独立，未修改块由生成器直接生成）
 # ----------------------------------------------------------------------------
@@ -667,6 +709,7 @@ func has_lod_block(level: int, key: Vector3i) -> bool:
 func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
 	if level == 0:
 		_chunk_buffers[key] = buf
+		_mark_neighbors_dirty(key)
 		return
 	_ensure_coarse_arrays(level)
 	_coarse_buffers[level - 1][key] = buf
@@ -1226,6 +1269,10 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 		_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) + cnt
 		# 流式：批量写入标记写盘（否则 chunk 被流式卸载时未 dirty → 磁盘旧数据残留）
 		_dirty_chunks[ck] = true
+		# 增量持久化：标记该 chunk 有数据需写盘（卸载时 save_chunk，preload 可重载）。
+		# 否则流式卸载后磁盘无该 chunk → 粗层降采样快照空 → 矩形空洞。
+		if stream != null:
+			_persisted_chunks[ck] = true
 	# 标记脏 chunk + 跨界面的边界邻居（用 C++ 返回的边界掩码，按 chunk 标记，
 	# 避免逐体素 _mark_voxel_dirty 的多词条 dict 写入瓶颈）
 	var boundary: Dictionary = res["boundary"]
@@ -1279,6 +1326,8 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		# 流式：批量删除同样标记写盘（否则 chunk 被流式卸载时未 dirty → 直接丢弃，
 		# 磁盘旧数据残留导致重载后体素"复活"）
 		_dirty_chunks[ck] = true
+		if stream != null:
+			_persisted_chunks[ck] = true
 		touched[ck] = true
 	# 标记脏 chunk + 跨界面的边界邻居（用 C++ 返回的边界掩码，按 chunk 标记，
 	# 避免逐体素 7 次 dict 写入的大崩塌瓶颈）

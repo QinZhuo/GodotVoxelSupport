@@ -67,6 +67,19 @@ var _async_pending: Array[Dictionary] = []
 var _async_results: Array[Dictionary] = []
 var _async_mutex := Mutex.new()
 
+## 粗层（lod>=1）在途任务上限：程序化生成较慢，无上限会让 WorkerThreadPool 被大量粗层任务占满，
+## LOD0/粗层 mesh 长时间空洞（移动时 LOD 边界出现横竖/块状缺口）。超限丢弃粗层 request（渲染器后续重试），
+## 保证近处 LOD0 数据加载优先。
+const MAX_COARSE_PENDING := 96
+
+
+## 所有层的在途任务总数
+func _async_pending_total() -> int:
+	var total := 0
+	for d in _async_pending:
+		total += d.size()
+	return total
+
 
 ## 请求后台生成 chunk/block 数据（lod=0 走 _generate_chunk，lod>=1 走 _generate_chunk_lod）。
 ## 同 key 已提交/已就绪则不重复。
@@ -76,6 +89,10 @@ func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 		_async_pending.append({})
 	while _async_results.size() <= lod:
 		_async_results.append({})
+	# 粗层在途限流（lod0 不限制——近处地形加载优先）
+	if lod >= 1 and _async_pending_total() >= MAX_COARSE_PENDING:
+		_async_mutex.unlock()
+		return
 	var submitted := _async_pending[lod].has(chunk_key) or _async_results[lod].has(chunk_key)
 	if not submitted:
 		_async_pending[lod][chunk_key] = true
