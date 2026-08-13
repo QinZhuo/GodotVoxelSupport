@@ -264,14 +264,13 @@ const LOD_BLOCK_HALO_SIZE := LOD_BLOCK_SIZE + LOD_BLOCK_HALO * 2
 ## 从 chunk 缓冲快照构建 LOD 大块的 34³ 大格 halo（纯函数，供异步 worker，线程安全）。
 ## 中心 32³ 大格 = 大块内部（降采样 2^lod_shift³ 体素 → 1 大格，取非空材质）；
 ## 6 外缘面 = 相邻大块边界 1 大格层（跨界可见性）。
-## lod_shift=1 走原生快路径（build_lod1_block_halo_from_buffers）；更高层走通用 GDScript 降采样。
+## 任意 lod_shift 统一走原生通用降采样（build_lod_block_halo_from_buffers_native）；原生缺失时兜底 GDScript 降采样。
 static func build_lod_block_halo_from_buffers(buffers: Dictionary, block_key: Vector3i, lod_shift: int = 1) -> PackedInt32Array:
-	# 原生快路径仅支持 level 1（2³ 降采样）
-	if lod_shift == 1:
-		var native_halo := NativeLoader.build_lod1_block_halo_from_buffers(buffers, block_key)
-		if native_halo.size() == LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE:
-			return native_halo
-	# 通用 GDScript 降采样（任意 lod_shift：每大格 = 2^lod_shift 体素）
+	# 原生通用降采样（任意 lod_shift）
+	var native_halo := NativeLoader.build_lod_block_halo_from_buffers_native(buffers, block_key, lod_shift)
+	if native_halo.size() == LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE:
+		return native_halo
+	# 兜底 GDScript 降采样（原生不可用，任意 lod_shift：每大格 = 2^lod_shift 体素）
 	var cell_voxels := 1 << lod_shift
 	var cells_per_chunk := VoxelChunk.CHUNK_SIZE / cell_voxels
 	var chunks_per_block := LOD_BLOCK_SIZE / cells_per_chunk
@@ -331,7 +330,11 @@ static func build_lod_block_halo_from_buffers(buffers: Dictionary, block_key: Ve
 ## 从独立 LOD 数据块（每 LOD 32³ 大格，值 = 材质ID）构建 34³ halo（无降采样，直接拷大格）：
 ## 中心 32³ = block 自身；6 外缘面 = 相邻 block 边界 1 大格层（跨界可见性）。
 ## Voxel Tools 式独立数据层的网格化入口：粗层 mesh 直接由大格数据生成，无需 LOD0 chunk。
+## 原生下沉 C++（build_lod_block_halo_from_lod_buffers_native）；原生缺失时兜底 GDScript。
 static func build_lod_block_halo_from_lod_buffers(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
+	var native_halo := NativeLoader.build_lod_block_halo_from_lod_buffers_native(buffers, block_key)
+	if native_halo.size() == LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE:
+		return native_halo
 	var HS := LOD_BLOCK_HALO_SIZE
 	var g := LOD_BLOCK_SIZE
 	var halo := PackedInt32Array()
@@ -466,11 +469,13 @@ static func generate_lod_block_arrays(
 
 ## 从对齐材质数组构建透明标志数组（PackedByteArray，索引=材质ID，1=透明）
 ## 供原生 generate_chunk_dense 使用（C++ 跨语言读 VoxelMaterial 属性较慢，预计算传入）
+## 防御：worker 线程读材质数组时主线程可能正在对齐（COW/竞态），访问前再校验边界防越界崩溃。
 static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:
+	var n := aligned_materials.size()
 	var flags := PackedByteArray()
-	flags.resize(aligned_materials.size())
-	for i in aligned_materials.size():
-		var mat = aligned_materials[i]
+	flags.resize(n)
+	for i in n:
+		var mat: Variant = aligned_materials[i] if i < aligned_materials.size() else null
 		flags[i] = 1 if mat != null and mat.trans > 0 else 0
 	return flags
 

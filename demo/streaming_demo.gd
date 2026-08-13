@@ -81,6 +81,7 @@ func _rebuild_world() -> void:
 func _apply_renderer_config() -> void:
 	_target.voxel_scale = voxel_scale
 	_target.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
+	_target.lod_count = 3
 	_target.spawn_debris_on_damage = true
 	_target.use_voxel_health = true
 	_target.damage_per_voxel = 1.0
@@ -249,6 +250,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				_speed = SPEED_FAST if event.pressed else SPEED_BASE
 			KEY_SHIFT:
 				_speed = SPEED_BASE * 0.3 if event.pressed else SPEED_BASE
+			KEY_0:
+				# 数据源切换：文件流 ↔ 程序化（释放旧数据 → 重建世界 → 重置相机）
+				if event.pressed:
+					_current_mode = Mode.PROCEDURAL if _current_mode == Mode.FILE_STREAM else Mode.FILE_STREAM
+					_rebuild_world()
+					print("[流式Demo] 切换到数据源: %s" % _mode_name())
 			KEY_1:
 				if event.pressed:
 					_target.lod_count = 1
@@ -317,4 +324,4 @@ func _update_hud() -> void:
 			"相机位置: (%d, %d, %d)\n" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)]
 	if _current_mode == Mode.PROCEDURAL:
 		_hud.text += "origin shift: %s\n" % _target._origin_chunk
-	_hud.text += "\nWASD移动 Q/E升降 空格加速\n数字1-4: 切换LOD层数"
+	_hud.text += "\nWASD移动 Q/E升降 空格加速\n0: 切换数据源   数字1-4: 切换LOD层数"

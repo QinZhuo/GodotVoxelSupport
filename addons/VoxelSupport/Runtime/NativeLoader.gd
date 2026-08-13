@@ -111,6 +111,28 @@ static func build_lod1_block_halo_from_buffers(buffers: Dictionary, block_key: V
 	return inst.call(&"build_lod1_block_halo_from_buffers", buffers, block_key)
 
 
+## 构建 LOD 大块的 34³ halo（通用降采样，任意 lod_shift，原生下沉 C++）。
+## lod_shift=i → 每大格 2^i 体素。无原生/旧库缺方法时返回空数组。
+static func build_lod_block_halo_from_buffers_native(buffers: Dictionary, block_key: Vector3i, lod_shift: int) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return PackedInt32Array()
+	if not ClassDB.class_has_method(&"VoxelNative", &"build_lod_block_halo_from_buffers_native", false):
+		return PackedInt32Array()
+	return inst.call(&"build_lod_block_halo_from_buffers_native", buffers, block_key, lod_shift)
+
+
+## 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，原生下沉 C++）。
+## 无原生/旧库缺方法时返回空数组。
+static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return PackedInt32Array()
+	if not ClassDB.class_has_method(&"VoxelNative", &"build_lod_block_halo_from_lod_buffers_native", false):
+		return PackedInt32Array()
+	return inst.call(&"build_lod_block_halo_from_lod_buffers_native", buffers, block_key)
+
+
 ## 支撑图失稳检测（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照
 ## removed: 本次被移除的体素位置数组

@@ -89,12 +89,13 @@ func _ensure_dir() -> void:
 ## 返回 {chunk_key: {local_index: mat_id}}（文件不存在/格式不符 → 空字典）
 func _read_region_file(region_key: Vector3i) -> Dictionary:
 	var chunks := {}
+	var lod_chunks := {}
 	var path := _region_path(region_key)
 	if FileAccess.file_exists(path):
 		var f := _open_read(path)
 		if f:
 			var version := f.get_32()
-			if version == FORMAT_VERSION:
+			if version >= 2:
 				var count := f.get_32()
 				for i in count:
 					var cx := f.get_32()
@@ -107,8 +108,27 @@ func _read_region_file(region_key: Vector3i) -> Dictionary:
 						var mat := f.get_32()
 						chunk_data[idx] = mat
 					chunks[Vector3i(cx, cy, cz)] = chunk_data
+				# v3+：粗层 LOD 数据（文件流持久化降采样缓存）
+				if version >= 3:
+					var lod_count := f.get_32()
+					for l in lod_count:
+						var lod := l + 1
+						var lc := f.get_32()
+						var ld := {}
+						for j in lc:
+							var cx2 := f.get_32()
+							var cy2 := f.get_32()
+							var cz2 := f.get_32()
+							var vc2 := f.get_32()
+							var cd2 := {}
+							for k in vc2:
+								var idx2 := f.get_32()
+								var mat2 := f.get_32()
+								cd2[idx2] = mat2
+							ld[Vector3i(cx2, cy2, cz2)] = cd2
+						lod_chunks[lod] = ld
 			f.close()
-	return chunks
+	return {"chunks": chunks, "lod_chunks": lod_chunks}
 
 
 # ----------------------------------------------------------------------------
@@ -132,9 +152,9 @@ func request_region_load(region_key: Vector3i) -> bool:
 
 ## 后台线程：读 region 文件 → 结果队列（Mutex 保护），call_deferred 回主线程
 func _io_read_worker(region_key: Vector3i) -> void:
-	var chunks := _read_region_file(region_key)
+	var data := _read_region_file(region_key)
 	_io_mutex.lock()
-	_io_results[region_key] = chunks
+	_io_results[region_key] = data
 	_io_mutex.unlock()
 	call_deferred("_on_region_loaded", region_key)
 
@@ -142,21 +162,23 @@ func _io_read_worker(region_key: Vector3i) -> void:
 ## 主线程：取后台结果，回填 region 缓存（并执行 LRU 驱逐）
 func _on_region_loaded(region_key: Vector3i) -> void:
 	_io_mutex.lock()
-	var chunks: Variant = _io_results.get(region_key)
+	var data: Variant = _io_results.get(region_key)
 	_io_results.erase(region_key)
 	_io_pending.erase(region_key)
 	_io_mutex.unlock()
 	if _region_cache.has(region_key):
 		return  # 主线程已同步加载过
-	# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下次 request 重读
-	if (chunks is Dictionary and (chunks as Dictionary).is_empty()) and FileAccess.file_exists(_region_path(region_key)):
-		return
-	_cache_region(region_key, chunks if chunks is Dictionary else {})
+	if data is Dictionary:
+		var chunks: Dictionary = data.get("chunks", {})
+		# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下次 request 重读
+		if chunks.is_empty() and FileAccess.file_exists(_region_path(region_key)):
+			return
+		_cache_region(region_key, chunks, data.get("lod_chunks", {}))
 
 
 ## 缓存 region 并维护 LRU（超限驱逐最久未用并异步写回）。返回缓存条目。
-func _cache_region(region_key: Vector3i, chunks: Dictionary) -> Dictionary:
-	var entry := {"chunks": chunks, "dirty": false}
+func _cache_region(region_key: Vector3i, chunks: Dictionary, lod_chunks: Dictionary = {}) -> Dictionary:
+	var entry := {"chunks": chunks, "lod_chunks": lod_chunks, "dirty": false}
 	_region_cache[region_key] = entry
 	_region_order.append(region_key)
 	if _region_order.size() > REGION_CACHE_MAX:
@@ -176,11 +198,12 @@ func _get_region(region_key: Vector3i) -> Dictionary:
 	if entry != null:
 		_touch_region(region_key)
 		return entry
-	var chunks := _read_region_file(region_key)
+	var data := _read_region_file(region_key)
+	var chunks: Dictionary = data.get("chunks", {})
 	# 防御：文件存在但读到空（异步写窗口期）→ 不缓存空，下帧重读
-	if chunks.is_empty() and FileAccess.file_exists(_region_path(region_key)):
-		return {"chunks": {}, "dirty": false}
-	return _cache_region(region_key, chunks)
+	if chunks.is_empty() and data.get("lod_chunks", {}).is_empty() and FileAccess.file_exists(_region_path(region_key)):
+		return {"chunks": {}, "lod_chunks": {}, "dirty": false}
+	return _cache_region(region_key, chunks, data.get("lod_chunks", {}))
 
 
 ## 更新 LRU：把 region 移到末尾（最近使用）
@@ -215,18 +238,19 @@ func _flush_region(region_key: Vector3i) -> void:
 	if not entry.get("dirty", false):
 		return
 	var chunks: Dictionary = entry["chunks"]
-	WorkerThreadPool.add_task(_io_write_worker.bind(region_key, chunks))
+	var lod_chunks: Dictionary = entry.get("lod_chunks", {})
+	WorkerThreadPool.add_task(_io_write_worker.bind(region_key, chunks, lod_chunks))
 
 
 ## 后台线程写盘入口（不碰缓存字典，数据快照传入）
-func _io_write_worker(region_key: Vector3i, chunks: Dictionary) -> void:
-	_write_region_file(region_key, chunks)
+func _io_write_worker(region_key: Vector3i, chunks: Dictionary, lod_chunks: Dictionary = {}) -> void:
+	_write_region_file(region_key, chunks, lod_chunks)
 
 
 ## 写 region 文件（原子写：先写临时文件再替换，避免读方读到"半写"文件损坏）。
-## chunks 为空 → 删除文件。后台线程可安全调用。
-func _write_region_file(region_key: Vector3i, chunks: Dictionary) -> void:
-	if chunks.is_empty():
+## chunks 与 lod_chunks 都为空 → 删除文件。后台线程可安全调用。
+func _write_region_file(region_key: Vector3i, chunks: Dictionary, lod_chunks: Dictionary = {}) -> void:
+	if chunks.is_empty() and lod_chunks.is_empty():
 		var path := _region_path(region_key)
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
@@ -248,6 +272,22 @@ func _write_region_file(region_key: Vector3i, chunks: Dictionary) -> void:
 		for idx in chunk_data:
 			f.store_32(idx)
 			f.store_32(chunk_data[idx])
+	# v3：粗层 LOD 数据（文件流持久化降采样缓存）
+	f.store_32(lod_chunks.size())
+	for lod in lod_chunks:
+		f.store_32(int(lod) - 1)  # lod 从 1 开始，存 0 基索引
+		var ld: Dictionary = lod_chunks[lod]
+		f.store_32(ld.size())
+		for bk in ld:
+			var bk3: Vector3i = bk
+			f.store_32(bk3.x)
+			f.store_32(bk3.y)
+			f.store_32(bk3.z)
+			var bd: Dictionary = ld[bk]
+			f.store_32(bd.size())
+			for idx in bd:
+				f.store_32(idx)
+				f.store_32(bd[idx])
 	f.close()
 	# 原子替换：读方只会看到旧文件（完整）或新文件（完整），不会读到半写文件
 	var path := _region_path(region_key)
@@ -262,7 +302,7 @@ func _write_region_file(region_key: Vector3i, chunks: Dictionary) -> void:
 func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
 	if not entry.get("dirty", false):
 		return
-	_write_region_file(region_key, entry["chunks"])
+	_write_region_file(region_key, entry["chunks"], entry.get("lod_chunks", {}))
 	entry["dirty"] = false
 
 
@@ -272,7 +312,22 @@ func _save_region(region_key: Vector3i, entry: Dictionary) -> void:
 
 func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> void:
 	if lod != 0:
-		return  # 文件流仅存全精度 chunk（粗层由程序化流/降采样处理）
+		# 粗层：存 region 的 lod_chunks（分 lod 字典，文件流持久化降采样缓存）
+		var ld := {}
+		for i in buffer.size():
+			var v: int = buffer[i]
+			if v > 0:
+				ld[i] = v
+		var entry := _get_region(_region_key(chunk_key))
+		var lc: Dictionary = entry["lod_chunks"]
+		if not lc.has(lod):
+			lc[lod] = {}
+		if ld.is_empty():
+			lc[lod].erase(chunk_key)
+		else:
+			lc[lod][chunk_key] = ld
+		entry["dirty"] = true
+		return
 	if buffer.is_empty():
 		erase_chunk(chunk_key, 0)
 		return
@@ -292,39 +347,70 @@ func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> 
 
 func load_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 	if lod != 0:
-		return PackedInt32Array()
+		var entry := _get_region(_region_key(chunk_key))
+		var lc: Dictionary = entry["lod_chunks"]
+		if not lc.has(lod):
+			return PackedInt32Array()
+		var ld: Variant = lc[lod].get(chunk_key)
+		if ld == null:
+			return PackedInt32Array()
+		var size := VoxelChunkGenerator.LOD_BLOCK_SIZE
+		var buf := PackedInt32Array()
+		buf.resize(size * size * size)
+		for idx in ld:
+			if idx >= 0 and idx < size * size * size:
+				buf[idx] = ld[idx]
+		return buf
 	var entry := _get_region(_region_key(chunk_key))
 	var chunk_data: Variant = entry["chunks"].get(chunk_key)
 	if chunk_data == null:
 		return PackedInt32Array()
-	var buf := PackedInt32Array()
-	buf.resize(CHUNK_VOLUME)
+	var buf2 := PackedInt32Array()
+	buf2.resize(CHUNK_VOLUME)
 	for idx in chunk_data:
 		# 防御：异步写/读竞态下文件损坏可能读到越界 index，跳过避免崩溃
 		if idx >= 0 and idx < CHUNK_VOLUME:
-			buf[idx] = chunk_data[idx]
-	return buf
+			buf2[idx] = chunk_data[idx]
+	return buf2
 
 
 func has_chunk(chunk_key: Vector3i, lod: int = 0) -> bool:
 	if lod != 0:
-		return false
-	var entry := _get_region(_region_key(chunk_key))
-	return entry["chunks"].has(chunk_key)
+		var entry := _get_region(_region_key(chunk_key))
+		var lc: Dictionary = entry["lod_chunks"]
+		return lc.has(lod) and (lc[lod] as Dictionary).has(chunk_key)
+	var entry2 := _get_region(_region_key(chunk_key))
+	return entry2["chunks"].has(chunk_key)
 
 
 func erase_chunk(chunk_key: Vector3i, lod: int = 0) -> void:
 	if lod != 0:
+		var entry := _get_region(_region_key(chunk_key))
+		var lc: Dictionary = entry["lod_chunks"]
+		if lc.has(lod):
+			(lc[lod] as Dictionary).erase(chunk_key)
+			entry["dirty"] = true
 		return
-	var entry := _get_region(_region_key(chunk_key))
-	if entry["chunks"].has(chunk_key):
-		entry["chunks"].erase(chunk_key)
-		entry["dirty"] = true
+	var entry2 := _get_region(_region_key(chunk_key))
+	if entry2["chunks"].has(chunk_key):
+		entry2["chunks"].erase(chunk_key)
+		entry2["dirty"] = true
 
 
 func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
 	if lod != 0:
-		return []
+		# 粗层：返回缓存 region 中该 lod 的 block keys（粗层按需 request，不枚举全部文件）
+		var keys := {}
+		for region_key in _region_cache:
+			var entry: Dictionary = _region_cache[region_key]
+			var lc: Dictionary = entry.get("lod_chunks", {})
+			if lc.has(lod):
+				for bk in lc[lod]:
+					keys[bk] = true
+		var out: Array[Vector3i] = []
+		for bk in keys:
+			out.append(bk)
+		return out
 	var keys := {}
 	# 缓存中的 region
 	for region_key in _region_cache:

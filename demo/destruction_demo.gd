@@ -51,7 +51,6 @@ extends Node
 ## 可破坏对象
 var _target: VoxelDestructible
 var _hud: Label
-var _perf_log_label: Label
 var _mode_label: Label
 var _camera: Camera3D
 
@@ -96,6 +95,10 @@ var _prev_s := false
 var _prev_l := false
 var _prev_1 := false
 var _prev_2 := false
+var _prev_3 := false
+var _prev_4 := false
+var _prev_9 := false
+var _prev_0 := false
 var _prev_c := false
 var _prev_v := false
 var _prev_t := false
@@ -217,6 +220,7 @@ func _build_target() -> void:
 func _configure_target(data: VoxelData) -> void:
 	_target.data = data
 	_target.voxel_scale = voxel_scale
+	_target.lod_count = 3
 	_target.spawn_debris_on_damage = true
 	_target.max_debris_per_hit = 40
 	# 碎片系统已改为纯粒子实现，无物理碰撞体
@@ -414,6 +418,12 @@ func _create_large_structure_data() -> VoxelData:
 	_perf_log.append("[生成] 结构尺寸: %dx%dx%d = ~%d 体素" % [S.x, S.y, S.z, S.x * S.y * S.z])
 	_perf_log.append("[生成] 实际体素数: %d" % data.get_voxel_count())
 
+	# 文件流：chunk/粗层数据按需写盘/读盘（破坏持久化可写盘 + 粗层降采样缓存复用重启保留）
+	var stream := VoxelFileStream.new()
+	stream.directory = "user://voxel_destruction_stream"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(stream.directory))
+	data.stream = stream
+
 	return data
 
 
@@ -451,18 +461,6 @@ func _setup_hud() -> void:
 	_hud.add_theme_constant_override("outline_size", 4)
 	layer.add_child(_hud)
 
-	# 性能日志 (右侧滚动区域)
-	_perf_log_label = Label.new()
-	_perf_log_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_perf_log_label.position = Vector2(-400, 10)
-	_perf_log_label.size = Vector2(390, 580)
-	_perf_log_label.add_theme_font_size_override("font_size", 12)
-	_perf_log_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.3))
-	_perf_log_label.add_theme_color_override("font_outline_color", Color.BLACK)
-	_perf_log_label.add_theme_constant_override("outline_size", 3)
-	_perf_log_label.autowrap_mode = TextServer.AUTOWRAP_WORD
-	layer.add_child(_perf_log_label)
-
 	_mode_label = Label.new()
 	_mode_label.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	_mode_label.position = Vector2(10, 260)
@@ -483,6 +481,10 @@ func _handle_input(_delta: float) -> void:
 	var key_l := Input.is_key_pressed(KEY_L)
 	var key_1 := Input.is_key_pressed(KEY_1)
 	var key_2 := Input.is_key_pressed(KEY_2)
+	var key_3 := Input.is_key_pressed(KEY_3)
+	var key_4 := Input.is_key_pressed(KEY_4)
+	var key_9 := Input.is_key_pressed(KEY_9)
+	var key_0 := Input.is_key_pressed(KEY_0)
 	var key_c := Input.is_key_pressed(KEY_C)
 	var key_v := Input.is_key_pressed(KEY_V)
 	var key_t := Input.is_key_pressed(KEY_T)
@@ -512,13 +514,27 @@ func _handle_input(_delta: float) -> void:
 		damage_radius = maxf(damage_radius - 1.0, 1.0)
 		_log_perf_line("破坏半径: %.1f" % damage_radius)
 
-	# 1/2: 调整应力传播强度
-	if key_1 and not _prev_1:
+	# 1/2: 调整应力传播强度（9/0）
+	if key_9 and not _prev_9:
 		_target.stress_force = mini(_target.stress_force + 5.0, 50.0)
 		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_target.stress_force, _target.stress_max_steps])
-	if key_2 and not _prev_2:
+	if key_0 and not _prev_0:
 		_target.stress_force = maxf(_target.stress_force - 5.0, 5.0)
 		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_target.stress_force, _target.stress_max_steps])
+
+	# 1-4: 切换 LOD 层数（与流式 demo 一致）
+	if key_1 and not _prev_1:
+		_target.lod_count = 1
+		_log_perf_line("LOD层数: 1 (仅LOD0)")
+	if key_2 and not _prev_2:
+		_target.lod_count = 2
+		_log_perf_line("LOD层数: 2")
+	if key_3 and not _prev_3:
+		_target.lod_count = 3
+		_log_perf_line("LOD层数: 3")
+	if key_4 and not _prev_4:
+		_target.lod_count = 4
+		_log_perf_line("LOD层数: 4")
 
 	# R: 重置
 	if key_r and not _prev_r:
@@ -713,69 +729,34 @@ func _update_hud() -> void:
 	var collapse_method := "局部增量" if _target.local_collapse else "全量"
 	var dm_name := "球形" if _damage_mode == DamageMode.SPHERE else "射线"
 
-	_hud.text = """===== 体素性能监控 =====
-FPS: %d  |  帧: %d
-体素总数: %d  |  已破坏: %d
-Chunk数: %d  |  应力: %.0f(步数%d)
+	var lod_info := ""
+	for lv in _target._lod_meshes.size():
+		var cnt := 0
+		for bk in _target._lod_meshes[lv]:
+			if _target._lod_meshes[lv][bk] != null:
+				cnt += 1
+		lod_info += "L%d:%d  " % [lv, cnt]
 
-[网格重建耗时] 评价: %s(%s)
-当前: %.1f ms  |  平均: %.1f ms
-最低: %.1f ms  |  最高: %.1f ms
-近60帧: <=200ms(%d)  <=500ms(%d)  >1000ms(%d)
-
-[重建明细]
-重建Chunk: %d  |  受影响Chunk: %d
-生成阶段: %.1f ms  |  应用阶段: %.1f ms
-平均每Chunk: %.2f ms
-实心三角: %d  |  透明三角: %d  |  合计: %d
-
-[破坏 (Damage)]
-平均耗时: %.4f ms
-上次移除体素: %d
-上次崩塌体素数: %d
-
-[体素坍缩]
-崩塌检测: %s  |  支撑强度: 无(粒子系统)
-
-[时间线: 近%d帧网格重建耗时趋势]
-%s
+	_hud.text = """===== 体素破坏 Demo =====
+FPS: %d    体素: %d    已破坏: %d
+LOD: %d层  %s
+破坏: %s(半径%.1f)  连续: %s  应力: %.0f
+网格重建: %.1fms(平均%.1f)  三角: %d
 """ % [
-		Engine.get_frames_per_second(), _frame_count,
-		vc, destroyed,
-		chunk_count, _target.stress_force, _target.stress_max_steps,
-		perf_rating, perf_rating_color,
-		mgt, avg_mgt,
-		min_mgt, max_mgt,
-		under_200_count, under_500_count, high_mgt_count,
-		rebuild_chunks, affected_chunks,
-		mesh_gen_slice, apply_time,
-		avg_chunk_gen_ms,
-		solid_tris, trans_tris, total_tris,
-		avg_dt,
-		_target.last_damage_count,
-		_target.last_collapse_count,
-		collapse_method,
-		_mesh_gen_times.size(), chart,
+		Engine.get_frames_per_second(), vc, destroyed,
+		_target.lod_count, lod_info,
+		dm_name, damage_radius, "开" if _continuous_mode else "关", _target.stress_force,
+		mgt, avg_mgt, total_tris,
 	]
 
-	_mode_label.text = """碎片: %s  |  模式: %s  |  连续: %s
-半径: %.1f  |  间隔: %d帧
-[左键]球形 [右键]单体 [空格]射线
-[C]连续开关 [V]切换模式 [T]日志开关
-[+/-]半径  [R]重置 [B]崩底
-[1]应力+ [2]应力-  [S]存档 [L]读档
-结构: %dx%dx%d  |  外壳: %d  |  楼层: %d
+	_mode_label.text = """[左键]球形  [右键]单体  [空格]射线
+[C]连续开关  [V]切换模式  [T]日志
+[1-4]切换LOD  [9/0]应力  [+/-]半径
+[R]重置  [B]崩底  [S]存档  [L]读档
+结构: %dx%dx%d
 """ % [
-		mode_name, dm_name, "开" if _continuous_mode else "关",
-		damage_radius, continuous_interval,
 		structure_size.x, structure_size.y, structure_size.z,
-		shell_thickness, floor_count,
 	]
-
-	# 性能日志仅在 Godot 控制台输出（不再显示在 UI 中）
-	# 日志由 _log_perf_line 统一管理，自动打印到控制台
-	if _show_perf_log and _perf_log_label:
-		_perf_log_label.text = "日志已输出到 Godot 控制台\n按 T 切换显示"
 
 
 ## 重新计算统计缓存（仅在数据变化时调用）

@@ -64,6 +64,14 @@ public:
 	static Dictionary generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
 			float scale, const Vector3 &offset);
 
+	// 从 LOD0 chunk buffers 降采样构建 LOD 大块 34³ halo（lod_shift>=2 通用降采样，文件流粗层缓存用）
+	static PackedInt32Array build_lod_block_halo_from_buffers_native(const Dictionary &buffers,
+			const Vector3i &block_key, int lod_shift);
+
+	// 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，无降采样）：中心 32³ + 6 外缘面
+	static PackedInt32Array build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers,
+			const Vector3i &block_key);
+
 	// 构建 LOD1 大块(32³ 大格)的 34³ halo（中心 32³ 降采样 2³ 体素 + 6 外缘面），
 	// 下沉 C++ 替代 GDScript 逐体素循环（大块 halo 构建吞吐提升）。
 	static PackedInt32Array build_lod1_block_halo_from_buffers(const Dictionary &buffers, const Vector3i &block_key);

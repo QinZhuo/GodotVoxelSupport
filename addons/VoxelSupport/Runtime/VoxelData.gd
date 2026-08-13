@@ -224,6 +224,16 @@ var _coarse_buffers: Array[Dictionary] = []
 ## LOD0 编辑影响该 block 时标记，下次渲染走降采样（合并 LOD0 数据）而非生成器。
 var _coarse_modified: Array[Dictionary] = []
 
+## 文件流粗层降采样任务去重：_lod_downsample_pending[level-1] = {block_key: true}。
+## 文件流（VoxelFileStream 无粗层生成器）的粗层数据从 LOD0 chunk 降采样生成，结果缓存到
+## _coarse_buffers（移动复用）并持久化到文件流（重启保留），避免每次渲染都重复降采样。
+var _lod_downsample_pending: Array[Dictionary] = []
+
+## 降采样空结果重试计数：_lod_downsample_retries[level-1] = {block_key: n}。
+## 自动 request 可能早于 LOD0 chunk 加载（相机移动时前方 chunk 未就绪 → 快照空），
+## 空结果延迟重试（上限 3 次）等 LOD0 就绪，防空区域死循环。
+var _lod_downsample_retries: Array[Dictionary] = []
+
 ## 每 chunk 体素计数（chunk key -> int，增量维护 O(1)）。
 ## 替代 _maybe_erase_empty_chunk 的 4096 全量扫描：增减体素时更新计数，
 ## 归零即视为空 chunk 可擦除——消除破坏/崩塌热路径的 16³ 循环。
@@ -704,6 +714,90 @@ func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 	var s := stream
 	if s != null and s.has_method("request_chunk_async"):
 		s.request_chunk_async(chunk_key, lod)
+	# 文件流粗层：先查持久化（region 已存降采样缓存）→ 直接读回填；无 → 从 LOD0 降采样生成（后台）并持久化
+	if lod >= 1 and s is VoxelFileStream and not has_lod_block(lod, chunk_key):
+		if s.has_chunk(chunk_key, lod):
+			var buf := s.load_chunk(chunk_key, lod)
+			if buf.size() > 0:
+				set_lod_block(lod, chunk_key, buf)
+		else:
+			_start_lod_downsample(chunk_key, lod)
+
+
+## 文件流粗层降采样任务去重（_lod_downsample_pending[level-1]）
+## 数据在主线程构造快照（preload 磁盘回读 + 内存读取），避免后台线程读 _chunk_buffers 撞 COW 旧副本。
+func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
+	while _lod_downsample_pending.size() <= lod - 1:
+		_lod_downsample_pending.append({})
+	if _lod_downsample_pending[lod - 1].has(block_key):
+		return
+	_lod_downsample_pending[lod - 1][block_key] = true
+	var cell := 1 << lod
+	var chunks_per_block := (VoxelChunkGenerator.LOD_BLOCK_SIZE * cell) / VoxelChunk.CHUNK_SIZE
+	var base_chunk := block_key * chunks_per_block
+	var buffers := {}
+	for cz in chunks_per_block:
+		for cy in chunks_per_block:
+			for cx in chunks_per_block:
+				var ck := base_chunk + Vector3i(cx, cy, cz)
+				if not _chunk_buffers.has(ck):
+					preload_chunk(ck)
+				if _chunk_buffers.has(ck):
+					buffers[ck] = _chunk_buffers[ck]
+	if buffers.is_empty():
+		call_deferred("_on_lod_downsample_ready", block_key, lod, PackedInt32Array())
+		return
+	WorkerThreadPool.add_task(_lod_downsample_worker.bind(block_key, lod, buffers))
+
+
+## 后台线程：从 LOD0 chunk 数据降采样生成粗层 block 数据（32³ 大格，每格 = 2^lod 体素）。
+## buffers 为主线程快照（引用共享，只读安全），结果经 call_deferred 回主线程。
+func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary) -> void:
+	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, block_key, lod)
+	var g := VoxelChunkGenerator.LOD_BLOCK_SIZE
+	var hs := VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
+	var off := VoxelChunkGenerator.LOD_BLOCK_HALO
+	var buf := PackedInt32Array()
+	buf.resize(g * g * g)
+	for lz in g:
+		for ly in g:
+			for lx in g:
+				buf[lx + ly * g + lz * g * g] = halo[(off + lx) + (off + ly) * hs + (off + lz) * hs * hs]
+	call_deferred("_on_lod_downsample_ready", block_key, lod, buf)
+
+
+## 主线程：粗层降采样完成 → 缓存 _coarse_buffers + 持久化文件流（重启保留），供渲染器复用
+func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Array) -> void:
+	if lod - 1 < _lod_downsample_pending.size():
+		_lod_downsample_pending[lod - 1].erase(block_key)
+	if buf.is_empty():
+		# LOD0 chunk 可能尚未加载（自动 request 早于 LOD0 就绪，或覆盖 chunk 仅存磁盘）→
+		# 主线程 preload 覆盖 chunk 后重试，上限防空区域死循环
+		_retry_lod_downsample(block_key, lod)
+		return
+	if lod - 1 < _lod_downsample_retries.size():
+		_lod_downsample_retries[lod - 1].erase(block_key)
+	set_lod_block(lod, block_key, buf)
+	if stream is VoxelFileStream:
+		stream.save_chunk(block_key, buf, lod)
+
+
+## 粗层降采样空结果延迟重试：LOD0 chunk 常晚于粗层 request 就绪（流式加载），
+## 延迟 0.5s 跨帧重试（preload 会在 _start_lod_downsample 内执行），5 次上限防空区域死循环。
+func _retry_lod_downsample(block_key: Vector3i, lod: int) -> void:
+	while _lod_downsample_retries.size() <= lod - 1:
+		_lod_downsample_retries.append({})
+	var n: int = _lod_downsample_retries[lod - 1].get(block_key, 0)
+	if n >= 5:
+		_lod_downsample_retries[lod - 1].erase(block_key)
+		return
+	_lod_downsample_retries[lod - 1][block_key] = n + 1
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree:
+		tree.create_timer(0.5).timeout.connect(
+			func() -> void: _start_lod_downsample(block_key, lod))
+	else:
+		_start_lod_downsample(block_key, lod)
 
 
 ## 该 chunk/block 是否已有后台生成任务进行中或结果就绪（渲染器每帧预算限流用，避免重复提交）。
@@ -713,7 +807,13 @@ func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
 		return true
 	var s := stream
 	if s != null and s.has_method("is_chunk_pending"):
-		return s.is_chunk_pending(chunk_key, lod)
+		if s.is_chunk_pending(chunk_key, lod):
+			return true
+	# 文件流粗层降采样任务进行中（防重复降采样）
+	if lod >= 1 and s is VoxelFileStream:
+		var idx := lod - 1
+		if idx < _lod_downsample_pending.size() and _lod_downsample_pending[idx].has(chunk_key):
+			return true
 	return false
 
 
