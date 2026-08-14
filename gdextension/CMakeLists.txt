@@ -20,6 +20,20 @@ if(NOT DEFINED GODOTCPP_API_VERSION)
     set(GODOTCPP_API_VERSION "4.7")
 endif()
 
+# godot-cpp 用 GODOTCPP_TARGET（而非 CMAKE_BUILD_TYPE）决定 debug/release 特性
+# （DEBUG_ENABLED 宏等）。根据 CMAKE_BUILD_TYPE 自动对齐，否则 Release 构建
+# 仍会以 template_debug 特性编译（带调试断言/日志），库与 .gdextension 的
+# release 条目语义不符：
+#   CMAKE_BUILD_TYPE=Debug   → GODOTCPP_TARGET=template_debug
+#   CMAKE_BUILD_TYPE=Release → GODOTCPP_TARGET=template_release
+if(NOT DEFINED GODOTCPP_TARGET)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(GODOTCPP_TARGET "template_release")
+    else()
+        set(GODOTCPP_TARGET "template_debug")
+    endif()
+endif()
+
 # 引入 godot-cpp（其 CMake 通过 GODOTCPP_API_VERSION 选择对应 extension_api.json）
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../godot-cpp ${CMAKE_CURRENT_BINARY_DIR}/godot-cpp)
 
@@ -47,8 +61,9 @@ endif()
 #   macOS debug:   libvoxelnative.macos.debug.arm64.dylib
 #   Linux debug:   libvoxelnative.linux.debug.x86_64.so
 #   Windows debug: voxelnative.windows.debug.x86_64.dll
+# 注意：macOS/Linux 需保留默认 "lib" 前缀（与 .gdextension 条目匹配），
+#       故不设置 PREFIX ""；Windows 平台 CMake 默认无前缀，输出名已与条目一致。
 set_target_properties(voxelnative PROPERTIES
-    PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
