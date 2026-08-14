@@ -28,7 +28,6 @@ script = ExtResource("1_stream")
 script = ExtResource("2_destructible")
 visibility_mode = 2
 view_distance = 200.0
-_lod_preload_blocks = null
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=944907852]
 environment = SubResource("Environment_1")

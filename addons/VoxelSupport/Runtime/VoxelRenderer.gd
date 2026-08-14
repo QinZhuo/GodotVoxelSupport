@@ -135,7 +135,7 @@ var _lod_generation_id: Array[int] = []
 ## 每帧一次对齐的各层材质（供所有 worker 复用）
 var _lod_materials: Array[Array] = []
 ## 每帧最多派发/挂载的粗 LOD 网格数（硬上限；mesh 由工作线程构建，挂载仅赋值，可适当调大）
-@export_range(1, 200, 1) var _lod_build_per_frame: int = 64
+@export_range(1, 400, 1) var _lod_build_per_frame: int = 128
 
 ## 粗层预生成提前量（block 数）：把粗层 block 的生成范围向外扩展，
 ## 让它们在进入 LOD 带之前就生成好——相机跨带时新层级已就绪，
@@ -305,8 +305,10 @@ var _origin_chunk: Vector3i = Vector3i.ZERO
 const ORIGIN_SHIFT_THRESHOLD := 256
 # 异步网格生成状态（多任务并行，每个任务独立处理）
 var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
+var _coarse_task_ids: Array[int] = []    # 粗 LOD worker 任务 ID（退出时等待，防 call_deferred 打到已释放实例）
 var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
 var _generation_id := 0
+var _exiting := false                    # 退出中：worker 结果回调据此直接丢弃，避免访问已清理数据
 # 材质快照缓存：材质对象深拷贝较昂贵，仅在材质变化时重建一次，供子线程安全读取
 var _materials_snapshot: Array = []
 var _materials_snapshot_dirty: bool = true
@@ -527,7 +529,13 @@ func get_voxel(pos: Vector3i) -> int:
 
 
 func _exit_tree() -> void:
+	# 退出：等待所有 worker 任务完成后再释放，否则 worker 完成时 call_deferred
+	# 会打到已释放实例（"Cannot call method 'call_deferred' on a previously freed instance"）。
+	_exiting = true
 	_cancel_async()
+	for tid in _coarse_task_ids:
+		WorkerThreadPool.wait_for_task_completion(tid)
+	_coarse_task_ids.clear()
 	_clear_lod_meshes()
 
 
@@ -1068,10 +1076,10 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 			if _lod_meshes[level][bk] != null or not data.has_lod_block(level, bk):
 				continue
 		var dist: float = needed[bk]
-		# 数据已就绪的 block 不受内带限制：预生成/挂载 mesh（LOD0 移除后粗层直接显示，
-		# 避免移动时粗层数据就绪但 mesh 未挂载的块状空洞）
-		# 预生成范围（upper + preload_d）内的 block 也允许生成——进入带前就绪，消除切换真空。
-		if not data.has_lod_block(level, bk) and (dist < inner - margin or dist > upper + preload_d):
+		# 近处（LOD0 带内，dist<inner-margin）的 block 由 LOD0 chunk 显示，不生成 L1 mesh——
+		# 否则与 1b 移除（近处内层就绪→移除 L1）形成"生成→移除→再生成"循环 → L0/L1 交替闪烁。
+		# 带内及带外预生成范围（upper+preload_d 内）正常生成：进入带前就绪，消除切换真空。
+		if dist < inner - margin or (not data.has_lod_block(level, bk) and dist > upper + preload_d):
 			continue
 		# 修改过的 block 由降采样回退（_build_lod_block 处理，数据来自 LOD0）；未修改优先独立数据。
 		# 流若无粗层独立数据能力（程序化流会生成；文件流/自定义流仅实现 lod=0 → request 无效果）：
@@ -1304,9 +1312,9 @@ func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	# 只派发（主线程轻量）：快照/降采样/mesh 全部在 worker 内完成——
 	# 数据保留在内存（_chunk_buffers/粗层大格只读），worker 一次生成完整 mesh（halo 完整——无空洞），
 	# 主线程不构造快照（不卡），每帧按数量派发全部 needed block（不饿死）。
-	WorkerThreadPool.add_task(_lod_worker_build.bind(
+	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_build.bind(
 		data, bk, level, _lod_generation_id[level], voxel_scale,
-		data.center_offset if data else Vector3.ZERO, _lod_materials[level].duplicate()))
+		data.center_offset if data else Vector3.ZERO, _lod_materials[level].duplicate())))
 	return true
 
 
@@ -1321,8 +1329,8 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 		return
 	_lod_pending_tasks[level][bk] = true
 	var snapshot := data.snapshot_lod_block_chunks(bk, level)
-	WorkerThreadPool.add_task(_lod_worker_data_only.bind(
-		snapshot, bk, level, _lod_generation_id[level]))
+	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_data_only.bind(
+		snapshot, bk, level, _lod_generation_id[level])))
 
 
 ## 工作线程：粗 LOD 大块由独立大格数据直接生成 mesh（线程安全，只读参数快照）。
@@ -1414,6 +1422,8 @@ func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id
 
 ## 主线程：内带失效 block 降采样数据同步（_coarse_buffers + 持久化），mesh 由 LOD0 反映。
 func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32Array) -> void:
+	if _exiting:
+		return
 	if level < 1 or level >= _lod_pending_tasks.size():
 		return
 	_lod_pending_tasks[level].erase(bk)
@@ -1442,6 +1452,8 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 ## 降采样回退路径会顺带返回大格数据 buf，同步粗层缓存（_coarse_buffers + 持久化），避免缓存缺口。
 func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: int,
 		buf := PackedInt32Array()) -> void:
+	if _exiting:
+		return
 	if level < 1 or level >= _lod_pending_tasks.size():
 		return
 	_lod_pending_tasks[level].erase(bk)
@@ -1705,6 +1717,8 @@ func _generate_chunk_worker(buffers: Dictionary, materials: Array, chunk_key: Ve
 ## 延迟批处理避免"最后一个任务完成"瞬间在主线程做重活（_on_batch_complete 可能触发
 ## 新任务启动/emit 信号），防止偶发帧尖峰（曾观测到 83ms 主线程 spike）
 func _on_thread_result(result: Dictionary) -> void:
+	if _exiting:
+		return
 	var _diag_t0 := Time.get_ticks_usec()
 	# 丢弃过期结果（gen_id 不匹配说明是旧批次）
 	var gen_id = result.get("gen_id", -1)

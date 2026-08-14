@@ -57,4 +57,4 @@ voxel_support.vol.array_mesh={
 
 [threading]
 
-worker_pool/max_threads=12.0
+worker_pool/max_threads=16.0
