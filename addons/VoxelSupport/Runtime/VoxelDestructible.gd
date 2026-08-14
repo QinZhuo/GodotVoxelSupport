@@ -443,9 +443,35 @@ func _after_removal(removed: Array) -> void:
 
 ## 应力传播：从被移除的体素出发，向邻居传播应力
 ## 若邻居体素材质的 connection_strength 不足以承受应力，则断裂
-## 轻量 BFS，直接同步执行，无需异步（邻域检查量级远小于数据快照开销）
+## 优先走原生 C++（chunk 缓冲直读 + 材质强度查表，破坏瞬间主线程热点）；
+## 原生不可用/旧库缺方法时回退 GDScript 版本。
 ## 返回所有因应力传播而断裂的体素位置
 func _propagate_stress(removed: Array) -> Array:
+	if not data or removed.is_empty():
+		return []
+	var native_res = NativeLoader.propagate_stress(
+		data._chunk_buffers, removed, _build_strength_table(),
+		stress_max_steps, stress_force, stress_decay)
+	if native_res is Array:
+		return native_res
+	return _propagate_stress_gd(removed)
+
+
+## 材质连接强度预取表（索引=材质ID）：BFS 内直接数组读，替代逐邻居 as 转换 + 动态属性访问。
+## 与 GDScript 回退版 _get_connection_strength 默认一致（无效材质 10.0）。
+func _build_strength_table() -> PackedFloat32Array:
+	var table := PackedFloat32Array()
+	if data:
+		for m in data.materials:
+			if m:
+				table.append(m.connection_strength)
+			else:
+				table.append(10.0)
+	return table
+
+
+## GDScript 回退版应力传播（原生不可用时）
+func _propagate_stress_gd(removed: Array) -> Array:
 	if not data or removed.is_empty():
 		return []
 
@@ -486,7 +512,7 @@ func _propagate_stress(removed: Array) -> Array:
 	if diag_enabled:
 		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
 		if _t_ms > 0.5:
-			print("[诊断] _propagate_stress: 起点%d, 结果%d, 耗时%.2f ms" % [removed.size(), stress_removed.size(), _t_ms])
+			print("[诊断] _propagate_stress(GD回退): 起点%d, 结果%d, 耗时%.2f ms" % [removed.size(), stress_removed.size(), _t_ms])
 
 	return stress_removed
 

@@ -77,6 +77,13 @@ public:
 	// 只访问破坏点附近体素。设计为惰性加载：只收集候选及邻居涉及的局部 chunk，避免全量拷贝整世界。
 	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed);
 
+	// 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
+	// strength_table: 材质连接强度表（PackedFloat32Array，索引=材质ID），GDScript 预取传入。
+	// max_steps/force/decay: 应力传播参数（与 VoxelDestructible.stress_* 一致）。
+	// 返回 Array[Vector3i]（应力断裂体素）。
+	static Array propagate_stress(const Dictionary &buffers, const Array &removed,
+			const PackedFloat32Array &strength_table, int max_steps, float force, float decay);
+
 	// 批量移除体素（返回修改后的 chunk buffer + 每 chunk 实际移除数）
 	// buffers: chunk key -> PackedInt32Array(16³)
 	// positions: 待移除位置数组（Array[Vector3i]）

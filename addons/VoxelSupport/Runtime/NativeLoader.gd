@@ -124,6 +124,21 @@ static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dict
 	return inst.call(&"find_unsupported_around", buffers, removed)
 
 
+## 应力传播（裂纹扩散，转发到原生实现，动态调用）
+## buffers: chunk key -> PackedInt32Array(32³) 密集缓冲
+## removed: 被移除的起点体素；strength_table: 材质连接强度表（索引=材质ID）
+## max_steps/force/decay: 应力传播参数
+## 返回 Array[Vector3i]（应力断裂体素）；原生不可用/旧库缺方法时返回 null（GDScript 侧回退）。
+static func propagate_stress(buffers: Dictionary, removed: Array, strength_table: PackedFloat32Array,
+		max_steps: int, force: float, decay: float) -> Variant:
+	var inst := _get_instance()
+	if inst == null:
+		return null
+	if not ClassDB.class_has_method(&"VoxelNative", &"propagate_stress", false):
+		return null
+	return inst.call(&"propagate_stress", buffers, removed, strength_table, max_steps, force, decay)
+
+
 ## 批量移除体素（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(16³)，会被就地修改（值>0 清零）
 ## positions: 待移除位置数组

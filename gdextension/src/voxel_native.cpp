@@ -798,6 +798,88 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 	return unstable;
 }
 
+// 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
+// 邻居体素材质 connection_strength < 当前 force → 断裂（加入下一层继续传播）。
+// strength_table: PackedFloat32Array（索引=材质ID），由 GDScript 预取，
+//   消除原 GDScript 版逐邻居的 has_voxel/get_voxel 字典查询 + as 对象转换（破坏瞬间主线程热点）。
+// 复用 find_unsupported_around 的 chunk 惰性加载 + buffer 直读模式（C++ 指针访问，零 GDScript 开销）。
+// 返回 Array[Vector3i]（应力断裂的体素位置）。
+Array VoxelNative::propagate_stress(const Dictionary &buffers, const Array &removed,
+		const PackedFloat32Array &strength_table, int max_steps, float force, float decay) {
+	Array result;
+	if (buffers.is_empty() || removed.is_empty()) {
+		return result;
+	}
+	// 惰性构建 chunk 缓冲查找结构（只收集传播涉及的 chunk，避免全量拷贝）
+	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
+	auto ensure_chunk = [&](const Vector3i &p) {
+		const uint64_t kk = vkey(chunk_of(p));
+		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
+			if (buffers.has(chunk_of(p))) {
+				chunk_bufs[kk] = buffers[chunk_of(p)];
+			}
+		}
+	};
+	// 读体素材质 ID（>0 表示存在），chunk 缓冲直读
+	auto get_mat = [&](const Vector3i &p) -> int32_t {
+		const Vector3i ck = chunk_of(p);
+		const auto it = chunk_bufs.find(vkey(ck));
+		if (it == chunk_bufs.end()) {
+			return 0;
+		}
+		const Vector3i local = p - ck * CHUNK_BITS;
+		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_BITS || local.y >= CHUNK_BITS || local.z >= CHUNK_BITS) {
+			return 0;
+		}
+		return it->second.ptr()[buf_index(local)];
+	};
+	// removed 集合（时间戳集合作 visited，快速查重）
+	std::unordered_set<uint64_t> removed_set;
+	std::vector<Vector3i> current_layer;
+	for (int i = 0; i < removed.size(); ++i) {
+		const Vector3i rp = removed[i];
+		removed_set.insert(vkey(rp));
+		ensure_chunk(rp);
+		current_layer.push_back(rp);
+	}
+	float current_force = force;
+	for (int step = 0; step < max_steps; ++step) {
+		if (current_layer.empty()) {
+			break;
+		}
+		current_force *= (1.0f - decay);
+		if (current_force <= 0.0f) {
+			break;
+		}
+		std::vector<Vector3i> next_layer;
+		for (const Vector3i &p : current_layer) {
+			for (int d = 0; d < 6; ++d) {
+				const Vector3i nb(p.x + NEIGHBORS_6[d][0], p.y + NEIGHBORS_6[d][1], p.z + NEIGHBORS_6[d][2]);
+				const uint64_t nk = vkey(nb);
+				if (removed_set.find(nk) != removed_set.end()) {
+					continue;
+				}
+				ensure_chunk(nb);
+				const int32_t mat = get_mat(nb);
+				if (mat <= 0) {
+					continue;
+				}
+				float strength = 10.0f;
+				if (mat < strength_table.size()) {
+					strength = strength_table[mat];
+				}
+				if (current_force > strength) {
+					removed_set.insert(nk);
+					result.append(nb);
+					next_layer.push_back(nb);
+				}
+			}
+		}
+		current_layer = std::move(next_layer);
+	}
+	return result;
+}
+
 Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
 	// 批量移除体素：按 chunk 分组，把修改后的 PackedInt32Array 放回结果，供 GDScript 覆盖。
 	// 大崩塌（每帧 4096+ 体素）时替代 GDScript 逐体素循环，主线程提速。
@@ -1041,6 +1123,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelNative::build_lod_block_halo_from_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);
