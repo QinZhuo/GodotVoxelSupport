@@ -1242,24 +1242,10 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 	# 非流式无需 preload，原生 set_voxels_bulk 会为全新 chunk 创建空 buffer。
 	if stream != null:
 		var ck_list: Array = NativeLoader.collect_chunks(positions)
-		if ck_list.is_empty() and not positions.is_empty():
-			var need_ck := {}
-			for p in positions:
-				need_ck[_chunk_of(p)] = true
-			ck_list.assign(need_ck.keys())
 		for ck in ck_list:
 			if not _chunk_buffers.has(ck) and _persisted_chunks.has(ck):
 				preload_chunk(ck)
 	var res: Dictionary = NativeLoader.set_voxels_bulk(_chunk_buffers, positions, material_id)
-	if res.is_empty():
-		# 原生不可用/旧库缺方法 → 回退逐体素（保持行为一致）
-		for p in positions:
-			var pos: Vector3i = p
-			_write_buffer_impl(pos, material_id, false)
-			_mark_voxel_dirty(pos)
-		if notify:
-			emit_changed()
-		return
 	var modified_buffers: Dictionary = res["buffers"]
 	var chunk_set: Dictionary = res["chunk_set"]
 	for ck in chunk_set:

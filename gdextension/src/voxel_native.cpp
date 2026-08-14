@@ -880,6 +880,44 @@ Array VoxelNative::propagate_stress(const Dictionary &buffers, const Array &remo
 	return result;
 }
 
+// 批量收集体素材质 ID（替代 GDScript 逐体素 get_voxel 字典查询，破坏管线热点）。
+// 与 GDScript get_voxel 语义一致：有体素 → 材质 ID（>0），无体素 → -1。
+// 返回 Dictionary{pos(Vector3i): int}。
+Dictionary VoxelNative::collect_materials(const Dictionary &buffers, const Array &positions) {
+	Dictionary result;
+	if (buffers.is_empty() || positions.is_empty()) {
+		return result;
+	}
+	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
+	auto ensure_chunk = [&](const Vector3i &p) {
+		const uint64_t kk = vkey(chunk_of(p));
+		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
+			if (buffers.has(chunk_of(p))) {
+				chunk_bufs[kk] = buffers[chunk_of(p)];
+			}
+		}
+	};
+	auto get_mat = [&](const Vector3i &p) -> int32_t {
+		const Vector3i ck = chunk_of(p);
+		const auto it = chunk_bufs.find(vkey(ck));
+		if (it == chunk_bufs.end()) {
+			return 0;
+		}
+		const Vector3i local = p - ck * CHUNK_BITS;
+		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_BITS || local.y >= CHUNK_BITS || local.z >= CHUNK_BITS) {
+			return 0;
+		}
+		return it->second.ptr()[buf_index(local)];
+	};
+	for (int i = 0; i < positions.size(); ++i) {
+		const Vector3i p = positions[i];
+		ensure_chunk(p);
+		const int32_t m = get_mat(p);
+		result[p] = (m > 0) ? m : -1;
+	}
+	return result;
+}
+
 Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
 	// 批量移除体素：按 chunk 分组，把修改后的 PackedInt32Array 放回结果，供 GDScript 覆盖。
 	// 大崩塌（每帧 4096+ 体素）时替代 GDScript 逐体素循环，主线程提速。
@@ -1124,6 +1162,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);

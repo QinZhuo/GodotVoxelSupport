@@ -443,22 +443,18 @@ func _after_removal(removed: Array) -> void:
 
 ## 应力传播：从被移除的体素出发，向邻居传播应力
 ## 若邻居体素材质的 connection_strength 不足以承受应力，则断裂
-## 优先走原生 C++（chunk 缓冲直读 + 材质强度查表，破坏瞬间主线程热点）；
-## 原生不可用/旧库缺方法时回退 GDScript 版本。
+## 原生 C++（chunk 缓冲直读 + 材质强度查表）；原生库为强制依赖，无 GDScript 回退。
 ## 返回所有因应力传播而断裂的体素位置
 func _propagate_stress(removed: Array) -> Array:
 	if not data or removed.is_empty():
 		return []
-	var native_res = NativeLoader.propagate_stress(
+	return NativeLoader.propagate_stress(
 		data._chunk_buffers, removed, _build_strength_table(),
 		stress_max_steps, stress_force, stress_decay)
-	if native_res is Array:
-		return native_res
-	return _propagate_stress_gd(removed)
 
 
 ## 材质连接强度预取表（索引=材质ID）：BFS 内直接数组读，替代逐邻居 as 转换 + 动态属性访问。
-## 与 GDScript 回退版 _get_connection_strength 默认一致（无效材质 10.0）。
+## 与 GDScript 版 _get_connection_strength 默认一致（无效材质 10.0）。
 func _build_strength_table() -> PackedFloat32Array:
 	var table := PackedFloat32Array()
 	if data:
@@ -468,53 +464,6 @@ func _build_strength_table() -> PackedFloat32Array:
 			else:
 				table.append(10.0)
 	return table
-
-
-## GDScript 回退版应力传播（原生不可用时）
-func _propagate_stress_gd(removed: Array) -> Array:
-	if not data or removed.is_empty():
-		return []
-
-	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
-	var all_removed: Dictionary = {}
-	for p in removed:
-		all_removed[p] = true
-
-	var stress_removed: Array = []
-	var current_layer: Array = removed
-	var current_force: float = stress_force
-
-	for step in range(stress_max_steps):
-		if current_layer.is_empty():
-			break
-		var next_layer: Array = []
-		current_force *= (1.0 - stress_decay)
-		if current_force <= 0.0:
-			break
-
-		for p in current_layer:
-			var pos: Vector3i = p
-			for d in data.NEIGHBORS_6:
-				var nb := pos + d
-				if nb in all_removed:
-					continue
-				if not data.has_voxel(nb):
-					continue
-				var mat_id := data.get_voxel(nb)
-				var conn_strength := _get_connection_strength(mat_id)
-				if current_force > conn_strength:
-					# 应力超过连接强度 → 断裂
-					all_removed[nb] = true
-					stress_removed.append(nb)
-					next_layer.append(nb)
-		current_layer = next_layer
-
-	if diag_enabled:
-		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
-		if _t_ms > 0.5:
-			print("[诊断] _propagate_stress(GD回退): 起点%d, 结果%d, 耗时%.2f ms" % [removed.size(), stress_removed.size(), _t_ms])
-
-	return stress_removed
 
 
 ## 获取材质的连接强度
@@ -1360,13 +1309,8 @@ func _ensure_debris_root() -> void:
 
 
 func _collect_voxel_materials(positions: Array) -> Dictionary:
-	var mat_map := {}
-	if not data:
-		return mat_map
-	for pos in positions:
-		# 使用 get_voxel 安全访问，不存在时返回 -1（类型化字典直接 [] 访问缺失键会抛异常）
-		mat_map[pos] = data.get_voxel(pos)
-	return mat_map
+	# 原生批量收集（chunk 缓冲直读，替代逐体素 get_voxel 字典查询）；原生库为强制依赖。
+	return NativeLoader.collect_materials(data._chunk_buffers if data else {}, positions)
 
 
 ## 整块碎裂粒子：当物理体池已满、大块无法生成物理体时，

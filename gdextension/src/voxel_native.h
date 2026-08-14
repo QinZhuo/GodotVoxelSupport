@@ -84,6 +84,11 @@ public:
 	static Array propagate_stress(const Dictionary &buffers, const Array &removed,
 			const PackedFloat32Array &strength_table, int max_steps, float force, float decay);
 
+	// 批量收集体素材质 ID（替代 GDScript 逐体素 get_voxel 字典查询）。
+	// 与 get_voxel 语义一致：有体素 → 材质 ID（>0），无体素 → -1。
+	// 返回 Dictionary{pos(Vector3i): int}。
+	static Dictionary collect_materials(const Dictionary &buffers, const Array &positions);
+
 	// 批量移除体素（返回修改后的 chunk buffer + 每 chunk 实际移除数）
 	// buffers: chunk key -> PackedInt32Array(16³)
 	// positions: 待移除位置数组（Array[Vector3i]）

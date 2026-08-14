@@ -124,19 +124,30 @@ static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dict
 	return inst.call(&"find_unsupported_around", buffers, removed)
 
 
-## 应力传播（裂纹扩散，转发到原生实现，动态调用）
+## 应力传播（转发到原生实现，动态调用）
 ## buffers: chunk key -> PackedInt32Array(32³) 密集缓冲
 ## removed: 被移除的起点体素；strength_table: 材质连接强度表（索引=材质ID）
 ## max_steps/force/decay: 应力传播参数
-## 返回 Array[Vector3i]（应力断裂体素）；原生不可用/旧库缺方法时返回 null（GDScript 侧回退）。
+## 返回 Array[Vector3i]（应力断裂体素）。原生库为强制依赖，缺失时报错。
 static func propagate_stress(buffers: Dictionary, removed: Array, strength_table: PackedFloat32Array,
-		max_steps: int, force: float, decay: float) -> Variant:
+		max_steps: int, force: float, decay: float) -> Array:
 	var inst := _get_instance()
 	if inst == null:
-		return null
-	if not ClassDB.class_has_method(&"VoxelNative", &"propagate_stress", false):
-		return null
+		push_error("[NativeLoader] propagate_stress 需要原生库 VoxelNative")
+		return []
 	return inst.call(&"propagate_stress", buffers, removed, strength_table, max_steps, force, decay)
+
+
+## 批量收集体素材质 ID（转发到原生实现，动态调用）。
+## buffers: chunk key -> PackedInt32Array(32³) 密集缓冲
+## positions: 体素位置数组
+## 返回 Dictionary{pos(Vector3i): int}（无体素 → -1）。原生库为强制依赖，缺失时报错。
+static func collect_materials(buffers: Dictionary, positions: Array) -> Dictionary:
+	var inst := _get_instance()
+	if inst == null:
+		push_error("[NativeLoader] collect_materials 需要原生库 VoxelNative")
+		return {}
+	return inst.call(&"collect_materials", buffers, positions)
 
 
 ## 批量移除体素（转发到原生实现，动态调用）
