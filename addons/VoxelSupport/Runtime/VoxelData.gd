@@ -143,24 +143,55 @@ func invalidate_lod_for_chunk(ck: Vector3i) -> void:
 		_mark_lod_invalid(Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod), lod)
 
 
-## 用户编辑体素：失效高层 block 并标记"需降采样"（编辑影响该 block，不能用纯生成器数据），
-## 同时从独立数据层移除缓存（下次重生成时降采样合并编辑）。
+## 用户编辑体素：失效高层 block 并标记"需降采样"（编辑影响该 block，不能用纯生成器数据）。
+## 金字塔增量：保留 coarse 缓存（不 erase），只记录脏大格区域（增量降采样，未脏大格复用）。
 func mark_lod_modified(pos: Vector3i) -> void:
 	var ck := _chunk_of(pos)
 	for lod in range(1, maxi(lod_count, 1)):
 		var bk := Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod)
 		_mark_lod_invalid(bk, lod)
 		_mark_coarse_modified(bk, lod)
-		erase_lod_block(lod, bk)
+		_mark_lod_dirty_region(bk, lod, pos, pos)
 
 
-## 用户编辑 chunk（批量）：标记覆盖它的所有高层 block 需降采样（同上）
+## 用户编辑 chunk（批量）：标记覆盖它的所有高层 block 需降采样（同上，记录整 chunk 脏区域）
 func mark_lod_modified_for_chunk(ck: Vector3i) -> void:
+	var vox_min := ck * CHUNK_SIZE
+	var vox_max := vox_min + Vector3i(CHUNK_SIZE - 1, CHUNK_SIZE - 1, CHUNK_SIZE - 1)
 	for lod in range(1, maxi(lod_count, 1)):
 		var bk := Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod)
 		_mark_lod_invalid(bk, lod)
 		_mark_coarse_modified(bk, lod)
-		erase_lod_block(lod, bk)
+		_mark_lod_dirty_region(bk, lod, vox_min, vox_max)
+
+
+## 每层 block 的脏大格区域（block 内大格坐标 [min,max] 含），增量降采样用
+var _lod_dirty_region: Array[Dictionary] = []
+
+
+## 记录 block 的脏大格区域（体素范围 [vox_min, vox_max] 覆盖的 block 内大格，并集）
+func _mark_lod_dirty_region(block_key: Vector3i, lod: int, vox_min: Vector3i, vox_max: Vector3i) -> void:
+	while _lod_dirty_region.size() <= lod:
+		_lod_dirty_region.append({})
+	var gmin := Vector3i(vox_min.x >> lod, vox_min.y >> lod, vox_min.z >> lod) - block_key * LOD_GRID
+	var gmax := Vector3i(vox_max.x >> lod, vox_max.y >> lod, vox_max.z >> lod) - block_key * LOD_GRID
+	gmin = Vector3i(clampi(gmin.x, 0, LOD_GRID - 1), clampi(gmin.y, 0, LOD_GRID - 1), clampi(gmin.z, 0, LOD_GRID - 1))
+	gmax = Vector3i(clampi(gmax.x, 0, LOD_GRID - 1), clampi(gmax.y, 0, LOD_GRID - 1), clampi(gmax.z, 0, LOD_GRID - 1))
+	if gmax.x < gmin.x or gmax.y < gmin.y or gmax.z < gmin.z:
+		return
+	var region: Array = _lod_dirty_region[lod].get(block_key, [Vector3i(999999, 999999, 999999), Vector3i(-1, -1, -1)])
+	region[0] = Vector3i(mini(region[0].x, gmin.x), mini(region[0].y, gmin.y), mini(region[0].z, gmin.z))
+	region[1] = Vector3i(maxi(region[1].x, gmax.x), maxi(region[1].y, gmax.y), maxi(region[1].z, gmax.z))
+	_lod_dirty_region[lod][block_key] = region
+
+
+## 取并清空指定 block 的脏大格区域（渲染器增量降采样消费）
+func get_lod_dirty_region(lod: int, bk: Vector3i) -> Array:
+	if lod < _lod_dirty_region.size():
+		var r: Array = _lod_dirty_region[lod].get(bk, [])
+		_lod_dirty_region[lod].erase(bk)
+		return r
+	return []
 
 
 ## 记录指定层级 block 失效（通知渲染器重建）
@@ -713,6 +744,11 @@ func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
 		return
 	_ensure_coarse_arrays(level)
 	_coarse_buffers[level - 1][key] = buf
+	# 数据已同步（全量降采样 或 金字塔增量 patch 写入）→ 清除 modified，
+	# worker 据此走独立数据路径（从 coarse 生成 mesh），不再全量从 L0 降采样覆盖。
+	while _coarse_modified.size() <= level - 1:
+		_coarse_modified.append({})
+	_coarse_modified[level - 1].erase(key)
 
 
 func erase_lod_block(level: int, key: Vector3i) -> void:

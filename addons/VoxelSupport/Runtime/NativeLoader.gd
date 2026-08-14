@@ -104,6 +104,17 @@ static func build_lod_block_halo_from_buffers_native(buffers: Dictionary, block_
 	return inst.call(&"build_lod_block_halo_from_buffers_native", buffers, block_key, lod_shift)
 
 
+## 金字塔增量降采样：只重算 block 内 [rmin,rmax] 脏大格，未脏大格从 coarse 复用。
+## 与全量降采样规则一致（取第一个非空材质）。coarse: 现有 block 大格数据（32³）。
+## 返回完整 block 大格数据（脏大格已更新）。
+static func patch_lod_block(buffers: Dictionary, block_key: Vector3i, lod_shift: int,
+		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return coarse
+	return inst.call(&"patch_lod_block", buffers, block_key, lod_shift, coarse, rmin, rmax)
+
+
 ## 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，原生下沉 C++）。
 ## 无原生/旧库缺方法时返回空数组。
 static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:

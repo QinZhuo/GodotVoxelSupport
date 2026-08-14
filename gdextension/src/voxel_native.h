@@ -65,6 +65,13 @@ public:
 	static PackedInt32Array build_lod_block_halo_from_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key, int lod_shift);
 
+	// 金字塔增量降采样：只重算 block 内 [rmin,rmax] 脏大格，未脏大格从 coarse 复用。
+	// 与全量降采样规则一致（取第一个非空材质），保证结果一致。编辑后破坏成本 O(脏大格)。
+	// coarse: 现有 block 大格数据（32³）；返回完整 block 数据（脏大格已更新）。
+	static PackedInt32Array patch_lod_block(const Dictionary &buffers, const Vector3i &block_key,
+			int lod_shift, const PackedInt32Array &coarse,
+			const Vector3i &rmin, const Vector3i &rmax);
+
 	// 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，无降采样）：中心 32³ + 6 外缘面
 	static PackedInt32Array build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key);

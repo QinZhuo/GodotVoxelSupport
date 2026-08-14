@@ -1031,6 +1031,17 @@ func _process_lod() -> void:
 				if bdist > _lod_outer[level] + _margin + _lod_preload_extent(level):
 					data.erase_lod_block(level, bk)
 					continue
+				# 【金字塔增量】coarse 已有缓存：主线程 patch 只重算脏大格（未脏复用），
+				# 再派发 mesh worker 从 coarse 生成（set_lod_block 已清 modified → 不走全量降采样）。
+				var region := data.get_lod_dirty_region(level, bk)
+				if not region.is_empty() and data.has_lod_block(level, bk):
+					var coarse := data.get_lod_block(level, bk)
+					var patched := NativeLoader.patch_lod_block(
+						data._chunk_buffers, bk, level, coarse, region[0], region[1])
+					data.set_lod_block(level, bk, patched)
+					if bdist >= _inner - _margin:
+						_build_lod_block(level, bk)
+					continue
 				if bdist < _inner - _margin:
 					_build_lod_data_only(level, bk)
 				else:

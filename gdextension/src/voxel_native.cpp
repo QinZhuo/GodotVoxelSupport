@@ -569,7 +569,6 @@ PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dic
 	return halo;
 }
 
-// 从独立 LOD 数据块（每 LOD 32³ 大格，值 = 材质ID）构建 34³ halo（直接拷大格，无降采样）：
 // 中心 32³ = block 自身；6 外缘面 = 相邻 block 边界 1 大格层（跨界可见性）。
 // 对应 GDScript VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers（Voxel Tools 式独立数据层网格入口）。
 PackedInt32Array VoxelNative::build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers, const Vector3i &block_key) {
@@ -918,6 +917,69 @@ Dictionary VoxelNative::collect_materials(const Dictionary &buffers, const Array
 	return result;
 }
 
+// 金字塔增量降采样：只重算 block 内 [rmin, rmax] 区域的脏大格，未脏大格从 coarse 复用。
+// 与全量 build_lod_block_halo_from_buffers_native 降采样规则一致（大格值 = 覆盖 cell³ 体素中
+// 第一个非空材质），保证增量/全量结果一致。编辑体素后只影响少数大格 → 破坏成本 O(脏大格)。
+// coarse: 现有 block 大格数据（PackedInt32Array 32³，未脏大格保留）；为空则先建空 buffer。
+// buffers: LOD0 chunk 缓冲（chunk key -> PackedInt32Array 32³）。
+// 返回完整 block 大格数据（脏大格已更新，未脏大格保持 coarse 旧值）。
+PackedInt32Array VoxelNative::patch_lod_block(const Dictionary &buffers, const Vector3i &block_key,
+		int lod_shift, const PackedInt32Array &coarse,
+		const Vector3i &rmin, const Vector3i &rmax) {
+	constexpr int BS = 32;
+	const int cell = 1 << lod_shift;
+	const int block_voxels = BS * cell;
+	PackedInt32Array buf = coarse;
+	if (buf.size() < BS * BS * BS) {
+		buf.resize(BS * BS * BS);
+	}
+	// 惰性 chunk 缓冲（只读脏大格涉及的 chunk，避免全量读取）
+	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
+	auto get_voxel = [&](int wx, int wy, int wz) -> int32_t {
+		const Vector3i p(wx, wy, wz);
+		const Vector3i ck = chunk_of(p);
+		const uint64_t kk = vkey(ck);
+		auto it = chunk_bufs.find(kk);
+		if (it == chunk_bufs.end()) {
+			if (buffers.has(ck)) {
+				chunk_bufs[kk] = buffers[ck];
+				it = chunk_bufs.find(kk);
+			} else {
+				return 0;
+			}
+		}
+		const Vector3i local = p - ck * CHUNK_BITS;
+		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_BITS || local.y >= CHUNK_BITS || local.z >= CHUNK_BITS) {
+			return 0;
+		}
+		return it->second.ptr()[buf_index(local)];
+	};
+	// 只对脏大格降采样（取第一个非空材质，与全量一致）
+	for (int gz = rmax.z; gz >= rmin.z; --gz) {
+		const int bz = block_key.z * block_voxels + gz * cell;
+		for (int gy = rmax.y; gy >= rmin.y; --gy) {
+			const int by = block_key.y * block_voxels + gy * cell;
+			for (int gx = rmax.x; gx >= rmin.x; --gx) {
+				const int bx = block_key.x * block_voxels + gx * cell;
+				int mat = 0;
+				for (int dz = 0; dz < cell && mat == 0; ++dz) {
+					for (int dy = 0; dy < cell && mat == 0; ++dy) {
+						for (int dx = 0; dx < cell; ++dx) {
+							const int32_t m = get_voxel(bx + dx, by + dy, bz + dz);
+							if (m > 0) {
+								mat = m;
+								break;
+							}
+						}
+					}
+				}
+				buf[gx + gy * BS + gz * BS * BS] = mat;
+			}
+		}
+	}
+	return buf;
+}
+
 Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
 	// 批量移除体素：按 chunk 分组，把修改后的 PackedInt32Array 放回结果，供 GDScript 覆盖。
 	// 大崩塌（每帧 4096+ 体素）时替代 GDScript 逐体素循环，主线程提速。
@@ -1159,6 +1221,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelNative::build_lod_block_halo_from_buffers_native);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
