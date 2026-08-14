@@ -945,30 +945,40 @@ static func _compute_hull_points(local_voxels: Dictionary, scale: float) -> Pack
 func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, scale: float) -> Variant:
 	if local_voxels.is_empty():
 		return null
-	# 判断掉落体是否超出单 chunk dense 范围（local_voxels 以 center 为中心，检查最大偏移）
-	var max_abs := 0
+	# 【负坐标修复】local_voxels 以 center 为中心（可为负）。原生生成器按 chunk 分组时
+	# 对负坐标（p>>CHUNK_SHIFT）分 chunk 导致各 chunk mesh 顶点基准不一致 → 掉落块被拉伸成"横条"。
+	# 统一平移到非负（相对组最小角），并用 offset=min 补偿回 center 坐标系（C++: world = pos*scale + offset*scale）。
+	var min_p := Vector3i(local_voxels.keys()[0])
 	for pos_key in local_voxels:
 		var p: Vector3i = pos_key
-		max_abs = maxi(max_abs, maxi(maxi(absi(p.x), absi(p.y)), absi(p.z)))
-	# HALO_SIZE=18：可容纳 local 坐标 [-HALO, HALO_SIZE-HALO-1] = [-1, 16]，即中心±16
-	if max_abs <= VoxelChunk.HALO_SIZE - VoxelChunk.HALO - 1:
-		# 构造 18³ 密集 halo：以 center 为 chunk 原点（chunk_key=0），local 坐标 + HALO 偏移
+		min_p = Vector3i(mini(min_p.x, p.x), mini(min_p.y, p.y), mini(min_p.z, p.z))
+	var translated: Dictionary = {}
+	var max_extent := 0
+	for pos_key in local_voxels:
+		var p: Vector3i = pos_key
+		var tp := p - min_p
+		translated[tp] = int(local_voxels[pos_key])
+		max_extent = maxi(max_extent, maxi(maxi(tp.x, tp.y), tp.z))
+	var offset := Vector3(min_p)
+	# 判断掉落体是否超出单 chunk dense 范围（平移后最大坐标）
+	if max_extent <= VoxelChunk.HALO_SIZE - VoxelChunk.HALO - 1:
+		# 构造密集 halo：以平移后原点为 chunk 原点（chunk_key=0），坐标 + HALO 偏移（非负）
 		var halo := PackedInt32Array()
 		halo.resize(VoxelChunk.HALO_VOLUME)
-		for pos_key in local_voxels:
+		for pos_key in translated:
 			var p: Vector3i = pos_key
 			var lx := p.x + VoxelChunk.HALO
 			var ly := p.y + VoxelChunk.HALO
 			var lz := p.z + VoxelChunk.HALO
 			if lx < 0 or ly < 0 or lz < 0 or lx >= VoxelChunk.HALO_SIZE or ly >= VoxelChunk.HALO_SIZE or lz >= VoxelChunk.HALO_SIZE:
-				return VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
-			halo[lx + ly * VoxelChunk.HALO_SIZE + lz * VoxelChunk.HALO_SIZE * VoxelChunk.HALO_SIZE] = int(local_voxels[pos_key])
+				return VoxelChunkGenerator.generate_arrays_runtime(translated, materials, {"scale": scale, "offset": offset})
+			halo[lx + ly * VoxelChunk.HALO_SIZE + lz * VoxelChunk.HALO_SIZE * VoxelChunk.HALO_SIZE] = int(translated[pos_key])
 		var aligned := VoxelMaterial.align_by_id(materials)
 		var result := VoxelChunkGenerator.generate_single_chunk_dense(
-			halo, aligned, scale, Vector3i.ZERO, Vector3.ZERO)
+			halo, aligned, scale, Vector3i.ZERO, offset)
 		if result != null and not result.is_empty():
 			return result
-	return VoxelChunkGenerator.generate_arrays_runtime(local_voxels, materials, {"scale": scale, "offset": Vector3.ZERO})
+	return VoxelChunkGenerator.generate_arrays_runtime(translated, materials, {"scale": scale, "offset": offset})
 
 
 ## 掉落体 mesh 组装入口：
