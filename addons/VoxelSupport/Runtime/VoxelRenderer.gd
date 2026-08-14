@@ -1033,11 +1033,17 @@ func _process_lod() -> void:
 					continue
 				# 【金字塔增量】coarse 已有缓存：主线程 patch 只重算脏大格（未脏复用），
 				# 再派发 mesh worker 从 coarse 生成（set_lod_block 已清 modified → 不走全量降采样）。
+				# L1 从 L0 chunk 降采样；L2+ 逐级上推从上一层 coarse 降采样（省 64 倍 L0 读取）。
 				var region := data.get_lod_dirty_region(level, bk)
 				if not region.is_empty() and data.has_lod_block(level, bk):
 					var coarse := data.get_lod_block(level, bk)
-					var patched := NativeLoader.patch_lod_block(
-						data._chunk_buffers, bk, level, coarse, region[0], region[1])
+					var patched: PackedInt32Array
+					if level == 1:
+						patched = NativeLoader.patch_lod_block(
+							data._chunk_buffers, bk, level, coarse, region[0], region[1])
+					else:
+						patched = NativeLoader.patch_lod_block_from_lod(
+							data._coarse_buffers[level - 2], bk, level, coarse, region[0], region[1])
 					data.set_lod_block(level, bk, patched)
 					if bdist >= _inner - _margin:
 						_build_lod_block(level, bk)
@@ -1532,7 +1538,7 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 	if level < 1 or level >= _lod_pending_tasks.size():
 		return
 	_lod_pending_tasks[level].erase(bk)
-	if level >= _lod_block_gen.size() or gen_id != _lod_block_gen[level].get(bk, -1):
+	if level >= _lod_block_gen.size() or gen_id != _lod_block_gen[level].get(bk, 0):
 		return
 	if buf.size() > 0 and data != null:
 		data.set_lod_block(level, bk, buf)
@@ -1556,7 +1562,7 @@ func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: in
 	if level < 1 or level >= _lod_pending_tasks.size():
 		return
 	_lod_pending_tasks[level].erase(bk)
-	if level >= _lod_block_gen.size() or gen_id != _lod_block_gen[level].get(bk, -1):
+	if level >= _lod_block_gen.size() or gen_id != _lod_block_gen[level].get(bk, 0):
 		return
 	# 同步粗层缓存（降采样回退的数据与 mesh 一致，供后续复用/持久化）。
 	# 仅 mesh 非空（有实际体素）才写缓存：真空 block 若写全 0 buffer，

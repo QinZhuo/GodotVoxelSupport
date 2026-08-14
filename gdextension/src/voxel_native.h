@@ -72,6 +72,12 @@ public:
 			int lod_shift, const PackedInt32Array &coarse,
 			const Vector3i &rmin, const Vector3i &rmax);
 
+	// 金字塔逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样（而非从 L0 全量）。
+	// coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格)。返回完整当前 block 大格数据。
+	static PackedInt32Array patch_lod_block_from_lod(const Dictionary &coarse_buffers,
+			const Vector3i &block_key, int lod, const PackedInt32Array &coarse,
+			const Vector3i &rmin, const Vector3i &rmax);
+
 	// 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，无降采样）：中心 32³ + 6 外缘面
 	static PackedInt32Array build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key);

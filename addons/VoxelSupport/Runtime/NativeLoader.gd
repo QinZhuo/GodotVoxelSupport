@@ -115,6 +115,16 @@ static func patch_lod_block(buffers: Dictionary, block_key: Vector3i, lod_shift:
 	return inst.call(&"patch_lod_block", buffers, block_key, lod_shift, coarse, rmin, rmax)
 
 
+## 金字塔逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样（而非从 L0 全量）。
+## coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格)。返回完整当前 block 大格数据。
+static func patch_lod_block_from_lod(coarse_buffers: Dictionary, block_key: Vector3i, lod: int,
+		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
+	var inst := _get_instance()
+	if inst == null:
+		return coarse
+	return inst.call(&"patch_lod_block_from_lod", coarse_buffers, block_key, lod, coarse, rmin, rmax)
+
+
 ## 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，原生下沉 C++）。
 ## 无原生/旧库缺方法时返回空数组。
 static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:

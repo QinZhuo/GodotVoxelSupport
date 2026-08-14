@@ -980,6 +980,66 @@ PackedInt32Array VoxelNative::patch_lod_block(const Dictionary &buffers, const V
 	return buf;
 }
 
+// 金字塔逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样（而非从 L0 全量）。
+// 当前层 block 覆盖 (32<<lod)³ 体素；上一层 block 覆盖 (32<<(lod-1))³ = 8 个（2³）。
+// 当前大格 (gx,gy,gz) 覆盖 2³ 个上一层大格：上一层大格坐标 = (block*32+g)*2 + (dx,dy,dz)。
+// 取第一个非空上层大格值（与全量 L0 降采样规则一致，保证逐级/全量结果一致）。
+// coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格) 字典。
+// coarse: 当前 block 现有大格数据（未脏大格保留）。返回完整当前 block 大格数据。
+PackedInt32Array VoxelNative::patch_lod_block_from_lod(const Dictionary &coarse_buffers,
+		const Vector3i &block_key, int lod, const PackedInt32Array &coarse,
+		const Vector3i &rmin, const Vector3i &rmax) {
+	constexpr int BS = 32;
+	PackedInt32Array buf = coarse;
+	if (buf.size() < BS * BS * BS) {
+		buf.resize(BS * BS * BS);
+	}
+	// 惰性读上一层 coarse（block → 32³ 大格）
+	std::unordered_map<uint64_t, PackedInt32Array> coarse_map;
+	auto get_prev = [&](int wx, int wy, int wz) -> int32_t {
+		const Vector3i p(wx, wy, wz);
+		const Vector3i pbk(p.x >> 5, p.y >> 5, p.z >> 5);
+		const uint64_t kk = vkey(pbk);
+		auto it = coarse_map.find(kk);
+		if (it == coarse_map.end()) {
+			if (coarse_buffers.has(pbk)) {
+				coarse_map[kk] = coarse_buffers[pbk];
+				it = coarse_map.find(kk);
+			} else {
+				return 0;
+			}
+		}
+		const Vector3i local = p - pbk * BS;
+		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= BS || local.y >= BS || local.z >= BS) {
+			return 0;
+		}
+		return it->second.ptr()[local.x + local.y * BS + local.z * BS * BS];
+	};
+	for (int gz = rmax.z; gz >= rmin.z; --gz) {
+		const int pz = (block_key.z * BS + gz) * 2;
+		for (int gy = rmax.y; gy >= rmin.y; --gy) {
+			const int py = (block_key.y * BS + gy) * 2;
+			for (int gx = rmax.x; gx >= rmin.x; --gx) {
+				const int px = (block_key.x * BS + gx) * 2;
+				int mat = 0;
+				for (int dz = 0; dz < 2 && mat == 0; ++dz) {
+					for (int dy = 0; dy < 2 && mat == 0; ++dy) {
+						for (int dx = 0; dx < 2; ++dx) {
+							const int32_t m = get_prev(px + dx, py + dy, pz + dz);
+							if (m > 0) {
+								mat = m;
+								break;
+							}
+						}
+					}
+				}
+				buf[gx + gy * BS + gz * BS * BS] = mat;
+			}
+		}
+	}
+	return buf;
+}
+
 Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
 	// 批量移除体素：按 chunk 分组，把修改后的 PackedInt32Array 放回结果，供 GDScript 覆盖。
 	// 大崩塌（每帧 4096+ 体素）时替代 GDScript 逐体素循环，主线程提速。
@@ -1222,6 +1282,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelNative::build_lod_block_halo_from_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
