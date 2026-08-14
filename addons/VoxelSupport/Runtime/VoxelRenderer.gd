@@ -1443,6 +1443,38 @@ func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id
 
 
 ## 主线程：内带失效 block 降采样数据同步（_coarse_buffers + 持久化），mesh 由 LOD0 反映。
+## 粗层降采样空的处理：确定空（block 覆盖的 L0 chunk 全不存在——区域外/空气层）
+## → 一次设 null 防重复派发（否则空块反复降采样占满 worker，lod_count>1 帧率骤降）；
+## 数据未就绪（L0 chunk 存在但降采样空）→ 重试计数，上限后设 null 防真空循环。
+func _lod_mark_null_or_retry(level: int, bk: Vector3i) -> void:
+	var definitely_empty := true
+	var base := bk * (1 << level)
+	var span := 1 << level
+	for cz in span:
+		for cy in span:
+			for cx in span:
+				var ck := base + Vector3i(cx, cy, cz)
+				if data != null and data._chunk_buffers.has(ck):
+					definitely_empty = false
+					break
+			if not definitely_empty:
+				break
+		if not definitely_empty:
+			break
+	if definitely_empty:
+		# 区域外/空气层：无任何 L0 数据 → 确定空，一次设 null（不重试，省 worker）
+		_lod_null_retries.erase(str(level) + "_" + str(bk))
+		_lod_meshes[level][bk] = null
+		return
+	var _rk := str(level) + "_" + str(bk)
+	var _rn: int = _lod_null_retries.get(_rk, 0)
+	if _rn >= 3:
+		_lod_null_retries.erase(_rk)
+		_lod_meshes[level][bk] = null
+	else:
+		_lod_null_retries[_rk] = _rn + 1
+
+
 func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32Array) -> void:
 	if _exiting:
 		return
@@ -1456,14 +1488,8 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 		if data.stream is VoxelFileStream:
 			data.stream.save_chunk(bk, buf, level)
 	else:
-		# 降采样空（LOD0 数据未就绪）：不设空标记（否则跳过→洞永远），重试计数防真空循环
-		var _rk := str(level) + "_" + str(bk)
-		var _rn: int = _lod_null_retries.get(_rk, 0)
-		if _rn >= 3:
-			_lod_null_retries.erase(_rk)
-			_lod_meshes[level][bk] = null  # 真空 block：标记空，避免重复派发
-		else:
-			_lod_null_retries[_rk] = _rn + 1
+		# 降采样空（LOD0 数据未就绪 或 区域外/空气层）：确定空一次设 null，其余重试计数
+		_lod_mark_null_or_retry(level, bk)
 	# 数据已同步（mesh 由 LOD0 chunk 反映），解除重建标记防重复派发
 	if level < _lod_rebuild.size():
 		_lod_rebuild[level].erase(bk)
@@ -1494,19 +1520,15 @@ func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: in
 	if mesh == null or mesh.get_surface_count() == 0:
 		# 降采样结果为空：多为 LOD0 数据未就绪（快照空）→ 不设空标记，移除条目让后续重试。
 		# 否则空标记会让 _process_lod_level 跳过该 block，LOD0 数据就绪后也不会重建 → 洞永远。
-		# 真空 block 防循环：重试计数上限后设空标记。
+		# 真空 block 防循环：确定空（区域外/空气层）一次设 null，数据未就绪重试上限后设 null。
 		if _lod_rebuilding(level, bk):
 			_remove_lod_mesh(level, bk)
 		if level < _lod_rebuild.size():
 			_lod_rebuild[level].erase(bk)
-		var _rk := str(level) + "_" + str(bk)
-		var _rn: int = _lod_null_retries.get(_rk, 0)
-		if _rn >= 3:
-			_lod_null_retries.erase(_rk)
-			_lod_meshes[level][bk] = null  # 真空 block：标记空，避免重复派发
-			return
-		_lod_null_retries[_rk] = _rn + 1
-		_lod_meshes[level].erase(bk)  # 移除条目 → 下次 _process_lod_level 重新派发降采样
+		_lod_mark_null_or_retry(level, bk)
+		if _lod_meshes[level].has(bk) and _lod_meshes[level][bk] == null:
+			return  # 已设真空标记 → 停止派发
+		_lod_meshes[level].erase(bk)  # 重试中 → 移除条目，下次 _process_lod_level 重新派发降采样
 		return
 	_lod_mesh_apply_queue.append([level, bk, mesh])
 
