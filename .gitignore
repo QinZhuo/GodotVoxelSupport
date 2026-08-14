@@ -31,10 +31,8 @@ addons/VoxelSupport/Native/libvoxelnative.dll
 addons/VoxelSupport/Native/libvoxelnative.windows.*
 addons/VoxelSupport/Native/*.dll.a
 # Godot 运行期临时文件（~前缀 + 文件锁）
-addons/VoxelSupport/Native/~*
+
 
 *.gdextension.uid
-/addons/DEVFramework/Entity/ECS/Native/~devecs.windows.debug.x86_64.dll
-/addons/DEVFramework/Entity/ECS/Native/*.TMP
-/addons/DEVFramework/ECS/Native/~devecs.windows.debug.x86_64.dll
-/addons/DEVFramework/ECS/Native/~devecs.windows.debug.x86_64.dll~RF118a2b6.TMP
+*.TMP
+~*.dll

@@ -137,6 +137,12 @@ var _lod_materials: Array[Array] = []
 ## 每帧最多派发/挂载的粗 LOD 网格数（硬上限；mesh 由工作线程构建，挂载仅赋值，可适当调大）
 @export_range(1, 200, 1) var _lod_build_per_frame: int = 64
 
+## 粗层预生成提前量（block 数）：把粗层 block 的生成范围向外扩展，
+## 让它们在进入 LOD 带之前就生成好——相机跨带时新层级已就绪，
+## 消除"旧层已移除、新层异步生成中"的真空窗口（移动中闪现空洞）。
+## 0 = 关闭（只在进入带后才生成）；建议 1~3（越大越无感，预加载 ring 常驻量略增）。
+@export_range(0, 6, 1) var _lod_preload_blocks: int = 1
+
 # LOD 大块（godot_voxel 风格大 block）：LOD_GRID³ 大格，每格 = 2^level 体素。
 #   level 0 = chunk（LOD_GRID = CHUNK_SIZE = 32，block key == chunk key）
 #   level i = 大块覆盖 (32×2^i)³ 体素，block key = chunk key >> i
@@ -155,6 +161,14 @@ static func _lod_block_center(bk: Vector3i, world_offset: Vector3, block_edge_wo
 ## LOD level block 世界边长（= 32×2^level 体素 × voxel_scale）
 func _lod_block_edge_world(level: int) -> float:
 	return voxel_scale * float(LOD_GRID << level)
+
+
+## 粗层预生成提前量（世界单位）：_lod_preload_blocks 个本层 block 边长。
+## level 0 不预生成（chunk 由流式加载逻辑负责）。
+func _lod_preload_extent(level: int) -> float:
+	if level <= 0 or _lod_preload_blocks <= 0:
+		return 0.0
+	return _lod_block_edge_world(level) * float(_lod_preload_blocks)
 
 
 ## LOD 层滞回带宽（世界单位）：该层显示区 = block 距离 ∈ (inner-margin, outer+margin)
@@ -1003,13 +1017,16 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 	var upper := (unload_d + edge_world * 0.5) if is_coarsest else (outer + margin)
 	# 1a. 推导需要：按本层 band 直接枚举 block（Voxel Tools 式——粗层数据独立，无需从 LOD0 chunk 推导）
 	#   needed 存 block 中心距离（float），1c 复用，避免同一 block 重复算 distance_to。
+	#   预生成提前量：生成范围向外扩 _lod_preload_extent，让粗层 block 在进入带前就生成好——
+	#   相机跨带时新层级已就绪，消除"旧层移除/新层异步生成"的真空窗口（移动中闪现空洞）。
+	var preload_d := _lod_preload_extent(level)
 	var needed := {}
-	var r_bk := ceili((outer + margin) / edge_world) + 1
+	var r_bk := ceili((outer + margin + preload_d) / edge_world) + 1
 	var cam_bk := _lod_block_of_chunk(_chunk_from_world(cam_pos, voxel_scale * VoxelChunk.CHUNK_SIZE, world_offset), level)
 	# 平方距离判定（避免 distance_to 的 sqrt）。先用整数 block 距离做球内预筛，
 	# 大幅减少候选（立方体角部 block 直接跳过，大半径时省一半以上循环），
 	# 通过时再算一次实际欧氏距离缓存，供 1c 精确判定 / 排序复用。
-	var radius := outer + margin
+	var radius := outer + margin + preload_d
 	var radius_sq := radius * radius
 	var r_blocks := ceili(radius / edge_world) + 2
 	var r2 := r_blocks * r_blocks
@@ -1028,7 +1045,9 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 				if dsq <= radius_sq:
 					needed[bk] = sqrt(dsq)
 	# 1b. 移除超出区间的：>unload 卸载；<inner-margin 进入内层带（内层就绪才移除）；
-	#     >upper 进入更粗层带（更粗层就绪才移除，否则保留兜底防空洞）
+	#     >upper 进入更粗层带（更粗层就绪才移除，否则保留兜底防空洞）。
+	#     预生成范围（<= upper+preload_d）内的 block 即使更粗层就绪也保留——
+	#     它们作为预加载常驻（1d 隐藏），进入带内时直接显示，消除切换真空。
 	var remove_keys: Array = []
 	for bk in _lod_meshes[level]:
 		var dist := _block_dist(bk, level, cam_pos)
@@ -1036,7 +1055,7 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 			remove_keys.append(bk)
 		elif dist < inner - margin and _level_finer_ready(level, bk, cam):
 			remove_keys.append(bk)
-		elif dist > upper and _has_lod_mesh(level + 1, Vector3i(bk.x >> 1, bk.y >> 1, bk.z >> 1)):
+		elif dist > upper + preload_d and _has_lod_mesh(level + 1, Vector3i(bk.x >> 1, bk.y >> 1, bk.z >> 1)):
 			remove_keys.append(bk)
 	for bk in remove_keys:
 		_remove_lod_mesh(level, bk)
@@ -1051,7 +1070,8 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 		var dist: float = needed[bk]
 		# 数据已就绪的 block 不受内带限制：预生成/挂载 mesh（LOD0 移除后粗层直接显示，
 		# 避免移动时粗层数据就绪但 mesh 未挂载的块状空洞）
-		if not data.has_lod_block(level, bk) and (dist < inner - margin or dist > upper):
+		# 预生成范围（upper + preload_d）内的 block 也允许生成——进入带前就绪，消除切换真空。
+		if not data.has_lod_block(level, bk) and (dist < inner - margin or dist > upper + preload_d):
 			continue
 		# 修改过的 block 由降采样回退（_build_lod_block 处理，数据来自 LOD0）；未修改优先独立数据。
 		# 流若无粗层独立数据能力（程序化流会生成；文件流/自定义流仅实现 lod=0 → request 无效果）：
@@ -1172,6 +1192,11 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 				var bdist := _block_dist(ck, 0, cam_pos)
 				if bdist > lod0_d + lod0_margin:
 					continue  # 粗 LOD 区
+				# 粗层带（render_level>0）的 chunk 由对应粗层 block 覆盖，
+				# 不标记 LOD0 dirty——否则补建→转交粗层→无 L0 mesh→再补建死循环，
+				# 且 _level_finer_ready 会把它当"重建中就绪"→ L1 隐藏 → LOD0/LOD1 交界空洞。
+				if _chunk_render_level(ck, cam_pos) > 0:
+					continue
 				data._mark_chunk_dirty(ck)
 				need_lod0_update = true
 	if need_lod0_update:
@@ -1207,10 +1232,14 @@ func _level_finer_ready(level: int, bk: Vector3i, cam: Camera3D) -> bool:
 					continue
 				if fine == 0:
 					if data.has_chunk(sbk):
-						# 重建中（mesh 在构建队列或数据层标脏）→ 视为就绪：避免破坏瞬间内层未就绪
-						# 导致粗层临时替代（LOD 边界来回移动 → "不同 LOD 层级闪烁"）。
+						# 重建中（mesh 在构建队列或数据层标脏）→ 仅当该 chunk 实际属于
+						# LOD0 带（render_level==0，会被 L0 构建）才视为就绪：
+						# 破坏瞬间内层未就绪会导致粗层临时替代（LOD 边界来回移动 → 闪烁）。
+						# 而 LOD1 带的 chunk 由粗层覆盖、L0 永不构建，若当成就绪会让
+						# _process_lod_level 隐藏粗层 → LOD0/LOD1 交界处背景透出空洞。
 						if _mesh_build_queue.has(sbk) or (data and data._dirty_mesh_chunks.has(sbk)):
-							continue
+							if _chunk_render_level(sbk, cam.global_position) == 0:
+								continue
 						var aabb := _chunk_world_aabb(sbk, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position)
 						if _aabb_has_vertex_in_frustum(aabb, cam):
 							return false
