@@ -33,6 +33,5 @@ addons/VoxelSupport/Native/*.dll.a
 # Godot 运行期临时文件（~前缀 + 文件锁）
 
 
-*.gdextension.uid
 *.TMP
 ~*.dll
