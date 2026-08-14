@@ -309,6 +309,10 @@ var _coarse_task_ids: Array[int] = []    # 粗 LOD worker 任务 ID（退出时�
 var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
 var _generation_id := 0
 var _exiting := false                    # 退出中：worker 结果回调据此直接丢弃，避免访问已清理数据
+# 数据 chunk y 范围（平面地形 needed 枚举剪枝：球体全高大部分是空气层，
+# 跳过空 block 的降采样派发——否则高层空块反复派发占满 worker，lod_count>1 帧率骤降）
+var _data_chunk_y_min := 0
+var _data_chunk_y_max := 0
 # 材质快照缓存：材质对象深拷贝较昂贵，仅在材质变化时重建一次，供子线程安全读取
 var _materials_snapshot: Array = []
 var _materials_snapshot_dirty: bool = true
@@ -965,6 +969,17 @@ func _process_lod() -> void:
 	# 内存 chunk 键快照：多步骤同帧复用，避免每帧多次分配
 	var loaded_chunks := data.get_loaded_chunk_keys()
 	var cam_dir: Vector3 = -cam.global_transform.basis.z
+	# 数据 chunk y 范围（平面地形剪枝）：needed 枚举只遍历数据实际占用的 y 层，
+	# 跳过空气层空 block 的降采样派发（lod_count>1 帧率骤降的主因）。
+	if data:
+		var _y_min := 99999
+		var _y_max := -99999
+		for ck in data._chunk_buffers:
+			if ck.y < _y_min: _y_min = ck.y
+			if ck.y > _y_max: _y_max = ck.y
+		if _y_min <= _y_max:
+			_data_chunk_y_min = _y_min
+			_data_chunk_y_max = _y_max
 
 	# 0. 数据变化 → 各粗层 block 失效重建（编辑/破坏触发）。
 	#    不立即移除旧 mesh（防重建期间可见性振荡 → 闪烁）：标记重建并立即派发降采样，
@@ -1031,6 +1046,13 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 	var needed := {}
 	var r_bk := ceili((outer + margin + preload_d) / edge_world) + 1
 	var cam_bk := _lod_block_of_chunk(_chunk_from_world(cam_pos, voxel_scale * VoxelChunk.CHUNK_SIZE, world_offset), level)
+	# y 方向剪枝：只枚举数据实际占用的 block y 层（球体全高大部分是空气层，
+	# 高层空 block 降采样空还反复派发 → worker 满载 → lod_count>1 帧率骤降）。
+	var dy_lo: int = -r_bk
+	var dy_hi: int = r_bk
+	if data:
+		dy_lo = maxi(dy_lo, (_data_chunk_y_min >> level) - cam_bk.y)
+		dy_hi = mini(dy_hi, (_data_chunk_y_max >> level) - cam_bk.y)
 	# 平方距离判定（避免 distance_to 的 sqrt）。先用整数 block 距离做球内预筛，
 	# 大幅减少候选（立方体角部 block 直接跳过，大半径时省一半以上循环），
 	# 通过时再算一次实际欧氏距离缓存，供 1c 精确判定 / 排序复用。
@@ -1040,7 +1062,7 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 	var r2 := r_blocks * r_blocks
 	for dz in range(-r_bk, r_bk + 1):
 		var dzz := dz * dz
-		for dy in range(-r_bk, r_bk + 1):
+		for dy in range(dy_lo, dy_hi + 1):
 			var dyz := dzz + dy * dy
 			if dyz > r2:
 				continue
