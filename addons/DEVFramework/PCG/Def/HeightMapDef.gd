@@ -61,6 +61,13 @@ class_name HeightMapDef extends PCGGeneratorDef
 ## 休止角（talus）：相邻格高差超过此值即搬运，越小坡越缓
 @export_range(0.001, 0.2, 0.005) var thermal_talus := 0.05
 
+## —— 后处理链（可插拔后处理步骤） ——
+## 河流雕刻：从高地沿最陡下降刻出河道（宽=river_width 格）
+@export_range(0, 16, 1) var river_count := 0
+@export_range(1, 8, 1) var river_width := 2
+## 台地化：将高度场量化为 N 级台阶（0=关），产生梯田/台地效果
+@export_range(0, 32, 1) var terrace_levels := 0
+
 
 func generate(ctx: PCGContext) -> void:
 	var hm := PCGTool.generate_heightmap(self, ctx.rng)

@@ -16,6 +16,11 @@ var name: String:
 	set(value):
 		resource_name = value
 
+## 翻译名(从翻译文件读取, 不存储; 所有 Def 子类共享)
+@export var tr_name: String:
+	get():
+		return tr(name)
+
 func _to_string() -> String:
 	if is_built_in():
 		return get_script().get_global_name()
@@ -27,16 +32,6 @@ func get_desc(_data) -> String:
 
 static func get_def_desc(def: Def, data):
 	return def.get_desc(data) if def else ""
-
-func _get_zh(key: String) -> String:
-	if Engine.is_editor_hint() and not is_built_in():
-		return CSVDataAccess.get_csv_value(get_csv_path(), key, "zh", key)
-	else:
-		return name
-
-func _set_zh(key: String, value: String):
-	if Engine.is_editor_hint() and not is_built_in():
-		CSVDataAccess.set_csv_value(get_csv_path(), key, "zh", value)
 
 func get_csv_path() -> String:
 	var csv_name: String = get_script().get_global_name()
@@ -68,9 +63,5 @@ static func load_data(path: String) -> Def:
 	return null
 
 func _validate_property(property: Dictionary) -> void:
-	if "_init_def" in self:
-		call("_init_def")
-	if property.name.begins_with("zh_"):
-		property.usage = PROPERTY_USAGE_EDITOR ## 中文信息不存储
-	elif property.name.begins_with("tr_"):
+	if property.name.begins_with("tr_"):
 		property.usage = PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY ## 翻译变量只读且不储存

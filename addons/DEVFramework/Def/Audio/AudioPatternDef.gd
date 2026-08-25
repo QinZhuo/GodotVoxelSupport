@@ -21,7 +21,7 @@ class_name AudioPatternDef extends Def
 @export_range(1, 12, 1) var beats_per_bar := 4
 
 func get_desc(_data) -> String:
-	return "%d 音符 @%gBPM" % [notes.size(), bpm]
+	return "%d 音符 @%dBPM" % [notes.size(), int(bpm)]
 
 func _to_string() -> String:
-	return "Pattern[%d, %gBPM]" % [notes.size(), bpm]
+	return "Pattern[%d, %dBPM]" % [notes.size(), int(bpm)]

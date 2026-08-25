@@ -18,7 +18,23 @@ addons/DEVFramework/PCG/
 │   ├── TextureGenDef.gd       # 程序化纹理生成器（噪声/云/木纹/砖墙/水面，色带映射）
 │   ├── LSystemDef.gd          # L-System 生长生成器（重写规则 turtle 绘制，线段集输出）
 │   ├── TileDef3D / TileSetDef3D  # 3D WFC 六面 socket 瓦片与瓦片集
-│   ├── CityDef.gd             # 城市街区生成（道路网格 + 建筑/公园）
+│   ├── TownDef.gd             # 城镇生成总控（可插拔步骤链：选址→贴地路网→环路→巷道→广场→地块→建筑→室内→绿化→街具→农田→地形回写）
+│   ├── TownStepDef.gd         # 城镇步骤抽象基类
+│   ├── steps/                   # 城镇可插拔步骤（12 个，见 docs/城镇生成管线设计案.md）
+│   │   ├── TownSiteStep.gd    # 选址（地形评分）
+│   │   ├── TownRoadStep.gd    # 道路网（主街坡度A* + 次街生长）
+│   │   ├── TownRingStep.gd    # 边界环路
+│   │   ├── TownAlleyStep.gd   # 巷道细分
+│   │   ├── TownPlazaStep.gd   # 广场 + 中心设施
+│   │   ├── TownParcelStep.gd  # 临街地块细分
+│   │   ├── TownBuildingStep.gd # 建筑放置（锚点定位 + 分向退线）
+│   │   ├── TownInteriorStep.gd # 室内家具 + 校验修复
+│   │   ├── TownGreeneryStep.gd # 绿化散布 + 行道树
+│   │   ├── TownStreetStep.gd  # 街具（路灯/长椅）
+│   │   ├── TownFarmStep.gd    # 农田条纹区
+│   │   └── TownConformStep.gd # V1 地形回写（cut & fill）
+│   ├── FacilityDef.gd          # 功能设施定义（酒馆/教堂…：数量/偏好/专属户型）
+│   ├── FurnitureTableDef.gd    # 家具槽位加权表
 │   ├── PlacementDef.gd        # 散布放置器（泊松圆盘/抖动网格/均匀随机，可按网格剔除）
 │   ├── PlacementDef3D.gd      # 3D 散布放置器（3D 泊松/网格/随机，可按 3D 网格剔除）
 │   ├── ContentEntryDef.gd     # 加权表项（物品/事件/怪物等条目）
@@ -29,6 +45,7 @@ addons/DEVFramework/PCG/
 │   ├── BiomeMapDef.gd         # 生物群系图生成器（多层噪声映射）
 │   ├── TemplateDef / TemplateStitchDef  # 手作模板 + 拼接
 │   ├── RiverDef / RoadDef     # 河流（梯度下降）/ 道路（MST 走廊）
+│   ├── AudioGenDef.gd         # 音频生成器(AudioSynthDef → AudioStreamWAV, 同 seed 生成配套音效/BGM)
 │   └── PCGDef.gd              # 生成管线（组合多个生成器 + 共享 seed）
 ├── Entity/                    # 生成结果（运行时数据）
 │   ├── GeneratedGrid.gd       # 2D 整数栅格（邻居/连通域/BFS 查询，可序列化）
@@ -38,9 +55,11 @@ addons/DEVFramework/PCG/
 │   ├── ChunkedWorld.gd        # 2D 分块世界（seed+chunk 坐标确定性懒生成，seed+增量存档）
 │   ├── ChunkedWorld3D.gd      # 3D 分块世界（统一噪声种子 + 世界坐标偏移，地表跨块连续，seed+增量存档）
 │   ├── WFCAnimator.gd         # WFC 过程动画器（分步观测-传播 + 波函数渲染）
+│   ├── TownLayout.gd           # 城镇生成结果（选址/道路图/地块/建筑/室内/绿化/街具/农田/地形）
+│   ├── TownGenContext.gd       # 城镇步骤共享上下文（TownStepDef 间传递数据）
 │   └── PCGContext.gd          # 管线上下文（rng / 结果字典）
 └── Tool/
-    └── PCGTool.gd             # 统一入口（随机/噪声/网格/群系/散布/内容/管线/异步）
+    └── PCGTool.gd             # 统一入口（随机/噪声/网格/群系/散布/内容/管线/异步/城镇算法）
 ```
 
 ## 快速上手
@@ -283,14 +302,53 @@ var fixed := {Vector3i(2, 2, 2): 0, Vector3i(3, 3, 3): 1, AABB(Vector3(10, 10, 1
 var voxels := PCGTool.generate_grid_3d(wfc3d_def, PCGTool.make_rng(seed), fixed)
 ```
 
-### 5.8 城市与内容进化
+### 5.8 程序化音频生成（AudioGenDef）
 
-**CityDef**（城市街区）：道路网格划分街区，街区填充建筑/公园：
+用 `AudioGenDef` 把程序化音频接入 PCG 管线（对齐 `TextureGenDef`）：`AudioSynthTool`（PCG/Tool）负责渲染，管线内同一种子可生成世界 + 配套音效/BGM。
 
 ```gdscript
-var city: CityDef = load("res://Assets/Def/PCG/City_Grid.tres")
-var city_grid := PCGTool.generate_city(city, PCGTool.make_rng(seed))
-# 值语义：road_value=道路 / building_value=建筑 / park_value=公园 / empty=街道
+var synth: AudioSynthDef = load("res://Assets/Def/Audio/Examples/SFX_Laser.tres")
+var audio_gen := AudioGenDef.from_def(synth, "laser")   # 包装音频定义
+var pcg := PCGDef.new()
+pcg.generators.append(audio_gen)
+var out := PCGTool.generate(pcg, 123)                    # 同 seed 必复现
+var stream: AudioStreamWAV = out["laser"]                # 直接播放/保存
+```
+
+音频生成核心（合成/编曲/风格/示例）在框架音频模块；`AudioTool` 为通用音频管理（播放/总线/保存/查询），两者均非 PCG 专属。
+
+### 5.9 城镇生成与内容进化 **TownDef**（可插拔步骤管线总控）：
+
+S1 地形评分选址 → S2 贴地道路网(主街坡度A*→边缘枢纽 / 次街扰动生长) →
+环路 → S2b 递归空间细分刻巷道 → 广场(中心设施) → S3 街区提取 → S4 临街地块细分 →
+S5 建筑放置(设施优先 / 住宅填充 / 锚点定位保证门临路 / 切台·桩基贴地) →
+S6 室内家具(槽位抽变体 + 装饰散布 + 校验修复) + 院落围栏 →
+绿化散布 + 行道树 + 街具(路灯/长椅) + 农田条纹 + V1 地形回写。
+设计全案见 `docs/城镇生成管线设计案.md`、贴地方案见 `docs/城镇贴地放置技术方案.md`：
+
+```gdscript
+var town: TownDef = load("res://Assets/Def/PCG/City_Grid.tres")
+var layout := PCGTool.generate_town(town, heightmap, seed)   # heightmap 可为 null(平地)
+layout.town_name             # 城镇名(ContentGenDef NAME 模式生成)
+layout.site                  # 选址点(评分 site_score)
+layout.roads_grid            # 道路层：主街/次街/巷道/桥/环路 值可配(TownDef 导出)
+layout.build_grid            # 建筑层：墙/地板/门 值可配
+layout.buildings             # [{id,type,style,rect,door,facing,layers(层数),roof(gable/flat),foundation(terrace/stilt)}]
+layout.parcels               # 地块[{rect, cells, frontage_dir 临街方向, 无临街已丢弃}]
+layout.interiors             # building_id -> {slots:[{cell,item}], props:[...], yard:[围栏格]}
+layout.trees                 # 树木格(空地散布+行道树)
+layout.streets               # {"lamps":[路灯], "benches":[长椅]}
+layout.farms                 # 农田区块数组(每项为连片格线性索引)
+# 可插拔步骤：TownDef.steps 留空=内置标准链；每个 TownStepDef 子类自带参数可单独配置；
+# 不同 steps 组合+参数 = 不同风格城镇(农耕镇/山地矿镇/渔村…)
+# 户型模板(TemplateDef)：G=门(画在最底边墙)，B/T/C/H/S 等字符=家具槽位；
+# 槽位表(FurnitureTableDef)：slot_name=槽位字符，items 加权抽家具变体；
+# 设施定义(FacilityDef)：facility_name/count(数量期望)/prefer_main_street/layers/roof/templates(专属户型，空回退 houses)；
+# 风格分区(style_table)：邻近建筑 70% 概率继承同风格，形成同街区同风格；
+# 示例全套见 City_Grid.tres + House_*/Building_*/Furniture_*.tres
+# 风格变体示范：Town_MountainMine.tres（山地矿镇——石砌为主/无农田/小广场矿井口/补给站+铁匠铺）
+#               创建新风格 = 复制 tres + 改参数，零新代码
+# 管线内使用：heightmap_key 指向高度图结果键，输出 key/_roads/_build/_site 四个键
 ```
 
 **ContentEvolveDef**（遗传算法进化）：进化出高适应度的组合（如词缀装备），
@@ -423,8 +481,8 @@ w2.get_cell(5, 5)                       # 未改动格由 seed 复现
 
 ## 演示
 
-- `res://Scenes/PCG/PCGDemo.tscn` — 2D 生成展示：噪声层 / 程序化纹理（云/木纹/砖墙/水面）/ 网格（WFC 固定格涂色 + 过程动画、Voronoi、模板拼接、城市）/ 高度图（岛屿/大陆伪彩渲染+侵蚀）/ L-System（分形植物/树）/ 散布 / 内容（含词缀）/ 生物群系 / **河流道路（地形叠加蓝线河道/灰线道路）** / 综合管线
-- `res://Scenes/PCG/PCGDemo3D.tscn` — 3D 体素展示：地表高度图 / 3D 细胞洞穴 / 3D WFC，鼠标拖拽旋转查看；已接入导航网格（切换地形即可看到导航统计与寻路实测）
+- `res://Scenes/PCG/PCGDemo.tscn` — 2D 生成展示：噪声层 / 程序化纹理（云/木纹/砖墙/水面）/ 网格（WFC 固定格涂色 + 过程动画、Voronoi、模板拼接）/ **城镇（选址+路网+临街地块预览）** / 高度图（岛屿/大陆伪彩渲染+侵蚀）/ L-System（分形植物/树）/ 散布 / 内容（含词缀）/ 生物群系 / **河流道路（地形叠加蓝线河道/灰线道路）** / 综合管线
+- `res://Scenes/PCG/PCGDemo3D.tscn` — 3D 体素展示：地表高度图 / 3D 细胞洞穴 / 3D WFC / **城镇（TownLayout→体块建筑群：程序化天空盒+双层屋顶+发光窗+定向门板+道路/广场/环路/家具着色；墙体为导航障碍，门到门寻路实测）**，鼠标拖拽旋转查看
 - `res://Scenes/PCG/ChunkDemo.tscn` — 2D 分块世界：确定性无限世界、同步/异步生成、seed 增量存档
 - `res://Scenes/PCG/ChunkDemo3D.tscn` — 3D 分块世界（地表跨块连续）/ 3D 散布，鼠标拖拽旋转查看；已接入跨 chunk 合并导航网格 + **异步生成开关（勾选后后台并行生成 + 进度条实时显示）**
 - `res://Scenes/PCG/NavPatrolDemo.tscn` — **NPC 三态 AI + RVO 避障演示**：PCG 地表/洞穴地形 + `NavigationAgent3D` NPC 自动巡逻/追逐玩家/近距离逃跑（引擎原生连续寻路，洞穴多层经斜坡上下连通）；黄色球是 `NavigationObstacle3D` 动态障碍，方向键移动，NPC 用 RVO 实时避让；绿色玩家 WASD 控制
@@ -475,6 +533,7 @@ WFC 演示小贴士：切到「网格」选 WFC 配置，左侧选「刷子」�
 | `PCTConstraintTest` | 迷宫/BSP/模板/3D 洞穴连通域=1、3D WFC 交替无违规、泊松最小间距、序列化往返、增量存档 |
 | `PCTBenchmarkTest` | 各算法耗时基准（GDScript 参考值） |
 | `PCGNativeTest` | **框架级共享原生库**：7 个原生类加载+方法校验、侵蚀/热侵蚀/2D/3D WFC/动画器/L-System/洞穴功能正确性、同 seed 可复现、缺库报错路径 |
+| `PCTTownReport` | **城镇质量报告**：多种子批量统计（门临路率/设施齐全率/地块利用率/连通性/耗时），PASS/FAIL 输出调参依据 |
 
 运行方式（在编辑器执行，结果打印到日志）：
 ```gdscript
@@ -482,6 +541,7 @@ PCTDeterminismTest.run()
 PCTConstraintTest.run()
 PCTBenchmarkTest.run()
 PCGNativeTest.run()
+PCTTownReport.run()          # 城镇质量报告（可传种子数与起始种子）
 ```
 
 **当前基准参考**（64 位桌面，C++ 版）：WFC 64×64 约 72ms、200×200 约 6.5s；3D 地表 8ms、3D 洞穴 3ms、3D WFC 16³ 75ms；侵蚀 5 万液滴+热侵蚀 96×96 约 59ms；分块世界 49 chunk 269ms；综合管线 112ms。

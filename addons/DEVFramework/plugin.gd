@@ -11,12 +11,15 @@ extends EditorPlugin
 const DevProjectSetup = preload("res://addons/DEVFramework/Tool/DevProjectSetup.gd")
 const DevAudioExamples = preload("res://addons/DEVFramework/Tool/DevAudioExamples.gd")
 
+const DEF_TABLE_SCENE := "res://addons/DEVFramework/DefTable/DefTableView.tscn"
+
 const AUTOLOAD_NAME := "DevMCP"
 const AUTOLOAD_PATH := "res://addons/DEVFramework/MCP/MCPDevServer.gd"
 
 var _mcp: MCPDevServer
 var _debugger_plugin: MCPDebuggerPlugin
 var _ecs_debugger: ECSDebuggerPlugin
+var _def_table: Control
 
 
 func _enter_tree() -> void:
@@ -33,6 +36,7 @@ func _enter_tree() -> void:
 	add_tool_menu_item("DEV 音频：生成示例音频定义...", Callable(self, "_on_create_audio_examples"))
 	# 启用插件: 开启 MCP
 	_set_mcp_enabled(true)
+	_setup_def_table()
 
 
 func _exit_tree() -> void:
@@ -40,6 +44,52 @@ func _exit_tree() -> void:
 	remove_tool_menu_item("DEV 音频：生成示例音频定义...")
 	# 停用插件: 关闭 MCP
 	_set_mcp_enabled(false)
+	_teardown_def_table()
+
+
+## DefTable: 顶部 Main Screen Tab, 查看/复制/粘贴 Def 静态数据
+func _setup_def_table() -> void:
+	if _def_table != null:
+		return
+	var scene: PackedScene = load(DEF_TABLE_SCENE)
+	if scene == null:
+		return
+	_def_table = scene.instantiate()
+	_def_table.editor_interface = get_editor_interface()
+	_def_table.editor_plugin = self
+	_def_table.visible = false
+	get_editor_interface().get_editor_main_screen().add_child(_def_table)
+
+
+func _teardown_def_table() -> void:
+	if _def_table == null:
+		return
+	if is_instance_valid(_def_table):
+		_def_table.queue_free()
+	_def_table = null
+
+
+func _get_plugin_name() -> String:
+	return "DefTable"
+
+
+func _has_main_screen() -> bool:
+	return true
+
+
+func _make_visible(visible: bool) -> void:
+	if is_instance_valid(_def_table):
+		_def_table.visible = visible
+		if visible:
+			_def_table._on_refresh_pressed()
+
+
+func _get_plugin_icon() -> Texture2D:
+	# 直接引用本地白色表格图标, 避免每次动态查找编辑器主题图标
+	var tex := load("res://addons/DEVFramework/DefTable/icon_table.png") as Texture2D
+	if tex != null:
+		return tex
+	return get_editor_interface().get_base_control().get_theme_icon("Data", "EditorIcons")
 
 
 func _on_create_structure() -> void:

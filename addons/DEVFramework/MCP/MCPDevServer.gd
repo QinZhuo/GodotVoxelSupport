@@ -291,7 +291,7 @@ func _auto_verify_schema() -> Dictionary:
 		"retries": {"type": "integer", "description": "失败后的重试次数(总执行=1+retries)。每轮独立重启场景, 用于排除 flaky/时序性失败。默认 0"},
 		"retry_backoff_ms": {"type": "integer", "description": "重试间隔毫秒, 默认 500"},
 		"prev_snapshot": {"type": "object", "description": "可选: 上次的 scene_deps 快照(由本工具返回), 传入后检测本次执行前脚本/资源/配置是否变化, 结果含 deps_changed(兼容 code_changed)。供 verify_fix 复用。"},
-		"operations": {"type": "array", "description": "操作序列(模拟玩家行为+延迟+断言)。每步格式: {'action': wait/click/drag/key/eval/poll/screenshot, ...}. wait 带 ms; click 带 x/y; drag 带 from_x/from_y/to_x/to_y; key 带 key; eval 带 code(GDScript, 可return); poll 带 code+timeout_ms(轮询直到返回 true); screenshot 可带 capture_type。操作间自动串行执行。"},
+		"operations": {"type": "array", "description": "操作序列(模拟玩家行为+延迟+断言)。每步格式: {'action': wait/click/drag/key/eval/poll/screenshot/game_tree/node_info, ...}. wait 带 ms; click 带 x/y; drag 带 from_x/from_y/to_x/to_y; key 带 key; eval 带 code(GDScript, 可return, 支持await); poll 带 code+timeout_ms(轮询直到返回 true); screenshot 可带 capture_type; game_tree 可带 max_depth/include_properties/expect_contains/expect_not_contains(运行时场景树快照+结构断言); node_info 带 path+同款断言(节点实时属性)。断言参数支持字符串或数组, 不满足即该步 fail。操作间自动串行执行。"},
 	}}
 
 
@@ -505,7 +505,7 @@ func _register_dev_tools() -> void:
 		_call_reload_project)
 
 	_add_tool("eval_code",
-		"在编辑器进程执行GDScript(查值/调工具/验证逻辑)。可return返回值, print进get_logs。包装为Node方法, 可用get_tree()/get_node()。缩进自动归一化。字符串内换行用char(10)勿用'\\n'(JSON会拆行)。",
+		"在编辑器进程执行GDScript(查值/调工具/验证逻辑)。可return返回值, print进get_logs。支持await(协程等待完成后返回真实值)。包装为Node方法, 可用get_tree()/get_node()。缩进自动归一化。字符串内换行用char(10)勿用'\\n'(JSON会拆行)。",
 		{"type": "object", "properties": {"code": {"type": "string", "description": "要执行的 GDScript 代码(方法体内容, 缩进由服务器自动处理)"}}},
 		_call_eval_code)
 
@@ -1469,7 +1469,10 @@ func _call_call_node_method(args: Dictionary) -> Dictionary:
 	var converted_args: Array = []
 	for arg in args_arr:
 		converted_args.append(_auto_convert_arg(arg))
+	# 方法体含 await 时 callv 返回协程状态对象: 等待完成取真实返回值(同步方法不进此分支)(同步方法不进此分支)
 	var result: Variant = node.callv(method, converted_args)
+	if result is Object and result.get_class() == "GDScriptFunctionState":
+		result = await result
 	return _ok("已调用 %s.%s() -> %s" % [path, method, str(result)])
 
 
@@ -2087,7 +2090,13 @@ func _call_eval_code(args: Dictionary) -> Dictionary:
 	var root := get_tree().root
 	if root:
 		root.add_child(inst)
+	# 代码含 await 即为协程: 不带 await 的调用会立即返回协程状态对象,
+	# 必须等待完成才能拿到真实返回值。类型名未暴露给 GDScript(不能 is 检查),
+	# 用运行时反射判断(GDScriptFunctionState 条件分支为官方推荐防御模式,
+	# 同步代码不进此分支, 无额外开销)。挂起风险由外层超时护栏(wire/HTTP 客户端)兜底。
 	var result: Variant = inst.call("_mcp_run")
+	if result is Object and result.get_class() == "GDScriptFunctionState":
+		result = await result
 	if root:
 		inst.queue_free()
 	# 收集本次运行产生的运行期错误(若代码 halt, 也会反映为错误入队)
@@ -2727,6 +2736,9 @@ func _resolve_node(path: String) -> Node:
 	var root := _edited_root()
 	if root == null:
 		return null
+	# 运行时额外支持全局绝对路径(/root/...), 可触达 autoload 单例; 编辑器语义不变
+	if not Engine.is_editor_hint() and path.begins_with("/root"):
+		return get_node_or_null(path)
 	if path == "root" or path == "/" or path == str(root.name):
 		return root
 	if path.begins_with("@"):
@@ -2948,7 +2960,7 @@ func _register_runtime_tools() -> void:
 		_call_take_screenshot)
 
 	_register_game_play_tool("game_eval",
-		"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。可return返回值。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。",
+		"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。可return返回值, 支持await。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。",
 		{"type": "object", "properties": {"code": _code_arg()}},
 		_call_eval_code,
 		func(args): return await _call_game_eval_proxy(args))
@@ -2972,10 +2984,48 @@ func _register_runtime_tools() -> void:
 		func(args): return await _call_runtime_proxy("clear_game_errors", args))
 
 	_register_game_play_tool("auto_verify",
-		"自动验证闭环: 启动场景后按操作序列模拟玩家行为, 每步后增量查错。操作: wait(延迟)/click/drag/key(输入)/eval(执行GDScript可return)/poll(轮询直到code返回true, 探测期eval错误不计入)/screenshot。soft模式(stop_on_error=false)跑完全部步骤再汇总, hard模式任一步出错即停。retries>0时失败自动重启场景重跑(排除flaky), 曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration为单次总时长上限(默认4s), 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
+		"自动验证闭环: 启动场景后按操作序列模拟玩家行为, 每步后增量查错。操作: wait(延迟)/click/drag/key(输入)/eval(执行GDScript可return, 支持await)/poll(轮询直到code返回true, 探测期eval错误不计入)/screenshot/game_tree(运行时场景树快照+结构断言expect_contains/expect_not_contains)/node_info(节点实时属性快照+断言)。soft模式(stop_on_error=false)跑完全部步骤再汇总, hard模式任一步出错即停。retries>0时失败自动重启场景重跑(排除flaky), 曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration为单次总时长上限(默认4s), 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
 		_auto_verify_schema(),
 		_runtime_auto_verify,
 		func(args): return await _call_auto_verify(args))
+
+	_register_game_play_tool("get_game_scene_tree",
+		"获取游戏运行中的实时场景树(以当前场景为根, 含名称/类型, 可选关键属性)。与编辑器版 get_scene_tree 区分: 本工具读的是运行中的活实例(位置/可见性等为实时值)。理解运行状态/找活节点路径用。",
+		{"type": "object", "properties": {
+			"max_depth": {"type": "integer", "description": "最大展开深度, 默认 8"},
+			"include_properties": {"type": "boolean", "description": "是否附带前3层节点的关键属性, 默认 false"}
+		}},
+		_runtime_get_scene_tree,
+		func(args): return await _call_runtime_proxy("get_game_scene_tree", args))
+
+	_register_game_play_tool("get_game_node_info",
+		"获取游戏运行中节点的实时属性。path 支持: 当前场景相对路径('Player'/'Main/Player')、'/root/'开头全局绝对路径(可访问 autoload)、'@'开头按唯一名深搜。与编辑场景版 get_node_info 区分。",
+		{"type": "object", "properties": {"path": _path_arg("运行中节点的路径")}, "required": ["path"]},
+		_call_get_node_info,
+		func(args): return await _call_runtime_proxy("get_game_node_info", args))
+
+	_register_game_play_tool("call_game_node_method",
+		"调用游戏运行中节点的方法(实时调试触发: 播放动画/切换状态等)。args 以数组传参, 字符串参数自动转换 Vector2/Vector3/Color 等类型。",
+		{"type": "object", "properties": {
+			"path": _path_arg("运行中节点的路径(同 get_game_node_info)"),
+			"method": {"type": "string", "description": "方法名"},
+			"args": {"type": "array", "description": "参数数组"}
+		}},
+		_call_call_node_method,
+		func(args): return await _call_runtime_proxy("call_game_node_method", args))
+
+
+## 运行时: 获取游戏正在运行的场景树(_edited_root 在游戏进程内返回 current_scene)。
+## 复用编辑器版的遍历与属性提取, 保证两种模式输出格式一致。
+func _runtime_get_scene_tree(args: Dictionary) -> Dictionary:
+	var root := _edited_root()
+	if root == null:
+		return _fail("游戏场景尚未就绪(get_tree().current_scene 为空)")
+	var max_depth: int = int(args.get("max_depth", 8))
+	var include_props: bool = _to_bool(args.get("include_properties", false))
+	var lines: Array = []
+	_walk_scene_tree(root, 0, max_depth, include_props, lines)
+	return _ok("\n".join(lines))
 
 
 ## 递归收集可见节点信息(运行时模式, 游戏进程内坐标天然正确)
@@ -3267,7 +3317,7 @@ func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 					step["status"] = "action_error"
 					step["message"] = str(r3.get("text", ""))
 			"eval":
-				var r4: Dictionary = _call_eval_code({"code": str(op.get("code", ""))})
+				var r4: Dictionary = await _call_eval_code({"code": str(op.get("code", ""))})
 				step["result"] = str(r4.get("text", ""))
 				if r4.get("is_error", false):
 					step["status"] = "action_error"
@@ -3291,9 +3341,34 @@ func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 					var sc: Variant = r5.get("structuredContent", null)
 					if sc is Dictionary:
 						step["screenshot"] = {"path": str(sc.get("path", "")), "res_path": str(sc.get("res_path", ""))}
+			"game_tree":
+				# 运行时场景树快照 + 结构断言(expect_contains/expect_not_contains, 字符串或数组)
+				var gt: Dictionary = _runtime_get_scene_tree({
+					"max_depth": int(op.get("max_depth", 4)),
+					"include_properties": _to_bool(op.get("include_properties", false)),
+				})
+				var tree_text := str(gt.get("text", ""))
+				step["tree"] = _clip_step_text(tree_text)
+				var tree_fails: Array = _check_step_expect(tree_text, op)
+				if not tree_fails.is_empty():
+					step["status"] = "assert_failed"
+					step["message"] = "; ".join(tree_fails)
+			"node_info":
+				# 运行时节点实时属性快照 + 断言(对属性 JSON 文本做包含检查)
+				var ni: Dictionary = _call_get_node_info({"path": str(op.get("path", ""))})
+				var node_text := str(ni.get("text", ""))
+				step["node"] = _clip_step_text(node_text)
+				if bool(ni.get("is_error", false)):
+					step["status"] = "action_error"
+					step["message"] = node_text
+				else:
+					var node_fails: Array = _check_step_expect(node_text, op)
+					if not node_fails.is_empty():
+						step["status"] = "assert_failed"
+						step["message"] = "; ".join(node_fails)
 			_:
 				step["status"] = "invalid_action"
-				step["message"] = "未知操作: %s(可选: wait/click/drag/key/eval/poll/screenshot)" % action
+				step["message"] = "未知操作: %s(可选: wait/click/drag/key/eval/poll/screenshot/game_tree/node_info)" % action
 		# 每步后增量查错(捕捉该操作触发的运行时错误)
 		if _logger:
 			var taken := _logger.take_errors_since(err_cursor)
@@ -3310,10 +3385,13 @@ func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 		# hard 模式: 任一步出错立即停
 		if stop_on_error and step["status"] != "ok":
 			break
-	# 汇总判定: fail = 任一错误 或 任一步非 ok(poll 超时/动作失败/非法操作) 或 预算耗尽未跑完
+	# 汇总判定: fail = 任一错误 或 任一步非 ok(poll 超时/动作失败/断言失败/非法操作) 或 预算耗尽未跑完
 	var failed := not all_errors.is_empty()
+	var first_failed_step := -1
 	for s in steps:
 		if str(s.get("status", "ok")) != "ok":
+			if first_failed_step < 0:
+				first_failed_step = int(s.get("index", -1))
 			failed = true
 			break
 	# 预算耗尽/提前中断导致部分操作未执行完 → fail(除非是 hard 模式在出错步骤主动停)
@@ -3329,9 +3407,10 @@ func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 		"operation_count": operations.size(),
 		"error_count": all_errors.size(),
 		"first_error_step": first_error_step,
+		"first_failed_step": first_failed_step,
 		"total_waited_ms": total_waited_ms,
 		"stop_on_error": stop_on_error,
-		"hint": "verdict=fail 时 first_error_step 指向出错操作下标, 对应 steps[i].status/errors。poll 超时/动作报错/运行期错误都会导致 fail。",
+		"hint": "verdict=fail 时 first_failed_step 指向首个失败操作(断言失败/动作报错/轮询超时), first_error_step 指向首个运行期脚本错误步骤; 对应 steps[i].status/errors/message。",
 	}
 	if not all_errors.is_empty():
 		out["errors"] = all_errors
@@ -3350,12 +3429,41 @@ func _poll_until(op: Dictionary, deadline: int) -> bool:
 	var start := Time.get_ticks_msec()
 	var poll_deadline := mini(deadline, start + timeout_ms)
 	while Time.get_ticks_msec() < poll_deadline:
-		var r: Dictionary = _call_eval_code({"code": code})
+		var r: Dictionary = await _call_eval_code({"code": code})
 		if not r.get("is_error", false):
 			if _eval_returned_true(str(r.get("text", ""))):
 				return true
 		await get_tree().create_timer(interval_ms / 1000.0).timeout
 	return false
+
+
+## 步骤快照文本裁剪: 控制单步体积, 防止大场景树撑爆返回结果
+func _clip_step_text(text: String, limit: int = 2000) -> String:
+	if text.length() <= limit:
+		return text
+	return text.left(limit) + "\n...(已截断, 完整 %d 字符)" % text.length()
+
+
+## 步骤断言检查: expect_contains 全部需出现; expect_not_contains 任一出现即失败。
+## 参数支持字符串或字符串数组。返回失败描述列表(空=通过)。
+func _check_step_expect(text: String, op: Dictionary) -> Array:
+	var fails: Array = []
+	for item in _as_str_list(op.get("expect_contains", null)):
+		if not text.contains(str(item)):
+			fails.append("缺少期望内容: %s" % str(item))
+	for item in _as_str_list(op.get("expect_not_contains", null)):
+		if text.contains(str(item)):
+			fails.append("出现禁止内容: %s" % str(item))
+	return fails
+
+
+## 断言参数归一: null->空数组, 单字符串->单元素数组, 数组原样
+func _as_str_list(v: Variant) -> Array:
+	if v == null:
+		return []
+	if v is Array:
+		return v
+	return [v]
 
 
 ## 解析 eval 返回文本, 判断是否返回 true

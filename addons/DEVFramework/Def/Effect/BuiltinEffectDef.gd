@@ -1,14 +1,11 @@
 @tool
 class_name BuiltinEffectDef extends EffectDef
 
-@export_multiline var zh_desc: String:
-	set(value):
-		var def := get_root_def()
-		if def:
-			def._set_zh(str(def.name, '_desc'), value)
+## 翻译描述(从翻译文件读取, 不存储)
+@export_multiline var tr_desc: String:
 	get():
 		var def := get_root_def()
-		return def._get_zh(str(def.name, '_desc')) if def else super._to_string()
+		return tr(str(def.name, '_desc')) if def else super._to_string()
 
 func apply(_data):
 	pass

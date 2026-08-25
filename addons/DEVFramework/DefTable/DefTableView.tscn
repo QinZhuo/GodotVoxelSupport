@@ -1,0 +1,158 @@
+[gd_scene format=3 uid="uid://c8y4dtbl0ef1"]
+
+[ext_resource type="Script" path="res://addons/DEVFramework/DefTable/DefTableView.gd" id="1_dock"]
+[ext_resource type="Script" path="res://addons/DEVFramework/DefTable/DefTableGrid.gd" id="2_grid"]
+
+[node name="DefTableView" type="MarginContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/margin_left = 3
+theme_override_constants/margin_right = 3
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_bottom = 3
+script = ExtResource("1_dock")
+
+[node name="Split" type="HSplitContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="LeftPanel" type="VBoxContainer" parent="Split"]
+layout_mode = 2
+custom_minimum_size = Vector2(150, 0)
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 0.35
+theme_override_constants/separation = 4
+
+[node name="DirLabel" type="Label" parent="Split/LeftPanel"]
+layout_mode = 2
+text = "Def 类型"
+horizontal_alignment = 1
+
+[node name="DirTree" type="Tree" parent="Split/LeftPanel"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+hide_root = true
+allow_reselect = true
+select_mode = 0
+
+[node name="RightPanel" type="VBoxContainer" parent="Split"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.0
+theme_override_constants/separation = 4
+
+[node name="TopBar" type="HBoxContainer" parent="Split/RightPanel"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="RefreshBtn" type="Button" parent="Split/RightPanel/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "刷新"
+
+[node name="CountLabel" type="Label" parent="Split/RightPanel/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "共 0 个 Def"
+vertical_alignment = 1
+
+[node name="TableArea" type="HBoxContainer" parent="Split/RightPanel"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 0
+
+[node name="FrozenPane" type="VBoxContainer" parent="Split/RightPanel/TableArea"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 0
+
+[node name="FrozenHeader" type="ScrollContainer" parent="Split/RightPanel/TableArea/FrozenPane"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(0, 32)
+size_flags_vertical = 0
+horizontal_scroll_mode = 0
+vertical_scroll_mode = 0
+
+[node name="FrozenHeaderRow" type="HBoxContainer" parent="Split/RightPanel/TableArea/FrozenPane/FrozenHeader"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 0
+
+[node name="FrozenGridScroll" type="ScrollContainer" parent="Split/RightPanel/TableArea/FrozenPane"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+vertical_scroll_mode = 3
+
+[node name="FrozenGrid" type="Container" parent="Split/RightPanel/TableArea/FrozenPane/FrozenGridScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+script = ExtResource("2_grid")
+
+[node name="FrozenSpacer" type="Control" parent="Split/RightPanel/TableArea/FrozenPane"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(0, 0)
+
+[node name="ScrollPane" type="VBoxContainer" parent="Split/RightPanel/TableArea"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 0
+
+[node name="HeaderScroll" type="ScrollContainer" parent="Split/RightPanel/TableArea/ScrollPane"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(0, 32)
+size_flags_horizontal = 3
+horizontal_scroll_mode = 2
+vertical_scroll_mode = 0
+
+[node name="HeaderRow" type="HBoxContainer" parent="Split/RightPanel/TableArea/ScrollPane/HeaderScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 0
+
+[node name="GridScroll" type="ScrollContainer" parent="Split/RightPanel/TableArea/ScrollPane"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+horizontal_scroll_mode = 1
+vertical_scroll_mode = 1
+
+[node name="Grid" type="Container" parent="Split/RightPanel/TableArea/ScrollPane/GridScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+script = ExtResource("2_grid")
+
+[node name="StatusBar" type="HBoxContainer" parent="Split/RightPanel"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="SelLabel" type="Label" parent="Split/RightPanel/StatusBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "未选中"
+vertical_alignment = 1
+
+[node name="HintLabel" type="Label" parent="Split/RightPanel/StatusBar"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = ""
+horizontal_alignment = 2
+vertical_alignment = 1

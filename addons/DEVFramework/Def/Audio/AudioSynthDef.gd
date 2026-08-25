@@ -75,14 +75,14 @@ enum Category {
 @export_tool_button("随机生成音效") var _randomize:
 	get:
 		return func() -> void:
-			AudioTool.randomize_def(self)
+			AudioSynthTool.randomize_def(self)
 			AudioTool.play_editor_preview(self)
 
 ## 微调变体: 现有参数小幅扰动 + 编曲重新掷种子, 生成后自动试听
 @export_tool_button("微调变体") var _mutate:
 	get:
 		return func() -> void:
-			AudioTool.mutate_def(self)
+			AudioSynthTool.mutate_def(self)
 			AudioTool.play_editor_preview(self)
 
 ## 烘焙到约定目录 res://Assets/Audio/Baked/<Def名>.wav(异步后台生成, 完成后刷新资源面板)

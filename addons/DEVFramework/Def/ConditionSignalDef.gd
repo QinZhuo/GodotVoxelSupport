@@ -5,10 +5,6 @@
 ## 仅在条件满足时执行回调。
 class_name ConditionSignalDef extends SignalDef
 
-## 中文名
-@export var name_zh: String:
-	get(): return _get_zh(name)
-	set(value): _set_zh(name, value)
 
 ## 被包装的信号定义
 @export var signal_def: SignalDef
