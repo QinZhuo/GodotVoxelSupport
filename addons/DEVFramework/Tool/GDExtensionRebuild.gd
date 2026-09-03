@@ -18,7 +18,7 @@ extends EditorScript
 ##   3) *.gdextension [libraries]: 当前 平台.类型[.架构] 键 = 产物最终文件名与落点(部署规格)。
 ##
 ## 其余自动判定: 源码目录(唯一工程根 res://gdextension, 多个 addons 候选按规格配对);
-## 构建类型 debug/release 跟随当前编辑器; 生成器探测 ninja 否则交给 cmake。
+## 构建类型 debug/release 跟随当前编辑器; 构建后端固定只用 CMake 原生 Makefiles。
 ## 缓存纪律: 一切中间产物/CMake 缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略),
 ## 不进入工程目录; 部署后按规格 [libraries] 白名单清理 Native —— 只保留各平台/类型/架构键声明的
 ## 必要产物, 清掉无后缀原始/导入库(.a)与规格外历史库及临时残留(~*/TMP), 工程内只留必要文件。
@@ -37,13 +37,22 @@ extends EditorScript
 
 const KEY_UPDATE_SUBMODULE := "dev_framework/gdextension_build/auto_update_submodule"
 const KEY_RELOAD_EDITOR := "dev_framework/gdextension_build/auto_reload_editor"
+const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # 检测到卡死(无新目标且无编译器进程)时自动终止进程树
+const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
 
 static var _me: GDExtensionRebuild   # 异步构建期间持有自身(菜单调用方不持有实例)
 
 var _lines: Array[String] = []
 var _cache_dirty := false   # submodule 检出变化 → 构建缓存作废, 需重新配置
 var _start_ms := 0
-var _last_progress := ""    # 最近一次解析到的 [k/N] 编译进度
+var _raw_log_pos := 0       # raw_build.log 尾部读取游标
+var _total_targets := -1    # 编译目标总数缓存(Makefile 解析, -1=未解析)
+var _objects_logged := 0    # 上次打印磁盘进度时的目标数(≥30 才刷一行)
+var _stall_warned := false  # 目标全满但仍卡住时只提示一次
+var _prev_done_count := -1  # 上次心跳时的目标数(判断是否还在推进)
+var _no_advance := 0        # 目标数无推进的累计秒(心跳间隔 10s)
+var _stall_checked := false # 卡死检测已判定并处理
+var _stall_killed := false  # 已自动终止卡死进程树
 
 
 func _run() -> void:
@@ -580,6 +589,41 @@ func _opt(key: String, def_val: bool) -> bool:
 	return bool(ProjectSettings.get_setting(key, def_val))
 
 
+func _stall_kill_enabled() -> bool:
+	return bool(ProjectSettings.get_setting(KEY_STALL_KILL, true))
+
+
+## 存活编译器子进程数(cc1plus/g++/clang/python); 查询失败返回 -1
+func _active_compile_procs() -> int:
+	var out: Array = []
+	if OS.get_name() == "Windows":
+		if OS.execute("C:/Windows/System32/tasklist.exe", PackedStringArray(), out, true) != 0:
+			return -1
+		var n := 0
+		for line in out:
+			var l := String(line)
+			if l.contains("cc1plus") or l.contains("g++.exe") or l.contains("python"):
+				n += 1
+		return n
+	if OS.execute("ps", PackedStringArray(["-e", "-o", "comm="]), out, true) == 0:
+		var n := 0
+		for line in out:
+			var l := String(line)
+			if l.contains("cc1plus") or l.contains("g++") or l.contains("clang") or l.contains("python"):
+				n += 1
+		return n
+	return -1
+
+
+## 终止进程树(cmake→make→g++)
+func _kill_build_tree(pid: int) -> void:
+	if OS.get_name() == "Windows":
+		OS.execute("C:/Windows/System32/taskkill.exe",
+				PackedStringArray(["/PID", str(pid), "/T", "/F"]), [], true)
+	else:
+		OS.execute("kill", PackedStringArray(["-KILL", str(pid)]), [], true)
+
+
 ## 构建缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略, 不入库、不污染工程)。
 ## 复用已有缓存(优先名称含当前 平台+构建类型 者, 再取最新); 没有则新建 <源>-<os>-<arch>-<类型>。
 func _pick_build_dir(source_dir: String) -> String:
@@ -627,14 +671,17 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary) -
 		_log("submodule 已更新, 作废旧构建缓存: ", build_dir)
 		_wipe_dir(build_dir)
 	if FileAccess.file_exists(build_dir.path_join("CMakeCache.txt")):
-		_log("复用构建目录(以缓存配置为准): ", build_dir)
-		return true
+		# 后端一致性: 缓存必须是 CMake Makefiles, 否则 cmake --build 会按缓存里的其它生成器执行
+		if _cache_is_makefiles(build_dir):
+			_log("复用构建目录(以缓存配置为准): ", build_dir)
+			return true
+		_log("缓存生成器不是 Makefiles, 作废重新配置。")
+		_wipe_dir(build_dir)
 	var src_abs := _abs(source_dir)
 	DirAccess.make_dir_recursive_absolute(build_dir)
 	var args: PackedStringArray = ["-S", src_abs, "-B", build_dir]
-	var generator := _detect_generator()
-	if generator != "":
-		args.append_array(["-G", generator])
+	# 只用 CMake 原生后端: Windows MinGW Makefiles / 其余 Unix Makefiles
+	args.append_array(["-G", "MinGW Makefiles" if OS.get_name() == "Windows" else "Unix Makefiles"])
 	# API 版本: CMakeLists 默认值对应的绑定快照存在则尊重(不传 -D);
 	# 否则在 godot-cpp 本地快照里选"≤ 引擎版本"的最新可用(避免默认 4.7 但无 4-7 快照导致失败)
 	var api := _api_version_to_pass(source_dir, String(info.get("api_default", "")))
@@ -708,9 +755,18 @@ func _has_snapshot(source_dir: String, api: String) -> bool:
 	return FileAccess.file_exists(_api_file(_abs(source_dir).path_join("godot-cpp/gdextension"), api))
 
 
-func _detect_generator() -> String:
-	var out: Array = []
-	return "Ninja" if OS.execute("ninja", ["--version"], out) == 0 else ""
+## 读取 CMakeCache 确认生成器是否为 Makefiles(后端一致性检查)
+func _cache_is_makefiles(build_dir: String) -> bool:
+	var f := FileAccess.open(build_dir.path_join("CMakeCache.txt"), FileAccess.READ)
+	if f == null:
+		return false
+	while not f.eof_reached():
+		var line := f.get_line()
+		if line.begins_with("CMAKE_GENERATOR:INTERNAL="):
+			f.close()
+			return line.contains("Makefiles")
+	f.close()
+	return false
 
 
 # ------------------------------------------------------------ 异步构建
@@ -718,29 +774,99 @@ func _detect_generator() -> String:
 func _build(build_dir: String) -> bool:
 	var type := _build_type()
 	_log("开始编译 (", type, ")…… 编辑器保持可用, 输出实时回显。")
-	var args := ["--build", build_dir, "--config", type.capitalize()]
-	var pipe: Dictionary = OS.execute_with_pipe("cmake", PackedStringArray(args), false)
-	var pid: int = int(pipe.get("pid", 0))
-	var stdout: Variant = pipe.get("stdout")
-	var stderr: Variant = pipe.get("stderr")
+	var jobs := int(ProjectSettings.get_setting(KEY_JOBS, 0))
+	if jobs <= 0:
+		jobs = clampi(OS.get_processor_count(), 2, 16)
+	# 子进程输出重定向到文件, 本进程定时尾读回显 —— 不经过 Godot execute_with_pipe 管道。
+	# 原因: Godot Windows 的管道实现存在读取竞态(高频起停子进程时读线程停摆 → 子进程写管道被堵 → 构建死锁),
+	# ninja/make 下均已复现。文件 IO 无此问题, 编辑器仍可用, 输出仍实时(受 stdout 块缓冲影响略有分批)。
+	var raw := _raw_log_path()
+	DirAccess.remove_absolute(raw)
+	_raw_log_pos = 0
+	var shell := "sh"
+	var run_args := PackedStringArray()
+	var cmd_line := "cmake --build \"%s\" --config %s --parallel %d > \"%s\" 2>&1" \
+			% [build_dir, type.capitalize(), jobs, raw]
+	if OS.get_name() == "Windows":
+		# 写入临时 .cmd 再执行, 避免 cmd /c 内联多层引号在含空格路径下转义出错
+		var bat := raw.get_base_dir().path_join("run_build.cmd")
+		var bf := FileAccess.open(bat, FileAccess.WRITE)
+		if bf:
+			bf.store_line("@echo off")
+			bf.store_line(cmd_line)
+			bf.store_line("exit /b %errorlevel%")
+			bf.close()
+		shell = "cmd.exe"
+		run_args = PackedStringArray(["/c", bat.replace("/", "\\")])
+	else:
+		run_args = PackedStringArray(["-c", cmd_line])
+	# 用 create_process 启动, 完全不建立管道: 子进程链若继承管道句柄会导致其等待 EOF 而死锁
+	# (此前 Ninja/Make 在 Godot 内异步卡死、引擎 PeekNamedPipe 报错的根因)。输出已重定向到文件。
+	var pid := OS.create_process(shell, run_args)
 	if pid <= 0:
-		_log("execute_with_pipe 不可用, 退化为阻塞执行(编辑器会卡住直到完成)。")
+		_log("异步执行不可用, 退化为阻塞执行(编辑器会卡住直到完成)。")
 		var out: Array = []
-		var code := OS.execute("cmake", PackedStringArray(args), out, true)
+		var code := OS.execute(shell, run_args, out, true)
 		_print_out(out)
 		return code == 0
 	var tree := Engine.get_main_loop() as SceneTree
+	_total_targets = -1   # 每次构建重新解析 Makefile(目录可能重建/缓存残留)
+	_stall_warned = false
+	_stall_checked = false
+	_stall_killed = false
+	_prev_done_count = -1
+	_no_advance = 0
+	_state_write("编译中: 启动…")
+	var tick := 0
+	var silent := 0
 	while OS.is_process_running(pid):
-		_drain(stdout)
-		_drain(stderr)
+		var had := _drain_log(raw)
+		if had:
+			silent = 0
+		else:
+			silent += 1
+		tick += 1
+		if tick % 10 == 0:   # ~每 2s: 磁盘产物进度(独立于输出, 兜底可量化)
+			_report_disk_progress(build_dir)
+		if silent >= 50 and silent % 50 == 0:   # 静默 ≥10s 后每 10s 心跳一次
+			var d := _count_build_objects(build_dir)
+			var t := _total_compile_units(build_dir)
+			if t > 0:
+				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d/%d 目标文件" % [silent / 5, d, t])
+			else:
+				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d 个目标(总数未知)" % [silent / 5, d])
+			if silent >= 300 and not _stall_warned and t > 0 and d >= t:   # 已满但仍卡 ≥60s → 一次性诊断引导
+				_stall_warned = true
+				_log_raw("所有编译目标已生成但进程仍未退出: 通常是构建描述文件被并发写入/截断损坏,")
+				_log_raw("或同时开了多个 Godot 实例抢占同一构建目录。")
+				_log_raw("处理: 关闭全部 Godot → 删除该构建目录后重新运行(将重新配置), 并保持单实例。")
+			# 卡死熔断: 目标长期不增长 + 无编译器子进程存活 → 构建系统在等不存在的子进程(非编译慢)
+			if d == _prev_done_count:
+				_no_advance += 10
+			else:
+				_no_advance = 0
+				_prev_done_count = d
+			if _no_advance >= 60 and not _stall_checked and not _stall_killed:
+				var active := _active_compile_procs()
+				if active == 0:
+					_stall_checked = true
+					_log_raw("异常检测: %d 秒无新目标且无任何编译器进程 —— 构建疑似卡死, 尝试终止进程树。" % _no_advance)
+					if _stall_kill_enabled():
+						_kill_build_tree(pid)
+						_stall_killed = true
+						_log_raw("已终止卡死进程树(pid %d)。可直接重跑(从已编译部分继续); 反复出现请排查杀软实时扫描/编译器异常。" % pid)
+					else:
+						_log_raw("自动终止已关闭(ProjectSettings: %s=false)。请在任务管理器结束 cmake/make 后重跑。" % KEY_STALL_KILL)
+				else:
+					_log_raw("%d 秒无新目标, 仍有 %d 个编译器进程在跑(可能正在编译超大文件), 继续等待。" % [_no_advance, active])
+		if _stall_killed:
+			break
 		await tree.create_timer(0.2).timeout
-	_drain(stdout)
-	_drain(stderr)
+	_drain_log(raw)   # 进程退出会 flush 全部缓冲, 收尾再读一次
+	if _stall_killed:
+		_log("构建已被工具终止(疑似卡死)。")
+		return false
 	var exit_code := OS.get_process_exit_code(pid)
-	if stdout is FileAccess:
-		(stdout as FileAccess).close()
-	if stderr is FileAccess:
-		(stderr as FileAccess).close()
 	if exit_code == 0:
 		_log("编译成功。")
 	else:
@@ -748,31 +874,97 @@ func _build(build_dir: String) -> bool:
 	return exit_code == 0
 
 
-func _drain(pipe) -> void:
-	if pipe == null or not (pipe is FileAccess):
-		return
-	var fa := pipe as FileAccess
-	if fa.get_length() <= fa.get_position():
-		return
-	var text := fa.get_as_text()
-	if text != "":
-		_log_raw(text)
-		_track_progress(text)
+## 子进程原始输出落点(每次构建覆盖)
+func _raw_log_path() -> String:
+	return _abs("res://.godot/gdextension_build/raw_build.log")
 
 
-static var _prog_re: RegEx = null   # [k/N] 编译进度
+## 定期把磁盘真实进度写入 state/日志(每 ~2s; 每前进 ≥30 个目标才刷一行日志, 避免刷屏)
+func _report_disk_progress(build_dir: String) -> void:
+	var total := _total_compile_units(build_dir)
+	var done := _count_build_objects(build_dir)
+	if total > 0:
+		_state_write("编译中: 已生成 %d/%d 目标" % [done, total])
+	else:
+		_state_write("编译中: 已生成 %d 个目标" % done)
+	if done - _objects_logged >= 30:
+		_objects_logged = done
+		if total > 0:
+			_log_raw("编译进度: %d/%d 目标" % [done, total])
+		else:
+			_log_raw("编译进度: 已生成 %d 个目标" % done)
 
-## 解析 cmake 输出中的 [k/N] 进度 → 更新 state.txt(供状态工具实时查看)
-func _track_progress(text: String) -> void:
-	if _prog_re == null:
-		_prog_re = RegEx.new()
-		_prog_re.compile("\\[(\\d+)/(\\d+)\\]")
-	var cur := ""
-	for m in _prog_re.search_all(text):
-		cur = "%s/%s" % [m.get_string(1), m.get_string(2)]
-	if cur != "" and cur != _last_progress:
-		_last_progress = cur
-		_state_write("编译中: %s" % cur)
+
+## 构建目录里已生成的编译单元(.o/.obj)数量 —— 独立于输出管道的真实进度
+func _count_build_objects(build_dir: String) -> int:
+	var count := 0
+	var stack: Array[String] = [build_dir]
+	while not stack.is_empty():
+		var dir := DirAccess.open(stack.pop_back())
+		if dir == null:
+			continue
+		dir.list_dir_begin()
+		var e := dir.get_next()
+		while e != "":
+			if e.begins_with("."):
+				e = dir.get_next()
+				continue
+			var full := dir.get_current_dir().path_join(e)
+			if dir.current_is_dir():
+				stack.append(full)
+			elif e.ends_with(".o") or e.ends_with(".obj"):
+				count += 1
+			e = dir.get_next()
+		dir.list_dir_end()
+	return count
+
+
+## 编译目标总数: 统计整个构建树所有 build.make 里的"对象编译目标"(去重)。
+## 覆盖根工程与 godot-cpp 子 make; 同一对象会有多行依赖声明, 故按目标路径去重后再计数。
+## 只认 "<path>.o/.obj" 形式的目标行, 与扩展名差异(Unix .o / Windows .obj)无关。解析一次并缓存。
+func _total_compile_units(build_dir: String) -> int:
+	if _total_targets >= 0:
+		return _total_targets
+	_total_targets = 0
+	var seen := {}
+	var stack: Array[String] = [build_dir]
+	while not stack.is_empty():
+		var dir := DirAccess.open(stack.pop_back())
+		if dir == null:
+			continue
+		dir.list_dir_begin()
+		var e := dir.get_next()
+		while e != "":
+			if e.begins_with("."):
+				e = dir.get_next()
+				continue
+			var full := dir.get_current_dir().path_join(e)
+			if dir.current_is_dir():
+				stack.append(full)
+			elif e == "build.make":
+				for line in FileAccess.get_file_as_string(full).split("\n"):
+					var target := line.split(":", 1)[0].strip_edges()
+					if (target.ends_with(".o") or target.ends_with(".obj")) and not seen.has(target):
+						seen[target] = true
+						_total_targets += 1
+			e = dir.get_next()
+		dir.list_dir_end()
+	return _total_targets
+
+
+## 读取原始构建日志自上次位置起的新内容, 逐行回显到 Output/镜像日志; 返回是否有新行
+func _drain_log(raw_path: String) -> bool:
+	var f := FileAccess.open(raw_path, FileAccess.READ)
+	if f == null:
+		return false
+	f.seek(_raw_log_pos)
+	var had := false
+	while not f.eof_reached():
+		_log_raw(f.get_line())
+		had = true
+	_raw_log_pos = f.get_position()
+	f.close()
+	return had
 
 
 # ------------------------------------------------------------ 部署: 找产物 → 按规格键改名放入落点
