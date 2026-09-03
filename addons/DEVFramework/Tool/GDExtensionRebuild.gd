@@ -9,15 +9,14 @@ extends EditorScript
 ## → CMake 配置(必要时)/异步编译(不卡编辑器, 实时回显) → 产物按规格改名部署。
 ##
 ## 三条"事实源", 不猜:
-##   1) CMakeCache.txt(已配置过): 生成器/编译器/API 全以缓存为准, 只 cmake --build;
-##   2) CMakeLists.txt(无缓存需配置时): 只扫三个高可信 token ——
-##        add_library(<name> SHARED)          认产物名(替代模糊找库)
-##        *_OUTPUT_DIRECTORY = <字面路径>     产物直出目录(加为搜索根)
-##        set(GODOTCPP_API_VERSION "x.y")     有默认则不再传 -D(尊重工程钉的绑定版本)
-##      其余(条件/生成器/编译器)交给 cmake 自身, 不做 CMake 语义解释;
-##   3) *.gdextension [libraries]: 当前 平台.类型[.架构] 键 = 产物最终文件名与落点(部署规格)。
+##   1) CMakeLists.txt(唯一事实源): 解析 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 /
+##      各平台条件块 OUTPUT_NAME → 精确推导本机产物文件名与绝对路径(CMake 直出, 无需搬移);
+##   2) *.gdextension [libraries]: 按产物文件名精确反查声明它的规格文件(确定性匹配,
+##      不依赖修改时间等启发式信号); 产物落点以 CMake 推导为准, 规格键仅作白名单清理;
+##   3) CMakeCache.txt(已配置过): 生成器/编译器/API 全以缓存为准, 只 cmake --build。
+## CMakeLists 非模板写法(未钉 OUTPUT_NAME/直出目录)时才回退旧的 规格平台键+修改时间 匹配。
 ##
-## 其余自动判定: 源码目录(唯一工程根 res://gdextension, 多个 addons 候选按规格配对);
+## 源码目录: 唯一工程根 res://gdextension(不存在才扫 addons/*/);
 ## 构建类型 debug/release 跟随当前编辑器; 构建后端固定只用 CMake 原生 Makefiles。
 ## 缓存纪律: 一切中间产物/CMake 缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略),
 ## 不进入工程目录; 部署后按规格 [libraries] 白名单清理 Native —— 只保留各平台/类型/架构键声明的
@@ -67,7 +66,7 @@ func _run() -> void:
 		return _finish()
 	var source_dir: String = loc.get("source")
 	var ext_file: String = loc.get("extension")
-	var target_res := _parse_library_target(ext_file)
+	var target_res := String(loc.get("artifact"))
 	if target_res.is_empty():
 		return _finish()
 	_log("源码工程: ", source_dir)
@@ -85,7 +84,7 @@ func _run() -> void:
 	var build_dir := _pick_build_dir(source_dir)
 	if build_dir.is_empty():
 		return _finish()
-	var info := _read_cmake_info(source_dir, build_dir)
+	var info: Dictionary = loc.get("info")
 	_state_write("构建进行中: 配置 CMake…")
 	if not _ready_build_dir(build_dir, source_dir, info):
 		return _finish_with("CMake 配置失败")
@@ -121,19 +120,44 @@ func _finish_with(result: String) -> void:
 
 # ------------------------------------------------------------ 零配置定位
 
-## 源码目录: res://gdextension 唯一工程根; 多个 addons 候选时按规格文件归属配对
+## 定位构建目标 —— 以 CMakeLists 为唯一事实源, 不再做模糊匹配:
+##   1) 解析 CMakeLists.txt 的 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 /
+##      各平台条件块里的 OUTPUT_NAME;
+##   2) 由此精确推导"本机预期产物文件名 + 绝对路径"(CMake 直出, 无需搬移);
+##   3) 用产物文件名反查声明它的 *.gdextension 规格文件([libraries] 值精确匹配文件名)。
+## CMakeLists 未按模板钉产物名时, 才回退旧的 规格平台键+修改时间 匹配(兜底)。
 func _locate() -> Dictionary:
-	var dirs := discover_source_dirs()
+	var dirs: Array[String] = []
+	if _is_ext_source("res://gdextension"):
+		dirs.append("res://gdextension")
+	else:
+		dirs = discover_source_dirs()
 	if dirs.is_empty():
 		_log("未发现 GDExtension 工程。请确认 res://gdextension(或 addons/*/) 含 CMakeLists.txt + godot-cpp/ submodule。")
 		return {}
+	var source_dir: String = dirs[0]
+	if dirs.size() > 1:
+		_log("发现多个工程目录, 取首个: ", source_dir)
+		for d in dirs:
+			_log("    - 候选: ", d)
+	var info := _read_cmake_info(source_dir)
+
+	# 主路径: CMake 已钉产物名 → 产物路径完全可推导
+	var art := _expected_artifact(info)
+	if not art.is_empty():
+		var ext := _find_ext_by_artifact(String(art.get("file")))
+		if ext != "":
+			_log("已锁定(CMake→规格 精确匹配): ", source_dir, " + ", ext)
+			return {"source": source_dir, "extension": ext, "artifact": String(art.get("res")), "info": info, "mode": "cmake"}
+		_log("CMake 产物 %s 未被任何 *.gdextension 声明, 回退平台键匹配。" % String(art.get("file")))
+
+	# ---- 回退: 规格文件 [libraries] 平台键 + 修改时间(仅当 CMakeLists 非模板写法) ----
 	var ext_order: Array[String] = []
 	var seen := {}
-	for d in dirs:
-		for e in find_extension_files(d):
-			if not seen.has(e):
-				seen[e] = true
-				ext_order.append(e)
+	for e in find_extension_files(source_dir):
+		if not seen.has(e):
+			seen[e] = true
+			ext_order.append(e)
 	if ext_order.is_empty():
 		_log("未找到 *.gdextension 规格文件(常见位置: addons/**/Native、addons/**、bin)。")
 		return {}
@@ -152,20 +176,93 @@ func _locate() -> Dictionary:
 		if m > newest:
 			newest = m
 			ext_file = e
-	var source_dir: String = dirs[0]
 	if dirs.size() > 1:
 		var by_ext := _source_matching_addon(ext_file, dirs)
-		if by_ext != "":
+		if by_ext != "" and by_ext != source_dir:
 			source_dir = by_ext
-		else:
-			_log("多个工程目录且无法判定归属, 默认取: ", source_dir)
-			for d in dirs:
-				_log("    - 候选: ", d)
-	if dirs.size() > 1 or ext_order.size() > 1:
-		_log("已选择: ", source_dir, " + ", ext_file)
-		if not runnable.is_empty() and runnable.size() < ext_order.size():
-			_log("其余规格无本机(", want, ")条目, 已忽略。")
-	return {"source": source_dir, "extension": ext_file}
+			info = _read_cmake_info(source_dir)
+	var target_res := _parse_library_target(ext_file)
+	if target_res.is_empty():
+		return {}
+	_log("已选择(回退匹配): ", source_dir, " + ", ext_file)
+	if not runnable.is_empty() and runnable.size() < ext_order.size():
+		_log("其余规格无本机(", want, ")条目, 已忽略。")
+	return {"source": source_dir, "extension": ext_file, "artifact": target_res, "info": info, "mode": "fallback"}
+
+
+## 由 CMake 信息推导本机预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
+## 依赖 CMakeLists 已钉 OUTPUT_NAME(按平台条件块) + OUTPUT_DIRECTORY 直出目录;
+## 未钉 OUTPUT_NAME 时按 CMake 默认规则用 target 名(Windows 无前缀 / macOS/Linux 带 lib 前缀)。
+func _expected_artifact(info: Dictionary) -> Dictionary:
+	var out_dirs: Array = info.get("out_dirs", [])
+	var target := String(info.get("target", ""))
+	if out_dirs.is_empty() or target == "":
+		return {}
+	var name := String(info.get("output_name", ""))
+	if name == "":
+		name = target
+	var file := ""
+	match _os_label():
+		"windows":
+			file = "%s.dll" % name
+		"macos":
+			file = "lib%s.dylib" % name
+		"linux":
+			file = "lib%s.so" % name
+	if file == "":
+		return {}
+	var out_abs := String(out_dirs[0])
+	return {"file": file, "res": _abs_to_res(out_abs).path_join(file), "abs": out_abs.path_join(file)}
+
+
+## 在 addons 下反查声明了指定产物文件名的 *.gdextension([libraries] 值按文件名精确匹配)。
+## 匹配是确定性的: 产物文件名 ↔ 规格声明一一对应, 不依赖修改时间等启发式信号。
+func _find_ext_by_artifact(file_name: String) -> String:
+	var cands: Array[String] = []
+	_collect_ext("res://addons", cands, {}, 3)
+	var hits: Array[String] = []
+	for e in cands:
+		for val in _parse_library_keys(e).values():
+			if String(val).get_file() == file_name:
+				hits.append(e)
+				break
+	if hits.is_empty():
+		return ""
+	if hits.size() > 1:
+		_log("多个规格声明了同一产物, 取首个:")
+		for h in hits:
+			_log("    - ", h)
+	return hits[0]
+
+
+## CMake if/elseif 条件文本 → "平台.构建类型" 归档键(仅识别本工具支持的模板写法)
+static func _cond_key(cond: String) -> String:
+	var c := cond.replace(" ", "")
+	var os := ""
+	if c.contains("WIN32"):
+		os = "windows"
+	elif c.contains("NOTAPPLE") and c.contains("UNIX"):
+		os = "linux"
+	elif c.contains("APPLE"):
+		os = "macos"
+	if os == "":
+		return ""
+	var type := ""
+	if c.contains("Debug"):
+		type = "debug"
+	elif c.contains("Release"):
+		type = "release"
+	if type == "":
+		return ""
+	return "%s.%s" % [os, type]
+
+
+## 绝对路径 → res:// 路径(项目根内); 项目根外原样返回
+func _abs_to_res(p: String) -> String:
+	var root := _abs("res://")
+	if p.begins_with(root):
+		return "res://" + p.substr(root.length())
+	return p
 
 
 ## 规格文件位于某个"同样是工程候选"的 addons 目录下时, 判定归属
@@ -282,10 +379,13 @@ static func _parse_library_keys(ext_file: String) -> Dictionary:
 
 # ------------------------------------------------------------ 读 CMakeLists 分辨"如何构建"(三个高可信 token)
 
-## 返回 {target, out_dirs(绝对), api_default}。不解释 CMake 语义, 只扫模板级高可信写法;
+## 返回 {target, out_dirs(绝对), api_default, output_name(当前平台+类型), output_names(全量)}。
+## 不解释 CMake 语义, 只扫模板级高可信写法;
 ## 扫不到任何 token 也不报错 —— 交由缓存/默认/模糊找库兜底。
-func _read_cmake_info(project_dir: String, build_dir: String) -> Dictionary:
-	var info := {target = "", out_dirs = [], api_default = ""}
+## OUTPUT_NAME 解析: 跟踪 if/elseif 条件块, 按 "平台.构建类型" 归档 ——
+## CMakeLists 由该单点钉死各平台产物名, 产物路径完全可推导, 无需模糊匹配。
+func _read_cmake_info(project_dir: String) -> Dictionary:
+	var info := {target = "", out_dirs = [], api_default = "", output_name = "", output_names = {}}
 	var cmake_path := _abs(project_dir).path_join("CMakeLists.txt")
 	if not FileAccess.file_exists(cmake_path):
 		return info
@@ -315,6 +415,36 @@ func _read_cmake_info(project_dir: String, build_dir: String) -> Dictionary:
 	var am := re_api.search(text)
 	if am:
 		info.api_default = am.get_string(1) if am.get_string(1) != "" else am.get_string(2)
+
+	# OUTPUT_NAME: 逐行跟踪 if/elseif/endif, 把各条件块里的值按 平台.构建类型 归档
+	var re_if := RegEx.new()
+	re_if.compile("^\\s*(?:el)?if\\s*\\(([^)]*)\\)")
+	var re_endif := RegEx.new()
+	re_endif.compile("^\\s*endif\\s*\\(")
+	var re_name := RegEx.new()
+	re_name.compile("OUTPUT_NAME\\s+\"?([A-Za-z0-9._-]+)\"?")
+	var cond := ""
+	var names := {}
+	for raw_line in text.split("\n"):
+		var line := raw_line.strip_edges()
+		if re_endif.search(line) != null:
+			cond = ""
+			continue
+		var im := re_if.search(line)
+		if im != null:
+			cond = im.get_string(1)
+			continue
+		if cond == "":
+			continue
+		var nm := re_name.search(line)
+		if nm != null:
+			var key := _cond_key(cond)
+			if key != "":
+				names[key] = nm.get_string(1)
+	info.output_names = names
+	var cur := "%s.%s" % [_os_label(), _build_type()]
+	if names.has(cur):
+		info.output_name = names[cur]
 	return info
 
 
@@ -969,33 +1099,36 @@ func _drain_log(raw_path: String) -> bool:
 
 # ------------------------------------------------------------ 部署: 找产物 → 按规格键改名放入落点
 
+## 部署: 第一事实是 CMake 直出 —— 预期产物路径存在即完成, 不搬移不改名;
+## 仅当直出缺失(CMake 未配 OUTPUT_DIRECTORY 等)才兜底在构建目录里查找产物,
+## 复制为预期文件名 —— 复制目标同样由 CMakeLists 推导, 不做猜测式改名。
 func _deploy(build_dir: String, ext_file: String, target_res: String, info: Dictionary) -> void:
-	var roots: Array[String] = [build_dir]
-	for d in info.get("out_dirs", []):
-		roots.append(String(d))
-	var target_dir_abs := _abs(target_res).get_base_dir()
-	if not roots.has(target_dir_abs):
-		roots.append(target_dir_abs)
-	var artifact := _find_artifact(roots, String(info.get("target", "")))
-	if artifact.is_empty():
-		_log("未定位到产物, 请检查上方编译输出。")
-		return
 	var target_abs := _abs(target_res)
-	if artifact == target_abs:
-		_log("产物已就位(直出目标目录): ", target_abs)
+	if FileAccess.file_exists(target_abs):
+		_log("产物已就位(CMake 直出): ", target_res)
 	else:
-		DirAccess.make_dir_recursive_absolute(target_abs.get_base_dir())
-		_log("产物: ", artifact)
-		if _copy_binary(artifact, target_abs):
-			_log("已部署: ", target_res)
-		else:
-			_log("覆盖目标失败: ", target_abs)
-			if OS.get_name() == "Windows":
-				_log("原因通常是编辑器正加载该 dll(Windows 文件锁)。请关闭编辑器后手动复制:")
-			else:
-				_log("请检查目标目录权限后重试, 或手动复制:")
-			_log("    copy  \"%s\"  →  \"%s\"" % [artifact, target_abs])
+		var roots: Array[String] = [build_dir]
+		for d in info.get("out_dirs", []):
+			roots.append(String(d))
+		var artifact := _find_artifact(roots, String(info.get("target", "")))
+		if artifact.is_empty():
+			_log("未定位到产物, 请检查上方编译输出。")
 			return
+		DirAccess.make_dir_recursive_absolute(target_abs.get_base_dir())
+		if artifact == target_abs:
+			_log("产物已就位: ", target_abs)
+		else:
+			_log("产物(兜底定位): ", artifact)
+			if _copy_binary(artifact, target_abs):
+				_log("已部署: ", target_res)
+			else:
+				_log("覆盖目标失败: ", target_abs)
+				if OS.get_name() == "Windows":
+					_log("原因通常是编辑器正加载该 dll(Windows 文件锁)。请关闭编辑器后手动复制:")
+				else:
+					_log("请检查目标目录权限后重试, 或手动复制:")
+				_log("    copy  \"%s\"  →  \"%s\"" % [artifact, target_abs])
+				return
 	# 部署后白名单清理: 该目录只保留 *.gdextension [libraries] 声明的各平台必要产物
 	_cleanup_native(target_abs.get_base_dir(), ext_file, target_res)
 
