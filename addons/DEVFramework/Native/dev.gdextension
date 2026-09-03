@@ -5,8 +5,8 @@ compatibility_minimum = "4.3"
 
 [libraries]
 
-macos.debug.universal = "res://addons/DEVFramework/Native/libdev.macos.debug.universal.dylib"
-macos.release.universal = "res://addons/DEVFramework/Native/libdev.macos.release.universal.dylib"
+macos.debug = "res://addons/DEVFramework/Native/libdev.macos.debug.universal.dylib"
+macos.release = "res://addons/DEVFramework/Native/libdev.macos.release.universal.dylib"
 windows.debug.x86_64 = "res://addons/DEVFramework/Native/dev.windows.debug.x86_64.dll"
 windows.release.x86_64 = "res://addons/DEVFramework/Native/dev.windows.release.x86_64.dll"
 linux.debug.x86_64 = "res://addons/DEVFramework/Native/libdev.linux.debug.x86_64.so"
