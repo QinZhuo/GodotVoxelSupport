@@ -1265,6 +1265,8 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 	if uni_line >= 0:
 		target_line = uni_line
 		write_key = uni_key
+		if first_arch_line >= 0:
+			remove_lines[first_arch_line] = true   # universal 键已存在时, 残留架构键一并删除(指向文件已合并删除)
 	elif first_arch_line >= 0:
 		target_line = first_arch_line
 		write_key = uni_key
@@ -1547,10 +1549,20 @@ func _os_label() -> String:
 		_: return OS.get_name().to_lower()
 
 
-## 本机架构名(构建缓存目录隔离用; universal 归一为 x86_64)
+## 本机架构名(构建缓存目录隔离用; universal 编辑器二进制用 uname 探测真实运行架构)
 func _arch() -> String:
 	var arch := Engine.get_architecture_name().to_lower()
-	return "x86_64" if arch == "universal" else arch
+	if arch != "universal":
+		return arch
+	# universal 二进制无法从引擎 API 得知真实运行架构: 在 Apple Silicon 上归一为 x86_64
+	# 会构建出宿主无法加载的库, 故用 uname 探测硬件架构(arm64/x86_64), 失败才回退旧规则
+	if OS.get_name() == "macOS":
+		var out: Array = []
+		if OS.execute("uname", PackedStringArray(["-m"]), out) == 0 and not out.is_empty():
+			var host := String(out[0]).strip_edges().to_lower()
+			if host == "arm64" or host == "x86_64":
+				return host
+	return "x86_64"
 
 
 func _os_token() -> String:

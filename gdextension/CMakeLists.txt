@@ -68,7 +68,7 @@ endif()
 # 将编译产物直接输出到插件分发目录 addons/VoxelSupport/Native/
 # （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，编译完即就位，无需手动复制）
 # 输出名与 .gdextension 声明的文件名严格一致，避免运行期加载到旧库（签名不匹配崩溃）：
-#   macOS debug:   libvoxelnative.macos.debug.arm64.dylib
+#   macOS debug:   libvoxelnative.macos.debug.<架构>.dylib(架构随构建自动填充)
 #   Linux debug:   libvoxelnative.linux.debug.x86_64.so
 #   Windows debug: voxelnative.windows.debug.x86_64.dll
 # 注意：macOS/Linux 需保留默认 "lib" 前缀（与 .gdextension 条目匹配），
@@ -78,10 +78,22 @@ set_target_properties(voxelnative PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
 )
+# macOS 架构 tag: 交叉构建(-DCMAKE_OSX_ARCHITECTURES=arm64|x86_64)取指定架构,
+# 未指定时取宿主架构(CMAKE_HOST_SYSTEM_PROCESSOR = uname -m)。
+# 不得硬编码架构名: 否则交叉构建轮会直出同名产物, 覆盖/抢占其他架构的产物文件。
+if(APPLE)
+    set(VOSX_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    if(CMAKE_OSX_ARCHITECTURES)
+        list(LENGTH CMAKE_OSX_ARCHITECTURES VOSX_ARCH_COUNT)
+        if(VOSX_ARCH_COUNT EQUAL 1)
+            list(GET CMAKE_OSX_ARCHITECTURES 0 VOSX_ARCH)
+        endif()
+    endif()
+endif()
 if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.debug.arm64")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.debug.${VOSX_ARCH}")
 elseif(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.release.arm64")
+    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.release.${VOSX_ARCH}")
 elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.windows.debug.x86_64")
 elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")

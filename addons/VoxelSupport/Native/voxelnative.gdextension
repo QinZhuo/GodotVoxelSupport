@@ -5,10 +5,8 @@ compatibility_minimum = "4.3"
 
 [libraries]
 
-macos.debug.arm64 = "res://addons/VoxelSupport/Native/libvoxelnative.macos.debug.arm64.dylib"
-macos.release.arm64 = "res://addons/VoxelSupport/Native/libvoxelnative.macos.release.arm64.dylib"
-macos.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelnative.macos.debug.x86_64.dylib"
-macos.release.x86_64 = "res://addons/VoxelSupport/Native/libvoxelnative.macos.release.x86_64.dylib"
+macos.debug.universal = "res://addons/VoxelSupport/Native/libvoxelnative.macos.debug.universal.dylib"
+macos.release.universal = "res://addons/VoxelSupport/Native/libvoxelnative.macos.release.universal.dylib"
 windows.debug.x86_64 = "res://addons/VoxelSupport/Native/voxelnative.windows.debug.x86_64.dll"
 windows.release.x86_64 = "res://addons/VoxelSupport/Native/voxelnative.windows.release.x86_64.dll"
 linux.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelnative.linux.debug.x86_64.so"
