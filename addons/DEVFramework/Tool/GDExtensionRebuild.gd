@@ -10,13 +10,15 @@ extends EditorScript
 ##
 ## 两条"事实源", 不猜、无兜底、零 *.gdextension 匹配:
 ##   1) CMakeLists.txt(唯一事实源): 解析 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 /
-##      各平台条件块 OUTPUT_NAME → 精确推导本机产物文件名与绝对路径(CMake 直出, 无需搬移);
-##      产物路径即最终落点, 不涉及规格文件反查(引擎加载由 .gdextension 自行声明);
+##      各平台条件块 OUTPUT_NAME → 精确推导 debug+release 双版本产物文件名与绝对路径
+##      (CMake 直出, 无需搬移); 产物路径即最终落点, 不涉及规格文件反查(引擎加载由 .gdextension 自行声明);
 ##   2) CMakeCache.txt(已配置过): 生成器/编译器/API 全以缓存为准, 只 cmake --build。
+## 一次运行自动构建两个版本: 先当前编辑器类型(debug 编辑器优先出 debug), 再另一版本;
+## debug 与 release 各用独立构建缓存(CMAKE_BUILD_TYPE 不同不能共用)。
 ## 任一步推导失败 → 明确报错终止(宁可失败也不猜测), 修正 CMakeLists 后重跑。
 ##
 ## 源码目录: 唯一工程根 res://gdextension(不存在才扫 addons/*/);
-## 构建类型 debug/release 跟随当前编辑器; 构建后端固定只用 CMake 原生 Makefiles。
+## 构建后端固定只用 CMake 原生 Makefiles。
 ## 缓存纪律: 一切中间产物/CMake 缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略),
 ## 不进入工程目录; 部署后按规格 [libraries] 白名单清理 Native —— 只保留各平台/类型/架构键声明的
 ## 必要产物, 清掉无后缀原始/导入库(.a)与规格外历史库及临时残留(~*/TMP), 工程内只留必要文件。
@@ -64,11 +66,10 @@ func _run() -> void:
 	if loc.is_empty():
 		return _finish()
 	var source_dir: String = loc.get("source")
-	var target_res := String(loc.get("artifact"))
-	if target_res.is_empty():
+	var targets: Array = loc.get("targets")
+	if targets.is_empty():
 		return _finish()
 	_log("源码工程: ", source_dir)
-	_log("本机产物落点: ", target_res)
 
 	if not _precheck(source_dir):
 		return _finish_with("定位/工具链失败")
@@ -78,19 +79,26 @@ func _run() -> void:
 	if _opt(KEY_UPDATE_SUBMODULE, true):
 		_state_write("构建进行中: 同步 godot-cpp…")
 		await _sync_godot_cpp(source_dir)
-	var build_dir := _pick_build_dir(source_dir)
-	if build_dir.is_empty():
-		return _finish()
-	var info: Dictionary = loc.get("info")
-	_state_write("构建进行中: 配置 CMake…")
-	if not _ready_build_dir(build_dir, source_dir, info):
-		return _finish_with("CMake 配置失败")
-	var ok := await _build(build_dir)
-	if not ok:
-		return _finish_with("编译失败(查看 build.log)")
-	_deploy(target_res, info)
+	# 双版本依次: 配置 → 编译 → 部署验证 (debug 先行, 编辑器尽快可用; release 随后)
+	var done: Array[String] = []
+	for tg in targets:
+		var type := String(tg.get("type"))
+		var target_res := String(tg.get("artifact"))
+		_log("──── ", type, " 版 ────")
+		var build_dir := _pick_build_dir(source_dir, type)
+		if build_dir.is_empty():
+			return _finish()
+		var info: Dictionary = loc.get("info")
+		_state_write("构建进行中(%s): 配置 CMake…" % type)
+		if not _ready_build_dir(build_dir, source_dir, info, type):
+			return _finish_with("CMake 配置失败(%s)" % type)
+		var ok := await _build(build_dir, type)
+		if not ok:
+			return _finish_with("编译失败(%s, 查看 build.log)" % type)
+		_deploy(target_res, info)
+		done.append(target_res)
 	var elapsed := (Time.get_ticks_msec() - _start_ms) / 1000.0
-	var summary := "构建成功(用时 %.1fs)\n产物: %s\n日志: res://.godot/gdextension_build/build.log" % [elapsed, target_res]
+	var summary := "构建成功(debug + release, 用时 %.1fs)\n产物: %s\n日志: res://.godot/gdextension_build/build.log" % [elapsed, ", ".join(done)]
 	if _opt(KEY_RELOAD_EDITOR, true):
 		summary += "\n下一步: 2 秒后自动重载当前项目。"
 	else:
@@ -138,33 +146,45 @@ func _locate() -> Dictionary:
 			_log("    - 候选: ", d)
 	var info := _read_cmake_info(source_dir)
 
-	var art := _expected_artifact(info)
-	if art.is_empty():
-		_log("CMakeLists.txt 缺少模板级产物定义, 无法推导本机产物路径。")
-		_log("需要: add_library(<name> SHARED) + *_OUTPUT_DIRECTORY 直出目录 + 覆盖本机平台的 OUTPUT_NAME 条目。")
-		return {}
+	# 双版本推导: debug + release 各推导一次产物路径(先当前编辑器类型, 编辑器尽快可用)
+	var types: Array[String] = [_build_type()]
+	for t in ["debug", "release"]:
+		if not types.has(t):
+			types.append(t)
+	var targets: Array = []
+	for t in types:
+		var art := _expected_artifact(info, t)
+		if art.is_empty():
+			_log("CMakeLists.txt 缺少 ", t, " 版产物定义, 无法推导产物路径。")
+			_log("需要: add_library(<name> SHARED) + *_OUTPUT_DIRECTORY 直出目录 + OUTPUT_NAME 条目 ", _os_label(), ".", t, "。")
+			return {}
+		targets.append({"type": t, "artifact": String(art.get("res"))})
 	_log("已锁定(CMake 推导): ", source_dir)
-	_log("预期产物: ", String(art.get("res")))
-	return {"source": source_dir, "artifact": String(art.get("res")), "info": info}
+	for tg in targets:
+		_log("预期产物(", String(tg.get("type")), "): ", String(tg.get("artifact")))
+	return {"source": source_dir, "targets": targets, "info": info}
 
 
-## 由 CMake 信息推导本机预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
-## 产物名 = 当前平台.构建类型 对应的 OUTPUT_NAME 条目(CMake 实际行为);
-## CMakeLists 钉了 OUTPUT_NAME 却缺本机平台条目 → 模板未覆盖本机, 报空不猜测;
+## 由 CMake 信息推导指定构建类型的预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
+## 产物名 = 平台.构建类型 对应的 OUTPUT_NAME 条目(CMake 实际行为);
+## CMakeLists 钉了 OUTPUT_NAME 却缺该条目 → 模板未覆盖, 报空不猜测;
 ## 全文未钉 OUTPUT_NAME → 按 CMake 默认规则用 target 名(Windows 无前缀 / macOS/Linux 带 lib 前缀)。
-func _expected_artifact(info: Dictionary) -> Dictionary:
+func _expected_artifact(info: Dictionary, type: String) -> Dictionary:
 	var out_dirs: Array = info.get("out_dirs", [])
 	var target := String(info.get("target", ""))
 	if out_dirs.is_empty() or target == "":
 		return {}
-	var name := String(info.get("output_name", ""))
 	var names: Dictionary = info.get("output_names", {})
+	var name := String(info.get("output_name", "")) if type == _build_type() else ""
 	if name == "":
 		if not names.is_empty():
-			_log("CMakeLists 钉了 OUTPUT_NAME 但缺少本机平台条目(", _os_label(), ".", _build_type(), "), 无法推导产物名。")
-			_log("现有平台条目: ", ", ".join(names.keys()))
-			return {}
-		name = target
+			name = String(names.get("%s.%s" % [_os_label(), type], ""))
+		if name == "":
+			if not names.is_empty():
+				_log("CMakeLists 钉了 OUTPUT_NAME 但缺少条目(", _os_label(), ".", type, "), 无法推导产物名。")
+				_log("现有平台条目: ", ", ".join(names.keys()))
+				return {}
+			name = target
 	var file := ""
 	match _os_label():
 		"windows":
@@ -276,7 +296,7 @@ func _read_cmake_info(project_dir: String) -> Dictionary:
 
 	# OUTPUT_NAME: 逐行跟踪 if/elseif/endif, 把各条件块里的值按 平台.构建类型 归档
 	var re_if := RegEx.new()
-	re_if.compile("^\\s*(?:el)?if\\s*\\(([^)]*)\\)")
+	re_if.compile("^\\s*(?:else)?if\\s*\\(([^)]*)\\)")
 	var re_endif := RegEx.new()
 	re_endif.compile("^\\s*endif\\s*\\(")
 	var re_name := RegEx.new()
@@ -613,11 +633,11 @@ func _kill_build_tree(pid: int) -> void:
 
 
 ## 构建缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略, 不入库、不污染工程)。
-## 复用已有缓存(优先名称含当前 平台+构建类型 者, 再取最新); 没有则新建 <源>-<os>-<arch>-<类型>。
-func _pick_build_dir(source_dir: String) -> String:
+## 复用已有缓存(优先名称含指定 平台+构建类型 者, 再取最新); 没有则新建 <源>-<os>-<arch>-<类型>。
+## debug 与 release 各用独立缓存(CMAKE_BUILD_TYPE 不同不能共用)。
+func _pick_build_dir(source_dir: String, type: String) -> String:
 	var cache_root := _abs("res://.godot/gdextension_build")
 	var token := _os_token()
-	var type := _build_type()
 	var cached: Array[String] = []
 	var cached_ok: Array[String] = []
 	var cdir := DirAccess.open(cache_root)
@@ -654,7 +674,7 @@ static func _newest_cache(dirs: Array) -> String:
 	return best
 
 
-func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary) -> bool:
+func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, type: String) -> bool:
 	if _cache_dirty and FileAccess.file_exists(build_dir.path_join("CMakeCache.txt")):
 		_log("submodule 已更新, 作废旧构建缓存: ", build_dir)
 		_wipe_dir(build_dir)
@@ -675,7 +695,7 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary) -
 	var api := _api_version_to_pass(source_dir, String(info.get("api_default", "")))
 	if api != "":
 		args.append("-DGODOTCPP_API_VERSION=%s" % api)
-	args.append("-DCMAKE_BUILD_TYPE=%s" % _build_type_cap())
+	args.append("-DCMAKE_BUILD_TYPE=%s" % type.capitalize())
 	_log("配置 CMake: ", " ".join(args))
 	var out: Array = []
 	var code := OS.execute("cmake", args, out, true)
@@ -759,8 +779,7 @@ func _cache_is_makefiles(build_dir: String) -> bool:
 
 # ------------------------------------------------------------ 异步构建
 
-func _build(build_dir: String) -> bool:
-	var type := _build_type()
+func _build(build_dir: String, type: String) -> bool:
 	_log("开始编译 (", type, ")…… 编辑器保持可用, 输出实时回显。")
 	var jobs := int(ProjectSettings.get_setting(KEY_JOBS, 0))
 	if jobs <= 0:
@@ -1052,13 +1071,9 @@ func _os_token() -> String:
 	return _os_label()
 
 
-## 构建类型跟随当前编辑器(debug 编辑器 → debug 产物, 与 .gdextension 键对应)
+## 构建类型跟随当前编辑器(debug 编辑器 → debug 产物优先构建)
 func _build_type() -> String:
 	return "debug" if OS.is_debug_build() else "release"
-
-
-func _build_type_cap() -> String:
-	return _build_type().capitalize()
 
 
 # ------------------------------------------------------------ 小工具
