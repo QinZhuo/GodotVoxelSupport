@@ -5,11 +5,10 @@ compatibility_minimum = "4.3"
 
 [libraries]
 
-macos.debug.arm64 = "res://addons/DEVFramework/Native/libdev.macos.debug.arm64.dylib"
-macos.release.arm64 = "res://addons/DEVFramework/Native/libdev.macos.release.arm64.dylib"
-macos.debug.x86_64 = "res://addons/DEVFramework/Native/libdev.macos.debug.x86_64.dylib"
-macos.release.x86_64 = "res://addons/DEVFramework/Native/libdev.macos.release.x86_64.dylib"
+macos.debug.universal = "res://addons/DEVFramework/Native/libdev.macos.debug.universal.dylib"
+macos.release.universal = "res://addons/DEVFramework/Native/libdev.macos.release.universal.dylib"
 windows.debug.x86_64 = "res://addons/DEVFramework/Native/dev.windows.debug.x86_64.dll"
 windows.release.x86_64 = "res://addons/DEVFramework/Native/dev.windows.release.x86_64.dll"
 linux.debug.x86_64 = "res://addons/DEVFramework/Native/libdev.linux.debug.x86_64.so"
 linux.release.x86_64 = "res://addons/DEVFramework/Native/libdev.linux.release.x86_64.so"
+macos.debug.arm64 = "res://addons/DEVFramework/Native/libdev.macos.debug.arm64.dylib"
