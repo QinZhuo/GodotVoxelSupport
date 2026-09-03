@@ -1,21 +1,29 @@
-﻿@tool
+@tool
 class_name GDExtensionRebuild
 extends EditorScript
 
-## 通用 GDExtension 一键构建工具 —— 零配置、零移动，支持任何遵循 godot-cpp 生态约定的扩展。
+## 通用 GDExtension 一键构建工具 —— 零配置构建 + 规范命名部署, 支持任何 godot-cpp 生态扩展。
 ##
 ## 自动出现在 项目 → 工具 → EditorScript（EditorScriptMenuTool 扫描注册）。
-## 一次运行自动完成: 发现扩展工程 → 读 CMakeLists 与 *.gdextension 分辨"如何构建/产物去哪"
-## → CMake 配置(必要时)/异步编译(不卡编辑器, 实时回显) → 产物按规格改名部署。
+## 一次运行自动完成: 发现扩展工程 → 读 CMakeLists 分辨"如何构建/产物去哪"
+## → CMake 配置(必要时)/异步编译(不卡编辑器, 实时回显) → 产物改名为规范名部署。
 ##
-## 两条"事实源", 不猜、无兜底、零 *.gdextension 匹配:
-##   1) CMakeLists.txt(唯一事实源): 解析 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 /
-##      各平台条件块 OUTPUT_NAME → 精确推导 debug+release 双版本产物文件名与绝对路径
-##      (CMake 直出, 无需搬移); 产物路径即最终落点, 不涉及规格文件反查(引擎加载由 .gdextension 自行声明);
-##   2) CMakeCache.txt(已配置过): 生成器/编译器/API 全以缓存为准, 只 cmake --build。
+## 两条"事实源":
+##   1) CMakeLists.txt(构建事实源): 只需解析出 add_library 目标名 与 *_OUTPUT_DIRECTORY 直出目录 ——
+##      OUTPUT_NAME 各平台条件块为**可选项**(有则直出名即规范名, 零改名);
+##      未写时 CMake 直出默认名(如 libdev.dylib), 工具统一改名为规范名:
+##        lib<名>.<平台>.<debug|release>.<架构>.dylib / <名>.<平台>.<类型>.<架构>.dll / lib<名>...so
+##      该规范名与 godot-cpp 官方 [libraries] 键风格一致, *.gdextension 声明无需手改;
+##   2) CMakeCache.txt(已配置过): 生成器/编译器/API/构建类型 全以缓存为准, 只 cmake --build。
 ## 一次运行自动构建两个版本: 先当前编辑器类型(debug 编辑器优先出 debug), 再另一版本;
-## debug 与 release 各用独立构建缓存(CMAKE_BUILD_TYPE 不同不能共用)。
+## debug 与 release 各用独立构建缓存(复用前校验 CMakeCache 的 CMAKE_BUILD_TYPE, 不符即作废重配)。
 ## 任一步推导失败 → 明确报错终止(宁可失败也不猜测), 修正 CMakeLists 后重跑。
+## 声明同步(dev_framework/gdextension_build/sync_gdextension, 默认开): 部署后以"规范名产物"为准,
+## 自动回写 *.gdextension [libraries] 的本平台键 —— 已有键只更新值(键名/架构风格不动), 缺键按
+## "<平台>.<构建类型>[.<架构>]" 新增; template_debug 等其他体系键与其他段一律不碰。
+## 跨项目零手工对齐; 不凭空创建 *.gdextension(entry_symbol 写在 C++ 里无法推导, 引擎侧需自行提供)。
+## 关闭时退化为一致性校验告警。Native 清理白名单 = 声明键文件 + 本机两类型规范名,
+## 杜绝"清理误删声明产物"—— 无任何白名单依据时跳过清理(宁可残留也不误删)。
 ##
 ## 源码目录: 唯一工程根 res://gdextension(不存在才扫 addons/*/);
 ## 构建后端固定只用 CMake 原生 Makefiles。
@@ -37,6 +45,8 @@ extends EditorScript
 
 const KEY_UPDATE_SUBMODULE := "dev_framework/gdextension_build/auto_update_submodule"
 const KEY_RELOAD_EDITOR := "dev_framework/gdextension_build/auto_reload_editor"
+const KEY_SYNC_GDEXT := "dev_framework/gdextension_build/sync_gdextension"   # 部署后把实盘产物路径回写 *.gdextension([libraries])
+const GDEXT_TYPES := ["debug", "release", "template_debug", "template_release"]   # 声明键中的构建类型 tag
 const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # 检测到卡死(无新目标且无编译器进程)时自动终止进程树
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
 
@@ -53,6 +63,7 @@ var _prev_done_count := -1  # 上次心跳时的目标数(判断是否还在推�
 var _no_advance := 0        # 目标数无推进的累计秒(心跳间隔 10s)
 var _stall_checked := false # 卡死检测已判定并处理
 var _stall_killed := false  # 已自动终止卡死进程树
+var _synced: Array[String] = []   # 本次运行同步的声明条目(最终摘要展示)
 
 
 func _run() -> void:
@@ -80,6 +91,10 @@ func _run() -> void:
 		_state_write("构建进行中: 同步 godot-cpp…")
 		await _sync_godot_cpp(source_dir)
 	# 双版本依次: 配置 → 编译 → 部署验证 (debug 先行, 编辑器尽快可用; release 随后)
+	var info: Dictionary = loc.get("info")
+	var gdext_res := _find_gdextension(info)
+	if gdext_res == "":
+		_log("产物输出目录未发现 *.gdextension, 跳过声明同步(引擎加载扩展仍需自行提供)。")
 	var done: Array[String] = []
 	for tg in targets:
 		var type := String(tg.get("type"))
@@ -88,17 +103,24 @@ func _run() -> void:
 		var build_dir := _pick_build_dir(source_dir, type)
 		if build_dir.is_empty():
 			return _finish()
-		var info: Dictionary = loc.get("info")
 		_state_write("构建进行中(%s): 配置 CMake…" % type)
 		if not _ready_build_dir(build_dir, source_dir, info, type):
 			return _finish_with("CMake 配置失败(%s)" % type)
 		var ok := await _build(build_dir, type)
 		if not ok:
 			return _finish_with("编译失败(%s, 查看 build.log)" % type)
-		_deploy(target_res, info)
+		var actual := _deploy(target_res, info, type)
+		if actual == "":
+			return _finish_with("产物部署失败(%s, 查看 build.log)" % type)
+		_post_deploy(info, gdext_res, type, actual)
 		done.append(target_res)
 	var elapsed := (Time.get_ticks_msec() - _start_ms) / 1000.0
-	var summary := "构建成功(debug + release, 用时 %.1fs)\n产物: %s\n日志: res://.godot/gdextension_build/build.log" % [elapsed, ", ".join(done)]
+	var types_txt: Array[String] = []
+	for tg in targets:
+		types_txt.append(String(tg.get("type")))
+	var summary := "构建成功(%s, 用时 %.1fs)\n产物: %s\n日志: res://.godot/gdextension_build/build.log" % [" + ".join(types_txt), elapsed, ", ".join(done)]
+	if not _synced.is_empty():
+		summary += "\n声明同步: " + ", ".join(_synced)
 	if _opt(KEY_RELOAD_EDITOR, true):
 		summary += "\n下一步: 2 秒后自动重载当前项目。"
 	else:
@@ -125,11 +147,11 @@ func _finish_with(result: String) -> void:
 
 # ------------------------------------------------------------ 零配置定位
 
-## 定位构建目标 —— 一切信息只从 CMakeLists.txt 获取, 无兜底:
-##   1) 解析 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 / 各平台条件块 OUTPUT_NAME;
-##   2) 由此精确推导"本机预期产物文件名 + 绝对路径"(CMake 直出, 无需搬移);
-##   3) 产物路径即最终落点, 不涉及任何 *.gdextension 匹配(引擎加载由 .gdextension 自行声明)。
-## 任一步推导失败 → 直接报错终止, 不做猜测式匹配。
+## 定位构建目标 —— 只需 CMakeLists 给出 目标名 + 输出目录:
+##   1) 解析 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录;
+##   2) 按工具规范名推导各构建类型产物(lib<名>.<平台>.<类型>.<架构>.<ext>);
+##   3) 直出名若与规范名不同(未写 OUTPUT_NAME 的默认名), 编译后由 _deploy 改名归位。
+## 推导不出目标名/输出目录 → 直接报错终止, 不做猜测式匹配。
 func _locate() -> Dictionary:
 	var dirs: Array[String] = []
 	if _is_ext_source("res://gdextension"):
@@ -155,8 +177,7 @@ func _locate() -> Dictionary:
 	for t in types:
 		var art := _expected_artifact(info, t)
 		if art.is_empty():
-			_log("CMakeLists.txt 缺少 ", t, " 版产物定义, 无法推导产物路径。")
-			_log("需要: add_library(<name> SHARED) + *_OUTPUT_DIRECTORY 直出目录 + OUTPUT_NAME 条目 ", _os_label(), ".", t, "。")
+			_log("CMakeLists.txt 无法推导产物: 需要 add_library(<name> SHARED) 与 *_OUTPUT_DIRECTORY 直出目录。")
 			return {}
 		targets.append({"type": t, "artifact": String(art.get("res"))})
 	_log("已锁定(CMake 推导): ", source_dir)
@@ -166,37 +187,36 @@ func _locate() -> Dictionary:
 
 
 ## 由 CMake 信息推导指定构建类型的预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
-## 产物名 = 平台.构建类型 对应的 OUTPUT_NAME 条目(CMake 实际行为);
-## CMakeLists 钉了 OUTPUT_NAME 却缺该条目 → 模板未覆盖, 报空不猜测;
-## 全文未钉 OUTPUT_NAME → 按 CMake 默认规则用 target 名(Windows 无前缀 / macOS/Linux 带 lib 前缀)。
+## 文件名 = 工具规范名 lib<target>.<平台>.<类型>.<架构>.<ext>(与 godot-cpp 官方 [libraries] 键风格一致);
+## CMakeLists 若钉了同名 OUTPUT_NAME 则直出即命中(零改名), 未钉/默认名由 _deploy 统一改名归位。
 func _expected_artifact(info: Dictionary, type: String) -> Dictionary:
 	var out_dirs: Array = info.get("out_dirs", [])
 	var target := String(info.get("target", ""))
 	if out_dirs.is_empty() or target == "":
 		return {}
-	var names: Dictionary = info.get("output_names", {})
-	var name := String(info.get("output_name", "")) if type == _build_type() else ""
-	if name == "":
-		if not names.is_empty():
-			name = String(names.get("%s.%s" % [_os_label(), type], ""))
-		if name == "":
-			if not names.is_empty():
-				_log("CMakeLists 钉了 OUTPUT_NAME 但缺少条目(", _os_label(), ".", type, "), 无法推导产物名。")
-				_log("现有平台条目: ", ", ".join(names.keys()))
-				return {}
-			name = target
-	var file := ""
-	match _os_label():
-		"windows":
-			file = "%s.dll" % name
-		"macos":
-			file = "lib%s.dylib" % name
-		"linux":
-			file = "lib%s.so" % name
-	if file == "":
-		return {}
+	var file := _canonical_file(target, type)
 	var out_abs := String(out_dirs[0])
 	return {"file": file, "res": _abs_to_res(out_abs).path_join(file), "abs": out_abs.path_join(file)}
+
+
+## 工具规范产物名: lib<名>.<平台>.<debug|release>.<架构>.dylib /
+##                 <名>.<平台>.<debug|release>.<架构>.dll(Windows 无 lib 前缀) /
+##                 lib<名>.<平台>.<debug|release>.<架构>.so
+## 架构取编辑器运行架构(macOS universal 归一 x86_64) —— 与 .gdextension 官方键/tag 命名对齐。
+func _canonical_file(target: String, type: String) -> String:
+	var ext := ""
+	var prefix := "lib"
+	match _os_label():
+		"windows":
+			ext = ".dll"
+			prefix = ""
+		"macos":
+			ext = ".dylib"
+		"linux":
+			ext = ".so"
+		_:
+			return ""
+	return "%s%s.%s.%s.%s%s" % [prefix, target, _os_label(), type, _arch(), ext]
 
 
 ## CMake if/elseif 条件文本 → "平台.构建类型" 归档键(仅识别本工具支持的模板写法)
@@ -633,34 +653,15 @@ func _kill_build_tree(pid: int) -> void:
 
 
 ## 构建缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略, 不入库、不污染工程)。
-## 复用已有缓存(优先名称含指定 平台+构建类型 者, 再取最新); 没有则新建 <源>-<os>-<arch>-<类型>。
-## debug 与 release 各用独立缓存(CMAKE_BUILD_TYPE 不同不能共用)。
+## 目录名固定 <源>-<os>-<arch>-<类型> —— debug 与 release 天然隔离, 不再从"任意缓存"复用
+## (旧逻辑会把 release 塞进 debug 缓存目录: 单配置生成器忽略 --config, release 实际从未编译)。
+## 复用前 _ready_build_dir 还会校验缓存里的 CMAKE_BUILD_TYPE, 不符即作废重配。
 func _pick_build_dir(source_dir: String, type: String) -> String:
 	var cache_root := _abs("res://.godot/gdextension_build")
-	var token := _os_token()
-	var cached: Array[String] = []
-	var cached_ok: Array[String] = []
-	var cdir := DirAccess.open(cache_root)
-	if cdir:
-		cdir.list_dir_begin()
-		var entry := cdir.get_next()
-		while entry != "":
-			if cdir.current_is_dir():
-				var full := cache_root.path_join(entry)
-				if FileAccess.file_exists(full.path_join("CMakeCache.txt")):
-					cached.append(full)
-					var low := entry.to_lower()
-					if low.contains(token) and low.contains(type):
-						cached_ok.append(full)
-			entry = cdir.get_next()
-		cdir.list_dir_end()
-	if not cached_ok.is_empty():
-		return _newest_cache(cached_ok)
-	if not cached.is_empty():
-		return _newest_cache(cached)
-	var fresh := cache_root.path_join("%s-%s-%s-%s" % [source_dir.get_file(), _os_label(), _arch(), type])
-	_log("未发现已配置构建缓存, 将新建: ", fresh)
-	return fresh
+	var dir := cache_root.path_join("%s-%s-%s-%s" % [source_dir.get_file(), _os_label(), _arch(), type])
+	if not FileAccess.file_exists(dir.path_join("CMakeCache.txt")):
+		_log("未发现(%s)已配置构建缓存, 将新建: " % type, dir)
+	return dir
 
 
 static func _newest_cache(dirs: Array) -> String:
@@ -681,9 +682,14 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, t
 	if FileAccess.file_exists(build_dir.path_join("CMakeCache.txt")):
 		# 后端一致性: 缓存必须是 CMake Makefiles, 否则 cmake --build 会按缓存里的其它生成器执行
 		if _cache_is_makefiles(build_dir):
-			_log("复用构建目录(以缓存配置为准): ", build_dir)
-			return true
-		_log("缓存生成器不是 Makefiles, 作废重新配置。")
+			# 构建类型一致性: 单配置生成器(Makefiles)忽略 --config, 缓存类型不符会把 release 跑成 debug
+			var cached_type := _cache_build_type(build_dir)
+			if cached_type == type:
+				_log("复用构建目录(以缓存配置为准): ", build_dir)
+				return true
+			_log("缓存构建类型(%s)与目标(%s)不符, 作废重新配置。" % [cached_type if cached_type != "" else "未设置", type])
+		else:
+			_log("缓存生成器不是 Makefiles, 作废重新配置。")
 		_wipe_dir(build_dir)
 	var src_abs := _abs(source_dir)
 	DirAccess.make_dir_recursive_absolute(build_dir)
@@ -777,6 +783,20 @@ func _cache_is_makefiles(build_dir: String) -> bool:
 	return false
 
 
+## 读取 CMakeCache 的 CMAKE_BUILD_TYPE(单配置生成器实际生效的构建类型); 无设置返回 ""
+func _cache_build_type(build_dir: String) -> String:
+	var f := FileAccess.open(build_dir.path_join("CMakeCache.txt"), FileAccess.READ)
+	if f == null:
+		return ""
+	while not f.eof_reached():
+		var line := f.get_line()
+		if line.begins_with("CMAKE_BUILD_TYPE:STRING="):
+			f.close()
+			return line.substr("CMAKE_BUILD_TYPE:STRING=".length()).to_lower()
+	f.close()
+	return ""
+
+
 # ------------------------------------------------------------ 异步构建
 
 func _build(build_dir: String, type: String) -> bool:
@@ -853,7 +873,7 @@ func _build(build_dir: String, type: String) -> bool:
 			else:
 				_no_advance = 0
 				_prev_done_count = d
-			if _no_advance >= 60 and not _stall_checked and not _stall_killed:
+			if _no_advance >= 300 and not _stall_checked and not _stall_killed:
 				var active := _active_compile_procs()
 				if active == 0:
 					_stall_checked = true
@@ -976,17 +996,233 @@ func _drain_log(raw_path: String) -> bool:
 
 # ------------------------------------------------------------ 部署: CMake 直出验证 + 纯 CMake 推导的残留清理
 
-## 部署: 唯一事实是 CMake 直出 —— 预期产物路径存在即完成, 不搬移不改名;
-## 不存在即报错(由定位阶段保证能走到这里时产物路径已确定), 不做猜测式查找/复制。
-func _deploy(target_res: String, info: Dictionary) -> void:
+## 部署: 直出命中规范名即用; 否则实盘兜底取最新动态库, 并统一**改名**为规范名
+## (CMake 默认名 libdev.dylib → libdev.macos.debug.arm64.dylib), 与 *.gdextension 声明天然对应。
+## CMakeLists 钉了规范名 OUTPUT_NAME 时改名零成本(同名跳过)。找不到产物返回 ""(部署失败)。
+## Windows 边界: 编辑器锁住加载中的 dll 致改名失败 → 保留直出名并告警(声明同步按实盘名对齐, 保可用)。
+func _deploy(target_res: String, info: Dictionary, type: String) -> String:
+	var out_dir: String = info.get("out_dirs", [])[0]
+	var actual := ""
 	var target_abs := _abs(target_res)
-	if not FileAccess.file_exists(target_abs):
+	if FileAccess.file_exists(target_abs):
+		actual = target_res.get_file()
+	else:
+		actual = _scan_dynamic_libs(out_dir)
+		if actual != "":
+			_log("规范名产物未直出, 实盘取最新动态库: ", actual)
+	if actual == "":
 		_log("预期产物未生成: ", target_abs)
-		_log("请确认 CMakeLists 已钉 OUTPUT_DIRECTORY 直出目录与各平台 OUTPUT_NAME, 并检查上方编译输出。")
+		_log("请确认 CMakeLists 已钉 *_OUTPUT_DIRECTORY 直出目录, 并检查上方编译输出。")
+		return ""
+	var canonical := _canonical_file(String(info.get("target", "")), type)
+	if actual != canonical:
+		if _rename_lib(out_dir, actual, canonical):
+			_log("产物规范命名: ", actual, " → ", canonical)
+			actual = canonical
+		else:
+			_log("警告: 规范命名失败(文件可能被占用), 保留 ", actual, "; 声明同步将按实盘名对齐。")
+	_log("产物已就位: ", _abs_to_res(out_dir).path_join(actual))
+	return actual
+
+
+## 同目录改名(先清旧规范名残留); 失败返回 false(Windows 编辑器锁定 dll 等场景)
+func _rename_lib(dir_path: String, from_file: String, to_file: String) -> bool:
+	var to_abs := String(dir_path).path_join(to_file)
+	if FileAccess.file_exists(to_abs):
+		DirAccess.remove_absolute(to_abs)
+	return DirAccess.rename_absolute(String(dir_path).path_join(from_file), to_abs) == OK
+
+
+## 部署后处理: 声明同步(或校验告警) → 清理。
+## 清理白名单 = *.gdextension [libraries] 全部键声明的文件(声明即白名单, 与加载需求天然一致);
+## 无声明可依时退回 CMake OUTPUT_NAME 推导; 两者皆空则跳过清理(宁可残留也不误删)。
+func _post_deploy(info: Dictionary, gdext_res: String, type: String, actual: String) -> void:
+	var native_dir: String = info.get("out_dirs", [])[0]
+	var platform := _os_label()
+	if gdext_res != "":
+		if _opt(KEY_SYNC_GDEXT, true):
+			_gdext_sync(gdext_res, _abs_to_res(native_dir).path_join(actual), platform, type, actual)
+		else:
+			_gdext_verify(gdext_res, platform, type, actual)
+	var target := String(info.get("target", ""))
+	var keep := _gdext_keep_files(gdext_res)
+	keep.append(_canonical_file(target, "debug"))     # 本机两类型规范名恒为白名单
+	keep.append(_canonical_file(target, "release"))
+	keep.append(actual)   # 防御: 本次落位文件必保(改名失败时的直出名)
+	if keep.is_empty():
+		_log("无清理白名单, 跳过 Native 清理。")
 		return
-	_log("产物已就位(CMake 直出): ", target_res)
-	# 部署后清理: 白名单同样纯 CMake 推导 —— OUTPUT_NAME 各平台条目按平台后缀展开
-	_cleanup_native(target_abs.get_base_dir(), _cmake_keep_names(info))
+	_cleanup_native(native_dir, keep)
+
+
+## 在产物输出目录(*_OUTPUT_DIRECTORY)里定位 *.gdextension(与产物同目录是框架约定)。
+## 找不到返回 ""(此时跳过声明同步与校验, 引擎侧需自行提供声明文件)。
+func _find_gdextension(info: Dictionary) -> String:
+	for d in info.get("out_dirs", []):
+		var dir := DirAccess.open(String(d))
+		if dir == null:
+			continue
+		dir.list_dir_begin()
+		var e := dir.get_next()
+		while e != "":
+			if not dir.current_is_dir() and e.ends_with(".gdextension"):
+				dir.list_dir_end()
+				return _abs_to_res(String(d)).path_join(e)
+			e = dir.get_next()
+		dir.list_dir_end()
+	return ""
+
+
+## 实盘扫描: 输出目录里的动态库(dylib/dll/so), 取 mtime 最新 —— 覆盖 CMake 默认名/变量拼接名等
+## 解析器无法预知的直出名(刚编译完, 最新即本次直出)。返回文件名, 无动态库返回 ""。
+func _scan_dynamic_libs(dir_path: String) -> String:
+	var best := ""
+	var best_m := -1
+	var dir := DirAccess.open(String(dir_path))
+	if dir == null:
+		return ""
+	dir.list_dir_begin()
+	var e := dir.get_next()
+	while e != "":
+		if not dir.current_is_dir():
+			var low := e.to_lower()
+			if low.ends_with(".dylib") or low.ends_with(".dll") or low.ends_with(".so"):
+				var m := FileAccess.get_modified_time(String(dir_path).path_join(e))
+				if m > best_m:
+					best_m = m
+					best = e
+		e = dir.get_next()
+	dir.list_dir_end()
+	return best
+
+
+## 解析 *.gdextension: 保留原始行; 抽取 [libraries] 段的 键→(行号, 值) 与段尾插入点。
+func _gdext_parse(gdext_res: String) -> Dictionary:
+	if not FileAccess.file_exists(gdext_res):
+		return {}
+	var re_kv := RegEx.new()
+	re_kv.compile("^\\s*([A-Za-z0-9_.]+)\\s*=\\s*(.+?)\\s*$")
+	var lines := FileAccess.get_file_as_string(gdext_res).split("\n")
+	var sec := ""
+	var lib_end := -1
+	var entries: Array = []
+	var values := {}
+	for i in lines.size():
+		var s := String(lines[i]).strip_edges()
+		if s.begins_with("["):
+			if sec == "libraries" and lib_end < 0:
+				lib_end = i
+			sec = s.trim_prefix("[").trim_suffix("]").strip_edges()
+			continue
+		if sec != "libraries":
+			continue
+		var m := re_kv.search(String(lines[i]))
+		if m == null:
+			continue
+		var key := m.get_string(1)
+		entries.append({"key": key, "line": i})
+		values[key] = m.get_string(2).trim_prefix("\"").trim_suffix("\"")
+		lib_end = i + 1
+	if lib_end < 0:
+		lib_end = lines.size()
+	return {"lines": lines, "entries": entries, "values": values, "lib_end": lib_end}
+
+
+## 声明键是否属于"本平台 + 本构建类型": 首 tag = 平台, 且键无任何类型 tag(通用键)或含目标类型。
+## template_debug/template_release 等其他体系键不视为目标(不更新、不冲突)。
+static func _gdext_key_matches(key: String, platform: String, type: String) -> bool:
+	var tags := key.split(".")
+	if tags.is_empty() or tags[0] != platform:
+		return false
+	var has_type := false
+	for t in tags:
+		if GDEXT_TYPES.has(t):
+			has_type = true
+	return not has_type or tags.has(type)
+
+
+## 声明同步: 以实盘产物为准, 把 [libraries] 里"本平台+本类型"的键值写成产物路径。
+## 已有匹配键 → 只更新值(键名与其架构 tag 风格保持不动); 值已一致则不写(零 diff);
+## 无匹配键 → 按 "<平台>.<类型>[.<文件名内架构>]" 新增(引擎特性匹配要求键 tags ⊆ 当前 features,
+## 缺架构 tag 的键对同平台各架构通用, 故自动新增也不锁死架构)。
+func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: String, file: String) -> void:
+	var parsed := _gdext_parse(gdext_res)
+	if parsed.is_empty():
+		return
+	var lines: PackedStringArray = parsed["lines"]
+	var found_key := ""
+	var found_line := -1
+	var found_val := ""
+	for ent in parsed["entries"]:
+		var key := String(ent.get("key"))
+		if _gdext_key_matches(key, platform, type):
+			found_key = key
+			found_line = int(ent.get("line"))
+			found_val = String(parsed["values"].get(key, ""))
+			break
+	var value := "\"%s\"" % file_res
+	if found_line >= 0:
+		if found_val == file_res:
+			_log("声明已一致, 无需同步: ", String(gdext_res).get_file(), " [", found_key, "]")
+			return
+		lines[found_line] = "%s = %s" % [found_key, value]
+		_synced.append("%s → %s(更新)" % [found_key, file_res])
+		_log("已同步声明(更新): ", gdext_res, " [", found_key, "] = ", value)
+	else:
+		var arch := ""
+		var re_arch := RegEx.new()
+		re_arch.compile("\\.(arm64|x86_64|arm32|x86_32|universal)\\.")
+		var am := re_arch.search(file)
+		if am:
+			arch = am.get_string(1)
+		var new_key := "%s.%s" % [platform, type]
+		if arch != "":
+			new_key += "." + arch
+		var at: int = parsed["lib_end"]
+		while at > 0 and String(lines[at - 1]).strip_edges() == "":
+			at -= 1
+		lines.insert(at, "%s = %s" % [new_key, value])
+		_synced.append("%s → %s(新增)" % [new_key, file_res])
+		_log("已同步声明(新增): ", gdext_res, " [", new_key, "] = ", value)
+	var f := FileAccess.open(gdext_res, FileAccess.WRITE)
+	if f == null:
+		_log("声明写回失败: ", gdext_res)
+		return
+	f.store_string("\n".join(lines))
+	f.close()
+
+
+## sync 关闭时的退化模式: 只校验不回写 —— 声明与实盘不一致时明确告警(引擎将加载失败)。
+func _gdext_verify(gdext_res: String, platform: String, type: String, file: String) -> void:
+	var parsed := _gdext_parse(gdext_res)
+	if parsed.is_empty():
+		return
+	var seen := false
+	for ent in parsed["entries"]:
+		var key := String(ent.get("key"))
+		if not _gdext_key_matches(key, platform, type):
+			continue
+		seen = true
+		var declared := String(parsed["values"].get(key, "")).get_file()
+		if declared != file:
+			_log("警告: 声明不一致 —— [", key, "] 指向 ", declared, ", 实际产物 ", file, "; 引擎可能无法加载!")
+			_log("可开启 dev_framework/gdextension_build/sync_gdextension 自动对齐, 或修正 CMakeLists OUTPUT_NAME。")
+		break
+	if not seen:
+		_log("警告: ", String(gdext_res).get_file(), " 缺少 [", platform, ".", type, "] 声明键, 引擎可能无法加载本产物(开启 sync 可自动补齐)。")
+
+
+## 清理白名单: [libraries] 全部键声明的文件名 —— 声明里没出现的库即规格外残留。
+func _gdext_keep_files(gdext_res: String) -> PackedStringArray:
+	var keep := PackedStringArray()
+	if gdext_res == "":
+		return keep
+	var parsed := _gdext_parse(gdext_res)
+	if parsed.is_empty():
+		return keep
+	for ent in parsed["entries"]:
+		keep.append(String(parsed["values"].get(String(ent.get("key")), "")).get_file())
+	return keep
 
 
 ## CMake OUTPUT_NAME 全量平台条目 → 各平台产物文件名白名单。
@@ -1102,6 +1338,8 @@ func _log_raw(text: String) -> void:
 	_lines.append(text)
 	print(text)
 	var f := FileAccess.open(_log_path(), FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open(_log_path(), FileAccess.WRITE)   # 文件不存在时先创建(READ_WRITE 不建文件)
 	if f:
 		f.seek_end()
 		f.store_string(text + "\n")
