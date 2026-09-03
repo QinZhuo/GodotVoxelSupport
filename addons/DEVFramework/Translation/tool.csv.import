@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://bf0d7dthsbbmh"
+
+[deps]
+
+files=["res://addons/DEVFramework/Translation/tool.zh.translation", "res://addons/DEVFramework/Translation/tool.zh_Hant.translation", "res://addons/DEVFramework/Translation/tool.en.translation", "res://addons/DEVFramework/Translation/tool.ru.translation", "res://addons/DEVFramework/Translation/tool.pt.translation", "res://addons/DEVFramework/Translation/tool.es.translation", "res://addons/DEVFramework/Translation/tool.de.translation", "res://addons/DEVFramework/Translation/tool.ja.translation", "res://addons/DEVFramework/Translation/tool.ko.translation", "res://addons/DEVFramework/Translation/tool.pl.translation", "res://addons/DEVFramework/Translation/tool.fr.translation"]
+
+source_file="res://addons/DEVFramework/Translation/tool.csv"
+dest_files=["res://addons/DEVFramework/Translation/tool.zh.translation", "res://addons/DEVFramework/Translation/tool.zh_Hant.translation", "res://addons/DEVFramework/Translation/tool.en.translation", "res://addons/DEVFramework/Translation/tool.ru.translation", "res://addons/DEVFramework/Translation/tool.pt.translation", "res://addons/DEVFramework/Translation/tool.es.translation", "res://addons/DEVFramework/Translation/tool.de.translation", "res://addons/DEVFramework/Translation/tool.ja.translation", "res://addons/DEVFramework/Translation/tool.ko.translation", "res://addons/DEVFramework/Translation/tool.pl.translation", "res://addons/DEVFramework/Translation/tool.fr.translation"]
+
+[params]
+
+compress=false
+delimiter=0
+unescape_keys=false
+unescape_translations=true

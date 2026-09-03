@@ -1,4 +1,4 @@
-﻿@tool
+@tool
 class_name TownDef extends PCGGeneratorDef
 ## 城镇生成总控 — 可插拔步骤管线（城镇生成总控）
 ##
@@ -78,6 +78,8 @@ class_name TownDef extends PCGGeneratorDef
 @export_range(4, 128, 1) var min_block_area := 32
 @export_range(16, 512, 2) var lot_max_area := 60
 @export_range(4, 64, 1) var lot_min_area := 18
+## 地块最短边（格）：切分时保证两半沿切轴都不窄于此值，防 1 格细条地块
+@export_range(1, 8, 1) var lot_min_edge := 2
 ## [建筑]
 @export var houses: Array[TemplateDef] = []
 @export var facilities: Array[FacilityDef] = []
@@ -85,6 +87,8 @@ class_name TownDef extends PCGGeneratorDef
 @export_range(0, 4, 1) var setback := 1
 @export_range(1, 8, 1) var house_layers_min := 1
 @export_range(1, 8, 1) var house_layers_max := 3
+## 面积→高度权重（CGA Mass Modeling：0=纯中心距离梯度, 1=纯地块面积驱动）
+@export_range(0.0, 1.0, 0.05) var area_height_weight := 0.4
 @export var house_roof := "gable"
 @export var flat_roof_styles: Array[String] = ["石砌", "砖混"]
 @export var style_table: Array[ContentEntryDef] = []
@@ -112,6 +116,32 @@ class_name TownDef extends PCGGeneratorDef
 @export_range(0, 6, 1) var infill_passes := 3
 ## 象限最低路格密度阈值（该象限路格数/象限面积，低于即触发补生长）
 @export_range(0.0, 0.25, 0.005) var infill_min_density := 0.05
+## 死路清理：迭代摘除 4 邻域度数≤1 的次街/巷道端头（主街/干道/环路/桥不动）
+@export var prune_dead_ends := true
+## 路网模式: false=主街A*+次街生长(TownRoadStep), true=张量场路网(TensorRoadStep)
+## 张量场: 网格/径向/噪声/等高线四场 RBF 混合 → 流线追踪 → 吸附成网
+@export var use_tensor_roads := false
+## [张量场路网] 以下参数在 use_tensor_roads=true 时生效（总控，同步到 TensorRoadStep）
+## 网格场整体角度(度)
+@export_range(-90.0, 90.0, 1.0) var tensor_grid_angle := 0.0
+## 径向场权重与中心(格坐标, 负值=关闭): 环形+放射大街
+@export_range(0.0, 2.0, 0.05) var tensor_radial_strength := 0.0
+@export var tensor_radial_center := Vector2(-1, -1)
+## 噪声场权重: 街道弯曲有机感
+@export_range(0.0, 1.5, 0.05) var tensor_noise_strength := 0.0
+## 等高线场权重: 道路沿等高线走(需高度图, 平地自动失效)
+@export_range(0.0, 2.0, 0.05) var tensor_contour_strength := 0.0
+## 主街/次街线间距(格)
+@export_range(8, 64, 1) var tensor_major_spacing := 24
+@export_range(4, 32, 1) var tensor_minor_spacing := 10
+## 坡度限制: 流线单步高差超过该值即截断(0=不限制); 山地次街存活关键, 过严会截断大量街段
+@export_range(0.0, 1.0, 0.01) var tensor_max_step_rise := 0.03
+## 城区半径(格, 0=铺满全图): 流线以选址点为圆心只在该半径内追踪, 出圈即断
+## 防止路网+路灯延伸到无人区/图缘(A* 模式天然选址居中, 张量场需显式限定)
+@export_range(0, 256, 1) var tensor_town_radius := 0
+## 直行锁定(格): 道路保持直行的最短长度, 到点才重新定向
+## 方向量化以网格轴(横平竖直)为主, 仅当方向场明确指向斜向时才产生45°道路
+@export_range(1.0, 32.0, 0.5) var tensor_straight_run := 10.0
 ## [分区] 启用语义分区（市集/贵族/民居，写入 parcels[i].ward 与 layout.wards）
 @export var enable_wards := true
 ## [城墙] 启用城墙+城门（墙写入 build 层；门洞记录到 layout.gates）
@@ -142,22 +172,28 @@ func get_desc(_data) -> String:
 func effective_steps() -> Array[TownStepDef]:
 	if not steps.is_empty():
 		return steps
-	return TownDef.default_steps()
+	return TownDef.default_steps(use_tensor_roads, enable_walls)
 
 
 ## 内置标准链（每次调用生成新实例，资源间互不干扰）
-static func default_steps() -> Array[TownStepDef]:
+## use_walls=false(现代城市等) 时不挂城墙步骤, 链里完全没有墙/门逻辑
+static func default_steps(use_tensor: bool = false, use_walls: bool = true) -> Array[TownStepDef]:
 	var list: Array[TownStepDef] = []
 	list.append(TownSiteStep.new())
-	list.append(TownRoadStep.new())
-	list.append(TownArterialStep.new())
+	# S2 路网二选一: A*主街生长 / 张量场流线追踪
+	list.append(TensorRoadStep.new() if use_tensor else TownRoadStep.new())
+	# 张量场主街已承担干道骨架+集散次街职责, ArterialStep 仅在 A* 模式追加
+	if not use_tensor:
+		list.append(TownArterialStep.new())
 	list.append(TownRingStep.new())
 	list.append(TownAlleyStep.new())
 	list.append(TownPlazaStep.new())
 	list.append(TownParcelStep.new())
 	list.append(TownWardStep.new())
 	list.append(TownBuildingStep.new())
-	list.append(TownWallStep.new())
+	# 城墙+城门: 仅古城/要塞类城镇挂载(现代城市 enable_walls=false 时整步跳过)
+	if use_walls:
+		list.append(TownWallStep.new())
 	list.append(TownInteriorStep.new())
 	list.append(TownGreeneryStep.new())
 	list.append(TownStreetStep.new())

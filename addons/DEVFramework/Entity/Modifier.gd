@@ -11,12 +11,13 @@ func _init(p_source, p_value: int, p_mode: Mode = Mode.VALUE):
 	value = p_value
 	mode = p_mode
 
+## 单修饰器应用(顺序语义, 仅供兼容/单步场景); 聚合请用 ModifierValue 的分阶段计算
 func apply(base: int) -> int:
 	match mode:
 		Mode.VALUE:
 			return base + value
 		Mode.PERCENT:
-			return base * value / 100
+			return int(round(base * value / 100.0))
 	return base
 
 func _to_string():

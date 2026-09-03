@@ -10,6 +10,8 @@ class_name TownParcelStep extends TownStepDef
 @export_range(16, 512, 2) var lot_max_area := 60
 ## 地块面积下限（小于丢弃转绿地）
 @export_range(4, 64, 1) var lot_min_area := 18
+## 地块最短边（格）：切分时保证两半沿切轴都不窄于此值，防细条地块
+@export_range(1, 8, 1) var lot_min_edge := 2
 
 
 func apply(ctx: TownGenContext) -> void:

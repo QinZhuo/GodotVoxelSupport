@@ -20,6 +20,8 @@ var name: String:
 @export var tr_name: String:
 	get():
 		return tr(name)
+	set(value):
+		_set_tr_name(value)
 
 func _to_string() -> String:
 	if is_built_in():
@@ -37,6 +39,16 @@ func get_csv_path() -> String:
 	var csv_name: String = get_script().get_global_name()
 	csv_name = csv_name.trim_suffix("Def").to_snake_case()
 	return "res://Assets/Translation/{0}.csv".format([csv_name])
+
+## 写入翻译到 CSV 文件（仅编辑器下生效）
+func _set_tr_name(value: String) -> void:
+	if not Engine.is_editor_hint():
+		return
+	var locale := TranslationTool.get_current_locale()
+	if locale.is_empty():
+		locale = TranslationServer.get_locale()
+	CSVDataAccess.set_translation_value(get_csv_path(), name, locale, value)
+	CSVDataAccess.apply_translation(get_csv_path(), locale)
 
 func get_root_def() -> Def:
 	if is_built_in():
@@ -63,5 +75,8 @@ static func load_data(path: String) -> Def:
 	return null
 
 func _validate_property(property: Dictionary) -> void:
-	if property.name.begins_with("tr_"):
+	if property.name == &"tr_name":
+		# 显示在编辑器中，但不存储到资源文件（值存储在 CSV 中）
+		property.usage = PROPERTY_USAGE_EDITOR
+	elif property.name.begins_with("tr_"):
 		property.usage = PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY ## 翻译变量只读且不储存

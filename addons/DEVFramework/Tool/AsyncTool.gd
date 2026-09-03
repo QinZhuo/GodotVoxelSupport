@@ -51,24 +51,40 @@ static func thread_call_with_progress(work: Callable, on_progress: Callable = fu
 	on_progress.call(data.get("p", data.get("progress", 1.0)))
 	return data.get("result")
 
-## 每帧 poll done() 直到返回 true
-static func await_until(done: Callable) -> void:
+## 每帧 poll done() 直到返回 true；带超时检测，超时后强制继续并打印警告日志。
+## [param done] 完成检测回调，返回 true 视为完成
+## [param timeout_ms] 超时时间（毫秒）。>0 时启用超时检测，超时后强制返回
+## [param log_name] 超时日志标识（可选，便于定位）
+static func await_until(done: Callable, timeout_ms: int = -1, log_name: String = "") -> void:
+	var start_time := Time.get_ticks_msec()
 	while not done.call():
+		if timeout_ms > 0 and Time.get_ticks_msec() - start_time > timeout_ms:
+			LogTool.warn("异步", "%s 等待超时(>%dms)，强制继续" % [log_name, timeout_ms])
+			return
 		await Engine.get_main_loop().process_frame
 
-## 等待所有 Signal 各触发一次
-static func await_signals(...sigs) -> void:
-	if sigs.is_empty():
+## 等待所有 Signal 各触发一次；内置超时保护（基于 await_until 的超时检测）。
+## 默认内置 8000ms 超时；日志名会自动拼接等待的信号名（如 "await_signals:on_trigger_end,on_trigger_end"）。
+## 调用方只需传入信号即可。
+static func await_signals(...args) -> void:
+	if args.is_empty():
 		return
-	var remaining := sigs.size()
+	# 自动拼接等待的信号名，便于超时日志精确定位是哪些信号未触发
+	var sig_names := []
+	for i in args.size():
+		var sig: Signal = args[i]
+		sig_names.append(sig.get_name())
+	var log_name := "%s:%s" % ["await_signals", ", ".join(sig_names)]
+	var remaining := args.size()
 	var triggered := {value = 0}
-	for i in sigs.size():
-		var sig: Signal = sigs[i]
-		sig.connect(func(...args):
+	for i in args.size():
+		var sig: Signal = args[i]
+		sig.connect(func(..._sig_args):
 			triggered.value += 1
 			LogTool.log("信号", "已触发[%d/%d]: %s" % [triggered.value, remaining, sig])
 		, CONNECT_ONE_SHOT)
-	await await_until(func(): return triggered.value >= remaining)
+	await await_until(func(): return triggered.value >= remaining, -1, log_name)
+
 
 ## 全局回调延迟（秒），MonitorGame 启动时设为 0.1
 static var await_emit_delay: float = 0.0
@@ -93,21 +109,24 @@ static func call_in_frames(items: Array, per_frame_count: int, process_fn: Calla
 		if idx < items.size() and not cancel_check.call():
 			await Engine.get_main_loop().process_frame
 
-## 等待协程完成，带超时保护。超时后强制继续并打印警告日志。
+## 等待协程完成，基于 await_until 的超时检测实现。超时后强制继续并打印警告日志。
 ## [param action] 要执行的协程函数（Callable），函数内部使用 await 则可被超时保护
-## [param timeout_ms] 超时时间（毫秒）
-## [param log_name] 日志中标识该调用的名称
-static func await_with_timeout(action: Callable, timeout_ms: int, log_name: String) -> void:
+## [param timeout_ms] 超时时间（毫秒）。不传或 <=0 时使用统一的默认等待时间 await_with_timeout_default_ms
+## [param log_name] 日志标识（可选）。为空时自动基于 action 的方法名生成
+static func await_with_timeout(action: Callable, timeout_ms: int = -1, log_name: String = "") -> void:
 	var state := {done = false}
 	# 启动后台协程执行 action，完成后设置 state.done
 	await_call(action, func(): state.done = true)
-	var start_time := Time.get_ticks_msec()
-	await await_until(func():
-		if Time.get_ticks_msec() - start_time > timeout_ms:
-			LogTool.error("异步", "%s 超时(>%dms)，强制继续" % [log_name, timeout_ms])
-			return true
-		return state.done
-	)
+	# 超时时间：未指定时使用统一默认值
+	var t := await_with_timeout_default_ms if timeout_ms <= 0 else timeout_ms
+	# 日志名：为空时自动从 action 提取方法名，便于定位
+	if log_name.is_empty():
+		log_name = action.get_method() if action.is_valid() else "await_with_timeout"
+	# 复用 await_until 的超时检测：state.done 置 true 或超时即继续
+	await await_until(func(): return state.done, t, log_name)
+
+## await_with_timeout 的统一默认等待时间（毫秒），>0 时启用超时检测
+static var await_with_timeout_default_ms: int = 5000
 
 ## 异步执行协程，完成后调用回调。适合"发后不理"场景。
 ## [param action] 要执行的协程
@@ -132,3 +151,29 @@ static func await_emit(s: Signal, ...args) -> void:
 		if await_emit_delay > 0.0 and i < conns.size() - 1:
 			await Engine.get_main_loop().create_timer(await_emit_delay).timeout
 	timer.stop()
+
+## 安全等待一个协程句柄(GDScriptFunctionState), 返回其结果。
+## 引擎陷阱: await 一个【已完成/已失效】的句柄会永久挂起且无任何报错 ——
+## 本方法先经 is_valid() 判定, 仅活跃句柄才真正等待; 失效/非句柄输入返回 null。
+static func await_state_safe(fs: Variant) -> Variant:
+	if _is_active_function_state(fs):
+		return await fs
+	return null
+
+
+## 幂等连接信号：若调用方尚未连接该信号则 connect，防止重复 connect 报错 ERR_INVALID_PARAMETER。
+## [param sig] 目标信号（如 obj.my_signal）
+## [param callable] 连接的回调；注意用 bind 绑定稳定宿主后其恒等，is_connected 才能正确去重
+static func connect_once(sig: Signal, callable: Callable) -> void:
+	if not sig.is_connected(callable):
+		sig.connect(callable)
+
+## 幂等断开信号：仅当已连接时 disconnect
+static func safe_disconnect(sig: Signal, callable: Callable) -> void:
+	if sig.is_connected(callable):
+		sig.disconnect(callable)
+
+static func _is_active_function_state(v: Variant) -> bool:
+	if v == null or not (v is Object) or v.get_class() != "GDScriptFunctionState":
+		return false
+	return bool(v.call("is_valid"))

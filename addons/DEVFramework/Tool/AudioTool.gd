@@ -2,7 +2,7 @@
 ## 通用音频管理工具 — 播放 / 总线 / 保存 / 查询 / 效果链 / 编辑器预览与烘焙
 ## 职责边界:
 ##   · 通用音频管理(非 PCG 专属): 播放任意 AudioStream / 总线效果 / WAV 保存 / 流信息查询
-##   · 程序化**生成**由 PCG 模块控制: PCG/Tool/AudioSynthTool.gd(Def→采样) + PCG/Def/AudioGenDef.gd(PCG 管线接入)
+##   · 程序化**生成**由 Audio 模块承载: Audio/Tool/AudioSynthTool.gd(Def→采样); PCG 经 PCG/Def/AudioGenDef.gd 桥接入管线
 ##     AudioTool 播放时经 AudioSynthTool 生成, 不承担生成桥接职责
 ## 使用:
 ##   AudioTool.play_stream(stream)            # 播放任意音频流(通用)

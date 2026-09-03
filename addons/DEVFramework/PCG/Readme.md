@@ -18,16 +18,20 @@ addons/DEVFramework/PCG/
 │   ├── TextureGenDef.gd       # 程序化纹理生成器（噪声/云/木纹/砖墙/水面，色带映射）
 │   ├── LSystemDef.gd          # L-System 生长生成器（重写规则 turtle 绘制，线段集输出）
 │   ├── TileDef3D / TileSetDef3D  # 3D WFC 六面 socket 瓦片与瓦片集
-│   ├── TownDef.gd             # 城镇生成总控（可插拔步骤链：选址→贴地路网→环路→巷道→广场→地块→建筑→室内→绿化→街具→农田→地形回写）
+│   ├── TownDef.gd             # 城镇生成总控（可插拔步骤链：选址→贴地路网→[干道]→环路→巷道+街区加密→广场→地块→建筑→[城墙]→室内→绿化→街具→农田→地形回写）
 │   ├── TownStepDef.gd         # 城镇步骤抽象基类
-│   ├── steps/                   # 城镇可插拔步骤（12 个，见 docs/城镇生成管线设计案.md）
+│   ├── steps/                   # 城镇可插拔步骤（15 个，见下方管线说明）
 │   │   ├── TownSiteStep.gd    # 选址（地形评分）
-│   │   ├── TownRoadStep.gd    # 道路网（主街坡度A* + 次街生长）
-│   │   ├── TownRingStep.gd    # 边界环路
-│   │   ├── TownAlleyStep.gd   # 巷道细分
+│   │   ├── TownRoadStep.gd    # 道路网 A* 流派（主街坡度A* + 次街生长）
+│   │   ├── TensorRoadStep.gd  # 道路网张量场流派（方向场混合→流线追踪，与 TownRoadStep 二选一）
+│   │   ├── TownArterialStep.gd # 横穿干道+集散次街（仅 A* 流派追加）
+│   │   ├── TownRingStep.gd    # 边界环路（含补生长/死路清理/桥值兜底）
+│   │   ├── TownAlleyStep.gd   # 巷道细分 + 真实街区加密（封闭口袋迭代切割）
 │   │   ├── TownPlazaStep.gd   # 广场 + 中心设施
 │   │   ├── TownParcelStep.gd  # 临街地块细分
+│   │   ├── TownWardStep.gd    # 风格分区
 │   │   ├── TownBuildingStep.gd # 建筑放置（锚点定位 + 分向退线）
+│   │   ├── TownWallStep.gd    # 城墙+城门（enable_walls=false 时整步不挂载，现代城市关闭）
 │   │   ├── TownInteriorStep.gd # 室内家具 + 校验修复
 │   │   ├── TownGreeneryStep.gd # 绿化散布 + 行道树
 │   │   ├── TownStreetStep.gd  # 街具（路灯/长椅）
@@ -319,16 +323,22 @@ var stream: AudioStreamWAV = out["laser"]                # 直接播放/保存
 
 ### 5.9 城镇生成与内容进化 **TownDef**（可插拔步骤管线总控）：
 
-S1 地形评分选址 → S2 贴地道路网(主街坡度A*→边缘枢纽 / 次街扰动生长) →
-环路 → S2b 递归空间细分刻巷道 → 广场(中心设施) → S3 街区提取 → S4 临街地块细分 →
-S5 建筑放置(设施优先 / 住宅填充 / 锚点定位保证门临路 / 切台·桩基贴地) →
+S1 地形评分选址 → S2 贴地道路网(二选一: A*流派=主街坡度A*→边缘枢纽+次街扰动生长 / 张量场流派=方向场混合→流线追踪, use_tensor_roads 切换) →
+[仅A*流派追加横穿干道] → 环路 → S2b 递归空间细分刻巷道 + 真实街区加密(封闭口袋迭代切割至目标尺度) →
+广场(中心设施) → S3 街区提取 → S4 临街地块细分 →
+S5 建筑放置(设施优先 / 住宅填充 / 锚点定位保证门临路 / 切台·桩基贴地 /
+面积·临街宽→楼型楼层的形态规则) →
+[古城配置 enable_walls=true 时挂载城墙城门, 现代城市整步跳过] →
 S6 室内家具(槽位抽变体 + 装饰散布 + 校验修复) + 院落围栏 →
 绿化散布 + 行道树 + 街具(路灯/长椅) + 农田条纹 + V1 地形回写。
-设计全案见 `docs/城镇生成管线设计案.md`、贴地方案见 `docs/城镇贴地放置技术方案.md`：
+环路收口后自动做 稀疏象限补生长 + 死路清理 + 桥值兜底校验。
+> 注：旧 CityDef 均匀网格城市已按设计案移除，城市生成统一走 TownDef 管线；
+> 历史设计案/贴地方案文档已归档删除，以本 Readme 为准。
 
 ```gdscript
 var town: TownDef = load("res://Assets/Def/PCG/City_Grid.tres")
 var layout := PCGTool.generate_town(town, heightmap, seed)   # heightmap 可为 null(平地)
+var layout2 := await PCGTool.generate_town_async(town, heightmap, seed)  # 后台线程版, 大城镇不卡主线程
 layout.town_name             # 城镇名(ContentGenDef NAME 模式生成)
 layout.site                  # 选址点(评分 site_score)
 layout.roads_grid            # 道路层：主街/次街/巷道/桥/环路 值可配(TownDef 导出)
@@ -525,7 +535,8 @@ WFC 演示小贴士：切到「网格」选 WFC 配置，左侧选「刷子」�
 
 ## 测试与基准
 
-`res://Tests/PCG/` 提供确定性 / 约束 / 性能三套自检（`class_name XXTest extends RefCounted`，`static run()`）：
+`res://Scripts/Test/pcg/` 提供确定性 / 约束 / 性能三套自检（`class_name XXTest extends RefCounted`，`static run()` 返回 bool），
+经桥接用例 `Scripts/Test/test_pcg.gd` 接入 TestRunner 套件：
 
 | 脚本 | 验证内容 |
 |---|---|

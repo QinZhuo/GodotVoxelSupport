@@ -14,7 +14,8 @@ DEVFramework 是一套面向 Godot 4 的数据驱动开发框架，通过「Def�
 6. [View 视图层](#六view-视图层)
 7. [MCP 调试服务器](#七mcp-调试服务器)
 8. [典型使用流程](#八典型使用流程)
-9. [FAQ](#九faq)
+9. [已知引擎陷阱](#九已知引擎陷阱必读)
+10. [FAQ](#十faq)
 
 ---
 
@@ -51,13 +52,14 @@ res://Scripts/        # 游戏脚本
 ┌─────────────────────────────────────────────┐
 │  View 视图层    UITool / UIPanel / ArrayView ... │
 ├─────────────────────────────────────────────┤
-│  Entity 实体层  Buff / Modifier / Task / Component │
+│  Entity 实体层  Modifier / Task / StateMachine / ECS桥接 │
 ├─────────────────────────────────────────────┤
 │  Def 定义层     EntityDef / EffectDef / ValueDef │   ← 策划可配置的 *.tres 资源
 └─────────────────────────────────────────────┘
 ```
 
 **设计原则：**
+- **框架 = 机制，项目 = 内容**：框架只保留换一款游戏仍成立的数学/协议/管线（Modifier、Task、EffectDef 协议等）；具体游戏语义（Buff、属性容器、伤害效果）放项目 `Scripts/` 继承实现。边界规则见 [`LAYERS.md`](LAYERS.md)。
 - **Def 只描述静态配置**，不保存运行时状态（见 `Def.gd` 注释）。任何运行时数据都存放在外部上下文（Entity / Component / 场景节点）中。
 - **Entity 是运行时数据载体**，由 `EntityDef` 驱动，可序列化。
 - **View 负责显示**，通过 `data` 属性与数据解耦，数据变化驱动刷新。
@@ -70,6 +72,7 @@ res://Scripts/        # 游戏脚本
 | `dev_framework/log/show_timestamps` | bool | false | 是否显示时间戳 |
 | `dev_framework/log/ignored_tags` | PackedStringArray | `[]` | 被忽略的日志标签 |
 | `dev_framework/save_tool/encrypt_salt` | String | 项目名 | 存档加密盐（备用） |
+| `dev_framework/mcp/ignored_error_patterns` | PackedStringArray | `[]` | eval 附带运行期错误的过滤子串（如 `"对象池"`），命中即不随 eval 结果返回 |
 
 ---
 
@@ -96,11 +99,7 @@ res://Scripts/        # 游戏脚本
 ```
 Def
 ├── EntityDef            # 通用实体定义（中文名、图标、主题色、效果、强度值）
-│   ├── AttributeDef     # 属性定义（tags）
-│   ├── BuffDef          # Buff 定义（tags）
 │   ├── TagDef           # 标签定义（tag 匹配判断）
-│   │   ├── AttributeTagDef
-│   │   └── BuffTagDef
 │   ├── TipDef           # 提示/图鉴定义
 │   └── TaskDef          # 任务定义（抽象）
 │       ├── SignalTaskDef   # 信号驱动任务
@@ -119,6 +118,9 @@ Def
 │   └── MaxValueDef / MinValueDef           # 最大/最小
 └── SignalDef            # 信号定义（抽象）→ connect/disconnect_signal(data, callable)
     └── ConditionSignalDef  # 带条件的信号包装
+
+# 项目层扩展示例（本仓库，见 LAYERS.md 分层约定）
+EntityDef ├── AttributeDef（属性）/ BuffDef（Buff）/ AttributeTagDef / BuffTagDef
 ```
 
 ### 3.3 扩展一个新的 Def
@@ -154,20 +156,22 @@ func _to_string():
 
 ### 3.4 任务（Task）体系
 
-`TaskDef` 定义任务，`Task` 负责运行时推进：
+`TaskDef` 定义任务，`Task` 负责运行时推进。状态机：`INACTIVE → ACTIVE → COMPLETED / FAILED / CANCELLED`。
 
 | 子类 | 行为 |
 |---|---|
 | `SignalTaskDef` / `SignalTask` | 任一信号触发即完成 |
+| `CountTaskDef` / `CountTask` | 计数目标：信号累加到 `required` 即完成（进度型） |
 | `GroupTaskDef` / `GroupTask` | 三种模式：`SEQUENTIAL`（顺序）、`ANY_ORDER`（任意顺序全部）、`COMPLETE_ANY`（任一完成即结束） |
 
 ```gdscript
 var task := Task.create(task_def)  # 通过工厂创建实体
 task.activate(data)
 task.completed.connect(_on_task_done)
+task.get_progress()                # Vector2i(已完成数, 总数)
 ```
 
-任务实体支持 `save_data()` / `load_data()`，可用于任务系统存档。
+任务实体支持 `save_data()` / `load_data()` 与 `Task.restore()` 存档还原；`TaskTool` 提供活动列表/按 Def 查找/聚合存读档。详见 [`Task/Readme.md`](Task/Readme.md)。
 
 ---
 
@@ -177,7 +181,9 @@ task.completed.connect(_on_task_done)
 
 运行时实体基类（`RefCounted`）。提供了 `entity_changed` 信号、统一的 `def` 驱动模式与 `get_desc()`。
 
-### 4.2 Buff（`Buff.gd`）
+### 4.2 Buff（`Buff.gd`，项目层）
+
+> 本仓库已将 Buff 下沉到项目 `Scripts/Entity/Buff.gd`（含业务语义：层数触发效果、联机策略），框架不再内置。以下用法不变，仅位置在项目层。
 
 带层数（stacks）的实体：
 
@@ -210,9 +216,9 @@ attr.value_changed.connect(func(modifier): ...)
 
 ### 4.4 Component（节点组件）
 
-组件继承 `Component`（本质是 `Node`），挂载到场景节点上：
+组件继承 `Component`（本质是 `Node`），挂载到场景节点上。框架只提供 `Component` 基类（宿主查找 + ECS 桥接）；业务容器属项目层，如本仓库的：
 
-| 组件 | 职责 | 关键 API |
+| 组件（项目层） | 职责 | 关键 API |
 |---|---|---|
 | `AttributeComponent` | 管理一组属性 | `get_attribute(name)`、`add_modifier(attr, mod, immediate)`、`remove_modifiers(source)`、`clear()`、`save_data()` |
 | `BuffComponent` | 管理 Buff 层数 | `get_buff(name)`、`add_stacks(name, n)`、`remove_stacks(name, n)`、`clear_stacks(name)`、`save_data()` |
@@ -294,6 +300,30 @@ var out: Dictionary = PCGTool.generate(pipeline_def, seed)
 2D/3D 分块世界、WFC 高级（固定格/回溯/重试/过程动画）、异步生成、seed+增量存档。
 
 **完整使用说明见 [`PCG/Readme.md`](PCG/Readme.md)**。
+
+### 4.8 Camera 虚拟机位（`Camera/`）
+
+3D 镜头管理模块，思路对齐 Unity Cinemachine：场景里摆若干**机位**（`VirtualCamera3D`，只描述取景意图），
+由场景中唯一的**大脑**（`CameraBrain3D`，真实 `Camera3D`）每帧挑出生效机位并平滑混合过去。
+
+```gdscript
+vcam.set_active(true)        # 参与竞争(面板信号可直连 set_active(bind true/false))
+vcam.activate(0.5)           # 代码切换, 本次过渡 0.5 秒
+vcam.deactivate()            # 退出竞争, 自动回落到上一个机位
+CameraTool.get_camera()      # 真实渲染相机(无 Brain 时退回视口相机)
+CameraTool.snap()            # 立即对齐当前机位(传送/场景切换)
+```
+
+- **竞争规则**：`priority` 大者胜，同级取最后激活者 → 「开面板激活机位 / 关面板取消激活」天然构成机位栈；生效机位带缓存，不每帧遍历。
+- **混合**：固定时长 + Tween 曲线（每个机位可单独配 `blend_time/trans/ease`）；位置可选 **直线 / 球面 / 柱面** 轨迹（绕枢纽点绕行，不会切过目标内部）；`lens_fov` 一并插值；混合结束后持续跟随机位。需要 **A→B 专属过渡** 或按来源/目标统一过渡时，在 Brain 的 `blends` 挂 [过渡规则](Camera/Readme.md#过渡规则表blends)（按机位名匹配、支持通配、精确者胜）。
+- **机位能力**：默认固定取景（Inspector 极简）；需要动态取景时挂 [行为资源](Camera/Readme.md#三行为资源camerabehaviordef)——内置 `FollowBehaviorDef`（跟随 + 按轴阻尼 + **死区/软区**）、`LookAtBehaviorDef`（瞄准 + 可配 up）、`NoiseBehaviorDef`（常驻手持抖动，噪声源用 Godot 原生 `Noise`），也可继承 `CameraBehaviorDef` 自定义；另有 `lens_fov`（覆盖视场角）。
+- **不重复造轮子**：碰撞回避用 `SpringArm3D`、路径运镜用 `PathFollow3D`、物理插值用引擎设置——见 [用 Godot 原生能力组合高级机位](Camera/Readme.md#五用-godot-原生能力组合高级机位)。
+- **待机策略**：`standby_update` 三档（ALWAYS / ROUND_ROBIN / NEVER），未生效机位不白跑；上台瞬间自动对齐姿态。
+- **冲击与震屏**：`CameraTool.impulse(pos, strength, radius, duration)` 定向冲击（传播延迟 + 距离衰减）、`CameraTool.shake(strength)` 无方向震屏。
+- **叠加偏移层**：常态特效/鼠标跟随一律写 Brain 的 `position_offset` / `rotation_offset`，与机位混合互不争写 transform（`TweenShake` 把 `property` 指向 `:position_offset` 即可）。
+- **编辑器**：机位有视锥 gizmo（插件注册，生效中显示橙色）与「对齐到编辑器视角」按钮；底部面板 **Camera Viewfinder** 可实时预览机位画面（共享编辑器 3D 视口的 World3D，带三分线构图辅助与 Solo）。
+
+**完整使用说明见 [`Camera/Readme.md`](Camera/Readme.md)**。
 
 ---
 
@@ -387,7 +417,8 @@ await ActorTool.load_data(root, data)
 ### 5.8 程序化音频生成（PCG AudioSynthTool + 通用 AudioTool）
 
 **架构分层**（对齐程序化纹理的 PCG 先例）：
-- **生成（PCG 模块）**：`PCG/Tool/AudioSynthTool.gd`（Def→采样数据，含 `render_data`/`generate`/`randomize_def` 等）+ `PCG/Def/AudioGenDef.gd`（`extends PCGGeneratorDef`，**接入 PCG 管线**，同种子可生成配套音效/BGM）+ 配置 Def（`Def/Audio/*`）+ C++ `AudioSynthEngine`。
+- **生成（Audio 模块，自包含）**：`Audio/Tool/AudioSynthTool.gd`（Def→采样数据，含 `render_data`/`generate`/`randomize_def` 等）+ 配置 Def（`Audio/Def/*`）+ 运行时展开（`Audio/Entity/AudioSequence.gd`）+ C++ `AudioSynthEngine`。
+- **PCG 管线桥接**：`PCG/Def/AudioGenDef.gd`（`extends PCGGeneratorDef`）把 Audio 接入 PCG 管线——同种子可生成配套音效/BGM；依赖方向 PCG→Audio 单向。
 - **通用管理（AudioTool）**：播放任意 `AudioStream`（`play_stream`）、程序化 BGM（`play_loop`，内部经 AudioSynthTool 生成）、总线效果、WAV 保存、流查询、编辑器预览/烘焙——**非 PCG 专属，任何音频都可用**。
 - AudioTool 保留生成方法的兼容代理（标注见 PCG）。
 
@@ -472,6 +503,7 @@ AudioTool.list_examples()                      # 列出全部示例
 | `ArrayViewTool` | 数组视图通用逻辑：`get_item_name` / `create_view` / `free_view`（配合对象池） |
 | `TweenViewTool` | Tween 显隐控制与释放：`update_visible` / `finish_and_free` |
 | `PCGTool` | PCG 统一入口：噪声/网格(2D/3D)/群系/散布/内容/河流道路/分块世界/管线/异步/序列化 |
+| `CameraTool` | Camera 模块统一入口：`get_brain` / `get_camera` / `get_current` / `activate` / `deactivate` / `find` / `snap` |
 | `DevProjectSetup` | 一键创建项目目录结构（编辑器菜单触发） |
 | `SpriteFramesToAnimationLibrary` | `EditorScript`：将选中的 SpriteFrames 生成 AnimationLibrary |
 
@@ -543,7 +575,7 @@ array_view.remove_item(item)
 | 类 | 说明 |
 |---|---|
 | `TweenView / 2D / 3D` | 通过 `tween_visible` 布尔驱动 Tween 显隐 |
-| `OutlineEffect` | 后处理描边：`OutlineEffect.set_outlined(true, mesh)` |
+| `OutlineEffect` | 多实例后处理描边（一个实例 = 一种描边，在 Compositor 资源里配置颜色/宽度/标记通道）。项目侧 @export 直接引用实例资源，调用实例的 `set_marked(true, mesh)` 开关；框架内部悬停走静态快捷方式 `OutlineEffect.set_outlined(true, mesh)`（固定通道 0）。颜色动画由项目侧每帧改实例的 `outline_color` 驱动 |
 | `GLSLShaderEffect` | 可编程后处理（填 `define_code` / `main_code` 实时编译） |
 | `Trail3D` | 拖尾网格 |
 | `BakedPool / BakedPoolManager` | 烘焙对象池（编辑器一键生成池子，运行时 `pool_get`/`pool_push`） |
@@ -653,52 +685,45 @@ claude mcp list        # 查看已配置
 
 | 工具名 | 作用 |
 |---|---|
-| `validate_script` | 校验 GDScript 语法/可编译性（传 `path` 或 `code`，兼容非 `@tool`/纯工具类脚本）|
-| `validate_resource` | 校验资源/场景能否被引擎加载 |
+| `validate` | **统一验证入口**（`kind=script/resource`）。script: 校验 GDScript 语法/可编译性（传 `path` 或 `code`，兼容非 `@tool`/纯工具类脚本）；resource: 校验资源/场景能否被引擎加载 |
 | `list_dir` | 列出目录内容（支持递归）|
 | `classdb_query` | 查询 Godot 类的 API（方法/属性/信号签名）或按关键字搜索类名，供 AI 写脚本前确认原生 API |
-| `get_logs` | 读取编辑器控制台日志（增量/关键字/截断）|
-| `get_errors` | 读取捕获的错误（含来源文件、行号、**GDScript 栈追踪**）|
-| `clear_errors` | 清空错误缓冲区 |
-| `take_screenshot` | 捕获编辑器当前窗口画面（存到 `user://mcp_screenshots/`）|
+| `get_logs` | **统一日志/警告/错误获取**：`kind=log/warning/error`、`source=auto/editor/game`（auto 时游戏运行中自动取游戏侧）、增量游标、重复合并 |
+| `clear_logs` | 清空日志/错误缓冲（`scope=all/logs/errors`，游戏运行中作用于游戏侧）|
+| `take_screenshot` | 截图四模式：text（节点布局文本化）/ game / editor / scene |
 | `get_scene_tree` | 获取当前编辑场景的节点树结构 |
 | `get_node_info` | 读取编辑场景中指定节点属性列表及当前值 |
-| `set_node_property` | 修改编辑场景中节点属性（经 UndoRedo 提交，可 Ctrl+Z 撤销；保存才写回 .tscn）|
+| `set_node_property` | 修改编辑场景中节点属性（UndoRedo 可撤销；保存才写回 .tscn）。含 position/rotation/scale 等 transform 属性（Vector 可传 `'1,2'` 字符串）|
 | `call_node_method` | 触发编辑场景中节点方法 |
-| `get_game_scene_tree` | **运行时**：获取游戏运行中的实时场景树（活实例的名称/类型/实时属性）|
-| `get_game_node_info` | **运行时**：读取运行中节点的实时属性（支持相对路径 / `/root/` 绝对路径含 autoload / `@` 唯一名深搜）|
-| `call_game_node_method` | **运行时**：调用运行中节点的方法（播放动画/切换状态等实时调试触发；支持含 await 的协程方法）|
-| `add_node` | 向编辑场景添加节点/实例化子场景（UndoRedo 可撤销）|
-| `remove_node` / `duplicate_node` | 删除 / 复制场景节点（含子树，UndoRedo 可撤销）|
-| `set_node_transform` | 设置节点位置/旋转/缩放（2D/3D）|
+| `add_node` / `remove_node` / `duplicate_node` | 添加 / 删除 / 复制场景节点（UndoRedo 可撤销）|
 | `connect_signal` | 连接场景节点信号到方法（随场景保存）|
 | `create_resource` | 创建 .tres 资源配置（指定脚本 + 属性字典，配置驱动开发用）|
 | `get_resource_info` | 读取 .tres/.tscn 资源完整属性树（递归，理解配置结构）|
 | `get_editor_activity` | 感知编辑器当前状态（打开场景/选中节点/运行中游戏），用于 AI 与人类协作不踩踏 |
-| `get_project_info` | 项目/版本/当前编辑场景等环境信息 |
-| `get_project_settings` | 主场景/autoload/输入映射/图层命名等关键配置 |
-| `run_game` / `stop_game` | 独立进程启动/停止游戏（日志并入 `get_logs`）|
-| `reload_project` | **重载项目**：重建全局类缓存（新 `class_name` 立即注册）+ 重扫资源；可选重载当前场景 |
-| `eval_code` | 在编辑器内执行一段 GDScript 代码并返回结果（print 进 `get_logs`；**支持 await**，协程代码等待完成后返回真实值）|
-| `get_global_classes` | 列出已注册的全部全局类（含路径/基类）|
+| `get_project_info` | 项目信息统一入口：`section=basic`(默认)/`settings`(主场景/autoload/输入映射)/`classes`(全局类清单) |
+| `game_control` | 游戏运行控制：`action=start`(支持 uid:// 场景；已在运行时自动接管重启)/`stop` |
+| `reload_project` | **软重启（重载）编辑器**：修改框架代码后调用以统一全局类脚本代次让新逻辑生效（原重扫逻辑已由编辑器自动处理）；`save=true` 自动保存场景、`delay_sec` 延迟触发；重启期间 MCP 断开、回来自动恢复 |
+| `eval_code` | 在编辑器内执行一段 GDScript 代码并返回结果。**支持 await**：代码含 `await` 时等待协程完成后回传最终返回值（`timeout_ms` 默认 8000/上限 15000，超时协程继续后台执行、实例自动延迟回收）|
 | `open_scene` | 在编辑器打开指定场景 |
 | `set_main_scene` | 设置项目主场景并保存 |
-| `get_project_setting` / `set_project_setting` | 读/写任意 ProjectSettings 项（可即时保存）|
+| `project_setting` | 读/写任意 ProjectSettings 项：`value` 缺省=读取，提供=写入保存（数组/对象自动还原 Variant）|
 | `save_all` | 保存全部场景与项目设置 |
 | `reimport` | 重新导入指定资源（重建导入缓存）|
 | `search_symbols` | 跨脚本/场景/资源搜索符号（函数/变量/类定义与引用，支持节点名与资源路径）|
-| `find_resource_users` | **双向依赖查询**：`users`=谁引用该资源（反向），`deps`=该资源依赖谁（正向，带类型标签）。改/删资源前查完整影响面 |
-| `auto_verify` | **自动验证闭环**：启动场景后按操作序列模拟玩家行为（wait/click/drag/key/eval/poll/screenshot），每步后增量查错。支持 hard/soft 模式、flaky 重试、依赖变化检测 |
+| `find_resource_users` | **双向依赖查询**：`users`=谁引用该资源（反向），`deps`=该资源依赖谁（正向，带类型标签）。目标为带全局类名的脚本时额外扫描类名在其它 .gd 中的词边界使用点（kind=class_ref，覆盖 @onready/类型注解/静态调用等无路径引用场景）。改/删资源前查完整影响面 |
+| `auto_verify` | **自动验证闭环**：启动场景后按操作序列模拟玩家行为（wait/click/drag/key/eval/poll/screenshot），每步后增量查错。支持 hard/soft 模式、flaky 重试、依赖变化检测。游戏已在运行时自动接管（停止旧实例后重跑） |
 | `verify_fix` | **有状态验证修复会话**：记住验证配置，AI 改完代码后 `continue` 即重跑（省去重传操作序列），支持多会话并行 |
+| `run_tests` | 运行项目单元测试（`Scripts/Test/`，extends TestCase，test_ 开头方法自动发现；支持协程用例）。返回统计与失败明细 |
+| `refresh_tools` | 手动重建 MCP 工具注册表：改框架脚本后调用，客户端重拉 tools/list 即生效（免重启） |
 
-> **提示**：修改插件代码（`MCPDevServer.gd` 等）后，新工具需**重启编辑器**才会注册（脚本热重载不会重建工具注册表）。
+> **提示**：修改插件代码（`MCPDevServer.gd` 等）后，新工具需**重启编辑器**才会注册（脚本热重载不会重建工具注册表）。可调用 `reload_project` 工具一键软重启（合并自原 restart_editor），或改完后调 `refresh_tools` 重建注册表。
 
 ### 5. 典型 AI 调试流程
 
 1. 打开项目并启用 `DEV Framework` 插件，连接 http://127.0.0.1:8931/mcp。
-2. AI `list_dir` / `validate_script` / `validate_resource` 排查脚本与资源问题。
+2. AI `list_dir` / `validate` 排查脚本与资源问题。
 3. AI `get_scene_tree` / `get_node_info` 理解当前编辑场景的节点与属性。
-4. AI 用 `set_node_property` / `call_node_method` 快速验证逻辑，`get_errors` 定位报错。
+4. AI 用 `set_node_property` / `call_node_method` 快速验证逻辑，`get_logs`(kind=error) 定位报错。
 5. `take_screenshot` 查看编辑器画面实际表现。
 
 ### 5.1 自动验证闭环（auto_verify / verify_fix）
@@ -724,16 +749,12 @@ claude mcp list        # 查看已配置
 | `click` | `x, y` | 模拟点击（复用 `simulate_click`）|
 | `drag` | `from_x, from_y, to_x, to_y` | 模拟拖拽 |
 | `key` | `key` | 模拟按键 |
-| `eval` | `code` | 执行 GDScript，结果记入 step（支持 await）|
+| `eval` | `code` | 执行 GDScript，结果记入 step |
 | `poll` | `code, timeout_ms, interval_ms` | **轮询直到条件满足**（等异步/动画结果，探测期 eval 错误不计入验证）|
 | `screenshot` | `capture_type` | 截图（结果含路径）|
-| `game_tree` | `max_depth, include_properties, expect_contains, expect_not_contains` | **运行时场景树快照 + 结构断言**：期望内容缺失或禁止内容出现即该步 fail |
-| `node_info` | `path, expect_contains, expect_not_contains` | 运行时节点实时属性快照 + 断言 |
-
-> 断言参数（`expect_contains` / `expect_not_contains`）支持字符串或字符串数组；`game_tree` 断言作用于树文本（含节点名/类型），`node_info` 断言作用于属性 JSON 文本。
 
 **判定与模式**：
-- `verdict=pass/fail`；`first_failed_step` 指向首个失败操作（断言失败/动作报错/轮询超时），`first_error_step` 指向首个运行期脚本错误步骤，`steps[i].status/errors/message` 给出定位。
+- `verdict=pass/fail`；`first_error_step` 指向出错操作下标，`steps[i].status/errors` 给出定位。
 - `stop_on_error=true`（hard）任一步出错立即停；`false`（soft）跑完全部步骤再汇总。
 - `retries>0` 失败自动重启场景重跑（排除 flaky）；**曾失败但最终通过会标 `was_flaky=true`**（警惕被时序掩盖的潜在 bug），返回 `retry_history`。
 - `prev_snapshot`（由上次返回的 `scene_deps` 提供）可检测**场景依赖（脚本/配置/图片/音频等）是否变化**，结果含 `deps_changed`。
@@ -767,12 +788,12 @@ verify_fix {action:"abort"}                        # 结束会话
 - 改任何场景节点前，先用 `get_scene_tree` / `get_node_info` 看清结构与当前属性，再动手。
 - **不确定 Godot 原生 API 的用法时，先用 `classdb_query` 查询**（方法/属性/信号签名），再写代码，避免臆造 API。
 - `set_node_property` 与 `add_node` 已接入 UndoRedo，AI 的修改用户可按 **Ctrl+Z 撤销**——请放心使用，但也不要反复试探性乱改，尽量一次改对。
-- 修改场景节点或新建脚本/资源后，记得 `save_scene` / `reload_project`，否则改动不会持久化或全局类不生效。
+- 修改场景节点或新建脚本/资源后，记得 `save_scene`（新 class_name 全局类识别依赖重启/扫描，见陷阱1）。
 - 长任务（重编译、生成音频、导出）会占用编辑器，且单次 MCP 调用有超时，**拆成小步骤**完成，不要一次塞超长指令。
-- 排查脚本问题时：先 `validate_script` 验证语法，再 `get_errors` 看运行期错误（含栈追踪），配合 `get_logs` 定位。
+- 排查脚本问题时：先 `validate` 验证语法，再 `get_logs`(kind=error) 看运行期错误（含栈追踪），配合 `get_logs` 定位。
 
 **安全边界**
-- 编辑器 **运行游戏时**（`get_editor_activity` 显示 game_running=true），应避免对编辑场景做结构性改动；如需改结构先 `stop_game`。
+- 编辑器 **运行游戏时**（`get_editor_activity` 显示 game_running=true），应避免对编辑场景做结构性改动；如需改结构先 `game_control`(action=stop)。
 - `eval_code` / `game_eval` 可执行任意 GDScript，是**可信开发者工具**，AI 应最小权限使用：只读/求解优先，改动场景尽量走 `set_node_property` 等专门工具而非 eval。
 - `write_file` / `delete_file` 会直接读写磁盘，先确认路径无误，避免越界到已知目标文件之外。
 
@@ -817,7 +838,34 @@ var data = await SaveTool.load_async("user://save.json", SaveTool.Mode.JSON)
 
 ---
 
-## 九、FAQ
+## 九、已知引擎陷阱（与框架协作必读）
+
+以下均为 Godot 4.7 实测行为，无报错、难排查，编写/修改框架及使用协程时务必知晓：
+
+### 陷阱1：改框架代码后必须重启编辑器
+运行中的编辑器对**已注册全局类脚本**的 `reload()` 静默无效——磁盘是新代码，运行实例永远执行旧逻辑，且无任何提示。
+- 症状：新加的方法调用报 "Nonexistent function"、行为与源码不符
+- 根因：GDScriptCache 命中缓存时不校验文件 mtime（引擎 issue #49298）；外部编辑器的改动依赖编辑器窗口聚焦时的 mtime 比对（issue #72825）
+- **自动化路径（推荐）**：MCP 工具 `reload_project` —— 封装 `EditorInterface.restart_editor(save=true)`，AI 改完框架代码后自主调用，延迟 1 秒触发软重启（先送达确认响应再重启），编辑器自动保存、自动重启、MCP 自动回连，用户零操作
+- 缓解：`refresh_tools` 可重建工具注册表（仅工具清单，不解决类逻辑）
+- 辅助：开启编辑器设置 `text_editor/behavior/files/auto_reload_scripts_on_external_change` 后，普通项目脚本的外部修改会自动重载（历史版本有 bug，4.4+ 基本可用）
+
+### 陷阱2：await 已完成的协程句柄会永久挂起
+对已执行完毕的 `GDScriptFunctionState` 再 `await`，协程永不恢复且零报错。
+典型场景：先 emit 信号唤醒子协程、再 await 其句柄——唤醒瞬间链条已完成，随后的 await 即死锁。
+- 正确姿势：保持"先挂起、后触发、再等待"的顺序；或用 `AsyncTool.await_state_safe(fs)`（内部经 `is_valid()` 判定，失效句柄立即返回 null）
+
+### 陷阱3：跨编译代次的类型化赋值静默失败
+脚本被 reload 后产生新的类代次，此时 `var x: OldClass = new_obj` 若两侧代次不同，赋值结果为 **null 且不报错**。
+- 正确姿势：框架内部跨 reload 边界传递对象用无类型变量；怀疑时用 `is` 断言代替信任类型标注
+
+### 陷阱4：can_instantiate() 对 RefCounted 脚本可能误报 false
+`extends RefCounted` 的全局类脚本 `can_instantiate()` 返回 false 但实际可正常 `new()`。
+- 正确姿势：直接 `new()` 并判空，不要依赖该判定
+
+---
+
+## 十、FAQ
 
 **Q1：Def 能否存运行时数据？**
 不能。Def 是纯配置（`Resource`），运行时状态应放 Entity / Component / 场景节点，通过外部上下文（如 `GameContext`）传入。

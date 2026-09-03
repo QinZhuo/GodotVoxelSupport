@@ -60,9 +60,16 @@ func reset():
 		value_changed.emit(null)
 
 func _recompute(modifier: Modifier = null):
-	var v := _base_value
+	# 分阶段聚合(GAS 式固定公式): (base + ΣVALUE) × ΠPERCENT, 内部浮点消截断, 对外取整
+	# 消除修饰器插入顺序导致的非确定性(旧实现按列表顺序逐个应用, 混用两种模式时结果依赖添加顺序)
+	var acc := float(_base_value)
+	var percent := 1.0
 	for m in _modifiers:
-		v = m.apply(v)
+		if m.mode == Modifier.Mode.VALUE:
+			acc += m.value
+		else:
+			percent *= m.value / 100.0
+	var v := int(round(acc * percent))
 	if _value == v:
 		return
 	_value = v

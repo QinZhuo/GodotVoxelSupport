@@ -616,8 +616,41 @@ func batch_clamp_where(anchor, must: Array, op_comp, op_field: StringName,
 	for c in conditions:
 		_record_access(_resolve_component_name(c.get("comp", &"")))
 	_mark_dirty(ocn)
+	var col = _core.get_column(ocn, op_field)
+	if col is PackedInt32Array:
+		return _gd_batch_clamp_int(an, must, ocn, op_field, mincn, min_field, maxcn, max_field, conditions)
 	return _core.batch_clamp_where(an, _names(must), ocn, op_field,
 		mincn, min_field, maxcn, max_field, _normalize_conds(conditions))
+
+
+## int 列钳制的 GDScript 兜底实现(原生 batch_clamp 仅支持 float 列):
+## 用对齐查询取 满足条件 且 拥有 op/min/max 字段的实体行号, 逐行 clampi 后整列写回
+func _gd_batch_clamp_int(an: StringName, must: Array, ocn: StringName, op_field: StringName,
+		mincn: StringName, min_field: StringName, maxcn: StringName, max_field: StringName,
+		conditions: Array) -> int:
+	var comps: Array = [ocn]
+	if mincn != ocn:
+		comps.append(mincn)
+	if maxcn != ocn and maxcn != mincn:
+		comps.append(maxcn)
+	var aligned: Array = query_aligned_where(an, _names(must), [], _normalize_conds(conditions), comps)
+	var rows_op: PackedInt32Array = aligned[0]
+	var rows_min: PackedInt32Array = aligned[comps.find(mincn)]
+	var rows_max: PackedInt32Array = aligned[comps.find(maxcn)]
+	var col: PackedInt32Array = _core.get_column(ocn, op_field)
+	var minc = _core.get_column(mincn, min_field)
+	var maxc = _core.get_column(maxcn, max_field)
+	var changed := 0
+	for k in rows_op.size():
+		var v := col[rows_op[k]]
+		var cv := clampi(v, int(minc[rows_min[k]]), int(maxc[rows_max[k]]))
+		if cv != v:
+			col[rows_op[k]] = cv
+			changed += 1
+	if changed > 0:
+		_core.set_column(ocn, op_field, col)
+		_mark_dirty(ocn)
+	return changed
 
 ## 缓存条目是否仍有效: 全局版本一致 且 所有依赖组件版本一致。
 func _entry_valid(entry: Dictionary) -> bool:
@@ -698,6 +731,7 @@ func batch_apply(anchor, must: Array, op_comp, op_field: StringName, op: int, fa
 	return _core.batch_apply(an, _names(must), ocn, op_field, op, factor, addend)
 
 ## 批量边界钳制: col = clamp(col, min, max), min/max 取自其他组件字段
+## 注: 原生实现仅支持 float 列; int 列自动走 GDScript 兜底(否则静默不写回)
 func batch_clamp(anchor, must: Array, op_comp, op_field: StringName, min_comp, min_field: StringName, max_comp, max_field: StringName) -> int:
 	var an := _resolve_component_name(anchor)
 	var ocn := _resolve_component_name(op_comp)
@@ -710,6 +744,9 @@ func batch_clamp(anchor, must: Array, op_comp, op_field: StringName, min_comp, m
 	for mn in _names(must):
 		_record_access(mn)
 	_mark_dirty(ocn)
+	var col = _core.get_column(ocn, op_field)
+	if col is PackedInt32Array:
+		return _gd_batch_clamp_int(an, must, ocn, op_field, mincn, min_field, maxcn, max_field, [])
 	return _core.batch_clamp(an, _names(must), ocn, op_field,
 		mincn, min_field, maxcn, max_field)
 

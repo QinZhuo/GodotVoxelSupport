@@ -3,7 +3,7 @@
 ## 运行时实体基类 —— 也是 **ECS 桥接的重点**。
 ##
 ## 理想用法: 只用 Entity(及其子类) 就能把数据放进 ECS, 无需接触裸 ECS API:
-##   var e := Entity.new()                  # 或 Buff/Modifier 等子类
+##   var e := Entity.new()                  # 或项目自定义子类
 ##   e.ecs.world = world                    # 绑定世界(懒创建 ECS 实体)
 ##   e.add_component(HealthComponent, {"hp": 100})   # 数据进 ECS 列
 ##   e.set_field(HealthComponent, &"hp", 80)         # 读写 ECS

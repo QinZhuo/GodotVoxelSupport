@@ -15,8 +15,8 @@ static func get_item_name(item) -> String:
 	return str(hash(item))
 
 ## 创建并配置一个数据项的视图实例。
-## 支持对象池复用，自动设置 data 和 name。
-## [param view_scene] 用于实例化的 PackedScene（pool 为空时必填）
+## 池空时自动回退为 view_scene 现场实例化(不再返回 null), pool_push 对外来节点会 queue_free 释放。
+## [param view_scene] 用于实例化的 PackedScene(pool 为空/池不足时的兜底, 必填)
 ## [param pool] 可选的 BakedPool 对象池
 ## [param item] 数据项
 ## [returns] 配置好的视图节点，失败返回 null
@@ -24,7 +24,7 @@ static func create_view(view_scene: PackedScene, pool, item) -> Node:
 	var view: Node
 	if pool:
 		view = pool.pool_get()
-	else:
+	if view == null:
 		if not view_scene:
 			LogTool.error("数组视图", "view_scene 未赋值!")
 			return null

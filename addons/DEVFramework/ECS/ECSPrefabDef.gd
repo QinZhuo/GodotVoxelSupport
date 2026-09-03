@@ -9,7 +9,7 @@ extends Def
 ## 字段名/类型由 Godot 的 @export 系统保证, 不会手写出错。
 ##
 ## 继承 Def 获得: name 自动派生、翻译(zh_*)、存档短路径、get_desc,
-## 与其他 Def(AttributeDef/BuffDef/GoapActionDef)完全同一体系。
+## 与其他 Def(GoapActionDef/TaskDef)完全同一体系。
 ##
 ## 用法:
 ##   1. 创建 .tres 资源(放在 res://Assets/Def/ECS/ 下), 在 Inspector 里

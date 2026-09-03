@@ -10,8 +10,6 @@
 @export var color: Color = Color.WHITE
 ## 效果
 @export var effect: EffectDef
-## 强度值 用于数值平衡
-@export var power: float
 
 func get_desc(_data) -> String:
 	var display_name := get_display_name(_data)

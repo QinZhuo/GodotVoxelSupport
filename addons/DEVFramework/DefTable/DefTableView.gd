@@ -1,4 +1,4 @@
-﻿@tool
+@tool
 ## DefTable 顶部 Main Screen: 按 Def 类型目录加载 Def 资源(.tres),
 ## 以只读表格展示, 支持选择/复制/粘贴(批量赋值)/Inspector 联动/排序。
 ## 参照 resources_spreadsheet_view 的表格交互, 但去掉单元格内编辑, 只做展示+复制粘贴。
@@ -844,8 +844,14 @@ func _update_visible_rows(force_rebuild: bool = false) -> void:
 
 	var view_h := maxf(grid_scroll.size.y, 1.0)
 	var new_first: int = grid.row_index_at(grid_scroll.scroll_vertical)
+	# 累加起点必须是首行的绝对偏移 row_offsets[new_first], 而非 scroll_vertical:
+	# 当滚动停在高行中部时(scroll_y > row_offsets[new_first]), 从 scroll_y 累加会把
+	# 已滚过该行的像素虚增进去, 使 acc 提前触底 —— 窗口过早收窄, 视口下方行不被物化
+	# ("下面的数据没更新")。从首行真实顶部开始累加才能精确覆盖完整视口。
+	var acc := 0.0
+	if grid.row_offsets.size() > 0:
+		acc = grid.row_offsets[new_first]
 	var vis_count := 0
-	var acc := grid_scroll.scroll_vertical
 	while new_first + vis_count < rows.size() and acc < grid_scroll.scroll_vertical + view_h:
 		acc += grid.row_heights[new_first + vis_count]
 		vis_count += 1

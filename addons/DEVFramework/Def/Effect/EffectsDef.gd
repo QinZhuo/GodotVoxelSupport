@@ -8,8 +8,9 @@ func apply(data):
 		await effect.apply(data)
 
 func revert(data):
-	for effect in effects:
-		await effect.revert(data)
+	# 逆序回滚(undo 栈 LIFO 语义): apply 正序叠加的状态必须倒序撤销才可逆
+	for i in range(effects.size() - 1, -1, -1):
+		await effects[i].revert(data)
 
 func _to_string():
 	var effects_str: String = ""

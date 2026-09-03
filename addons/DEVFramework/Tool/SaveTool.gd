@@ -28,6 +28,28 @@ static func check_version(data: Variant, version: String, defaults: Dictionary) 
 	return result
 
 
+## 比较两个点分语义版本号（如 "0.5.0"、"1.2.3.4"）
+## [br]a 高于 b 返回 1，a 低于 b 返回 -1，相等返回 0
+## [br]缺失的部分按 0 处理；任一为空视为相等（返回 0），便于对旧数据无为处理
+static func compare_version(a: String, b: String) -> int:
+	if a.is_empty() or b.is_empty():
+		return 0
+	var pa := a.split(".")
+	var pb := b.split(".")
+	var n := maxi(pa.size(), pb.size())
+	for i in n:
+		var va := int(pa[i]) if i < pa.size() else 0
+		var vb := int(pb[i]) if i < pb.size() else 0
+		if va != vb:
+			return 1 if va > vb else -1
+	return 0
+
+
+## a 版本号严格高于 b 时返回 true（含相等语义，遵循 compare_version）
+static func is_version_newer(a: String, b: String) -> bool:
+	return compare_version(a, b) > 0
+
+
 # ============================================================
 # 数据合并
 # ============================================================

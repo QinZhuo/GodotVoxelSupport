@@ -3,7 +3,8 @@ class_name AudioGenDef extends PCGGeneratorDef
 ## 程序化音频生成器 — 把 AudioSynthDef 渲染成 AudioStreamWAV, 接入 PCG 管线
 ## 对齐 TextureGenDef(程序化纹理): 同为"内容生成器", 结果写入 ctx.output[key]
 ## 使同一种子管线可同时生成世界 + 配套音效/BGM(自适应音频/程序化配乐)
-## 生成核心在 AudioSynthTool(PCG/Tool) + AudioSynthEngine(C++)
+## 生成核心在 AudioSynthTool(Audio 模块, Audio/Tool) + AudioSynthEngine(C++)
+## 依赖方向: PCG(本模块) → Audio(单向桥接, Audio 不反向依赖 PCG)
 
 ## 要渲染的音频定义(音色/编曲/鼓/和声/效果全部配置驱动)
 @export var synth_def: AudioSynthDef
