@@ -35,7 +35,7 @@ if(NOT DEFINED GODOTCPP_TARGET)
 endif()
 
 # 引入 godot-cpp（其 CMake 通过 GODOTCPP_API_VERSION 选择对应 extension_api.json）
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../godot-cpp ${CMAKE_CURRENT_BINARY_DIR}/godot-cpp)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp ${CMAKE_CURRENT_BINARY_DIR}/godot-cpp)
 
 add_library(voxelnative SHARED
     src/register_types.cpp
