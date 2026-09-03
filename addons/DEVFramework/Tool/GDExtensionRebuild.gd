@@ -8,13 +8,13 @@ extends EditorScript
 ## 一次运行自动完成: 发现扩展工程 → 读 CMakeLists 与 *.gdextension 分辨"如何构建/产物去哪"
 ## → CMake 配置(必要时)/异步编译(不卡编辑器, 实时回显) → 产物按规格改名部署。
 ##
-## 三条"事实源", 不猜:
+## 三条"事实源", 不猜、无兜底:
 ##   1) CMakeLists.txt(唯一事实源): 解析 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 /
 ##      各平台条件块 OUTPUT_NAME → 精确推导本机产物文件名与绝对路径(CMake 直出, 无需搬移);
 ##   2) *.gdextension [libraries]: 按产物文件名精确反查声明它的规格文件(确定性匹配,
 ##      不依赖修改时间等启发式信号); 产物落点以 CMake 推导为准, 规格键仅作白名单清理;
 ##   3) CMakeCache.txt(已配置过): 生成器/编译器/API 全以缓存为准, 只 cmake --build。
-## CMakeLists 非模板写法(未钉 OUTPUT_NAME/直出目录)时才回退旧的 规格平台键+修改时间 匹配。
+## 任一步推导失败 → 明确报错终止(宁可失败也不猜测), 修正 CMakeLists/规格文件后重跑。
 ##
 ## 源码目录: 唯一工程根 res://gdextension(不存在才扫 addons/*/);
 ## 构建类型 debug/release 跟随当前编辑器; 构建后端固定只用 CMake 原生 Makefiles。
@@ -91,7 +91,7 @@ func _run() -> void:
 	var ok := await _build(build_dir)
 	if not ok:
 		return _finish_with("编译失败(查看 build.log)")
-	_deploy(build_dir, ext_file, target_res, info)
+	_deploy(ext_file, target_res)
 	var elapsed := (Time.get_ticks_msec() - _start_ms) / 1000.0
 	var summary := "构建成功(用时 %.1fs)\n产物: %s\n日志: res://.godot/gdextension_build/build.log" % [elapsed, target_res]
 	if _opt(KEY_RELOAD_EDITOR, true):
@@ -120,12 +120,12 @@ func _finish_with(result: String) -> void:
 
 # ------------------------------------------------------------ 零配置定位
 
-## 定位构建目标 —— 以 CMakeLists 为唯一事实源, 不再做模糊匹配:
+## 定位构建目标 —— 以 CMakeLists 为唯一事实源, 无兜底:
 ##   1) 解析 CMakeLists.txt 的 add_library 目标名 / *_OUTPUT_DIRECTORY 直出目录 /
 ##      各平台条件块里的 OUTPUT_NAME;
 ##   2) 由此精确推导"本机预期产物文件名 + 绝对路径"(CMake 直出, 无需搬移);
 ##   3) 用产物文件名反查声明它的 *.gdextension 规格文件([libraries] 值精确匹配文件名)。
-## CMakeLists 未按模板钉产物名时, 才回退旧的 规格平台键+修改时间 匹配(兜底)。
+## 任一步推导失败 → 直接报错终止, 不做猜测式匹配。
 func _locate() -> Dictionary:
 	var dirs: Array[String] = []
 	if _is_ext_source("res://gdextension"):
@@ -142,52 +142,18 @@ func _locate() -> Dictionary:
 			_log("    - 候选: ", d)
 	var info := _read_cmake_info(source_dir)
 
-	# 主路径: CMake 已钉产物名 → 产物路径完全可推导
 	var art := _expected_artifact(info)
-	if not art.is_empty():
-		var ext := _find_ext_by_artifact(String(art.get("file")))
-		if ext != "":
-			_log("已锁定(CMake→规格 精确匹配): ", source_dir, " + ", ext)
-			return {"source": source_dir, "extension": ext, "artifact": String(art.get("res")), "info": info, "mode": "cmake"}
-		_log("CMake 产物 %s 未被任何 *.gdextension 声明, 回退平台键匹配。" % String(art.get("file")))
-
-	# ---- 回退: 规格文件 [libraries] 平台键 + 修改时间(仅当 CMakeLists 非模板写法) ----
-	var ext_order: Array[String] = []
-	var seen := {}
-	for e in find_extension_files(source_dir):
-		if not seen.has(e):
-			seen[e] = true
-			ext_order.append(e)
-	if ext_order.is_empty():
-		_log("未找到 *.gdextension 规格文件(常见位置: addons/**/Native、addons/**、bin)。")
+	if art.is_empty():
+		_log("CMakeLists.txt 缺少模板级产物定义, 无法推导本机产物路径。")
+		_log("需要: add_library(<name> SHARED) + *_OUTPUT_DIRECTORY 直出目录 + 各平台条件块 OUTPUT_NAME。")
 		return {}
-	var want := "%s.%s.%s" % [_os_label(), _build_type(), _arch()]
-	var want_short := "%s.%s" % [_os_label(), _build_type()]
-	var runnable: Array[String] = []
-	for e in ext_order:
-		var keys := _parse_library_keys(e)
-		if keys.has(want) or keys.has(want_short):
-			runnable.append(e)
-	var pool: Array[String] = runnable if not runnable.is_empty() else ext_order
-	var ext_file: String = pool[0]
-	var newest := -1.0
-	for e in pool:
-		var m := FileAccess.get_modified_time(e)
-		if m > newest:
-			newest = m
-			ext_file = e
-	if dirs.size() > 1:
-		var by_ext := _source_matching_addon(ext_file, dirs)
-		if by_ext != "" and by_ext != source_dir:
-			source_dir = by_ext
-			info = _read_cmake_info(source_dir)
-	var target_res := _parse_library_target(ext_file)
-	if target_res.is_empty():
+	var file := String(art.get("file"))
+	var ext := _find_ext_by_artifact(file)
+	if ext == "":
+		_log("CMake 产物 %s 未被任何 *.gdextension 的 [libraries] 声明, 无法定位规格文件。" % file)
 		return {}
-	_log("已选择(回退匹配): ", source_dir, " + ", ext_file)
-	if not runnable.is_empty() and runnable.size() < ext_order.size():
-		_log("其余规格无本机(", want, ")条目, 已忽略。")
-	return {"source": source_dir, "extension": ext_file, "artifact": target_res, "info": info, "mode": "fallback"}
+	_log("已锁定(CMake→规格 精确匹配): ", source_dir, " + ", ext)
+	return {"source": source_dir, "extension": ext, "artifact": String(art.get("res")), "info": info}
 
 
 ## 由 CMake 信息推导本机预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
@@ -265,17 +231,6 @@ func _abs_to_res(p: String) -> String:
 	return p
 
 
-## 规格文件位于某个"同样是工程候选"的 addons 目录下时, 判定归属
-static func _source_matching_addon(ext_file: String, dirs: Array) -> String:
-	var parts := ext_file.split("/", false)
-	if parts.size() >= 3 and parts[1] == "addons":
-		var addon_dir := "res://addons/%s" % parts[2]
-		for d in dirs:
-			if d == addon_dir:
-				return d
-	return ""
-
-
 ## 自动发现工程目录候选(静态, 供外部/MCP 复用): 项目根 gdextension/ + 各 addons/*/
 static func discover_source_dirs() -> Array[String]:
 	var out: Array[String] = []
@@ -302,17 +257,7 @@ static func _is_ext_source(dir_path: String) -> bool:
 	return has_build and has_cpp
 
 
-## 自动收集 *.gdextension(静态, 供外部/MCP 复用): 工程目录内/bin + addons/**/Native + addons/**
-static func find_extension_files(source_dir: String) -> Array[String]:
-	var found: Array[String] = []
-	var seen := {}
-	for probe in [source_dir, source_dir.path_join("bin")]:
-		_collect_ext(probe, found, seen, 0)
-	_collect_ext("res://addons", found, seen, 3)
-	found.sort()
-	return found
-
-
+## 收集 *.gdextension: 工程目录内/bin + addons/**/Native + addons/**
 static func _collect_ext(dir_path: String, out: Array[String], seen: Dictionary, depth: int) -> void:
 	if depth < 0 or seen.has(dir_path):
 		return
@@ -338,21 +283,6 @@ static func _collect_ext(dir_path: String, out: Array[String], seen: Dictionary,
 	dir.list_dir_end()
 
 
-## 解析 [libraries] 中当前 平台.类型[.架构] 键 → res:// 落点; 键缺失给出清单
-func _parse_library_target(ext_file: String) -> String:
-	var keys := _parse_library_keys(ext_file)
-	var want := "%s.%s.%s" % [_os_label(), _build_type(), _arch()]
-	var want_short := "%s.%s" % [_os_label(), _build_type()]
-	for try_key in [want, want_short]:
-		if keys.has(try_key):
-			return keys[try_key]
-	_log("规格文件中缺少本机条目 ", want, "(或 ", want_short, "), 现有条目:")
-	for k in keys:
-		_log("    - ", k, " = ", keys[k])
-	return ""
-
-
-## 解析 .gdextension 的 [libraries] 段(静态, 供外部/MCP 复用)
 static func _parse_library_keys(ext_file: String) -> Dictionary:
 	var keys := {}
 	var f := FileAccess.open(ext_file, FileAccess.READ)
@@ -1099,36 +1029,15 @@ func _drain_log(raw_path: String) -> bool:
 
 # ------------------------------------------------------------ 部署: 找产物 → 按规格键改名放入落点
 
-## 部署: 第一事实是 CMake 直出 —— 预期产物路径存在即完成, 不搬移不改名;
-## 仅当直出缺失(CMake 未配 OUTPUT_DIRECTORY 等)才兜底在构建目录里查找产物,
-## 复制为预期文件名 —— 复制目标同样由 CMakeLists 推导, 不做猜测式改名。
-func _deploy(build_dir: String, ext_file: String, target_res: String, info: Dictionary) -> void:
+## 部署: 唯一事实是 CMake 直出 —— 预期产物路径存在即完成, 不搬移不改名;
+## 不存在即报错(由定位阶段保证能走到这里时产物路径已确定), 不做猜测式查找/复制。
+func _deploy(ext_file: String, target_res: String) -> void:
 	var target_abs := _abs(target_res)
-	if FileAccess.file_exists(target_abs):
-		_log("产物已就位(CMake 直出): ", target_res)
-	else:
-		var roots: Array[String] = [build_dir]
-		for d in info.get("out_dirs", []):
-			roots.append(String(d))
-		var artifact := _find_artifact(roots, String(info.get("target", "")))
-		if artifact.is_empty():
-			_log("未定位到产物, 请检查上方编译输出。")
-			return
-		DirAccess.make_dir_recursive_absolute(target_abs.get_base_dir())
-		if artifact == target_abs:
-			_log("产物已就位: ", target_abs)
-		else:
-			_log("产物(兜底定位): ", artifact)
-			if _copy_binary(artifact, target_abs):
-				_log("已部署: ", target_res)
-			else:
-				_log("覆盖目标失败: ", target_abs)
-				if OS.get_name() == "Windows":
-					_log("原因通常是编辑器正加载该 dll(Windows 文件锁)。请关闭编辑器后手动复制:")
-				else:
-					_log("请检查目标目录权限后重试, 或手动复制:")
-				_log("    copy  \"%s\"  →  \"%s\"" % [artifact, target_abs])
-				return
+	if not FileAccess.file_exists(target_abs):
+		_log("预期产物未生成: ", target_abs)
+		_log("请确认 CMakeLists 已钉 OUTPUT_DIRECTORY 直出目录与各平台 OUTPUT_NAME, 并检查上方编译输出。")
+		return
+	_log("产物已就位(CMake 直出): ", target_res)
 	# 部署后白名单清理: 该目录只保留 *.gdextension [libraries] 声明的各平台必要产物
 	_cleanup_native(target_abs.get_base_dir(), ext_file, target_res)
 
@@ -1170,53 +1079,6 @@ func _library_whitelist(ext_file: String) -> Dictionary:
 		if file != "":
 			keep[file] = true
 	return keep
-
-
-## 在多个搜索根里找"名字匹配 CMake 目标"的最新共享库(跳过 godot-cpp 中间产物)
-func _find_artifact(roots: Array, target: String) -> String:
-	var stems := PackedStringArray()
-	if target != "":
-		stems.append(target)
-		stems.append("lib" + target)
-	var found: Array[String] = []
-	for r in roots:
-		_walk_artifact(String(r), 0, stems, found)
-	if found.is_empty():
-		return ""
-	found.sort_custom(func(a: String, b: String) -> bool:
-		return FileAccess.get_modified_time(a) > FileAccess.get_modified_time(b))
-	return found[0]
-
-
-func _walk_artifact(dir_path: String, depth: int, stems: PackedStringArray, out: Array[String]) -> void:
-	if depth > 3:
-		return
-	if dir_path.to_lower().ends_with("godot-cpp"):
-		return
-	var dir := DirAccess.open(dir_path)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var entry := dir.get_next()
-	while entry != "":
-		if entry.begins_with("."):
-			entry = dir.get_next()
-			continue
-		var full := dir_path.path_join(entry)
-		if dir.current_is_dir():
-			_walk_artifact(full, depth + 1, stems, out)
-		elif entry.ends_with(".dll") or entry.ends_with(".so") or entry.ends_with(".dylib"):
-			var ok_stem := stems.is_empty()
-			if not ok_stem:
-				var stem := entry.get_basename()
-				for s in stems:
-					if stem == s:
-						ok_stem = true
-						break
-			if ok_stem:
-				out.append(full)
-		entry = dir.get_next()
-	dir.list_dir_end()
 
 
 # ------------------------------------------------------------ 平台信息
@@ -1261,23 +1123,6 @@ func _res(p: String) -> String:
 
 func _abs(p: String) -> String:
 	return ProjectSettings.globalize_path(_res(p))
-
-
-## 字节级复制(失败返回 false 由调用方给指引)
-func _copy_binary(src: String, dst: String) -> bool:
-	var f_in := FileAccess.open(src, FileAccess.READ)
-	if f_in == null:
-		return false
-	var data := f_in.get_buffer(f_in.get_length())
-	f_in.close()
-	if data.is_empty():
-		return false
-	var f_out := FileAccess.open(dst, FileAccess.WRITE)
-	if f_out == null:
-		return false
-	f_out.store_buffer(data)
-	f_out.close()
-	return true
 
 
 func _print_out(out: Array) -> void:
