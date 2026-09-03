@@ -3,7 +3,7 @@ extends RefCounted
 
 ## ECS 原生桥接 —— 懒加载 ECSCore(C++ 库)。
 ## 原生库由**框架级统一入口** FrameworkNative 管理:
-##   res://addons/DEVFramework/Native/devecs.gdextension
+##   res://addons/DEVFramework/Native/dev.gdextension
 ## ECS 只声明自己的必需方法集并委托加载, 不直接操作 ClassDB。
 ## 框架强依赖 C++ 原生库: 库缺失/版本不匹配时明确 push_error 报错(无静默回退)。
 ## 所有调用走动态 ClassDB 派发, 避免编辑器启动早期静态解析崩溃。

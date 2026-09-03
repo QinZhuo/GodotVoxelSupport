@@ -41,7 +41,7 @@ func setup(p_def: GridGenDef, p_rng: RandomNumberGenerator, p_fixed: Dictionary 
 	# 纯 C++ 实现（框架强依赖 PCGWFCAnimator，无 GDScript 回退）
 	var native := FrameworkNative.get_native(&"PCGWFCAnimator", [&"setup", &"step", &"get_wave"])
 	if native == null:
-		push_error("WFCAnimator.setup: 原生库 PCGWFCAnimator 不可用! 请确认 Native/devecs.gdextension 已加载。")
+		push_error("WFCAnimator.setup: 原生库 PCGWFCAnimator 不可用! 请确认 Native/dev.gdextension 已加载。")
 		done = true
 		return
 	_core = native
@@ -159,6 +159,3 @@ func _fixed_index(key) -> int:
 			if x >= 0 and x < width and y >= 0 and y < height:
 				return y * width + x
 	return -1
-
-
-

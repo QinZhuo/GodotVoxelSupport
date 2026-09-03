@@ -265,7 +265,7 @@ world.tick(delta)
 ### 4.6b 框架级共享原生库（`Native/`）
 
 整个 DEVFramework 的 C++ 原生能力集中在**唯一一个共享扩展**：
-`res://addons/DEVFramework/Native/devecs.gdextension`（编译产物也在该目录）。任何模块的原生类都注册在这一个库里，共用一份二进制。当前已注册：
+`res://addons/DEVFramework/Native/dev.gdextension`（编译产物也在该目录）。任何模块的原生类都注册在这一个库里，共用一份二进制。当前已注册：
 - `ECSCore` — ECS 高性能实体组件系统
 - `PCGErode` — PCG 高度图侵蚀加速（C++ 水力粒子液滴含悬崖/沉积参数 + 热侵蚀平滑坡面）
 - `PCGWFC` / `PCGWFC3D` — PCG 2D/3D 波函数坍缩加速（大图快 ~30 倍）
@@ -279,7 +279,7 @@ world.tick(delta)
 - `FrameworkNative.instantiate_script(script)` — 稳定的脚本实例化（规避全局类注册时序问题）
 - `FrameworkNative.refresh(...)` — 清缓存（库热重载/测试）
 
-新增模块原生能力时：把 C++ 类注册进 `devecs.gdextension`（需源码重编译），GDScript 侧通过 `FrameworkNative.get_native(&"你的类名", [...])` 访问，不要各自维护一份 ClassDB 检测逻辑。
+新增模块原生能力时：把 C++ 类注册进 `dev.gdextension`（需源码重编译），GDScript 侧通过 `FrameworkNative.get_native(&"你的类名", [...])` 访问，不要各自维护一份 ClassDB 检测逻辑。
 
 ### 4.7 PCG 程序化内容生成（`PCG/`）
 
@@ -450,7 +450,7 @@ AudioTool.list_examples()                      # 列出全部示例
 
 | 能力 | 实现 | 说明 |
 |---|---|---|
-| 振荡/滤波/包络/鼓 | **C++ 原生 `AudioSynthEngine`** | Godot 无逐采样合成 API，必须自研；放共享原生库（`devecs.gdextension`），性能远高于 GDScript 逐采样 |
+| 振荡/滤波/包络/鼓 | **C++ 原生 `AudioSynthEngine`** | Godot 无逐采样合成 API，必须自研；放共享原生库（`dev.gdextension`），性能远高于 GDScript 逐采样 |
 | 混响 / 延迟 / 失真 / 限幅 / 压缩 / EQ | **Godot 内置 `AudioEffect`** | 播放时经 `AudioSynthDef.bus` + `fx_chain` 路由到带效果的总线；**离线烘焙同样支持**——用内置 `AudioEffectRecord` 录音法把效果链固化进 .wav（`bake_wav(..., bake_fx=true)`，默认开启）|
 | WAV 写盘 | 自写 44 字节标准 PCM 头 | 4.7.1 内置 `save_to_wav()` 会把 16bit 立体声写成 mono 头（数据仍交错），Godot 重导入后声道/时长错乱，故自写标准头 |
 | 循环播放 | **Godot 通用 `AudioStreamPlayer` + `AudioStreamWAV.loop_mode`** | `AudioTool.play_loop()` 先完整生成 loop 流再交给引擎原生播放 |

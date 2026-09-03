@@ -287,7 +287,7 @@ static func generate_heightmap(def: HeightMapDef, rng: RandomNumberGenerator) ->
 	if def.erosion_droplets > 0:
 		var native := FrameworkNative.get_native(&"PCGErode", [&"erode"])
 		if native == null:
-			push_error("PCGTool.generate_heightmap: 原生库 PCGErode 不可用! 请确认 Native/devecs.gdextension 已加载。")
+			push_error("PCGTool.generate_heightmap: 原生库 PCGErode 不可用! 请确认 Native/dev.gdextension 已加载。")
 		else:
 			var out: PackedFloat32Array = native.call(&"erode",
 				hm.heights, hm.width, hm.height,
@@ -301,7 +301,7 @@ static func generate_heightmap(def: HeightMapDef, rng: RandomNumberGenerator) ->
 	if def.thermal_iterations > 0:
 		var native := FrameworkNative.get_native(&"PCGErode", [&"thermal"])
 		if native == null:
-			push_error("PCGTool.generate_heightmap: 原生库 PCGErode 不可用! 请确认 Native/devecs.gdextension 已加载。")
+			push_error("PCGTool.generate_heightmap: 原生库 PCGErode 不可用! 请确认 Native/dev.gdextension 已加载。")
 		else:
 			var out: PackedFloat32Array = native.call(&"thermal",
 				hm.heights, hm.width, hm.height,
@@ -438,7 +438,7 @@ static func generate_lsystem(def: LSystemDef, rng: RandomNumberGenerator) -> Pac
 	# 纯 C++ 实现（框架强依赖共享原生库 PCGLSystem，无 GDScript 回退）
 	var native := FrameworkNative.get_native(&"PCGLSystem", [&"generate"])
 	if native == null:
-		push_error("PCGTool.generate_lsystem: 原生库 PCGLSystem 不可用! 请确认 Native/devecs.gdextension 已加载。")
+		push_error("PCGTool.generate_lsystem: 原生库 PCGLSystem 不可用! 请确认 Native/dev.gdextension 已加载。")
 		return PackedVector2Array()
 	return native.call(&"generate",
 		def.axiom, def.rules, def.iterations,
@@ -3958,7 +3958,7 @@ static func _gen3d_surface(grid: GeneratedGrid3D, def: Grid3DGenDef, rng: Random
 static func _gen3d_cave(grid: GeneratedGrid3D, def: Grid3DGenDef, rng: RandomNumberGenerator) -> void:
 	var native := FrameworkNative.get_native(&"PCGCave3D", [&"generate"])
 	if native == null:
-		push_error("PCGTool.generate_grid_3d: 原生库 PCGCave3D 不可用! 请确认 Native/devecs.gdextension 已加载。")
+		push_error("PCGTool.generate_grid_3d: 原生库 PCGCave3D 不可用! 请确认 Native/dev.gdextension 已加载。")
 		return
 	var out: PackedInt32Array = native.call(&"generate",
 		grid.width, grid.height, grid.depth,
@@ -3989,7 +3989,7 @@ static func _gen3d_wfc(grid: GeneratedGrid3D, def: Grid3DGenDef, rng: RandomNumb
 	# 纯 C++ 实现（框架强依赖共享原生库 PCGWFC3D，无 GDScript 回退）
 	var native := FrameworkNative.get_native(&"PCGWFC3D", [&"generate"])
 	if native == null:
-		push_error("PCGTool.generate_grid_3d: 原生库 PCGWFC3D 不可用! 请确认 Native/devecs.gdextension 已加载。")
+		push_error("PCGTool.generate_grid_3d: 原生库 PCGWFC3D 不可用! 请确认 Native/dev.gdextension 已加载。")
 		grid.fill(def.solid_value)
 		return
 	# socket 字符串 → 连续 id（注意：lambda 捕获变量不跨调用持久，必须用显式循环编号）
@@ -4096,7 +4096,7 @@ static func _gen_wfc(grid: GeneratedGrid, def: GridGenDef, rng: RandomNumberGene
 	# 纯 C++ 实现（框架强依赖共享原生库 PCGWFC，无 GDScript 回退）
 	var native := FrameworkNative.get_native(&"PCGWFC", [&"generate"])
 	if native == null:
-		push_error("PCGTool.generate_grid: 原生库 PCGWFC 不可用! 请确认 Native/devecs.gdextension 已加载。")
+		push_error("PCGTool.generate_grid: 原生库 PCGWFC 不可用! 请确认 Native/dev.gdextension 已加载。")
 		grid.fill(def.solid_value)
 		return
 	# socket 字符串 → 连续 id（注意：lambda 捕获变量不跨调用持久，必须用显式循环编号）

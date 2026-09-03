@@ -4,7 +4,7 @@ extends RefCounted
 ## 框架级统一 GDExtension 原生桥接。
 ##
 ## 整个 DEVFramework 的 C++ 原生能力集中在**唯一一个共享扩展**：
-##   res://addons/DEVFramework/Native/devecs.gdextension
+##   res://addons/DEVFramework/Native/dev.gdextension
 ## （ECS 的 ECSCore、未来 PCG 侵蚀加速等模块原生类都注册在这里，共用一份二进制）。
 ##
 ## 职责：
@@ -16,7 +16,7 @@ extends RefCounted
 ## 保证整个框架共用一份原生库、错误信息统一。
 
 ## 共享原生库配置路径（相对 res://）
-const NATIVE_EXTENSION_PATH := "res://addons/DEVFramework/Native/devecs.gdextension"
+const NATIVE_EXTENSION_PATH := "res://addons/DEVFramework/Native/dev.gdextension"
 
 ## 已缓存的原生实例（模块类名 → Object）
 static var _cache: Dictionary = {}
