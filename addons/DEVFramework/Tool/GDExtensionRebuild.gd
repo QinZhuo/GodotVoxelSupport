@@ -60,6 +60,7 @@ const GDEXT_TYPES := ["debug", "release", "template_debug", "template_release"] 
 const GDEXT_ARCHS := ["arm64", "x86_64", "arm32", "x86_32", "universal"]          # 声明键/规范名中的架构 tag
 const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # 检测到卡死(无新目标且无编译器进程)时自动终止进程树
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
+const KEY_BUILD_TYPES := "dev_framework/gdextension_build/build_types"   # 要构建的构建类型(Array[String], 如 ["release"]=仅 release); 空=当前编辑器类型+另一版本
 
 static var _me: GDExtensionRebuild   # 异步构建期间持有自身(菜单调用方不持有实例)
 
@@ -75,6 +76,7 @@ var _no_advance := 0        # 目标数无推进的累计秒(心跳间隔 10s)
 var _stall_checked := false # 卡死检测已判定并处理
 var _stall_killed := false  # 已自动终止卡死进程树
 var _synced: Array[String] = []   # 本次运行同步的声明条目(最终摘要展示)
+var _build_types: Array[String] = []   # 本次实际要构建的构建类型(由配置决定, 部署保活/清理据此收敛)
 
 
 func _run() -> void:
@@ -210,11 +212,9 @@ func _locate() -> Dictionary:
 	var info := _read_cmake_info(source_dir)
 	var gdext_res := _find_gdextension(info)
 
-	# 双版本 × 架构: 类型 = [当前编辑器类型优先, 另一类型]; 架构 = 本机 + 声明中缺失的交叉架构(仅 macOS)
-	var types: Array[String] = [_build_type()]
-	for t in ["debug", "release"]:
-		if not types.has(t):
-			types.append(t)
+	# 类型 = 配置的构建类型(如 ["release"]=仅 release, 单版本提速); 空配置则 [当前编辑器类型优先, 另一类型]
+	# 架构 = 本机 + 声明中缺失的交叉架构(仅 macOS)
+	var types: Array[String] = _plan_build_types()
 	var archs := _plan_archs(gdext_res)
 	var targets: Array = []
 	for t in types:
@@ -1154,12 +1154,13 @@ func _rename_lib(dir_path: String, from_file: String, to_file: String) -> bool:
 func _final_cleanup(info: Dictionary, gdext_res: String, target: String) -> void:
 	var native_dir: String = info.get("out_dirs", [])[0]
 	var keep := _gdext_keep_files(gdext_res)
-	for a in _declared_archs(gdext_res):   # 声明仍是架构键的类型(合并失败/未合并) → 规范名保护
-		keep.append(_canonical_file(target, "debug", a))
-		keep.append(_canonical_file(target, "release", a))
+	var types: Array[String] = _build_types if not _build_types.is_empty() else ["debug", "release"]
+	for a in _declared_archs(gdext_res):   # 声明仍是架构键的类型(合并失败/未合并) → 规范名保护(仅保护实际构建的类型)
+		for bt in types:
+			keep.append(_canonical_file(target, bt, a))
 	if _os_label() == "macos":
-		keep.append(_universal_file(target, "debug"))     # lipo 合并产物恒保
-		keep.append(_universal_file(target, "release"))
+		for bt in types:   # lipo 合并产物恒保(仅保护实际构建的类型)
+			keep.append(_universal_file(target, bt))
 	if keep.is_empty():
 		_log("无清理白名单, 跳过 Native 清理。")
 		return
@@ -1576,6 +1577,28 @@ func _os_token() -> String:
 ## 构建类型跟随当前编辑器(debug 编辑器 → debug 产物优先构建)
 func _build_type() -> String:
 	return "debug" if OS.is_debug_build() else "release"
+
+
+## 本次要构建的构建类型清单(配置驱动):
+##   ProjectSettings: dev_framework/gdextension_build/build_types (Array[String])
+##   合法项仅 debug / release —— 填 ["release"] 即"只构建 release"单版本提速。
+##   空/未配置 → 回退默认: 当前编辑器类型优先 + 另一版本(双版本)。
+##   结果写入 _build_types, 部署保活(_final_cleanup)据此只保护实际构建的类型产物。
+func _plan_build_types() -> Array[String]:
+	var cfg: Array = ProjectSettings.get_setting(KEY_BUILD_TYPES, [])
+	var out: Array[String] = []
+	for t in cfg:
+		var s := String(t).to_lower()
+		if (s == "debug" or s == "release") and not out.has(s):
+			out.append(s)
+	if out.is_empty():
+		out = [_build_type()]
+		for t in ["debug", "release"]:
+			if not out.has(t):
+				out.append(t)
+	_build_types = out
+	_log("构建类型清单: ", " ".join(out))
+	return out
 
 
 # ------------------------------------------------------------ 小工具
