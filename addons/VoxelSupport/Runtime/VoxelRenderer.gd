@@ -1658,6 +1658,20 @@ func _update_mesh_async() -> void:
 	# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居），
 	# 替代逐体素 dirty_voxels 的大批量追踪——大崩塌移除不再主线程逐体素写 dict
 	rebuild_chunks = data.get_dirty_chunks()
+	var had_dirty := not rebuild_chunks.is_empty()
+	# 【流式防抖】剔除已在延迟补建队列的脏 chunk：其重建权归 _deferred_chunks
+	# （晋升时 _process_deferred_chunks 重新 _mark_chunk_dirty，且未来构建的快照必含
+	# 已到达的邻居数据，无需边界缝合标记）。否则流式波次中每个新到 chunk 都把视锥外
+	# 的延迟邻居重新标脏 → 每帧一轮"脏N→视锥内0→再延迟"空转：gen_id 无限递增、
+	# 枚举+视锥判定每帧照付、永不收敛（STREAMING 大波次主线程卡顿的根源）。
+	var dropped := 0
+	if not _deferred_chunks.is_empty():
+		for i in range(rebuild_chunks.size() - 1, -1, -1):
+			if _deferred_chunks.has(rebuild_chunks[i]):
+				rebuild_chunks.remove_at(i)
+				dropped += 1
+	if diag_enabled and dropped > 0:
+		print("[诊断] 增量重建防抖: 剔除已在延迟队列的脏 chunk %d 个" % dropped)
 	# 限量批次：超过上限的放回 dirty（下帧续建）。回原点/大崩塌时 dirty 可上千，
 	# 单帧全量快照 + 派发上千 worker → 主线程阻塞（update_mesh 数百 ms → 帧率个位数）。
 	# 分批后每帧快照/派发量受限，网格经 _process_mesh_build_queue 平滑上传。
@@ -1670,6 +1684,10 @@ func _update_mesh_async() -> void:
 		# 重建只生成第一批，其余 chunk 网格缺失（破坏demo初始只显示一个小角落、
 		# 流式demo脚底下不显示）。置位后下帧 _process 继续消费下一批。
 		_request_update()
+	# 有脏标记但全部已在延迟队列 → 本帧无生产性工作：不递增 gen_id、不派发任务、
+	# 不再触发下一帧（延迟队列晋升补建时自会标脏触发），杜绝空转轮次。
+	if rebuild_chunks.is_empty() and had_dirty:
+		return
 	# 材质快照复用缓存（仅在材质变化时深拷贝），避免每帧大对象深拷贝
 	var snapshot_materials := _materials_snapshot
 	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
