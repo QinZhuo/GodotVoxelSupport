@@ -347,7 +347,10 @@ var _lod_mesh_apply_scheduled: bool = false
 @export_range(1, 100, 1) var _mesh_build_per_frame: int = 12
 # 增量重建每帧最多处理的 dirty chunk 数：超出放回下帧续建（防回原点/大崩塌单帧
 # 快照+派发上千 worker 阻塞主线程）。值越大重建越快但帧尖峰风险越高。
-@export_range(8, 512, 8) var _rebuild_batch_limit: int = 64
+# 默认按 CHUNK_VOLUME 等比缩放：64 是 16³（4096 体素）时代调的值；32³ 单个 halo
+# 快照约 2~4ms，64 个/帧 ≈ 主线程 130~200ms → 等比换算 16³的64 ≈ 32³的8。
+# 数量之外另有毫秒预算双保险（_snapshot_budgeted）。
+@export_range(8, 512, 8) var _rebuild_batch_limit: int = 64 * 4096 / VoxelChunk.CHUNK_VOLUME
 # 帧尾构建是否已排期（防重复 call_deferred）
 var _mesh_build_scheduled: bool = false
 # GPU 忙检测：上一帧渲染耗时超过此阈值(ms)时暂停本帧构建，避免 ArrayMesh
@@ -1716,7 +1719,15 @@ func _update_mesh_async() -> void:
 		var visible: Array[Vector3i] = _filter_visible_chunks(all_chunks)
 		if diag_enabled:
 			print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
-		var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
+		var snap := _snapshot_budgeted(visible)
+		var snapshot: Dictionary = snap["snapshot"]
+		var taken: int = snap["taken"]
+		if taken < visible.size():
+			# 超快照预算部分放回 dirty（下帧走增量分支续建），防初始/切换模式一帧全量快照尖峰
+			for j in range(taken, visible.size()):
+				data._mark_chunk_dirty(visible[j])
+			_request_update()
+			visible.resize(taken)
 		_pending_task_count = visible.size()
 		for ck in visible:
 			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
@@ -1733,11 +1744,40 @@ func _update_mesh_async() -> void:
 		var visible: Array[Vector3i] = _filter_visible_chunks(rebuild_chunks)
 		if diag_enabled:
 			print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
-		var snapshot: Dictionary = data.snapshot_chunks_halo(visible)
+		var snap := _snapshot_budgeted(visible)
+		var snapshot: Dictionary = snap["snapshot"]
+		var taken: int = snap["taken"]
+		if taken < visible.size():
+			# 超快照预算部分放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位）
+			for j in range(taken, visible.size()):
+				data._mark_chunk_dirty(visible[j])
+			_request_update()
+			visible.resize(taken)
 		_pending_task_count = visible.size()
 		for ck in visible:
 			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
 				snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+
+
+## 可见 chunk 的 halo 快照（毫秒预算版）：逐片快照、超预算即止。
+## 32³ 单 chunk 的 halo 快照（27 邻居 preload + COW）约 2~4ms，整批一次快照在
+## 波次期会拖出 130~200ms 主线程尖峰。原生 snapshot_chunks_halo 对每个请求 chunk
+## 自动外扩 27 邻居（voxel_native.cpp），故切片快照不产生边界洞。
+## 返回 {snapshot: Dictionary(ck -> 缓冲), taken: int}；未快照尾部由调用方放回 dirty。
+func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
+	var budget_ms := 6.0
+	if visible.size() > _rebuild_batch_limit:
+		budget_ms = 10.0
+	var t0 := Time.get_ticks_usec()
+	var snapshot: Dictionary = {}
+	var taken := 0
+	while taken < visible.size():
+		var endi := mini(taken + 4, visible.size())
+		snapshot.merge(data.snapshot_chunks_halo(visible.slice(taken, endi)))
+		taken = endi
+		if taken < visible.size() and (Time.get_ticks_usec() - t0) / 1000.0 > budget_ms:
+			break
+	return {snapshot = snapshot, taken = taken}
 
 
 ## 统一工作线程结果字典契约（#6）：全量/增量/单chunk/空场景所有生成路径
@@ -1950,10 +1990,10 @@ func _process_mesh_build_queue() -> void:
 		# 自适应：若本帧构建已超预算，提前停止避免帧尖峰（大量破坏时预算放宽）
 		if (Time.get_ticks_usec() - t0) / 1000.0 > budget_ms:
 			break
-	# 若还有剩余，下帧继续
-	if not _mesh_build_queue.is_empty():
-		_mesh_build_scheduled = true
-		call_deferred("_process_mesh_build_queue")
+	# 剩余留待下帧：由 _process 每帧检测非空后调度（一帧至多一次）。
+	# 【不能】在此 call_deferred 自续调度——MessageQueue.flush 会把 flush 期间新推入的
+	# 调用在同帧继续执行，自续 = 同帧反复进本函数（每次 budget 个/3ms 直至清空积压），
+	# 流式波次期几十个 worker 结果回主线程时整队一帧打穿，数量+毫秒限流双双失效。
 	if diag_enabled and built > 0:
 		print("[诊断] GPU上传批处理: %d chunk, 耗时%.2f ms, 剩余%d" % [
 			built, (Time.get_ticks_usec() - t0) / 1000.0, _mesh_build_queue.size()])
@@ -1985,9 +2025,10 @@ func _process_lod_mesh_apply_queue() -> void:
 			# 内带丢弃（LOD0 区由 LOD0 chunk 反映洞）：数据已同步，解除重建标记防重复派发
 			_lod_rebuild[level].erase(bk)
 		_lod_mesh_apply_queue.remove_at(i)
-	if not _lod_mesh_apply_queue.is_empty():
-		_lod_mesh_apply_scheduled = true
-		call_deferred("_process_lod_mesh_apply_queue")
+	# 剩余留待下帧（_process 每帧调度一次）。不能 call_deferred 自续：同帧 flush 内会
+	# 反复进本函数直至清空，帧预算失效（同 _process_mesh_build_queue 的教训）。
+	if diag_enabled and built > 0:
+		print("[诊断] LOD大块挂载批处理: %d 个, 剩余%d" % [built, _lod_mesh_apply_queue.size()])
 
 
 ## 粗 LOD 大块是否仍在显示区间（挂载前校验，相机移动后过期结果丢弃）。
