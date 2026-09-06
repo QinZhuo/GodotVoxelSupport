@@ -66,40 +66,20 @@ if(APPLE)
 endif()
 
 # 将编译产物直接输出到插件分发目录 addons/VoxelSupport/Native/
-# （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，编译完即就位，无需手动复制）
-# 输出名与 .gdextension 声明的文件名严格一致，避免运行期加载到旧库（签名不匹配崩溃）：
-#   macOS debug:   libvoxelnative.macos.debug.<架构>.dylib(架构随构建自动填充)
-#   Linux debug:   libvoxelnative.linux.debug.x86_64.so
-#   Windows debug: voxelnative.windows.debug.x86_64.dll
-# 注意：macOS/Linux 需保留默认 "lib" 前缀（与 .gdextension 条目匹配），
-#       故不设置 PREFIX ""；Windows 平台 CMake 默认无前缀，输出名已与条目一致。
+# （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，产物落盘即到位，无需手动复制）
+# 产物命名交给 GDExtensionRebuild(项目→工具)统一改名为 .gdextension 声明的规范名
+# (<名>.<平台>.<类型>.<架构>.<ext>)；CMake 只负责直出默认名：
+#   Windows: voxelnative.dll / macOS: libvoxelnative.dylib / Linux: libvoxelnative.so
+# 注意：不经工具的裸 cmake 构建，产物名未经规范命名，交付前需跑一次工具（或手动改名）。
+# Windows 必须显式去前缀：MSVC 默认无前缀，但 MinGW/GCC 的 CMake 会默认加 "lib"
+# （CMAKE_SHARED_LIBRARY_PREFIX=lib），直出 libvoxelnative.dll 与工具约定的默认名
+# voxelnative.dll 不符 → 部署分支误判（旧库被当新产物、新产物被当残留清理）。
+# macOS/Linux 需保留默认 "lib" 前缀（与 .gdextension 条目匹配），故不设置 PREFIX ""。
+if(WIN32)
+    set_target_properties(voxelnative PROPERTIES PREFIX "")
+endif()
 set_target_properties(voxelnative PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
 )
-# macOS 架构 tag: 交叉构建(-DCMAKE_OSX_ARCHITECTURES=arm64|x86_64)取指定架构,
-# 未指定时取宿主架构(CMAKE_HOST_SYSTEM_PROCESSOR = uname -m)。
-# 不得硬编码架构名: 否则交叉构建轮会直出同名产物, 覆盖/抢占其他架构的产物文件。
-if(APPLE)
-    set(VOSX_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-    if(CMAKE_OSX_ARCHITECTURES)
-        list(LENGTH CMAKE_OSX_ARCHITECTURES VOSX_ARCH_COUNT)
-        if(VOSX_ARCH_COUNT EQUAL 1)
-            list(GET CMAKE_OSX_ARCHITECTURES 0 VOSX_ARCH)
-        endif()
-    endif()
-endif()
-if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.debug.${VOSX_ARCH}")
-elseif(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.macos.release.${VOSX_ARCH}")
-elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.windows.debug.x86_64")
-elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.windows.release.x86_64")
-elseif(UNIX AND NOT APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.linux.debug.x86_64")
-elseif(UNIX AND NOT APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    set_target_properties(voxelnative PROPERTIES OUTPUT_NAME "voxelnative.linux.release.x86_64")
-endif()

@@ -70,6 +70,7 @@ var _start_ms := 0
 var _raw_log_pos := 0       # raw_build.log 尾部读取游标
 var _total_targets := -1    # 编译目标总数缓存(Makefile 解析, -1=未解析)
 var _objects_logged := 0    # 上次打印磁盘进度时的目标数(≥30 才刷一行)
+var _build_started_unix := 0.0   # 本次编译启动时刻(Unix 秒): 判定默认名产物是否"本次链接", 防部署残留旧库冒充新产物
 
 var _prev_done_count := -1  # 上次心跳时的目标数(判断是否还在推进)
 var _no_advance := 0        # 目标数无推进的累计秒(心跳间隔 10s)
@@ -930,6 +931,7 @@ func _build(build_dir: String, type: String) -> bool:
 		run_args = PackedStringArray(["-c", cmd_line])
 	# 用 create_process 启动, 完全不建立管道: 子进程链若继承管道句柄会导致其等待 EOF 而死锁
 	# (此前 Ninja/Make 在 Godot 内异步卡死、引擎 PeekNamedPipe 报错的根因)。输出已重定向到文件。
+	_build_started_unix = Time.get_unix_time_from_system()
 	var pid := OS.create_process(shell, run_args)
 	if pid <= 0:
 		_log("异步执行不可用, 退化为阻塞执行(编辑器会卡住直到完成)。")
@@ -1091,7 +1093,7 @@ func _drain_log(raw_path: String) -> bool:
 
 # ------------------------------------------------------------ 部署: CMake 直出验证 + 纯 CMake 推导的残留清理
 
-## 部署: 直出命中规范名即用; 否则实盘兜底取最新动态库, 并统一**改名**为规范名
+## 部署: 默认名直出 → 实盘最新非常规名动态库 → 已存在规范名, 三级判定后统一**改名**为规范名
 ## (CMake 默认名 libdev.dylib → libdev.macos.debug.arm64.dylib), 与 *.gdextension 声明天然对应。
 ## CMakeLists 钉了规范名 OUTPUT_NAME 时改名零成本(同名跳过)。找不到产物返回 ""(部署失败)。
 ## Windows 边界: 编辑器锁住加载中的 dll 致改名失败 → 保留直出名并告警(声明同步按实盘名对齐, 保可用)。
@@ -1101,7 +1103,21 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String) -
 	var canonical := _canonical_file(target, type, arch)
 	var actual := ""
 	var direct := _default_out_file(target)   # CMake 默认直出名(刚链接, mtime 最新, 内容必然新鲜)
+	# 已知命名集合 = 默认名 + 本目标全部 类型×架构 规范名: 都是"声明/最终形态"文件,
+	# 不作为实盘扫描候选 —— 否则同目录其他 类型/架构 的产物(先构建的 debug 库、
+	# 钉了 OUTPUT_NAME 的直出规范名)会被误认为本次直出物而遭改名劫持
+	var known := PackedStringArray()
+	if direct != "":
+		known.append(direct)
+	for t in GDEXT_TYPES:
+		for a in GDEXT_ARCHS:
+			known.append(_canonical_file(target, t, a))
+	# 默认名命中须是"本次链接"的产物(mtime ≥ 本次编译启动): 编译器直出名与本工具约定不符时
+	# (MinGW lib 前缀等), 上一次部署失败残留的默认名旧库会顶替直出名存在, 不可当作新产物
+	var direct_fresh := false
 	if direct != "" and FileAccess.file_exists(String(out_dir).path_join(direct)):
+		direct_fresh = FileAccess.get_modified_time(String(out_dir).path_join(direct)) + 5.0 >= _build_started_unix
+	if direct_fresh:
 		# 默认名存在 → 本次链接产物, 强制改名归位(覆盖可能残留的旧规范名, 杜绝陈旧命中)
 		if _rename_lib(out_dir, direct, canonical):
 			_log("产物规范命名: ", direct, " → ", canonical)
@@ -1109,12 +1125,16 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String) -
 		else:
 			_log("警告: 规范命名失败(文件可能被占用), 保留 ", direct, "; 声明同步将按实盘名对齐。")
 			actual = direct
-	elif FileAccess.file_exists(_abs(target_res)):
-		actual = canonical   # 直出名即规范名(CMake 钉了 OUTPUT_NAME)
 	else:
-		actual = _scan_dynamic_libs(out_dir)
+		# 默认名缺失/非本次产物 → 先实盘取本目标"最新"的非常规名动态库(刚链接完, 最新即本次
+		# 直出; 兼容 MinGW lib 前缀等编译器直出名差异), 最后才退回已存在的规范名
+		# (CMake 钉了 OUTPUT_NAME 且刚重链)。顺序不能反: 先认"规范名已存在"会把编译器直出的
+		# 非默认名新产物当残留清掉, 而同目录旧规范名库被误当新产物(陈旧命中)。
+		actual = _scan_dynamic_libs(out_dir, target, known)
 		if actual != "":
 			_log("规范名产物未直出, 实盘取最新动态库: ", actual)
+		elif FileAccess.file_exists(_abs(target_res)):
+			actual = canonical   # 直出名即规范名(CMake 钉了 OUTPUT_NAME)
 	if actual == "":
 		_log("预期产物未生成: ", _abs(target_res))
 		_log("请确认 CMakeLists 已钉 *_OUTPUT_DIRECTORY 直出目录, 并检查上方编译输出。")
@@ -1315,11 +1335,17 @@ func _declared_archs(gdext_res: String) -> Array[String]:
 	return archs
 
 
-## 实盘扫描: 输出目录里的动态库(dylib/dll/so), 取 mtime 最新 —— 覆盖 CMake 默认名/变量拼接名等
-## 解析器无法预知的直出名(刚编译完, 最新即本次直出)。返回文件名, 无动态库返回 ""。
-func _scan_dynamic_libs(dir_path: String) -> String:
+## 实盘扫描: 输出目录里"本目标"的动态库(dylib/dll/so), 取 mtime 最新 ——
+## 覆盖编译器直出名差异(MinGW 默认加 lib 前缀)与变量拼接名等解析器无法预知的直出名
+## (刚编译完, 最新即本次直出)。只认文件名含目标名的库(不劫持同目录其他目标的产物);
+## 排除 exclude(默认名+全部规范名: 其他 类型/架构 的声明产物不是本次直出物)、
+## universal 合并产物与编辑器 ~ 临时残留。返回文件名, 无动态库返回 ""。
+func _scan_dynamic_libs(dir_path: String, target_name: String, exclude: PackedStringArray) -> String:
 	var best := ""
 	var best_m := -1
+	var excl := {}
+	for k in exclude:
+		excl[k] = true
 	var dir := DirAccess.open(String(dir_path))
 	if dir == null:
 		return ""
@@ -1329,9 +1355,9 @@ func _scan_dynamic_libs(dir_path: String) -> String:
 		if not dir.current_is_dir():
 			var low := e.to_lower()
 			if low.ends_with(".dylib") or low.ends_with(".dll") or low.ends_with(".so"):
-				if e.contains(".universal."):
+				if e.contains(".universal.") or e.begins_with("~") or not e.contains(target_name) or excl.has(e):
 					e = dir.get_next()
-					continue   # universal 合并产物不是构建直出物, 不参与实盘兜底
+					continue   # universal 合并产物/~ 残留/其他目标产物/已知命名 不参与实盘兜底
 				var m := FileAccess.get_modified_time(String(dir_path).path_join(e))
 				if m > best_m:
 					best_m = m
