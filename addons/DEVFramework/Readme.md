@@ -507,6 +507,25 @@ AudioTool.list_examples()                      # 列出全部示例
 | `DevProjectSetup` | 一键创建项目目录结构（编辑器菜单触发） |
 | `SpriteFramesToAnimationLibrary` | `EditorScript`：将选中的 SpriteFrames 生成 AnimationLibrary |
 
+### 5.10 更新日志（ChangelogTool）
+
+面向玩家的「版本更新提示」：框架只负责**版本判定 / 条目过滤 / 已见状态记录**，**UI 由项目自行实现**。
+
+- 当前版本：Godot 内置项目设置 `application/config/version`（项目设置 → Application → Config → Version，发布时修改；未配置时回退到日志 Def 中的最高版本）。
+- 内容：在 `Assets/Def/` 下建 `ChangelogDef` 的 .tres，每个 `ChangelogEntryDef` 介绍**一个**功能更新（`version / date / category / text / player_visible`）；`target` 可指向任意资源（配置 Def / 图片 / 模型等），如何展示由项目决定。示例见 `Assets/Def/Changelog/ChangelogExample.tres`。
+- 已见版本：**不单独存储文件**，由项目并入自己的游戏存档持久化（读 `get_seen_version()`，写入用 `mark_seen()`/`load_seen_version()`）；不并入则视为首次运行，不弹窗。
+
+```gdscript
+# 读档（游戏启动加载存档后、判断更新前）
+ChangelogTool.load_seen_version(save_data.get("changelog_version", ""))
+if ChangelogTool.has_update():
+    var entries: Array = ChangelogTool.get_pending_entries()  # 待展示条目（新→旧）
+    changelog_popup.show_entries(entries)  # 项目自建弹窗
+    ChangelogTool.mark_seen()              # 展示后记录已见版本
+# 存档时
+save_data["changelog_version"] = ChangelogTool.get_seen_version()
+```
+
 ---
 
 ## 六、View 视图层
