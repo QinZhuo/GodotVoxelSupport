@@ -34,6 +34,9 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = Shape.cube,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
 			hint_string = "cube,sphere",
+			# 修改 shape 时强制刷新全部选项可见性，
+			# 否则编辑器不会重新调用 _get_option_visibility (godot#49641)
+			usage = PropertyUsageFlags.PROPERTY_USAGE_DEFAULT | PropertyUsageFlags.PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED,
 		},
 		{
 			name = sphere_subdivisions,
@@ -92,6 +95,7 @@ const material_trans_path := "material/material_trans_path"
 const import_materials_textures := "material/import_materials_textures"
 
 ## sphere_* 选项仅在形状选择 sphere 时显示
+## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
 func _get_option_visibility(_path: String, option_name: StringName, options: Dictionary) -> bool:
 	if String(option_name).begins_with("mesh/sphere_"):
 		return options.get(VoxelMeshImporter.shape, Shape.cube) == Shape.sphere
