@@ -13,6 +13,9 @@ dest_files=["res://.godot/imported/deer.vox-e5d415c2526e1668330e5e4349c72db6.mes
 [params]
 
 mesh/scale=0.1
+mesh/shape=1
+mesh/sphere_subdivisions=0
+mesh/sphere_scale=1.0
 mesh/frame_index=0
 mesh/unwrap_lightmap_uv2=false
 mesh/uv2_texel_size=0.2

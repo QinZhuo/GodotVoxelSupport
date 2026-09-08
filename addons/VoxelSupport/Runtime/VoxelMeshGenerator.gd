@@ -155,6 +155,19 @@ var materials: Array[Material]
 var root_path: String
 ## 运行时材质数组 (非空时优先于 voxel.materials 使用)
 var runtime_materials: Array = []
+## 导入形状 (VoxelMeshImporter.Shape): cube=面片网格, sphere=每体素一颗小球
+var shape: int = VoxelMeshImporter.Shape.cube
+## 球体细分级别 (icosphere)，仅 sphere 形状生效；默认 0=20 面，优先保证性能
+var sphere_subdivisions: int = 0
+## 小球半径相对体素边长的比例，仅 sphere 形状生效
+var sphere_scale: float = 1.0
+## sphere 模式下待同步生成的球心集合 (start_generate_mesh 填充，wait_finished 消费)
+var _sphere_cells: Dictionary[Vector3i, int] = {}
+## 实际生效的采样间隔：由顶点预算自动推导，无外部设置项
+var _sphere_step_used: int = 1
+
+## 顶点预算：超出则自动放大采样间隔，防止大模型在编辑器内 OOM 崩溃
+const SPHERE_VERTEX_BUDGET := 4_000_000
 
 
 func _init(voxel: VoxData, options: Dictionary, path: String = "") -> void:
@@ -164,6 +177,9 @@ func _init(voxel: VoxData, options: Dictionary, path: String = "") -> void:
 	scale = options.get(VoxelMeshImporter.scale, 0.1)
 	if scale <= 0:
 		scale = 0.01
+	shape = options.get(VoxelMeshImporter.shape, VoxelMeshImporter.Shape.cube)
+	sphere_subdivisions = clampi(options.get(VoxelMeshImporter.sphere_subdivisions, 0), 0, 2)
+	sphere_scale = clampf(options.get(VoxelMeshImporter.sphere_scale, 1.0), 0.05, 2.0)
 
 func generate_materials(options: Dictionary) -> Array[Material]:
 	materials.resize(2)
@@ -255,23 +271,36 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	if voxels.size() == 0:
 		return
 
-	slice_voxels = [ {}, {}, {}]
+	var solid_voxels: Dictionary[Vector3i, int] = {}
 	for pos in voxels:
 		# 统一材质契约：材质ID 0 = 空（空气），跳过不参与网格与包围盒
 		if voxels[pos] <= 0:
 			continue
+		solid_voxels[pos] = voxels[pos]
 		pos_min.x = min(pos_min.x, pos.x)
 		pos_min.y = min(pos_min.y, pos.y)
 		pos_min.z = min(pos_min.z, pos.z)
 		pos_max.x = max(pos_max.x, pos.x)
 		pos_max.y = max(pos_max.y, pos.y)
 		pos_max.z = max(pos_max.z, pos.z)
+
+	if solid_voxels.size() == 0:
+		return
+
+	if shape == VoxelMeshImporter.Shape.sphere:
+		# 球体模式：每颗小球代表一个(可能降采样的)体素格子
+		_sphere_cells = _select_sphere_cells(solid_voxels)
+		tasks.clear()
+		return
+
+	slice_voxels = [ {}, {}, {}]
+	for pos in solid_voxels:
 		for axis in 3:
 			var slice_index := pos[axis]
 			var slices := slice_voxels[axis]
 			if not slices.has(slice_index):
 				slices[slice_index] = {}
-			slices[slice_index][pos] = voxels[pos]
+			slices[slice_index][pos] = solid_voxels[pos]
 
 	tasks.clear()
 	for dir in FaceTool.Faces.size():
@@ -279,7 +308,74 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 		tasks.append(task)
 		task.id = WorkerThreadPool.add_task(_generate_dir_face.bind(task))
 
+
+## 球体模式：按 step 降采样体素为格子，格子材质取第一个非空材质（与 LOD 降采样规则一致）
+func _downsample_to_cells(voxels: Dictionary[Vector3i, int], step: int) -> Dictionary[Vector3i, int]:
+	if step <= 1:
+		return voxels
+	var cells: Dictionary[Vector3i, int] = {}
+	for pos: Vector3i in voxels:
+		var key := Vector3i(_floor_div(pos.x, step), _floor_div(pos.y, step), _floor_div(pos.z, step))
+		if not cells.has(key):
+			cells[key] = voxels[pos]
+	return cells
+
+
+static func _floor_div(v: int, d: int) -> int:
+	var q: int = v / d
+	if q * d > v:
+		q -= 1
+	return q
+
+
+## 球体模式：只保留至少有一格外露的格子
+## 完全被实心邻居包裹的格子不可见，跳过可大幅减少三角形数量
+func _collect_surface_cells(cells: Dictionary[Vector3i, int]) -> Dictionary[Vector3i, int]:
+	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	var result: Dictionary[Vector3i, int] = {}
+	for pos: Vector3i in cells:
+		var id: int = cells[pos]
+		for dir in FaceTool.Normals.size():
+			var n_pos: Vector3i = pos + Vector3i(FaceTool.Normals[dir])
+			if not cells.has(n_pos):
+				result[pos] = id
+				break
+			if FaceTool.face_visible(mats[id], mats[cells[n_pos]]):
+				result[pos] = id
+				break
+	return result
+
+
+## 球体模式：按顶点预算自动推导采样间隔，返回最终球心格子集合
+## 大模型(数十万外露体素)若不降采样会直接 OOM 崩溃，故预算优先于精度
+## 先用包围盒表面积估算所需 step，避免反复全量扫描；step 不作为外部设置项
+func _select_sphere_cells(voxels: Dictionary[Vector3i, int]) -> Dictionary[Vector3i, int]:
+	var verts_per_sphere: int = FaceTool.get_icosphere(sphere_subdivisions)["vertices"].size()
+	var dims := (pos_max - pos_min) + Vector3i.ONE
+	var surface_est := 2 * (dims.x * dims.y + dims.y * dims.z + dims.z * dims.x)
+	# cells_at_step ~= surface_est / step^2，要求 cells*verts <= budget
+	var step := 1
+	var need := int(ceil(sqrt(float(surface_est) * verts_per_sphere / float(SPHERE_VERTEX_BUDGET))))
+	while step < need and step < 32:
+		step *= 2
+	var cells := _collect_surface_cells(_downsample_to_cells(voxels, step))
+	# 估算偏低时兜底放大（最多一次全量重扫）
+	while cells.size() * verts_per_sphere > SPHERE_VERTEX_BUDGET and step < 32:
+		step *= 2
+		cells = _collect_surface_cells(_downsample_to_cells(voxels, step))
+	_sphere_step_used = step
+	if step > 1:
+		print("voxel sphere: auto step ", step, " (spheres=", cells.size(),
+			", budget=", SPHERE_VERTEX_BUDGET, " verts)")
+	return cells
+
+
 func wait_finished(gen_uv2: bool, uv2_texel_size: float) -> ArrayMesh:
+	if shape == VoxelMeshImporter.Shape.sphere:
+		if _sphere_cells.size() > 0:
+			_build_sphere_mesh(_sphere_cells)
+			_sphere_cells = {}
+		return mesh
 	if tasks.size() > 0:
 		var surface := SurfaceTool.new()
 		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -298,6 +394,72 @@ func wait_finished(gen_uv2: bool, uv2_texel_size: float) -> ArrayMesh:
 		if gen_uv2:
 			mesh.lightmap_unwrap(Transform3D.IDENTITY, uv2_texel_size)
 	return mesh
+
+## 球体模式：为每颗球心放置一颗 icosphere，按材质透明度分到 0=实体 / 1=透明 两个 surface
+## 与 cube 路径共用同一套材质与 UV 采样契约 (VoxelMaterial.uv_for_id)
+## 直接构建 ArrayMesh（共享顶点 + 索引缓冲），比 SurfaceTool 逐顶点快一个数量级
+func _build_sphere_mesh(cells: Dictionary[Vector3i, int]) -> void:
+	var template := FaceTool.get_icosphere(sphere_subdivisions)
+	var unit_verts: PackedVector3Array = template["vertices"]
+	var unit_indices: PackedInt32Array = template["indices"]
+	var nv: int = unit_verts.size()
+	var ni: int = unit_indices.size()
+
+	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	var step_f := float(_sphere_step_used)
+	var radius := 0.5 * sphere_scale * step_f * scale
+	# 球心落在格子中心：格子 key 覆盖体素 [key*step, key*step+step)，中心 = key*step + step/2
+	# step=1 时即体素中心 (pos+0.5)，与 cube 路径的包围盒对齐
+	var origin := Vector3(step_f * 0.5, step_f * 0.5, step_f * 0.5)
+
+	# 第一遍：按 实体/透明 分桶（s=0 实体，s=1 透明），并预取球心，避免第二遍重复字典查找
+	var bucket_pos: Array[PackedVector3Array] = [PackedVector3Array(), PackedVector3Array()]
+	var bucket_id: Array[PackedInt32Array] = [PackedInt32Array(), PackedInt32Array()]
+	for pos: Vector3i in cells:
+		var id: int = cells[pos]
+		var mat: VoxelMaterial = mats[id] if id < mats.size() else null
+		var s := 0 if (mat == null or mat.trans <= 0) else 1
+		bucket_pos[s].append((origin + Vector3(pos) * step_f) * scale)
+		bucket_id[s].append(id)
+
+	for s in 2:
+		var n_spheres: int = bucket_pos[s].size()
+		if n_spheres == 0:
+			continue
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		var verts := PackedVector3Array()
+		var normals := PackedVector3Array()
+		var uvs := PackedVector2Array()
+		var idxs := PackedInt32Array()
+		verts.resize(n_spheres * nv)
+		normals.resize(n_spheres * nv)
+		uvs.resize(n_spheres * nv)
+		idxs.resize(n_spheres * ni)
+		var vi := 0
+		var ii := 0
+		for j in n_spheres:
+			var center: Vector3 = bucket_pos[s][j]
+			var u := VoxelMaterial.uv_for_id(bucket_id[s][j])
+			var uv := Vector2(u, 0.5)
+			var vbase := vi
+			for k in nv:
+				var v: Vector3 = unit_verts[k]
+				verts[vi] = center + v * radius
+				normals[vi] = v
+				uvs[vi] = uv
+				vi += 1
+			for k in ni:
+				idxs[ii] = unit_indices[k] + vbase
+				ii += 1
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_NORMAL] = normals
+		arrays[Mesh.ARRAY_TEX_UV] = uvs
+		arrays[Mesh.ARRAY_INDEX] = idxs
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		# 空 surface 已跳过，材质须绑定到实际 surface 序号
+		mesh.surface_set_material(mesh.get_surface_count() - 1, materials[s])
+
 
 func _generate_dir_face(task) -> void:
 	var surfaces: Array[SurfaceTool] = [SurfaceTool.new(), SurfaceTool.new()]
