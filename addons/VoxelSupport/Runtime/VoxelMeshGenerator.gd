@@ -257,7 +257,9 @@ func generate_emission_textrue(save_path: String = "") -> ImageTexture:
 
 
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
-	var voxels_hash := voxels.hash()
+	# hash 必须包含所有影响几何的选项：MeshLibrary 模式会复用磁盘上的旧 mesh(带 meta)，
+	# 若只含体素数据，单独修改 scale/sphere_* 时会被短路、保留旧网格
+	var voxels_hash := hash([voxels.hash(), scale, shape, sphere_subdivisions, sphere_scale])
 	if not mesh:
 		mesh = ArrayMesh.new()
 	else:
