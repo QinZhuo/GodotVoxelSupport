@@ -39,6 +39,12 @@ static func get_icosphere(subdivisions: int = 2) -> Dictionary:
 			var ca := _edge_midpoint(verts, edge_midpoints, c, a)
 			new_indices.append_array([a, ab, ca, b, bc, ab, c, ca, bc, ab, bc, ca])
 		indices = new_indices
+	# Godot 正面为顺时针缠绕(从可见侧观察)：把 OpenGL 逆时针索引翻转为 (a, c, b)，
+	# 否则球体外壁会被当作背面剔除，CULL_BACK 下看到的是远侧内壁
+	for i in range(0, indices.size(), 3):
+		var tmp := indices[i + 1]
+		indices[i + 1] = indices[i + 2]
+		indices[i + 2] = tmp
 	var result := {
 		"vertices": PackedVector3Array(verts),
 		"indices": PackedInt32Array(indices),
