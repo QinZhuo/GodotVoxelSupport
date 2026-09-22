@@ -161,17 +161,34 @@ static func await_state_safe(fs: Variant) -> Variant:
 	return null
 
 
-## 幂等连接信号：若调用方尚未连接该信号则 connect，防止重复 connect 报错 ERR_INVALID_PARAMETER。
+## 幂等连接信号：若该回调（对象 + 方法）尚未连接则 connect，防止重复 connect 报错 ERR_INVALID_PARAMETER。
 ## [param sig] 目标信号（如 obj.my_signal）
-## [param callable] 连接的回调；注意用 bind 绑定稳定宿主后其恒等，is_connected 才能正确去重
-static func connect_once(sig: Signal, callable: Callable) -> void:
+## [param callable] 连接的回调
+## [param flags] 透传给 connect（如 CONNECT_ONE_SHOT）
+##
+## 关于去重：Godot 的 Callable 相等性**只比较「对象 + 方法」**，bind() 绑定的参数不参与比较
+## （实测：`m.bind(a) == m.bind(b)` 与 `sig.is_connected(m.bind(其它上下文))` 均为 true）。
+## 所以即使回调每次 bind 了不同的上下文实例（效果被反复 apply 的常见情况），本方法也能正确去重，
+## 不需要手动断开旧监听；反过来，裸 connect 第二次就会抛 already connected。
+static func connect_once(sig: Signal, callable: Callable, flags: int = 0) -> void:
 	if not sig.is_connected(callable):
-		sig.connect(callable)
+		sig.connect(callable, flags)
 
-## 幂等断开信号：仅当已连接时 disconnect
+## 幂等断开信号：仅当已连接时 disconnect（未连接时 Godot 会报错，故统一走这里）
 static func safe_disconnect(sig: Signal, callable: Callable) -> void:
 	if sig.is_connected(callable):
 		sig.disconnect(callable)
+
+## 幂等连接信号（只能拿到信号名时用，如 @export var signal_name: StringName 的场合）
+## 语义与去重规则同 connect_once
+static func connect_once_named(obj: Object, signal_name: StringName, callable: Callable, flags: int = 0) -> void:
+	if not obj.is_connected(signal_name, callable):
+		obj.connect(signal_name, callable, flags)
+
+## 幂等断开信号（只能拿到信号名时用）
+static func safe_disconnect_named(obj: Object, signal_name: StringName, callable: Callable) -> void:
+	if obj.is_connected(signal_name, callable):
+		obj.disconnect(signal_name, callable)
 
 static func _is_active_function_state(v: Variant) -> bool:
 	if v == null or not (v is Object) or v.get_class() != "GDScriptFunctionState":

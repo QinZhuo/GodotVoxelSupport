@@ -224,7 +224,10 @@ static func save_async(path: String, data, mode: Mode = Mode.JSON) -> Error:
 		return await _flush_pending(path, err)
 
 	var _t := LogTool.timer("存档", str("保存 ", path))
-	var bytes: PackedByteArray = await AsyncTool.thread_call(func(): return gzip_encode(data))
+	# 先做快照：后台线程编码期间主线程仍会修改原容器（Array/Dictionary 非线程安全），
+	# 直接共享可能导致序列化结果错乱（如字典被平铺成"键/值"交替的元素），必须先深拷贝
+	var snapshot: Variant = data.duplicate(true) if (data is Array or data is Dictionary) else data
+	var bytes: PackedByteArray = await AsyncTool.thread_call(func(): return gzip_encode(snapshot))
 	var err := _write_file(path, bytes)
 	_t.stop()
 	if err == OK and OS.has_feature("editor") and path.begins_with("user://"):

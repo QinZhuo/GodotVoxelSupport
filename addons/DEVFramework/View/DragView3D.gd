@@ -264,7 +264,7 @@ func _calculate_sort_index() -> int:
 
 	return new_index if new_index != current_index else -1
 
-## 执行数组排序：移动 data 中的元素并重新绑定视图
+## 执行数组排序：移动 data 中的元素，并交给容器按 data 重新对齐槽位视图
 func _apply_sort(new_index: int):
 	var views: Array = drag_container.views
 	var current_index: int = views.find(self)
@@ -278,8 +278,6 @@ func _apply_sort(new_index: int):
 	new_index = clampi(new_index, 0, drag_container.data.size())
 	drag_container.data.insert(new_index, dragged_item)
 
-	var count: int = mini(drag_container.data.size(), drag_container.views.size())
-	for i in count:
-		var sorted_view: Node3D = drag_container.views[i]
-		if is_instance_valid(sorted_view) and "data" in sorted_view:
-			sorted_view.data = drag_container.data[i]
+	## 必须走容器的 resync_views（重绑 data **并**同步视图名），不能只重绑 views[i].data：
+	## 视图名会滞后于数据，之后按名字匹配的增删（remove_item / refresh_item）就会操作到错误的视图
+	drag_container.resync_views()

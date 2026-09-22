@@ -40,10 +40,19 @@ var _current_index: int = 0
 @export var label: String = "Option":
 	set(v):
 		label = v
-		if _description_label:
-			_description_label.text = v
+		# 空标签隐藏节点，避免无标签场景下残留文字或空白占位
+		_apply_label()
 
 @export var wrap_around: bool = true
+
+## 是否禁用：禁用后置灰并屏蔽交互（调用方的焦点链需自行跳过禁用项）
+@export var disabled: bool = false:
+	set(v):
+		if disabled == v:
+			return
+		disabled = v
+		if _built:
+			_apply_disabled()
 
 # ------------------------------------------------------------
 # 状态变量
@@ -114,8 +123,16 @@ func _build_content() -> void:
 			_build_spinner()
 		DisplayMode.TOGGLE:
 			_build_toggle()
-	_description_label.text = label
+	_apply_label()
 	_sync_display()
+	_apply_disabled()
+
+## 同步描述标签：文本跟随 label，空值或默认占位符时隐藏整个标签节点
+func _apply_label() -> void:
+	if not _description_label:
+		return
+	_description_label.text = label
+	_description_label.visible = not label.is_empty()
 
 func _build_spinner() -> void:
 	var arrow_btn := func(text: String) -> Button:
@@ -179,6 +196,28 @@ func select_index(idx: int) -> void:
 func set_index_no_signal(idx: int) -> void:
 	_current_index = _clamp_index(idx)
 	_sync_display()
+
+## 设置可用状态（即 disabled 的取反写法，便于外部一行调用）
+func set_enabled(value: bool) -> void:
+	disabled = not value
+
+func is_enabled() -> bool:
+	return not disabled
+
+## 禁用时置灰 + 屏蔽交互，同时把标签一起压暗
+func _apply_disabled() -> void:
+	modulate = Color(1, 1, 1, 1) if not disabled else Color(1, 1, 1, 0.4)
+	var buttons: Array[Button] = []
+	if _prev_btn:
+		buttons.append(_prev_btn)
+	if _value_btn:
+		buttons.append(_value_btn)
+	if _next_btn:
+		buttons.append(_next_btn)
+	buttons.append_array(_toggle_btns)
+	for btn in buttons:
+		if btn:
+			btn.disabled = disabled
 
 func get_current_value() -> Variant:
 	return options[current_index] if current_index >= 0 and current_index < options.size() else null
@@ -273,12 +312,19 @@ func _apply_theme() -> void:
 				if hover_style:
 					btn.add_theme_stylebox_override("pressed", hover_style)
 
-	_description_label.custom_minimum_size = Vector2(_read_const("description_min_width", 80), 0)
+	# 仅在标签可见时预留宽度，隐藏状态下不占据布局空间
+	_description_label.custom_minimum_size = (
+		Vector2(_read_const("description_min_width", 80), 0) if _description_label.visible else Vector2.ZERO
+	)
 
 	var arrow_sz := _read_const("arrow_min_size", 28)
+	# 箭头宽度可单独放宽（点击范围），未配置时回退到 arrow_min_size 以保持既有主题行为
+	var arrow_w := _read_const("arrow_min_width", arrow_sz)
+	var arrow_h := _read_const("arrow_min_height", arrow_sz)
 	if _prev_btn:
-		_prev_btn.custom_minimum_size = Vector2(arrow_sz, arrow_sz)
-		_next_btn.custom_minimum_size = Vector2(arrow_sz, arrow_sz)
+		var asz := Vector2(arrow_w, arrow_h)
+		_prev_btn.custom_minimum_size = asz
+		_next_btn.custom_minimum_size = asz
 
 	var btn_w := _read_const("button_min_width", 0)
 	var btn_h := _read_const("button_min_height", 0)

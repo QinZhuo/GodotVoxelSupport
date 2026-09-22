@@ -19,8 +19,15 @@ func _to_string():
 	return effects_str
 
 func get_desc(data) -> String:
-	var effects_str: String = ""
+	## 用单空格 join（跳过空描述）：
+	## 原来逐个 `+= desc + " "` 会留下尾随空格，子效果描述自身带前导/尾随空格时
+	## 还会拼出双空格（如「获得2格挡  重复2次」）
+	var parts: PackedStringArray = []
 	for effect in effects:
-		if effect:
-			effects_str += effect.get_desc(data) + " "
-	return effects_str
+		if effect == null:
+			continue
+		var part: String = str(effect.get_desc(data)).strip_edges()
+		if part.is_empty():
+			continue
+		parts.append(part)
+	return " ".join(parts)

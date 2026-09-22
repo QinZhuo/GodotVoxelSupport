@@ -104,15 +104,46 @@ func clear():
 		_free_slot(i)
 	_update_slot_visibility()
 
+## 按 data 重新对齐所有槽位视图：保证 views[i] 显示 data[i]，且视图名同步为数据名。
+## 删除 / 拖拽排序后**必须**调用 —— 框架内部（remove_item / refresh_item / get_item_position）
+## 都依赖「槽位索引 == data 索引」和「视图名 == 数据名」两条约定，只重绑 data 而不补洞 / 不改名，
+## 会让视图与模型数组（如 Actor.card.cards）错位，表现为卖出/购买后卡牌显示顺序错乱。
+## 复用已有视图实例（只改 data / name），不重建节点，避免闪烁。
+func resync_views():
+	_resize_views()
+	for i in views.size():
+		var item = data[i] if (data and i < data.size()) else null
+		var view = views[i]
+		if item == null:
+			if is_instance_valid(view):
+				_free_slot(i)
+			continue
+		if is_instance_valid(view) and "data" in view:
+			if view.data != item:
+				view.data = item
+			view.name = ArrayViewTool.get_item_name(item)
+		else:
+			if is_instance_valid(view):
+				_free_slot(i)
+			_set_slot_view(i, item)
+	_update_slot_visibility()
+
 func refresh_item(item) -> Node3D:
 	_resize_views()
-	var item_name = ArrayViewTool.get_item_name(item)
+	## 已有视图显示该数据：同步视图名后直接返回
 	for i in views.size():
-		var view = views[i]
-		if is_instance_valid(view) and view.name == item_name:
-			if "data" in view:
-				view.data = item
-			return view
+		var v = views[i]
+		if is_instance_valid(v) and "data" in v and v.data == item:
+			v.name = ArrayViewTool.get_item_name(item)
+			return v
+	## data 中已收录该项（如"买重复卡 → 升级替换"会 erase 后 insert 回中间）：
+	## 必须按 data 重新对齐，否则新物品会被塞进第一个空槽（末尾），与模型顺序不一致
+	var idx: int = data.find(item) if data else -1
+	if idx >= 0:
+		resync_views()
+		if idx < views.size() and is_instance_valid(views[idx]):
+			return views[idx]
+	## 兜底：data 未收录该项（独立调用）→ 放到第一个空槽
 	var view = _set_slot_view(_find_slot_index(), item)
 	_update_slot_visibility()
 	return view
@@ -128,7 +159,8 @@ func remove_at(index: int):
 	if index < 0 or index >= views.size():
 		return
 	_free_slot(index)
-	_update_slot_visibility()
+	## 补洞：删除后必须重新对齐，否则槽位索引与 data 索引错位
+	resync_views()
 
 func set_item(index: int, item) -> Node3D:
 	_resize_views()
@@ -140,14 +172,18 @@ func set_item(index: int, item) -> Node3D:
 	return view
 
 func remove_item(item):
+	if item == null:
+		return
 	_resize_views()
-	var item_name = ArrayViewTool.get_item_name(item)
+	## 按「视图当前显示的数据」定位，而不是按视图名 —— 拖拽排序只重绑 data、名字会滞后，
+	## 按名字匹配会释放错槽位（表现为卖掉的卡还在显示、其它卡消失）
 	for i in views.size():
 		var view = views[i]
-		if is_instance_valid(view) and view.name == item_name:
+		if is_instance_valid(view) and "data" in view and view.data == item:
 			_free_slot(i)
-			_update_slot_visibility()
-			return
+			break
+	## 释放后重新对齐（补洞 + 同步视图名），保证 views[i] 与 data[i] 一一对应
+	resync_views()
 
 func get_item_position(item) -> Vector3:
 	_resize_views()

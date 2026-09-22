@@ -28,8 +28,8 @@ enum Category {
 ## 关联资源（配置 Def / 图片 / 模型等），由项目决定如何展示
 @export var target: Resource
 
-## 是否展示给玩家（false = 开发向内容，不进入玩家更新日志）
-@export var player_visible := true
+## 是否仅 Debug 模式展示（true = 开发 / 测试向内容；判定逻辑由 ChangelogTool 的注入接口提供）
+@export var debug_only := false
 
 func _to_string() -> String:
 	if text.is_empty():

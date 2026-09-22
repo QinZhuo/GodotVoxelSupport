@@ -1,13 +1,20 @@
 class_name ScreenshotCapture extends Node
 
+## 双重截图触发节点: 双击左键触发。颜色空间处理统一委托给 ScreenshotTool,
+## 保证与 MCP take_screenshot / EditorScript 入口使用同一条管线(默认颜色正确)。
+
 @export_file_path("*.png") var save_path: String = "res://screenshot.png"
 @export var custom_resolution: Vector2i = Vector2i(256, 256)
 @export var linear_to_srgb: bool = true
 
 func _ready() -> void:
-	await await get_tree().create_timer(1).timeout
-	get_window().size = custom_resolution
-	printerr("set ", custom_resolution)
+	await get_tree().create_timer(1).timeout
+	if Engine.is_embedded_in_editor():
+		# 嵌入编辑器运行时 DisplayServer 禁止修改窗口尺寸，截图尺寸由 img.resize 保证
+		LogTool.error("截图", "嵌入编辑器运行，跳过窗口 resize（输出尺寸仍为 %s）" % custom_resolution)
+	else:
+		get_window().size = custom_resolution
+		printerr("set ", custom_resolution)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.is_pressed() and event.is_double_click():
@@ -21,12 +28,11 @@ func _take_screenshot() -> void:
 	viewport.transparent_bg = true
 	await RenderingServer.frame_post_draw
 
+	# 取图后统一走 ScreenshotTool.normalize: 转 RGBA8 + 可选 linear_to_srgb(缺省开启)
 	var img := viewport.get_texture().get_image()
 	img.resize(custom_resolution.x, custom_resolution.y, Image.INTERPOLATE_LANCZOS)
 	_apply_dithering(img)
-	img.convert(Image.FORMAT_RGBA8)
-	if linear_to_srgb:
-		img.linear_to_srgb()
+	ScreenshotTool.normalize(img, {"srgb": linear_to_srgb})
 	img.save_png(save_path)
 	viewport.transparent_bg = original_bg
 

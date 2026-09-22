@@ -49,6 +49,11 @@ static func free_view(view: Node, pool):
 		if "tween_free" in view:
 			view.tween_free()
 		else:
+			## queue_free 是**延迟**释放：不先摘除，节点会在槽位里多留一帧。
+			## 若同一帧又往该槽位放新视图，新节点会因重名被引擎改名为 @Xxx@N，
+			## 且两个视图重叠一帧（闪现）。因此先摘除再释放。
+			if view.get_parent() != null:
+				view.get_parent().remove_child(view)
 			view.queue_free()
 
 ## 从父节点中按名称查找视图。

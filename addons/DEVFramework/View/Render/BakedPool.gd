@@ -27,6 +27,10 @@ func pool_get() -> Node3D:
 
 func pool_push(item: Node3D):
 	if !used_items.has(item):
+		## 外来节点（池耗尽时 view_scene 兜底实例化的）直接摘除再释放：
+		## queue_free 是延迟的，不先摘除会让它在槽位里多留一帧（同一帧重填该槽位会重名被引擎改名 + 视觉重叠）
+		if item.get_parent() != null:
+			item.get_parent().remove_child(item)
 		item.queue_free()
 		return
 	used_items.erase(item)

@@ -1141,7 +1141,7 @@ func _call_classdb_query(args: Dictionary) -> Dictionary:
 func _instance_signal_list(cname: String) -> Array:
 	if not ClassDB.can_instantiate(cname):
 		return []
-	var inst := ClassDB.instantiate(cname)
+	var inst: Object = ClassDB.instantiate(cname)
 	if inst == null:
 		return []
 	var sigs: Array = inst.get_signal_list()
@@ -1343,17 +1343,6 @@ func _call_take_screenshot(args: Dictionary) -> Dictionary:
 		# 运行时模式: 直接处理
 		return await _runtime_take_screenshot(args)
 
-	var filename := "mcp_%s" % Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
-	# 清理文件名中的非法字符(Windows 不支持 : / \ * ? " < > |)
-	filename = filename.replace("/", "_").replace("\\", "_").replace("*", "_").replace("?", "_") \
-		.replace("\"", "_").replace("<", "_").replace(">", "_").replace("|", "_")
-	if not filename.ends_with(".png"):
-		filename += ".png"
-	# 保存到 .godot 目录下，不会被 Godot 扫描为资源，也不会被版本控制
-	var dir_path := "res://.godot/mcp_screenshots"
-	var dir := DirAccess.open("res://")
-	if dir:
-		dir.make_dir_recursive(".godot/mcp_screenshots")
 	var img: Image = null
 	match capture_type:
 		"scene":
@@ -1364,27 +1353,28 @@ func _call_take_screenshot(args: Dictionary) -> Dictionary:
 			img = await _capture_editor_viewport()
 			if img == null or img.is_empty():
 				return _fail("截图失败: 编辑器视口纹理为空")
+	# 统一走 ScreenshotTool: sRGB 校正(保证颜色正确) -> 缩放 -> 保存。
 	# 缺省降采样到 1280 宽以控制截图体积(大视口/高分屏尤其明显), 传更大的 max_width 可保留更高分辨率。
-	var max_width := int(args.get("max_width", 1280))
-	if max_width > 0 and max_width < img.get_width():
-		var scale := float(max_width) / float(img.get_width())
-		img.resize(max_width, int(img.get_height() * scale), Image.INTERPOLATE_LANCZOS)
-	var path := "%s/%s" % [dir_path, filename]
-	var img_err := img.save_png(path)
-	if img_err != OK:
-		return _fail("保存截图失败: 错误码 %d" % img_err)
-	var bytes: PackedByteArray = FileAccess.get_file_as_bytes(path)
+	var shot: Dictionary = ScreenshotTool.save_image(img, {
+		"dir": ScreenshotTool.DEFAULT_DIR_RES,
+		"prefix": "mcp",
+		"max_width": int(args.get("max_width", ScreenshotTool.DEFAULT_MAX_WIDTH)),
+		"srgb": bool(args.get("srgb", true)),
+		"capture_type": capture_type,
+	})
+	if not shot.get("ok", false):
+		return _fail(str(shot.get("error", "截图失败")))
 	return _ok_json({
-		"path": ProjectSettings.globalize_path(path),
-		"res_path": path,
-		"width": img.get_width(),
-		"height": img.get_height(),
-		"bytes": bytes.size() if bytes else 0,
+		"path": shot.get("path", ""),
+		"res_path": shot.get("res_path", ""),
+		"width": int(shot.get("width", 0)),
+		"height": int(shot.get("height", 0)),
+		"bytes": int(shot.get("bytes", 0)),
 		"capture_type": capture_type,
 	})
 
 
-## 捕获编辑器视口截图
+## 捕获编辑器视口截图(已做 sRGB 校正)
 func _capture_editor_viewport() -> Image:
 	if not Engine.is_editor_hint():
 		return null
@@ -1399,10 +1389,11 @@ func _capture_editor_viewport() -> Image:
 	# 编辑器进程的 RenderingServer.frame_post_draw 不一定按时触发(与游戏的标准帧循环不同),
 	# 等待其会永久挂起。编辑器主循环由 process_frame 驱动, 等帧后直接读纹理即可。
 	# 也不要调用 RenderingServer.force_draw(): 在线程化渲染下同步阻塞可能卡住编辑器。
-	return viewport.get_texture().get_image()
+	# await_draw=false: 上面已按编辑器节奏等帧, 不再等 frame_post_draw(会挂起)。
+	return await ScreenshotTool.grab(viewport, {"await_draw": false})
 
 
-## 生成当前编辑场景的缩略图
+## 生成当前编辑场景的缩略图(已做 sRGB 校正)
 func _capture_scene_thumbnail(_args: Dictionary) -> Image:
 	if not Engine.is_editor_hint():
 		return null
@@ -1437,7 +1428,7 @@ func _capture_scene_thumbnail(_args: Dictionary) -> Image:
 		return null
 	tree.root.add_child(viewport)
 	await _wait_frames(tree, 5, 3000)
-	var img: Image = viewport.get_texture().get_image()
+	var img: Image = await ScreenshotTool.grab(viewport, {"await_draw": false})
 	viewport.queue_free()
 	return img
 
@@ -3143,10 +3134,11 @@ func _register_runtime_tools() -> void:
 		func(args): return await _call_runtime_proxy("simulate_key", args))
 
 	_register_game_play_tool("take_screenshot",
-		"画面感知工具。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可include_text=false关)。'editor'编辑器视口截图,'scene'场景缩略图。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。",
+		"画面感知工具。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可include_text=false关)。'editor'编辑器视口截图,'scene'场景缩略图。截图默认已做 sRGB 校正(颜色正确), 如确需原始线性图可传 srgb=false。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。",
 		{"type": "object", "properties": {
 			"capture_type": {"type": "string", "description": "模式: 'text' 文本化截图(默认, 推荐, 需游戏运行), 'game' 真实游戏截图(需游戏运行), 'editor' 编辑器视口截图, 'scene' 当前场景缩略图"},
 			"max_width": {"type": "integer", "description": "仅真实截图生效: 最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
+			"srgb": {"type": "boolean", "description": "仅真实截图生效: 是否做 sRGB 颜色校正, 默认 true(颜色正确)。传 false 保留原始线性图"},
 			"include_text": {"type": "boolean", "description": "仅真实截图生效: 是否附带文本化截图(text 字段), 默认 true"},
 			"text_max_nodes": {"type": "integer", "description": "文本化截图最多节点数, 默认 50"}
 		}},
@@ -3370,33 +3362,27 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 	var filename := "mcp_%s" % Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
 	filename += ".png"
 	var dir_path := "user://mcp_screenshots"
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir_path))
 	var viewport := get_viewport()
 	if viewport == null:
 		return _fail("无法获取游戏视口")
-	# 等待渲染线程完成本帧绘制后再读纹理。
-	# 不要用 RenderingServer.force_draw(): 它在线程化渲染 + vsync 下会阻塞主线程等渲染线程,
-	# 可导致窗口"未响应"、渲染帧停止(已实测复现)。
-	await RenderingServer.frame_post_draw
-	var img: Image = viewport.get_texture().get_image()
-	if img == null or img.is_empty():
-		return _fail("游戏截图失败: 视口纹理为空")
+	# 统一走 ScreenshotTool: 取图 -> sRGB 校正(保证颜色正确) -> 缩放 -> 保存。
 	# 缺省降采样到 1280 宽以控制体积, 传更大的 max_width 可保留更高分辨率。
-	var max_width := int(args.get("max_width", 1280))
-	if max_width > 0 and max_width < img.get_width():
-		var scale := float(max_width) / float(img.get_width())
-		img.resize(max_width, int(img.get_height() * scale), Image.INTERPOLATE_LANCZOS)
-	var path := "%s/%s" % [dir_path, filename]
-	var img_err := img.save_png(path)
-	if img_err != OK:
-		return _fail("保存截图失败: 错误码 %d" % img_err)
-	var bytes: PackedByteArray = FileAccess.get_file_as_bytes(path)
+	var shot: Dictionary = await ScreenshotTool.capture(viewport, {
+		"path": "%s/%s" % [dir_path, filename],
+		"max_width": int(args.get("max_width", ScreenshotTool.DEFAULT_MAX_WIDTH)),
+		"srgb": bool(args.get("srgb", true)),
+		"capture_type": "game",
+	})
+	if not shot.get("ok", false):
+		return _fail(str(shot.get("error", "截图失败")))
+	var img_w := int(shot.get("width", 0))
+	var img_h := int(shot.get("height", 0))
 	var result: Dictionary = {
-		"path": ProjectSettings.globalize_path(path),
-		"res_path": path,
-		"width": img.get_width(),
-		"height": img.get_height(),
-		"bytes": bytes.size() if bytes else 0,
+		"path": shot.get("path", ""),
+		"res_path": shot.get("res_path", ""),
+		"width": img_w,
+		"height": img_h,
+		"bytes": int(shot.get("bytes", 0)),
 		"capture_type": "game",
 	}
 	# 整合文本化截图快照(text): 截图同时返回画面可见节点布局,

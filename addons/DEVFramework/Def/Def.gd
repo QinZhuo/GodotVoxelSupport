@@ -61,6 +61,14 @@ const DEFS_BASE := "res://Assets/Def/"
 func save_data():
 	return resource_path.trim_prefix(DEFS_BASE)
 
+## 通用接口：递归加载指定文件夹（及子目录）下所有满足 filter 的 Def
+## 兼容导出包的 .tres.remap；sort_key 非空时按其升序排序
+static func load_defs_in_dir(dir_path: String, filter: Callable, sort_key: Callable = Callable()) -> Array[Def]:
+	var defs: Array[Def] = SaveTool.load_defs(dir_path, filter)
+	if sort_key.is_valid():
+		defs.sort_custom(sort_key)
+	return defs
+
 ## 从存档数据中加载 Def（兼容旧存档的完整路径格式）
 ## 文件不存在时返回 null 并输出日志
 static func load_data(path: String) -> Def:

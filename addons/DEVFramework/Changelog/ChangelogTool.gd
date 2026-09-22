@@ -24,6 +24,10 @@ const DEFS_DIR := "res://Assets/Def/"
 ## 玩家上次已见版本（首次运行 / 未并入存档时为空 ""）
 static var _seen_version := ""
 
+## 当前是否处于 Debug 模式（由框架 DebugTool 统一判定，debug_only 条目据此展示）
+static func is_debug_mode() -> bool:
+	return DebugTool.is_debug_mode()
+
 
 # ============================================================
 # 查询
@@ -46,7 +50,7 @@ static func has_update() -> bool:
 		return false
 	return not get_pending_entries().is_empty()
 
-## 待展示条目：seen < v <= current、player_visible；按版本从新到旧排序
+## 待展示条目：seen < v <= current；debug_only 条目仅 Debug 模式展示；按版本从新到旧排序
 static func get_pending_entries() -> Array[ChangelogEntryDef]:
 	var cur := get_current_version()
 	var seen := get_seen_version()
@@ -54,7 +58,7 @@ static func get_pending_entries() -> Array[ChangelogEntryDef]:
 		return []
 	var result: Array[ChangelogEntryDef] = []
 	for entry in _collect_entries():
-		if not entry or not entry.player_visible:
+		if not entry or (entry.debug_only and not is_debug_mode()):
 			continue
 		if entry.version.is_empty():
 			continue
