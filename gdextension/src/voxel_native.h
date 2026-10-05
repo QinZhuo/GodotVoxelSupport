@@ -14,12 +14,12 @@
 
 namespace godot {
 
-// 体素插件原生核心（GDExtension C++ 热路径）
-// GDScript 侧通过 VoxelNative 调用，替代部分 GDScript 慢实现：
-//   - greedy_merge_dense:     贪婪网格合并（已完成，~11.5x）
-//   - generate_chunk_dense:   chunk 网格生成主循环（16³ 体素 × 6 方向可见性 + 贪婪合并）
-//   - find_unsupported_around: 支撑图失稳检测（已完成）
-//   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速，GDScript 逐体素循环替代）
+// 体素插件原生核心（GDExtension C++）——插件的**硬依赖**：全部热路径都在这里，
+// GDScript 侧只做编排（NativeLoader 一次性校验必需方法，缺失即报错，不做 GDScript 兜底）。
+//   - greedy_merge_dense:     贪婪网格合并（2D 同材质矩形合并）
+//   - generate_chunk_dense:   chunk 网格生成主循环（32³ 体素 × 6 方向可见性 + 贪婪合并）
+//   - find_unsupported_around: 支撑图失稳检测
+//   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速）
 //   - partition_connected:    连通分组（大崩塌掉落体分组提速）
 class VoxelNative : public RefCounted {
 	GDCLASS(VoxelNative, RefCounted)
@@ -33,11 +33,11 @@ public:
 	// width/height: 网格宽高
 	// 返回 Dictionary：{pos: PackedInt32Array, size: PackedInt32Array, val: PackedInt32Array}
 	//   pos[i*2]=u, pos[i*2+1]=v; size[i*2]=w, size[i*2+1]=h; val[i]=材质ID
-	// 注意：与 GDScript 版行为一致，会就地清零 grid 已合并的格子
+	// 注意：会就地清零 grid 已合并的格子
 	static Dictionary greedy_merge_dense(PackedInt32Array grid, int width, int height);
 
-	// 生成单个 chunk 的网格数据（性能关键路径，等价于 GDScript _generate_chunk_dense_into）
-	// halo: 18³ 密集光环缓冲（PackedInt32Array，值=材质ID，0=空）
+	// 生成单个 chunk 的网格数据（性能关键路径）
+	// halo: 34³ 密集光环缓冲（PackedInt32Array，值=材质ID，0=空）
 	// trans_flags: 材质透明标志数组（PackedByteArray，索引=材质ID，1=透明）。由 GDScript 侧
 	//              预计算传入，避免 C++ 跨语言读 VoxelMaterial 属性。
 	// scale: 体素缩放；chunk: chunk key；use_local_space: 顶点用 chunk 局部坐标；
@@ -54,8 +54,8 @@ public:
 	static Dictionary generate_lod1_block_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 			float scale, const Vector3i &block_key, const Vector3 &offset);
 
-	// 构建 chunk 的 18³ halo（中心 16³ + 1 外缘）——LOD0 网格生成 worker 用，
-	// 下沉 C++ 替代 GDScript 逐体素循环（27 邻居 × 重叠区）。
+	// 构建 chunk 的 34³ halo（中心 32³ + 1 外缘）——LOD0 网格生成 worker 用，
+	// 遍历 27 邻居与光环的重叠区。
 	static PackedInt32Array build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk);
 
 	// 稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心：分 chunk + 原生 dense 面生成 + 合并，全 C++）
@@ -92,7 +92,7 @@ public:
 			const Vector3i &block_key);
 
 	// 支撑图失稳检测（等价于 VoxelData.find_unsupported_around）
-	// buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照（VoxelData._chunk_buffers 的深拷贝）
+	// buffers: chunk key -> PackedInt32Array(32³) 的密集缓冲快照（VoxelData._chunk_buffers）
 	// removed: 本次被移除的体素位置数组（Array[Vector3i]）
 	// 返回：失稳体素位置集合 Dictionary{pos(Vector3i): true}（GDScript 直接作 Set 用）
 	// 实时局部传播（无预计算缓存）：有效支撑 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数，
@@ -112,7 +112,7 @@ public:
 	static Dictionary collect_materials(const Dictionary &buffers, const Array &positions);
 
 	// 批量移除体素（返回修改后的 chunk buffer + 每 chunk 实际移除数）
-	// buffers: chunk key -> PackedInt32Array(16³)
+	// buffers: chunk key -> PackedInt32Array(32³)
 	// positions: 待移除位置数组（Array[Vector3i]）
 	// 返回 Dictionary：{removed: int 总移除数, chunk_removed: {chunk_key: count},
 	//                   buffers: {chunk_key: PackedInt32Array(修改后)} }
@@ -137,20 +137,20 @@ public:
 	static Array partition_connected(const Array &positions);
 
 	// 快照受影响区域的 chunk 缓冲（chunks + 27 邻居）。
-	// buffers: chunk key -> PackedInt32Array(16³)
+	// buffers: chunk key -> PackedInt32Array(32³)
 	// chunks: 需要快照的 chunk key 数组（含其邻居）
 	// 返回 Dictionary：{chunk_key: PackedInt32Array}。
 	// 用 COW 共享（PackedInt32Array 原子 refcount）：worker 只读 const，主线程后续
 	// 写 buffers 触发写时拷贝 → 省去逐 chunk duplicate 的 64KB 深拷贝（大场景快照提速）。
 	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
 
-	// ---- QVox 文件写入用：CRC32 ----
-	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib / GDScript _crc_of_slice 完全一致。
+	// ---- QVox 格式：CRC32（读写两端唯一实现） ----
+	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib 口径一致。
 	// 覆盖 data[start, start+length)，含初值 0xFFFFFFFF 与终值异或。
 	//
-	// 【为什么下沉】GDScript 逐字节查表算 1.4MB 要 ~84ms，是 QVox 增量写盘的最大单项开销。
-	// 试过 crc32_combine 拼接（单次 1.48ms，比整扫还慢）与 slicing-by-8（解释器下反而 0.7×），
-	// 在 GDScript 层都已证明压不下去。C++ 下同一算法 ~0.5ms 即可（约 170×）。
+	// 【为什么放在这里】GDScript 逐字节查表算 1.4MB 要 ~84ms，是 QVox 写盘的最大单项开销
+	// （曾尝试 crc32_combine 拼接与 slicing-by-8，在解释器下都不成立）；C++ 下 ~0.5ms。
+	// 因此 GDScript 侧不再保留兜底实现，读写校验与子块索引都调这两个方法。
 	//
 	// start/length 允许 -1：start<0 → 0；length<0 → 到末尾。越界自动裁剪。
 	static int64_t crc32(const PackedByteArray &data, int64_t start, int64_t length);

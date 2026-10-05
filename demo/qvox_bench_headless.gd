@@ -141,19 +141,16 @@ func run_bench() -> void:
 		if bi["type"] == "VOX0":
 			vbi = bi
 	t0 = Time.get_ticks_usec()
-	var enc := QVoxFile._try_encode_model_incremental(stream._raw_bytes, vbi, 0, docn.models["0"], stream._dirty_chunks, 32, stream._vox0_index.get(0, {}))
+	var enc: PackedByteArray = QVoxFile._try_encode_model_incremental(stream._raw_bytes, vbi, 0, docn.models["0"], stream._dirty_chunks, 32, stream._vox0_index.get(0, {}))
 	var t_enc := _us(t0)
-	var pl_sz := 0
-	if not enc.is_empty():
-		pl_sz = (enc["payload"] as PackedByteArray).size()
-	lines.append("  子块编码=%.2fms payload=%d (旧=%d)" % [t_enc, pl_sz, vbi["total"] - 12])
+	lines.append("  子块编码=%.2fms payload=%d (旧=%d)" % [t_enc, enc.size(), vbi["total"] - 12])
 	t0 = Time.get_ticks_usec()
 	var _pick := QVoxBlockCodec.pick_codec(stream.load_chunk(ck0, 0), CV)
 	lines.append("  单块 pick_codec=%.2fms" % _us(t0))
 
 	# ---- 字节级等价性：增量写结果 == 全量 serialize 结果 ----
-	# 这是本次改动的关键回归：块 CRC 现在由 crc32_combine 拼出，
-	# 必须与"整段重扫"得到的结果**逐字节一致**，否则只是变快而已。
+	# 关键回归：增量写的字节必须与"全量 serialize"**逐字节一致**（含块 CRC），
+	# 否则只是变快而已。
 	var doc_full := QVoxFile.QVoxDocument.new()
 	doc_full.head = stream._build_head()
 	doc_full.materials = stream._materials_to_qvox()

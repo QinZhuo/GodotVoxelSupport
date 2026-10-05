@@ -543,7 +543,7 @@ func _lod_expected_crcs(block_key: Vector3i, lod: int) -> Array:
 	var crcs: Array = []
 	var l0: Variant = _vox0_index.get(0)
 	if l0 is Dictionary:
-		var meta: Variant = (l0 as Dictionary).get("_crc")
+		var meta: Variant = (l0 as Dictionary).get("_meta")
 		if meta is Dictionary:
 			var subs: Variant = (meta as Dictionary).get("sub")
 			if subs is Dictionary:

@@ -221,6 +221,9 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	_clear_debris()
+	# 必须转发给父类：它负责置 _exiting、等待在途 worker、清理 LOD 网格——
+	# 漏掉会让 worker 完成时的 call_deferred 打到已释放实例。
+	super._exit_tree()
 
 
 # ----------------------------------------------------------------------------

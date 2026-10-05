@@ -1,255 +1,247 @@
 class_name NativeLoader
 extends RefCounted
 
-## 原生加速加载器（GDExtension 桥接）
+## GDExtension 原生核心桥（VoxelNative）——**硬依赖**。
 ##
-## 负责检测 VoxelNative (GDExtension C++) 是否可用，并把热路径调用转发给原生实现。
-## 设计目标：
-##   - 无原生库时静默回退到纯 GDScript 实现（插件仍可全功能运行）
-##   - 平台/版本不匹配时（如 Windows 用户没带 dll），不报错、自动回退
-##   - 单例懒初始化，避免启动开销
+## 插件全部热路径（网格生成 / 崩塌检测 / 批量体素写 / 快照 / CRC）都实现在原生库里，
+## 因此不保留任何 GDScript 兜底：库缺失或方法不全时，这里统一报一次错并返回空值。
+## 单一实现 = 单一行为，不会出现"有库/无库两条路径表现不一致"。
 ##
-## 关键设计：所有原生调用都通过鸭子类型动态调用（ClassDB.instantiate + Object.call），
-## 不使用 VoxelNative.xxx() 编译期静态引用。原因：编辑器启动早期（GDExtension
-## 加载完成前）GDScript 若静态解析 VoxelNative 的方法会直接崩溃（SIGKILL 无报错），
-## 动态调用则完全运行时绑定，任何启动时序都安全。
+## 【为什么动态绑定】编辑器启动早期（扩展注册完成前）GDScript 静态引用 VoxelNative
+## 会直接 SIGKILL；经 ClassDB + Object.call 动态绑定对任何启动时序都安全。
 
-static var _available: int = -1  # -1=未检测, 0=不可用, 1=可用
-static var _inst: Object = null   # VoxelNative 实例缓存（避免重复实例化）
-static var _required_methods := [
+## 必需方法清单（版本不匹配 = 整体不可用，一次性报错）。
+const REQUIRED_METHODS: Array[StringName] = [
 	&"greedy_merge_dense",
 	&"generate_chunk_dense",
-	&"find_unsupported_around",
-	&"remove_voxels_bulk",
-	&"partition_connected",
-	&"snapshot_chunks_halo",
+	&"generate_lod1_block_dense",
+	&"build_halo_from_buffers",
 	&"generate_arrays_native",
 	&"generate_spheres_native",
+	&"build_lod_block_halo_from_buffers_native",
+	&"patch_lod_block",
+	&"patch_lod_block_from_lod",
+	&"build_lod_block_halo_from_lod_buffers_native",
+	&"find_unsupported_around",
 	&"propagate_stress",
 	&"collect_materials",
+	&"remove_voxels_bulk",
+	&"set_voxels_bulk",
+	&"collect_chunks",
+	&"partition_connected",
+	&"snapshot_chunks_halo",
+	&"crc32",
+	&"crc32_segments",
 ]
 
-## 获取原生实例（懒初始化）。返回 null 表示不可用。
-static func _get_instance() -> Object:
+static var _inst: Object = null
+static var _failed := false
+
+
+## 取原生实例（懒初始化 + 能力校验）。不可用时返回 null，且只报一次错（不刷屏）。
+static func instance() -> Object:
 	if _inst != null and is_instance_valid(_inst):
 		return _inst
-	if not ClassDB.class_exists(&"VoxelNative"):
-		_available = 0
+	if _failed:
 		return null
-	# 校验所有必需方法存在（版本不匹配时整体回退 GDScript）
-	for m in _required_methods:
+	_failed = true
+	if not ClassDB.class_exists(&"VoxelNative"):
+		push_error("[VoxelSupport] 缺少原生库 VoxelNative（GDExtension 未加载）。"
+				+ "请确认 addons/VoxelSupport/Native/ 下有匹配当前平台与 Godot 版本的动态库。")
+		return null
+	for m in REQUIRED_METHODS:
 		if not ClassDB.class_has_method(&"VoxelNative", m, false):
-			_available = 0
+			push_error("[VoxelSupport] 原生库 VoxelNative 缺少方法 '%s'（库与插件版本不匹配）。" % m)
 			return null
 	_inst = ClassDB.instantiate(&"VoxelNative")
-	_available = 1 if _inst != null else 0
+	if _inst == null:
+		push_error("[VoxelSupport] VoxelNative 实例化失败，插件不可用。")
 	return _inst
 
 
-## 原生库是否可用（类已注册 + 所有必需方法存在 = 加载成功）
+## 原生库是否可用（类已注册 + 必需方法齐全）。供 HUD / 演示脚本查询。
 static func is_available() -> bool:
-	return _get_instance() != null
+	return instance() != null
 
 
-## 贪婪网格合并（转发到原生实现，动态调用）
-## grid: PackedInt32Array 行优先，0=空；会被就地清零已合并格子
-## 返回 {pos, size, val} 三个 PackedInt32Array
+## 强制重新检测（失败后补装库时调用）。
+static func refresh() -> void:
+	_failed = false
+	_inst = null
+
+
+# ----------------------------------------------------------------------------
+# 桥接方法：一律"取实例 → 为空则返回空值 → 否则动态调用"。
+# 返回值形状与原生签名一致（见 voxel_native.h）。
+# ----------------------------------------------------------------------------
+
+## 贪婪网格合并（2D 密集网格同材质矩形合并）。grid 会被就地清零已合并格子。
+## 返回 {pos, size, val} 三个 PackedInt32Array。
 static func merge_dense(grid: PackedInt32Array, width: int, height: int) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
+	if inst == null:
+		return {}
 	return inst.call(&"greedy_merge_dense", grid, width, height)
 
 
-## 生成单个 chunk 网格（转发到原生实现，动态调用）
-## halo: 18³ 密集光环缓冲；trans_flags: 材质透明标志数组（PackedByteArray，索引=材质ID）
-## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...}
+## 单个 chunk 网格（halo: 34³ 密集光环，值 = 材质ID，0 = 空）。
 static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByteArray,
 		scale: float, chunk: Vector3i, use_local_space: bool, offset: Vector3) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
+	if inst == null:
+		return {}
 	return inst.call(&"generate_chunk_dense", halo, trans_flags, scale, chunk, use_local_space, offset)
 
 
-## LOD1 大块网格（一次性生成 32³ 大格，godot_voxel 风格大 block）。
-## halo: 34³ 大格光环（中心 32³ + 1 外缘）；block_key: 大块 key。
-## 可选能力：无原生库或旧库缺此方法时返回空字典，GDScript 侧安全降级（不静默出错）。
+## LOD 大块网格（一次性 32³ 大格；halo: 34³ 大格光环）。
 static func generate_lod1_block_dense(halo: PackedInt32Array, trans_flags: PackedByteArray,
 		scale: float, block_key: Vector3i, offset: Vector3) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		return {}
-	if not ClassDB.class_has_method(&"VoxelNative", &"generate_lod1_block_dense", false):
-		push_error("[NativeLoader] generate_lod1_block_dense 需要原生库 VoxelNative（未加载或方法缺失）")
 		return {}
 	return inst.call(&"generate_lod1_block_dense", halo, trans_flags, scale, block_key, offset)
 
 
-## 构建 chunk 的 18³ halo（原生下沉 C++）。无原生/旧库缺方法时返回空数组。
+## 由 chunk 密集缓冲构建 34³ 光环（中心 32³ + 1 外缘）。
 static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> PackedInt32Array:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		return PackedInt32Array()
-	if not ClassDB.class_has_method(&"VoxelNative", &"build_halo_from_buffers", false):
 		return PackedInt32Array()
 	return inst.call(&"build_halo_from_buffers", buffers, chunk)
 
 
-## 稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心全 C++：分 chunk + 原生 dense + 合并）。
-## 返回与 generate_arrays_runtime 相同的 Dictionary（solid/trans 顶点），无原生时返回空。
+## 稀疏体素字典 → 网格 arrays（掉落体/大范围破坏：分 chunk + dense + 合并，全在原生）。
 static func generate_arrays_native(voxels: Dictionary, trans_flags: PackedByteArray,
 		scale: float, offset: Vector3) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
 		return {}
 	return inst.call(&"generate_arrays_native", voxels, trans_flags, scale, offset)
 
 
-## 球体网格（每体素一颗 icosphere，按顶点预算自动降采样）：导入 shape=sphere 用。
-## 返回与 generate_arrays_native 相同结构的 Dictionary，另含 "step"（实际采样间隔）。
-## 原生库为强制依赖（网格生成内核已统一下沉 C++），缺失时返回空字典并报错。
+## 球体网格（每体素一颗 icosphere，按顶点预算自动降采样）。另含 "step"（实际采样间隔）。
 static func generate_spheres_native(voxels: Dictionary, trans_flags: PackedByteArray,
 		subdivisions: int, sphere_scale: float, scale: float, vertex_budget: int) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		push_error("[NativeLoader] generate_spheres_native 需要原生库 VoxelNative")
 		return {}
-	return inst.call(&"generate_spheres_native", voxels, trans_flags, subdivisions, sphere_scale, scale, vertex_budget)
+	return inst.call(&"generate_spheres_native", voxels, trans_flags,
+			subdivisions, sphere_scale, scale, vertex_budget)
 
 
-## 构建 LOD 大块的 34³ halo（通用降采样，任意 lod_shift，原生下沉 C++）。
-## lod_shift=i → 每大格 2^i 体素。无原生/旧库缺方法时返回空数组。
-static func build_lod_block_halo_from_buffers_native(buffers: Dictionary, block_key: Vector3i, lod_shift: int) -> PackedInt32Array:
-	var inst := _get_instance()
+## 由 chunk 缓冲降采样构建 LOD 大块 34³ 大格光环（lod_shift = 每大格 2^shift 体素）。
+static func build_lod_block_halo_from_buffers_native(buffers: Dictionary, block_key: Vector3i,
+		lod_shift: int) -> PackedInt32Array:
+	var inst := instance()
 	if inst == null:
-		return PackedInt32Array()
-	if not ClassDB.class_has_method(&"VoxelNative", &"build_lod_block_halo_from_buffers_native", false):
 		return PackedInt32Array()
 	return inst.call(&"build_lod_block_halo_from_buffers_native", buffers, block_key, lod_shift)
 
 
 ## 金字塔增量降采样：只重算 block 内 [rmin,rmax] 脏大格，未脏大格从 coarse 复用。
-## 与全量降采样规则一致（取第一个非空材质）。coarse: 现有 block 大格数据（32³）。
-## 返回完整 block 大格数据（脏大格已更新）。
-## 可选能力：无原生库或旧库缺此方法时保持原 coarse 数据返回，GDScript 侧安全降级。
 static func patch_lod_block(buffers: Dictionary, block_key: Vector3i, lod_shift: int,
 		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		return coarse
-	if not ClassDB.class_has_method(&"VoxelNative", &"patch_lod_block", false):
-		push_error("[NativeLoader] patch_lod_block 需要原生库 VoxelNative（未加载或方法缺失），保持原 coarse 数据")
 		return coarse
 	return inst.call(&"patch_lod_block", buffers, block_key, lod_shift, coarse, rmin, rmax)
 
 
-## 金字塔逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样（而非从 L0 全量）。
-## coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格)。返回完整当前 block 大格数据。
-## 可选能力：无原生库或旧库缺此方法时保持原 coarse 数据返回，GDScript 侧安全降级。
+## 逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样。
 static func patch_lod_block_from_lod(coarse_buffers: Dictionary, block_key: Vector3i, lod: int,
 		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		return coarse
-	if not ClassDB.class_has_method(&"VoxelNative", &"patch_lod_block_from_lod", false):
-		push_error("[NativeLoader] patch_lod_block_from_lod 需要原生库 VoxelNative（未加载或方法缺失），保持原 coarse 数据")
 		return coarse
 	return inst.call(&"patch_lod_block_from_lod", coarse_buffers, block_key, lod, coarse, rmin, rmax)
 
 
-## 从独立 LOD 数据块（每 LOD 32³ 大格）构建 34³ halo（直接拷大格，原生下沉 C++）。
-## 无原生/旧库缺方法时返回空数组。
-static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
-	var inst := _get_instance()
+## 由独立 LOD 数据块构建 34³ 大格光环（直接拷大格，无降采样）。
+static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary,
+		block_key: Vector3i) -> PackedInt32Array:
+	var inst := instance()
 	if inst == null:
-		return PackedInt32Array()
-	if not ClassDB.class_has_method(&"VoxelNative", &"build_lod_block_halo_from_lod_buffers_native", false):
 		return PackedInt32Array()
 	return inst.call(&"build_lod_block_halo_from_lod_buffers_native", buffers, block_key)
 
 
-## 支撑图失稳检测（转发到原生实现，动态调用）
-## buffers: chunk key -> PackedInt32Array(32³) 的密集缓冲快照
-## removed: 本次被移除的体素位置数组
-## 返回失稳体素集合 Dictionary{pos(Vector3i): true}
+## 支撑失稳检测：返回失稳体素集合 {pos: true}。
 static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
+	if inst == null:
+		return {}
 	return inst.call(&"find_unsupported_around", buffers, removed)
 
 
-## 应力传播（转发到原生实现，动态调用）
-## buffers: chunk key -> PackedInt32Array(32³) 密集缓冲
-## removed: 被移除的起点体素；strength_table: 材质连接强度表（索引=材质ID）
-## max_steps/force/decay: 应力传播参数
-## 返回 Array[Vector3i]（应力断裂体素）。原生库为强制依赖，缺失时报错。
-static func propagate_stress(buffers: Dictionary, removed: Array, strength_table: PackedFloat32Array,
-		max_steps: int, force: float, decay: float) -> Array:
-	var inst := _get_instance()
+## 应力传播（裂纹扩散）：返回断裂体素 Array[Vector3i]。
+static func propagate_stress(buffers: Dictionary, removed: Array,
+		strength_table: PackedFloat32Array, max_steps: int, force: float, decay: float) -> Array:
+	var inst := instance()
 	if inst == null:
-		push_error("[NativeLoader] propagate_stress 需要原生库 VoxelNative")
 		return []
 	return inst.call(&"propagate_stress", buffers, removed, strength_table, max_steps, force, decay)
 
 
-## 批量收集体素材质 ID（转发到原生实现，动态调用）。
-## buffers: chunk key -> PackedInt32Array(32³) 密集缓冲
-## positions: 体素位置数组
-## 返回 Dictionary{pos(Vector3i): int}（无体素 → -1）。原生库为强制依赖，缺失时报错。
+## 批量收集体素材质 ID：{pos: int}（无体素 → -1）。
 static func collect_materials(buffers: Dictionary, positions: Array) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		push_error("[NativeLoader] collect_materials 需要原生库 VoxelNative")
 		return {}
 	return inst.call(&"collect_materials", buffers, positions)
 
 
-## 批量移除体素（转发到原生实现，动态调用）
-## buffers: chunk key -> PackedInt32Array(32³)，会被就地修改（值>0 清零）
-## positions: 待移除位置数组
-## 返回 Dictionary：{removed: int, chunk_removed: {chunk_key: count}}
+## 批量移除体素（就地改 buffers）。返回 {removed, chunk_removed, buffers, boundary}。
 static func remove_voxels_bulk(buffers: Dictionary, positions: Array) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
+	if inst == null:
+		return {}
 	return inst.call(&"remove_voxels_bulk", buffers, positions)
 
 
-## 批量设置体素为同一材质（转发到原生实现，动态调用）。
-## 与原生的 set_voxels_bulk 对称 remove_voxels_bulk；该方法为【可选】能力——
-## 旧版原生库无此方法时返回空字典，GDScript 侧回退逐体素循环，不影响其他原生加速。
-## 返回 Dictionary：{added, chunk_set, buffers, boundary}
+## 批量设置同材质体素（就地改 buffers）。返回 {added, chunk_set, buffers, boundary}。
 static func set_voxels_bulk(buffers: Dictionary, positions: Array, material_id: int) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		return {}
-	if not ClassDB.class_has_method(&"VoxelNative", &"set_voxels_bulk", false):
 		return {}
 	return inst.call(&"set_voxels_bulk", buffers, positions, material_id)
 
 
-## 收集 positions 涉及的 chunk key（去重，转发到原生）。可选能力，无原生时返回空数组。
+## 收集 positions 涉及的 chunk key（去重）。
 static func collect_chunks(positions: Array) -> Array:
-	var inst := _get_instance()
+	var inst := instance()
 	if inst == null:
-		return []
-	if not ClassDB.class_has_method(&"VoxelNative", &"collect_chunks", false):
 		return []
 	return inst.call(&"collect_chunks", positions)
 
 
-## 连通分组（转发到原生实现，动态调用）
-## positions: Array[Vector3i]，按 6 方向连通分组
-## 返回 Array[Array[Vector3i]]
+## 按 6 方向连通性分组：返回 Array[Array[Vector3i]]。
 static func partition_connected(positions: Array) -> Array:
-	var inst := _get_instance()
+	var inst := instance()
+	if inst == null:
+		return []
 	return inst.call(&"partition_connected", positions)
 
 
-## 快照受影响区域 chunk 缓冲（转发到原生实现，动态调用）
-## buffers: chunk key -> PackedInt32Array
-## chunks: 需快照的 chunk key 数组（含 27 邻居）
-## 返回 Dictionary（COW 共享，省深拷贝）
+## 快照受影响区域的 chunk 缓冲（chunks + 27 邻居，COW 共享）。
 static func snapshot_chunks_halo(buffers: Dictionary, chunks: Array) -> Dictionary:
-	var inst := _get_instance()
+	var inst := instance()
+	if inst == null:
+		return {}
 	return inst.call(&"snapshot_chunks_halo", buffers, chunks)
 
 
-## 强制重新检测（加载失败后重试时调用）
-static func refresh() -> void:
-	_available = -1
-	_inst = null
+## 一段字节的标准 CRC32（含初值 0xFFFFFFFF 与终值异或）。start/length 传 -1 表示"从头/到末尾"。
+static func crc32(data: PackedByteArray, start: int = -1, length: int = -1) -> int:
+	var inst := instance()
+	if inst == null:
+		return 0
+	return int(inst.call(&"crc32", data, start, length))
+
+
+## 多段 CRC32：等价于把各段顺序拼接后算一次（免去 GDScript 侧临时拼接）。
+static func crc32_segments(data: PackedByteArray, offsets: PackedInt64Array,
+		lengths: PackedInt64Array) -> int:
+	var inst := instance()
+	if inst == null:
+		return 0
+	return int(inst.call(&"crc32_segments", data, offsets, lengths))

@@ -275,7 +275,7 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 		# 而是"作者明确选择不做校验"）。check_crc=false 时则无论 crc 字段为何都跳过。
 		var has_crc := crc != 0
 		if check_crc and has_crc:
-			var computed := _compute_crc(bytes, pos, type, length)
+			var computed := _block_crc(bytes, pos, length)
 			if computed != crc:
 				# CRC 失败：跳过该块（DROP_BLOCK），保留其余（§9.0）
 				var msg := "块 %s 的 CRC 不匹配，已跳过" % type
@@ -1085,14 +1085,12 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 					continue  # 该 model 已空 → 不写（块集合变化本应退全量，这里兜底）
 				# 【子块级增量】先试"只重编码脏 chunk、其余子块搬运旧字节"。
 				# 失败（块集合变化）退回整 model 重编码。
-				# vox0_index 命中则免去重索引（省 ~90ms/次），未命中内部会现场补算。
-				var cached_idx: Dictionary = vox0_index.get(mid, {})
-				var enc := _try_encode_model_incremental(old_bytes, bi, mid, new_blocks, dirty_chunks, block_size, cached_idx)
-				if enc.is_empty():
-					_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(mid, new_blocks, block_size), include_crc)
-				else:
-					# 用子块级增量给出的预算 CRC，避免整段重扫（1.4MB 省 ~90ms）。
-					_write_block_with_crc(out, QVoxSpec.BLOCK_VOX0, enc["payload"], int(enc["crc"]), include_crc)
+				# vox0_index 命中则免去子块重索引（对 1.4MB 负载约省 90ms）。
+				var enc := _try_encode_model_incremental(
+						old_bytes, bi, mid, new_blocks, dirty_chunks, block_size, vox0_index.get(mid, {}))
+				var payload_vox0: PackedByteArray = enc if not enc.is_empty() \
+						else _encode_vox0(mid, new_blocks, block_size)
+				_write_block(out, QVoxSpec.BLOCK_VOX0, payload_vox0, include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
@@ -1147,11 +1145,11 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 ## 返回 { key(Vector3i): { "head_off", "codec", "payload_off", "payload_len", "block_total" } }，
 ## offset 均相对 payload 起点。codec=0（保留值）或负载越界的块会被跳过。
 ##
-## 额外返回该 VOX0 的**块级 CRC 拆分信息**（放在返回值特殊键 "_crc"）：
-##   { "header_crc": int,     // 顶层块头里的 length‖type 之后、子块之前那 6 字节的贡献
-##     "order": [Vector3i…],  // 子块的物理顺序
-##     "sub": { key: {"crc": int, "len": int} } }  // 每个子块的 CRC 与字节数
-## 这样只改 1 个子块时，新 payload 的 CRC 可用 crc32_combine 拼接（O(子块数)，不含总字节）。
+## 额外返回特殊键 "_meta"：
+##   { "order": [Vector3i…],           // 子块的物理顺序（增量写据此保持字节序）
+##     "sub": { key: {"crc": int} } }  // 每个子块的 CRC32
+## 子块 CRC 同时是 LOD 派生缓存（CACH）的来源校验依据：缓存的 source_crc 就是它所依赖的
+## LOD0 子块 CRC 集合（见 _lod_expected_crcs）。
 static func index_vox0_blocks(payload: PackedByteArray, _block_size: int) -> Dictionary:
 	var out: Dictionary = {}
 	if payload.size() < QVoxSpec.VOX_MODEL_HEADER_SIZE:
@@ -1184,63 +1182,38 @@ static func index_vox0_blocks(payload: PackedByteArray, _block_size: int) -> Dic
 			"block_total": QVoxSpec.VOX_BLOCK_HEADER_SIZE + plen,
 		}
 		order.append(key)
-		# 记录子块（含 17 字节头）的 CRC 与长度，供 crc32_combine 拼接
-		var sub_len := QVoxSpec.VOX_BLOCK_HEADER_SIZE + plen
-		subs[key] = {"crc": _crc_of_slice(payload, head_off, sub_len), "len": sub_len}
+		# 记录子块（含 17 字节头）的 CRC：增量写与 LOD 缓存来源校验共用
+		subs[key] = {"crc": _slice_crc(payload, head_off, QVoxSpec.VOX_BLOCK_HEADER_SIZE + plen)}
 		pos = payload_off + plen
-	# 记录模型头（model_id + block_count + payload_length）的 CRC，作为拼接的"左端"
-	out["_crc"] = {
-		"header_crc": _crc_of_slice(payload, 0, QVoxSpec.VOX_MODEL_HEADER_SIZE),
-		"header_len": QVoxSpec.VOX_MODEL_HEADER_SIZE,
-		"order": order,
-		"sub": subs,
-	}
+	out["_meta"] = {"order": order, "sub": subs}
 	return out
 
 
-## 对一段字节（可指定起点与长度）算标准 CRC32。
+## CRC32（标准 IEEE 802.3，反射多项式 0xEDB88320）——统一由原生 VoxelNative 计算。
 ##
-## 【两级实现】
-##   1. **native 路径（首选）**：VoxelNative.crc32 —— C++ 下 1.4MB 约 0.5ms。
-##   2. GDScript 回退：逐字节查表，1.4MB 约 84ms（仅在 native 不可用时走，如未编译扩展）。
-##
-## 【为什么必须下沉】GDScript 层试过两种加速，**都不成立**：
-##   - crc32_combine 拼接：单次 ~1.48ms（46 轮 GF(2) 矩阵平方 × 32 步），
-##     144 个子块 = 213ms，比整扫还慢一倍。zlib 的常数因子在解释器下爆炸。
-##   - slicing-by-8（一次吞 8 字节）：迭代数降到 1/8，但每次迭代运算量增长更多，
-##     实测反而慢到 114ms（0.7×）。
-## 解释器开销下逐字节查表已是极限，故把这一步交给 native。
-static func _crc_of_slice(data: PackedByteArray, start: int, length: int) -> int:
-	if _native_crc() and ClassDB.class_has_method("VoxelNative", "crc32", true):
-		return int(VoxelNative.crc32(data, start, length))
-	var table := _crc32_table()
-	var crc := 0xFFFFFFFF
-	var end := mini(start + length, data.size())
-	for i in range(start, end):
-		crc = (crc >> 8) ^ int(table[(crc ^ data[i]) & 0xFF])
-	return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+## 读写两端共用这一处实现：读取端校验块 CRC，写入端算块 CRC，增量写算子块 CRC。
+## 原生下 1.4MB 约 0.5ms；GDScript 逐字节查表要 ~84ms，且 crc32_combine 拼接在解释器下
+## 比整扫更慢（实测 1.48ms/次），因此不保留兜底——原生库为硬依赖（见 NativeLoader）。
+static func _slice_crc(data: PackedByteArray, start: int, length: int) -> int:
+	return NativeLoader.crc32(data, start, length)
 
 
-## VoxelNative 单例是否可用（懒查询 + 缓存）。扩展未加载时返回 null。
-static var _native_probe_done := false
-static var _native_ok := false
-
-static func _native_crc() -> bool:
-	if not _native_probe_done:
-		_native_probe_done = true
-		_native_ok = ClassDB.class_exists("VoxelNative")
-	return _native_ok
+## 一个块的 CRC：覆盖 length(4) ‖ type(4) ‖ 负载的 length 字节（含尾部零填充）。
+## 两段不连续（中间隔着 crc 字段），交给 crc32_segments 一次算完，免去临时拼接。
+static func _block_crc(full: PackedByteArray, header_at: int, length: int) -> int:
+	return NativeLoader.crc32_segments(full,
+			PackedInt64Array([header_at, header_at + QVoxSpec.BLOCK_HEADER_SIZE]),
+			PackedInt64Array([8, length]))
 
 
 ## 【子块级增量编码】一个 model 的 VOX0：只重编码 dirty 的 chunk，其余子块字节原样搬运。
-## 同时用 crc32_combine 由"未变子块的旧 CRC + 新子块的 CRC"拼出新 payload 的 CRC，
-## 避免为 1.4MB 负载重扫一遍（92ms → O(子块数)）。
+## 未变子块在旧、新 payload 里偏移完全相同，故按"连续未变段"整段 memcpy；脏块通常只有 1~2 个。
 ##
-## 返回 { "payload": PackedByteArray, "crc": int }；不适用时返回空 Dictionary，
-## 调用方据此退回 _encode_vox0（整 model 重编码）。
-static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dictionary, blocks: Dictionary, dirty_chunks: Dictionary, block_size: int) -> Dictionary:
+## 返回新 payload；块集合已变（增量不适用）时返回空，调用方据此退回 _encode_vox0 整编码。
+## CRC 由写入方统一算（_block_crc），此处不重复。
+static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dictionary, blocks: Dictionary, dirty_chunks: Dictionary, block_size: int) -> PackedByteArray:
 	var n := block_size * block_size * block_size
-	# 仅取真正的子块条目（old_index 里的 "_crc" 是元信息，不是子块）
+	# 仅取真正的子块条目（old_index 里的 "_meta" 是元信息，不是子块）
 	var sub_count := 0
 	for k in old_index:
 		if k is Vector3i:
@@ -1254,17 +1227,16 @@ static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dic
 		live[k] = true
 	# 块集合必须与旧文件一致，增量才成立（否则要增删子块 → 退回整编码）
 	if live.size() != sub_count:
-		return {}
+		return PackedByteArray()
 	for k in live:
 		if not old_index.has(k):
-			return {}
+			return PackedByteArray()
 	for k in old_index:
 		if k is Vector3i and not live.has(k):
-			return {}
+			return PackedByteArray()
 
-	# 按旧的物理顺序重建，保持确定性
-	var crc_meta: Dictionary = old_index.get("_crc", {})
-	var order: Array = crc_meta.get("order", [])
+	# 按旧的物理顺序重建，保持确定性（"_meta" 由 index_vox0_blocks 写入）
+	var order: Array = (old_index.get("_meta", {}) as Dictionary).get("order", [])
 	var keys := order.duplicate()
 	if keys.is_empty():
 		# 兜底：没有物理顺序元信息时按坐标排序（保证同一 index 得到同一输出）
@@ -1310,7 +1282,7 @@ static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dic
 		var pick := QVoxBlockCodec.pick_codec(buf2, n)
 		var codec: int = pick[0]
 		if codec == QVoxSpec.CODEC_EMPTY:
-			return {}  # 变成空块：块集合已变，退回整编码
+			return PackedByteArray()  # 变成空块：块集合已变，退回整编码
 		var pl := QVoxBlockCodec.pack(codec, buf2, n)
 		var off := out.size()
 		out.resize(off + QVoxSpec.VOX_BLOCK_HEADER_SIZE)
@@ -1325,50 +1297,39 @@ static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dic
 	# 【回填 payload_length】块体自 VOX_MODEL_HEADER_SIZE 起，长度即 out.size() - 头长。
 	# 有了它，解析侧可以 expected_end = 头长 + payload_length 精确切负载，填充灰区归零。
 	out.encode_u32(6, out.size() - QVoxSpec.VOX_MODEL_HEADER_SIZE)
-
-	# 【CRC】直接对拼好的 payload 扫一遍 —— 实测 1.7MB 约 108ms，
-	# 是当前唯一可行的选择。曾尝试用 crc32_combine 把"未变子块的旧 CRC"拼接起来
-	# 以避免整扫，但 GDScript 下单次 combine 要 ~1.48ms（46 轮 GF(2) 矩阵平方 × 32 步），
-	# 144 个子块就是 213ms —— 比整扫还慢一倍。combine 的常数因子在解释器下不成立。
-	# 想要更低开销只能靠"4 字节并行查表"进一步压 zlib 式整扫，
-	# 或把 CRC 计算下沉到 GDExtension 的 native 侧。
-	var crc := _crc_of_slice(out, 0, out.size())
-	return {"payload": out, "crc": crc}
+	return out
 
 
 ## 【子块级增量】尝试以"只重编码脏 chunk"的方式重建一个 model 的 VOX0。
 ##
-## old_bytes / bi(该 VOX0 在旧文件中的块索引) 给出旧 VOX0 的原始字节；
+## old_bytes / bi（该 VOX0 在旧文件中的块索引）给出旧 VOX0 的原始字节；
 ## dirty_chunks_by_model 是 { model_id: {chunk_key: true} }（可为空 → 整 model 重编码）。
 ##
-## 返回 { "payload": PackedByteArray, "crc": int }；不适用时返回空 Dictionary。
+## 返回新 payload；不适用增量时返回空，调用方退回整 model 重编码。
 ##
 ## old_vox0_index 为调用方缓存的 index_vox0_blocks 结果（可空 Dict → 现场重算）。
-## 缓存命中时省去对 1.4MB 负载重算子块 CRC 的 ~90ms。
-static func _try_encode_model_incremental(old_bytes: PackedByteArray, bi: Dictionary, model_id: int, blocks: Dictionary, dirty_chunks_by_model: Dictionary, block_size: int, old_vox0_index: Dictionary = {}) -> Dictionary:
+static func _try_encode_model_incremental(old_bytes: PackedByteArray, bi: Dictionary, model_id: int, blocks: Dictionary, dirty_chunks_by_model: Dictionary, block_size: int, old_vox0_index: Dictionary = {}) -> PackedByteArray:
 	var off: int = bi["offset"]
 	var total: int = bi["total"]
 	if off + total > old_bytes.size():
-		return {}
+		return PackedByteArray()
 	# 旧 VOX0 的 payload 区间：跳过 12 字节顶层块头
 	var payload_off := off + QVoxSpec.BLOCK_HEADER_SIZE
 	var payload_len := total - QVoxSpec.BLOCK_HEADER_SIZE
 	if payload_len < QVoxSpec.VOX_MODEL_HEADER_SIZE:
-		return {}
+		return PackedByteArray()
 	var old_payload := old_bytes.slice(payload_off, payload_off + payload_len)
 	var old_index := old_vox0_index
 	if old_index.is_empty():
 		old_index = index_vox0_blocks(old_payload, block_size)
 	if old_index.is_empty():
-		return {}
+		return PackedByteArray()
 	var dirty: Dictionary = dirty_chunks_by_model.get(model_id, {})
-	var enc: Dictionary = encode_vox0_incremental(old_payload, old_index, blocks, dirty, block_size)
-	if enc.is_empty():
-		return {}
-	var payload: PackedByteArray = enc["payload"]
+	var payload := encode_vox0_incremental(old_payload, old_index, blocks, dirty, block_size)
+	if payload.is_empty():
+		return PackedByteArray()
 	payload.encode_u16(0, model_id & 0xFFFF)  # 回填 model_id
-	# CRC 在 encode_vox0_incremental 里已按最终字节算好（含 model_id 段），可直接用。
-	return {"payload": payload, "crc": int(enc["crc"])}
+	return payload
 
 
 ## 增量写是否适用：块集合（VOX0 的 model_id 集合）必须一致——增量只能就地替换块，
@@ -1448,200 +1409,10 @@ static func _write_block(out: PackedByteArray, type: String, payload: PackedByte
 	# CRC 覆盖 length ‖ type ‖ 负载的 length 个字节（含尾部填充）。
 	# 此刻 out 已含 [header(12) + payload + padding]，直接对这段连续字节算 CRC。
 	if include_crc:
-		var crc := _compute_crc(out, header_at, type, length)
+		var crc := _block_crc(out, header_at, length)
 		out.encode_u32(header_at + 8, crc)
 	else:
 		out.encode_u32(header_at + 8, 0)
-
-
-## 写一个块，但 CRC 由调用方**预算好**，跳过对整段负载的重扫。
-##
-## crc_payload 必须是对 payload **全部字节**（不含尾部零填充）算出的标准 CRC32
-## （即含初值 0xFFFFFFFF 与终值异或，与 _crc_of_slice 的口径一致）。
-## 块 CRC 覆盖 length(4) ‖ type(4) ‖ 负载的 length 个字节（含填充），
-## 后两项用 crc32_combine 拼上：开销与 payload 大小无关。
-##
-## 【为什么值得】native CRC 下整段重扫 1.4MB 约 0.5ms，本身已不贵；
-## 但 combine 只用 ~2 次调用（≤3ms）就把这次扫描省掉，仍是净赚（且对 GDScript 回退路径意义更大）。
-static func _write_block_with_crc(out: PackedByteArray, type: String, payload: PackedByteArray, crc_payload: int, include_crc: bool) -> void:
-	var length := QVoxSpec.padded_length(payload.size())
-	var header_at := out.size()
-	out.resize(header_at + QVoxSpec.BLOCK_HEADER_SIZE)
-	out.encode_u32(header_at, length)
-	var t := type.to_ascii_buffer()
-	if t.size() != 4:
-		push_error("[QVox] 块类型必须是 4 个 ASCII 字符: '%s'" % type)
-		t.resize(4)
-	for i in 4:
-		out[header_at + 4 + i] = t[i]
-	out.append_array(payload)
-	var pad := length - payload.size()
-	for _p in pad:
-		out.append(0)
-	if include_crc:
-		var crc := crc_payload & 0xFFFFFFFF
-		if pad > 0:
-			crc = crc32_combine(crc, _crc_of_zeros(pad), pad)
-		crc = crc32_combine(_crc_of_slice(out, header_at, 8), crc, length)
-		out.encode_u32(header_at + 8, crc)
-	else:
-		out.encode_u32(header_at + 8, 0)
-
-
-## 连续 n 个零字节的标准 CRC32（n 很小：仅为块的尾部填充）。
-static func _crc_of_zeros(n: int) -> int:
-	var table := _crc32_table()
-	var crc := 0xFFFFFFFF
-	for _i in n:
-		crc = (crc >> 8) ^ int(table[crc & 0xFF])
-	return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
-
-
-## 计算块的 CRC32：length 的 4 字节 ‖ type 的 4 字节 ‖ 负载的 payload_size 个字节。
-## payload_size 必须与读取端切片长度一致（即 length，含填充）。
-##
-## 【性能】逐位实现（每字节 8 次迭代、每次带分支）在 1.4MB 文件上约 730ms，是写/读
-## 路径的最大单项开销。改用 256 项查表后降至约 180ms（实测 4.0×），且是纯算术无分支。
-## 表本身用 `_crc32_table()` 惰性构造一次（static，跨调用复用）。
-## 现在底层走 _crc_of_slice（native CRC 优先），1.4MB 约 0.5ms。
-static func _compute_crc(full: PackedByteArray, header_at: int, _type: String, payload_size: int) -> int:
-	var table := _crc32_table()
-	var crc := 0xFFFFFFFF
-	for i in 8:  # length(4) + type(4)
-		crc = (crc >> 8) ^ table[(crc ^ full[header_at + i]) & 0xFF]
-	var payload_start := header_at + QVoxSpec.BLOCK_HEADER_SIZE
-	for i in payload_size:
-		crc = (crc >> 8) ^ table[(crc ^ full[payload_start + i]) & 0xFF]
-	return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
-
-
-## CRC32（IEEE 802.3，多项式 0xEDB88320 反射式）的 256 项查表。
-## Godot 4 未在 ClassDB 暴露 CRC32（HashingContext 只有 MD5/SHA），故自建。
-## static 惰性缓存：只构造一次，之后所有 CRC 计算共享。
-##
-## 【类型注意】必须用普通 Array（存 64 位 int）而非 PackedInt32Array：
-## 后者把 0xEE0E612C 这类 >0x7FFFFFFF 的表项折成**负** int32，参与
-## `(crc >> 8) ^ table[...]` 时高位全 1，结果与逐位法不一致（曾经的 bug）。
-## 用 Array 保留完整的无符号 32 位值，XOR 语义才正确。
-static var _crc_table_cache: Array = []
-
-static func _crc32_table() -> Array:
-	if not _crc_table_cache.is_empty():
-		return _crc_table_cache
-	var t: Array = []
-	t.resize(256)
-	for i in 256:
-		var c := i
-		for _j in 8:
-			if c & 1:
-				c = (c >> 1) ^ 0xEDB88320
-			else:
-				c = c >> 1
-		t[i] = c & 0xFFFFFFFF
-	_crc_table_cache = t
-	return t
-
-
-## CRC32 的"拼接"原语：已知左半段 A 的 CRC（crc_a）、右半段 B 的 CRC（crc_b）与 B 的
-## 字节数 len_b，求 A‖B 的 CRC。
-##
-## 用途（增量写的关键优化）：一个 VOX0 的负载由上百个子块拼成，只改了 1 个子块时，
-## 若整段重算 CRC 要 92ms（1.4MB）。用本函数把"未变子块的旧 CRC"按 GF(2) 线性
-## 组合起来，代价从 O(总字节) 降到 O(子块数·log(子块字节))。
-##
-## 严格移植 zlib 的 crc32_combine()：GF(2) 多项式矩阵 + 平方求幂。
-## 参数与返回均为标准 CRC32（含初值 0xFFFFFFFF 与终值异或），与 _compute_crc 一致。
-static func crc32_combine(crc_a: int, crc_b: int, len_b: int) -> int:
-	if len_b <= 0:
-		return crc_a & 0xFFFFFFFF
-	# zlib 的契约定在"最终 CRC"上（含初值/终值异或），直接传入即可，不要再自行去终值。
-	return _crc32_combine_mid(crc_a, crc_b, len_b) & 0xFFFFFFFF
-
-
-## zlib crc32_combine 的核心：输入已去掉终值异或的中间态 a_mid / b_mid，返回中间态。
-##
-## 严格照搬 zlib 的 crc32_combine_()：
-##   odd  = "一个零位"算子（odd[0]=poly，odd[n]=1<<(n-1)）
-##   even = odd²（两个零位）；odd = even²（四个零位）
-##   循环中每轮把 even/odd 与 len2 的二进制位配对作用，偶数轮用 even、奇数轮用 odd。
-static func _crc32_combine_mid(a_mid: int, b_mid: int, len_b: int) -> int:
-	# zlib 原文：
-	#   odd[0] = 0xedb88320; row=1; for n=1..31: odd[n]=row; row<<=1
-	#   gf2_matrix_square(even, odd)    /* even = odd² */
-	#   gf2_matrix_square(odd, even)    /* odd  = even² */
-	#   do {
-	#       gf2_matrix_square(even, odd)          /* even = odd² */
-	#       if (len2 & 1) crc1 = times(even, crc1)
-	#       len2 >>= 1; if (len2 == 0) break;
-	#       gf2_matrix_square(odd, even)          /* odd = even² */
-	#       if (len2 & 1) crc1 = times(odd, crc1)
-	#       len2 >>= 1;
-	#   } while (len2 != 0);
-	#   crc1 ^= crc2;
-	var odd := _crc32_matrix_one_zero_bit()
-	var even := _crc32_matrix_square(odd)
-	odd = _crc32_matrix_square(even)
-
-	var a := a_mid & 0xFFFFFFFF
-	var n := len_b
-	while true:
-		even = _crc32_matrix_square(odd)
-		if n & 1:
-			a = _crc32_matrix_times(even, a)
-		n >>= 1
-		if n == 0:
-			break
-		odd = _crc32_matrix_square(even)
-		if n & 1:
-			a = _crc32_matrix_times(odd, a)
-		n >>= 1
-		if n == 0:
-			break
-	return (a ^ b_mid) & 0xFFFFFFFF
-
-
-## zlib: "一个零位"算子矩阵。odd[0]=poly，其后各行依次左移一位（单位矩阵的位移）。
-static func _crc32_matrix_one_zero_bit() -> Array:
-	var m: Array = []
-	m.resize(32)
-	m[0] = 0xEDB88320 & 0xFFFFFFFF
-	var row := 1
-	for n in range(1, 32):
-		m[n] = row & 0xFFFFFFFF
-		row = (row << 1) & 0xFFFFFFFF
-	return m
-
-
-## GF(2) 矩阵 × 向量（列压缩）：out = Σ_{i: vec 第 i 位} mat[i]。
-static func _crc32_matrix_times(mat: Array, vec: int) -> int:
-	var out := 0
-	var v := vec & 0xFFFFFFFF
-	var i := 0
-	while v != 0 and i < 32:
-		if v & 1:
-			out ^= int(mat[i])
-		v >>= 1
-		i += 1
-	return out & 0xFFFFFFFF
-
-
-## GF(2) 矩阵平方：square[i] = mat · mat[i]。
-static func _crc32_matrix_square(mat: Array) -> Array:
-	var out: Array = []
-	out.resize(32)
-	for i in 32:
-		out[i] = _crc32_matrix_times(mat, int(mat[i]))
-	return out
-
-
-static func _crc32_byte(crc: int, b: int) -> int:
-	crc = crc ^ b
-	for _i in 8:
-		if crc & 1:
-			crc = (crc >> 1) ^ 0xEDB88320
-		else:
-			crc = crc >> 1
-	return crc & 0xFFFFFFFF
 
 
 ## HEAD JSON 编码：紧凑序列化（无多余空白）+ UTF-8 字节。

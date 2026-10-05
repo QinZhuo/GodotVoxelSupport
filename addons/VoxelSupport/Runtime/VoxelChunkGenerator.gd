@@ -35,9 +35,6 @@ static func generate_arrays_runtime(
 	var aligned := VoxelMaterial.align_by_id(materials)
 	if not voxels is Dictionary or voxels.is_empty():
 		return null
-	if not NativeLoader.is_available():
-		push_error("[VoxelChunkGenerator] 网格生成需要原生库 VoxelNative（未加载）")
-		return null
 	var trans_flags := VoxelMaterial.build_trans_flags(aligned)
 	return NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
 
@@ -54,7 +51,7 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> PackedInt32Array:
 	var native_halo := NativeLoader.build_halo_from_buffers(buffers, chunk)
 	if native_halo.size() != HALO_VOLUME:
-		push_error("[VoxelChunkGenerator] chunk halo 构建需要原生库 VoxelNative（未加载或方法缺失）")
+		push_error("[VoxelChunkGenerator] 原生返回的 halo 尺寸异常：%d != %d" % [native_halo.size(), HALO_VOLUME])
 	return native_halo
 
 
@@ -67,9 +64,6 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 static func generate_single_chunk_dense(
 		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
 		offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	if not NativeLoader.is_available():
-		push_error("[VoxelChunkGenerator] chunk 网格生成需要原生库 VoxelNative（未加载）")
-		return {}
 	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
 	var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
@@ -84,6 +78,7 @@ static func generate_single_chunk_dense(
 const LOD_BLOCK_SIZE := VoxelChunk.CHUNK_SIZE
 const LOD_BLOCK_HALO := 1
 const LOD_BLOCK_HALO_SIZE := LOD_BLOCK_SIZE + LOD_BLOCK_HALO * 2
+const LOD_BLOCK_HALO_VOLUME := LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE
 
 
 ## 从 chunk 缓冲快照构建 LOD 大块的 34³ 大格 halo（纯函数，供异步 worker，线程安全）。
@@ -92,8 +87,8 @@ const LOD_BLOCK_HALO_SIZE := LOD_BLOCK_SIZE + LOD_BLOCK_HALO * 2
 ## 实现完全在 GDExtension (C++) 中（build_lod_block_halo_from_buffers_native），无 GDScript 兜底。
 static func build_lod_block_halo_from_buffers(buffers: Dictionary, block_key: Vector3i, lod_shift: int = 1) -> PackedInt32Array:
 	var native_halo := NativeLoader.build_lod_block_halo_from_buffers_native(buffers, block_key, lod_shift)
-	if native_halo.size() != LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE:
-		push_error("[VoxelChunkGenerator] LOD halo 构建需要原生库 VoxelNative（未加载或方法缺失）")
+	if native_halo.size() != LOD_BLOCK_HALO_VOLUME:
+		push_error("[VoxelChunkGenerator] 原生返回的 LOD halo 尺寸异常：%d != %d" % [native_halo.size(), LOD_BLOCK_HALO_VOLUME])
 	return native_halo
 
 
@@ -103,8 +98,8 @@ static func build_lod_block_halo_from_buffers(buffers: Dictionary, block_key: Ve
 ## 实现完全在 GDExtension (C++) 中（build_lod_block_halo_from_lod_buffers_native），无 GDScript 兜底。
 static func build_lod_block_halo_from_lod_buffers(buffers: Dictionary, block_key: Vector3i) -> PackedInt32Array:
 	var native_halo := NativeLoader.build_lod_block_halo_from_lod_buffers_native(buffers, block_key)
-	if native_halo.size() != LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE * LOD_BLOCK_HALO_SIZE:
-		push_error("[VoxelChunkGenerator] LOD halo 构建需要原生库 VoxelNative（未加载或方法缺失）")
+	if native_halo.size() != LOD_BLOCK_HALO_VOLUME:
+		push_error("[VoxelChunkGenerator] 原生返回的 LOD halo 尺寸异常：%d != %d" % [native_halo.size(), LOD_BLOCK_HALO_VOLUME])
 	return native_halo
 
 
@@ -116,9 +111,6 @@ static func build_lod_block_halo_from_lod_buffers(buffers: Dictionary, block_key
 static func generate_lod_block_arrays(
 		lod_halo: PackedInt32Array, aligned_materials: Array, scale: float, block_key: Vector3i,
 		offset: Vector3 = Vector3.ZERO, lod_shift: int = 1) -> Dictionary:
-	if not NativeLoader.is_available():
-		push_error("[VoxelChunkGenerator] LOD 大块网格生成需要原生库 VoxelNative（未加载）")
-		return {}
 	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
 	var result: Dictionary
 	if lod_shift == 1:

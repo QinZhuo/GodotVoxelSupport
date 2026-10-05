@@ -383,7 +383,7 @@ Dictionary VoxelNative::generate_lod1_block_dense(const PackedInt32Array &halo, 
 }
 
 PackedInt32Array VoxelNative::build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk) {
-	// 构建 18³ halo（中心 16³ + 1 外缘）：遍历 27 邻居 chunk 与光环的重叠区，数组下标读取。
+	// 构建 34³ halo（中心 32³ + 1 外缘）：遍历 27 邻居 chunk 与光环的重叠区，数组下标读取。
 	// 下沉 C++ 替代 GDScript 逐体素循环（worker 端 halo 构建吞吐提升）。
 	PackedInt32Array halo;
 	halo.resize(HALO_SIZE * HALO_SIZE * HALO_SIZE);
@@ -477,7 +477,7 @@ Dictionary VoxelNative::generate_arrays_native(const Dictionary &voxels, const P
 			continue;
 		}
 		const Vector3i ck(voxs[0].x >> CHUNK_SHIFT, voxs[0].y >> CHUNK_SHIFT, voxs[0].z >> CHUNK_SHIFT);
-		// 2. 构建 18³ halo（含邻居，查体素表）
+		// 2. 构建 34³ halo（含邻居，查体素表）
 		PackedInt32Array halo;
 		halo.resize(HALO_SIZE * HALO_SIZE * HALO_SIZE);
 		const Vector3i origin = ck * CHUNK_SIZE;
@@ -1557,8 +1557,9 @@ Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Ar
 // QVox 文件写入：CRC32（标准 IEEE 802.3，反射多项式 0xEDB88320）
 // ----------------------------------------------------------------------------
 //
-// 与 zlib / GDScript _crc_of_slice 口径一致：初值 0xFFFFFFFF，终值异或 0xFFFFFFFF。
-// GDScript 逐字节查表算 1.4MB 要 ~84ms；同一算法在 C++ 下 ~0.5ms（约 170x）。
+// 与 zlib 口径一致：初值 0xFFFFFFFF，终值异或 0xFFFFFFFF。
+// GDScript 逐字节查表算 1.4MB 要 ~84ms；同一算法在 C++ 下 ~0.5ms（约 170x），
+// 故 GDScript 侧不再保留兜底实现，QVox 读写校验与子块索引统一调这里。
 // 表用函数内 static const 惰性构造一次，线程安全（C++11 magic static）。
 
 static const uint32_t *qvox_crc32_table() {

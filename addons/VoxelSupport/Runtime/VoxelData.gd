@@ -40,12 +40,12 @@ extends Resource
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
-## 数据层磁盘流（VoxelStream / QVoxStream）。非空时启用数据层按需加载/卸载：
-##   - 内存只保留活跃 chunk，其余 chunk 数据由 stream 负责写盘/读盘（磁盘为权威）
-##   - 修改过的 chunk 卸载时写回磁盘；变空时清盘；未修改且磁盘已有的直接丢弃
+## 数据层磁盘流（VoxelStream / QVoxStream）。非空时启用数据层按需加载：
+##   - 内存只保留"已加载"的 chunk，其余数据由 stream 负责读盘（磁盘为权威）
+##   - 修改过的 chunk 写回磁盘；变空时清盘；未修改且磁盘已有的可直接丢弃
 ##   - 访问 / 范围查询 / 破坏 / 网格生成会自动从磁盘加载所需 chunk（见各方法注释）
-## 渲染器可在 STREAMING 模式下按距离调用 unload_chunk() / preload_chunk() 驱动
-## 数据层的卸载与补建（见 VoxelRenderer._process_streaming）。
+## unload_chunk() 由**调用方**决定何时释放内存缓冲：当前 VoxelRenderer 不调用它——
+## LOD0 数据是粗层降采样的来源，需按 LOD0 带常驻，渲染层只按距离释放网格与粗层数据块。
 ## 通过 set_stream() 或 setter 赋值；切换时会先 flush 旧流。
 @export var stream: VoxelStream:
 	set(v):
@@ -178,6 +178,14 @@ const LOD_GRID := VoxelChunk.CHUNK_SIZE
 var _lod_invalidated: Array[Dictionary] = []
 
 
+## 取"分层字典数组"的第 level 层（必要时补足到该层）。全项目唯一维护这类数组的地方：
+## 各层各自一张 {key: value} 表；越界即补空层，避免每处手写 while-append（易漏、易越界）。
+static func _layer(layers: Array[Dictionary], level: int) -> Dictionary:
+	while layers.size() <= level:
+		layers.append({})
+	return layers[level]
+
+
 ## 失效体素所在 chunk 对应的所有更高层 LOD block（LOD0 数据变化后调用）。
 ## 仅失效网格重建（数据回填/程序化生成也会触发，见 accept_chunk_buffer）；
 ## 用户编辑额外标记 modified 用 mark_lod_modified*。
@@ -221,43 +229,39 @@ var _lod_dirty_region: Array[Dictionary] = []
 
 ## 记录 block 的脏大格区域（体素范围 [vox_min, vox_max] 覆盖的 block 内大格，并集）
 func _mark_lod_dirty_region(block_key: Vector3i, lod: int, vox_min: Vector3i, vox_max: Vector3i) -> void:
-	while _lod_dirty_region.size() <= lod:
-		_lod_dirty_region.append({})
 	var gmin := Vector3i(vox_min.x >> lod, vox_min.y >> lod, vox_min.z >> lod) - block_key * LOD_GRID
 	var gmax := Vector3i(vox_max.x >> lod, vox_max.y >> lod, vox_max.z >> lod) - block_key * LOD_GRID
 	gmin = Vector3i(clampi(gmin.x, 0, LOD_GRID - 1), clampi(gmin.y, 0, LOD_GRID - 1), clampi(gmin.z, 0, LOD_GRID - 1))
 	gmax = Vector3i(clampi(gmax.x, 0, LOD_GRID - 1), clampi(gmax.y, 0, LOD_GRID - 1), clampi(gmax.z, 0, LOD_GRID - 1))
 	if gmax.x < gmin.x or gmax.y < gmin.y or gmax.z < gmin.z:
 		return
-	var region: Array = _lod_dirty_region[lod].get(block_key, [Vector3i(999999, 999999, 999999), Vector3i(-1, -1, -1)])
+	var layer := _layer(_lod_dirty_region, lod)
+	var region: Array = layer.get(block_key, [Vector3i(999999, 999999, 999999), Vector3i(-1, -1, -1)])
 	region[0] = Vector3i(mini(region[0].x, gmin.x), mini(region[0].y, gmin.y), mini(region[0].z, gmin.z))
 	region[1] = Vector3i(maxi(region[1].x, gmax.x), maxi(region[1].y, gmax.y), maxi(region[1].z, gmax.z))
-	_lod_dirty_region[lod][block_key] = region
+	layer[block_key] = region
 
 
 ## 取并清空指定 block 的脏大格区域（渲染器增量降采样消费）
 func get_lod_dirty_region(lod: int, bk: Vector3i) -> Array:
-	if lod < _lod_dirty_region.size():
-		var r: Array = _lod_dirty_region[lod].get(bk, [])
-		_lod_dirty_region[lod].erase(bk)
-		return r
-	return []
+	if lod >= _lod_dirty_region.size():
+		return []
+	var layer: Dictionary = _lod_dirty_region[lod]
+	var r: Array = layer.get(bk, [])
+	layer.erase(bk)
+	return r
 
 
 ## 记录指定层级 block 失效（通知渲染器重建）
 func _mark_lod_invalid(block_key: Vector3i, lod: int) -> void:
-	while _lod_invalidated.size() <= lod:
-		_lod_invalidated.append({})
-	_lod_invalidated[lod][block_key] = true
+	_layer(_lod_invalidated, lod)[block_key] = true
 
 
 ## 标记粗层 block 需降采样（编辑影响该 block，不能用纯生成器数据）
 func _mark_coarse_modified(block_key: Vector3i, lod: int) -> void:
 	if lod < 1:
 		return
-	while _coarse_modified.size() <= lod - 1:
-		_coarse_modified.append({})
-	_coarse_modified[lod - 1][block_key] = true
+	_layer(_coarse_modified, lod - 1)[block_key] = true
 
 
 ## 清空所有层级失效标记
@@ -710,6 +714,14 @@ func shift_origin(offset: Vector3i) -> void:
 		_coarse_buffers[i] = _shift_dict_keys(_coarse_buffers[i], offset)
 	for i in _coarse_modified.size():
 		_coarse_modified[i] = _shift_dict_keys(_coarse_modified[i], offset)
+	# 以下三张表同样以 block key 为键（脏大格区域 / 降采样去重 / 降采样重试），
+	# 漏平移会让它们与数据基准脱节（残留旧坐标条目、去重失效）。
+	for i in _lod_dirty_region.size():
+		_lod_dirty_region[i] = _shift_dict_keys(_lod_dirty_region[i], offset)
+	for i in _lod_downsample_pending.size():
+		_lod_downsample_pending[i] = _shift_dict_keys(_lod_downsample_pending[i], offset)
+	for i in _lod_downsample_retries.size():
+		_lod_downsample_retries[i] = _shift_dict_keys(_lod_downsample_retries[i], offset)
 	# 生成器的"可生成范围"也要跟着平移，否则无限世界平移后范围判定仍指向旧坐标。
 	if generator != null:
 		generator.shift_bounds(offset)
@@ -778,11 +790,10 @@ func snapshot_lod_block_chunks(block_key: Vector3i, lod: int) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
 
 
-## 纯只读 chunk halo 快照（worker 线程安全）：不 preload / 不写任何状态，
-## 仅快照 _chunk_buffers 中已存在的数据（缺失 chunk 视为空——真空区域正常）。
-## 与 snapshot_lod_block_chunks 一致地外扩 ±2^lod 层收集 halo 邻居 chunk：
-## LOD halo 构建需要边界邻居数据（6 外缘面），否则 block 边界缺面 → 空洞。
-## 数据保留在内存时（LOD 区不禁用卸载）可安全在 WorkerThreadPool 内调用。
+## 纯只读 chunk halo 快照：不 preload / 不写任何状态，仅快照 _chunk_buffers 中已存在的数据
+## （缺失 chunk 视为空——真空区域正常）。与 snapshot_lod_block_chunks 一致地外扩 ±2^lod 层
+## 收集 halo 邻居 chunk：LOD halo 构建需要边界邻居数据（6 外缘面），否则 block 边界缺面 → 空洞。
+## 调用方在**主线程**构造好后交给 worker 只读（worker 不得触碰活动字典）。
 func snapshot_lod_block_chunks_readonly(block_key: Vector3i, lod: int) -> Dictionary:
 	var chunks_per_axis := 1 << lod
 	var cks: Array[Vector3i] = []
@@ -810,10 +821,8 @@ func snapshot_lod_block_chunks_readonly(block_key: Vector3i, lod: int) -> Dictio
 # ----------------------------------------------------------------------------
 
 func _ensure_coarse_arrays(level: int) -> void:
-	while _coarse_buffers.size() <= level - 1:
-		_coarse_buffers.append({})
-	while _coarse_modified.size() <= level - 1:
-		_coarse_modified.append({})
+	_layer(_coarse_buffers, level - 1)
+	_layer(_coarse_modified, level - 1)
 
 
 ## 取指定 LOD 的数据块（level 0 = LOD0 chunk；>=1 = 粗层 32³ 大格数据）。无则返回空数组。
@@ -842,8 +851,6 @@ func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
 	_coarse_buffers[level - 1][key] = buf
 	# 数据已同步（全量降采样 或 金字塔增量 patch 写入）→ 清除 modified，
 	# worker 据此走独立数据路径（从 coarse 生成 mesh），不再全量从 L0 降采样覆盖。
-	while _coarse_modified.size() <= level - 1:
-		_coarse_modified.append({})
 	_coarse_modified[level - 1].erase(key)
 
 
@@ -881,6 +888,17 @@ func is_lod_block_modified(level: int, key: Vector3i) -> bool:
 	return idx < _coarse_modified.size() and _coarse_modified[idx].has(key)
 
 
+## 该粗层 block 能否**只靠自身与 6 邻居的大格数据**网格化（无需回退 LOD0 降采样）。
+## 供渲染器在派发 worker 前判定数据来源，从而把快照构造留在主线程（线程安全）。
+func can_mesh_lod_block_standalone(level: int, key: Vector3i) -> bool:
+	if is_lod_block_modified(level, key) or not has_lod_block(level, key):
+		return false
+	for d in NEIGHBORS_6:
+		if not has_lod_block(level, key + d):
+			return false
+	return true
+
+
 ## 请求异步生成/加载 chunk/block 数据（后台线程：程序化走生成器，文件流走 region 读盘）。
 ## 统一带 lod 参数（0 = LOD0 chunk，>=1 = 粗层 block）。数据就绪后经 poll_all_ready 回填。
 func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
@@ -897,11 +915,10 @@ func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 ## 文件流粗层降采样任务去重（_lod_downsample_pending[level-1]）
 ## 数据在主线程构造快照（preload 磁盘回读 + 内存读取），避免后台线程读 _chunk_buffers 撞 COW 旧副本。
 func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
-	while _lod_downsample_pending.size() <= lod - 1:
-		_lod_downsample_pending.append({})
-	if _lod_downsample_pending[lod - 1].has(block_key):
+	var pending := _layer(_lod_downsample_pending, lod - 1)
+	if pending.has(block_key):
 		return
-	_lod_downsample_pending[lod - 1][block_key] = true
+	pending[block_key] = true
 	var cell := 1 << lod
 	var chunks_per_block := (VoxelChunkGenerator.LOD_BLOCK_SIZE * cell) / VoxelChunk.CHUNK_SIZE
 	var base_chunk := block_key * chunks_per_block
@@ -947,13 +964,12 @@ func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Arr
 ## 粗层降采样空结果延迟重试：LOD0 chunk 常晚于粗层 request 就绪（流式加载），
 ## 延迟 0.5s 跨帧重试（preload 会在 _start_lod_downsample 内执行），5 次上限防空区域死循环。
 func _retry_lod_downsample(block_key: Vector3i, lod: int) -> void:
-	while _lod_downsample_retries.size() <= lod - 1:
-		_lod_downsample_retries.append({})
-	var n: int = _lod_downsample_retries[lod - 1].get(block_key, 0)
+	var retries := _layer(_lod_downsample_retries, lod - 1)
+	var n: int = retries.get(block_key, 0)
 	if n >= 5:
-		_lod_downsample_retries[lod - 1].erase(block_key)
+		retries.erase(block_key)
 		return
-	_lod_downsample_retries[lod - 1][block_key] = n + 1
+	retries[block_key] = n + 1
 	var tree := Engine.get_main_loop() as SceneTree
 	if tree:
 		tree.create_timer(0.5).timeout.connect(
@@ -1100,7 +1116,6 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 	if material_id <= 0:
 		remove_voxel(pos, notify)
 		return
-	var existed := has_voxel(pos)
 	_write_buffer_impl(pos, material_id, false)
 	_mark_voxel_dirty(pos)
 	if notify:
@@ -1401,7 +1416,6 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 			_preload_ck[_chunk_of(pos)] = true
 		for ck in _preload_ck:
 			preload_chunk(ck)
-	var _diag_t0 := Time.get_ticks_usec()
 	# 原生批量移除（C++ 按 chunk 分组改 buffer，返回修改后的 buffer + 每 chunk 移除数 + 边界掩码）
 	var res: Dictionary = NativeLoader.remove_voxels_bulk(_chunk_buffers, positions)
 	var modified_buffers: Dictionary = res["buffers"]
@@ -1441,10 +1455,6 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		_maybe_erase_empty_chunk(ck)
 	if notify:
 		emit_changed()
-	# 诊断：批量移除超过 100 体素时打印耗时
-	var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
-	if _t_ms > 2.0:
-		print("[诊断] VoxelData._remove_voxels: %d 体素, 耗时 %.2f ms" % [positions.size(), _t_ms])
 	return positions
 
 
@@ -1873,8 +1883,5 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 ## 返回失稳体素位置集合 {pos: true}
 func find_unsupported_around(removed: Array) -> Dictionary:
 	if removed.is_empty() or _chunk_buffers.is_empty():
-		return {}
-	if not NativeLoader.is_available():
-		push_error("[VoxelData] find_unsupported_around 需要原生库 VoxelNative，未加载则无法进行崩塌检测")
 		return {}
 	return NativeLoader.find_unsupported_around(_chunk_buffers, removed)

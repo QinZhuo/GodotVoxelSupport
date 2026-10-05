@@ -280,9 +280,6 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 
 	if voxels.size() == 0:
 		return
-	if not NativeLoader.is_available():
-		push_error("[VoxelMeshGenerator] 网格生成需要原生库 VoxelNative（未加载）")
-		return
 
 	var trans_flags := VoxelMaterial.build_trans_flags(
 			runtime_materials if not runtime_materials.is_empty() else voxel.materials)

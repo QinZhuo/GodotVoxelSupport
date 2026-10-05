@@ -89,7 +89,8 @@ data.generator = MyWorld.new()          # 未编辑的部分按 key 确定性生
 - **动态原点重定位（origin shift）** — 相机远移自动平移世界基准，坐标保持小（float32 精度安全）→ 真正的无限世界
 - **修改持久化** — 玩家修改的 chunk 由 `stream` 负责，重启保留
 - **异步生成** — chunk 生成在后台线程（`WorkerThreadPool`），主线程只提交/回填
-- **自动卸载** — 超出 `view_distance` 的 chunk 丢弃，回来时重新生成
+- **自动卸载** — 超出距离的网格与粗层 LOD 块被释放，回来时重新构建
+  （LOD0 chunk 数据常驻：它是粗层降采样的来源）
 
 ### 破坏与崩塌
 
@@ -121,7 +122,7 @@ target.damage_ray(origin, direction, max_distance)
 - **程序化世界**：使用 `visibility_mode = STREAMING` — 无限世界必然按距离驱动（FULL/FRUSTUM 曾会导致空白，已自动修复）
 - `lod_count = 1` 表示关闭 LOD（全部全精度）；大世界设 `lod_count >= 2`。
   LOD_i 半径自动 = `view_distance / 2^(lod_count-1-i)`（每级 ×2，对齐 Voxel Tools 标准做法）
-- `unload_distance = 0` 会自动回退到 `view_distance * 1.5`
+- `unload_distance = 0` 会自动回退到 `view_distance * 1.2`
 - `generate_collision` **默认 false** — 需要物理碰撞时开启
 - `voxel_scale` = 每个体素的世界单位（数据坐标是 1 体素单位）；所有距离参数都是世界单位
 
