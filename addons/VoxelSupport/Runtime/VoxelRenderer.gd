@@ -1,4 +1,4 @@
-﻿@tool
+@tool
 class_name VoxelRenderer
 extends MeshInstance3D
 
