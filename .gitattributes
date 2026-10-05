@@ -6,4 +6,6 @@
 /addons    !export-ignore
 /addons/** !export-ignore
 
-*.vox filter=lfs diff=lfs merge=lfs -text
+# 体素二进制资产统一走 Git LFS（.qvox 与 .vox 同级，均为模型源文件）。
+*.vox  filter=lfs diff=lfs merge=lfs -text
+*.qvox filter=lfs diff=lfs merge=lfs -text

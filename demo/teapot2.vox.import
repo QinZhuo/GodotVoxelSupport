@@ -1,21 +1,14 @@
 [remap]
 
-importer="voxel_mesh"
-type="Mesh"
-uid="uid://cgwj1wb77lnd5"
-path="res://.godot/imported/teapot2.vox-4ae77a1c43e37fabd92c1ecb59115943.mesh"
+importer="voxel_noop"
+type="Resource"
+uid="uid://c8355hxlhjvf1"
+path="res://.godot/imported/teapot2.vox-4ae77a1c43e37fabd92c1ecb59115943.res"
 
 [deps]
 
 source_file="res://demo/teapot2.vox"
-dest_files=["res://.godot/imported/teapot2.vox-4ae77a1c43e37fabd92c1ecb59115943.mesh"]
+dest_files=["res://.godot/imported/teapot2.vox-4ae77a1c43e37fabd92c1ecb59115943.res"]
 
 [params]
 
-mesh/scale=0.1
-mesh/frame_index=0
-mesh/unwrap_lightmap_uv2=false
-mesh/uv2_texel_size=0.2
-material/import_materials_textures=false
-material/material_path=""
-material/material_trans_path=""

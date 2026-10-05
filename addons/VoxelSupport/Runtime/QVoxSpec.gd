@@ -109,11 +109,30 @@ const CODEC_INDEXED := 4  ## uint8 n + n 个材质索引 + N×⌈log₂n⌉ 位�
 const DEFAULT_BLOCK_SIZE := 32
 const DEFAULT_UP_AXIS := "y"
 
+## up_axis 白名单（§3.1）。缺省 y；出现其他值按缺省处理并告警。
+const ALLOWED_UP_AXES := ["x", "y", "z"]
+
 ## 每通道支持的位宽（当前仅定长数值通道）。
 const ALLOWED_BPP := [8, 16, 32]
 
 ## 支配通道名（channels[0] 必须为此，决定空块判定与可见性）。
 const DOMINANT_CHANNEL := "material"
+
+## 当前版本支持的通道数：**恰好 1 个**（dominant = material）。
+##
+## 【为什么收敛为单通道】规范原设计允许 `channels` 列多个定长通道（如附加 sdf），
+## 但编解码层只按单通道 material 实现 —— 于是"多通道文件"会被**接受却读错**
+## （RUN 逐游程交错 (len, material, sdf)，只读 material 会从第二段起错位）。
+## 同域参照 MagicaVoxel .vox 也只有单一体素通道，附加数据一律走独立块类型
+## （P1：新功能 = 新块类型）。故本版把契约收敛为"恰好 1 个通道"：读方遇到 >1
+## 直接拒绝（FATAL，fail-fast），不再静默误读。将来确需多通道时，作为新的
+## qvox 版本引入"逐通道布局描述"（类似 KTX2 的 DFD），而不是现在就背这个成本。
+const SUPPORTED_CHANNEL_COUNT := 1
+
+## 支配通道每体素位宽与字节数（bpp=16 → 2 字节）。
+## 编解码层里所有"每通道一个值"的宽度都引用此常量，消除散落的魔法数 2。
+const CHANNEL_BPP := 16
+const CHANNEL_BYTES := CHANNEL_BPP / 8
 
 # ----------------------------------------------------------------------------
 # MATE 材质条目（12 字节定长 → index × 12 随机访问）
@@ -240,6 +259,15 @@ static func from_u32(v: int) -> int:
 
 ## 该块类型是否为当前版本已知类型。
 static func is_known_block_type(t: String) -> bool:
+	return t in KNOWN_BLOCK_TYPES
+
+
+## 读者在 HEAD.require 校验里"能处理"的块类型（§10）。
+##
+## 语义 = "能产出正确结果"，而非"名字见过"：五种内建类型都算能处理，
+## 其中 CACH 本就允许被忽略（忽略它即为正确处理，P5），故同样算"能处理"。
+## require 里出现此外的任何类型 → 必须拒绝整个文件（而非静默跳过）。
+static func can_handle_block_type(t: String) -> bool:
 	return t in KNOWN_BLOCK_TYPES
 
 

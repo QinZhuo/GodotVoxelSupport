@@ -9,7 +9,7 @@ func _get_visible_name():
 	return "Voxel Mesh"
 
 func _get_recognized_extensions():
-	return ['vox']
+	return VoxData.SUPPORTED_EXTENSIONS.duplicate()
 
 func _get_save_extension():
 	return "mesh"
@@ -103,7 +103,7 @@ func _get_option_visibility(_path: String, option_name: StringName, options: Dic
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var mesh: ArrayMesh
-	mesh = VoxelMeshGenerator.generate_mesh(VoxAccess.Open(source_file).voxel, options, source_file)
+	mesh = VoxelMeshGenerator.generate_mesh(VoxData.from_asset(source_file), options, source_file)
 	if not mesh:
 		return FAILED
 	return ResourceSaver.save(mesh, "%s.%s" % [save_path, _get_save_extension()])

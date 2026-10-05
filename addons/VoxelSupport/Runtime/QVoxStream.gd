@@ -92,7 +92,7 @@ var _loaded_node: Dictionary = {}
 # 异步请求（统一流式接口）：chunk_key -> true（lod=0）。数据就在内存，poll 时直接回填。
 var _async_requested: Dictionary = {}
 
-# 未识别的块（类型 -> [payload]），重写时原样保留，保证不丢外部数据。
+# 未内建解析的块（类型 -> [payload]），含真未知类型与 CACH。重写时原样保留，保证不丢外部数据。
 var _unknown_blocks: Dictionary = {}
 
 
@@ -281,7 +281,7 @@ func _build_vox0_index(block_size: int, bytes: PackedByteArray = PackedByteArray
 func _build_head() -> Dictionary:
 	var head := {
 		"qvox": QVoxSpec.VERSION,
-		"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": 16}],
+		"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": QVoxSpec.CHANNEL_BPP}],
 		"block_size": CHUNK_SIZE,
 		"up_axis": QVoxSpec.DEFAULT_UP_AXIS,
 	}
@@ -293,33 +293,70 @@ func _build_head() -> Dictionary:
 	return head
 
 
-## 上层材质数组（VoxelMaterial 或 null）→ QVox MATE Dictionary 列表。
+## 上层材质数组 → QVox MATE Dictionary 列表。
+##
+## 【必须幂等】`_materials` 有两种来源：
+##   1) 上层经 set_materials() 注入的 VoxelMaterial 对象（属性 color/trans/metal/...）；
+##   2) 从磁盘加载时直接赋值的 MATE Dictionary（键 rgba/metal/...，见 _ensure_loaded）。
+## 早先这里只认 (1)：于是"加载 → 改块 → flush"时，(2) 被当成 (1) 重新解释——
+## 没有 `color` 键 → 取 Color.WHITE，**所有材质被静默写成白色**（且 alpha 变 255）。
+## 现在先识别"已经是 MATE 形状"的输入并原样归一化，两种来源都正确、多次写盘稳定。
+##
+## 条目 0 恒为空气（全零，§4）：体素值 0 就是空气，故无论调用方给的是什么，
+## 这一条都必须归零——它是格式不变量，不该指望每个调用方都记得。
 func _materials_to_qvox() -> Array:
 	var out: Array = []
 	for i in _materials.size():
 		var m: Variant = _materials[i]
-		if m == null:
-			out.append({
-				"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0,
-				"e_r": 0, "e_g": 0, "e_b": 0,
-			})
+		if i == 0 or m == null:
+			out.append(_air_entry())
 			continue
-		var c: Color = m.color if ("color" in m) else Color.WHITE
-		var a := int(round((1.0 - float(m.trans)) * 255.0)) if ("trans" in m) else 255
-		a = clampi(a, 0, 255)
-		var rgba := (int(c.r * 255.0) << 24) | (int(c.g * 255.0) << 16) | (int(c.b * 255.0) << 8) | a
-		var em: float = float(m.emission) if ("emission" in m) else 0.0
-		out.append({
-			"rgba": rgba & 0xFFFFFFFF,
-			"metal": clampi(int(round(float(m.metal) * 255.0)), 0, 255) if ("metal" in m) else 0,
-			"rough": clampi(int(round(float(m.rough) * 255.0)), 0, 255) if ("rough" in m) else 255,
-			"hardness": clampi(int(round(float(m.hardness))), 0, 255) if ("hardness" in m) else 1,
-			"mass": clampi(int(round(float(m.mass))), 0, 255) if ("mass" in m) else 1,
-			"e_r": clampi(int(round(c.r * em * 255.0)), 0, 255),
-			"e_g": clampi(int(round(c.g * em * 255.0)), 0, 255),
-			"e_b": clampi(int(round(c.b * em * 255.0)), 0, 255),
-		})
+		if m is Dictionary and (m as Dictionary).has("rgba"):
+			out.append(_mate_from_dict(m as Dictionary))
+			continue
+		out.append(_mate_from_material(m))
 	return out
+
+
+## 空气条目（条目 0 的规范形态，§4）。每次返回新字典，避免调用方彼此共享引用。
+func _air_entry() -> Dictionary:
+	return {
+		"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0,
+		"e_r": 0, "e_g": 0, "e_b": 0,
+	}
+
+
+## 已是 MATE 形状的 Dictionary → 规范化（掩码到合法范围），供幂等写盘使用。
+func _mate_from_dict(d: Dictionary) -> Dictionary:
+	return {
+		"rgba": int(d.get("rgba", 0)) & 0xFFFFFFFF,
+		"metal": clampi(int(d.get("metal", 0)), 0, 255),
+		"rough": clampi(int(d.get("rough", 0)), 0, 255),
+		"hardness": clampi(int(d.get("hardness", 0)), 0, 255),
+		"mass": clampi(int(d.get("mass", 0)), 0, 255),
+		"e_r": clampi(int(d.get("e_r", 0)), 0, 255),
+		"e_g": clampi(int(d.get("e_g", 0)), 0, 255),
+		"e_b": clampi(int(d.get("e_b", 0)), 0, 255),
+	}
+
+
+## 上层 VoxelMaterial 对象 → MATE 条目。
+func _mate_from_material(m: Variant) -> Dictionary:
+	var c: Color = m.color if ("color" in m) else Color.WHITE
+	var a := int(round((1.0 - float(m.trans)) * 255.0)) if ("trans" in m) else 255
+	a = clampi(a, 0, 255)
+	var rgba := (int(c.r * 255.0) << 24) | (int(c.g * 255.0) << 16) | (int(c.b * 255.0) << 8) | a
+	var em: float = float(m.emission) if ("emission" in m) else 0.0
+	return {
+		"rgba": rgba & 0xFFFFFFFF,
+		"metal": clampi(int(round(float(m.metal) * 255.0)), 0, 255) if ("metal" in m) else 0,
+		"rough": clampi(int(round(float(m.rough) * 255.0)), 0, 255) if ("rough" in m) else 255,
+		"hardness": clampi(int(round(float(m.hardness))), 0, 255) if ("hardness" in m) else 1,
+		"mass": clampi(int(round(float(m.mass))), 0, 255) if ("mass" in m) else 1,
+		"e_r": clampi(int(round(c.r * em * 255.0)), 0, 255),
+		"e_g": clampi(int(round(c.g * em * 255.0)), 0, 255),
+		"e_b": clampi(int(round(c.b * em * 255.0)), 0, 255),
+	}
 
 
 ## 内存 _models（int model_id → {Vector3i: PackedInt32Array}）→ QVox doc.models（字符串键）。

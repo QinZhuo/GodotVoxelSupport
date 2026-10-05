@@ -9,7 +9,7 @@ func _get_visible_name():
 	return "Voxel MeshLibrary"
 
 func _get_recognized_extensions():
-	return ['vox']
+	return VoxData.SUPPORTED_EXTENSIONS.duplicate()
 
 func _get_save_extension():
 	return "res"
@@ -40,4 +40,4 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 	return options
 
 func _import(source_file, save_path, options, _platforms, gen_files):
-	return ResourceSaver.save(VoxelMeshGenerator.generate_mesh_library(VoxAccess.Open(source_file).voxel, options, source_file), "%s.%s" % [save_path, _get_save_extension()])
+	return ResourceSaver.save(VoxelMeshGenerator.generate_mesh_library(VoxData.from_asset(source_file), options, source_file), "%s.%s" % [save_path, _get_save_extension()])

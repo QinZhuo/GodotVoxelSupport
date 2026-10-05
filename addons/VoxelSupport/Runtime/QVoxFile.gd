@@ -42,7 +42,8 @@ class QVoxDocument extends RefCounted:
 	## NODE 的已校验只读视图（§7）。任一引用无效的节点/帧已被丢弃。
 	## 解析失败或无 NODE 块时为 null。
 	var scene: QVoxSceneGraph = null
-	## 未知块（类型 -> [payload PackedByteArray, ...]），原样保留以便重写不丢数据。
+	## 未内建解析的块（类型 -> [payload PackedByteArray, ...]），**原样保留以便重写不丢数据**。
+	## 含两类：真正未知的类型（P1 跳过），以及 CACH（语义上可忽略，但重写时保真搬运）。
 	var unknown_blocks: Dictionary = {}
 
 	## 【增量写用】块字节索引（仅 parse_with_index 填充，parse 时为 null）。
@@ -259,7 +260,7 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 		# 切片，两者都是"header 8 字节 + length 字节负载"。若一边不含填充、另一边含填充，
 		# 只要填充 ≥ 1 字节就会全部块 CRC 失败（曾经的 bug）。
 		var payload := bytes.slice(payload_start, payload_start + length)
-		# 【CRC=0 约定：写入方声明"本块无校验值"】§13
+		# 【CRC=0 约定：写入方声明"本块无校验值"】§10（编码约定·CRC 可关）
 		# 写入端 include_crc=false 时把 crc 字段填 0。读取端据此跳过校验，
 		# 使"生成小体积/可读性优先的无 CRC 文件"成为一条真实可用的路径（D4）。
 		# 真 CRC 恰好为 0 的概率是 1/2³²，且此时少校验一次的代价可忽略（不是安全问题，
@@ -297,6 +298,13 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 				doc.head = _parse_head(payload)
 				if doc.head.is_empty():
 					return null
+				# 【能力门】必须在解码任何 VOX0 之前完成：require 声明了本读者处理不了的
+				# 块类型、或 channels 数超出当前支持，都属"继续读只会得到错误结果"，
+				# 按 §10 拒绝整个文件（而不是静默跳过、读出一堆垃圾）。
+				var cap := _check_capabilities(doc.head)
+				if cap != "":
+					_flush_fatal(report, cap, notes)
+					return null
 				block_size = doc.get_block_size()
 			QVoxSpec.BLOCK_MATE:
 				doc.materials = _parse_mate(payload)
@@ -310,10 +318,11 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 					doc.block_index[entry]["model_id"] = int(model_id)
 			QVoxSpec.BLOCK_NODE:
 				doc.node = _parse_json(payload)
-			QVoxSpec.BLOCK_CACH:
-				pass  # 缓存可删，读取时一律忽略（P5）
 			_:
-				# 未知块：跳过 length 字节（P1）。永远不算错误。
+				# 未知块 + CACH：一律按 length 跳过（P1），并**原样留存**以便重写不丢数据。
+				# CACH 按 P5 本可忽略，但"读取时可忽略"不等于"重写时该丢弃字节"——把它与
+				# 未知块归入同一条**不透明搬运**通道，serialize / serialize_incremental /
+				# QVoxStream 三条路径因此行为完全一致，也不会静默改写文件。
 				if not doc.unknown_blocks.has(type):
 					doc.unknown_blocks[type] = []
 				doc.unknown_blocks[type].append(payload)
@@ -363,10 +372,11 @@ static func _validate(doc: QVoxDocument, rep: QVoxReport) -> void:
 		return
 	var n := B * B * B
 
-	# --- channels[0] 必须是 material（§3.1） ---
+	# --- channels[0] 必须是 material；通道数必须 == 1（§3.1，本版收敛为单通道） ---
 	var channels: Array = doc.get_channels()
-	if channels.is_empty():
-		rep.errors.append("HEAD.channels 为空")
+	if channels.size() != QVoxSpec.SUPPORTED_CHANNEL_COUNT:
+		rep.errors.append("HEAD.channels 含 %d 个通道，当前版本仅支持 %d 个（%s）" \
+				% [channels.size(), QVoxSpec.SUPPORTED_CHANNEL_COUNT, QVoxSpec.DOMINANT_CHANNEL])
 		return
 	var ch0: Variant = channels[0]
 	if not (ch0 is Dictionary) or String(ch0.get("name", "")) != QVoxSpec.DOMINANT_CHANNEL:
@@ -380,6 +390,12 @@ static func _validate(doc: QVoxDocument, rep: QVoxReport) -> void:
 		if not QVoxSpec.is_allowed_bpp(int(c.get("bpp", 0))):
 			rep.errors.append("HEAD.channels[%d].bpp=%s 不在 %s" % [ci, c.get("bpp"), QVoxSpec.ALLOWED_BPP])
 			return
+
+	# --- up_axis（§3.1：只允许 x/y/z；其他值按缺省 y 处理并告警，不拒绝文件） ---
+	var up := str(doc.head.get("up_axis", QVoxSpec.DEFAULT_UP_AXIS))
+	if not (up in QVoxSpec.ALLOWED_UP_AXES):
+		rep.warnings.append("HEAD.up_axis='%s' 非法（应为 %s），按默认 '%s' 处理" \
+				% [up, QVoxSpec.ALLOWED_UP_AXES, QVoxSpec.DEFAULT_UP_AXIS])
 
 	# --- bounds（半开区间 [min, max)，体素坐标）§5.1 / §9 ---
 	var bounds := doc.get_bounds()
@@ -396,8 +412,12 @@ static func _validate(doc: QVoxDocument, rep: QVoxReport) -> void:
 		else:
 			rep.warnings.append("HEAD.bounds 格式非法的 min/max，已忽略")
 
-	# --- MATE 索引越界（§9：VOX0 内材质值必须 < entry_count） ---
+	# --- MATE 条目 0 必须是空气（全零）§4 ---
+	# "体素值 == 材质索引"这一无条件等式依赖条目 0 全零；条目 0 非零说明写方材质表错位，
+	# 属语义不一致（不致命：索引仍可用，故只告警）。
 	var mate_count := doc.materials.size()
+	if mate_count > 0 and not _is_air_entry(doc.materials[0]):
+		rep.warnings.append("MATE 条目 0 应为全零（空气），实际非零（§4）")
 
 	# --- 逐 model / 逐块校验 ---
 	var mate_violations := 0
@@ -459,6 +479,30 @@ static func _validate(doc: QVoxDocument, rep: QVoxReport) -> void:
 		doc.scene = _build_scene(doc, rep)
 
 
+## HEAD 能力门（§3.1 / §10）：读者"必须理解"的东西是否都能理解。
+##
+## 返回 "" 表示可继续；返回非空字符串表示应拒绝整个文件（FATAL）。
+## 【为什么必须在 VOX0 之前】能力不足若只在语义校验阶段报出，VOX0 早已被按错误假设解码，
+## 结果是"接受但读错"。门放在最前面，"读不了"就退化成一次明确的拒绝。
+static func _check_capabilities(head: Dictionary) -> String:
+	# require：读者必须理解的块类型列表；无法处理其中任一者即拒绝（§10）。
+	# 不在此列表中的未知块仍按 P1 安全跳过——这正是 glTF extensionsUsed/Required 的分工。
+	var req: Variant = head.get("require")
+	if req is Array:
+		for t in (req as Array):
+			var ts := String(t)
+			if ts != "" and not QVoxSpec.can_handle_block_type(ts):
+				return "HEAD.require 含本读者无法处理的块类型 '%s'（§10：拒绝整个文件）" % ts
+	# channels：当前版本恰好 1 个通道（material）。>1 会让单通道 codec 错读，故拒绝而非静默误读。
+	var channels: Variant = head.get("channels")
+	if not (channels is Array) or (channels as Array).is_empty():
+		return "HEAD.channels 必须是非空数组"
+	if (channels as Array).size() != QVoxSpec.SUPPORTED_CHANNEL_COUNT:
+		return "HEAD.channels 含 %d 个通道，当前版本仅支持 %d 个（%s）" \
+				% [(channels as Array).size(), QVoxSpec.SUPPORTED_CHANNEL_COUNT, QVoxSpec.DOMINANT_CHANNEL]
+	return ""
+
+
 ## 解析 HEAD 的 JSON payload（剥离尾部零填充）。
 static func _parse_head(payload: PackedByteArray) -> Dictionary:
 	var d := _parse_json(payload)
@@ -496,6 +540,10 @@ static func _parse_mate(payload: PackedByteArray) -> Array:
 	if payload.size() < 2:
 		return out
 	var count := payload.decode_u16(0)
+	if count == 0:
+		# §4：MATE 里至少含条目 0（空气）。entry_count=0 违反规范 → 视为"未声明材质"并告警。
+		push_warning("[QVox] MATE entry_count=0（§4 要求至少含条目 0），按无材质处理")
+		return out
 	var need := 2 + count * QVoxSpec.MATE_ENTRY_SIZE
 	if payload.size() < need:
 		push_error("[QVox] MATE 条目越界")
@@ -518,6 +566,19 @@ static func _parse_mate(payload: PackedByteArray) -> Array:
 			"e_b": payload[off + 10],
 		})
 	return out
+
+
+## 该 MATE 条目是否为"空气"（§4：条目 0 保留且全零）。
+## 判据是**条目语义字段全零**，不直接比 12 字节原始块——因为 reserved 字节按规范写 0，
+## 若用原始字节比较，一份 reserved 非零的文件会被误判（而我们只关心可见属性是否为空）。
+static func _is_air_entry(entry: Variant) -> bool:
+	if not (entry is Dictionary):
+		return false
+	var e: Dictionary = entry
+	for k in ["rgba", "metal", "rough", "hardness", "mass", "e_r", "e_g", "e_b"]:
+		if int(e.get(k, 0)) != 0:
+			return false
+	return true
 
 
 ## 解析一个 VOX0 payload 并写入 doc.models。返回 model_id（失败返回 null）。
@@ -873,7 +934,7 @@ static func serialize(doc: QVoxDocument, include_crc: bool = true) -> PackedByte
 	# NODE
 	if not doc.node.is_empty():
 		_write_block(out, QVoxSpec.BLOCK_NODE, _encode_json(doc.node), include_crc)
-	# 未知块原样保留（重写不丢数据）
+	# 未知块 / CACH：原样保留（重写不丢数据；CACH 可删但没必要替作者删）
 	for type in doc.unknown_blocks:
 		for payload in doc.unknown_blocks[type]:
 			_write_block(out, type, payload, include_crc)
@@ -911,7 +972,7 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 	out.append_array(QVoxSpec.signature_bytes())
 	var block_size := new_doc.get_block_size()
 
-	# 按旧文件的物理块顺序重建：HEAD 必须第一个（规范 §4）。
+	# 按旧文件的物理块顺序重建：HEAD 必须第一个（规范 §1 / §3）。
 	# 先写 HEAD，再写其余块（跳过在 out 中已写的 HEAD）。
 	for idx in old_doc.block_index.size():
 		var bi: Dictionary = old_doc.block_index[idx]

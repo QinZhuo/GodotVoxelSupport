@@ -49,7 +49,7 @@ static func pick_codec(buf: PackedInt32Array, n: int) -> Array:
 	if all_same:
 		if first == 0:
 			return [QVoxSpec.CODEC_EMPTY, 0]
-		return [QVoxSpec.CODEC_SOLID, 2]  # 单通道 bpp=16 → 2 字节
+		return [QVoxSpec.CODEC_SOLID, QVoxSpec.CHANNEL_BYTES]  # 单通道 bpp=16 → 2 字节
 
 	# ---- 第 2 趟：RUN 精确字节 + 取值跨度（min/max）----
 	# 跨度 (max-min) ≤ 255 是"取值数 ≤ 256"的必要条件，用做 INDEXED 的廉价预筛。
@@ -63,16 +63,16 @@ static func pick_codec(buf: PackedInt32Array, n: int) -> Array:
 		if v == run_val:
 			run_len += 1
 		else:
-			run_bytes += _varint_size(run_len) + 2   # varint 长度 + uint16 值
+			run_bytes += _varint_size(run_len) + QVoxSpec.CHANNEL_BYTES   # varint 长度 + 通道值
 			run_val = v
 			run_len = 1
 		if v > vmax:
 			vmax = v
 		elif v < vmin:
 			vmin = v
-	run_bytes += _varint_size(run_len) + 2
+	run_bytes += _varint_size(run_len) + QVoxSpec.CHANNEL_BYTES
 
-	var dense_bytes := n * 2              # bpp=16
+	var dense_bytes := n * QVoxSpec.CHANNEL_BYTES   # bpp=16
 	var best_codec := QVoxSpec.CODEC_DENSE
 	var best_bytes := dense_bytes
 	if run_bytes < best_bytes:
@@ -91,7 +91,7 @@ static func pick_codec(buf: PackedInt32Array, n: int) -> Array:
 				break
 		if distinct_ok:
 			var bits := _bits_for(distinct.size())
-			var indexed_bytes := 1 + distinct.size() * 2 + ((n * bits + 7) >> 3)
+			var indexed_bytes := 1 + distinct.size() * QVoxSpec.CHANNEL_BYTES + ((n * bits + 7) >> 3)
 			if indexed_bytes < best_bytes:
 				best_codec = QVoxSpec.CODEC_INDEXED
 				best_bytes = indexed_bytes
@@ -111,7 +111,7 @@ static func _estimate_run_bytes(buf: PackedInt32Array, n: int) -> int:
 		var run := 1
 		while i + run < n and buf[i + run] == v:
 			run += 1
-		total += _varint_size(run) + 2  # 长度 varint + 值 uint16
+		total += _varint_size(run) + QVoxSpec.CHANNEL_BYTES  # 长度 varint + 通道值
 		i += run
 	return total
 
@@ -157,7 +157,7 @@ static func pack(codec: int, buf: PackedInt32Array, n: int) -> PackedByteArray:
 ## SOLID：单通道一个 uint16 值。
 static func _pack_solid(buf: PackedInt32Array) -> PackedByteArray:
 	var out := PackedByteArray()
-	out.resize(2)
+	out.resize(QVoxSpec.CHANNEL_BYTES)
 	var v: int = buf[0] if buf.size() > 0 else 0
 	out.encode_u16(0, v & 0xFFFF)
 	return out
@@ -184,7 +184,7 @@ static func _pack_run(buf: PackedInt32Array, n: int) -> PackedByteArray:
 	for k in lens.size():
 		_append_varint(out, lens[k])
 		var off := out.size()
-		out.resize(off + 2)
+		out.resize(off + QVoxSpec.CHANNEL_BYTES)
 		out.encode_u16(off, vals[k] & 0xFFFF)
 	return out
 
@@ -200,13 +200,13 @@ static func _pack_dense(buf: PackedInt32Array, n: int) -> PackedByteArray:
 	# int32 → 字节（原生直拷）→ 每 4 字节取低 2 字节
 	var raw := buf.to_byte_array()
 	var out := PackedByteArray()
-	out.resize(n * 2)
+	out.resize(n * QVoxSpec.CHANNEL_BYTES)
 	var dst := 0
 	for i in n:
-		var src := i * 4
+		var src := i * 4   # int32 元素步长（4 字节），与通道宽度无关
 		out[dst] = raw[src]
 		out[dst + 1] = raw[src + 1]
-		dst += 2
+		dst += QVoxSpec.CHANNEL_BYTES
 	return out
 
 
@@ -226,9 +226,9 @@ static func _pack_indexed(buf: PackedInt32Array, n: int) -> PackedByteArray:
 	out[0] = table.size() & 0xFF
 	# 值表
 	var off := out.size()
-	out.resize(off + table.size() * 2)
+	out.resize(off + table.size() * QVoxSpec.CHANNEL_BYTES)
 	for k in table.size():
-		out.encode_u16(off + k * 2, table[k] & 0xFFFF)
+		out.encode_u16(off + k * QVoxSpec.CHANNEL_BYTES, table[k] & 0xFFFF)
 	# 位打包索引
 	var bit_buf := PackedByteArray()
 	var total_bits := n * bits
@@ -264,7 +264,7 @@ static func unpack(codec: int, payload: PackedByteArray, n: int) -> PackedInt32A
 
 
 static func _unpack_solid(payload: PackedByteArray, n: int) -> PackedInt32Array:
-	if payload.size() < 2:
+	if payload.size() < QVoxSpec.CHANNEL_BYTES:
 		return PackedInt32Array()
 	var v := payload.decode_u16(0)
 	var buf := PackedInt32Array()
@@ -288,10 +288,10 @@ static func _unpack_run(payload: PackedByteArray, n: int) -> PackedInt32Array:
 			return PackedInt32Array()  # varint 越界 → 损坏
 		var run_len: int = r[0]
 		pos = r[1]
-		if pos + 2 > payload.size():
+		if pos + QVoxSpec.CHANNEL_BYTES > payload.size():
 			return PackedInt32Array()
 		var v := payload.decode_u16(pos)
-		pos += 2
+		pos += QVoxSpec.CHANNEL_BYTES
 		for _j in run_len:
 			if idx >= n:
 				return PackedInt32Array()  # 游程和超过 N → 损坏
@@ -303,18 +303,18 @@ static func _unpack_run(payload: PackedByteArray, n: int) -> PackedInt32Array:
 
 
 static func _unpack_dense(payload: PackedByteArray, n: int) -> PackedInt32Array:
-	if payload.size() < n * 2:
+	if payload.size() < n * QVoxSpec.CHANNEL_BYTES:
 		return PackedInt32Array()
 	# 先把 uint16 序列还原为 int32 字节布局（每元素低 2 字节 + 2 个 0），
 	# 再交给原生 `to_int32_array()` 直拷。比逐元素 `decode_u16` 快得多。
 	var wide := PackedByteArray()
-	wide.resize(n * 4)
+	wide.resize(n * 4)   # int32 元素步长（4 字节）
 	var src := 0
 	var dst := 0
 	for i in n:
 		wide[dst] = payload[src]
 		wide[dst + 1] = payload[src + 1]
-		src += 2
+		src += QVoxSpec.CHANNEL_BYTES
 		dst += 4
 	return wide.to_int32_array()
 
@@ -328,13 +328,13 @@ static func _unpack_indexed(payload: PackedByteArray, n: int) -> PackedInt32Arra
 		var empty := PackedInt32Array()
 		empty.resize(n)
 		return empty
-	var table_end := 1 + count * 2
+	var table_end := 1 + count * QVoxSpec.CHANNEL_BYTES
 	if payload.size() < table_end:
 		return PackedInt32Array()
 	var table := PackedInt32Array()
 	table.resize(count)
 	for k in count:
-		table[k] = payload.decode_u16(1 + k * 2)
+		table[k] = payload.decode_u16(1 + k * QVoxSpec.CHANNEL_BYTES)
 	var bits := _bits_for(count)
 	var needed := (n * bits + 7) >> 3
 	if payload.size() < table_end + needed:

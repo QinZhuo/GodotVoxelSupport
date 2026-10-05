@@ -1,21 +1,32 @@
 # `.qvox` 样例文件
 
-这里放着**实际存在的** `.qvox` 文件——和 `demo/*.vox` 一样是能直接打开、hexdump、
-观察结构的真实文件，而不是"只存在于运行时"的东西。
+这里放着**实际存在的** `.qvox` 文件——与 `demo/*.vox` 同级，是能直接打开、
+hexdump、观察结构、并作为**项目资产**被编辑器导入的体素模型文件。
 
-## 为什么之前"看不到 .qvox 文件"
+## `.qvox` 的定位：一等模型资产，不是中间产物
 
-`.qvox` 是**运行时烘焙产物**，默认写进 Godot 的 `user://`，不是项目目录：
+`.qvox` 是与 `.vox` **同级的体素模型容器**，不是"烘焙中间产物"或临时文件：
 
-```
-Windows:  %APPDATA%\Godot\app_userdata\Voxel Support\
-macOS:    ~/Library/Application Support/Godot/app_userdata/Voxel Support/
-Linux:    ~/.local/share/godot/app_userdata/Voxel Support/
-```
+- **它是源资产**：放在项目里、进版本库，由编辑器按扩展名导入（见下）。
+- **它是自描述的**：一个文件自带材质（`MATE`）、体素（`VOX0`）、可选场景图
+  （`NODE`）与元数据（`HEAD`）；删掉 `CACH` 也不损失语义。
+- 同一个容器**也**能承载"整个世界存档"（`QVoxStream` 的用法，落在 `user://`）——
+  那是它的一种使用场景，不是它的身份。
 
-这与 `.vox` 的角色不同：`.vox` 通常是**源资产**（放在项目里、进版本库），
-`.qvox` 由导入/烘焙流程从 `.vox` 生成、可随时重建，所以运行时产物不进项目目录。
-本目录就是"把烘焙结果也放一份进项目"的样例，方便直接观察与文档引用。
+> 派生物是 `.godot/imported/…` 下的导入产物；`.qvox` 本身是源。
+
+## 编辑器导入
+
+`addons/VoxelSupport/Importers/` 下的导入器**同时识别 `.vox` 与 `.qvox`**
+（统一入口 `VoxData.from_asset()`），因此 `.qvox` 在 Godot 里与 `.vox` 一样，
+可在导入面板选择产物形式：
+
+| 导入器 | 产物 | 用途 |
+|---|---|---|
+| Voxel Data Resource | `VoxelData` (.res) | 运行时体素数据（可破坏 / 动态修改） |
+| Voxel Mesh | `ArrayMesh` (.mesh) | 静态网格 |
+| Voxel MeshLibrary | `MeshLibrary` (.res) | 网格库（by model / node / frame） |
+| Voxel No Import | 空 `Resource` | 只要原始文件、不做导入 |
 
 ## 文件
 
@@ -66,4 +77,5 @@ while off < len(d):
 
 样例由 `demo/qvox_vs_mesh_compare.tscn` / `demo/qvox_model_viewer.tscn` 的烘焙流程
 生成。要刷新本目录，在编辑器里加载模型后把 `user://qvox_viewer/*.qvox` 拷回这里，
-或直接调用 `QVoxStream` 写入 `res://demo/samples/`（见 `docs/QVOX_FORMAT.md` §13）。
+或新建一个 `QVoxStream`，把 `file_path` 直接指向 `res://demo/samples/`（§8 的读取
+流程与 §10 的编码约定对任何路径一视同仁）。

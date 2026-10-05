@@ -1,4 +1,4 @@
-﻿@tool
+@tool
 class_name VoxelData
 extends Resource
 
@@ -322,7 +322,9 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: b
 
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
 	else:
-		res.grid_size = Vector3i(voxel_data.size)
+		# 空模型：VoxData 没有 `size` 属性（那是 VoxelModel 的），此前这里会运行期报错。
+		# 空资产按零尺寸处理即可，调用方随后通常也不会渲染它。
+		res.grid_size = Vector3i.ZERO
 
 	# 材质数组：voxel_data.materials 是固定长度数组，其数组索引 i 即材质 ID (体素值)
 	# 因此直接按索引 i 复制到 res.materials，保证"体素值 = data.materials 索引"的约定

@@ -1,8 +1,8 @@
 [remap]
 
-importer="voxel_data"
+importer="voxel_noop"
 type="Resource"
-uid="uid://dwlsmke33vkb6"
+uid="uid://68k511xh2afy"
 path="res://.godot/imported/deer_data.vox-5eb8944a9906d3c3be9bd8059cf88fe4.res"
 
 [deps]
@@ -12,6 +12,3 @@ dest_files=["res://.godot/imported/deer_data.vox-5eb8944a9906d3c3be9bd8059cf88fe
 
 [params]
 
-mesh/frame_index=0
-mesh/scale=0.1
-mesh/center=true

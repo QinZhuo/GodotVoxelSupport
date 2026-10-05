@@ -39,6 +39,121 @@ static func get_offset_voxels(voxels: Dictionary[Vector3i, int], offset: Vector3
 		result[pos + offset] = voxels[pos]
 	return result
 
+
+# ----------------------------------------------------------------------------
+# 从体素资产文件加载 —— .vox / .qvox 共用入口
+# ----------------------------------------------------------------------------
+# 本插件把两者都视为**模型资产**（同等地位），导入管线不该关心源格式。
+# "扩展名 → 解析器"的分派因此收敛到这一处：
+#   .vox  → VoxAccess（MagicaVoxel，外部格式）
+#   .qvox → _from_qvox （QVox，本插件的一等容器格式）
+# 新增格式只需在此加一行，4 个 EditorImportPlugin 无需改动。
+
+## 导入管线支持的扩展名。各导入器统一引用，避免同一事实在多处重复。
+const SUPPORTED_EXTENSIONS := ["vox", "qvox"]
+
+
+## 按扩展名把资产文件解析为 VoxData；不支持的格式或解析失败返回 null。
+static func from_asset(path: String) -> VoxData:
+	if path.get_extension().to_lower() == "qvox":
+		return _from_qvox(path)
+	var access := VoxAccess.Open(path)
+	return access.voxel if access != null else null
+
+
+## .qvox → VoxData。
+##
+## 映射约定：
+##   · 每个 VOX0 的 model_id → 一个 VoxelModel，体素存**绝对体素坐标**（offset = ZERO）。
+##     QVox 的"块坐标 × block_size"本身就是世界体素坐标，不需要 .vox 那套
+##     "按 size 居中 + Z 翻转"的 offset 约定。
+##   · MATE → VoxelMaterial，**数组索引 == 材质ID**（索引 0 恒为空气占位），
+##     与全项目统一材质契约一致。
+##   · NODE 不参与转换：QVox 场景图（下标寻址 + model 引用）与 VoxData 的 node/frame
+##     并非一一对应。导入时统一"每个 model 一个 frame"（等价 check_nodes() 的行为）。
+##     需要完整场景图语义时，请直接使用 QVoxFile.parse() 得到的 doc.scene。
+static func _from_qvox(path: String) -> VoxData:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_error("[VoxData] 无法读取 %s" % path)
+		return null
+	var bytes := f.get_buffer(f.get_length())
+	f.close()
+
+	var rep := QVoxFile.QVoxReport.new()
+	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	if doc == null:
+		push_error("[VoxData] %s 解析失败：%s" % [path, rep.summary()])
+		return null
+	for w in rep.warnings:
+		push_warning("[VoxData] %s: %s" % [path.get_file(), w])
+
+	var out := VoxData.new()
+	_qvox_fill_materials(doc, out)
+	_qvox_fill_models(doc, out)
+	out.check_nodes()
+	return out
+
+
+## MATE 条目 → VoxelMaterial（索引 == 材质ID）。
+static func _qvox_fill_materials(doc: QVoxFile.QVoxDocument, out: VoxData) -> void:
+	if doc.materials.is_empty():
+		return
+	out.materials.resize(doc.materials.size())
+	for i in doc.materials.size():
+		var e: Dictionary = doc.materials[i]
+		var rgba := int(e.get("rgba", 0)) & 0xFFFFFFFF
+		var a := float(rgba & 0xFF) / 255.0
+		var m := VoxelMaterial.new()
+		m.id = i
+		m.color = Color(float((rgba >> 24) & 0xFF) / 255.0,
+				float((rgba >> 16) & 0xFF) / 255.0,
+				float((rgba >> 8) & 0xFF) / 255.0, a)
+		m.trans = clampf(1.0 - a, 0.0, 1.0)
+		m.metal = float(int(e.get("metal", 0))) / 255.0
+		m.rough = float(int(e.get("rough", 0))) / 255.0
+		m.hardness = float(int(e.get("hardness", 1)))
+		m.mass = float(int(e.get("mass", 1)))
+		# QVox 自发光是 RGB 三通道；VoxelMaterial 只有单通道强度，取三通道最大值近似。
+		var er := float(int(e.get("e_r", 0))) / 255.0
+		var eg := float(int(e.get("e_g", 0))) / 255.0
+		var eb := float(int(e.get("e_b", 0))) / 255.0
+		m.emission = maxf(er, maxf(eg, eb))
+		out.materials[i] = m
+
+
+## VOX0 块数组 → VoxelModel（绝对体素坐标）。
+static func _qvox_fill_models(doc: QVoxFile.QVoxDocument, out: VoxData) -> void:
+	var b := doc.get_block_size()
+	if b <= 0:
+		return
+	var ids := doc.models.keys()
+	ids.sort()
+	for mid in ids:
+		var blocks: Variant = doc.models[mid]
+		if not (blocks is Dictionary) or (blocks as Dictionary).is_empty():
+			continue
+		var model := VoxelModel.new()
+		model.offset = Vector3.ZERO
+		var voxels: Dictionary[Vector3i, int] = {}
+		for k in (blocks as Dictionary):
+			var key: Vector3i = k
+			var buf: PackedInt32Array = blocks[key]
+			for idx in buf.size():
+				var v := buf[idx]
+				if v == 0:
+					continue
+				# 块内线性下标 → 局部坐标（与 QVoxSpec 一致：idx = x + y·B + z·B²）
+				var lx := idx % b
+				var ly := (idx / b) % b
+				var lz := idx / (b * b)
+				voxels[Vector3i(key.x * b + lx, key.y * b + ly, key.z * b + lz)] = v
+		if voxels.is_empty():
+			continue
+		model.voxels = voxels
+		out.models.append(model)
+
+
 class VoxelModel:
 	var size: Vector3:
 		set(value):
