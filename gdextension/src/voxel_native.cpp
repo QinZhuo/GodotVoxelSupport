@@ -740,6 +740,34 @@ Dictionary VoxelNative::generate_spheres_native(const Dictionary &voxels, const 
 	return result;
 }
 
+namespace {
+// LOD 大格降采样：在 [base, base+cell)³ 内按 (z, y, x) 序取**第一个非空材质**（0 = 空）。
+//
+// 【为什么抽出来】这条规则原先在四处各手写了一遍 —— LOD halo 的中心 32³、halo 的 6 外缘面、
+// patch_lod_block（脏大格增量）、patch_lod_block_from_lod（金字塔逐级上推）。
+// 更麻烦的是遍历序并不一致：外缘面那处因为按面重新映射了轴，实际遍历序是 (z,x,y) 与 (y,x,z)，
+// 与其余三处的 (z,y,x) 不同 —— 同一个概念的操作有三套"谁先撞上就选谁"的顺序，
+// 一格跨多种材质时哪个材质代表这一格就成了偶然。此处统一为 (z,y,x)：既是多数派，
+// 也与"逐级上推结果 == 全量降采样结果"这一既定语义一致（见 patch_lod_block_from_lod 注释）。
+//
+// get_voxel(wx, wy, wz) 由调用方提供：可直接索引 chunk 缓冲（同块内），
+// 也可跨块惰性查表（外缘面 / 增量 patch）。
+template <typename GetVoxel>
+inline int32_t downsample_cell(const GetVoxel &get_voxel, int bx, int by, int bz, int cell) {
+	for (int dz = 0; dz < cell; ++dz) {
+		for (int dy = 0; dy < cell; ++dy) {
+			for (int dx = 0; dx < cell; ++dx) {
+				const int32_t m = get_voxel(bx + dx, by + dy, bz + dz);
+				if (m > 0) {
+					return m;
+				}
+			}
+		}
+	}
+	return 0;
+}
+} // namespace
+
 // 通用降采样：从 LOD0 chunk buffers 构建 LOD 大块 34³ halo（任意 lod_shift）。
 // lod_shift=1 → cell=2（原 LOD1）；更高层每大格 = 2^lod_shift 体素。
 PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dictionary &buffers, const Vector3i &block_key, int lod_shift) {
@@ -761,33 +789,45 @@ PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dic
 				const PackedInt32Array buf = buffers[ck];
 				if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) continue;
 				const int32_t *b = buf.ptr();
+				auto getv = [b](int x, int y, int z) -> int32_t {
+					return b[x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE];
+				};
 				for (int lz8 = 0; lz8 < sub_per_chunk; ++lz8) {
 					for (int ly8 = 0; ly8 < sub_per_chunk; ++ly8) {
 						for (int lx8 = 0; lx8 < sub_per_chunk; ++lx8) {
 							const int lx = cx * sub_per_chunk + lx8;
 							const int ly = cy * sub_per_chunk + ly8;
 							const int lz = cz * sub_per_chunk + lz8;
-							int mat = 0;
-							for (int dz = 0; dz < cell && mat == 0; ++dz) {
-								for (int dy = 0; dy < cell && mat == 0; ++dy) {
-									for (int dx = 0; dx < cell; ++dx) {
-										const int m = b[(lx8*cell+dx) + (ly8*cell+dy)*CHUNK_SIZE + (lz8*cell+dz)*CHUNK_SIZE*CHUNK_SIZE];
-										if (m > 0) { mat = m; break; }
-									}
-								}
-							}
-							halo[(1+lx) + (1+ly)*HS + (1+lz)*HS*HS] = mat;
+							halo[(1+lx) + (1+ly)*HS + (1+lz)*HS*HS] =
+									downsample_cell(getv, lx8 * cell, ly8 * cell, lz8 * cell, cell);
 						}
 					}
 				}
 			}
 		}
 	}
-	// 6 外缘面：相邻大块边界 1 大格层（降采样 cell³ 体素）
+	// 6 外缘面：相邻大块边界 1 大格层（降采样 cell³ 体素）。
+	// 采样立方体的固定轴由 fix_grid 决定、面内两轴由 (lu, lv) 决定；
+	// 交给 downsample_cell 后，三轴遍历序统一为 (z, y, x)。
 	const Vector3i dirs[6] = {
 		Vector3i(1,0,0), Vector3i(-1,0,0),
 		Vector3i(0,1,0), Vector3i(0,-1,0),
 		Vector3i(0,0,1), Vector3i(0,0,-1),
+	};
+	// 跨 block/chunk 的体素读取：只有外缘一圈越界，故按需惰性解析 chunk
+	auto getv_nb = [&buffers](int wx, int wy, int wz) -> int32_t {
+		const Vector3i nck(wx >> CHUNK_SHIFT, wy >> CHUNK_SHIFT, wz >> CHUNK_SHIFT);
+		if (!buffers.has(nck)) {
+			return 0;
+		}
+		const PackedInt32Array nbuf = buffers[nck];
+		if (nbuf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) {
+			return 0;
+		}
+		const int lx = wx - nck.x * CHUNK_SIZE;
+		const int ly = wy - nck.y * CHUNK_SIZE;
+		const int lz = wz - nck.z * CHUNK_SIZE;
+		return nbuf.ptr()[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE];
 	};
 	for (int di = 0; di < 6; ++di) {
 		const Vector3i d = dirs[di];
@@ -797,27 +837,23 @@ PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dic
 		const int halo_pos = (d[face] < 0) ? 0 : (HS - 1);
 		for (int lv = 0; lv < BS; ++lv) {
 			for (int lu = 0; lu < BS; ++lu) {
-				int mat = 0;
-				for (int dv = 0; dv < cell && mat == 0; ++dv) {
-					for (int du = 0; du < cell && mat == 0; ++du) {
-						for (int df = 0; df < cell; ++df) {
-							// 外缘面轴坐标：固定轴 = fix_grid（0 或 BS-1），另两轴分别用 lu/lv。
-							// face=0(x) 时 vy 用 lu、vz 用 lv；face=1(y) 时 vx 用 lu、vz 用 lv；
-							// face=2(z) 时 vx 用 lu、vy 用 lv。固定轴 df 采样 cell 层。
-							const int vx = nbk.x*block_voxels + ((face == 0) ? (fix_grid*cell+df) : (lu*cell+du));
-							const int vy = nbk.y*block_voxels + ((face == 1) ? (fix_grid*cell+df) : ((face == 0) ? (lu*cell+du) : (lv*cell+dv)));
-							const int vz = nbk.z*block_voxels + ((face == 2) ? (fix_grid*cell+df) : (lv*cell+dv));
-							const Vector3i ck(vx>>CHUNK_SHIFT, vy>>CHUNK_SHIFT, vz>>CHUNK_SHIFT);
-							if (!buffers.has(ck)) continue;
-							const PackedInt32Array buf = buffers[ck];
-							if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) continue;
-							const int32_t *b = buf.ptr();
-							const int local = (vx - ck.x*CHUNK_SIZE) + (vy - ck.y*CHUNK_SIZE)*CHUNK_SIZE + (vz - ck.z*CHUNK_SIZE)*CHUNK_SIZE*CHUNK_SIZE;
-							const int m = b[local];
-							if (m > 0) { mat = m; break; }
-						}
-					}
+				// 采样立方体左下角（世界体素坐标）：固定轴取 fix_grid 那一大格，
+				// 面内两轴 face=0(x)→(y,z)、face=1(y)→(x,z)、face=2(z)→(x,y) 分别用 (lu, lv)。
+				int bx, by, bz;
+				if (face == 0) {
+					bx = nbk.x * block_voxels + fix_grid * cell;
+					by = nbk.y * block_voxels + lu * cell;
+					bz = nbk.z * block_voxels + lv * cell;
+				} else if (face == 1) {
+					bx = nbk.x * block_voxels + lu * cell;
+					by = nbk.y * block_voxels + fix_grid * cell;
+					bz = nbk.z * block_voxels + lv * cell;
+				} else {
+					bx = nbk.x * block_voxels + lu * cell;
+					by = nbk.y * block_voxels + lv * cell;
+					bz = nbk.z * block_voxels + fix_grid * cell;
 				}
+				const int mat = downsample_cell(getv_nb, bx, by, bz, cell);
 				int hx, hy, hz;
 				if (face == 0) { hx = halo_pos; hy = 1+lu; hz = 1+lv; }
 				else if (face == 1) { hx = 1+lu; hy = halo_pos; hz = 1+lv; }
@@ -1220,26 +1256,14 @@ PackedInt32Array VoxelNative::patch_lod_block(const Dictionary &buffers, const V
 		}
 		return it->second.ptr()[buf_index(local)];
 	};
-	// 只对脏大格降采样（取第一个非空材质，与全量一致）
+	// 只对脏大格降采样（规则见 downsample_cell，与全量一致）
 	for (int gz = rmax.z; gz >= rmin.z; --gz) {
 		const int bz = block_key.z * block_voxels + gz * cell;
 		for (int gy = rmax.y; gy >= rmin.y; --gy) {
 			const int by = block_key.y * block_voxels + gy * cell;
 			for (int gx = rmax.x; gx >= rmin.x; --gx) {
 				const int bx = block_key.x * block_voxels + gx * cell;
-				int mat = 0;
-				for (int dz = 0; dz < cell && mat == 0; ++dz) {
-					for (int dy = 0; dy < cell && mat == 0; ++dy) {
-						for (int dx = 0; dx < cell; ++dx) {
-							const int32_t m = get_voxel(bx + dx, by + dy, bz + dz);
-							if (m > 0) {
-								mat = m;
-								break;
-							}
-						}
-					}
-				}
-				buf[gx + gy * BS + gz * BS * BS] = mat;
+				buf[gx + gy * BS + gz * BS * BS] = downsample_cell(get_voxel, bx, by, bz, cell);
 			}
 		}
 	}
@@ -1249,7 +1273,8 @@ PackedInt32Array VoxelNative::patch_lod_block(const Dictionary &buffers, const V
 // 金字塔逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样（而非从 L0 全量）。
 // 当前层 block 覆盖 (32<<lod)³ 体素；上一层 block 覆盖 (32<<(lod-1))³ = 8 个（2³）。
 // 当前大格 (gx,gy,gz) 覆盖 2³ 个上一层大格：上一层大格坐标 = (block*32+g)*2 + (dx,dy,dz)。
-// 取第一个非空上层大格值（与全量 L0 降采样规则一致，保证逐级/全量结果一致）。
+// 降采样规则复用 downsample_cell（(z,y,x) 序取第一个非空），与全量 L0 降采样一致，
+// 故"逐级上推"与"从 L0 全量重算"得到相同结果。
 // coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格) 字典。
 // coarse: 当前 block 现有大格数据（未脏大格保留）。返回完整当前 block 大格数据。
 PackedInt32Array VoxelNative::patch_lod_block_from_lod(const Dictionary &coarse_buffers,
@@ -1287,19 +1312,7 @@ PackedInt32Array VoxelNative::patch_lod_block_from_lod(const Dictionary &coarse_
 			const int py = (block_key.y * BS + gy) * 2;
 			for (int gx = rmax.x; gx >= rmin.x; --gx) {
 				const int px = (block_key.x * BS + gx) * 2;
-				int mat = 0;
-				for (int dz = 0; dz < 2 && mat == 0; ++dz) {
-					for (int dy = 0; dy < 2 && mat == 0; ++dy) {
-						for (int dx = 0; dx < 2; ++dx) {
-							const int32_t m = get_prev(px + dx, py + dy, pz + dz);
-							if (m > 0) {
-								mat = m;
-								break;
-							}
-						}
-					}
-				}
-				buf[gx + gy * BS + gz * BS * BS] = mat;
+				buf[gx + gy * BS + gz * BS * BS] = downsample_cell(get_prev, px, py, pz, 2);
 			}
 		}
 	}
