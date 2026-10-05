@@ -37,8 +37,11 @@ enum VisibilityMode {
 @export var voxel_scale: float = 0.1:
 	set(v):
 		voxel_scale = v
-		# Voxel scale 变化会影响 chunk mesh 的位置，需要重建
-		if not _lod_meshes[0].is_empty():
+		# Voxel scale 变化会影响 chunk mesh 的位置，需要重建。
+		# 守卫：本 setter 可能在 _ready()/_configure_lod() 之前被调用（场景反序列化、
+		# 编辑器 Inspector 赋值、在 add_child 之前设属性），此时 _lod_meshes 仍为空数组，
+		# 直接取 [0] 会越界报错。空数组时无网格可清理，跳过即可。
+		if not _lod_meshes.is_empty() and not _lod_meshes[0].is_empty():
 			_clear_lod_meshes()
 		_request_update()
 
@@ -751,7 +754,7 @@ func _process_deferred_chunks() -> void:
 ## 按相机距离管理 chunk 数据与网格，数据源差异全部下沉到 VoxelStream 接口：
 ##   - 程序化流（VoxelProceduralStream）：未修改 chunk 后台确定性生成（request_chunk_async），
 ##     修改过的 chunk 同步预载已存数据（防止重新生成覆盖用户修改）
-##   - 文件流（VoxelFileStream）：region 异步读盘（request_region_load），chunk 数据回内存
+##   - 文件流（QVoxStream）：内存块索引 O(1) 命中（QVoxStream 单文件常驻索引），chunk 数据回内存
 ## 统一流程：① poll 回填异步结果 → ② 距离内扫描缺失 chunk 提交（限量/降频）→ ③ 卸载超范围。
 ## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走廉价接口
 ## （程序化 = is_in_generation_bounds；文件 = VoxelData 已持久化索引），
@@ -780,7 +783,7 @@ func _process_streaming() -> void:
 	if is_procedural:
 		_check_origin_shift(cam)
 
-	# 1) 回填后台异步结果（程序化生成 / 文件流 region 读盘），统一 poll → accept（按 lod 分流）
+	# 1) 回填后台异步结果（程序化生成 / 文件流内存索引命中），统一 poll → accept（按 lod 分流）
 	# poll 限量 = 加载预算的 2 倍：避免来回移动时每帧 accept 过多（主线程写入 + 失效开销大 → 掉帧）
 	var applied := 0
 	var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 2, 32))
@@ -831,7 +834,7 @@ func _process_streaming() -> void:
 						continue
 					# 存在性统一判定（廉价，无磁盘 IO）：
 					#   程序化 = is_in_generation_bounds（无限流恒 true / 有限模板流查范围）
-					#   文件流 = VoxelData 已持久化索引（O(1)，避免 has_chunk 同步读 region）
+					#   文件流 = VoxelData 已持久化索引（O(1)，避免 has_chunk 触碰磁盘）
 					var available := stream.has_chunk(ck) if is_procedural else data._persisted_chunks.has(ck)
 					if not available:
 						continue
@@ -1169,7 +1172,7 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 		if not data.is_lod_block_modified(level, bk) and not data.has_lod_block(level, bk):
 			# 文件流：直接降采样生成（一次完成——mesh + 数据缓存同步），不等异步 request 两阶段。
 			# 异步降采样（request → 数据 → 下次帧 mesh）完成时机晚，近处粗层块长期无 mesh → 固定空洞。
-			if data.stream is VoxelFileStream:
+			if data.stream is QVoxStream:
 				to_build.append([dist, bk])
 				continue
 			var _pending := data.is_chunk_pending(bk, level)
@@ -1545,7 +1548,7 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 		return
 	if buf.size() > 0 and data != null:
 		data.set_lod_block(level, bk, buf)
-		if data.stream is VoxelFileStream:
+		if data.stream is QVoxStream:
 			data.stream.save_chunk(bk, buf, level)
 	else:
 		# 降采样空（LOD0 数据未就绪 或 区域外/空气层）：确定空一次设 null，其余重试计数
@@ -1573,7 +1576,7 @@ func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: in
 	# → 死循环占满跨层构建预算，更粗层永远分不到（远处空洞）。
 	if buf.size() > 0 and data != null and mesh != null and mesh.get_surface_count() > 0:
 		data.set_lod_block(level, bk, buf)
-		if data.stream is VoxelFileStream:
+		if data.stream is QVoxStream:
 			data.stream.save_chunk(bk, buf, level)
 	if _lod_meshes[level].has(bk) and not _lod_rebuilding(level, bk):
 		return
@@ -2174,8 +2177,12 @@ func _clear_lod_meshes() -> void:
 			if mi != null and is_instance_valid(mi):
 				mi.queue_free()
 		_lod_meshes[level].clear()
-		_lod_pending[level].clear()
-		_lod_pending_tasks[level].clear()
+		# _lod_pending / _lod_pending_tasks / _lod_rebuild 由 _configure_lod() 与
+		# _lod_meshes 同步维护；加 size 守卫，防止外部改动导致层数不一致时越界。
+		if level < _lod_pending.size():
+			_lod_pending[level].clear()
+		if level < _lod_pending_tasks.size():
+			_lod_pending_tasks[level].clear()
 	if data:
 		data.clear_lod_cache()
 	_clear_chunk_collisions()

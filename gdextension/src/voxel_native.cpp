@@ -88,14 +88,49 @@ constexpr int CHUNK_SLICE = CHUNK_SIZE * CHUNK_SIZE;
 constexpr int HALO = 1;
 constexpr int HALO_SIZE = CHUNK_SIZE + HALO * 2;
 
-// 网格整数坐标 → 64 位哈希键（顶点去重用；21 位/分量覆盖 ±100 万范围）
+// 网格整数坐标 → 64 位哈希键（用于 chunk 去重 / 材质映射等，
+// 21 位/分量，覆盖 ±100 万范围）。
+//
+// 【坑】旧实现只对 z 做 `& 0x1FFFFF`，x / y 直接 `uint32_t(x) << 42` / `<< 21`：
+//   - x 占 bit42..63，但 uint32 左移 42 只保留低 22 位（高 10 位被丢弃）；
+//   - y 占 bit21..52，与 x 的区域在 bit42..52 **重叠 11 位**，`|` 会互相污染；
+//   结果：负坐标（二补数高位全 1）极易撞键。实测 chunk 坐标 x∈[-1000,1000] 时，
+//   相邻 chunk (-1000,-3,-3) 与 (-999,-3,-3) 等 41979 组直接碰撞 →
+//   chunks / mat_map / chunk_bufs 互相覆盖，表现为"chunk 网格错乱、材质串味"。
+//   （另一类偶发：x≥2^22 时高位被截断，vkey(0,0,0)==vkey(2^22,0,0)。）
+//
+// 【修法】三个分量都先 `& 0x1FFFFF` 截到 21 位，再放到互不重叠的位段：
+//   x → bit42..62，y → bit21..41，z → bit0..20（共 63 位，最高位不用）。
+//   21 位二补数覆盖 [-1048576, 1048575]，对 chunk 坐标（±3 万）绰绰有余，
+//   且**同一有符号值总有同一位型**，同一坐标必得同一键、不同坐标在位段内必不同。
 inline uint64_t grid_vkey(int x, int y, int z) {
-	const uint64_t ux = uint64_t(uint32_t(x));
-	const uint64_t uy = uint64_t(uint32_t(y));
-	const uint64_t uz = uint64_t(uint32_t(z));
-	return (ux << 42) | (uy << 21) | (uz & 0x1FFFFF);
+	const uint64_t ux = uint64_t(uint32_t(x) & 0x1FFFFFu);
+	const uint64_t uy = uint64_t(uint32_t(y) & 0x1FFFFFu);
+	const uint64_t uz = uint64_t(uint32_t(z) & 0x1FFFFFu);
+	return (ux << 42) | (uy << 21) | uz;
 }
 inline uint64_t grid_vkey(const Vector3i &p) { return grid_vkey(p.x, p.y, p.z); }
+
+// 顶点去重键 = (网格角点, 面序号, 材质ID)。
+// 【坑】早期实现用 `key = key * 31 + x` 逐级叠加：grid_vkey 已占满 63 位，
+// 再乘 31 会**溢出 uint64 并回绕**，把高位信息丢掉 → 不同 (角点,面,材质) 撞成
+// 同一键，一个顶点的 UV/法线被另一材质的三角形复用。渲染表现是同一三角形上
+// 出现两个不同材质 ID 的 UV（u 在两 texel 间插值）——即"彩虹条纹/同心方格"。
+//
+// 现改为**精确复合键**（零碰撞）：角点各轴 21 位 + 面 3 位 + 材质 8 位 = 74 位，
+// 超过 64 位，故用一个结构体键配 std::map 做精确比较（不用哈希，杜绝碰撞）。
+struct VertexKey {
+	int32_t x, y, z;
+	int32_t face;
+	int32_t mat;
+	bool operator<(const VertexKey &o) const {
+		if (x != o.x) return x < o.x;
+		if (y != o.y) return y < o.y;
+		if (z != o.z) return z < o.z;
+		if (face != o.face) return face < o.face;
+		return mat < o.mat;
+	}
+};
 
 // 6 方向邻居偏移（对应 FaceTool.Normals 顺序：+Y,-Y,-X,+X,+Z,-Z）
 constexpr int HALO_DIRS[6] = {
@@ -189,8 +224,8 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 	PackedVector3Array solid_verts, solid_normals, trans_verts, trans_normals;
 	PackedVector2Array solid_uvs, trans_uvs;
 	PackedInt32Array solid_idxs, trans_idxs;
-	std::unordered_map<uint64_t, int> solid_cache;
-	std::unordered_map<uint64_t, int> trans_cache;
+	std::map<VertexKey, int> solid_cache;
+	std::map<VertexKey, int> trans_cache;
 	const int size_slice = size * size;
 	const int halo_size = size + 2;
 	const int hdirs[6] = {
@@ -288,9 +323,7 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 							pos.z + int(point.z * float(sz.z)));
 					const Vector3 world_pos = (Vector3(pos) + point * sizef) * scale - origin_offset + offset * scale;
 					if (is_trans) {
-						uint64_t key = grid_vkey(grid_pt);
-						key = key * 31 + uint64_t(face_idx);
-						key = key * 31 + uint64_t(mat_id);
+						VertexKey key{ grid_pt.x, grid_pt.y, grid_pt.z, face_idx, mat_id };
 						auto it = trans_cache.find(key);
 						if (it != trans_cache.end()) {
 							trans_idxs.append(it->second);
@@ -303,9 +336,7 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 							trans_cache[key] = vi;
 						}
 					} else {
-						uint64_t key = grid_vkey(grid_pt);
-						key = key * 31 + uint64_t(face_idx);
-						key = key * 31 + uint64_t(mat_id);
+						VertexKey key{ grid_pt.x, grid_pt.y, grid_pt.z, face_idx, mat_id };
 						auto it = solid_cache.find(key);
 						if (it != solid_cache.end()) {
 							solid_idxs.append(it->second);
@@ -652,12 +683,18 @@ inline Vector3i chunk_of(const Vector3i &pos) {
 }
 
 // 体素坐标 -> 哈希键（合并 3 个 int32 为 1 个 uint64，替代 Vector3i 哈希）
+//
+// 【坑】旧实现只对 z 做 `& 0x1FFFFF`，x / y 未截断：x 左移 42 只保留低 22 位、
+//   y 左移 21 占 bit21..52 与 x 的 bit42..63 **重叠 11 位**，`|` 互相污染。
+//   负坐标（二补数高位全 1）大面积撞键 → by_chunk / ck_of_key / removed_set
+//   等哈希表把不同 chunk/体素当成同一个。修法与 grid_vkey 一致：三分量各截 21 位、
+//   放互不重叠位段（x→42..62, y→21..41, z→0..20）。
 inline uint64_t vkey(int x, int y, int z) {
-	// 每个分量占 21 位（覆盖 ±1M 范围），符号位保留
-	const uint64_t ux = uint64_t(uint32_t(x));
-	const uint64_t uy = uint64_t(uint32_t(y));
-	const uint64_t uz = uint64_t(uint32_t(z));
-	return (ux << 42) | (uy << 21) | (uz & 0x1FFFFF);
+	// 每个分量占 21 位（覆盖 ±1M 范围），符号由二补数低 21 位保留
+	const uint64_t ux = uint64_t(uint32_t(x) & 0x1FFFFFu);
+	const uint64_t uy = uint64_t(uint32_t(y) & 0x1FFFFFu);
+	const uint64_t uz = uint64_t(uint32_t(z) & 0x1FFFFFu);
+	return (ux << 42) | (uy << 21) | uz;
 }
 inline uint64_t vkey(const Vector3i &p) { return vkey(p.x, p.y, p.z); }
 
@@ -1274,6 +1311,89 @@ Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Ar
 	return needed;
 }
 
+// ----------------------------------------------------------------------------
+// QVox 文件写入：CRC32（标准 IEEE 802.3，反射多项式 0xEDB88320）
+// ----------------------------------------------------------------------------
+//
+// 与 zlib / GDScript _crc_of_slice 口径一致：初值 0xFFFFFFFF，终值异或 0xFFFFFFFF。
+// GDScript 逐字节查表算 1.4MB 要 ~84ms；同一算法在 C++ 下 ~0.5ms（约 170x）。
+// 表用函数内 static const 惰性构造一次，线程安全（C++11 magic static）。
+
+static const uint32_t *qvox_crc32_table() {
+	static uint32_t table[256];
+	static bool built = false;
+	if (!built) {
+		for (uint32_t i = 0; i < 256; ++i) {
+			uint32_t c = i;
+			for (int j = 0; j < 8; ++j) {
+				c = (c & 1u) ? ((c >> 1) ^ 0xEDB88320u) : (c >> 1);
+			}
+			table[i] = c;
+		}
+		built = true;
+	}
+	return table;
+}
+
+// 对一段连续字节算 CRC32；start/length 可传 -1（start<0 → 0；length<0 → 到末尾）
+static uint32_t qvox_crc32_run(const uint8_t *p, int64_t n) {
+	const uint32_t *table = qvox_crc32_table();
+	uint32_t crc = 0xFFFFFFFFu;
+	for (int64_t i = 0; i < n; ++i) {
+		crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFFu];
+	}
+	return crc ^ 0xFFFFFFFFu;
+}
+
+int64_t VoxelNative::crc32(const PackedByteArray &p_data, int64_t p_start, int64_t p_length) {
+	const int64_t total = p_data.size();
+	int64_t start = p_start < 0 ? 0 : p_start;
+	if (start > total) {
+		start = total;
+	}
+	int64_t length;
+	if (p_length < 0) {
+		length = total - start;
+	} else {
+		length = p_length;
+		if (start + length > total) {
+			length = total - start;
+		}
+	}
+	if (length <= 0) {
+		// 空区间：标准 CRC32 的空输入值（初值异或终值）
+		return (int64_t)0u;
+	}
+	return (int64_t)qvox_crc32_run(p_data.ptr() + start, length);
+}
+
+int64_t VoxelNative::crc32_segments(const PackedByteArray &p_data, const PackedInt64Array &p_offsets, const PackedInt64Array &p_lengths) {
+	const int64_t total = p_data.size();
+	const int64_t nseg = p_offsets.size() < p_lengths.size() ? p_offsets.size() : p_lengths.size();
+	const uint32_t *table = qvox_crc32_table();
+	uint32_t crc = 0xFFFFFFFFu;
+	for (int64_t s = 0; s < nseg; ++s) {
+		int64_t start = p_offsets[s];
+		int64_t length = p_lengths[s];
+		if (start < 0) {
+			start = 0;
+		}
+		if (start > total) {
+			start = total;
+		}
+		if (length < 0) {
+			length = total - start;
+		} else if (start + length > total) {
+			length = total - start;
+		}
+		const uint8_t *p = p_data.ptr() + start;
+		for (int64_t i = 0; i < length; ++i) {
+			crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFFu];
+		}
+	}
+	return (int64_t)(crc ^ 0xFFFFFFFFu);
+}
+
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
@@ -1292,4 +1412,6 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32", "data", "start", "length"), &VoxelNative::crc32);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32_segments", "data", "offsets", "lengths"), &VoxelNative::crc32_segments);
 }

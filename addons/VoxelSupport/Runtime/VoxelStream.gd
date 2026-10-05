@@ -12,10 +12,10 @@ extends Resource
 ##   - 访问 / 范围查询 / 破坏 / 网格生成会自动从磁盘加载所需 chunk
 ##
 ## 全部方法为 @abstract 抽象方法（无实现，函数头后直接换行）。子类必须实现，
-## 未实现会编译报错。内置实现：VoxelFileStream（region 块级存储）、
+## 未实现会编译报错。内置实现：QVoxStream（.qvox 单文件块流存储）、
 ## VoxelProceduralStream（程序化无限世界，其子类覆写 _generate_chunk 实现生成算法）。
 ## 数据格式约定（与 VoxelData 统一材质契约一致）：
-##   buffer = PackedInt32Array(16³)，值 = 材质ID（0 = 空/空气）。
+##   buffer = PackedInt32Array(32³)，值 = 材质ID（0 = 空/空气）。
 ##   空 chunk（全 0）不落盘，由 VoxelData 在变空时调用 erase_chunk。
 
 ## 保存单个 chunk/block 的体素数据到流（写盘）。

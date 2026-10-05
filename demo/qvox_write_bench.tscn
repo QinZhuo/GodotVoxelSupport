@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://demo/qvox_write_bench.gd" id="1_bench"]
+
+[node name="QVoxWriteBench" type="Node3D"]
+script = ExtResource("1_bench")

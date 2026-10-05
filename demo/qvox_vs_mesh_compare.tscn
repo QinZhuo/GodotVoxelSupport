@@ -1,0 +1,43 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://demo/qvox_vs_mesh_compare.gd" id="1_cmp"]
+
+[sub_resource type="ProceduralSkyMaterial" id="Sky_mat"]
+sky_top_color = Color(0.14, 0.19, 0.29, 1)
+sky_horizon_color = Color(0.6, 0.64, 0.7, 1)
+ground_bottom_color = Color(0.28, 0.29, 0.32, 1)
+ground_horizon_color = Color(0.5, 0.52, 0.56, 1)
+
+[sub_resource type="Sky" id="Sky_1"]
+sky_material = SubResource("Sky_mat")
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 2
+sky = SubResource("Sky_1")
+ambient_light_source = 3
+ambient_light_sky_contribution = 0.68
+reflected_light_source = 3
+tonemap_mode = 2
+ssao_enabled = true
+
+[node name="QVoxVsMeshCompare" type="Node3D"]
+script = ExtResource("1_cmp")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="KeyLight" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 8, 0)
+light_energy = 1.15
+shadow_enabled = true
+
+[node name="FillLight" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.866, -0.25, -0.433, 0, 0.866, -0.5, 0.5, -0.433, 0.75, 0, 5, 0)
+light_energy = 0.35
+light_color = Color(0.7, 0.8, 1, 1)
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.95, -0.31, 0, 0.31, 0.95, 0, 5, 16)
+current = true
+fov = 60.0
+far = 800.0

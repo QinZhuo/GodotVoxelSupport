@@ -137,7 +137,7 @@ static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary, bl
 
 
 ## 支撑图失稳检测（转发到原生实现，动态调用）
-## buffers: chunk key -> PackedInt32Array(16³) 的密集缓冲快照
+## buffers: chunk key -> PackedInt32Array(32³) 的密集缓冲快照
 ## removed: 本次被移除的体素位置数组
 ## 返回失稳体素集合 Dictionary{pos(Vector3i): true}
 static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dictionary:
@@ -172,7 +172,7 @@ static func collect_materials(buffers: Dictionary, positions: Array) -> Dictiona
 
 
 ## 批量移除体素（转发到原生实现，动态调用）
-## buffers: chunk key -> PackedInt32Array(16³)，会被就地修改（值>0 清零）
+## buffers: chunk key -> PackedInt32Array(32³)，会被就地修改（值>0 清零）
 ## positions: 待移除位置数组
 ## 返回 Dictionary：{removed: int, chunk_removed: {chunk_key: count}}
 static func remove_voxels_bulk(buffers: Dictionary, positions: Array) -> Dictionary:

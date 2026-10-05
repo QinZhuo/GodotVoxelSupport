@@ -16,7 +16,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="Voxel Support"
 config/tags=PackedStringArray("tool")
-run/main_scene="uid://dl2c605m5it3r"
+run/main_scene="res://demo/demo.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="uid://dryeet8uchrw"
 

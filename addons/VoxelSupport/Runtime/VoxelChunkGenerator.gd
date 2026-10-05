@@ -47,7 +47,7 @@ static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
 	return _merge_meshes(arrays)
 
 
-## 从 chunk 缓冲字典（chunk key → PackedInt32Array，密集 16³）构建单个 chunk 的 18³ 光环缓冲
+## 从 chunk 缓冲字典（chunk key → PackedInt32Array，密集 32³）构建单个 chunk 的 18³ 光环缓冲
 ## 线程安全：buffers 必须是调用方提供的独立快照（深拷贝），子线程内只读。
 ## 供异步 worker 在子线程内直接从快照构建 halo，避免主线程逐 chunk 提取的阻塞。
 ## 实现完全在 GDExtension (C++) 中（build_halo_from_buffers），无 GDScript 兜底。

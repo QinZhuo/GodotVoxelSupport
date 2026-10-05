@@ -35,3 +35,9 @@ addons/VoxelSupport/Native/*.dll.a
 
 *.TMP
 ~*.dll
+
+# demo/samples/ 下的 .qvox 是**烘焙产物**，但刻意提交入库——
+# 它们是格式的"实际存在的文件"示例，供人直接 hexdump / 观察结构。
+# （运行时产物默认落在 user://，不在仓库里；见 QVOX_FORMAT.md §13。）
+!demo/samples/*.qvox
+/.workbuddy

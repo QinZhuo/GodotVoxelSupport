@@ -25,7 +25,7 @@
 VoxelData                    — 体素数据存储与修改（材质、chunk 缓冲）
   └─ VoxelStream (@abstract) — chunk 级持久化 API（全部方法 @abstract，
                                子类漏实现任一将无法编译）
-       ├─ VoxelFileStream         — 磁盘 region 流式存储（体素世界存档）
+       ├─ QVoxStream              — .qvox 单文件块流世界存档
        └─ VoxelProceduralStream (@abstract) — 程序化无限世界
             └─ 子类覆写 @abstract `_generate_chunk()`
 VoxelRenderer              — 异步网格生成、LOD、流式加载、碰撞
@@ -41,8 +41,8 @@ VoxelDestructible          — 继承 VoxelRenderer：破坏、崩塌、掉落�
 var data := VoxelData.new()
 # ... 添加材质、填充体素（set_voxels / load_voxels_dict）
 
-var stream := VoxelFileStream.new()
-stream.directory = "user://my_world"
+var stream := QVoxStream.new()
+stream.file_path = "user://my_world/world.qvox"
 data.stream = stream
 
 var renderer := VoxelDestructible.new()
@@ -61,7 +61,7 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 class_name MyWorld
 extends VoxelProceduralStream
 
-## 覆写基类 @abstract 方法：返回 16³ PackedInt32Array（值 = 材质ID，0 = 空）。
+## 覆写基类 @abstract 方法：返回 32³ PackedInt32Array（值 = 材质ID，0 = 空）。
 ## 必须确定性：同 chunk_key → 同地形。
 func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	# 例如基于噪声的高度图 —— 用【绝对体素 y】判断，保证跨层连续

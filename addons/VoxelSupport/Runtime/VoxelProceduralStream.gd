@@ -9,7 +9,7 @@ extends VoxelStream
 ## 设计：
 ##   - 未修改 chunk：由子类 _generate_chunk 按 chunk key 程序化生成（确定性，可重复，零存储）
 ##   - 用户破坏的 chunk：save_chunk 记录修改，覆盖程序化数据
-##   - 可选 persist_directory：修改的 chunk 复用 VoxelFileStream 写盘，重启保留破坏
+##   - 可选 persist_directory：修改的 chunk 复用 QVoxStream 写盘（单 .qvox），重启保留破坏
 ##   - get_all_chunk_keys：只枚举修改的（无限世界不枚举程序化全部）
 ##   - 有限范围（矩形地图/建筑模板）：继承基类 VoxelStream 的范围限制能力，
 ##     set_grid_size(AABB) / set_chunk_bounds(精确集合)，has_chunk 复用 is_in_generation_bounds
@@ -20,22 +20,23 @@ extends VoxelStream
 
 ## 修改持久化目录（可选）：用户破坏的 chunk 写盘，重启后保留。留空则修改仅存内存。
 ## 用 setter 保证 new() 之后再赋值也能立即创建文件流。
+## 底层 QVoxStream 是单文件格式，目录下固定用 world.qvox 承载整个世界的破坏数据。
 @export var persist_directory: String = "":
 	set(value):
 		persist_directory = value
 		if _file_stream == null and persist_directory != "":
-			_file_stream = VoxelFileStream.new()
-			_file_stream.directory = persist_directory
+			_file_stream = QVoxStream.new()
+			_file_stream.file_path = persist_directory.path_join(QVoxStream.WORLD_FILE_NAME)
 			_rebuild_persisted_index()
 
 # 修改过的 chunk（破坏覆盖程序化）：chunk_key -> PackedInt32Array（lod=0）
 var _modified: Dictionary = {}
 # 修改过的粗层 block（编辑降采样结果）：_modified_lod[level-1] = {block_key: buffer}
 var _modified_lod: Array[Dictionary] = []
-# 可选文件持久化（复用 VoxelFileStream 的 region 存储）
-var _file_stream: VoxelFileStream = null
+# 可选文件持久化（复用 QVoxStream 的单文件块流存储）
+var _file_stream: QVoxStream = null
 # 文件流中已持久化的 chunk key 索引：load_chunk 先查此内存索引，避免每 chunk
-# 同步读 region 文件（来回移动大量生成时同步读盘 → 主线程卡死）。
+# 同步读盘（来回移动大量生成时同步读盘 → 主线程卡死）。
 var _persisted_keys: Dictionary = {}
 
 
@@ -47,7 +48,7 @@ func _rebuild_persisted_index() -> void:
 			_persisted_keys[ck] = true
 
 
-## @abstract 虚函数：按 chunk key 生成 16³ chunk 缓冲（值 = 材质ID，0=空）。
+## @abstract 虚函数：按 chunk key 生成 32³ chunk 缓冲（值 = 材质ID，0=空）。
 ## 子类必须覆写实现生成算法（未覆写会编译报错）。
 @abstract
 func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array

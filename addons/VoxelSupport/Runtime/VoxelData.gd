@@ -11,7 +11,7 @@ extends Resource
 ## 【存储方案】chunk 分区密集缓冲（性能关键）
 ## 旧方案：整个世界用 Dictionary[Vector3i, int]，每个体素一个 Vector3i 哈希键，
 ##         邻居查询/切片/网格生成全部命中字典哈希 → 大型场景慢一个量级。
-## 新方案：非空 chunk 各持一块 PackedInt32Array(16³)，值 = 材质ID（0=空）。
+## 新方案：非空 chunk 各持一块 PackedInt32Array(32³)，值 = 材质ID（0=空）。
 ##         体素读写 = 1 次 chunk 字典查询 + 1 次数组下标；稀疏性只存在于 chunk 层。
 ##         网格生成使用 18³ 密集"光环缓冲"，邻居读取全为数组下标、无越界检查。
 ##
@@ -32,7 +32,7 @@ extends Resource
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
-## 数据层磁盘流（VoxelStream / VoxelFileStream）。非空时启用数据层按需加载/卸载：
+## 数据层磁盘流（VoxelStream / QVoxStream）。非空时启用数据层按需加载/卸载：
 ##   - 内存只保留活跃 chunk，其余 chunk 数据由 stream 负责写盘/读盘（磁盘为权威）
 ##   - 修改过的 chunk 卸载时写回磁盘；变空时清盘；未修改且磁盘已有的直接丢弃
 ##   - 访问 / 范围查询 / 破坏 / 网格生成会自动从磁盘加载所需 chunk（见各方法注释）
@@ -252,7 +252,7 @@ const HALO := VoxelChunk.HALO
 const HALO_SIZE := VoxelChunk.HALO_SIZE
 const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 
-## chunk key -> 密集缓冲 (PackedInt32Array, 16³)。值 = 材质ID（0 = 空），材质ID 0 保留为空。
+## chunk key -> 密集缓冲 (PackedInt32Array, 32³)。值 = 材质ID（0 = 空），材质ID 0 保留为空。
 ## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
 var _chunk_buffers: Dictionary = {}
 
@@ -266,7 +266,7 @@ var _coarse_buffers: Array[Dictionary] = []
 var _coarse_modified: Array[Dictionary] = []
 
 ## 文件流粗层降采样任务去重：_lod_downsample_pending[level-1] = {block_key: true}。
-## 文件流（VoxelFileStream 无粗层生成器）的粗层数据从 LOD0 chunk 降采样生成，结果缓存到
+## 文件流（QVoxStream 无粗层生成器）的粗层数据从 LOD0 chunk 降采样生成，结果缓存到
 ## _coarse_buffers（移动复用）并持久化到文件流（重启保留），避免每次渲染都重复降采样。
 var _lod_downsample_pending: Array[Dictionary] = []
 
@@ -277,7 +277,7 @@ var _lod_downsample_retries: Array[Dictionary] = []
 
 ## 每 chunk 体素计数（chunk key -> int，增量维护 O(1)）。
 ## 替代 _maybe_erase_empty_chunk 的 4096 全量扫描：增减体素时更新计数，
-## 归零即视为空 chunk 可擦除——消除破坏/崩塌热路径的 16³ 循环。
+## 归零即视为空 chunk 可擦除——消除破坏/崩塌热路径的 32³ 循环。
 var _chunk_voxel_counts: Dictionary = {}
 
 ## 磁盘上已持久化的 chunk（key -> true，权威标志：该 chunk 数据存在于流中）。
@@ -559,6 +559,10 @@ func get_unloaded_chunk_keys() -> Array[Vector3i]:
 func flush() -> void:
 	if stream == null:
 		return
+	# QVox 流：先注入材质调色板，使 .qvox 自带 MATE（文件自包含，P2 每条事实只存一次）
+	var qs := stream as QVoxStream
+	if qs != null:
+		qs.set_materials(materials)
 	for ck in _dirty_chunks.keys():
 		var buf: PackedInt32Array = _chunk_buffers.get(ck)
 		if buf == null:
@@ -794,7 +798,7 @@ func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 	if s != null and s.has_method("request_chunk_async"):
 		s.request_chunk_async(chunk_key, lod)
 	# 文件流粗层：先查持久化（region 已存降采样缓存）→ 直接读回填；无 → 从 LOD0 降采样生成（后台）并持久化
-	if lod >= 1 and s is VoxelFileStream and not has_lod_block(lod, chunk_key):
+	if lod >= 1 and s is QVoxStream and not has_lod_block(lod, chunk_key):
 		if s.has_chunk(chunk_key, lod):
 			var buf := s.load_chunk(chunk_key, lod)
 			if buf.size() > 0:
@@ -857,7 +861,7 @@ func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Arr
 	if lod - 1 < _lod_downsample_retries.size():
 		_lod_downsample_retries[lod - 1].erase(block_key)
 	set_lod_block(lod, block_key, buf)
-	if stream is VoxelFileStream:
+	if stream is QVoxStream:
 		stream.save_chunk(block_key, buf, lod)
 
 
@@ -889,7 +893,7 @@ func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
 		if s.is_chunk_pending(chunk_key, lod):
 			return true
 	# 文件流粗层降采样任务进行中（防重复降采样）
-	if lod >= 1 and s is VoxelFileStream:
+	if lod >= 1 and s is QVoxStream:
 		var idx := lod - 1
 		if idx < _lod_downsample_pending.size() and _lod_downsample_pending[idx].has(chunk_key):
 			return true
@@ -1498,7 +1502,7 @@ func _serialize_all_voxels() -> Array:
 	var voxel_list := _serialize_voxels()
 	if stream == null:
 		return voxel_list
-	# 磁盘流（VoxelFileStream）：合并已持久化但不在内存的 chunk（临时加载，不污染内存缓存）
+	# 磁盘流（QVoxStream）：合并已持久化但不在内存的 chunk（临时加载，不污染内存缓存）
 	var extra: Array = []
 	for ck: Vector3i in _persisted_chunks:
 		if not _chunk_buffers.has(ck):

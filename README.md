@@ -27,7 +27,7 @@ You can see the rendering effects of voxel models imported using this plugin in 
 VoxelData                    — voxel storage & editing (materials, chunk buffers)
   └─ VoxelStream (@abstract) — chunk-level persistence API (all methods @abstract,
                                a subclass missing any will fail to compile)
-       ├─ VoxelFileStream         — disk region-file streaming (persist voxel worlds)
+       ├─ QVoxStream              — single-file .qvox block-stream world storage
        └─ VoxelProceduralStream (@abstract) — infinite procedural world
             └─ your subclass overrides @abstract `_generate_chunk()`
 VoxelRenderer              — async mesh generation, LOD, streaming, collision
@@ -43,8 +43,8 @@ All mesh generation runs on background threads (`WorkerThreadPool`); the main th
 var data := VoxelData.new()
 # ... add materials, fill voxels (set_voxels / load_voxels_dict)
 
-var stream := VoxelFileStream.new()
-stream.directory = "user://my_world"
+var stream := QVoxStream.new()
+stream.file_path = "user://my_world/world.qvox"
 data.stream = stream
 
 var renderer := VoxelDestructible.new()
@@ -63,7 +63,7 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 class_name MyWorld
 extends VoxelProceduralStream
 
-## Override the base @abstract method: return a 16³ PackedInt32Array
+## Override the base @abstract method: return a 32³ PackedInt32Array
 ## (value = material id, 0 = empty). Must be deterministic: same chunk_key → same terrain.
 func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	# e.g. noise-based heightmap — use ABSOLUTE voxel y for cross-layer continuity

@@ -3,6 +3,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_int64_array.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
@@ -134,6 +135,22 @@ public:
 	// 用 COW 共享（PackedInt32Array 原子 refcount）：worker 只读 const，主线程后续
 	// 写 buffers 触发写时拷贝 → 省去逐 chunk duplicate 的 64KB 深拷贝（大场景快照提速）。
 	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
+
+	// ---- QVox 文件写入用：CRC32 ----
+	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib / GDScript _crc_of_slice 完全一致。
+	// 覆盖 data[start, start+length)，含初值 0xFFFFFFFF 与终值异或。
+	//
+	// 【为什么下沉】GDScript 逐字节查表算 1.4MB 要 ~84ms，是 QVox 增量写盘的最大单项开销。
+	// 试过 crc32_combine 拼接（单次 1.48ms，比整扫还慢）与 slicing-by-8（解释器下反而 0.7×），
+	// 在 GDScript 层都已证明压不下去。C++ 下同一算法 ~0.5ms 即可（约 170×）。
+	//
+	// start/length 允许 -1：start<0 → 0；length<0 → 到末尾。越界自动裁剪。
+	static int64_t crc32(const PackedByteArray &data, int64_t start, int64_t length);
+
+	// 一次算多段：offsets[i] / lengths[i] 逐对给出各段区间，语义等价于把各段顺序
+	// 拼接后算一次 CRC32。用于"块前缀(length‖type) ‖ 负载"这类多段场景，
+	// 免去 GDScript 侧先拼一段临时 PackedByteArray 再算。
+	static int64_t crc32_segments(const PackedByteArray &data, const PackedInt64Array &offsets, const PackedInt64Array &lengths);
 };
 
 } // namespace godot
