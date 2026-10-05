@@ -334,8 +334,10 @@ var _lod_downsample_retries: Array[Dictionary] = []
 ## 归零即视为空 chunk 可擦除——消除破坏/崩塌热路径的 32³ 循环。
 var _chunk_voxel_counts: Dictionary = {}
 
-## 内存中被修改过、尚未写盘的 chunk（key -> true）。卸载时写盘；变空时清盘。
-## 未修改且磁盘已有的 chunk 卸载时直接丢弃（磁盘为权威，无意义 IO 写入）。
+## 内存中被修改过的 chunk（key -> true）。**两个用途**：
+##   1) 存储回写：卸载时写盘、变空时清盘（未修改且磁盘已有的直接丢弃）；
+##   2) 资源持久化：有生成器的世界只把"改过的块"写进资源载荷（见 _collect_persist_blocks）。
+## 因此它不能只在有 stream 时才维护——加载/导入路径也必须逐块登记。
 var _dirty_chunks: Dictionary = {}
 
 ## 体素总数（增量维护，O(1) 查询，供 HUD 等高频读取）
@@ -376,10 +378,9 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0, center: 
 		# 空资产按零尺寸处理即可，调用方随后通常也不会渲染它。
 		res.grid_size = Vector3i.ZERO
 
-	# 材质数组：voxel_data.materials 是固定长度数组，其数组索引 i 即材质 ID (体素值)
-	# 因此直接按索引 i 复制到 res.materials，保证"体素值 = data.materials 索引"的约定
-	# 注意：不能用 mat.id，因为 VoxAccess 未给每个材质设置不同的 id（默认全为0）
-	# 索引 0 保留为空占位（材质ID 0 = 空），不复制
+	# 材质数组：以**数组索引**为准复制到 res.materials（索引 i 即材质ID = 体素值），
+	# 这样即使来源材质对象的 id 字段未被设置也正确（索引才是权威映射）。
+	# 索引 0 保留为空占位（材质ID 0 = 空），不复制。
 	res.materials.resize(256)
 	for i in range(1, voxel_data.materials.size()):
 		var src: VoxelMaterial = voxel_data.materials[i]
@@ -453,6 +454,19 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 			_voxel_count += 1
 			_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) + 1
 		buf[idx] = mat_id
+
+
+## 直接装入一块密集缓冲（导入 / 资源载荷恢复专用）：不做逐体素写。
+## 体素数用原生 `PackedInt32Array.count(0)` 统计——这是块级安装唯一的 O(N) 步骤，且在 C++ 侧
+## （GDScript 逐元素循环算 32³ 约 3ms，这里是 0.008ms）。
+func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
+	if buf.size() != CHUNK_VOLUME:
+		push_error("[VoxelData] 块 %s 的缓冲长度 %d != %d，已跳过" % [chunk_key, buf.size(), CHUNK_VOLUME])
+		return
+	_chunk_buffers[chunk_key] = buf
+	var n := buf.size() - buf.count(0)
+	_chunk_voxel_counts[chunk_key] = n
+	_voxel_count += n
 
 
 ## 若 chunk 体素计数归零则移除该 chunk 键（O(1)，替代 4096 全量扫描）
@@ -1582,6 +1596,28 @@ func _serialize_all_voxels() -> Array:
 	return voxel_list
 
 
+## 从 QVox 资产构造。QVox 的块坐标恒等于 chunk 坐标（block_size == CHUNK_SIZE），
+## 因此常规情形下这是一次**块缓冲搬运**（零逐体素重映射、零中间稀疏字典）；
+## 只有需要融合变换（非恒等摆放 / 非 Y 朝上）时才逐体素展开。
+## center 为 true 时记录居中偏移（X/Z 居中、Y 贴底），与 from_voxel_data 语义一致。
+static func from_qvox(qvox: QVoxAsset, center: bool = true) -> VoxelData:
+	var res := VoxelData.new()
+	res.materials = qvox.materials
+	if qvox.is_block_importable():
+		var blocks: Dictionary = qvox.block_buffers()
+		for key in blocks:
+			# duplicate：本资源随后会就地修改缓冲，不得与 QVoxAsset 共享
+			res._install_block_buffer(key, (blocks[key] as PackedInt32Array).duplicate())
+	else:
+		var voxels: Dictionary = qvox.fused_voxels()
+		for pos in voxels:
+			res._write_buffer_impl(pos, voxels[pos], false)
+	res.grid_size = qvox.grid_size()
+	if center:
+		res.center_offset = qvox.center_offset()
+	return res
+
+
 ## 从 [[x, y, z, mat_id], ...] 重建体素（直接写 chunk 密集缓冲，不标记脏 chunk）
 func _deserialize_voxels(voxel_list: Variant) -> void:
 	if voxel_list == null:
@@ -1600,10 +1636,16 @@ func _deserialize_voxels(voxel_list: Variant) -> void:
 #   1. 程序化流只序列化"用户修改过的 chunk"（未修改的可确定性重新生成）。
 #   2. 载荷整体 GZIP 压缩后 base64 存储（SaveTool 同款：var_to_bytes + COMPRESSION_GZIP），
 #      即使静态大模型数据也压缩到可接受体积。
-# 载荷格式固定为 GZIP 压缩（无旧版明文兼容，_decode_payload 见注释）。
+# 载荷格式固定为 GZIP（见 _encode_payload / _decode_payload）。
 
 ## 载荷压缩魔数（与 SaveTool 的 "GZIP" 头一致，用于识别压缩格式）
 const PAYLOAD_MAGIC := "GZIP"
+
+## 资源载荷格式版本。**只此一版，不提供任何旧版读取路径**——载荷是私有存储属性
+## （PROPERTY_USAGE_STORAGE），没有对外契约，格式变更时重新导入/保存即可；
+## 读端保留兼容分支只会变成永久的负担。版本号仍在，是为了让"版本不符"当场变成
+## 一条明确报错，而不是静默按新格式误读。
+const PAYLOAD_VERSION := 1
 
 ## 声明隐藏的 storage 属性（PROPERTY_USAGE_STORAGE：不显示在编辑器，但随资源保存/加载）
 func _get_property_list() -> Array[Dictionary]:
@@ -1620,13 +1662,16 @@ func _get(property: StringName) -> Variant:
 	return null
 
 
-## 编码资源载荷：{v, grid_size, voxels} → var_to_bytes → GZIP → base64 字符串。
-## 返回的是可写进 .tscn 的字符串；解码见 _decode_payload。
+## 编码资源载荷：{v, grid_size, blocks} → var_to_bytes → GZIP → base64 字符串。
+##
+## 【为什么是"块表"而不是逐体素列表】体素本来就按 chunk 对齐存在 `_chunk_buffers`
+## （PackedInt32Array），直接搬运是零转换；逐体素列表则要先构造一个百万级
+## Array of Arrays 再序列化，峰值内存与耗时都是它的数倍。
 func _encode_payload() -> String:
 	var data := {
-		"v": 2,
+		"v": PAYLOAD_VERSION,
 		"grid_size": [grid_size.x, grid_size.y, grid_size.z],
-		"voxels": _serialize_voxels_for_storage(),
+		"blocks": _collect_persist_blocks(),
 	}
 	var raw := var_to_bytes(data)
 	var compressed := raw.compress(FileAccess.COMPRESSION_GZIP)
@@ -1635,26 +1680,52 @@ func _encode_payload() -> String:
 	return Marshalls.raw_to_base64(out)
 
 
-## 解码资源载荷：base64 → GZIP 解压 → 恢复 Dictionary。
-## 仅支持新版 GZIP 压缩格式（旧版 var_to_str 明文载荷不再兼容）。
+## 收集"需随资源持久化"的块缓冲 {chunk_key: PackedInt32Array}。
+## 取舍与 _serialize_voxels_for_storage 一致：
+##   有生成器 → 只存用户改过的块（未改的由生成器确定性重算，全量存会把 .tscn 撑爆）；
+##   无生成器 → 存内存中全部块（磁盘流中的部分由 stream 自己负责，不进资源载荷）。
+func _collect_persist_blocks() -> Dictionary:
+	var out := {}
+	if generator != null:
+		for ck in _collect_modified_chunk_keys():
+			var buf := _get_chunk_buffer_for_storage(ck)
+			if not buf.is_empty():
+				out[ck] = buf
+		return out
+	for ck in _chunk_buffers:
+		out[ck] = _chunk_buffers[ck]
+	return out
+
+
+## 从载荷恢复块缓冲（块表：chunk_key → PackedInt32Array）。缺字段即视为空载荷。
+func _load_payload_blocks(payload: Dictionary) -> void:
+	var blocks: Variant = payload.get("blocks")
+	if not (blocks is Dictionary):
+		return
+	for key in (blocks as Dictionary):
+		_install_block_buffer(key, (blocks as Dictionary)[key])
+
+
+## 解码资源载荷：base64 → GZIP 解压 → Dictionary。任一环节不符即报错并返回 null。
 func _decode_payload(value: String) -> Variant:
 	if value.is_empty():
 		return null
-	# 新格式首字符必为 base64 字母表（[A-Za-z0-9]）；旧明文以 '{' 开头，直接报错不空转。
-	var c0 := value.unicode_at(0)
-	var is_b64 := (c0 >= 65 and c0 <= 90) or (c0 >= 97 and c0 <= 122) or (c0 >= 48 and c0 <= 57)
-	if not is_b64:
-		push_error("[VoxelData] voxel_data_payload 格式不受支持（旧版明文载荷已不再兼容，请重新导入/保存）")
-		return null
 	var raw := Marshalls.base64_to_raw(value)
+	# 魔数已在 base64 之前写入，故解出来必以 "GZ" 开头（校验它能挡住"非本格式的字符串"）。
 	if raw.size() < 4 or raw[0] != 0x47 or raw[1] != 0x5A:  # "GZ"
 		push_error("[VoxelData] voxel_data_payload 缺少 GZIP 压缩头，载荷无效")
 		return null
 	var decompressed := raw.slice(4).decompress_dynamic(-1, FileAccess.COMPRESSION_GZIP)
-	if decompressed.size() == 0:
+	if decompressed.is_empty():
 		return null
 	var data: Variant = bytes_to_var(decompressed)
-	return data if data is Dictionary else null
+	if not (data is Dictionary):
+		return null
+	if int((data as Dictionary).get("v", 0)) != PAYLOAD_VERSION:
+		push_error("[VoxelData] voxel_data_payload 版本 %s 不受支持（本版仅 %d），请重新导入/保存"
+				% [(data as Dictionary).get("v"), PAYLOAD_VERSION])
+		return null
+	return data
 
 
 func _set(property: StringName, value: Variant) -> bool:
@@ -1676,7 +1747,7 @@ func _set(property: StringName, value: Variant) -> bool:
 			var gs: Variant = payload.get("grid_size", [0, 0, 0])
 			if gs is Array and gs.size() >= 3:
 				grid_size = Vector3i(int(gs[0]), int(gs[1]), int(gs[2]))
-			_deserialize_voxels(payload.get("voxels", null))
+			_load_payload_blocks(payload)
 		return true
 	return false
 

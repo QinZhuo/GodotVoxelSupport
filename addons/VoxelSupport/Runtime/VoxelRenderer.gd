@@ -1618,6 +1618,8 @@ func _update_mesh_async() -> void:
 	# 一次对齐材质供所有 per-chunk worker 复用，避免每个任务重复 align_by_id
 	# （生成器内部要求"数组索引==材质ID"，对齐后可 O(1) 按 ID 取材质）
 	var aligned_materials := VoxelMaterial.align_by_id(snapshot_materials)
+	# 透明标志表按批次算一次（逐块重建要扫一遍材质表，批量重建时纯属重复劳动）
+	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
 	var gen_id := _generation_id + 1
 	_generation_id = gen_id
 	# 渲染居中偏移（体素单位），子线程无权访问节点，随任务参数传入
@@ -1669,7 +1671,7 @@ func _update_mesh_async() -> void:
 	_pending_task_count = visible.size()
 	for ck in visible:
 		_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-			snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+			snapshot, aligned_materials, trans_flags, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 
 
 ## 可见 chunk 的 halo 快照（毫秒预算版）：逐片快照、超预算即止。
@@ -1741,12 +1743,13 @@ func _apply_stats_from_result(result: Dictionary) -> void:
 ## 避免主线程逐 chunk 提取 halo 造成秒级阻塞（旧方案）。
 ## materials 参数为已按 ID 对齐的材质数组（主线程派发时一次对齐，worker 复用避免重复开销）
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
-func _generate_chunk_worker(buffers: Dictionary, materials: Array, chunk_key: Vector3i,
-		gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO,
+func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: PackedByteArray,
+		chunk_key: Vector3i, gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO,
 		diag_enabled: bool = false) -> void:
 	var t0 := Time.get_ticks_usec()
 	var halo := VoxelChunkGenerator.build_halo_from_buffers(buffers, chunk_key)
-	var arr := VoxelChunkGenerator.generate_single_chunk_dense(halo, materials, scale, chunk_key, offset)
+	var arr := VoxelChunkGenerator.generate_single_chunk_dense(
+			halo, materials, scale, chunk_key, offset, trans_flags)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 
 	# 诊断：每 chunk 生成耗时 > 5ms 时打印（仅诊断模式开启时）

@@ -40,21 +40,6 @@ window/vsync/vsync_mode=0
 
 enabled=PackedStringArray("res://addons/DEVFramework/plugin.cfg", "res://addons/VoxelSupport/plugin.cfg")
 
-[importer_defaults]
-
-MagicaVoxel.With.Extensions.To.Mesh={
-"FirstKeyframeOnly": true,
-"GreedyMeshGenerator": true,
-"Scale": 0.1,
-"SnapToGround": false
-}
-voxel_support.link_res.vol.array_mesh={
-&"add_uv2": true
-}
-voxel_support.vol.array_mesh={
-&"add_uv2": true
-}
-
 [threading]
 
 worker_pool/max_threads=16.0

@@ -342,7 +342,8 @@ func test_stream_end_to_end() -> void:
 
 
 # ----------------------------------------------------------------------------
-# .qvox 作为一等资产：解析 → VoxAsset → VoxelData / Mesh（复用导入管线）
+# .qvox 作为一等资产：解析 → QVoxAsset → VoxelData / Mesh
+# （导入链路本身的用例在 test_qvox_import.gd；这里只钉"源格式 ↔ 适配器"的分派契约）
 # ----------------------------------------------------------------------------
 
 ## 四种导入器都必须把 .qvox 当作可识别扩展名，且**不能丢掉 .vox**（否则破坏既有导入）。
@@ -367,60 +368,22 @@ func test_importers_recognize_qvox() -> void:
 		assert_true("vox" in exts, "%s 应仍识别 vox" % p.get_file())
 
 
-## 样例经 VoxAsset.from_asset 必须解析成非空 VoxAsset（models + materials）。
-func test_qvox_access_samples() -> void:
-	var files := _list_qvox(SAMPLES_DIR)
-	assert_true(not files.is_empty(), "应有样例")
-	for path in files:
-		var vox := VoxAsset.from_asset(str(path))
-		assert_true(vox != null, "%s 应能解析" % path.get_file())
-		if vox == null:
-			continue
-		assert_true(vox.models.size() > 0, "%s 应至少解析出一个 model" % path.get_file())
-		var total := 0
-		for m in vox.models:
-			total += (m as VoxAsset.VoxelModel).voxels.size()
-		assert_true(total > 0, "%s 应有非空体素" % path.get_file())
-		assert_true(vox.materials.size() >= 2, "%s 应带回材质表" % path.get_file())
-
-
-## .qvox → VoxAsset → VoxelData：与 .vox 同一条导入路径。
-func test_qvox_to_voxeldata() -> void:
-	var path := SAMPLES_DIR + "/deer.qvox"
-	assert_true(FileAccess.file_exists(path), "样例 deer.qvox 应存在")
-	if not FileAccess.file_exists(path):
-		return
+## 扩展名分派契约：`.qvox` 归 QVoxAsset，`.vox` 归 VoxAsset，绝不互相冒充。
+##
+## 这条是"源格式与适配器必须形状匹配"的守门用例：VoxAsset 是 MagicaVoxel 场景图形状的
+## 适配器，用它承载 .qvox 会丢掉 NODE 场景图与除第一个之外的所有模型（详见 QVoxAsset 注释），
+## 因此 from_asset() 遇到 .qvox 必须明确拒绝而不是返回一个丢信息的对象。
+func test_source_format_dispatch() -> void:
+	assert_true(QVoxAsset.handles("res://a/b.qvox"), "QVoxAsset 应认领 .qvox")
+	assert_true(QVoxAsset.handles("res://a/b.QVOX"), "扩展名判定应大小写无关")
+	assert_false(QVoxAsset.handles("res://a/b.vox"), "QVoxAsset 不应认领 .vox")
 	assert_true("qvox" in VoxAsset.SUPPORTED_EXTENSIONS and "vox" in VoxAsset.SUPPORTED_EXTENSIONS,
-			"扩展名列表应同时含 qvox 与 vox")
-	var vox := VoxAsset.from_asset(path)
-	assert_true(vox != null, "应能从 .qvox 解析出 VoxAsset")
-	if vox == null:
-		return
-	var data := VoxelData.from_voxel_data(vox, 0, true)
-	assert_true(data != null, "应能从 .qvox 构造 VoxelData")
-	if data == null:
-		return
-	assert_true(data.grid_size.x > 0 and data.grid_size.y > 0 and data.grid_size.z > 0,
-			"grid_size 应为正（%s）" % str(data.grid_size))
+			"扩展名列表应同时含 qvox 与 vox（四个导入器共用）")
 
-
-## .qvox → 网格：用 VoxelMeshImporter 的真实默认选项跑一遍生成。
-func test_qvox_mesh_import() -> void:
-	var path := SAMPLES_DIR + "/deer.qvox"
-	if not FileAccess.file_exists(path):
-		assert_true(false, "样例 deer.qvox 应存在")
-		return
-	var vox := VoxAsset.from_asset(path)
-	if vox == null:
-		assert_true(false, "应能从 .qvox 解析出 VoxAsset")
-		return
-	var opts := {}
-	for o in VoxelMeshImporter.new()._get_import_options("", false):
-		opts[o["name"]] = o["default_value"]
-	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, path)
-	assert_true(mesh != null, "应为 .qvox 生成网格")
-	if mesh != null:
-		assert_true(mesh.get_surface_count() > 0, "生成的网格应有 surface")
+	var sample := SAMPLES_DIR + "/deer.qvox"
+	if FileAccess.file_exists(sample):
+		assert_true(VoxAsset.from_asset(sample) == null, "VoxAsset.from_asset 必须拒绝 .qvox")
+		assert_true(QVoxAsset.from_file(sample) != null, "QVoxAsset 应能解析同一文件")
 
 
 # ----------------------------------------------------------------------------

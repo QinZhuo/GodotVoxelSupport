@@ -19,43 +19,57 @@ static func Open(path: String) -> VoxAccess:
 	file.close()
 	return vox
 
-static var rot_cache: Array
-static func decode_rotation(byte_value: int) -> Basis:
-	if rot_cache[byte_value] != null:
-		return rot_cache[byte_value]
+## 0–23 朝向的解码缓存（Basis 是值类型，缓存只省重复的位运算与列构造）。
+static var _rotations: Array = []
 
-	var row0_index = byte_value & 3
-	var row1_index = (byte_value >> 2) & 3
-	var row2_index = 3 - row0_index - row1_index
 
-	var sign0 = 1 if ((byte_value >> 4) & 1) == 0 else -1
-	var sign1 = 1 if ((byte_value >> 5) & 1) == 0 else -1
-	var sign2 = 1 if ((byte_value >> 6) & 1) == 0 else -1
-
-	var cols = [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
-	cols[row0_index].x = sign0
-	cols[row1_index].y = sign1
-	cols[row2_index].z = sign2
-
-	var col0 = cols[0]
-	var col1 = cols[1]
-	var col2 = cols[2]
-
-	var godot_col0 = Vector3(col0.x, col0.z, -col0.y)
-	var godot_col1 = Vector3(col2.x, col2.z, -col2.y)
-	var godot_col2 = Vector3(-col1.x, -col1.z, col1.y)
-	var rotation := Basis(godot_col0, godot_col1, godot_col2)
-	rot_cache[byte_value] = rotation
-	return rotation
+## `.vox` 的 `nTRN._r`：MagicaVoxel 的 0–23 轴对齐朝向编码。
+##
+## 【为什么只留在这里】这是 `.vox` 独有的省字节布局——低 2 位与次 2 位分别是第 1、2 行
+## 非零元所在的列，第 3 行由"三行必须是单位轴的置换"推出，高 3 位是三个轴的符号；
+## 只有 24 种朝向且隐含 Z-up。它是 MagicaVoxel 的历史包袱而非通用表示，因此不外提成
+## 公共类，也不要求 QVox 的 NODE 去模仿（那边用四元数，见 QVoxAsset._node_transform）。
+##
+## 解码结果是精确的轴对齐 Basis：整数坐标经它变换后仍是整数，往返无浮点误差。
+static func _decode_rotation(value: int) -> Basis:
+	if _rotations.is_empty():
+		_rotations.resize(24)
+	value = clampi(value, 0, 23)
+	var cached: Variant = _rotations[value]
+	if cached != null:
+		return cached
+	var row0 := value & 3
+	var row1 := (value >> 2) & 3
+	var row2 := 3 - row0 - row1
+	var sign0 := 1.0 if ((value >> 4) & 1) == 0 else -1.0
+	var sign1 := 1.0 if ((value >> 5) & 1) == 0 else -1.0
+	var sign2 := 1.0 if ((value >> 6) & 1) == 0 else -1.0
+	# 三行各有一个 ±1：第 i 行的非零元落在 rowX 指定的列上，其余为 0
+	var cols := [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
+	cols[row0] = Vector3(sign0, 0, 0)
+	cols[row1] = Vector3(0, sign1, 0)
+	cols[row2] = Vector3(0, 0, sign2)
+	var col0: Vector3 = cols[0]
+	var col1: Vector3 = cols[1]
+	var col2: Vector3 = cols[2]
+	# 源格式为 Z-up、Godot 为 Y-up：列重排即轴向转换
+	var basis := Basis(
+			Vector3(col0.x, col0.z, -col0.y),
+			Vector3(col2.x, col2.z, -col2.y),
+			Vector3(-col1.x, -col1.z, col1.y))
+	_rotations[value] = basis
+	return basis
 
 func _init(file: FileAccess):
-	if not rot_cache.size():
-		rot_cache.resize(256)
 	_file = file
 	voxel = VoxAsset.new()
+	# 索引 0 恒为 null（空气占位，遵循全项目统一材质契约）；1..255 预建并设好 id，
+	# 使"数组下标 == 材质ID"成立（align_by_id、体素值查找都依赖这一点）。
 	voxel.materials.resize(256)
-	for i in voxel.materials.size():
-		voxel.materials[i] = VoxelMaterial.new()
+	for i in range(1, voxel.materials.size()):
+		var mat := VoxelMaterial.new()
+		mat.id = i
+		voxel.materials[i] = mat
 	while file.get_position() < file.get_length():
 		read_chunk()
 	voxel.check_nodes()
@@ -106,7 +120,7 @@ func read_chunk():
 					var position := frame_attributes['_t'].split_floats(' ')
 					frame.position = Vector3(position[0], position[2], -position[1])
 				if frame_attributes.has('_r'):
-					frame.rotation = decode_rotation(int(frame_attributes['_r']))
+					frame.rotation = _decode_rotation(int(frame_attributes['_r']))
 		"nGRP":
 			var node := _get_node()
 			for i in _get_32():
@@ -120,12 +134,11 @@ func read_chunk():
 				node.get_frame(frame_index).model_id = model_id
 		"MATL":
 			var material_id := _get_32()
-			if material_id < 256:
+			# 条目 0 是空气占位（null），只有 1..255 是真实材质
+			if material_id >= 1 and material_id < 256:
 				var material := voxel.materials[material_id]
 				var attributes := _get_dictionary()
 				var type = attributes.get("_type", "diffuse")
-				if material_id == 1:
-					print_rich("material_", material_id, " ", "[color=#", material.color.to_html(), "]", material.color, "[/color]  类型: ", type, " 属性: ", attributes)
 				match type:
 					"_metal":
 						material.metal = float(attributes.get("_metal", 0))

@@ -41,6 +41,86 @@ func is_transparent() -> bool:
 
 
 # ----------------------------------------------------------------------------
+# QVox MATE 条目互转（唯一实现：QVoxStream 写盘、QVoxAsset 导入共用）
+# ----------------------------------------------------------------------------
+# MATE 条目 = 12 字节定长语义结构：rgba / metal / rough / hardness / mass / e_r / e_g / e_b (+reserved)。
+#
+# 【为什么必须收敛到一处】此前"材质 → MATE"散落在 QVoxStream（写盘）与 VoxAsset（导入）两处，
+# 两侧字段与量纲各自手抄 —— 漏一个字段就会静默丢数据（connection_strength 正是如此）。
+#
+# 【量纲约定】metal / rough：0–1 浮点 ↔ 0–255；hardness / mass：直接存整数（材质侧本就是
+# 0–255 量级的整数语义）；emission：QVox 存 RGB 三通道，材质只有单通道强度 → 取三通道最大值。
+#
+# 【已知格式缺口】MATE 只有一个物理量 hardness，而 VoxelMaterial 有 hardness + connection_strength
+# 两个独立旋钮：往返时 connection_strength 只能取默认值。要保住它需扩展 MATE（12 字节里的
+# reserved 可承载，但会让旧文件的语义发生变化），留待格式版本升级时处理。
+
+## 空气条目（MATE 条目 0 的规范形态）。每次返回新字典，避免调用方彼此共享引用。
+static func air_mate() -> Dictionary:
+	return {"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0,
+			"e_r": 0, "e_g": 0, "e_b": 0}
+
+
+## MATE 条目 → 材质。id 为条目下标，即材质ID。
+static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
+	var rgba := int(entry.get("rgba", 0)) & 0xFFFFFFFF
+	var a := float(rgba & 0xFF) / 255.0
+	var mat := VoxelMaterial.new()
+	mat.id = id
+	mat.color = Color(
+			float((rgba >> 24) & 0xFF) / 255.0,
+			float((rgba >> 16) & 0xFF) / 255.0,
+			float((rgba >> 8) & 0xFF) / 255.0, a)
+	mat.trans = clampf(1.0 - a, 0.0, 1.0)
+	mat.metal = float(int(entry.get("metal", 0))) / 255.0
+	mat.rough = float(int(entry.get("rough", 0))) / 255.0
+	mat.hardness = float(int(entry.get("hardness", 1)))
+	mat.mass = float(int(entry.get("mass", 1)))
+	var er := float(int(entry.get("e_r", 0))) / 255.0
+	var eg := float(int(entry.get("e_g", 0))) / 255.0
+	var eb := float(int(entry.get("e_b", 0))) / 255.0
+	mat.emission = maxf(er, maxf(eg, eb))
+	return mat
+
+
+## 材质 → MATE 条目。输入可为 VoxelMaterial、已是 MATE 形状的 Dictionary（幂等归一化）、或 null（空气）。
+## 幂等性很关键：QVoxStream 的材质表既可能是上层注入的 VoxelMaterial，也可能是从磁盘加载的
+## MATE Dictionary —— 后者若按前者解释会写出全白材质（曾经的 bug）。
+static func to_mate(m: Variant) -> Dictionary:
+	if m == null:
+		return air_mate()
+	if m is Dictionary:
+		var d: Dictionary = m
+		return {
+			"rgba": int(d.get("rgba", 0)) & 0xFFFFFFFF,
+			"metal": clampi(int(d.get("metal", 0)), 0, 255),
+			"rough": clampi(int(d.get("rough", 0)), 0, 255),
+			"hardness": clampi(int(d.get("hardness", 0)), 0, 255),
+			"mass": clampi(int(d.get("mass", 0)), 0, 255),
+			"e_r": clampi(int(d.get("e_r", 0)), 0, 255),
+			"e_g": clampi(int(d.get("e_g", 0)), 0, 255),
+			"e_b": clampi(int(d.get("e_b", 0)), 0, 255),
+		}
+	var color: Color = m.color if ("color" in m) else Color.WHITE
+	var alpha := 255
+	if "trans" in m:
+		alpha = clampi(int(round((1.0 - float(m.trans)) * 255.0)), 0, 255)
+	var rgba := (int(color.r * 255.0) << 24) | (int(color.g * 255.0) << 16) \
+			| (int(color.b * 255.0) << 8) | alpha
+	var em: float = float(m.emission) if ("emission" in m) else 0.0
+	return {
+		"rgba": rgba & 0xFFFFFFFF,
+		"metal": clampi(int(round(float(m.metal) * 255.0)), 0, 255) if ("metal" in m) else 0,
+		"rough": clampi(int(round(float(m.rough) * 255.0)), 0, 255) if ("rough" in m) else 255,
+		"hardness": clampi(int(round(float(m.hardness))), 0, 255) if ("hardness" in m) else 1,
+		"mass": clampi(int(round(float(m.mass))), 0, 255) if ("mass" in m) else 1,
+		"e_r": clampi(int(round(color.r * em * 255.0)), 0, 255),
+		"e_g": clampi(int(round(color.g * em * 255.0)), 0, 255),
+		"e_b": clampi(int(round(color.b * em * 255.0)), 0, 255),
+	}
+
+
+# ----------------------------------------------------------------------------
 # 材质数组对齐：确保"数组索引 == 材质ID"，体素中存的材质ID可直接作数组索引
 # 供 VoxelMeshGenerator / VoxelChunkGenerator 等所有网格生成器统一使用
 #

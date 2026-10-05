@@ -132,6 +132,11 @@ Related properties are **hidden in the Inspector automatically** when they have 
 - **The native library is a hard dependency** — mesh generation, destruction and CRC all live in
   `addons/VoxelSupport/Native/` (GDExtension `VoxelNative`). If it is missing or version-mismatched,
   the plugin logs one clear error and draws nothing; there is no GDScript fallback.
+- **`.vox` and `.qvox` have separate asset adapters** — `.vox` (MagicaVoxel scene graph) uses
+  `VoxAsset.from_asset()`; `.qvox` (one `VOX0` per model + `NODE` placement) uses
+  `QVoxAsset.from_file()`. `VoxAsset.from_asset()` on a `.qvox` **returns null with an error**:
+  forcing the MagicaVoxel shape onto QVox silently dropped the `NODE` graph and every model after
+  the first. The import plugins dispatch by extension for you.
 
 ### Streaming demo
 

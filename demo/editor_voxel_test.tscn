@@ -20,7 +20,6 @@ script = ExtResource("5_ly2s3")
 materials = Array[ExtResource("4_rgb08")]([null, SubResource("Resource_w68vc")])
 stream = SubResource("Resource_lsd7j")
 lod_count = 4
-voxel_data_payload = "R1pJUB+LCAAAAAAAAAqTZmBgYAZiFiBmBOIyIGaCYpAYJxCnF2WmxBdnVqUC2TJQ9SB5Biw0SA8byJz8itScYoh6EAAAViJTGWgAAAA="
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
 sky_top_color = Color(0.15, 0.2, 0.3, 1)

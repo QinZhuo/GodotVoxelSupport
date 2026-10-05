@@ -141,7 +141,7 @@ func run_bench() -> void:
 		if bi["type"] == "VOX0":
 			vbi = bi
 	t0 = Time.get_ticks_usec()
-	var enc: PackedByteArray = QVoxFile._try_encode_model_incremental(stream._raw_bytes, vbi, 0, docn.models["0"], stream._dirty_chunks, 32, stream._vox0_index.get(0, {}))
+	var enc: PackedByteArray = QVoxFile._try_encode_model_incremental(stream._raw_bytes, vbi, 0, docn.models[0], stream._dirty_chunks, 32, stream._vox0_index.get(0, {}))
 	var t_enc := _us(t0)
 	lines.append("  子块编码=%.2fms payload=%d (旧=%d)" % [t_enc, enc.size(), vbi["total"] - 12])
 	t0 = Time.get_ticks_usec()

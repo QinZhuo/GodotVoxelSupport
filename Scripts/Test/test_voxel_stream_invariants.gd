@@ -284,7 +284,7 @@ func _write_world_with_cach(path: String) -> void:
 		"up_axis": QVoxSpec.DEFAULT_UP_AXIS,
 	}
 	doc.materials = [_air(), _air()]
-	doc.models = {"0": {Vector3i.ZERO: _block_with(Vector3i(1, 1, 1), 1)}}
+	doc.models = {0: {Vector3i.ZERO: _block_with(Vector3i(1, 1, 1), 1)}}
 	doc.cach = [{
 		"kind": "mesh",
 		"algo_version": 1,

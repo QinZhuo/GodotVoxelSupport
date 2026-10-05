@@ -22,7 +22,9 @@ func _get_resource_type():
 	return 'Resource'
 
 func _get_priority() -> float:
-	return 2
+	# 最低优先级：它是"显式选择才生效"的兜底项，不该成为新文件的默认导入器
+	# （此前它是最高的 2，导致新加的 .vox/.qvox 默认导入成空 Resource）。
+	return 0.0
 
 func _get_import_options(path, preset):
 	return []

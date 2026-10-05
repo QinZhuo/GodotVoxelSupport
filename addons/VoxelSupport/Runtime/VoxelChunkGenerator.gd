@@ -56,15 +56,18 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 
 
 ## 从"光环缓冲"生成单个 chunk 的网格数据（密集数组版，性能关键路径）
-## halo 为 18³ 密集缓冲（统一材质契约：值 = 材质ID，0 = 空），由 build_halo_from_buffers 提供。
+## halo 为 34³ 密集缓冲（统一材质契约：值 = 材质ID，0 = 空），由 build_halo_from_buffers 提供。
 ## 覆盖 chunk 内部 + 1 体素外缘，所有邻居读取均为数组下标且无越界检查。
 ## 线程安全：halo 是独立的深拷贝，子线程只读。
+## trans_flags 可由调用方预计算传入（逐块重建它要扫一遍材质表，批量构建时应只算一次）；
+## 传空则内部按 aligned_materials 现算。
 ## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_verts, ...} 或 {}（空块）
 ## 实现完全在 GDExtension (C++) 中（NativeLoader.generate_chunk_dense），无 GDScript 兜底。
 static func generate_single_chunk_dense(
 		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
-		offset: Vector3 = Vector3.ZERO) -> Dictionary:
-	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
+		offset: Vector3 = Vector3.ZERO, trans_flags: PackedByteArray = PackedByteArray()) -> Dictionary:
+	if trans_flags.is_empty():
+		trans_flags = VoxelMaterial.build_trans_flags(aligned_materials)
 	var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
 		return {}

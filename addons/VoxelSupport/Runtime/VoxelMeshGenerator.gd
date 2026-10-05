@@ -162,14 +162,191 @@ static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayM
 	else:
 		return ArrayMesh.new()
 
+
+## 材质通道图（albedo/metal/rough/emission）——一次导入只构建一次。
+## 此前每张纹理都重新构建全部 4 张图（4 材质 × 4 纹理 = 16 次），纯浪费。
+func _get_channel_images() -> Dictionary:
+	if _channel_images.is_empty():
+		var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+		_channel_images = _build_channel_images(mats)
+	return _channel_images
+
+
+# ----------------------------------------------------------------------------
+# QVox 路径 —— 块级生成
+# ----------------------------------------------------------------------------
+# QVox 的 block_size 恒等于 CHUNK_SIZE，块坐标就是 chunk 坐标，因此网格可以直接按块生成：
+# build_halo_from_buffers（跨块面可见性）→ generate_chunk_dense。无需把数据摊平成
+# Dictionary[Vector3i,int] 再交给 generate_arrays_native 重新分块（那是 .vox 路径的做法）。
+#
+# 坐标约定：use_local_space=false → 顶点 = (体素坐标 + offset) × scale，即**绝对世界坐标**，
+# 于是各块结果可直接拼接；块边界面"负方向本块负责、正方向看邻居"的约定保证每个跨界只生成
+# 一次 → 拼接后无重叠面、无 z-fighting。
+
+## 由块缓冲生成网格 arrays（输出形状与 generate_arrays_native 一致）。
+static func generate_arrays_from_chunks(chunks: Dictionary, trans_flags: PackedByteArray,
+		scale: float, offset: Vector3) -> Dictionary:
+	var sv := PackedVector3Array()
+	var sn := PackedVector3Array()
+	var su := PackedVector2Array()
+	var si := PackedInt32Array()
+	var tv := PackedVector3Array()
+	var tn := PackedVector3Array()
+	var tu := PackedVector2Array()
+	var ti := PackedInt32Array()
+	for key in chunks:
+		var ck: Vector3i = key
+		var halo := VoxelChunkGenerator.build_halo_from_buffers(chunks, ck)
+		if halo.is_empty():
+			continue
+		var part := NativeLoader.generate_chunk_dense(halo, trans_flags, scale, ck, false, offset)
+		# 【为什么写在循环体内而不是抽函数】Packed*Array 是写时复制：把累积数组传进辅助
+		# 函数会多一个引用，每次 append 都触发整段复制（O(n²)）。故就地 append 局部变量。
+		var pv: PackedVector3Array = part.get("solid_verts", PackedVector3Array())
+		if not pv.is_empty():
+			var base := sv.size()
+			sv.append_array(pv)
+			sn.append_array(part["solid_normals"])
+			su.append_array(part["solid_uvs"])
+			si.append_array(_shift_index_array(part["solid_idxs"], base))
+		var pt: PackedVector3Array = part.get("trans_verts", PackedVector3Array())
+		if not pt.is_empty():
+			var base_t := tv.size()
+			tv.append_array(pt)
+			tn.append_array(part["trans_normals"])
+			tu.append_array(part["trans_uvs"])
+			ti.append_array(_shift_index_array(part["trans_idxs"], base_t))
+	return {
+		"solid_verts": sv, "solid_normals": sn, "solid_uvs": su, "solid_idxs": si,
+		"trans_verts": tv, "trans_normals": tn, "trans_uvs": tu, "trans_idxs": ti,
+	}
+
+
+## 索引数组整体加偏移（多块网格合并时把各自的顶点基准抬到全局）。
+static func _shift_index_array(idxs: PackedInt32Array, base: int) -> PackedInt32Array:
+	if base == 0:
+		return idxs
+	var out := PackedInt32Array()
+	out.resize(idxs.size())
+	for i in idxs.size():
+		out[i] = idxs[i] + base
+	return out
+
+
+## .qvox → ArrayMesh（单网格）。选项与 .vox 路径共用，故两者产物形状一致。
+static func generate_mesh_from_qvox(qvox: QVoxAsset, options: Dictionary, path: String = "") -> ArrayMesh:
+	var gen := VoxelMeshGenerator.new(null, options, path)
+	gen.qvox = qvox
+	gen.runtime_materials = qvox.materials
+	gen.generate_materials(options)
+	gen.start_generate_mesh_from_qvox()
+	gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
+	if not gen.mesh or gen.mesh.get_surface_count() == 0:
+		return null
+	return gen.mesh
+
+
+## .qvox → MeshLibrary。split_by_model / split_by_node 都是"每项一个网格"：
+##   模型分项：每个 VOX0 一项（项名 model_<id>）；
+##   节点分项：NODE 里每个 kind="model" 节点一项（项名取节点名）。
+## QVox 没有 .vox 那种"体素动画帧"，故 split_by_frame 退化为按模型分项。
+static func generate_mesh_library_from_qvox(qvox: QVoxAsset, options: Dictionary,
+		path: String = "") -> MeshLibrary:
+	var lib: MeshLibrary = null
+	if path != "" and FileAccess.file_exists(path):
+		var res: Resource = ResourceLoader.load(path)
+		if res is MeshLibrary:
+			lib = res
+	if lib == null:
+		lib = MeshLibrary.new()
+	var items: Array
+	match int(options[VoxelMeshLibraryImporter.mesh_mode]):
+		VoxelMeshLibraryImporter.MeshMode.split_by_node:
+			items = _items_by_node(qvox)
+		VoxelMeshLibraryImporter.MeshMode.split_by_frame:
+			push_warning("[VoxelMeshGenerator] .qvox 没有体素动画帧，split_by_frame 按 split_by_model 处理")
+			items = _items_by_model(qvox)
+		_:
+			items = _items_by_model(qvox)
+	_fill_mesh_library(lib, qvox.materials, items, options, path)
+	return lib
+
+
+static func _items_by_model(qvox: QVoxAsset) -> Array:
+	var out: Array = []
+	var ids: Array = qvox.models.keys()
+	ids.sort()
+	for mid in ids:
+		out.append({"name": "model_%d" % int(mid), "chunks": qvox.model_blocks(int(mid))})
+	return out
+
+
+static func _items_by_node(qvox: QVoxAsset) -> Array:
+	var out: Array = []
+	var used := {}
+	var seq := 0
+	for p in qvox.placements:
+		var nm: String = String(p.get("name", ""))
+		# 无名/重名时退化为稳定编号 —— 项名是 MeshLibrary 项的身份，不能撞
+		while nm == "" or used.has(nm):
+			nm = "node_%d" % seq
+			seq += 1
+		used[nm] = true
+		out.append({"name": nm, "chunks": qvox.model_blocks(int(p["model_id"]))})
+	return out
+
+
+## 按 items（[{name, chunks}]）逐项生成网格写入 MeshLibrary。
+## 每项各自居中（QVoxAsset.center_offset_for）—— 与 .vox 路径"每个 VoxelModel 带自己的 offset"一致。
+static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
+		options: Dictionary, path: String) -> void:
+	var old_meshes: Array[ArrayMesh] = []
+	for i in lib.get_item_list():
+		var old := lib.get_item_mesh(i)
+		if old:
+			old_meshes.append(old)
+	lib.clear()
+	var idx := 0
+	for item in items:
+		var chunks: Dictionary = item["chunks"]
+		if chunks.is_empty():
+			continue
+		var item_name: String = item["name"]
+		var child := _get_mesh(item_name, path, options)
+		child.clear_surfaces()
+		var gen := VoxelMeshGenerator.new(null, options, path)
+		gen.mesh = child
+		gen.runtime_materials = materials
+		gen.generate_materials(options)
+		gen.start_generate_mesh_from_chunks(
+				chunks, QVoxAsset.center_offset_for(QVoxAsset.bounds_for_blocks(chunks)))
+		gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
+		if child.get_surface_count() == 0:
+			continue
+		lib.create_item(idx)
+		lib.set_item_mesh(idx, child)
+		lib.set_item_name(idx, item_name)
+		idx += 1
+		if options[VoxelMeshLibraryImporter.import_meshes] and path:
+			ResourceSaver.save(child)
+	# 清掉本次未再生成的旧网格文件（与 .vox 路径同策略：按项名反查，找不到即删）
+	for old in old_meshes:
+		if old.resource_path != "" and lib.find_item_by_name(old.resource_name) < 0:
+			DirAccess.remove_absolute(old.resource_path)
+
+
 var scale: float = 1
 var mesh: ArrayMesh
 var voxel: VoxAsset
+## .qvox 资产（与 voxel 二选一；见 generate_mesh_from_qvox）
+var qvox: QVoxAsset = null
 var frame_index: int
 var materials: Array[Material]
 var root_path: String
 ## 运行时材质数组 (非空时优先于 voxel.materials 使用)
 var runtime_materials: Array = []
+## 材质通道图缓存（一次导入只构建一次；见 _get_channel_images）
+var _channel_images: Dictionary = {}
 ## 导入形状 (VoxelMeshImporter.Shape): cube=面片网格, sphere=每体素一颗小球
 var shape: int = VoxelMeshImporter.Shape.cube
 ## 球体细分级别 (icosphere)，仅 sphere 形状生效；默认 0=20 面，优先保证性能
@@ -237,9 +414,7 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 
 func _generate_texture(save_path: String, type: String) -> ImageTexture:
 	# 复用统一的通道图生成，避免与运行时纹理两套采样逻辑漂移
-	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	var images := _build_channel_images(mats)
-	var image: Image = images[type]
+	var image: Image = _get_channel_images()[type]
 	DirAccess.make_dir_absolute(save_path.get_basename())
 	var path := save_path.get_basename() + '/tex_' + type + '.tres'
 	var texture: ImageTexture = ResourceLoader.load(path) if FileAccess.file_exists(path) else ImageTexture.create_from_image(image)
@@ -288,6 +463,41 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(voxels, trans_flags, scale, Vector3.ZERO)
+
+
+## 由块缓冲生成网格（QVox 路径的实例入口：整资产 / MeshLibrary 分项共用）。
+## layout_offset 为体素单位的居中偏移（见 QVoxAsset.center_offset_for）。
+func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3) -> void:
+	_reset_mesh()
+	_native_arrays = {}
+	if chunks.is_empty():
+		return
+	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	_native_arrays = generate_arrays_from_chunks(
+			chunks, VoxelMaterial.build_trans_flags(materials_src), scale, layout_offset)
+
+
+## 生成整个 QVox 资产：恒等摆放走块级（零逐体素展开），有变换时逐体素融合。
+func start_generate_mesh_from_qvox() -> void:
+	_reset_mesh()
+	_native_arrays = {}
+	if qvox == null or qvox.is_empty():
+		return
+	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else qvox.materials
+	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
+	if qvox.is_block_importable():
+		_native_arrays = generate_arrays_from_chunks(
+				qvox.block_buffers(), trans_flags, scale, qvox.center_offset())
+	else:
+		_native_arrays = NativeLoader.generate_arrays_native(
+				qvox.fused_voxels(), trans_flags, scale, qvox.center_offset())
+
+
+func _reset_mesh() -> void:
+	if mesh == null:
+		mesh = ArrayMesh.new()
+	else:
+		mesh.clear_surfaces()
 
 
 ## 完成生成：把原生 arrays 组装为 surface，并按需展开 lightmap UV2

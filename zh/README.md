@@ -125,6 +125,13 @@ target.damage_ray(origin, direction, max_distance)
 - `unload_distance = 0` 会自动回退到 `view_distance * 1.2`
 - `generate_collision` **默认 false** — 需要物理碰撞时开启
 - `voxel_scale` = 每个体素的世界单位（数据坐标是 1 体素单位）；所有距离参数都是世界单位
+- **原生库是硬依赖** —— 网格生成 / 破坏 / CRC 全在 `addons/VoxelSupport/Native/`（GDExtension
+  `VoxelNative`）。库缺失或版本不匹配时插件只报一次明确错误、不做 GDScript 兜底。
+- **`.vox` 与 `.qvox` 各有自己的资产适配器** —— `.vox`（MagicaVoxel 场景图）走
+  `VoxAsset.from_asset()`；`.qvox`（一个 `VOX0` 一个模型 + `NODE` 摆放）走
+  `QVoxAsset.from_file()`。对 `.qvox` 调 `VoxAsset.from_asset()` 会**报错并返回 null**：
+  把 MagicaVoxel 的形状硬套到 QVox 上会静默丢掉 `NODE` 场景图与除第一个之外的全部模型。
+  编辑器的导入插件已按扩展名自动分派，无需手动区分。
 
 ### 流式 demo
 

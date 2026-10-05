@@ -39,8 +39,31 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 		}])
 	return options
 
+func _get_priority() -> float:
+	# 排在 Mesh 之后、Data 之前：网格库是"要自己拼装"的进阶用法
+	return 1.5
+
+
+## .qvox 没有体素动画帧，split_by_frame 会被当作 split_by_model 处理（导入时给出警告）。
+## frame_index 对 .qvox 同样无意义 → 隐藏。
+func _get_option_visibility(path: String, option_name: StringName, options: Dictionary) -> bool:
+	if option_name == frame_index:
+		return not QVoxAsset.handles(path)
+	return super._get_option_visibility(path, option_name, options)
+
+
 func _import(source_file, save_path, options, _platforms, gen_files):
-	var voxel_data := VoxAsset.from_asset(source_file)
-	if voxel_data == null:
+	var lib: MeshLibrary
+	if QVoxAsset.handles(source_file):
+		var qvox := QVoxAsset.from_file(source_file)
+		if qvox == null:
+			return FAILED
+		lib = VoxelMeshGenerator.generate_mesh_library_from_qvox(qvox, options, source_file)
+	else:
+		var voxel_data := VoxAsset.from_asset(source_file)
+		if voxel_data == null:
+			return FAILED
+		lib = VoxelMeshGenerator.generate_mesh_library(voxel_data, options, source_file)
+	if lib == null:
 		return FAILED
-	return ResourceSaver.save(VoxelMeshGenerator.generate_mesh_library(voxel_data, options, source_file), "%s.%s" % [save_path, _get_save_extension()])
+	return ResourceSaver.save(lib, "%s.%s" % [save_path, _get_save_extension()])

@@ -77,6 +77,25 @@ class QVoxDocument extends RefCounted:
 		var b: Variant = head.get("bounds")
 		return b if b is Dictionary else {}
 
+	## 全部 model_id（统一为 int，升序）。
+	##
+	## 【为什么要有这个访问器】`models` 的键可能是 int（解析端与 QVoxStream 写入端产出的形式），
+	## 也可能是 str（调用方手写 doc 时的常见写法）。Godot 里 `0` 与 `"0"` 是不同的键，混用会让
+	## `has()`/取值静默落空 —— 历史上正是它让增量写无声退化成全量。把"键类型"这个细节收敛到
+	## 本类，读写两侧一律经 model_ids()/model_blocks() 访问，调用方怎么写都不会踩坑。
+	func model_ids() -> Array[int]:
+		var out: Array[int] = []
+		for k in models:
+			out.append(int(k))
+		out.sort()
+		return out
+
+	## 取指定 model_id 的块表（兼容 int / str 两种键；不存在返回 null）。
+	func model_blocks(model_id: int) -> Variant:
+		if models.has(model_id):
+			return models[model_id]
+		return models.get(str(model_id))
+
 
 ## NODE 块（§7）的已校验只读视图。
 ## 所有引用按下标解析，越界/成环/悬空的节点或帧已在构造时被丢弃。
@@ -969,10 +988,11 @@ static func serialize(doc: QVoxDocument, include_crc: bool = true) -> PackedByte
 	if not doc.materials.is_empty():
 		_write_block(out, QVoxSpec.BLOCK_MATE, _encode_mate(doc), include_crc)
 	# VOX0：每个 model 一个块
-	var model_ids := doc.models.keys()
-	model_ids.sort()
-	for mid in model_ids:
-		_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(int(mid), doc.models[mid], doc.get_block_size()), include_crc)
+	for mid in doc.model_ids():
+		var blocks: Variant = doc.model_blocks(mid)
+		if blocks is Dictionary:
+			_write_block(out, QVoxSpec.BLOCK_VOX0,
+					_encode_vox0(mid, blocks as Dictionary, doc.get_block_size()), include_crc)
 	# NODE
 	if not doc.node.is_empty():
 		_write_block(out, QVoxSpec.BLOCK_NODE, _encode_json(doc.node), include_crc)
@@ -1075,21 +1095,19 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 				_copy_block(old_bytes, out, bi)
 			continue
 		if type == QVoxSpec.BLOCK_VOX0:
-			# 注意：块索引里的 model_id 是 int，而 new_doc.models 用 String 键（见 _models_to_qvox_models）。
-			# 访问新 doc 必须用 str(mid)，否则取到 null（曾经导致增量写静默退化为全量）。
 			var mid: int = int(bi.get("model_id", -1))
-			var mid_key := str(mid)
-			if mid >= 0 and dirty_models.has(mid) and new_doc.models.has(mid_key):
-				var new_blocks: Dictionary = new_doc.models[mid_key]
-				if _model_is_empty(new_blocks):
+			var new_blocks: Variant = new_doc.model_blocks(mid)
+			if mid >= 0 and dirty_models.has(mid) and new_blocks is Dictionary:
+				var blocks: Dictionary = new_blocks
+				if _model_is_empty(blocks):
 					continue  # 该 model 已空 → 不写（块集合变化本应退全量，这里兜底）
 				# 【子块级增量】先试"只重编码脏 chunk、其余子块搬运旧字节"。
 				# 失败（块集合变化）退回整 model 重编码。
 				# vox0_index 命中则免去子块重索引（对 1.4MB 负载约省 90ms）。
 				var enc := _try_encode_model_incremental(
-						old_bytes, bi, mid, new_blocks, dirty_chunks, block_size, vox0_index.get(mid, {}))
+						old_bytes, bi, mid, blocks, dirty_chunks, block_size, vox0_index.get(mid, {}))
 				var payload_vox0: PackedByteArray = enc if not enc.is_empty() \
-						else _encode_vox0(mid, new_blocks, block_size)
+						else _encode_vox0(mid, blocks, block_size)
 				_write_block(out, QVoxSpec.BLOCK_VOX0, payload_vox0, include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
@@ -1119,14 +1137,13 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 		var bi: Dictionary = old_doc.block_index[idx]
 		if bi["type"] == QVoxSpec.BLOCK_VOX0:
 			old_model_ids[int(bi.get("model_id", -1))] = true
-	var new_ids := new_doc.models.keys()
-	new_ids.sort()
-	for mid in new_ids:
-		if old_model_ids.has(int(mid)):
+	for mid in new_doc.model_ids():
+		if old_model_ids.has(mid):
 			continue
-		if _model_is_empty(new_doc.models[mid]):
+		var blocks: Variant = new_doc.model_blocks(mid)
+		if not (blocks is Dictionary) or _model_is_empty(blocks as Dictionary):
 			continue
-		_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(int(mid), new_doc.models[mid], block_size), include_crc)
+		_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(mid, blocks, block_size), include_crc)
 
 	# CACH：脏则整体重写（旧块已在上面被跳过）。CACH 允许出现在文件任意位置（§2 表），
 	# 统一追加在末尾既简单又让"旧块跳过 + 新块追加"天然等价于一次替换。
@@ -1339,10 +1356,9 @@ static func _try_encode_model_incremental(old_bytes: PackedByteArray, bi: Dictio
 ## 公开：调用方（QVoxStream）需要据此决定"是否要额外追加派生块"——
 ## 走全量时旧 CACH 不会被搬运，必须补写，故它必须能预知 serialize_incremental 走哪条路。
 ##
-## 【键类型必须统一】doc.models 用 String 键（`str(mid)`，见 _models_to_qvox_models），
-## 而 VOX0 块索引里的 model_id 是 int。Godot 的 Dictionary 中 `0` 与 `"0"` 是**不同的键**，
-## 混用会让 `has()` 恒为 false —— 曾经因此让增量写 100% 退化成全量（且无声）。
-## 这里两边都归一化为 String 再比较。
+## 【键类型必须统一】doc.models 的键一律为 int（解析端与写入端一致）。
+## Godot 的 Dictionary 中 `0` 与 `"0"` 是**不同的键**，混用会让 has() 恒为 false ——
+## 曾经因此让增量写 100% 退化成全量（且无声）。故这里两侧都用 int 比较。
 static func incremental_applicable(old_doc: QVoxDocument, new_doc: QVoxDocument) -> bool:
 	if old_doc == null or old_doc.block_index.is_empty():
 		return false
@@ -1350,14 +1366,14 @@ static func incremental_applicable(old_doc: QVoxDocument, new_doc: QVoxDocument)
 	for idx in old_doc.block_index.size():
 		var bi: Dictionary = old_doc.block_index[idx]
 		if bi["type"] == QVoxSpec.BLOCK_VOX0:
-			old_models[str(int(bi.get("model_id", -1)))] = true
+			old_models[int(bi.get("model_id", -1))] = true
 	# 旧里有新里没有的 model（删除了）→ 增量无法去掉块 → 全量
 	for mid in old_models:
 		if not new_doc.models.has(mid):
 			return false
 	# 新里有旧里没有的 model（新增了）→ 增量无法插入块 → 全量
-	for mid in new_doc.models:
-		if not old_models.has(str(mid)):
+	for mid in new_doc.model_ids():
+		if not old_models.has(mid):
 			return false
 	return true
 

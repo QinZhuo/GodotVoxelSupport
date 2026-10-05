@@ -95,16 +95,31 @@ const material_path := "material/material_path"
 const material_trans_path := "material/material_trans_path"
 const import_materials_textures := "material/import_materials_textures"
 
+func _get_priority() -> float:
+	# 网格是绝大多数用户的期望产物，故作为新文件的默认导入器
+	# （No Import 降到 0、Data/MeshLibrary 次之，避免"默认导入成空资源"）。
+	return 2.0
+
+
 ## sphere_* 选项仅在形状选择 sphere 时显示
 ## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
-func _get_option_visibility(_path: String, option_name: StringName, options: Dictionary) -> bool:
+## frame_index 对 .qvox 无意义（一个 VOX0 就是一个模型，无动画帧概念）→ 隐藏。
+func _get_option_visibility(path: String, option_name: StringName, options: Dictionary) -> bool:
 	if String(option_name).begins_with("mesh/sphere_"):
 		return options.get(VoxelMeshImporter.shape, Shape.cube) == Shape.sphere
+	if option_name == frame_index:
+		return not QVoxAsset.handles(path)
 	return true
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var mesh: ArrayMesh
-	mesh = VoxelMeshGenerator.generate_mesh(VoxAsset.from_asset(source_file), options, source_file)
+	if QVoxAsset.handles(source_file):
+		var qvox := QVoxAsset.from_file(source_file)
+		if qvox == null:
+			return FAILED
+		mesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, options, source_file)
+	else:
+		mesh = VoxelMeshGenerator.generate_mesh(VoxAsset.from_asset(source_file), options, source_file)
 	if not mesh:
 		return FAILED
 	return ResourceSaver.save(mesh, "%s.%s" % [save_path, _get_save_extension()])

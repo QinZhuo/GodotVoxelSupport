@@ -95,16 +95,18 @@ func test_kernel_sphere_subdivisions() -> void:
 # 端到端基线（真实 .qvox 走完整导入路径）
 # ----------------------------------------------------------------------------
 
-## deer.qvox 走 VoxelMeshGenerator.generate_mesh（真实导入入口）的三角形数基线。
+## deer.qvox 走 VoxelMeshGenerator.generate_mesh_from_qvox（真实导入入口）的三角形数基线。
 ## 与合成模型互补：合成模型测规则，这里测"真实数据 + 真实编排"的整体结果。
+## 两条路径（旧：稀疏字典 + generate_arrays_native；新：块级 halo + dense）用的是同一个
+## 面生成内核与同一套块边界面归属规则，故三角形数应与基线一致——这正是本用例的意义。
 func test_kernel_deer_sample_baseline() -> void:
 	var path := SAMPLES_DIR + "/deer.qvox"
 	if not FileAccess.file_exists(path):
 		assert_true(false, "样例 deer.qvox 应存在（端到端基线依赖它）")
 		return
-	var vox := VoxAsset.from_asset(path)
-	if vox == null:
-		assert_true(false, "应能从 .qvox 解析出 VoxAsset")
+	var qvox := QVoxAsset.from_file(path)
+	if qvox == null:
+		assert_true(false, "应能从 .qvox 解析出 QVoxAsset")
 		return
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
@@ -118,7 +120,7 @@ func test_kernel_deer_sample_baseline() -> void:
 		VoxelMeshImporter.material_path: "",
 		VoxelMeshImporter.material_trans_path: "",
 	}
-	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, path)
+	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, opts, path)
 	assert_true(mesh != null, "应为 deer.qvox 生成网格")
 	if mesh == null:
 		return

@@ -1,4 +1,28 @@
 class_name VoxAsset
+extends RefCounted
+
+## MagicaVoxel（`.vox`）资产的宿主：模型 / 材质 / 场景图（nTRN·nGRP·nSHP·LAYR）/ 动画帧。
+##
+## 【只服务 `.vox`】`.qvox` 的对应概念形状不同（一个 `model_id` 一个 `VOX0` + `NODE` 定位，
+## 没有 `nSHP`/frame/`Z` 翻转那套约定），由 `QVoxAsset` 承载。把 `.qvox` 塞进本类会丢
+## NODE 与多模型信息（详见 QVoxAsset 类注释），故 `from_asset()` 遇到 `.qvox` 会直接报错。
+
+const SUPPORTED_EXTENSIONS := ["vox", "qvox"]
+
+## `.vox` 的扩展名（本类实际处理的格式）。`SUPPORTED_EXTENSIONS` 是两个格式的合集，
+## 供四个导入器统一声明"识别哪些扩展名"。
+const VOX_EXTENSION := "vox"
+
+
+## 按扩展名把资产文件解析为 VoxAsset；不支持的格式或解析失败返回 null。
+static func from_asset(path: String) -> VoxAsset:
+	if QVoxAsset.handles(path):
+		push_error("[VoxAsset] %s 是 .qvox：请改用 QVoxAsset.from_file()。"
+				% path + "（VoxAsset 是 MagicaVoxel 专用适配器，硬塞会丢 NODE 与多模型信息）")
+		return null
+	var access := VoxAccess.Open(path)
+	return access.voxel if access != null else null
+
 
 var models: Array[VoxelModel]
 
@@ -13,10 +37,6 @@ func get_voxels(frame_index: int = 0) -> Dictionary[Vector3i, int]:
 		return nodes[0].get_voxels(self, frame_index)
 	return {}
 
-func get_mesh(frame_index: int = 0) -> ArrayMesh:
-	if nodes.size() > 0:
-		return nodes[0].get_mesh(self, frame_index)
-	return null
 
 func check_nodes() -> Dictionary:
 	# 当 .vox 无场景图(scene graph)时，为每个 model 建一个帧节点，确保能取到体素
@@ -40,124 +60,10 @@ static func get_offset_voxels(voxels: Dictionary[Vector3i, int], offset: Vector3
 	return result
 
 
-# ----------------------------------------------------------------------------
-# 从体素资产文件加载 —— .vox / .qvox 共用入口
-# ----------------------------------------------------------------------------
-# 本插件把两者都视为**模型资产**（同等地位），导入管线不该关心源格式。
-# "扩展名 → 解析器"的分派因此收敛到这一处：
-#   .vox  → VoxAccess（MagicaVoxel，外部格式）
-#   .qvox → _from_qvox （QVox，本插件的一等容器格式）
-# 新增格式只需在此加一行，4 个 EditorImportPlugin 无需改动。
-
-## 导入管线支持的扩展名。各导入器统一引用，避免同一事实在多处重复。
-const SUPPORTED_EXTENSIONS := ["vox", "qvox"]
-
-
 ## 导入面板选项名的单一出处：mesh/frame_index、mesh/scale 同时被 Mesh 与 Data 两个
 ## 导入器使用（VoxelMeshImporter / VoxelDataImporter），值必须与既有 .import 文件完全一致。
 const OPT_FRAME_INDEX := "mesh/frame_index"
 const OPT_SCALE := "mesh/scale"
-
-
-## 按扩展名把资产文件解析为 VoxAsset；不支持的格式或解析失败返回 null。
-static func from_asset(path: String) -> VoxAsset:
-	if path.get_extension().to_lower() == "qvox":
-		return _from_qvox(path)
-	var access := VoxAccess.Open(path)
-	return access.voxel if access != null else null
-
-
-## .qvox → VoxAsset。
-##
-## 映射约定：
-##   · 每个 VOX0 的 model_id → 一个 VoxelModel，体素存**绝对体素坐标**（offset = ZERO）。
-##     QVox 的"块坐标 × block_size"本身就是世界体素坐标，不需要 .vox 那套
-##     "按 size 居中 + Z 翻转"的 offset 约定。
-##   · MATE → VoxelMaterial，**数组索引 == 材质ID**（索引 0 恒为空气占位），
-##     与全项目统一材质契约一致。
-##   · NODE 不参与转换：QVox 场景图（下标寻址 + model 引用）与 VoxAsset 的 node/frame
-##     并非一一对应。导入时统一"每个 model 一个 frame"（等价 check_nodes() 的行为）。
-##     需要完整场景图语义时，请直接使用 QVoxFile.parse() 得到的 doc.scene。
-static func _from_qvox(path: String) -> VoxAsset:
-	var f := FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		push_error("[VoxAsset] 无法读取 %s" % path)
-		return null
-	var bytes := f.get_buffer(f.get_length())
-	f.close()
-
-	var rep := QVoxFile.QVoxReport.new()
-	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
-	if doc == null:
-		push_error("[VoxAsset] %s 解析失败：%s" % [path, rep.summary()])
-		return null
-	for w in rep.warnings:
-		push_warning("[VoxAsset] %s: %s" % [path.get_file(), w])
-
-	var out := VoxAsset.new()
-	_qvox_fill_materials(doc, out)
-	_qvox_fill_models(doc, out)
-	out.check_nodes()
-	return out
-
-
-## MATE 条目 → VoxelMaterial（索引 == 材质ID）。
-static func _qvox_fill_materials(doc: QVoxFile.QVoxDocument, out: VoxAsset) -> void:
-	if doc.materials.is_empty():
-		return
-	out.materials.resize(doc.materials.size())
-	for i in doc.materials.size():
-		var e: Dictionary = doc.materials[i]
-		var rgba := int(e.get("rgba", 0)) & 0xFFFFFFFF
-		var a := float(rgba & 0xFF) / 255.0
-		var m := VoxelMaterial.new()
-		m.id = i
-		m.color = Color(float((rgba >> 24) & 0xFF) / 255.0,
-				float((rgba >> 16) & 0xFF) / 255.0,
-				float((rgba >> 8) & 0xFF) / 255.0, a)
-		m.trans = clampf(1.0 - a, 0.0, 1.0)
-		m.metal = float(int(e.get("metal", 0))) / 255.0
-		m.rough = float(int(e.get("rough", 0))) / 255.0
-		m.hardness = float(int(e.get("hardness", 1)))
-		m.mass = float(int(e.get("mass", 1)))
-		# QVox 自发光是 RGB 三通道；VoxelMaterial 只有单通道强度，取三通道最大值近似。
-		var er := float(int(e.get("e_r", 0))) / 255.0
-		var eg := float(int(e.get("e_g", 0))) / 255.0
-		var eb := float(int(e.get("e_b", 0))) / 255.0
-		m.emission = maxf(er, maxf(eg, eb))
-		out.materials[i] = m
-
-
-## VOX0 块数组 → VoxelModel（绝对体素坐标）。
-static func _qvox_fill_models(doc: QVoxFile.QVoxDocument, out: VoxAsset) -> void:
-	var b := doc.get_block_size()
-	if b <= 0:
-		return
-	var ids := doc.models.keys()
-	ids.sort()
-	for mid in ids:
-		var blocks: Variant = doc.models[mid]
-		if not (blocks is Dictionary) or (blocks as Dictionary).is_empty():
-			continue
-		var model := VoxelModel.new()
-		model.offset = Vector3.ZERO
-		var voxels: Dictionary[Vector3i, int] = {}
-		for k in (blocks as Dictionary):
-			var key: Vector3i = k
-			var buf: PackedInt32Array = blocks[key]
-			for idx in buf.size():
-				var v := buf[idx]
-				if v == 0:
-					continue
-				# 块内线性下标 → 局部坐标（与 QVoxSpec 一致：idx = x + y·B + z·B²）
-				var lx := idx % b
-				var ly := (idx / b) % b
-				var lz := idx / (b * b)
-				voxels[Vector3i(key.x * b + lx, key.y * b + ly, key.z * b + lz)] = v
-		if voxels.is_empty():
-			continue
-		model.voxels = voxels
-		out.models.append(model)
 
 
 class VoxelModel:
@@ -170,8 +76,6 @@ class VoxelModel:
 	var offset: Vector3
 
 	var voxels: Dictionary[Vector3i, int]
-
-	var mesh: ArrayMesh
 
 	func _to_string() -> String:
 		return str(voxels.size(), ' ', size)
@@ -220,38 +124,17 @@ class VoxelNode:
 				frames[index] = VoxelFrame.new()
 			return frames[index]
 
+	## 递归收集本节点子树的 [模型, 变换] 列表（结果缓存在本节点的 models 字段）。
+	## 直接递归：子节点的 models 字段本身就是缓存，交给线程池再立刻 wait 只会让
+	## 父任务占着线程等子任务（层级深时可能饿死线程池），且任务返回值本身也取不到。
 	func get_models(voxel: VoxAsset, frame_index: int, ignore_trans: bool = false) -> Array:
 		if layerId in voxel.layers and not voxel.layers[layerId].isVisible:
 			return models
 		models.clear()
-		if child_nodes.size() > 0:
-			var tasks := []
-			for i in child_nodes:
-				tasks.append(WorkerThreadPool.add_task(voxel.nodes[i].get_models.bind(voxel, frame_index)))
-			for task in tasks:
-				WorkerThreadPool.wait_for_task_completion(task)
-			for i in child_nodes:
-				models.append_array(voxel.nodes[i].models)
+		for i in child_nodes:
+			models.append_array(voxel.nodes[i].get_models(voxel, frame_index))
 		get_frame(frame_index, true).merge_models(voxel, models, ignore_trans)
 		return models
-
-	const MaxSurface = 2
-	func get_mesh(voxel: VoxAsset, frame_index: int) -> ArrayMesh:
-		var result_mesh = ArrayMesh.new()
-		var surface := SurfaceTool.new()
-		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-		var models := get_models(voxel, frame_index)
-		for face in MaxSurface:
-			for i in models.size():
-				var mesh: ArrayMesh = models[i][0].mesh
-				if mesh.get_surface_count() <= face:
-					continue
-				var transform: Transform3D = models[i][1]
-				surface.append_from(mesh, face, transform)
-			surface.commit(result_mesh)
-			surface.clear()
-		return result_mesh
-
 
 	func get_voxels(voxel: VoxAsset, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
 		var voxels: Dictionary[Vector3i, int]
