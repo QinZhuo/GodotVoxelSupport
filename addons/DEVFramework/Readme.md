@@ -72,7 +72,7 @@ res://Scripts/        # 游戏脚本
 | `dev_framework/log/show_timestamps` | bool | false | 是否显示时间戳 |
 | `dev_framework/log/ignored_tags` | PackedStringArray | `[]` | 被忽略的日志标签 |
 | `dev_framework/save_tool/encrypt_salt` | String | 项目名 | 存档加密盐（备用） |
-| `dev_framework/mcp/ignored_error_patterns` | PackedStringArray | `[]` | eval 附带运行期错误的过滤子串（如 `"对象池"`），命中即不随 eval 结果返回 |
+| `dev_framework/mcp/ignored_error_patterns` | PackedStringArray | `[]` | 运行期错误的过滤子串（如 `"对象池"`），命中即不随结果返回。追加在内置模式之后——内置已含 `Unrecognized UID`（编辑器重启后 UID 缓存重建期的无害噪音）。对 eval 附带错误与通用工具诊断两条上报路径同时生效 |
 
 ---
 
@@ -108,7 +108,7 @@ Def
 │   └── ValueConditionDef  # 数值比较条件（=、!=、>、<、>=、<=）
 ├── EffectDef            # 效果（抽象）→ apply(context) / revert(context)
 │   ├── EffectsDef       # 效果组合（依次执行）
-│   └── BuiltinEffectDef # 内置文本效果（占位，仅描述）
+│   └── SystemEffectDef # 内置文本效果（占位，仅描述）
 ├── ValueDef             # 数值表达式（抽象）→ get_float / get_int
 │   ├── IntValueDef / FloatValueDef        # 常量
 │   ├── AddValueDef / SubtractValueDef     # 加减
@@ -267,39 +267,17 @@ world.tick(delta)
 整个 DEVFramework 的 C++ 原生能力集中在**唯一一个共享扩展**：
 `res://addons/DEVFramework/Native/dev.gdextension`（编译产物也在该目录）。任何模块的原生类都注册在这一个库里，共用一份二进制。当前已注册：
 - `ECSCore` — ECS 高性能实体组件系统
-- `PCGErode` — PCG 高度图侵蚀加速（C++ 水力粒子液滴含悬崖/沉积参数 + 热侵蚀平滑坡面）
-- `PCGWFC` / `PCGWFC3D` — PCG 2D/3D 波函数坍缩加速（大图快 ~30 倍）
-- `PCGWFCAnimator` — PCG WFC 过程动画器（有状态逐步推进，可视化生成过程）
-- `PCGLSystem` — PCG L-System 生长展开加速（大迭代快数十倍）
-- `PCGCave3D` — PCG 3D 细胞洞穴加速（26 邻域平滑，快数百倍）
+
+> 已编译产物 `dev.gdextension` 内**仍注册着已移除模块的原生类**：6 个 PCG 原生类（`PCGWFC3D` / `PCGCave3D` /
+> `PCGWFC` / `PCGWFCAnimator` / `PCGErode` / `PCGLSystem`）与 `AudioSynthEngine`。它们的 C++ 源码已随之移除，
+> 但**没有任何 GDScript 调用方**，故不阻塞运行；下次重编译 `dev.gdextension` 时会自动消失。
 
 由 **`FrameworkNative`**（`Native/FrameworkNative.gd`）统一懒加载与校验：
 - `FrameworkNative.get_native(&"ECSCore", required_methods)` — 按类名取共享实例（缓存 + 方法集版本校验）
-- `FrameworkNative.get_native(&"PCGErode", [&"erode"])` / `&"PCGWFC"` / `&"PCGLSystem"` — PCG 算法加速
 - `FrameworkNative.instantiate_script(script)` — 稳定的脚本实例化（规避全局类注册时序问题）
 - `FrameworkNative.refresh(...)` — 清缓存（库热重载/测试）
 
 新增模块原生能力时：把 C++ 类注册进 `dev.gdextension`（需源码重编译），GDScript 侧通过 `FrameworkNative.get_native(&"你的类名", [...])` 访问，不要各自维护一份 ClassDB 检测逻辑。
-
-### 4.7 PCG 程序化内容生成（`PCG/`）
-
-框架内置一套 **程序化内容生成** 模块，遵循 Def → Entity → Tool 三层模式：
-所有生成参数都是 `.tres` 资源（策划可配），同一 `seed` 必然复现，支持 2D/3D、配置管线与 seed 增量存档。
-
-```gdscript
-# 单步：网格生成
-var def: GridGenDef = load("res://Assets/Def/PCG/Grid_Cave.tres")
-var grid := PCGTool.generate_grid(def, PCGTool.make_rng(seed))
-
-# 管线：地形→群系→河流→道路→资源点→战利品 一条龙
-var out: Dictionary = PCGTool.generate(pipeline_def, seed)
-```
-
-**能力一览**：8 种 2D 网格算法（噪声地形/细胞洞穴/迷宫/随机游走/BSP/WFC/Voronoi/模板拼接）、
-3D 体素（地表/3D 洞穴/3D WFC）、生物群系、河流/道路、散布（2D/3D）、内容生成（加权/名字/马尔可夫/词缀）、
-2D/3D 分块世界、WFC 高级（固定格/回溯/重试/过程动画）、异步生成、seed+增量存档。
-
-**完整使用说明见 [`PCG/Readme.md`](PCG/Readme.md)**。
 
 ### 4.8 Camera 虚拟机位（`Camera/`）
 
@@ -369,7 +347,7 @@ var result = await AsyncTool.thread_call(work_callable)        # 后台线程执
 await AsyncTool.await_until(func(): return _flag)              # 每帧轮询
 await AsyncTool.await_signals(sig_a, sig_b)                    # 等待多个信号各触发一次
 await AsyncTool.call_in_frames(items, 30, process_fn)          # 分帧批量处理，防掉帧
-await AsyncTool.await_with_timeout(action, 5000, "取名")       # 带超时保护
+await AsyncTool.await_with_timeout(action, 5000, "取名")       # 等待到完成，超时只告警（看门狗）
 AsyncTool.await_emit(sig, args...)                             # 手动触发信号并同步 await 回调
 ```
 
@@ -396,6 +374,18 @@ TimeTool.pause() / TimeTool.resume()
 TimeTool.get_current_scale()        # 当前最终 time_scale
 ```
 
+**步进队列（`TickTool` + `GameTimer`）** —— 让"同一物理 tick 内多个等待恢复的先后"可复现：
+
+```gdscript
+TickTool.defer(order_key, action)   # 登记"本 tick 末尾按序执行"的动作
+```
+
+宿主每物理 tick 末尾调用一次 `TickTool.tick()`（须在角色 `_physics_process` 之后）。派发按
+`order_key` 升序、同 key 按登记先后（FIFO）⇒ 顺序是队列内容的**纯函数**，与场景树顺序、启动时机、
+帧率都无关；`order_key` 的含义由项目决定（框架不解释）。未调用过 `tick()` 时 `defer` 立即执行 ——
+行为与不使用本工具一致，不会因未接线而挂住等待。`GameTimer` 是它的计时器载体：到期/提前停止都进
+同一队列，计时基准为物理 tick。
+
 ### 5.6 TranslationTool — 翻译
 
 ```gdscript
@@ -414,86 +404,34 @@ var data = await ActorTool.save_data(root)
 await ActorTool.load_data(root, data)
 ```
 
-### 5.8 程序化音频生成（PCG AudioSynthTool + 通用 AudioTool）
+### 5.8 通用音频管理（AudioTool）
 
-**架构分层**（对齐程序化纹理的 PCG 先例）：
-- **生成（Audio 模块，自包含）**：`Audio/Tool/AudioSynthTool.gd`（Def→采样数据，含 `render_data`/`generate`/`randomize_def` 等）+ 配置 Def（`Audio/Def/*`）+ 运行时展开（`Audio/Entity/AudioSequence.gd`）+ C++ `AudioSynthEngine`。
-- **PCG 管线桥接**：`PCG/Def/AudioGenDef.gd`（`extends PCGGeneratorDef`）把 Audio 接入 PCG 管线——同种子可生成配套音效/BGM；依赖方向 PCG→Audio 单向。
-- **通用管理（AudioTool）**：播放任意 `AudioStream`（`play_stream`）、程序化 BGM（`play_loop`，内部经 AudioSynthTool 生成）、总线效果、WAV 保存、流查询、编辑器预览/烘焙——**非 PCG 专属，任何音频都可用**。
-- AudioTool 保留生成方法的兼容代理（标注见 PCG）。
-
-用 `AudioSynthDef` 描述声音，一键生成 3A 级音效 / BGM / 氛围 / 循环音乐，无需外部音频素材：
+> 程序化音频合成（Def 驱动的逐采样合成、C++ `AudioSynthEngine` 内核、风格/编曲模板与示例音效库）
+> 已于 2026-10 从本仓移除。AudioTool 现在只做**通用音频管理**：播放任意 `AudioStream`、总线效果、
+> WAV 保存、流查询、效果录音。
 
 ```gdscript
-# 一行播放示例音效 / 无限循环 BGM(全链路: 自动总线、自动释放)
-AudioTool.play_example("SFX_Laser")            # 音效一行
-var bgm := AudioTool.play_loop(load("res://Assets/Def/Audio/Examples/BGM_Loop_Adventure.tres"))  # 无限循环 BGM
-
-# 完整控制
-var def: AudioSynthDef = AudioTool.example_def("SFX_Laser")     # 加载示例定义
-var stream := AudioTool.generate_and_save(def, "res://out/sfx.wav")  # 生成并导出 .wav
-AudioTool.play(def)                            # 生成并播放(自动路由到定义的总线)
-AudioTool.get_stream_info(stream)              # 查询时长/采样率/循环信息
-AudioTool.list_examples()                      # 列出全部示例
+AudioTool.play_stream(stream, -6.0, "SFX")          # 播放任意音频流(播放结束自动释放)
+AudioTool.get_stream_info(stream)                   # 查询时长/采样率/声道/循环
+AudioTool.save_wav(stream, "res://out/sfx.wav")      # 导出标准立体声 WAV
+AudioTool.save_resource(stream, "res://out/sfx.tres")# 存为 Godot 音频资源(可直接拖入播放器)
+AudioTool.setup_audio_buses()                       # 一键生成 Master/SFX/BGM/UI 标准总线布局
 ```
 
-- **渲染管线**：`Def → AudioSequence（展开事件）→ AudioSynthEngine（C++ 逐采样合成，gdextension/src/audio_synth.cpp）→ AudioSynthTool（归一化/软削波/int16 母带）`。
-- **风格模板层**（`StyleDef`）：**风格配方**一键生成完整 BGM Def——配置全局（BPM/调性/和声/效果链）+ 声部列表（角色+音色模板+力度/八度）+ 鼓模式 + 段落。内置 **12 个音色模板**（`lead_square/lead_fm/pad_saw/bass_acid/pluck/drum_kick` 等）与 **8 种风格预设**（`StyleDef.preset("HOUSE")` 等：Chiptune/Rock/House/Jazz/Trap/Cinematic/World/Ambient）。`.build()` 返回可播放 `AudioSynthDef`；参考资源 `Examples/Style_House.tres`。
-- **合成内核 C++ 实现**：PolyBLEP 抗锯齿振荡器（6 波形）、**FM 频率调制**（调制器-载波对，DX7 风格电钢/钟/贝斯）、**Karplus-Strong 拨弦**（物理建模吉他/竖琴/古筝）、SVF 滤波器（低/带/高通，可被**LFO 扫频**）、ADSR 包络（支持曲线）、**LFO 自动化层**（`AudioLFODef` 可同时调制滤波/音量/声像/音高，实现扫频/抽吸/自动声像/颤音等音色演化）、鼓合成（KICK / SNARE / HAT / HAT_OPEN / TOM / CLAP）全部由**共享原生库 `AudioSynthEngine`** 实现（`FrameworkNative.get_native(&"AudioSynthEngine")`，无 GDScript 回退）。这些是 Godot 不提供的数据级合成 API，故自研并放原生层以获得实时性能；**其余通用能力一律用 Godot 已有功能**。
-- **自动编曲**（`AudioMusicDef`）：音阶音池 + 加权随机游走旋律 + 和弦进行 + 鼓节奏音型；**段落结构**（`AudioMusicSectionDef`）支持 intro/verse/chorus/outro 等曲式——每段独立小节数/和声进行/强度/乐器启停/八度偏移，声部间段落无缝拼接。
-- **和声深度**：ChordType 覆盖三和弦→13 和弦全系（含 9/11/13、挂留、加九等 21 种）；`chord_quality` 逐音级指定和弦色彩（调式交换/借用和弦）；声部级 + 段落级 `transpose_semitones` 转调（副歌升调等）；`AudioMusicDef.preset_progression("II_V_I")` 等 10 组常用和声进行预设（含 12 小节蓝调/爵士循环/小室进行）。
-- **鼓模式预设库**（`DrumPatternDef`）：行模式节奏型（每字符一步，`K/S/H/h/T/C/x`），任意步数（16=十六分/12=三连音/24=十六分三连）+ 切分 + 深度摇摆；内置 ROCK/HOUSE/TRAP/BREAKBEAT/FUNK/TECHNO/REGGAE/BALLAD 预设（`DrumPatternDef.preset("HOUSE")`），`AudioMusicDef.drum_pattern` 接入，按 `drum_kit` 分轨到不同鼓声部。
-- **循环 BGM**：`AudioTool.play_loop()` 一次性烘焙完整 loop 流（`AudioStreamWAV.loop_mode` 原生循环），交给 Godot 通用 `AudioStreamPlayer` 播放，无实时渲染负担。
-- **后台线程**：`AudioTool.generate_async(def)` 放 worker 线程渲染，避免阻塞主线程。
-
-**只自研"无法用内置实现"的部分，其余全部用 Godot 已有功能：**
+**音频处理全部交给 Godot 内置能力，框架不做任何逐采样合成**：
 
 | 能力 | 实现 | 说明 |
 |---|---|---|
-| 振荡/滤波/包络/鼓 | **C++ 原生 `AudioSynthEngine`** | Godot 无逐采样合成 API，必须自研；放共享原生库（`dev.gdextension`），性能远高于 GDScript 逐采样 |
-| 混响 / 延迟 / 失真 / 限幅 / 压缩 / EQ | **Godot 内置 `AudioEffect`** | 播放时经 `AudioSynthDef.bus` + `fx_chain` 路由到带效果的总线；**离线烘焙同样支持**——用内置 `AudioEffectRecord` 录音法把效果链固化进 .wav（`bake_wav(..., bake_fx=true)`，默认开启）|
-| WAV 写盘 | 自写 44 字节标准 PCM 头 | 4.7.1 内置 `save_to_wav()` 会把 16bit 立体声写成 mono 头（数据仍交错），Godot 重导入后声道/时长错乱，故自写标准头 |
-| 循环播放 | **Godot 通用 `AudioStreamPlayer` + `AudioStreamWAV.loop_mode`** | `AudioTool.play_loop()` 先完整生成 loop 流再交给引擎原生播放 |
-| 总线布局 | **Godot 内置 `AudioServer` / `AudioBusLayout`** | `AudioTool.setup_audio_buses()` 一键生成 Master/SFX/BGM/UI 布局并写入项目设置 |
+| 播放 / 循环 | **Godot 内置 `AudioStreamPlayer`** | `play_stream()` 播放结束自动释放；循环用 `AudioStreamWAV.loop_mode` |
+| 混响 / 延迟 / 失真 / 限幅 / 压缩 / EQ | **Godot 内置 `AudioEffect`** | 播放时路由到带效果的总线；`create_fx(name)` 取标准预设、`fxs_from_names([...])` 批量构建 |
+| 总线布局 | **Godot 内置 `AudioServer` / `AudioBusLayout`** | `setup_audio_buses()` 生成布局并写入项目设置；`ensure_bus()` 幂等建任意效果总线 |
+| 效果录音 | 内置 `AudioEffectRecord` | `render_with_fx(stream, fx)` 真实播放 + 录音固化效果链（需可用音频设备） |
+| WAV 写盘 | 自写 44 字节标准 PCM 头 | 见下方说明 |
 
-- `AudioTool.ensure_bus()` 按需幂等创建任意效果总线；`resolve_bus()` 为带 `fx_chain` 的定义自动建 `FX_<bus>` 效果总线。
-- `AudioTool.play_stream()` 播放结束后自动释放节点；`play_loop()` 返回的循环 BGM 播放器自动挂到定义的总线。
+标准预设名：`reverb` / `reverb_hall` / `delay` / `distortion` / `limiter` / `compressor` / `eq_lowpass` / `eq_highpass` / `eq_bandpass` / `spectrum`。
 
-| 类 | 说明 |
-|---|---|
-| `AudioSynthDef` | 根定义：类别（SFX/BGM/AMBIENT/LOOP）、采样率、主音量、软削波、`bus` + `fx_chain`（总线效果链）、循环/淡出 |
-| `AudioVoiceDef` | 声部（Tone/DRUM），含振荡器组、滤波器、ADSR、声像、音量 |
-| `AudioMusicDef` | 自动编曲配方；`AudioPatternDef` 显式四分音符节拍 |
-| `AudioSequence` / `AudioSynthEngine` | 事件展开（GDScript）/ C++ 逐采样合成核心（共享原生库） |
-| `AudioTool` / `DevAudioExamples` | **统一入口**：渲染/生成/播放/保存/总线/示例 全部集成 / 一键生成示例定义 |
-
-`AudioTool` 是音频功能的**唯一对外入口**，内部再分为：合成内核（C++ `AudioSynthEngine` 逐采样合成 + `soft_clip`/`midi_to_freq`/`Wave` 小函数）、合成渲染（`render_data`/`build_stream`/`render`）、生成（`generate`/`generate_async`）、播放（`play`/`play_stream`/`play_loop`/`play_example`）、保存（`save_wav`/`save_resource`/`generate_and_save`/`bake_wav`）、查询（`get_stream_info`/`list_examples`/`example_def`）、**调试与基准**（`inspect_def` 定义一键分析 / `benchmark` 渲染耗时基准）、总线管理（`ensure_bus`/`resolve_bus`/`create_fx`/`setup_audio_buses`）、编辑器预览（`play_editor_preview`/`stop_editor_preview`）。
-
-### Inspector 预览与烘焙
-
-每个 `AudioSynthDef` 资源自带两个内建按钮（`@export_tool_button`，无需任何插件代码）：
-
-- `▶ 播放 ／ ■ 停止`：**切换式**按钮——空闲时后台生成并按 `bus`/`fx_chain` 试听（BGM 自动循环），生成中或播放中再点则停止。
-- `随机生成音效` / `微调变体`：sfxr 灵感一键工具——**随机生成**全参数重随机（默认 `random_preserve_wave` 保持波形/声部基础，`mutate_locked` 中列出的顶层属性不被改动）；**微调变体**在现有参数上小幅扰动并重新掷编曲种子，快速批量产出"相似但不同"的候选，点完自动试听。结构（声部数/振荡器数）恒保持，空定义会自动补默认结构保证出声。
-- `烘焙 WAV...`：异步后台生成并写出标准立体声 WAV 到约定目录 `res://Assets/Audio/Baked/<Def名>.wav`，**默认把 `fx_chain` 效果链一起烘焙进文件**（内置 `AudioEffectRecord` 录音法，`AudioTool.bake_wav(def, path, bake_fx=false)` 可关闭），完成后自动刷新资源面板。**长 BGM 建议烘焙成 wav 资源供游戏直接加载**（引擎导入后为 QOA 压缩，播放开销极小）。
-
-`fx_chain` 为 **Godot 原生 `Array[AudioEffect]` 资源数组**——直接在 Inspector 里从音频效果资源列表选取并展开调参（混响 / 延迟 / 失真 / 限幅 / 压缩 / EQ 等任意内置效果）；代码侧可用 `AudioTool.create_fx("reverb")` 取标准预设、`AudioTool.fxs_from_names(["reverb", "delay"])` 批量构建。标准预设名：`reverb` / `reverb_hall` / `delay` / `distortion` / `limiter` / `compressor` / `eq_lowpass` / `eq_highpass` / `eq_bandpass` / `spectrum`。
-
-> 生成较重的 BGM（16 秒）约需 2 倍实时（后台线程；C++ `AudioSynthEngine` 实测 16s BGM 渲染约 0.3s），一次性烘焙成 `.wav` 资源供游戏加载；循环 BGM 用 `AudioTool.play_loop()`（完整流 + 通用播放器）。
-
-**人性化随机**：`AudioMusicDef` / `AudioPatternDef` 上新增 `pitch_jitter_cents`（每音符音高 ±音分抖动）与 `timing_jitter_ms`（每音符触发时间 ±毫秒抖动），消除重复旋律/打击乐的机械感；`AudioPatternDef.random_seed` 控制抖动变体。
-
-**淡入淡出**：`AudioSynthDef.fade_in`（头部淡入，离线烘焙与 `play_loop()` 完整流均生效，仅首轮）与 `fade_out`（尾部淡出）。注意：循环 BGM 若设 `fade_in`，因 `loop_begin=0` 每圈会重复淡入，建议循环曲用 0。
-
-**算法审查与参数语义**（对照 Godot 引擎源码 + 业界标准实现）：
-- 合成内核（PolyBLEP/SVF/ADSR/FM/Karplus-Strong/鼓/PCG32 RNG/常量功率声像/母带）与标准实现一致；`AudioStreamWAV.loop_begin/end` 为**帧**单位。
-- **转调同步**：`transpose_semitones` 对旋律/和弦/贝斯/琶音一致生效（旋律基于音池 + 转调叠加）。
-- `AudioOscillatorDef.phase_offset`：振荡器初始相位；`AudioFilterDef.cutoff_lfo_amount`：滤波截止随声部 LFO 线性调制（配合 `AudioLFODef`）。
-- 冗余：`AudioVoiceDef.drum_length` 已废弃（鼓时长由事件与指数衰减决定），打包层保留占位以稳定布局。
-
-**示例音效库**（共 25 个）：激光/爆炸/金币/受击/跳跃/UI 点击/能量拾取/脚步声/翻滚/魔法/重击/**FM 电钢(DX7)**/**拨弦(Karplus-Strong)**/**Acid Bass(LFO 扫频)** + **10 种风格 BGM**：冒险/氛围/8位 Chiptune/摇滚/House/Trap/爵士/电影管弦/世界拨弦/综合 Showcase。
-
-`Scenes/AudioDemo/AudioDemo.tscn` 是**程序化音频风格画廊**：10 种风格一键生成 BGM，点击后 InfoLabel 展示该风格的**音色构成与用到的能力**（如「爵士: FM 电钢 7/9 和弦 + 摇摆鼓 → 和声深度 + 鼓模式摇摆」），直观理解程序化生成能做到的程度。
+- `resolve_bus(bus, fx)`：`fx` 非空时自动建 `FX_<bus>` 效果总线，`play_stream()` 内部自动调用。
+- WAV 写盘说明：4.7.1 内置 `AudioStreamWAV.save_to_wav()` 会把 16bit 立体声写成 mono 头（数据仍交错），Godot 重导入后声道/时长错乱，故 `save_wav()` 自写标准头。
 
 ### 5.9 其他工具
 
@@ -502,7 +440,7 @@ AudioTool.list_examples()                      # 列出全部示例
 | `CSVDataAccess` | CSV 读写（`get_csv_value` / `set_csv_value` 等） |
 | `ArrayViewTool` | 数组视图通用逻辑：`get_item_name` / `create_view` / `free_view`（配合对象池） |
 | `TweenViewTool` | Tween 显隐控制与释放：`update_visible` / `finish_and_free` |
-| `PCGTool` | PCG 统一入口：噪声/网格(2D/3D)/群系/散布/内容/河流道路/分块世界/管线/异步/序列化 |
+
 | `CameraTool` | Camera 模块统一入口：`get_brain` / `get_camera` / `get_current` / `activate` / `deactivate` / `find` / `snap` |
 | `DevProjectSetup` | 一键创建项目目录结构（编辑器菜单触发） |
 | `SpriteFramesToAnimationLibrary` | `EditorScript`：将选中的 SpriteFrames 生成 AnimationLibrary |
@@ -598,7 +536,7 @@ array_view.remove_item(item)
 | `GLSLShaderEffect` | 可编程后处理（填 `define_code` / `main_code` 实时编译） |
 | `Trail3D` | 拖尾网格 |
 | `BakedPool / BakedPoolManager` | 烘焙对象池（编辑器一键生成池子，运行时 `pool_get`/`pool_push`） |
-| `ScreenshotCapture` | 双击截图（支持透明背景 + 抖动量化） |
+| `ScreenshotCapture` | 延迟自动截图（`auto_capture_delay`，默认 3 秒；启动后自动截一张，无手动触发入口。默认不透明背景，需抠图时勾 `transparent_background`；含抖动量化） |
 | `SubView3D` | 3D 子视口（把 2D UI 投影到 3D 表面） |
 | `Background` | 视差滚动背景 |
 | `SwingFollow2D` | 摆动跟随动画 |
@@ -633,6 +571,7 @@ AI 助手 ──MCP Streamable HTTP──▶ http://127.0.0.1:8931/mcp  (Godot �
 |---|---|---|
 | `dev_framework/mcp/enabled` | `true` | MCP 服务器总开关 |
 | `dev_framework/mcp/port` | `8931` | 监听端口（仅本机 `127.0.0.1`）|
+| `dev_framework/mcp/log_tool_results` | `false` | 是否把**每次工具调用**（入参 + 返回摘要）打进 Godot 输出面板。默认关闭：日志捕获器挂在引擎 `print` 通道上，MCP 自己的回声会被 `get_logs` 原样返回给 AI，白占上下文并淹没项目日志。工具**报错**始终以 error 级别输出，不受此开关影响 |
 
 ### 3. AI 助手连接配置
 
@@ -707,8 +646,15 @@ claude mcp list        # 查看已配置
 | `validate` | **统一验证入口**（`kind=script/resource`）。script: 校验 GDScript 语法/可编译性（传 `path` 或 `code`，兼容非 `@tool`/纯工具类脚本）；resource: 校验资源/场景能否被引擎加载 |
 | `list_dir` | 列出目录内容（支持递归）|
 | `classdb_query` | 查询 Godot 类的 API（方法/属性/信号签名）或按关键字搜索类名，供 AI 写脚本前确认原生 API |
-| `get_logs` | **统一日志/警告/错误获取**：`kind=log/warning/error`、`source=auto/editor/game`（auto 时游戏运行中自动取游戏侧）、增量游标、重复合并 |
-| `clear_logs` | 清空日志/错误缓冲（`scope=all/logs/errors`，游戏运行中作用于游戏侧）|
+| `get_logs` | **编辑器侧**日志/警告/错误获取：`kind=log/warning/error`、增量游标、重复合并。恒读编辑器进程缓冲 |
+| `clear_logs` | 清空**编辑器侧**日志/错误缓冲（`scope=all/logs/errors`）|
+| `get_game_logs` | **游戏进程侧**日志（print/printerr），增量游标、重复合并。编辑器调用时经调试线转发 |
+| `get_game_errors` | **游戏进程侧**错误（脚本错误/assert/push_error，含文件/行号/栈追踪）。游戏断点暂停时仍可安全调用 |
+| `clear_game_logs` / `clear_game_errors` | 清空**游戏进程侧**缓冲（`scope=all/logs/errors`）|
+
+> 日志类工具的进程归属**只由工具名决定**：不带 `game_` 的读本进程缓冲，带 `game_` 的读游戏进程缓冲。
+> 早期 `get_logs` 另有 `source=auto/editor/game` 三档，其中 `auto` 会在游戏运行时静默改读游戏缓冲——
+> 查编辑器自己的错误却拿到游戏的错误，且调用方无从察觉。故已删除该参数，跨进程只保留一条通路。
 | `take_screenshot` | 截图四模式：text（节点布局文本化）/ game / editor / scene |
 | `get_scene_tree` | 获取当前编辑场景的节点树结构 |
 | `get_node_info` | 读取编辑场景中指定节点属性列表及当前值 |
@@ -721,7 +667,7 @@ claude mcp list        # 查看已配置
 | `get_editor_activity` | 感知编辑器当前状态（打开场景/选中节点/运行中游戏），用于 AI 与人类协作不踩踏 |
 | `get_project_info` | 项目信息统一入口：`section=basic`(默认)/`settings`(主场景/autoload/输入映射)/`classes`(全局类清单) |
 | `game_control` | 游戏运行控制：`action=start`(支持 uid:// 场景；已在运行时自动接管重启)/`stop` |
-| `reload_project` | **软重启（重载）编辑器**：修改框架代码后调用以统一全局类脚本代次让新逻辑生效（原重扫逻辑已由编辑器自动处理）；`save=true` 自动保存场景、`delay_sec` 延迟触发；重启期间 MCP 断开、回来自动恢复 |
+| `restart_editor` | **重启编辑器**：修改框架代码后调用以统一全局类脚本代次让新逻辑生效（原重扫逻辑已由编辑器自动处理）；**总会先保存全部已打开的场景**（封装 `EditorInterface.restart_editor(true)`）；`delay_sec` 延迟触发；重启期间 MCP 断开、回来自动恢复 |
 | `eval_code` | 在编辑器内执行一段 GDScript 代码并返回结果。**支持 await**：代码含 `await` 时等待协程完成后回传最终返回值（`timeout_ms` 默认 8000/上限 15000，超时协程继续后台执行、实例自动延迟回收）|
 | `open_scene` | 在编辑器打开指定场景 |
 | `set_main_scene` | 设置项目主场景并保存 |
@@ -735,7 +681,7 @@ claude mcp list        # 查看已配置
 | `run_tests` | 运行项目单元测试（`Scripts/Test/`，extends TestCase，test_ 开头方法自动发现；支持协程用例）。返回统计与失败明细 |
 | `refresh_tools` | 手动重建 MCP 工具注册表：改框架脚本后调用，客户端重拉 tools/list 即生效（免重启） |
 
-> **提示**：修改插件代码（`MCPDevServer.gd` 等）后，新工具需**重启编辑器**才会注册（脚本热重载不会重建工具注册表）。可调用 `reload_project` 工具一键软重启（合并自原 restart_editor），或改完后调 `refresh_tools` 重建注册表。
+> **提示**：修改插件代码（`MCPDevServer.gd` 等）后，新工具需**重启编辑器**才会注册（脚本热重载不会重建工具注册表）。可调用 `restart_editor` 工具一键重启（保存后重启），或改完后调 `refresh_tools` 重建注册表。
 
 ### 5. 典型 AI 调试流程
 
@@ -800,7 +746,7 @@ verify_fix {action:"abort"}                        # 结束会话
 - 代码按类目放到 `Scripts/Def/`、`Scripts/Entity/`、`Scripts/View/`，不要把所有脚本塞进单个场景脚本。
 - **UI 等可显示内容一律用场景（.tscn）搭建，不要用代码 `new`**（见框架 `View/*` 与 `UITool`）。改动 UI 优先在场景里调整节点属性，而非写代码生成。
 - 优先**配置驱动**：能通过 `.tres` 资源配置的数据（数值、效果、标签、GOAP 行动/目标）就用资源，不硬编码在脚本里。
-- **程序化生成走 PCG 模块**：涉及地形/地牢/内容/群系等生成，一律用 `addons/DEVFramework/PCG/`（`PCGTool` + `*Def` 资源 + seed 可复现），不要手写生成算法；参数放 `.tres`，见 [`PCG/Readme.md`](PCG/Readme.md)。
+- **3D 程序化生成已拆为独立插件**：原 `addons/DEVFramework/PCG/`（3D 栅格 / 分块世界 / 生成管线 / `SdfField` 双投影 / 造型与摆放双契约 / seed 可复现）已于 2026-10 移出本仓库，改为独立插件项目 `d:\Work\GodotProject\PCG`（插件名 `pcg`，零 autoload、零 `.tres` 依赖）。需要 3D 生成能力时装入该插件并遵循其 Readme；本框架不再内置任何生成器。
 - 写脚本时使用显式类型标注（`func foo(x: int) -> void`）、`@onready` 获取节点引用、`@export` 暴露可调参数，与 `Scenes/AI/GoapDemo.gd` 等示例风格一致。
 
 **MCP 工具使用规范**
@@ -808,7 +754,7 @@ verify_fix {action:"abort"}                        # 结束会话
 - **不确定 Godot 原生 API 的用法时，先用 `classdb_query` 查询**（方法/属性/信号签名），再写代码，避免臆造 API。
 - `set_node_property` 与 `add_node` 已接入 UndoRedo，AI 的修改用户可按 **Ctrl+Z 撤销**——请放心使用，但也不要反复试探性乱改，尽量一次改对。
 - 修改场景节点或新建脚本/资源后，记得 `save_scene`（新 class_name 全局类识别依赖重启/扫描，见陷阱1）。
-- 长任务（重编译、生成音频、导出）会占用编辑器，且单次 MCP 调用有超时，**拆成小步骤**完成，不要一次塞超长指令。
+- 长任务（重编译、导出）会占用编辑器，且单次 MCP 调用有超时，**拆成小步骤**完成，不要一次塞超长指令。
 - 排查脚本问题时：先 `validate` 验证语法，再 `get_logs`(kind=error) 看运行期错误（含栈追踪），配合 `get_logs` 定位。
 
 **安全边界**
@@ -865,7 +811,7 @@ var data = await SaveTool.load_async("user://save.json", SaveTool.Mode.JSON)
 运行中的编辑器对**已注册全局类脚本**的 `reload()` 静默无效——磁盘是新代码，运行实例永远执行旧逻辑，且无任何提示。
 - 症状：新加的方法调用报 "Nonexistent function"、行为与源码不符
 - 根因：GDScriptCache 命中缓存时不校验文件 mtime（引擎 issue #49298）；外部编辑器的改动依赖编辑器窗口聚焦时的 mtime 比对（issue #72825）
-- **自动化路径（推荐）**：MCP 工具 `reload_project` —— 封装 `EditorInterface.restart_editor(save=true)`，AI 改完框架代码后自主调用，延迟 1 秒触发软重启（先送达确认响应再重启），编辑器自动保存、自动重启、MCP 自动回连，用户零操作
+- **自动化路径（推荐）**：MCP 工具 `restart_editor` —— 直接封装 `EditorInterface.restart_editor(true)`，AI 改完框架代码后自主调用，延迟 1 秒触发（先送达确认响应再重启），引擎先保存全部已打开的场景再重启、MCP 自动回连，用户零操作
 - 缓解：`refresh_tools` 可重建工具注册表（仅工具清单，不解决类逻辑）
 - 辅助：开启编辑器设置 `text_editor/behavior/files/auto_reload_scripts_on_external_change` 后，普通项目脚本的外部修改会自动重载（历史版本有 bug，4.4+ 基本可用）
 

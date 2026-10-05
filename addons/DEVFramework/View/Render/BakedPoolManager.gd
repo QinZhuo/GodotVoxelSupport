@@ -121,7 +121,7 @@ func _create_or_update_mesh_pool(mesh: ArrayMesh) -> BakedPool:
 			var mesh_instance := MeshInstance3D.new()
 			mesh_instance.mesh = mesh
 			mesh_instance.name = str(key, '_', i + 1)
-			existing_pool.add_child(mesh_instance)
+			existing_pool.pool_add(mesh_instance)
 			mesh_instance.owner = self
 			LogTool.log("烘焙池", "补充", mesh_instance.name)
 		return existing_pool
@@ -135,7 +135,7 @@ func _create_or_update_mesh_pool(mesh: ArrayMesh) -> BakedPool:
 		var mesh_instance := MeshInstance3D.new()
 		mesh_instance.mesh = mesh
 		mesh_instance.name = str(key, '_', i + 1)
-		new_pool.add_child(mesh_instance)
+		new_pool.pool_add(mesh_instance)
 		mesh_instance.owner = self
 
 	LogTool.log("烘焙池", "创建", key, "数量:", pool_min_size, "=>", new_pool)
@@ -150,7 +150,7 @@ func _create_or_update_scene_pool(scene: PackedScene) -> BakedPool:
 		for i in range(current_count, pool_min_size):
 			var item := scene.instantiate()
 			item.name = str(key, '_', i + 1)
-			existing_pool.add_child(item)
+			existing_pool.pool_add(item)
 			item.owner = self
 		if current_count < pool_min_size:
 			LogTool.log("烘焙池", "补充", key, "数量:", current_count, "=>", pool_min_size)
@@ -164,7 +164,7 @@ func _create_or_update_scene_pool(scene: PackedScene) -> BakedPool:
 	for i in pool_min_size:
 		var item := scene.instantiate()
 		item.name = str(key, '_', i + 1)
-		new_pool.add_child(item)
+		new_pool.pool_add(item)
 		item.owner = self
 
 	LogTool.log("烘焙池", "创建", key, "数量:", pool_min_size, "=>", new_pool)

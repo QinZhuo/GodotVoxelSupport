@@ -68,15 +68,25 @@ static func grab(viewport: Viewport, opts: Dictionary = {}) -> Image:
 
 ## 把 Image 处理成可保存的正确颜色空间。就地修改并返回同一 Image。
 ## 这是"颜色正确"的关键: 缺省执行 sRGB 校正。
+## opts:
+##   srgb  : bool 是否做 sRGB 校正; 缺省 true
+##   dither: bool 量化到 8 位时是否做误差扩散抖动(防渐变条带 banding); 缺省 false。
+##           ⚠️ 抖动补偿的必须是**最终 8 位量化**的误差 —— 因此本函数会先在线性值上做
+##           sRGB 编码(**保持浮点、不量化**), 再量化到 8 位并扩散误差。
+##           若顺序反过来(先量化再抖), 量化对已是 8 位的图像就是恒等操作, 抖动白做。
 static func normalize(image: Image, opts: Dictionary = {}) -> Image:
 	if image == null or image.is_empty():
+		return image
+	var srgb := bool(opts.get("srgb", true))
+	if bool(opts.get("dither", false)):
+		_dither_to_rgba8(image, srgb)
 		return image
 	# 统一为 8 位 RGBA8: linear_to_srgb 只在该格式下有定义的良好行为,
 	# 且 PNG 输出需要 8 位通道。
 	if image.get_format() != Image.FORMAT_RGBA8:
 		image.convert(Image.FORMAT_RGBA8)
 	# sRGB 校正: 把线性光值转回 sRGB 显示值(缺省开启)。
-	if bool(opts.get("srgb", true)):
+	if srgb:
 		image.linear_to_srgb()
 	return image
 
@@ -172,6 +182,107 @@ static func list_shots(dir_res: String = DEFAULT_DIR_RES) -> PackedStringArray:
 	arr.sort()
 	arr.reverse()
 	return PackedStringArray(arr)
+
+
+# -------- 抖动量化(防 banding) --------
+
+## sRGB 编码查找表的步数。逐像素 pow() 在高分辨率出图时开销惊人(500 万像素 ≈ 1500 万次 pow),
+## 改用 LUT + 线性插值代替 —— 1025 次 pow 建表, 之后每像素只是两次查表 + 一次插值。
+## 1024 级在 [0,1] 上的插值误差远小于 1/255, 对 8 位输出无影响。
+const SRGB_LUT_STEPS := 1024
+
+## sRGB 编码 LUT(线性光值 → sRGB 显示值)。延迟构建, 只建一次。
+static var _srgb_lut: PackedFloat32Array
+
+
+## 线性光值 → sRGB 显示值(与 Godot 内部 Math::linear_to_srgb 同款公式)。保持浮点, 不量化。
+static func srgb_encode(c: float) -> float:
+	if c <= 0.0031308:
+		return c * 12.92
+	return 1.055 * pow(c, 1.0 / 2.4) - 0.055
+
+
+## 带 Floyd–Steinberg 误差扩散地把图像量化到 8 位 RGBA8, 消除大面积渐变上的色阶断层(banding)。
+##
+## 顺序: 先在线性值上做 sRGB 编码(**浮点, 不量化**) → 再量化到 8 位并把量化误差扩散给邻居。
+## banding 是"最终 8 位 sRGB 值"的台阶造成的, 所以抖动必须补偿这一步 —— 顺序反了就白做。
+##
+## 实现: 先把图像转 32 位浮点, 再用底层 PackedFloat32Array 直接读写, 避免逐像素
+## get_pixel/set_pixel(Color 构造 + 边界检查)的开销; sRGB 编码走 LUT。
+static func _dither_to_rgba8(image: Image, srgb: bool) -> void:
+	var w := image.get_width()
+	var h := image.get_height()
+	if w <= 0 or h <= 0:
+		return
+	var steps := float(SRGB_LUT_STEPS)
+	if srgb and _srgb_lut.size() != SRGB_LUT_STEPS + 1:
+		var lut := PackedFloat32Array()
+		lut.resize(SRGB_LUT_STEPS + 1)
+		for i in SRGB_LUT_STEPS + 1:
+			lut[i] = srgb_encode(float(i) / steps)
+		_srgb_lut = lut
+	if image.get_format() != Image.FORMAT_RGBAF:
+		image.convert(Image.FORMAT_RGBAF)
+	var buf := image.get_data().to_float32_array()
+	var bytes := PackedByteArray()
+	bytes.resize(w * h * 4)
+	var inv := 1.0 / 255.0
+	var src := 0
+	var dst := 0
+	for y in h:
+		for x in w:
+			var r := clampf(buf[src], 0.0, 1.0)
+			var g := clampf(buf[src + 1], 0.0, 1.0)
+			var b := clampf(buf[src + 2], 0.0, 1.0)
+			if srgb:
+				r = _lut_srgb(r, steps)
+				g = _lut_srgb(g, steps)
+				b = _lut_srgb(b, steps)
+			var qr := roundf(r * 255.0)
+			var qg := roundf(g * 255.0)
+			var qb := roundf(b * 255.0)
+			bytes[dst] = clampi(int(qr), 0, 255)
+			bytes[dst + 1] = clampi(int(qg), 0, 255)
+			bytes[dst + 2] = clampi(int(qb), 0, 255)
+			bytes[dst + 3] = clampi(int(roundf(clampf(buf[src + 3], 0.0, 1.0) * 255.0)), 0, 255)
+			## Floyd–Steinberg: 量化误差按 7/16、3/16、5/16、1/16 扩散给 右 / 左下 / 下 / 右下。
+			## 注: PackedFloat32Array 是值类型(传参会拷贝), 所以这里必须内联而不能抽成小函数。
+			var er := r - qr * inv
+			var eg := g - qg * inv
+			var eb := b - qb * inv
+			if x + 1 < w:
+				buf[src + 4] += er * 0.4375
+				buf[src + 5] += eg * 0.4375
+				buf[src + 6] += eb * 0.4375
+			if y + 1 < h:
+				if x > 0:
+					var i_bl := src + (w - 1) * 4
+					buf[i_bl] += er * 0.1875
+					buf[i_bl + 1] += eg * 0.1875
+					buf[i_bl + 2] += eb * 0.1875
+				var i_b := src + w * 4
+				buf[i_b] += er * 0.3125
+				buf[i_b + 1] += eg * 0.3125
+				buf[i_b + 2] += eb * 0.3125
+				if x + 1 < w:
+					var i_br := src + (w + 1) * 4
+					buf[i_br] += er * 0.0625
+					buf[i_br + 1] += eg * 0.0625
+					buf[i_br + 2] += eb * 0.0625
+			src += 4
+			dst += 4
+	image.copy_from(Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, bytes))
+
+
+## 用 LUT + 线性插值做 sRGB 编码(见 SRGB_LUT_STEPS)。直接读静态表, 不传参以免拷贝。
+static func _lut_srgb(c: float, steps: float) -> float:
+	if c <= 0.0:
+		return 0.0
+	if c >= 1.0:
+		return 1.0
+	var t := c * steps
+	var i := int(t)
+	return lerpf(_srgb_lut[i], _srgb_lut[i + 1], t - float(i))
 
 
 # -------- 内部工具 --------

@@ -9,6 +9,11 @@
 ## 两处可注入的扩展点（默认行为开箱即用，通常无需注册）：
 ## [br]- [method set_debug_checker]：覆盖整个 Debug 模式判定
 ## [br]- [method set_branch_provider]：覆盖分支探测来源（默认使用内置 GodotSteam 探测）
+## [br]内置 GodotSteam 探测完全动态调用（不引用 `Steam` 标识符），未安装 GodotSteam 的项目
+## 可以正常编译与运行，只是拿不到分支名；Steam 项目若能直接访问 GodotSteam，
+## 推荐自己注入更稳：[codeblock]
+## DebugTool.set_branch_provider(func(): return Steam.getCurrentBetaName())
+## [/codeblock]
 ##
 ## [codeblock]
 ## DebugTool.is_debug_mode()      # 面板显隐 / debug_only 更新日志等统一判定
@@ -113,16 +118,54 @@ static func _query_branch() -> String:
 
 
 ## 内置探测：GodotSteam 当前 beta / 测试分支名的方法
-const _STEAM_BRANCH_METHOD := "getCurrentBetaName"
+const _STEAM_BRANCH_METHOD := &"getCurrentBetaName"
+## GodotSteam 的类名 / 单例名
+## [br]⚠️ 只作字符串使用：编译期直接写 `Steam.xxx` 会让未安装 GodotSteam 的项目标识符解析失败、
+## 整个脚本编译不出来（连带依赖它的 ChangelogTool 等一起挂），故内置探测一律动态调用。
+const _STEAM_CLASS := &"Steam"
+
+## GodotSteam 入口对象缓存（Engine 单例或 autoload 节点；null = 本项目没有 Steam 侧能力）
+static var _steam_api: Object = null
 
 
 ## GodotSteam 是否可用（未安装插件 / 未运行 Steam 时内置探测静默跳过）
 static func _steam_ready() -> bool:
-	return ClassDB.class_exists("Steam") and Steam.isSteamRunning() and Steam.has_method(_STEAM_BRANCH_METHOD)
+	var api := _get_steam_api()
+	if api == null:
+		return false
+	return api.has_method("isSteamRunning") and api.has_method(_STEAM_BRANCH_METHOD) \
+		and bool(api.call("isSteamRunning"))
+
+
+## 取 GodotSteam 入口对象：Engine 单例 → autoload 节点；都没有则返回 null（静默降级）
+static func _get_steam_api() -> Object:
+	if is_instance_valid(_steam_api):
+		return _steam_api
+	if Engine.has_singleton(_STEAM_CLASS):
+		_steam_api = Engine.get_singleton(_STEAM_CLASS)
+	else:
+		var loop := Engine.get_main_loop() as SceneTree
+		if loop != null:
+			_steam_api = loop.root.get_node_or_null(^"Steam")
+	if is_instance_valid(_steam_api) and _steam_api.has_method(_STEAM_BRANCH_METHOD):
+		return _steam_api
+	_steam_api = null
+	return null
 
 
 static func _query_steam_branch() -> String:
+	var api := _get_steam_api()
+	if api == null:
+		return ""
 	# 兼容不同 GodotSteam 版本的参数形式（部分版本需要传入缓冲区长度）
-	if Steam.get_method_argument_count(_STEAM_BRANCH_METHOD) > 0:
-		return str(Steam.call(_STEAM_BRANCH_METHOD, 256))
-	return str(Steam.call(_STEAM_BRANCH_METHOD))
+	if _method_argc(api, _STEAM_BRANCH_METHOD) > 0:
+		return str(api.call(_STEAM_BRANCH_METHOD, 256))
+	return str(api.call(_STEAM_BRANCH_METHOD))
+
+
+## 动态取对象某方法的参数个数（instance 没有 get_method_argument_count，只能查 method_list）
+static func _method_argc(obj: Object, method: StringName) -> int:
+	for info in obj.get_method_list():
+		if StringName(info.get("name", "")) == method:
+			return (info.get("args", []) as Array).size()
+	return 0

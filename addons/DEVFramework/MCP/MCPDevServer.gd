@@ -11,21 +11,197 @@
 ## 桥接由 MCPDebuggerPlugin(EditorDebuggerPlugin)负责, 生命周期由 plugin.gd 控制。
 class_name MCPDevServer extends Node
 
+## ------- 拆出的零状态协议层模块(preload, 非 class_name) -------
+## 这三个模块只有静态方法、不持有状态, 且与本文件是**单向**依赖(它们不引用本文件),
+## 所以拆出去是安全的。引用方式上的两条硬约束, 都是踩坑换来的:
+##
+##   1. 三个模块**必须带 @tool**(与本文件一致)。
+##      缺 @tool 时编辑器**跳过完整语义分析**, 于是模块里的解析期错误不会被发现,
+##      lint 也会静默跳过它们 —— 表现为"静态检查全绿, 运行时才炸"。真实的一次:
+##      MCPToolSchema 误用了 Godot 3 的 Dictionary.merge_in(Godot 4 只有返回新字典的
+##      merge), 编译失败 → GDScript 没有成员表 → preload 拿到的脚本 is_tool() 为 false、
+##      get_script_method_list() 为空 → MCPResult.ok / MCPToolSchema.logs 全部报
+##      "Nonexistent function 'xxx' in base 'GDScript'"(方法确实存在于磁盘源码中)。
+##      又因为**每个 handler 都经 _ok/_err 收口**, 一处不可达就等于全服务器工具同时返回
+##      空结果, 表现为"每个调用都返回一段警告文本"。
+##      排查这类"方法明明存在却说没有"的空壳脚本, 用这三招(eval_code 里直接跑):
+##        S.is_tool()                  # false = 没被当成 tool 脚本分析
+##        S.get_script_method_list()   # []    = 没编译出任何成员
+##        S.reload()                   # 返回非 0 = 解析/编译失败, 详细错误在编辑器输出
+##   2. 引用必须用 preload 而不是 class_name: 本文件既是 autoload 又是被插件 load() 动态
+##      加载, 新建的 class_name 未必已进全局类缓存, 标识符会解析不到; 反过来若模块内
+##      声明 class_name, 这里的同名 const 又会触发 "hides a global script class"。
+##      故三个模块一律不声明 class_name。
+const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
+const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
+const MCPToolMeta := preload("res://addons/DEVFramework/MCP/MCPToolMeta.gd")
+const MCPArgCheck := preload("res://addons/DEVFramework/MCP/MCPArgCheck.gd")
+const MCPScriptSync := preload("res://addons/DEVFramework/MCP/MCPScriptSync.gd")
+const MCPToolAudit := preload("res://addons/DEVFramework/MCP/MCPToolAudit.gd")
+## 输出整形层(序列化转义兜底 + 统一输出上限截断)。与其它 preload 的区别: 它既不注册工具也不
+## 提供协议端点, 而是**全部工具共用的一道关口**, 详见该文件顶部注释。
+const MCPFormat := preload("res://addons/DEVFramework/MCP/MCPFormat.gd")
+
+## ------- 工具域文件 -------
+## 每个域收编一组工具的「注册 + schema + handler + 专属辅助函数」, 统一暴露
+## `static func register(add_tool: Callable) -> void`; 本文件只负责把 _add_tool 传进去。
+##
+## 依赖严格单向: 本文件 -> 域文件, 域文件不引用本文件, 也不持有服务器状态。域内 handler 一律
+## static, 因此 MCPToolAudit 靠 get_method() 做的入参一致性自检照常有效(改用 lambda 注册会
+## 让 get_method() 返回空串, 那批工具将静默跳过自检 —— 见 MCPToolAudit 开头)。
+##
+## **但接缝不止 register 一种形态 —— 照着"域 = 一个 register"去接线一定会漏。**
+## 下面这份表是**实测**的各域导出(不是设计意图), 新增域时按它补一行:
+##   MCPValidateTools / MCPResourceTools / MCPSceneTools / MCPFileTools / MCPCodeIndex
+##       register
+##   MCPLogTools        register + bind_logger(logger)
+##                      —— get_game_logs / get_game_errors 复用日志捕获器, 游戏进程侧漏注入时
+##                         它们显式返回"日志捕获器未就绪"(这条是显式的, 不会静默)
+##   MCPDevTools        register + set_eval_ctx_provider(provider)
+##                      —— game_eval / auto_verify 的新鲜度闸门要用 _mode 与游戏启动时刻。
+##                         漏注入**不报错**, 守卫静默全放行且运行期错误捕获不到, 症状是
+##                         "game_eval 的问题查不出来"
+##   MCPProjectTools    register + set_session_facts_provider(provider)
+##   MCPScreenshotTools **没有 register**: take_screenshot 的默认模式 text 必须经本文件的
+##                      _call_runtime_proxy 转发到游戏进程(内部挂 _pending / debugger_plugin),
+##                      静态化不了。它只暴露 spec()(desc/schema 单副本) + capture_editor_side(),
+##                      由本文件在 _register_runtime_tools 里那一处注册点调用。
+##   MCPEditorEnv       **不是工具域**: 跨域共享的编辑器环境辅助, 无 register 也不注册工具。
+##                      它原本是本文件的实例方法 _edited_root(), 被三个域同时用, 不属于任何
+##                      单一域, 所以提到共享层而不是让每域留一份私有副本(副本分叉的症状从
+##                      调用栈看不出根因)。
+const MCPCodeIndex := preload("res://addons/DEVFramework/MCP/MCPCodeIndex.gd")
+const MCPEditorEnv := preload("res://addons/DEVFramework/MCP/MCPEditorEnv.gd")
+const MCPDevTools := preload("res://addons/DEVFramework/MCP/MCPDevTools.gd")
+const MCPFileTools := preload("res://addons/DEVFramework/MCP/MCPFileTools.gd")
+const MCPLogTools := preload("res://addons/DEVFramework/MCP/MCPLogTools.gd")
+const MCPProjectTools := preload("res://addons/DEVFramework/MCP/MCPProjectTools.gd")
+const MCPResourceTools := preload("res://addons/DEVFramework/MCP/MCPResourceTools.gd")
+const MCPSceneTools := preload("res://addons/DEVFramework/MCP/MCPSceneTools.gd")
+const MCPScreenshotTools := preload("res://addons/DEVFramework/MCP/MCPScreenshotTools.gd")
+const MCPTestTools := preload("res://addons/DEVFramework/MCP/MCPTestTools.gd")
+const MCPUITools := preload("res://addons/DEVFramework/MCP/MCPUITools.gd")
+const MCPValidateTools := preload("res://addons/DEVFramework/MCP/MCPValidateTools.gd")
+
+##   3. **改上面几个模块后, refresh_tools 不足以让改动生效** —— 但**解法不是 reload 本文件**
+##      (见第 4 条, 那会杀死服务器)。实测有效的链路只有一条, 分两种情况:
+##
+##      **A. 改的是 MCPToolMeta / MCPToolSchema / MCPResult / MCPArgCheck / MCPScriptSync**
+##         (即除本文件外的 preload 依赖) —— 用 eval_code 原地重载, 再 refresh_tools:
+##           for n in ["MCPToolMeta", "MCPToolSchema"]:
+##               load("res://addons/DEVFramework/MCP/%s.gd" % n).reload(true)
+##         之所以有效: const 持有的是 GDScript **对象**, 而 reload() 是**原地重新编译**同一个
+##         对象, 故 const 引用自动指向新代码, 无需重载本文件。
+##
+##      **B. 改的是本文件自身**(工具描述/schema 字面量都在这里) —— 无法热生效, 只能重启:
+##         在编辑器「插件」里取消勾选 DEVFramework 再重新勾选(或重启编辑器)。
+##
+##      为什么不能直接 reload 本文件: 本文件正承载着 HTTP 服务器(_http 字段), 原地重载会
+##      终止该服务器, 之后 MCP 端口不再监听、所有调用返回"无法连接", 且**无法再靠 MCP 工具
+##      自救**(restart_editor / refresh_tools 都调不到了), 只能去编辑器里重新启用插件。实测踩过。
+##      边界: 本文件内另外两处 reload()(两个 eval 入口)编译的都是 eval_code 用的**临时**脚本
+##      (GDScript.new(), 无资源路径, 不进 Resource 缓存), 与此无关; 第三条编译路径(脚本校验)
+##      搬去了 MCPValidateTools.gd, 同样不碰本文件。
+##      这条边界原先还带一个洞: MCPScriptSync._guard_editor 会对磁盘有改动的每个 .gd 做
+##      CACHE_MODE_REPLACE 重载, 而集合里**包含本文件** —— 改完本文件而服务器实例尚未重建时,
+##      eval_code 的守卫路径会顺手把本文件也重载掉, 于是 eval 执行到一半服务已死、端口失联。
+##      现已兜住: 本文件在编辑器进程的 _ready 里把自己登记进 MCPScriptSync._unreloadable,
+##      _guard_editor 会先分流 —— 显式阻止并指引重启, 而不是静默重载。
+##
+##      判据: 改完量一次 tools/list 字符数, 未变即未生效 —— 别把"refresh_tools 报告成功且
+##      契约自检 pass"当成生效证据, 它在未生效时同样返回成功。
+
 ## ------- 配置项(ProjectSettings) -------
 const SETTING_ENABLED := "dev_framework/mcp/enabled"
 const SETTING_PORT := "dev_framework/mcp/port"
 const SETTING_TOKEN := "dev_framework/mcp/token"
-const SETTING_MAX_MESSAGES := "dev_framework/mcp/max_messages"
 const SETTING_MAX_OUTPUT_CHARS := "dev_framework/mcp/max_output_chars"
+const SETTING_LOG_TOOL_RESULTS := "dev_framework/mcp/log_tool_results"
 
-## 统一输出上限默认值(字符)。所有工具返回的 text 字段超过此值即转为明确错误提示, 防上下文/token 被撑爆。
-const DEFAULT_MAX_OUTPUT_CHARS := 90000
+## 统一输出上限默认值(字符)。超限则**截断**返回并附续读提示, 而非整条拒绝。
+##
+## 取值 24000 的推导(两级约束, 取更严的那个):
+##
+##   1. 客户端侧对单次工具输出另有约 51200 字符的硬上限, 超出后**静默**截断, 调用方拿不到
+##      任何"数据不完整"的信号。原默认值 90000 高于它, 实测 get_scene_tree 无参调用返回
+##      60453 字符时本层直接放行, 随后被无声切掉 9253 字符 —— AI 拿着残缺场景树以为看全了。
+##   2. **同一份内容会被写两遍**: MCPResult 出于兼容同时输出顶层 text 与规范要求的
+##      content[0].text(实测两者长度完全相同)。所以 24000 字符的正文在响应体里是 48000,
+##      必须连双写一起算, 否则限了等于没限 —— 这也是先取 30000 时实测响应仍有 64797
+##      字符(其中 60000 是同一内容的两份拷贝)的原因。
+##
+## 24000 × 2 = 48000 < 51200, 留出协议包装层余量。
+const DEFAULT_MAX_OUTPUT_CHARS := 24000
 
-## 输出给 AI 的核心属性白名单(过滤编辑器内部数百项属性, 控制上下文开销)
-const CORE_PROP_NAMES := ["name", "position", "scale", "rotation", "rotation_degrees", "visible", "modulate", "process_mode", "z_index", "text", "color"]
 
 ## ------- MCP 常量 -------
+## PROTOCOL_VERSION 是**回落版本**: 客户端既没在 HTTP 头声明、也没在 _meta 声明时用它。
+## 保持它在 2025-03-26 是刻意的 —— 现役客户端(Claude Code / Cursor 等)全部按旧握手走,
+## 抬高回落值会让它们在 initialize 阶段就看到不认识的版本号。
 const PROTOCOL_VERSION := "2025-03-26"
+
+## 支持的协议版本, 新到旧。用于 initialize 的版本回显与 -32022 的 supported 列表。
+##
+## 维护多版本是必需的, 不是过度设计: 版本号是"最后一次**向后不兼容**变更"的日期, 而
+## 客户端各自锁定的日期不同(它声明什么, 我们就必须能接住)。规范里也写明服务端可以
+## 同时支持多个版本。只认最新版会让所有老客户端直接失联。
+##
+## 但"支持多版本"**不等于为每版写一套实现** —— 差异其实只有一处: 新字段要不要发。
+## 见 _decorate_result: 新字段只发给 SUPPORTED_PROTOCOL_VERSIONS[0], 旧版一律不发。
+## 新字段对老客户端是未知的会被忽略, 反过来给老版塞新字段才是破坏兼容。
+##
+## 2025-06-18 在列表里但无行为差异(它与 2025-03-26 的唯一区别是 structuredContent,
+## 而本服务器对所有版本都发 structuredContent), 列出来是为了不拒掉恰好要这一版的客户端。
+## 2025-11-25 是**握手式协议(2026-07-28 之前)的最后一版**, 各家 SDK 普遍把它标为
+## latestInitializationProtocolVersion / 最新支持版。它带来的是 Tasks 持久化状态机、
+## Sampling 里的 Tool use、增强版 Elicitation —— 这些本服务器一概没有, 故与 2025-06-18
+## 一样无行为差异; 列它是为了让恰好要这一版的客户端能**精确命中**。此前列表漏了它,
+## 结果这类客户端会被 _negotiate_version 一路降级到 2025-06-18 才停下 —— 多数客户端能接受,
+## 但严格锁版的客户端就会因版本号对不上而断连。
+const SUPPORTED_PROTOCOL_VERSIONS := ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"]
+
+## 2026-07-28 起, 版本改为**逐请求**声明, 且 HTTP 传输必须同时带同名头。
+const META_VERSION_KEY := "io.modelcontextprotocol/protocolVersion"
+const META_CLIENT_CAPS_KEY := "io.modelcontextprotocol/clientCapabilities"
+## 首个"逐请求声明版本"的协议版本。自该版本起规范要求每个请求的 _meta 同时声明
+## protocolVersion 与 clientCapabilities, 缺任一即为 malformed request(必须回 -32602)。
+## 更早的版本是握手式, _meta 里本就没有这两个字段 —— 所以这个要求**只对声明了
+## META_REQUIRED_SINCE 的请求生效**, 否则会把现有旧版客户端全部拒掉。
+const META_REQUIRED_SINCE := "2026-07-28"
+const HEADER_VERSION := "mcp-protocol-version"
+
+## ======= 错误码: 本文件唯一的错误码事实来源 =======
+##
+## 收敛前 -32602/-32700/-32601/-32603/-32000 全部以裸字面量散落在各处, 只有两个 2026-07-28
+## 的新码被提成了常量。结果是"同一个错误在两处用不同写法", 改错误码语义/对齐规范时要逐处
+## 搜索漏改, 而漏改的那一处不会报错, 只会在客户端那边表现为莫名奇妙的报错分类。
+## 标准 JSON-RPC 2.0 的码不是 MCP 私有约定, 但集中在文件头声明一次, 至少让它们可被静态检查。
+## 请求体不是合法 JSON。进 JSON-RPC 之前就失败, 无 req_id 可回。
+const ERR_PARSE := -32700
+## JSON-RPC 层: 方法名不在 _handlers 里。
+const ERR_METHOD_NOT_FOUND := -32601
+## JSON-RPC 层: 参数结构/取值不合法(同参数重试无意义, 故不可重试)。
+const ERR_INVALID_PARAMS := -32602
+## JSON-RPC 层: 服务端内部状态异常(通常是 handler 未产出结果)。
+const ERR_INTERNAL := -32603
+## 传输层拒绝: 请求根本没进 JSON-RPC(方法不支持 / 鉴权失败 / Origin 被拦)。
+## 规范把 -32000~-32099 定为"实现自用", MCP 自己没给这三种场景分配码, 故共用一个。
+const ERR_TRANSPORT_REJECTED := -32000
+## 2026-07-28 新增错误码(规范 baseline 里 -32000 段由 MCP 自用)。
+## HTTP 头声明的版本与 _meta 声明的不一致。
+const ERR_HEADER_MISMATCH := -32020
+## 协商完成后仍发来不受支持的版本。
+const ERR_UNSUPPORTED_VERSION := -32022
+
+## tools/list 等可缓存结果建议的缓存时长。工具清单在进程生命周期内是静态的
+## (_tool_defs 只在初始化/refresh_tools 时填充), 故给一个较长的 TTL。
+##
+## TTL 只是**兜底上限**, 不是"改了会自动通知"的机制: 本服务器是一次请求一个连接的短连接
+## HTTP, 推不出 notifications/tools/list_changed(capabilities 里已如实报 listChanged:false),
+## 客户端缓存一旦建立就只能等它自己过期或被 IDE 侧重连刷新。写"refresh_tools 后客户端会
+## 重新拉取"是错的 —— 那不是本服务器能保证的事, 别再让文案暗示它。
+const LIST_TTL_MS := 600000
+
 const SERVER_NAME := "devframework-godot-mcp"
 const SERVER_VERSION := "0.3.0"
 
@@ -43,14 +219,26 @@ var _http: MCPTcpHttpServer
 var _logger: MCPLogger
 var _port := int(ProjectSettings.get_setting(SETTING_PORT, 8931))
 var _enabled := true
+## 是否已与某个客户端完成过 initialize 版本协商(进程级单标志)。
+## 用途: 在协商完成之前, 对不认识的协议版本一律**降级**而不是拒绝 —— 因为握手期的严格
+## 只会换来失联(客户端不会重试、也不会换版本), 而此时我们还不知道客户端要干什么,
+## 猜错版本顶多导致响应形状差一点, 远好过整个连不上。协商完成后再严格, 此时客户端理应
+## 已经改用协商好的版本, 还在发陌生版本就说明它跳过了握手或中途换了版本, 该拒。
+var _version_negotiated := false
 var _tool_handlers := {} # 工具名 -> Callable
 var _tool_defs := [] # 工具定义列表(MCP 格式)
+var _tool_schemas := {} # 工具名 -> inputSchema。tools/list 要的是数组(协议规定),而入参校验
+	# 要的是按名直查 —— 遍历数组去找会得到**注册顺序上的第一个同名项**, 一旦将来出现同名
+	# 注册(先注册的后覆盖), 校验就会拿错 schema 且毫无征兆。故两份索引分开存, 各按各的形状用。
 var _mode := MODE_EDITOR # editor / runtime
 
 ## 编辑器模式: 指向 MCPDebuggerPlugin(由 plugin.gd 注入)
 var debugger_plugin: MCPDebuggerPlugin = null
 ## 编辑器模式: 游戏进程 MCP 桥接是否就绪(收到 dev_mcp:ready)
 var _game_ready := false
+## 当前游戏调试会话的启动时刻(unix 秒); 0 = 没有游戏在运行。
+## 用途: 作为游戏侧新鲜度判据的基准(见 MCPScriptSync.guard_eval), 记录在会话建立/结束时更新
+var _game_started_at: int = 0
 ## 编辑器模式: 等待游戏响应的请求表 req_id -> 结果(未就绪为 null)
 var _pending := {}
 var _next_req_id := 1
@@ -60,8 +248,21 @@ var _game_breaked := false
 ## 游戏被暂停时 EngineDebugger 调试线程仍活着, 这类工具仅读本地缓冲即返回, 不会挂起。
 const _BREAK_SAFE_TOOLS := ["get_game_errors", "get_game_logs"]
 
+## 逐条 JSON-RPC 请求日志的开关(现场可 set, 不必重启编辑器)。
+static var _log_rpc := false
+
 ## verify_fix 会话(editor 侧): 按 session_id 存验证配置, 支持 start/continue/status/abort 多会话
 var _verify_sessions: Dictionary = {}
+
+## 最近一次工具契约自检的问题列表(空 = 通过)。由 _audit_tools 写入,
+## 供 refresh_tools 响应回给 AI —— 否则自检结果只能翻编辑器日志, 等于没有。
+## 工具名 -> "入参自检该切哪个 handler"。与 _tool_handlers 的差别: _tool_handlers 存的是
+## **实际被调用的**那一份, 而转发型工具注册进去的是纯转发 lambda(编辑器侧经调试线转发到游戏
+## 进程), 转发器不读任何入参键, 自检切它只能得到空结论 —— 那等于把"没查"报成"通过"。
+## 这里存的是同一工具的**具体实现**, 即真正读入参的那份代码。
+var _tool_audit_handlers := {}
+
+var _tool_audit_issues: Array[String] = []
 
 
 ## ------- 生命周期(autoload) -------
@@ -72,12 +273,21 @@ func _ready() -> void:
 	if Engine.is_editor_hint():
 		# 编辑器进程: 生命周期完全由 plugin.gd 控制(启用时 start_editor()/停用时 stop())。
 		# 这里仅登记 instance, 不自动启动, 避免与插件开关产生端口/生命周期冲突。
+		# 顺带把自己登记为"不可热重载"(见文件顶部 B 条): 原地重载本文件会终止 HTTP 服务器,
+		# 且之后所有工具都调不到。登记后 MCPScriptSync._guard_editor 会先分流、显式阻止并
+		# 指引重启, 而不是静默重载把整条 MCP 通道关掉。
+		MCPScriptSync.register_unreloadable(get_script().resource_path, "承载 MCP HTTP 服务器")
 		return
 	# 游戏进程: 仅注册调试线消息捕获器, 供编辑器经 EngineDebugger wire 调用运行时工具。
 	# 不开启任何端口; 正常手动运行/发布版无调试线, 捕获器注册后无消息到达, 无副作用。
 	if not _enabled:
 		return
 	_mode = MODE_RUNTIME
+	# 游戏侧新鲜度基准(见 MCPScriptSync.guard_eval)。必须在游戏进程内自己记一份 ——
+	# 编辑器侧的同名变量由会话回调赋值, 游戏进程没有那些回调, 漏设会让判据退化成
+	# "无基准=全部放行", 等于闸门失效。取 autoload 就绪时刻而非调试线就绪时刻:
+	# autoload 先于主场景加载, 取早了不会误报(加载时读到的就是磁盘最新版本)。
+	_game_started_at = int(Time.get_unix_time_from_system())
 	_logger = MCPLogger.new()
 	OS.add_logger(_logger)
 	_register_runtime_tools()
@@ -104,12 +314,17 @@ func _on_debugger_message(message: String, data: Array) -> bool:
 
 func _call_runtime_tool_async(req_id: int, tool_name: String, args: Dictionary) -> void:
 	var result: Dictionary
-	if _tool_handlers.has(tool_name):
+	## 长任务(游戏用例)运行期间: 需要主循环的工具会被用例拖慢, 多数会干等到超时才报错。
+	## 这里立即返回 busy, 让调用方先读进度 —— 读缓冲类工具与用例自身仍放行。
+	if _game_tests_running and tool_name != "run_game_tests" and not _BREAK_SAFE_TOOLS.has(tool_name):
+		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请先反复调用 run_game_tests 读进度直到 running=false, 或用 game_control(action=stop) 终止用例。" % tool_name,
+			"busy", true, "run_game_tests读进度至running=false后再调用; 或game_control(action=stop)终止用例")
+	elif _tool_handlers.has(tool_name):
 		result = await _tool_handlers[tool_name].call(args)
 	else:
 		result = _fail("未知运行时工具: %s" % tool_name)
 	# 统一输出上限: 与编辑器进程一致, 超限转明确错误提示后再回发(避免调试线承载巨型载荷)。
-	result = _enforce_output_cap(tool_name, result)
+	result = MCPFormat.enforce_output_cap(tool_name, result, _output_cap())
 	EngineDebugger.send_message(DEBUGGER_PREFIX + ":result", [req_id, result])
 
 
@@ -121,6 +336,9 @@ func _on_debugger_capture(message: String, data: Array) -> bool:
 	match kind:
 		"ready":
 			_game_ready = true
+			# 运行时桥接就绪 ⟹ 游戏已加载完全部脚本, 此刻才是新鲜度判据最准的基准。
+			# 覆盖"会话建立 → 就绪"这段时间内的改动, 把闸门的误报窗口压到最小
+			_mark_script_baseline("调试线就绪")
 			LogTool.log("MCP", "游戏调试线桥接已就绪")
 		"result":
 			if data.size() >= 2:
@@ -133,10 +351,11 @@ func _on_debugger_capture(message: String, data: Array) -> bool:
 func _on_session_started(session_id: int) -> void:
 	LogTool.log("MCP", "游戏调试会话已建立(session=%d)" % session_id)
 	_game_ready = false
+	_mark_script_baseline("调试会话建立")
 	# 保留旧的未决失败结果不覆盖; 新会话开始, 旧请求已无意义
 	for req_id in _pending:
 		if _pending[req_id] == null:
-			_pending[req_id] = _err("游戏调试会话已重启, 原请求被取消", "transient", true, "重新调用该工具即可")
+			_pending[req_id] = _err_transient("游戏调试会话已重启, 原请求被取消", "重新调用该工具即可")
 	_pending.clear()
 
 
@@ -147,21 +366,22 @@ func _on_session_stopped(session_id: int) -> void:
 	LogTool.log("MCP", "游戏调试会话已结束(session=%d)" % session_id)
 	_game_ready = false
 	_game_breaked = false
-	var msg := "游戏进程已停止(正常结束或崩溃), 所有未完成的运行时调用被取消。请先 run_game 重新启动游戏后再试。"
+	_game_started_at = 0
+	var msg := "游戏进程已停止(正常结束或崩溃), 所有未完成的运行时调用被取消。请先 game_control(action=start) 重新启动游戏后再试。"
 	for req_id in _pending:
 		if _pending[req_id] == null:
-			_pending[req_id] = _err(msg, "game_stopped", true, "调用 run_game 重新启动游戏, 等待调试线就绪后重试")
+			_pending[req_id] = _err_game_stopped(msg, "调用 game_control(action=start) 重新启动游戏, 等待调试线就绪后重试")
 
 
 ## 游戏进入断点暂停(脚本错误/断点触发, 主循环暂停但调试线仍在)。
 ## 此时运行时工具若发请求会干等超时, 应立即填充未决请求为明确错误, 让 AI 知道是"游戏被调试器暂停"而非无响应。
 func _on_session_breaked(_session_id: int, can_debug: bool) -> void:
 	_game_breaked = true
-	LogTool.log("MCP", "游戏已进入断点暂停(调试循环=%s)。运行时工具会立即返回明确错误, 可用 debug_continue 让游戏继续。" % str(can_debug))
-	var msg := "游戏被断点暂停(脚本错误/断点)。get_game_errors/get_game_logs仍可用, 先查错误; 再debug_continue继续; 要修脚本则stop_game后改代码重跑。"
+	LogTool.log("MCP", "游戏已进入断点暂停(调试循环=%s)。运行时工具会立即返回明确错误, 可用 game_control(action=continue) 让游戏继续。" % str(can_debug))
+	var msg := "游戏被断点暂停(脚本错误/断点)。get_game_errors/get_game_logs仍可用, 先查错误; 再game_control(action=continue)继续; 要修脚本则game_control(action=stop)后改代码重跑。"
 	for req_id in _pending:
 		if _pending[req_id] == null:
-			_pending[req_id] = _err(msg, "game_breaked", true, "get_game_errors查错后debug_continue; 或stop_game修复重启")
+			_pending[req_id] = _err_game_breaked(msg)
 
 
 ## 游戏解除断点暂停, 恢复运行
@@ -187,40 +407,98 @@ func start_editor() -> void:
 	start()
 
 
-## 每帧驱动 HTTP 服务器
+## 当前真正持有监听端口的实例(进程内至多一个)。
+##
+## 编辑器进程里其实有**两个** MCPDevServer: project.godot 里的 autoload 行, 以及 plugin.gd
+## 用 MCPDevServer.new() 建的子节点(真正在监听的是后者)。所以"该不该启动/自愈"必须按
+## **实例身份**判断, 不能只看 _http 是不是 null —— 否则 autoload 那个从不监听的实例会
+## 误以为服务器挂了, 反复去 bind 已被占用的端口, 每 5 秒刷一条绑定失败。
+##
+## 更关键的是脚本热重载会把**实例**成员变量全部重置为默认值: _http 变成 null, 它持有的
+## TCPServer 随之被 GC 释放、监听端口关闭, MCP 服务器就此静默死亡 —— 现象是"AI 突然连不上",
+## 日志里却没有任何报错, 只能靠重启编辑器恢复。
+##
+## 这里用 static 而非成员变量: 只有 static 能活过热重载。换成成员变量的话, "本来在跑但被
+## 重载清掉"和"本来就没在跑"就都成了 null, 恰好分不出该自愈的那种情况。
+static var _owner = null
+static var _last_autostart := 0
+
+
+## 每帧驱动 HTTP 服务器, 并在它意外消失时自动拉起
 func _process(_delta: float) -> void:
 	if _http:
 		_http.poll()
+		return
+	# 自愈只在"这个实例本来就该监听"时发生: 热重载把 _http 清成 null 后端口已被释放,
+	# 而用户和插件都没主动停过, 该自动重开, 否则每次改框架脚本都得重启编辑器才能继续用 MCP。
+	# 启动本身仍可能失败(端口被别的进程占着), 故按时间节流, 免得每帧都去 bind 刷错误日志。
+	if _owner != self or not Engine.is_editor_hint():
+		return
+	var now := Time.get_ticks_msec()
+	if now - _last_autostart < 5000:
+		return
+	_last_autostart = now
+	LogTool.log("MCP", "检测到 MCP 服务器已停止(通常是脚本热重载清掉了状态), 正在自动重新启动…")
+	start_editor()
+
+
+## tools/list 内容指纹: 把当前注册表压成一个短十六进制串。
+##
+## 存在的理由: "改完生效了吗"在这套架构里**无法从返回值判断**。refresh_tools 改的是正在
+## 运行的实例, 它自己的执行必然是"新"的, 于是无论工具表实际变没变, 返回的都是成功; 而
+## 客户端是否同步又是另一件事(短连接推不出通知)。两边都只能靠猜, 猜错就会拿着**旧 schema**
+## 继续改代码 —— 那比没改更糟, 因为它看起来是验证过的。
+##
+## 有了指纹, 这件事变成可测量的: 改代码 → refresh_tools → 指纹变了 = 工具表真的变了;
+## 指纹没变 = 注册表压根没重建成功(典型如改了 MCPDevServer.gd 自身而实例没重启)。
+##
+## 用 JSON.stringify 而非 str(): 后者对嵌套 Dictionary 的键序不保证稳定, 指纹会随内容
+## 不变而变, 比对立刻失去意义。
+func _schema_fingerprint() -> String:
+	return "%08x" % (JSON.stringify(_tool_defs).hash() & 0xFFFFFFFF)
 
 
 func _call_refresh_tools(_args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return _fail("仅在编辑器模式可用")
 	_register_editor_tools()
-	LogTool.log("MCP", "手动重建工具注册表: %d 个工具" % _tool_defs.size())
-	return _ok("已重建工具注册表: %d 个工具。客户端重新拉取 tools/list 即拿到最新定义(无需重启编辑器)。" % _tool_defs.size())
-
-
-func _call_run_tests(args: Dictionary) -> Dictionary:
-	var filter := str(args.get("filter", ""))
-	var summary: Dictionary = await TestRunner.run_all(filter)
-	return _ok_json(summary)
-
-
-func _delayed_restart(save: bool, delay_sec: float) -> void:
-	if delay_sec > 0.0:
-		await get_tree().create_timer(delay_sec).timeout
-	EditorInterface.restart_editor(save)
+	var count := _tool_defs.size()
+	var fp := _schema_fingerprint()
+	LogTool.log("MCP", "手动重建工具注册表: %d 个工具, 指纹 %s" % [count, fp])
+	# 把契约自检结果一并回给 AI: 否则自检只落到编辑器日志里, 等于没有 —— AI 改完框架脚本
+	# 调 refresh_tools, 期望的正是"我这次改动是否引入了契约问题"这一条答案。
+	#
+	# message 里明说客户端不一定同步: 本服务器推不出 tools/list_changed, 拿"客户端会自动
+	# 重新拉取"当前提是错的(见 LIST_TTL_MS 与 _server_capabilities 的说明)。不写清楚的话,
+	# 调用方会拿 tools/list 里**会话开始时的旧快照**当权威, 并据此认为改动已生效。
+	if _tool_audit_issues.is_empty():
+		return _ok_json({
+			"tool_count": count,
+			"schema_fingerprint": fp,
+			"audit": "pass",
+			"message": "服务器侧工具注册表已重建: %d 个工具, 契约自检通过, 指纹 %s。判定'是否真的生效'以本指纹跨次对比为准(指纹不变即注册表没变)。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 因此客户端若缓存了旧的 tools/list, 它手上的 schema 仍是旧的 —— 需在 IDE 侧重连 MCP 才会刷新; 在此之前, 以 tools/list 直查服务器为准, 不要拿会话开始时的快照当权威。" % [count, fp],
+		})
+	return _ok_json({
+		"tool_count": count,
+		"schema_fingerprint": fp,
+		"audit": "fail",
+		"issues": _tool_audit_issues,
+		"message": "服务器侧工具注册表已重建: %d 个工具, 但契约自检发现 %d 个问题(见 issues), 指纹 %s。判定'是否真的生效'以本指纹跨次对比为准。【客户端不一定同步】本服务器推不出 tools/list_changed, 客户端缓存的旧 tools/list 要到 IDE 侧重连 MCP 才刷新。" % [count, _tool_audit_issues.size(), fp],
+	})
 
 
 ## ------- 工具注册表手动刷新 -------
-## 修改框架脚本(新增/修改工具)后, 由 AI 调用 refresh_tools 手动重建注册表,
-## 客户端重新拉取 tools/list 即生效, 无需重启编辑器。
+## 由 AI 调用 refresh_tools 手动重建注册表, 客户端重新拉取 tools/list 即生效, 无需重启编辑器。
+##
+## **边界**: 只对"被本服务器 preload 的其他脚本"生效(MCPToolMeta / MCPToolSchema 等)——
+## 它们是独立 Script 资源, 编辑器文件系统扫描会重载, 静态函数随之更新。
+## 而本文件(MCPDevServer.gd)自身的方法体不会被热替换进**已在运行的实例**, 故改本文件时
+## 必须重建服务器实例(禁用再启用插件 / restart_editor)。此时 refresh_tools 依旧返回成功,
+## 工具表却原样不变 —— 这个"静默无效"是本条注释存在的唯一理由。
 
 
 ## 关闭服务器并移除 Logger(退出时由引擎自动调用)
 func _exit_tree() -> void:
-	stop()
 	stop()
 	if EngineDebugger.is_active() and EngineDebugger.has_capture(DEBUGGER_PREFIX):
 		EngineDebugger.unregister_message_capture(DEBUGGER_PREFIX)
@@ -239,12 +517,17 @@ func start() -> void:
 		printerr("MCPDevServer: 监听端口 %d 失败 (错误码 %d)。已自动跳过, AI 助手将无法连接。" % [_port, err])
 		_http = null
 		return
+	# 只在**监听成功**后才认领 owner: 绑定失败还标记成"该我监听", 会让自愈反复重试
+	# 一个根本轮不到自己的端口。
+	_owner = self
 	_http.request_received.connect(_on_request)
-	LogTool.log("MCP", "MCP 服务器已开启(%s): http://127.0.0.1:%d/mcp" % [_mode, _port])
-	LogTool.log("MCP", "可用工具(%s): %s" % [_mode, _tool_defs.map(func(d): return d.name)])
+	# 工具名清单不打: 49 个名字会占满日志, 而它是静态的, 客户端随时能用 tools/list 查。
+	LogTool.log("MCP", "MCP 服务器已开启(%s): http://127.0.0.1:%d/mcp, 已注册 %d 个工具" % [_mode, _port, _tool_defs.size()])
 
 
 func stop() -> void:
+	if _owner == self:
+		_owner = null
 	if _http:
 		_http.request_received.disconnect(_on_request)
 		_http.stop()
@@ -256,73 +539,32 @@ func is_running() -> bool:
 
 
 ## ------- 工具注册 -------
+## 协议字段(title/annotations/outputSchema)统一由 MCPToolMeta 生成, 注册点只关心
+## "名字 + 说明 + 入参 schema + handler" 四件事。少一个字段不会编译失败、也不会在
+## tools/list 里报错, 只会让客户端把它当破坏性工具反复确认 —— 故用单一构建口杜绝漏填。
 func _add_tool(name: String, desc: String, input_schema: Dictionary, handler: Callable) -> void:
 	_tool_handlers[name] = handler
-	_tool_defs.append({"name": name, "description": desc, "inputSchema": input_schema})
+	_tool_schemas[name] = input_schema
+	_tool_defs.append(MCPToolMeta.build(name, desc, input_schema))
 
 
-## 无参工具的标准 schema
-func _no_arg_schema() -> Dictionary:
-	return {"type": "object", "properties": {}}
-
-
-## 常用 path 参数
-func _path_arg(desc: String) -> Dictionary:
-	return {"type": "string", "description": desc}
-
-
-## 常用 code 参数
-func _code_arg(desc: String = "要执行的 GDScript 代码(方法体内容, 缩进由服务器自动处理)") -> Dictionary:
-	return {"type": "string", "description": desc}
-
-
-## 游戏操作工具 schema(editor 代理版与 runtime 原生版共用)
-func _simulate_click_schema() -> Dictionary:
-	return {"type": "object", "properties": {
-		"x": {"type": "integer", "description": "屏幕X坐标"},
-		"y": {"type": "integer", "description": "屏幕Y坐标"},
-	}, "required": ["x", "y"]}
-
-
-func _simulate_drag_schema() -> Dictionary:
-	return {"type": "object", "properties": {
-		"from_x": {"type": "integer", "description": "起始X坐标"},
-		"from_y": {"type": "integer", "description": "起始Y坐标"},
-		"to_x": {"type": "integer", "description": "目标X坐标"},
-		"to_y": {"type": "integer", "description": "目标Y坐标"},
-	}, "required": ["from_x", "from_y", "to_x", "to_y"]}
-
-
-func _simulate_key_schema() -> Dictionary:
-	return {"type": "object", "properties": {
-		"key": {"type": "string", "description": "按键名称, 如 'space', 'enter', 'escape', 'a'-'z', '0'-'9'"},
-		"pressed": {"type": "boolean", "description": "true=按下, false=释放, 默认 true"},
-	}, "required": ["key"]}
-
-
-func _logs_schema(default_max: int, unit: String) -> Dictionary:
-	return {"type": "object", "properties": {
-		"max": {"type": "integer", "description": "最多条数(合并后), 默认 %d" % default_max},
-		"since": {"type": "integer", "description": "增量游标(上次返回的 next), 只返回此位置之后的%s, 默认 0=全量" % unit},
-		"merge": {"type": "boolean", "description": "是否合并连续重复%s, 默认 true" % unit},
-	}}
-
-
-## auto_verify 参数 schema
-func _auto_verify_schema() -> Dictionary:
-	return {"type": "object", "properties": {
-		"scene": {"type": "string", "description": "要启动的场景 res:// 路径, 缺省用主场景"},
-		"duration": {"type": "number", "description": "单次运行总时长上限(秒), 默认 4, 超过判失败"},
-		"stop_on_error": {"type": "boolean", "description": "任一步出错立即停止(true=hard)还是跑完再汇总(false=soft), 默认 true"},
-		"retries": {"type": "integer", "description": "失败后的重试次数(总执行=1+retries)。每轮独立重启场景, 用于排除 flaky/时序性失败。默认 0"},
-		"retry_backoff_ms": {"type": "integer", "description": "重试间隔毫秒, 默认 500"},
-		"prev_snapshot": {"type": "object", "description": "可选: 上次的 scene_deps 快照(由本工具返回), 传入后检测本次执行前脚本/资源/配置是否变化, 结果含 deps_changed(兼容 code_changed)。供 verify_fix 复用。"},
-		"operations": {"type": "array", "description": "操作序列(模拟玩家行为+延迟+断言)。每步格式: {'action': wait/click/drag/key/eval/poll/screenshot, ...}. wait 带 ms; click 带 x/y; drag 带 from_x/from_y/to_x/to_y; key 带 key; eval 带 code(GDScript, 可return); poll 带 code+timeout_ms(轮询直到返回 true); screenshot 可带 capture_type。操作间自动串行执行。"},
-	}}
+## ======= 工具参数 schema =======
+## 直接调用 MCPToolSchema 的工厂, 不在本文件另设转发层。
+## 转发层曾用于让拆分可回退, 拆分早已完成并验证通过, 它的可回退价值已经兑现完; 留着它
+## 只会让**同一个概念有两个名字**(_path_arg 与 MCPToolSchema.str_arg), 新增工具的人得
+## 先猜该用哪个 —— 这正是"接口不统一"的具体代价。各工厂的设计依据见 MCPToolSchema 内的注释。
 
 
 ## 通用游戏操作工具注册: editor 侧 handler 经调试线转发, runtime 侧就地执行
 func _register_game_play_tool(name: String, desc: String, schema: Dictionary, runtime_handler: Callable, editor_handler: Callable) -> void:
+	# 登记"入参自检该切哪一份"。两个 handler 里必有一个是纯转发 lambda, 而转发器不读任何入参键:
+	# 自检切它会因切不出函数体而**静默跳过**(见 MCPToolAudit.audit_handler_params), 于是这批工具
+	# 永久退出检查范围且无任何迹象。故把那份具体实现登记下来, 由自检去切它。
+	for h in [runtime_handler, editor_handler]:
+		var m := String(h.get_method())
+		if m != "<anonymous lambda>":
+			_tool_audit_handlers[name] = h
+			break
 	if _mode == MODE_EDITOR:
 		_add_tool(name, desc, schema, editor_handler)
 	else:
@@ -332,157 +574,115 @@ func _register_game_play_tool(name: String, desc: String, schema: Dictionary, ru
 func _reset_tools() -> void:
 	_tool_handlers.clear()
 	_tool_defs.clear()
+	# _tool_schemas 与 _tool_audit_handlers 一并清: 三份索引必须同增同减。少清一份当下不会报错
+	# (遍历 _tool_defs 走不到残留项), 只会在工具改名/删除后留下一条"按名可查、却不对应任何已注册
+	# 工具"的脏记录 —— 而那种残留恰好会在同名工具将来重新注册时静默生效, 比缺字段更难查。
+	_tool_schemas.clear()
+	_tool_audit_handlers.clear()
 
 
 func _register_editor_tools() -> void:
 	_reset_tools()
 	_register_validate_tools()
 	_register_log_tools()
-	_register_screenshot_tools()
 	_register_scene_tools()
-	_register_scene_edit_tools()
 	_register_project_tools()
 	_register_run_tools()
 	_register_dev_tools()
 	_register_file_tools()
 	_register_game_play_tools()
 
+	## 域文件注册。放在各 _register_* 之后: 域文件不认识本服务器, 只能靠传入 _add_tool 完成
+	## 注册, 所以它们的工具统一排在主文件工具之后。
+	MCPCodeIndex.register(_add_tool)
+	# eval_code 的运行时上下文(mode / 游戏启动时刻 / 日志捕获器)全是实例状态, 域文件拿不到,
+	# 经 provider 注入。**游戏进程侧也必须注入**(见 _register_runtime_tools): 那边的 game_eval
+	# 等宿主工具根本不走 register(), 漏注入时守卫会静默全放行且运行期错误完全捕获不到,
+	# 两种都不报错, 只表现为"game_eval 的问题查不出来"。
+	MCPDevTools.set_eval_ctx_provider(func(): return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger})
+	MCPDevTools.register(_add_tool)
+	MCPResourceTools.register(_add_tool)
+
+	_audit_tools()
+
+
+## ======= 契约自检 =======
+##
+## 为什么必须有: 全部工具(主文件 + 各域文件)都是手写注册, 而协议层的失败模式**全部是静默的**
+## —— handler 漏注册(调用时报 Unknown tool)、schema 少一个 properties(客户端按 schema 校验后
+## 把合法参数当非法)、annotations 名单写了不存在的工具名(白填)。没有任何一种会编译报错。
+## 这不是假设: 本框架此前就有 _call_set_node_transform 实现完整却从未注册的死代码,
+## 以及 SETTING_MAX_MESSAGES 定义后全项目无读取点的死设置, 两者都是靠人工翻代码发现的。
+## 拆分之后这条自检比拆分前更要紧: 域文件的 schema 与 handler 分处两个文件, 一旦主文件
+## 忘了把某个域接进来, 上面三种静默失败会有两种同时发生。
+##
+## 挂在两处注册收尾: 编辑器侧(_register_editor_tools 末)与游戏进程侧(_ready 的 runtime
+## 分支末)。各自只跑一次, 不重复告警。
+func _audit_tools() -> void:
+	# 自检规则本身在 MCPToolAudit 里; 这里只负责喂数据 + 报结果。
+	#
+	# 传进来的路径只用于**定位目录**: MCPToolAudit 会展开该目录下的全部 .gd, 而不是只扫本文件
+	# —— handler 已按域拆到 MCPCodeIndex 等文件, 只扫本文件等于那些域的入参一致性自检静默失效。
+	# 刻意不维护"要扫哪些文件"的名单: 名单会漏, 而漏掉的形态就是"那批工具永远通过检查"且无任何
+	# 迹象。理由详见 MCPToolAudit 的扫描范围说明。
+	# registry_is_full: 只有编辑器进程注册全量工具。游戏进程只注册运行时那部分, 在那里做
+	# "名单里的工具名是否都已注册"的反向校验会把分模式注册误报成名单未同步(实测刷 33 条)。
+	_tool_audit_issues = MCPToolAudit.audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR)
+	# 自检通过是常态, 静默即可; 只在发现问题时报警, 否则每次启动都要宣告一遍"没问题"。
+	if not _tool_audit_issues.is_empty():
+		LogTool.log("MCP", "工具契约自检发现 %d 个问题:\n  - %s" % [_tool_audit_issues.size(), "\n  - ".join(_tool_audit_issues)])
+
 
 ## ------- 工具实现 =======
 
 ## -- 脚本/资源验证 --
+## desc / schema / handler 已全部搬进 MCPValidateTools.register —— 契约单副本。
 func _register_validate_tools() -> void:
-	_add_tool("validate",
-		"统一验证入口。kind=script: 验证GDScript语法/可编译性(传path读磁盘或传code源码), 返回是否有效与错误明细; kind=resource: 验证资源/场景能否被引擎加载(排查.tres/.tscn损坏或依赖缺失)。",
-		{"type": "object", "properties": {
-			"kind": {"type": "string", "enum": ["script", "resource"], "description": "验证类型, 默认 script"},
-			"path": _path_arg("目标 res:// 路径(script 与 code 二选一)"),
-			"code": {"type": "string", "description": "kind=script 时可直接传源码文本"}
-		}},
-		_call_validate)
-
-	_add_tool("list_dir",
-		"列出res://或user://目录下的文件/子目录。",
-		{"type": "object", "properties": {"path": _path_arg("目录路径, 默认 res://"), "recursive": {"type": "boolean", "description": "是否递归列出子目录, 默认 false"}}},
-		_call_list_dir)
-
-	_add_tool("classdb_query",
-		"查询Godot类API(方法/属性/信号/枚举)。search模糊搜类名, class_name查指定类成员。写脚本前确认API签名用。返回JSON。",
-		{"type": "object", "properties": {
-			"class_name": {"type": "string", "description": "要查询的类名(如 CharacterBody2D/Button), 提供后返回该类的成员清单"},
-			"search": {"type": "string", "description": "按关键字模糊搜索类名(如 'body' 匹配 CharacterBody2D/RigidBody2D 等)"},
-			"methods": {"type": "boolean", "description": "是否返回方法清单, 默认 true"},
-			"properties": {"type": "boolean", "description": "是否返回属性清单, 默认 true"},
-			"signals": {"type": "boolean", "description": "是否返回信号清单, 默认 true"}
-		}},
-		_call_classdb_query)
+	MCPValidateTools.register(_add_tool)
 
 
 ## -- 日志/错误 --
+## 日志类工具的进程归属**只由工具名决定**, 不由参数决定: 本函数注册的这一对只读编辑器进程
+## 自己的缓冲, 游戏进程的一律 get_game_*/clear_game_*。这条判据与"旧的 source=auto 三档"
+## 为何要收掉的历史理由已搬进 MCPLogTools 顶部, 留一份在这里只会与域文件各说各话而漂移。
 func _register_log_tools() -> void:
-	_add_tool("get_logs",
-		"统一获取日志/错误/警告(获取而非打印)。kind=log 取print日志; kind=warning 取push_warning警告; kind=error 取脚本错误(script_error/shader_error/stderr, 含栈追踪)。source=auto 时游戏运行中自动取游戏侧否则编辑器侧。返回next游标作since增量拉取, 连续重复自动合并(repeat计数)节省token。",
-		{"type": "object", "properties": {
-			"kind": {"type": "string", "enum": ["log", "warning", "error"], "description": "获取类别, 默认 log"},
-			"source": {"type": "string", "enum": ["auto", "editor", "game"], "description": "来源, 默认 auto(游戏运行中=game)"},
-			"max": {"type": "integer", "description": "最多返回条数, 默认 200(log)/100(warning|error)"},
-			"since": {"type": "integer", "description": "增量游标(上次返回的 next), 默认 0=全量"},
-			"merge": {"type": "boolean", "description": "是否合并连续重复条目, 默认 true"}
-		}},
-		_call_get_logs)
-
-	_add_tool("clear_logs",
-		"清空日志/错误缓冲(调试复位)。scope=all 全清; scope=logs 只清print日志; scope=errors 只清错误与警告。有游戏会话时作用于游戏进程。",
-		{"type": "object", "properties": {
-			"scope": {"type": "string", "enum": ["all", "logs", "errors"], "description": "清理范围, 默认 all"}
-		}},
-		_call_clear_logs)
+	# 游戏进程侧的 get_game_logs / get_game_errors / clear_game_errors / clear_game_logs
+	# 也复用 MCPLogTools 的底层件, 所以**两个进程都要注入捕获器**。漏注入时那几个工具会
+	# 显式返回"日志捕获器未就绪"(不是静默失效), 见 MCPLogTools.bind_logger 的注释。
+	MCPLogTools.bind_logger(_logger)
+	MCPLogTools.register(_add_tool)
 
 
-## -- 截图 --
-func _register_screenshot_tools() -> void:
-	# take_screenshot 由 _register_runtime_tools 统一注册(_register_game_play_tool 按 mode 分流),
-	# editor 版经 _call_take_screenshot 支持 text/game/editor/scene 四模式。
-	pass
-
-
-## -- 场景树 / 节点 --
+## -- 场景树 / 节点 + 场景编辑 --
+## 原先分两组注册(读: _register_scene_tools, 写: _register_scene_edit_tools), 现合并为一次
+## MCPSceneTools.register: 9 个工具同属一个域, 拆成两次调用只会让"一个域一次注册"出现两种
+## 粒度。desc / schema / handler 全在域文件内, 契约单副本。
 func _register_scene_tools() -> void:
-	_add_tool("get_scene_tree",
-		"获取当前编辑场景的节点树结构(路径/名称/类型)。理解场景结构用。",
-		{"type": "object", "properties": {"max_depth": {"type": "integer", "description": "最大展开深度, 默认 8"}, "include_properties": {"type": "boolean", "description": "是否附带每个节点的关键属性, 默认 false"}}},
-		_call_get_scene_tree)
-
-	_add_tool("get_node_info",
-		"获取编辑场景中指定节点的属性及当前值。path传节点名或路径(如Main/Player)。",
-		{"type": "object", "properties": {"path": _path_arg("节点路径(编辑场景内), 如 'Main' 或 'Main/Player'")}},
-		_call_get_node_info)
-
-	_add_tool("set_node_property",
-		"修改编辑场景中节点属性(调试用), UndoRedo提交可按Ctrl+Z撤。仅改内存, 需save_scene写回.tscn。支持任意属性含 Node2D/Node3D 的 position/rotation/scale(Vector 可传 '1,2'/'1,2,3' 字符串)。",
-		{"type": "object", "properties": {"path": _path_arg("节点路径(编辑场景内)"), "property": {"type": "string", "description": "属性名"}, "value": {"description": "新值(支持数字/字符串/布尔; Vector2 等可传 '1,2' 字符串)"}}},
-		_call_set_node_property)
-
-	_add_tool("call_node_method",
-		"调用编辑场景中节点的方法(调试触发逻辑, 如播放动画/切换状态)。args以数组传参。",
-		{"type": "object", "properties": {"path": _path_arg("节点路径(编辑场景内)"), "method": {"type": "string", "description": "方法名"}, "args": {"type": "array", "description": "参数数组"}}},
-		_call_call_node_method)
-
-
-## -- 场景编辑 --
-func _register_scene_edit_tools() -> void:
-	_add_tool("add_node",
-		"在当前编辑场景添加节点或实例化子场景。node_type为类名或.tscn的res://路径。UndoRedo提交可Ctrl+Z撤。",
-		{"type": "object", "properties": {"parent": {"type": "string", "description": "父节点路径(编辑场景内), 缺省为场景根"}, "node_type": {"type": "string", "description": "节点类型类名或子场景 res:// 路径"}, "name": {"type": "string", "description": "新节点名称(可选)"}}},
-		_call_add_node)
-
-	_add_tool("save_scene",
-		"保存当前编辑场景到.tscn(set_node_property/add_node改动需save后写回)。",
-		_no_arg_schema(),
-		_call_save_scene)
-
-	_add_tool("remove_node",
-		"从当前编辑场景删除指定节点(含子树)。UndoRedo提交可Ctrl+Z撤。",
-		{"type": "object", "properties": {"path": _path_arg("节点路径(编辑场景内)")}, "required": ["path"]},
-		_call_remove_node)
-
-	_add_tool("duplicate_node",
-		"复制当前编辑场景中的节点(含子树), 可作为兄弟节点。UndoRedo提交可Ctrl+Z撤。",
-		{"type": "object", "properties": {"path": _path_arg("要复制的节点路径(编辑场景内)"), "new_name": {"type": "string", "description": "新节点名称(可选, 默认原名+_copy)"}}, "required": ["path"]},
-		_call_duplicate_node)
-
-	_add_tool("connect_signal",
-		"在编辑场景节点上连接信号到方法(运行时连接, 随场景保存)。source_path源节点, signal信号名(如 'pressed'), method目标方法名, target_path目标节点(缺省为源节点所在场景根)。",
-		{"type": "object", "properties": {
-			"source_path": {"type": "string", "description": "发出信号的节点路径"},
-			"signal": {"type": "string", "description": "信号名(如 pressed)"},
-			"method": {"type": "string", "description": "要连接的方法名"},
-			"target_path": {"type": "string", "description": "目标节点路径(缺省为源节点)"}
-		}, "required": ["source_path", "signal", "method"]},
-		_call_connect_signal)
+	MCPSceneTools.register(_add_tool)
 
 
 ## -- 项目信息 --
+## get_project_info / get_editor_activity 迁到 MCPProjectTools。两个 handler 都需要宿主侧的
+## 会话事实(mcp_running / game_running / bridge_ready), 那是主服务器的实例状态, 域文件拿不到,
+## 故这里注入一个 provider。**必须现取现用而不是注册时拍快照** —— 用户随时启停游戏, 快照过了
+## 第一次 refresh_tools 就永久过期, 表现为"游戏正跑着而 get_editor_activity 报 game_running=null",
+## 反而会邀请 game_control 去抢占一个正在运行的会话。
 func _register_project_tools() -> void:
-	_add_tool("get_project_info",
-		"项目信息统一入口。section=basic: 名称/版本/当前编辑场景/主场景/运行模式; section=settings: 关键配置(主场景/autoload/输入映射/图层命名); section=classes: 已注册全局类清单(类名/路径/基类, 确认新 class_name 是否生效)。",
-		{"type": "object", "properties": {
-			"section": {"type": "string", "enum": ["basic", "settings", "classes"], "description": "信息分区, 默认 basic"}
-		}},
-		_call_get_project_info)
-
-	_add_tool("get_editor_activity",
-		"编辑器状态(打开场景/选中节点/运行游戏/文件系统选中项), 感知用户在编辑器做了什么避免踩踏。",
-		_no_arg_schema(),
-		_call_get_editor_activity)
+	MCPProjectTools.set_session_facts_provider(func() -> Dictionary:
+		return {
+			"mcp_running": is_running(),
+			"game_running": _has_game_session(),
+			"bridge_ready": _has_game_session() and _game_ready,
+		})
+	MCPProjectTools.register(_add_tool)
 
 
 ## -- 运行游戏 --
 func _register_run_tools() -> void:
 	_add_tool("game_control",
-		"游戏运行控制。action=start: 以调试模式启动(等效F5, 自动建EngineDebugger调试线; scene缺省用主场景且支持 uid:// 形式; 游戏已在运行时自动停止旧实例后重启); action=stop: 停止运行中的游戏。",
+		"游戏运行控制。action=start: 以调试模式启动(等效F5, 自动建EngineDebugger调试线; scene缺省用主场景且支持 uid:// 形式; 游戏已在运行时自动停止旧实例后重启); action=stop: 停止运行中的游戏; action=continue: 解除因脚本错误/断点被暂停的游戏(等效Debugger面板Continue)—— 工具报 error_category=game_breaked 时用它恢复, 未暂停时调用是安全的空操作。【副作用】start/stop 会抢占并中断用户手头正在玩的那个游戏进程 —— 执行前先用 get_editor_activity 确认没有正在进行的调试, 执行后游戏不会自动恢复。",
 		{"type": "object", "properties": {
-			"action": {"type": "string", "enum": ["start", "stop"], "description": "启动或停止"},
+			"action": {"type": "string", "enum": ["start", "stop", "continue"], "description": "启动/停止/解除断点暂停"},
 			"scene": {"type": "string", "description": "action=start 时可选: 要运行的场景 res:// 或 uid:// 路径"}
 		}, "required": ["action"]},
 		_call_game_control)
@@ -504,176 +704,223 @@ func _register_run_tools() -> void:
 
 
 ## -- 开发辅助(重载编辑器/求值/设置) --
+## 原先这个函数是个混装大组(restart_editor / refresh_tools / run_tests / script_status /
+## eval_code / open_scene / set_main_scene / project_setting / save_all / reimport /
+## create_resource / get_resource_info)。拆分后只剩两个留在这里:
+##   - refresh_tools 要重跑 _register_editor_tools 整棵注册树, 并读 _tool_defs /
+##     _tool_audit_issues / _schema_fingerprint(), 全是注册表自身状态, 域文件拿不到也不该拿;
+##   - run_tests 属测试域, 已拆进 MCPTestTools。
+## 其余: eval_code / script_status / restart_editor -> MCPDevTools(见 _register_editor_tools);
+## 7 个资源与项目设置类工具 -> MCPResourceTools。
 func _register_dev_tools() -> void:
-	_add_tool("reload_project",
-		"软重启(重载)编辑器: 修改框架代码(addons/DEVFramework/**.gd)后调用, 以统一全局类脚本代次并让新逻辑生效(原重扫逻辑已由编辑器自动处理, 不再需要)。延迟默认1秒触发以保证本响应先送达; 重启期间MCP连接短暂断开(端口不变+插件自启自动恢复), 客户端等待数秒后重试调用即可继续。",
-		{"type": "object", "properties": {
-			"save": {"type": "boolean", "description": "重启前是否自动保存全部场景, 默认 true"},
-			"delay_sec": {"type": "number", "description": "延迟触发的秒数(留时间送达本响应), 默认 1.0, 上限 10"}
-		}},
-		_call_reload_project)
-
 	_add_tool("refresh_tools",
-		"手动重建 MCP 工具注册表: 修改框架脚本(如 MCPDevServer.gd 新增/修改工具描述或参数)后调用, 免重启编辑器。响应含当前工具数; 客户端随后重新拉取 tools/list 即拿到最新定义。",
-		_no_arg_schema(),
+		"手动重建 MCP 工具注册表(免重启编辑器), 响应含工具数、schema_fingerprint 与契约自检结果。**判定'是否真的生效': 跨次对比 schema_fingerprint** —— 指纹不变即工具表没变。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 客户端缓存的旧 tools/list 不会自动刷新, 需在 IDE 侧重连 MCP 才更新; 在此之前, 以 tools/list 直查服务器为准, 勿把会话开始时的快照当权威。【重要: 适用范围】改动**被本服务器 preload 的其他脚本**时有效, 例如 MCPToolMeta.gd 的注解名单(READ_ONLY/DESTRUCTIVE/SIDE_EFFECT/IDEMPOTENT)、MCPToolSchema.gd 的入参构造、具体工具实现的辅助脚本 —— 只需调用本工具。但改动 **MCPDevServer.gd 自身**(新增/修改工具、描述、注册表逻辑)时**本工具无效**: 运行实例的方法体不会被热替换, 必须重建服务器实例(禁用再启用 DEVFramework 插件, 或 restart_editor)。该情况下本工具仍返回成功, 但注册表内容原样不变 —— 正是靠 schema_fingerprint 不变来识别这种'假成功'。",
+		MCPToolSchema.no_arg(),
 		_call_refresh_tools)
 
-	_add_tool("run_tests",
-		"运行项目单元测试(Scripts/Test/ 目录, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。返回通过/失败统计与失败明细。修改核心逻辑(ModifierValue/EffectsDef/StateMachine/Task/GameCommand 等)后建议调用。",
-		{"type": "object", "properties": {
-			"filter": {"type": "string", "description": "可选: 用例文件路径子串过滤, 如 test_effects"}
-		}},
-		_call_run_tests)
-
-	_add_tool("eval_code",
-		"在编辑器进程执行GDScript(查值/调工具/验证逻辑)。可return返回值, print进get_logs。支持await: 代码含await时等待协程完成后回传最终结果(timeout_ms默认8000, 上限15000; 超时协程继续后台执行)。包装为Node方法, 可用get_tree()/get_node()。缩进自动归一化。字符串内换行用char(10)勿用'\\n'(JSON会拆行)。",
-		{"type": "object", "properties": {"code": {"type": "string", "description": "要执行的 GDScript 代码(方法体内容, 缩进由服务器自动处理)"}, "timeout_ms": {"type": "integer", "description": "可选: 含await代码的等待上限毫秒, 默认 8000, 上限 15000"}}},
-		_call_eval_code)
-
-	_add_tool("search_symbols",
-		"跨脚本与场景/资源配置搜索符号。.gd 支持函数/变量/类定义与引用; .tscn/.tres 支持节点定义(node)、资源关联(ext_resource)、引用。改签名/改节点名/查某资源在哪些场景被用, 或找某功能实现位置。",
-		{"type": "object", "properties": {
-			"query": {"type": "string", "description": "要搜索的标识符(如 _generate / player_pos / Player 节点名 / MyClass / 资源路径)"},
-			"kind": {"type": "string", "description": "过滤: function/variable/class(仅.gd)/node(节点名)/resource(ext_resource)/ref(引用)/all(默认)"},
-			"path": _path_arg("限定搜索目录(res://子路径), 默认 res:// 全项目"),
-			"include_resources": {"type": "boolean", "description": "是否搜索 .tscn/.tres 文件, 默认 true"},
-			"max_results": {"type": "integer", "description": "最多返回条数, 默认 100"}
-		}, "required": ["query"]},
-		_call_search_symbols)
-
-	_add_tool("find_resource_users",
-		"查任意资源的双向依赖: users=谁引用该资源(反向), deps=该资源依赖谁(正向依赖链, 含脚本/配置/场景/资产类型标签)。兼容 Godot4 的 res://路径 与 uid://xxx 两种引用形式。目标为带全局类名的脚本时, 额外扫描其它 .gd 中类名的词边界使用点(类型注解/extends/静态调用等, kind=class_ref)。改名/删除/移动资源前查完整影响面。",
-		{"type": "object", "properties": {
-			"path": _path_arg("目标资源路径(如 res://Scenes/Main.tscn 或 Scenes/Main.tscn)"),
-			"max_results": {"type": "integer", "description": "最多返回引用文件数, 默认 100"},
-			"include_script_refs": {"type": "boolean", "description": "是否包含 .gd 脚本里的 preload/load 引用, 默认 true"},
-			"include_class_refs": {"type": "boolean", "description": "是否包含全局类名在 .gd 中的词边界引用扫描(仅目标是带 class_name 的脚本时生效), 默认 true"}
-		}, "required": ["path"]},
-		_call_find_resource_users)
-
-	_add_tool("open_scene",
-		"在编辑器打开场景(res://路径)。",
-		{"type": "object", "properties": {"path": _path_arg("场景 res:// 路径")}},
-		_call_open_scene)
-
-	_add_tool("set_main_scene",
-		"设置项目主场景并保存project.godot。",
-		{"type": "object", "properties": {"path": _path_arg("主场景 res:// 路径")}},
-		_call_set_main_scene)
-
-	_add_tool("project_setting",
-		"读写任意项目设置项(如 application/config/name)。value 缺省=读取; 提供 value=写入并保存。数组/对象值会自动还原为真正的 Variant。",
-		{"type": "object", "properties": {
-			"name": {"type": "string", "description": "设置项名称"},
-			"value": {"description": "可选: 新值; 缺省则只读"}
-		}, "required": ["name"]},
-		_call_project_setting)
-
-	_add_tool("save_all",
-		"保存全部打开的场景与项目设置。",
-		_no_arg_schema(),
-		_call_save_all)
-
-	_add_tool("reimport",
-		"重新导入资源(重建.godot/imported缓存), 资源显示异常/导入配置变更后使用。",
-		{"type": "object", "properties": {"path": _path_arg("要重新导入的资源 res:// 路径")}},
-		_call_reimport)
-
-	_add_tool("create_resource",
-		"创建 .tres 资源配置: 指定脚本(class_name 或 res://脚本路径)与属性字典, 写入 res:// 或 user:// 路径。配置驱动开发时创建 Def 资源用。注意: 新建脚本 class_name 需先 reload_project 才能被引擎识别, 若创建失败请先 reload。",
-		{"type": "object", "properties": {
-			"path": _path_arg("要创建的 .tres 完整路径(如 res://Assets/Def/PCG/MyDef.tres)"),
-			"script": {"type": "string", "description": "脚本 class_name 或 res:// 脚本路径(如 GridGenDef 或 res://addons/.../GridGenDef.gd)"},
-			"properties": {"type": "object", "description": "属性字典(键=导出属性名, 值=属性值), 可嵌套资源/数组"}
-		}, "required": ["path", "script"]},
-		_call_create_resource)
-
-	_add_tool("get_resource_info",
-		"读取 .tres/.tscn 资源的完整属性树(递归), 便于理解配置结构。返回类型/导出属性/嵌套子资源/引用的脚本。排查配置或了解 Def 资源用。",
-		{"type": "object", "properties": {
-			"path": _path_arg("资源 res:// 路径(如 res://Assets/Def/PCG/Grid_Cave.tres)"),
-			"max_depth": {"type": "integer", "description": "嵌套资源最大展开深度, 默认 5"}
-		}, "required": ["path"]},
-		_call_get_resource_info)
+	# run_tests 已搬进 MCPTestTools —— 为何编辑器侧只跑进程无关用例, 见该文件。
+	MCPTestTools.register(_add_tool)
 
 
 ## -- 文件操作 --
+## desc / schema / handler 与路径守卫(guard_write_path)全部搬进 MCPFileTools。
+## "写类工具统一带 dry_run"的使用约定说明也一并搬走 —— 留一份在这里只会与域文件
+## 各说一份而漂移。
 func _register_file_tools() -> void:
-	_add_tool("read_file",
-		"读取文件内容(UTF-8)。返回内容与大小。",
-		{"type": "object", "properties": {
-			"path": _path_arg("文件路径(res:// 或 user://)")
-		}, "required": ["path"]},
-		_call_read_file)
-
-	_add_tool("write_file",
-		"写入内容到文件(不存在则创建, 含目录; 存在则覆盖)。",
-		{"type": "object", "properties": {
-			"path": _path_arg("文件路径(res:// 或 user://)"),
-			"content": {"type": "string", "description": "要写入的内容"}
-		}, "required": ["path", "content"]},
-		_call_write_file)
-
-	_add_tool("append_file",
-		"追加内容到文件(不存在则创建)。",
-		{"type": "object", "properties": {
-			"path": _path_arg("文件路径(res:// 或 user://)"),
-			"content": {"type": "string", "description": "要追加的内容"}
-		}, "required": ["path", "content"]},
-		_call_append_file)
-
-	_add_tool("delete_file",
-		"删除文件或空目录。",
-		{"type": "object", "properties": {
-			"path": _path_arg("文件或目录路径(res:// 或 user://)")
-		}, "required": ["path"]},
-		_call_delete_file)
-
-	_add_tool("file_exists",
-		"检查文件或目录是否存在。",
-		{"type": "object", "properties": {
-			"path": _path_arg("文件或目录路径(res:// 或 user://)")
-		}, "required": ["path"]},
-		_call_file_exists)
+	MCPFileTools.register(_add_tool)
 
 
 ## ======= MCP 协议处理 =======
 
-func _on_request(method: String, path: String, headers: Dictionary, body: PackedByteArray, stream) -> void:
+func _on_request(method: String, path: String, query: String, headers: Dictionary, body: PackedByteArray, stream) -> void:
 	# MCP 服务器已关闭时忽略请求（编辑器重启期间）
 	if _http == null:
 		return
 	if method == "OPTIONS":
 		_http.send_response(stream, 204, _cors_headers(headers), "")
 		return
+	if method == "GET":
+		_serve_sse(stream, headers)
+		return
 	if method != "POST":
-		_http.send_response(stream, 405, {"Allow": "POST, OPTIONS", "Content-Type": "application/json"}, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"Method Not Allowed\"},\"id\":null}")
+		_send_rpc_error(stream, 405, headers, null, ERR_TRANSPORT_REJECTED, "Method Not Allowed", {}, {"Allow": "POST, GET, OPTIONS"})
 		return
 	# 鉴权: 可选 Bearer token(dev_framework/mcp/token, 非空时启用)
 	var token: String = ProjectSettings.get_setting(SETTING_TOKEN, "")
 	if not token.is_empty():
 		var auth := str(headers.get("authorization", ""))
 		if auth != "Bearer " + token:
-			_http.send_response(stream, 401, _cors_headers(headers), JSON.stringify({"jsonrpc": "2.0", "error": {"code": - 32000, "message": "Unauthorized"}, "id": null}))
+			_send_rpc_error(stream, 401, headers, null, ERR_TRANSPORT_REJECTED, "Unauthorized")
 			return
 	# 校验 Origin: 拦截浏览器/外部站点的跨域调用(eval_code 可执行任意代码, 防本机 RCE)。
 	# 无 Origin(本地 CLI/工具)或本机 Origin 放行。
 	var origin := str(headers.get("origin", "")).to_lower()
 	if not origin.is_empty() and not (origin.begins_with("http://127.0.0.1") or origin.begins_with("http://localhost") or origin.begins_with("http://0.0.0.0")):
-		_http.send_response(stream, 403, _cors_headers(headers), JSON.stringify({"jsonrpc": "2.0", "error": {"code": - 32000, "message": "Forbidden"}, "id": null}))
+		_send_rpc_error(stream, 403, headers, null, ERR_TRANSPORT_REJECTED, "Forbidden")
 		return
 	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
 	if parsed == null or not parsed is Dictionary:
-		_http.send_response(stream, 400, {"Content-Type": "application/json"}, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error\"},\"id\":null}")
+		_send_rpc_error(stream, 400, headers, null, ERR_PARSE, "Parse error")
 		return
 	var req: Dictionary = parsed
-	var response := await _handle_jsonrpc(req)
+	# 协议版本协商(2026-07-28 起逐请求声明)。两处都缺省才回落 PROTOCOL_VERSION ——
+	# 旧客户端两个都不发, 走老握手, 行为与改动前完全一致。
+	var proto := str(headers.get(HEADER_VERSION, ""))
+	var meta_version := ""
+	var rparams: Variant = req.get("params", null)
+	# meta 提到函数级作用域: 除了版本号, 下面还要查 clientCapabilities 是否存在,
+	# 而原先它只在 if 块内可见。
+	var meta := {}
+	if rparams is Dictionary:
+		var raw_meta: Variant = (rparams as Dictionary).get("_meta", null)
+		if raw_meta is Dictionary:
+			meta = raw_meta
+			meta_version = str(meta.get(META_VERSION_KEY, ""))
+	if not meta_version.is_empty() and not proto.is_empty() and meta_version != proto:
+		# 规范要求二者必须一致, 不一致直接 400: 放行会让"头说 A 体说 B"的请求按错误版本解析。
+		# data 里回两个实际收到的值和可用版本: 客户端据此能自行改对后重试, 只给一句
+		# message 的话它无从判断该改哪个 —— 而它本来完全有能力自己修好。
+		_send_rpc_error(stream, 400, headers, req.get("id", null), ERR_HEADER_MISMATCH,
+			"Header mismatch: %s 与 _meta 声明的版本不一致" % HEADER_VERSION,
+			{"supported": SUPPORTED_PROTOCOL_VERSIONS, "header": proto, "meta": meta_version})
+		return
+	# declared 与 effective 必须分开, 两者含义不同:
+	#   declared  = 客户端**实际声明**了什么版本。全程只读, 用来做一致性与规范判定。
+	#   effective = 本次实际按哪一版解析。降级只改它。
+	# 早先把降级结果写回 requested, 于是"服务端决定用 2026-07-28 解析"被当成了"客户端声明了
+	# 2026-07-28", 紧接着的 _meta 必填校验据此要求该客户端补 _meta —— 而它声明的是 2099-01-01,
+	# 从未说过自己支持 2026-07-28。等于凭空造出一个它无论如何都满足不了的要求, 客户端只会看到
+	# "缺 protocolVersion"却查不出自己到底哪错了。
+	var declared := proto if not proto.is_empty() else meta_version
+	var rpc_method := str(req.get("method", ""))
+	var effective := declared
+	if not declared.is_empty() and not SUPPORTED_PROTOCOL_VERSIONS.has(declared):
+		if rpc_method == "initialize" or not _version_negotiated:
+			# 协商降级而不是报错(理由见 _negotiate_version 与 _version_negotiated 的注释)。
+			# 握手期报错等于失联: 2025-11-25 及更早的客户端拿到版本错误不会重试。
+			effective = _negotiate_version(declared)
+			LogTool.log("MCP", "%s 请求的协议版本 %s 不受支持, 协商降级为 %s (支持: %s)" % [rpc_method, declared, effective, str(SUPPORTED_PROTOCOL_VERSIONS)])
+		else:
+			# 协商完成后仍发陌生版本: 说明它跳过了握手或中途换了版本, 按猜测的版本解析只会错。
+			#
+			# 这里必须打日志 —— 本分支原本一行日志都不打, 结果是客户端界面显示
+			# "MCP error -32022: Unsupported protocol version", 而服务端日志里既没有这条
+			# 错误、也没有对应的 POST 记录, 完全看不出客户端到底要哪个版本, 无法定位。
+			LogTool.log("MCP", "拒绝 %s: 协议版本 %s 不受支持 (支持: %s)" % [rpc_method, declared, str(SUPPORTED_PROTOCOL_VERSIONS)])
+			_send_rpc_error(stream, 400, headers, req.get("id", null), ERR_UNSUPPORTED_VERSION,
+				"Unsupported protocol version",
+				{"supported": SUPPORTED_PROTOCOL_VERSIONS, "requested": declared})
+			return
+	# 2026-07-28 起规范要求: 声明了该版本的请求, 其 _meta 必须**同时**带 protocolVersion 与
+	# clientCapabilities, 缺任一即为 malformed request, 必须回 ERR_INVALID_PARAMS + HTTP 400。
+	#
+	# 刻意用 Invalid params 而不是 ERR_UNSUPPORTED_VERSION: 那是另一个问题 —— 请求可能完全合法,
+	# 只是没说清自己用的哪一版, 客户端把字段补上就能继续, 不该被当成"版本不受支持"。
+	#
+	# 两点收窄, 都是为了不误伤现有客户端:
+	#   - 只对声明了 META_REQUIRED_SINCE 的请求生效(旧版本是握手式, _meta 里没有这两个字段);
+	#   - 跳过 initialize —— 它正是用来协商版本的, 要求它先声明版本是循环依赖。
+	# 判定依据是 declared(客户端声明的原始版本)而非 effective: 若按 effective 判定, 上面刚被
+	# 降级到这个版本的客户端会被要求补 _meta, 而它降级的原因恰恰是它不认识这一版。
+	if declared == META_REQUIRED_SINCE and rpc_method != "initialize":
+		var missing: Array[String] = []
+		if meta_version.is_empty():
+			missing.append(META_VERSION_KEY)
+		if not meta.has(META_CLIENT_CAPS_KEY):
+			missing.append(META_CLIENT_CAPS_KEY)
+		if not missing.is_empty():
+			_send_rpc_error(stream, 400, headers, req.get("id", null), ERR_INVALID_PARAMS,
+				"Missing required _meta field(s): %s" % ", ".join(missing),
+				{"missing": missing, "required": [META_VERSION_KEY, META_CLIENT_CAPS_KEY]})
+			return
+	# 两处都没声明版本(老客户端)才回落 PROTOCOL_VERSION; 降级过的 effective 本身必是受支持版本
+	if effective.is_empty():
+		effective = PROTOCOL_VERSION
+	# 提前取 sessionId: 旧式 SSE 会话投递的请求要把响应改走 SSE 流, 且日志需与会话对应
+	var sid := _query_param(query, "sessionId")
+	# 默认只记**首次**版本协商那一条, 且只在全量开关打开时才记其余请求。
+	# 不记 tools/list / prompts/list / resources/list / notifications/initialized: 它们每个会话
+	# 只发生一次, 逐条打出来是纯噪音 —— 排查握手真正需要的恰恰是"协商成了什么 / 请求有没有落到
+	# 正确的 SSE 会话上", 不是这四条记账流水。tools/call 同样不打(结果已由 _log_tool_result 记过)。
+	#
+	# **initialize 必须用 _version_negotiated 收窄, 不能无条件打**: 客户端每次重连/换会话都会重发
+	# initialize, 条件里写死 rpc_method == "initialize" 时 IDE 一抖动就是一串同内容日志, 而协商
+	# 结果并不会每次都变。首协商之后该字段为 true, 重连的 initialize 便不再记录。
+	# 现场排查要全量时 set 一下即可, 不必重启编辑器(那会顺带踢掉客户端的 SSE 连接)。
+	if _log_rpc or (rpc_method == "initialize" and not _version_negotiated):
+		LogTool.log("MCP", "POST %s | 版本 %s | 会话 %s" % [rpc_method, effective, sid if not sid.is_empty() else "-"])
+	var response := await _handle_jsonrpc(req, effective)
+	if rpc_method == "initialize" and not response.is_empty():
+		_version_negotiated = true
 	# JSON-RPC 通知(无 id)按 MCP 规范回 202 空响应
 	if response.is_empty():
 		_http.send_response(stream, 202, {}, "")
 		return
-	var json := JSON.stringify(response)
+	var json := MCPFormat.json_safe(JSON.stringify(response))
+	# 旧式 SSE 会话投递的请求: 响应必须回写到它开的那条 SSE 流, POST 上只回 202。
+	# 若这里直接在 POST 上回 JSON, 旧式客户端永远读不到响应(它不读 POST 的 body),
+	# 现象是"显示已连接但所有工具都超时"。会话已失效时才降级回 Streamable HTTP 直回。
+	if _http.has_sse_session(sid):
+		if _http.send_sse_message(sid, json):
+			_http.send_response(stream, 202, {}, "")
+			return
+		LogTool.log("MCP", "旧式 SSE 会话 %s 已失效, 降级为 Streamable HTTP 直回" % sid)
 	_http.send_response(stream, 200, _cors_headers(headers), json)
+
+
+## GET /mcp → 开启旧式 HTTP+SSE 会话。
+##
+## 规范(Transports §Backwards Compatibility)要求新旧两个端点并存: POST 走 Streamable HTTP,
+## GET 走旧式 SSE。客户端用哪种取决于它的配置 —— 未声明 transportType 的客户端
+## (如 CodeBuddy 的 .mcp.json 只写 url 时)默认按旧式 SSE 连接, 会先 GET 等 endpoint 事件。
+##
+## 之前这里对 GET 一律回 405, 代码注释写的是"客户端会回退纯 POST, 全部工具正常"——
+## **实测是错的**: 客户端收到 405 后直接放弃, 一次 POST 都不发, 界面永远停在"连接中"。
+## 所以 GET 必须真的把流开出来, 而不是拒掉。
+func _serve_sse(stream, headers: Dictionary) -> void:
+	var endpoint := _endpoint_url()
+	# 已完成握手的客户端走的是 Streamable HTTP(请求全在 POST 上直回), 它此刻 GET 开的
+	# 流只是通知/保活通道, 永不承载请求 —— 再套 10s 未使用回收就会把它当废弃流掐断,
+	# 客户端随即重开, 形成"断流-重连"死循环, 界面一直停在"连接中"。
+	var sid := _http.open_legacy_sse(stream, _sse_headers(headers), endpoint, not _version_negotiated)
+	if sid.is_empty():
+		# 开不了流(并发已满/连接已断) → 回 405, 客户端仍可退回纯 Streamable HTTP
+		_send_rpc_error(stream, 405, headers, null, ERR_TRANSPORT_REJECTED, "Method Not Allowed", {}, {"Allow": "POST, GET, OPTIONS"})
+		return
+	# 默认**不记**这条: 客户端每次重连/重试都会走一遍这里, 实测 IDE 抖动时就是一串同内容日志,
+	# 而"客户端连上了"从插件启用那条就能看出。排查"sessions 握手不通"时才 set 全量开关。
+	# 要记就只取 sid 前 8 位 —— 完整 uuid 没有可读价值, 却会挤掉后面的诊断信息。
+	if _log_rpc:
+		LogTool.log("MCP", "GET /mcp 通告 endpoint=%s, 会话 %s" % [endpoint, sid.substr(0, 8)])
+
+
+## SSE 响应头。与 _cors_headers 分开是因为语义不同: 那里是"一次 JSON-RPC 往返"的响应头,
+## 带 Mcp-Session-Id 指代 Streamable HTTP 的会话; 而这里开的是旧式 SSE 流, 它的身份由
+## 通告出去的 endpoint 里的 sessionId 决定, 再附一个 Streamable HTTP 语义的会话头只会误导客户端。
+func _sse_headers(headers: Dictionary) -> Dictionary:
+	var h := {
+		"Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+		"Access-Control-Allow-Headers": "Authorization, Content-Type, Mcp-Session-Id",
+	}
+	var origin := str(headers.get("origin", ""))
+	if not origin.is_empty():
+		h["Access-Control-Allow-Origin"] = origin
+	return h
+
+
+## 通告给旧式客户端的 POST 地址。用绝对 URL: 部分旧客户端不会拿它与 SSE 的 URL 做相对
+## 解析, 而是原样使用, 相对路径会被它当成不可用。
+func _endpoint_url() -> String:
+	return "http://127.0.0.1:%d/mcp" % _http.get_port()
+
+
+## 从 query 串取参数值(键名大小写不敏感)。旧式 SSE 传输把 sessionId 放在 query 上。
+static func _query_param(query: String, key: String) -> String:
+	for pair in query.split("&", false):
+		var kv := pair.split("=", true, 1)
+		if kv.size() == 2 and kv[0].strip_edges().to_lower() == key.to_lower():
+			return kv[1].uri_decode()
+	return ""
 
 
 ## CORS 响应头
@@ -694,8 +941,35 @@ func _make_session_id(headers: Dictionary) -> String:
 	return headers.get("mcp-session-id", "dev-framework-default-session")
 
 
-## 处理一条 JSON-RPC 请求(MCP), 返回响应字典
-func _handle_jsonrpc(req: Dictionary) -> Dictionary:
+## 协议版本协商: 回一个"客户端大概率也认识"的版本。
+##
+## 规范(initialize 小节)对不支持的版本给出的指令是**回一个自己支持的版本**, 而不是报错:
+##   "If the server supports the requested protocol version, it MUST respond with the same
+##    version. Otherwise, the server MUST respond with another protocol version it supports."
+## 之前这里对不认识的版本直接回 -32022, 等于违背规范: 客户端在握手阶段收到错误不会重试、
+## 也不会换一个版本, 只会反复重开连接并最终报 "Unsupported protocol version" 而失联。
+##
+## 规范建议回"最新的"那个, 但那对更老的客户端仍然是死路(它不认识就断连), 所以这里取
+## **不超过 requested 的最新版本** —— 客户端提出的版本只会比它自己新或相等, 往回退一档
+## 最可能被它接受; 连这个都没有(客户端比我们还老)就回我们最老的那个, 至少是条活路。
+## 版本号是 ISO 日期, 故字典序即时间序, 可直接比字符串。
+static func _negotiate_version(requested: String) -> String:
+	if requested.is_empty():
+		return PROTOCOL_VERSION
+	if SUPPORTED_PROTOCOL_VERSIONS.has(requested):
+		return requested
+	for v in SUPPORTED_PROTOCOL_VERSIONS: # 已按新→旧排序
+		if v < requested:
+			return v
+	return SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.size() - 1]
+
+
+## 处理一条 JSON-RPC 请求(MCP), 返回响应字典。
+## proto 是本请求协商到的协议版本(由 _on_request 从 HTTP 头 / _meta 解析, 见那里的注释)。
+## 它只影响**响应形状**: 2026-07-28 起 result 必须带 resultType, 可缓存结果还必须带
+## ttlMs/cacheScope。旧版本一律不发这些字段 —— 新字段对旧客户端是未知的, 会被忽略,
+## 但也没必要让旧客户端去读它们。
+func _handle_jsonrpc(req: Dictionary, proto: String = PROTOCOL_VERSION) -> Dictionary:
 	var req_id: Variant = req.get("id", null)
 	if req_id == null:
 		return {}
@@ -704,29 +978,51 @@ func _handle_jsonrpc(req: Dictionary) -> Dictionary:
 	match method:
 		"initialize":
 			var client_info := ""
+			var requested_proto := ""
 			var params0: Variant = req.get("params", {})
 			if params0 is Dictionary:
 				var ci: Variant = params0.get("clientInfo", null)
 				if ci is Dictionary:
 					client_info = "%s v%s" % [ci.get("name", "unknown"), ci.get("version", "?")]
-			LogTool.log("MCP", "客户端初始化: %s (协议: %s)" % [client_info, str(req.get("params", {}).get("protocolVersion", "")) if req.get("params", {}) is Dictionary else ""])
+				requested_proto = str(params0.get("protocolVersion", ""))
+			# 版本回显而非强推: initialize 的语义是"就客户端提出的版本达成一致",
+			# 服务端单方面抬高版本号会让不支持该版本的客户端直接失联(它没有前向兼容能力)。
+			var agreed := _negotiate_version(requested_proto)
+			if not requested_proto.is_empty() and agreed != requested_proto:
+				# 标明是**请求体**声明的版本: 外层 _on_request 还会就协议头/_meta 声明的版本
+				# 打一条同结构的日志(来源不同: 头 vs body), 不标注会被误认成同一条打了两遍。
+				LogTool.log("MCP", "initialize 请求体声明的版本 %s 不受支持, 协商降级为 %s (支持: %s)" % [requested_proto, agreed, str(SUPPORTED_PROTOCOL_VERSIONS)])
+			LogTool.log("MCP", "客户端初始化: %s (协议: %s -> %s)" % [client_info, requested_proto, agreed])
 			# 能力协商: 声明工具列表变更通知与日志能力
 			return {
 				"jsonrpc": "2.0",
 				"id": req_id,
 				"result": {
-					"protocolVersion": PROTOCOL_VERSION,
-					"capabilities": {
-						"tools": {"listChanged": true},
-						"logging": {"supportedLevels": ["debug", "info", "warning", "error"]},
-					},
+					"protocolVersion": agreed,
+					"capabilities": _server_capabilities(),
 					"serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
 				},
 			}
 		"notifications/initialized":
 			return {}
+		# 2026-07-28 起客户端可在发其他请求前先探知服务端支持哪些版本。规范标为服务端 MUST。
+		# 只报版本与身份, 不带 tools —— 工具表另有 tools/list 且可缓存, 在这里重复一遍
+		# 会让 38K 的清单被拉两次(而 discover 通常不可缓存)。
+		# 注: 规范的 DiscoverResult 完整字段未公开, 这里是按已公开的
+		# Result/ServerCapabilities/Implementation 三个接口推导的最小形状;
+		# 多报无害(客户端按 schema 取自己认识的), 少报才会被拒。
+		"server/discover":
+			return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result({
+				"protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
+				"protocolVersion": proto,
+				"capabilities": _server_capabilities(),
+				"serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+			}, proto)}
 		"tools/list":
-			return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": _tool_defs}}
+			# ttlMs/cacheScope 让客户端缓存这份 38K 的清单而不是每次重拉 —— 它在进程生命周期内
+			# 是静态的, 变了也只有 refresh_tools 会变(而那之后客户端本来就会重新拉)。
+			return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result(
+				{"tools": _tool_defs}, proto, true)}
 		"tools/call":
 			var params: Variant = req.get("params", {})
 			var params_dict: Dictionary = params if params is Dictionary else {}
@@ -735,30 +1031,137 @@ func _handle_jsonrpc(req: Dictionary) -> Dictionary:
 			var raw_args: Variant = params_dict.get("arguments", {})
 			var arguments: Dictionary = raw_args if raw_args is Dictionary else {}
 			if not (raw_args is Dictionary):
-				return _jsonrpc_error(req_id, -32602, "Invalid params: 'arguments' must be an object: %s" % str(raw_args))
-			LogTool.log("MCP", "工具调用(%s): %s, 参数: %s" % [_mode, tool_name, str(arguments)])
+				return _jsonrpc_error(req_id, ERR_INVALID_PARAMS, "Invalid params: 'arguments' must be an object: %s" % str(raw_args))
+			# 入参日志与成功结果日志同开关(dev_framework/mcp/log_tool_results): 它们是同一个问题的
+			# 两半 —— 一次调用打两行回声, 且都被本进程 MCPLogger 抄进 get_logs 返回给 AI。排查时打开。
+			if ProjectSettings.get_setting(SETTING_LOG_TOOL_RESULTS, false):
+				# 参数截断: eval_code/game_eval 传的是代码正文(上限 8192 字符), 整段打进日志会撑爆日志。
+				var arg_log := str(arguments)
+				if arg_log.length() > 300:
+					arg_log = arg_log.left(300) + ("…(已截断, 共 %d 字符)" % arg_log.length())
+				LogTool.log("MCP", "工具调用(%s): %s, 参数: %s" % [_mode, tool_name, arg_log])
 			if not _tool_handlers.has(tool_name):
-				return _jsonrpc_error(req_id, -32602, "Unknown tool: %s" % tool_name)
+				return _jsonrpc_error(req_id, ERR_INVALID_PARAMS, "Unknown tool: %s" % tool_name)
+			# 入参校验: 拦在 handler **之前**。handler 内部的 VariantTool 是为"健壮"而非"诚实"
+			# 设计的(转换失败回落缺省值), 那在协议边界上会把参数错误伪装成合法结果 ——
+			# 详见 MCPArgCheck 类注释里 max_depth:"5" 那个例子。
+			var arg_issues := MCPArgCheck.check(_tool_schemas.get(tool_name, {}), arguments)
+			if not arg_issues.is_empty():
+				return {"jsonrpc": "2.0", "id": req_id, "result": MCPResult.for_protocol(_err_validation(
+					"参数校验未通过 (%d 项):\n- %s" % [arg_issues.size(), "\n- ".join(arg_issues)],
+					"按上述提示修正后重试; 每个参数的合法取值见 tools/list 里该工具的 inputSchema(enum/required)与 description"))}
 			# 安全执行: 隔离 handler 运行期错误, 避免 GDScript 无 try/catch 导致协程中止、响应永不发出
 			var result := await _safe_call_handler(_tool_handlers[tool_name], arguments)
 			# 统一输出上限: 超限转明确错误提示, 避免巨型响应撑爆上下文/拷贝缓冲
-			result = _enforce_output_cap(tool_name, result)
+			result = MCPFormat.enforce_output_cap(tool_name, result, _output_cap())
 			if result.is_empty():
-				return _jsonrpc_error(req_id, -32603, "Internal error: 工具执行未返回结果")
+				return _jsonrpc_error(req_id, ERR_INTERNAL, "Internal error: 工具执行未返回结果")
 			# 记录返回信息到 MCP 日志, 便于诊断"返回异常/空"等问题。仅打印非原始数据
 			# (get_logs / get_errors / get_game_logs / get_game_errors / 文件读写等巨量内容工具截断显示)。
+			# 必须在剥离 text/is_error **之前**记 —— 日志摘要读的就是这两个字段。
 			_log_tool_result(tool_name, result)
-			return {"jsonrpc": "2.0", "id": req_id, "result": result}
+			# 出协议边界: 剥掉仅供进程内使用的顶层 text / is_error。二者与 content[0].text
+			# 逐字节重复, 不剥等于每次调用把同一份正文传两遍(实测占大结果 45%)。详见 MCPResult.for_protocol。
+			return {"jsonrpc": "2.0", "id": req_id, "result": MCPResult.for_protocol(result)}
+		# resources: 静态文档入口。短连接架构发不出推送, 故 subscribe / listChanged 均为 false。
+		# 注意 resources/read 的成功与失败**都**放在 result 里(失败时带 isError + content),
+		# 而不是走 JSON-RPC error: 规范两种都允许, 而这里选 result 是因为"uri 不对"属于
+		# 换掉 uri 就能自纠错的问题, 与 tools/call 的处理方式保持一致。
+		"resources/list":
+			return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result(
+				{"resources": MCPResourceTools.list_resources()}, proto, true)}
+		"resources/read":
+			var rparams: Variant = req.get("params", {})
+			var rdict: Dictionary = rparams if rparams is Dictionary else {}
+			# 成功与失败都在 result 里(失败时是 _err_validation, 自带 content+isError),
+			# 故两条路径都要过 for_protocol: 失败那条同样带 text/is_error。
+			return {"jsonrpc": "2.0", "id": req_id,
+				"result": _decorate_result(MCPResult.for_protocol(MCPResourceTools.read_resource(str(rdict.get("uri", "")))), proto, true)}
 		"ping":
 			return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+		# 声明支持 4 个级别却什么都不做, 比不声明更糟: 模型会据此以为 debug/info 日志已被
+		# 过滤掉, 于是不再去 get_logs 里拉, 结果恰恰丢掉了它最需要的东西 —— 这是**误导性
+		# 响应**。这里不实现分级过滤(那要贯穿整条日志管线, 是独立的一件事), 但必须如实说明
+		# "记下了、不生效", 并指明真正能控制日志量的参数。
 		"logging/setLevel":
-			return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+			var lparams: Variant = req.get("params", {})
+			var ldict: Dictionary = lparams if lparams is Dictionary else {}
+			var level := str(ldict.get("level", "info"))
+			if level not in ["debug", "info", "warning", "error"]:
+				return _jsonrpc_error(req_id, ERR_INVALID_PARAMS, "level 无效: %s (可选: debug/info/warning/error)" % level)
+			return {"jsonrpc": "2.0", "id": req_id, "result": {
+				"ok": true,
+				"level": level,
+				"applied": false,
+				"note": "已记录 level=" + level + ", 但本服务器当前不按级别过滤日志, 日志仍会全部保留。控制日志量请用 get_logs 的 since(增量)/max(限量)/contains(过滤)。",
+			}}
 		_:
-			return _jsonrpc_error(req_id, -32601, "Method not found: %s" % method)
+			return _jsonrpc_error(req_id, ERR_METHOD_NOT_FOUND, "Method not found: %s" % method)
 
 
 func _jsonrpc_error(req_id: Variant, code: int, message: String) -> Dictionary:
 	return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+## HTTP 层直接回 JSON-RPC 错误的**唯一出口**。
+##
+## ## 为什么要有这个函数
+##
+## 收敛前这里散着 6 处各写各的(4 处手写转义字符串 + 2 处 JSON.stringify), 攒出四重不一致:
+##   1. 字段序 —— 手写那几处把 id 排在 error **之后**, 与 _jsonrpc_error 相反。
+##   2. CORS —— 405 与 Parse error 两处没走 _cors_headers, 浏览器客户端读不到状态码,
+##      只能报"网络错误"而看不到真正的 405/400。
+##   3. 净化 —— 6 处**全部绕过 MCPFormat.json_safe**, 而正常响应走了。协议边界必须单一收口,
+##      否则日后往 json_safe 加规则时会整类漏掉, 边界就漏了。
+##   4. data —— ERR_HEADER_MISMATCH 原本只回一句 message, 客户端既不知道实际收到的两个
+##      版本、也不知道可用版本, 无从自行改正; 而它本来完全有能力自己修好。
+##
+## 与 _jsonrpc_error 的分工: 后者返回字典给 JSON-RPC 层(await 上来后统一序列化);
+## 本函数直接发出 HTTP 响应, 服务于"还没进 JSON-RPC 就必须拒绝"的场景(方法/鉴权/
+## Origin/解析失败/版本协商)。
+func _send_rpc_error(stream, status: int, req_headers: Dictionary, req_id: Variant, code: int, message: String, data: Dictionary = {}, extra_headers: Dictionary = {}) -> void:
+	var hdrs := _cors_headers(req_headers)
+	for k in extra_headers:
+		hdrs[k] = extra_headers[k]
+	# data 仅在非空时才出现。规范原文是"客户端需要结构化信息时放在 data",
+	# 无信息可给时塞个空对象等于告诉客户端"这里有 data, 但内容你自己看"——比不给更糟。
+	var err_obj := {"code": code, "message": message}
+	if not data.is_empty():
+		err_obj["data"] = data
+	_http.send_response(stream, status, hdrs, MCPFormat.json_safe(JSON.stringify({
+		"jsonrpc": "2.0", "id": req_id, "error": err_obj,
+	})))
+
+
+## 服务端能力声明。initialize 与 server/discover 共用 —— 同一份事实写两处,
+## 迟早会在只改一处后让客户端对"服务端支持什么"得到互相矛盾的答案。
+func _server_capabilities() -> Dictionary:
+	return {
+		# 工具清单在进程生命周期内是静态的(_tool_defs 只在初始化时填充), 而本服务器
+		# 是"一次请求一个连接"(Connection: close)的短连接 HTTP, **发不出任何服务端
+		# 推送** —— notifications/tools/list_changed 在此架构下永远无法送达。
+		# 声明 true 会让客户端白白订阅一个永不到来的通知(还会挂起等它), 报 false 才是诚实的。
+		"tools": {"listChanged": false},
+		# resources 只读静态文档, 无订阅能力(短连接发不出推送), 清单也是静态的。
+		"resources": {"subscribe": false, "listChanged": false},
+		# 旧日志级别机制。2026-07-28 已把通知侧标记为废弃(SEP-2577), 改由每请求
+		# _meta 的 logLevel 逐请求开启; 这里保留 setLevel 只为兼容旧客户端。
+		"logging": {"supportedLevels": ["debug", "info", "warning", "error"]},
+	}
+
+
+## 按协商到的协议版本给 result 补新版必需字段。
+## 2026-07-28 起 Result 必须带 resultType(客户端见到缺省会当 "complete" 处理, 但那是
+## 兼容旧服务端的兜底, 不该由新服务端依赖); 可缓存结果还必须带 ttlMs + cacheScope。
+## cacheScope 用 public: 工具清单与资源清单是进程级静态定义, 不含任何用户特定数据。
+func _decorate_result(result: Dictionary, proto: String, cacheable := false) -> Dictionary:
+	if proto != SUPPORTED_PROTOCOL_VERSIONS[0]:
+		return result
+	result["resultType"] = "complete"
+	if cacheable:
+		result["ttlMs"] = LIST_TTL_MS
+		result["cacheScope"] = "public"
+	return result
 
 
 ## 安全执行工具 handler: 在执行前后记录/比对错误缓冲, 把运行期错误转换成结构化诊断附加到结果。
@@ -772,6 +1175,9 @@ func _safe_call_handler(handler: Callable, arguments: Dictionary) -> Dictionary:
 		return {}
 	if _logger and _logger.get_error_count() > err_before:
 		var outcome := _collect_runtime_error(err_before)
+		# 全部命中忽略模式(如 UID 缓存重建期的噪音)时不附加诊断: 模式表与判定都在 MCPDevTools
+		if MCPDevTools.is_all_ignored(outcome, MCPDevTools.get_ignored_error_patterns()):
+			return result
 		var base: Dictionary = result
 		var new_text := str(base.get("text", "")) + "\n[警告] 执行过程中捕获运行期错误:\n%s" % outcome
 		base["text"] = new_text
@@ -797,41 +1203,46 @@ func _collect_runtime_error(err_before: int) -> String:
 	return "%s  (%s:%s %s)" % [msg, f, ln, fn]
 
 
-## 统一输出上限: 所有工具(编辑器进程与游戏进程)的返回 text 不得超过上限字符。
-## 超限时不发送完整巨型 JSON, 而是返回明确错误提示(附体积与应对建议), 避免上下文/token 被撑爆。
-## 上限实时读 ProjectSettings(dev_framework/mcp/max_output_chars), 改设置无需重启即生效;
-## <=0 表示关闭上限。
-## 注意: 游标类工具(get_logs/get_errors)超限会丢失 next, AI 应调低 max/加 since 分页重试以恢复游标。
-func _enforce_output_cap(tool_name: String, result: Dictionary) -> Dictionary:
-	var cap := int(ProjectSettings.get_setting(SETTING_MAX_OUTPUT_CHARS, DEFAULT_MAX_OUTPUT_CHARS))
-	if cap <= 0:
-		return result
-	var text := str(result.get("text", ""))
-	if text.length() <= cap:
-		return result
-	# 用字符串拼接而非 % 格式化, 避免任何格式化歧义(括号包住以保证多行续行被正确解析)
-	var msg := ("工具 " + tool_name + " 返回内容超过统一输出上限(" + str(cap) + " 字符, 实际 " + str(text.length()) +
-		" 字符), 为避免耗尽上下文, 未发送完整内容。\n开头预览: " + text.left(200) +
-		"\n\n应对: 用更精确参数缩小范围后重试(如 get_logs/get_errors 调低 max 或传 since; read_file 先确认文件大小; classdb_query 用更具体类名; list_dir 关闭 recursive; get_scene_tree 减小 max_depth)。")
-	return _err(msg, "validation", true, "按提示用更精确参数(参考各工具的 max/since/merge 等)缩小范围后重试")
+## 实时读统一输出上限。截断实现搬去 MCPFormat 之后, 这里是**唯一**读该设置的地方 ——
+## 设置项键名与默认值因此仍只有一处定义, 而格式层得以保持无状态(它的每个分支都对应一种真实
+## 事故, 无状态才能离线逐个测)。<=0 表示关闭上限, 与 enforce_output_cap 的约定一致。
+## 上限实时读 ProjectSettings(dev_framework/mcp/max_output_chars), 改设置无需重启即生效。
+func _output_cap() -> int:
+	return int(ProjectSettings.get_setting(SETTING_MAX_OUTPUT_CHARS, DEFAULT_MAX_OUTPUT_CHARS))
 
 
-## 把工具调用结果摘要记录到 MCP 日志, 便于诊断"返回异常/空"等问题。
-## 巨型内容工具(get_logs/get_errors/get_game_logs/get_game_errors/read_file/take_screenshot 等)
-## 只打印结构摘要, 避免日志被撑爆。
+## 把工具调用结果记录到 MCP 日志。**成功路径默认不打**, 由 dev_framework/mcp/log_tool_results 开关。
+##
+## 为什么成功路径默认关闭(这不是"少打点日志"的口味问题, 有两个硬后果):
+##   1. **它会把自己抄进 get_logs 的返回值里。** 本项目的日志捕获器是 OS.add_logger 装的
+##      MCPLogger, 走引擎 print 通道 —— 而本函数用的正是 LogTool.log → print_rich。所以每一条
+##      "[editor] xxx 返回: ..." 都会进环形缓冲, 被 get_logs 原样返回给 AI。等于 MCP 每被调一次,
+##      就往 AI 的上下文里塞一条自己写的回声, 而项目自己的日志被挤在中间。
+##   2. **失败才是需要留在输出面板的东西。** "这次调用返回了什么"对 AI 是权威(它拿到的是响应
+##      本体), 对人类只有"报错了"才有价值 —— 那条已经走 LogTool.error 且不受 enabled 开关影响。
+## 需要排查"返回空/返回怪"时临时把该开关打开, 排查完关掉即可。
 func _log_tool_result(tool_name: String, result: Dictionary) -> void:
 	var text: String = str(result.get("text", ""))
 	var is_err: bool = result.get("is_error", false)
-	var head := "[%s] %s 返回: " % [_mode, tool_name]
-	var big := tool_name in ["get_logs", "clear_logs",
-			"read_file", "take_screenshot", "get_scene_tree",
-			"classdb_query", "get_node_info", "get_project_info",
-			"get_editor_activity", "list_dir", "project_setting"]
 	if is_err:
-		LogTool.log("MCP", "%s错误: %s" % [head, text.left(400)])
+		# 用 error 级别而非 log: LogTool 让 ERROR 不受 enabled 开关与 tag 忽略的影响,
+		# 否则一旦关掉 MCP 日志或把该 tag 加进忽略列表, 工具错误会被一并吞掉 ——
+		# 而"工具报错"恰恰是最需要它在日志里留下痕迹的时刻。
+		LogTool.error("MCP", "[%s] %s 错误: %s" % [_mode, tool_name, text.left(400)])
 		return
-	if big:
-		# 只打顶层结构(键/计数), 不打全文
+	if not ProjectSettings.get_setting(SETTING_LOG_TOOL_RESULTS, false):
+		return
+	# 打全文还是打结构摘要(顶层键 + 数组/字典计数), 只按**长度**判, 不按工具名维护名单。
+	#
+	# 原来是一份"巨型内容工具"名单(get_logs / read_file / take_screenshot / get_scene_tree ...)。
+	# 名单是本项目要消灭的那类东西: 新增一个返回大内容的工具就会漏登记 → 日志被撑爆;
+	# 而名单里的工具绝大多数时候返回的是短输出(get_project_info 一次几百字符), 白瞎了摘要,
+	# 把最该看的那一行变成键名罗列 —— 实测中真正需要人看的恰恰是这类短状态行。
+	# 按长度判是自适应的: 长的必压(不会出现撑爆), 短的必全(查状态时看到的就是真内容)。
+	const SUMMARY_THRESHOLD := 600
+	const INLINE_LIMIT := 400
+	var head := "[%s] %s 返回: " % [_mode, tool_name]
+	if text.length() > SUMMARY_THRESHOLD:
 		var summary := ""
 		var t := text.strip_edges()
 		if t.begins_with("{") or t.begins_with("["):
@@ -849,425 +1260,129 @@ func _log_tool_result(tool_name: String, result: Dictionary) -> void:
 			summary = t.left(200)
 		LogTool.log("MCP", "%s%s" % [head, summary])
 	else:
-		LogTool.log("MCP", "%s%s" % [head, text.left(400)])
+		LogTool.log("MCP", "%s%s" % [head, text.left(INLINE_LIMIT)])
 
 
-## 统一工具结果封装
-## 同时输出 MCP 标准字段(content 数组 + 驼峰 isError)与自定义字段(text/is_error),
-## 兼容官方 SDK 客户端(读 content/isError)与旧式客户端/内部逻辑(读 text/is_error)。
-## extra 用于追加结构化字段(structuredContent / error_category 等)。
-func _wrap(text: String, is_error: bool, extra: Dictionary = {}) -> Dictionary:
-	var out := {
-		"text": text,
-		"is_error": is_error,
-		"isError": is_error,
-		"content": [ {"type": "text", "text": text}],
-	}
-	for key in extra:
-		out[key] = extra[key]
-	return out
+## ======= 结果封装(薄转发, 实现在 MCPResult) =======
+## 下面这层转发是刻意的: 实现已拆到 MCPResult.gd(协议边界, 零状态依赖, 可独立单测),
+## 但保留同名转发可让 50+ 个调用点零改动, 也让这次拆分可回退 —— 把转发换回实现即可。
+## 引用分类常量请写 MCPResult.CAT_*(唯一定义处已随之迁走)。
+
+
+func _wrap(text: String, is_error: bool, extra: Dictionary = {}, content_text: String = "") -> Dictionary:
+	return MCPResult.make(text, is_error, extra, content_text)
 
 
 func _ok(text: String) -> Dictionary:
-	return _wrap(text, false)
+	return MCPResult.ok(text)
 
 
 func _fail(text: String) -> Dictionary:
-	return _wrap(text, true)
+	return MCPResult.fail(text)
 
 
-## 结构化结果封装: 数据同时以 MCP 标准 structuredContent(2025-06-18+) 与
-## content[].text(序列化 JSON, 向后兼容) 输出, 兼容最新官方 SDK 与旧式客户端。
-## 注意: 数据先经 JSON 往返(serialize→parse), 把 NodePath/Vector2/Color 等 Variant
-## 转成 JSON 兼容类型, 保证 structuredContent 是纯 JSON 对象(官方 SDK 客户端可安全解析)。
 func _ok_json(data: Dictionary) -> Dictionary:
-	var json := JSON.stringify(data)
-	var safe_data: Variant = JSON.parse_string(json)
-	if not safe_data is Dictionary:
-		safe_data = data
-	return _wrap(json, false, {"structuredContent": safe_data})
+	return MCPResult.ok_json(data)
 
 
-## 结构化错误封装(MCP 工具执行错误)。category 语义:
-##   validation  - 输入/代码问题, 修正后重试即可(同参数重试永远失败)
-##   transient   - 暂时性故障(超时/未就绪), 等待后重试可能成功
-##   game_stopped- 游戏进程已结束/崩溃, 必须 run_game 重启后才能继续
-##   internal    - 服务器内部错误, 不应重试同参数
-## retryable=true 表示"等待/修正后重试有机会成功"。
+## 原 _ok_with_meta(正文与结构化元信息分离的封装) 已随 get_scene_tree 搬进 MCPSceneTools,
+## 主文件这边随迁走后已无调用点, 故整块删除。需要该封装时直接调 MCPResult.ok_with_meta。
+
+
+## 语义化错误封装: retryable 由类别固化, 调用方只负责给出恢复动作。
+## 这是新增代码的推荐入口(它把"该不该重试"这个判断从调用点收敛到一处)。
+##
+## 这里**故意没有** stale_code 的转发: 该类别唯一的用法在新鲜度守卫里是随守卫结果
+## 动态透传的(str(guard.get("category", MCPResult.CAT_STALE_CODE))), 类别要到运行时
+## 才知道, 静态封装用不上。MCPResult.err_stale_code 仍在原处(它是协议边界的一部分,
+## 不该因本文件暂无静态调用点而缺项); 等这里真的出现第一个静态调用点再补转发 ——
+## 不要为了"看起来对称"先摆一个没人调用的空壳。
+func _err_validation(text: String, recovery: String) -> Dictionary:
+	return MCPResult.err_validation(text, recovery)
+
+
+func _err_transient(text: String, recovery: String) -> Dictionary:
+	return MCPResult.err_transient(text, recovery)
+
+
+func _err_game_stopped(text: String, recovery: String) -> Dictionary:
+	return MCPResult.err_game_stopped(text, recovery)
+
+
+func _err_game_breaked(text: String, recovery: String = "") -> Dictionary:
+	return MCPResult.err_game_breaked(text, recovery)
+
+
+func _err_internal(text: String, recovery: String = "") -> Dictionary:
+	return MCPResult.err_internal(text, recovery)
+
+
+## 底层结构化错误封装。category 取值见 MCPResult.CAT_*; retryable 由语义化封装固化,
+## 仅当它需按上下文动态决定(如新鲜度守卫结果的 category 透传)时才直接调用。
 func _err(text: String, category: String, retryable: bool, recovery: String) -> Dictionary:
-	return _wrap(text, true, {
-		"error_category": category,
-		"is_retryable": retryable,
-		"recovery": recovery,
-	})
+	return MCPResult.err(text, category, retryable, recovery)
 
 
-## 辅助函数：将 Variant 转换为 bool（支持 bool、String("true"/"True")、数字等）
-func _to_bool(value: Variant) -> bool:
-	if value is bool:
-		return value
-	if value is String:
-		return value.to_lower() == "true"
-	if value is int or value is float:
-		return value != 0
-	return false
+## ======= 统一入参读取: 一律走 VariantTool =======
+##
+## 本文件不再保留任何私有参数读取副本: handler 的键值经 VariantTool.get_* 读取,
+## 需要值级转换时用 as_*(或 infer / coerce)。统一规则、坑位说明与"为什么"集中在
+## VariantTool 顶部, 那里是本规则的**唯一事实来源** —— 不要在这里重新抄一份。
+##
+## ======= 两处合法的裸读(不要当漂移收掉) =======
+## set_node_property 与 set_project_setting 的 "value" 走裸 args.get("value", null"),
+## 因为它们的**目标类型事先未知**: 前者要靠 node.get(property) 的 typeof() 反推, 后者由用户
+## 任意指定。这两处接 VariantTool.infer(猜类型) / VariantTool.coerce(对齐目标类型),
+## 强行套进 get_* 反而会丢信息。除这两处外, handler 里的 args.get( 一律是漂移。
+##
+## 注意这是**约定而非守卫**: 契约自检(_audit_tools / MCPToolAudit.audit_handler_params)校验的是
+## "schema 声明了哪些键、schema 与 handler 声明是否一致", 不校验 handler 是否绕过
+## VariantTool 裸读。新增 handler 时只能靠自律 —— 这点必须写明, 否则后人会误以为
+## 已经有检查兜着。想让它变成真守卫, 需在 MCPToolAudit.audit_handler_params 加一条: handler 源码中
+## 出现 args.get( 且该键不在 VariantTool.get_* 调用列表中 → 报问题。
+##
+## 历史教训(留着提醒别走回头路): 本文件此前同时存在 `_to_bool`(支持 "true"/数字)与 9 处
+## 绕过它的裸转, 而 `_arg_int` 更是长期零调用 —— 入口摆在那里却一行防护都没生效。
+## "同一个参数两种读法"长期共存, 每处裸转都是一个潜在的静默反转。
 
 
-## ======= 工具 Callable 实现 =======
-
-func _call_validate_script(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	var code: String = str(args.get("code", ""))
-	if path.is_empty() and code.is_empty():
-		return _fail("必须提供 path 或 code 之一")
-	if not path.is_empty():
-		if not ResourceLoader.exists(path):
-			return _fail("脚本文件不存在: %s" % path)
-		var file := FileAccess.open(path, FileAccess.READ)
-		if not file:
-			return _fail("无法读取脚本文件: %s" % path)
-		code = file.get_as_text()
-		file.close()
-	var script := _make_tmp_script(code)
-	var outcome := _compile_and_collect(script)
-	# 剔除误报: GDScript.new() 临时脚本默认无路径, 引擎会因 class_name 已全局注册
-	# 且注册路径 != 本脚本路径而报 "hides a global class"——当验证对象正是该 class_name
-	# 的注册文件本身(或其修改版本)时, 此冲突并非真实语法错误, 应剔除后再判定有效性。
-	outcome.real_errors = _filter_class_conflicts(outcome.real_errors, path, code)
-	# warnings 通道同样过滤: 带 "Warning treated as error" 后缀的 hides 消息会被归入此处
-	var filtered_warns: Array = []
-	for w in outcome.warnings:
-		var msg := str(w)
-		if msg.contains("hides a global script class") and _is_class_conflict_false_positive(_class_from_conflict(msg), path, code):
-			continue
-		filtered_warns.append(msg)
-	outcome.warnings = filtered_warns
-	if outcome.real_errors.is_empty():
-		return _ok_json({
-			"valid": true,
-			"message": "脚本语法有效" + ("(含 %d 条可忽略警告)" % outcome.warnings.size() if outcome.warnings.size() > 0 else ""),
-			"error_latin": 0,
-			"error_text": "",
-			"warnings": outcome.warnings,
-		})
-	var text := "; ".join(outcome.real_errors)
-	return _ok_json({
-		"valid": false,
-		"message": "解析失败: %s" % text,
-		"error_line": 0,
-		"error_text": text,
-		"errors": outcome.real_errors,
-		"warnings": outcome.warnings,
-	})
+## get_game_logs 的进程侧实现: 只读本进程 print 日志。与 _call_get_errors 一样直接调
+## MCPLogTools._call_collect_logs, 不经 get_logs 的 handler —— 后者曾按 source 转发, 而 args
+## 原样带走 source, 于是"编辑器 get_logs(source=game) -> 游戏 get_game_logs -> 再次命中
+## source=game -> 又转发"形成自我转发, 而游戏进程 debugger_plugin 恒为 null, 于是恒定报
+## "游戏未运行"(游戏明明在跑)。
+## source 参数现已整体删除, 该类自我转发不再可能发生; 独立出来另有一利: 本函数只读 schema
+## 声明过的参数, 入参契约自检自然通过, 不靠白名单绕过。
+func _call_get_game_logs(args: Dictionary) -> Dictionary:
+	# 不要写 await: 底层件不是协程(内部无 await), await 只会换来 redundant-await 警告。
+	return MCPLogTools._call_collect_logs(args, false)
 
 
-## 构造一个用于预编译的临时 GDScript(无资源路径, 不触碰 Resource 缓存)。
-func _make_tmp_script(code: String) -> GDScript:
-	var script := GDScript.new()
-	script.source_code = code
-	return script
-
-
-## 编译临时脚本并收集时的新增错误/警告。返回 {"real_errors", "warnings"}。
-func _compile_and_collect(script: GDScript) -> Dictionary:
-	var n0: int = _logger.get_error_cursor() if _logger else 0
-	script.reload()
-	var new_errs: Array = []
-	if _logger:
-		new_errs = _logger.take_errors_since(n0).entries
-	var real: Array = []
-	var warns: Array = []
-	for e in new_errs:
-		var msg: String = str(e.get("message", ""))
-		if msg.contains("Warning treated as error") or msg.contains("inferred from a Variant"):
-			warns.append(msg)
-		else:
-			real.append(msg)
-	return {"real_errors": real, "warnings": warns}
-
-
-## 逐个过滤 class 冲突: 保留真实冲突, 剔除"验证该 class_name 注册文件本身"造成的误报。
-func _filter_class_conflicts(errors: Array, path: String, code: String) -> Array:
-	var kept: Array = []
-	for e in errors:
-		var msg := str(e)
-		if msg.contains("hides a global script class"):
-			var cls := _class_from_conflict(msg)
-			if not _is_class_conflict_false_positive(cls, path, code):
-				kept.append(e)
-		else:
-			kept.append(e)
-	return kept
-
-
-## 从冲突错误文本解析出冲突的 class_name(形如 "Class \"Foo\" hides a global class.")。
-func _class_from_conflict(msg: String) -> String:
-	var start := msg.find("\"")
-	if start < 0:
-		return ""
-	var end := msg.find("\"", start + 1)
-	if end < 0:
-		return ""
-	return msg.substr(start + 1, end - start - 1)
-
-
-## 判定一条 class 冲突是否为误报:
-## - 冲突的 class_name 尚未全局注册        → 缓存滞后, 误报
-## - 注册路径 == 本次被验证 path            → 验证注册文件自身, 误报
-## - 无 path 但 code 声明了同名 class_name  → 新定义源, 误报
-## - 解析不出 class_name                    → 无法判断, 保守不判误报(可能真是语法错误)
-func _is_class_conflict_false_positive(cls: String, path: String, code: String) -> bool:
-	if cls.is_empty():
-		return false
-	var reg := _global_class_path(cls)
-	if reg.is_empty():
-		return true
-	if not path.is_empty() and _same_path(reg, path):
-		return true
-	if path.is_empty() and _extract_class_name(code) == cls:
-		return true
-	return false
-
-
-## 查询一个 class_name 在全局类缓存中的注册路径(res://…); 未注册返回 ""。
-func _global_class_path(target_class: String) -> String:
-	var classes: Array = ProjectSettings.get_setting("_global_script_classes", [])
-	for c in classes:
-		if c is Dictionary and str(c.get("class", "")) == target_class:
-			return str(c.get("path", ""))
-	return ""
-
-
-## 简化路径比较(处理分隔符/大小写, 避免 Windows 盘符差异导致误判)。
-func _same_path(a: String, b: String) -> bool:
-	return a.replace("\\", "/").to_lower() == b.replace("\\", "/").to_lower()
-
-
-## 扫描脚本头部(class_name 仅允许在 extends 之前), 返回声明的类名; 未声明返回 ""。
-func _extract_class_name(code: String) -> String:
-	for line in code.split("\n"):
-		var t := line.strip_edges()
-		if t.is_empty() or t.begins_with("#") or t.begins_with("@"):
-			continue
-		if t.begins_with("class_name "):
-			return t.trim_prefix("class_name ").split(" ")[0].replace("\t", "").strip_edges()
-		if not t.begins_with("extends"):
-			break
-	return ""
-
-
-func _call_validate_resource(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not ResourceLoader.exists(path):
-		return _fail("资源不存在: %s" % path)
-	var res: Resource = ResourceLoader.load(path)
-	if res == null:
-		return _fail("资源加载失败: %s" % path)
-	return _ok_json({
-		"valid": true,
-		"type": res.get_class(),
-		"message": "资源可正常加载",
-	})
-
-
-## 查询 Godot 类的 API(方法/属性/信号)。用于 AI 写脚本前确认原生 API 用法。
-func _call_classdb_query(args: Dictionary) -> Dictionary:
-	var query_class: String = str(args.get("class_name", ""))
-	var search: String = str(args.get("search", ""))
-	var want_methods: bool = args.get("methods", true)
-	var want_props: bool = args.get("properties", true)
-	var want_signals: bool = args.get("signals", true)
-
-	# 模糊搜索类名
-	if search != "":
-		var matches: Array = []
-		var all_classes := ClassDB.get_class_list()
-		for c in all_classes:
-			if str(c).to_lower().contains(search.to_lower()):
-				matches.append(c)
-		matches.sort()
-		if matches.size() > 50:
-			matches = matches.slice(0, 50)
-		return _ok_json({"mode": "search", "query": search, "match_count": matches.size(), "classes": matches})
-
-	if query_class == "":
-		return _fail("必须提供 class_name 或 search")
-	if not ClassDB.class_exists(query_class):
-		return _fail("类不存在: %s(请用 search 模糊搜索)" % query_class)
-
-	var out := {"class_name": query_class, "inherits": _class_inheritance_chain(query_class)}
-	if want_methods:
-		var methods: Array = []
-		for m in ClassDB.class_get_method_list(query_class, true):
-			var arg_sig := ""
-			var arg_names: Array = m.get("args", [])
-			if arg_names.size() > 0:
-				var parts := PackedStringArray()
-				for a in arg_names:
-					parts.append("%s:%s" % [a.get("name", "?"), a.get("type", "?")])
-				arg_sig = "(" + ", ".join(parts) + ")"
-			else:
-				arg_sig = "()"
-			var ret: int = int(m.get("return", {}).get("type", 0)) if m.get("return", {}) is Dictionary else 0
-			methods.append("%s%s -> %s" % [m.get("name", "?"), arg_sig, _type_name(ret)])
-		out["methods"] = methods
-	if want_props:
-		var props: Array = []
-		for p in ClassDB.class_get_property_list(query_class, true):
-			props.append("%s : %s" % [p.get("name", "?"), _type_name(int(p.get("type", 0)))])
-		out["properties"] = props
-	if want_signals:
-		var signals: Array = []
-		var sigs: Array = _instance_signal_list(query_class)
-		for s in sigs:
-			var arg_sig := ""
-			var arg_names: Array = s.get("args", [])
-			if arg_names.size() > 0:
-				var parts := PackedStringArray()
-				for a in arg_names:
-					parts.append("%s:%s" % [a.get("name", "?"), a.get("type", "?")])
-				arg_sig = "(" + ", ".join(parts) + ")"
-			else:
-				arg_sig = "()"
-			signals.append("%s%s" % [s.get("name", "?"), arg_sig])
-		out["signals"] = signals
-	return _ok_json(out)
-
-
-## 获取类的信号列表: ClassDB.class_get_signal_list 对内置类返回空,
-## 改为实例化后调 get_signal_list()(实例仅用于读 API, 无需入树)。
-func _instance_signal_list(cname: String) -> Array:
-	if not ClassDB.can_instantiate(cname):
-		return []
-	var inst: Object = ClassDB.instantiate(cname)
-	if inst == null:
-		return []
-	var sigs: Array = inst.get_signal_list()
-	inst.free()
-	return sigs
-
-
-## 返回类的继承链(从基类到最终祖先)
-func _class_inheritance_chain(cname: String) -> Array:
-	var chain: Array = []
-	var cur := cname
-	while cur != "" and ClassDB.class_exists(cur):
-		chain.append(cur)
-		cur = ClassDB.get_parent_class(cur)
-	return chain
-
-
-## 将 Godot 类型枚举值转为可读类型名
-func _type_name(type_id: int) -> String:
-	match type_id:
-		TYPE_NIL: return "null"
-		TYPE_BOOL: return "bool"
-		TYPE_INT: return "int"
-		TYPE_FLOAT: return "float"
-		TYPE_STRING: return "String"
-		TYPE_VECTOR2: return "Vector2"
-		TYPE_VECTOR3: return "Vector3"
-		TYPE_COLOR: return "Color"
-		TYPE_ARRAY: return "Array"
-		TYPE_DICTIONARY: return "Dictionary"
-		TYPE_OBJECT: return "Object"
-		TYPE_NODE_PATH: return "NodePath"
-		TYPE_PACKED_STRING_ARRAY: return "PackedStringArray"
-		_:
-			if type_id >= TYPE_OBJECT:
-				return "Object/%s" % type_id
-			return "type_%d" % type_id
-func _call_list_dir(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", "res://"))
-	var recursive: bool = _to_bool(args.get("recursive", false))
-	if not path.ends_with("/"):
-		path += "/"
-	var dir := DirAccess.open(path)
-	if dir == null:
-		return _fail("无法打开目录: %s" % path)
-	var dirs: Array = []
-	var files: Array = []
-	if recursive:
-		_collect_dir(path, dirs, files)
-	else:
-		dir.list_dir_begin()
-		var f := dir.get_next()
-		while not f.is_empty():
-			if dir.current_is_dir() and f != "." and f != "..":
-				dirs.append(f)
-			elif not dir.current_is_dir():
-				files.append(f)
-			f = dir.get_next()
-		dir.list_dir_end()
-	return _ok_json({"path": path, "dirs": dirs, "files": files})
-
-
-## 递归收集目录内容(供 list_dir 使用)
-func _collect_dir(base: String, dirs: Array, files: Array) -> void:
-	var d := DirAccess.open(base)
-	if d == null:
-		return
-	d.list_dir_begin()
-	var f := d.get_next()
-	while not f.is_empty():
-		if d.current_is_dir() and f != "." and f != "..":
-			dirs.append(base + f + "/")
-			_collect_dir(base + f + "/", dirs, files)
-		elif not d.current_is_dir():
-			files.append(base + f)
-		f = d.get_next()
-	d.list_dir_end()
-
-
-## get_logs 统一入口: kind=log/warning/error, source=auto/editor/game
-func _call_get_logs(args: Dictionary) -> Dictionary:
-	var kind := str(args.get("kind", "log"))
-	var is_errors := kind == "error" or kind == "warning"
-	var source := str(args.get("source", "auto"))
-	if source == "game":
-		return await _call_runtime_proxy("get_game_errors" if is_errors else "get_game_logs", args)
-	var result: Dictionary = await _call_collect_logs(args, is_errors, source == "editor")
-	if is_errors:
-		# 按类别过滤: warning 只要 type==warning; error 排除 warning(script_error/shader_error/stderr/error)
-		var want_warning := kind == "warning"
-		var payload: Dictionary = result.get("structuredContent", result)
-		var entries: Array = payload.get("errors", [])
-		var filtered := entries.filter(func(e: Dictionary):
-			var t := str(e.get("type", ""))
-			return (t == "warning") if want_warning else (t != "warning"))
-		payload["errors"] = filtered
-		payload["count"] = filtered.size()
-		return _ok_json(payload)
-	return result
-
-
-func _call_validate(args: Dictionary) -> Dictionary:
-	if str(args.get("kind", "script")) == "resource":
-		return await _call_validate_resource(args)
-	return await _call_validate_script(args)
-
-
-## 游戏运行控制: start(支持 uid:// 场景, 已在运行时自动停止旧实例后重启)/stop
+## 游戏运行控制: start(支持 uid:// 场景, 已在运行时自动停止旧实例后重启)/stop/continue
+##
+## continue 并入本工具而非独立成工具, 理由见 _call_debug_continue 上方那段注释 —— 简言之:
+## 客户端决定映射哪些工具, 恢复路径必须落在**一定被映射**的那个工具上。
 func _call_game_control(args: Dictionary) -> Dictionary:
-	match str(args.get("action", "")):
+	match VariantTool.get_string(args, "action"):
+		"continue":
+			return _call_debug_continue({})
 		"start":
+			# 已在运行时自动停旧实例再启动, 不要求调用方手动先 stop。
+			# 旧实例持有的是它启动时固化的脚本, 而"改完脚本 → 重启 → 验证"是最高频组合;
+			# 多要求一步就多一次"忘了重启"的机会。新鲜度闸门拦下时给出的恢复动作正是 start,
+			# 若这里还要再调一次 stop, 那道提示等于没给出出路
+			if _has_game_session():
+				_call_stop_game({})
+				if not await _wait_game_stopped(5.0):
+					return _fail("旧游戏实例 5 秒内未停止, 无法重启。请用 game_control(action=stop) 确认状态后重试。")
 			return await _call_run_game(args)
 		"stop":
 			return await _call_stop_game({})
-	return _fail("未知 action: %s (可选 start/stop)" % str(args.get("action", "")))
-
-
-## 项目设置项读写统一入口: value 缺省=读取, 提供=写入并保存
-func _call_project_setting(args: Dictionary) -> Dictionary:
-	if args.has("value"):
-		return _call_set_project_setting(args)
-	return _call_get_project_setting(args)
+	return _fail("未知 action: %s (可选 start/stop/continue)" % VariantTool.get_string(args, "action"))
 
 
 func _call_get_errors(args: Dictionary) -> Dictionary:
-	return await _call_collect_logs(args, true)
+	return MCPLogTools._call_collect_logs(args, true)
 
 
 ## 编辑器模式且游戏调试线活跃(编辑器进程指向游戏进程的数据/操作要走代理)
@@ -1275,572 +1390,59 @@ func _has_game_session() -> bool:
 	return _mode == MODE_EDITOR and debugger_plugin != null and debugger_plugin.has_active_session()
 
 
-## 统一收集日志/错误: is_errors=true 取错误, false 取日志; force_editor=true 时即使游戏运行中也取编辑器侧
-func _call_collect_logs(args: Dictionary, is_errors: bool, force_editor := false) -> Dictionary:
-	var tool_name := "get_game_errors" if is_errors else "get_game_logs"
-	# 编辑器模式且游戏调试线活跃: 真正取游戏进程的日志/错误。
-	if not force_editor and _has_game_session():
-		return await _call_runtime_proxy(tool_name, args)
-	if _logger == null:
-		return _fail("错误捕获器未就绪" if is_errors else "日志捕获器未就绪")
-	var max: int = int(args.get("max", 100 if is_errors else 200))
-	# since: 上次拉取返回的 next 游标, 增量拉取新条目以节省上下文(token)。默认 0 = 全量。
-	var since: int = int(args.get("since", 0))
-	# merge: 连续重复的同内容条目合并为一条(repeat 计数), 减少 token。默认 true。
-	var merge: bool = args.get("merge", true)
-	var result: Dictionary = _logger.take_errors_since(since) if is_errors else _logger.take_logs_since(since)
-	var clean: Array = []
-	for e in result.entries:
-		var c: Dictionary = e.duplicate(is_errors)
-		if c.has("message"):
-			c.message = _logger.sanitize(str(c.message))
-		clean.append(c)
-	var merged: Array = _logger.merge_duplicates(clean) if merge else clean
-	var start := maxi(0, merged.size() - max)
-	var out: Array = merged.slice(start)
-	var type_word := "错误" if is_errors else "日志"
-	var hint := "将 next 作为下次调用的 since 参数即可只取新增%s。连续重复的同位置%s已合并为一条并带 repeat 计数, 可用 merge=false 关闭合并。" % [type_word, type_word]
-	var payload := {
-		"count": out.size(),
-		"next": int(result.get("next", 0)),
-		"total_raw": clean.size(),
-		"hint": hint,
-	}
-	if is_errors:
-		payload["errors"] = out
-		payload["cleared"] = bool(result.get("cleared", false))
-	else:
-		payload["logs"] = out
-	return _ok_json(payload)
-
-
-func _call_clear_errors(args: Dictionary) -> Dictionary:
-	# 编辑器模式且游戏调试线活跃: 清游戏错误(与 _call_get_errors 的"游戏优先"一致)。
-	if _has_game_session():
-		return await _call_runtime_proxy("clear_game_errors", args)
-	var scope := str(args.get("scope", "all"))
-	if _logger:
-		if scope == "all" or scope == "errors":
-			_logger.clear_errors()
-		if scope == "all" or scope == "logs":
-			_logger.clear_messages()
-	return _ok("已清空%s缓冲区" % ("全部" if scope == "all" else ("错误" if scope == "errors" else "日志")))
-
-
-func _call_clear_logs(args: Dictionary) -> Dictionary:
-	# 统一清理入口: 有游戏会话时代理到游戏进程
-	if _has_game_session():
-		return await _call_runtime_proxy("clear_game_logs", args)
-	return await _call_clear_errors(args)
+## 记录"脚本新鲜度基准"的当前时刻(见 MCPScriptSync.guard_eval)。
+##
+## 基准点必须不晚于脚本加载完成的时刻才安全, 故一律取"此刻"而非任何已有的时间戳 ——
+## 原名 _active_session_started_at 声称"引擎会话给出的启动时刻", 但实现只是读当前时钟,
+## 名字会让人以为它读的是引擎会话数据而在别处被误用。reason 只进日志: 便于事后核对
+## 判据基准是否选得过晚(基准越晚, 越可能漏报"游戏加载后才改的文件")。
+func _mark_script_baseline(reason: String) -> void:
+	_game_started_at = int(Time.get_unix_time_from_system())
+	LogTool.log("MCP", "脚本新鲜度基准更新(%s): %d" % [reason, _game_started_at])
 
 
 func _call_take_screenshot(args: Dictionary) -> Dictionary:
 	# text(文本化截图) 与 game(真实截图) 都分析游戏运行画面: 编辑器模式经调试线转发到游戏进程
-	var capture_type: String = str(args.get("capture_type", "text"))
+	var capture_type: String = VariantTool.get_string(args, "capture_type", "text")
 	if capture_type == "text" or capture_type == "game":
 		if _mode == MODE_EDITOR:
 			return await _call_runtime_proxy("take_screenshot", args)
 		# 运行时模式: 直接处理
 		return await _runtime_take_screenshot(args)
 
-	var img: Image = null
-	match capture_type:
-		"scene":
-			img = await _capture_scene_thumbnail(args)
-			if img == null or img.is_empty():
-				return _fail("场景缩略图生成失败: 无法渲染场景或场景为空")
-		_: # "editor"
-			img = await _capture_editor_viewport()
-			if img == null or img.is_empty():
-				return _fail("截图失败: 编辑器视口纹理为空")
-	# 统一走 ScreenshotTool: sRGB 校正(保证颜色正确) -> 缩放 -> 保存。
-	# 缺省降采样到 1280 宽以控制截图体积(大视口/高分屏尤其明显), 传更大的 max_width 可保留更高分辨率。
-	var shot: Dictionary = ScreenshotTool.save_image(img, {
-		"dir": ScreenshotTool.DEFAULT_DIR_RES,
-		"prefix": "mcp",
-		"max_width": int(args.get("max_width", ScreenshotTool.DEFAULT_MAX_WIDTH)),
-		"srgb": bool(args.get("srgb", true)),
-		"capture_type": capture_type,
-	})
-	if not shot.get("ok", false):
-		return _fail(str(shot.get("error", "截图失败")))
-	return _ok_json({
-		"path": shot.get("path", ""),
-		"res_path": shot.get("res_path", ""),
-		"width": int(shot.get("width", 0)),
-		"height": int(shot.get("height", 0)),
-		"bytes": int(shot.get("bytes", 0)),
-		"capture_type": capture_type,
-	})
-
-
-## 捕获编辑器视口截图(已做 sRGB 校正)
-func _capture_editor_viewport() -> Image:
-	if not Engine.is_editor_hint():
-		return null
-	var base: Control = EditorInterface.get_base_control()
-	if base == null:
-		return null
-	var viewport := base.get_viewport()
-	var tree := base.get_tree()
-	if viewport == null or tree == null:
-		return null
-	await _wait_frames(tree, 3, 2500)
-	# 编辑器进程的 RenderingServer.frame_post_draw 不一定按时触发(与游戏的标准帧循环不同),
-	# 等待其会永久挂起。编辑器主循环由 process_frame 驱动, 等帧后直接读纹理即可。
-	# 也不要调用 RenderingServer.force_draw(): 在线程化渲染下同步阻塞可能卡住编辑器。
-	# await_draw=false: 上面已按编辑器节奏等帧, 不再等 frame_post_draw(会挂起)。
-	return await ScreenshotTool.grab(viewport, {"await_draw": false})
-
-
-## 生成当前编辑场景的缩略图(已做 sRGB 校正)
-func _capture_scene_thumbnail(_args: Dictionary) -> Image:
-	if not Engine.is_editor_hint():
-		return null
-	var thumbnail_size := 256
-	var root := _edited_root()
-	if root == null:
-		return null
-	var scene_path := root.get_scene_file_path()
-	if scene_path.is_empty():
-		return null
-	if not ResourceLoader.exists(scene_path):
-		return null
-	var scene_res: Resource = ResourceLoader.load(scene_path)
-	if not scene_res is PackedScene:
-		return null
-	var scene_instance: Node = scene_res.instantiate()
-	if scene_instance == null:
-		return null
-	var viewport := SubViewport.new()
-	viewport.size = Vector2i(thumbnail_size, thumbnail_size)
-	viewport.transparent_bg = true
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	viewport.add_child(scene_instance)
-	scene_instance.owner = viewport
-	var base: Control = EditorInterface.get_base_control()
-	if base == null:
-		viewport.queue_free()
-		return null
-	var tree := base.get_tree()
-	if tree == null:
-		viewport.queue_free()
-		return null
-	tree.root.add_child(viewport)
-	await _wait_frames(tree, 5, 3000)
-	var img: Image = await ScreenshotTool.grab(viewport, {"await_draw": false})
-	viewport.queue_free()
-	return img
-
-
-## 等待若干帧, 带超时上限(毫秒, 0 表示不限)
-func _wait_frames(tree: SceneTree, frames: int, timeout_msec: int) -> void:
-	var deadline := Time.get_ticks_msec() + timeout_msec
-	for i in frames:
-		if timeout_msec > 0 and Time.get_ticks_msec() > deadline:
-			break
-		await tree.process_frame
-
-
-func _call_get_scene_tree(args: Dictionary) -> Dictionary:
-	var max_depth: int = int(args.get("max_depth", 8))
-	var include_props: bool = _to_bool(args.get("include_properties", false))
-	var root := _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var lines: Array = []
-	_walk_scene_tree(root, 0, max_depth, include_props, lines)
-	return _ok("\n".join(lines))
-
-
-## 递归展开场景树(供 get_scene_tree 使用)
-func _walk_scene_tree(node: Node, depth: int, max_depth: int, include_props: bool, lines: Array) -> void:
-	if depth > max_depth:
-		return
-	var indent := "  ".repeat(depth)
-	lines.append("%s%s [%s]" % [indent, node.name, node.get_class()])
-	if include_props and depth < 3:
-		var props := _collect_essential_props(node)
-		if not props.is_empty():
-			lines.append("%s    props: %s" % [indent, JSON.stringify(props)])
-	for child in node.get_children():
-		_walk_scene_tree(child, depth + 1, max_depth, include_props, lines)
-
-
-func _call_get_node_info(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	var node := _resolve_node(path)
-	if node == null:
-		return _fail("找不到节点: %s" % path)
-	var info := {
-		"name": node.name,
-		"class": node.get_class(),
-		"path": node.get_path(),
-		"properties": _collect_essential_props(node),
-	}
-	return _ok_json(info)
-
-
-## 提取对 AI 调试最有用的核心属性
-func _collect_essential_props(node: Node) -> Dictionary:
-	var out := {}
-	for p in node.get_property_list():
-		var pname: String = str(p.name)
-		if pname.begins_with("theme_override") or pname.begins_with("accessibility_") \
-				or pname.begins_with("focus_") or pname == "editor_description" or pname == "script":
-			continue
-		if p.usage & PROPERTY_USAGE_SCRIPT_VARIABLE or pname in CORE_PROP_NAMES:
-			var v: Variant = node.get(pname)
-			if v != null and not (v is Object or v is Resource):
-				out[pname] = v
-	return out
-
-
-func _call_set_node_property(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	var property: String = str(args.get("property", ""))
-	var value: Variant = args.get("value", null)
-	var node := _resolve_node(path)
-	if node == null:
-		return _fail("找不到节点: %s" % path)
-	var current: Variant = node.get(property)
-	if current == null and not node.has_method(property):
-		return _fail("节点 %s 没有属性: %s" % [path, property])
-	var typed: Variant = _auto_convert_arg(value)
-	if typed is String and current != null:
-		typed = _coerce_value(value, typeof(current))
-	if typed == null and value != null:
-		return _fail("无法转换值 %s 为属性类型" % str(value))
-	# 经 UndoRedo 提交, 使 AI 的修改可用 Ctrl+Z 撤销(Ctrl+Z 作用于当前编辑场景)
-	var undo := _editor_undo_redo()
-	if undo:
-		undo.create_action("MCP: set %s.%s" % [node.name, property])
-		undo.add_do_property(node, property, typed)
-		undo.add_undo_property(node, property, current)
-		undo.commit_action()
-	else:
-		node.set(property, typed)
-	return _ok("已设置 %s.%s = %s" % [path, property, str(node.get(property))])
-
-
-func _call_call_node_method(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	var method: String = str(args.get("method", ""))
-	var args_arr: Array = args.get("args", [])
-	var node := _resolve_node(path)
-	if node == null:
-		return _fail("找不到节点: %s" % path)
-	if not node.has_method(method):
-		return _fail("节点 %s 没有方法: %s" % [path, method])
-	var converted_args: Array = []
-	for arg in args_arr:
-		converted_args.append(_auto_convert_arg(arg))
-	var result: Variant = node.callv(method, converted_args)
-	return _ok("已调用 %s.%s() -> %s" % [path, method, str(result)])
-
-
-func _call_add_node(args: Dictionary) -> Dictionary:
-	var parent_path := str(args.get("parent", ""))
-	var node_type := str(args.get("node_type", ""))
-	var new_name := str(args.get("name", ""))
-	var root := _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var parent := root
-	if not parent_path.is_empty():
-		parent = _resolve_node(parent_path)
-		if parent == null:
-			return _fail("找不到父节点: %s" % parent_path)
-	var new_node: Node
-	if node_type.begins_with("res://"):
-		if not ResourceLoader.exists(node_type):
-			return _fail("子场景不存在: %s" % node_type)
-		var packed: PackedScene = ResourceLoader.load(node_type)
-		if packed == null:
-			return _fail("子场景加载失败: %s" % node_type)
-		new_node = packed.instantiate()
-	else:
-		if not ClassDB.class_exists(node_type):
-			return _fail("未知节点类型: %s" % node_type)
-		new_node = ClassDB.instantiate(node_type)
-		if new_node == null:
-			return _fail("无法实例化节点类型: %s" % node_type)
-	if not new_name.is_empty():
-		new_node.name = new_name
-	var owner_root: Node = root
-	var undo := _editor_undo_redo()
-	if undo and is_inside_tree():
-		# 经 UndoRedo 提交, 使 AI 新增节点可用 Ctrl+Z 移除。
-		# do/undo 回调挂在 parent 场景节点上, 让 action 进场景历史(而非全局历史)。
-		undo.create_action("MCP: add %s" % new_node.name)
-		undo.add_do_method(parent, "add_child", new_node, true)
-		undo.add_undo_method(parent, "remove_child", new_node)
-		undo.add_do_property(new_node, "owner", owner_root)
-		undo.add_undo_property(new_node, "owner", null)
-		undo.commit_action()
-	else:
-		parent.add_child(new_node, true)
-		_assign_owner_recursive(new_node, owner_root)
-	return _ok("已添加节点 %s [%s] 到 %s" % [new_node.name, new_node.get_class(), parent.name])
-
-
-## 递归把节点及其子树 owner 设为场景根, 保证新增节点可随场景保存
-func _assign_owner_recursive(node: Node, root: Node) -> void:
-	node.owner = root
-	for child in node.get_children():
-		_assign_owner_recursive(child, root)
-
-
-## 删除节点(含子树)
-func _call_remove_node(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	var root: Node = _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var node: Node = _resolve_node(path)
-	if node == null:
-		return _fail("找不到节点: %s" % path)
-	if node == root:
-		return _fail("不能删除场景根节点")
-	var parent: Node = node.get_parent()
-	if parent == null:
-		return _fail("节点没有父节点: %s" % path)
-	# 直接删除: 节点删除的 UndoRedo 会保留已删节点引用, 保存场景时触发
-	# "No path can be resolved ... not inside tree" 警告(Godot 已知问题)。
-	# 为干净起见, remove 不做 undo(删除操作本身幂等, 风险低)。
-	parent.remove_child(node)
-	node.owner = null
-	node.queue_free()
-	return _ok("已删除节点 %s" % node.name)
-
-
-## 复制节点(含子树)为兄弟
-func _call_duplicate_node(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	var new_name := str(args.get("new_name", ""))
-	var root: Node = _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var node: Node = _resolve_node(path)
-	if node == null:
-		return _fail("找不到节点: %s" % path)
-	var dup: Node = node.duplicate(Node.DUPLICATE_GROUPS | Node.DUPLICATE_SCRIPTS | Node.DUPLICATE_SIGNALS | Node.DUPLICATE_GROUPS)
-	if dup == null:
-		return _fail("节点复制失败: %s" % path)
-	if new_name.is_empty():
-		new_name = node.name + "_copy"
-	dup.name = new_name
-	var parent: Node = node.get_parent()
-	if parent == null:
-		return _fail("节点没有父节点: %s" % path)
-	var owner_root: Node = root
-	var undo: EditorUndoRedoManager = _editor_undo_redo()
-	if undo and is_inside_tree():
-		undo.create_action("MCP: duplicate %s" % new_name)
-		undo.add_do_method(parent, "add_child", dup, true)
-		undo.add_undo_method(parent, "remove_child", dup)
-		undo.add_do_property(dup, "owner", owner_root)
-		undo.add_undo_property(dup, "owner", null)
-		undo.commit_action()
-	else:
-		parent.add_child(dup, true)
-		_assign_owner_recursive(dup, owner_root)
-	return _ok("已复制节点 %s → %s" % [node.name, dup.name])
-
-
-## 设置节点位置/旋转/缩放(2D/3D)
-func _call_set_node_transform(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	var property := str(args.get("property", ""))
-	var value: Variant = args.get("value", null)
-	var root: Node = _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var node: Node = _resolve_node(path)
-	if node == null:
-		return _fail("找不到节点: %s" % path)
-	if not node is Node2D and not node is Node3D:
-		return _fail("仅支持 Node2D/Node3D 节点(当前 %s)" % node.get_class())
-	var converted: Variant = _auto_convert_arg(value)
-	if not node.has_method("set"):
-		return _fail("节点不可写属性: %s" % path)
-	var undo: EditorUndoRedoManager = _editor_undo_redo()
-	if undo and is_inside_tree():
-		var old: Variant = node.get(property)
-		undo.create_action("MCP: set %s.%s" % [node.name, property])
-		undo.add_do_property(node, property, converted)
-		undo.add_undo_property(node, property, old)
-		undo.commit_action()
-	else:
-		node.set(property, converted)
-	return _ok("已设置 %s.%s = %s" % [node.name, property, str(converted)])
-
-
-## 连接信号到方法
-func _call_connect_signal(args: Dictionary) -> Dictionary:
-	var source_path := str(args.get("source_path", ""))
-	var signal_name := str(args.get("signal", ""))
-	var method := str(args.get("method", ""))
-	var target_path := str(args.get("target_path", ""))
-	var root: Node = _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var source: Node = _resolve_node(source_path)
-	if source == null:
-		return _fail("找不到源节点: %s" % source_path)
-	if not source.has_signal(signal_name):
-		return _fail("节点 %s 没有信号 %s" % [source.name, signal_name])
-	var target: Node = source
-	if not target_path.is_empty():
-		target = _resolve_node(target_path)
-		if target == null:
-			return _fail("找不到目标节点: %s" % target_path)
-	if not target.has_method(method):
-		return _fail("目标节点 %s 没有方法 %s" % [target.name, method])
-	# 场景内连接的信号, 随场景保存
-	var undo: EditorUndoRedoManager = _editor_undo_redo()
-	if undo and is_inside_tree():
-		undo.create_action("MCP: connect %s.%s -> %s.%s" % [source.name, signal_name, target.name, method])
-		undo.add_do_method(source, "connect", signal_name, Callable(target, method))
-		undo.add_undo_method(source, "disconnect", signal_name, Callable(target, method))
-		undo.commit_action()
-	else:
-		source.connect(signal_name, Callable(target, method))
-	return _ok("已连接 %s.%s → %s.%s" % [source.name, signal_name, target.name, method])
-
-
-func _call_save_scene(_args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var root := _edited_root()
-	if root == null:
-		return _fail("当前没有打开的场景")
-	var err := EditorInterface.save_scene()
-	if err != OK:
-		return _fail("保存场景失败(错误码 %d)" % err)
-	return _ok("已保存场景 %s" % root.get_scene_file_path())
-
-
-func _call_get_project_info(args: Dictionary) -> Dictionary:
-	var section := str(args.get("section", "basic"))
-	if section == "settings":
-		return await _call_get_project_settings({})
-	if section == "classes":
-		return _call_get_global_classes({})
-	if section != "basic":
-		return _fail("未知 section: %s (可选 basic/settings/classes)" % section)
-	var session_active: bool = _has_game_session()
-	var info := {
-		"project_name": ProjectSettings.get_setting("application/config/name", ""),
-		"godot_version": Engine.get_version_info(),
-		"editor": Engine.is_editor_hint(),
-		"debug_build": OS.is_debug_build(),
-		"current_scene": _edited_root().get_scene_file_path() if _edited_root() else null,
-		"mode": _mode,
-		"mcp_port": _port,
-		"mcp_running": is_running(),
-		"game_running": session_active,
-		"bridge_ready": session_active and _game_ready,
-		"session_active": session_active,
-	}
-	return _ok_json(info)
-
-
-## 感知编辑器当前状态(用于 AI 与人类协作): 打开场景/选中节点/运行状态等
-func _call_get_editor_activity(_args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var out := {
-		"mode": "editor",
-		"game_running": _has_game_session(),
-		"bridge_ready": debugger_plugin != null and _game_ready,
-	}
-	# 打开的场景与选中节点
-	var root := _edited_root()
-	if root:
-		out["open_scene"] = root.get_scene_file_path()
-		out["scene_name"] = str(root.name)
-	var selection := EditorInterface.get_selection()
-	if selection != null:
-		var selected: Array[Node] = []
-		for n in selection.get_selected_nodes():
-			selected.append(n)
-		out["selected_nodes"] = selected.map(func(n: Node): return str(n.get_path()))
-	out["mcp_running"] = is_running()
-	return _ok_json(out)
-
-
-func _call_get_project_settings(_args: Dictionary) -> Dictionary:
-	var root := _edited_root()
-	var info := {
-		"main_scene": ProjectSettings.get_setting("application/run/main_scene", ""),
-		"project_name": ProjectSettings.get_setting("application/config/name", ""),
-		"autoloads": _autoloads(),
-		"input_actions": _input_actions(),
-		"layers_2d": _named_layers("layer_names/2d_physics"),
-		"layers_2d_render": _named_layers("layer_names/2d_render"),
-		"layers_3d": _named_layers("layer_names/3d_physics"),
-		"layers_3d_render": _named_layers("layer_names/3d_render"),
-		"current_scene": root.get_scene_file_path() if root else null,
-	}
-	return _ok_json(info)
-
-
-## 收集 autoload 单例(名字 -> 路径)
-func _autoloads() -> Dictionary:
-	var out := {}
-	for key in ProjectSettings.get_property_list():
-		var name: String = str(key.get("name", ""))
-		if name.begins_with("autoload/") and name.count("/") == 1:
-			var keyname := name.trim_prefix("autoload/")
-			var val = ProjectSettings.get_setting(name)
-			if val is String and not (val.begins_with("*") or val.begins_with("&")):
-				out[keyname] = val
-	return out
-
-
-## 收集输入映射动作名
-func _input_actions() -> Array:
-	var out := []
-	for key in ProjectSettings.get_property_list():
-		var name: String = str(key.get("name", ""))
-		if name.begins_with("input/"):
-			out.append(name.trim_prefix("input/"))
-	return out
-
-
-## 读取图层命名
-func _named_layers(setting_key: String) -> Dictionary:
-	var out := {}
-	for key in ProjectSettings.get_property_list():
-		var name: String = str(key.get("name", ""))
-		if name.begins_with(setting_key + "/"):
-			var idx := name.trim_prefix(setting_key + "/")
-			out[int(idx)] = ProjectSettings.get_setting(name)
-	return out
+	# editor / scene 两模式只取编辑器进程自己的像素, 整段搬进了 MCPScreenshotTools
+	# (含 SubViewport 渲染、frame_post_draw 那三条禁令、sRGB 校正与 1280 降采样)。
+	# 本函数必须留在主文件的只有上面 text/game 那段: 它要 _call_runtime_proxy 与
+	# _runtime_take_screenshot, 两者都依赖 _pending / debugger_plugin, 静态化不了。
+	# 那边**刻意不叫 _call_take_screenshot**: 跨文件同名会让"按函数名取实现"(grep、审计切源码)
+	# 有机会取到错误那一份, 域文件那边把理由写全了。
+	return await MCPScreenshotTools.capture_editor_side(capture_type, args)
 
 
 func _call_run_game(args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return _fail("仅在编辑器模式可运行游戏")
 	if _has_game_session():
-		return _fail("游戏已在运行(活跃调试会话)。如需重启请先 stop_game。")
-	var scene := str(args.get("scene", ""))
+		return _fail("游戏已在运行(活跃调试会话)。如需重启请用 game_control(action=start)(会自动停掉旧实例)。")
+	var raw := VariantTool.get_string(args, "scene")
+	var source := "参数 scene"
+	if raw.is_empty():
+		# 未指定时用主场景(项目里通常配置为 uid:// 形式)
+		raw = str(ProjectSettings.get_setting("application/run/main_scene", ""))
+		source = "项目主场景(application/run/main_scene)"
+		if raw.is_empty():
+			return _err_validation(
+				"必须提供 scene(要运行的场景 res:// 路径), 例如 res://Scenes/Main/Main.tscn",
+				"传入 scene 参数后重试。")
+	# uid:// → res://。解析失败时模块会先重扫重建 UID 缓存再重试一次, 因为编辑器重启后
+	# 第一次启动必然撞上缓存未就绪 —— 那正是"改代码 → restart_editor → 验证"的第一个动作
+	var scene := await MCPScriptSync.resolve_scene_path(raw)
 	if scene.is_empty():
-		# 未指定时用主场景
-		scene = str(ProjectSettings.get_setting("application/run/main_scene", ""))
-		if scene.is_empty():
-			return _fail("必须提供 scene(要运行的场景 res:// 路径), 例如 res://Scenes/Main/Main.tscn")
-	# uid 形式(主场景常配置为 uid://xxx): 先解析为资源路径再校验
-	if scene.begins_with("uid://"):
-		var resolved := ResourceUID.uid_to_path(scene)
-		if resolved.is_empty() or not resolved.begins_with("res://"):
-			return _fail("uid 无法解析到项目内资源路径: %s" % scene)
-		scene = resolved
-	if not scene.begins_with("res://"):
-		scene = "res://" + scene
+		return _err_validation("无法把%s解析为项目内资源路径: %s" % [source, raw],
+			"确认该资源已导入; 也可绕过 uid 解析 —— 直接传 res:// 路径形式。")
 	if not ResourceLoader.exists(scene):
-		return _fail("启动场景不存在: %s" % scene)
+		return _err_validation("启动场景不存在: %s" % scene,
+			"传入存在的场景路径后重试。")
 	var scene_res: Resource = ResourceLoader.load(scene)
 	if not scene_res is PackedScene:
 		return _fail("不是有效场景文件: %s(类型: %s)" % [scene, scene_res.get_class() if scene_res else "null"])
@@ -1868,7 +1470,7 @@ func _call_stop_game(_args: Dictionary) -> Dictionary:
 func _call_auto_verify(args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return _fail("仅在编辑器模式可用")
-	var scene := str(args.get("scene", ""))
+	var scene := VariantTool.get_string(args, "scene")
 	# 自动接管: 已运行的游戏先停止再重跑(本工具自行管理启停, 对齐 Playwright 等托管生命周期工具惯例)。
 	if _has_game_session():
 		EditorInterface.stop_playing_scene()
@@ -1877,10 +1479,10 @@ func _call_auto_verify(args: Dictionary) -> Dictionary:
 		while _has_game_session() and waited < 5.0:
 			await get_tree().create_timer(0.1).timeout
 			waited += 0.1
-	var retries := int(args.get("retries", 0))
-	var backoff_ms := int(args.get("retry_backoff_ms", 500))
+	var retries := VariantTool.get_int(args, "retries")
+	var backoff_ms := VariantTool.get_int(args, "retry_backoff_ms", 500)
 	# 可选: 调用方提供的上次依赖快照({path: mtime}), 用于检测本次执行前代码是否变化
-	var prev_snapshot: Dictionary = args.get("prev_snapshot", {}) if args.get("prev_snapshot") is Dictionary else {}
+	var prev_snapshot: Dictionary = VariantTool.get_dict(args, "prev_snapshot")
 	var history: Array = []
 	var attempts := 0
 	while true:
@@ -1959,11 +1561,11 @@ func _attach_code_change_info(sc: Dictionary, scene: String, prev_snapshot: Dict
 func _call_verify_fix(args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return _fail("仅在编辑器模式可用")
-	var action := str(args.get("action", "start")).to_lower()
-	var session_id := str(args.get("session_id", "default"))
+	var action := VariantTool.get_string(args, "action", "start").to_lower()
+	var session_id := VariantTool.get_string(args, "session_id", "default")
 	# abort: 清除指定会话(或全部)
 	if action == "abort":
-		if str(args.get("all", false)) == "true":
+		if VariantTool.get_bool(args, "all"):
 			_verify_sessions.clear()
 			return _ok_json({"action": "abort", "session_active": false, "message": "全部 verify_fix 会话已清除"})
 		_verify_sessions.erase(session_id)
@@ -1972,7 +1574,7 @@ func _call_verify_fix(args: Dictionary) -> Dictionary:
 	if action == "status":
 		if _verify_sessions.is_empty():
 			return _ok_json({"action": "status", "session_active": false, "session_count": 0, "message": "无活跃会话。用 action=start 创建。"})
-		if str(args.get("all", false)) == "true":
+		if VariantTool.get_bool(args, "all"):
 			return _ok_json({"action": "status", "session_active": true, "session_count": _verify_sessions.size(), "sessions": _verify_sessions})
 		if not _verify_sessions.has(session_id):
 			return _ok_json({"action": "status", "session_id": session_id, "session_active": false, "message": "会话不存在: %s" % session_id})
@@ -1980,12 +1582,12 @@ func _call_verify_fix(args: Dictionary) -> Dictionary:
 	# start / continue
 	if action == "start":
 		_verify_sessions[session_id] = {
-			"scene": str(args.get("scene", "")),
-			"operations": args.get("operations", []),
-			"duration": float(args.get("duration", 4.0)),
-			"retries": int(args.get("retries", 0)),
-			"retry_backoff_ms": int(args.get("retry_backoff_ms", 500)),
-			"stop_on_error": bool(args.get("stop_on_error", true)),
+			"scene": VariantTool.get_string(args, "scene"),
+			"operations": VariantTool.get_array(args, "operations"),
+			"duration": VariantTool.get_float(args, "duration", 4.0),
+			"retries": VariantTool.get_int(args, "retries"),
+			"retry_backoff_ms": VariantTool.get_int(args, "retry_backoff_ms", 500),
+			"stop_on_error": VariantTool.get_bool(args, "stop_on_error", true),
 			"rounds": [],
 			"deps_snapshot": {},
 		}
@@ -2010,8 +1612,14 @@ func _call_verify_fix(args: Dictionary) -> Dictionary:
 	if not prev_snapshot.is_empty():
 		verify_args["prev_snapshot"] = prev_snapshot
 	var result: Dictionary = await _call_auto_verify(verify_args)
-	# 用 auto_verify 返回的最新依赖快照更新会话(供下次 continue 比对)
-	var sc: Variant = result.get("structuredContent", null)
+	# 错误响应不能当成功结果读: 错误结果的 sc 里没有 verdict / deps_changed 字段,
+	# 读它会让 verdict 被 `sc.get("verdict", "unknown")` 静默读成 "unknown"(而非明确的
+	# "error"), 并让 deps_changed 取默认 true —— 于是"本轮根本没跑起来"这一事实被
+	# "依赖有变化, 重跑有意义"这个乐观结论盖掉。故先分流, 错误时 sc 保持 null。
+	# (MCPResult.err 现在会填 structuredContent, 见该函数的说明)
+	var sc: Variant = null
+	if not bool(result.get("is_error", false)):
+		sc = result.get("structuredContent", null)
 	var deps_changed := true
 	if sc is Dictionary:
 		deps_changed = bool(sc.get("deps_changed", sc.get("code_changed", true)))
@@ -2048,45 +1656,10 @@ func _call_verify_fix(args: Dictionary) -> Dictionary:
 	return _ok_json(round_summary)
 
 
-## 收集场景依赖链的全部资源文件(递归: 场景依赖 → 资源依赖), 含脚本/配置/图片/音频/字体等。
-## 排除 .godot 缓存与 .import 元数据, 只看用户资源。
-func _collect_scene_deps(scene: String) -> Dictionary:
-	var deps := {}
-	var visited := {}
-	_collect_deps_recursive(scene, deps, visited)
-	return deps
-
-
-func _collect_deps_recursive(path: String, deps: Dictionary, visited: Dictionary) -> void:
-	if visited.has(path):
-		return
-	visited[path] = true
-	# 排除引擎缓存/导入元数据(这些被改动不代表用户资源变化)
-	if path.contains("/.godot/") or path.ends_with(".import"):
-		return
-	if path.ends_with(".gd") or path.ends_with(".tres") or path.ends_with(".tscn") or path.ends_with(".res") \
-		or path.ends_with(".png") or path.ends_with(".jpg") or path.ends_with(".svg") or path.ends_with(".webp") \
-		or path.ends_with(".wav") or path.ends_with(".ogg") or path.ends_with(".mp3") \
-		or path.ends_with(".ttf") or path.ends_with(".otf") or path.ends_with(".glb") or path.ends_with(".gltf"):
-		deps[path] = true
-	if not ResourceLoader.exists(path):
-		return
-	var sub := ResourceLoader.get_dependencies(path)
-	for dep in sub:
-		var dep_str := String(dep)
-		# 格式: path 或 uid::<空>::path
-		var real := dep_str
-		if dep_str.contains("::"):
-			real = dep_str.get_slice("::", 2)
-		if real.is_empty():
-			continue
-		_collect_deps_recursive(real, deps, visited)
-
-
 ## 快照依赖文件的修改时间(path -> mtime)。mtime 变化即认为代码/资源被改动。
 func _snapshot_deps_mtime(scene: String) -> Dictionary:
 	var snap := {}
-	var deps := _collect_scene_deps(scene)
+	var deps := MCPCodeIndex.collect_scene_deps(scene)
 	for path in deps:
 		if not FileAccess.file_exists(String(path)):
 			continue
@@ -2117,6 +1690,16 @@ func _run_auto_verify_once(scene: String, args: Dictionary) -> Dictionary:
 	return result
 
 
+## 等待游戏调试会话结束(供 start 前自动停止旧实例用), 超时返回 false
+func _wait_game_stopped(timeout_sec: float = 5.0) -> bool:
+	var deadline := Time.get_ticks_msec() + int(timeout_sec * 1000)
+	while Time.get_ticks_msec() < deadline:
+		if not _has_game_session():
+			return true
+		await get_tree().create_timer(0.1).timeout
+	return not _has_game_session()
+
+
 ## 等待游戏进程的调试线桥接就绪(session 已激活 且 收到 dev_mcp:ready), 超时返回 false
 func _wait_game_ready(timeout_sec: float = 15.0) -> bool:
 	var deadline := Time.get_ticks_msec() + int(timeout_sec * 1000)
@@ -2127,987 +1710,6 @@ func _wait_game_ready(timeout_sec: float = 15.0) -> bool:
 	return false
 
 
-## ======= 开发辅助工具实现 =======
-
-## reload_project: 软重启编辑器(原重扫逻辑不再需要; 修改框架代码后重启以统一全局类脚本代次)
-func _call_reload_project(args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var save := bool(args.get("save", true))
-	var delay_sec: float = clampf(float(args.get("delay_sec", 1.0)), 0.0, 10.0)
-	# 延迟触发: 让本工具的确认响应先送达客户端, 否则进程即刻退出客户端只能收到超时
-	_delayed_restart(save, delay_sec)
-	return _ok("编辑器将在 %.1f 秒后软重启%s。重启期间 MCP 连接短暂断开(端口不变+插件自启自动恢复), 客户端等待数秒后重试调用即可继续。" % [delay_sec, "并自动保存全部场景" if save else ""])
-
-
-func _call_eval_code(args: Dictionary) -> Dictionary:
-	var code: String = str(args.get("code", ""))
-	if code.is_empty():
-		return _fail("必须提供 code")
-	# 静态安全扫描(禁止逃逸 API)
-	var forbidden := _eval_forbidden_scan(code)
-	if forbidden != "":
-		return _err(forbidden, "validation", false, "移除被禁止的 API 调用后重新调用 eval")
-	# 预编译检查(语法错误在到达解释器前拦截)
-	var precheck := _precheck_eval_code(code)
-	if precheck != "":
-		return _err(precheck, "validation", false, "修正代码语法后重新调用 eval(语法错误无法通过重试解决)")
-	var script := GDScript.new()
-	var body := _indent_method_body(code)
-	# 包装为挂到场景树的 Node 方法, 让用户代码可直接 get_tree()/get_node() 访问当前场景
-	script.source_code = "extends Node\nfunc _mcp_run():\n%s" % body
-	var err := script.reload()
-	if err != OK:
-		var text := error_string(err)
-		var hint := ""
-		if text.contains("hides a global script class"):
-			hint = " (class_name 与全局类冲突: 请勿在 eval_code 中声明类, 或先 reload_project)"
-		return _err("代码解析失败: %s%s\n解析详情已输出到编辑器控制台, 可用 get_logs 查看。" % [text, hint],
-			"validation", false, "修正代码后重新调用 eval")
-	# 执行前记录错误游标, 以便捕获本次 eval 运行期错误(用逻辑游标, 环形缓冲满后仍正确)
-	var err_before: int = _logger.get_error_cursor() if _logger else 0
-	var inst: Node = script.new()
-	if inst == null:
-		return _err("无法实例化求值脚本", "internal", false, "重新调用 eval, 或检查服务器日志")
-	var root := get_tree().root
-	if root:
-		root.add_child(inst)
-	var result: Variant = inst.call("_mcp_run")
-	# await 感知: 代码含 await 时 call 返回协程句柄, 等待其完成再回传真实结果(带超时)。
-	# 超时不杀续体: 实例转交延迟回收, 协程自然结束后自动释放(对齐 DevTools/Node REPL 的 top-level await 语义)。
-	if _is_function_state(result):
-		var timeout_sec := clampf(float(args.get("timeout_ms", 8000)) / 1000.0, 0.5, 15.0)
-		var holder := {"done": false, "value": null}
-		_await_state(result, holder)
-		var elapsed := 0.0
-		while not holder.done and elapsed < timeout_sec:
-			await get_tree().create_timer(0.05).timeout
-			elapsed += 0.05
-		if not holder.done:
-			_reap_later(result, inst)
-			return _ok("协程仍在后台执行(已等待%.1fs): eval 启动的异步流程会继续运行, 实例将在其结束后自动释放。\n如需拿到最终返回值请增大 timeout_ms 重试(上限15000); 若只需触发副作用则当前调用已生效。" % elapsed)
-		result = holder.value
-	if root and is_instance_valid(inst):
-		inst.queue_free()
-	# 收集本次运行产生的运行期错误(若代码 halt, 也会反映为错误入队)
-	var runtime_errors: Array = []
-	if _logger:
-		var taken: Dictionary = _logger.take_errors_since(err_before)
-		runtime_errors = taken.get("entries", [])
-	var shown := str(result)
-	if result is Dictionary or result is Array:
-		shown = JSON.stringify(result)
-	# 运行期错误(如 get_node 访问 null 字段)应作为错误即时返回, 而非"成功+警告",
-	# 否则编辑器侧只能等 20s 超时再回查错误缓冲, AI 无法及时定位。
-	if not runtime_errors.is_empty():
-		var merged := _condense_runtime_errors(runtime_errors)
-		if merged.is_empty():
-			return _ok("执行成功, 返回: %s\n(捕获 %d 条运行期错误, 均命中 dev_framework/mcp/ignored_error_patterns 已过滤)" % [shown, runtime_errors.size()])
-		var msgs := PackedStringArray()
-		var max_show := mini(merged.size(), 5)
-		for i in range(max_show):
-			var e: Dictionary = merged[i]
-			var count := int(e.get("count", 1))
-			msgs.append("%s@%s:%s" % [e.get("message", ""), e.get("file", "?"), e.get("line", "?")] + ("" if count <= 1 else " (x%d)" % count))
-		return _err(
-			"eval 执行返回: %s\n执行中捕获 %d 条运行期错误(合并后 %d 类, 前 %d 类):\n%s\n\n提示: get_node() 相对路径基于 eval 脚本实例, 找不到节点常因路径写错, 建议用绝对路径(/root/场景名/...) 或 get_tree().current_scene.get_node(...)。完整错误列表可用 get_game_errors; 重复噪音可在项目设置 dev_framework/mcp/ignored_error_patterns 配置子串忽略。" %
-			[shown, runtime_errors.size(), merged.size(), max_show, "\n".join(msgs)],
-			"validation", true, "修正 eval 代码中的错误后重试")
-	return _ok("执行成功, 返回: %s" % shown)
-
-
-## eval 附带错误降噪: 按 message+位置合并重复计数, 并应用项目设置
-## dev_framework/mcp/ignored_error_patterns(字符串数组, 子串匹配)过滤已知噪音。
-func _condense_runtime_errors(entries: Array) -> Array:
-	var ignored: Array = []
-	var ignored_v: Variant = ProjectSettings.get_setting("dev_framework/mcp/ignored_error_patterns", null)
-	if ignored_v is Array or ignored_v is PackedStringArray:
-		for p in ignored_v:
-			ignored.append(str(p))
-	elif ignored_v is String and str(ignored_v).strip_edges() != "":
-		# 兼容历史坏值(JSON 数组被存成字符串): 先尝试还原, 失败则按逗号拆分
-		var parsed: Variant = JSON.parse_string(str(ignored_v))
-		if parsed is Array:
-			for p in parsed:
-				ignored.append(str(p))
-		else:
-			for p in str(ignored_v).split(","):
-				ignored.append(p.strip_edges())
-	var merged: Array = []
-	var index := {}
-	for e: Dictionary in entries:
-		var msg := str(e.get("message", ""))
-		var skip := false
-		for p in ignored:
-			if p != "" and msg.contains(p):
-				skip = true
-				break
-		if skip:
-			continue
-		var key := "%s|%s|%s" % [msg, str(e.get("file", "")), str(e.get("line", ""))]
-		if index.has(key):
-			merged[index[key]]["count"] = int(merged[index[key]]["count"]) + 1
-		else:
-			index[key] = merged.size()
-			merged.append({"message": msg, "file": str(e.get("file", "?")), "line": str(e.get("line", "?")), "count": 1})
-	return merged
-
-
-## 把用户 eval_code 规范成方法体缩进
-func _indent_method_body(code: String) -> String:
-	var lines := code.split("\n")
-	var out := PackedStringArray()
-	for line in lines:
-		var norm := _normalize_indent(line, 4)
-		out.append("    " + norm)
-	return "\n".join(out)
-
-
-func _normalize_indent(line: String, tab_w: int) -> String:
-	var i := 0
-	var spaces := 0
-	while i < line.length():
-		var c := line.unicode_at(i)
-		if c == 9:
-			spaces += tab_w
-			i += 1
-		elif c == 32:
-			spaces += 1
-			i += 1
-		else:
-			break
-	var prefix := ""
-	for j in spaces:
-		prefix += " "
-	return prefix + line.substr(i)
-
-
-## 判断值是否为协程句柄(GDScriptFunctionState 未暴露给脚本类型系统, 用类名判断)
-func _is_function_state(v) -> bool:
-	return v != null and v is Object and v.get_class() == "GDScriptFunctionState"
-
-
-## 等待协程完成并把最终返回值写入 holder(fire-and-forget 调用)
-func _await_state(fs: Object, holder: Dictionary) -> void:
-	var value = await fs
-	holder.value = value
-	holder.done = true
-
-
-## eval 协程超时后的延迟回收: 自然结束后再释放求值实例(不掐死续体)
-func _reap_later(fs: Object, inst: Node) -> void:
-	await fs
-	if is_instance_valid(inst):
-		inst.queue_free()
-
-
-func _call_get_global_classes(_args: Dictionary) -> Dictionary:
-	var list := ProjectSettings.get_global_class_list()
-	var out: Array = []
-	for c in list:
-		out.append({
-			"name": c.get("name", ""),
-			"path": c.get("path", ""),
-			"base": c.get("base", ""),
-			"class": c.get("class", ""),
-		})
-	return _ok_json({"count": out.size(), "classes": out})
-
-
-## 跨脚本与场景/资源配置搜索符号(函数/变量/类定义与引用)
-func _call_search_symbols(args: Dictionary) -> Dictionary:
-	var query := str(args.get("query", ""))
-	var kind := str(args.get("kind", "all"))
-	var search_path := str(args.get("path", ""))
-	var include_resources := bool(args.get("include_resources", true))
-	var max_results := int(args.get("max_results", 100))
-	if query.is_empty():
-		return _fail("必须提供 query")
-	var base_dir := "res://"
-	if not search_path.is_empty():
-		if not search_path.begins_with("res://"):
-			search_path = "res://" + search_path.trim_prefix("/")
-		base_dir = search_path
-		if not DirAccess.dir_exists_absolute(base_dir):
-			return _fail("目录不存在: %s" % base_dir)
-	var allowed_kinds := ["all", "function", "variable", "class", "node", "resource", "ref"]
-	if kind not in allowed_kinds:
-		return _fail("kind 无效: %s (可选: all/function/variable/class/node/resource/ref)" % kind)
-	# query 若是资源路径/uid, 补充另一形态(uid 或 res://路径)以便双向匹配
-	var needles: Array = [query]
-	if query.begins_with("res://"):
-		var uid := ResourceLoader.get_resource_uid(query)
-		if uid >= 0:
-			needles.append(ResourceUID.id_to_text(uid))
-	elif query.begins_with("uid://"):
-		var rpath := ResourceUID.uid_to_path(query)
-		if not rpath.is_empty():
-			needles.append(rpath)
-	# 收集文件(仅 .gd 或含 .tscn/.tres)
-	var code_files: Array = []
-	var extensions := PackedStringArray([".gd"])
-	if include_resources:
-		extensions = PackedStringArray([".gd", ".tscn", ".tres"])
-	_collect_files(base_dir, code_files, extensions)
-	# 逐文件扫描
-	var defs: Array = []
-	var refs: Array = []
-	for fpath in code_files:
-		var is_scene: bool = fpath.ends_with(".tscn") or fpath.ends_with(".tres")
-		var matcher := func(line: String, line_num: int) -> Variant:
-			var m: Variant
-			if is_scene:
-				m = _match_scene_symbol(line, needles)
-			else:
-				m = _match_symbol(line, needles)
-			if m == null:
-				return null
-			m["line"] = line_num
-			m["text"] = line.strip_edges()
-			return m
-		for hit in _scan_file_lines(fpath, matcher):
-			var entry := {
-				"file": fpath,
-				"line": hit.get("line", 0),
-				"text": hit.get("text", ""),
-				"type": hit.get("type", "ref"),
-				"symbol": hit.get("symbol", query),
-			}
-			if kind != "all" and String(entry.get("type")) != kind:
-				continue
-			if entry.get("type") == "ref":
-				if refs.size() < max_results:
-					refs.append(entry)
-			elif defs.size() < max_results:
-				defs.append(entry)
-			if defs.size() + refs.size() >= max_results * 2:
-				break
-		if defs.size() + refs.size() >= max_results * 2:
-			break
-	return _ok_json({
-		"query": query,
-		"definitions": defs,
-		"references": refs,
-		"definition_count": defs.size(),
-		"reference_count": refs.size(),
-		"files_scanned": code_files.size(),
-	})
-
-
-## 递归收集 res:// 下匹配扩展名的文件(如 .gd/.tscn/.tres)
-func _collect_files(dir_path: String, out: Array, extensions: PackedStringArray) -> void:
-	var dir := DirAccess.open(dir_path)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var fname := dir.get_next()
-	while not fname.is_empty():
-		if fname == "." or fname == "..":
-			fname = dir.get_next()
-			continue
-		var full := dir_path.path_join(fname)
-		if dir.current_is_dir():
-			# 跳过隐藏/构建目录
-			if not fname.begins_with(".") and fname != "build" and fname != "Native":
-				_collect_files(full, out, extensions)
-		elif _has_any_ext(fname, extensions):
-			out.append(full)
-		fname = dir.get_next()
-	dir.list_dir_end()
-
-
-func _has_any_ext(fname: String, extensions: PackedStringArray) -> bool:
-	for ext in extensions:
-		if fname.ends_with(ext):
-			return true
-	return false
-
-
-## 逐行扫描文件, matcher(line, line_num) 返回字典即命中(含 type 等), 返回 null 跳过。收集全部命中行。
-func _scan_file_lines(fpath: String, matcher: Callable) -> Array:
-	var hits: Array = []
-	if not FileAccess.file_exists(fpath):
-		return hits
-	var file := FileAccess.open(fpath, FileAccess.READ)
-	if file == null:
-		return hits
-	var line_num := 0
-	while not file.eof_reached():
-		var line := file.get_line()
-		line_num += 1
-		var result: Variant = matcher.call(line, line_num)
-		if result != null:
-			hits.append(result)
-	file.close()
-	return hits
-
-
-## 匹配一行里的符号定义或引用, needles[0] 为原始 query。返回 {type, symbol} 或 null
-func _match_symbol(line: String, needles: Array) -> Variant:
-	var stripped := line.strip_edges()
-	if stripped.begins_with("#"):
-		return null
-	var query := String(needles[0])
-	# 定义: func 名字(
-	if RegEx.create_from_string("\\bfunc\\s+(" + _regex_escape(query) + ")\\s*\\(").search(stripped):
-		return {"type": "function", "symbol": query}
-	# 定义: class_name 名字 或 class 名字
-	if RegEx.create_from_string("\\bclass(?:_name)?\\s+(" + _regex_escape(query) + ")\\b").search(stripped):
-		return {"type": "class", "symbol": query}
-	# 定义: var 名字 / @export var 名字 / const 名字
-	if RegEx.create_from_string("\\b(?:var|const)\\s+(" + _regex_escape(query) + ")\\s*(?::|=)").search(stripped):
-		return {"type": "variable", "symbol": query}
-	# 引用: 任一 needle 命中
-	for needle in needles:
-		if stripped.contains(String(needle)):
-			return {"type": "ref", "symbol": String(needle)}
-	return null
-
-
-func _regex_escape(s: String) -> String:
-	return s.replace("\\", "\\\\").replace(".", "\\.").replace("(", "\\(").replace(")", "\\)").replace("[", "\\[").replace("]", "\\]").replace("{", "\\{").replace("}", "\\}").replace("*", "\\*").replace("+", "\\+").replace("?", "\\?").replace("|", "\\|").replace("^", "\\^").replace("$", "\\$")
-
-
-## 匹配 .tscn/.tres 文件行的符号定义或引用, needles[0] 为原始 query
-func _match_scene_symbol(line: String, needles: Array) -> Variant:
-	var stripped := line.strip_edges()
-	if stripped.is_empty():
-		return null
-	var query := String(needles[0])
-	var is_path_query := query.begins_with("res://") or query.begins_with("uid://")
-	# 节点定义: [node name="查询" (仅标识符查询时)
-	if not is_path_query and stripped.begins_with("[node"):
-		var name_idx := stripped.find("name=\"")
-		if name_idx != -1:
-			var name_part := stripped.substr(name_idx + 6)
-			var name_end := name_part.find("\"")
-			if name_end != -1 and name_part.substr(0, name_end) == query:
-				return {"type": "node", "symbol": query}
-	# ext_resource / sub_resource 定义(资源/脚本关联)
-	if stripped.begins_with("[ext_resource") or stripped.begins_with("[sub_resource"):
-		for needle in needles:
-			if stripped.contains(String(needle)):
-				return {"type": "resource", "symbol": String(needle)}
-	# 普通引用: 任一 needle 命中(含属性值引用, 如 script=ExtResource(...) 等)
-	for needle in needles:
-		if stripped.contains(String(needle)):
-			return {"type": "ref", "symbol": String(needle)}
-	return null
-
-
-func _call_find_resource_users(args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var path := str(args.get("path", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not path.begins_with("res://"):
-		path = "res://" + path.trim_prefix("/")
-	if not ResourceLoader.exists(path):
-		return _fail("资源不存在: %s" % path)
-	var include_script_refs := bool(args.get("include_script_refs", true))
-	var include_class_refs := bool(args.get("include_class_refs", true))
-	var max_results := int(args.get("max_results", 100))
-	# 目标资源的 UID 与归一化路径
-	var target_uid := ResourceLoader.get_resource_uid(path)
-	var needles: Array = [ResourceUID.ensure_path(path)]
-	if target_uid >= 0:
-		needles.append(ResourceUID.id_to_text(target_uid))
-	var target_res_path := String(needles[0])
-	# 目标脚本的全局类名(存在时启用第二引用通道: 类名在 .gd 中的词边界使用点)
-	var target_class_name := ""
-	if include_class_refs and target_res_path.ends_with(".gd"):
-		for c in ProjectSettings.get_global_class_list():
-			if String(c.get("path", "")) == target_res_path:
-				target_class_name = str(c.get("name", c.get("class", "")))
-				break
-	# 收集全部代码/资源配置文件
-	var files: Array = []
-	var extensions := PackedStringArray([".gd", ".tscn", ".tres", ".res"])
-	_collect_files("res://", files, extensions)
-	var users: Array = []
-	var files_scanned := 0
-	for fpath in files:
-		if fpath == target_res_path:
-			continue
-		# .gd 脚本: preload/load 引用走文本匹配; 全局类名引用走词边界匹配
-		if fpath.ends_with(".gd"):
-			if not include_script_refs:
-				continue
-			var matcher := func(line: String, _line_num: int) -> Variant:
-				if line.begins_with("#"):
-					return null
-				for needle in needles:
-					if line.contains(String(needle)):
-						return {"needle": String(needle)}
-				if target_class_name != "" and _line_contains_word(line, target_class_name):
-					return {"needle": target_class_name, "class_ref": true}
-				return null
-			var hits := _scan_file_lines(fpath, matcher)
-			if not hits.is_empty():
-				var hit: Dictionary = hits[0]
-				var entry := {"file": fpath, "kind": "class_ref" if bool(hit.get("class_ref", false)) else "script"}
-				if hit.has("needle"):
-					entry["via"] = hit["needle"]
-				users.append(entry)
-				if users.size() >= max_results:
-					break
-			continue
-		# 其他资源文件: 引擎级依赖解析(准确处理 uid::path 引用)
-		var deps := ResourceLoader.get_dependencies(fpath)
-		files_scanned += 1
-		var matched := false
-		for dep in deps:
-			var dep_str := String(dep)
-			if dep_str.contains("::"):
-				# uid::<空>::path 三段格式
-				if target_uid >= 0 and dep_str.get_slice("::", 0) == str(target_uid):
-					matched = true
-					break
-				if dep_str.get_slice("::", 2) == target_res_path:
-					matched = true
-					break
-			elif dep_str == target_res_path:
-				matched = true
-				break
-		if matched:
-			users.append({"file": fpath, "kind": "resource"})
-			if users.size() >= max_results:
-				break
-	var uid_text := String(needles[1]) if needles.size() > 1 else ""
-	# 正向依赖链: 该资源依赖谁(场景/脚本/配置/资产), 与 users(谁引用它)互为反向
-	var deps_list: Array = []
-	var deps_map := _collect_scene_deps(target_res_path)
-	for dpath in deps_map:
-		if String(dpath) == target_res_path:
-			continue
-		deps_list.append({"path": String(dpath), "type": _resource_type_label(String(dpath))})
-	deps_list.sort_custom(func(a: Dictionary, b: Dictionary): return str(a.get("path", "")) < str(b.get("path", "")))
-	return _ok_json({
-		"target": target_res_path,
-		"uid": uid_text,
-		"class_name": target_class_name,
-		"user_count": users.size(),
-		"files_scanned": files_scanned,
-		"users": users,
-		"dep_count": deps_list.size(),
-		"deps": deps_list,
-		"hint": "users=谁引用该资源(反向, kind=script为路径引用/class_ref为全局类名使用点/resource为资源依赖), deps=该资源依赖谁(正向)。改/删资源前看两边评估影响面。",
-	})
-
-
-## 词边界匹配: 标识符前后不得是字母/数字/下划线(避免子串误命中)
-func _line_contains_word(line: String, word: String) -> bool:
-	if word.is_empty():
-		return false
-	var idx := line.find(word)
-	while idx >= 0:
-		var before_ok := idx == 0 or not _is_ident_char(line[idx - 1])
-		var after := idx + word.length()
-		var after_ok := after >= line.length() or not _is_ident_char(line[after])
-		if before_ok and after_ok:
-			return true
-		idx = line.find(word, idx + 1)
-	return false
-
-
-func _is_ident_char(c: String) -> bool:
-	return c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
-
-
-## 按扩展名分类资源: script/config/scene/asset
-func _resource_type_label(path: String) -> String:
-	if path.ends_with(".gd"):
-		return "script"
-	if path.ends_with(".tscn"):
-		return "scene"
-	if path.ends_with(".tres") or path.ends_with(".res"):
-		return "config"
-	return "asset"
-
-
-func _call_open_scene(args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var path := str(args.get("path", ""))
-	if path.is_empty() or not ResourceLoader.exists(path):
-		return _fail("场景不存在: %s" % path)
-	EditorInterface.open_scene_from_path(path)
-	return _ok("已打开场景 %s" % path)
-
-
-func _call_set_main_scene(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not ResourceLoader.exists(path):
-		return _fail("场景不存在: %s" % path)
-	ProjectSettings.set_setting("application/run/main_scene", path)
-	ProjectSettings.save()
-	return _ok("已设置主场景: %s" % path)
-
-
-func _call_get_project_setting(args: Dictionary) -> Dictionary:
-	var name := str(args.get("name", ""))
-	if name.is_empty():
-		return _fail("必须提供 name")
-	if not ProjectSettings.has_setting(name):
-		return _fail("不存在设置项: %s" % name)
-	return _ok_json({"name": name, "value": ProjectSettings.get_setting(name)})
-
-
-func _call_set_project_setting(args: Dictionary) -> Dictionary:
-	var name := str(args.get("name", ""))
-	if name.is_empty():
-		return _fail("必须提供 name")
-	var value: Variant = args.get("value", null)
-	# 防御: 部分 JSON→Variant 链路会把数组/对象退化为字符串(形如 ["a","b"]/{"k":1}),
-	# 此处尝试还原为真正的 Variant, 保证数组类设置(如 PackedStringArray 语义项)可被原生读取。
-	if value is String:
-		var s := str(value).strip_edges()
-		if (s.begins_with("[") and s.ends_with("]")) or (s.begins_with("{") and s.ends_with("}")):
-			var parsed: Variant = JSON.parse_string(s)
-			if parsed is Array or parsed is Dictionary:
-				value = parsed
-	ProjectSettings.set_setting(name, value)
-	ProjectSettings.save()
-	return _ok("已设置 %s = %s 并保存" % [name, str(value)])
-
-
-func _call_save_all(_args: Dictionary) -> Dictionary:
-	if Engine.is_editor_hint():
-		EditorInterface.save_all_scenes()
-	var ps := ProjectSettings.save()
-	return _ok("已保存全部场景, 项目设置(err=%d)" % ps)
-
-
-func _call_reimport(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	if path.is_empty() or not ResourceLoader.exists(path):
-		return _fail("资源不存在: %s" % path)
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var fs := EditorInterface.get_resource_filesystem()
-	if fs == null:
-		return _fail("编辑器文件系统不可用")
-	fs.reimport_files([path])
-	return _ok("已触发重新导入: %s" % path)
-
-
-## 创建 .tres 资源配置
-func _call_create_resource(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	var script_ref := str(args.get("script", ""))
-	var properties: Dictionary = args.get("properties", {})
-	if path.is_empty() or script_ref.is_empty():
-		return _fail("必须提供 path 和 script")
-	if not path.ends_with(".tres"):
-		return _fail("路径必须以 .tres 结尾: %s" % path)
-	# 解析脚本: class_name 或 res:// 脚本路径
-	var script: Script = null
-	if script_ref.begins_with("res://"):
-		script = load(script_ref) as Script
-	elif script_ref.begins_with("class:"):
-		script = load(script_ref.trim_prefix("class:")) as Script
-	else:
-		# 全局类名(如 GridGenDef): 查全局类列表找脚本路径
-		var all_classes := ProjectSettings.get_global_class_list()
-		for c in all_classes:
-			if str(c.get("class", "")) == script_ref:
-				script = load(str(c.get("path", ""))) as Script
-				break
-		if script == null:
-			# 兜底: 尝试当作 res:// 相对路径
-			script = load("res://" + script_ref) as Script
-	if script == null:
-		return _fail("找不到脚本 %s (新建脚本请先 reload_project)" % script_ref)
-	if not script.can_instantiate():
-		return _fail("脚本 %s 不可实例化(abstract/@tool 缺失?)" % script_ref)
-	var res: Resource = script.new() as Resource
-	if res == null:
-		return _fail("脚本实例化失败: %s" % script_ref)
-	# 设置属性(逐项, 用自动类型转换)
-	for key in properties:
-		if not res.has_method("set") and not (key in res):
-			return _fail("属性不存在: %s" % key)
-		var v: Variant = _auto_convert_arg(properties[key])
-		res.set(key, v)
-	# 确保目录存在并保存
-	var dir_path := path.get_base_dir()
-	if not dir_path.is_empty():
-		var dir := DirAccess.open(dir_path)
-		if dir == null:
-			var err := DirAccess.make_dir_recursive_absolute(dir_path)
-			if err != OK:
-				return _fail("无法创建目录: %s (错误码: %d)" % [dir_path, err])
-	var err := ResourceSaver.save(res, path)
-	if err != OK:
-		return _fail("保存资源失败: %s (错误码: %d)" % [path, err])
-	if Engine.is_editor_hint():
-		var fs := EditorInterface.get_resource_filesystem()
-		if fs:
-			fs.scan()
-	return _ok_json({
-		"path": path,
-		"script": script_ref,
-		"properties": properties,
-		"message": "资源配置创建成功(建议 reload_project 让编辑器识别新资源)"
-	})
-
-
-## 读取资源的完整属性树
-func _call_get_resource_info(args: Dictionary) -> Dictionary:
-	var path := str(args.get("path", ""))
-	var max_depth := int(args.get("max_depth", 5))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not ResourceLoader.exists(path):
-		return _fail("资源不存在: %s" % path)
-	var res: Resource = ResourceLoader.load(path)
-	if res == null:
-		return _fail("资源加载失败: %s" % path)
-	var info := {
-		"path": path,
-		"type": res.get_class(),
-		"script": res.get_script().resource_path if res.get_script() else null,
-		"name": res.resource_name if res is Resource else "",
-		"properties": _resource_property_tree(res, 0, max_depth),
-	}
-	return _ok_json(info)
-
-
-## 递归收集资源导出属性(含嵌套子资源)
-func _resource_property_tree(res: Resource, depth: int, max_depth: int) -> Dictionary:
-	var out := {}
-	if depth > max_depth:
-		return {"_note": "达到最大深度, 停止展开"}
-	for p in res.get_property_list():
-		var pname: String = str(p.name)
-		# 跳过内置元数据与脚本引用(避免噪音)
-		if pname.begins_with("_") or pname in ["resource_path", "resource_name", "script", "resource_local_to_scene"]:
-			continue
-		var val: Variant = res.get(pname)
-		if val is Resource:
-			if val == res:
-				out[pname] = {"_self_ref": true}
-			else:
-				out[pname] = _resource_property_tree(val, depth + 1, max_depth)
-		elif val is Dictionary:
-			out[pname] = {"_dict_size": (val as Dictionary).size()}
-		elif val is Array:
-			out[pname] = {"_array_size": (val as Array).size(), "_type": _value_type(val)}
-		else:
-			out[pname] = {"value": val, "type": _value_type(val)}
-	return out
-
-
-func _value_type(v: Variant) -> String:
-	return type_string(typeof(v))
-
-
-## ======= 文件操作实现 =======
-
-func _call_read_file(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not FileAccess.file_exists(path):
-		return _fail("文件不存在: %s" % path)
-	var file := FileAccess.open(path, FileAccess.READ)
-	if file == null:
-		return _fail("无法打开文件: %s (错误码: %d)" % [path, FileAccess.get_open_error()])
-	# 仅支持 UTF-8(引擎默认编码)。此前声明的 gbk/gb2312 实际未实现解码, 已移除以免误导。
-	var content := file.get_as_text()
-	var size := file.get_length()
-	file.close()
-	return _ok_json({
-		"path": path,
-		"size": size,
-		"encoding": "utf-8",
-		"content": content
-	})
-
-
-func _call_write_file(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	var content: String = str(args.get("content", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	var dir_path := path.get_base_dir()
-	if not dir_path.is_empty():
-			var dir := DirAccess.open(dir_path)
-			if dir == null:
-				var err := DirAccess.make_dir_recursive_absolute(dir_path)
-				if err != OK:
-					return _fail("无法创建目录: %s (错误码: %d)" % [dir_path, err])
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		return _fail("无法写入文件: %s (错误码: %d)" % [path, FileAccess.get_open_error()])
-	file.store_string(content)
-	var size := file.get_length()
-	file.close()
-	return _ok_json({
-		"path": path,
-		"size": size,
-		"message": "文件写入成功"
-	})
-
-
-func _call_append_file(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	var content: String = str(args.get("content", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not FileAccess.file_exists(path):
-		return _call_write_file(args)
-	var file := FileAccess.open(path, FileAccess.READ_WRITE)
-	if file == null:
-		return _fail("无法打开文件: %s (错误码: %d)" % [path, FileAccess.get_open_error()])
-	file.seek_end()
-	file.store_string(content)
-	var new_size := file.get_length()
-	file.close()
-	return _ok_json({
-		"path": path,
-		"size": new_size,
-		"message": "内容追加成功"
-	})
-
-
-func _call_delete_file(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	if not FileAccess.file_exists(path):
-		var dir := DirAccess.open(path)
-		if dir == null:
-			return _fail("文件或目录不存在: %s" % path)
-		var err := DirAccess.remove_absolute(path)
-		if err != OK:
-			return _fail("无法删除目录: %s (错误码: %d)。注意: 只能删除空目录" % [path, err])
-		return _ok_json({"path": path, "message": "目录删除成功"})
-	var err := DirAccess.remove_absolute(path)
-	if err != OK:
-		return _fail("无法删除文件: %s (错误码: %d)" % [path, err])
-	return _ok_json({"path": path, "message": "文件删除成功"})
-
-
-func _call_file_exists(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("path", ""))
-	if path.is_empty():
-		return _fail("必须提供 path")
-	var exists := FileAccess.file_exists(path)
-	var is_dir := false
-	if not exists:
-		var dir := DirAccess.open(path)
-		is_dir = dir != null
-	return _ok_json({
-		"path": path,
-		"exists": exists or is_dir,
-		"is_directory": is_dir,
-		"message": "文件存在" if exists else ("目录存在" if is_dir else "文件不存在")
-	})
-
-
-## ======= 辅助 =======
-
-## 当前正在编辑的场景根节点(编辑器模式)或运行中场景(运行时模式)
-func _edited_root() -> Node:
-	if Engine.is_editor_hint():
-		return EditorInterface.get_edited_scene_root()
-	var tree := get_tree()
-	return tree.current_scene if tree else null
-
-
-## 在场景内解析节点(名称/相对路径/绝对路径)
-func _resolve_node(path: String) -> Node:
-	var root := _edited_root()
-	if root == null:
-		return null
-	if path == "root" or path == "/" or path == str(root.name):
-		return root
-	if path.begins_with("@"):
-		return root.find_child(path.substr(1), true, false)
-	if path.begins_with("/"):
-		var rel := path.trim_prefix("/")
-		return root.get_node_or_null(rel)
-	var n := root.get_node_or_null(path)
-	if n:
-		return n
-	return root.find_child(path, true, false)
-
-
-## 获取编辑器 UndoRedo 管理器(仅编辑器模式)。所有场景变异工具经它提交,
-## 使 AI 的修改可被用户 Ctrl+Z 撤销。非编辑器/不可用时返回 null(调用方应兜底直接修改)。
-func _editor_undo_redo() -> EditorUndoRedoManager:
-	if not Engine.is_editor_hint():
-		return null
-	return EditorInterface.get_editor_undo_redo()
-
-
-## 自动推断并转换参数类型(无需知道目标类型)
-## 支持: Vector2/Vector2i/Vector3/Vector3i/Color/Rect2/数字/布尔等
-func _auto_convert_arg(value: Variant) -> Variant:
-	if not value is String:
-		return value
-	var s: String = value
-	# 检测 Vector2 格式: "x,y" 或 "(x, y)"
-	if s.count(",") == 1 and not s.contains("Color") and not s.contains("Rect"):
-		var parts := s.replace("(", "").replace(")", "").split(",")
-		if parts.size() == 2:
-			var x := parts[0].strip_edges()
-			var y := parts[1].strip_edges()
-			if _is_numeric(x) and _is_numeric(y):
-				return Vector2(float(x), float(y))
-	# 检测 Vector2i 格式
-	if s.count(",") == 1 and s.contains("i"):
-		var parts := s.replace("(", "").replace(")", "").replace("i", "").split(",")
-		if parts.size() == 2:
-			var x := parts[0].strip_edges()
-			var y := parts[1].strip_edges()
-			if _is_numeric(x) and _is_numeric(y):
-				return Vector2i(int(x), int(y))
-	# 检测 Vector3 格式: "x,y,z"
-	if s.count(",") == 2:
-		var parts := s.replace("(", "").replace(")", "").split(",")
-		if parts.size() == 3:
-			var x := parts[0].strip_edges()
-			var y := parts[1].strip_edges()
-			var z := parts[2].strip_edges()
-			if _is_numeric(x) and _is_numeric(y) and _is_numeric(z):
-				return Vector3(float(x), float(y), float(z))
-	# 检测 Color 格式: "r,g,b" 或 "r,g,b,a"
-	if s.count(",") >= 2 and s.count(",") <= 3:
-		var parts := s.replace("(", "").replace(")", "").split(",")
-		if parts.size() >= 3 and parts.size() <= 4:
-			var all_numeric := true
-			for p in parts:
-				if not _is_numeric(p.strip_edges()):
-					all_numeric = false
-					break
-			if all_numeric:
-				var r := float(parts[0].strip_edges())
-				var g := float(parts[1].strip_edges())
-				var b := float(parts[2].strip_edges())
-				var a := float(parts[3].strip_edges()) if parts.size() == 4 else 1.0
-				return Color(r, g, b, a)
-	# 检测 Rect2 格式: "x,y,w,h"
-	if s.count(",") == 3:
-		var parts := s.replace("(", "").replace(")", "").split(",")
-		if parts.size() == 4:
-			var all_numeric := true
-			for p in parts:
-				if not _is_numeric(p.strip_edges()):
-					all_numeric = false
-					break
-			if all_numeric:
-				return Rect2(float(parts[0].strip_edges()), float(parts[1].strip_edges()),
-					float(parts[2].strip_edges()), float(parts[3].strip_edges()))
-	# 检测纯数字
-	if _is_numeric(s):
-		if s.contains("."):
-			return float(s)
-		else:
-			return int(s)
-	# 检测布尔值
-	if s == "true":
-		return true
-	elif s == "false":
-		return false
-	# 检测 null
-	if s == "null" or s == "nil":
-		return null
-	return value
-
-
-## 检查字符串是否为有效数字
-func _is_numeric(s: String) -> bool:
-	if s.is_empty():
-		return false
-	var i := 0
-	if s[0] == "-" or s[0] == "+":
-		i = 1
-	var has_dot := false
-	while i < s.length():
-		var c := s[i]
-		if c == ".":
-			if has_dot:
-				return false
-			has_dot = true
-		else:
-			var code := c.unicode_at(0)
-			if code < 48 or code > 57: # '0'-'9'
-				return false
-		i += 1
-	return true
-
-
-## 将传入值转换为目标类型(处理 Vector2/Vector3/Color 等字符串)
-func _coerce_value(value: Variant, target_type: int) -> Variant:
-	if value is String:
-		var s: String = value
-		match target_type:
-			TYPE_VECTOR2:
-				if s.count(",") == 1:
-					var parts := s.split(",")
-					return Vector2(float(parts[0]), float(parts[1]))
-			TYPE_VECTOR2I:
-				if s.count(",") == 1:
-					var parts := s.split(",")
-					return Vector2i(int(parts[0]), int(parts[1]))
-			TYPE_VECTOR3:
-				if s.count(",") == 2:
-					var parts := s.split(",")
-					return Vector3(float(parts[0]), float(parts[1]), float(parts[2]))
-			TYPE_VECTOR3I:
-				if s.count(",") == 2:
-					var parts := s.split(",")
-					return Vector3i(int(parts[0]), int(parts[1]), int(parts[2]))
-			TYPE_VECTOR4:
-				if s.count(",") == 3:
-					var parts := s.split(",")
-					return Vector4(float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-			TYPE_VECTOR4I:
-				if s.count(",") == 3:
-					var parts := s.split(",")
-					return Vector4i(int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]))
-			TYPE_COLOR:
-				if s.count(",") >= 2:
-					var parts := s.split(",")
-					if parts.size() == 3:
-						return Color(float(parts[0]), float(parts[1]), float(parts[2]), 1.0)
-					elif parts.size() >= 4:
-						return Color(float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-			TYPE_RECT2:
-				if s.count(",") == 3:
-					var parts := s.split(",")
-					return Rect2(float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-			TYPE_RECT2I:
-				if s.count(",") == 3:
-					var parts := s.split(",")
-					return Rect2i(int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]))
-			TYPE_PLANE:
-				if s.count(",") == 3:
-					var parts := s.split(",")
-					return Plane(float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-			TYPE_QUATERNION:
-				if s.count(",") == 3:
-					var parts := s.split(",")
-					return Quaternion(float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-			TYPE_AABB:
-				if s.count(",") == 5:
-					var parts := s.split(",")
-					return AABB(Vector3(float(parts[0]), float(parts[1]), float(parts[2])),
-					           Vector3(float(parts[3]), float(parts[4]), float(parts[5])))
-			TYPE_INT:
-				return int(s)
-			TYPE_FLOAT:
-				return float(s)
-			TYPE_BOOL:
-				return s == "true"
-	return value
-
-
 ## ======= 运行时工具(游戏进程内原生执行) =======
 
 func _register_runtime_tools() -> void:
@@ -3115,71 +1717,106 @@ func _register_runtime_tools() -> void:
 	# 这里只能追加 runtime 工具, 不能 reset 否则会清掉前面分组的注册)。
 	if _tool_handlers.is_empty():
 		_reset_tools()
+	# 游戏进程侧同样要注入日志捕获器: get_game_logs / get_game_errors / clear_game_errors /
+	# clear_game_logs 复用 MCPLogTools 的底层件, 漏注入时它们显式返回"日志捕获器未就绪"。
+	MCPLogTools.bind_logger(_logger)
+	# eval ctx provider: 游戏侧的 game_eval / auto_verify / 轮询探针都经 MCPDevTools.eval_code,
+	# 而新鲜度闸门要用 _mode 与游戏启动时刻、日志捕获器。漏注入不报错, 但守卫会静默全放行且
+	# 运行期错误完全捕获不到 —— 症状是"game_eval 的问题查不出来"。
+	MCPDevTools.set_eval_ctx_provider(func(): return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger})
+	# 排在 simulate_click 之前注册: 使用顺序就是"先查后点", 工具表按此顺序排能让 AI
+	# 先看到定位手段再看到执行手段。
+	_register_game_play_tool("get_interactables",
+		"列出当前画面里可交互的东西 —— **2D 控件(按钮/输入框/滑动条/标签)与 3D 物体(主菜单按钮/卡牌/媒体按钮都是 3D)** —— 每条带一个短引用 ref(如 e3)。**先查后点**: 拿到 ref 后用 simulate_click(ref=e3) 直接点击, 无需自己换算坐标。2D 元素给两套矩形(viewport_rect 视口坐标 / window_rect 窗口坐标); space=3d 的元素刻意不给矩形(3D 投影点会随相机漂移), 点击由工具在物体自身上激活。用 space=3d 可单独取 3D 子集(本项目实测可见 75 个, 常比 UI 还多, 混在默认清单里容易被 max_nodes 截掉)。filter=text 只取带文字的(读血量/分数/提示语), class_filter=Button 按类型筛(对 3D 元素也可按脚本名筛, 如 GameButtonView3D), text_contains 按文案筛。ref 由服务端解析成**实时**位置, 界面在查询后有动画或位移也不会点偏; 若报未知 ref 说明界面已变, 重新查一次即可。【只读】不改任何游戏状态。",
+		MCPUITools.schema(),
+		MCPUITools._handle_get_interactables,
+		func(args): return await _call_runtime_proxy("get_interactables", args))
+
 	_register_game_play_tool("simulate_click",
-		"在游戏窗口模拟鼠标左键点击(按下+释放), 坐标为游戏视口坐标。自动化测试按钮/UI等交互。",
-		_simulate_click_schema(),
+		"在游戏窗口模拟鼠标左键点击(按下+释放)。**推荐先用 get_interactables 拿到元素 ref, 再用 ref=e3 点击** —— 由服务端解析成实时位置, 不必自己换算坐标。ref 指向 3D 物体(space=3d)时改为在该物体自身上激活一次点击、**不注入鼠标事件**(相机可动, 投影坐标必点偏)。也可直接传 x/y(默认窗口坐标, 传 space=viewport 则按视口坐标换算)。【副作用】注入的是**真实输入事件**, 会打进用户此刻正在玩的那个游戏窗口并走完整业务链路 —— 重复调用会重复扣血/重复触发, 故不可自动重试; 游戏未在运行时调用会失败。",
+		MCPToolSchema.simulate_click(),
 		_call_simulate_click,
 		func(args): return await _call_runtime_proxy("simulate_click", args))
 
 	_register_game_play_tool("simulate_drag",
-		"在游戏窗口模拟拖拽(按下→移动→释放), 测试拖拽交互。",
-		_simulate_drag_schema(),
+		"在游戏窗口模拟拖拽(按下→移动→释放), 测试拖拽交互。【副作用】注入的是**真实输入事件**, 会打进用户此刻正在玩的那个游戏窗口并走完整业务链路, 重复调用会重复触发(如重复拾取/重复移动), 故不可自动重试; 游戏未在运行时调用会失败。",
+		MCPToolSchema.simulate_drag(),
 		_call_simulate_drag,
 		func(args): return await _call_runtime_proxy("simulate_drag", args))
 
 	_register_game_play_tool("simulate_key",
-		"在游戏窗口模拟键盘按键(按下/释放), 测试键盘交互。",
-		_simulate_key_schema(),
+		"在游戏窗口模拟键盘按键(按下/释放), 测试键盘交互。【副作用】注入的是**真实输入事件**, 会打进用户此刻正在玩的那个游戏窗口并走完整业务链路, 重复调用会重复触发(重复跳两次/重复扣血), 故不可自动重试; 游戏未在运行时调用会失败。",
+		MCPToolSchema.simulate_key(),
 		_call_simulate_key,
 		func(args): return await _call_runtime_proxy("simulate_key", args))
 
-	_register_game_play_tool("take_screenshot",
-		"画面感知工具。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可include_text=false关)。'editor'编辑器视口截图,'scene'场景缩略图。截图默认已做 sRGB 校正(颜色正确), 如确需原始线性图可传 srgb=false。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。",
-		{"type": "object", "properties": {
-			"capture_type": {"type": "string", "description": "模式: 'text' 文本化截图(默认, 推荐, 需游戏运行), 'game' 真实游戏截图(需游戏运行), 'editor' 编辑器视口截图, 'scene' 当前场景缩略图"},
-			"max_width": {"type": "integer", "description": "仅真实截图生效: 最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
-			"srgb": {"type": "boolean", "description": "仅真实截图生效: 是否做 sRGB 颜色校正, 默认 true(颜色正确)。传 false 保留原始线性图"},
-			"include_text": {"type": "boolean", "description": "仅真实截图生效: 是否附带文本化截图(text 字段), 默认 true"},
-			"text_max_nodes": {"type": "integer", "description": "文本化截图最多节点数, 默认 50"}
-		}},
+	# take_screenshot 的 name/desc/schema 由 MCPScreenshotTools.spec() 单副本提供, 这里不再各写
+	# 一份 —— 两处各写必然漂移, 而 desc 漂移不会编译报错, 只在客户端表现为"参数说明对不上"。
+	# 两个 handler 都要留在主文件: _runtime_take_screenshot 要 Node 上下文(get_viewport/get_tree),
+	# _call_take_screenshot 的 text/game 分支要 _call_runtime_proxy(内部挂 _pending/debugger_plugin)。
+	var _shot_spec := MCPScreenshotTools.spec()
+	_register_game_play_tool(_shot_spec["name"],
+		_shot_spec["desc"],
+		_shot_spec["schema"],
 		_runtime_take_screenshot,
 		_call_take_screenshot)
 
 	_register_game_play_tool("game_eval",
-		"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。可return返回值。支持await: 代码含await时等待协程完成后回传最终结果(timeout_ms默认8000, 上限15000; 超时协程继续后台执行)。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。",
-		{"type": "object", "properties": {"code": _code_arg(), "timeout_ms": {"type": "integer", "description": "可选: 含await代码的等待上限毫秒, 默认 8000, 上限 15000"}}},
-		_call_eval_code,
+		"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。【副作用】执行的是**任意 GDScript 代码**并会先热重载游戏脚本: 可改运行状态(血量/场景/存档)或停掉游戏, 故不可自动重试; 纯查询类需求优先用 take_screenshot(capture_type='text') 或 get_game_logs。可return返回值。支持await: 代码含await时等待协程完成后回传最终结果(超时协程继续后台执行, timeout_ms 上限见参数)。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。【新鲜度闸门】引擎不热重载游戏进程, 所以改过 .gd 后执行只会得到旧代码的无效结果。本工具会先自动热重载, 再按两类原因拒绝执行(error_category=stale_code): ①该脚本在游戏里已有既存实例(引擎不允许热替换实例类型)——消息会给出具体脚本与节点路径; ②该脚本是全局类(class_name)——实测全局类引用不随脚本缓存刷新, 且游戏进程无 EditorInterface 无法刷全局类表。因此改过 .gd 后仍需 game_control(action=start) 重启再验证。",
+		{"type": "object", "properties": {"code": MCPToolSchema.code_arg(), "timeout_ms": MCPToolSchema.code_timeout_arg(), "auto_resume": {"type": "boolean", "description": "可选: 游戏处于断点暂停时先自动 game_control(action=continue) 再执行(默认 false —— 默认不自动跳过, 以免掩盖真错误; 确认只是瞬态暂停时可传 true)"}}},
+		MCPDevTools._call_eval_code,
 		func(args): return await _call_game_eval_proxy(args))
 
+	_register_game_play_tool("run_game_tests",
+		"在**游戏进程**里跑需要游戏进程的用例(Scripts/Test/ 下声明 needs_game_process() 返回 true 的用例; 依赖 MonitorGame/场景树/真实时间轴)。发射即返回+读进度: 首次调用启动, 之后反复调用读同一份报告直到 running=false(不要带 filter 中途重启)。与编辑器侧的 run_tests 互补: run_tests 会把这些用例列为 skipped, 两类合起来才是全量。需游戏已运行(game_control start)。",
+		{"type": "object", "properties": {
+			"filter": {"type": "string", "description": "可选: 用例文件路径子串过滤(仅启动时生效)"},
+			"wait_ms": {"type": "integer", "description": "本次最多等待毫秒(默认 8000, 上限 15000), 超时返回当前进度"}
+		}},
+		_runtime_run_game_tests,
+		func(args): return await _call_runtime_proxy("run_game_tests", args))
+
+	# 以下 4 个是**游戏进程侧**的日志/清理入口。游戏进程内不注册 get_logs/clear_logs,
+	# 它们是那里唯一的通道, 故不可合并掉; 但也**不该**在编辑器侧跟 get_logs/clear_logs 合并
+	# —— 那正是 source=auto 静默串缓冲的由来。现在两侧各自按名字自洽: 带 game_ 的读游戏
+	# 缓冲, 不带的读本进程; 跨进程只由下面这个 lambda 转发, 各 handler 内部一律不自行代理。
 	_register_game_play_tool("get_game_logs",
-		"获取游戏进程的日志(print/printerr)。返回next游标, 增量用其作since避免重复。连续重复的同内容日志自动合并为一条(repeat 计数)以节省token。",
-		_logs_schema(200, "日志"),
-		_call_get_logs,
+		"【游戏进程】获取游戏进程的日志(print/printerr)。编辑器进程自己的日志用 get_logs —— 两者读的是不同缓冲, 不会互相串。返回next游标, 增量用其作since避免重复。连续重复的同内容日志自动合并为一条(repeat 计数)以节省token。",
+		MCPToolSchema.logs("200", "日志"),
+		_call_get_game_logs,
 		func(args): return await _call_runtime_proxy("get_game_logs", args))
 
 	_register_game_play_tool("get_game_errors",
-		"获取游戏进程捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。返回next游标, 增量用其作since。连续重复的同位置错误自动合并为一条(repeat 计数)以节省token。",
-		_logs_schema(100, "错误"),
+		"【游戏进程】获取游戏进程捕获的错误(脚本错误/assert/push_error), 含文件/行号/类型/栈追踪。编辑器进程自己的错误用 get_logs(kind=error)。游戏被断点暂停时本工具与 get_game_logs 仍可安全调用。返回next游标, 增量用其作since。连续重复的同位置错误自动合并为一条(repeat 计数)以节省token。",
+		MCPToolSchema.logs("100", "错误"),
 		_call_get_errors,
 		func(args): return await _call_runtime_proxy("get_game_errors", args))
 
 	_register_game_play_tool("clear_game_errors",
-		"清空游戏进程的错误缓冲。",
+		"【游戏进程】清空游戏进程的错误缓冲。编辑器进程自己的缓冲用 clear_logs。",
 		{"type": "object", "properties": {"scope": {"type": "string", "enum": ["all", "logs", "errors"], "description": "清理范围, 默认 all"}}},
-		_call_clear_errors,
+		MCPLogTools._call_clear_errors,
 		func(args): return await _call_runtime_proxy("clear_game_errors", args))
 
 	_register_game_play_tool("clear_game_logs",
-		"清空游戏进程的日志缓冲。",
+		"【游戏进程】清空游戏进程的日志缓冲。编辑器进程自己的缓冲用 clear_logs。",
 		{"type": "object", "properties": {"scope": {"type": "string", "enum": ["all", "logs", "errors"], "description": "清理范围, 默认 all"}}},
-		_call_clear_logs,
+		MCPLogTools._call_clear_errors,
 		func(args): return await _call_runtime_proxy("clear_game_logs", args))
 
 	_register_game_play_tool("auto_verify",
-		"自动验证闭环: 启动场景后按操作序列模拟玩家行为, 每步后增量查错。操作: wait(延迟)/click/drag/key(输入)/eval(执行GDScript可return)/poll(轮询直到code返回true, 探测期eval错误不计入)/screenshot。soft模式(stop_on_error=false)跑完全部步骤再汇总, hard模式任一步出错即停。retries>0时失败自动重启场景重跑(排除flaky), 曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration为单次总时长上限(默认4s), 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
-		_auto_verify_schema(),
+		"自动验证闭环: 启动场景后按 operations 序列模拟玩家行为, 每步后增量查错。【副作用: 会接管用户正在玩的游戏】若已有游戏在运行, 本工具会**先将其停止**再启动本工具指定的场景, 结束后再停掉游戏 —— 用户手头的游戏进程会被中断且不会自动恢复。执行前先用 get_editor_activity 确认没有正在进行的调试。操作各字段格式见 operations 参数(不在此复述); 其中 poll 的探测期 eval 出错**不计入**失败判定。retries>0 时曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration 是单次总时长上限, 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
+		MCPToolSchema.auto_verify(),
 		_runtime_auto_verify,
 		func(args): return await _call_auto_verify(args))
+
+	# 游戏进程侧自检: 这里注册的是 runtime 工具子集, 与编辑器侧完整集合不同 —— 名单里若有
+	# 本模式不存在的名字, 只有各自自检才抓得到。
+	# 用 _mode 判定而非无条件执行: 编辑器侧经 _register_game_play_tools 也会走到这里, 若
+	# 同样跑一次就会与 _register_editor_tools 末尾的全量自检重复告警(内容完全相同的两次
+	# 打印), 而编辑器侧那次才是权威的全量结果。
+	if _mode == MODE_RUNTIME:
+		_audit_tools()
 
 
 ## 递归收集可见节点信息(运行时模式, 游戏进程内坐标天然正确)
@@ -3239,9 +1876,6 @@ func _collect_visible_nodes(node: Node, viewport: Viewport, result: Array, max_n
 			var sprite := node as Sprite2D
 			if sprite.texture:
 				info["texture_size"] = {"x": sprite.texture.get_width(), "y": sprite.texture.get_height()}
-		elif node is Control:
-			var control := node as Control
-			info["rect"] = {"x": int(control.position.x), "y": int(control.position.y), "w": int(control.size.x), "h": int(control.size.y)}
 		elif node is Polygon2D:
 				var polygon := node as Polygon2D
 				info["polygon_count"] = polygon.polygon.size()
@@ -3251,33 +1885,119 @@ func _collect_visible_nodes(node: Node, viewport: Viewport, result: Array, max_n
 
 
 ## 运行时: 模拟鼠标左键点击(游戏进程内 Input.parse_input_event 直接生效)
+##
+## 三条定位路径, 优先 ref:
+##   ref + space=window/subviewport —— 由 MCPUITools 解析成**实时**坐标。界面在查询与点击之间
+##   动过也不会点偏。
+##   ref + space=3d —— **不投递鼠标事件**, 改为在物体自身上激活, 见 _activate_interactable_3d。
+##   x/y —— 调用方自报坐标系(space, 默认 window)。必须自报: Input.parse_input_event 收的是
+##   **窗口坐标**, 而 Control.global_position / get_interactables 的 viewport_rect 是**视口坐标**,
+##   两者差一个 content_scale。旧版描述写"坐标为游戏视口坐标"是错的 —— 照它传值会稳定点在
+##   目标左上方约 12%(项目实测比例约 0.88), 且偏移随分辨率变化, 表现为"换台电脑就点不准"。
 func _call_simulate_click(args: Dictionary) -> Dictionary:
-	var x: int = int(args.get("x", 0))
-	var y: int = int(args.get("y", 0))
+	var pos := Vector2.ZERO
+	var space := ""
+	var target_space := "window"
+	var sub_vp_path := ""
+	var ref := VariantTool.get_string(args, "ref").strip_edges()
+	if not ref.is_empty():
+		var r := MCPUITools.resolve_ref(ref)
+		if not bool(r.get("ok")):
+			return _fail(str(r.get("error", "ref 解析失败")))
+		target_space = str(r.get("space", "window"))
+		if target_space == "3d":
+			return _activate_interactable_3d(str(r.get("path", "")), ref)
+		pos = r["pos"]
+		sub_vp_path = str(r.get("sub_viewport_path", ""))
+	else:
+		if not args.has("x") or not args.has("y"):
+			return _fail("需提供 ref(get_interactables 返回的元素引用), 或 x + y; 可加 space 声明 x/y 属于 window(默认) 还是 viewport")
+		space = VariantTool.get_string(args, "space", "window").strip_edges().to_lower()
+		if space != "window" and space != "viewport":
+			return _fail("space 只能是 window 或 viewport, 收到: %s" % space)
+		pos = Vector2(VariantTool.get_int(args, "x"), VariantTool.get_int(args, "y"))
+		if space == "viewport":
+			pos *= MCPUITools.window_scale()
+	# x/y 是调用方自报坐标, 无从知道它指向哪个界面 —— 一律按窗口坐标注入, 与旧行为一致。
+	var sub_vp: SubViewport = null
+	if not sub_vp_path.is_empty():
+		var loop := Engine.get_main_loop() as SceneTree
+		sub_vp = loop.root.get_node_or_null(NodePath(sub_vp_path)) as SubViewport
+		if sub_vp == null:
+			return _fail("ref=%s 所在的子视口已不存在(界面已变化), 请重新调用 get_interactables。" % ref)
 	var down_event := InputEventMouseButton.new()
 	down_event.button_index = MOUSE_BUTTON_LEFT
 	down_event.pressed = true
-	down_event.position = Vector2(x, y)
-	down_event.global_position = Vector2(x, y)
-	Input.parse_input_event(down_event)
+	down_event.position = pos
+	down_event.global_position = pos
 	var up_event := InputEventMouseButton.new()
 	up_event.button_index = MOUSE_BUTTON_LEFT
 	up_event.pressed = false
-	up_event.position = Vector2(x, y)
-	up_event.global_position = Vector2(x, y)
-	Input.parse_input_event(up_event)
+	up_event.position = pos
+	up_event.global_position = pos
+	if sub_vp != null:
+		# 子视口元素: 直接投递给那个子视口, 与真人点 3D 平板时 SubView3D 的投递路径同源。
+		# 走全局输入是点不到的 —— 那块 UI 在 3D 平板上, 窗口坐标落在它上面也不会被它收到。
+		#
+		# 必须先补一个 motion: push_input 是同步处理的, 不先把鼠标"挪到"目标上建立 hover,
+		# 紧随其后的 press/release 不会让 BaseButton 进入按下态(实测: 补 motion 必中, 不补不中)。
+		# 窗口那条路不需要, 因为 Input.parse_input_event 走的是 OS 事件队列, hover 会被顺带更新。
+		var move_event := InputEventMouseMotion.new()
+		move_event.position = pos
+		move_event.global_position = pos
+		sub_vp.push_input(move_event)
+		sub_vp.push_input(down_event)
+		sub_vp.push_input(up_event)
+	else:
+		Input.parse_input_event(down_event)
+		Input.parse_input_event(up_event)
 	return _ok_json({
-		"position": {"x": x, "y": y},
-		"message": "鼠标左键点击事件已发送"
+		"position": {"x": pos.x, "y": pos.y},
+		"located_by": ("ref=%s" % ref) if not ref.is_empty() else ("x/y(space=%s)" % space),
+		"space": target_space,
+		"message": "鼠标左键点击事件已发送" if sub_vp == null else "鼠标左键点击事件已投递到子视口 %s" % sub_vp_path
+	})
+
+
+## 在 3D 物体自身上激活一次点击(不注入鼠标事件)。
+##
+## 为什么不用射线命中: 3D 物体投影到屏幕是个点, 而本项目相机带鼠标跟随视角(PlayerCamera 的
+## rotation_offset 按鼠标相对屏幕中心的偏移 lerp, max 5°, 实测能让屏幕元素位移 66~176px),
+## 于是"投影坐标 → 注入点击"这条回路必然脱靶, 且脱靶量随鼠标位置变化。activate() 是物体
+## 自己提供的确定性入口(ButtonView3D.activate 内部就是 _mouse_down + _mouse_up), 与真人
+## 操作、手柄焦点导航(InputTool._activate_3d)走的是同一条路径。
+##
+## 代价: 绕过遮挡判定 —— 被别的物体挡住时这里照样会触发。对"点它一下会发生什么"正是想要的,
+## 但要知道它**不等价于**"点在屏幕上那个位置"。
+func _activate_interactable_3d(path: String, ref: String) -> Dictionary:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return _fail("场景树不可用(游戏未运行?)")
+	# 刻意声明为 Variant: activate()/_mouse_down() 不在基类上, 按 Node 静态类型调用过不了编译。
+	var node: Variant = loop.root.get_node_or_null(NodePath(path))
+	if node == null:
+		return _fail("ref=%s 指向的 3D 物体已不存在(界面已变化), 请重新调用 get_interactables。" % ref)
+	if node.has_method("activate"):
+		node.activate()
+	elif node.has_method("_mouse_down") and node.has_method("_mouse_up"):
+		node._mouse_down()
+		node._mouse_up()
+	else:
+		return _fail("3D 物体 %s 既无 activate() 也无 _mouse_down/_mouse_up, 无法激活" % node.name)
+	return _ok_json({
+		"located_by": "ref=%s" % ref,
+		"space": "3d",
+		"path": path,
+		"message": "已在 3D 物体 %s 上激活一次点击(未注入鼠标事件)" % node.name,
 	})
 
 
 ## 运行时: 模拟鼠标拖拽(左键按下->移动到目标->释放)
 func _call_simulate_drag(args: Dictionary) -> Dictionary:
-	var from_x: int = int(args.get("from_x", 0))
-	var from_y: int = int(args.get("from_y", 0))
-	var to_x: int = int(args.get("to_x", 0))
-	var to_y: int = int(args.get("to_y", 0))
+	var from_x: int = VariantTool.get_int(args, "from_x")
+	var from_y: int = VariantTool.get_int(args, "from_y")
+	var to_x: int = VariantTool.get_int(args, "to_x")
+	var to_y: int = VariantTool.get_int(args, "to_y")
 	var down_event := InputEventMouseButton.new()
 	down_event.button_index = MOUSE_BUTTON_LEFT
 	down_event.pressed = true
@@ -3312,8 +2032,8 @@ func _call_simulate_drag(args: Dictionary) -> Dictionary:
 
 ## 运行时: 模拟键盘按键
 func _call_simulate_key(args: Dictionary) -> Dictionary:
-	var key_str: String = str(args.get("key", "")).to_lower()
-	var pressed: bool = _to_bool(args.get("pressed", true))
+	var key_str: String = VariantTool.get_string(args, "key").to_lower()
+	var pressed := VariantTool.get_bool(args, "pressed", true)
 	var key_code: Key
 	match key_str:
 		"space": key_code = KEY_SPACE
@@ -3345,13 +2065,53 @@ func _call_simulate_key(args: Dictionary) -> Dictionary:
 	})
 
 
+## ======= 运行时: 游戏进程用例(依赖 MonitorGame / 场景树 / 真实时间轴) =======
+
+## 游戏用例会话状态: `run_game_tests` 首次调用启动, 后续调用读进度 ——
+## 一个完整的游戏用例(真实战斗 + 真实回放)远超工具单次超时, 不能靠一次调用等完。
+var _game_tests_running := false
+var _game_tests_report: Dictionary = {}
+
+
+## 运行时: 在**游戏进程**里跑需要游戏进程的用例(`TestRunner` MODE_GAME)。
+## 用法: 首次调用启动, 之后反复调用读进度 —— 流程与断言全在用例里, 调用方不需要任何编排。
+func _runtime_run_game_tests(args: Dictionary) -> Dictionary:
+	var filter := VariantTool.get_string(args, "filter")
+	var wait_ms: int = clampi(VariantTool.get_int(args, "wait_ms", 8000), 0, 15000)
+	var started := false
+	if not _game_tests_running:
+		_game_tests_running = true
+		_game_tests_report = {}
+		started = true
+		_run_game_tests_async(filter)  # 有意不 await(见上方状态说明)
+	if wait_ms > 0:
+		var tree := get_tree()
+		if tree:
+			var deadline := Time.get_ticks_msec() + wait_ms
+			while _game_tests_running and Time.get_ticks_msec() < deadline:
+				await tree.create_timer(0.2).timeout
+	var out: Dictionary = _game_tests_report.duplicate(true)
+	out.running = _game_tests_running
+	if started:
+		out.started = true
+	if _game_tests_running:
+		out.hint = "用例仍在运行: 再次调用 run_game_tests 读进度即可(带 filter 会等本轮结束后重启)"
+	return _ok_json(out)
+
+
+func _run_game_tests_async(filter: String) -> void:
+	var summary: Dictionary = await TestRunner.run_all(filter, TestRunner.TESTS_DIR, TestRunner.MODE_GAME)
+	_game_tests_report = summary
+	_game_tests_running = false
+
+
 ## 运行时: 捕获游戏视口截图(文件名自动生成)
 func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
-	var capture_type: String = str(args.get("capture_type", "text"))
+	var capture_type: String = VariantTool.get_string(args, "capture_type", "text")
 	# 纯文本化截图模式(text): 不保存图片, 直接返回可见节点布局快照。
 	# 适合点击游玩模拟与无法识别图像的 AI, 大幅节省 token。默认模式。
 	if capture_type == "text":
-		var text_max_nodes := int(args.get("text_max_nodes", 50))
+		var text_max_nodes := VariantTool.get_int(args, "text_max_nodes", 50)
 		var text_data := _build_game_view_snapshot(text_max_nodes)
 		return _ok_json({
 			"capture_type": "text",
@@ -3369,8 +2129,8 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 	# 缺省降采样到 1280 宽以控制体积, 传更大的 max_width 可保留更高分辨率。
 	var shot: Dictionary = await ScreenshotTool.capture(viewport, {
 		"path": "%s/%s" % [dir_path, filename],
-		"max_width": int(args.get("max_width", ScreenshotTool.DEFAULT_MAX_WIDTH)),
-		"srgb": bool(args.get("srgb", true)),
+		"max_width": VariantTool.get_int(args, "max_width", ScreenshotTool.DEFAULT_MAX_WIDTH),
+		"srgb": VariantTool.get_bool(args, "srgb", true),
 		"capture_type": "game",
 	})
 	if not shot.get("ok", false):
@@ -3387,8 +2147,8 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 	}
 	# 整合文本化截图快照(text): 截图同时返回画面可见节点布局,
 	# 供 AI 在无图像输入时也能理解画面。可用 include_text=false 关闭, text_max_nodes 控制节点数。
-	if bool(args.get("include_text", true)):
-		var text_max_nodes := int(args.get("text_max_nodes", 50))
+	if VariantTool.get_bool(args, "include_text", true):
+		var text_max_nodes := VariantTool.get_int(args, "text_max_nodes", 50)
 		result["text"] = _build_game_view_snapshot(text_max_nodes)
 	return _ok_json(result)
 
@@ -3426,11 +2186,11 @@ func _build_game_view_snapshot(max_nodes: int) -> Dictionary:
 ##   poll  {code, timeout_ms, interval_ms} 轮询直到 code 返回 true 或超时
 ##   screenshot {capture_type?} 截图(结果记入 step)
 func _runtime_auto_verify(args: Dictionary) -> Dictionary:
-	var operations: Array = args.get("operations", [])
+	var operations: Array = VariantTool.get_array(args, "operations")
 	if operations.is_empty():
 		return _fail("必须提供 operations 操作序列")
-	var duration := float(args.get("duration", 4.0))
-	var stop_on_error: bool = _to_bool(args.get("stop_on_error", true))
+	var duration := VariantTool.get_float(args, "duration", 4.0)
+	var stop_on_error := VariantTool.get_bool(args, "stop_on_error", true)
 	var err_cursor: int = _logger.get_error_cursor() if _logger else 0
 	var steps: Array = []
 	var all_errors: Array = []
@@ -3465,7 +2225,7 @@ func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 					step["status"] = "action_error"
 					step["message"] = str(r3.get("text", ""))
 			"eval":
-				var r4: Dictionary = await _call_eval_code({"code": str(op.get("code", ""))})
+				var r4: Dictionary = await MCPDevTools._call_eval_code({"code": str(op.get("code", ""))})
 				step["result"] = str(r4.get("text", ""))
 				if r4.get("is_error", false):
 					step["status"] = "action_error"
@@ -3548,7 +2308,7 @@ func _poll_until(op: Dictionary, deadline: int) -> bool:
 	var start := Time.get_ticks_msec()
 	var poll_deadline := mini(deadline, start + timeout_ms)
 	while Time.get_ticks_msec() < poll_deadline:
-		var r: Dictionary = await _call_eval_code({"code": code})
+		var r: Dictionary = await MCPDevTools._call_eval_code({"code": code})
 		if not r.get("is_error", false):
 			if _eval_returned_true(str(r.get("text", ""))):
 				return true
@@ -3572,13 +2332,15 @@ func _register_game_play_tools() -> void:
 	# _register_game_play_tool 按 _mode 分流 handler(editor 代理转发 / runtime 就地执行)。
 	_register_runtime_tools()
 
-	_add_tool("debug_continue",
-		"让因脚本错误/断点被暂停的游戏继续运行(等效Debugger面板Continue)。当工具报错'游戏处于断点暂停'时调用。",
-		_no_arg_schema(),
-		_call_debug_continue)
-
 
 ## 编辑器进程: 解除游戏断点暂停(等效编辑器的 Continue 按钮)
+##
+## **入口是 game_control(action=continue), 不是一个独立工具** —— 这不是命名偏好, 是被工具列表
+## 逼出来的: 协议层的 tools/list 由**客户端**决定把哪些工具映射成本会话里可调用的入口, 而那个
+## 名单不受服务端控制。曾把它注册成独立工具 debug_continue, 服务端 tools/list 里确实有(50 个),
+## 但客户端映射里没有, 于是 game_breaked 类错误的 recovery("...后 debug_continue")指向一个
+## **AI 看得见名字、却调不到**的工具: 恢复路径在最需要它的时刻断开, 而这类错误恰恰只在
+## 游戏出错时出现, 也就是说它在开发中后期才暴露。
 func _call_debug_continue(_args: Dictionary) -> Dictionary:
 	if not _has_game_session():
 		return _fail("没有运行中的游戏, 无需继续")
@@ -3587,25 +2349,23 @@ func _call_debug_continue(_args: Dictionary) -> Dictionary:
 	if debugger_plugin.debug_continue():
 		_game_breaked = false
 		return _ok("已让游戏继续运行(解除断点暂停)")
-	return _err("无法解除断点暂停", "internal", false, "尝试 stop_game 后重新 run_game")
+	return _err_internal("无法解除断点暂停", "尝试 game_control(action=stop) 后 game_control(action=start) 重启")
 
 
 ## 转发工具调用到游戏进程(经 EngineDebugger 调试线)。仅编辑器模式。
 func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 	if debugger_plugin == null or not debugger_plugin.has_active_session():
-		return _err("游戏未运行。请先使用 run_game 启动游戏", "game_stopped", true, "调用 run_game 启动游戏, 等待调试线就绪后重试")
+		return _err_game_stopped("游戏未运行。请先使用 game_control(action=start) 启动游戏", "调用 game_control(action=start) 启动游戏, 等待调试线就绪后重试")
 	if _game_breaked and not _BREAK_SAFE_TOOLS.has(tool_name):
 		# 断点暂停: 依赖主循环的工具必然挂起; get_game_errors/get_game_logs仍可用; 自动回查错误缓冲拼进响应。
 		var diagnose := await _fetch_recent_game_error(tool_name)
 		if diagnose != "":
-			return _err("游戏被断点暂停, 工具 %s 需要主循环无法执行。\n已自动读取错误:\n%s\n\n修正脚本后 debug_continue 继续, 或 stop_game 重启。" %
-				[tool_name, diagnose],
-				"game_breaked", true, "get_game_errors查错后debug_continue; 或stop_game修复重启")
-		return _err("游戏被断点暂停, 工具 %s 需要主循环无法执行。\n错误缓冲无内容(可能是手动断点)。get_game_errors复核后 debug_continue, 或 stop_game 重启。" %
-			tool_name,
-			"game_breaked", true, "get_game_errors复核后debug_continue; 或stop_game修复重启")
+			return _err_game_breaked("游戏被断点暂停, 工具 %s 需要主循环无法执行。\n已自动读取错误:\n%s\n\n修正脚本后 game_control(action=continue) 继续, 或 game_control(action=stop) 重启。" %
+				[tool_name, diagnose])
+		return _err_game_breaked("游戏被断点暂停, 工具 %s 需要主循环无法执行。\n错误缓冲无内容(可能是手动断点)。get_game_errors复核后 game_control(action=continue), 或 game_control(action=stop) 重启。" %
+			tool_name, "get_game_errors复核后game_control(action=continue); 或game_control(action=stop)修复重启")
 	if not _game_ready:
-		return _err("游戏调试线尚未就绪", "transient", true, "等待游戏启动完成(可稍后重试, 或重新 run_game)")
+		return _err_transient("游戏调试线尚未就绪", "等待游戏启动完成(可稍后重试, 或 game_control(action=start) 重启)")
 	var req_id := _next_req_id
 	_next_req_id += 1
 	_pending[req_id] = null
@@ -3620,19 +2380,21 @@ func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 			return _normalize_wire_result(result, tool_name)
 		if not debugger_plugin.has_active_session():
 			_pending.erase(req_id)
-			return _err("游戏进程已停止/崩溃(工具 %s 请求被取消)。先 run_game 重启。" % tool_name,
-				"game_stopped", true, "run_game重启后重试")
+			return _err_game_stopped("游戏进程已停止/崩溃(工具 %s 请求被取消)。先 game_control(action=start) 重启。" % tool_name,
+				"game_control(action=start)重启后重试")
 		await get_tree().process_frame
 	if _pending.has(req_id):
 		_pending.erase(req_id)
 	# 超时主因: eval触发运行期脚本错误导致_mcp_run中止未回发, 或是死循环/卡死。自动回查错误缓冲拼进响应。
 	var diagnose := await _fetch_recent_game_error(tool_name)
 	if diagnose != "":
-		return _err("游戏进程响应超时(20s), 工具: %s。已发现运行期脚本错误:\n%s\n\n修正代码后重试; 若无疑错误仍超时再考虑死循环。" %
+		# 同上面的 eval 分支: 原样重发同一工具必然再超时一次, 故 is_retryable=false。
+		# 有效路径是先按 recovery 改代码或重启游戏 —— 那属于"改参数后重试"。
+		return _err_validation("游戏进程响应超时(20s), 工具: %s。已发现运行期脚本错误:\n%s\n\n修正代码后重试; 若无疑错误仍超时再考虑死循环。" %
 			[tool_name, diagnose],
-			"validation", true, "修正上方脚本错误后重试; 仍超时则stop_game后重新run_game")
+			"修正上方脚本错误后重试; 仍超时则 game_control(action=stop) 后 game_control(action=start) 重启")
 	return _err("游戏进程响应超时(20s), 工具: %s。错误缓冲无脚本错误, 可能是死循环/卡死或无响应。" % tool_name,
-		"transient", true, "查game_eval是否死循环; 必要时stop_game后重新run_game")
+		MCPResult.CAT_TRANSIENT, true, "查game_eval是否死循环; 必要时 game_control(action=stop) 后 game_control(action=start) 重启")
 
 
 ## 超时诊断: 回查游戏错误缓冲, 返回最近一条脚本错误描述(无则返回 "")
@@ -3687,152 +2449,33 @@ func _normalize_wire_result(result: Dictionary, _tool_name: String) -> Dictionar
 		extra["error_category"] = result.get("error_category")
 		extra["is_retryable"] = bool(result.get("is_retryable", false))
 		extra["recovery"] = str(result.get("recovery", ""))
-	return _wrap(text, is_err, extra)
+	# 保留来源侧的 content[].text(错误响应里是 _err 拼的结构化 JSON): 代理归一化的只是
+	# 外层形状, 不该顺手把内层承载的信息降级成纯文本 —— 那样游戏侧 _err 拼好的
+	# category / recovery 到 AI 那里又看不见了, 代理反而成了信息黑洞
+	var content_text := text
+	if result.get("content") is Array:
+		var c: Array = result["content"]
+		if not c.is_empty() and c[0] is Dictionary:
+			content_text = str(c[0].get("text", text))
+	return _wrap(text, is_err, extra, content_text)
 
 
 ## 编辑器侧 game_eval 转发: 先本地预编译 + 静态检查, 通过后才发到游戏进程。
 ## 语法错误/被禁止的代码在编辑器内拦截, 避免污染游戏进程(运行时解析错误可能中断游戏)。
+##
+## 新鲜度**不在这里**判定: 编辑器只知道"哪些文件变了", 不知道"游戏里是否已存在
+## 这些脚本的实例", 而后者才是能否热替换的关键。只有游戏进程能遍历自己的场景树,
+## 所以判定统一交给游戏侧的 guard_eval —— 它会先尝试热重载, 再按"有既存实例"
+## 与"是全局类"两类原因分别上报(后者是引擎限制, 游戏进程刷不了全局类表)。
 func _call_game_eval_proxy(args: Dictionary) -> Dictionary:
-	var code: String = str(args.get("code", ""))
-	var precheck := _precheck_eval_code(code)
+	var precheck := MCPDevTools.precheck_eval_code(VariantTool.get_string(args, "code"))
 	if precheck != "":
-		return _err("game_eval 被编辑器侧预检拦截: %s" % precheck, "validation", false, "修正代码后重新调用 game_eval(语法错误无法通过重试解决, 需修改代码)")
+		return _err_validation("game_eval 被编辑器侧预检拦截: %s" % precheck, "修正代码后重新调用 game_eval(语法错误无法通过重试解决, 需修改代码)")
+	## auto_resume: 调用方明确要求时先解除断点暂停再执行(默认不开, 避免掩盖真错误)
+	if VariantTool.get_bool(args, "auto_resume") and _game_breaked:
+		var resumed := await _call_debug_continue({})
+		if bool(resumed.get("is_error", false)):
+			return resumed
 	return await _call_runtime_proxy("game_eval", args)
 
 
-## 预检 eval 代码: 返回 "" 表示通过, 否则返回错误描述。
-## 1) 静态扫描被禁止的 API(防代码逃逸编辑器/游戏沙箱); 2) GDScript 语法预编译。
-func _precheck_eval_code(code: String) -> String:
-	if code.is_empty():
-		return "必须提供 code"
-	if code.length() > MAX_EVAL_LENGTH:
-		return "代码过长: %d 字符, 超过上限 %d。请拆分逻辑后重试。" % [code.length(), MAX_EVAL_LENGTH]
-	var forbidden := _eval_forbidden_scan(code)
-	if forbidden != "":
-		return forbidden
-	var script := GDScript.new()
-	var body := _indent_method_body(code)
-	script.source_code = "extends Node\nfunc _mcp_run():\n%s" % body
-	var err := script.reload()
-	if err != OK:
-		var text := error_string(err)
-		var hint := ""
-		if text.contains("hides a global script class"):
-			hint = " (class_name 与全局类冲突: 请勿在 eval_code 中声明类, 或先 reload_project)"
-		return "代码解析失败: %s%s" % [text, hint]
-	return ""
-
-
-## 静态扫描 eval 代码中被禁止的 API, 返回 "" 表示通过。
-## 黑名单分两类: 精确成员访问(点号匹配) 与 危险类名(前缀匹配, 防绕过点号约束)。
-## 注意: 此扫描是"事故防护围栏", 不替代信任模型——eval 代码本身就能访问当前场景任意节点。
-## 它拦不住有恶意意图的攻击者(AI 可换等价 API), 主要价值是防止"被提示注入诱导"的自动执行
-## 顺手触发危险副作用(删文件/发请求/弹 shell), 用一层廉价检查把事故概率压下去。
-## 若要强隔离必须把 eval 放进独立沙箱进程, 远超 GDScript 静态扫描的能力, 属设计取舍。
-const _EVAL_FORBIDDEN := [
-	# -- 精确成员访问(阻止系统/进程逃逸) --
-	["OS.execute", "调用系统命令"],
-	["OS.create_process", "启动外部进程"],
-	["OS.shell_open", "调用 shell 打开外部程序"],
-	["OS.kill", "终止进程"],
-	["OS.get_environment", "读取环境变量"],
-	["DisplayServer.shell_open", "调用 shell"],
-	["Engine.get_main_loop", "绕过作用域访问主循环"],
-	["Engine.get_physics_frames", "读取引擎内部状态"],
-	["Engine.get_singleton", "获取 OS/DisplayServer 等单例以绕过点号黑名单"],
-	# -- 危险类名前缀(网络/文件/时间戳副作用) --
-	["HTTPRequest", "发起网络请求"],
-	["TCPServer", "监听网络端口"],
-	["StreamPeerTCP", "TCP 连接"],
-	["StreamPeerTLS", "TLS 连接"],
-	["UDPServer", "UDP 监听"],
-	["PackedScene.new", "新建场景"],
-	["FileAccess", "读写文件"],
-	["DirAccess", "操作文件系统"],
-	["ResourceLoader.load", "加载任意资源"],
-	["ProjectSettings.set_setting", "修改项目设置"],
-	["DirAccess.open", "打开目录"],
-]
-
-## eval 代码长度上限(字符), 防止超长脚本导致编辑/运行进程缓慢或冻结。超限以 validation 错误拒绝。
-const MAX_EVAL_LENGTH := 8192
-
-
-## 判断是否为"空标识符"字符(数字开头等非法用途, 防止 `123execute` 之类绕过)
-func _is_eval_id_char(c: String) -> bool:
-	return c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
-
-
-## 静态扫描 eval 代码中被禁止的 API, 返回 "" 表示通过。
-func _eval_forbidden_scan(code: String) -> String:
-	# 词法级扫描: 跳过字符串字面量/注释/预处理器, 只扫描真实代码 token, 避免误报。
-	# 同时做标识符边界检查, 防止 `fooProcess`/`executefield` 之类拼接绕过。
-	var i := 0
-	var length := code.length()
-	while i < length:
-		var c := code[i]
-		# 跳过字符串字面量 ' " (含转义) 和 """ 长字符串
-		if c == '"' or c == "'":
-			var quote := code[i]
-			if i + 2 < length and code[i + 1] == quote and code[i + 2] == quote:
-				i += 3
-				while i + 2 < length and not (code[i] == quote and code[i + 1] == quote and code[i + 2] == quote):
-					i += 1
-				i += 3
-				continue
-			i += 1
-			while i < length:
-				if code[i] == '\\':
-					i += 2
-					continue
-				if code[i] == quote:
-					break
-				i += 1
-			i += 1
-			continue
-		# 跳过 '#' 注释到行尾
-		if c == '#':
-			while i < length and code[i] != '\n':
-				i += 1
-			continue
-		# 跳过 @onready/@export 等注解(不匹配代码, 但避免误认其中的单词)
-		if c == '@':
-			while i < length and (_is_eval_id_char(code[i])):
-				i += 1
-			continue
-		# 扫描一个标识符 token
-		if _is_eval_id_char(c):
-			var start := i
-			while i < length and _is_eval_id_char(code[i]):
-				i += 1
-			var token := code.substr(start, i - start)
-			# 单 token 危险类名(前缀匹配类名本身)
-			for item in _EVAL_FORBIDDEN:
-				var name: String = item[0]
-				if "." in name:
-					continue
-				if token == name:
-					return "代码包含被禁止的 API: %s (%s)。出于安全考虑不允许在 eval 中执行。" % [name, item[1]]
-			# 成员访问: 检查后续是否为 .成员名(如 OS.execute), 支持空格与换行
-			for item in _EVAL_FORBIDDEN:
-				var name: String = item[0]
-				if "." not in name:
-					continue
-				var parts := name.split(".")
-				if token != parts[0]:
-					continue
-				# 跳过 . 与空白
-				var j := i
-				while j < length and (code[j] == ' ' or code[j] == '\t' or code[j] == '\n' or code[j] == '\r'):
-					j += 1
-				if j < length and code[j] == '.':
-					j += 1
-					var k := j
-					while k < length and _is_eval_id_char(code[k]):
-						k += 1
-					if code.substr(j, k - j) == parts[1]:
-						return "代码包含被禁止的 API: %s (%s)。出于安全考虑不允许在 eval 中执行。" % [name, item[1]]
-			continue
-		# 非标识符字符: 继续
-		i += 1
-	return ""

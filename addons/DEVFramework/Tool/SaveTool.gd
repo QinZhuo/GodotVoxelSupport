@@ -100,10 +100,14 @@ static func merge_data(base: Dictionary, incoming: Dictionary, rules: Variant = 
 				else:
 					result[key] = incoming_val
 			MergeMode.ARRAY_UNION:
-				if base.get(key) is Array and incoming_val is Array:
-					result[key] = merge_array_union(base[key], incoming_val, opts[1] if opts.size() > 1 else "", opts[2] if opts.size() > 2 else 0)
-				else:
-					result[key] = incoming_val if incoming_val is Array else []
+				if incoming_val is Array:
+					if base.get(key) is Array:
+						result[key] = merge_array_union(base[key], incoming_val, opts[1] if opts.size() > 1 else "", opts[2] if opts.size() > 2 else 0)
+					else:
+						result[key] = incoming_val
+				# incoming 不是数组（字段被写坏 / 类型不符）⇒ **保留 base**：
+				# 旧实现写 `result[key] = []`，会让一个坏值把本地好数组清空（实测过）
+
 			_:
 				if incoming_val is Dictionary and result.get(key) is Dictionary:
 					result[key] = merge_data(result[key], incoming_val, rules)
@@ -297,7 +301,7 @@ static func _read_file(actual_path: String, mode: Mode, original_path: String = 
 		if text.is_empty():
 			LogTool.warn("存档", "文件为空: %s" % display)
 			return null
-		var parsed = JSON.parse_string(text)
+		var parsed = VariantTool.parse_json(text)
 		if parsed == null:
 			LogTool.warn("存档", "JSON解析失败: %s" % display)
 		return parsed

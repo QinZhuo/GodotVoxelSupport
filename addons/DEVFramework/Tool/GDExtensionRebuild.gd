@@ -452,18 +452,111 @@ func _which(prog: String) -> bool:
 	return OS.execute(prog, ["--version"], out) == 0
 
 
-## Windows: PATH 无 g++ 时, 按通用约定(环境变量→用户目录/常见根扫描)定位并注入本次进程 PATH
+## Windows: 确保 MinGW 工具链在本次构建的 PATH 中。
+## CMake 虽以缓存里的绝对路径启动构建器(CMAKE_MAKE_PROGRAM), 但 MinGW Makefiles 生成的 Makefile
+## 会递归调 `$(MAKE)`(展开为字面量 make), 子进程只能靠 PATH 解析 —— 故编译器与 make 任一缺失都
+## 必须注入工具链 bin 目录; 只看 g++ 会漏掉"有 g++ 无 make"的机器(w64devkit 同目录两者皆有)。
 func _ensure_toolchain_env() -> void:
 	if OS.get_name() != "Windows":
 		return
-	if _which("g++"):
-		return
-	var bin_dir := _find_exe_dir("g++.exe")
-	if bin_dir == "":
-		_log("PATH 中无 g++, 也未发现常见 MinGW/w64devkit。可设环境变量 MINGW_HOME/W64DEVKIT_HOME 指向工具根目录, 或安装 w64devkit。")
-		return
-	OS.set_environment("PATH", "%s;%s" % [bin_dir, OS.get_environment("PATH")])
-	_log("已把 MinGW 加入本次构建 PATH: ", bin_dir)
+	for _i in 4:
+		var missing := _missing_toolchain_bins()
+		if missing.is_empty():
+			return
+		var bin_dir := _toolchain_bin_dir()
+		if bin_dir == "":
+			_log("PATH 中缺少 ", ", ".join(missing), ", 也未发现常见 MinGW/w64devkit。可设环境变量 MINGW_HOME/W64DEVKIT_HOME 指向工具根目录, 或安装 w64devkit。")
+			return
+		if OS.get_environment("PATH").split(";", false).has(bin_dir):
+			_log("工具链目录已在 PATH 中但仍缺少 ", ", ".join(missing), ", 请检查该目录内容: ", bin_dir)
+			return
+		OS.set_environment("PATH", "%s;%s" % [bin_dir, OS.get_environment("PATH")])
+		_log("已把 MinGW 加入本次构建 PATH: ", bin_dir)
+
+
+## 构建期必需的可执行文件 —— MinGW Makefiles 下 make 与编译器同等必需
+func _missing_toolchain_bins() -> Array[String]:
+	var missing: Array[String] = []
+	if not _which("g++"):
+		missing.append("g++")
+	if not _which("make") and not _which("mingw32-make"):
+		missing.append("make")
+	return missing
+
+
+## 工具链 bin 目录 —— 构建目录 CMakeCache 记录的编译器/构建器绝对路径最权威, 无缓存时按约定扫描
+func _toolchain_bin_dir() -> String:
+	for cache in _cache_files():
+		for key in ["CMAKE_MAKE_PROGRAM", "CMAKE_CXX_COMPILER", "CMAKE_C_COMPILER"]:
+			var dir := _cache_toolchain_dir(cache, key)
+			if dir != "":
+				return dir
+	return _find_exe_dir("g++.exe")
+
+
+## 构建根目录下全部 CMakeCache.txt —— 缓存里的绝对路径是工具链最权威的线索
+func _cache_files() -> Array[String]:
+	var out: Array[String] = []
+	var stack: Array[String] = [_abs("res://.godot/gdextension_build")]
+	while not stack.is_empty():
+		var dir_path: String = stack.pop_back()
+		var d := DirAccess.open(dir_path)
+		if d == null:
+			continue
+		d.list_dir_begin()
+		var e := d.get_next()
+		while e != "":
+			var full := dir_path.path_join(e)
+			if d.current_is_dir():
+				stack.append(full)
+			elif e.to_lower() == "cmakecache.txt":
+				out.append(full)
+			e = d.get_next()
+		d.list_dir_end()
+	return out
+
+
+## 从 CMakeCache.txt 读某个路径项(前缀匹配 "<key>:<TYPE>=", 覆盖 FILEPATH/INTERNAL 等);
+## 未找到 / NOTFOUND / 空值 均返回 ""
+func _cache_value(cache: String, key: String) -> String:
+	var f := FileAccess.open(cache, FileAccess.READ)
+	if f == null:
+		return ""
+	var prefix := key + ":"
+	while not f.eof_reached():
+		var line := f.get_line()
+		if not line.begins_with(prefix):
+			continue
+		var val := line.substr(prefix.length()).strip_edges()
+		if val.is_empty() or val.find("NOTFOUND") >= 0:
+			return ""
+		return val
+	return ""
+
+
+## 从 CMakeCache.txt 读某个路径项, 返回确实含工具链可执行文件的 bin 目录
+func _cache_toolchain_dir(cache: String, key: String) -> String:
+	var val := _cache_value(cache, key)
+	if val == "":
+		return ""
+	var dir := val.get_base_dir().replace("\\", "/")
+	for exe in ["g++.exe", "make.exe", "mingw32-make.exe"]:
+		if FileAccess.file_exists(dir.path_join(exe)):
+			return dir
+	return ""
+
+
+## 校验缓存里记录的工具链绝对路径是否仍指向真实存在的文件 —— 换机器 / 换工具链安装位置后
+## 这些路径会失效(缓存随文件夹一起被拷走时尤其典型), 此时必须作废重配, 否则 cmake --build
+## 会去调旧机器上的编译器 / 构建器。返回失效项说明(空 = 全部存活)。
+func _dead_toolchain_paths(build_dir: String) -> Array[String]:
+	var cache := build_dir.path_join("CMakeCache.txt")
+	var dead: Array[String] = []
+	for key in ["CMAKE_MAKE_PROGRAM", "CMAKE_CXX_COMPILER", "CMAKE_C_COMPILER", "CMAKE_COMMAND"]:
+		var v := _cache_value(cache, key)
+		if v != "" and not FileAccess.file_exists(v):
+			dead.append("%s=%s" % [key, v.get_file()])
+	return dead
 
 
 ## 通用可执行文件定位 —— 跨平台、不写死用户名/机器路径:
@@ -735,7 +828,8 @@ func _kill_build_tree(pid: int) -> void:
 ## 构建缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略, 不入库、不污染工程)。
 ## 目录名固定 <源>-<os>-<架构>-<类型> —— 类型/架构天然隔离, 不再从"任意缓存"复用
 ## (旧逻辑会把 release 塞进 debug 缓存目录: 单配置生成器忽略 --config, release 实际从未编译)。
-## 复用前 _ready_build_dir 还会校验缓存里的 CMAKE_BUILD_TYPE / CMAKE_OSX_ARCHITECTURES, 不符即作废重配。
+## 复用前 _ready_build_dir 还会校验缓存里的 CMAKE_BUILD_TYPE / CMAKE_OSX_ARCHITECTURES /
+## 工具链绝对路径(编译器 / 构建器 / cmake, 换机器后指向旧机器路径即失效), 任一不符即作废重配。
 func _pick_build_dir(source_dir: String, type: String, arch: String) -> String:
 	var cache_root := _abs("res://.godot/gdextension_build")
 	var dir := cache_root.path_join("%s-%s-%s-%s" % [source_dir.get_file(), _os_label(), arch, type])
@@ -766,13 +860,18 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, t
 			var cached_type := _cache_build_type(build_dir)
 			# 架构一致性(macOS): CMAKE_OSX_ARCHITECTURES 决定产物架构, 缓存不符即作废
 			var cached_arch := _cache_osx_archs(build_dir) if _os_label() == "macos" else arch
-			if cached_type == type and cached_arch == arch:
+			# 工具链存活: 缓存里记的是绝对路径, 换机器/重装工具链后即失效, 必须作废重配
+			var dead_tc := _dead_toolchain_paths(build_dir)
+			if cached_type == type and cached_arch == arch and dead_tc.is_empty():
 				_log("复用构建目录(以缓存配置为准): ", build_dir)
 				return true
-			_log("缓存配置(%s.%s)与目标(%s.%s)不符, 作废重新配置。" % [
-				cached_type if cached_type != "" else "未设置",
-				cached_arch if cached_arch != "" else "默认架构",
-				type, arch])
+			if not dead_tc.is_empty():
+				_log("缓存工具链已失效(", ", ".join(dead_tc), "), 作废重新配置。")
+			else:
+				_log("缓存配置(%s.%s)与目标(%s.%s)不符, 作废重新配置。" % [
+					cached_type if cached_type != "" else "未设置",
+					cached_arch if cached_arch != "" else "默认架构",
+					type, arch])
 		else:
 			_log("缓存生成器不是 Makefiles, 作废重新配置。")
 		_wipe_dir(build_dir)

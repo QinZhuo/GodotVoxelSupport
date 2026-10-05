@@ -37,8 +37,8 @@ func _enter_tree() -> void:
 	_register("dev_framework/mcp/enabled", TYPE_BOOL, true)
 	_register("dev_framework/mcp/port", TYPE_INT, 8931)
 	_register("dev_framework/mcp/token", TYPE_STRING, "")
-	_register("dev_framework/mcp/max_output_chars", TYPE_INT, 90000)
-	_register("dev_framework/audio/default_sample_rate", TYPE_INT, 44100)
+	_register("dev_framework/mcp/max_output_chars", TYPE_INT, MCPDevServer.DEFAULT_MAX_OUTPUT_CHARS)
+	_register("dev_framework/mcp/log_tool_results", TYPE_BOOL, false)
 	# 先开启 MCP 调试服务器, 避免后续初始化(工具菜单/DefTable)出错时阻断调试链路
 	_set_mcp_enabled(true)
 	# 导出时剔除 DevMCP autoload（编辑器专用脚本不进正式包，避免解析崩溃）

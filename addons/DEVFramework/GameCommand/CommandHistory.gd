@@ -13,15 +13,6 @@ func append(cmd: GameCommand) -> void:
 func size() -> int:
 	return commands.size()
 
-## 删除第一条匹配的命令（用于取消回滚）。predicate 收到 GameCommand 返回是否删除。
-## 返回是否有删除
-func remove_if(predicate: Callable) -> bool:
-	for i in commands.size():
-		if predicate.call(commands[i]):
-			commands.remove_at(i)
-			return true
-	return false
-
 ## 取指定 tick 的全部命令（保持记录顺序）
 func commands_for(tick: int) -> Array[GameCommand]:
 	var result: Array[GameCommand] = []
@@ -35,13 +26,6 @@ func clear() -> void:
 
 func is_empty() -> bool:
 	return commands.is_empty()
-
-## 弹出指定 tick 的全部命令并返回（消费式读取，弹出不影响记录顺序）
-func pop_for(tick: int) -> Array[GameCommand]:
-	var result := commands_for(tick)
-	for cmd in result:
-		commands.erase(cmd)
-	return result
 
 func save_data() -> Array:
 	var out := []

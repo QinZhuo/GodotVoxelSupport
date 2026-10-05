@@ -3,7 +3,7 @@
 DEV Framework 的**任务系统**：`Def（静态配置 .tres）→ Entity（运行时推进）`，完全外部驱动 —— 无运行器、无隐式生命周期，调用方创建并持有任务实体，靠信号推进。
 **新手教程是任务系统的一个"特化子类"**：整体完全复用任务引擎（完成判定 / 流程 / 序列化），只在其上增加「步骤表现」与「引导视图」两个特化组件。教程不是另一个系统，也不是脱离任务的表现层。
 
-**依赖方向（单向）**：任务包（Entity / Def / GroupTask 等）**绝不引用任何** **`Tutorial*`** **类型**；只有教程包（TutorialStepDef / TutorialGuide）依赖任务包。
+**依赖方向（单向）**：任务包（Entity / Def / GroupTask 等）**绝不引用任何** **`Tutorial*`** **类型**；只有教程包（TutorialStepDef / TutorialOverlay）依赖任务包。
 
 ***
 
@@ -86,10 +86,10 @@ TaskTool.untrack(task)              # 场景销毁时注销（静态表持有强
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `Def/TutorialStepDef.gd`   | **步骤定义**：继承 `SignalTaskDef`，额外携带表现字段（target/拦截）；完成语义（resolve\_target / has\_signals / click\_to\_complete）归口于此      |
 | `Def/TutorialTargetDef.gd` | 目标换算：把 Control / Node2D / Node3D → 统一屏幕矩形                                                                           |
-| `View/TutorialGuide.gd`    | **教程控制器**：直接订阅 `GroupTask` 的逐步信号（step\_entered/child\_completed/completed），步骤进入→渲染表现、纯提示点击→判定完成。一个类完成"推进+表现"，无中间转发器 |
+| `View/TutorialOverlay.gd`    | **教程控制器**：直接订阅 `GroupTask` 的逐步信号（step\_entered/child\_completed/completed），步骤进入→渲染表现、纯提示点击→判定完成。一个类完成"推进+表现"，无中间转发器 |
 | `Scenes/Tutorial/`         | 演示场景（含 `ClickableBall.gd` 自发光点击信号范式）                                                                                |
 
-**设计要点**：教程流程就是一个普通 `GroupTaskDef`（步骤为 `TutorialStepDef`）。何时完成完全由 Task 系统信号驱动；`GroupTask` 自内建 `step_entered` 逐步信号，`TutorialGuide` 直接订阅它渲染表现并推进。层级单向：任务包 ← 教程包。
+**设计要点**：教程流程就是一个普通 `GroupTaskDef`（步骤为 `TutorialStepDef`）。何时完成完全由 Task 系统信号驱动；`GroupTask` 自内建 `step_entered` 逐步信号，`TutorialOverlay` 直接订阅它渲染表现并推进。层级单向：任务包 ← 教程包。
 
 ### 快速上手（三步）
 
@@ -176,7 +176,7 @@ func _on_task_changed() -> void:
 | `node_path: NodePath`              | 目标节点（相对教程宿主 root）                                                                   |
 | `padding: float = 8`               | 挖孔外扩像素（挖孔 = 目标视觉体量 + padding）                                                       |
 | `arrow: bool = true`               | 显示指示箭头                                                                              |
-| `allow_outside_drag: bool = false` | 放行孔外按下（拖拽类步骤：目标可能超出挖孔，需放行按下才能起拖）。每步进入时自动带入 `TutorialGuide.allow_hand_drag`，运行期也可手动改 |
+| `allow_outside_drag: bool = false` | 放行孔外按下（拖拽类步骤：目标可能超出挖孔，需放行按下才能起拖）。每步进入时自动带入 `TutorialOverlay.allow_hand_drag`，运行期也可手动改 |
 
 屏幕矩形换算规则：
 
@@ -188,7 +188,7 @@ func _on_task_changed() -> void:
 
 - 箭头**默认置于挖孔上方**指向目标，顶部放不下才翻到下方兜底；提示气泡始终在箭头尾端外侧（默认上方），固定不随目标左右偏移/浮动；`arrow=false` 时不画箭头，气泡置于孔下方；纯提示（无孔）气泡横向铺满、贴屏幕底部显示（可经 `set_tip_top_limit` 限制顶部不遮住目标）
 
-### TutorialGuide 主题（命名空间 `"TutorialGuide"`）
+### TutorialOverlay 主题（命名空间 `"TutorialOverlay"`）
 
 | 主题项                                | 类型        | 控制     |
 | ---------------------------------- | --------- | ------ |
@@ -201,14 +201,14 @@ func _on_task_changed() -> void:
 
 ```gdscript
 var theme := Theme.new()
-theme.set_color("dim_color", "TutorialGuide", Color(0, 0, 0.08, 0.62))
-theme.set_stylebox("frame_stylebox", "TutorialGuide", my_frame_box)
+theme.set_color("dim_color", "TutorialOverlay", Color(0, 0, 0.08, 0.62))
+theme.set_stylebox("frame_stylebox", "TutorialOverlay", my_frame_box)
 guide.theme = theme   # 或 ThemeTypeVariation / 项目全局主题
 ```
 
 ## 四、常见用法
 
-**纯提示步骤"点任意处继续"（自动）**：无 `target` 且无 `signals` 的步骤，点任意处/按继续键 → `TutorialGuide` 依据 `TutorialStepDef.click_to_complete` 判定并完成当前步骤。宿主无需转发，也无重复完成的隐患。
+**纯提示步骤"点任意处继续"（自动）**：无 `target` 且无 `signals` 的步骤，点任意处/按继续键 → `TutorialOverlay` 依据 `TutorialStepDef.click_to_complete` 判定并完成当前步骤。宿主无需转发，也无重复完成的隐患。
 
 > 有 `target` 的步骤完成靠目标自身交互/信号；无 `target` 但配了 `signals` 的"等待信号"步骤不遮罩、也不点击完成。
 
@@ -253,7 +253,7 @@ var data := task.save_data()                    # 进度存档（含子步骤）
 var same_task := Task.restore(data, {"root": host})  # 断点续玩：重建并激活到存档进度
 ```
 
-**自定义外观**：继承 `TutorialGuide` 重写 `_draw`（`_draw_dim/_draw_arrow`），或改造 `focus()/show_step()` 触发的表现；流程/完成逻辑无需改动。
+**自定义外观**：继承 `TutorialOverlay` 重写 `_draw`（`_draw_dim/_draw_arrow`），或改造 `focus()/show_step()` 触发的表现；流程/完成逻辑无需改动。
 
 ### 键盘 / 手柄与可访问性（走 Godot 焦点系统）
 

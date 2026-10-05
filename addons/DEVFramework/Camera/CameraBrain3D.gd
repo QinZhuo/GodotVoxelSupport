@@ -68,6 +68,11 @@ var _dirty: bool = true
 
 func _enter_tree() -> void:
 	main = self
+	# 分辨率自适应：进场时对齐全局保持基准轴（规则见 DisplayTool）。
+	# 必须先于 _ready 抓取 _base_fov，否则错误基准会被逐帧驱动放大。
+	# 编辑器里 Brain 是工具脚本, 不改动编辑器窗口
+	if not Engine.is_editor_hint():
+		DisplayTool.apply_to_window(get_window(), self)
 
 
 func _exit_tree() -> void:

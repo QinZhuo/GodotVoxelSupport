@@ -84,10 +84,17 @@ static func register_focus_group(nodes: Array[Node], default_index: int = 0) -> 
 ## 清空焦点组，所有控件退出导航。
 static func clear_focus_group() -> void:
 	_set_group_focus_mode(_focus_group, false)
-	_notify_focus_exit(_focus_group[_focus_index] if _focus_index >= 0 and _focus_index < _focus_group.size() else null)
+	## ⚠️ 当前焦点节点可能已被释放（注册方被销毁时没来得及清）⇒ 必须先判有效再通知，
+	## 否则 _notify_focus_exit 会因"参数是已释放实例"直接报错
+	var focus: Node = _focus_group[_focus_index] if _focus_index >= 0 and _focus_index < _focus_group.size() else null
+	_notify_focus_exit(focus if is_instance_valid(focus) else null)
 	_focus_group.clear()
 	_focus_index = -1
 	LogTool.log("焦点导航", "焦点组已清空")
+
+## 当前焦点组是否就是这批节点（给"只想收自己那份"的调用方用，如 EquipOptionMenu）
+static func is_focus_group(nodes: Array) -> bool:
+	return _focus_group == nodes
 
 ## 批量设置控件的 focus_mode 启用/禁用导航。
 static func _set_group_focus_mode(nodes: Array[Node], enabled: bool) -> void:
@@ -137,9 +144,10 @@ static func _ensure_2d_focus() -> void:
 # 3D 焦点导航 — 手动管理 3D 节点的焦点切换
 # ============================================================
 
-## 获取当前聚焦的 3D 节点。
+## 获取当前聚焦的 3D 节点（已释放/失效时返回 null）。
 static func get_3d_focus() -> Node:
-	if _focus_index >= 0 and _focus_index < _focus_group.size() and _focus_group[0] is Node3D:
+	if _focus_index >= 0 and _focus_index < _focus_group.size() \
+			and _focus_group[0] is Node3D and is_instance_valid(_focus_group[_focus_index]):
 		return _focus_group[_focus_index]
 	return null
 
@@ -157,6 +165,12 @@ static func _handle_3d_navigation(event: InputEvent) -> bool:
 		return false
 
 	if _focus_index < 0:
+		_ensure_focus()
+		if _focus_index < 0:
+			return false
+	## ⚠️ 当前焦点节点可能已被释放（注册方销毁时没来得及清）⇒ 重新挑一个有效的，
+	## 否则下面的 _move_3d / _activate_3d 会拿到已释放实例报错
+	if not _is_active(_focus_group[_focus_index]):
 		_ensure_focus()
 		if _focus_index < 0:
 			return false
@@ -198,11 +212,12 @@ static func _match_dir(event: InputEvent, action: StringName, key1: Key, key2: K
 		and (event.keycode == key1 or event.keycode == key2)
 
 static func _set_focus(index: int) -> void:
+	if index < 0 or index >= _focus_group.size():
+		return
 	var prev := _focus_group[_focus_index] if _focus_index >= 0 and _focus_index < _focus_group.size() else null
 	_focus_index = index
-	var cur := _focus_group[_focus_index]
 	_notify_focus_exit(prev)
-	_notify_focus_enter(cur)
+	_notify_focus_enter(_focus_group[index])
 
 static func _move_3d(direction: Vector2) -> void:
 	if _focus_index < 0:

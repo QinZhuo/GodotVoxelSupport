@@ -453,9 +453,11 @@ func _from_text(text: String, col: int) -> Dictionary:
 			var bv = str_to_var(text)
 			if bv is bool:
 				return _ok(bv)
-			if text == "true" or text == "1" or text.to_lower() == "yes":
+			# 布尔字面量表统一取 VariantTool, 免得此处一份、as_bool 又一份而悄悄分叉
+			var low := text.strip_edges().to_lower()
+			if VariantTool.BOOL_TRUE_LITERALS.has(low):
 				return _ok(true)
-			if text == "false" or text == "0" or text.to_lower() == "no":
+			if VariantTool.BOOL_FALSE_LITERALS.has(low):
 				return _ok(false)
 			return _err("期望 bool(true/false/1/0), 得到 '%s'" % text)
 		TYPE_COLOR:
@@ -472,12 +474,12 @@ func _from_text(text: String, col: int) -> Dictionary:
 			return _err("期望资源路径(res://), 得到 '%s'" % text)
 		TYPE_ARRAY, TYPE_PACKED_STRING_ARRAY, TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY, TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY:
 			# 数组: 优先按 _cell_copy_text 的 JSON 格式还原(含资源路径), 兼容 var_to_str 的手写格式
-			var parsed = JSON.parse_string(text)
+			var parsed = VariantTool.parse_json(text)
 			if parsed is Array:
 				return _ok(_jsonable_to_value(parsed))
 			return _err("期望数组(JSON), 得到 '%s'" % text)
 		TYPE_DICTIONARY:
-			var parsed_dict = JSON.parse_string(text)
+			var parsed_dict = VariantTool.parse_json(text)
 			if parsed_dict is Dictionary:
 				return _ok(_jsonable_to_value(parsed_dict))
 			var sv = str_to_var(text)

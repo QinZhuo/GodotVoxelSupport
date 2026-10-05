@@ -17,11 +17,17 @@ static func update_visible(tween: TweenAnimation, visible: bool, reset: bool):
 	else:
 		tween.playback()
 
-## 等待 Tween 动画结束并释放节点。
-## 编辑器模式下直接 queue_free 跳过动画。
+## 播放退出动画，播完后释放节点。
 ## [param node] 要释放的节点
 ## [param tween] 可选的 TweenAnimation
+##
+## ⚠️ 不可写成 `await tween.playback().finished`：tween 被 kill() 时 finished 永不触发
+## （Godot 已知问题 godotengine/godot-proposals#13296），协程会永久悬挂。
+## 而归还对象池、场景切换、重新播放都会 kill tween，于是悬挂的协程状态（含局部变量快照）
+## 常驻，反复打断不断累积。改用一次性信号连接则零残留：取消即不释放，
+## 且正好符合"已被收回池中的实例不该再被释放"的预期。
 static func finish_and_free(node: Node, tween: TweenAnimation) -> void:
 	if tween and not tween.is_playback:
-		await tween.playback().finished
+		tween.playback().finished.connect(node.queue_free, CONNECT_ONE_SHOT)
+		return
 	node.queue_free()

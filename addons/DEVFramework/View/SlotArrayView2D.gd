@@ -1,194 +1,115 @@
 @tool
+## 槽位数组视图：**Node2D 子节点 = 槽位**（其他类型子节点忽略），`data[i]` 的视图挂在槽位 i 下。
+##
+## 契约：① `views[i]` 显示 `data[i]`（定位按视图当前的 `data` 比对，视图名只用于 Scene Tree 可读，
+## 数据项不需要实现 `get_view_name()`）；② `data[i] == null` = 空槽位（跳过但占索引）；
+## ③ `data` 多于槽位 = 多余项不显示并报错；④ `add_item()` 槽位满时落到最后一格。
+##
+## 算法实现在 ArrayViewTool（与 Node3D 版共用同一份），本类只负责类型与宿主钩子。
 class_name SlotArrayView2D extends Node2D
 
+## 视图场景（每个数据项实例化一个）
 @export var view_scene: PackedScene:
 	set(value):
 		view_scene = value
 		_preview_setup()
 
-var pool: BakedPool2D
+## 数据数组（赋值即刷新）
 var data: Array:
 	set(value):
 		data = value
 		refresh()
 
+## 空槽位是否连槽位本身一起隐藏（只显示有视图的槽位）
 @export var auto_hide_empty: bool = false:
 	set(value):
 		auto_hide_empty = value
 		_update_slot_visibility()
 
-var views: Array[Node2D] = []
+## 可选对象池：只需实现 pool_get() / pool_push()，BakedPool 与 BakedPool2D 都兼容
+##（框架侧按鸭子类型调用，见 ArrayViewTool）。留空则每次现场实例化 view_scene。
+## ⚠️ BakedPoolManager.find_pool() 只返回 3D 的 BakedPool，要用统一注册需自行建池节点后注入
+var pool
 
-func _resize_views():
-	var count = get_child_count()
-	while views.size() < count:
-		views.append(null)
-	while views.size() > count:
-		var view = views.pop_back()
-		if is_instance_valid(view):
-			ArrayViewTool.free_view(view, pool)
+## 与 data 一一对应的视图列表（框架每次刷新都会把长度对齐到槽位数；业务侧只读）
+var views: Array[Node2D] = []
 
 func _ready():
 	_resize_views()
 	_preview_setup()
 
-func _preview_setup():
-	if not Engine.is_editor_hint():
-		return
-	_resize_views()
-	clear()
-	var slot_nodes := get_children()
-	if not view_scene or slot_nodes.is_empty():
-		return
-	for i in slot_nodes.size():
-		_set_slot_view(i, null)
-	_update_slot_visibility()
+## 槽位 = 本节点的 Node2D 子节点（按顺序）。
+## 承载动画 / 辅助节点的普通 Node 不算槽位，可以放心挂在本节点下。
+func _get_slots() -> Array[Node2D]:
+	var slots: Array[Node2D] = []
+	for child in get_children():
+		if child is Node2D:
+			slots.append(child)
+	return slots
 
-func _update_slot_visibility():
-	if not auto_hide_empty:
-		return
-	var slot_nodes := get_children()
-	for i in slot_nodes.size():
-		var slot = slot_nodes[i] as Node2D
-		if not slot:
-			continue
-		slot.visible = i < views.size() and is_instance_valid(views[i])
+## ---- 公开接口（实现见 ArrayViewTool.slot_*）----
 
-# --- 核心私有方法 ---
+## 按 data 重建全部槽位视图
+func refresh() -> void:
+	ArrayViewTool.slot_refresh(self)
 
-# 在指定插槽设置 view（释放旧 view → 创建新 view → 挂载到插槽）
-func _set_slot_view(slot_index: int, item) -> Node2D:
-	var slot_nodes := get_children()
-	if slot_index < 0 or slot_index >= slot_nodes.size():
-		return null
-	var view = ArrayViewTool.create_view(view_scene, pool, item)
-	if view:
-		slot_nodes[slot_index].add_child(view)
-		views[slot_index] = view
-	return view
+## 清空所有槽位视图（不改 data）
+func clear() -> void:
+	ArrayViewTool.slot_clear(self)
 
-# 释放指定插槽的 view
-func _free_slot(slot_index: int):
-	if slot_index < 0 or slot_index >= views.size():
-		return
-	if is_instance_valid(views[slot_index]):
-		ArrayViewTool.free_view(views[slot_index], pool)
-	views[slot_index] = null
+## 按 data 重新对齐全部槽位（拖拽排序 / 删项后调用；复用已有实例，不重建节点）
+func resync_views() -> void:
+	ArrayViewTool.slot_resync(self)
 
-# 查找第一个空插槽索引，全满则返回最后一个（溢出兜底）
-func _find_slot_index() -> int:
-	if views.is_empty():
-		return -1
-	for i in views.size():
-		if not is_instance_valid(views[i]):
-			return i
-	return views.size() - 1
+## 把第 index 项对齐到 data[index]（含整体重排；下标越界 / 空数据位返回 null）
+func refresh_at(index: int) -> Node2D:
+	return ArrayViewTool.slot_refresh_at(self, index) as Node2D
 
-# --- 公开方法 ---
-
-func refresh():
-	_resize_views()
-	clear()
-	var slot_nodes := get_children()
-	if not data or data.is_empty() or slot_nodes.is_empty():
-		return
-	var last_index = slot_nodes.size() - 1
-	for i in data.size():
-		if data[i] == null:
-			continue
-		_set_slot_view(mini(i, last_index), data[i])
-	_update_slot_visibility()
-
-func clear():
-	for i in views.size():
-		_free_slot(i)
-	_update_slot_visibility()
-
-## 按 data 重新对齐所有槽位视图：保证 views[i] 显示 data[i]，且视图名同步为数据名。
-## 删除 / 拖拽排序后**必须**调用 —— 框架内部（remove_item / refresh_item / get_item_position）
-## 都依赖「槽位索引 == data 索引」和「视图名 == 数据名」两条约定。
-## 复用已有视图实例（只改 data / name），不重建节点，避免闪烁。
-func resync_views():
-	_resize_views()
-	for i in views.size():
-		var item = data[i] if (data and i < data.size()) else null
-		var view = views[i]
-		if item == null:
-			if is_instance_valid(view):
-				_free_slot(i)
-			continue
-		if is_instance_valid(view) and "data" in view:
-			if view.data != item:
-				view.data = item
-			view.name = ArrayViewTool.get_item_name(item)
-		else:
-			if is_instance_valid(view):
-				_free_slot(i)
-			_set_slot_view(i, item)
-	_update_slot_visibility()
-
+## 刷新某个数据项：不在 data 里时按"已有视图重绑"或"新增一项"处理
 func refresh_item(item) -> Node2D:
-	_resize_views()
-	## 已有视图显示该数据：同步视图名后直接返回
-	for i in views.size():
-		var v = views[i]
-		if is_instance_valid(v) and "data" in v and v.data == item:
-			v.name = ArrayViewTool.get_item_name(item)
-			return v
-	## data 中已收录该项（如"买重复卡 → 升级替换"会 erase 后 insert 回中间）：
-	## 必须按 data 重新对齐，否则新物品会被塞进第一个空槽（末尾），与模型顺序不一致
-	var idx: int = data.find(item) if data else -1
-	if idx >= 0:
-		resync_views()
-		if idx < views.size() and is_instance_valid(views[idx]):
-			return views[idx]
-	## 兜底：data 未收录该项（独立调用）→ 放到第一个空槽
-	var view = _set_slot_view(_find_slot_index(), item)
-	_update_slot_visibility()
-	return view
+	return ArrayViewTool.refresh_item(self, item) as Node2D
 
+## 追加一项到第一个空槽（满槽则落到最后一格）
 func add_item(item) -> Node2D:
-	_resize_views()
-	var view = _set_slot_view(_find_slot_index(), item)
-	_update_slot_visibility()
-	return view
+	return ArrayViewTool.slot_add_item(self, item) as Node2D
 
-func remove_at(index: int):
-	_resize_views()
-	if index < 0 or index >= views.size():
-		return
-	_free_slot(index)
-	## 补洞：删除后必须重新对齐，否则槽位索引与 data 索引错位
-	resync_views()
-
+## 把 item 放到指定槽位（不读 data，用于"这一格临时改显示别的"）；越界返回 null。
+## ⚠️ data 才是唯一真相：之后的 refresh / resync_views / refresh_item 会按 data 把它纠回来
 func set_item(index: int, item) -> Node2D:
-	_resize_views()
-	var slot_nodes := get_children()
-	if index < 0 or index >= slot_nodes.size():
-		return null
-	var view = _set_slot_view(index, item)
-	_update_slot_visibility()
-	return view
+	return ArrayViewTool.slot_set_item(self, index, item) as Node2D
 
-func remove_item(item):
-	if item == null:
-		return
-	_resize_views()
-	## 按「视图当前显示的数据」定位，而不是按视图名 —— 拖拽排序只重绑 data、名字会滞后，
-	## 按名字匹配会释放错槽位（表现为卖掉的卡还在显示、其它卡消失）
-	for i in views.size():
-		var view = views[i]
-		if is_instance_valid(view) and "data" in view and view.data == item:
-			_free_slot(i)
-			break
-	## 释放后重新对齐（补洞 + 同步视图名），保证 views[i] 与 data[i] 一一对应
-	resync_views()
+## 槽位数量（= 本节点的 Node2D 子节点数；业务侧按容器容量裁剪数据时用它）
+func get_slot_count() -> int:
+	return _get_slots().size()
 
+## 移除第 index 个视图（不改 data）并补洞重排
+func remove_at(index: int) -> void:
+	ArrayViewTool.slot_remove_at(self, index)
+
+## 移除某个数据项的视图（item 为 null 时不动：null 是空槽位的合法值）
+func remove_item(item) -> void:
+	ArrayViewTool.remove_item(self, item)
+
+## 取第 index 槽位上的视图（越界 / 空槽返回 null）
+func get_view(index: int) -> Node2D:
+	return ArrayViewTool.get_view(views, index) as Node2D
+
+## 某个数据项所在槽位的全局位置（找不到时报错并返回原点）
 func get_item_position(item) -> Vector2:
 	_resize_views()
-	for i in views.size():
-		var view = views[i]
-		if is_instance_valid(view) and "data" in view and view.data == item:
-			return view.global_position
+	var view := get_view(ArrayViewTool.index_of_item(data, views, item))
+	if view:
+		return view.global_position
 	printerr(self, "  无法获取位置 ", item)
 	return Vector2.ZERO
+
+## ---- 宿主钩子（ArrayViewTool.slot_* 调用）----
+
+func _resize_views() -> void:
+	ArrayViewTool.resize_views(views, _get_slots().size(), pool)
+
+func _update_slot_visibility() -> void:
+	ArrayViewTool.update_slot_visibility(_get_slots(), views, auto_hide_empty)
+
+func _preview_setup() -> void:
+	ArrayViewTool.slot_preview_setup(self)

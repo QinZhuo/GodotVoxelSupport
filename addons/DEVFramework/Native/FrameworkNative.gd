@@ -5,7 +5,7 @@ extends RefCounted
 ##
 ## 整个 DEVFramework 的 C++ 原生能力集中在**唯一一个共享扩展**：
 ##   res://addons/DEVFramework/Native/dev.gdextension
-## （ECS 的 ECSCore、未来 PCG 侵蚀加速等模块原生类都注册在这里，共用一份二进制）。
+## （如 ECS 的 ECSCore 等模块原生类都注册在这里，共用一份二进制）。
 ##
 ## 职责：
 ##   - 懒加载共享原生库（所有模块第一次访问时统一加载，避免各自重复检测）

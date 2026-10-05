@@ -76,13 +76,14 @@ SaveTool.save_async(path, data)
 |---|---|---|
 | 属性数学 | `Modifier` / `ModifierValue`（base_value+修饰链重算） | — |
 | 属性/Buff 容器与语义 | — | `Buff` / `BuffComponent` / `AttributeComponent` / 各 Def 与 TagDef |
-| 效果系统 | `EffectDef`(协议) / `EffectsDef` / `BuiltinEffectDef` | 70+ 具体效果 Def、`GameContext` |
+| 效果系统 | `EffectDef`(协议) / `EffectsDef` / `SystemEffectDef` | 70+ 具体效果 Def、`GameContext` |
 | 流程状态 | `StateMachine` | MonitorGame 的状态枚举与转换表 |
+| 步进顺序 | `TickTool`（物理 tick 步进队列，按 `order_key` 定序）/ `GameTimer` | `Actor._tick_order()`（玩家先于敌方的策略）、`MonitorGame._physics_process`（接线点） |
 | 任务系统 | `Task`/`TaskDef` 协议 | 教程任务 .tres 定义 |
 | 回放命令 | `GameCommand`/`CommandHistory`/`InputSource` 协议 | `&"use_equip"` 等具体命令、`CartridgeInputSource` |
 | AI | Goap 全套（暂未使用） | — |
 | 镜头 | `VirtualCamera3D` / `CameraBrain3D` / `CameraTool`（机位竞争 + 混合数学 + 叠加偏移协议） | `PlayerCamera`（鼠标跟随手感、震屏参数、场景机位摆放） |
-| 其余 | ECS / PCG / Tween / View / Audio / Tool | Actor 及其组件、View 子类 |
+| 其余 | ECS / Tween / View / Tool | Actor 及其组件、View 子类 |
 
 ---
 
@@ -107,19 +108,45 @@ MCP 辅助：改/删共享资源前先 `find_resource_users` 查双向依赖；�
 | 轨道 | 目录 | 放什么 |
 |---|---|---|
 | **分层轴** | `Def/` `Entity/` `View/` `Tool/` 根部 | 核心骨架：被所有功能共用的基类协议（EffectDef/ValueDef/SignalDef）、纯数学原语（ModifierValue）、横切工具 |
-| **功能轴** | `<Module>/{Def,Entity,Tool}/` 自包含 | 可拔插功能域：AI、ECS、PCG、Audio、Task、GameCommand、Tween、Camera |
+| **功能轴** | `<Module>/{Def,Entity,Tool}/` 自包含 | 可拔插功能域：AI、ECS、Task、GameCommand、Tween、Camera |
 
 **归属三问**（新增功能时按序自问）：
 1. **删除测试**：整文件夹删掉后框架其余部分还能编译运行吗？能→功能轴；不能→分层轴
-2. **API 宽度**：对外是少量入口类（GoapAgent/ECSWorld/AudioTool）→功能轴；是被广泛继承的基础协议（EffectDef 被 70+ 类继承）→分层轴
+2. **API 宽度**：对外是少量入口类（GoapAgent/ECSWorld/CameraTool）→功能轴；是被广泛继承的基础协议（EffectDef 被 70+ 类继承）→分层轴
 3. **共变率**：一个需求总是同时改这组文件吗？是→功能轴
 
 **红线**：禁止把同一功能域的 Def 与 Entity 劈到分层轴两处（2026-08 已归位 Task/Audio，见第八节）。
-跨模块依赖必须单向且显式注释（如 PCG→Audio 经 AudioGenDef 桥接，Audio 不反向依赖 PCG）。
+跨模块依赖必须单向且显式注释（如 GameCommand→ECS、Camera→UI，各模块不得反向依赖）。
 
 ---
 
 ## 八、历史决策记录
+
+> **现状标注**：以下条目记录 **PCG**（已拆为独立项目）与**程序化音频合成**（2026-10 整体删除，未拆出）
+> 两个模块在本仓库存续期间的设计决策，相关目录均已移出，路径描述仅作历史存档。
+> 3D 程序化生成现为独立插件项目 `d:\Work\GodotProject\PCG`；查当前用法请去该项目的 Readme。
+> 音频合成无对应项目；历史条目里的 `Audio/`、`AudioGenDef` 等路径均已不存在，勿据此新建代码。
+
+**2026-10：PCG 全量重构为「3D 生成运行时」，SDF 并入（功能轴）**
+- 动因：模块原为「2D 栅格地图生成 + 3D 体素补丁」，2D 占代码量 92.6%；这类产物是俯视地图数据，与"3D 模型"是两类产物，混在一处会让真正的 3D 能力被淹没。需求明确：PCG 专职服务 3D 模型世界生成，同一份数据既能产体素模型也能产 lowpoly 场景。
+- 做法一（收敛产物类别）：整体移除 2D 能力 —— 2D 栅格 8 种算法、生物群系、河流道路、程序化纹理、L-System、模板拼接、内容进化，以及配套的约 64 个 `.tres` 与 2D 演示/测试。保留 3D 栅格（4 种算法）、3D 散布、分块世界、生成管线。
+- 做法二（合并平行系统）：原与PCG 平行的 `SDF/` 模块整体并入 `PCG/`，重构为六层：`Core/`（SdfField + 几何算子 + MeshExtractor + 噪声层，统一中间表示）、`Voxel/`（3D 栅格 + 体素产物）、`Model/`（PropGen/PropBuild/PropGenTool/PropLayoutTool/ModelGraph/ModelBaker）、`Pipeline/`、`Style/`（三渲二）、`World/`（SceneStylePack）。
+- 核心主张（成为模块的轴）：**烘焙只做一次**。`SdfField` 是唯一中间表示，MeshExtractor 与 VoxelExtractor 各自只是投影；实测烘焙占总耗时 99.9% 以上，所以双产物几乎不加钱、两产物必然同形、换画风不必重算几何。
+- 分层落点：`SceneStylePack` 留在框架但只含机制（画风+配色+配方表+布局参数+输出形态），三套具体预设引用项目生成器脚本，故拆到 `Scripts/Gen/SceneStylePresets.gd`；`WorldAssembler.from_pack()` 建在项目层，依赖方向单向（项目 → 框架）。
+- 决策：**不保留 2D 兼容层**。保留会让"只做 3D"这件事在代码里失效，而 2D 产物已有替代路径（地图可由体素栅格顶视导出）。
+- 遗留：`PCGErode` / `PCGLSystem` 等 PCG 原生类已随 PCG 模块移出，其源码已删，但已编译的 `dev.gdextension` 仍注册着它们（无调用方，不阻塞运行，重编译后消失）。
+- 验证：`Scripts/Test/pcg/` 8 个测试经 `test_pcg.gd` 单桥接接入 TestRunner；演示收敛为 `Scenes/PCG/` 5 个 3D 场景。
+
+**2026-10：SDF 模块按「生成 / 布局」双契约定位（功能轴）**〔本条已被上一条取代：`SDF/` 已整体并入 `PCG/`，文档迁至 `PCG/Readme.md`〕
+- 动因：单体造型与世界摆放若揉在一个生成器里，会同时烂掉两头——换风格要通读世界逻辑，布局无法复用于新物体，存档只能存网格。需求明确要求「各物体独立生成，最终只做摆放」。
+- 做法：新增 `SDF/` 功能轴，内部再切两个**互不通气**的域：`Entity/Tool`（分块稠密 SDF 基座 + Surface Nets / Dual Contouring 提取）与 `Gen/`（`PropGen` 生成契约 / `PropBuild` 局部产物 / `PropGenTool` 烘焙 / `PropLayoutTool` 贴地朝向避让）。两者唯一交接面是 `PropBuild`。
+- 分层落点：框架层只保证能力，**不预设任何具体物体**（框架内无「商店/医院」等语义）；`ShopGen`/`HospitalGen`/`VehicleGen`/`StreetGen` 与 `WorldAssembler`、`PropRecipe` 全部落**项目层** `Scripts/Gen/`，换一款游戏整目录可替换。
+- 依赖方向单向：`Gen → 基座`。布局层通过鸭子类型（`func(x,z) -> float`）取地面高度，因此**不认识任何地形类**，不反向依赖 PCG 的地形实现。
+- 决策：布局层允许 `ground_step` 采样密度参数（长单体必需），但不允许传入地形对象——保持「只认数字」的对偶关系。
+- 验证：`Scripts/Test/pcg/` 三层测试（生成 / 布局 / 端到端）经 `test_sdf.gd` 接入 TestRunner，实跑 3 项全过。其中布局层测试**全程不生成真实几何**（夹具手搓 3 顶点假网格），是「布局层不认识几何细节」的可执行证明；生成层断言「包围盒最低点 ≈ 0」，是「纯局部空间」的可执行证明。
+- 演示：`Scenes/PCG/PCGWorldAssemble.tscn`（项目层）把三条主张做成可当场验证的交互——点选单体只换 seed 与网格、**站位位移实测 0.0 m**（证明解耦）；存档 14 条每条恰好 `tag/seed/x/y/z/yaw` 6 字段且不含网格；读档 14/14 还原、位置偏差 0.0 m、朝向误差 ~1.5e-7、二次存档与原始存档逐字节一致。
+- 补充决策：**分帧组装是框架职责，不是调用方的耐心问题**。`assemble()` 同步跑完会堵住主线程近 20 s（实测 14 单体烘焙 18485 ms / 布局 3 ms），期间窗口不响应、`SceneTree.current_scene` 甚至取不到。故框架直接提供 `assemble_step()` / `assemble_finish()` / `step_progress()` / `step_pending()`，同步 `assemble()` 保留为薄封装以兼容旧调用。
+- 教训（已写入 `SDF/Readme.md` §6）：`rng.state = rng.seed` 会让 PCG32 序列退化、不同 seed 塌成同一值，且确定性测试**全过**——测试必须同时断言「同 seed 复现」与「异 seed 不同」。
 
 **2026-08：Buff/Attribute 下沉项目层**
 - 动因：框架反向硬编码项目路径、Buff 触发逻辑绑定项目 GameContext、多人权限/存档格式属游戏策略。

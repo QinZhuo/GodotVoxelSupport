@@ -278,6 +278,6 @@ func _apply_sort(new_index: int):
 	new_index = clampi(new_index, 0, drag_container.data.size())
 	drag_container.data.insert(new_index, dragged_item)
 
-	## 必须走容器的 resync_views（重绑 data **并**同步视图名），不能只重绑 views[i].data：
-	## 视图名会滞后于数据，之后按名字匹配的增删（remove_item / refresh_item）就会操作到错误的视图
+	## 必须走容器的 resync_views：它按 data 重新对齐**所有**槽位（views[i] ↔ data[i]）。
+	## 只改 data 而不对齐，之后 refresh_item / remove_item / get_item_position 会按错位的槽位操作
 	drag_container.resync_views()
