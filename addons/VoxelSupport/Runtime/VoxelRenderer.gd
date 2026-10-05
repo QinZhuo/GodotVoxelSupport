@@ -1612,8 +1612,8 @@ func _update_mesh_async() -> void:
 	# 每个子线程只读取自己那个私有的光环快照，主线程后续增删 data 不与之冲突，
 	# 杜绝数据竞态（块随机显示/隐藏的根因），同时避免整世界深拷贝与字典切片扫描。
 	var rebuild_chunks: Array[Vector3i] = []
-	# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居），
-	# 替代逐体素 dirty_voxels 的大批量追踪——大崩塌移除不再主线程逐体素写 dict
+	# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居）：
+	# 大崩塌移除不再主线程逐体素写 dict
 	rebuild_chunks = data.get_dirty_chunks()
 	var had_dirty := not rebuild_chunks.is_empty()
 	# 【流式防抖】剔除已在延迟补建队列的脏 chunk：其重建权归 _deferred_chunks

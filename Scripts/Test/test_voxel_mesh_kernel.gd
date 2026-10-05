@@ -102,9 +102,9 @@ func test_kernel_deer_sample_baseline() -> void:
 	if not FileAccess.file_exists(path):
 		assert_true(false, "样例 deer.qvox 应存在（端到端基线依赖它）")
 		return
-	var vox := VoxData.from_asset(path)
+	var vox := VoxAsset.from_asset(path)
 	if vox == null:
-		assert_true(false, "应能从 .qvox 解析出 VoxData")
+		assert_true(false, "应能从 .qvox 解析出 VoxAsset")
 		return
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
@@ -146,7 +146,7 @@ func _mat(id: int, trans: float = 0.0) -> VoxelMaterial:
 
 
 ## 走 cube 路径生成网格；直接复用 VoxelMeshGenerator 的生成阶段，
-## 绕过 VoxData/材质文件 IO（测试只关心几何内核）
+## 绕过 VoxAsset/材质文件 IO（测试只关心几何内核）
 func _gen_cube(model: Dictionary[Vector3i, int], mats: Array) -> ArrayMesh:
 	return _gen(model, mats, VoxelMeshImporter.Shape.cube, 0)
 

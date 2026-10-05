@@ -64,6 +64,33 @@ static func halo_index_world(wx: int, wy: int, wz: int, origin: Vector3i) -> int
 	return halo_index(wx - origin.x + HALO, wy - origin.y + HALO, wz - origin.z + HALO)
 
 
+# ----------------------------------------------------------------------------
+# LOD 大块几何
+# ----------------------------------------------------------------------------
+# 约定（见 VoxelData.LOD_GRID / VoxelChunkGenerator.LOD_BLOCK_SIZE）：
+#   LOD 大块 = CHUNK_SIZE³ 个大格，每格代表 2^lod 体素。
+#   故边长 = CHUNK_SIZE × 2^lod 体素 → 每轴覆盖 2^lod 个 LOD0 chunk。
+# 这两个函数是"哪些 LOD0 chunk 属于某个 LOD 大块"的唯一权威算法：
+# 降采样（哪些 chunk 作为输入）与派生缓存的来源校验（source_crc 覆盖哪些 chunk）
+# 必须用同一套坐标，否则缓存会在来源没变时被判失效（或反之，更糟）。
+
+## lod（>=1）大块每轴覆盖的 LOD0 chunk 数。
+static func lod_chunks_per_axis(lod: int) -> int:
+	return 1 << maxi(lod, 0)
+
+
+## lod（>=1）大块 block_key 覆盖的全部 LOD0 chunk 坐标（ZYX 遍历，确定性顺序）。
+static func lod_covered_chunks(block_key: Vector3i, lod: int) -> Array[Vector3i]:
+	var span := lod_chunks_per_axis(lod)
+	var base := block_key * span
+	var out: Array[Vector3i] = []
+	for dz in span:
+		for dy in span:
+			for dx in span:
+				out.append(base + Vector3i(dx, dy, dz))
+	return out
+
+
 ## 从光环缓冲（34³）中抽取中心块（去掉 HALO 外缘一圈），返回紧凑缓冲（CHUNK_VOLUME）。
 ## 供 LOD 大块降采样等复用，避免各处重复手写光环下标公式（下标步长漂移风险）。
 static func extract_center_from_halo(halo: PackedInt32Array) -> PackedInt32Array:

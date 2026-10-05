@@ -1,4 +1,4 @@
-class_name VoxData
+class_name VoxAsset
 
 var models: Array[VoxelModel]
 
@@ -59,15 +59,15 @@ const OPT_FRAME_INDEX := "mesh/frame_index"
 const OPT_SCALE := "mesh/scale"
 
 
-## 按扩展名把资产文件解析为 VoxData；不支持的格式或解析失败返回 null。
-static func from_asset(path: String) -> VoxData:
+## 按扩展名把资产文件解析为 VoxAsset；不支持的格式或解析失败返回 null。
+static func from_asset(path: String) -> VoxAsset:
 	if path.get_extension().to_lower() == "qvox":
 		return _from_qvox(path)
 	var access := VoxAccess.Open(path)
 	return access.voxel if access != null else null
 
 
-## .qvox → VoxData。
+## .qvox → VoxAsset。
 ##
 ## 映射约定：
 ##   · 每个 VOX0 的 model_id → 一个 VoxelModel，体素存**绝对体素坐标**（offset = ZERO）。
@@ -75,13 +75,13 @@ static func from_asset(path: String) -> VoxData:
 ##     "按 size 居中 + Z 翻转"的 offset 约定。
 ##   · MATE → VoxelMaterial，**数组索引 == 材质ID**（索引 0 恒为空气占位），
 ##     与全项目统一材质契约一致。
-##   · NODE 不参与转换：QVox 场景图（下标寻址 + model 引用）与 VoxData 的 node/frame
+##   · NODE 不参与转换：QVox 场景图（下标寻址 + model 引用）与 VoxAsset 的 node/frame
 ##     并非一一对应。导入时统一"每个 model 一个 frame"（等价 check_nodes() 的行为）。
 ##     需要完整场景图语义时，请直接使用 QVoxFile.parse() 得到的 doc.scene。
-static func _from_qvox(path: String) -> VoxData:
+static func _from_qvox(path: String) -> VoxAsset:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
-		push_error("[VoxData] 无法读取 %s" % path)
+		push_error("[VoxAsset] 无法读取 %s" % path)
 		return null
 	var bytes := f.get_buffer(f.get_length())
 	f.close()
@@ -89,12 +89,12 @@ static func _from_qvox(path: String) -> VoxData:
 	var rep := QVoxFile.QVoxReport.new()
 	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
 	if doc == null:
-		push_error("[VoxData] %s 解析失败：%s" % [path, rep.summary()])
+		push_error("[VoxAsset] %s 解析失败：%s" % [path, rep.summary()])
 		return null
 	for w in rep.warnings:
-		push_warning("[VoxData] %s: %s" % [path.get_file(), w])
+		push_warning("[VoxAsset] %s: %s" % [path.get_file(), w])
 
-	var out := VoxData.new()
+	var out := VoxAsset.new()
 	_qvox_fill_materials(doc, out)
 	_qvox_fill_models(doc, out)
 	out.check_nodes()
@@ -102,7 +102,7 @@ static func _from_qvox(path: String) -> VoxData:
 
 
 ## MATE 条目 → VoxelMaterial（索引 == 材质ID）。
-static func _qvox_fill_materials(doc: QVoxFile.QVoxDocument, out: VoxData) -> void:
+static func _qvox_fill_materials(doc: QVoxFile.QVoxDocument, out: VoxAsset) -> void:
 	if doc.materials.is_empty():
 		return
 	out.materials.resize(doc.materials.size())
@@ -129,7 +129,7 @@ static func _qvox_fill_materials(doc: QVoxFile.QVoxDocument, out: VoxData) -> vo
 
 
 ## VOX0 块数组 → VoxelModel（绝对体素坐标）。
-static func _qvox_fill_models(doc: QVoxFile.QVoxDocument, out: VoxData) -> void:
+static func _qvox_fill_models(doc: QVoxFile.QVoxDocument, out: VoxAsset) -> void:
 	var b := doc.get_block_size()
 	if b <= 0:
 		return
@@ -177,7 +177,7 @@ class VoxelModel:
 		return str(voxels.size(), ' ', size)
 
 	func get_voxels():
-		return VoxData.get_offset_voxels(voxels, offset)
+		return VoxAsset.get_offset_voxels(voxels, offset)
 
 
 class VoxelNode:
@@ -193,7 +193,7 @@ class VoxelNode:
 
 	var models: Array[Array]
 
-	func get_name(voxel: VoxData, frame_index: int = 0, is_root: bool = true) -> String:
+	func get_name(voxel: VoxAsset, frame_index: int = 0, is_root: bool = true) -> String:
 		if name:
 			return name
 		for i in child_nodes:
@@ -220,7 +220,7 @@ class VoxelNode:
 				frames[index] = VoxelFrame.new()
 			return frames[index]
 
-	func get_models(voxel: VoxData, frame_index: int, ignore_trans: bool = false) -> Array:
+	func get_models(voxel: VoxAsset, frame_index: int, ignore_trans: bool = false) -> Array:
 		if layerId in voxel.layers and not voxel.layers[layerId].isVisible:
 			return models
 		models.clear()
@@ -236,7 +236,7 @@ class VoxelNode:
 		return models
 
 	const MaxSurface = 2
-	func get_mesh(voxel: VoxData, frame_index: int) -> ArrayMesh:
+	func get_mesh(voxel: VoxAsset, frame_index: int) -> ArrayMesh:
 		var result_mesh = ArrayMesh.new()
 		var surface := SurfaceTool.new()
 		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -253,7 +253,7 @@ class VoxelNode:
 		return result_mesh
 
 
-	func get_voxels(voxel: VoxData, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
+	func get_voxels(voxel: VoxAsset, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
 		var voxels: Dictionary[Vector3i, int]
 		var models := get_models(voxel, frame_index, center)
 		for i in models.size():
@@ -278,7 +278,7 @@ class VoxelFrame:
 		get(): return Transform3D(rotation if rotation else Quaternion.IDENTITY,
 			position if position else Vector3.ZERO)
 
-	func merge_models(voxel: VoxData, models: Array[Array], ignore_trans: bool):
+	func merge_models(voxel: VoxAsset, models: Array[Array], ignore_trans: bool):
 		if model_id >= 0:
 			var model := voxel.models[model_id]
 			models.append([model, Transform3D.IDENTITY.translated(model.offset)])

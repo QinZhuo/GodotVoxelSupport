@@ -6,7 +6,7 @@ extends TestCase
 ##   · 常量单一事实源（通道宽度）与编解码往返；
 ##   · 整文件 serialize ↔ parse 往返；
 ##   · HEAD 能力门：require 含未支持块 → 拒绝；channels ≠ 1 → 拒绝（§3.1 / §10）；
-##   · CACH 与未知块的不透明保真搬运（P5 + "不静默改字节"）；
+##   · CACH 作为一等块的结构往返与损坏处置（§6 / §9），未知块的不透明保真搬运；
 ##   · 仓库样例 .qvox 能被当前读取器以 CRC 校验开启的方式读入。
 ##
 ## 之所以把样例纳入测试：样例是"格式的活体示例"，一旦写入端与读取端口径漂移
@@ -148,14 +148,17 @@ func test_bad_up_axis_warns_only() -> void:
 # CACH / 未知块：不透明保真搬运
 # ----------------------------------------------------------------------------
 
+## CACH 是一等块（§6：结构可解析），未知块是不透明搬运；两者往返都必须保真。
 func test_cach_and_unknown_passthrough() -> void:
 	var doc := _make_doc()
-	# CACH：4 字符 kind + algo_version + source_count + payload（结构由写入方定义）
-	var cach := PackedByteArray()
-	cach.append_array("mesh".to_ascii_buffer())
-	cach.resize(10)                       # kind[4] + algo_version[2] + source_count[2] + reserved[2]
-	cach.append_array("hello-cache".to_utf8_buffer())
-	doc.unknown_blocks["CACH"] = [cach]
+	# CACH：8 字节定长前置（kind/algo_version/source_count）+ source_crc[] + 写入方自定义负载
+	var data := "hello-cache".to_utf8_buffer()
+	doc.cach = [{
+		"kind": "mesh",
+		"algo_version": 2,
+		"source_crc": [0x00FA12C4, 0xDEADBEEF],
+		"payload": data,
+	}]
 	doc.unknown_blocks["ZZZZ"] = ["opaque".to_utf8_buffer()]
 
 	var bytes := QVoxFile.serialize(doc)
@@ -164,20 +167,55 @@ func test_cach_and_unknown_passthrough() -> void:
 	assert_true(doc1 != null, "含 CACH/未知块的文件应可读入（%s）" % rep.summary())
 	if doc1 == null:
 		return
-	assert_true(doc1.unknown_blocks.has("CACH"), "CACH 应被原样留存")
+	assert_eq(doc1.cach.size(), 1, "CACH 应被解析为一等块（而非未知块）")
 	assert_true(doc1.unknown_blocks.has("ZZZZ"), "未知块应被原样留存")
+	if doc1.cach.size() == 1:
+		var c: Dictionary = doc1.cach[0]
+		assert_eq(String(c["kind"]), "mesh", "kind 往返")
+		assert_eq(int(c["algo_version"]), 2, "algo_version 往返")
+		assert_eq(c["source_crc"], [0x00FA12C4, 0xDEADBEEF], "source_crc 往返")
+		# 顶层块 payload 按规范含尾部零填充（length 含填充），故比较"内容"而非原始长度。
+		assert_eq(_strip_trailing_zeros(c["payload"]), data, "CACH 内容逐字节保留")
 
-	# 再写一遍：两者都必须还在（CACH 历史上在 serialize 全量路径会被丢掉）
+	# 再写一遍：两者都必须还在
 	var bytes2 := QVoxFile.serialize(doc1)
 	var rep2 := QVoxFile.QVoxReport.new()
 	var doc2: QVoxFile.QVoxDocument = QVoxFile.parse(bytes2, true, rep2, true)
 	assert_true(doc2 != null, "二次往返应可读入（%s）" % rep2.summary())
 	if doc2 == null:
 		return
-	assert_true(doc2.unknown_blocks.has("CACH"), "二次往返 CACH 仍在")
+	assert_eq(doc2.cach.size(), 1, "二次往返 CACH 仍在")
 	assert_true(doc2.unknown_blocks.has("ZZZZ"), "二次往返未知块仍在")
-	# 顶层块 payload 按规范含尾部零填充（length 含填充），故比较"内容"而非原始长度。
-	assert_eq(_strip_trailing_zeros(doc2.unknown_blocks["CACH"][0]), cach, "CACH 内容逐字节保留")
+	if doc2.cach.size() == 1:
+		assert_eq(_strip_trailing_zeros(doc2.cach[0]["payload"]), data, "CACH 内容逐字节保留")
+
+
+## 结构损坏的 CACH（source_count 超出块长）→ 只丢该块（DROP_BLOCK），不拒绝整个文件（§9）。
+func test_malformed_cach_is_dropped_not_fatal() -> void:
+	var doc := _make_doc()
+	doc.cach = [{"kind": "mesh", "algo_version": 1, "source_crc": [], "payload": "x".to_utf8_buffer()}]
+	var bytes := QVoxFile.serialize(doc)
+
+	# 定位 CACH 块并把 source_count 改成远超 length 的值（结构损坏）
+	var patched := false
+	for bi in QVoxFile.scan_block_index(bytes):
+		if bi["type"] == QVoxSpec.BLOCK_CACH:
+			bytes.encode_u16(int(bi["offset"]) + QVoxSpec.BLOCK_HEADER_SIZE + 6, 0xFFFF)
+			patched = true
+			break
+	assert_true(patched, "样例里应有 CACH 块")
+	if not patched:
+		return
+
+	# CRC 已因改动而失效，故关闭校验，单独考察结构层处置
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, false, rep, true)
+	assert_true(parsed != null, "损坏的 CACH 不应拒绝整个文件")
+	if parsed == null:
+		return
+	assert_true(parsed.cach.is_empty(), "结构非法的 CACH 应被丢弃")
+	assert_eq(rep.dropped_blocks, 1, "应计入一次 DROP_BLOCK（%s）" % rep.summary())
+	assert_true(not parsed.models.is_empty(), "其余块不受影响")
 
 
 # ----------------------------------------------------------------------------
@@ -299,7 +337,7 @@ func test_stream_end_to_end() -> void:
 
 
 # ----------------------------------------------------------------------------
-# .qvox 作为一等资产：解析 → VoxData → VoxelData / Mesh（复用导入管线）
+# .qvox 作为一等资产：解析 → VoxAsset → VoxelData / Mesh（复用导入管线）
 # ----------------------------------------------------------------------------
 
 ## 四种导入器都必须把 .qvox 当作可识别扩展名，且**不能丢掉 .vox**（否则破坏既有导入）。
@@ -324,33 +362,33 @@ func test_importers_recognize_qvox() -> void:
 		assert_true("vox" in exts, "%s 应仍识别 vox" % p.get_file())
 
 
-## 样例经 VoxData.from_asset 必须解析成非空 VoxData（models + materials）。
+## 样例经 VoxAsset.from_asset 必须解析成非空 VoxAsset（models + materials）。
 func test_qvox_access_samples() -> void:
 	var files := _list_qvox(SAMPLES_DIR)
 	assert_true(not files.is_empty(), "应有样例")
 	for path in files:
-		var vox := VoxData.from_asset(str(path))
+		var vox := VoxAsset.from_asset(str(path))
 		assert_true(vox != null, "%s 应能解析" % path.get_file())
 		if vox == null:
 			continue
 		assert_true(vox.models.size() > 0, "%s 应至少解析出一个 model" % path.get_file())
 		var total := 0
 		for m in vox.models:
-			total += (m as VoxData.VoxelModel).voxels.size()
+			total += (m as VoxAsset.VoxelModel).voxels.size()
 		assert_true(total > 0, "%s 应有非空体素" % path.get_file())
 		assert_true(vox.materials.size() >= 2, "%s 应带回材质表" % path.get_file())
 
 
-## .qvox → VoxData → VoxelData：与 .vox 同一条导入路径。
+## .qvox → VoxAsset → VoxelData：与 .vox 同一条导入路径。
 func test_qvox_to_voxeldata() -> void:
 	var path := SAMPLES_DIR + "/deer.qvox"
 	assert_true(FileAccess.file_exists(path), "样例 deer.qvox 应存在")
 	if not FileAccess.file_exists(path):
 		return
-	assert_true("qvox" in VoxData.SUPPORTED_EXTENSIONS and "vox" in VoxData.SUPPORTED_EXTENSIONS,
+	assert_true("qvox" in VoxAsset.SUPPORTED_EXTENSIONS and "vox" in VoxAsset.SUPPORTED_EXTENSIONS,
 			"扩展名列表应同时含 qvox 与 vox")
-	var vox := VoxData.from_asset(path)
-	assert_true(vox != null, "应能从 .qvox 解析出 VoxData")
+	var vox := VoxAsset.from_asset(path)
+	assert_true(vox != null, "应能从 .qvox 解析出 VoxAsset")
 	if vox == null:
 		return
 	var data := VoxelData.from_voxel_data(vox, 0, true)
@@ -367,9 +405,9 @@ func test_qvox_mesh_import() -> void:
 	if not FileAccess.file_exists(path):
 		assert_true(false, "样例 deer.qvox 应存在")
 		return
-	var vox := VoxData.from_asset(path)
+	var vox := VoxAsset.from_asset(path)
 	if vox == null:
-		assert_true(false, "应能从 .qvox 解析出 VoxData")
+		assert_true(false, "应能从 .qvox 解析出 VoxAsset")
 		return
 	var opts := {}
 	for o in VoxelMeshImporter.new()._get_import_options("", false):

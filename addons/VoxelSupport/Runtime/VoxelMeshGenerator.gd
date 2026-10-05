@@ -6,7 +6,7 @@ class_name VoxelMeshGenerator
 ## 此处只负责：材质纹理、MeshLibrary 分割编排，以及把原生 arrays 交给引擎 API 组装。
 
 
-static func generate_mesh(voxel: VoxData, options: Dictionary, path: String = "") -> ArrayMesh:
+static func generate_mesh(voxel: VoxAsset, options: Dictionary, path: String = "") -> ArrayMesh:
 	var gen := VoxelMeshGenerator.new(voxel, options, path)
 	gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
@@ -83,7 +83,7 @@ static func _build_channel_images(materials: Array) -> Dictionary:
 		"rough": rough_image, "emission": emission_image,
 	}
 
-static func generate_mesh_library(voxel: VoxData, options: Dictionary, path: String = "") -> MeshLibrary:
+static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: String = "") -> MeshLibrary:
 	var root_gen := VoxelMeshGenerator.new(voxel, options, path)
 	root_gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
@@ -164,7 +164,7 @@ static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayM
 
 var scale: float = 1
 var mesh: ArrayMesh
-var voxel: VoxData
+var voxel: VoxAsset
 var frame_index: int
 var materials: Array[Material]
 var root_path: String
@@ -183,7 +183,7 @@ const SPHERE_VERTEX_BUDGET := 4_000_000
 var _native_arrays: Dictionary = {}
 
 
-func _init(voxel: VoxData, options: Dictionary, path: String = "") -> void:
+func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
 	self.root_path = path
 	self.voxel = voxel
 	frame_index = options.get(VoxelMeshImporter.frame_index, 0)
@@ -284,7 +284,8 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 		push_error("[VoxelMeshGenerator] 网格生成需要原生库 VoxelNative（未加载）")
 		return
 
-	var trans_flags := _build_trans_flags()
+	var trans_flags := VoxelMaterial.build_trans_flags(
+			runtime_materials if not runtime_materials.is_empty() else voxel.materials)
 	if shape == VoxelMeshImporter.Shape.sphere:
 		_native_arrays = NativeLoader.generate_spheres_native(
 			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET)
@@ -328,14 +329,3 @@ static func _surface_arrays(native_arrays: Dictionary, prefix: String) -> Array:
 	arrays[Mesh.ARRAY_TEX_UV] = native_arrays[prefix + "_uvs"]
 	arrays[Mesh.ARRAY_INDEX] = idxs
 	return arrays
-
-
-## 材质透明标志表（索引=材质ID，1=透明），供原生几何内核判定面可见性并分桶
-func _build_trans_flags() -> PackedByteArray:
-	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	var flags := PackedByteArray()
-	flags.resize(mats.size())
-	for i in mats.size():
-		var m: VoxelMaterial = mats[i]
-		flags[i] = 1 if (m != null and m.trans > 0) else 0
-	return flags

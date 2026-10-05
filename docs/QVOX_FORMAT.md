@@ -7,7 +7,7 @@
 >
 > 配套实现（`addons/VoxelSupport/`）：
 > - **格式内核** `QVoxSpec` / `QVoxBlockCodec` / `QVoxFile`（定义、编解码、读写与校验）
-> - **资产导入** `VoxData.from_asset()`：`.vox` 与 `.qvox` 的统一入口
+> - **资产导入** `VoxAsset.from_asset()`：`.vox` 与 `.qvox` 的统一入口
 > - **世界存档** `QVoxStream`：可写、脏标记、增量落盘
 >
 > 编辑器导入器（`addons/VoxelSupport/Importers/`）**同时识别 `.vox` 与 `.qvox`**，
@@ -414,11 +414,12 @@ uint32  source_crc[]  source_count 个来源块的 CRC32，升序排列且去重
 byte[]  payload       余下的全部字节（含块尾填充）
 ```
 
-四个字段共 10 字节**定长前置**（`source_crc[]` 长度为 `4 × source_count`），
-其后直到块尾（含尾部填充）即缓存内容——**由外层块头的 `length` 界定，内部不再
-重复存储**（P2）。读者从块头取 `length`，减去 `10 + 4×source_count` 字节，
-剩余即缓存内容（其中至多 3 个尾部零字节是填充）。这与 `HEAD`（整段 JSON 就是
-payload）是同一套读法：**长度来自块头，内容随之而来，无需内部再记长度**。
+`kind`(4) + `algo_version`(2) + `source_count`(2) 共 **8 字节定长前置**
+（`source_crc[]` 长度为 `4 × source_count`），其后直到块尾（含尾部填充）即缓存
+内容——**由外层块头的 `length` 界定，内部不再重复存储**（P2）。读者从块头取
+`length`，减去 `8 + 4×source_count` 字节，剩余即缓存内容（其中至多 3 个尾部零
+字节是填充）。这与 `HEAD`（整段 JSON 就是 payload）是同一套读法：
+**长度来自块头，内容随之而来，无需内部再记长度**。
 
 **为什么 `source_crc` 是一个数组，而不是一个值？** 因为真实的派生数据很少只依赖
 一个块。一个"整模型简化网格"缓存依赖该模型的**全部**非空块；一个"邻域查询加速"
@@ -431,7 +432,7 @@ payload）是同一套读法：**长度来自块头，内容随之而来，无�
 1. 当前来源集合（按同一规则算出的升序去重 CRC 列表）与该数组不一致 → 丢弃，重算。
 2. `(kind, algo_version)` 组合读者不认识 → 丢弃，重算。
 3. `kind` 不认识 → 丢弃。
-4. `source_count` 使 `10 + 4×source_count > length` → 该块损坏，跳过（§9）。
+4. `source_count` 使 `8 + 4×source_count > length` → 该块损坏，跳过（§9）。
 
 > 比较是**集合比较**，不是顺序比较：数组中 CRC 升序去重，因此同一组来源无论
 > 写入顺序如何都产生相同表示。

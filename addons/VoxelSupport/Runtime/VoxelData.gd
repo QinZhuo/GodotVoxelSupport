@@ -5,7 +5,7 @@ extends Resource
 ## 可序列化的体素数据资源
 ## 用于运行时动态渲染、修改和破坏体素
 ## 可由 VoxelRenderer / VoxelDestructible 节点使用
-## 与 VoxData 不同，此资源专为序列化和运行时使用设计
+## 与 VoxAsset 不同，此资源专为序列化和运行时使用设计
 ## 注: 直接使用 Resource 内置的 changed 信号 (通过 emit_changed() 发射)
 ##
 ## 【存储方案】chunk 分区密集缓冲（性能关键）
@@ -49,8 +49,6 @@ extends Resource
 			flush()
 		stream = v
 		_persisted_chunks.clear()
-		# 注：不清空 _dirty_chunks —— 内存中未写盘的数据是"新数据"，切换流后
-		# 仍需持久化（卸载时写盘到新流）。只有 _persisted_chunks 从新流重建。
 		# 程序化流：把本数据层的 grid_size（体素世界尺寸）同步给流做有限范围限制。
 		# 流按此 AABB 只生成世界范围内 chunk（地面矩形地图）；无限流传 ZERO 自动关闭。
 		if stream is VoxelProceduralStream:
@@ -58,6 +56,12 @@ extends Resource
 		if stream != null:
 			for ck in stream.get_all_chunk_keys():
 				_persisted_chunks[ck] = true
+		# 内存里已有、新流里没有的 chunk 必须重新标记为"待写"：上面的 flush 只保证
+		# 旧流完好（它已把 _dirty_chunks 清空），若不补标，这些 chunk 卸载时会被当成
+		# "磁盘已有"直接丢弃，而新流其实从未见过它们 → 数据静默丢失。
+		for ck in _chunk_buffers:
+			if not _persisted_chunks.has(ck):
+				_dirty_chunks[ck] = true
 
 ## 居中偏移 (体素单位，运行时渲染时叠加到网格顶点)
 ## 导入时若 center 选项开启，自动计算使模型左右前后居中(X/Z)、上下贴底(Y=0)
@@ -66,13 +70,8 @@ extends Resource
 ## 该偏移不影响破坏/查询逻辑 (它们基于原始数据坐标)
 @export var center_offset: Vector3 = Vector3.ZERO
 
-## 本次变更涉及的体素集合（单格 set_voxel/remove_voxel 记录；大批量修改走 chunk 级
-## _dirty_mesh_chunks，不写此字典避免大崩塌主线程 dict 写入瓶颈）。
-## 注：渲染器增量重建基于 chunk 级 _dirty_mesh_chunks，此集合无内部消费，仅对外提供。
-var dirty_voxels: Dictionary[Vector3i, int] = {}
-
-## 脏 mesh chunk（chunk 级，供渲染器增量重建）。大批量修改标记到 chunk 粒度，
-## 替代逐体素 dirty_voxels 的主线程 dict 写入瓶颈。含跨界面的边界邻居。
+## 脏 mesh chunk（chunk 级，供渲染器增量重建）。所有修改都标记到 chunk 粒度，
+## 避免逐体素脏集合的主线程 dict 写入瓶颈（大崩塌每帧数千体素）。含跨界面的边界邻居。
 var _dirty_mesh_chunks: Dictionary = {}
 
 ## 标记体素所在 chunk 需要重建（含 6 个跨界面的边界邻居——面可见性依赖邻居）。
@@ -300,9 +299,9 @@ const NEIGHBORS_6: Array[Vector3i] = [
 ]
 
 
-## 从 VoxData 构造 (编辑器导入时使用)
+## 从 VoxAsset 构造 (编辑器导入时使用)
 ## center 为 true 时，记录居中偏移使渲染时模型中心对齐原点 (与 mesh 导入行为一致)
-static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: bool = true) -> VoxelData:
+static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0, center: bool = true) -> VoxelData:
 	var res := VoxelData.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 
@@ -322,7 +321,7 @@ static func from_voxel_data(voxel_data: VoxData, frame_index: int = 0, center: b
 
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
 	else:
-		# 空模型：VoxData 没有 `size` 属性（那是 VoxelModel 的），此前这里会运行期报错。
+		# 空模型：VoxAsset 没有 `size` 属性（那是 VoxelModel 的），此前这里会运行期报错。
 		# 空资产按零尺寸处理即可，调用方随后通常也不会渲染它。
 		res.grid_size = Vector3i.ZERO
 
@@ -372,7 +371,7 @@ static func _local_from_index(i: int) -> Vector3i:
 	return VoxelChunk.local_from_index(i)
 
 
-## 写入体素缓冲（核心原语）。不追踪 dirty_voxels / 不触发信号（由调用方处理）。
+## 写入体素缓冲（核心原语）。不标记脏 chunk / 不触发信号（由调用方处理）。
 ## 统一材质契约：材质ID 0 = 空，缓冲直接存材质ID（0 = 空）。
 ## check_empty=true 时，若写入后该 chunk 缓冲全空则移除 chunk 键（回收内存）。
 func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
@@ -580,7 +579,7 @@ func flush() -> void:
 	stream.flush()
 
 
-## 构建期/读档批量填充 {pos: mat_id}，不追踪 dirty_voxels、不触发信号。
+## 构建期/读档批量填充 {pos: mat_id}，不标记脏 chunk、不触发信号。
 ## 适合一次性生成大量静态体素（demo 场景构建、外部数据导入）。
 func load_voxels_dict(dict: Dictionary) -> void:
 	for pos_key in dict:
@@ -613,10 +612,6 @@ func shift_origin(offset: Vector3i) -> void:
 	_persisted_chunks = _shift_dict_keys(_persisted_chunks, offset)
 	_dirty_chunks = _shift_dict_keys(_dirty_chunks, offset)
 	_dirty_mesh_chunks = _shift_dict_keys(_dirty_mesh_chunks, offset)
-	var ndv: Dictionary[Vector3i, int] = {}
-	for k in dirty_voxels:
-		ndv[Vector3i(k) + offset] = dirty_voxels[k]
-	dirty_voxels = ndv
 	for i in _lod_invalidated.size():
 		_lod_invalidated[i] = _shift_dict_keys(_lod_invalidated[i], offset)
 	for i in _coarse_buffers.size():
@@ -938,7 +933,7 @@ func _for_each_non_empty_voxel(cb: Callable) -> void:
 
 
 func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
-	var out := {}
+	var out: Dictionary[Vector3i, int] = {}
 	var seen := {}
 	for ck: Vector3i in _chunk_buffers:
 		seen[ck] = true
@@ -1023,7 +1018,6 @@ func set_voxel(pos: Vector3i, material_id: int, notify: bool = true) -> void:
 		return
 	var existed := has_voxel(pos)
 	_write_buffer_impl(pos, material_id, false)
-	dirty_voxels[pos] = material_id
 	_mark_voxel_dirty(pos)
 	if notify:
 		emit_changed()
@@ -1037,11 +1031,6 @@ func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
 ## 清空所有体素（同时清除磁盘流中的持久化数据）
 func clear(notify: bool = true) -> void:
 	for ck: Vector3i in _chunk_buffers:
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				dirty_voxels[origin + _local_from_index(i)] = -1
 		_mark_chunk_dirty(ck)
 	_chunk_buffers.clear()
 	_chunk_voxel_counts.clear()
@@ -1320,8 +1309,8 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 ## 批量移除指定位置的体素 (内部统一实现，供各 remove_* 复用)
 ## 写 buffer 由原生 C++ 完成（remove_voxels_bulk，按 chunk 分组直接改 PackedInt32Array），
 ## 替代 GDScript 逐体素循环——大崩塌（每帧 4096+ 体素）主线程大幅提速。
-## GDScript 只做计数维护 + 标记脏 chunk（chunk 级 _mark_voxel_dirty，替代逐体素
-## dirty_voxels 的 dict 写入瓶颈；边界邻居由 _mark_voxel_dirty 一并标记）。
+## GDScript 只做计数维护 + 标记脏 chunk（chunk 级 _mark_voxel_dirty，避免逐体素 dict
+## 写入瓶颈；边界邻居由 _mark_voxel_dirty 一并标记）。
 func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	if positions.is_empty():
 		return []
@@ -1505,7 +1494,7 @@ func _serialize_all_voxels() -> Array:
 	return voxel_list
 
 
-## 从 [[x, y, z, mat_id], ...] 重建体素（直接写 chunk 密集缓冲，不追踪 dirty_voxels）
+## 从 [[x, y, z, mat_id], ...] 重建体素（直接写 chunk 密集缓冲，不标记脏 chunk）
 func _deserialize_voxels(voxel_list: Variant) -> void:
 	if voxel_list == null:
 		return

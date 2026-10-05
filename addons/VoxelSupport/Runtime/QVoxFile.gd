@@ -42,8 +42,16 @@ class QVoxDocument extends RefCounted:
 	## NODE 的已校验只读视图（§7）。任一引用无效的节点/帧已被丢弃。
 	## 解析失败或无 NODE 块时为 null。
 	var scene: QVoxSceneGraph = null
+	## CACH 块（§6，派生数据：删掉语义为零）。每项：
+	##   { "kind": String, "algo_version": int, "source_crc": Array[int]（升序去重）,
+	##     "payload": PackedByteArray（定长前置之后的全部字节，含块尾填充）}
+	## 顺序即文件中的物理顺序。**格式层不解释任何 kind**（§6：含义由写入方与读者商定），
+	## 只做结构切分——把它升为一等块而非"未知块"，是为了让增量写能按块重编码，
+	## 而不是把旧 CACH 字节原样搬过去（那会让已失效的缓存永远留在盘上）。
+	var cach: Array = []
+
 	## 未内建解析的块（类型 -> [payload PackedByteArray, ...]），**原样保留以便重写不丢数据**。
-	## 含两类：真正未知的类型（P1 跳过），以及 CACH（语义上可忽略，但重写时保真搬运）。
+	## 只装真未知类型（P1：读到不认识的就按 length 跳过并留字节）。CACH 是一等块，不在此。
 	var unknown_blocks: Dictionary = {}
 
 	## 【增量写用】块字节索引（仅 parse_with_index 填充，parse 时为 null）。
@@ -318,11 +326,19 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 					doc.block_index[entry]["model_id"] = int(model_id)
 			QVoxSpec.BLOCK_NODE:
 				doc.node = _parse_json(payload)
+			QVoxSpec.BLOCK_CACH:
+				# §6：只做结构切分（kind / algo_version / source_crc / 余下字节）。
+				# 前缀或来源表越界 → 该块损坏，按 §9 的 DROP_BLOCK 跳过，不影响其余块。
+				var cach_entry: Variant = _parse_cach(payload)
+				if cach_entry == null:
+					var msg := "CACH 结构非法（前置或 source_crc 越界），已跳过"
+					push_warning("[QVox] " + msg)
+					notes.block_dropped(msg)
+				else:
+					doc.cach.append(cach_entry)
 			_:
-				# 未知块 + CACH：一律按 length 跳过（P1），并**原样留存**以便重写不丢数据。
-				# CACH 按 P5 本可忽略，但"读取时可忽略"不等于"重写时该丢弃字节"——把它与
-				# 未知块归入同一条**不透明搬运**通道，serialize / serialize_incremental /
-				# QVoxStream 三条路径因此行为完全一致，也不会静默改写文件。
+				# 未知块：按 length 跳过（P1）并**原样留存**以便重写不丢数据。
+				# 只有格式层不认识的类型才走这里；CACH 已升为一等块（见 doc.cach）。
 				if not doc.unknown_blocks.has(type):
 					doc.unknown_blocks[type] = []
 				doc.unknown_blocks[type].append(payload)
@@ -566,6 +582,32 @@ static func _parse_mate(payload: PackedByteArray) -> Array:
 			"e_b": payload[off + 10],
 		})
 	return out
+
+
+## 解析 CACH payload → { kind, algo_version, source_crc, payload }。结构非法返回 null。
+##
+## 【长度语义】外层块头的 length 含 0–3 字节尾部零填充，而 CACH 的 payload 段本身
+## 没有内部长度字段（P2：不存可由他字段推导的值）。因此这里**不剥填充**——
+## 原样交出"前置 + 来源表之后的全部字节"，由认识该 kind 的写入方按自己的格式定界。
+## 这正是 §6 写明"byte[] payload 余下的全部字节（含块尾填充）"的含义。
+static func _parse_cach(payload: PackedByteArray) -> Variant:
+	if payload.size() < QVoxSpec.CACH_PREFIX_SIZE:
+		return null
+	var kind := _read_type(payload, 0)
+	var algo_version := payload.decode_u16(4)
+	var source_count := payload.decode_u16(6)
+	var need := QVoxSpec.CACH_PREFIX_SIZE + source_count * 4
+	if payload.size() < need:
+		return null
+	var source_crc: Array = []
+	for i in source_count:
+		source_crc.append(payload.decode_u32(QVoxSpec.CACH_PREFIX_SIZE + i * 4))
+	return {
+		"kind": kind,
+		"algo_version": algo_version,
+		"source_crc": source_crc,
+		"payload": payload.slice(need),
+	}
 
 
 ## 该 MATE 条目是否为"空气"（§4：条目 0 保留且全零）。
@@ -934,11 +976,46 @@ static func serialize(doc: QVoxDocument, include_crc: bool = true) -> PackedByte
 	# NODE
 	if not doc.node.is_empty():
 		_write_block(out, QVoxSpec.BLOCK_NODE, _encode_json(doc.node), include_crc)
-	# 未知块 / CACH：原样保留（重写不丢数据；CACH 可删但没必要替作者删）
+	# CACH：派生数据（可删，P5）。写入方提供什么就写什么，格式层不解释 kind。
+	append_cach_blocks(out, doc.cach, include_crc)
+	# 未知块：原样保留（重写不丢数据）
 	for type in doc.unknown_blocks:
 		for payload in doc.unknown_blocks[type]:
 			_write_block(out, type, payload, include_crc)
 
+	return out
+
+
+## 把 CACH 条目编码为完整顶层块（含 12 字节块头）并追加到 out。
+##
+## 供两条路径共用：serialize 全量写、serialize_incremental 的"CACH 脏则整体重写"分支，
+## 以及 QVoxStream 在写完权威数据后追加派生缓存。三条路径都只经过这里，
+## 因此 CACH 的字节布局永远只有一处实现（P4 的"块头自足"在写入端的样子）。
+static func append_cach_blocks(out: PackedByteArray, entries: Array, include_crc: bool = true) -> void:
+	for e in entries:
+		if not (e is Dictionary):
+			continue
+		_write_block(out, QVoxSpec.BLOCK_CACH, encode_cach(e as Dictionary), include_crc)
+
+
+## CACH 条目 → 负载字节：8 字节定长前置 + source_crc[] + 内容。
+static func encode_cach(entry: Dictionary) -> PackedByteArray:
+	var kind := String(entry.get("kind", ""))
+	var src: Variant = entry.get("source_crc", [])
+	var crcs: Array = src if src is Array else []
+	var out := PackedByteArray()
+	out.resize(QVoxSpec.CACH_PREFIX_SIZE + crcs.size() * 4)
+	var k := kind.to_ascii_buffer()
+	if k.size() != 4:
+		push_error("[QVox] CACH kind 必须是 4 个 ASCII 字符: '%s'" % kind)
+		k.resize(4)
+	for i in 4:
+		out[i] = k[i]
+	out.encode_u16(4, int(entry.get("algo_version", 0)) & 0xFFFF)
+	out.encode_u16(6, crcs.size() & 0xFFFF)
+	for i in crcs.size():
+		out.encode_u32(QVoxSpec.CACH_PREFIX_SIZE + i * 4, int(crcs[i]) & 0xFFFFFFFF)
+	out.append_array(entry.get("payload", PackedByteArray()))
 	return out
 
 
@@ -961,11 +1038,16 @@ static func serialize(doc: QVoxDocument, include_crc: bool = true) -> PackedByte
 ##                 若每次写盘都重算，子块级增量的收益会被它吃光。由调用方（QVoxStream）
 ##                 在加载时建一次、写盘后增量维护，后续写盘直接复用 → 归零。
 ##                 缺省为空 → 退回"现场重算索引"（正确但慢），保证旧调用方不受影响。
+##   dirty_cach    派生缓存（CACH）是否变化。true 时旧 CACH 块全部跳过、new_doc.cach
+##                 在末尾整体重写；false 时旧 CACH 原样搬运。"整批重写"而非逐条比对，
+##                 是因为 CACH 由调用方整体持有（QVoxStream 的 _lod_cache），
+##                 逐条 diff 的复杂度换不来相应收益。
 ##
 ## 返回新文件字节。确定性：同一输入必得同一输出。
-static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocument, new_doc: QVoxDocument, dirty_models: Dictionary, dirty_global: bool, include_crc: bool = true, dirty_chunks: Dictionary = {}, vox0_index: Dictionary = {}) -> PackedByteArray:
+static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocument, new_doc: QVoxDocument, dirty_models: Dictionary, dirty_global: bool, include_crc: bool = true, dirty_chunks: Dictionary = {}, vox0_index: Dictionary = {}, dirty_cach: bool = false) -> PackedByteArray:
 	# 快速退化判定：块集合变化 → 必须全量重写（增量只搬运旧块，无法插入/删除块）。
-	if not _incremental_applicable(old_doc, new_doc):
+	# 调用方通常已用 incremental_applicable 判过一次；这里再判一次是防御（无害）。
+	if not incremental_applicable(old_doc, new_doc):
 		return serialize(new_doc, include_crc)
 
 	var out := PackedByteArray()
@@ -1021,6 +1103,14 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
+		if type == QVoxSpec.BLOCK_CACH:
+			# CACH 脏 → 丢弃旧块（不搬运），稍后在末尾由 new_doc.cach 整体重写；
+			# 不脏 → 原样搬运（缓存内容与其来源都没变）。
+			# 【为什么不逐条 diff】CACH 全部由调用方整体持有（如 QVoxStream 的 LOD 缓存），
+			# 而"派生数据可删"（P5）意味着丢掉重写永远是正确的，故整批处理最简单且无灰区。
+			if not dirty_cach:
+				_copy_block(old_bytes, out, bi)
+			continue
 		# 未知块：原样搬运（重写不丢数据）
 		_copy_block(old_bytes, out, bi)
 
@@ -1039,6 +1129,11 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 		if _model_is_empty(new_doc.models[mid]):
 			continue
 		_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(int(mid), new_doc.models[mid], block_size), include_crc)
+
+	# CACH：脏则整体重写（旧块已在上面被跳过）。CACH 允许出现在文件任意位置（§2 表），
+	# 统一追加在末尾既简单又让"旧块跳过 + 新块追加"天然等价于一次替换。
+	if dirty_cach:
+		append_cach_blocks(out, new_doc.cach, include_crc)
 
 	return out
 
@@ -1276,13 +1371,18 @@ static func _try_encode_model_incremental(old_bytes: PackedByteArray, bi: Dictio
 	return {"payload": payload, "crc": int(enc["crc"])}
 
 
-## 增量写是否适用：块集合（HEAD/MATE/NODE 数量 + VOX0 的 model_id 集合 + 未知块数与类型）必须一致。
+## 增量写是否适用：块集合（VOX0 的 model_id 集合）必须一致——增量只能就地替换块，
+## 无法插入/删除块。CACH 不参与判断：它允许出现在文件任意位置（§2 表），
+## 由调用方的 dirty_cach 决定"搬运旧块"还是"整体跳过并在末尾重写"。
+##
+## 公开：调用方（QVoxStream）需要据此决定"是否要额外追加派生块"——
+## 走全量时旧 CACH 不会被搬运，必须补写，故它必须能预知 serialize_incremental 走哪条路。
 ##
 ## 【键类型必须统一】doc.models 用 String 键（`str(mid)`，见 _models_to_qvox_models），
 ## 而 VOX0 块索引里的 model_id 是 int。Godot 的 Dictionary 中 `0` 与 `"0"` 是**不同的键**，
 ## 混用会让 `has()` 恒为 false —— 曾经因此让增量写 100% 退化成全量（且无声）。
 ## 这里两边都归一化为 String 再比较。
-static func _incremental_applicable(old_doc: QVoxDocument, new_doc: QVoxDocument) -> bool:
+static func incremental_applicable(old_doc: QVoxDocument, new_doc: QVoxDocument) -> bool:
 	if old_doc == null or old_doc.block_index.is_empty():
 		return false
 	var old_models := {}

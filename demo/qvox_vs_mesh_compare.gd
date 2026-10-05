@@ -330,7 +330,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 ## 用与 VoxelMeshImporter 完全相同的选项构建参考 mesh。
 ## demo/deer.vox.import 的参数：scale=0.1, shape=1(cube), frame_index=0,
 ## import_materials_textures=false, material_path=""
-func _build_reference_mesh(voxel: VoxData) -> ArrayMesh:
+func _build_reference_mesh(voxel: VoxAsset) -> ArrayMesh:
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
 		VoxelMeshImporter.shape: VoxelMeshImporter.Shape.cube,

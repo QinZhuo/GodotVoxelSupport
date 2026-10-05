@@ -13,7 +13,7 @@ func _get_visible_name():
 	return "Voxel No Import"
 
 func _get_recognized_extensions():
-	return VoxData.SUPPORTED_EXTENSIONS.duplicate()
+	return VoxAsset.SUPPORTED_EXTENSIONS.duplicate()
 
 func _get_save_extension():
 	return "res"

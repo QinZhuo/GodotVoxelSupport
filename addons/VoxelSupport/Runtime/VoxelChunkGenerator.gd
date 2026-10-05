@@ -38,7 +38,7 @@ static func generate_arrays_runtime(
 	if not NativeLoader.is_available():
 		push_error("[VoxelChunkGenerator] 网格生成需要原生库 VoxelNative（未加载）")
 		return null
-	var trans_flags := _build_trans_flags(aligned)
+	var trans_flags := VoxelMaterial.build_trans_flags(aligned)
 	return NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
 
 
@@ -70,7 +70,7 @@ static func generate_single_chunk_dense(
 	if not NativeLoader.is_available():
 		push_error("[VoxelChunkGenerator] chunk 网格生成需要原生库 VoxelNative（未加载）")
 		return {}
-	var trans_flags := _build_trans_flags(aligned_materials)
+	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
 	var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
 		return {}
@@ -119,7 +119,7 @@ static func generate_lod_block_arrays(
 	if not NativeLoader.is_available():
 		push_error("[VoxelChunkGenerator] LOD 大块网格生成需要原生库 VoxelNative（未加载）")
 		return {}
-	var trans_flags := _build_trans_flags(aligned_materials)
+	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
 	var result: Dictionary
 	if lod_shift == 1:
 		result = NativeLoader.generate_lod1_block_dense(lod_halo, trans_flags, scale * 2.0, block_key, offset)
@@ -128,19 +128,6 @@ static func generate_lod_block_arrays(
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
 		return {}
 	return result
-
-
-## 从对齐材质数组构建透明标志数组（PackedByteArray，索引=材质ID，1=透明）
-## 供原生 generate_chunk_dense 使用（C++ 跨语言读 VoxelMaterial 属性较慢，预计算传入）
-## 防御：worker 线程读材质数组时主线程可能正在对齐（COW/竞态），访问前再校验边界防越界崩溃。
-static func _build_trans_flags(aligned_materials: Array) -> PackedByteArray:
-	var n := aligned_materials.size()
-	var flags := PackedByteArray()
-	flags.resize(n)
-	for i in n:
-		var mat: Variant = aligned_materials[i] if i < aligned_materials.size() else null
-		flags[i] = 1 if mat != null and mat.trans > 0 else 0
-	return flags
 
 
 ## 将生成的网格数据组装为 ArrayMesh（必须在主线程调用，会修改 ArrayMesh）

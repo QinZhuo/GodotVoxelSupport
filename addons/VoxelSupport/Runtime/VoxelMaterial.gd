@@ -77,6 +77,19 @@ static func find_by_id(materials: Array, mat_id: int) -> VoxelMaterial:
 	return null
 
 
+## 材质数组 → 透明标志表（PackedByteArray，索引 = 材质ID，1 = 透明），供原生几何内核
+## 判定面可见性并分桶。之所以预计算传入：C++ 跨语言逐个读 VoxelMaterial 属性太慢。
+## 防御：worker 线程读材质数组时主线程可能正在对齐（COW/竞态），每次访问前校验边界防越界崩溃。
+static func build_trans_flags(materials: Array) -> PackedByteArray:
+	var n := materials.size()
+	var flags := PackedByteArray()
+	flags.resize(n)
+	for i in n:
+		var m: Variant = materials[i] if i < materials.size() else null
+		flags[i] = 1 if (m != null and m.trans > 0) else 0
+	return flags
+
+
 # ----------------------------------------------------------------------------
 # 材质→各通道颜色：所有纹理生成（编辑器文件纹理 / 运行时内存纹理）统一采样公式
 # 避免编辑器导入与运行时渲染两套实现漂移
