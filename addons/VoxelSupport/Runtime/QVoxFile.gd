@@ -1137,23 +1137,6 @@ static func _native_crc() -> bool:
 	return _native_ok
 
 
-## 对"两段拼接"算 CRC32：等价于先把 left‖right 拼起来再算。
-## native 路径用 crc32_segments 一次完成（免去 GDScript 侧拼临时缓冲）。
-static func _crc_of_concat(left: PackedByteArray, right: PackedByteArray) -> int:
-	if _native_crc() and ClassDB.class_has_method("VoxelNative", "crc32_segments", true):
-		var buf := PackedByteArray()
-		buf.append_array(left)
-		buf.append_array(right)
-		var offs := PackedInt64Array([0, left.size()])
-		var lens := PackedInt64Array([left.size(), right.size()])
-		return int(VoxelNative.crc32_segments(buf, offs, lens))
-	# 回退：拼起来逐段扫
-	var buf2 := PackedByteArray()
-	buf2.append_array(left)
-	buf2.append_array(right)
-	return _crc_of_slice(buf2, 0, buf2.size())
-
-
 ## 【子块级增量编码】一个 model 的 VOX0：只重编码 dirty 的 chunk，其余子块字节原样搬运。
 ## 同时用 crc32_combine 由"未变子块的旧 CRC + 新子块的 CRC"拼出新 payload 的 CRC，
 ## 避免为 1.4MB 负载重扫一遍（92ms → O(子块数)）。

@@ -264,6 +264,23 @@ func test_stream_end_to_end() -> void:
 	assert_true(r2.load_chunk(ck_b, 0).is_empty(), "擦除后 B 应消失")
 	assert_eq(r2.load_chunk(Vector3i.ZERO, 1), buf_l1, "擦除后 lod1 数据不受影响")
 
+	# 异步取数路径：T2 把「登记 / 去重 / 取出」的簿记上提到了 VoxelStream 基类，
+	# 而渲染器的流式加载正是走这条路，必须有覆盖（此前完全没有）。
+	r2.request_chunk_async(ck_a, 0)
+	assert_true(r2.is_chunk_pending(ck_a, 0), "异步请求应登记为在途")
+	var ready := r2.poll_all_ready(8)
+	assert_eq(ready.size(), 1, "应取回 1 项")
+	if ready.size() == 1:
+		assert_eq(ready[0][0], 0, "取回项的 lod")
+		assert_eq(ready[0][1], ck_a, "取回项的 chunk_key")
+		assert_eq(ready[0][2], buf_a, "取回的缓冲应与写入一致")
+	assert_true(not r2.is_chunk_pending(ck_a, 0), "取回后不应仍在途")
+
+	# 请求一个不存在的 chunk：不产出结果，但登记同样要被消费掉（否则渲染器会一直等它）。
+	r2.request_chunk_async(Vector3i(9, 9, 9), 0)
+	assert_eq(r2.poll_all_ready(8).size(), 0, "不存在的 chunk 不应产出结果")
+	assert_true(not r2.is_chunk_pending(Vector3i(9, 9, 9), 0), "空块请求也应被消费")
+
 	# 文件本身仍应是合法 .qvox（用独立读取路径复核一次）
 	var f := FileAccess.open(path, FileAccess.READ)
 	assert_true(f != null, "应能打开写出的文件")

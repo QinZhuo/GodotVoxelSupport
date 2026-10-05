@@ -17,6 +17,28 @@ static func generate_mesh(voxel: VoxData, options: Dictionary, path: String = ""
 	return gen.mesh
 
 
+# 材质魔术值：编辑器导入与运行时生成共用，避免两处漂移
+const MATERIAL_EMISSION_ENERGY := 20.0
+const MATERIAL_REFRACTION_SCALE := 0.01
+
+
+## 统一配置实心材质（编辑器/运行时共用）
+static func _configure_solid_material(m: StandardMaterial3D) -> void:
+	m.emission_enabled = true
+	m.emission_energy_multiplier = MATERIAL_EMISSION_ENERGY
+	m.metallic = 1.0
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+
+
+## 统一配置透明材质（在实心材质基础上追加折射/透明，关闭自发光）
+static func _configure_trans_material(m: StandardMaterial3D) -> void:
+	m.refraction_enabled = true
+	m.refraction_scale = MATERIAL_REFRACTION_SCALE
+	m.emission_enabled = false
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+
+
 ## 从材质数组生成运行时纹理材质 (StandardMaterial3D 数组，0=实体 1=透明)
 ## 与编辑器导入的纹理材质等价，但完全在内存中生成，不涉及文件 IO
 ## 复用与编辑器导入一致的 UV 采样方案 (纹素中心对齐材质ID)
@@ -25,20 +47,14 @@ static func generate_textured_materials_runtime(materials: Array) -> Array:
 	var result: Array = [null, null]
 	var images := _build_channel_images(materials)
 	var solid := StandardMaterial3D.new()
-	solid.emission_enabled = true
-	solid.emission_energy_multiplier = 20
-	solid.metallic = 1
+	_configure_solid_material(solid)
 	solid.albedo_texture = ImageTexture.create_from_image(images["albedo"])
 	solid.metallic_texture = ImageTexture.create_from_image(images["metal"])
 	solid.roughness_texture = ImageTexture.create_from_image(images["rough"])
 	solid.emission_texture = ImageTexture.create_from_image(images["emission"])
-	solid.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	result[0] = solid
 	var trans := solid.duplicate()
-	trans.refraction_enabled = true
-	trans.refraction_scale = 0.01
-	trans.emission_enabled = false
-	trans.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_configure_trans_material(trans)
 	result[1] = trans
 	return result
 
@@ -194,14 +210,11 @@ func generate_material(save_path: String = "") -> StandardMaterial3D:
 		DirAccess.make_dir_absolute(save_path.get_basename())
 	var material: Material = ResourceLoader.load(path) if FileAccess.file_exists(path) else StandardMaterial3D.new()
 	if material is StandardMaterial3D:
-		material.emission_enabled = true
-		material.emission_energy_multiplier = 20
-		material.metallic = 1
+		_configure_solid_material(material)
 		material.albedo_texture = generate_albedo_textrue(save_path)
 		material.metallic_texture = generate_metal_textrue(save_path)
 		material.roughness_texture = generate_rough_textrue(save_path)
 		material.emission_texture = generate_emission_textrue(save_path)
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 		if save_path:
 			material.resource_path = path
 			ResourceSaver.save(material)
@@ -217,11 +230,7 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 	DirAccess.make_dir_absolute(save_path.get_basename())
 	var material: Material = ResourceLoader.load(path) if FileAccess.file_exists(path) else base.duplicate() if base else StandardMaterial3D.new()
 	if material is StandardMaterial3D:
-		material.refraction_enabled = true
-		material.refraction_scale = 0.01
-		material.emission_enabled = false
-		material.transparency = BaseMaterial3D.Transparency.TRANSPARENCY_ALPHA
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		_configure_trans_material(material)
 		if save_path:
 			material.resource_path = path
 			ResourceSaver.save(material)
@@ -229,7 +238,7 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 		pass
 	return material
 
-func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> ImageTexture:
+func _generate_texture(save_path: String, type: String) -> ImageTexture:
 	# 复用统一的通道图生成，避免与运行时纹理两套采样逻辑漂移
 	var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
 	var images := _build_channel_images(mats)
@@ -244,16 +253,16 @@ func _generate_texture(get_pixel: Callable, save_path: String, type: String) -> 
 	return texture
 
 func generate_albedo_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.albedo_color(m), save_path, "albedo")
+	return _generate_texture(save_path, "albedo")
 
 func generate_metal_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.metal_color(m), save_path, "metal")
+	return _generate_texture(save_path, "metal")
 
 func generate_rough_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.rough_color(m), save_path, "rough")
+	return _generate_texture(save_path, "rough")
 
 func generate_emission_textrue(save_path: String = "") -> ImageTexture:
-	return _generate_texture(func(m: VoxelMaterial): return VoxelMaterial.emission_color(m), save_path, "emission")
+	return _generate_texture(save_path, "emission")
 
 
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:

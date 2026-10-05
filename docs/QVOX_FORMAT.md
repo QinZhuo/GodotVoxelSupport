@@ -7,8 +7,18 @@
 >
 > 配套实现（`addons/VoxelSupport/`）：
 > - **格式内核** `QVoxSpec` / `QVoxBlockCodec` / `QVoxFile`（定义、编解码、读写与校验）
-> - **资产导入** `VoxData.from_asset()`：`.vox` 与 `.qvox` 的统一入口 → 编辑器导入器
+> - **资产导入** `VoxData.from_asset()`：`.vox` 与 `.qvox` 的统一入口
 > - **世界存档** `QVoxStream`：可写、脏标记、增量落盘
+>
+> 编辑器导入器（`addons/VoxelSupport/Importers/`）**同时识别 `.vox` 与 `.qvox`**，
+> 在导入面板可选四种产物：
+> - `Voxel Data Resource` → `VoxelData` (.res)：运行时体素数据（可破坏 / 动态修改）
+> - `Voxel Mesh` → `ArrayMesh` (.mesh)：静态网格
+> - `Voxel MeshLibrary` → `MeshLibrary` (.res)：网格库（by model / node / frame）
+> - `Voxel No Import` → 空 `Resource`：只要原始文件、不做导入
+>
+> `demo/samples/*.qvox` 是可直接 hexdump 对照的样例，同时是
+> `Scripts/Test/test_qvox_format.gd` 的测试夹具（随 `.gitattributes` 走 Git LFS）。
 
 > **单一文件。单一数据流。每条事实只存一次。**
 

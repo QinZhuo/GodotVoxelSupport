@@ -62,3 +62,15 @@ static func halo_index(lx: int, ly: int, lz: int) -> int:
 ## 世界坐标 + chunk 原点 → 光环线性下标
 static func halo_index_world(wx: int, wy: int, wz: int, origin: Vector3i) -> int:
 	return halo_index(wx - origin.x + HALO, wy - origin.y + HALO, wz - origin.z + HALO)
+
+
+## 从光环缓冲（34³）中抽取中心块（去掉 HALO 外缘一圈），返回紧凑缓冲（CHUNK_VOLUME）。
+## 供 LOD 大块降采样等复用，避免各处重复手写光环下标公式（下标步长漂移风险）。
+static func extract_center_from_halo(halo: PackedInt32Array) -> PackedInt32Array:
+	var buf := PackedInt32Array()
+	buf.resize(CHUNK_VOLUME)
+	for lz in CHUNK_SIZE:
+		for ly in CHUNK_SIZE:
+			for lx in CHUNK_SIZE:
+				buf[buf_index(lx, ly, lz)] = halo[halo_index(HALO + lx, HALO + ly, HALO + lz)]
+	return buf

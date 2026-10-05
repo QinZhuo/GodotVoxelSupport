@@ -947,7 +947,7 @@ func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, 
 			var lz := p.z + VoxelChunk.HALO
 			if lx < 0 or ly < 0 or lz < 0 or lx >= VoxelChunk.HALO_SIZE or ly >= VoxelChunk.HALO_SIZE or lz >= VoxelChunk.HALO_SIZE:
 				return VoxelChunkGenerator.generate_arrays_runtime(translated, materials, {"scale": scale, "offset": offset})
-			halo[lx + ly * VoxelChunk.HALO_SIZE + lz * VoxelChunk.HALO_SIZE * VoxelChunk.HALO_SIZE] = int(translated[pos_key])
+			halo[VoxelChunk.halo_index(lx, ly, lz)] = int(translated[pos_key])
 		var aligned := VoxelMaterial.align_by_id(materials)
 		var result := VoxelChunkGenerator.generate_single_chunk_dense(
 			halo, aligned, scale, Vector3i.ZERO, offset)

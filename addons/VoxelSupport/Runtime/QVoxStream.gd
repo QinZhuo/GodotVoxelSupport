@@ -89,8 +89,8 @@ var _loaded_head: Dictionary = {}
 var _loaded_materials: Array = []
 var _loaded_node: Dictionary = {}
 
-# 异步请求（统一流式接口）：chunk_key -> true（lod=0）。数据就在内存，poll 时直接回填。
-var _async_requested: Dictionary = {}
+# 异步请求簿记见基类 VoxelStream（_async_pending / _async_enqueue / ...）：数据就在内存，
+# poll 时就地回填。
 
 # 未内建解析的块（类型 -> [payload]），含真未知类型与 CACH。重写时原样保留，保证不丢外部数据。
 var _unknown_blocks: Dictionary = {}
@@ -464,40 +464,39 @@ func get_stream_path() -> String:
 
 # ----------------------------------------------------------------------------
 # 统一异步接口（与 VoxelProceduralStream 共用同一套流式加载）
+# 簿记（登记 / 去重 / 取出）复用基类 VoxelStream 的 _async_* 工具
 # ----------------------------------------------------------------------------
 
-## 异步请求：数据常驻内存，直接登记即可，poll_all_ready 当轮即可取回。
+## 异步请求：数据常驻内存，直接登记即可（poll 时就地读回），无需后台任务。
 func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 	if lod != 0:
 		return
-	if _async_requested.has(chunk_key):
-		return
 	_ensure_loaded()
-	_async_requested[chunk_key] = true
+	_async_enqueue(chunk_key, 0)
 
 
 func poll_all_ready(max_count: int) -> Array:
 	var out: Array = []
-	for ck in _async_requested.keys():
+	for e in _async_pending_keys():
 		if out.size() >= max_count:
 			break
-		_async_requested.erase(ck)
-		var buf := load_chunk(ck, 0)
+		var lod: int = e[0]
+		var ck: Vector3i = e[1]
+		_async_drop_pending(ck, lod)
+		var buf := load_chunk(ck, lod)
 		if buf.is_empty():
 			continue
-		out.append([0, ck, buf])
+		out.append([lod, ck, buf])
 	return out
 
 
 func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
 	if lod != 0:
 		return false
-	return _async_requested.has(chunk_key)
+	return _async_is_pending(chunk_key, 0)
 
 
-## 清空异步请求队列（数据源重建/切换时调用）。
-func clear_async_state() -> void:
-	_async_requested.clear()
+# clear_async_state() 复用基类实现（清空在途 / 就绪登记）。
 
 
 # ----------------------------------------------------------------------------

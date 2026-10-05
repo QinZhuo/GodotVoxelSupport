@@ -399,9 +399,6 @@ func _record_perf_stats(chunk_count: int, gen_time_ms: float, apply_time_ms: flo
 	stats["sample_count"] = stats["sample_count"] as int + 1
 
 
-const _COLLISION_BODY_NAME := "_VoxelRendererCollision"
-
-
 func _ready() -> void:
 	_configure_lod()
 	_request_update()
@@ -1418,17 +1415,6 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 		snapshot, bk, level, _lod_block_gen[level].get(bk, 0))))
 
 
-## 工作线程：粗 LOD 大块由独立大格数据直接生成 mesh（线程安全，只读参数快照）。
-## 直接在此构建 ArrayMesh（add_surface_from_arrays 走 RenderingServer，线程安全；
-## GPU 上传由引擎延迟到主线程渲染提交，摊平上传尖峰），主线程只做轻量挂载。
-func _lod_worker(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int, scale: float,
-		offset: Vector3, aligned_materials: Array) -> void:
-	var halo := VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers(buffers, bk)
-	var arr := VoxelChunkGenerator.generate_lod_block_arrays(halo, aligned_materials, scale, bk, offset, level)
-	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
-	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id)
-
-
 ## 工作线程：粗 LOD 大块 mesh 生成（快照/降采样/mesh 全在 worker 内——主线程只轻量派发）。
 ## 数据保留在内存（VoxelData 只读 COW 安全），一次生成完整 halo（边界无缺面空洞），
 ## 降采样时顺带返回大格数据（buf）同步粗层缓存。
@@ -1453,14 +1439,7 @@ func _lod_worker_build(vd: VoxelData, bk: Vector3i, level: int, gen_id: int, sca
 		# 数据保留在内存（LOD 区不禁用卸载）时结果完整；缺失 chunk 视为空（真空区域）。
 		var buffers := vd.snapshot_lod_block_chunks_readonly(bk, level)
 		halo = VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
-		var g := VoxelChunkGenerator.LOD_BLOCK_SIZE
-		var hs := VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
-		var off := VoxelChunkGenerator.LOD_BLOCK_HALO
-		buf.resize(g * g * g)
-		for lz in g:
-			for ly in g:
-				for lx in g:
-					buf[lx + ly * g + lz * g * g] = halo[(off + lx) + (off + ly) * hs + (off + lz) * hs * hs]
+		buf = VoxelChunk.extract_center_from_halo(halo)
 	else:
 		var snap := vd.snapshot_lod_block_data(bk, level)
 		halo = VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers(snap, bk)
@@ -1469,39 +1448,11 @@ func _lod_worker_build(vd: VoxelData, bk: Vector3i, level: int, gen_id: int, sca
 	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id, buf)
 
 
-## 工作线程：修改过的粗 LOD 大块降采样 halo + 一次性网格生成（线程安全，只读参数快照）。
-## 顺带返回降采样大格数据（buf），主线程同步粗层缓存（_coarse_buffers + 持久化），
-## 让"request 早于 LOD0 就绪 → 自动降采样空"的块也能补上缓存（mesh 与数据一致，重启复用）。
-func _lod_worker_downsample(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int, scale: float,
-		offset: Vector3, aligned_materials: Array) -> void:
-	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
-	var arr := VoxelChunkGenerator.generate_lod_block_arrays(halo, aligned_materials, scale, bk, offset, level)
-	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
-	var buf := PackedInt32Array()
-	buf.resize(VoxelChunkGenerator.LOD_BLOCK_SIZE * VoxelChunkGenerator.LOD_BLOCK_SIZE * VoxelChunkGenerator.LOD_BLOCK_SIZE)
-	var g := VoxelChunkGenerator.LOD_BLOCK_SIZE
-	var hs := VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
-	var off := VoxelChunkGenerator.LOD_BLOCK_HALO
-	for lz in g:
-		for ly in g:
-			for lx in g:
-				buf[lx + ly * g + lz * g * g] = halo[(off + lx) + (off + ly) * hs + (off + lz) * hs * hs]
-	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id, buf)
-
-
 ## 工作线程：内带失效 block 只降采样大格数据（不生成 mesh——mesh 由 LOD0 chunk 反映）。
 ## 拆分两阶段：内带 block 的粗层 mesh 应用会被 _should_apply 丢弃，省去 arrays/mesh 构建。
 func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
-	var g := VoxelChunkGenerator.LOD_BLOCK_SIZE
-	var hs := VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
-	var off := VoxelChunkGenerator.LOD_BLOCK_HALO
-	var buf := PackedInt32Array()
-	buf.resize(g * g * g)
-	for lz in g:
-		for ly in g:
-			for lx in g:
-				buf[lx + ly * g + lz * g * g] = halo[(off + lx) + (off + ly) * hs + (off + lz) * hs * hs]
+	var buf := VoxelChunk.extract_center_from_halo(halo)
 	call_deferred("_on_lod_data_ready", bk, level, gen_id, buf)
 
 
@@ -1712,6 +1663,9 @@ func _update_mesh_async() -> void:
 	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
 	# per-chunk 异步生成（唯一网格路径）
+	# 可见性决策：全量走所有 chunk；增量先清除"已变空"chunk 的残留 mesh 再决策。
+	# 两分支决策不同，但下方"快照预算 + 派发"完全一致，合并到一处。
+	var visible: Array[Vector3i]
 	if rebuild_chunks.is_empty():
 		# 全量构建（初始构建或切换模式后）：分 chunk 独立线程，逐个显示
 		var all_chunks := data.get_all_chunk_keys()
@@ -1719,22 +1673,9 @@ func _update_mesh_async() -> void:
 			# 空场景：无 chunk 可生成，直接返回（无任务，pending 保持 0）
 			return
 		# 统一可见性决策（流式距离 + 视锥/近处全向）
-		var visible: Array[Vector3i] = _filter_visible_chunks(all_chunks)
+		visible = _filter_visible_chunks(all_chunks)
 		if diag_enabled:
 			print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
-		var snap := _snapshot_budgeted(visible)
-		var snapshot: Dictionary = snap["snapshot"]
-		var taken: int = snap["taken"]
-		if taken < visible.size():
-			# 超快照预算部分放回 dirty（下帧走增量分支续建），防初始/切换模式一帧全量快照尖峰
-			for j in range(taken, visible.size()):
-				data._mark_chunk_dirty(visible[j])
-			_request_update()
-			visible.resize(taken)
-		_pending_task_count = visible.size()
-		for ck in visible:
-			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-				snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 	else:
 		# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
 		# 【关键】先清除"已变空"chunk 的残留 mesh：破坏/崩塌后 chunk 内体素
@@ -1744,22 +1685,23 @@ func _update_mesh_async() -> void:
 			if _lod_meshes[0].has(ck) and not data.has_chunk(ck):
 				_remove_chunk_mesh(ck)
 		# 统一可见性决策（流式距离 + 视锥/近处全向）
-		var visible: Array[Vector3i] = _filter_visible_chunks(rebuild_chunks)
+		visible = _filter_visible_chunks(rebuild_chunks)
 		if diag_enabled:
 			print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
-		var snap := _snapshot_budgeted(visible)
-		var snapshot: Dictionary = snap["snapshot"]
-		var taken: int = snap["taken"]
-		if taken < visible.size():
-			# 超快照预算部分放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位）
-			for j in range(taken, visible.size()):
-				data._mark_chunk_dirty(visible[j])
-			_request_update()
-			visible.resize(taken)
-		_pending_task_count = visible.size()
-		for ck in visible:
-			_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-				snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+	# 快照预算：超预算尾部放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位），
+	# 避免初始/切换模式一帧全量快照尖峰。
+	var snap := _snapshot_budgeted(visible)
+	var snapshot: Dictionary = snap["snapshot"]
+	var taken: int = snap["taken"]
+	if taken < visible.size():
+		for j in range(taken, visible.size()):
+			data._mark_chunk_dirty(visible[j])
+		_request_update()
+		visible.resize(taken)
+	_pending_task_count = visible.size()
+	for ck in visible:
+		_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
+			snapshot, aligned_materials, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
 
 
 ## 可见 chunk 的 halo 快照（毫秒预算版）：逐片快照、超预算即止。
@@ -1799,18 +1741,6 @@ static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: in
 		"affected_count": affected_count,
 		"gen_id": gen_id,
 	}
-
-
-## 统计 chunk_arrays 字典（ck -> {solid_verts, trans_verts}）的总实心/透明顶点数
-static func _count_chunk_vertices(chunk_arrays: Dictionary) -> Vector2i:
-	var sv := 0
-	var tv := 0
-	for ck in chunk_arrays:
-		var arr = chunk_arrays[ck]
-		if arr is Dictionary:
-			sv += arr.get("solid_verts", PackedVector3Array()).size()
-			tv += arr.get("trans_verts", PackedVector3Array()).size()
-	return Vector2i(sv, tv)
 
 
 ## 以顶点计数更新 last_* 统计字段（实心/透明三角形 = 顶点数 / 3）
@@ -2138,23 +2068,6 @@ func _on_batch_complete() -> void:
 
 	# 批次完成信号（外部依赖此信号感知场景更新完毕）
 	mesh_updated.emit()
-
-
-## 生成多个 chunk 的网格数据（串行，在工作线程内调用时避免嵌套线程池死锁）
-## 注意：此函数在工作线程内调用，禁止使用 add_group_task 等嵌套线程池调用
-func _update_collision() -> void:
-	_clear_collision()
-	if not mesh:
-		return
-	_collision_body = StaticBody3D.new()
-	_collision_body.name = _COLLISION_BODY_NAME
-	var shape := ConcavePolygonShape3D.new()
-	var faces := mesh.get_faces()
-	if faces.size() > 0:
-		shape.set_faces(faces)
-		var owner_id := _collision_body.create_shape_owner(_collision_body)
-		_collision_body.shape_owner_add_shape(owner_id, shape)
-	add_child(_collision_body, false, Node.INTERNAL_MODE_BACK)
 
 
 func _clear_collision() -> void:

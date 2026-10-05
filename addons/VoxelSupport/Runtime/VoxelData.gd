@@ -839,15 +839,7 @@ func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
 ## buffers 为主线程快照（引用共享，只读安全），结果经 call_deferred 回主线程。
 func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, block_key, lod)
-	var g := VoxelChunkGenerator.LOD_BLOCK_SIZE
-	var hs := VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
-	var off := VoxelChunkGenerator.LOD_BLOCK_HALO
-	var buf := PackedInt32Array()
-	buf.resize(g * g * g)
-	for lz in g:
-		for ly in g:
-			for lx in g:
-				buf[lx + ly * g + lz * g * g] = halo[(off + lx) + (off + ly) * hs + (off + lz) * hs * hs]
+	var buf := VoxelChunk.extract_center_from_halo(halo)
 	call_deferred("_on_lod_downsample_ready", block_key, lod, buf)
 
 
@@ -1208,7 +1200,7 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 		for z in range(min_z, max_z + 1):
 			for y in range(min_y, max_y + 1):
 				for x in range(min_x, max_x + 1):
-					if buf[(x - origin.x) + (y - origin.y) * CHUNK_SIZE + (z - origin.z) * CHUNK_SLICE] <= 0:
+					if buf[VoxelChunk.buf_index(x - origin.x, y - origin.y, z - origin.z)] <= 0:
 						continue
 					var dx: int = x - cxi
 					var dy: int = y - cyi
@@ -1246,7 +1238,7 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 		for z in range(min_z, max_z + 1):
 			for y in range(min_y, max_y + 1):
 				for x in range(min_x, max_x + 1):
-					if buf[(x - origin.x) + (y - origin.y) * CHUNK_SIZE + (z - origin.z) * CHUNK_SLICE] <= 0:
+					if buf[VoxelChunk.buf_index(x - origin.x, y - origin.y, z - origin.z)] <= 0:
 						continue
 					result.append(Vector3i(x, y, z))
 	return result
@@ -1272,7 +1264,7 @@ func remove_voxels(positions: Array, notify: bool = true) -> Array:
 ## 并标记脏 chunk，让 VoxelRenderer 走增量重建（只重建受影响 chunk）。
 ## 语义与 set_voxel 一致：material_id <= 0（含 0=空）视为批量移除；已存在体素被覆盖时支撑图不变。
 ## 性能：走原生 C++ set_voxels_bulk（按 chunk 分组直接改 PackedInt32Array，对称 remove_voxels_bulk），
-## 替代旧的逐体素 GDScript 字典写（每体素 5~8 次哈希）；原生不可用时回退逐体素循环。
+## 替代旧的逐体素 GDScript 字典写（每体素 5~8 次哈希）。
 func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void:
 	if positions.is_empty():
 		return

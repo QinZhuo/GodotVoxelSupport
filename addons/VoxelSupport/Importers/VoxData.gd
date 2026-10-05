@@ -53,6 +53,12 @@ static func get_offset_voxels(voxels: Dictionary[Vector3i, int], offset: Vector3
 const SUPPORTED_EXTENSIONS := ["vox", "qvox"]
 
 
+## 导入面板选项名的单一出处：mesh/frame_index、mesh/scale 同时被 Mesh 与 Data 两个
+## 导入器使用（VoxelMeshImporter / VoxelDataImporter），值必须与既有 .import 文件完全一致。
+const OPT_FRAME_INDEX := "mesh/frame_index"
+const OPT_SCALE := "mesh/scale"
+
+
 ## 按扩展名把资产文件解析为 VoxData；不支持的格式或解析失败返回 null。
 static func from_asset(path: String) -> VoxData:
 	if path.get_extension().to_lower() == "qvox":

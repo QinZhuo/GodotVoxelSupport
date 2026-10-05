@@ -39,6 +39,6 @@ addons/VoxelSupport/Native/*.dll.a
 # .qvox 是**一等模型资产**（与 .vox 同级），已随 .gitattributes 的 *.qvox 规则
 # 纳入 Git LFS 管理。demo/samples/ 下保留一份可直接 hexdump / 观察结构的样例，
 # 供人对照文档 §11 的实际字节。
-# （世界存档默认落在 user://，不在仓库里；见 demo/samples/README.md。）
+# （世界存档默认落在 user://，不在仓库里；格式与导入说明见 docs/QVOX_FORMAT.md。）
 !demo/samples/*.qvox
 /.workbuddy

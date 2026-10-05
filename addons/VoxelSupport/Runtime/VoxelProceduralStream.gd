@@ -63,53 +63,28 @@ func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array
 
 
 # 后台生成（WorkerThreadPool）：确定性纯函数生成移出主线程，避免切场景/移动时生成卡顿。
-# 统一按 lod 分层：_async_pending[lod] = {key: true}；_async_results[lod] = {key: buf}。
-var _async_pending: Array[Dictionary] = []
-var _async_results: Array[Dictionary] = []
-var _async_mutex := Mutex.new()
-
+# 在途 / 就绪簿记（含 Mutex 与按 lod 分层）复用基类 VoxelStream 的 _async_* 工具：
+# _async_pending[lod] = {key: true}，_async_results[lod] = {key: buf}。
 ## 粗层（lod>=1）在途任务上限：程序化生成较慢，无上限会让 WorkerThreadPool 被大量粗层任务占满，
 ## LOD0/粗层 mesh 长时间空洞（移动时 LOD 边界出现横竖/块状缺口）。超限丢弃粗层 request（渲染器后续重试），
 ## 保证近处 LOD0 数据加载优先。
 const MAX_COARSE_PENDING := 96
 
 
-## 所有层的在途任务总数
-func _async_pending_total() -> int:
-	var total := 0
-	for d in _async_pending:
-		total += d.size()
-	return total
-
-
 ## 请求后台生成 chunk/block 数据（lod=0 走 _generate_chunk，lod>=1 走 _generate_chunk_lod）。
-## 同 key 已提交/已就绪则不重复。
+## 同 key 已提交/已就绪则不重复（去重由基类 _async_enqueue 完成）。
 func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
-	_async_mutex.lock()
-	while _async_pending.size() <= lod:
-		_async_pending.append({})
-	while _async_results.size() <= lod:
-		_async_results.append({})
 	# 粗层在途限流（lod0 不限制——近处地形加载优先）
 	if lod >= 1 and _async_pending_total() >= MAX_COARSE_PENDING:
-		_async_mutex.unlock()
 		return
-	var submitted := _async_pending[lod].has(chunk_key) or _async_results[lod].has(chunk_key)
-	if not submitted:
-		_async_pending[lod][chunk_key] = true
-	_async_mutex.unlock()
-	if not submitted:
+	if _async_enqueue(chunk_key, lod):
 		WorkerThreadPool.add_task(_async_generate.bind(chunk_key, lod))
 
 
 ## 后台线程 worker：调用子类生成器生成数据（lod 决定粒度），结果入队待主线程 poll。
 func _async_generate(chunk_key: Vector3i, lod: int) -> void:
 	var buf := _generate_chunk(chunk_key) if lod == 0 else _generate_chunk_lod(chunk_key, lod)
-	_async_mutex.lock()
-	if _async_pending[lod].has(chunk_key):
-		_async_results[lod][chunk_key] = buf
-		_async_pending[lod].erase(chunk_key)
-	_async_mutex.unlock()
+	_async_resolve(chunk_key, lod, buf)
 
 
 ## 主线程取异步生成结果；未就绪返回空数组。
@@ -129,36 +104,15 @@ func poll_chunk_async(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 
 ## 该 chunk/block 是否已有后台任务进行中或结果就绪（避免重复提交）。
 func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
-	_async_mutex.lock()
-	var r := lod < _async_pending.size() and (_async_pending[lod].has(chunk_key) or _async_results[lod].has(chunk_key))
-	_async_mutex.unlock()
-	return r
+	return _async_is_pending(chunk_key, lod)
 
 
 ## 主线程批量取后台生成结果（不限提交方——ensure 与 halo 经 preload_chunk 提交的都会回填，
 ## 避免 async_results 堆积导致数据供给停滞）。返回 [[lod, chunk_key, buf], ...]。
 func poll_all_ready(max_count: int) -> Array:
-	var out: Array = []
-	_async_mutex.lock()
-	for lod in _async_results.size():
-		var res: Dictionary = _async_results[lod]
-		for key in res.keys():
-			if out.size() >= max_count:
-				break
-			out.append([lod, key, res[key]])
-			res.erase(key)
-	_async_mutex.unlock()
-	return out
+	return _async_take_ready(max_count)
 
-
-## 取消/清空全部后台任务状态（数据源重建时调用）。
-func clear_async_state() -> void:
-	_async_mutex.lock()
-	for d in _async_pending:
-		d.clear()
-	for d in _async_results:
-		d.clear()
-	_async_mutex.unlock()
+# clear_async_state() 复用基类实现（清空在途 / 就绪登记）。
 
 
 ## 从流加载 chunk/block。优先级：修改的 > 文件持久化 > 程序化生成（同步兜底，

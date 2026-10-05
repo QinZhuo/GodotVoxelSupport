@@ -62,6 +62,106 @@ func poll_all_ready(max_count: int) -> Array
 
 
 # ----------------------------------------------------------------------------
+# 【异步簿记】统一流式接口共用的"在途 / 就绪"登记（非抽象，子类可直接复用）
+# ----------------------------------------------------------------------------
+# 只做登记 / 去重 / 取出，不关心数据从哪来（磁盘读 / 程序化生成由子类决定）。
+# 分层（与 poll_all_ready 的 lod 语义一致）：lod=0 为 LOD0 chunk，lod>=1 为粗层 block：
+#   _async_pending[lod] = {chunk_key: true}    在途（已提交、未就绪）
+#   _async_results[lod] = {chunk_key: buffer}  就绪（待 poll 取回）
+# 二者由 _async_mutex 保护——程序化流在 worker 线程回填结果，主线程登记 / 取出。
+var _async_pending: Array[Dictionary] = []
+var _async_results: Array[Dictionary] = []
+var _async_mutex := Mutex.new()
+
+
+## 登记一个异步请求；同 key 在途或已就绪则去重。返回是否为新登记
+## （子类据此决定是否真正发起后台任务，如 WorkerThreadPool.add_task）。
+func _async_enqueue(chunk_key: Vector3i, lod: int = 0) -> bool:
+	_async_mutex.lock()
+	while _async_pending.size() <= lod:
+		_async_pending.append({})
+	while _async_results.size() <= lod:
+		_async_results.append({})
+	var submitted := _async_pending[lod].has(chunk_key) or _async_results[lod].has(chunk_key)
+	if not submitted:
+		_async_pending[lod][chunk_key] = true
+	_async_mutex.unlock()
+	return not submitted
+
+
+## 在途（未就绪）任务总数，供子类做在途限流。
+func _async_pending_total() -> int:
+	_async_mutex.lock()
+	var total := 0
+	for d in _async_pending:
+		total += d.size()
+	_async_mutex.unlock()
+	return total
+
+
+## 回填结果：把 key 从"在途"移入"就绪"（仅当该 key 仍在途时生效）。
+func _async_resolve(chunk_key: Vector3i, lod: int, buffer: PackedInt32Array) -> void:
+	_async_mutex.lock()
+	if lod < _async_pending.size() and _async_pending[lod].has(chunk_key):
+		_async_results[lod][chunk_key] = buffer
+		_async_pending[lod].erase(chunk_key)
+	_async_mutex.unlock()
+
+
+## 该 chunk/block 是否已有在途任务或结果就绪。
+func _async_is_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
+	_async_mutex.lock()
+	var r := lod < _async_pending.size() \
+			and (_async_pending[lod].has(chunk_key) or _async_results[lod].has(chunk_key))
+	_async_mutex.unlock()
+	return r
+
+
+## 主线程批量取出就绪结果：[[lod, chunk_key, buf], ...]，未就绪的保留待下次轮询。
+func _async_take_ready(max_count: int) -> Array:
+	var out: Array = []
+	_async_mutex.lock()
+	for lod in _async_results.size():
+		var res: Dictionary = _async_results[lod]
+		for key in res.keys():
+			if out.size() >= max_count:
+				break
+			out.append([lod, key, res[key]])
+			res.erase(key)
+	_async_mutex.unlock()
+	return out
+
+
+## 在途请求 key 快照：[[lod, chunk_key], ...]（供"登记即可用"的内存流在 poll 时自行物化）。
+func _async_pending_keys() -> Array:
+	var out: Array = []
+	_async_mutex.lock()
+	for lod in _async_pending.size():
+		for key in _async_pending[lod].keys():
+			out.append([lod, key])
+	_async_mutex.unlock()
+	return out
+
+
+## 从在途集合移除单个 key（内存流 poll 物化后调用；空数据丢弃也走这里）。
+func _async_drop_pending(chunk_key: Vector3i, lod: int = 0) -> void:
+	_async_mutex.lock()
+	if lod < _async_pending.size():
+		_async_pending[lod].erase(chunk_key)
+	_async_mutex.unlock()
+
+
+## 清空全部异步请求 / 结果状态（数据源重建或切换时调用）。
+func clear_async_state() -> void:
+	_async_mutex.lock()
+	for d in _async_pending:
+		d.clear()
+	for d in _async_results:
+		d.clear()
+	_async_mutex.unlock()
+
+
+# ----------------------------------------------------------------------------
 # 【可选有限范围】所有流共有的"可生成范围"能力（非抽象，子类可直接使用）
 # ----------------------------------------------------------------------------
 # 两层判定，渲染器扫描循环高频调用（如 VoxelRenderer._process_streaming 的

@@ -40,4 +40,7 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 	return options
 
 func _import(source_file, save_path, options, _platforms, gen_files):
-	return ResourceSaver.save(VoxelMeshGenerator.generate_mesh_library(VoxData.from_asset(source_file), options, source_file), "%s.%s" % [save_path, _get_save_extension()])
+	var voxel_data := VoxData.from_asset(source_file)
+	if voxel_data == null:
+		return FAILED
+	return ResourceSaver.save(VoxelMeshGenerator.generate_mesh_library(voxel_data, options, source_file), "%s.%s" % [save_path, _get_save_extension()])

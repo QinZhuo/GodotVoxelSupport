@@ -82,8 +82,9 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 		},
 	]
 
-const frame_index := "mesh/frame_index"
-const scale := "mesh/scale"
+## 选项名统一取自 VoxData 单一出处（与 VoxelDataImporter 共用，避免同值重复定义）
+const frame_index := VoxData.OPT_FRAME_INDEX
+const scale := VoxData.OPT_SCALE
 const shape := "mesh/shape"
 ## icosphere 细分级别 (0..4)，下拉标签为对应三角形数
 const sphere_subdivisions := "mesh/sphere_subdivisions"

@@ -24,6 +24,8 @@ static var _required_methods := [
 	&"partition_connected",
 	&"snapshot_chunks_halo",
 	&"generate_arrays_native",
+	&"propagate_stress",
+	&"collect_materials",
 ]
 
 ## 获取原生实例（懒初始化）。返回 null 表示不可用。
@@ -67,9 +69,15 @@ static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByte
 
 ## LOD1 大块网格（一次性生成 32³ 大格，godot_voxel 风格大 block）。
 ## halo: 34³ 大格光环（中心 32³ + 1 外缘）；block_key: 大块 key。
+## 可选能力：无原生库或旧库缺此方法时返回空字典，GDScript 侧安全降级（不静默出错）。
 static func generate_lod1_block_dense(halo: PackedInt32Array, trans_flags: PackedByteArray,
 		scale: float, block_key: Vector3i, offset: Vector3) -> Dictionary:
 	var inst := _get_instance()
+	if inst == null:
+		return {}
+	if not ClassDB.class_has_method(&"VoxelNative", &"generate_lod1_block_dense", false):
+		push_error("[NativeLoader] generate_lod1_block_dense 需要原生库 VoxelNative（未加载或方法缺失）")
+		return {}
 	return inst.call(&"generate_lod1_block_dense", halo, trans_flags, scale, block_key, offset)
 
 
@@ -107,20 +115,28 @@ static func build_lod_block_halo_from_buffers_native(buffers: Dictionary, block_
 ## 金字塔增量降采样：只重算 block 内 [rmin,rmax] 脏大格，未脏大格从 coarse 复用。
 ## 与全量降采样规则一致（取第一个非空材质）。coarse: 现有 block 大格数据（32³）。
 ## 返回完整 block 大格数据（脏大格已更新）。
+## 可选能力：无原生库或旧库缺此方法时保持原 coarse 数据返回，GDScript 侧安全降级。
 static func patch_lod_block(buffers: Dictionary, block_key: Vector3i, lod_shift: int,
 		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
 	var inst := _get_instance()
 	if inst == null:
+		return coarse
+	if not ClassDB.class_has_method(&"VoxelNative", &"patch_lod_block", false):
+		push_error("[NativeLoader] patch_lod_block 需要原生库 VoxelNative（未加载或方法缺失），保持原 coarse 数据")
 		return coarse
 	return inst.call(&"patch_lod_block", buffers, block_key, lod_shift, coarse, rmin, rmax)
 
 
 ## 金字塔逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样（而非从 L0 全量）。
 ## coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格)。返回完整当前 block 大格数据。
+## 可选能力：无原生库或旧库缺此方法时保持原 coarse 数据返回，GDScript 侧安全降级。
 static func patch_lod_block_from_lod(coarse_buffers: Dictionary, block_key: Vector3i, lod: int,
 		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
 	var inst := _get_instance()
 	if inst == null:
+		return coarse
+	if not ClassDB.class_has_method(&"VoxelNative", &"patch_lod_block_from_lod", false):
+		push_error("[NativeLoader] patch_lod_block_from_lod 需要原生库 VoxelNative（未加载或方法缺失），保持原 coarse 数据")
 		return coarse
 	return inst.call(&"patch_lod_block_from_lod", coarse_buffers, block_key, lod, coarse, rmin, rmax)
 
