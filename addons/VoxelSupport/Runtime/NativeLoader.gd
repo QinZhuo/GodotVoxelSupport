@@ -24,6 +24,7 @@ static var _required_methods := [
 	&"partition_connected",
 	&"snapshot_chunks_halo",
 	&"generate_arrays_native",
+	&"generate_spheres_native",
 	&"propagate_stress",
 	&"collect_materials",
 ]
@@ -99,6 +100,18 @@ static func generate_arrays_native(voxels: Dictionary, trans_flags: PackedByteAr
 	if inst == null:
 		return {}
 	return inst.call(&"generate_arrays_native", voxels, trans_flags, scale, offset)
+
+
+## 球体网格（每体素一颗 icosphere，按顶点预算自动降采样）：导入 shape=sphere 用。
+## 返回与 generate_arrays_native 相同结构的 Dictionary，另含 "step"（实际采样间隔）。
+## 原生库为强制依赖（网格生成内核已统一下沉 C++），缺失时返回空字典并报错。
+static func generate_spheres_native(voxels: Dictionary, trans_flags: PackedByteArray,
+		subdivisions: int, sphere_scale: float, scale: float, vertex_budget: int) -> Dictionary:
+	var inst := _get_instance()
+	if inst == null:
+		push_error("[NativeLoader] generate_spheres_native 需要原生库 VoxelNative")
+		return {}
+	return inst.call(&"generate_spheres_native", voxels, trans_flags, subdivisions, sphere_scale, scale, vertex_budget)
 
 
 ## 构建 LOD 大块的 34³ halo（通用降采样，任意 lod_shift，原生下沉 C++）。

@@ -2,7 +2,9 @@
 
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <unordered_map>
@@ -132,7 +134,7 @@ struct VertexKey {
 	}
 };
 
-// 6 方向邻居偏移（对应 FaceTool.Normals 顺序：+Y,-Y,-X,+X,+Z,-Z）
+// 6 方向邻居偏移（面顺序权威定义：+Y, -Y, -X, +X, +Z, -Z）
 constexpr int HALO_DIRS[6] = {
 	HALO_SIZE,               // +Y
 	-HALO_SIZE,              // -Y
@@ -142,7 +144,7 @@ constexpr int HALO_DIRS[6] = {
 	-HALO_SIZE * HALO_SIZE,  // -Z
 };
 
-// 每面轴向信息 {perp(切片轴), u(水平轴), v(垂直轴)}（对应 FaceTool.SliceAxis）
+// 每面轴向信息 {perp(切片轴), u(水平轴), v(垂直轴)}（面顺序同上）
 struct FaceAxes { int perp, u, v; };
 constexpr FaceAxes FACE_AXES[6] = {
 	{1, 0, 2},  // +Y Top    perp=Y u=X v=Z
@@ -153,12 +155,12 @@ constexpr FaceAxes FACE_AXES[6] = {
 	{2, 0, 1},  // -Z Back
 };
 
-// 6 面法线（对应 FaceTool.Normals）
+// 6 面法线（面顺序同上）
 constexpr float NORMALS[6][3] = {
 	{0, 1, 0}, {0, -1, 0}, {-1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, -1},
 };
 
-// 6 面顶点（对应 FaceTool.Faces，6 顶点/面 = 2 三角形，顺序与原版一致）
+// 6 面顶点（6 顶点/面 = 2 三角形，顺时针缠绕，Godot 正面）
 constexpr float FACES[6][6][3] = {
 	// Top (+Y)
 	{{1, 1, 1}, {0, 1, 1}, {0, 1, 0}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}},
@@ -331,7 +333,7 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 							const int vi = trans_verts.size();
 							trans_verts.append(world_pos);
 							trans_normals.append(normal);
-							trans_uvs.append(Vector2(u_uv, 0.0f));
+							trans_uvs.append(Vector2(u_uv, 0.5f));
 							trans_idxs.append(vi);
 							trans_cache[key] = vi;
 						}
@@ -344,7 +346,7 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 							const int vi = solid_verts.size();
 							solid_verts.append(world_pos);
 							solid_normals.append(normal);
-							solid_uvs.append(Vector2(u_uv, 0.0f));
+							solid_uvs.append(Vector2(u_uv, 0.5f));
 							solid_idxs.append(vi);
 							solid_cache[key] = vi;
 						}
@@ -508,6 +510,233 @@ Dictionary VoxelNative::generate_arrays_native(const Dictionary &voxels, const P
 		result["trans_uvs"] = tu;
 		result["trans_idxs"] = ti;
 	}
+	return result;
+}
+
+namespace {
+// 单位 icosphere 模板：正二十面体 → 逐次细分(每三角形拆 4) → 中点投影回单位球面。
+// 相比 UV 球：三角形面积均匀、无极点奇点，适合风格化小球渲染。
+// 最后把逆时针缠绕翻转为 (a, c, b)：Godot 正面为顺时针，否则球体外壁被背面剔除。
+void build_icosphere(int subdivisions, std::vector<Vector3> &out_verts, std::vector<int> &out_indices) {
+	const double t = (1.0 + std::sqrt(5.0)) / 2.0;
+	std::vector<Vector3> verts = {
+		Vector3(-1.0f, float(t), 0.0f), Vector3(1.0f, float(t), 0.0f),
+		Vector3(-1.0f, float(-t), 0.0f), Vector3(1.0f, float(-t), 0.0f),
+		Vector3(0.0f, -1.0f, float(t)), Vector3(0.0f, 1.0f, float(t)),
+		Vector3(0.0f, -1.0f, float(-t)), Vector3(0.0f, 1.0f, float(-t)),
+		Vector3(float(t), 0.0f, -1.0f), Vector3(float(t), 0.0f, 1.0f),
+		Vector3(float(-t), 0.0f, -1.0f), Vector3(float(-t), 0.0f, 1.0f),
+	};
+	for (Vector3 &v : verts) {
+		v = v.normalized();
+	}
+	// 20 个面（逆时针，从外部看）
+	std::vector<int> indices = {
+		0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
+		1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
+		3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
+		4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
+	};
+	for (int sub = 0; sub < subdivisions; ++sub) {
+		std::unordered_map<uint64_t, int> mid_cache;
+		std::vector<int> new_indices;
+		new_indices.reserve(indices.size() * 4);
+		auto edge_mid = [&](int a, int b) -> int {
+			const uint64_t key = a < b ? (uint64_t(a) * 4194304ull + uint64_t(b))
+					: (uint64_t(b) * 4194304ull + uint64_t(a));
+			auto it = mid_cache.find(key);
+			if (it != mid_cache.end()) {
+				return it->second;
+			}
+			verts.push_back(((verts[a] + verts[b]) * 0.5f).normalized());
+			const int idx = (int)verts.size() - 1;
+			mid_cache[key] = idx;
+			return idx;
+		};
+		for (size_t i = 0; i < indices.size(); i += 3) {
+			const int a = indices[i];
+			const int b = indices[i + 1];
+			const int c = indices[i + 2];
+			const int ab = edge_mid(a, b);
+			const int bc = edge_mid(b, c);
+			const int ca = edge_mid(c, a);
+			new_indices.push_back(a); new_indices.push_back(ab); new_indices.push_back(ca);
+			new_indices.push_back(b); new_indices.push_back(bc); new_indices.push_back(ab);
+			new_indices.push_back(c); new_indices.push_back(ca); new_indices.push_back(bc);
+			new_indices.push_back(ab); new_indices.push_back(bc); new_indices.push_back(ca);
+		}
+		indices = new_indices;
+	}
+	for (size_t i = 0; i < indices.size(); i += 3) {
+		const int tmp = indices[i + 1];
+		indices[i + 1] = indices[i + 2];
+		indices[i + 2] = tmp;
+	}
+	out_verts = verts;
+	out_indices = indices;
+}
+
+// 向下取整除法（与 GDScript 整数除法的截断语义对齐）
+inline int grid_floor_div(int v, int d) {
+	const int q = v / d;
+	return q * d > v ? q - 1 : q;
+}
+} // namespace
+
+// 球体网格（导入 shape=sphere）：每体素一颗 icosphere，按顶点预算自动降采样。
+// 语义与旧 GDScript 导入实现一致：
+//   - 先用包围盒表面积估算采样间隔 step，再按实际外露格子数兜底放大（step 上限 32）
+//   - 只保留至少有一格外露的格子（被实心邻居完全包裹的格子不可见）
+//   - 结果按 实体 / 透明 分桶；UV 采样纹素中心 (mat_id+0.5)/256, v=0.5
+// 返回 Dictionary：{solid_verts, solid_normals, solid_uvs, solid_idxs,
+//                   trans_verts, trans_normals, trans_uvs, trans_idxs, step}
+Dictionary VoxelNative::generate_spheres_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
+		int subdivisions, float sphere_scale, float scale, int vertex_budget) {
+	const uint8_t *tflags = trans_flags.ptr();
+	const int n_mats = trans_flags.size();
+	const int subs = subdivisions < 0 ? 0 : (subdivisions > 2 ? 2 : subdivisions);
+	const double budget = vertex_budget > 0 ? double(vertex_budget) : 1.0;
+
+	// 1. 收集有效体素(>0) 与包围盒
+	const Array keys = voxels.keys();
+	Vector3i pos_min(0, 0, 0);
+	Vector3i pos_max(0, 0, 0);
+	bool has_voxel = false;
+	for (int i = 0; i < keys.size(); ++i) {
+		const Vector3i p = keys[i];
+		if (int64_t(voxels[p]) <= 0) {
+			continue;
+		}
+		if (!has_voxel) {
+			has_voxel = true;
+			pos_min = p;
+			pos_max = p;
+		} else {
+			pos_min.x = std::min(pos_min.x, p.x);
+			pos_min.y = std::min(pos_min.y, p.y);
+			pos_min.z = std::min(pos_min.z, p.z);
+			pos_max.x = std::max(pos_max.x, p.x);
+			pos_max.y = std::max(pos_max.y, p.y);
+			pos_max.z = std::max(pos_max.z, p.z);
+		}
+	}
+
+	std::vector<Vector3> unit_verts;
+	std::vector<int> unit_indices;
+	build_icosphere(subs, unit_verts, unit_indices);
+	const int verts_per_sphere = (int)unit_verts.size();
+
+	// 2. 采样间隔 step：先按包围盒表面积估算，避免反复全量扫描
+	int step = 1;
+	if (has_voxel) {
+		const Vector3i dims = pos_max - pos_min + Vector3i(1, 1, 1);
+		const double surface_est = 2.0 * (double(dims.x) * dims.y + double(dims.y) * dims.z + double(dims.z) * dims.x);
+		const int need = (int)std::ceil(std::sqrt(surface_est * verts_per_sphere / budget));
+		while (step < need && step < 32) {
+			step *= 2;
+		}
+	}
+
+	// 3. 降采样为格子（格内取"第一个"非空材质，与 LOD 降采样规则一致）→ 只保留外露格子
+	auto select_cells = [&](int st) {
+		// 按 keys 原始顺序遍历，保证"第一个非空材质"的取法确定
+		std::unordered_map<uint64_t, std::pair<Vector3i, int32_t>> cells;
+		for (int i = 0; i < keys.size(); ++i) {
+			const Vector3i p = keys[i];
+			const int64_t m = int64_t(voxels[p]);
+			if (m <= 0) {
+				continue;
+			}
+			const Vector3i ck(grid_floor_div(p.x, st), grid_floor_div(p.y, st), grid_floor_div(p.z, st));
+			const uint64_t k = grid_vkey(ck);
+			if (cells.find(k) == cells.end()) {
+				cells[k] = std::make_pair(ck, (int32_t)m);
+			}
+		}
+		std::unordered_map<uint64_t, std::pair<Vector3i, int32_t>> picked;
+		for (auto &kv : cells) {
+			const Vector3i &c = kv.second.first;
+			const int32_t id = kv.second.second;
+			const Vector3i npos[6] = {
+				Vector3i(c.x, c.y + 1, c.z), Vector3i(c.x, c.y - 1, c.z),
+				Vector3i(c.x - 1, c.y, c.z), Vector3i(c.x + 1, c.y, c.z),
+				Vector3i(c.x, c.y, c.z + 1), Vector3i(c.x, c.y, c.z - 1),
+			};
+			bool keep = false;
+			for (int d = 0; d < 6; ++d) {
+				auto it = cells.find(grid_vkey(npos[d]));
+				if (it == cells.end()) {
+					keep = true;
+					break;
+				}
+				const int32_t n_id = it->second.second;
+				const bool m_trans = id < n_mats && tflags[id] != 0;
+				const bool n_trans = n_id < n_mats && tflags[n_id] != 0;
+				if (m_trans != n_trans || (m_trans && id != n_id)) {
+					keep = true;
+					break;
+				}
+			}
+			if (keep) {
+				picked[kv.first] = kv.second;
+			}
+		}
+		return picked;
+	};
+
+	auto picked = select_cells(step);
+	while ((int)picked.size() * verts_per_sphere > vertex_budget && step < 32) {
+		step *= 2;
+		picked = select_cells(step);
+	}
+	if (step > 1) {
+		UtilityFunctions::print("voxel sphere: auto step ", step, " (spheres=", (int)picked.size(),
+				", budget=", vertex_budget, " verts)");
+	}
+
+	// 4. 展开球体：每格子一颗小球，按 实体/透明 分桶
+	const float step_f = float(step);
+	const float radius = 0.5f * sphere_scale * step_f * scale;
+	// 球心落在格子中心：格子覆盖体素 [key*step, key*step+step)，中心 = (key + 0.5) * step
+	const Vector3 cell_origin(step_f * 0.5f, step_f * 0.5f, step_f * 0.5f);
+	const int nv = verts_per_sphere;
+	const int ni = (int)unit_indices.size();
+
+	PackedVector3Array sv, sn, tv, tn;
+	PackedVector2Array su, tu;
+	PackedInt32Array si, ti;
+	auto emit = [&](const std::pair<Vector3i, int32_t> &cell, bool is_trans) {
+		PackedVector3Array &vs = is_trans ? tv : sv;
+		PackedVector3Array &ns = is_trans ? tn : sn;
+		PackedVector2Array &us = is_trans ? tu : su;
+		PackedInt32Array &is = is_trans ? ti : si;
+		const Vector3 center = (cell_origin + Vector3(cell.first) * step_f) * scale;
+		const float u = (float(cell.second) + 0.5f) / 256.0f;
+		const int vbase = vs.size();
+		for (int k = 0; k < nv; ++k) {
+			vs.append(center + unit_verts[k] * radius);
+			ns.append(unit_verts[k]);
+			us.append(Vector2(u, 0.5f));
+		}
+		for (int k = 0; k < ni; ++k) {
+			is.append(unit_indices[k] + vbase);
+		}
+	};
+	for (auto &kv : picked) {
+		const int32_t id = kv.second.second;
+		emit(kv.second, id < n_mats && tflags[id] != 0);
+	}
+
+	Dictionary result;
+	result["solid_verts"] = sv;
+	result["solid_normals"] = sn;
+	result["solid_uvs"] = su;
+	result["solid_idxs"] = si;
+	result["trans_verts"] = tv;
+	result["trans_normals"] = tn;
+	result["trans_uvs"] = tu;
+	result["trans_idxs"] = ti;
+	result["step"] = step;
 	return result;
 }
 
@@ -1400,6 +1629,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_native);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_spheres_native", "voxels", "trans_flags", "subdivisions", "sphere_scale", "scale", "vertex_budget"), &VoxelNative::generate_spheres_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelNative::build_lod_block_halo_from_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);

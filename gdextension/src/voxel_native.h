@@ -62,6 +62,14 @@ public:
 	static Dictionary generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
 			float scale, const Vector3 &offset);
 
+	// 球体网格（导入 shape=sphere）：每体素一颗 icosphere，按顶点预算自动降采样。
+	// subdivisions: icosphere 细分级别(0..2)；sphere_scale: 小球半径/体素边长；
+	// vertex_budget: 顶点上限（超出则自动放大采样间隔）。
+	// 返回 Dictionary：{solid_verts, solid_normals, solid_uvs, solid_idxs,
+	//                   trans_verts, trans_normals, trans_uvs, trans_idxs, step}
+	static Dictionary generate_spheres_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
+			int subdivisions, float sphere_scale, float scale, int vertex_budget);
+
 	// 从 LOD0 chunk buffers 降采样构建 LOD 大块 34³ halo（lod_shift>=2 通用降采样，文件流粗层缓存用）
 	static PackedInt32Array build_lod_block_halo_from_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key, int lod_shift);
