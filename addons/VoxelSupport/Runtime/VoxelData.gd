@@ -26,8 +26,16 @@ extends Resource
 ## 帧数量 (保留用于未来动画扩展)
 @export var frame_count: int = 1
 
-## 体素网格尺寸 (体素个数，由导入时计算)
-@export var grid_size: Vector3i = Vector3i.ZERO
+## 体素网格尺寸 (体素个数，由导入时计算)。
+## 有限尺寸同时就是**生成器的可生成范围**（见 _sync_generator_bounds），故变化时要立刻同步：
+## 否则"先设 generator、后设 grid_size"的调用方会拿到一个范围没生效的生成器
+## （渲染器于是对 view_distance 内每个 chunk 都提交生成 → 海量空 chunk）。
+@export var grid_size: Vector3i = Vector3i.ZERO:
+	set(v):
+		if grid_size == v:
+			return
+		grid_size = v
+		_sync_generator_bounds()
 
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
@@ -78,17 +86,22 @@ var _async := VoxelAsyncLoader.new()
 
 
 ## 把两个数据源同步给编排器，并把本数据层的 grid_size 转成生成器的可生成范围。
-## 生成器按此 AABB 只生成世界范围内的 chunk（有限地图）；ZERO = 无限世界，自动关闭。
-## 不同步会让渲染器对 view_distance 内每个 chunk 都提交生成 → 海量空 chunk。
 func _sync_sources() -> void:
-	if generator != null:
-		generator.set_grid_size(grid_size)
+	_sync_generator_bounds()
 	if _async == null:
 		return
 	# 换源时丢弃在途 / 就绪登记：那些请求属于旧数据源，回填进新世界会写出错坐标的数据。
 	# （早先这本账挂在流对象上，换流自然带走；现在它归本数据层所有，必须显式清。）
 	_async.clear()
 	_async.configure(stream, generator)
+
+
+## 把 grid_size 转成生成器的可生成范围 AABB（ZERO = 无限世界，自动关闭）。
+## 生成器只生成世界范围内的 chunk（矩形地图），否则渲染器会对 view_distance 内每个 chunk
+## 都提交生成 → 海量空 chunk。数据源与尺寸任一变化都要重跑，故单独成一个函数供两处调用。
+func _sync_generator_bounds() -> void:
+	if generator != null:
+		generator.set_grid_size(grid_size)
 
 ## 居中偏移 (体素单位，运行时渲染时叠加到网格顶点)
 ## 导入时若 center 选项开启，自动计算使模型左右前后居中(X/Z)、上下贴底(Y=0)
