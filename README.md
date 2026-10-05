@@ -25,16 +25,24 @@ You can see the rendering effects of voxel models imported using this plugin in 
 
 ```
 VoxelData                    — voxel storage & editing (materials, chunk buffers)
-  └─ VoxelStream (@abstract) — chunk-level persistence API (all methods @abstract,
-                               a subclass missing any will fail to compile)
-       ├─ QVoxStream              — single-file .qvox block-stream world storage
-       └─ VoxelProceduralStream (@abstract) — infinite procedural world
-            └─ your subclass overrides @abstract `_generate_chunk()`
+  ├─ VoxelStream (@abstract)     — STORAGE: chunk-level persistence API (all @abstract)
+  │    ├─ QVoxStream             — single-file .qvox block-stream world storage (disk)
+  │    └─ VoxelMemoryStream      — memory only (no persistence; a home for edits)
+  └─ VoxelGenerator (@abstract)  — GENERATION: compute data from a key (no I/O, no state)
+       └─ your subclass overrides @abstract `_generate_chunk()` / `_generate_chunk_lod()`
 VoxelRenderer              — async mesh generation, LOD, streaming, collision
 VoxelDestructible          — extends VoxelRenderer: destruction, collapse, falling debris
 ```
 
-**Data access order** (per chunk): memory buffer → disk stream → procedural generation.
+**Storage and generation are two parallel parts**: `stream` stores (disk or memory),
+`generator` generates (procedural terrain). They can coexist (procedural world + persisted
+destruction); lookup order is always **stream first** — anything stored is authoritative and
+must never be overwritten by a freshly generated result.
+Pending/ready bookkeeping, dedup, throttling and background dispatch live in one place
+(`VoxelAsyncLoader`); each source only answers two synchronous questions: "is it stored?" and
+"can you generate it?".
+
+**Data access order** (per chunk): memory buffer → stream → generator.
 All mesh generation runs on background threads (`WorkerThreadPool`); the main thread never builds voxel meshes or generates chunks synchronously.
 
 ### Static world (disk streaming)
@@ -61,7 +69,7 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 
 ```gdscript
 class_name MyWorld
-extends VoxelProceduralStream
+extends VoxelGenerator
 
 ## Override the base @abstract method: return a 32³ PackedInt32Array
 ## (value = material id, 0 = empty). Must be deterministic: same chunk_key → same terrain.
@@ -69,18 +77,21 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	# e.g. noise-based heightmap — use ABSOLUTE voxel y for cross-layer continuity
 	...
 
-# usage
-var stream := MyWorld.new()
-stream.persist_directory = "user://world_edits"   # optional: persist player edits across restart
+# usage: the generator GENERATES, the stream STORES (swap freely, independently)
 var data := VoxelData.new()
-data.stream = stream
+data.stream = QVoxStream.new()          # player edits go to disk, survive restart
+data.stream.file_path = "user://world_edits/world.qvox"
+data.generator = MyWorld.new()          # untouched parts generated from the key
 # assign to VoxelRenderer.data (recommend visibility_mode = STREAMING)
 ```
+
+> Swap `stream` for `VoxelMemoryStream` to keep edits in memory only; leave it unset and the
+> engine falls back to a memory stream automatically. The generator code never changes.
 
 Features:
 - **Deterministic** — same chunk_key → same terrain, continuous across borders and origin shifts
 - **Origin shift** — camera moving far auto-shifts the world origin so coordinates stay small (float32 precision safe) → truly unlimited world
-- **Edit persistence** — player-modified chunks stored under `persist_directory`, survive restart
+- **Edit persistence** — player-modified chunks are stored by `stream`, surviving restart
 - **Async generation** — chunk generation runs on background threads; main thread only submits/collects
 - **Auto-unload** — chunks beyond `view_distance` are dropped and regenerated on return
 

@@ -23,16 +23,22 @@
 
 ```
 VoxelData                    — 体素数据存储与修改（材质、chunk 缓冲）
-  └─ VoxelStream (@abstract) — chunk 级持久化 API（全部方法 @abstract，
-                               子类漏实现任一将无法编译）
-       ├─ QVoxStream              — .qvox 单文件块流世界存档
-       └─ VoxelProceduralStream (@abstract) — 程序化无限世界
-            └─ 子类覆写 @abstract `_generate_chunk()`
+  ├─ VoxelStream (@abstract)     — 存储：chunk 级持久化 API（全部方法 @abstract）
+  │    ├─ QVoxStream             — .qvox 单文件块流世界存档（磁盘）
+  │    └─ VoxelMemoryStream      — 纯内存（不落盘；程序化世界的编辑落脚处）
+  └─ VoxelGenerator (@abstract)  — 生成：给定 key 算出数据（不碰 I/O、无状态）
+       └─ 子类覆写 @abstract `_generate_chunk()` / `_generate_chunk_lod()`
 VoxelRenderer              — 异步网格生成、LOD、流式加载、碰撞
 VoxelDestructible          — 继承 VoxelRenderer：破坏、崩塌、掉落碎片
 ```
 
-**数据访问顺序**（每 chunk）：内存缓冲 → 磁盘流 → 程序化生成。
+**"存"与"造"是两个并列的部件**：`stream` 负责存（磁盘 / 内存），`generator` 负责造
+（程序化地形）。二者可以同时存在（程序化世界 + 破坏存档），取数优先级恒为
+**流 > 生成器**——存过的必须权威，不能被重新生成覆盖。
+登记 / 去重 / 后台派发 / 回填集中在 `VoxelAsyncLoader` 一处，两个数据源都只回答
+"存了吗"与"能造吗"两个同步问题。
+
+**数据访问顺序**（每 chunk）：内存缓冲 → 流 → 生成器。
 所有网格生成在后台线程（`WorkerThreadPool`），主线程不阻塞于体素生成/建网格。
 
 ### 静态世界（磁盘流式）
@@ -59,7 +65,7 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 
 ```gdscript
 class_name MyWorld
-extends VoxelProceduralStream
+extends VoxelGenerator
 
 ## 覆写基类 @abstract 方法：返回 32³ PackedInt32Array（值 = 材质ID，0 = 空）。
 ## 必须确定性：同 chunk_key → 同地形。
@@ -67,18 +73,21 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	# 例如基于噪声的高度图 —— 用【绝对体素 y】判断，保证跨层连续
 	...
 
-# 使用
-var stream := MyWorld.new()
-stream.persist_directory = "user://world_edits"   # 可选：持久化玩家修改，重启保留
+# 使用：生成器"造"，存储"存"（可自由替换，互不影响）
 var data := VoxelData.new()
-data.stream = stream
+data.stream = QVoxStream.new()          # 玩家修改落盘，重启保留
+data.stream.file_path = "user://world_edits/world.qvox"
+data.generator = MyWorld.new()          # 未编辑的部分按 key 确定性生成
 # 赋值给 VoxelRenderer.data（建议 visibility_mode = STREAMING）
 ```
+
+> `stream` 换成 `VoxelMemoryStream` 即"修改只存内存、退出即丢"；留空则由引擎自动兜底
+> 建一个内存流。生成器代码一行都不用改。
 
 特性：
 - **确定性** — 同 chunk_key → 同地形，chunk 边界与 origin shift 后世界连续
 - **动态原点重定位（origin shift）** — 相机远移自动平移世界基准，坐标保持小（float32 精度安全）→ 真正的无限世界
-- **修改持久化** — 玩家修改的 chunk 写入 `persist_directory`，重启保留
+- **修改持久化** — 玩家修改的 chunk 由 `stream` 负责，重启保留
 - **异步生成** — chunk 生成在后台线程（`WorkerThreadPool`），主线程只提交/回填
 - **自动卸载** — 超出 `view_distance` 的 chunk 丢弃，回来时重新生成
 

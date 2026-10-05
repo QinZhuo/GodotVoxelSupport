@@ -37,7 +37,7 @@ const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
 
 const FILE_EXT := ".qvox"
 
-## 目录型调用方（如程序化流的 persist_directory）使用的固定文件名。
+## 按目录组织存档的调用方使用的固定文件名（一个目录承载整个世界）。
 const WORLD_FILE_NAME := "world" + FILE_EXT
 
 ## LOD 派生缓存在 CACH 里的命名空间与算法版本（§6：kind 由写入方定义，格式不解释）。
@@ -108,8 +108,8 @@ var _loaded_head: Dictionary = {}
 var _loaded_materials: Array = []
 var _loaded_node: Dictionary = {}
 
-# 异步请求簿记见基类 VoxelStream（_async_pending / _async_enqueue / ...）：数据就在内存，
-# poll 时就地回填。
+# 异步取数由 VoxelAsyncLoader 编排：它先问 has_chunk，命中就调 load_chunk 直读内存
+# （本类的索引常驻内存，无需后台任务），故本类不实现任何异步接口。
 
 # 真未知块（格式层不认识的类型 -> [payload]）。重写时原样保留，保证不丢外部数据。
 # CACH 不在这里——它是一等块（doc.cach / _lod_cache），有自己的重写路径。
@@ -684,41 +684,8 @@ func get_stream_path() -> String:
 	return file_path
 
 
-# ----------------------------------------------------------------------------
-# 统一异步接口（与 VoxelProceduralStream 共用同一套流式加载）
-# 簿记（登记 / 去重 / 取出）复用基类 VoxelStream 的 _async_* 工具
-# ----------------------------------------------------------------------------
-
-## 异步请求：数据常驻内存，直接登记即可（poll 时就地读回），无需后台任务。
-func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
-	if lod != 0:
-		return
-	_ensure_loaded()
-	_async_enqueue(chunk_key, 0)
-
-
-func poll_all_ready(max_count: int) -> Array:
-	var out: Array = []
-	for e in _async_pending_keys():
-		if out.size() >= max_count:
-			break
-		var lod: int = e[0]
-		var ck: Vector3i = e[1]
-		_async_drop_pending(ck, lod)
-		var buf := load_chunk(ck, lod)
-		if buf.is_empty():
-			continue
-		out.append([lod, ck, buf])
-	return out
-
-
-func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
-	if lod != 0:
-		return false
-	return _async_is_pending(chunk_key, 0)
-
-
-# clear_async_state() 复用基类实现（清空在途 / 就绪登记）。
+# 异步取数（request / poll / 在途查询）不在本类：存储只回答"存没存、取出来"，
+# 编排（去重、限流、后台派发、结果回填）由 VoxelAsyncLoader 一处负责。
 
 
 # ----------------------------------------------------------------------------

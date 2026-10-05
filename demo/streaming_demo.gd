@@ -4,7 +4,7 @@ extends Node
 ##
 ## 目的：直观展示距离 LOD 卸载（Streaming）与两种数据流，测试内容高度关联：
 ##   - 文件流模式：手工构建的大地面+散布建筑（QVoxStream 单文件流式，破坏可写盘）
-##   - 程序化模式：VoxelProceduralStream 子类（_generate_chunk 噪声地形）+ origin shift 无限世界
+##   - 程序化模式：VoxelGenerator 子类（_generate_chunk 噪声地形）+ QVoxStream 存破坏 + origin shift 无限世界
 ## 两种模式共用同一渲染器与 LOD/流式逻辑，相机 WASD 自由移动。
 ##
 ## 操作：
@@ -173,14 +173,20 @@ func _build_world_file() -> void:
 	_target.global_position = -Vector3(bounds.size.x, 0, bounds.size.z) * voxel_scale * 0.5
 
 
-## 程序化模式：VoxelProceduralStream 子类（_generate_chunk 噪声地形）+ origin shift 无限世界
+## 程序化模式：VoxelGenerator 子类（_generate_chunk 噪声地形）+ origin shift 无限世界。
+## "造"与"存"是两个并列的部件：generator 造未编辑的部分，stream 存编辑过的覆盖层。
 func _build_world_procedural() -> void:
-	# 程序化流（子类覆写 _generate_chunk 实现生成算法）
-	var stream := ProceduralTerrainGenerator.new()
-	# 修改持久化：用户破坏的 chunk 写盘，重启后保留（跨进程验证程序化+破坏存档）
-	stream.persist_directory = "user://voxel_procedural_stream"
 	var data := VoxelData.new()
+	# 存储：用户破坏的 chunk 写盘，重启后保留（跨进程验证程序化 + 破坏存档）。
+	# 换成 VoxelMemoryStream 即"只存内存、退出即丢"，上层代码一行都不用改。
+	var dir := "user://voxel_procedural_stream"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
+	var stream := QVoxStream.new()
+	stream.file_path = dir.path_join(QVoxStream.WORLD_FILE_NAME)
 	data.stream = stream
+	# 生成器：子类覆写 _generate_chunk / _generate_chunk_lod 实现生成算法。
+	# 先设 stream 再设 generator：generator 的 setter 只在 stream 为空时才兜底建内存流。
+	data.generator = ProceduralTerrainGenerator.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	mat.color = Color(0.35, 0.55, 0.3)

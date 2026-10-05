@@ -280,7 +280,7 @@ func test_stream_end_to_end() -> void:
 	s.set_materials([null, null, null, null])   # 4 个条目：体素值 1..3 均落在范围内
 	s.save_chunk(ck_a, buf_a, 0)
 	s.save_chunk(ck_b, buf_b, 0)
-	s.save_chunk(Vector3i.ZERO, buf_l1, 1)      # lod=1 → model 1
+	s.save_chunk(Vector3i.ZERO, buf_l1, 1)      # lod=1 → CACH 派生缓存（不是 model 1）
 	s.flush()
 	assert_true(FileAccess.file_exists(path), "应写出 .qvox 文件")
 
@@ -300,24 +300,29 @@ func test_stream_end_to_end() -> void:
 	r2.file_path = path
 	assert_eq(r2.load_chunk(ck_a, 0), buf_a, "擦除后 A 仍应存在")
 	assert_true(r2.load_chunk(ck_b, 0).is_empty(), "擦除后 B 应消失")
-	assert_eq(r2.load_chunk(Vector3i.ZERO, 1), buf_l1, "擦除后 lod1 数据不受影响")
+	# lod1 是 CACH（派生数据）：B 正是它的来源之一，来源集合变了 §6 规则 1 就判失效。
+	# 真实流程里 VoxelData 会立刻重算并覆盖它；这里直接操作存储层，故表现为"未命中"。
+	# （曾经这里是 assert_eq(..., buf_l1)：那时 lod1 存成独立 model，没有来源校验。）
+	assert_true(r2.load_chunk(Vector3i.ZERO, 1).is_empty(), "来源变更后 lod1 缓存应失效（§6）")
 
-	# 异步取数路径：T2 把「登记 / 去重 / 取出」的簿记上提到了 VoxelStream 基类，
-	# 而渲染器的流式加载正是走这条路，必须有覆盖（此前完全没有）。
-	r2.request_chunk_async(ck_a, 0)
-	assert_true(r2.is_chunk_pending(ck_a, 0), "异步请求应登记为在途")
-	var ready := r2.poll_all_ready(8)
+	# 异步取数路径：登记 / 去重 / 后台派发 / 回填全部集中在 VoxelData 的 VoxelAsyncLoader
+	# （存储本身已不含任何异步接口），渲染器的流式加载正是走这条路，必须有覆盖。
+	var dq := VoxelData.new()
+	dq.stream = r2
+	dq.request_chunk_async(ck_a, 0)
+	assert_true(dq.is_chunk_pending(ck_a, 0), "异步请求应登记为在途")
+	var ready := dq.poll_all_ready(8)
 	assert_eq(ready.size(), 1, "应取回 1 项")
 	if ready.size() == 1:
 		assert_eq(ready[0][0], 0, "取回项的 lod")
 		assert_eq(ready[0][1], ck_a, "取回项的 chunk_key")
 		assert_eq(ready[0][2], buf_a, "取回的缓冲应与写入一致")
-	assert_true(not r2.is_chunk_pending(ck_a, 0), "取回后不应仍在途")
+	assert_true(not dq.is_chunk_pending(ck_a, 0), "取回后不应仍在途")
 
 	# 请求一个不存在的 chunk：不产出结果，但登记同样要被消费掉（否则渲染器会一直等它）。
-	r2.request_chunk_async(Vector3i(9, 9, 9), 0)
-	assert_eq(r2.poll_all_ready(8).size(), 0, "不存在的 chunk 不应产出结果")
-	assert_true(not r2.is_chunk_pending(Vector3i(9, 9, 9), 0), "空块请求也应被消费")
+	dq.request_chunk_async(Vector3i(9, 9, 9), 0)
+	assert_eq(dq.poll_all_ready(8).size(), 0, "不存在的 chunk 不应产出结果")
+	assert_true(not dq.is_chunk_pending(Vector3i(9, 9, 9), 0), "空块请求也应被消费")
 
 	# 文件本身仍应是合法 .qvox（用独立读取路径复核一次）
 	var f := FileAccess.open(path, FileAccess.READ)

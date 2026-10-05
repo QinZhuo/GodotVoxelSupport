@@ -304,7 +304,7 @@ const STREAM_UNLOAD_INTERVAL := 8
 # 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
 var _stream_force_build: Dictionary = {}
-# 统一流式异步请求：已提交后台任务（生成/读盘）待回填的 chunk（stream.request_chunk_async）
+# 统一流式异步请求：已提交后台任务（生成 / 读流）待回填的 chunk（VoxelData.request_chunk_async）
 var _pending_chunks: Dictionary = {}
 # 数据基准 chunk（origin shift 后）：相机 chunk 距基准超阈值时平移世界，保持 float 精度。
 var _origin_chunk: Vector3i = Vector3i.ZERO
@@ -426,7 +426,7 @@ func _process(_delta: float) -> void:
 	# 统一流式/程序化驱动：程序化无限世界总是按距离生成（不依赖 visibility_mode——
 	# 无限世界只能按距离生成，设 FULL/FRUSTUM 若不走流式会导致数据永不生成 → 画面空白）；
 	# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
-	if _streaming_enabled or (data and data.stream is VoxelProceduralStream):
+	if _streaming_enabled or (data and data.generator != null):
 		_process_streaming()
 	# LOD 管理：每 interval 帧限量生成/移除（降低每帧遍历开销，近处 LOD0 / 远处各粗层互补）。
 	# 数据变化（破坏/编辑）时立即处理（不等降频周期 → 破坏重建更及时）。
@@ -748,14 +748,13 @@ func _process_deferred_chunks() -> void:
 
 
 ## 统一流式/程序化驱动（合并原 _process_streaming / _process_procedural）：
-## 按相机距离管理 chunk 数据与网格，数据源差异全部下沉到 VoxelStream 接口：
-##   - 程序化流（VoxelProceduralStream）：未修改 chunk 后台确定性生成（request_chunk_async），
-##     修改过的 chunk 同步预载已存数据（防止重新生成覆盖用户修改）
-##   - 文件流（QVoxStream）：内存块索引 O(1) 命中（QVoxStream 单文件常驻索引），chunk 数据回内存
+## 按相机距离管理 chunk 数据与网格。数据源分成两个**并列**的抽象，差异不再靠类型分支猜：
+##   - generator（VoxelGenerator）：未存过的 chunk 后台确定性生成。
+##     存过的（= 用户改过）必须优先从流取，否则重新生成会覆盖用户修改。
+##   - stream（VoxelStream）：已存的数据（QVoxStream 常驻内存索引 → 直读）。
 ## 统一流程：① poll 回填异步结果 → ② 距离内扫描缺失 chunk 提交（限量/降频）→ ③ 卸载超范围。
-## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走廉价接口
-## （程序化 = is_in_generation_bounds；文件 = VoxelData 已持久化索引），
-## 不再维护 _streamed_out_chunks 渲染层注册表。
+## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走 VoxelData.can_supply_chunk
+## （流里已存 或 生成器可生成），不再维护 _streamed_out_chunks 渲染层注册表。
 func _process_streaming() -> void:
 	if not is_inside_tree():
 		return
@@ -764,8 +763,7 @@ func _process_streaming() -> void:
 	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
 	if cam == null:
 		return
-	var stream: VoxelStream = data.stream
-	if stream == null:
+	if not data.is_streaming():
 		return
 	var cam_pos := cam.global_position
 	var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
@@ -774,16 +772,15 @@ func _process_streaming() -> void:
 	var load_d := view_distance
 	var unload_d := _unload_d()
 	var cam_ck := _chunk_from_world(cam_pos, chunk_size_world, world_offset)
-	var is_procedural := stream is VoxelProceduralStream
 
 	# 程序化无限世界：origin shift（相机 chunk 距基准超阈值 → 平移数据+渲染+相机）
-	if is_procedural:
+	if data.generator != null:
 		_check_origin_shift(cam)
 
-	# 1) 回填后台异步结果（程序化生成 / 文件流内存索引命中），统一 poll → accept（按 lod 分流）
+	# 1) 回填后台异步结果（生成器产出 / 流里直读），统一 poll → accept（按 lod 分流）
 	# poll 限量 = 加载预算的 2 倍：避免来回移动时每帧 accept 过多（主线程写入 + 失效开销大 → 掉帧）
 	var applied := 0
-	var results := stream.poll_all_ready(maxi(_stream_load_per_frame * 2, 32))
+	var results := data.poll_all_ready(maxi(_stream_load_per_frame * 2, 32))
 	for r in results:
 		var lod: int = r[0]
 		var ck: Vector3i = r[1]
@@ -811,7 +808,7 @@ func _process_streaming() -> void:
 		load_budget = _stream_load_per_frame * 2
 	if _streaming_check_tick % visibility_check_interval == 0:
 		var r := ceili(load_d / chunk_size_world) + 1
-		var yspan := stream.get_vertical_half_span()
+		var yspan := data.get_vertical_half_span()
 		var exhausted := false
 		for dz in range(-r, r + 1):
 			if exhausted:
@@ -829,11 +826,9 @@ func _process_streaming() -> void:
 					# 按带请求独立数据（生成器 _generate_chunk_lod 直接生成，省内存/生成量）。
 					if _chunk_render_level(ck, cam_pos) > 0:
 						continue
-					# 存在性统一判定（廉价，无磁盘 IO）：
-					#   程序化 = is_in_generation_bounds（无限流恒 true / 有限模板流查范围）
-					#   文件流 = VoxelData 已持久化索引（O(1)，避免 has_chunk 触碰磁盘）
-					var available := stream.has_chunk(ck) if is_procedural else data._persisted_chunks.has(ck)
-					if not available:
+					# 存在性统一判定（廉价，无 IO）：流里已存 或 生成器可生成。
+					# 两个抽象各表达一个含义，不再靠类型分支猜（见 VoxelData.can_supply_chunk）。
+					if not data.can_supply_chunk(ck):
 						continue
 					if data.is_chunk_loaded(ck):
 						continue
@@ -841,8 +836,8 @@ func _process_streaming() -> void:
 						continue
 					if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > load_d:
 						continue
-					# 程序化修改过的 chunk：重新生成会覆盖用户修改 → 同步预载已存数据
-					if is_procedural and data._persisted_chunks.has(ck):
+					# 生成器世界里已存过的 chunk（= 用户改过）：重新生成会覆盖修改 → 同步预载已存数据
+					if data.generator != null and data.is_stored(ck):
 						if data.preload_chunk(ck):
 							_stream_force_build[ck] = true
 							data._mark_chunk_dirty(ck)
@@ -1059,10 +1054,10 @@ func _process_lod() -> void:
 	# 1. 各层：移除超出区间 / 生成带内缺失 / 可见性兜底（跨层共享构建预算）
 	_lod_build_this_frame = 0
 	_lod_submit_this_frame = 0
-	# 程序化流：粗层独立数据生成较慢（噪声），收紧每帧粗层 request 预算，
+	# 程序化生成：粗层独立数据生成较慢（噪声），收紧每帧粗层 request 预算，
 	# 让出 WorkerThreadPool 给 LOD0 chunk 生成（切换后快速看到地形，粗层随后补充）。
 	var submit_budget: int = _lod_submit_per_frame
-	if data and data.stream is VoxelProceduralStream:
+	if data and data.generator != null:
 		submit_budget = 40
 	# 每层独立构建预算 = 总数均分（保证近层建完前更粗层也能推进，不被近层 in-flight
 	# 队列饿死——否则 LOD1 海量候选每帧占满共享配额，LOD2 永远 0 个 → 远处空洞）。
@@ -1568,8 +1563,8 @@ func _build_lod_from_arrays(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 
 
 ## 卸载单个 chunk 网格（非超级块模式）：释放 mesh + 节点。
-## 重载不再需要渲染层注册表：统一流式扫描用 stream.has_chunk（程序化）/VoxelData._persisted_chunks
-## （文件流）判定存在性，重进加载范围即按需重载。
+## 重载不再需要渲染层注册表：统一流式扫描用 VoxelData.can_supply_chunk 判定存在性
+## （流里已存 或 生成器可生成），重进加载范围即按需重载。
 func _unload_chunk(ck: Vector3i) -> void:
 	var mi: MeshInstance3D = _lod_meshes[0].get(ck)
 	if mi != null and is_instance_valid(mi):
@@ -1867,9 +1862,9 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			var _t1 := Time.get_ticks_usec()
 			has_voxels_in_data = data.has_chunk(chunk_key)
 			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
-		# 程序化流：数据已被 LOD1 区释放（超 LOD0 区、由 LOD1 覆盖）→ 该异步结果过期丢弃。
+		# 程序化生成：数据已被 LOD1 区释放（超 LOD0 区、由 LOD1 覆盖）→ 该异步结果过期丢弃。
 		# 否则释放后异步 mesh 结果回来仍建网格 → 地块"显示→消失→再显示"闪烁。
-		if data and data.stream is VoxelProceduralStream and not has_voxels_in_data:
+		if data and data.generator != null and not has_voxels_in_data:
 			_pending_task_count -= 1
 			if _pending_task_count <= 0:
 				_pending_task_count = 0

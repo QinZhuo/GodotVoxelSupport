@@ -38,7 +38,7 @@ extends Resource
 ##   - 访问 / 范围查询 / 破坏 / 网格生成会自动从磁盘加载所需 chunk（见各方法注释）
 ## 渲染器可在 STREAMING 模式下按距离调用 unload_chunk() / preload_chunk() 驱动
 ## 数据层的卸载与补建（见 VoxelRenderer._process_streaming）。
-## 通过 set_stream() 或 setter 赋值；切换时会先 flush 旧流并恢复新流的已持久化索引。
+## 通过 set_stream() 或 setter 赋值；切换时会先 flush 旧流。
 @export var stream: VoxelStream:
 	set(v):
 		# setter 内部赋值不会递归，可直接设置底层存储（与 VoxelRenderer.data 同模式）
@@ -48,20 +48,47 @@ extends Resource
 		if stream != null and not _dirty_chunks.is_empty():
 			flush()
 		stream = v
-		_persisted_chunks.clear()
-		# 程序化流：把本数据层的 grid_size（体素世界尺寸）同步给流做有限范围限制。
-		# 流按此 AABB 只生成世界范围内 chunk（地面矩形地图）；无限流传 ZERO 自动关闭。
-		if stream is VoxelProceduralStream:
-			(stream as VoxelProceduralStream).set_grid_size(grid_size)
-		if stream != null:
-			for ck in stream.get_all_chunk_keys():
-				_persisted_chunks[ck] = true
-		# 内存里已有、新流里没有的 chunk 必须重新标记为"待写"：上面的 flush 只保证
-		# 旧流完好（它已把 _dirty_chunks 清空），若不补标，这些 chunk 卸载时会被当成
-		# "磁盘已有"直接丢弃，而新流其实从未见过它们 → 数据静默丢失。
+		# 内存里已有、新流里没有的 chunk 必须重新标记为"待写"：上面的 flush 只保证旧流完好
+		# （它已清空 _dirty_chunks），若不补标，这些 chunk 卸载时会被当成"流里已有"直接丢弃，
+		# 而新流其实从未见过它们 → 数据静默丢失。
 		for ck in _chunk_buffers:
-			if not _persisted_chunks.has(ck):
+			if stream == null or not stream.has_chunk(ck, 0):
 				_dirty_chunks[ck] = true
+		_sync_sources()
+
+## 生成器（VoxelGenerator 子类）。与 stream 是**并列**的两个数据源：
+##   stream    "存"：用户编辑、存档、导入的静态数据（见上）
+##   generator "造"：程序化地形 —— 未编辑部分按 key 确定性生成，零存储
+## 二者可并存（程序化世界 + 破坏存档）。取数优先级恒为 **流 > 生成器**：
+## 存过的东西必须权威，不能被生成结果覆盖。
+##
+## 只设 generator 不设 stream 时，会自动补一个 VoxelMemoryStream 作编辑的落脚处
+## （否则编辑过的 chunk 无处可存，卸载后被重新生成覆盖 → 破坏成果丢失）。
+@export var generator: VoxelGenerator:
+	set(v):
+		if generator == v:
+			return
+		generator = v
+		if generator != null and stream == null:
+			stream = VoxelMemoryStream.new()
+		_sync_sources()
+
+## 取数编排器（在途 / 就绪 / 去重 / 限流 / 后台派发）。全项目唯一持有这本账的地方。
+var _async := VoxelAsyncLoader.new()
+
+
+## 把两个数据源同步给编排器，并把本数据层的 grid_size 转成生成器的可生成范围。
+## 生成器按此 AABB 只生成世界范围内的 chunk（有限地图）；ZERO = 无限世界，自动关闭。
+## 不同步会让渲染器对 view_distance 内每个 chunk 都提交生成 → 海量空 chunk。
+func _sync_sources() -> void:
+	if generator != null:
+		generator.set_grid_size(grid_size)
+	if _async == null:
+		return
+	# 换源时丢弃在途 / 就绪登记：那些请求属于旧数据源，回填进新世界会写出错坐标的数据。
+	# （早先这本账挂在流对象上，换流自然带走；现在它归本数据层所有，必须显式清。）
+	_async.clear()
+	_async.configure(stream, generator)
 
 ## 居中偏移 (体素单位，运行时渲染时叠加到网格顶点)
 ## 导入时若 center 选项开启，自动计算使模型左右前后居中(X/Z)、上下贴底(Y=0)
@@ -279,10 +306,6 @@ var _lod_downsample_retries: Array[Dictionary] = []
 ## 归零即视为空 chunk 可擦除——消除破坏/崩塌热路径的 32³ 循环。
 var _chunk_voxel_counts: Dictionary = {}
 
-## 磁盘上已持久化的 chunk（key -> true，权威标志：该 chunk 数据存在于流中）。
-## 与内存缓存独立：chunk 卸载（unload_chunk）后仍保留此标志，供按需重载/索引。
-var _persisted_chunks: Dictionary = {}
-
 ## 内存中被修改过、尚未写盘的 chunk（key -> true）。卸载时写盘；变空时清盘。
 ## 未修改且磁盘已有的 chunk 卸载时直接丢弃（磁盘为权威，无意义 IO 写入）。
 var _dirty_chunks: Dictionary = {}
@@ -378,7 +401,7 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
 	if buf == null:
-		if stream != null and _persisted_chunks.has(ck):
+		if is_stored(ck):
 			# 流式：该 chunk 在磁盘已有数据，先载入内存再修改（保留旧数据）
 			preload_chunk(ck)
 			buf = _chunk_buffers.get(ck)
@@ -411,10 +434,9 @@ func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
 	_chunk_buffers.erase(ck)
 	_chunk_voxel_counts.erase(ck)
 	_dirty_chunks.erase(ck)
-	if stream != null and _persisted_chunks.has(ck):
-		# 流式：世界该处已清空，同步删除磁盘数据（否则重载会出现"幽灵 chunk"）
+	if is_stored(ck):
+		# 流式：世界该处已清空，同步删除存储里的旧数据（否则重载会出现"幽灵 chunk"）
 		stream.erase_chunk(ck)
-		_persisted_chunks.erase(ck)
 
 
 # ----------------------------------------------------------------------------
@@ -427,48 +449,66 @@ func set_stream(s: VoxelStream) -> void:
 	stream = s
 
 
-## 数据层流式是否启用
+## 数据层流式是否启用（有流可读/写，或能程序化生成）
 func is_streaming() -> bool:
-	return stream != null
+	return stream != null or generator != null
 
 
-## chunk 是否在内存中（有密集缓冲）。has_chunk 的严格子集（仅内存，不含磁盘）。
+## chunk 是否在内存中（有密集缓冲）。has_chunk 的严格子集（仅内存，不含存储）。
 func is_chunk_loaded(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key)
 
 
-## 从流加载 chunk 数据到内存。已加载返回 true；流中不存在返回 false。
+## 该 chunk 是否**已存在流中**（纯存储事实，与"能否生成"无关）。
+## 取代早先的 _persisted_chunks 镜像——那时它靠 save/erase 处手工同步，
+## origin shift 一平移就与流的真实内容脱节（镜像的经典失效方式）。
+## 直接问流既是权威的，也是 O(1) 的（QVoxStream 的键索引常驻内存）。
+func is_stored(chunk_key: Vector3i) -> bool:
+	return stream != null and stream.has_chunk(chunk_key, 0)
+
+
+## 该 chunk 的数据能否取到：流里已存 或 生成器可生成。廉价、无 IO，供渲染器距离扫描用。
+func can_supply_chunk(chunk_key: Vector3i) -> bool:
+	if stream != null and stream.has_chunk(chunk_key, 0):
+		return true
+	return generator != null and generator.is_in_generation_bounds(chunk_key)
+
+
+## 渲染器距离扫描的垂直半跨度（无生成器时只有 ±1 层）。
+func get_vertical_half_span() -> int:
+	return generator.get_vertical_half_span() if generator != null else 1
+
+
+## 把 chunk 数据**同步**载入内存。已加载返回 true；取不到返回 false。
 ## 流式补建/网格生成前调用，保证后续读操作走内存数组。
+##
+## 两条路分开处理（这正是"存"与"造"分工的价值）：
+##   流里已存 → 同步直读。存储取数是确定的、快的（QVoxStream 索引常驻内存），
+##             没有理由为此绕一趟异步队列。
+##   只有生成器 → 交给异步。生成慢，而网格 / LOD halo 会成片调用它，
+##             同步生成会把主线程卡死；就绪后由 accept_chunk_buffer 回填。
 func preload_chunk(chunk_key: Vector3i) -> bool:
 	if _chunk_buffers.has(chunk_key):
 		return true
-	if stream == null:
-		return false
-	# 数据可用性：磁盘持久化(缓存索引) 或 程序化流(任意 chunk 可生成)
-	var available := _persisted_chunks.has(chunk_key)
-	if not available and stream is VoxelProceduralStream:
-		available = stream.has_chunk(chunk_key)
-	if not available:
-		return false
-	# 程序化流 + 数据不在内存（非持久化）：提交后台生成并返回 false，不在主线程同步
-	# 生成（网格/LOD1 的 halo snapshot 大量调用会卡顿）。就绪后由 accept_chunk_buffer 回填。
-	if stream is VoxelProceduralStream and not _persisted_chunks.has(chunk_key):
-		(stream as VoxelProceduralStream).request_chunk_async(chunk_key)
-		return false
-	var buf := stream.load_chunk(chunk_key)
-	if buf.is_empty():
-		_persisted_chunks.erase(chunk_key)
-		return false
-	_chunk_buffers[chunk_key] = buf
-	var cnt := 0
-	for i in CHUNK_VOLUME:
-		if buf[i] > 0:
-			cnt += 1
-	_chunk_voxel_counts[chunk_key] = cnt
-	_voxel_count += cnt
-	# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合，防横/竖/块状空洞）
-	_mark_neighbors_dirty(chunk_key)
-	return true
+	if is_stored(chunk_key):
+		var buf := stream.load_chunk(chunk_key, 0)
+		if buf.size() != CHUNK_VOLUME:
+			# 索引说有、实际读不到（文件被外部改写等）→ 以读结果为准，顺手清掉
+			stream.erase_chunk(chunk_key, 0)
+			return false
+		_chunk_buffers[chunk_key] = buf
+		var cnt := 0
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				cnt += 1
+		_chunk_voxel_counts[chunk_key] = cnt
+		_voxel_count += cnt
+		# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合）
+		_mark_neighbors_dirty(chunk_key)
+		return true
+	if generator != null and generator.is_in_generation_bounds(chunk_key):
+		_async.request(chunk_key, 0)
+	return false
 
 
 ## 回填统一异步流式结果（程序化后台生成 / 文件流 region 读盘，主线程调用）。
@@ -519,10 +559,9 @@ func unload_chunk(chunk_key: Vector3i) -> bool:
 	if _dirty_chunks.has(chunk_key):
 		if _chunk_voxel_counts.get(chunk_key, 0) > 0:
 			stream.save_chunk(chunk_key, _chunk_buffers[chunk_key])
-			_persisted_chunks[chunk_key] = true
-		elif _persisted_chunks.has(chunk_key):
+		elif is_stored(chunk_key):
+			# 世界该处已清空 → 同步清掉存储里的旧数据，否则重载会出现"幽灵 chunk"
 			stream.erase_chunk(chunk_key)
-			_persisted_chunks.erase(chunk_key)
 		_dirty_chunks.erase(chunk_key)
 	_voxel_count -= _chunk_voxel_counts.get(chunk_key, 0)
 	_chunk_voxel_counts.erase(chunk_key)
@@ -545,12 +584,12 @@ func get_loaded_chunk_keys() -> Array[Vector3i]:
 	return keys
 
 
-## 获取磁盘上已持久化但不在内存的 chunk key 列表（流式补建调度用）
+## 获取流中已存但不在内存的 chunk key 列表（流式补建调度用）
 func get_unloaded_chunk_keys() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
 	if stream == null:
 		return keys
-	for ck: Vector3i in _persisted_chunks:
+	for ck in stream.get_all_chunk_keys(0):
 		if not _chunk_buffers.has(ck):
 			keys.append(ck)
 	return keys
@@ -571,10 +610,8 @@ func flush() -> void:
 			continue
 		if _chunk_voxel_counts.get(ck, 0) > 0:
 			stream.save_chunk(ck, buf)
-			_persisted_chunks[ck] = true
-		elif _persisted_chunks.has(ck):
+		elif is_stored(ck):
 			stream.erase_chunk(ck)
-			_persisted_chunks.erase(ck)
 	_dirty_chunks.clear()
 	stream.flush()
 
@@ -586,7 +623,7 @@ func load_voxels_dict(dict: Dictionary) -> void:
 		_write_buffer_impl(pos_key, dict[pos_key], false)
 
 
-## 获取所有有数据的 chunk key（内存 + 磁盘流中已持久化的）
+## 获取所有有数据的 chunk key（内存 + 流中已存的）
 func get_all_chunk_keys() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
 	var seen := {}
@@ -594,7 +631,7 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 		keys.append(ck)
 		seen[ck] = true
 	if stream != null:
-		for ck: Vector3i in _persisted_chunks:
+		for ck in stream.get_all_chunk_keys(0):
 			if not seen.has(ck):
 				keys.append(ck)
 				seen[ck] = true
@@ -609,7 +646,6 @@ func shift_origin(offset: Vector3i) -> void:
 		return
 	_chunk_buffers = _shift_dict_keys(_chunk_buffers, offset)
 	_chunk_voxel_counts = _shift_dict_keys(_chunk_voxel_counts, offset)
-	_persisted_chunks = _shift_dict_keys(_persisted_chunks, offset)
 	_dirty_chunks = _shift_dict_keys(_dirty_chunks, offset)
 	_dirty_mesh_chunks = _shift_dict_keys(_dirty_mesh_chunks, offset)
 	for i in _lod_invalidated.size():
@@ -618,8 +654,11 @@ func shift_origin(offset: Vector3i) -> void:
 		_coarse_buffers[i] = _shift_dict_keys(_coarse_buffers[i], offset)
 	for i in _coarse_modified.size():
 		_coarse_modified[i] = _shift_dict_keys(_coarse_modified[i], offset)
-	if stream is VoxelProceduralStream:
-		(stream as VoxelProceduralStream).shift_origin(offset)
+	# 生成器的"可生成范围"也要跟着平移，否则无限世界平移后范围判定仍指向旧坐标。
+	if generator != null:
+		generator.shift_bounds(offset)
+	# 在途 / 就绪登记的 key 同样要平移，否则回填会写到旧坐标（数据落在错误的 chunk 上）。
+	_async.shift_keys(offset)
 
 
 static func _shift_dict_keys(d: Dictionary, offset: Vector3i) -> Dictionary:
@@ -791,17 +830,12 @@ func is_lod_block_modified(level: int, key: Vector3i) -> bool:
 func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 	if has_lod_block(lod, chunk_key):
 		return
-	var s := stream
-	if s != null and s.has_method("request_chunk_async"):
-		s.request_chunk_async(chunk_key, lod)
-	# 文件流粗层：先查持久化（region 已存降采样缓存）→ 直接读回填；无 → 从 LOD0 降采样生成（后台）并持久化
-	if lod >= 1 and s is QVoxStream and not has_lod_block(lod, chunk_key):
-		if s.has_chunk(chunk_key, lod):
-			var buf := s.load_chunk(chunk_key, lod)
-			if buf.size() > 0:
-				set_lod_block(lod, chunk_key, buf)
-		else:
-			_start_lod_downsample(chunk_key, lod)
+	# 统一编排：流里已存（含 QVox 的粗层 CACH 缓存）→ 主线程直读；否则生成器可生成 → 后台生成。
+	_async.request(chunk_key, lod)
+	# 粗层再兜底：两个数据源都没有（如纯文件流且没存过粗层缓存）→ 从 LOD0 降采样得到。
+	# 粗层本就是 LOD0 的派生数据，降采样是最保底的来源（结果同样落 CACH 缓存）。
+	if lod >= 1 and not has_lod_block(lod, chunk_key) and not _async.is_pending(chunk_key, lod):
+		_start_lod_downsample(chunk_key, lod)
 
 
 ## 文件流粗层降采样任务去重（_lod_downsample_pending[level-1]）
@@ -872,17 +906,14 @@ func _retry_lod_downsample(block_key: Vector3i, lod: int) -> void:
 		_start_lod_downsample(block_key, lod)
 
 
-## 该 chunk/block 是否已有后台生成任务进行中或结果就绪（渲染器每帧预算限流用，避免重复提交）。
-## 程序化流有内部异步队列；无该方法的数据源视为无防重需求（返回 false）。
+## 该 chunk/block 是否已有后台任务进行中或结果就绪（渲染器每帧预算限流用，避免重复提交）。
 func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
 	if has_lod_block(lod, chunk_key):
 		return true
-	var s := stream
-	if s != null and s.has_method("is_chunk_pending"):
-		if s.is_chunk_pending(chunk_key, lod):
-			return true
-	# 文件流粗层降采样任务进行中（防重复降采样）
-	if lod >= 1 and s is QVoxStream:
+	if _async.is_pending(chunk_key, lod):
+		return true
+	# 粗层降采样任务进行中（防重复降采样）
+	if lod >= 1:
 		var idx := lod - 1
 		if idx < _lod_downsample_pending.size() and _lod_downsample_pending[idx].has(chunk_key):
 			return true
@@ -907,10 +938,7 @@ func snapshot_lod_block_data(block_key: Vector3i, level: int) -> Dictionary:
 
 ## 主线程批量取回异步就绪的 chunk/block 数据。返回 [[lod, key, PackedInt32Array], ...]。
 func poll_all_ready(max_count: int) -> Array:
-	var s := stream
-	if s != null and s.has_method("poll_all_ready"):
-		return s.poll_all_ready(max_count)
-	return []
+	return _async.poll_ready(max_count)
 
 
 # ----------------------------------------------------------------------------
@@ -939,7 +967,7 @@ func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
 		seen[ck] = true
 	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int): out[pos] = mat_id)
 	if stream != null:
-		for ck: Vector3i in _persisted_chunks:
+		for ck in stream.get_all_chunk_keys(0):
 			if seen.has(ck):
 				continue
 			var buf := _load_chunk_from_stream(ck)
@@ -958,7 +986,7 @@ func get_voxel(pos: Vector3i) -> int:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
 	if buf == null:
-		if stream != null and _persisted_chunks.has(ck):
+		if is_stored(ck):
 			preload_chunk(ck)
 			buf = _chunk_buffers.get(ck)
 		if buf == null:
@@ -972,7 +1000,7 @@ func has_voxel(pos: Vector3i) -> bool:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
 	if buf == null:
-		if stream != null and _persisted_chunks.has(ck):
+		if is_stored(ck):
 			preload_chunk(ck)
 			buf = _chunk_buffers.get(ck)
 		if buf == null:
@@ -988,7 +1016,7 @@ func get_positions() -> Array:
 		seen[ck] = true
 	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int): out.append(pos))
 	if stream != null:
-		for ck: Vector3i in _persisted_chunks:
+		for ck in stream.get_all_chunk_keys(0):
 			if seen.has(ck):
 				continue
 			var buf := _load_chunk_from_stream(ck)
@@ -1041,9 +1069,9 @@ func clear(notify: bool = true) -> void:
 	for d in _coarse_modified:
 		d.clear()
 	if stream != null:
-		for ck: Vector3i in _persisted_chunks:
+		for ck in stream.get_all_chunk_keys(0):
 			stream.erase_chunk(ck)
-		_persisted_chunks.clear()
+	_async.clear()
 	if notify:
 		emit_changed()
 
@@ -1172,7 +1200,7 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var r_i := ceili(radius)
 	for ck in overlap_chunks:
 		if not _chunk_buffers.has(ck):
-			if stream != null and _persisted_chunks.has(ck):
+			if is_stored(ck):
 				# 流式：磁盘上的 chunk 载入内存再查询（保证范围查询覆盖持久化数据）
 				preload_chunk(ck)
 			else:
@@ -1210,7 +1238,7 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 		return result
 	for ck in overlap_chunks:
 		if not _chunk_buffers.has(ck):
-			if stream != null and _persisted_chunks.has(ck):
+			if is_stored(ck):
 				# 流式：磁盘上的 chunk 载入内存再查询
 				preload_chunk(ck)
 			else:
@@ -1266,7 +1294,7 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 	if stream != null:
 		var ck_list: Array = NativeLoader.collect_chunks(positions)
 		for ck in ck_list:
-			if not _chunk_buffers.has(ck) and _persisted_chunks.has(ck):
+			if not _chunk_buffers.has(ck) and is_stored(ck):
 				preload_chunk(ck)
 	var res: Dictionary = NativeLoader.set_voxels_bulk(_chunk_buffers, positions, material_id)
 	var modified_buffers: Dictionary = res["buffers"]
@@ -1276,12 +1304,8 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 		var cnt: int = chunk_set[ck]
 		_voxel_count += cnt
 		_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) + cnt
-		# 流式：批量写入标记写盘（否则 chunk 被流式卸载时未 dirty → 磁盘旧数据残留）
+		# 流式：批量写入标记写盘（否则 chunk 被流式卸载时未 dirty → 存储里旧数据残留）
 		_dirty_chunks[ck] = true
-		# 增量持久化：标记该 chunk 有数据需写盘（卸载时 save_chunk，preload 可重载）。
-		# 否则流式卸载后磁盘无该 chunk → 粗层降采样快照空 → 矩形空洞。
-		if stream != null:
-			_persisted_chunks[ck] = true
 	# 标记脏 chunk + 跨界面的边界邻居（用 C++ 返回的边界掩码，按 chunk 标记，
 	# 避免逐体素 _mark_voxel_dirty 的多词条 dict 写入瓶颈）
 	var boundary: Dictionary = res["boundary"]
@@ -1333,10 +1357,8 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 		_voxel_count -= cnt
 		_chunk_voxel_counts[ck] = _chunk_voxel_counts.get(ck, 0) - cnt
 		# 流式：批量删除同样标记写盘（否则 chunk 被流式卸载时未 dirty → 直接丢弃，
-		# 磁盘旧数据残留导致重载后体素"复活"）
+		# 存储里旧数据残留导致重载后体素"复活"）
 		_dirty_chunks[ck] = true
-		if stream != null:
-			_persisted_chunks[ck] = true
 		touched[ck] = true
 	# 标记脏 chunk + 跨界面的边界邻居（用 C++ 返回的边界掩码，按 chunk 标记，
 	# 避免逐体素 7 次 dict 写入的大崩塌瓶颈）
@@ -1435,16 +1457,16 @@ func _serialize_chunks_to_list(chunk_keys: Array) -> Array:
 	return voxel_list
 
 
-## 收集"需随资源持久化"的 chunk key（程序化流：用户修改过的 = 内存未写盘 _dirty_chunks +
-## 流已持久化的修改 get_all_chunk_keys）。非程序化流返回空（由 _serialize_voxels 全量覆盖）。
+## 收集"需随资源持久化"的 chunk key（有生成器的世界：用户修改过的 = 内存未写盘 _dirty_chunks +
+## 流中已存的覆盖层）。无生成器返回空（由 _serialize_voxels 全量覆盖）。
 func _collect_modified_chunk_keys() -> Array:
 	var keys := {}
-	if stream is VoxelProceduralStream:
-		var proc: VoxelProceduralStream = stream
+	if generator != null:
 		for ck in _dirty_chunks:
 			keys[ck] = true
-		for ck in proc.get_all_chunk_keys():
-			keys[ck] = true
+		if stream != null:
+			for ck in stream.get_all_chunk_keys(0):
+				keys[ck] = true
 	var out: Array = []
 	for ck in keys:
 		out.append(ck)
@@ -1452,11 +1474,11 @@ func _collect_modified_chunk_keys() -> Array:
 
 
 ## 序列化"需要随资源持久化"的体素（_get 存储专用）。
-## 程序化流：只序列化用户修改过的 chunk（未修改的由 _generate_chunk 确定性生成、无需存储——
+## 有生成器：只序列化用户修改过的 chunk（未修改的由生成器确定性重算、无需存储——
 ##   全部序列化会把 .tscn 撑成上百 MB（历史上 734 万体素 → 137MB 的灾难即由此而来））。
-## 静态数据（无流 / 文件流）：数据只存在于内存（文件流磁盘为权威），序列化全部内存体素。
+## 无生成器（纯静态数据 / 文件流）：数据只存在于内存与流中，序列化全部体素。
 func _serialize_voxels_for_storage() -> Array:
-	if stream is VoxelProceduralStream:
+	if generator != null:
 		var keys := _collect_modified_chunk_keys()
 		if keys.is_empty():
 			return []
@@ -1464,7 +1486,7 @@ func _serialize_voxels_for_storage() -> Array:
 	return _serialize_voxels()
 
 
-## 取 chunk 缓冲（内存优先；未加载则从流读取——程序化流修改数据存于 stream._modified / 文件流）
+## 取 chunk 缓冲（内存优先；未加载则从流读取）
 func _get_chunk_buffer_for_storage(chunk_key: Vector3i) -> PackedInt32Array:
 	var buf = _chunk_buffers.get(chunk_key)
 	if buf != null:
@@ -1474,20 +1496,20 @@ func _get_chunk_buffer_for_storage(chunk_key: Vector3i) -> PackedInt32Array:
 	return PackedInt32Array()
 
 
-## 序列化所有体素（内存 + 磁盘流中已持久化的数据）。
-## 流式模式下磁盘数据由 stream 管理，一次性全量存档时需合并；
-## 磁盘部分临时加载，不污染内存缓存。
-## 程序化流：未修改 chunk 可确定性重新生成，只序列化修改过的（磁盘为权威，与资源存储一致）。
+## 序列化所有体素（内存 + 流中已存的数据）。
+## 流式模式下存储数据由 stream 管理，一次性全量存档时需合并；
+## 存储部分临时加载，不污染内存缓存。
+## 有生成器：未修改 chunk 可确定性重新生成，只序列化修改过的。
 ## save_data()（显式存档）使用此完整版；资源持久化（_get）走 _serialize_voxels_for_storage。
 func _serialize_all_voxels() -> Array:
-	if stream is VoxelProceduralStream:
+	if generator != null:
 		return _serialize_voxels_for_storage()
 	var voxel_list := _serialize_voxels()
 	if stream == null:
 		return voxel_list
-	# 磁盘流（QVoxStream）：合并已持久化但不在内存的 chunk（临时加载，不污染内存缓存）
+	# 存储流（QVoxStream）：合并已存但不在内存的 chunk（临时加载，不污染内存缓存）
 	var extra: Array = []
-	for ck: Vector3i in _persisted_chunks:
+	for ck in stream.get_all_chunk_keys(0):
 		if not _chunk_buffers.has(ck):
 			extra.append(ck)
 	voxel_list.append_array(_serialize_chunks_to_list(extra))
@@ -1642,8 +1664,8 @@ func load_data(data: Variant) -> void:
 ## 获取指定 chunk 内的所有体素位置（基于密集缓冲扫描）
 ## 返回 Array[Vector3i]（体素位置列表），空 chunk 返回空数组
 func get_chunk_voxels(chunk_key: Vector3i) -> Array:
-	if not _chunk_buffers.has(chunk_key) and stream != null and _persisted_chunks.has(chunk_key):
-		# 流式：磁盘上的 chunk 载入内存再遍历（保证结果完整）
+	if not _chunk_buffers.has(chunk_key) and is_stored(chunk_key):
+		# 流式：存储里的 chunk 载入内存再遍历（保证结果完整）
 		preload_chunk(chunk_key)
 	var buf = _chunk_buffers.get(chunk_key)
 	if buf == null:
@@ -1656,10 +1678,10 @@ func get_chunk_voxels(chunk_key: Vector3i) -> Array:
 	return result
 
 
-## O(1) 判断指定 chunk 数据是否已就绪（内存已加载 / 磁盘持久化）。
-## 程序化流未加载的 chunk 返回 false（需统一流式 _process_streaming 生成后才有数据）。
+## O(1) 判断指定 chunk 数据是否已就绪（内存已加载 / 流中已存）。
+## 生成器可生成但尚未生成的 chunk 返回 false（需统一流式 _process_streaming 生成后才有数据）。
 func has_chunk(chunk_key: Vector3i) -> bool:
-	return _chunk_buffers.has(chunk_key) or (stream != null and _persisted_chunks.has(chunk_key))
+	return _chunk_buffers.has(chunk_key) or is_stored(chunk_key)
 
 
 # ----------------------------------------------------------------------------
