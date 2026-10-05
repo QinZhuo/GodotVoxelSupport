@@ -53,6 +53,12 @@ func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
 	return out
 
 
+## O(1) 计数（不构造 key 数组）。
+func get_chunk_count(lod: int = 0) -> int:
+	var layer: Variant = _blocks.get(lod)
+	return (layer as Dictionary).size() if layer is Dictionary else 0
+
+
 ## 无写缓存，无需刷新。
 func flush() -> void:
 	pass

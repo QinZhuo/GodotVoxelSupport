@@ -41,6 +41,14 @@ func test_edit_unload_reload_roundtrip() -> void:
 	assert_true(d.stream.has_chunk(ck, 0), "卸载应把数据交给流")
 	d.flush()   # QVoxStream 的 save 只改内存 + 置脏，真正写盘在 flush
 
+	# 计数接口必须与 key 列表逐一对齐：HUD 每帧走 计数（不分配），调度走 key 列表。
+	# 两者若分叉，HUD 会显示错误的"磁盘 chunk 数"而调度却按另一套数字行动。
+	assert_eq(d.stream.get_chunk_count(0), d.stream.get_all_chunk_keys(0).size(),
+			"get_chunk_count 应与 get_all_chunk_keys 一致")
+	assert_eq(d.get_unloaded_chunk_count(), d.get_unloaded_chunk_keys().size(),
+			"未加载计数应与未加载 key 列表一致")
+	assert_eq(d.get_unloaded_chunk_count(), 1, "此时恰有 1 个 chunk 只在流中")
+
 	# 同实例：缺数据的 chunk 应从磁盘自动载回，读语义不变
 	assert_eq(d.get_voxel(positions[0]), 1, "同实例重载后材质应一致")
 	assert_eq(d.get_voxels_dict_snapshot(), edited, "同实例重载后体素集合应一致")

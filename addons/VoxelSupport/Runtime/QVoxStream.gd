@@ -675,6 +675,15 @@ func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
 	return out
 
 
+## O(1) 计数（不构造 key 数组）。
+func get_chunk_count(lod: int = 0) -> int:
+	_ensure_loaded()
+	if lod != 0:
+		var c: Variant = _lod_cache.get(lod)
+		return (c as Dictionary).size() if c is Dictionary else 0
+	return (_models[0] as Dictionary).size() if _models.has(0) else 0
+
+
 func flush() -> void:
 	_ensure_loaded()
 	_write_file()

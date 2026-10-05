@@ -68,7 +68,7 @@ enum VisibilityMode {
 			# 全量模式下补建已加载 chunk 的网格（卸载的由统一流式按需重载）
 			if data:
 				for ck in data.get_loaded_chunk_keys():
-					data._mark_chunk_dirty(ck)
+					data.mark_chunk_dirty(ck)
 		_request_update()
 		# 可见性变化影响多个属性的有效性 → 刷新 Inspector（隐藏/显示条件属性）
 		notify_property_list_changed()
@@ -741,7 +741,7 @@ func _process_deferred_chunks() -> void:
 			# 强制构建标记：确保增量重建时不被视锥剔除拦截回 deferred
 			# （该 chunk 在视锥外但已在加载范围，必须真正构建）
 			_stream_force_build[ck] = true
-			data._mark_chunk_dirty(ck)
+			data.mark_chunk_dirty(ck)
 		built += 1
 	if built > 0:
 		_request_update()
@@ -840,7 +840,7 @@ func _process_streaming() -> void:
 					if data.generator != null and data.is_stored(ck):
 						if data.preload_chunk(ck):
 							_stream_force_build[ck] = true
-							data._mark_chunk_dirty(ck)
+							data.mark_chunk_dirty(ck)
 							submitted += 1
 						continue
 					# 未修改（程序化可重生成）或文件流（磁盘读）：统一异步请求
@@ -993,7 +993,7 @@ func _process_lod() -> void:
 	if data:
 		var _bmin := Vector3i(999999, 999999, 999999)
 		var _bmax := Vector3i(-999999, -999999, -999999)
-		for ck in data._chunk_buffers:
+		for ck in data.get_loaded_chunk_keys():
 			_bmin = Vector3i(mini(_bmin.x, ck.x), mini(_bmin.y, ck.y), mini(_bmin.z, ck.z))
 			_bmax = Vector3i(maxi(_bmax.x, ck.x), maxi(_bmax.y, ck.y), maxi(_bmax.z, ck.z))
 		if _bmin.x <= _bmax.x:
@@ -1038,10 +1038,10 @@ func _process_lod() -> void:
 					var patched: PackedInt32Array
 					if level == 1:
 						patched = NativeLoader.patch_lod_block(
-							data._chunk_buffers, bk, level, coarse, region[0], region[1])
+							data.get_chunk_buffers(), bk, level, coarse, region[0], region[1])
 					else:
 						patched = NativeLoader.patch_lod_block_from_lod(
-							data._coarse_buffers[level - 2], bk, level, coarse, region[0], region[1])
+							data.get_lod_buffers(level - 1), bk, level, coarse, region[0], region[1])
 					data.set_lod_block(level, bk, patched)
 					if bdist >= _inner - _margin:
 						_build_lod_block(level, bk)
@@ -1266,7 +1266,7 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 							continue
 						if not data.has_chunk(ck):
 							data.request_chunk_async(ck, 0)  # LOD0 数据加载（文件流读盘/程序化生成）
-						data._mark_chunk_dirty(ck)
+						data.mark_chunk_dirty(ck)
 						need_lod0_update = true
 		else:
 			for ck in loaded_chunks:
@@ -1282,7 +1282,7 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 				# 且 _level_finer_ready 会把它当"重建中就绪"→ L1 隐藏 → LOD0/LOD1 交界空洞。
 				if _chunk_render_level(ck, cam_pos) > 0:
 					continue
-				data._mark_chunk_dirty(ck)
+				data.mark_chunk_dirty(ck)
 				need_lod0_update = true
 	if need_lod0_update:
 		_request_update()
@@ -1322,7 +1322,7 @@ func _level_finer_ready(level: int, bk: Vector3i, cam: Camera3D) -> bool:
 						# 破坏瞬间内层未就绪会导致粗层临时替代（LOD 边界来回移动 → 闪烁）。
 						# 而 LOD1 带的 chunk 由粗层覆盖、L0 永不构建，若当成就绪会让
 						# _process_lod_level 隐藏粗层 → LOD0/LOD1 交界处背景透出空洞。
-						if _mesh_build_queue.has(sbk) or (data and data._dirty_mesh_chunks.has(sbk)):
+						if _mesh_build_queue.has(sbk) or (data and data.is_chunk_mesh_dirty(sbk)):
 							if _chunk_render_level(sbk, cam.global_position) == 0:
 								continue
 						var aabb := _chunk_world_aabb(sbk, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position)
@@ -1419,8 +1419,7 @@ func _lod_worker_build(vd: VoxelData, bk: Vector3i, level: int, gen_id: int, sca
 	var halo: PackedInt32Array
 	var buf := PackedInt32Array()
 	if not need_downsample:
-		var coarse_idx := level - 1
-		var coarse: Dictionary = vd._coarse_buffers[coarse_idx] if coarse_idx < vd._coarse_buffers.size() else {}
+		var coarse := vd.get_lod_buffers(level)   # 越界返回空字典，与原先的边界判断等价
 		if not coarse.has(bk):
 			need_downsample = true
 		else:
@@ -1463,7 +1462,7 @@ func _lod_mark_null_or_retry(level: int, bk: Vector3i) -> void:
 		for cy in span:
 			for cx in span:
 				var ck := base + Vector3i(cx, cy, cz)
-				if data != null and data._chunk_buffers.has(ck):
+				if data != null and data.is_chunk_loaded(ck):
 					definitely_empty = false
 					break
 			if not definitely_empty:
@@ -1612,7 +1611,7 @@ func _update_mesh_async() -> void:
 	rebuild_chunks = data.get_dirty_chunks()
 	var had_dirty := not rebuild_chunks.is_empty()
 	# 【流式防抖】剔除已在延迟补建队列的脏 chunk：其重建权归 _deferred_chunks
-	# （晋升时 _process_deferred_chunks 重新 _mark_chunk_dirty，且未来构建的快照必含
+	# （晋升时 _process_deferred_chunks 重新 mark_chunk_dirty，且未来构建的快照必含
 	# 已到达的邻居数据，无需边界缝合标记）。否则流式波次中每个新到 chunk 都把视锥外
 	# 的延迟邻居重新标脏 → 每帧一轮"脏N→视锥内0→再延迟"空转：gen_id 无限递增、
 	# 枚举+视锥判定每帧照付、永不收敛（STREAMING 大波次主线程卡顿的根源）。
@@ -1629,7 +1628,7 @@ func _update_mesh_async() -> void:
 	# 分批后每帧快照/派发量受限，网格经 _process_mesh_build_queue 平滑上传。
 	if rebuild_chunks.size() > _rebuild_batch_limit:
 		for i in range(_rebuild_batch_limit, rebuild_chunks.size()):
-			data._mark_chunk_dirty(rebuild_chunks[i])
+			data.mark_chunk_dirty(rebuild_chunks[i])
 		rebuild_chunks.resize(_rebuild_batch_limit)
 		# 放回剩余 dirty 后必须重新置位：_update_mesh 开头会清 _dirty，
 		# 若不重新 _request_update，剩余 dirty 将永久卡住 → 初始构建/大批量
@@ -1690,7 +1689,7 @@ func _update_mesh_async() -> void:
 	var taken: int = snap["taken"]
 	if taken < visible.size():
 		for j in range(taken, visible.size()):
-			data._mark_chunk_dirty(visible[j])
+			data.mark_chunk_dirty(visible[j])
 		_request_update()
 		visible.resize(taken)
 	_pending_task_count = visible.size()
@@ -1901,7 +1900,7 @@ func _process_mesh_build_queue() -> void:
 	# 大量破坏（dirty 多）→ 临时提高本帧构建数/时间预算，减少连续破坏的 mesh 更新延迟感
 	var budget_n := _mesh_build_per_frame
 	var budget_ms := 3.0
-	if data and data._dirty_mesh_chunks.size() > _mesh_build_per_frame:
+	if data and data.get_dirty_mesh_chunk_count() > _mesh_build_per_frame:
 		budget_n = maxi(budget_n, 24)
 		budget_ms = 8.0
 	var keys := _mesh_build_queue.keys()

@@ -309,13 +309,15 @@ func _update_hud() -> void:
 	var fps := Engine.get_frames_per_second()
 	var chunk_meshes := _target._lod_meshes[0].size() if _target._lod_meshes.size() > 0 else 0
 	# 磁盘/修改已持久化但不在内存的 chunk 数（原 _streamed_out_chunks 已合并进统一流式）
-	var streamed := _target.data.get_unloaded_chunk_keys().size() if _target.data != null else 0
+	# 只取数量：get_unloaded_chunk_keys() 要构造整个 key 数组，每帧调等于白付一次分配
+	# （见 VoxelData.get_unloaded_chunk_count 的说明）。
+	var streamed := _target.data.get_unloaded_chunk_count() if _target.data != null else 0
 	var data_loaded := 0
 	var data_unloaded := 0
 	if _target.data != null:
 		data_loaded = _target.data.get_loaded_chunk_keys().size()
 		if _target.data.is_streaming():
-			data_unloaded = _target.data.get_unloaded_chunk_keys().size()
+			data_unloaded = _target.data.get_unloaded_chunk_count()
 	var draw := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 	# 各 LOD 层实际挂载的块数（null = 空块标记，不计）
 	var lod_counts := ""

@@ -123,9 +123,20 @@ func _mark_voxel_dirty(pos: Vector3i) -> void:
 		_dirty_mesh_chunks[ck + Vector3i(0, 0, 1)] = true
 
 
-## 标记单个 chunk 需要重建（补建/流式加载路径用）
-func _mark_chunk_dirty(ck: Vector3i) -> void:
+## 标记单个 chunk 需要重建（补建 / 流式加载 / 粗层回填路径用）。
+## 公开：渲染器在"数据已就绪但 mesh 未建"时需要它，而脏集合是数据层的状态，不该由外部直改。
+func mark_chunk_dirty(ck: Vector3i) -> void:
 	_dirty_mesh_chunks[ck] = true
+
+
+## 该 chunk 是否已标脏待重建。**不取走**（取走并清空请用 get_dirty_chunks）。
+func is_chunk_mesh_dirty(ck: Vector3i) -> bool:
+	return _dirty_mesh_chunks.has(ck)
+
+
+## 待重建 chunk 数（渲染器每帧预算判断用；不构造数组）。
+func get_dirty_mesh_chunk_count() -> int:
+	return _dirty_mesh_chunks.size()
 
 
 ## chunk 数据就绪 → 标记依赖其 halo 的 6 个相邻 chunk 重建（边界 mesh 缝合）。
@@ -584,6 +595,25 @@ func get_loaded_chunk_keys() -> Array[Vector3i]:
 	return keys
 
 
+## 内存中的 chunk 缓冲字典（chunk_key → PackedInt32Array(CHUNK_VOLUME)）。
+##
+## **仅供原生批量接口直接读取**（C++ 侧按字典取缓冲，省掉逐体素走 GDScript 字典查询）；
+## 不要持有引用、也不要就地改写——写入请走 set_voxel / set_voxels_bulk。
+## 之所以返回内部字典而非副本：这些调用点每次都是整世界量级的读取，拷贝一份 32³×N 的
+## 缓冲比"绕过封装"代价更大，故把这条通道显式化并写清约束，而不是让它散落成私有访问。
+func get_chunk_buffers() -> Dictionary:
+	return _chunk_buffers
+
+
+## 指定 LOD 层（level >= 1）的粗层大格数据字典（block_key → PackedInt32Array(LOD_GRID³)）。
+## 与 get_chunk_buffers 同样**仅供原生批量接口读取**。
+func get_lod_buffers(level: int) -> Dictionary:
+	var idx := level - 1
+	if idx < 0 or idx >= _coarse_buffers.size():
+		return {}
+	return _coarse_buffers[idx]
+
+
 ## 获取流中已存但不在内存的 chunk key 列表（流式补建调度用）
 func get_unloaded_chunk_keys() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
@@ -593,6 +623,19 @@ func get_unloaded_chunk_keys() -> Array[Vector3i]:
 		if not _chunk_buffers.has(ck):
 			keys.append(ck)
 	return keys
+
+
+## 流中已存但不在内存的 chunk 数量。**不构造数组**，供 HUD 等每帧读取者使用。
+## 算法 = 流中总数 − 内存里"流中也有"的那些：后者只遍历已加载的小集合，
+## 且 has_chunk 是 O(1)，故整体 O(已加载数) 而非 O(流中总数)。
+func get_unloaded_chunk_count() -> int:
+	if stream == null:
+		return 0
+	var n := stream.get_chunk_count(0)
+	for ck in _chunk_buffers:
+		if stream.has_chunk(ck, 0):
+			n -= 1
+	return n
 
 
 ## 把内存中所有被修改的 chunk 写回磁盘（存档 / 退出前调用）
@@ -1059,7 +1102,7 @@ func remove_voxel(pos: Vector3i, notify: bool = true) -> void:
 ## 清空所有体素（同时清除磁盘流中的持久化数据）
 func clear(notify: bool = true) -> void:
 	for ck: Vector3i in _chunk_buffers:
-		_mark_chunk_dirty(ck)
+		mark_chunk_dirty(ck)
 	_chunk_buffers.clear()
 	_chunk_voxel_counts.clear()
 	_voxel_count = 0

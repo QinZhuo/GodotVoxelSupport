@@ -48,6 +48,13 @@ func erase_chunk(chunk_key: Vector3i, lod: int = 0) -> void
 @abstract
 func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]
 
+## 流中已存的 chunk/block 数量。
+## 【为什么单独开一个方法】HUD 等读取者每帧只想知道"有多少"，而 get_all_chunk_keys 必须
+## 构造一整个 key 数组——每帧白付一次 O(n) 分配。有 O(1) 计数的实现应覆写本方法
+## （QVoxStream / VoxelMemoryStream 已覆写）；默认实现退化为数数组长度，保证正确。
+func get_chunk_count(lod: int = 0) -> int:
+	return get_all_chunk_keys(lod).size()
+
 ## 刷新写入缓存（无写缓存的实现可留空）。
 @abstract
 func flush() -> void

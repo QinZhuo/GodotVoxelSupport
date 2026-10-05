@@ -449,7 +449,7 @@ func _propagate_stress(removed: Array) -> Array:
 	if not data or removed.is_empty():
 		return []
 	return NativeLoader.propagate_stress(
-		data._chunk_buffers, removed, _build_strength_table(),
+		data.get_chunk_buffers(), removed, _build_strength_table(),
 		stress_max_steps, stress_force, stress_decay)
 
 
@@ -1310,7 +1310,7 @@ func _ensure_debris_root() -> void:
 
 func _collect_voxel_materials(positions: Array) -> Dictionary:
 	# 原生批量收集（chunk 缓冲直读，替代逐体素 get_voxel 字典查询）；原生库为强制依赖。
-	return NativeLoader.collect_materials(data._chunk_buffers if data else {}, positions)
+	return NativeLoader.collect_materials(data.get_chunk_buffers() if data else {}, positions)
 
 
 ## 整块碎裂粒子：当物理体池已满、大块无法生成物理体时，
