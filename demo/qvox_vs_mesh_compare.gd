@@ -213,7 +213,9 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	_root.add_child(mesh_inst)
 
 	# ---------- B. QVox 路径 ----------
-	var data := VoxelData.from_voxel_data(vox.voxel, 0, true)
+	# 默认原点模式（bottom_center）与 A 段的 mesh 路径是**同一套**（见 VoxelData.OriginMode），
+	# 因此两侧不需要任何位置补偿就能对齐；_layout 会复核这一点。
+	var data := VoxelData.from_voxel_data(vox.voxel)
 	if data == null:
 		push_error("[QvxMeshCmp] from_voxel_data 失败: %s" % src)
 		return {}
@@ -291,6 +293,10 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	# ---------- D. QVox 渲染器 ----------
 	var rdata := VoxelData.new()
 	rdata.stream = reader
+	# 【关键】渲染顶点 = (体素坐标 + data.center_offset) * voxel_scale，故这个新 VoxelData 必须
+	# 继承同一份原点偏移——否则右侧会按"内容角点即原点"渲染，与左侧 mesh 差出一截
+	# （这正是本场景此前"基础位置差很多"的第二半原因：脚本新建 rdata 时漏了 center_offset）。
+	rdata.center_offset = data.center_offset
 	for m in data.materials:
 		if m != null:
 			rdata.add_material(m)
@@ -333,6 +339,8 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 func _build_reference_mesh(voxel: VoxAsset) -> ArrayMesh:
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
+		# 与右侧 data 路径显式取同一个原点模式：本场景要验证的正是"两条路一致"
+		VoxelMeshImporter.origin: VoxelData.OriginMode.BOTTOM_CENTER,
 		VoxelMeshImporter.shape: VoxelMeshImporter.Shape.cube,
 		VoxelMeshImporter.sphere_subdivisions: 0,
 		VoxelMeshImporter.sphere_scale: 1.0,
@@ -408,11 +416,12 @@ static func _local_from_index(i: int) -> Vector3i:
 	return Vector3i(lx, ly, lz)
 
 
-## 排布：左侧 mesh（正确基准），右侧 qvox。
-## 【坐标事实】两条路径的顶点都从体素/模型原点起算：
-##   mesh 路径：顶点 = (point*size + pos) * scale（体素坐标，含 VoxelModel.offset）
-##   qvox 路径：顶点 = (体素坐标) * scale（VoxelData 已把体素重映射到 [0,grid_size)）
-## 为了并排对齐，两侧都用各自「真实 AABB 中心」对齐到同一条竖直中线。
+## 排布：左侧 mesh（正确基准），右侧 qvox，各自直接摆到槽位，**不做任何位置补偿**。
+##
+## 【为什么不再需要补偿】两条路径现在共用同一套原点语义（`VoxelData.OriginMode`，
+## 默认 bottom_center = 内容 X/Z 居中 + Y 贴底）。历史上这里两边的原点不同——mesh 走 .vox 的
+## SIZE 盒中心（模型可能悬空/下沉）、data 走内容角点（贴地）——实测差 0.35~0.50（模型边长 2.2），
+## 当时靠"各自按 AABB 底面对齐"来掩盖。统一约定之后，那种补偿只会掩盖回归，故改为**校验并报告**。
 func _layout() -> void:
 	var count := _groups.size()
 	if count == 0:
@@ -444,19 +453,25 @@ func _layout() -> void:
 		mesh_inst.scale = Vector3.ONE * mesh_scale
 		qvox_r.voxel_scale = vs
 
-		# mesh 侧：把 AABB 中心平移到自身原点，再放到左边
-		var m_center := (ma.position + ma.size * 0.5) * mesh_scale
-		# qvox 侧：体素 AABB 中心 × scale
-		var q_center := (va.position + va.size * 0.5) * vs
-
+		# 两侧原点已统一（VoxelData.OriginMode.BOTTOM_CENTER）：X/Z 在内容中心、Y 在底面，
+		# 因此各自直接摆到槽位即可，**不需要任何位置补偿**。
 		var group_x := (i - (count - 1) * 0.5) * group_gap
 		var left_x := group_x - pair_gap * 0.5
 		var right_x := group_x + pair_gap * 0.5
-		# 左侧：让中心落在 left_x
-		mesh_inst.position = Vector3(left_x, 0.0, 0.0) - Vector3(m_center.x, 0.0, m_center.z)
-		# 右侧：VoxelRenderer 的 chunk 顶点 = 体素坐标 × voxel_scale，
-		# 体素 AABB 中心已在世界(renderer局部)坐标，直接反向平移即可。
-		qvox_r.position = Vector3(right_x, 0.0, 0.0) - Vector3(q_center.x, 0.0, q_center.z)
+		mesh_inst.position = Vector3(left_x, 0.0, 0.0)
+		qvox_r.position = Vector3(right_x, 0.0, 0.0)
+
+		# 【复核】两侧世界包围盒必须重合（同一 scale 下）。若哪天有人改坏了原点统一——比如又漏给
+		# rdata 设 center_offset、或 mesh 路径退回"作者摆放"——这里会当场报出来，而不是像以前
+		# 那样被一段位置补偿代码悄悄掩盖掉。
+		var q_off: Vector3 = qvox_r.data.center_offset if qvox_r.data != null else Vector3.ZERO
+		var m_min := ma.position * mesh_scale
+		var q_min := (va.position + q_off) * vs
+		var origin_delta := (m_min - q_min).length()
+		g["origin_delta"] = origin_delta
+		if origin_delta >= 0.01:
+			push_warning("[QvxMeshCmp] %s 两侧原点不一致：mesh 底面 y=%.3f vs qvox 底面 y=%.3f（Δ=%.3f）"
+					% [g["name"], m_min.y, q_min.y, origin_delta])
 
 		g["_w"] = target_extent
 		g["_h"] = maxf(ma.size.y * mesh_scale, va.size.y * vs)
@@ -603,7 +618,10 @@ func _update_hud() -> void:
 	var lines: Array = ["QVox ⇄ MESH 逐体素比对", ""]
 	for g in _groups:
 		var tag := "PASS" if g["ok"] else "FAIL"
-		lines.append("%s  [%s]" % [g["name"], tag])
+		var org: Variant = g.get("origin_delta")
+		var org_txt := "" if org == null else ("  原点Δ=%.3f%s"
+				% [float(org), "" if float(org) < 0.01 else " ←两侧不一致!"])
+		lines.append("%s  [%s]%s" % [g["name"], tag, org_txt])
 		if g["ok"]:
 			lines.append("  %d chunk / 比对 %d 格，零差异" % [g["chunks"], g["total_cells"]])
 			lines.append("  几何 %d tri，坏UV 0 坏法线 0" % g["geo_tris"])

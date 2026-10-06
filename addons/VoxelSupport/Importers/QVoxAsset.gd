@@ -29,6 +29,7 @@ var models: Dictionary = {}
 
 ## 摆放表：每项 { "model_id": int, "transform": Transform3D, "name": String }。
 ## 来自 NODE 场景图；NODE 缺失或未引用某个模型时，为该模型补一条恒等摆放。
+## 若构造时给了 `frame_index`，选定动画帧的节点补丁已并入各条的 `transform`（见 _frame_patches）。
 var placements: Array = []
 
 ## HEAD 原始元数据（up_axis / bounds / 自定义键原样保留，供调用方按需读取）
@@ -54,7 +55,8 @@ static func handles(path: String) -> bool:
 
 
 ## 读文件并解析（CRC 校验开启）。失败返回 null 并报错。
-static func from_file(path: String) -> QVoxAsset:
+## frame_index 选择动画帧（语义见 _frame_patches）；缺省 0 = 静态摆放叠加第 0 帧补丁。
+static func from_file(path: String, frame_index: int = 0) -> QVoxAsset:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		push_error("[QVoxAsset] 无法读取 %s" % path)
@@ -68,11 +70,11 @@ static func from_file(path: String) -> QVoxAsset:
 		return null
 	for w in rep.warnings:
 		push_warning("[QVoxAsset] %s: %s" % [path.get_file(), w])
-	return from_document(doc)
+	return from_document(doc, frame_index)
 
 
-## 由已解析文档构造（不做任何逐体素展开）。
-static func from_document(doc: QVoxFile.QVoxDocument) -> QVoxAsset:
+## 由已解析文档构造（不做任何逐体素展开）。frame_index 见 _frame_patches。
+static func from_document(doc: QVoxFile.QVoxDocument, frame_index: int = 0) -> QVoxAsset:
 	var out := QVoxAsset.new()
 	out.metadata = doc.head.duplicate(true)
 	out.up_axis = str(doc.head.get("up_axis", QVoxSpec.DEFAULT_UP_AXIS))
@@ -89,17 +91,19 @@ static func from_document(doc: QVoxFile.QVoxDocument) -> QVoxAsset:
 		var blocks: Variant = doc.models[mid]
 		if blocks is Dictionary and not (blocks as Dictionary).is_empty():
 			out.models[int(mid)] = (blocks as Dictionary).duplicate()
-	out.placements = _placements_from_scene(doc, out.models)
+	out.placements = _placements_from_scene(doc, out.models, frame_index)
 	return out
 
 
 ## NODE 场景图 → 摆放表（含每个节点累积后的世界变换）。
 ## 未出现在场景图中的模型补恒等摆放，保证"文件里有几个 VOX0 就导入几个"。
-static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionary) -> Array:
+## frame_index 的动画补丁叠加在各节点自身的 transform 上（见 _frame_patches）。
+static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionary, frame_index: int = 0) -> Array:
 	var pending := {}
 	for mid in models:
 		pending[mid] = true
 	var out: Array = []
+	var patches := _frame_patches(doc, frame_index)
 	var scene: QVoxFile.QVoxSceneGraph = doc.scene
 	if scene != null and not scene.nodes.is_empty():
 		var nodes: Array = scene.nodes
@@ -118,8 +122,9 @@ static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionar
 				stack.append([i, Transform3D.IDENTITY])
 		while not stack.is_empty():
 			var item: Array = stack.pop_back()
-			var node: Dictionary = nodes[int(item[0])]
-			var world: Transform3D = (item[1] as Transform3D) * _node_transform(node)
+			var node_index := int(item[0])
+			var node: Dictionary = nodes[node_index]
+			var world: Transform3D = (item[1] as Transform3D) * _node_transform(node, patches.get(node_index, {}))
 			if String(node.get("kind", "")) == "model":
 				var mid := int(node.get("model_id", -1))
 				if models.has(mid):
@@ -139,6 +144,36 @@ static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionar
 	return out
 
 
+## 取某一帧的**节点补丁表** `{ 节点下标: {t?, r?, s?} }`；无动画 / 越界 → 空表（全用自身 transform）。
+##
+## 【QVox 的动画帧就是"该时刻各节点的局部变换覆盖值"】`frames[i]` 里 `t` 是时间，其余键是
+## **节点下标**（与 NODE 的 `transform` 同字段名、同类型），因此补丁与 `transform` 覆盖式合并。
+##
+## 【frame_index 的语义】取**第一段动画**的 `frames[]` 下标：0 = 该动画的起始姿态，叠加在节点
+## 自身 `transform` 之上；0 也是缺省值，于是"没有动画的文件"与"看第 0 帧"走同一条路。
+## QVox 允许多段动画，而导入入口只暴露一个帧号——多动画的选择留到确实需要时再加，不预先猜。
+static func _frame_patches(doc: QVoxFile.QVoxDocument, frame_index: int) -> Dictionary:
+	if frame_index < 0 or doc.scene == null:
+		return {}
+	var anims: Array = doc.scene.animations
+	if anims.is_empty():
+		return {}
+	var frames: Variant = (anims[0] as Dictionary).get("frames")
+	if not (frames is Array) or frame_index >= (frames as Array).size():
+		return {}
+	var frame: Variant = (frames as Array)[frame_index]
+	if not (frame is Dictionary):
+		return {}
+	var out := {}
+	for key in (frame as Dictionary):
+		var idx := QVoxFile.as_index(key)
+		var patch: Variant = (frame as Dictionary)[key]
+		# 空补丁 = "该帧不改这个节点"，不进表（省一次无意义的字典写入）
+		if idx >= 0 and patch is Dictionary and not (patch as Dictionary).is_empty():
+			out[idx] = patch
+	return out
+
+
 ## 单个节点的局部变换。三个字段全部可选，缺省即恒等：
 ##   `t` 平移 `[x, y, z]`（体素单位）
 ##   `r` 旋转 **单位四元数** `[x, y, z, w]`（与 glTF 同构）
@@ -152,11 +187,16 @@ static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionar
 ## 三者按 T·R·S 组合（与 glTF / 常规场景图层级一致：缩放先于旋转作用于节点自身坐标系）。
 ## 非单位缩放会破坏"体素坐标是整数"这一前提，因此带缩放的摆放自动落到逐体素融合路径
 ## （`is_block_importable()` 为假），由 `fused_voxels()` 取整投影。
-static func _node_transform(node: Dictionary) -> Transform3D:
+## `patch` 非空时按字段覆盖本节点的 `transform`（动画帧补丁，见 `_frame_patches`）。
+static func _node_transform(node: Dictionary, patch: Dictionary = {}) -> Transform3D:
 	var xf: Variant = node.get("transform")
-	if not (xf is Dictionary):
+	var d: Dictionary = xf if xf is Dictionary else {}
+	if not patch.is_empty():
+		d = d.duplicate()
+		for k in patch:
+			d[k] = patch[k]
+	if d.is_empty():
 		return Transform3D.IDENTITY
-	var d: Dictionary = xf
 	var basis := Basis(_quaternion(d.get("r")))
 	var sv: Variant = d.get("s")
 	if sv is Array and (sv as Array).size() >= 3:
@@ -261,7 +301,7 @@ func fused_voxels() -> Dictionary:
 						var wp := full * Vector3(origin.x + lx, origin.y + ly, origin.z + lz)
 						out[Vector3i(int(round(wp.x)), int(round(wp.y)), int(round(wp.z)))] = m
 	_fused = out
-	_fused_bounds = _bounds_of(out)
+	_fused_bounds = VoxelData.voxel_bounds(out)
 	return _fused
 
 
@@ -295,31 +335,20 @@ func grid_size() -> Vector3i:
 	return (b["max"] as Vector3i) - (b["min"] as Vector3i) + Vector3i.ONE
 
 
-## 居中偏移（体素单位，叠加到渲染顶点）：X/Z 居中、Y 贴底。
-## 与 `VoxelData.from_voxel_data(center=true)`（`.vox` 路径）保持同一语义，
-## 使同一模型经数据层与网格两条路径渲染出的位置一致。
-func center_offset() -> Vector3:
-	return center_offset_for(voxel_bounds())
+## 原点偏移（体素单位，叠加到渲染顶点）：按 `origin_mode`（见 VoxelData.OriginMode）。
+## 与 `.vox` 路径共用 `VoxelData.origin_offset` 这一处实现——"两条路径位置一致"的保证就在这里。
+func origin_offset(origin_mode: int = VoxelData.OriginMode.BOTTOM_CENTER) -> Vector3:
+	return VoxelData.origin_offset(voxel_bounds(), origin_mode)
 
 
 # ----------------------------------------------------------------------------
 # 内部：包围盒
 # ----------------------------------------------------------------------------
 
-func _bounds_of(voxels: Dictionary) -> Dictionary:
-	var lo := Vector3i(2147483647, 2147483647, 2147483647)
-	var hi := Vector3i(-2147483648, -2147483648, -2147483648)
-	var found := false
-	for key in voxels:
-		var p: Vector3i = key
-		lo = Vector3i(mini(lo.x, p.x), mini(lo.y, p.y), mini(lo.z, p.z))
-		hi = Vector3i(maxi(hi.x, p.x), maxi(hi.y, p.y), maxi(hi.z, p.z))
-		found = true
-	return {"min": lo, "max": hi} if found else {}
-
-
 ## 任意块集合的精确体素包围盒（逐体素判空，只取非空体素）。
 ## 分项导出（每模型/每节点一份网格）也要各自居中，故做成静态可复用。
+## 注：体素字典（{Vector3i: 材质ID}）求界已统一到 `VoxelData.voxel_bounds`，此处只保留
+## "块缓冲"这一种输入形状（按 chunk 展开、逐体素判空是它唯一的差别）。
 static func bounds_for_blocks(blocks: Dictionary) -> Dictionary:
 	var lo := Vector3i(2147483647, 2147483647, 2147483647)
 	var hi := Vector3i(-2147483648, -2147483648, -2147483648)
@@ -344,11 +373,4 @@ static func bounds_for_blocks(blocks: Dictionary) -> Dictionary:
 	return {"min": lo, "max": hi} if found else {}
 
 
-## 由包围盒算居中偏移：X/Z 居中、Y 贴底（体素单位）。
-static func center_offset_for(bounds: Dictionary) -> Vector3:
-	if bounds.is_empty():
-		return Vector3.ZERO
-	var lo: Vector3i = bounds["min"]
-	var extent := (bounds["max"] as Vector3i) - lo + Vector3i.ONE
-	var half := Vector3(extent).floor() / 2.0
-	return Vector3(-(float(lo.x) + half.x), -float(lo.y), -(float(lo.z) + half.z))
+

@@ -161,7 +161,7 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 	if vox == null:
 		push_error("[QVoxViewer] VoxAccess 打开失败: %s" % src)
 		return {}
-	var data := VoxelData.from_voxel_data(vox.voxel, 0, true)
+	var data := VoxelData.from_voxel_data(vox.voxel)
 	if data == null:
 		push_error("[QVoxViewer] from_voxel_data 失败: %s" % src)
 		return {}

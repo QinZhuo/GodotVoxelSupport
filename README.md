@@ -132,6 +132,12 @@ Related properties are **hidden in the Inspector automatically** when they have 
 - **The native library is a hard dependency** — mesh generation, destruction and CRC all live in
   `addons/VoxelSupport/Native/` (GDExtension `VoxelNative`). If it is missing or version-mismatched,
   the plugin logs one clear error and draws nothing; there is no GDScript fallback.
+- **Asset origin is one shared import option: `mesh/origin`** — default `bottom_center` = X/Z centred
+  on the content bounds with the bottom at `Y = 0` (the usual game-asset pivot), so the same model
+  imported as a Mesh and as Voxel Data lands in exactly the same spot. MagicaVoxel's own origin is the
+  **centre of the model box, snapped between voxels** (5x5x3 gives (2,2,1), not (2.5,2.5,1.5)); use
+  `keep` to preserve that authored placement (needed for multi-model assemblies), or `content_center`
+  for a three-axis content-centred origin (the same idea as Blender's "Center Origins" option).
 - **`.vox` and `.qvox` have separate asset adapters** — `.vox` (MagicaVoxel scene graph) uses
   `VoxAsset.from_asset()`; `.qvox` (one `VOX0` per model + `NODE` placement) uses
   `QVoxAsset.from_file()`. `VoxAsset.from_asset()` on a `.qvox` **returns null with an error**:

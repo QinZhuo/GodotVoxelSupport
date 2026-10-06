@@ -30,6 +30,14 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = 0.1,
 		},
 		{
+			# 资产原点：默认"X/Z 居中 + Y 贴底"（游戏资产惯例：放进场景即站在地面）。
+			# 与 VoxelDataImporter 的同一选项共享取值与语义，详见 VoxelData.OriginMode。
+			name = origin,
+			default_value = VoxelData.OriginMode.BOTTOM_CENTER,
+			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
+			hint_string = "bottom_center,content_center,keep",
+		},
+		{
 			name = shape,
 			default_value = Shape.cube,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
@@ -85,6 +93,7 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 ## 选项名统一取自 VoxAsset 单一出处（与 VoxelDataImporter 共用，避免同值重复定义）
 const frame_index := VoxAsset.OPT_FRAME_INDEX
 const scale := VoxAsset.OPT_SCALE
+const origin := VoxAsset.OPT_ORIGIN
 const shape := "mesh/shape"
 ## icosphere 细分级别 (0..4)，下拉标签为对应三角形数
 const sphere_subdivisions := "mesh/sphere_subdivisions"
@@ -103,18 +112,17 @@ func _get_priority() -> float:
 
 ## sphere_* 选项仅在形状选择 sphere 时显示
 ## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
-## frame_index 对 .qvox 无意义（一个 VOX0 就是一个模型，无动画帧概念）→ 隐藏。
-func _get_option_visibility(path: String, option_name: StringName, options: Dictionary) -> bool:
+## frame_index 对两种源格式都有效（两者都有"帧"的概念）：`.vox` 取动画帧；`.qvox` 取 NODE 里
+## 第一段动画的 frames[] 下标——它是"该时刻各节点的局部变换覆盖值"，缺省 0 即起始姿态。
+func _get_option_visibility(_path: String, option_name: StringName, options: Dictionary) -> bool:
 	if String(option_name).begins_with("mesh/sphere_"):
 		return options.get(VoxelMeshImporter.shape, Shape.cube) == Shape.sphere
-	if option_name == frame_index:
-		return not QVoxAsset.handles(path)
 	return true
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var mesh: ArrayMesh
 	if QVoxAsset.handles(source_file):
-		var qvox := QVoxAsset.from_file(source_file)
+		var qvox := QVoxAsset.from_file(source_file, options[frame_index])
 		if qvox == null:
 			return FAILED
 		mesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, options, source_file)

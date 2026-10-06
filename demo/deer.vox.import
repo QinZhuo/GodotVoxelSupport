@@ -1,14 +1,25 @@
 [remap]
 
-importer="voxel_noop"
-type="Resource"
-uid="uid://fld1vt5h47nv"
-path="res://.godot/imported/deer.vox-e5d415c2526e1668330e5e4349c72db6.res"
+importer="voxel_mesh"
+type="Mesh"
+uid="uid://gflclp0kkff2"
+path="res://.godot/imported/deer.vox-e5d415c2526e1668330e5e4349c72db6.mesh"
 
 [deps]
 
 source_file="res://demo/deer.vox"
-dest_files=["res://.godot/imported/deer.vox-e5d415c2526e1668330e5e4349c72db6.res"]
+dest_files=["res://.godot/imported/deer.vox-e5d415c2526e1668330e5e4349c72db6.mesh"]
 
 [params]
 
+mesh/scale=0.1
+mesh/origin=0
+mesh/shape=1
+mesh/sphere_subdivisions=0
+mesh/sphere_scale=1.0
+mesh/frame_index=0
+mesh/unwrap_lightmap_uv2=false
+mesh/uv2_texel_size=0.2
+material/import_materials_textures=false
+material/material_path=""
+material/material_trans_path=""

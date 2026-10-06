@@ -44,18 +44,16 @@ func _get_priority() -> float:
 	return 1.5
 
 
-## .qvox 没有体素动画帧，split_by_frame 会被当作 split_by_model 处理（导入时给出警告）。
-## frame_index 对 .qvox 同样无意义 → 隐藏。
+## .qvox 的 split_by_frame 会被当作 split_by_model 处理——QVox 的 frames 是**节点变换补丁**
+## 而非"整模型体素帧"，给不出 .vox 那种每帧一网格；但 frame_index 仍有效（选择摆放到哪一帧）。
 func _get_option_visibility(path: String, option_name: StringName, options: Dictionary) -> bool:
-	if option_name == frame_index:
-		return not QVoxAsset.handles(path)
 	return super._get_option_visibility(path, option_name, options)
 
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var lib: MeshLibrary
 	if QVoxAsset.handles(source_file):
-		var qvox := QVoxAsset.from_file(source_file)
+		var qvox := QVoxAsset.from_file(source_file, options[frame_index])
 		if qvox == null:
 			return FAILED
 		lib = VoxelMeshGenerator.generate_mesh_library_from_qvox(qvox, options, source_file)

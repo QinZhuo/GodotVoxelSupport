@@ -795,7 +795,7 @@ static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 			var kids: Variant = n.get("children")
 			if kids is Array:
 				for c in kids:
-					var ci := _as_index(c)
+					var ci := as_index(c)
 					if ci < 0 or ci >= count or alive[ci] == 0:
 						alive[i] = 0
 						changed = true
@@ -828,7 +828,7 @@ static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 		if kids is Array:
 			var nk: Array = []
 			for c in kids:
-				var ci := _as_index(c)
+				var ci := as_index(c)
 				if ci >= 0 and remap.has(ci):
 					nk.append(remap[ci])
 			if nk.is_empty():
@@ -898,7 +898,7 @@ static func _node_self_ok(n: Variant, doc: QVoxDocument, index: int, _rep: QVoxR
 			return true
 		"model":
 			# kind="model" 的 model_id 必须存在对应 VOX0（§7）
-			var mid := _as_index(n.get("model_id"))
+			var mid := as_index(n.get("model_id"))
 			if mid < 0 or not doc.models.has(mid):
 				return false
 			var buf: Variant = doc.models.get(mid)
@@ -910,9 +910,11 @@ static func _node_self_ok(n: Variant, doc: QVoxDocument, index: int, _rep: QVoxR
 			return false
 
 
-## 把 JSON 里的数值（int 或 float）转成非负下标；非数值/负数返回 -1。
+## 把 JSON 里的节点下标（int / float / 字符串数字）转成非负下标；非数值/负数返回 -1。
 ## 注意：Godot 的 JSON 解析把整数也解析为 float，故不能直接用 `is int` 判定。
-static func _as_index(v: Variant) -> int:
+## 公开：本类用它校验 children / frames / model_id 的引用，QVoxAsset 解析动画帧的节点键也复用它
+## （同一套 JSON 下标语义只该有一份实现）。
+static func as_index(v: Variant) -> int:
 	if v is int:
 		return int(v) if int(v) >= 0 else -1
 	if v is float:
@@ -952,7 +954,7 @@ static func _find_cycle_nodes(arr: Array, alive: PackedByteArray, count: int) ->
 				kids = (n as Dictionary)["children"]
 			var advanced := false
 			for c in kids:
-				var ci := _as_index(c)
+				var ci := as_index(c)
 				if ci < 0 or ci >= count or alive[ci] == 0:
 					continue
 				if color[ci] == 0:

@@ -297,7 +297,8 @@ static func _items_by_node(qvox: QVoxAsset) -> Array:
 
 
 ## 按 items（[{name, chunks}]）逐项生成网格写入 MeshLibrary。
-## 每项各自居中（QVoxAsset.center_offset_for）—— 与 .vox 路径"每个 VoxelModel 带自己的 offset"一致。
+## 每项按 origin_mode 各自摆正（VoxelData.origin_offset）—— MeshLibrary 的每一项都是独立资产，
+## 本就该各自有原点，否则往场景里放第 N 项时位置会带着别的模型的偏移。
 static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 		options: Dictionary, path: String) -> void:
 	var old_meshes: Array[ArrayMesh] = []
@@ -319,7 +320,7 @@ static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 		gen.runtime_materials = materials
 		gen.generate_materials(options)
 		gen.start_generate_mesh_from_chunks(
-				chunks, QVoxAsset.center_offset_for(QVoxAsset.bounds_for_blocks(chunks)))
+				chunks, VoxelData.origin_offset(QVoxAsset.bounds_for_blocks(chunks), gen.origin_mode))
 		gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
 		if child.get_surface_count() == 0:
 			continue
@@ -353,6 +354,9 @@ var shape: int = VoxelMeshImporter.Shape.cube
 var sphere_subdivisions: int = 0
 ## 小球半径相对体素边长的比例，仅 sphere 形状生效
 var sphere_scale: float = 1.0
+## 资产原点模式（导入选项 mesh/origin，见 VoxelData.OriginMode）：决定顶点叠加多少原点偏移。
+## 四条链路共用同一套语义，故这里只把选项读进来，再交给 VoxelData.origin_offset 算。
+var origin_mode: int = VoxelData.OriginMode.BOTTOM_CENTER
 
 ## 顶点预算：超出则由原生按采样间隔自动降采样，防止大模型在编辑器内 OOM 崩溃
 const SPHERE_VERTEX_BUDGET := 4_000_000
@@ -370,6 +374,7 @@ func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
 	shape = options.get(VoxelMeshImporter.shape, VoxelMeshImporter.Shape.cube)
 	sphere_subdivisions = clampi(options.get(VoxelMeshImporter.sphere_subdivisions, 0), 0, 2)
 	sphere_scale = clampf(options.get(VoxelMeshImporter.sphere_scale, 1.0), 0.05, 2.0)
+	origin_mode = options.get(VoxelMeshImporter.origin, VoxelData.OriginMode.BOTTOM_CENTER)
 
 func generate_materials(options: Dictionary) -> Array[Material]:
 	materials.resize(2)
@@ -443,7 +448,7 @@ func generate_emission_textrue(save_path: String = "") -> ImageTexture:
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	# hash 必须包含所有影响几何的选项：MeshLibrary 模式会复用磁盘上的旧 mesh(带 meta)，
 	# 若只含体素数据，单独修改 scale/sphere_* 时会被短路、保留旧网格
-	var voxels_hash := hash([voxels.hash(), scale, shape, sphere_subdivisions, sphere_scale])
+	var voxels_hash := hash([voxels.hash(), scale, shape, sphere_subdivisions, sphere_scale, origin_mode])
 	_native_arrays = {}
 	if not mesh:
 		mesh = ArrayMesh.new()
@@ -458,15 +463,21 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 
 	var trans_flags := VoxelMaterial.build_trans_flags(
 			runtime_materials if not runtime_materials.is_empty() else voxel.materials)
+	# 原点偏移（体素单位）：按内容 AABB 算一次交给原生内核（cube 路径原生就支持 offset，
+	# 不必事后搬运顶点）。KEEP 模式跳过求界——那是一次 O(体素数) 的字典扫描。
+	var offset := Vector3.ZERO
+	if origin_mode != VoxelData.OriginMode.KEEP:
+		offset = VoxelData.origin_offset(VoxelData.voxel_bounds(voxels), origin_mode)
 	if shape == VoxelMeshImporter.Shape.sphere:
 		_native_arrays = NativeLoader.generate_spheres_native(
 			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET)
+		_translate_native_verts(offset * scale)
 	else:
-		_native_arrays = NativeLoader.generate_arrays_native(voxels, trans_flags, scale, Vector3.ZERO)
+		_native_arrays = NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
 
 
 ## 由块缓冲生成网格（QVox 路径的实例入口：整资产 / MeshLibrary 分项共用）。
-## layout_offset 为体素单位的居中偏移（见 QVoxAsset.center_offset_for）。
+## layout_offset 为体素单位的原点偏移（见 VoxelData.origin_offset）。
 func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3) -> void:
 	_reset_mesh()
 	_native_arrays = {}
@@ -485,12 +496,14 @@ func start_generate_mesh_from_qvox() -> void:
 		return
 	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else qvox.materials
 	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
+	# 原点偏移与 .vox 路径同一套（qvox.origin_offset 内部调 VoxelData.origin_offset）
+	var offset := qvox.origin_offset(origin_mode)
 	if qvox.is_block_importable():
 		_native_arrays = generate_arrays_from_chunks(
-				qvox.block_buffers(), trans_flags, scale, qvox.center_offset())
+				qvox.block_buffers(), trans_flags, scale, offset)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(
-				qvox.fused_voxels(), trans_flags, scale, qvox.center_offset())
+				qvox.fused_voxels(), trans_flags, scale, offset)
 
 
 func _reset_mesh() -> void:
@@ -507,6 +520,25 @@ func wait_finished(gen_uv2: bool, uv2_texel_size: float) -> ArrayMesh:
 	if shape != VoxelMeshImporter.Shape.sphere and gen_uv2:
 		mesh.lightmap_unwrap(Transform3D.IDENTITY, uv2_texel_size)
 	return mesh
+
+
+## 平移原生顶点（世界单位）。delta 为 0 时直接返回，不做无谓的遍历。
+##
+## 【为什么球体路径需要它】原生 `generate_spheres_native` 没有 offset 参数（只有 cube 路径的
+## `generate_arrays_native` 有），而原点模式是四条链路共用的语义，不能只在 cube 下生效。
+## 代价是一次 O(顶点数) 的 GDScript 遍历——球体模式本就是"每体素一颗球"的表现型用法，
+## 且只在导入时跑一次，可接受。
+func _translate_native_verts(delta: Vector3) -> void:
+	if delta.is_zero_approx():
+		return
+	for prefix: String in ["solid", "trans"]:
+		var key := prefix + "_verts"
+		var verts: PackedVector3Array = _native_arrays.get(key, PackedVector3Array())
+		if verts.is_empty():
+			continue
+		for i in verts.size():
+			verts[i] += delta
+		_native_arrays[key] = verts
 
 
 ## 把原生几何内核返回的 arrays 变成 surface（0=实体 / 1=透明），并绑定对应材质

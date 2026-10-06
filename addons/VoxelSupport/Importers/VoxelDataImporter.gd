@@ -13,7 +13,9 @@ extends EditorImportPlugin
 ## 选项名统一取自 VoxAsset 单一出处（与 VoxelMeshImporter 共用，避免同值重复定义）
 const frame_index := VoxAsset.OPT_FRAME_INDEX
 const scale := VoxAsset.OPT_SCALE
-const center := "mesh/center"
+## 资产原点：与 VoxelMeshImporter 同名同义（原先是本类独有的 `mesh/center` 布尔，
+## 只表达"居中/不居中"两态，无法表达"内容居中"与"保留作者摆放"——统一成三态枚举）。
+const origin := VoxAsset.OPT_ORIGIN
 
 
 func _get_importer_name():
@@ -51,30 +53,31 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = 0.1,
 		},
 		{
-			name = center,
-			default_value = true,
+			name = origin,
+			default_value = VoxelData.OriginMode.BOTTOM_CENTER,
+			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
+			hint_string = "bottom_center,content_center,keep",
 		},
 	]
 
 
-## .qvox 没有"动画帧"概念（一个 VOX0 就是一个模型，摆放由 NODE 决定），该选项对它无意义。
-func _get_option_visibility(path: String, option_name: StringName, _options: Dictionary) -> bool:
-	if option_name == frame_index:
-		return not QVoxAsset.handles(path)
+## frame_index 对两种源格式都有效（都有"帧"的概念）：`.vox` 取动画帧；`.qvox` 取 NODE 里
+## 第一段动画的 frames[] 下标——它是"该时刻各节点的局部变换覆盖值"，缺省 0 即起始姿态。
+func _get_option_visibility(_path: String, _option_name: StringName, _options: Dictionary) -> bool:
 	return true
 
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var res: VoxelData
 	if QVoxAsset.handles(source_file):
-		var qvox := QVoxAsset.from_file(source_file)
+		var qvox := QVoxAsset.from_file(source_file, options[frame_index])
 		if qvox == null:
 			return FAILED
-		res = VoxelData.from_qvox(qvox, options[center])
+		res = VoxelData.from_qvox(qvox, options[origin])
 	else:
 		var voxel_data := VoxAsset.from_asset(source_file)
 		if voxel_data == null:
 			return FAILED
-		res = VoxelData.from_voxel_data(voxel_data, options[frame_index], options[center])
+		res = VoxelData.from_voxel_data(voxel_data, options[frame_index], options[origin])
 	res.default_scale = options[scale]
 	return ResourceSaver.save(res, "%s.%s" % [save_path, _get_save_extension()])

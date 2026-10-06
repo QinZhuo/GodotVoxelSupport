@@ -352,27 +352,67 @@ const NEIGHBORS_6: Array[Vector3i] = [
 ]
 
 
+# ----------------------------------------------------------------------------
+# 资产原点（导入选项 mesh/origin）—— 四条链路共用的唯一约定
+# ----------------------------------------------------------------------------
+## 导入时的**资产原点**模式。`.vox`/`.qvox` × mesh/data 四条链路全走同一套语义。
+##
+## 【为什么必须统一】同一个模型经 mesh 与 data 两条路径进场景，必须落在同一位置。此前
+## mesh 路径保留 MagicaVoxel 的"作者摆放"（顶点从 SIZE 盒中心起算，模型可能悬空或下沉），
+## data 路径把内容 AABB 的角点当原点（贴地）——本仓库实测同一个模型两侧底面差 0.35~0.50
+## （模型边长 2.2），看着就像"位置差很多"，而体素数据其实完全一致。
+##
+## 【为什么默认贴地居中】这是游戏资产的通行原点（角色/道具的原点应在脚底中心）：放进场景
+## 即站在地面上，绕原点旋转不会甩飞。MagicaVoxel 自己把原点放在**包围盒中心、且落在体素
+## 之间**（奇数尺寸如 5×5×3 时是 (2,2,1) 而非 (2.5,2.5,1.5)）——那是建模工具的内部约定，
+## 不适合直接当资产原点；Blender 上装机量最高的 `.vox` 导入器（MagicaVoxel VOX format）
+## 为此专门加了 "Center Origins" 开关来修正它。所以这里给"统一默认 + 可关闭的开关"，
+## 而不是把某一种约定写死。
+enum OriginMode {
+	BOTTOM_CENTER,   ## 内容包围盒：X/Z 居中 + Y 贴底（默认，游戏资产惯例）
+	CONTENT_CENTER,  ## 内容包围盒三轴居中（绕自身旋转/做预览友好）
+	KEEP,            ## 保留作者摆放（SIZE 盒中心 + NODE/nTRN 位置）——多模型装配用
+}
+
+## 体素单位的原点偏移：把内容摆成 `mode` 描述的样子，渲染顶点再叠加它。
+##
+## **四条链路唯一的实现**：各写一份必然漂移，而漂移的表现是"模型位置莫名错开"。
+## 包围盒用内容 AABB（不是 .vox 的 SIZE 盒）——这正是与 MagicaVoxel 的差异所在。
+## `half` 用 floor 吸附到体素边界，与 MagicaVoxel"原点落在体素之间"同一处理，整数坐标不生小数。
+## `KEEP` 返回零向量：作者摆放已体现在顶点坐标里，不该再动。
+static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
+	if bounds.is_empty() or mode == OriginMode.KEEP:
+		return Vector3.ZERO
+	var lo: Vector3i = bounds["min"]
+	var hi: Vector3i = bounds["max"]
+	var half := Vector3(hi - lo + Vector3i.ONE).floor() / 2.0
+	var y := -float(lo.y) if mode == OriginMode.BOTTOM_CENTER else -(float(lo.y) + half.y)
+	return Vector3(-(float(lo.x) + half.x), y, -(float(lo.z) + half.z))
+
+
 ## 从 VoxAsset 构造 (编辑器导入时使用)
-## center 为 true 时，记录居中偏移使渲染时模型中心对齐原点 (与 mesh 导入行为一致)
-static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0, center: bool = true) -> VoxelData:
+## `origin_mode` 见 `OriginMode`：决定模型摆到哪，并据此写 `center_offset`（渲染时叠加）。
+static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
+		origin_mode: int = OriginMode.BOTTOM_CENTER) -> VoxelData:
 	var res := VoxelData.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 
-	# 重新映射体素坐标到 [0, grid_size) 范围
-	# VoxelNode.get_voxels() 中的 transform 包含 VoxelModel.offset 平移
-	# 导致体素数据范围在 [offset, offset + size) 之间
-	# 需要重新映射到 [0, size) 以匹配 grid_size
+	# 体素坐标重映射到 [0, grid_size)：VoxelNode.get_voxels() 的 transform 含 VoxelModel.offset
+	# 与节点变换，故原始坐标落在 [offset, offset + size) 之间。
+	# 【KEEP 例外】保留作者摆放 → 一律不重映射（坐标为负无妨，chunk 键本就支持负数）。
 	if not raw_voxels.is_empty():
-		var bounds := _calc_bounds(raw_voxels)
-		var min_pos: Vector3i = bounds[0]
-		var max_pos: Vector3i = bounds[1]
+		var bounds := voxel_bounds(raw_voxels)
+		var min_pos: Vector3i = bounds["min"]
+		var max_pos: Vector3i = bounds["max"]
+		var base := Vector3i.ZERO if origin_mode == OriginMode.KEEP else min_pos
 
-		# 重新映射：将所有体素位置减去 min_pos
 		for pos_key in raw_voxels.keys():
 			var pos: Vector3i = pos_key
-			res._write_buffer_impl(pos - min_pos, raw_voxels[pos_key], false)
+			res._write_buffer_impl(pos - base, raw_voxels[pos_key], false)
 
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
+		# 原点偏移：非 KEEP 时体素已重映射到"内容最小角 = 0"，故把同一套公式作用在**相对**包围盒上
+		res.center_offset = origin_offset({"min": Vector3i.ZERO, "max": max_pos - base}, origin_mode)
 	else:
 		# 空模型：VoxAsset 没有 `size` 属性（那是 VoxelModel 的），此前这里会运行期报错。
 		# 空资产按零尺寸处理即可，调用方随后通常也不会渲染它。
@@ -395,12 +435,8 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0, center: 
 		new_mat.emission = src.emission
 		res.materials[i] = new_mat
 
-	# 居中偏移：与 mesh 导入行为一致 —— 左右前后(X/Z)居中，上下(Y)不居中(底部贴原点)
-	# 网格顶点 = (体素坐标 + center_offset) * voxel_scale
-	# X/Z 偏移 = -(grid_size/2) floor，Y 偏移恒为 0，使模型水平居中且竖立于原点
-	if center:
-		var half_grid := (Vector3(res.grid_size) / 2.0).floor()
-		res.center_offset = Vector3(-half_grid.x, 0.0, -half_grid.z)
+	# 原点偏移已在上面的 if 里按 origin_mode 写好（见 OriginMode）：
+	# 渲染顶点 = (体素坐标 + center_offset) * voxel_scale。
 	return res
 
 
@@ -1194,10 +1230,14 @@ static func _bounds_to_aabb(bounds: Array) -> AABB:
 	return AABB(Vector3(min_pos), Vector3(extents))
 
 
-## 计算体素集合的 min/max 坐标范围，返回 [min_pos, max_pos]；空集合返回空数组
-static func _calc_bounds(voxels: Dictionary) -> Array:
+## 体素字典 `{Vector3i: 材质ID}` 的精确包围盒 `{"min": Vector3i, "max": Vector3i}`（含端点）；
+## 空集合返回 `{}`。
+##
+## **全项目唯一的"体素字典求界"实现**：`.vox`/`.qvox` 导入、原点偏移、网格生成都调它——
+## 同类公式各写一份必然漂移（本仓库已经因为"两条路径各有一套原点"出过一次 bug）。
+static func voxel_bounds(voxels: Dictionary) -> Dictionary:
 	if voxels.is_empty():
-		return []
+		return {}
 	var min_pos := Vector3i.MAX
 	var max_pos := Vector3i.MIN
 	for pos_key in voxels:
@@ -1208,7 +1248,7 @@ static func _calc_bounds(voxels: Dictionary) -> Array:
 		max_pos.x = maxi(max_pos.x, pos.x)
 		max_pos.y = maxi(max_pos.y, pos.y)
 		max_pos.z = maxi(max_pos.z, pos.z)
-	return [min_pos, max_pos]
+	return {"min": min_pos, "max": max_pos}
 
 
 # ----------------------------------------------------------------------------
@@ -1596,11 +1636,10 @@ func _serialize_all_voxels() -> Array:
 	return voxel_list
 
 
-## 从 QVox 资产构造。QVox 的块坐标恒等于 chunk 坐标（block_size == CHUNK_SIZE），
-## 因此常规情形下这是一次**块缓冲搬运**（零逐体素重映射、零中间稀疏字典）；
-## 只有需要融合变换（非恒等摆放 / 非 Y 朝上）时才逐体素展开。
-## center 为 true 时记录居中偏移（X/Z 居中、Y 贴底），与 from_voxel_data 语义一致。
-static func from_qvox(qvox: QVoxAsset, center: bool = true) -> VoxelData:
+## origin_mode 见 OriginMode（与 from_voxel_data 同一套语义，默认同为贴地居中）。
+## QVox 的体素坐标就是文件里的块坐标（**不重映射**），因此这里只需写对 center_offset——
+## 渲染顶点 = (块坐标 + center_offset) * voxel_scale，结果与 .vox 路径逐体素一致。
+static func from_qvox(qvox: QVoxAsset, origin_mode: int = OriginMode.BOTTOM_CENTER) -> VoxelData:
 	var res := VoxelData.new()
 	res.materials = qvox.materials
 	if qvox.is_block_importable():
@@ -1613,8 +1652,7 @@ static func from_qvox(qvox: QVoxAsset, center: bool = true) -> VoxelData:
 		for pos in voxels:
 			res._write_buffer_impl(pos, voxels[pos], false)
 	res.grid_size = qvox.grid_size()
-	if center:
-		res.center_offset = qvox.center_offset()
+	res.center_offset = qvox.origin_offset(origin_mode)
 	return res
 
 

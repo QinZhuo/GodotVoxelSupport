@@ -32,7 +32,7 @@ func test_multi_model_with_node_placement() -> void:
 	assert_eq(qvox.placements.size(), 2, "NODE 里两个 model 节点都应在")
 	assert_false(qvox.is_block_importable(), "带位移的摆放必须走融合路径")
 
-	var data := VoxelData.from_qvox(qvox, true)
+	var data := VoxelData.from_qvox(qvox)
 	assert_true(data != null, "应能构造 VoxelData")
 	if data == null:
 		return
@@ -55,7 +55,7 @@ func test_block_import_matches_fused() -> void:
 	assert_true(qvox.is_block_importable(), "无 NODE → 应可块级直连（零逐体素展开）")
 	if not qvox.is_block_importable():
 		return
-	var via_blocks := VoxelData.from_qvox(qvox, true)
+	var via_blocks := VoxelData.from_qvox(qvox)
 	# fused_voxels() 是"有变换时"的参考实现：两条路必须给出同一个世界
 	assert_eq(via_blocks.get_voxels_dict_snapshot(), qvox.fused_voxels(),
 			"块级直连与逐体素融合必须逐体素一致")
@@ -150,7 +150,7 @@ func test_samples_import_without_loss() -> void:
 		if qvox == null:
 			continue
 		assert_true(not qvox.is_empty(), "%s 应含非空块" % path.get_file())
-		var data := VoxelData.from_qvox(qvox, true)
+		var data := VoxelData.from_qvox(qvox)
 		assert_true(data.get_voxel_count() > 0, "%s 应导入出体素" % path.get_file())
 
 
@@ -170,7 +170,7 @@ func test_node_quaternion_rotation_applied() -> void:
 	if qvox == null:
 		return
 	assert_false(qvox.is_block_importable(), "带旋转的摆放必须走逐体素融合路径")
-	var data := VoxelData.from_qvox(qvox, true)
+	var data := VoxelData.from_qvox(qvox)
 	assert_eq(data.get_voxel_count(), 1, "旋转后仍应恰好一个体素")
 	assert_true(data.has_voxel(Vector3i(1, 1, -1)), "90° 绕 Y：(1,1,1) → (1,1,-1)")
 	assert_false(data.has_voxel(Vector3i(1, 1, 1)), "原位置不应残留")
@@ -184,8 +184,85 @@ func test_node_scale_and_translation_applied() -> void:
 	assert_true(qvox != null, "应能解析带缩放的 .qvox")
 	if qvox == null:
 		return
-	var data := VoxelData.from_qvox(qvox, true)
+	var data := VoxelData.from_qvox(qvox)
 	assert_true(data.has_voxel(Vector3i(12, 2, 2)), "先缩放 2× 再平移 (10,0,0)：(1,1,1) → (12,2,2)")
+
+
+# ----------------------------------------------------------------------------
+# ⑧ NODE.animations 的帧补丁必须真的被消费（此前只被解析/校验，没有任何读取方）
+# ----------------------------------------------------------------------------
+
+## `frame_index` 选第几帧，节点摆放就取那一帧的覆盖值。
+## 守的是"帧补丁不是死数据"：若哪天有人删掉 QVoxAsset._frame_patches 的调用，
+## 这里会立刻变成"两帧位置一样"而失败。
+func test_animation_frame_patch_applied() -> void:
+	var path := TEST_DIR + "/anim.qvox"
+	# 本 helper 只有一个节点 → 帧补丁的键是下标 0。
+	# 第 0 帧覆盖 t=(0,0,0)，第 1 帧覆盖 t=(0,64,0)。
+	_write_single_voxel_qvox(path, {},
+			[{"t": 0, "0": {"t": [0, 0, 0]}}, {"t": 100, "0": {"t": [0, 64, 0]}}])
+	var f0 := QVoxAsset.from_file(path, 0)
+	var f1 := QVoxAsset.from_file(path, 1)
+	assert_true(f0 != null and f1 != null, "应能解析带动画的 .qvox")
+	if f0 == null or f1 == null:
+		return
+	assert_eq(f0.placements.size(), 1, "每帧都应有 1 条摆放")
+	assert_eq(f1.placements.size(), 1, "每帧都应有 1 条摆放")
+	var d0 := VoxelData.from_qvox(f0)
+	var d1 := VoxelData.from_qvox(f1)
+	# 体素位于块 (0,0,0) 的局部 (1,1,1)
+	assert_true(d0.has_voxel(Vector3i(1, 1, 1)), "第 0 帧：模型应落在原点")
+	assert_true(d1.has_voxel(Vector3i(1, 65, 1)), "第 1 帧：帧补丁应把模型抬高 64")
+	assert_false(d1.has_voxel(Vector3i(1, 1, 1)), "第 1 帧：原位置不应残留")
+	# 越界帧号安全退化：不崩、按"无补丁"处理（等价静态摆放）
+	var out := QVoxAsset.from_file(path, 9)
+	assert_true(out != null, "越界 frame_index 不应导致失败")
+	if out != null:
+		assert_true(VoxelData.from_qvox(out).has_voxel(Vector3i(1, 1, 1)),
+				"越界 frame_index 应退化为无补丁")
+
+
+# ----------------------------------------------------------------------------
+# ⑨ 原点统一：`.vox → mesh` 与 `.vox → data` 必须摆在同一个位置（同 scale）
+# ----------------------------------------------------------------------------
+
+## 守的是"同一个模型经两条导入路径进场景，位置却差一截"那个 bug：
+## 两条路径共用 `VoxelData.OriginMode`（默认 bottom_center），所以同一 scale 下
+## mesh 的世界 AABB 与 data 的 `(体素AABB + center_offset) × scale` 必须重合。
+## 谁把某一条路退回"作者摆放"、或漏设 center_offset，这条立刻失败。
+##
+## 形状固定用 cube：sphere 是另一种几何（每体素一颗球，AABB 本就更大），与原点无关。
+func test_mesh_and_data_origin_agree() -> void:
+	var src := "res://demo/deer.vox"
+	if not ResourceLoader.exists(src):
+		return   # 纯净检出可能没有素材，不因缺资源判失败
+	var vox := VoxAsset.from_asset(src)
+	assert_true(vox != null, "应能解析 %s" % src)
+	if vox == null:
+		return
+
+	# 选项取导入器默认值（scale=0.1、origin=bottom_center）
+	var opts := {}
+	for o in VoxelMeshImporter.new()._get_import_options("", false):
+		opts[o["name"]] = o["default_value"]
+	opts[VoxelMeshImporter.shape] = VoxelMeshImporter.Shape.cube
+	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, src)
+	assert_true(mesh != null, "应为 deer.vox 生成网格")
+	if mesh == null:
+		return
+
+	var scale: float = opts[VoxelMeshImporter.scale]
+	var maabb := mesh.get_aabb()
+	var data := VoxelData.from_voxel_data(vox)
+	var db := data.get_voxels_aabb()
+	var dmin := (db.position + data.center_offset) * scale
+	var dsize := db.size * scale
+	var delta := (maabb.position - dmin).length() + (maabb.size - dsize).length()
+	assert_true(delta < 0.01,
+			"mesh 与 data 的原点/尺寸必须一致（Δ=%.4f；mesh=%s data=%s）"
+			% [delta, str(maabb), str(AABB(dmin, dsize))])
+	# bottom_center 的语义：底面贴地、X/Z 居中
+	assert_true(absf(maabb.position.y) < 0.01, "默认原点应让底面落在 y=0（实得 %.3f）" % maabb.position.y)
 
 
 # ----------------------------------------------------------------------------
@@ -217,13 +294,16 @@ func _one_voxel_block() -> PackedInt32Array:
 
 ## 造一个"单模型单体素"的 .qvox：块 (0,0,0) 内的 (1,1,1) 有一个体素，
 ## NODE 里一个 model 节点带给定的 transform（空字典 = 不写 NODE 块，即恒等摆放）。
+## frames 非空时写入一段动画（帧补丁以**节点下标**为键；本 helper 只有一个节点 → 下标 0）。
 ## 变换相关的用例共用它，使"看的是变换，而不是文档构造"。
-func _write_single_voxel_qvox(path: String, transform: Dictionary) -> void:
+func _write_single_voxel_qvox(path: String, transform: Dictionary, frames: Array = []) -> void:
 	var doc := _new_doc()
 	doc.models = {0: {Vector3i(0, 0, 0): _one_voxel_block()}}
-	if not transform.is_empty():
+	if not transform.is_empty() or not frames.is_empty():
 		doc.node = {"nodes": [{"name": "n", "kind": "model", "model_id": 0,
 				"transform": transform}]}
+		if not frames.is_empty():
+			doc.node["animations"] = [{"name": "a", "loop": false, "frames": frames}]
 	_write_bytes(path, QVoxFile.serialize(doc))
 
 
