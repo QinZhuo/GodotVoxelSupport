@@ -20,8 +20,13 @@ extends TestCase
 ## 分桶逻辑、球体细分等），而不是"测试写错了"——改动内核时刻意调整数字须同期说明。
 
 const SAMPLES_DIR := "res://demo/samples"
-## deer.qvox 端到端基线（Phase 0 对照实验：GDScript 旧路径与 C++ 新路径同为 1260）
-const DEER_CUBE_TRIS := 1260
+## deer.qvox 端到端基线（Phase 0 对照实验：GDScript 旧路径与 C++ 新路径同为 1260）。
+##
+## 【为什么现在是 1344】贪婪合并**逐 32³ 块**进行，模型跨块时面片会在块边界被切开，所以这个
+## 数字依赖的是**分块布局**，不只是体素排列：旧样例把坐标重映射到 (0,0,0) 起（整只鹿落在 1 个
+## 块内）→ 1260；样例改按 `world_origin` 坐标重烘后跨 4 个块 → 1344——而这正是 `.vox` 网格
+## 一直以来的值（下面的跨格式断言即是守卫）。重烘样例时这个数字合法地会变，须同期说明原因。
+const DEER_CUBE_TRIS := 1344
 
 
 # ----------------------------------------------------------------------------
@@ -125,6 +130,16 @@ func test_kernel_deer_sample_baseline() -> void:
 	if mesh == null:
 		return
 	assert_eq(_tris(mesh), DEER_CUBE_TRIS, "deer.qvox 立方体路径三角形数应与基线一致")
+
+	# 跨格式一致性：同一个模型走 `.vox → mesh` 必须得出同一个数字。
+	# 这是"两种格式导入结果一致"在几何层面的守卫——原点模式、坐标或分块布局任一漂移都会打破它。
+	var vox := VoxAsset.from_asset("res://demo/deer.vox")
+	assert_true(vox != null, "应能解析 deer.vox")
+	if vox != null:
+		var vmesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, "res://demo/deer.vox")
+		assert_true(vmesh != null, "应为 deer.vox 生成网格")
+		if vmesh != null:
+			assert_eq(_tris(vmesh), DEER_CUBE_TRIS, "同一模型 .vox→mesh 的三角形数应与 .qvox 一致")
 
 
 # ----------------------------------------------------------------------------

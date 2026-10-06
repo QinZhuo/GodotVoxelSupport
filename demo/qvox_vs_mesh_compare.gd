@@ -44,8 +44,19 @@ extends Node3D
 @export var pair_gap: float = 2.6
 @export var group_gap: float = 6.2
 @export var target_extent: float = 2.2
-@export var bake_dir: String = "user://qvox_viewer"
+## 烘焙缓存目录。**本场景独占，不与其它 demo 共用**：
+## 【踩过的坑】它原先是 `user://qvox_viewer`（与 qvox_model_viewer 同一个目录、同一批文件名），
+## 而 viewer 按 world_origin（负坐标）烘、本场景按 bottom_center（重映射到 0 起）烘——
+## 谁后跑谁把对方的缓存覆盖掉，表现是**逐体素比对莫名 FAIL**（差异成千上万格，但两侧位置仍对齐）。
+## 缓存键必须包含"写入时的语义"，否则缓存会跨语义串味。
+@export var bake_dir: String = "user://qvox_vs_mesh"
 @export var force_rebake: bool = false
+## 覆盖 QVOX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
+## 两侧**显式同取**的原点模式（见 `_build_group` / `_build_reference_mesh`）。
+## 抽成常量是为了让"烘焙文件名 + 数据构造 + mesh 选项"三处不可能各写一个值——
+## 这三处一旦不一致，表现就是逐体素比对 FAIL 而位置看着还对（最难查的那类 bug）。
+const ORIGIN_MODE := VoxelData.OriginMode.BOTTOM_CENTER
+
 ## 覆盖 QVOX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
 @export var qvox_uv_v_override: float = -1.0
 
@@ -217,13 +228,15 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	# 而本场景的排布与取景是按"模型贴地"设计的（world_origin 下 teapot1 会悬空 5.8 单位、出画）。
 	# 默认值本身的一致性由 test_qvox_import.gd 的 test_mesh_and_data_origin_agree 守着，
 	# 不靠本场景。
-	var data := VoxelData.from_voxel_data(vox.voxel, 0, VoxelData.OriginMode.BOTTOM_CENTER)
+	var data := VoxelData.from_voxel_data(vox.voxel, 0, ORIGIN_MODE)
 	if data == null:
 		push_error("[QvxMeshCmp] from_voxel_data 失败: %s" % src)
 		return {}
 	var chunks_vox := _extract_chunks(data)
 
-	var qpath := bake_dir.path_join(name + ".qvox")
+	# 文件名带回原点模式：缓存键必须包含"写入时的语义"，否则改了模式就会读到上一次的坐标
+	# （目录已独占，这层是第二道保险，也让缓存文件自解释）。
+	var qpath := bake_dir.path_join("%s_%d.qvox" % [name, ORIGIN_MODE])
 	if rebake or not FileAccess.file_exists(qpath):
 		_bake_qvox(qpath, data, chunks_vox)
 
@@ -342,7 +355,7 @@ func _build_reference_mesh(voxel: VoxAsset) -> ArrayMesh:
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
 		# 与右侧 data 路径显式取同一个原点模式：本场景要验证的正是"两条路一致"
-		VoxelMeshImporter.origin: VoxelData.OriginMode.BOTTOM_CENTER,
+		VoxelMeshImporter.origin: ORIGIN_MODE,
 		VoxelMeshImporter.shape: VoxelMeshImporter.Shape.cube,
 		VoxelMeshImporter.sphere_subdivisions: 0,
 		VoxelMeshImporter.sphere_scale: 1.0,

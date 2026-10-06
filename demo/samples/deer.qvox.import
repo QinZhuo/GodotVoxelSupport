@@ -13,7 +13,7 @@ dest_files=["res://.godot/imported/deer.qvox-07fb938cc748bfe3108752497f31944a.me
 [params]
 
 mesh/scale=0.1
-mesh/origin=1
+mesh/origin=0
 mesh/shape=0
 mesh/sphere_subdivisions=0
 mesh/sphere_scale=1.0
