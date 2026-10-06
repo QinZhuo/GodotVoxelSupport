@@ -540,9 +540,10 @@ func _handle_input(_delta: float) -> void:
 		_build_target()
 		_log_perf_line("场景重置")
 
-	# B: 破坏底部支撑层
+	# B: 破坏底部支撑层（整层截面 → 结构真正与地面断开 → 整块坠落）
+	# 连通性模型下"只削掉外侧一层皮"不会切断结构（其余截面仍锚定），故这里取整层。
 	if key_b and not _prev_b:
-		_target.damage_box(AABB(Vector3(0, 0, 0), Vector3(structure_size.x, 1.5, 1.5)))
+		_target.damage_box(AABB(Vector3(0, 0, 0), Vector3(structure_size.x, 3.5, structure_size.z)))
 		_log_perf_line("触发底部支撑层破坏")
 
 	# S/L: 存档/读档

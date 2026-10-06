@@ -1351,17 +1351,30 @@ func _get_chunks_in_box(aabb: AABB) -> Array[Vector3i]:
 
 ## 查询球形范围内的所有体素位置 (只读，不修改)
 ## 先找出与球体重叠的 chunk，再只扫描这些 chunk 的密集缓冲
+## 把该球形范围内"磁盘上有、内存里没有"的 chunk 先载入（流式下范围查询 / 破坏的前置步骤）。
+## 原生只读内存缓冲，不先载入就会漏掉已持久化但未加载的数据。
+func ensure_sphere_loaded(center: Vector3, radius: float) -> void:
+	if stream == null:
+		return
+	for ck in _get_chunks_in_sphere(center, radius):
+		if not _chunk_buffers.has(ck) and is_stored(ck):
+			preload_chunk(ck)
+
+
+## 盒形版本（同 ensure_sphere_loaded）。
+func ensure_box_loaded(aabb: AABB) -> void:
+	if stream == null:
+		return
+	for ck in _get_chunks_in_box(aabb):
+		if not _chunk_buffers.has(ck) and is_stored(ck):
+			preload_chunk(ck)
+
+
 func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
 	if _chunk_buffers.is_empty():
 		return result
-	# 扫描与判定都在原生（VoxelNative.collect_sphere_positions）：GDScript 版是"逐候选格
-	# 判距离 + 逐体素 append"，半径 30 时实测 **74ms/次**（22.7 万候选、11.3 万次装箱）。
-	# 这里只负责"把球覆盖到的、磁盘上已有但未加载的 chunk 先载入"（原生只看内存缓冲）。
-	if stream != null:
-		for ck in _get_chunks_in_sphere(center, radius):
-			if not _chunk_buffers.has(ck) and is_stored(ck):
-				preload_chunk(ck)
+	ensure_sphere_loaded(center, radius)
 	result.assign(NativeLoader.collect_sphere_positions(_chunk_buffers, center, radius))
 	return result
 
@@ -1375,10 +1388,7 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 	# 闭区间与 GDScript 版一致：min = floori(aabb.position)，max = floori(aabb.end - 1)
 	var mn := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
 	var mx := Vector3i(floori(aabb.end.x - 1.0), floori(aabb.end.y - 1.0), floori(aabb.end.z - 1.0))
-	if stream != null:
-		for ck in _get_chunks_in_box(aabb):
-			if not _chunk_buffers.has(ck) and is_stored(ck):
-				preload_chunk(ck)
+	ensure_box_loaded(aabb)
 	result.assign(NativeLoader.collect_box_positions(_chunk_buffers, mn, mx))
 	return result
 
@@ -1865,7 +1875,7 @@ func has_chunk(chunk_key: Vector3i) -> bool:
 # ----------------------------------------------------------------------------
 # 连通性检测（崩塌支撑判定）
 # ----------------------------------------------------------------------------
-# 全量支撑检测由 find_unsupported（GDScript 泛洪）与 find_unsupported_around（原生 C++）
+# 全量支撑检测由 find_unsupported（GDScript 泛洪）与 find_unsupported_island（原生静态岛）
 # 提供；批量分组由 partition_connected（原生）完成。
 
 ## 从种子体素位置集合出发，6 方向泛洪标记所有连通的体素，返回位置集合 (Dictionary 作 Set)
@@ -1992,8 +2002,9 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 ##   - 悬空分量必须完整遍历（需要移除），规模受破坏影响区域限制
 ##
 ## 实现完全在 GDExtension (C++) 中，无 GDScript 兜底。
-## 返回失稳体素位置集合 {pos: true}
-func find_unsupported_around(removed: Array) -> Dictionary:
+## 返回扁平 (x, y, z) 三元组（空 = 仍锚定）。消费方按批取用，避免百万体素在 GDScript 侧
+## 物化成位置数组（旧接口返回 {pos: true}，调用方 .keys() 就是百万个 Variant）。
+func find_unsupported_island(removed: Array, anchor_y: int = 0) -> PackedInt32Array:
 	if removed.is_empty() or _chunk_buffers.is_empty():
-		return {}
-	return NativeLoader.find_unsupported_around(_chunk_buffers, removed)
+		return PackedInt32Array()
+	return NativeLoader.find_unsupported_island(_chunk_buffers, removed, anchor_y)

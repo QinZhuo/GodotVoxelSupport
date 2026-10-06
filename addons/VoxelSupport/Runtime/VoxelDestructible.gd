@@ -10,7 +10,7 @@ extends VoxelRenderer
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
 signal voxel_damaged(positions: Array, spawn_debris: bool)      ## 体素被移除时 (含崩塌)
-signal voxel_hardened_batch(positions: Array, remaining: PackedFloat32Array) ## 受伤但未摧毁（与 positions 平行；每次伤害调用发一次）
+signal voxel_hardened_batch(positions: PackedVector3Array, remaining: PackedFloat32Array) ## 受伤但未摧毁（与 positions 平行；每次伤害调用发一次）
 signal voxels_about_to_collapse(positions: Array)               ## 悬空体素即将崩塌掉落前
 
 ## 崩塌掉落模式枚举
@@ -47,6 +47,10 @@ func _validate_property(property: Dictionary) -> void:
 ## 开启后破坏调用传入破坏位置，大幅减少每次崩塌检测的 BFS 范围（适合中频破坏+中型场景）
 ## 关闭则每次全量遍历所有体素判定（结果最精确，适合小型场景/低频）
 @export var local_collapse: bool = true
+
+## 锚定层：与 y <= anchor_y 连通（6 方向实心体素路径）的体素视为稳定。
+## 世界地面不在 y=0 时才需要改。判定模型见 NativeLoader.find_unsupported_island。
+@export var anchor_y: int = 0
 
 ## 逐体素健康度系统开关：关闭时忽略材质硬度，一击即碎
 @export var use_voxel_health: bool = true
@@ -138,6 +142,10 @@ var _cascade_total: Array = []            # 所有级联累积的失稳体素
 const MAX_CASCADE_VOXELS_PER_FRAME: int = 4096
 ## 分帧处理剩余待移除体素（尚未分组/移除的失稳体素）
 var _cascade_pending_voxels: Array = []
+## 整块失稳岛的扁平队列（原生直接返回 (x, y, z) 三元组）：几十万体素的静态岛不一次性
+## 物化成位置数组，每帧只取一批 → 单帧开销与内存都与崩塌规模无关。
+var _cascade_pending_flat := PackedInt32Array()
+var _cascade_flat_cursor: int = 0
 
 ## 单帧最大物理体生成数量（防止大规模级联时一帧创建过多 RigidBody3D）
 const MAX_FALLING_CHUNKS_PER_FRAME: int = 10
@@ -255,19 +263,17 @@ func _exit_tree() -> void:
 
 ## 球形破坏: 对中心点半径内的体素造成伤害
 ## center 为体素空间坐标 (1单位 = 1体素)，radius 单位同上
-## 即时累加伤害；实际移除在下一帧统一处理（_pending_removed 合并去重）
-## 返回被判定为应移除的体素位置数组（基于累计伤害）
+## 即时累加伤害（原生一趟完成：框定 chunk → 读材质 → 比硬度 → 累加 / 判移除）；
+## 实际移除在下一帧统一处理（_pending_removed 合并去重）。
+## 返回被判定为应移除的体素位置数组（基于累计伤害）。
 func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var positions := data.get_voxels_in_sphere(center, radius)
-	var removed := _apply_damage_immediate(positions, _materials_for(positions), damage_per_voxel)
-	if not removed.is_empty():
-		for pos in removed:
-			_pending_removed[pos] = true
-		_pending_spawn_debris = _pending_spawn_debris or do_spawn
-	return removed
+	data.ensure_sphere_loaded(center, radius)
+	return _consume_damage(NativeLoader.damage_sphere(
+		data.get_chunk_buffers(), _damage, center, radius,
+		_material_table(&"hardness", 1.0), damage_per_voxel, use_voxel_health), do_spawn)
 
 
 ## 盒形破坏（同 damage_sphere：即时累伤，下一帧统一移除）
@@ -275,26 +281,22 @@ func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var positions := data.get_voxels_in_box(aabb)
-	var removed := _apply_damage_immediate(positions, _materials_for(positions), damage_per_voxel)
-	if not removed.is_empty():
-		for pos in removed:
-			_pending_removed[pos] = true
-		_pending_spawn_debris = _pending_spawn_debris or do_spawn
-	return removed
+	data.ensure_box_loaded(aabb)
+	return _consume_damage(NativeLoader.damage_box(
+		data.get_chunk_buffers(), _damage,
+		Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z)),
+		Vector3i(floori(aabb.end.x - 1.0), floori(aabb.end.y - 1.0), floori(aabb.end.z - 1.0)),
+		_material_table(&"hardness", 1.0), damage_per_voxel, use_voxel_health), do_spawn)
 
 
-## 单体素破坏
+## 单体素破坏（= 退化盒，与盒路径共用同一原生内核）
 func damage_voxel(pos: Vector3i, spawn_debris: Variant = null) -> bool:
 	if not data or not data.has_voxel(pos):
 		return false
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var removed := _apply_damage_immediate([pos], _materials_for([pos]), damage_per_voxel)
-	if not removed.is_empty():
-		for p in removed:
-			_pending_removed[p] = true
-		_pending_spawn_debris = _pending_spawn_debris or do_spawn
-	return not removed.is_empty()
+	return not _consume_damage(NativeLoader.damage_box(
+		data.get_chunk_buffers(), _damage, pos, pos,
+		_material_table(&"hardness", 1.0), damage_per_voxel, use_voxel_health), do_spawn).is_empty()
 
 
 ## 射线破坏 (DDA)，朝指定方向破坏命中的第一个体素
@@ -373,31 +375,25 @@ func repair(amount: float) -> void:
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
 
-## 即时累加伤害（原生内核：逐体素读材质 → 比硬度 → 累加 / 判移除）。
-## positions 与 mats 平行（mats 来自 _materials_for，无体素处为 -1）。
-## 返回应被移除的体素位置；伤害缓冲的修改由原生回填，**必须写回**（同 remove_voxels_bulk 契约）。
-func _apply_damage_immediate(positions: Array, mats: PackedInt32Array, damage: float) -> Array:
-	if positions.is_empty():
-		return []
-	var res := NativeLoader.apply_damage(
-		_damage, positions, mats, _material_table(&"hardness", 1.0), damage, use_voxel_health)
+## 收尾一次原生伤害结果：写回伤害缓冲、发射硬化反馈、登记待移除。
+## 返回应被移除的体素位置（Array[Vector3i]——公开 API 一直如此）。
+func _consume_damage(res: Dictionary, do_spawn: bool) -> Array:
+	# 伤害缓冲由原生在本地副本上改，必须写回自己的账本（同 remove_voxels_bulk 契约）
 	var changed: Dictionary = res.get("damage_chunks", {})
 	for ck in changed:
 		_damage[ck] = changed[ck]
-	var removed: Array = res.get("removed", [])
+	var removed: Array = []
+	for v in res.get("removed", PackedVector3Array()):
+		removed.append(Vector3i(v))
 	last_damage_count = removed.size()
-	var hardened_pos: Array = res.get("hardened_pos", [])
+	if not removed.is_empty():
+		for pos in removed:
+			_pending_removed[pos] = true
+		_pending_spawn_debris = _pending_spawn_debris or do_spawn
+	var hardened_pos: PackedVector3Array = res.get("hardened_pos", PackedVector3Array())
 	if not hardened_pos.is_empty():
 		voxel_hardened_batch.emit(hardened_pos, res.get("hardened_rem", PackedFloat32Array()))
 	return removed
-
-
-## 与 positions 平行的材质 ID 数组（原生一次收集；无体素处为 -1）。
-## 伤害判定只需要"每个候选体素的材质"，不需要"位置 -> 材质"的字典查询。
-func _materials_for(positions: Array) -> PackedInt32Array:
-	if data == null:
-		return PackedInt32Array()
-	return NativeLoader.collect_materials_flat(data.get_chunk_buffers(), positions)
 
 
 ## 清空逐体素累计伤害（读档 / 重置 / 全毁后调用）。
@@ -547,10 +543,11 @@ func _stress_detect_fn() -> Callable:
 		return NativeLoader.propagate_stress(snap, pos, strength, steps, force, decay)
 
 
-## 悬空失稳扫描检测（原生返回 {pos: true}，应用侧统一归一化为位置数组）。
+## 静态岛失稳检测（原生）：返回因本次破坏而与锚定层断开的整块体素（扁平三元组，空 = 不塌）。
 func _unsupported_detect_fn() -> Callable:
+	var ay := anchor_y
 	return func(snap: Dictionary, pos: Array) -> Variant:
-		return NativeLoader.find_unsupported_around(snap, pos)
+		return NativeLoader.find_unsupported_island(snap, pos, ay)
 
 
 # ----------------------------------------------------------------------------
@@ -747,19 +744,9 @@ func _process_full_cascade() -> void:
 ##     材质+移除+生成全同步）。因此按 MAX_CASCADE_VOXELS_PER_FRAME 切块：
 ##     每帧只处理一批，剩余体素存 _cascade_pending_voxels，下帧继续检测。
 func _process_cascade_level() -> void:
-	# 优先处理上帧遗留的待移除体素（已判定失稳，直接走分组/移除/生成）
-	# 注意：遗留体素可能仍超单帧上限（上一帧一次性全量放入），需再次分帧
-	if not _cascade_pending_voxels.is_empty():
-		if _cascade_pending_voxels.size() > MAX_CASCADE_VOXELS_PER_FRAME:
-			var batch: Array = _cascade_pending_voxels.slice(0, MAX_CASCADE_VOXELS_PER_FRAME)
-			_cascade_pending_voxels = _cascade_pending_voxels.slice(MAX_CASCADE_VOXELS_PER_FRAME)
-			_process_cascade_batch(batch)
-			if diag_enabled:
-				print("[诊断] 级联分帧(遗留): 本帧%d体素, 剩余%d" % [batch.size(), _cascade_pending_voxels.size()])
-			return
-		var pending: Array = _cascade_pending_voxels
-		_cascade_pending_voxels = []
-		_process_cascade_batch(pending)
+	# 遗留批次优先（上帧未处理完的失稳体素，可能是几十万体素的整块失稳岛）
+	if not _cascade_pending_voxels.is_empty() or not _cascade_pending_flat.is_empty():
+		_process_next_cascade_batch()
 		return
 
 	if _cascade_check_positions.is_empty():
@@ -786,24 +773,51 @@ func _process_cascade_level() -> void:
 ## 结果可能是原生 find_unsupported_around 的 {pos: true} 字典，也可能是全量检测的位置数组，
 ## 此处统一归一化。
 func _apply_cascade_detection(queue: Array, unstable_raw: Variant) -> void:
+	# 原生静态岛检测 → 扁平 (x,y,z) 三元组；全量检测 → 位置数组。两者统一进分帧消费
+	if unstable_raw is PackedInt32Array:
+		_cascade_pending_flat = unstable_raw
+		_cascade_flat_cursor = 0
+		if diag_enabled:
+			print("[诊断] 级联检测: queue=%d, 失稳岛=%d 体素" % [queue.size(), _cascade_pending_flat.size() / 3])
+		_process_next_cascade_batch()
+		return
 	var unstable: Array = (unstable_raw as Dictionary).keys() if unstable_raw is Dictionary else (unstable_raw as Array)
 	if diag_enabled:
 		print("[诊断] 级联检测: queue=%d, 检测出unstable=%d" % [queue.size(), unstable.size()])
-	if unstable.is_empty():
+	_cascade_pending_voxels = unstable
+	_process_next_cascade_batch()
+
+
+## 从扁平队列取一批填进 _cascade_pending_voxels（至多 MAX_CASCADE_VOXELS_PER_FRAME 个）。
+func _refill_cascade_pending_from_flat() -> void:
+	var n := _cascade_pending_flat.size()
+	var take := mini(MAX_CASCADE_VOXELS_PER_FRAME, (n - _cascade_flat_cursor) / 3)
+	var out: Array = []
+	for i in take:
+		var k := _cascade_flat_cursor + i * 3
+		out.append(Vector3i(_cascade_pending_flat[k], _cascade_pending_flat[k + 1], _cascade_pending_flat[k + 2]))
+	_cascade_flat_cursor += take * 3
+	_cascade_pending_voxels = out
+	if _cascade_flat_cursor >= n:
+		_cascade_pending_flat = PackedInt32Array()
+		_cascade_flat_cursor = 0
+
+
+## 处理下一批（至多 MAX_CASCADE_VOXELS_PER_FRAME 个）；两级队列都空则终结本次级联。
+func _process_next_cascade_batch() -> void:
+	if _cascade_pending_voxels.is_empty() and not _cascade_pending_flat.is_empty():
+		_refill_cascade_pending_from_flat()
+	if _cascade_pending_voxels.is_empty():
 		_finalize_cascade()
 		return
-
-	# 超大崩塌分帧：超过单帧上限时只处理前 MAX_CASCADE_VOXELS_PER_FRAME 个，
-	# 剩余存入待处理队列，由 _process 下一帧继续（避免单帧 1 秒级主线程卡顿）
-	if unstable.size() > MAX_CASCADE_VOXELS_PER_FRAME:
-		var batch: Array = unstable.slice(0, MAX_CASCADE_VOXELS_PER_FRAME)
-		_cascade_pending_voxels = unstable.slice(MAX_CASCADE_VOXELS_PER_FRAME)
+	if _cascade_pending_voxels.size() > MAX_CASCADE_VOXELS_PER_FRAME:
+		var batch: Array = _cascade_pending_voxels.slice(0, MAX_CASCADE_VOXELS_PER_FRAME)
+		_cascade_pending_voxels = _cascade_pending_voxels.slice(MAX_CASCADE_VOXELS_PER_FRAME)
 		_process_cascade_batch(batch)
-		if diag_enabled:
-			print("[诊断] 级联分帧: 本帧%d体素, 剩余%d" % [batch.size(), _cascade_pending_voxels.size()])
 		return
-
-	_process_cascade_batch(unstable)
+	var pending: Array = _cascade_pending_voxels
+	_cascade_pending_voxels = []
+	_process_cascade_batch(pending)
 
 
 ## 处理一批失稳体素：分组 → 收集材质 → 移除 → 生成掉落体
@@ -838,11 +852,9 @@ func _process_cascade_batch(unstable: Array) -> void:
 	# 累积级联结果
 	_cascade_total.append_array(unstable)
 
-	# 本批处理完且无遗留 → 终结。
-	# 单轮级联：find_unsupported_around 内部已沿支撑链传播完整级联，
-	# 无需把 unstable 再次作为 removed 继续检测（否则配合较宽松的支撑判定
-	# 会连锁放大 → 破坏一点整楼/整行塌）。
-	if _cascade_pending_voxels.is_empty():
+	# 两级队列都空才算终结。单轮级联：原生 find_unsupported_island 一次给出整块失稳体素，
+	# 无需把结果再次作为 removed 投入检测（否则会二次放大）。
+	if _cascade_pending_voxels.is_empty() and _cascade_pending_flat.is_empty():
 		_finalize_cascade()
 
 	if diag_enabled:
@@ -864,6 +876,8 @@ func _finalize_cascade() -> void:
 	voxel_damaged.emit(_cascade_total, true)
 	_cascade_total = []
 	_cascade_check_positions = []
+	_cascade_pending_flat = PackedInt32Array()
+	_cascade_flat_cursor = 0
 
 
 ## 确保崩塌掉落块根节点存在
@@ -1346,18 +1360,19 @@ func _freeze_sleeping_chunks() -> void:
 func _find_unstable_voxels(around_positions: Array = []) -> Array:
 	if data.is_empty():
 		return []
-
-	var unstable_set: Dictionary
-	if local_collapse and not around_positions.is_empty():
-		unstable_set = data.find_unsupported_around(around_positions)
-	else:
-		unstable_set = data.find_unsupported()
-	if diag_enabled:
-		print("[诊断] _find_unstable_voxels: around=%d, 局部=%s, 结果=%d" % [around_positions.size(), (local_collapse and not around_positions.is_empty()), unstable_set.size()])
-
+	# 局部：原生静态岛（扁平三元组）；全量：GDScript 泛洪（遍历整个世界）
 	var unstable: Array = []
-	for key in unstable_set:
-		unstable.append(key)
+	if local_collapse and not around_positions.is_empty():
+		var flat := data.find_unsupported_island(around_positions, anchor_y)
+		var i := 0
+		while i + 2 < flat.size():
+			unstable.append(Vector3i(flat[i], flat[i + 1], flat[i + 2]))
+			i += 3
+	else:
+		for key in data.find_unsupported():
+			unstable.append(key)
+	if diag_enabled:
+		print("[诊断] _find_unstable_voxels: around=%d, 结果=%d" % [around_positions.size(), unstable.size()])
 	return unstable
 
 

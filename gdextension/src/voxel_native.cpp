@@ -988,115 +988,111 @@ inline int buf_index(const Vector3i &local) {
 
 } // namespace
 
-Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Array &removed) {
-	// 结果：失稳体素集合
-	Dictionary unstable;
+PackedInt32Array VoxelNative::find_unsupported_island(const Dictionary &buffers, const Array &removed, int anchor_y) {
+	PackedInt32Array out;
 	if (buffers.is_empty() || removed.is_empty()) {
-		return unstable;
+		return out;
 	}
-
-	// 惰性构建 chunk 缓冲查找结构：只收集候选体素及其邻居涉及的 chunk。
-	// 避免遍历整世界（1183 chunk 全量拷贝是灾难性开销）。
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
-	auto ensure_chunk = [&](const Vector3i &p) {
-		const uint64_t kk = vkey(chunk_of(p));
-		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
-			if (buffers.has(chunk_of(p))) {
-				chunk_bufs[kk] = buffers[chunk_of(p)];
-			}
-		}
+	// 静态岛判定（Teardown / Space Engineers 同一思路）：
+	//   体素稳定 ⟺ 存在一条由实心体素组成的 6 连通路径走到**锚定层**（y <= anchor_y）。
+	// 破坏 R 后从 R 的 6 邻居洪泛：触到锚定层 → 该连通块仍锚定，不塌；
+	// 走完整块都没触到 → 整块与地面断开，整块坠落。
+	//   · 壁上破一个洞 → 绕过洞口仍连地面 → 不塌；
+	//   · 承重被整条切断 → 整块坠落（期望的大面积崩塌）；
+	//   · 悬空楼板挂在墙上 → 仍连地面 → 不塌。
+	//     （旧"支撑只来自下方"规则会认定楼板每个体素都无支撑 → 破一处就整层塌，正是要修的病）
+	// 【快照即权威】不在 buffers 里的 chunk 视为空气——这与全量模型 VoxelData.find_unsupported
+	//   只在已载入体素上泛洪完全一致；调用方需保证候选区域已载入（VoxelData.ensure_*_loaded）。
+	//   反例教训：早先"碰到缺失 chunk 就保守放弃判定"会让**世界边界外永远缺 chunk**的世界
+	//   （例如从 x/y/z=0 开始的结构）每次都判成"仍锚定" → 表现为完全不塌。
+	// 【性能】每 chunk 一份已访问位图 + 体素指针（unordered_map 节点地址稳定，可长期缓存指针），
+	//   逐体素只做数组读写、不查哈希；向下优先 DFS 让常规破坏几步就触锚并放弃。
+	constexpr int32_t VOL = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	struct View {
+		const int32_t *vox = nullptr;
+		std::vector<uint8_t> seen;
 	};
-
-	// has_voxel：局部 chunk 内查询（与 GDScript has_voxel 语义一致：值>0 表示存在）
-	auto has_voxel = [&](const Vector3i &p) -> bool {
-		const Vector3i ck = chunk_of(p);
-		const auto it = chunk_bufs.find(vkey(ck));
-		if (it == chunk_bufs.end()) {
-			return false;
+	std::unordered_map<uint64_t, View> views;
+	std::unordered_set<uint64_t> removed_set;
+	removed_set.reserve((size_t)removed.size() * 2 + 1);
+	for (int i = 0; i < removed.size(); ++i) {
+		removed_set.insert(vkey(removed[i]));
+	}
+	auto view_of = [&](const Vector3i &ck) -> View * {
+		const uint64_t kk = vkey(ck);
+		const auto it = views.find(kk);
+		if (it != views.end()) {
+			return &it->second;
 		}
-		const Vector3i local = p - ck * CHUNK_BITS;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_BITS || local.y >= CHUNK_BITS || local.z >= CHUNK_BITS) {
-			return false;
+		if (!buffers.has(ck)) {
+			return nullptr;   // 无数据 → 空气
 		}
-		return it->second.ptr()[buf_index(local)] > 0;
+		const PackedInt32Array b = buffers[ck];
+		if (b.size() < VOL) {
+			return nullptr;
+		}
+		View v;
+		v.vox = b.ptr();
+		v.seen.assign(VOL, 0);
+		return &views.emplace(kk, std::move(v)).first->second;
 	};
-
-	// ---------------------------------------------------------------------------
-	// 增量支撑图失稳检测（localized propagation，性能优先，行为与破坏 demo 既有逻辑一致）
-	//   体素稳定 ⟺ LOWER_5（正下 + 4 对角下方）中任意 1 个存在且未失稳。
-	//   破坏移除 R 后，从 R 的上方位 + 水平候选出发，只沿失稳链传播（UPPER_5 上方 + HORIZONTAL_4 水平），
-	//   不遍历整世界/整连通分量 → 连续破坏每帧局部微秒级。
-	//   保守判定（对角也算支撑）保证：破坏局部 → 局部塌，不连锁整楼。
-	//   候选含水平方向（修复球洞侧壁等"removed 水平邻居悬空"漏检：正下无且无对角 → 掉落）。
-	// ---------------------------------------------------------------------------
-	// 候选 = removed 的 UPPER_5（上方 5）+ HORIZONTAL_4（水平 4）邻居（存在）
+	// 方向表按 y 升序排（下、上、-x、+x、-z、+z）；压栈时反序 → 先弹出 y 最小的邻居
+	constexpr int DIRS6[6][3] = {
+		{ 0, -1, 0 }, { 0, 1, 0 }, { -1, 0, 0 }, { 1, 0, 0 }, { 0, 0, -1 }, { 0, 0, 1 },
+	};
 	std::vector<Vector3i> stack;
-	std::unordered_set<uint64_t> seed_set;
+	std::vector<Vector3i> island;
+	Vector3i cur_ck;
+	View *cur = nullptr;
+	bool cur_valid = false;
+	// 入栈候选（实心且未访问）
+	auto push = [&](const Vector3i &p) {
+		const Vector3i ck = chunk_of(p);
+		if (!cur_valid || ck != cur_ck) {
+			cur_ck = ck;
+			cur_valid = true;
+			cur = view_of(ck);
+		}
+		if (cur == nullptr) {
+			return;   // 空 chunk（或未载入）→ 不连通
+		}
+		const int32_t idx = buf_index(p - ck * CHUNK_BITS);
+		if (cur->vox[idx] <= 0 || cur->seen[idx] != 0) {
+			return;
+		}
+		cur->seen[idx] = 1;
+		stack.push_back(p);
+	};
 	for (int i = 0; i < removed.size(); ++i) {
 		const Vector3i rp = removed[i];
-		ensure_chunk(rp);
-		for (int d = 0; d < 5; ++d) {
-			const Vector3i nb(rp.x + UPPER_5[d][0], rp.y + UPPER_5[d][1], rp.z + UPPER_5[d][2]);
-			ensure_chunk(nb);
-			const uint64_t nk = vkey(nb);
-			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
-				seed_set.insert(nk);
-				stack.push_back(nb);
-			}
-		}
-		for (int d = 0; d < 4; ++d) {
-			const Vector3i nb(rp.x + HORIZONTAL_4[d][0], rp.y + HORIZONTAL_4[d][1], rp.z + HORIZONTAL_4[d][2]);
-			ensure_chunk(nb);
-			const uint64_t nk = vkey(nb);
-			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
-				seed_set.insert(nk);
-				stack.push_back(nb);
+		for (int d = 0; d < 6; ++d) {
+			const Vector3i nb(rp.x + DIRS6[d][0], rp.y + DIRS6[d][1], rp.z + DIRS6[d][2]);
+			if (removed_set.find(vkey(nb)) == removed_set.end()) {
+				push(nb);
 			}
 		}
 	}
-
-	// 失稳传播（增量）：支撑 = LOWER_5 任意 1 个；removed / unstable 不计支撑；贴地(y==0)稳定
 	while (!stack.empty()) {
-		const Vector3i cur = stack.back();
+		const Vector3i p = stack.back();
 		stack.pop_back();
-		if (unstable.has(cur)) {
-			continue;
+		if (p.y <= anchor_y) {
+			return out;   // 触到锚定层 → 该连通块仍锚定
 		}
-		if (cur.y == 0) {
-			continue;
-		}
-		// 有效支撑数 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数
-		int effective = 0;
-		for (int d = 0; d < 5; ++d) {
-			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
-			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb)) {
-				effective += 1;
-			}
-		}
-		if (effective > 0) {
-			continue;
-		}
-		// 失稳
-		unstable[cur] = true;
-		// 连锁失稳：上方位 5 个 + 水平 4 个
-		for (int d = 0; d < 5; ++d) {
-			const Vector3i nb(cur.x + UPPER_5[d][0], cur.y + UPPER_5[d][1], cur.z + UPPER_5[d][2]);
-			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb)) {
-				stack.push_back(nb);
-			}
-		}
-		for (int d = 0; d < 4; ++d) {
-			const Vector3i nb(cur.x + HORIZONTAL_4[d][0], cur.y + HORIZONTAL_4[d][1], cur.z + HORIZONTAL_4[d][2]);
-			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb)) {
-				stack.push_back(nb);
-			}
+		island.push_back(p);
+		for (int d = 5; d >= 0; --d) {
+			push(Vector3i(p.x + DIRS6[d][0], p.y + DIRS6[d][1], p.z + DIRS6[d][2]));
 		}
 	}
-
-	return unstable;
+	// 走完整块都没触到锚定层 → 整块失稳（扁平 (x, y, z) 三元组）
+	out.resize((int64_t)island.size() * 3);
+	int32_t *w = out.ptrw();
+	int64_t k = 0;
+	for (size_t i = 0; i < island.size(); ++i) {
+		w[k++] = island[i].x;
+		w[k++] = island[i].y;
+		w[k++] = island[i].z;
+	}
+	return out;
 }
 
 // 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
@@ -1219,119 +1215,147 @@ Dictionary VoxelNative::collect_materials(const Dictionary &buffers, const Array
 	return result;
 }
 
-PackedInt32Array VoxelNative::collect_materials_flat(const Dictionary &buffers, const Array &positions) {
-	const int n = positions.size();
-	PackedInt32Array out;
-	out.resize(n);
-	if (n == 0) {
-		return out;
-	}
-	int32_t *w = out.ptrw();
-	const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
-	// 位置通常按 chunk 成组出现：缓存当前 chunk 的缓冲，把逐体素哈希降为逐 chunk 一次
-	Vector3i cur_ck;
-	bool cur_valid = false;
-	PackedInt32Array cur_buf;
-	const int32_t *cur_ptr = nullptr;
-	for (int i = 0; i < n; ++i) {
-		const Vector3i p = positions[i];
-		const Vector3i ck = chunk_of(p);
-		if (!cur_valid || ck != cur_ck) {
-			cur_ck = ck;
-			cur_valid = true;
-			cur_buf = PackedInt32Array();
-			cur_ptr = nullptr;
-			if (buffers.has(ck)) {
-				cur_buf = buffers[ck];
-				if (cur_buf.size() >= volume) {
-					cur_ptr = cur_buf.ptr();
-				}
-			}
-		}
-		if (cur_ptr == nullptr) {
-			w[i] = -1;
-			continue;
-		}
-		const int32_t m = cur_ptr[buf_index(p - ck * CHUNK_BITS)];
-		w[i] = (m > 0) ? m : -1;
-	}
-	return out;
-}
+namespace {
 
-Dictionary VoxelNative::apply_damage(const Dictionary &damage_chunks, const Array &positions,
-		const PackedInt32Array &materials, const PackedFloat32Array &hardness_table,
-		float damage, bool use_health) {
+// 破坏内核：在 in_shape 命中的非空体素上累加伤害。
+// vmin/vmax 是形状的体素 AABB（闭区间）——据此只遍历覆盖到的 chunk，绝不全世界外扩。
+// 结果位置一律走 PackedVector3Array：113k 个位置若用 Array[Vector3i] 光装箱就要十几毫秒。
+template <typename InShape>
+Dictionary qvox_damage_impl(const Dictionary &buffers, const Dictionary &damage_chunks,
+		const Vector3i &vmin, const Vector3i &vmax, InShape &&in_shape,
+		const PackedFloat32Array &hardness_table, float damage, bool use_health) {
 	Dictionary out;
-	Array removed;
-	Array hardened_pos;
+	PackedVector3Array removed;
+	PackedVector3Array hardened_pos;
 	PackedFloat32Array hardened_rem;
 	Dictionary changed;
-	const int n = positions.size();
-	for (int i = 0; i < n && !use_health; ++i) {
-		removed.push_back(positions[i]);
+	if (vmin.x > vmax.x || vmin.y > vmax.y || vmin.z > vmax.z) {
+		out["removed"] = removed;
+		out["hardened_pos"] = hardened_pos;
+		out["hardened_rem"] = hardened_rem;
+		out["damage_chunks"] = changed;
+		return out;
 	}
-	if (n > 0 && use_health) {
-		const int hn = hardness_table.size();
-		const int mn = materials.size();
-		const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
-		const float *hard = hardness_table.ptr();
-		const int32_t *mats = materials.ptr();
-		// 伤害缓冲按 chunk 惰性取出到本地（ptrw 会分叉，最后统一回填给调用方）
-		std::unordered_map<uint64_t, PackedFloat32Array> dmg;
-		std::unordered_map<uint64_t, Vector3i> ck_of;
-		Vector3i cur_ck;
-		bool cur_valid = false;
-		float *cur_ptr = nullptr;
-		for (int i = 0; i < n; ++i) {
-			const Vector3i p = positions[i];
-			const Vector3i ck = chunk_of(p);
-			if (!cur_valid || ck != cur_ck) {
-				cur_ck = ck;
-				cur_valid = true;
-				const uint64_t kk = vkey(ck);
-				auto it = dmg.find(kk);
-				if (it == dmg.end()) {
-					PackedFloat32Array b;
-					if (damage_chunks.has(ck)) {
-						b = damage_chunks[ck];
-					}
-					if (b.size() < volume) {
-						b.resize(volume);
-					}
-					it = dmg.emplace(kk, b).first;
-					ck_of[kk] = ck;
+	const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	const int hn = hardness_table.size();
+	const float *hard = hardness_table.ptr();
+	std::unordered_map<uint64_t, PackedFloat32Array> dmg;
+	std::unordered_map<uint64_t, Vector3i> ck_of;
+
+	// 只遍历形状 AABB 覆盖的 chunk 键（缺块直接跳过）
+	const Vector3i ck_lo = chunk_of(vmin);
+	const Vector3i ck_hi = chunk_of(vmax);
+	for (int cz = ck_lo.z; cz <= ck_hi.z; ++cz) {
+		for (int cy = ck_lo.y; cy <= ck_hi.y; ++cy) {
+			for (int cx = ck_lo.x; cx <= ck_hi.x; ++cx) {
+				const Vector3i ck(cx, cy, cz);
+				if (!buffers.has(ck)) {
+					continue;
 				}
-				cur_ptr = it->second.ptrw();
-			}
-			const int32_t mid = (i < mn) ? mats[i] : -1;
-			float h = 1.0f;
-			if (mid >= 0 && mid < hn) {
-				h = hard[mid];
-			}
-			if (h <= 0.0f) {
-				removed.push_back(p);
-				continue;
-			}
-			const int32_t idx = buf_index(p - ck * CHUNK_BITS);
-			const float cur = cur_ptr[idx] + damage;
-			if (cur >= h) {
-				cur_ptr[idx] = 0.0f;   // 移除即清零：该位置日后被重建时不应继承旧伤
-				removed.push_back(p);
-			} else {
-				cur_ptr[idx] = cur;
-				hardened_pos.push_back(p);
-				hardened_rem.push_back(h - cur);
+				const PackedInt32Array buf = buffers[ck];
+				if (buf.size() < volume) {
+					continue;
+				}
+				const int32_t *vox = buf.ptr();
+				float *dmg_ptr = nullptr;
+				if (use_health) {
+					const uint64_t kk = vkey(ck);
+					auto it = dmg.find(kk);
+					if (it == dmg.end()) {
+						PackedFloat32Array b;
+						if (damage_chunks.has(ck)) {
+							b = damage_chunks[ck];
+						}
+						if (b.size() < volume) {
+							b.resize(volume);
+						}
+						it = dmg.emplace(kk, b).first;
+						ck_of[kk] = ck;
+					}
+					dmg_ptr = it->second.ptrw();
+				}
+				const Vector3i origin = ck * CHUNK_BITS;
+				for (int lz = 0; lz < CHUNK_BITS; ++lz) {
+					for (int ly = 0; ly < CHUNK_BITS; ++ly) {
+						for (int lx = 0; lx < CHUNK_BITS; ++lx) {
+							const int32_t mat = vox[lx + ly * CHUNK_BITS + lz * CHUNK_BITS * CHUNK_BITS];
+							if (mat <= 0) {
+								continue;   // 空体素不参与
+							}
+							const Vector3i p = origin + Vector3i(lx, ly, lz);
+							if (!in_shape(p)) {
+								continue;
+							}
+							const Vector3 pos(p.x, p.y, p.z);
+							if (!use_health) {
+								removed.push_back(pos);
+								continue;
+							}
+							const float h = (mat < hn) ? hard[mat] : 1.0f;
+							if (h <= 0.0f) {
+								removed.push_back(pos);
+								continue;
+							}
+							const int idx = lx + ly * CHUNK_BITS + lz * CHUNK_BITS * CHUNK_BITS;
+							const float cur = dmg_ptr[idx] + damage;
+							if (cur >= h) {
+								dmg_ptr[idx] = 0.0f;   // 移除即清零：日后重建不继承旧伤
+								removed.push_back(pos);
+							} else {
+								dmg_ptr[idx] = cur;
+								hardened_pos.push_back(pos);
+								hardened_rem.push_back(h - cur);
+							}
+						}
+					}
+				}
 			}
 		}
-		for (auto &kv : dmg) {
-			changed[ck_of[kv.first]] = kv.second;
-		}
+	}
+	for (auto &kv : dmg) {
+		changed[ck_of[kv.first]] = kv.second;
 	}
 	out["removed"] = removed;
 	out["hardened_pos"] = hardened_pos;
 	out["hardened_rem"] = hardened_rem;
 	out["damage_chunks"] = changed;
 	return out;
+}
+
+} // namespace
+
+Dictionary VoxelNative::damage_sphere(const Dictionary &buffers, const Dictionary &damage_chunks,
+		const Vector3 &center, float radius, const PackedFloat32Array &hardness_table,
+		float damage, bool use_health) {
+	// 与 collect_sphere_positions 同口径：cxi = floor(center)，r_i = ceil(radius)，
+	// 比较用未取整的 radius²（保证球边界与查询端一致）。
+	const int cxi = (int)std::floor((double)center.x);
+	const int cyi = (int)std::floor((double)center.y);
+	const int czi = (int)std::floor((double)center.z);
+	const int r_i = (int)std::ceil((double)radius);
+	const float radius_sq = radius * radius;
+	return qvox_damage_impl(buffers, damage_chunks,
+			Vector3i(cxi - r_i, cyi - r_i, czi - r_i),
+			Vector3i(cxi + r_i, cyi + r_i, czi + r_i),
+			[&](const Vector3i &p) {
+				const int32_t dx = p.x - cxi;
+				const int32_t dy = p.y - cyi;
+				const int32_t dz = p.z - czi;
+				return (float)(dx * dx + dy * dy + dz * dz) <= radius_sq;
+			},
+			hardness_table, damage, use_health);
+}
+
+Dictionary VoxelNative::damage_box(const Dictionary &buffers, const Dictionary &damage_chunks,
+		const Vector3i &min_p, const Vector3i &max_p, const PackedFloat32Array &hardness_table,
+		float damage, bool use_health) {
+	// 闭区间 [min_p, max_p]；单个体素破坏 = 退化盒 (p, p)
+	return qvox_damage_impl(buffers, damage_chunks, min_p, max_p,
+			[&](const Vector3i &p) {
+				return p.x >= min_p.x && p.x <= max_p.x && p.y >= min_p.y && p.y <= max_p.y
+						&& p.z >= min_p.z && p.z <= max_p.z;
+			},
+			hardness_table, damage, use_health);
 }
 
 Dictionary VoxelNative::install_flat_voxels(const PackedInt32Array &flat) {
@@ -2394,12 +2418,12 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_island", "buffers", "removed", "anchor_y"), &VoxelNative::find_unsupported_island);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials_flat", "buffers", "positions"), &VoxelNative::collect_materials_flat);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("apply_damage", "damage_chunks", "positions", "materials", "hardness_table", "damage", "use_health"), &VoxelNative::apply_damage);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("damage_sphere", "buffers", "damage_chunks", "center", "radius", "hardness_table", "damage", "use_health"), &VoxelNative::damage_sphere);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("damage_box", "buffers", "damage_chunks", "min_p", "max_p", "hardness_table", "damage", "use_health"), &VoxelNative::damage_box);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);

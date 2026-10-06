@@ -22,7 +22,7 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"patch_lod_block",
 	&"patch_lod_block_from_lod",
 	&"build_lod_block_halo_from_lod_buffers_native",
-	&"find_unsupported_around",
+	&"find_unsupported_island",
 	&"propagate_stress",
 	&"collect_materials",
 	&"remove_voxels_bulk",
@@ -43,9 +43,9 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_bounds",
 	&"collect_sphere_positions",
 	&"collect_box_positions",
-	&"collect_materials_flat",
 	&"install_flat_voxels",
-	&"apply_damage",
+	&"damage_sphere",
+	&"damage_box",
 ]
 
 static var _inst: Object = null
@@ -179,12 +179,12 @@ static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary,
 	return inst.call(&"build_lod_block_halo_from_lod_buffers_native", buffers, block_key)
 
 
-## 支撑失稳检测：返回失稳体素集合 {pos: true}。
-static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dictionary:
+## 静态岛失稳检测：返回因本次破坏而与锚定层断开的整块体素（扁平 (x,y,z) 三元组，空 = 不塌）。
+static func find_unsupported_island(buffers: Dictionary, removed: Array, anchor_y: int = 0) -> PackedInt32Array:
 	var inst := instance()
 	if inst == null:
-		return {}
-	return inst.call(&"find_unsupported_around", buffers, removed)
+		return PackedInt32Array()
+	return inst.call(&"find_unsupported_island", buffers, removed, anchor_y)
 
 
 ## 应力传播（裂纹扩散）：返回断裂体素 Array[Vector3i]。
@@ -346,12 +346,27 @@ static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: V
 	return inst.call(&"collect_box_positions", buffers, min_p, max_p)
 
 
-## 与 positions **平行**的材质 ID 数组（无体素处为 -1）：免去"位置 -> 材质"的字典查询。
-static func collect_materials_flat(buffers: Dictionary, positions: Array) -> PackedInt32Array:
+## 球内逐体素累伤（一趟完成：框定 chunk → 读材质 → 比硬度 → 累加 / 判移除）。
+## 返回 {removed:PackedVector3Array, hardened_pos:PackedVector3Array,
+##       hardened_rem:PackedFloat32Array, damage_chunks:{ck: PackedFloat32Array}}。
+## **damage_chunks 里是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
+static func damage_sphere(buffers: Dictionary, damage_chunks: Dictionary, center: Vector3,
+		radius: float, hardness_table: PackedFloat32Array, damage: float,
+		use_health: bool) -> Dictionary:
 	var inst := instance()
 	if inst == null:
-		return PackedInt32Array()
-	return inst.call(&"collect_materials_flat", buffers, positions)
+		return {}
+	return inst.call(&"damage_sphere", buffers, damage_chunks, center, radius, hardness_table, damage, use_health)
+
+
+## 盒内逐体素累伤（闭区间 [min_p, max_p]；单个体素 = 退化盒）。契约同 damage_sphere。
+static func damage_box(buffers: Dictionary, damage_chunks: Dictionary, min_p: Vector3i,
+		max_p: Vector3i, hardness_table: PackedFloat32Array, damage: float,
+		use_health: bool) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"damage_box", buffers, damage_chunks, min_p, max_p, hardness_table, damage, use_health)
 
 
 ## 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}。

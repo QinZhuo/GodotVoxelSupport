@@ -1221,14 +1221,12 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 			if _pending:
 				continue  # 独立数据生成中（程序化流），等待回填
 			# 无粗层独立数据能力 → 降采样（_build_lod_block 快照空时回退降采样）
-		to_build.append([dist, bk])
-	# 构建预算有限：先按距离粗排（用缓存的 dist，便宜），截断候选，再按加载优先级细排
-	# （避免大 to_build 时对数百 block 全量算 priority，单层可省数十 ms）。
-	if to_build.size() > build_quota * 8:
-		to_build.sort_custom(func(a, b): return a[0] < b[0])
-		to_build = to_build.slice(0, build_quota * 8)
-	to_build.sort_custom(func(a, b):
-		return _lod_load_priority(a[1], level, cam_pos, cam_dir) < _lod_load_priority(b[1], level, cam_pos, cam_dir))
+		# 装饰排序：优先级在这里算一次并随元素携带，比较器只比数值
+		to_build.append([_lod_load_priority(bk, level, cam_pos, cam_dir), bk])
+	# 按加载优先级排序（元素首项已算好）。
+	# 不再需要"先按距离粗排 + 截断候选"那套技巧——它存在只是因为旧比较器每次比较都要重算
+	# 两次 _lod_load_priority（数百 block ≈ 数千次方法调用 + 三角运算，每层每帧一次）。
+	to_build.sort_custom(func(a, b): return a[0] < b[0])
 	if not to_build.is_empty():
 		var aligned: Array = VoxelMaterial.align_by_id(_materials_snapshot)
 		# 用 assign 避免 typed 数组（_lod_materials 为 Array[Array]）直接赋值类型校验失败

@@ -19,7 +19,7 @@ namespace godot {
 // GDScript 侧只做编排（NativeLoader 一次性校验必需方法，缺失即报错，不做 GDScript 兜底）。
 //   - greedy_merge_dense:     贪婪网格合并（2D 同材质矩形合并）
 //   - generate_chunk_dense:   chunk 网格生成主循环（32³ 体素 × 6 方向可见性 + 贪婪合并）
-//   - find_unsupported_around: 支撑图失稳检测
+//   - find_unsupported_island: 静态岛（连通性）失稳检测
 //   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速）
 //   - partition_connected:    连通分组（大崩塌掉落体分组提速）
 class VoxelNative : public RefCounted {
@@ -92,13 +92,13 @@ public:
 	static PackedInt32Array build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key);
 
-	// 支撑图失稳检测（等价于 VoxelData.find_unsupported_around）
-	// buffers: chunk key -> PackedInt32Array(32³) 的密集缓冲快照（VoxelData._chunk_buffers）
-	// removed: 本次被移除的体素位置数组（Array[Vector3i]）
-	// 返回：失稳体素位置集合 Dictionary{pos(Vector3i): true}（GDScript 直接作 Set 用）
-	// 实时局部传播（无预计算缓存）：有效支撑 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数，
-	// 只访问破坏点附近体素。设计为惰性加载：只收集候选及邻居涉及的局部 chunk，避免全量拷贝整世界。
-	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed);
+	// 静态岛失稳检测（连通性；与 VoxelData.find_unsupported 同一模型）：
+	//   体素稳定 ⟺ 存在实心体素组成的 6 连通路径走到锚定层（y <= anchor_y）。
+	// 从 removed 的 6 邻居洪泛：触到锚定层 → 该连通块仍锚定，返回空；否则返回整块失稳体素。
+	// buffers: chunk key -> PackedInt32Array(32³) 快照；removed: Array[Vector3i]
+	// 返回：扁平 (x, y, z) 三元组（空 = 不塌）。返回扁平而非 {pos:true} 字典，
+	// 是因为整块可达百万体素，字典 + keys() 会在主线程物化百万个 Variant。
+	static PackedInt32Array find_unsupported_island(const Dictionary &buffers, const Array &removed, int anchor_y);
 
 	// 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
 	// strength_table: 材质连接强度表（PackedFloat32Array，索引=材质ID），GDScript 预取传入。
@@ -178,18 +178,20 @@ public:
 	static Array collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius);
 	// 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
 	static Array collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p);
-	// 与 positions **平行**的材质 ID 数组（无体素处为 -1）。
-	// 伤害判定只需要"每个候选体素的材质"，不需要"位置 -> 材质"的字典查询。
-	static PackedInt32Array collect_materials_flat(const Dictionary &buffers, const Array &positions);
-	// 逐体素累加伤害（原生内核）：按硬度判定"移除 / 未摧毁"，返回与 positions 平行的结果。
+	// ---- 破坏内核（形状查询 + 累伤一趟完成）----
+	// 球/盒范围内的逐体素累伤：一趟内完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
+	// 材质就在遍历到的 chunk 缓冲里，所以不需要"先收集位置、再收集材质"两趟。
 	//   damage_chunks: {chunk_key: PackedFloat32Array(32³)} 现有累计伤害（缺省视为 0）
-	//   materials:     与 positions 平行（-1 = 无体素）；hardness_table: 索引 = 材质ID
-	//   use_health=false 时全部视为"应移除"，不碰伤害缓冲
-	// 返回 {removed:Array[Vector3i], hardened_pos:Array[Vector3i],
+	//   hardness_table: 索引 = 材质ID；use_health=false 时全部视为"应移除"，不碰伤害缓冲
+	// 返回 {removed:PackedVector3Array, hardened_pos:PackedVector3Array,
 	//       hardened_rem:PackedFloat32Array, damage_chunks:{ck: PackedFloat32Array}}
+	// 位置走 PackedVector3Array（连续存储、无逐元素 Variant 装箱）。
 	// **damage_chunks 必须由调用方写回**——原生在本地副本上写（同 remove_voxels_bulk 的契约）。
-	static Dictionary apply_damage(const Dictionary &damage_chunks, const Array &positions,
-			const PackedInt32Array &materials, const PackedFloat32Array &hardness_table,
+	static Dictionary damage_sphere(const Dictionary &buffers, const Dictionary &damage_chunks,
+			const Vector3 &center, float radius, const PackedFloat32Array &hardness_table,
+			float damage, bool use_health);
+	static Dictionary damage_box(const Dictionary &buffers, const Dictionary &damage_chunks,
+			const Vector3i &min_p, const Vector3i &max_p, const PackedFloat32Array &hardness_table,
 			float damage, bool use_health);
 	// 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}（均为新缓冲）。
 	// 与 collect_all_flat 成对（收 / 装），供存档载荷重建。
