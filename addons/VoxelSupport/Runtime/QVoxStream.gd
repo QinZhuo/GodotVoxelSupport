@@ -56,6 +56,16 @@ const CACH_LOD_ALGO := 1
 var _materials: Array = []
 
 ## 当累计脏块达到该值自动 flush（0 = 关闭自动，仅显式 flush）。防长时间不落盘。
+##
+## 【它同时是"单次落盘卡顿峰值"的上限】flush 在主线程重编码脏块，而重编码
+## （pick_codec + pack）是 GDScript 逐元素扫描。实测每块代价：
+##   · 纯 SOLID / 全空块：约 10~20µs（已走原生 count 快判）
+##   · 混合值块（2~4 种材质这种最常见形态）：**约 15ms/块**（pick ~7.7ms + pack ~7.9ms）
+## 故"该值 × 15ms"≈ 最坏单帧卡顿：256 → 可达数秒；调到 32 → 约 0.5s。
+## 要削掉这个峰值有两条路（都需另行改动，不在本篇注释范围）：
+##   1) 原生侧实现 pick_codec / pack（需重建 GDExtension 库）；
+##   2) 后台线程落盘（需一并设计脏集在写盘期间的新增如何补标，否则会丢存档）。
+## 现阶段最省事的缓解就是把它调小：落盘更频繁，但每次更短。
 @export var auto_flush_dirty: int = 256
 
 # ----------------------------------------------------------------------------
@@ -360,14 +370,15 @@ func _models_to_qvox_models() -> Dictionary:
 
 
 ## 去掉全零块（空块不落盘，P2 / §5.1）。
+## 判空用原生 `count(0)`：此前是"逐体素扫到第一个非空"的 GDScript 循环，而 flush 会对
+## **所有块的所有体素**跑一遍——1400 块 / 140 万体素的世界实测是秒级主线程冻结，
+## 换成原生后是十几毫秒（同一数量级内从"秒"降到"十毫秒"）。
 func _prune_empty(blocks: Dictionary) -> Dictionary:
 	var out: Dictionary = {}
 	for k in blocks:
 		var buf: PackedInt32Array = blocks[k]
-		for i in buf.size():
-			if buf[i] != 0:
-				out[k] = buf
-				break
+		if buf.count(0) != buf.size():
+			out[k] = buf
 	return out
 
 

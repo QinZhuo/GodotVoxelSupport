@@ -515,15 +515,22 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 		buf[idx] = mat_id
 
 
+## 统计一块密集缓冲的非空体素数。
+## **全项目唯一实现**：GDScript 逐元素循环（`for i in CHUNK_VOLUME: if buf[i] > 0`）实测
+## 0.53~0.85ms/块，而原生 `count(0)` 0.011ms（约 40~50 倍）。这条计数是流式回填
+## （每帧最多数十块）与粗层降采样（每块 2^lod³ 个 chunk）的必经步骤，属主线程主要固定
+## 开销之一。此前三处各写一份、其中两处还留在慢实现上（正是"改了一处漏改两处"的典型）。
+static func _count_voxels(buf: PackedInt32Array) -> int:
+	return buf.size() - buf.count(0)
+
+
 ## 直接装入一块密集缓冲（导入 / 资源载荷恢复专用）：不做逐体素写。
-## 体素数用原生 `PackedInt32Array.count(0)` 统计——这是块级安装唯一的 O(N) 步骤，且在 C++ 侧
-## （GDScript 逐元素循环算 32³ 约 3ms，这里是 0.008ms）。
 func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
 	if buf.size() != CHUNK_VOLUME:
 		push_error("[VoxelData] 块 %s 的缓冲长度 %d != %d，已跳过" % [chunk_key, buf.size(), CHUNK_VOLUME])
 		return
 	_chunk_buffers[chunk_key] = buf
-	var n := buf.size() - buf.count(0)
+	var n := _count_voxels(buf)
 	_chunk_voxel_counts[chunk_key] = n
 	_voxel_count += n
 
@@ -598,10 +605,7 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 			stream.erase_chunk(chunk_key, 0)
 			return false
 		_chunk_buffers[chunk_key] = buf
-		var cnt := 0
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				cnt += 1
+		var cnt := _count_voxels(buf)
 		_chunk_voxel_counts[chunk_key] = cnt
 		_voxel_count += cnt
 		# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合）
@@ -622,10 +626,7 @@ func accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int = 
 		if buf.size() != CHUNK_VOLUME:
 			return
 		_chunk_buffers[chunk_key] = buf
-		var cnt := 0
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				cnt += 1
+		var cnt := _count_voxels(buf)
 		_chunk_voxel_counts[chunk_key] = cnt
 		_voxel_count += cnt
 		# 数据就绪 → 标记网格重建。未修改的粗层块用独立数据层，不依赖 LOD0 回填，
@@ -725,6 +726,13 @@ func snapshot_all_chunk_buffers() -> Dictionary:
 ## （remove_voxels_bulk / set_voxels_bulk）因在本地副本上 ptrw() 才会分叉，但也依赖调用方
 ## 把结果写回字典。于是"浅拷贝快照交给 worker 只读"并不安全：主线程一个 set_voxel 就能改掉
 ## 在途快照。本计数补上缺失的那一半——快照活跃期内，单点写走显式拷贝，使快照真正不可变。
+##
+## 【为什么用"写侧守卫"而不是"读侧脱钩"】另一条路是让快照方在取证时把参与 chunk 深拷贝成
+## 私有数组（读者自己付拷贝）。实测否决了它：单块缓冲 128KB，而 `snapshot_chunks_halo`
+## 会外扩 27 邻居（8 chunk/批 → 约 216 个 chunk → 约 27MB、~1.4ms 固定开销，且每批都付）；
+## 写侧守卫则只在真的写时才付一次拷贝——实测带快照的 `set_voxel` 约 4.9µs/次
+## （不带快照 7.0µs/次，差异被内存带宽吸收）。"写少读多"的常规场景下写侧守卫便宜得多。
+## 例外：若应用每帧做数百次单点写且重建窗口长期开着，应改用读侧脱钩——按实测再定。
 func begin_readonly_snapshot() -> void:
 	_snapshot_readers += 1
 

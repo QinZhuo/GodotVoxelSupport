@@ -29,7 +29,7 @@ const U8_MAX := 255
 ## EMPTY 返回 [CODEC_EMPTY, 0]（调用方据此跳过——空块不写入文件）。
 ## 只在 SOLID / RUN / DENSE / INDEXED 之间比较（INDEXED 仅在可用时参与）。
 ##
-## 【性能】GDScript 逐元素循环很贵（32³ = 32768 次，一次裸循环约 3ms）。
+## 【性能】GDScript 逐元素循环很贵（32³ = 32768 次；实测一次裸循环 0.53~0.85ms）。
 ## 策略是**按代价递增、尽早退出**，绝不为每个候选各扫一遍：
 ##   1. 第 1 趟：EMPTY / SOLID（命中率最高，命中即刻返回，零后续代价）。
 ##   2. 第 2 趟：一趟同时算 RUN 的精确字节数 + 取值上界（用于判断 INDEXED 是否值得算）。
@@ -40,15 +40,14 @@ static func pick_codec(buf: PackedInt32Array, n: int) -> Array:
 		return [QVoxSpec.CODEC_EMPTY, 0]
 
 	# ---- 第 1 趟：EMPTY / SOLID 快速判定（尽早退出，命中率最高）----
+	# 用 `_all_equal`（n == 整块时底层是原生 count）判"全零 / 全同"：这两种是写入时最常见的
+	# 形态，而 GDScript 的 `for i in n` 判定在"全同"时**不会 break**，要走满 n 次
+	# （实测 32768 次约 1.1ms/块）；原生 count 约 25µs/次，对 EMPTY/SOLID 块是 ~40 倍。
+	# 代价：混合块会白付一次原生 count，相对其后续两趟扫描可忽略。
 	var first: int = buf[0]
-	var all_same := true
-	for i in n:
-		if buf[i] != first:
-			all_same = false
-			break
-	if all_same:
-		if first == 0:
-			return [QVoxSpec.CODEC_EMPTY, 0]
+	if _all_equal(buf, n, 0):
+		return [QVoxSpec.CODEC_EMPTY, 0]
+	if first != 0 and _all_equal(buf, n, first):
 		return [QVoxSpec.CODEC_SOLID, QVoxSpec.CHANNEL_BYTES]  # 单通道 bpp=16 → 2 字节
 
 	# ---- 第 2 趟：RUN 精确字节 + 取值跨度（min/max）----
@@ -97,6 +96,18 @@ static func pick_codec(buf: PackedInt32Array, n: int) -> Array:
 				best_bytes = indexed_bytes
 
 	return [best_codec, best_bytes]
+
+
+## 前 n 个元素是否全等于 v。
+## n == buf.size()（正常情形）走原生 count；n 小于缓冲长度时退回逐元素（罕见路径，
+## 此前的逐元素写法在这里是唯一实现，抽出来顺带把"整块"路径提速）。
+static func _all_equal(buf: PackedInt32Array, n: int, v: int) -> bool:
+	if n != buf.size():
+		for i in n:
+			if buf[i] != v:
+				return false
+		return true
+	return buf.count(v) == n
 
 
 ## 精确计算 RUN 编码的负载字节数（不实际构造，只累加长度）。

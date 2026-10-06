@@ -1399,12 +1399,13 @@ static func _node_changed(a: QVoxDocument, b: QVoxDocument) -> bool:
 
 
 ## model 是否"空"（没有任何非空块）。空 model 不写 VOX0。
+## 判空用原生 `count(0)`（与 QVoxStream._prune_empty 同因：逐体素 GDScript 扫描在
+## 写盘时是秒级开销，原生是毫秒级）。
 static func _model_is_empty(blocks: Dictionary) -> bool:
 	for k in blocks:
 		var buf: PackedInt32Array = blocks[k]
-		for i in buf.size():
-			if buf[i] != 0:
-				return false
+		if buf.count(0) != buf.size():
+			return false
 	return true
 
 

@@ -1020,20 +1020,21 @@ func _process_lod() -> void:
 	var world_offset := global_position
 	var unload_d := _unload_d()
 	var n_levels := maxi(lod_count, 1)
-	# 内存 chunk 键快照：多步骤同帧复用，避免每帧多次分配
+	# 内存 chunk 键快照：多步骤同帧复用（一次分配），并在同一趟里算出数据范围
 	var loaded_chunks := data.get_loaded_chunk_keys()
 	var cam_dir: Vector3 = -cam.global_transform.basis.z
 	# 数据 chunk 范围（needed 枚举剪枝）：只枚举数据实际占用的 x/y/z 层，
 	# 跳过空气层/模型外空 block 的降采样派发（lod_count>1 帧率骤降的主因）。
-	if data:
-		var _bmin := Vector3i(999999, 999999, 999999)
-		var _bmax := Vector3i(-999999, -999999, -999999)
-		for ck in data.get_loaded_chunk_keys():
+	# 与上面的键快照合并为一趟——此前是"再取一次 get_loaded_chunk_keys() 再全量遍历一次"，
+	# 数千 chunk 时每帧白付一次数组分配 + 一次遍历。
+	if not loaded_chunks.is_empty():
+		var _bmin: Vector3i = loaded_chunks[0]
+		var _bmax: Vector3i = loaded_chunks[0]
+		for ck in loaded_chunks:
 			_bmin = Vector3i(mini(_bmin.x, ck.x), mini(_bmin.y, ck.y), mini(_bmin.z, ck.z))
 			_bmax = Vector3i(maxi(_bmax.x, ck.x), maxi(_bmax.y, ck.y), maxi(_bmax.z, ck.z))
-		if _bmin.x <= _bmax.x:
-			_data_chunk_min = _bmin
-			_data_chunk_max = _bmax
+		_data_chunk_min = _bmin
+		_data_chunk_max = _bmax
 
 	# 0. 数据变化 → 各粗层 block 失效重建（编辑/破坏触发）。
 	#    不立即移除旧 mesh（防重建期间可见性振荡 → 闪烁）：标记重建并立即派发降采样，
@@ -1062,7 +1063,9 @@ func _process_lod() -> void:
 				var _inner := _lod_outer[level - 1] if level > 0 else 0.0
 				var _margin := _lod_margin(level)
 				if bdist > _lod_outer[level] + _margin + _lod_preload_extent(level):
+					# 超出预生成范围：数据与渲染侧状态一并清掉（否则该 block 的账本条目永久残留）
 					data.erase_lod_block(level, bk)
+					_remove_lod_mesh(level, bk)
 					continue
 				# 【金字塔增量】coarse 已有缓存：主线程 patch 只重算脏大格（未脏复用），
 				# 再派发 mesh worker 从 coarse 生成（set_lod_block 已清 modified → 不走全量降采样）。
@@ -1393,9 +1396,25 @@ func _remove_lod_mesh(level: int, bk: Vector3i) -> void:
 	var mi = _lod_meshes[level].get(bk)
 	if mi != null and is_instance_valid(mi):
 		mi.queue_free()
+	_clear_lod_block_state(level, bk)
+
+
+## 清除某层 block 的**全部**渲染侧状态（网格条目 + 各类待办 / 代次 / 重试账本）。
+## **单点维护**：这些表都以 block key 为键，漏清一个就会随探索范围无界增长。
+## 已知历史问题：`_lod_block_gen` / `_lod_rebuild` / `_lod_null_retries` 都不在旧
+## `_remove_lod_mesh` 的清理范围内 → 无限世界长会话下，每个曾失效过的 block 各留一条
+## （其中 `_lod_block_gen` 每条目必留，因为失效必写、移除必不删）。
+func _clear_lod_block_state(level: int, bk: Vector3i) -> void:
+	if level < 0 or level >= _lod_meshes.size():
+		return
 	_lod_meshes[level].erase(bk)
 	_lod_pending[level].erase(bk)
 	_lod_pending_tasks[level].erase(bk)
+	if level < _lod_rebuild.size():
+		_lod_rebuild[level].erase(bk)
+	if level < _lod_block_gen.size():
+		_lod_block_gen[level].erase(bk)
+	_lod_null_retries.erase(str(level) + "_" + str(bk))
 
 
 ## LOD 生成优先级：距离 + 视线方向加权（前方 block 先生成）。返回值越小越优先。
