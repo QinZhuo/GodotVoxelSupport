@@ -125,17 +125,17 @@ var _lod_outer: Array[float] = []
 ## 各 LOD 层渲染网格：_lod_meshes[lod] = {block_key: MeshInstance3D}。
 ## index 直接 = LOD 层级：0 = 全精度 chunk（level 0 block key == chunk key），>=1 = 粗层大块。
 var _lod_meshes: Array[Dictionary] = []
-## 各层待生成的 block（key -> true），由 _process_lod 限量生成
-var _lod_pending: Array[Dictionary] = []
 ## 各层异步生成：已派发待结果的 block（去重）
 var _lod_pending_tasks: Array[Dictionary] = []
 ## 失效重建标记：破坏/编辑后 block 数据变化，保留旧 mesh 直到新 mesh 就绪替换（防重建闪烁）
 var _lod_rebuild: Array[Dictionary] = []
-## 粗层降采样空结果重试计数（key: "level_bk" → n）：降采样空多为 LOD0 数据未就绪，
-## 不设空标记（否则跳过导致洞永远），重试上限后设空标记防真空 block 循环。
-var _lod_null_retries: Dictionary = {}
-## 各层生成代数：数据变化（invalidate）时递增，丢弃旧任务过期结果
-var _lod_generation_id: Array[int] = []
+## 粗层降采样空结果重试计数：index = LOD 层级（与 _lod_rebuild / _lod_block_gen 同构），
+## 内层 = block key → n。降采样空多为 LOD0 数据未就绪，不设空标记（否则跳过导致洞永远），
+## 重试上限后设空标记防真空 block 循环。
+## 【为什么用分层 Array 而不是 "level_bk" 字符串复合键】字符串键无法随 origin shift 平移
+## （要解析回来得拆串），于是平移时只能整表丢弃、重试计数错位。分层后可复用
+## VoxelChunk.shift_key_dict，与其它 block 级集合一致。
+var _lod_null_retries: Array[Dictionary] = []
 ## 各层 block 级代次（block key → int）：失效 block 各自递增（仅作废该 block 在途任务），
 ## 避免"任一失效就整体 +1 → 该层所有在途任务作废重派"的连续破坏任务洪峰。
 var _lod_block_gen: Array[Dictionary] = []
@@ -220,18 +220,16 @@ func _resize_lod_layers(n: int) -> void:
 		var level := _lod_meshes.size() - 1
 		_clear_lod_level(level)
 		_lod_meshes.pop_back()
-		_lod_pending.pop_back()
 		_lod_pending_tasks.pop_back()
 		_lod_rebuild.pop_back()
-		_lod_generation_id.pop_back()
+		_lod_null_retries.pop_back()
 		_lod_block_gen.pop_back()
 		_lod_materials.pop_back()
 	while _lod_meshes.size() < n:
 		_lod_meshes.append({})
-		_lod_pending.append({})
 		_lod_pending_tasks.append({})
 		_lod_rebuild.append({})
-		_lod_generation_id.append(0)
+		_lod_null_retries.append({})
 		_lod_block_gen.append({})
 		_lod_materials.append([])
 
@@ -265,7 +263,6 @@ func _clear_lod_level(level: int) -> void:
 		if mi != null and is_instance_valid(mi):
 			mi.queue_free()
 	_lod_meshes[level].clear()
-	_lod_pending[level].clear()
 	_lod_pending_tasks[level].clear()
 
 ## 是否生成静态碰撞体 (StaticBody3D + ConcavePolygonShape3D)
@@ -284,7 +281,6 @@ func _clear_lod_level(level: int) -> void:
 
 var _dirty: bool = false
 var _materials_cache: Array = []
-var _collision_body: StaticBody3D = null
 var _update_counter: int = 0
 
 # 视锥外待生成的 chunk（key = chunk key，value = true），进入视锥后补建
@@ -317,13 +313,12 @@ var _origin_chunk: Vector3i = Vector3i.ZERO
 ## 256 chunk ≈ 410 世界单位，远小于 float32 精度上限（~1677 万），安全。
 const ORIGIN_SHIFT_THRESHOLD := 256
 # 异步网格生成状态（多任务并行，每个任务独立处理）
-var _task_ids: Array[int] = []           # 多个并行任务 ID（仅用于取消时等待）
 var _coarse_task_ids: Array[int] = []    # 粗 LOD worker 任务 ID（退出时等待，防 call_deferred 打到已释放实例）
-var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
-var _generation_id := 0
+# 当前渲染扇出批次：同时持有"任务计数"与"只读快照句柄"，结算点唯一（见 VoxelMeshBatch）。
+# 任务计数与快照不再各自散落维护——旧实现里结果处理的两条早退路径各减一次计数，
+# 导致计数提前归零、快照在 worker 仍在读时被释放，COW 写保护被击穿。
+var _batch: VoxelMeshBatch = null
 var _exiting := false                    # 退出中：worker 结果回调据此直接丢弃，避免访问已清理数据
-# 本批次是否已登记只读快照（配对释放用；见 VoxelData.begin_readonly_snapshot）
-var _batch_snapshot_active: bool = false
 # 数据 chunk 范围（needed 枚举剪枝：球体全高大部分是空气层，
 # 跳过空 block 的降采样派发——否则高层空块反复派发占满 worker，lod_count>1 帧率骤降）
 var _data_chunk_min := Vector3i(0, 0, 0)
@@ -363,13 +358,8 @@ var _lod_mesh_apply_scheduled: bool = false
 @export_range(8, 512, 8) var _rebuild_batch_limit: int = 64 * 4096 / VoxelChunk.CHUNK_VOLUME
 # 帧尾构建是否已排期（防重复 call_deferred）
 var _mesh_build_scheduled: bool = false
-# GPU 忙检测：上一帧渲染耗时超过此阈值(ms)时暂停本帧构建，避免 ArrayMesh
-# add_surface_from_arrays 的同步 GPU 上传在 GPU 满载时 Metal fence wait() 超时
-var _gpu_busy_threshold_ms: float = 25.0
 # 上一帧 _delta（秒），GPU 忙检测用（帧耗时大 = GPU/渲染压力高）
 var _last_frame_delta: float = 0.0
-# 是否已开启 render time 测量（需 _ready 中调用一次 viewport_set_measure_render_time）
-var _measure_render_time_enabled: bool = false
 
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
@@ -394,7 +384,9 @@ var perf_stats: Dictionary = {
 	"sample_count": 0,        # 采样次数
 }
 
-## 记录一次性能统计采样（轻量级，仅累加数值，不维护数组）
+## 记录一次性能统计采样（轻量级，仅累加数值，不维护数组）。
+## apply_time_ms 由调用方传入**实测值**；此前这里被以 `last_apply_time_ms` 自身为实参调用，
+## 于是该字段永远是"把自己的旧值赋给自己"（恒为 0），而 demo 会读它做展示。
 func _record_perf_stats(chunk_count: int, gen_time_ms: float, apply_time_ms: float) -> void:
 	last_rebuild_chunk_count = chunk_count
 	last_mesh_gen_time_slice_ms = gen_time_ms
@@ -409,10 +401,8 @@ func _record_perf_stats(chunk_count: int, gen_time_ms: float, apply_time_ms: flo
 func _ready() -> void:
 	_configure_lod()
 	_request_update()
-	# 开启 viewport render time 测量，供 GPU 忙检测使用（_process_mesh_build_queue 用）
-	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
-	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
-	_measure_render_time_enabled = false
+	# GPU 忙检测统一用帧时长（_last_frame_delta）：viewport_set_measure_render_time
+	# 在部分驱动(如 Metal)上可能引发不稳定，故不启用引擎侧的 render time 测量。
 	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认见 _unload_d() = view*1.2）
 	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
 
@@ -420,7 +410,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# 记录上一帧耗时，供 GPU 忙检测使用（_process_mesh_build_queue）
 	_last_frame_delta = _delta
-	# 异步任务结果通过 call_deferred 直接传递到 _on_thread_result，无需轮询
+	# 异步任务结果由 VoxelMeshBatch 回传（批次结算时才释放快照），此处无需轮询
 	# 这里只处理限流和启动新任务
 
 	# 可见性管理（每帧限量执行，走近/远离平滑）：
@@ -478,12 +468,12 @@ func _process(_delta: float) -> void:
 		return
 	_update_counter = 0
 
-	# 若有尚未完成的异步任务，不启动新批次：直接启动新批次会递增 gen_id，
-	# 导致上一批次的 chunk 修复结果被丢弃（gen_id 不匹配），而上一批次的脏体素
-	# 又已在其派发时被清除，这些 chunk 的重建将永久丢失 → 界面残留被破坏面的"幽灵面"。
-	# 改为置位 retrigger，等当前批次全部完成后在 _on_batch_complete 中重新触发，
+	# 若有尚未完成的批次，不启动新批次：批次的脏体素在其派发时已被清除，
+	# 若此时覆盖 _batch，上一批的结果会因"批次身份不符"被丢弃，这些 chunk 的重建
+	# 将永久丢失 → 界面残留被破坏面的"幽灵面"。
+	# 改为置位 retrigger，等当前批次完成后在 _on_batch_complete 中重新触发，
 	# 保证每个脏 chunk 最终都得到一次应用。
-	if _pending_task_count > 0:
+	if _batch != null and _batch.is_active():
 		_pending_retrigger = true
 		return
 
@@ -509,7 +499,7 @@ func mark_dirty() -> void:
 ## 完成后由 _on_batch_complete 自动触发重建，保证共享切片引用安全。
 func force_update() -> void:
 	_dirty = true
-	if _pending_task_count > 0:
+	if _batch != null and _batch.is_active():
 		_pending_retrigger = true
 		return
 	_dirty = false
@@ -574,22 +564,20 @@ func _trim_coarse_tasks(all: bool = false) -> void:
 			_coarse_task_ids = _coarse_task_ids.slice(n_remove)
 
 
-## 取消尚未完成的异步网格生成任务
+## 取消尚未完成的异步网格生成任务。
+## 批次自己负责结算：cancel() 释放只读快照并停止发射结果，wait_tasks() 保证 worker
+## 在节点释放前全部结束（否则其 call_deferred 会打到已释放实例）。
 func _cancel_async() -> void:
-	for tid in _task_ids:
-		WorkerThreadPool.wait_for_task_completion(tid)
-	_task_ids.clear()
-	_pending_task_count = 0
-	_generation_id += 1
-	_release_batch_snapshot()
-
-
-## 配对释放本批次的只读快照登记（批次完成 / 被取消时调用）。幂等。
-func _release_batch_snapshot() -> void:
-	if _batch_snapshot_active:
-		_batch_snapshot_active = false
-		if data:
-			data.end_readonly_snapshot()
+	# 【必须先取局部引用】Signal 的 emit 是**同步**的：cancel() 内部 _finish() 会 emit
+	# finished，进而同步回调 _on_batch_finished 把 _batch 置空。若之后仍用 `_batch.xxx`，
+	# 就会在 null 上调用 → "Nonexistent function 'wait_tasks' in base 'Nil'"。
+	# （只有"_exit_tree 时批次仍在途"才触发，故长期潜伏：正常游玩极少命中。）
+	var batch := _batch
+	if batch == null:
+		return
+	batch.cancel()
+	batch.wait_tasks()
+	_batch = null
 
 
 func _update_mesh() -> void:
@@ -598,7 +586,6 @@ func _update_mesh() -> void:
 		_cancel_async()
 		mesh = null
 		_clear_lod_meshes()
-		_clear_collision()
 		mesh_updated.emit()
 		return
 
@@ -650,9 +637,6 @@ func _filter_visible_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 		if lod0_d > 0.0:
 			var level := _chunk_render_level(ck, cam_pos)
 			if level > 0:
-				var bk := _lod_block_of_chunk(ck, level)
-				if level < _lod_pending.size():
-					_lod_pending[level][bk] = true
 				_stream_force_build.erase(ck)
 				continue
 		# 流式补建强制的 chunk：距离驱动，无条件构建（清除标记避免重复）
@@ -819,8 +803,6 @@ func _process_streaming() -> void:
 		var buf: PackedInt32Array = r[2]
 		data.accept_chunk_buffer(ck, buf, lod)
 		# lod=0 的在途登记由 VoxelAsyncLoader 在回填时自动清除，此处无需本地清理
-		if lod >= 1 and lod < _lod_pending.size():
-			_lod_pending[lod].erase(ck)
 		applied += 1
 
 	# 2) 距离内扫描缺失 chunk 并提交（限量每帧；降频扫描，相机不动时结果不变）
@@ -966,6 +948,9 @@ func _check_origin_shift(cam: Camera3D) -> void:
 	_origin_chunk += shift
 	_shift_render(shift, chunk_size_world)
 	cam.global_position -= Vector3(shift) * chunk_size_world
+	# 相机缓存位置必须与平移后的相机同步，否则下一帧会读到一次伪"相机移动"，
+	# 白白重跑一轮流式扫描（并可能提前触发下一次 shift）。
+	_last_streaming_cam_pos = cam.global_position
 
 
 ## origin shift 后平移渲染层：所有网格节点 key 平移 + 节点 position 更新 + 各类集合字典 key 平移。
@@ -996,8 +981,7 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 		ndf[Vector3i(k) + shift] = true
 	_deferred_chunks = ndf
 	_stream_force_build = VoxelChunk.shift_key_dict(_stream_force_build, shift)
-	for level in range(1, _lod_pending.size()):
-		_lod_pending[level] = VoxelChunk.shift_key_dict(_lod_pending[level], shift)
+	for level in range(1, _lod_pending_tasks.size()):
 		_lod_pending_tasks[level] = VoxelChunk.shift_key_dict(_lod_pending_tasks[level], shift)
 	_mesh_build_queue = VoxelChunk.shift_key_dict(_mesh_build_queue, shift)
 	# 粗 LOD 挂载队列存的是旧坐标系生成的数组数据，平移会错位 → 直接清空（数据未变，重挂载）
@@ -1006,6 +990,25 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 	for k in _collision_rebuild_queue:
 		ncr[Vector3i(k) + shift] = true
 	_collision_rebuild_queue = ncr
+	# 碰撞体：键平移**且**节点位置/名字同步。只平移键会让 StaticBody3D 停留在旧世界坐标
+	# （碰撞与视觉错位），而新键处又会重复建体 → 幽灵碰撞体。
+	var ncc: Dictionary[Vector3i, StaticBody3D] = {}
+	for k in _chunk_collisions:
+		var nck2: Vector3i = Vector3i(k) + shift
+		var body: StaticBody3D = _chunk_collisions[k]
+		if body != null:
+			body.position = Vector3(nck2) * chunk_size_world
+			body.name = "Collision_%d_%d_%d" % [nck2.x, nck2.y, nck2.z]
+		ncc[nck2] = body
+	_chunk_collisions = ncc
+	# 粗层 block 级集合：漏平移会让在途任务拿旧键去比对 _lod_block_gen → 结果被误判过期丢弃，
+	# 且 _lod_null_retries 的键会永久停留在旧坐标系（无界增长）。
+	for level in range(1, _lod_rebuild.size()):
+		_lod_rebuild[level] = VoxelChunk.shift_key_dict(_lod_rebuild[level], shift)
+	for level in range(1, _lod_block_gen.size()):
+		_lod_block_gen[level] = VoxelChunk.shift_key_dict(_lod_block_gen[level], shift)
+	for level in range(1, _lod_null_retries.size()):
+		_lod_null_retries[level] = VoxelChunk.shift_key_dict(_lod_null_retries[level], shift)
 
 
 # ----------------------------------------------------------------------------
@@ -1081,10 +1084,10 @@ func _process_lod() -> void:
 					var coarse := data.get_lod_block(level, bk)
 					var patched: PackedInt32Array
 					if level == 1:
-						patched = NativeLoader.patch_lod_block(
+						patched = VoxelChunkGenerator.patch_lod_block(
 							data.get_chunk_buffers(), bk, level, coarse, region[0], region[1])
 					else:
-						patched = NativeLoader.patch_lod_block_from_lod(
+						patched = VoxelChunkGenerator.patch_lod_block_from_lod(
 							data.get_lod_buffers(level - 1), bk, level, coarse, region[0], region[1])
 					data.set_lod_block(level, bk, patched)
 					if bdist >= _inner - _margin:
@@ -1208,7 +1211,7 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 		if not data.is_lod_block_modified(level, bk) and not data.has_lod_block(level, bk):
 			# 文件流：直接降采样生成（一次完成——mesh + 数据缓存同步），不等异步 request 两阶段。
 			# 异步降采样（request → 数据 → 下次帧 mesh）完成时机晚，近处粗层块长期无 mesh → 固定空洞。
-			if data.stream is QVoxStream:
+			if data.stream != null and data.stream.supports_lod_layer():
 				to_build.append([dist, bk])
 				continue
 			var _pending := data.is_chunk_pending(bk, level)
@@ -1240,7 +1243,6 @@ func _process_lod_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir: Ve
 			break
 		if _build_lod_block(level, item[1]):
 			_built_this += 1
-	_lod_pending[level].clear()
 	# 1d. 可见性兜底：进入内层带且内层未就绪 → 本层显示（防切换空洞）；
 	#     超出本层带且更粗层已就绪 → 隐藏本层（防远处多层重叠 z-fight）
 	for bk in _lod_meshes[level]:
@@ -1409,13 +1411,12 @@ func _clear_lod_block_state(level: int, bk: Vector3i) -> void:
 	if level < 0 or level >= _lod_meshes.size():
 		return
 	_lod_meshes[level].erase(bk)
-	_lod_pending[level].erase(bk)
 	_lod_pending_tasks[level].erase(bk)
 	if level < _lod_rebuild.size():
 		_lod_rebuild[level].erase(bk)
 	if level < _lod_block_gen.size():
 		_lod_block_gen[level].erase(bk)
-	_lod_null_retries.erase(str(level) + "_" + str(bk))
+	_clear_null_retry(level, bk)
 
 
 ## LOD 生成优先级：距离 + 视线方向加权（前方 block 先生成）。返回值越小越优先。
@@ -1441,14 +1442,15 @@ func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	if _lod_pending_tasks[level].has(bk):
 		return false
 	_lod_pending_tasks[level][bk] = true
-	# 快照交给 worker 只读：登记只读快照，结果回填时在 _on_lod_thread_result 配对释放
-	data.begin_readonly_snapshot()
+	# 快照句柄随任务走到底、由 _on_lod_thread_result 释放：不依赖 LIFO 配对，
+	# 故与渲染批次的快照并发时也不会互相释放错。
+	var handle := data.begin_readonly_snapshot()
 	var standalone: bool = data.can_mesh_lod_block_standalone(level, bk)
 	var snapshot := data.snapshot_lod_block_data(bk, level) if standalone \
 			else data.snapshot_lod_block_chunks_readonly(bk, level)
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_build.bind(
 		snapshot, standalone, bk, level, _lod_block_gen[level].get(bk, 0), voxel_scale,
-		data.center_offset, _lod_materials[level].duplicate())))
+		data.center_offset, _lod_materials[level].duplicate(), handle)))
 	return true
 
 
@@ -1462,18 +1464,19 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 	if _lod_pending_tasks[level].has(bk):
 		return
 	_lod_pending_tasks[level][bk] = true
-	# 快照交给 worker 只读：登记只读快照，结果回填时在 _on_lod_data_ready 配对释放
-	data.begin_readonly_snapshot()
+	# 同上：句柄由 _on_lod_data_ready 释放。
+	var handle := data.begin_readonly_snapshot()
 	var snapshot := data.snapshot_lod_block_chunks(bk, level)
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_data_only.bind(
-		snapshot, bk, level, _lod_block_gen[level].get(bk, 0))))
+		snapshot, bk, level, _lod_block_gen[level].get(bk, 0), handle)))
 
 
 ## 工作线程：粗 LOD 大块 mesh 生成。只读主线程构造好的数据快照（线程安全，不触碰 VoxelData）。
 ##   standalone=true：快照是独立粗层大格数据（直接拷大格，无降采样）；
 ##   false：快照是 LOD0 chunk 缓冲（降采样），顺带回传大格数据供粗层缓存复用。
 func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, level: int,
-		gen_id: int, scale: float, offset: Vector3, aligned_materials: Array) -> void:
+		gen_id: int, scale: float, offset: Vector3, aligned_materials: Array,
+		handle: VoxelData.ReadonlySnapshot) -> void:
 	var halo: PackedInt32Array
 	var buf := PackedInt32Array()
 	if standalone:
@@ -1483,15 +1486,29 @@ func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, lev
 		buf = VoxelChunk.extract_center_from_halo(halo)
 	var arr := VoxelChunkGenerator.generate_lod_block_arrays(halo, aligned_materials, scale, bk, offset, level)
 	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
-	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id, buf)
+	call_deferred("_on_lod_thread_result", bk, level, mesh, gen_id, buf, handle)
 
 
 ## 工作线程：内带失效 block 只降采样大格数据（不生成 mesh——mesh 由 LOD0 chunk 反映）。
 ## 拆分两阶段：内带 block 的粗层 mesh 应用会被 _should_apply 丢弃，省去 arrays/mesh 构建。
-func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int) -> void:
+func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int,
+		handle: VoxelData.ReadonlySnapshot) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
 	var buf := VoxelChunk.extract_center_from_halo(halo)
-	call_deferred("_on_lod_data_ready", bk, level, gen_id, buf)
+	call_deferred("_on_lod_data_ready", bk, level, gen_id, buf, handle)
+
+
+## 取（必要时补建）某层的空结果重试计数表。与 _lod_rebuild / _lod_block_gen 的补层方式一致。
+func _null_retry_layer(level: int) -> Dictionary:
+	while _lod_null_retries.size() <= level:
+		_lod_null_retries.append({})
+	return _lod_null_retries[level]
+
+
+## 清除某个 block 的空结果重试计数（带层级守卫，外部改层数时不越界）。
+func _clear_null_retry(level: int, bk: Vector3i) -> void:
+	if level < _lod_null_retries.size():
+		_lod_null_retries[level].erase(bk)
 
 
 ## 主线程：内带失效 block 降采样数据同步（_coarse_buffers + 持久化），mesh 由 LOD0 反映。
@@ -1515,22 +1532,22 @@ func _lod_mark_null_or_retry(level: int, bk: Vector3i) -> void:
 			break
 	if definitely_empty:
 		# 区域外/空气层：无任何 L0 数据 → 确定空，一次设 null（不重试，省 worker）
-		_lod_null_retries.erase(str(level) + "_" + str(bk))
+		_clear_null_retry(level, bk)
 		_lod_meshes[level][bk] = null
 		return
-	var _rk := str(level) + "_" + str(bk)
-	var _rn: int = _lod_null_retries.get(_rk, 0)
+	var layer := _null_retry_layer(level)
+	var _rn: int = layer.get(bk, 0)
 	if _rn >= 3:
-		_lod_null_retries.erase(_rk)
+		layer.erase(bk)
 		_lod_meshes[level][bk] = null
 	else:
-		_lod_null_retries[_rk] = _rn + 1
+		layer[bk] = _rn + 1
 
 
-func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32Array) -> void:
-	# 配对释放 _build_lod_data_only 的只读快照登记（必须在任何早退之前）
-	if data:
-		data.end_readonly_snapshot()
+func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32Array,
+		handle: VoxelData.ReadonlySnapshot) -> void:
+	# 释放本任务自己的快照句柄（必须在任何早退之前）
+	handle.release()
 	if _exiting:
 		return
 	if level < 1 or level >= _lod_pending_tasks.size():
@@ -1540,7 +1557,7 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 		return
 	if buf.size() > 0 and data != null:
 		data.set_lod_block(level, bk, buf)
-		if data.stream is QVoxStream:
+		if data.stream != null and data.stream.supports_lod_layer():
 			data.stream.save_chunk(bk, buf, level)
 	else:
 		# 降采样空（LOD0 数据未就绪 或 区域外/空气层）：确定空一次设 null，其余重试计数
@@ -1554,10 +1571,10 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 ## mesh 已在工作线程构建（ArrayMesh），此处仅轻量挂载——避免主线程同步构建大 mesh 卡顿。
 ## 降采样回退路径会顺带返回大格数据 buf，同步粗层缓存（_coarse_buffers + 持久化），避免缓存缺口。
 func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: int,
-		buf := PackedInt32Array()) -> void:
-	# 配对释放 _build_lod_block 的只读快照登记（必须在任何早退之前）
-	if data:
-		data.end_readonly_snapshot()
+		buf := PackedInt32Array(), handle: VoxelData.ReadonlySnapshot = null) -> void:
+	# 释放本任务自己的快照句柄（必须在任何早退之前）
+	if handle != null:
+		handle.release()
 	if _exiting:
 		return
 	if level < 1 or level >= _lod_pending_tasks.size():
@@ -1571,7 +1588,7 @@ func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: in
 	# → 死循环占满跨层构建预算，更粗层永远分不到（远处空洞）。
 	if buf.size() > 0 and data != null and mesh != null and mesh.get_surface_count() > 0:
 		data.set_lod_block(level, bk, buf)
-		if data.stream is QVoxStream:
+		if data.stream != null and data.stream.supports_lod_layer():
 			data.stream.save_chunk(bk, buf, level)
 	if _lod_meshes[level].has(bk) and not _lod_rebuilding(level, bk):
 		return
@@ -1606,7 +1623,7 @@ func _build_lod_from_arrays(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 		_apply_materials(mesh)
 		mi.mesh = mesh
 	_set_lod_mesh(level, bk, mi)
-	_lod_null_retries.erase(str(level) + "_" + str(bk))
+	_clear_null_retry(level, bk)
 	if level < _lod_rebuild.size():
 		_lod_rebuild[level].erase(bk)
 
@@ -1683,13 +1700,8 @@ func _update_mesh_async() -> void:
 	var aligned_materials := VoxelMaterial.align_by_id(snapshot_materials)
 	# 透明标志表按批次算一次（逐块重建要扫一遍材质表，批量重建时纯属重复劳动）
 	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
-	var gen_id := _generation_id + 1
-	_generation_id = gen_id
 	# 渲染居中偏移（体素单位），子线程无权访问节点，随任务参数传入
 	var render_offset: Vector3 = data.center_offset if data else Vector3.ZERO
-
-	_task_ids.clear()
-	_pending_task_count = 0
 
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
 	# 将 voxel_scale 等渲染参数作为任务参数传入，避免子线程访问节点属性
@@ -1708,7 +1720,7 @@ func _update_mesh_async() -> void:
 		# 统一可见性决策（流式距离 + 视锥/近处全向）
 		visible = _filter_visible_chunks(all_chunks)
 		if diag_enabled:
-			print("[诊断] 全量构建 gen_id=%d: 总%d Chunk, 视锥内%d, 延迟%d" % [gen_id, all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
+			print("[诊断] 全量构建: 总%d Chunk, 视锥内%d, 延迟%d" % [all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
 	else:
 		# 增量重建：每个 chunk 独立一个线程任务，真正并行处理
 		# 【关键】先清除"已变空"chunk 的残留 mesh：破坏/崩塌后 chunk 内体素
@@ -1720,15 +1732,20 @@ func _update_mesh_async() -> void:
 		# 统一可见性决策（流式距离 + 视锥/近处全向）
 		visible = _filter_visible_chunks(rebuild_chunks)
 		if diag_enabled:
-			print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
+			print("[诊断] 增量重建: 脏%d Chunk, 视锥内%d, 延迟%d" % [rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
+	# 本帧渲染批次：任务计数与只读快照句柄都由它持有，结算点唯一（见 VoxelMeshBatch）。
+	# 结果处理里任何提前 return 都不可能再让计数失衡——这正是"双重递减击穿 COW"的根治。
+	var batch := VoxelMeshBatch.new()
+	batch.result_ready.connect(_on_batch_result.bind(batch))
+	batch.finished.connect(_on_batch_finished.bind(batch))
+	_batch = batch
 	# 快照预算：超预算尾部放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位），
 	# 避免初始/切换模式一帧全量快照尖峰。
 	# 声明"只读快照"：快照与活动缓冲共享底层，而 GDScript 的逐元素写不会触发写时拷贝，
 	# 故本批次在途期间主线程的单点写必须先在目标缓冲上分叉（见 VoxelData.begin_readonly_snapshot）。
-	# 批次完成 / 被取消时在 _on_batch_complete、_cancel_async 配对释放。
+	# 句柄交给批次，由它在结算（完成 / 取消）时唯一一次释放。
 	if data and not visible.is_empty():
-		data.begin_readonly_snapshot()
-		_batch_snapshot_active = true
+		batch.attach_snapshot(data.begin_readonly_snapshot())
 	var snap := _snapshot_budgeted(visible)
 	var snapshot: Dictionary = snap["snapshot"]
 	var taken: int = snap["taken"]
@@ -1737,10 +1754,23 @@ func _update_mesh_async() -> void:
 			data.mark_chunk_dirty(visible[j])
 		_request_update()
 		visible.resize(taken)
-	_pending_task_count = visible.size()
 	for ck in visible:
-		_task_ids.append(WorkerThreadPool.add_task(_generate_chunk_worker.bind(
-			snapshot, aligned_materials, trans_flags, ck, gen_id, voxel_scale, render_offset, diag_enabled)))
+		# 【必须用 lambda 显式绑定 out 的位置】Godot 4 的 Callable.bind() 把绑定实参放在
+		# call() 实参**之后**，所以 `_generate_chunk_worker.bind(args...).call(out)` 会让 out
+		# 落到第 1 个形参上、其余参数整体错位（曾因此报 "Cannot convert argument 2 from
+		# Dictionary to Array"）。旧代码用 add_task(bind(...)) 时没有额外实参，故掩盖了这一点。
+		# 下面的 lambda 只有一个自由形参 out，与 VoxelMeshBatch._wrap 的调用方式严格对应。
+		batch.spawn(func(out: Dictionary) -> void:
+			_generate_chunk_worker(snapshot, aligned_materials, trans_flags, ck,
+				voxel_scale, render_offset, diag_enabled, out))
+	# 一个任务都没派发出去时必须立即结算：否则 _batch 永远"在途"，会挡住后续所有更新
+	# （旧实现用裸计数 0 天然表示"无在途"，换成对象后要显式结清）。
+	batch.settle_if_idle()
+
+
+## 可见 chunk halo 快照的每帧毫秒预算：常规 6ms；可见集超过 _rebuild_batch_limit 时放宽到 10ms
+const _SNAPSHOT_BUDGET_MS := 6.0
+const _SNAPSHOT_BUDGET_MS_LARGE := 10.0
 
 
 ## 可见 chunk 的 halo 快照（毫秒预算版）：逐片快照、超预算即止。
@@ -1748,9 +1778,9 @@ func _update_mesh_async() -> void:
 ## 实测单 chunk 约 0.31ms（带流、邻居从盘重载），整批远小于预算。
 ## 返回 {snapshot: Dictionary(ck -> 缓冲), taken: int}；未快照尾部由调用方放回 dirty。
 func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
-	var budget_ms := 6.0
+	var budget_ms := _SNAPSHOT_BUDGET_MS
 	if visible.size() > _rebuild_batch_limit:
-		budget_ms = 10.0
+		budget_ms = _SNAPSHOT_BUDGET_MS_LARGE
 	var t0 := Time.get_ticks_usec()
 	var snapshot: Dictionary = {}
 	var taken := 0
@@ -1766,8 +1796,9 @@ func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
 ## 统一工作线程结果字典契约（#6）：全量/增量/单chunk/空场景所有生成路径
 ## 都通过 _make_result 构建结果，消费方 _apply_single_chunk_result 统一按键读取。
 ## chunk_key 缺省为 (-999,-999,-999) 表示"非单chunk结果"（全量结果）。
+## 不含 gen_id：过期判定已由 VoxelMeshBatch 的对象身份承担（取消即不再发射结果）。
 static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: int,
-		trans_vertices: int, total_chunks: int, affected_count: int, gen_id: int,
+		trans_vertices: int, total_chunks: int, affected_count: int,
 		chunk_key: Vector3i = Vector3i(-999, -999, -999)) -> Dictionary:
 	return {
 		"arrays": arrays,
@@ -1777,7 +1808,6 @@ static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: in
 		"trans_vertices": trans_vertices,
 		"total_chunks": total_chunks,
 		"affected_count": affected_count,
-		"gen_id": gen_id,
 	}
 
 
@@ -1804,7 +1834,7 @@ func _apply_stats_from_result(result: Dictionary) -> void:
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
 ## 单 chunk 工作线程入口：每个脏 chunk 独立一个线程任务，真正并行处理
-## 每个 chunk 独立生成网格数据，完成后通过 call_deferred 直接传回主线程
+## 每个 chunk 独立生成网格数据，结果由 VoxelMeshBatch 统一回传并结算
 ## 注意：此函数在子线程中运行，不能访问除参数外的节点属性！
 ## buffers 为主线程派发时一次性构建的"受影响区域"chunk 缓冲快照（深拷贝字典），
 ## worker 在子线程内据此构建自己的 18³ halo（纯只读，无数据竞态），
@@ -1812,8 +1842,8 @@ func _apply_stats_from_result(result: Dictionary) -> void:
 ## materials 参数为已按 ID 对齐的材质数组（主线程派发时一次对齐，worker 复用避免重复开销）
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
 func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: PackedByteArray,
-		chunk_key: Vector3i, gen_id: int, scale: float, offset: Vector3 = Vector3.ZERO,
-		diag_enabled: bool = false) -> void:
+		chunk_key: Vector3i, scale: float, offset: Vector3 = Vector3.ZERO,
+		diag_enabled: bool = false, out: Dictionary = {}) -> void:
 	var t0 := Time.get_ticks_usec()
 	var halo := VoxelChunkGenerator.build_halo_from_buffers(buffers, chunk_key)
 	var arr := VoxelChunkGenerator.generate_single_chunk_dense(
@@ -1836,39 +1866,40 @@ func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: 
 	var arrays := {}
 	if has_data:
 		arrays[chunk_key] = arr
-	var result := _make_result(arrays, gen_time_ms, sv, tv,
-		1 if has_data else 0, 1, gen_id, chunk_key)
+	# 结果写进 out（由 VoxelMeshBatch 传入）：回传与计数结算都由批次负责。
+	# 本函数不再自己 call_deferred —— 那会让"结果回传"与"计数递减"分处两地，
+	# 正是旧实现计数失衡的来源。
+	out.merge(_make_result(arrays, gen_time_ms, sv, tv, 1 if has_data else 0, 1, chunk_key))
 
-	# 使用 call_deferred 将结果传回主线程
-	call_deferred("_on_thread_result", result)
 
-
-## 主线程结果处理入口（通过 call_deferred 从工作线程调用）
-## 检查 gen_id 有效性，应用结果，递减计数器，全部完成后延迟到下一帧做批次清理
-## 延迟批处理避免"最后一个任务完成"瞬间在主线程做重活（_on_batch_complete 可能触发
-## 新任务启动/emit 信号），防止偶发帧尖峰（曾观测到 83ms 主线程 spike）
-func _on_thread_result(result: Dictionary) -> void:
-	if _exiting:
+## 主线程结果处理入口（由 VoxelMeshBatch 在主线程发射）。
+## **本函数不碰计数**：结算在批次内部唯一一处完成，故这里的任何提前 return
+## 都不可能让批次失衡（旧实现正是在这里与两条早退路径各减一次 → 双重递减）。
+## batch 由信号 bind 传入：batch != _batch 即说明已被换批 / 取消，结果过期。
+## 收尾仍延迟到下一帧（_on_batch_finished 置 _batch_complete_pending），
+## 避免"最后一个任务完成"瞬间在主线程做重活造成帧尖峰（曾观测到 83ms）。
+func _on_batch_result(result: Dictionary, batch: VoxelMeshBatch) -> void:
+	if batch != _batch or _exiting:
 		return
 	var _diag_t0 := Time.get_ticks_usec()
-	# 丢弃过期结果（gen_id 不匹配说明是旧批次）
-	var gen_id = result.get("gen_id", -1)
-	if gen_id != _generation_id:
-		return
 	
 	# 应用结果
 	_apply_single_chunk_result(result)
 	
-	# 递减任务计数器，全部完成后延迟到下一帧执行批次清理
-	_pending_task_count -= 1
-	if _pending_task_count <= 0:
-		_pending_task_count = 0  # 防止负数
-		_batch_complete_pending = true
+	# 计数不在此处递减：结算点在 VoxelMeshBatch 内部唯一一处。
+	var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+	if diag_enabled and _t_ms > 0.5:
+		print("[诊断] _on_batch_result: 剩余%d任务, 应用耗时%.2f ms" % [batch.pending_count(), _t_ms])
 
-	if _pending_task_count >= 0:
-		var _t_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
-		if diag_enabled and _t_ms > 0.5:
-			print("[诊断] _on_thread_result: 剩余%d任务, 应用耗时%.2f ms" % [_pending_task_count, _t_ms])
+
+## 批次结算（全部完成 / 被取消）：只读快照已由批次释放。
+## 仅"真的派发过任务"的批次才置收尾标志 —— 空批次等价于旧实现的裸计数 0，不做任何收尾。
+func _on_batch_finished(batch: VoxelMeshBatch) -> void:
+	if batch != _batch:
+		return
+	_batch = null
+	if batch.has_dispatched():
+		_batch_complete_pending = true
 
 
 ## 应用单个 chunk 的异步结果（在主线程 _process 中调用）
@@ -1878,7 +1909,6 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 	var _t_get_chunk := 0.0
 	var arrays = result.get("arrays", {})
 	var chunk_key: Vector3i = result.get("chunk_key", Vector3i(-999, -999, -999))
-	var gen_id = result.get("gen_id", -1)
 	var gen_time_ms = result.get("gen_time_ms", 0.0) as float
 
 	# 更新统计信息（统一契约 _apply_stats_from_result）
@@ -1895,10 +1925,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 		var cam_now := get_viewport().get_camera_3d() if is_inside_tree() else null
 		if _is_chunk_beyond_unload(
 				chunk_key, cam_now, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position, _unload_d()):
-			_pending_task_count -= 1
-			if _pending_task_count <= 0:
-				_pending_task_count = 0
-				_batch_complete_pending = true
+			# 丢弃过期结果：计数由 VoxelMeshBatch 统一结算，这里直接返回即可
 			return
 		var arr = arrays.get(chunk_key, {})
 		var has_voxels_in_data := false
@@ -1909,10 +1936,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 		# 程序化生成：数据已被 LOD1 区释放（超 LOD0 区、由 LOD1 覆盖）→ 该异步结果过期丢弃。
 		# 否则释放后异步 mesh 结果回来仍建网格 → 地块"显示→消失→再显示"闪烁。
 		if data and data.generator != null and not has_voxels_in_data:
-			_pending_task_count -= 1
-			if _pending_task_count <= 0:
-				_pending_task_count = 0
-				_batch_complete_pending = true
+			# 同上：结果过期丢弃，不碰计数
 			return
 
 		# 入队待构建（GPU 上传限流，_process 每帧批量处理）
@@ -1921,16 +1945,24 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			"arrays": arr if (arr is Dictionary and not arr.is_empty() and has_voxels_in_data) else {},
 			"has_voxels": has_voxels_in_data,
 		}
-		_record_perf_stats(1, gen_time_ms, last_apply_time_ms)
+		_record_perf_stats(1, gen_time_ms, _t_get_chunk)
 
-	# 诊断：单 chunk 应用耗时 > 1ms 时打印
+	# 诊断：单 chunk 应用耗时 > 1ms 时打印（顺带把实测应用耗时写进公开统计字段）
 	var _t_apply_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0
+	last_apply_time_ms = _t_apply_ms
 	if diag_enabled and _t_apply_ms > 1.0 and chunk_key.x != -999:
 		print("[诊断] _apply_single_chunk_result: Chunk%s, get_chunk=%.2fms, 总=%.2fms" % [chunk_key, _t_get_chunk, _t_apply_ms])
 
 
 # GPU 上传限流（批量构建队列）
 # 用 call_deferred 在帧尾执行，避开渲染循环内的 GPU 竞争；每帧限量构建。
+
+## mesh 组装（同步 GPU 上传）的每帧时间预算与数量上限：常规 3ms / _mesh_build_per_frame；
+## 大量破坏（脏 chunk 多于 _mesh_build_per_frame）时放宽到 8ms / 24，降低 mesh 更新延迟感。
+const _MESH_BUILD_BUDGET_MS := 3.0
+const _MESH_BUILD_BUDGET_MS_BURST := 8.0
+const _MESH_BUILD_BURST_COUNT := 24
+
 
 ## 每帧从构建队列取一批 chunk 构建 mesh（GPU 上传限流）。
 ## 连续破坏时大量异步结果回主线程，若每帧全部立即 build_mesh_from_arrays（同步 GPU 上传），
@@ -1944,10 +1976,10 @@ func _process_mesh_build_queue() -> void:
 	var built := 0
 	# 大量破坏（dirty 多）→ 临时提高本帧构建数/时间预算，减少连续破坏的 mesh 更新延迟感
 	var budget_n := _mesh_build_per_frame
-	var budget_ms := 3.0
+	var budget_ms := _MESH_BUILD_BUDGET_MS
 	if data and data.get_dirty_mesh_chunk_count() > _mesh_build_per_frame:
-		budget_n = maxi(budget_n, 24)
-		budget_ms = 8.0
+		budget_n = maxi(budget_n, _MESH_BUILD_BURST_COUNT)
+		budget_ms = _MESH_BUILD_BUDGET_MS_BURST
 	# 优先处理已有 mesh 的 chunk（保证破坏面及时更新），再处理新 chunk。
 	# 用"分组两趟"而非自定义比较器："已有优先"不构成严格弱序，sort_custom 要求合法比较器。
 	var pending_keys := _mesh_build_queue.keys()
@@ -2100,8 +2132,7 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 ## 处理 _pending_retrigger 并发出 mesh_updated 信号
 ## 空 Chunk 清理已在 _apply_single_chunk_result 中增量完成，无需全量遍历
 func _on_batch_complete() -> void:
-	# 配对释放本批次的只读快照登记（worker 已全部结束，快照不再被读取）
-	_release_batch_snapshot()
+	# 只读快照已由 VoxelMeshBatch 在结算时释放，此处无需再配对释放。
 	# 处理 _pending_retrigger（极少情况下被外部设置）
 	if _pending_retrigger:
 		_pending_retrigger = false
@@ -2117,12 +2148,6 @@ func _on_batch_complete() -> void:
 	mesh_updated.emit()
 
 
-func _clear_collision() -> void:
-	if _collision_body:
-		_collision_body.queue_free()
-		_collision_body = null
-
-
 ## 清理所有 chunk 子 MeshInstance3D 及关联碰撞体
 func _clear_lod_meshes() -> void:
 	_deferred_chunks.clear()
@@ -2130,6 +2155,8 @@ func _clear_lod_meshes() -> void:
 	_lod_mesh_apply_queue.clear()
 	for lv in _lod_rebuild.size():
 		_lod_rebuild[lv].clear()
+	for lv in _lod_null_retries.size():
+		_lod_null_retries[lv].clear()
 	# 清理所有 LOD 层网格（LOD0 chunk + 各粗层大块；null 表示空大块标记，跳过）
 	for level in _lod_meshes.size():
 		for bk in _lod_meshes[level]:
@@ -2137,10 +2164,8 @@ func _clear_lod_meshes() -> void:
 			if mi != null and is_instance_valid(mi):
 				mi.queue_free()
 		_lod_meshes[level].clear()
-		# _lod_pending / _lod_pending_tasks / _lod_rebuild 由 _configure_lod() 与
-		# _lod_meshes 同步维护；加 size 守卫，防止外部改动导致层数不一致时越界。
-		if level < _lod_pending.size():
-			_lod_pending[level].clear()
+		# _lod_pending_tasks / _lod_rebuild 由 _configure_lod() 与 _lod_meshes 同步维护；
+		# 加 size 守卫，防止外部改动导致层数不一致时越界。
 		if level < _lod_pending_tasks.size():
 			_lod_pending_tasks[level].clear()
 	if data:

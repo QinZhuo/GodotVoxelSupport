@@ -19,7 +19,7 @@ namespace godot {
 // GDScript 侧只做编排（NativeLoader 一次性校验必需方法，缺失即报错，不做 GDScript 兜底）。
 //   - greedy_merge_dense:     贪婪网格合并（2D 同材质矩形合并）
 //   - generate_chunk_dense:   chunk 网格生成主循环（32³ 体素 × 6 方向可见性 + 贪婪合并）
-//   - find_unsupported_island: 静态岛（连通性）失稳检测
+//   - find_unsupported_around: 支撑失稳检测（列支撑判定，运行期唯一实现）
 //   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速）
 //   - partition_connected:    连通分组（大崩塌掉落体分组提速）
 class VoxelNative : public RefCounted {
@@ -94,10 +94,6 @@ public:
 
 	// 支撑失稳检测（基线实现，见 .cpp 注释）：返回 {pos(Vector3i): true}。
 	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed);
-
-	// 【未使用·保留实现备查】连通性"静态岛"失稳检测（绑定已移除，运行期不再引用）。
-	// 当前运行期只有 find_unsupported_around（列支撑）一套判定；确认不再需要时可直接删除本函数整段。
-	static PackedInt32Array find_unsupported_island(const Dictionary &buffers, const Array &removed, int anchor_y);
 
 	// 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
 	// strength_table: 材质连接强度表（PackedFloat32Array，索引=材质ID），GDScript 预取传入。

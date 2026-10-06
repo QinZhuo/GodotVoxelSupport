@@ -78,18 +78,6 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			name = import_materials_textures,
 			default_value = false,
 		},
-		{
-			name = material_path,
-			default_value = "",
-			property_hint = PropertyHint.PROPERTY_HINT_FILE,
-			hint_string = "*tres,*res"
-		},
-		{
-			name = material_trans_path,
-			default_value = "",
-			property_hint = PropertyHint.PROPERTY_HINT_FILE,
-			hint_string = "*tres,*res"
-		},
 	]
 
 ## 选项名统一取自 VoxAsset 单一出处（与 VoxelDataImporter 共用，避免同值重复定义）
@@ -102,8 +90,6 @@ const sphere_subdivisions := "mesh/sphere_subdivisions"
 const sphere_scale := "mesh/sphere_scale"
 const unwrap_lightmap_uv2 := "mesh/unwrap_lightmap_uv2"
 const uv2_texel_size := "mesh/uv2_texel_size"
-const material_path := "material/material_path"
-const material_trans_path := "material/material_trans_path"
 const import_materials_textures := "material/import_materials_textures"
 
 func _get_priority() -> float:

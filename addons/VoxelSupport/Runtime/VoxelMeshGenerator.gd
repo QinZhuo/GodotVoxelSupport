@@ -153,7 +153,9 @@ static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayM
 	if options[VoxelMeshLibraryImporter.import_meshes] and path:
 		DirAccess.make_dir_absolute(path.get_basename())
 		var child_path := path.get_basename() + "/" + name + ".res"
-		var mesh := ResourceLoader.load(child_path) as ArrayMesh if FileAccess.file_exists(path) else null
+		# 存在性检查必须针对**要加载的那个文件**（child_path）。此前检查的是源资产 path，
+		# 于是"缓存的 .res 存在但源资产不在"时会漏加载，反之也会误走加载分支。
+		var mesh := ResourceLoader.load(child_path) as ArrayMesh if FileAccess.file_exists(child_path) else null
 		if not mesh:
 			mesh = ArrayMesh.new()
 			mesh.resource_path = child_path
@@ -391,18 +393,18 @@ func generate_material(save_path: String = "") -> StandardMaterial3D:
 	var material: Material = ResourceLoader.load(path) if FileAccess.file_exists(path) else StandardMaterial3D.new()
 	if material is StandardMaterial3D:
 		_configure_solid_material(material)
-		material.albedo_texture = generate_albedo_textrue(save_path)
-		material.metallic_texture = generate_metal_textrue(save_path)
-		material.roughness_texture = generate_rough_textrue(save_path)
-		material.emission_texture = generate_emission_textrue(save_path)
+		material.albedo_texture = generate_albedo_texture(save_path)
+		material.metallic_texture = generate_metal_texture(save_path)
+		material.roughness_texture = generate_rough_texture(save_path)
+		material.emission_texture = generate_emission_texture(save_path)
 		if save_path:
 			material.resource_path = path
 			ResourceSaver.save(material)
 	else:
-		generate_albedo_textrue(save_path)
-		generate_metal_textrue(save_path)
-		generate_rough_textrue(save_path)
-		generate_emission_textrue(save_path)
+		generate_albedo_texture(save_path)
+		generate_metal_texture(save_path)
+		generate_rough_texture(save_path)
+		generate_emission_texture(save_path)
 	return material
 
 func generate_material_trans(base: Material, save_path: String = "") -> StandardMaterial3D:
@@ -430,16 +432,16 @@ func _generate_texture(save_path: String, type: String) -> ImageTexture:
 		ResourceSaver.save(texture)
 	return texture
 
-func generate_albedo_textrue(save_path: String = "") -> ImageTexture:
+func generate_albedo_texture(save_path: String = "") -> ImageTexture:
 	return _generate_texture(save_path, "albedo")
 
-func generate_metal_textrue(save_path: String = "") -> ImageTexture:
+func generate_metal_texture(save_path: String = "") -> ImageTexture:
 	return _generate_texture(save_path, "metal")
 
-func generate_rough_textrue(save_path: String = "") -> ImageTexture:
+func generate_rough_texture(save_path: String = "") -> ImageTexture:
 	return _generate_texture(save_path, "rough")
 
-func generate_emission_textrue(save_path: String = "") -> ImageTexture:
+func generate_emission_texture(save_path: String = "") -> ImageTexture:
 	return _generate_texture(save_path, "emission")
 
 

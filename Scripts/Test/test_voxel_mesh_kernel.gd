@@ -122,8 +122,6 @@ func test_kernel_deer_sample_baseline() -> void:
 		VoxelMeshImporter.unwrap_lightmap_uv2: false,
 		VoxelMeshImporter.uv2_texel_size: 0.2,
 		VoxelMeshImporter.import_materials_textures: false,
-		VoxelMeshImporter.material_path: "",
-		VoxelMeshImporter.material_trans_path: "",
 	}
 	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, opts, path)
 	assert_true(mesh != null, "应为 deer.qvox 生成网格")

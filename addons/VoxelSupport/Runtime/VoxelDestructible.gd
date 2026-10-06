@@ -95,12 +95,12 @@ const AUTO_BOX_VOXELS: int = 256
 
 ## 监控统计
 var last_damage_count: int = 0     ## 最近一次破坏实际移除的体素数
-var last_damage_time_ms: float = 0 ## 最近一次破坏耗时 (ms)
 var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 
-## 逐体素累计伤害：按 chunk 的扁平 Float32 缓冲（原生伤害内核直接读写，避免逐体素字典查询；
-## 契约同 remove_voxels_bulk —— 原生在本地副本上改，调用方写回）
-var _damage: Dictionary = {}
+## 逐体素累计伤害账**不在这里**：它归 VoxelData（体素相邻状态，必须与 chunk 缓冲同生共死——
+## 卸载 / 清空 / origin shift / 载荷重建都要同步清理）。放在本节点上时无人负责清理，
+## 残留伤害会"继承"给后来放上去的新体素（一放上去就被秒杀），且随卸载无限增长。
+## 本节点只负责"发起伤害"，通过 data.get_damage_buffers() / data.set_damage_buffers() 读写。
 
 ## 破坏形状常量（对应原生 damage_shape 的 shape 参数）
 const SHAPE_SPHERE: int = 0
@@ -114,6 +114,8 @@ var _pending_spawn_debris: bool = false
 var _debris_root: Node3D = null
 var _falling_chunk_root: Node3D = null
 var _falling_chunk_id: int = 0
+## 在途的掉落块 mesh worker 任务 ID（退出时必须 join，见 _exit_tree）。
+var _falling_mesh_tasks: Array[int] = []
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
 ## 粒子对象池：空闲的 GPUParticles3D 集合（复用，避免每次破坏新建节点）。
@@ -121,8 +123,6 @@ var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 var _particle_pool: Array[GPUParticles3D] = []
 ## 粒子池上限（超过此数量不再缓存空闲节点，直接销毁）
 const PARTICLE_POOL_MAX: int = 64
-## 当前存活粒子系统数（用于调试/诊断）
-var _active_particle_count: int = 0
 
 ## 粒子淡出渐变共用资源（生命周期末渐隐）。所有粒子共用同一份，破坏瞬间省 Gradient/GradientTexture1D 创建。
 var _particle_fade_gradient: GradientTexture1D = null
@@ -225,6 +225,11 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	# 先等在途的掉落块 mesh worker 结束再清理：它们是**未跟踪**的任务，
+	# 若不等，其 call_deferred("_on_falling_chunk_mesh_result") 会打到已释放实例。
+	for tid in _falling_mesh_tasks:
+		WorkerThreadPool.wait_for_task_completion(tid)
+	_falling_mesh_tasks.clear()
 	_clear_debris()
 	# 必须转发给父类：它负责置 _exiting、等待在途 worker、清理 LOD 网格——
 	# 漏掉会让 worker 完成时的 call_deferred 打到已释放实例。
@@ -361,12 +366,11 @@ func repair(amount: float) -> void:
 ##   · 材质硬度按材质ID 查表一次传下去（原实现是逐体素 materials[id] 读取）。
 ## 返回应被移除的体素位置；实际移除仍由 _process 的统一管道处理。
 func _apply_damage_native(shape: int, center: Vector3, radius: float, vmin: Vector3i, vmax: Vector3i) -> Array:
-	var res := NativeLoader.damage_shape(data.get_chunk_buffers(), _damage, shape, center, radius,
-		vmin, vmax, _hardness_table(), damage_per_voxel, use_voxel_health, {})
+	var res := NativeLoader.damage_shape(data.get_chunk_buffers(), data.get_damage_buffers(),
+		shape, center, radius, vmin, vmax, _hardness_table(), damage_per_voxel,
+		use_voxel_health, {})
 	# 伤害缓冲回写（原生在本地副本上改，契约同 remove_voxels_bulk）
-	var changed: Dictionary = res.get("damage_chunks", {})
-	for ck in changed:
-		_damage[ck] = changed[ck]
+	data.set_damage_buffers(res.get("damage_chunks", {}))
 	# 硬化反馈（受伤未摧毁）→ 与基线同一套缓冲与帧尾合并信号
 	var hpos: PackedVector3Array = res.get("hardened_pos", PackedVector3Array())
 	var hrem: PackedFloat32Array = res.get("hardened_rem", PackedFloat32Array())
@@ -381,25 +385,19 @@ func _apply_damage_native(shape: int, center: Vector3, radius: float, vmin: Vect
 	return removed
 
 
-## 材质硬度查表（索引 = 材质ID）：一次 ≤256 项扫描，之后原生按 ID 直读
+## 材质硬度查表（索引 = 材质ID）：一次 ≤256 项扫描，之后原生按 ID 直读。
+## 表长下界取 MAX_MATERIAL_ID：原生按 ID 直读，表若短于最大体素材质ID 会越界读
+## （短表只可能出现在"材质数组与实际体素ID 不同步"的损坏数据上，此处兜住）。
 func _hardness_table() -> PackedFloat32Array:
 	var mats := data.materials if data != null else []
 	var out := PackedFloat32Array()
-	out.resize(maxi(mats.size(), 1))
+	out.resize(maxi(mats.size(), VoxelMaterial.MAX_MATERIAL_ID))
 	out.fill(1.0)
 	for i in mats.size():
 		var m = mats[i]
 		if m != null:
 			out[i] = m.hardness
 	return out
-
-
-func _get_material_hardness(mat_id: int) -> float:
-	if data and mat_id >= 0 and mat_id < data.materials.size():
-		var m = data.materials[mat_id] as VoxelMaterial
-		if m:
-			return m.hardness
-	return 1.0
 
 
 ## 破坏后的统一处理：崩塌检测 + 应力传播 + 整体健康度扣减
@@ -470,26 +468,17 @@ func _propagate_stress(removed: Array) -> Array:
 
 
 ## 材质连接强度预取表（索引=材质ID）：BFS 内直接数组读，替代逐邻居 as 转换 + 动态属性访问。
-## 与 GDScript 版 _get_connection_strength 默认一致（无效材质 10.0）。
+## 无效材质取默认 10.0。表长下界同 _hardness_table（原生按 ID 直读，防越界）。
 func _build_strength_table() -> PackedFloat32Array:
 	var table := PackedFloat32Array()
-	if data:
-		for m in data.materials:
-			if m:
-				table.append(m.connection_strength)
-			else:
-				table.append(10.0)
-	return table
-
-
-## 获取材质的连接强度
-## connection_strength 是 VoxelMaterial 的 @export 属性，一定存在
-func _get_connection_strength(mat_id: int) -> float:
-	if data and mat_id >= 0 and mat_id < data.materials.size():
-		var m = data.materials[mat_id] as VoxelMaterial
+	var mats: Array = data.materials if data != null else []
+	table.resize(maxi(mats.size(), VoxelMaterial.MAX_MATERIAL_ID))
+	table.fill(10.0)
+	for i in mats.size():
+		var m = mats[i]
 		if m:
-			return m.connection_strength
-	return 10.0
+			table[i] = m.connection_strength
+	return table
 
 
 # ----------------------------------------------------------------------------
@@ -660,12 +649,7 @@ func _process_full_cascade() -> void:
 	# 按连通性分组，每组生成一个 FallingChunk
 	var groups := VoxelData.partition_connected(total_unstable)
 	# 收集每组体素的材质ID（在移除前）
-	var group_materials: Array[Dictionary] = []
-	for group in groups:
-		var mat_map: Dictionary = {}
-		for pos in group:
-			mat_map[pos] = data.get_voxel(pos)
-		group_materials.append(mat_map)
+	var group_materials := _collect_group_materials(groups, total_unstable)
 	data.remove_voxels(total_unstable)
 	if not Engine.is_editor_hint():
 		_spawn_falling_chunks_from_groups(groups, group_materials)
@@ -742,12 +726,7 @@ func _process_cascade_batch(unstable: Array) -> void:
 	var _diag_t2 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 收集材质快照（在移除前）
-	var group_materials: Array[Dictionary] = []
-	for group in groups:
-		var mat_map: Dictionary = {}
-		for pos in group:
-			mat_map[pos] = data.get_voxel(pos)
-		group_materials.append(mat_map)
+	var group_materials := _collect_group_materials(groups, unstable)
 	var _diag_t3 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 移除失稳体素
@@ -893,7 +872,10 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	# 避免级联破坏时在主线程同步生成大量掉落块 mesh（最大主线程阻塞点）
 	var materials_snapshot: Array = data.materials.duplicate(false) if data else []
 	var spawn_scale := voxel_scale
-	WorkerThreadPool.add_task(_falling_chunk_mesh_worker.bind(local_voxels, materials_snapshot, spawn_scale, body))
+	# 跟踪任务 ID：退出时必须 join（见 _exit_tree），否则未跟踪 worker 的 call_deferred
+	# 会打到已释放实例。集合随 _clear_debris 清空。
+	_falling_mesh_tasks.append(WorkerThreadPool.add_task(
+		_falling_chunk_mesh_worker.bind(local_voxels, materials_snapshot, spawn_scale, body)))
 
 
 ## 后台线程入口：为掉落块生成网格数组（线程安全，不触碰 ArrayMesh/节点）
@@ -976,6 +958,8 @@ func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, 
 ## 结果入队，由 _process 帧尾限量组装（add_surface_from_arrays 的同步 GPU 上传
 ## 摊平到多帧，避免 Metal 满载时 fence wait() 超时）。
 func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}, hull_points: PackedVector3Array = PackedVector3Array()) -> void:
+	if _exiting:
+		return
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
@@ -1070,7 +1054,10 @@ func _add_box_collision(body: RigidBody3D, local_voxels: Dictionary) -> void:
 	var col := CollisionShape3D.new()
 	col.name = "CollisionShape3D"
 	col.shape = shape
-	col.position = (Vector3(min_p) + Vector3(size) * 0.5) * scale
+	# 体素格 p 在体素坐标里占 [p-0.5, p+0.5]，故 min_p..max_p 这段的盒心是 (min_p+max_p)/2。
+	# 此前写成 min_p + size*0.5 = (min_p+max_p+1)/2，比正确位置多出半格，
+	# 与 _compute_hull_points 给出的凸包（那一条是对的）错开半个体素 → 碰撞与视觉不符。
+	col.position = (Vector3(min_p) + Vector3(max_p)) * 0.5 * scale
 	body.add_child(col)
 	col.owner = body
 
@@ -1299,12 +1286,7 @@ func validate_stability() -> void:
 	# 按连通性分组，每组生成一个 FallingChunk
 	var groups := VoxelData.partition_connected(unstable)
 	# 收集每组体素的材质ID（在移除前）
-	var group_materials: Array[Dictionary] = []
-	for group in groups:
-		var mat_map: Dictionary = {}
-		for pos in group:
-			mat_map[pos] = data.get_voxel(pos)
-		group_materials.append(mat_map)
+	var group_materials := _collect_group_materials(groups, unstable)
 	data.remove_voxels(unstable)
 	if not Engine.is_editor_hint():
 		_spawn_falling_chunks_from_groups(groups, group_materials)
@@ -1327,6 +1309,21 @@ func _ensure_debris_root() -> void:
 func _collect_voxel_materials(positions: Array) -> Dictionary:
 	# 原生批量收集（chunk 缓冲直读，替代逐体素 get_voxel 字典查询）；原生库为强制依赖。
 	return NativeLoader.collect_materials(data.get_chunk_buffers() if data else {}, positions)
+
+
+## 按连通分组逐组建立 pos→材质ID 映射（移除前调用，供掉落体使用）。
+## 一趟原生批量读取全部位置（chunk 缓冲直读），再按组分片——替代原"逐组逐体素
+## data.get_voxel()"字典查询（大崩塌时数万次哈希查找全在主线程）。
+## 空/未知位置返回 -1，与 data.get_voxel 的既有语义一致。
+func _collect_group_materials(groups: Array, positions: Array) -> Array[Dictionary]:
+	var all_mats := _collect_voxel_materials(positions)
+	var out: Array[Dictionary] = []
+	for group in groups:
+		var mat_map: Dictionary = {}
+		for pos in group:
+			mat_map[pos] = all_mats.get(pos, -1)
+		out.append(mat_map)
+	return out
 
 
 ## 整块碎裂粒子：当物理体池已满、大块无法生成物理体时，
@@ -1441,7 +1438,6 @@ func _spawn_debris_particles(center: Vector3, mat_id: int, amount: int, mat_mass
 		_ensure_debris_root()
 		_debris_root.add_child(particles)
 	particles.visible = true
-	_active_particle_count += 1
 
 	particles.position = center
 	particles.amount = amount
@@ -1557,7 +1553,6 @@ func _get_particle_mesh(mat_id: int) -> Mesh:
 func _cleanup_particles(p: Node) -> void:
 	if p == null or not is_instance_valid(p):
 		return
-	_active_particle_count = maxi(_active_particle_count - 1, 0)
 	if p is GPUParticles3D and _particle_pool.size() < PARTICLE_POOL_MAX:
 		var gp := p as GPUParticles3D
 		gp.emitting = false
@@ -1580,7 +1575,6 @@ func _clear_debris() -> void:
 		if is_instance_valid(gp):
 			gp.queue_free()
 	_particle_pool.clear()
-	_active_particle_count = 0
 	_particle_mesh_cache.clear()
 
 

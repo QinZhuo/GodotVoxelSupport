@@ -138,7 +138,9 @@ class VoxelNode:
 			return models
 		models.clear()
 		for i in child_nodes:
-			models.append_array(voxel.nodes[i].get_models(voxel, frame_index))
+			# ignore_trans 必须继续往下传：漏传会让子树永远按 ignore_trans=false 展开，
+			# 于是"忽略透明体素"这个选项只在当前层生效（层级一深就失效）。
+			models.append_array(voxel.nodes[i].get_models(voxel, frame_index, ignore_trans))
 		get_frame(frame_index, true).merge_models(voxel, models, ignore_trans)
 		return models
 

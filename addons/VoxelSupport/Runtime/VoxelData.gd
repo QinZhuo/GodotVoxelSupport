@@ -228,6 +228,13 @@ func mark_lod_modified_for_chunk(ck: Vector3i) -> void:
 var _lod_dirty_region: Array[Dictionary] = []
 
 
+## 脏大格区域并集 [min, max] 的哨兵端值：min 起点取 +∞、max 起点取 -∞，首次 mini/maxi 即被真实值取代。
+## 只具名两个 Vector3i（值类型，共享安全）；累积数组仍须每次现造（见 _mark_lod_dirty_region），
+## 否则 layer.get 缺省返回同一份数组引用，首次写入就会污染这个"空初值"。
+const _DIRTY_MIN_SENTINEL := Vector3i(999999, 999999, 999999)
+const _DIRTY_MAX_SENTINEL := Vector3i(-1, -1, -1)
+
+
 ## 记录 block 的脏大格区域（体素范围 [vox_min, vox_max] 覆盖的 block 内大格，并集）
 func _mark_lod_dirty_region(block_key: Vector3i, lod: int, vox_min: Vector3i, vox_max: Vector3i) -> void:
 	var gmin := Vector3i(vox_min.x >> lod, vox_min.y >> lod, vox_min.z >> lod) - block_key * LOD_GRID
@@ -237,7 +244,7 @@ func _mark_lod_dirty_region(block_key: Vector3i, lod: int, vox_min: Vector3i, vo
 	if gmax.x < gmin.x or gmax.y < gmin.y or gmax.z < gmin.z:
 		return
 	var layer := _layer(_lod_dirty_region, lod)
-	var region: Array = layer.get(block_key, [Vector3i(999999, 999999, 999999), Vector3i(-1, -1, -1)])
+	var region: Array = layer.get(block_key, [_DIRTY_MIN_SENTINEL, _DIRTY_MAX_SENTINEL])
 	region[0] = Vector3i(mini(region[0].x, gmin.x), mini(region[0].y, gmin.y), mini(region[0].z, gmin.z))
 	region[1] = Vector3i(maxi(region[1].x, gmax.x), maxi(region[1].y, gmax.y), maxi(region[1].z, gmax.z))
 	layer[block_key] = region
@@ -311,6 +318,16 @@ const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 ## 空 chunk 不在此字典中（稀疏性只存在于 chunk 层）。
 var _chunk_buffers: Dictionary = {}
 
+## 逐体素累计伤害：chunk key -> PackedFloat32Array(CHUNK_VOLUME)。
+## 原生伤害内核直接按 chunk 读写它（免去逐体素字典查询）；契约同 remove_voxels_bulk ——
+## 原生在本地副本上改，调用方用 set_damage_buffers 写回。
+##
+## 【为什么归 VoxelData 而不是破坏节点】这是**体素相邻状态**：必须与 chunk 缓冲同生共死
+## （卸载 / 清空 / origin shift / 载荷重建都要同步处理）。放在破坏节点上时无人负责清理，
+## 于是残留伤害会"继承"给后来放上去的新体素（一放上去就被秒杀），且随卸载无限增长。
+## 【线程约定】只在主线程访问，不交给 worker，故不参与只读快照的写时分叉。
+var _damage: Dictionary = {}
+
 ## 每粗 LOD 独立数据层：_coarse_buffers[level-1] = {block_key: PackedInt32Array(LOD_GRID³ 大格)}
 ## 值 = 材质ID（0=空），每格 = 2^level 体素。与 Voxel Tools 一致：各 LOD 数据块独立，
 ## 未修改的粗层 block 由生成器 _generate_chunk_lod 直接生成（无需加载全部 LOD0 chunk）。
@@ -327,7 +344,13 @@ var _coarse_modified: Array[Dictionary] = []
 ## 派发 worker、把结果交回编排器，不再另存一份并行的 pending 账本。
 
 ## 只读快照持有者计数（见 begin_readonly_snapshot）。
+## 单点写路径（_write_buffer_impl）的 O(1) 判据：>0 即表示有 worker 可能共享底层缓冲。
 var _snapshot_readers: int = 0
+
+## 存活的快照句柄（handle -> true）。用于两件事：
+##   1) clear() / 载荷重建等世界级重置时强制回收，避免泄漏句柄永久钉住 _snapshot_readers；
+##   2) end_readonly_snapshot() 兼容 shim 需要知道"当前该释放哪一个"。
+var _live_snapshots: Dictionary = {}
 
 ## 每 chunk 体素计数（chunk key -> int，增量维护 O(1)）。
 ## 替代 _maybe_erase_empty_chunk 的 4096 全量扫描：增减体素时更新计数，
@@ -499,6 +522,8 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 		_chunk_buffers[ck] = buf
 	# 标记需要写盘：内存数据已变更（若最终变空由 _maybe_erase_empty_chunk 清盘）
 	_dirty_chunks[ck] = true
+	# 该位置被改写或移除 → 清零其累计伤害，否则残留伤害会"继承"给新体素（一放就被秒杀）
+	_clear_damage_at(pos)
 	var idx := _buf_index(pos - ck * CHUNK_SIZE)
 	var cur: int = buf[idx]
 	if mat_id <= 0:
@@ -539,6 +564,7 @@ func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
 	_chunk_buffers.erase(ck)
 	_chunk_voxel_counts.erase(ck)
 	_dirty_chunks.erase(ck)
+	_damage.erase(ck)
 	if is_stored(ck):
 		# 流式：世界该处已清空，同步删除存储里的旧数据（否则重载会出现"幽灵 chunk"）
 		stream.erase_chunk(ck)
@@ -665,6 +691,8 @@ func unload_chunk(chunk_key: Vector3i) -> bool:
 	_voxel_count -= _chunk_voxel_counts.get(chunk_key, 0)
 	_chunk_voxel_counts.erase(chunk_key)
 	_chunk_buffers.erase(chunk_key)
+	# 伤害账随 chunk 一起释放，否则卸载后残留账目会随世界遍历无限增长
+	_damage.erase(chunk_key)
 	return true
 
 
@@ -693,6 +721,62 @@ func get_chunk_buffers() -> Dictionary:
 	return _chunk_buffers
 
 
+# ----------------------------------------------------------------------------
+# 逐体素累计伤害账（体素相邻状态，随 chunk 生命周期同步）
+# ----------------------------------------------------------------------------
+
+## 累计伤害缓冲字典（chunk_key -> PackedFloat32Array(CHUNK_VOLUME)）。
+## 与 get_chunk_buffers 同样**仅供原生批量接口直接读写**。
+func get_damage_buffers() -> Dictionary:
+	return _damage
+
+
+## 写回原生伤害内核修改过的伤害缓冲（契约同 remove_voxels_bulk 的 buffers 回写）。
+func set_damage_buffers(changed: Dictionary) -> void:
+	for ck in changed:
+		_damage[ck] = changed[ck]
+
+
+## 取某 chunk 的伤害缓冲（不存在返回空数组）。
+func get_damage(chunk_key: Vector3i) -> PackedFloat32Array:
+	var buf: Variant = _damage.get(chunk_key)
+	return buf if buf != null else PackedFloat32Array()
+
+
+## 丢弃某 chunk 的伤害账（chunk 卸载 / 被清空时调用，防无界增长）。
+func clear_damage(chunk_key: Vector3i) -> void:
+	_damage.erase(chunk_key)
+
+
+## 清零若干体素位置的累计伤害（体素被移除后调用）。
+## positions 可为 Array[Vector3i]，也可为原生内核返回的 PackedVector3Array ——
+## 两者都暴露 x/y/z，故按分量构造，避免依赖具体元素类型。
+func clear_damage_bulk(positions: Variant) -> void:
+	if _damage.is_empty() or positions == null:
+		return
+	for p in positions:
+		_clear_damage_at(Vector3i(int(p.x), int(p.y), int(p.z)))
+
+
+## 清空全部伤害账（世界级重置用）。
+func clear_all_damage() -> void:
+	_damage.clear()
+
+
+## 清零单个体素位置的伤害（体素被移除**或被覆盖**时调用）。
+## 少了这一步，该位置的残留伤害会"继承"给后来放上去的新体素 → 新体素一放上去就被秒杀。
+func _clear_damage_at(pos: Vector3i) -> void:
+	if _damage.is_empty():
+		return
+	var ck := _chunk_of(pos)
+	var buf: Variant = _damage.get(ck)
+	if buf == null:
+		return
+	var arr: PackedFloat32Array = buf
+	arr[_buf_index(pos - ck * CHUNK_SIZE)] = 0.0
+	_damage[ck] = arr
+
+
 ## 指定 LOD 层（level >= 1）的粗层大格数据字典（block_key → PackedInt32Array(LOD_GRID³)）。
 ## 与 get_chunk_buffers 同样**仅供原生批量接口读取**。
 func get_lod_buffers(level: int) -> Dictionary:
@@ -706,25 +790,80 @@ func get_lod_buffers(level: int) -> Dictionary:
 # 只读快照生命周期（写时拷贝的"另一半"）
 # ----------------------------------------------------------------------------
 
-## 全部已加载 chunk 缓冲的只读快照（独立字典 + 与活动缓冲共享底层）。
-## **仅供后台线程只读**，且必须与 begin/end_readonly_snapshot 配合才是真正不可变的。
+## 只读快照句柄 —— **所有权式**的快照生命周期。
 ##
-## 为什么给全量而不是局部：破坏检测（应力传播 / 失稳扫描）会沿应力链 / 支撑链任意远地读
-## chunk，缺块会被当成"空"→ 误判失稳（多塌）或漏应力。局部快照省不下多少，却会改变语义。
-func snapshot_all_chunk_buffers() -> Dictionary:
-	return _chunk_buffers.duplicate(false)
+## 【为什么不用裸计数 begin/end 配对】快照的"结束"必须由**获得它的那一方**负责。裸计数下，
+## 任何一条提前返回路径漏掉 end，计数就永久 >0，此后每一次单点写都会分叉整块 32³ 缓冲
+## ——静默的性能塌陷，且从外部无从察觉（曾真实发生：批次提前释放击穿写保护）。
+## 改为返回句柄后，"谁持有谁释放"由引用关系本身表达，句柄被回收时还有 PREDELETE 兜底。
+##
+## 【为什么必须是句柄而不是 bool】粗层降采样与渲染批次可并发持有多个快照，
+## 裸计数无法区分"这次该释放哪一个"，句柄天然区分。
+class ReadonlySnapshot extends RefCounted:
+	var _data: VoxelData = null
+	var _released := false
+
+	func _init(d: VoxelData) -> void:
+		_data = d
+
+	## 释放快照（幂等）。调用后不得再使用本句柄。
+	func release() -> void:
+		if _released:
+			return
+		_released = true
+		var d := _data
+		_data = null
+		# VoxelData 可能已先被释放（资源换世界/退出）：此时没有账可还，直接返回。
+		if d != null and is_instance_valid(d):
+			d._on_snapshot_released(self)
+
+	## 泄漏兜底：句柄被 GC 而从未 release 时也要把计数还回去。
+	## 否则一次漏释放就会让写路径**永久**分叉——这正是本设计要根除的失效模式。
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE and not _released:
+			release()
 
 
-## 声明"缓冲即将交给后台线程只读"，必须与 end_readonly_snapshot() 成对（计数，可并发多批）。
+## 声明"缓冲即将交给后台线程只读"。返回的句柄负责释放（可并发多批）。
+##
 ## 实测 GDScript 对 PackedInt32Array 的逐元素写不触发写时拷贝，故浅拷贝快照并不安全：
 ## 快照活跃期内单点写必须先分叉（见 _write_buffer_impl）。选写侧守卫而非读侧脱钩，是因为后者
 ## 要按快照集深拷贝（约 27MB/批），写侧只在真的写时付一次（实测约 5µs/次）。
-func begin_readonly_snapshot() -> void:
+func begin_readonly_snapshot() -> ReadonlySnapshot:
 	_snapshot_readers += 1
+	var handle := ReadonlySnapshot.new(self)
+	_live_snapshots[handle] = true
+	return handle
 
 
+## 句柄释放回调（由 ReadonlySnapshot.release 调用；幂等性由句柄自身的 _released 保证）。
+func _on_snapshot_released(handle: ReadonlySnapshot) -> void:
+	if _live_snapshots.erase(handle):
+		_snapshot_readers = maxi(_snapshot_readers - 1, 0)
+
+
+## 【兼容入口】释放最近一次 begin 的句柄。
+## 仅在"begin/end 严格配对"时语义正确（本类内部与渲染器的粗层任务恰好如此）；
+## 每个句柄至多释放一次，故即便 LIFO 释放了"另一个"句柄，聚合计数依然正确。
+## 新的可并发调用点请直接使用 begin 返回的句柄。
 func end_readonly_snapshot() -> void:
-	_snapshot_readers = maxi(_snapshot_readers - 1, 0)
+	if _live_snapshots.is_empty():
+		return
+	var handles := _live_snapshots.keys()
+	(handles[handles.size() - 1] as ReadonlySnapshot).release()
+
+
+## 强制回收全部存活快照（clear / 载荷重建等**世界级重置**专用）。
+##
+## 只断链不改缓冲：调用方必须已保证此刻没有 worker 在读这些缓冲
+## （渲染器先取消其批次，再调用 data.clear()，见 VoxelRenderer._cancel_async）。
+## 不这么做的话，一个泄漏的句柄会让 _snapshot_readers 永久 >0，
+## 于是此后**每一次**单点写都要复制一整块 32³ 缓冲。
+func _force_release_snapshots() -> void:
+	for h in _live_snapshots.keys():
+		(h as ReadonlySnapshot)._released = true
+	_live_snapshots.clear()
+	_snapshot_readers = 0
 
 
 # ----------------------------------------------------------------------------
@@ -819,6 +958,8 @@ func shift_origin(offset: Vector3i) -> void:
 	_chunk_voxel_counts = VoxelChunk.shift_key_dict(_chunk_voxel_counts, offset)
 	_dirty_chunks = VoxelChunk.shift_key_dict(_dirty_chunks, offset)
 	_dirty_mesh_chunks = VoxelChunk.shift_key_dict(_dirty_mesh_chunks, offset)
+	# 伤害账同样以 chunk 为键，漏平移会让它与数据基准脱节（残留旧坐标条目）
+	_damage = VoxelChunk.shift_key_dict(_damage, offset)
 	for i in _lod_invalidated.size():
 		_lod_invalidated[i] = VoxelChunk.shift_key_dict(_lod_invalidated[i], offset)
 	for i in _coarse_buffers.size():
@@ -1019,7 +1160,9 @@ func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
 	if not _async.begin_derived(block_key, lod):
 		return
-	begin_readonly_snapshot()
+	# 句柄随任务走到底、由回填方释放：不再依赖"另一个调用点的 end"来配对，
+	# 故本路径与渲染批次的快照并发时也不会互相释放错。
+	var snapshot := begin_readonly_snapshot()
 	var cell := 1 << lod
 	var chunks_per_block := (VoxelChunkGenerator.LOD_BLOCK_SIZE * cell) / VoxelChunk.CHUNK_SIZE
 	var base_chunk := block_key * chunks_per_block
@@ -1033,23 +1176,25 @@ func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
 				if _chunk_buffers.has(ck):
 					buffers[ck] = _chunk_buffers[ck]
 	if buffers.is_empty():
-		call_deferred("_on_lod_downsample_ready", block_key, lod, PackedInt32Array())
+		call_deferred("_on_lod_downsample_ready", block_key, lod, PackedInt32Array(), snapshot)
 		return
-	WorkerThreadPool.add_task(_lod_downsample_worker.bind(block_key, lod, buffers))
+	WorkerThreadPool.add_task(_lod_downsample_worker.bind(block_key, lod, buffers, snapshot))
 
 
 ## 后台线程：从 LOD0 chunk 数据降采样生成粗层 block 数据（32³ 大格，每格 = 2^lod 体素）。
 ## buffers 为主线程快照（只读，配合 begin_readonly_snapshot 保证不被主线程改写），
-## 结果经 call_deferred 回主线程。
-func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary) -> void:
+## 结果经 call_deferred 回主线程。snapshot 句柄随参数带过去，保证释放方唯一。
+func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary,
+		snapshot: ReadonlySnapshot) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, block_key, lod)
 	var buf := VoxelChunk.extract_center_from_halo(halo)
-	call_deferred("_on_lod_downsample_ready", block_key, lod, buf)
+	call_deferred("_on_lod_downsample_ready", block_key, lod, buf, snapshot)
 
 
 ## 主线程：粗层降采样完成 → 缓存 _coarse_buffers + 持久化文件流（重启保留），供渲染器复用
-func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Array) -> void:
-	end_readonly_snapshot()
+func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Array,
+		snapshot: ReadonlySnapshot) -> void:
+	snapshot.release()
 	if buf.is_empty():
 		# LOD0 chunk 可能尚未加载（自动 request 早于 LOD0 就绪，或覆盖 chunk 仅存磁盘）→
 		# 结束在途登记但保留重试计数，交给 _retry_lod_downsample 决定是否再试
@@ -1058,7 +1203,7 @@ func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Arr
 		return
 	_async.end_derived(block_key, lod)
 	set_lod_block(lod, block_key, buf)
-	if stream is QVoxStream:
+	if stream != null and stream.supports_lod_layer():
 		stream.save_chunk(block_key, buf, lod)
 
 
@@ -1231,6 +1376,10 @@ func clear(notify: bool = true) -> void:
 	for ck: Vector3i in _chunk_buffers:
 		mark_chunk_dirty(ck)
 	_chunk_buffers.clear()
+	# 世界级重置：泄漏的句柄必须在此断链，否则 _snapshot_readers 永久 >0，
+	# 此后每一次单点写都要复制一整块 32³ 缓冲。调用方（渲染器）须已先取消其批次。
+	_force_release_snapshots()
+	_damage.clear()
 	_chunk_voxel_counts.clear()
 	_voxel_count = 0
 	_dirty_chunks.clear()
@@ -1511,6 +1660,10 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 			_dirty_mesh_chunks[ck + Vector3i(0, 0, 1)] = true
 		if b & 32:
 			_dirty_mesh_chunks[ck + Vector3i(0, 0, -1)] = true
+	# 移除后清零这些位置的累计伤害。用**请求列表**而非原生返回的 removed ——
+	# 后者是"实际移除的体素数"（int），不是位置数组。对本来就没有体素的位置清零也无害
+	# （那些位置按契约不应有伤害）。
+	clear_damage_bulk(positions)
 	# 批量移除后统一回收被清空的 chunk 键（O(1) 计数判断）
 	for ck in touched:
 		_maybe_erase_empty_chunk(ck)
@@ -1784,6 +1937,8 @@ func _set(property: StringName, value: Variant) -> bool:
 		# 只清内存缓冲，不动 stream 的磁盘持久化数据——场景加载时 stream 已先赋值，
 		# 若调 clear() 会走 stream.erase_chunk 误删磁盘上已持久化的修改 chunk。
 		_chunk_buffers.clear()
+		_force_release_snapshots()
+		_damage.clear()
 		_chunk_voxel_counts.clear()
 		_voxel_count = 0
 		_dirty_chunks.clear()

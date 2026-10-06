@@ -125,6 +125,20 @@ static func generate_lod_block_arrays(
 	return result
 
 
+## 金字塔增量降采样：只重算 block 内 [rmin, rmax] 脏大格，未脏大格从 coarse 复用。
+## 与其它几何内核一样**经本类统一入口**转发原生桥：调用方（渲染器）不应直接依赖
+## NativeLoader，否则"几何内核统一走这里"的分层约定会被逐个直调侵蚀掉。
+static func patch_lod_block(buffers: Dictionary, block_key: Vector3i, lod_shift: int,
+		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
+	return NativeLoader.patch_lod_block(buffers, block_key, lod_shift, coarse, rmin, rmax)
+
+
+## 逐级上推：当前层（lod>=2）从上一层 coarse 数据降采样。同上，统一入口。
+static func patch_lod_block_from_lod(coarse_buffers: Dictionary, block_key: Vector3i, lod: int,
+		coarse: PackedInt32Array, rmin: Vector3i, rmax: Vector3i) -> PackedInt32Array:
+	return NativeLoader.patch_lod_block_from_lod(coarse_buffers, block_key, lod, coarse, rmin, rmax)
+
+
 ## 将生成的网格数据组装为 ArrayMesh（必须在主线程调用，会修改 ArrayMesh）
 static func _merge_meshes(arrays: Dictionary) -> ArrayMesh:
 	var result := ArrayMesh.new()

@@ -131,8 +131,13 @@ const DEFAULT_UP_AXIS := "y"
 ## up_axis 白名单（§3.1）。缺省 y；出现其他值按缺省处理并告警。
 const ALLOWED_UP_AXES := ["x", "y", "z"]
 
-## 每通道支持的位宽（当前仅定长数值通道）。
-const ALLOWED_BPP := [8, 16, 32]
+## 【位宽契约】本版**只支持 CHANNEL_BPP（= 16 位）**，见下方同名常量。
+##
+## 规范原设计允许 8/16/32 三种位宽（ALLOWED_BPP），但块级编解码层只按 16 位实现
+## （CODEC_DENSE 每通道 N×bpp/8 字节、CODEC_INDEXED 位宽等均硬编码），于是"接受 bpp=8/32
+## 的文件却按 16 位解码"——与"多通道被接受却读错"是同一族缺陷（接受却误读）。
+## 因此用同一策略收敛：读方遇到非 16 直接拒绝（FATAL，fail-fast），而非静默误读。
+## 将来确需其它位宽时，随格式版本引入逐通道位宽描述，而不是现在背这个成本。
 
 ## 支配通道名（channels[0] 必须为此，决定空块判定与可见性）。
 const DOMINANT_CHANNEL := "material"
@@ -216,48 +221,6 @@ static func padded_length(payload_bytes: int) -> int:
 
 
 # ----------------------------------------------------------------------------
-# 长度派生（纯算术，无状态）—— 格式的"算术"集中在此，可单测、可复查
-# ----------------------------------------------------------------------------
-# 【设计意图】P2 说"不存可推导的事实"，但**推导关系本身应当显式化**。
-# 把"某段字节该多长""总长该是多少"这类计算集中为纯函数，好处有三：
-#   1. 读写两端调用同一个函数 → 不可能不一致（§1.2 CRC 那个历史 bug 的同族问题）；
-#   2. 可脱离文件独立单测（给定输入断言输出）；
-#   3. 校验逻辑从"内联四则运算"变成"调用一个具名函数"，读代码即知意图。
-
-
-## 一个顶层块占用的总字节数（块头 12 + length）。
-static func block_total_bytes(length: int) -> int:
-	return BLOCK_HEADER_SIZE + length
-
-
-## VOX0 模型负载的精确字节数：block[] 数组本身。
-## 仅用于文档说明；实际以存储在模型头里的 payload_length 为准。
-static func vox0_payload_end(model_payload_bytes: int) -> int:
-	return VOX_MODEL_HEADER_SIZE + model_payload_bytes
-
-
-## 一个 VOX0 块内子块的字节数（17 字节头 + 负载）。
-static func vox_block_total_bytes(block_payload_bytes: int) -> int:
-	return VOX_BLOCK_HEADER_SIZE + block_payload_bytes
-
-
-## MATE 负载字节数（2 字节 entry_count + entry_count × 12）。
-static func mate_payload_bytes(entry_count: int) -> int:
-	return 2 + entry_count * MATE_ENTRY_SIZE
-
-
-## 顶层块负载的实际内容长度（去掉尾部零填充）。
-## 写入端补的填充恒为 0–3 个零字节；本函数把它剥掉，得到"内容"长度。
-## 注意：仅适用于"内容不含合法尾部零"的负载（HEAD/NODE 的 JSON、MATE 的定长条目）。
-## VOX0 的尾随可能含合法零，故它**不**用本函数——这正是 payload_length 存在的原因。
-static func content_length(payload: PackedByteArray) -> int:
-	var end := payload.size()
-	while end > 0 and payload[end - 1] == 0:
-		end -= 1
-	return end
-
-
-# ----------------------------------------------------------------------------
 # 整数编解码（小端）—— QVoxSpec 只做"约定"，实际读写在 QVoxFile
 # ----------------------------------------------------------------------------
 
@@ -290,6 +253,6 @@ static func can_handle_block_type(t: String) -> bool:
 	return t in KNOWN_BLOCK_TYPES
 
 
-## 该 bpp 是否为当前版本允许的位宽。
+## 该 bpp 是否为当前版本支持的位宽（唯一真值：CHANNEL_BPP）。
 static func is_allowed_bpp(bpp: int) -> bool:
-	return bpp in ALLOWED_BPP
+	return bpp == CHANNEL_BPP

@@ -44,6 +44,9 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_sphere_positions",
 	&"collect_box_positions",
 	&"install_flat_voxels",
+	# 破坏内核：VoxelDestructible 的硬依赖。此前漏列，导致"库方法不全"这类版本不匹配
+	# 在校验阶段被放过，直到实际调破坏时才炸。
+	&"damage_shape",
 ]
 
 static var _inst: Object = null
@@ -86,15 +89,6 @@ static func refresh() -> void:
 # 桥接方法：一律"取实例 → 为空则返回空值 → 否则动态调用"。
 # 返回值形状与原生签名一致（见 voxel_native.h）。
 # ----------------------------------------------------------------------------
-
-## 贪婪网格合并（2D 密集网格同材质矩形合并）。grid 会被就地清零已合并格子。
-## 返回 {pos, size, val} 三个 PackedInt32Array。
-static func merge_dense(grid: PackedInt32Array, width: int, height: int) -> Dictionary:
-	var inst := instance()
-	if inst == null:
-		return {}
-	return inst.call(&"greedy_merge_dense", grid, width, height)
-
 
 ## 单个 chunk 网格（halo: 34³ 密集光环，值 = 材质ID，0 = 空）。
 static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByteArray,
@@ -202,7 +196,9 @@ static func collect_materials(buffers: Dictionary, positions: Array) -> Dictiona
 	return inst.call(&"collect_materials", buffers, positions)
 
 
-## 批量移除体素（就地改 buffers）。返回 {removed, chunk_removed, buffers, boundary}。
+## 批量移除体素（就地改 buffers）。
+## 返回 {removed: int（**实际移除的体素数**，不是位置数组）, chunk_removed: {ck: int},
+##       buffers: {ck: PackedInt32Array}, boundary: {ck: int 位掩码}}。
 static func remove_voxels_bulk(buffers: Dictionary, positions: Array) -> Dictionary:
 	var inst := instance()
 	if inst == null:
@@ -344,16 +340,10 @@ static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: V
 	return inst.call(&"collect_box_positions", buffers, min_p, max_p)
 
 
-## 统一形状破坏内核：一趟完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
+## 统一形状破坏内核（伤害结算下沉原生）：一趟完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
 ## shape：0 = 球（用 center/radius）｜1 = 盒（用闭区间 vmin..vmax）。两者只差一个有符号距离，
 ## 新增形状只需再补一个距离函数，噪声/方向偏置/伤害结算全部复用。
-## opts（可选）：{noise: float（坑口噪声 0~1）, direction: Vector3, bias: float（沿方向拉伸）}
-## 返回 {removed: PackedVector3Array, hardened_pos: PackedVector3Array,
-##       hardened_rem: PackedFloat32Array, damage_chunks: {ck: PackedFloat32Array}}。
-## **damage_chunks 是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
-## 统一形状破坏内核（伤害结算下沉原生）：一趟完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
-## shape：0 = 球（用 center/radius）｜1 = 盒（用闭区间 vmin..vmax）。
-## opts（可选，默认 {} = 无附加效果）：{noise, direction, bias}
+## opts（可选，默认 {} = 无附加效果）：{noise: float（坑口噪声 0~1）, direction: Vector3, bias: float（沿方向拉伸）}
 ## 返回 {removed: PackedVector3Array, hardened_pos: PackedVector3Array,
 ##       hardened_rem: PackedFloat32Array, damage_chunks: {ck: PackedFloat32Array}}。
 ## **damage_chunks 是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
@@ -373,13 +363,3 @@ static func install_flat_voxels(flat: PackedInt32Array) -> Dictionary:
 	if inst == null:
 		return {}
 	return inst.call(&"install_flat_voxels", flat)
-
-
-## 逐体素累加伤害（原生内核），返回 {removed, hardened_pos, hardened_rem, damage_chunks}。
-## **damage_chunks 里是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
-static func apply_damage(damage_chunks: Dictionary, positions: Array, materials: PackedInt32Array,
-		hardness_table: PackedFloat32Array, damage: float, use_health: bool) -> Dictionary:
-	var inst := instance()
-	if inst == null:
-		return {}
-	return inst.call(&"apply_damage", damage_chunks, positions, materials, hardness_table, damage, use_health)

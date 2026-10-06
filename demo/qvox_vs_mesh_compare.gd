@@ -363,8 +363,6 @@ func _build_reference_mesh(voxel: VoxAsset) -> ArrayMesh:
 		VoxelMeshImporter.unwrap_lightmap_uv2: false,
 		VoxelMeshImporter.uv2_texel_size: 0.2,
 		VoxelMeshImporter.import_materials_textures: false,
-		VoxelMeshImporter.material_path: "",
-		VoxelMeshImporter.material_trans_path: "",
 	}
 	return VoxelMeshGenerator.generate_mesh(voxel, opts)
 

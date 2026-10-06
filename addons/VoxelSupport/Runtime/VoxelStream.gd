@@ -55,6 +55,21 @@ func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]
 func get_chunk_count(lod: int = 0) -> int:
 	return get_all_chunk_keys(lod).size()
 
+## 本流是否承载粗层 LOD 数据（lod >= 1 的 block）。
+##
+## 【为什么需要这个查询】调用方（渲染器 / VoxelData）此前靠 `is QVoxStream` 判断，
+## 于是"抽象存储层"被迫泄露具体实现类型：新增任何一种带粗层的流都要回头改渲染器。
+## 换成虚方法后，判定依据是**能力**而非**类型**，与 has_chunk / load_chunk 的抽象一致。
+##
+## 语义：
+##   true  —— 独立存粗层块：粗层缺席时可直接同步降采样（不等一个流不会给的异步结果），
+##            且派生出的粗层数据回写本流持久化。
+##   false —— 内存流 / 自定义流：粗层只存在于内存（VoxelData._coarse_buffers），
+##            lod >= 1 一律视为流中不存在。
+func supports_lod_layer() -> bool:
+	return false
+
+
 ## 刷新写入缓存（无写缓存的实现可留空）。
 @abstract
 func flush() -> void
