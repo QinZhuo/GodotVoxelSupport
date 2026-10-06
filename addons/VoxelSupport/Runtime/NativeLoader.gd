@@ -44,8 +44,6 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_sphere_positions",
 	&"collect_box_positions",
 	&"install_flat_voxels",
-	&"damage_sphere",
-	&"damage_box",
 ]
 
 static var _inst: Object = null
@@ -179,13 +177,12 @@ static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary,
 	return inst.call(&"build_lod_block_halo_from_lod_buffers_native", buffers, block_key)
 
 
-## 列支撑失稳检测：返回 {pos: true}。
-## lateral_radius：横向连带塌落的传播半径（体素）；竖向（失去下方支撑）不受限。见原生注释。
-static func find_unsupported_around(buffers: Dictionary, removed: Array, lateral_radius: int = 16) -> Dictionary:
+## 支撑失稳检测（基线实现）：返回失稳体素集合 {pos: true}。
+static func find_unsupported_around(buffers: Dictionary, removed: Array) -> Dictionary:
 	var inst := instance()
 	if inst == null:
 		return {}
-	return inst.call(&"find_unsupported_around", buffers, removed, lateral_radius)
+	return inst.call(&"find_unsupported_around", buffers, removed)
 
 
 ## 应力传播（裂纹扩散）：返回断裂体素 Array[Vector3i]。
@@ -347,27 +344,15 @@ static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: V
 	return inst.call(&"collect_box_positions", buffers, min_p, max_p)
 
 
-## 球内逐体素累伤（一趟完成：框定 chunk → 读材质 → 比硬度 → 累加 / 判移除）。
-## 返回 {removed:PackedVector3Array, hardened_pos:PackedVector3Array,
-##       hardened_rem:PackedFloat32Array, damage_chunks:{ck: PackedFloat32Array}}。
-## **damage_chunks 里是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
-static func damage_sphere(buffers: Dictionary, damage_chunks: Dictionary, center: Vector3,
-		radius: float, hardness_table: PackedFloat32Array, damage: float,
-		use_health: bool) -> Dictionary:
-	var inst := instance()
-	if inst == null:
-		return {}
-	return inst.call(&"damage_sphere", buffers, damage_chunks, center, radius, hardness_table, damage, use_health)
-
-
-## 盒内逐体素累伤（闭区间 [min_p, max_p]；单个体素 = 退化盒）。契约同 damage_sphere。
-static func damage_box(buffers: Dictionary, damage_chunks: Dictionary, min_p: Vector3i,
-		max_p: Vector3i, hardness_table: PackedFloat32Array, damage: float,
-		use_health: bool) -> Dictionary:
-	var inst := instance()
-	if inst == null:
-		return {}
-	return inst.call(&"damage_box", buffers, damage_chunks, min_p, max_p, hardness_table, damage, use_health)
+## 统一形状破坏内核：一趟完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
+## shape：0 = 球（用 center/radius）｜1 = 盒（用闭区间 vmin..vmax）。两者只差一个有符号距离，
+## 新增形状只需再补一个距离函数，噪声/方向偏置/伤害结算全部复用。
+## opts（可选）：{noise: float（坑口噪声 0~1）, direction: Vector3, bias: float（沿方向拉伸）}
+## 返回 {removed: PackedVector3Array, hardened_pos: PackedVector3Array,
+##       hardened_rem: PackedFloat32Array, damage_chunks: {ck: PackedFloat32Array}}。
+## **damage_chunks 是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
+# 【已移除】damage_shape 桥接：破坏逻辑已回到基线版（伤害累积与硬度结算在 GDScript 内完成），
+# 不再从原生调用统一形状内核。原生实现保留但已解绑，不需要时可删除。
 
 
 ## 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}。

@@ -988,6 +988,8 @@ inline int buf_index(const Vector3i &local) {
 
 } // namespace
 
+// 【未使用】连通性"静态岛"模型：绑定已移除，运行期不再引用（当前运行期只用 find_unsupported_around）。
+// 保留实现备查；确认不再需要时可直接删除本函数整段。
 PackedInt32Array VoxelNative::find_unsupported_island(const Dictionary &buffers, const Array &removed, int anchor_y) {
 	PackedInt32Array out;
 	if (buffers.is_empty() || removed.is_empty()) {
@@ -995,12 +997,13 @@ PackedInt32Array VoxelNative::find_unsupported_island(const Dictionary &buffers,
 	}
 	// 静态岛判定（Teardown / Space Engineers 同一思路）：
 	//   体素稳定 ⟺ 存在一条由实心体素组成的 6 连通路径走到**锚定层**（y <= anchor_y）。
-	// 破坏 R 后从 R 的 6 邻居洪泛：触到锚定层 → 该连通块仍锚定，不塌；
-	// 走完整块都没触到 → 整块与地面断开，整块坠落。
+	// 破坏 R 后**逐个连通分量**判定（种子 = R 的 6 邻居，每个种子各自成一个分量、单独洪泛）：
+	//   分量触到锚定层 → 该分量仍锚定，丢弃；整分量都没触到 → 与地面断开，整块坠落。
 	//   · 壁上破一个洞 → 绕过洞口仍连地面 → 不塌；
 	//   · 承重被整条切断 → 整块坠落（期望的大面积崩塌）；
-	//   · 悬空楼板挂在墙上 → 仍连地面 → 不塌。
-	//     （旧"支撑只来自下方"规则会认定楼板每个体素都无支撑 → 破一处就整层塌，正是要修的病）
+	//   · 悬空楼板挂在墙上 → 仍连地面 → 不塌、不出洞、不留悬空；
+	//   · 1 宽栅片被拆一格 → 上方仍与栅片相连 → 不塌。
+	//     （对比列支撑模型：楼板每格都"无下方支撑" → 破一处就整层塌；1 宽栅片会逐层丢支撑 → 留下 1 格宽竖井）
 	// 【快照即权威】不在 buffers 里的 chunk 视为空气——这与全量模型 VoxelData.find_unsupported
 	//   只在已载入体素上泛洪完全一致；调用方需保证候选区域已载入（VoxelData.ensure_*_loaded）。
 	//   反例教训：早先"碰到缺失 chunk 就保守放弃判定"会让**世界边界外永远缺 chunk**的世界
@@ -1045,8 +1048,8 @@ PackedInt32Array VoxelNative::find_unsupported_island(const Dictionary &buffers,
 	Vector3i cur_ck;
 	View *cur = nullptr;
 	bool cur_valid = false;
-	// 入栈候选（实心且未访问）
-	auto push = [&](const Vector3i &p) {
+	// 入栈候选（实心且未访问）；返回 true = 本次真的入栈（调用方据此判断"新分量起点"）
+	auto push = [&](const Vector3i &p) -> bool {
 		const Vector3i ck = chunk_of(p);
 		if (!cur_valid || ck != cur_ck) {
 			cur_ck = ck;
@@ -1054,94 +1057,72 @@ PackedInt32Array VoxelNative::find_unsupported_island(const Dictionary &buffers,
 			cur = view_of(ck);
 		}
 		if (cur == nullptr) {
-			return;   // 空 chunk（或未载入）→ 不连通
+			return false;   // 空 chunk（或未载入）→ 不连通
 		}
 		const int32_t idx = buf_index(p - ck * CHUNK_BITS);
 		if (cur->vox[idx] <= 0 || cur->seen[idx] != 0) {
-			return;
+			return false;
 		}
 		cur->seen[idx] = 1;
 		stack.push_back(p);
+		return true;
 	};
+	// 【为什么必须逐分量】早先的写法把 removed 的 6 邻居**投进同一个洪泛**，碰到锚定层就整体放弃。
+	// 那会把"地面侧"与"悬空侧"当成同一分量：拆 1 宽柱的柱脚时，柱脚正下方就是地面，洪泛立刻触锚
+	// → 判"仍锚定" → 上方那截真正断开的柱子被漏掉（实测返回 0）。逐分量后各判各的。
+	// `seen` 全局有效 → 每个体素最多被访问一次，总代价仍是 O(访问量)；触锚即清栈并放弃该分量。
+	std::vector<Vector3i> result;
 	for (int i = 0; i < removed.size(); ++i) {
 		const Vector3i rp = removed[i];
 		for (int d = 0; d < 6; ++d) {
 			const Vector3i nb(rp.x + DIRS6[d][0], rp.y + DIRS6[d][1], rp.z + DIRS6[d][2]);
-			if (removed_set.find(vkey(nb)) == removed_set.end()) {
-				push(nb);
+			if (removed_set.find(vkey(nb)) != removed_set.end()) {
+				continue;
+			}
+			if (!push(nb)) {
+				continue;   // 已被别的分量访问过（或非实心）→ 不是新分量起点
+			}
+			island.clear();
+			bool anchored = false;
+			while (!stack.empty()) {
+				const Vector3i p = stack.back();
+				stack.pop_back();
+				if (p.y <= anchor_y) {
+					anchored = true;   // 该分量接地 → 整个丢弃；seen 会阻止重复访问
+					stack.clear();
+					break;
+				}
+				island.push_back(p);
+				for (int d2 = 5; d2 >= 0; --d2) {
+					push(Vector3i(p.x + DIRS6[d2][0], p.y + DIRS6[d2][1], p.z + DIRS6[d2][2]));
+				}
+			}
+			if (!anchored) {
+				result.insert(result.end(), island.begin(), island.end());
 			}
 		}
 	}
-	while (!stack.empty()) {
-		const Vector3i p = stack.back();
-		stack.pop_back();
-		if (p.y <= anchor_y) {
-			return out;   // 触到锚定层 → 该连通块仍锚定
-		}
-		island.push_back(p);
-		for (int d = 5; d >= 0; --d) {
-			push(Vector3i(p.x + DIRS6[d][0], p.y + DIRS6[d][1], p.z + DIRS6[d][2]));
-		}
-	}
-	// 走完整块都没触到锚定层 → 整块失稳（扁平 (x, y, z) 三元组）
-	out.resize((int64_t)island.size() * 3);
+	// 输出所有"与地面断开"的分量（扁平 (x, y, z) 三元组）
+	out.resize((int64_t)result.size() * 3);
 	int32_t *w = out.ptrw();
 	int64_t k = 0;
-	for (size_t i = 0; i < island.size(); ++i) {
-		w[k++] = island[i].x;
-		w[k++] = island[i].y;
-		w[k++] = island[i].z;
+	for (size_t i = 0; i < result.size(); ++i) {
+		w[k++] = result[i].x;
+		w[k++] = result[i].y;
+		w[k++] = result[i].z;
 	}
 	return out;
 }
 
-Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Array &removed, int lateral_radius) {
-	// 列支撑失稳检测：体素稳定 ⟺ LOWER_5（正下 + 4 对角下方）中任意 1 个存在且未失稳；贴地(y==0)稳定。
-	// 从 removed 的 UPPER_5 + HORIZONTAL_4 候选出发，沿 UPPER_5（竖向）+ HORIZONTAL_4（横向）传播。
-	// 【两件事必须分开看（业界同做法：传播必须有界）】
-	//   · 竖向传播 = "真的失去了下方支撑"——支撑链，不上限，这是破坏脆感的来源；
-	//   · 横向传播 = 连带扫落"本就下方悬空"的板——无界时就是"捅一处、整层/整世界连塌"的病根。
-	//     故只允许在 removed 的 AABB 外扩 lateral_radius 体素内横向扩散（< 0 = 不限制，仅作对照）。
-	//     同类参数见插件已有的 stress_max_steps（裂纹扩散步数上限）——都是"失稳影响半径"。
+Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Array &removed) {
+	// 结果：失稳体素集合
 	Dictionary unstable;
 	if (buffers.is_empty() || removed.is_empty()) {
 		return unstable;
 	}
-	Vector3i bmin = removed[0];
-	Vector3i bmax = removed[0];
-	if (lateral_radius >= 0) {
-		for (int i = 1; i < removed.size(); ++i) {
-			const Vector3i p = removed[i];
-			if (p.x < bmin.x) {
-				bmin.x = p.x;
-			}
-			if (p.y < bmin.y) {
-				bmin.y = p.y;
-			}
-			if (p.z < bmin.z) {
-				bmin.z = p.z;
-			}
-			if (p.x > bmax.x) {
-				bmax.x = p.x;
-			}
-			if (p.y > bmax.y) {
-				bmax.y = p.y;
-			}
-			if (p.z > bmax.z) {
-				bmax.z = p.z;
-			}
-		}
-		bmin.x -= lateral_radius;
-		bmin.y -= lateral_radius;
-		bmin.z -= lateral_radius;
-		bmax.x += lateral_radius;
-		bmax.y += lateral_radius;
-		bmax.z += lateral_radius;
-	}
-	auto in_spread = [&](const Vector3i &p) -> bool {
-		return lateral_radius < 0
-				|| (p.x >= bmin.x && p.x <= bmax.x && p.y >= bmin.y && p.y <= bmax.y && p.z >= bmin.z && p.z <= bmax.z);
-	};
+
+	// 惰性构建 chunk 缓冲查找结构：只收集候选体素及其邻居涉及的 chunk。
+	// 避免遍历整世界（1183 chunk 全量拷贝是灾难性开销）。
 	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
 	auto ensure_chunk = [&](const Vector3i &p) {
 		const uint64_t kk = vkey(chunk_of(p));
@@ -1151,6 +1132,8 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 			}
 		}
 	};
+
+	// has_voxel：局部 chunk 内查询（与 GDScript has_voxel 语义一致：值>0 表示存在）
 	auto has_voxel = [&](const Vector3i &p) -> bool {
 		const Vector3i ck = chunk_of(p);
 		const auto it = chunk_bufs.find(vkey(ck));
@@ -1163,6 +1146,16 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		}
 		return it->second.ptr()[buf_index(local)] > 0;
 	};
+
+	// ---------------------------------------------------------------------------
+	// 增量支撑图失稳检测（localized propagation，性能优先，行为与破坏 demo 既有逻辑一致）
+	//   体素稳定 ⟺ LOWER_5（正下 + 4 对角下方）中任意 1 个存在且未失稳。
+	//   破坏移除 R 后，从 R 的上方位 + 水平候选出发，只沿失稳链传播（UPPER_5 上方 + HORIZONTAL_4 水平），
+	//   不遍历整世界/整连通分量 → 连续破坏每帧局部微秒级。
+	//   保守判定（对角也算支撑）保证：破坏局部 → 局部塌，不连锁整楼。
+	//   候选含水平方向（修复球洞侧壁等"removed 水平邻居悬空"漏检：正下无且无对角 → 掉落）。
+	// ---------------------------------------------------------------------------
+	// 候选 = removed 的 UPPER_5（上方 5）+ HORIZONTAL_4（水平 4）邻居（存在）
 	std::vector<Vector3i> stack;
 	std::unordered_set<uint64_t> seed_set;
 	for (int i = 0; i < removed.size(); ++i) {
@@ -1181,12 +1174,14 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 			const Vector3i nb(rp.x + HORIZONTAL_4[d][0], rp.y + HORIZONTAL_4[d][1], rp.z + HORIZONTAL_4[d][2]);
 			ensure_chunk(nb);
 			const uint64_t nk = vkey(nb);
-			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end() && in_spread(nb)) {
+			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
 				seed_set.insert(nk);
 				stack.push_back(nb);
 			}
 		}
 	}
+
+	// 失稳传播（增量）：支撑 = LOWER_5 任意 1 个；removed / unstable 不计支撑；贴地(y==0)稳定
 	while (!stack.empty()) {
 		const Vector3i cur = stack.back();
 		stack.pop_back();
@@ -1196,6 +1191,7 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		if (cur.y == 0) {
 			continue;
 		}
+		// 有效支撑数 = LOWER_5 中 has_voxel 且不在 unstable 的邻居数
 		int effective = 0;
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
@@ -1207,7 +1203,9 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		if (effective > 0) {
 			continue;
 		}
+		// 失稳
 		unstable[cur] = true;
+		// 连锁失稳：上方位 5 个 + 水平 4 个
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + UPPER_5[d][0], cur.y + UPPER_5[d][1], cur.z + UPPER_5[d][2]);
 			ensure_chunk(nb);
@@ -1218,11 +1216,12 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 		for (int d = 0; d < 4; ++d) {
 			const Vector3i nb(cur.x + HORIZONTAL_4[d][0], cur.y + HORIZONTAL_4[d][1], cur.z + HORIZONTAL_4[d][2]);
 			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb) && in_spread(nb)) {
+			if (has_voxel(nb) && !unstable.has(nb)) {
 				stack.push_back(nb);
 			}
 		}
 	}
+
 	return unstable;
 }
 
@@ -1348,6 +1347,39 @@ Dictionary VoxelNative::collect_materials(const Dictionary &buffers, const Array
 
 namespace {
 
+// 值噪声（voxel 坐标 → [0,1)，三线性插值 + smoothstep）：让破坏坑口不规整。
+// noise=0 时完全不调用，零成本。等价于 Teardown 里"爆炸口不是标准球"的那层扰动。
+inline float qvox_hash01(int32_t x, int32_t y, int32_t z) {
+	uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + (uint32_t)z * 2147483647u;
+	h = (h ^ (h >> 13)) * 1274126177u;
+	return (float)((h ^ (h >> 16)) & 0xFFFFFFu) / 16777216.0f;
+}
+inline float qvox_noise3(float x, float y, float z) {
+	const float xf = std::floor(x);
+	const float yf = std::floor(y);
+	const float zf = std::floor(z);
+	const int32_t xi = (int32_t)xf;
+	const int32_t yi = (int32_t)yf;
+	const int32_t zi = (int32_t)zf;
+	const float fx = x - xf;
+	const float fy = y - yf;
+	const float fz = z - zf;
+	const float sx = fx * fx * (3.0f - 2.0f * fx);
+	const float sy = fy * fy * (3.0f - 2.0f * fy);
+	const float sz = fz * fz * (3.0f - 2.0f * fz);
+	float c[8];
+	for (int i = 0; i < 8; ++i) {
+		c[i] = qvox_hash01(xi + (i & 1), yi + ((i >> 1) & 1), zi + ((i >> 2) & 1));
+	}
+	const float x00 = c[0] + (c[1] - c[0]) * sx;
+	const float x10 = c[2] + (c[3] - c[2]) * sx;
+	const float x01 = c[4] + (c[5] - c[4]) * sx;
+	const float x11 = c[6] + (c[7] - c[6]) * sx;
+	const float y0 = x00 + (x10 - x00) * sy;
+	const float y1 = x01 + (x11 - x01) * sy;
+	return y0 + (y1 - y0) * sz;
+}
+
 // 破坏内核：在 in_shape 命中的非空体素上累加伤害。
 // vmin/vmax 是形状的体素 AABB（闭区间）——据此只遍历覆盖到的 chunk，绝不全世界外扩。
 // 结果位置一律走 PackedVector3Array：113k 个位置若用 Array[Vector3i] 光装箱就要十几毫秒。
@@ -1455,36 +1487,87 @@ Dictionary qvox_damage_impl(const Dictionary &buffers, const Dictionary &damage_
 
 } // namespace
 
-Dictionary VoxelNative::damage_sphere(const Dictionary &buffers, const Dictionary &damage_chunks,
-		const Vector3 &center, float radius, const PackedFloat32Array &hardness_table,
-		float damage, bool use_health) {
-	// 与 collect_sphere_positions 同口径：cxi = floor(center)，r_i = ceil(radius)，
-	// 比较用未取整的 radius²（保证球边界与查询端一致）。
-	const int cxi = (int)std::floor((double)center.x);
-	const int cyi = (int)std::floor((double)center.y);
-	const int czi = (int)std::floor((double)center.z);
-	const int r_i = (int)std::ceil((double)radius);
-	const float radius_sq = radius * radius;
-	return qvox_damage_impl(buffers, damage_chunks,
-			Vector3i(cxi - r_i, cyi - r_i, czi - r_i),
-			Vector3i(cxi + r_i, cyi + r_i, czi + r_i),
+// 【已解绑·未使用】统一形状破坏内核（球/盒 + 噪声/方向偏置）。破坏逻辑已回到基线版，
+// 运行期不再调用；保留实现备查。
+Dictionary VoxelNative::damage_shape(const Dictionary &buffers, const Dictionary &damage_chunks, int shape,
+		const Vector3 &center, float radius, const Vector3i &vmin_in, const Vector3i &vmax_in,
+		const PackedFloat32Array &hardness_table, float damage, bool use_health, const Dictionary &opts) {
+	// 统一形状内核：球（shape=0，center/radius）与盒（shape=1，闭区间 vmin..vmax）只差一个"有符号距离"。
+	// 两个通用扰动都作用在该距离上，故对两种形状同样有效（也天然适用于日后新增的形状）：
+	//   noise     → 沿边界按 3D 值噪声抖动（0 = 完美形状）；
+	//   direction → 沿冲击方向拉伸（bias>0 呈锥形/水滴形，破坏"朝里打"）。
+	const float noise = (float)(double)opts.get("noise", 0.0);
+	const Vector3 dir = opts.get("direction", Vector3());
+	const float bias = (float)(double)opts.get("bias", 0.0);
+	// 边界扰动会把形状撑出原始 AABB，先把遍历范围外扩（否则噪声被裁掉、坑口变回干净球面）
+	const int inflate = (int)std::ceil(noise * (shape == 0 ? radius : 1.0f) + std::fabs(bias) * radius) + 1;
+	Vector3i vmin(vmin_in.x - inflate, vmin_in.y - inflate, vmin_in.z - inflate);
+	Vector3i vmax(vmax_in.x + inflate, vmax_in.y + inflate, vmax_in.z + inflate);
+	if (shape == 0) {
+		const int cxi = (int)std::floor((double)center.x);
+		const int cyi = (int)std::floor((double)center.y);
+		const int czi = (int)std::floor((double)center.z);
+		const int r_i = (int)std::ceil((double)radius) + inflate;
+		return qvox_damage_impl(buffers, damage_chunks,
+				Vector3i(cxi - r_i, cyi - r_i, czi - r_i),
+				Vector3i(cxi + r_i, cyi + r_i, czi + r_i),
+				[&](const Vector3i &p) {
+					const int32_t dx = p.x - cxi;
+					const int32_t dy = p.y - cyi;
+					const int32_t dz = p.z - czi;
+					// 方向偏置 = 沿 direction 拉长（把该方向分量按 1/(1+bias) 缩短 → 各向异性但有界）。
+					// 注意不能用 `d += bias*dot(p,dir)`：那在 bias>0 时沿该方向变成无界锥。
+					float dist;
+					if (bias != 0.0f) {
+						const float along = (float)(dx * dir.x + dy * dir.y + dz * dir.z);
+						const float perp2 = (float)(dx * dx + dy * dy + dz * dz) - along * along;
+						const float stretched = along / (1.0f + bias);
+						dist = std::sqrt(perp2 + stretched * stretched);
+					} else {
+						dist = std::sqrt((float)(dx * dx + dy * dy + dz * dz));
+					}
+					float d = radius - dist;
+					if (noise > 0.0f) {
+						d += noise * radius * (qvox_noise3(p.x * 0.4f, p.y * 0.4f, p.z * 0.4f) - 0.5f) * 2.0f;
+					}
+					return d >= 0.0f;
+				},
+				hardness_table, damage, use_health);
+	}
+	// 盒：闭区间 [vmin_in, vmax_in]；单个体素破坏 = 退化盒 (p, p)
+	return qvox_damage_impl(buffers, damage_chunks, vmin, vmax,
 			[&](const Vector3i &p) {
-				const int32_t dx = p.x - cxi;
-				const int32_t dy = p.y - cyi;
-				const int32_t dz = p.z - czi;
-				return (float)(dx * dx + dy * dy + dz * dz) <= radius_sq;
-			},
-			hardness_table, damage, use_health);
-}
-
-Dictionary VoxelNative::damage_box(const Dictionary &buffers, const Dictionary &damage_chunks,
-		const Vector3i &min_p, const Vector3i &max_p, const PackedFloat32Array &hardness_table,
-		float damage, bool use_health) {
-	// 闭区间 [min_p, max_p]；单个体素破坏 = 退化盒 (p, p)
-	return qvox_damage_impl(buffers, damage_chunks, min_p, max_p,
-			[&](const Vector3i &p) {
-				return p.x >= min_p.x && p.x <= max_p.x && p.y >= min_p.y && p.y <= max_p.y
-						&& p.z >= min_p.z && p.z <= max_p.z;
+				const float dx = (float)(p.x - vmin_in.x);
+				const float dy = (float)(p.y - vmin_in.y);
+				const float dz = (float)(p.z - vmin_in.z);
+				float d = dx;
+				if ((float)(vmax_in.x - p.x) < d) {
+					d = (float)(vmax_in.x - p.x);
+				}
+				if (dy < d) {
+					d = dy;
+				}
+				if ((float)(vmax_in.y - p.y) < d) {
+					d = (float)(vmax_in.y - p.y);
+				}
+				if (dz < d) {
+					d = dz;
+				}
+				if ((float)(vmax_in.z - p.z) < d) {
+					d = (float)(vmax_in.z - p.z);
+				}
+				// 【不要 +1】此前写成 d += 1.0f（"格心到最近界面的格数"），会让判定退化为
+				// "d >= 0" → 盒外一层壳也被算作内部：单格破坏实际挖掉 3×3×3、盒破坏四周各多一层。
+				// 正确口径与球分支一致：min 到各面距离，格内 >= 0、格外 < 0。
+				if (noise > 0.0f) {
+					d += noise * (qvox_noise3(p.x * 0.4f, p.y * 0.4f, p.z * 0.4f) - 0.5f) * 2.0f;
+				}
+				// 方向偏置：沿 direction 把盒"拉长"（有界；不用无界锥写法）
+				if (bias != 0.0f) {
+					const float along = (float)(dx * dir.x + dy * dir.y + dz * dir.z);
+					d -= bias * along / (1.0f + bias);
+				}
+				return d >= 0.0f;
 			},
 			hardness_table, damage, use_health);
 }
@@ -2549,12 +2632,12 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed", "lateral_radius"), &VoxelNative::find_unsupported_around);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("damage_sphere", "buffers", "damage_chunks", "center", "radius", "hardness_table", "damage", "use_health"), &VoxelNative::damage_sphere);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("damage_box", "buffers", "damage_chunks", "min_p", "max_p", "hardness_table", "damage", "use_health"), &VoxelNative::damage_box);
+	// 【已解绑】damage_shape：破坏逻辑已回到基线版（伤害累积在 GDScript 内），不再从脚本调用。
+	// 实现保留备查；不需要时可整段删除（连同 qvox_hash01 / qvox_noise3）。
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);

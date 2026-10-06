@@ -92,10 +92,11 @@ public:
 	static PackedInt32Array build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key);
 
-	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed, int lateral_radius);
+	// 支撑失稳检测（基线实现，见 .cpp 注释）：返回 {pos(Vector3i): true}。
+	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed);
 
-	// 【未绑定·留作对照，运行期不参与】连通性静态岛模型（返回扁平三元组）。
-	// 曾用于 A/B：与列支撑模型的差别只在"支撑定义"。保留代码备查，不需要时可直接删除本实现。
+	// 【未使用·保留实现备查】连通性"静态岛"失稳检测（绑定已移除，运行期不再引用）。
+	// 当前运行期只有 find_unsupported_around（列支撑）一套判定；确认不再需要时可直接删除本函数整段。
 	static PackedInt32Array find_unsupported_island(const Dictionary &buffers, const Array &removed, int anchor_y);
 
 	// 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
@@ -176,21 +177,19 @@ public:
 	static Array collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius);
 	// 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
 	static Array collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p);
-	// ---- 破坏内核（形状查询 + 累伤一趟完成）----
-	// 球/盒范围内的逐体素累伤：一趟内完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
-	// 材质就在遍历到的 chunk 缓冲里，所以不需要"先收集位置、再收集材质"两趟。
-	//   damage_chunks: {chunk_key: PackedFloat32Array(32³)} 现有累计伤害（缺省视为 0）
-	//   hardness_table: 索引 = 材质ID；use_health=false 时全部视为"应移除"，不碰伤害缓冲
-	// 返回 {removed:PackedVector3Array, hardened_pos:PackedVector3Array,
-	//       hardened_rem:PackedFloat32Array, damage_chunks:{ck: PackedFloat32Array}}
-	// 位置走 PackedVector3Array（连续存储、无逐元素 Variant 装箱）。
-	// **damage_chunks 必须由调用方写回**——原生在本地副本上写（同 remove_voxels_bulk 的契约）。
-	static Dictionary damage_sphere(const Dictionary &buffers, const Dictionary &damage_chunks,
-			const Vector3 &center, float radius, const PackedFloat32Array &hardness_table,
-			float damage, bool use_health);
-	static Dictionary damage_box(const Dictionary &buffers, const Dictionary &damage_chunks,
-			const Vector3i &min_p, const Vector3i &max_p, const PackedFloat32Array &hardness_table,
-			float damage, bool use_health);
+	// ---- 破坏内核（统一形状 + 累伤一趟完成）----
+	// 一趟内完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"；材质就在遍历到的 chunk 缓冲里，
+	// 所以不需要"先收集位置、再收集材质"两趟。
+	//   shape：0 = 球（center/radius）｜1 = 盒（闭区间 vmin..vmax）——两者只差一个有符号距离，
+	//          新增形状只需再补一个距离函数，其余（噪声/方向偏置/伤害结算）全部复用。
+	//   opts（都可选）：
+	//     noise     : 0..1，沿边界按 3D 值噪声抖动 → 坑口不规整（0 = 完美形状，零成本）
+	//     direction : Vector3，冲击方向（与 bias 配合使用）
+	//     bias      : 沿 direction 的拉伸系数 → 锥形/水滴形破坏（"朝里打"）
+	//   其余契约同旧 damage_sphere/damage_box：damage_chunks 由调用方写回。
+	static Dictionary damage_shape(const Dictionary &buffers, const Dictionary &damage_chunks, int shape,
+			const Vector3 &center, float radius, const Vector3i &vmin, const Vector3i &vmax,
+			const PackedFloat32Array &hardness_table, float damage, bool use_health, const Dictionary &opts);
 	// 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}（均为新缓冲）。
 	// 与 collect_all_flat 成对（收 / 装），供存档载荷重建。
 	static Dictionary install_flat_voxels(const PackedInt32Array &flat);
