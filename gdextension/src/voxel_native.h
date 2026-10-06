@@ -144,6 +144,36 @@ public:
 	// 写 buffers 触发写时拷贝 → 省去逐 chunk duplicate 的 64KB 深拷贝（大场景快照提速）。
 	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
 
+	// ---- QVox 块级编解码（原生）----
+	// 【为什么下沉】GDScript 版 pick_codec + pack 是逐元素扫描：实测混合值块约 15ms/块
+	// （pick ~7.7ms + pack ~7.9ms），而一次落盘可能带数百个脏块（auto_flush_dirty 默认 256）
+	// → 单帧秒级卡顿。原生化后同样一块约 0.1~0.2ms（约 100 倍）。
+	//
+	// 为一个块缓冲挑选体积最小的编解码**并直接产出负载**（一次完成，替代 pick+pack 两趟）。
+	// 选择规则与字节布局以 QVoxSpec / docs/QVOX_FORMAT.md 为准：
+	//   EMPTY 0（永不写文件）/ SOLID 1 / RUN 2 / DENSE 3 / INDEXED 4
+	// 返回 {codec:int, payload:PackedByteArray}；EMPTY 时 codec=0、payload 空。
+	static Dictionary choose_and_pack(const PackedInt32Array &buf, int n);
+
+	// 按指定 codec 打包（供"codec 已知"的路径与测试使用）。EMPTY / 非法 codec 返回空。
+	static PackedByteArray pack_with_codec(int codec, const PackedInt32Array &buf, int n);
+
+	// ---- 体素枚举（原生批量：替代 GDScript 逐体素循环 + 逐体素 Callable / Variant 装箱）----
+	// buffers: chunk key -> PackedInt32Array(32³)。以下四个都只读 buffers，不修改。
+	//
+	// 全部非空体素位置（Array[Vector3i]）。
+	static Array collect_all_positions(const Dictionary &buffers);
+	// 全部非空体素的 (x, y, z, mat) 四元组扁平数组。
+	// 供存档载荷使用：相比"每个体素一个 4 元素 Array"省掉百万级小对象与约一个数量级内存。
+	static PackedInt32Array collect_all_flat(const Dictionary &buffers);
+	// 内容包围盒，返回 [min:Vector3i, max:Vector3i]；无体素返回空 Array。
+	static Array collect_bounds(const Dictionary &buffers);
+	// 球内体素位置（判定与 GDScript 版一致：dx²+dy²+dz² <= radius²，float 比较；
+	// 候选只扫"球 AABB ∩ chunk"的格子）。
+	static Array collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius);
+	// 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
+	static Array collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p);
+
 	// ---- QVox 格式：CRC32（读写两端唯一实现） ----
 	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib 口径一致。
 	// 覆盖 data[start, start+length)，含初值 0xFFFFFFFF 与终值异或。

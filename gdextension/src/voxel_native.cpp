@@ -1637,7 +1637,452 @@ int64_t VoxelNative::crc32_segments(const PackedByteArray &p_data, const PackedI
 	return (int64_t)(crc ^ 0xFFFFFFFFu);
 }
 
+// ----------------------------------------------------------------------------
+// QVox 块级编解码（原生）
+// ----------------------------------------------------------------------------
+// 字节布局权威在 QVoxSpec / docs/QVOX_FORMAT.md；这里只做实现，且与 GDScript 参考实现
+// （QVoxBlockCodec 的 unpack 仍是 GDScript，由 test_qvox_format 的往返用例做 oracle）逐字节一致。
+//   块内线性顺序 idx = x + y·B + z·B²（X 最快）；数值一律小端。
+
+namespace {
+
+constexpr int QVOX_CHANNEL_BYTES = 2;
+constexpr int QVOX_CODEC_EMPTY = 0;
+constexpr int QVOX_CODEC_SOLID = 1;
+constexpr int QVOX_CODEC_RUN = 2;
+constexpr int QVOX_CODEC_DENSE = 3;
+constexpr int QVOX_CODEC_INDEXED = 4;
+constexpr int QVOX_U8_MAX = 255;
+
+// LEB128 长度
+inline int qvox_varint_size(int64_t v) {
+	int s = 1;
+	while (v >= 0x80) {
+		v >>= 7;
+		++s;
+	}
+	return s;
+}
+
+// 表示 value 需要的最少位数（value ≥ 1；value=1 用 1 位）
+inline int qvox_bits_for(int value) {
+	int bits = 0;
+	int v = value - 1;
+	while (v > 0) {
+		++bits;
+		v >>= 1;
+	}
+	return bits < 1 ? 1 : bits;
+}
+
+PackedByteArray qvox_pack_solid(const int32_t *p, int n) {
+	PackedByteArray out;
+	out.resize(QVOX_CHANNEL_BYTES);
+	uint8_t *w = out.ptrw();
+	const int32_t v = n > 0 ? p[0] : 0;
+	w[0] = (uint8_t)(v & 0xFF);
+	w[1] = (uint8_t)((v >> 8) & 0xFF);
+	return out;
+}
+
+PackedByteArray qvox_pack_run(const int32_t *p, int n) {
+	// uint32 count + count×(varint 游程长度, uint16 值)
+	std::vector<uint8_t> body;
+	body.reserve((size_t)n + 16);
+	uint32_t count = 0;
+	int i = 0;
+	while (i < n) {
+		const int32_t v = p[i];
+		int run = 1;
+		while (i + run < n && p[i + run] == v) {
+			++run;
+		}
+		uint64_t lv = (uint64_t)run;
+		for (;;) {
+			const uint8_t b = (uint8_t)(lv & 0x7F);
+			lv >>= 7;
+			if (lv != 0) {
+				body.push_back((uint8_t)(b | 0x80));
+			} else {
+				body.push_back(b);
+				break;
+			}
+		}
+		body.push_back((uint8_t)(v & 0xFF));
+		body.push_back((uint8_t)((v >> 8) & 0xFF));
+		++count;
+		i += run;
+	}
+	PackedByteArray out;
+	out.resize(4 + (int64_t)body.size());
+	uint8_t *w = out.ptrw();
+	w[0] = (uint8_t)(count & 0xFF);
+	w[1] = (uint8_t)((count >> 8) & 0xFF);
+	w[2] = (uint8_t)((count >> 16) & 0xFF);
+	w[3] = (uint8_t)((count >> 24) & 0xFF);
+	for (size_t k = 0; k < body.size(); ++k) {
+		w[4 + k] = body[k];
+	}
+	return out;
+}
+
+PackedByteArray qvox_pack_dense(const int32_t *p, int n) {
+	PackedByteArray out;
+	out.resize((int64_t)n * QVOX_CHANNEL_BYTES);
+	uint8_t *w = out.ptrw();
+	for (int i = 0; i < n; ++i) {
+		w[2 * i] = (uint8_t)(p[i] & 0xFF);
+		w[2 * i + 1] = (uint8_t)((p[i] >> 8) & 0xFF);
+	}
+	return out;
+}
+
+PackedByteArray qvox_pack_indexed(const int32_t *p, int n) {
+	// 值表按"首次出现顺序"（与 GDScript 版一致，保证常见块逐字节相同）
+	std::vector<int32_t> table;
+	std::unordered_map<int32_t, int> index_of;
+	table.reserve(256);
+	index_of.reserve(1024);
+	for (int i = 0; i < n; ++i) {
+		const int32_t v = p[i];
+		if (index_of.find(v) == index_of.end()) {
+			index_of.emplace(v, (int)table.size());
+			table.push_back(v);
+		}
+	}
+	const int bits = qvox_bits_for((int)table.size());
+	const int64_t table_bytes = 1 + (int64_t)table.size() * QVOX_CHANNEL_BYTES;
+	const int64_t bit_bytes = ((int64_t)n * bits + 7) >> 3;
+	PackedByteArray out;
+	out.resize(table_bytes + bit_bytes);
+	uint8_t *w = out.ptrw();
+	w[0] = (uint8_t)(table.size() & 0xFF);
+	for (size_t k = 0; k < table.size(); ++k) {
+		w[1 + 2 * k] = (uint8_t)(table[k] & 0xFF);
+		w[1 + 2 * k + 1] = (uint8_t)((table[k] >> 8) & 0xFF);
+	}
+	for (int64_t k = table_bytes; k < out.size(); ++k) {
+		w[k] = 0;
+	}
+	int64_t bit_pos = 0;
+	for (int i = 0; i < n; ++i) {
+		const int code = index_of[p[i]];
+		for (int b = 0; b < bits; ++b) {
+			if ((code >> b) & 1) {
+				w[table_bytes + (bit_pos >> 3)] |= (uint8_t)(1 << (bit_pos & 7));
+			}
+			++bit_pos;
+		}
+	}
+	return out;
+}
+
+PackedByteArray qvox_pack_any(int codec, const int32_t *p, int n) {
+	switch (codec) {
+		case QVOX_CODEC_SOLID:
+			return qvox_pack_solid(p, n);
+		case QVOX_CODEC_RUN:
+			return qvox_pack_run(p, n);
+		case QVOX_CODEC_DENSE:
+			return qvox_pack_dense(p, n);
+		case QVOX_CODEC_INDEXED:
+			return qvox_pack_indexed(p, n);
+		default:
+			return PackedByteArray();
+	}
+}
+
+// 遍历所有 chunk 的非空体素，回调 fn(world_pos, material)
+template <typename F>
+void qvox_for_each_voxel(const Dictionary &buffers, F &&fn) {
+	const Array keys = buffers.keys();
+	const int32_t volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	for (int ki = 0; ki < keys.size(); ++ki) {
+		const Vector3i ck = keys[ki];
+		const PackedInt32Array buf = buffers[ck];
+		if (buf.size() < volume) {
+			continue;
+		}
+		const int32_t *p = buf.ptr();
+		const Vector3i origin = ck * CHUNK_BITS;
+		for (int32_t i = 0; i < volume; ++i) {
+			const int32_t v = p[i];
+			if (v > 0) {
+				fn(origin + Vector3i(i % CHUNK_BITS, (i / CHUNK_BITS) % CHUNK_BITS, i / (CHUNK_BITS * CHUNK_BITS)), v);
+			}
+		}
+	}
+}
+
+} // namespace
+
+PackedByteArray VoxelNative::pack_with_codec(int codec, const PackedInt32Array &buf, int n) {
+	if (n > buf.size()) {
+		n = buf.size();
+	}
+	if (n <= 0 || codec == QVOX_CODEC_EMPTY) {
+		return PackedByteArray();
+	}
+	return qvox_pack_any(codec, buf.ptr(), n);
+}
+
+Dictionary VoxelNative::choose_and_pack(const PackedInt32Array &buf, int n) {
+	if (n > buf.size()) {
+		n = buf.size();
+	}
+	int codec = QVOX_CODEC_EMPTY;
+	if (n > 0) {
+		const int32_t *p = buf.ptr();
+		const int32_t first = p[0];
+		// 第 1 趟：全零 / 全同（写入时最常见的两种形态，命中即免掉后续扫描）
+		bool all_zero = true;
+		for (int i = 0; i < n; ++i) {
+			if (p[i] != 0) {
+				all_zero = false;
+				break;
+			}
+		}
+		if (!all_zero) {
+			bool all_same = true;
+			for (int i = 1; i < n; ++i) {
+				if (p[i] != first) {
+					all_same = false;
+					break;
+				}
+			}
+			if (all_same) {
+				codec = QVOX_CODEC_SOLID;
+			} else {
+				// 第 2 趟：RUN 精确字节 + 取值跨度（跨度为 INDEXED 的廉价预筛）
+				int64_t run_bytes = 4;
+				int run_len = 1;
+				int32_t run_val = first;
+				int32_t vmax = first;
+				int32_t vmin = first;
+				for (int i = 1; i < n; ++i) {
+					const int32_t v = p[i];
+					if (v == run_val) {
+						++run_len;
+					} else {
+						run_bytes += (int64_t)qvox_varint_size(run_len) + QVOX_CHANNEL_BYTES;
+						run_val = v;
+						run_len = 1;
+					}
+					if (v > vmax) {
+						vmax = v;
+					} else if (v < vmin) {
+						vmin = v;
+					}
+				}
+				run_bytes += (int64_t)qvox_varint_size(run_len) + QVOX_CHANNEL_BYTES;
+
+				codec = QVOX_CODEC_DENSE;
+				int64_t best_bytes = (int64_t)n * QVOX_CHANNEL_BYTES;
+				if (run_bytes < best_bytes) {
+					codec = QVOX_CODEC_RUN;
+					best_bytes = run_bytes;
+				}
+
+				// 第 3 趟：INDEXED 仅在"取值跨度 ≤ 255"时才真正统计
+				if ((int64_t)vmax - (int64_t)vmin <= QVOX_U8_MAX) {
+					std::unordered_set<int32_t> distinct;
+					distinct.reserve(1024);
+					bool ok = true;
+					for (int i = 0; i < n; ++i) {
+						distinct.insert(p[i]);
+						if ((int)distinct.size() > QVOX_U8_MAX) {
+							ok = false;
+							break;
+						}
+					}
+					if (ok) {
+						const int bits = qvox_bits_for((int)distinct.size());
+						const int64_t indexed_bytes = 1 + (int64_t)distinct.size() * QVOX_CHANNEL_BYTES
+								+ (((int64_t)n * bits + 7) >> 3);
+						if (indexed_bytes < best_bytes) {
+							codec = QVOX_CODEC_INDEXED;
+						}
+					}
+				}
+			}
+		}
+	}
+	Dictionary out;
+	out["codec"] = codec;
+	out["payload"] = n > 0 ? qvox_pack_any(codec, buf.ptr(), n) : PackedByteArray();
+	return out;
+}
+
+Array VoxelNative::collect_all_positions(const Dictionary &buffers) {
+	Array out;
+	qvox_for_each_voxel(buffers, [&out](const Vector3i &pos, int32_t) {
+		out.push_back(pos);
+	});
+	return out;
+}
+
+PackedInt32Array VoxelNative::collect_all_flat(const Dictionary &buffers) {
+	int64_t count = 0;
+	qvox_for_each_voxel(buffers, [&count](const Vector3i &, int32_t) {
+		++count;
+	});
+	PackedInt32Array out;
+	out.resize(count * 4);
+	if (count == 0) {
+		return out;
+	}
+	int32_t *w = out.ptrw();
+	int64_t i = 0;
+	qvox_for_each_voxel(buffers, [&w, &i](const Vector3i &pos, int32_t mat) {
+		w[i++] = pos.x;
+		w[i++] = pos.y;
+		w[i++] = pos.z;
+		w[i++] = mat;
+	});
+	return out;
+}
+
+Array VoxelNative::collect_bounds(const Dictionary &buffers) {
+	Array out;
+	bool any = false;
+	int32_t mn[3] = { 0, 0, 0 };
+	int32_t mx[3] = { 0, 0, 0 };
+	qvox_for_each_voxel(buffers, [&any, &mn, &mx](const Vector3i &pos, int32_t) {
+		const int32_t c[3] = { pos.x, pos.y, pos.z };
+		if (!any) {
+			any = true;
+			for (int a = 0; a < 3; ++a) {
+				mn[a] = c[a];
+				mx[a] = c[a];
+			}
+			return;
+		}
+		for (int a = 0; a < 3; ++a) {
+			if (c[a] < mn[a]) {
+				mn[a] = c[a];
+			}
+			if (c[a] > mx[a]) {
+				mx[a] = c[a];
+			}
+		}
+	});
+	if (any) {
+		out.push_back(Vector3i(mn[0], mn[1], mn[2]));
+		out.push_back(Vector3i(mx[0], mx[1], mx[2]));
+	}
+	return out;
+}
+
+Array VoxelNative::collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius) {
+	Array out;
+	if (radius < 0.0f) {
+		return out;
+	}
+	// 与 GDScript 版同口径：cxi = floori(center.x)，r_i = ceili(radius)，
+	// 判定 float(dx²+dy²+dz²) <= radius²（用未取整的 radius²，保证边界一致）。
+	const int cxi = (int)std::floor((double)center.x);
+	const int cyi = (int)std::floor((double)center.y);
+	const int czi = (int)std::floor((double)center.z);
+	const int r_i = (int)std::ceil((double)radius);
+	const float radius_sq = radius * radius;
+	const int32_t lo[3] = { cxi - r_i, cyi - r_i, czi - r_i };
+	const int32_t hi[3] = { cxi + r_i, cyi + r_i, czi + r_i };
+
+	const Array keys = buffers.keys();
+	const int32_t volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	for (int ki = 0; ki < keys.size(); ++ki) {
+		const Vector3i ck = keys[ki];
+		const Vector3i origin = ck * CHUNK_BITS;
+		// 只处理与球 AABB 相交的 chunk
+		if (origin.x > hi[0] || origin.x + CHUNK_BITS - 1 < lo[0]
+				|| origin.y > hi[1] || origin.y + CHUNK_BITS - 1 < lo[1]
+				|| origin.z > hi[2] || origin.z + CHUNK_BITS - 1 < lo[2]) {
+			continue;
+		}
+		const PackedInt32Array buf = buffers[ck];
+		if (buf.size() < volume) {
+			continue;
+		}
+		const int32_t *p = buf.ptr();
+		const int32_t x0 = origin.x > lo[0] ? origin.x : lo[0];
+		const int32_t x1 = origin.x + CHUNK_BITS - 1 < hi[0] ? origin.x + CHUNK_BITS - 1 : hi[0];
+		const int32_t y0 = origin.y > lo[1] ? origin.y : lo[1];
+		const int32_t y1 = origin.y + CHUNK_BITS - 1 < hi[1] ? origin.y + CHUNK_BITS - 1 : hi[1];
+		const int32_t z0 = origin.z > lo[2] ? origin.z : lo[2];
+		const int32_t z1 = origin.z + CHUNK_BITS - 1 < hi[2] ? origin.z + CHUNK_BITS - 1 : hi[2];
+		for (int32_t z = z0; z <= z1; ++z) {
+			const int32_t dz = z - czi;
+			const int32_t lz = z - origin.z;
+			for (int32_t y = y0; y <= y1; ++y) {
+				const int32_t dy = y - cyi;
+				const int32_t ly = y - origin.y;
+				const int32_t row = ly * CHUNK_BITS + lz * CHUNK_BITS * CHUNK_BITS;
+				const int32_t dyz = dy * dy + dz * dz;
+				for (int32_t x = x0; x <= x1; ++x) {
+					const int32_t lx = x - origin.x;
+					if (p[row + lx] <= 0) {
+						continue;
+					}
+					const int32_t dx = x - cxi;
+					if ((float)(dx * dx + dyz) <= radius_sq) {
+						out.push_back(Vector3i(x, y, z));
+					}
+				}
+			}
+		}
+	}
+	return out;
+}
+
+Array VoxelNative::collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p) {
+	Array out;
+	if (min_p.x > max_p.x || min_p.y > max_p.y || min_p.z > max_p.z) {
+		return out;
+	}
+	const Array keys = buffers.keys();
+	const int32_t volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	for (int ki = 0; ki < keys.size(); ++ki) {
+		const Vector3i ck = keys[ki];
+		const Vector3i origin = ck * CHUNK_BITS;
+		if (origin.x > max_p.x || origin.x + CHUNK_BITS - 1 < min_p.x
+				|| origin.y > max_p.y || origin.y + CHUNK_BITS - 1 < min_p.y
+				|| origin.z > max_p.z || origin.z + CHUNK_BITS - 1 < min_p.z) {
+			continue;
+		}
+		const PackedInt32Array buf = buffers[ck];
+		if (buf.size() < volume) {
+			continue;
+		}
+		const int32_t *p = buf.ptr();
+		const int32_t x0 = origin.x > min_p.x ? origin.x : min_p.x;
+		const int32_t x1 = origin.x + CHUNK_BITS - 1 < max_p.x ? origin.x + CHUNK_BITS - 1 : max_p.x;
+		const int32_t y0 = origin.y > min_p.y ? origin.y : min_p.y;
+		const int32_t y1 = origin.y + CHUNK_BITS - 1 < max_p.y ? origin.y + CHUNK_BITS - 1 : max_p.y;
+		const int32_t z0 = origin.z > min_p.z ? origin.z : min_p.z;
+		const int32_t z1 = origin.z + CHUNK_BITS - 1 < max_p.z ? origin.z + CHUNK_BITS - 1 : max_p.z;
+		for (int32_t z = z0; z <= z1; ++z) {
+			const int32_t lz = z - origin.z;
+			for (int32_t y = y0; y <= y1; ++y) {
+				const int32_t row = (y - origin.y) * CHUNK_BITS + lz * CHUNK_BITS * CHUNK_BITS;
+				for (int32_t x = x0; x <= x1; ++x) {
+					if (p[row + (x - origin.x)] > 0) {
+						out.push_back(Vector3i(x, y, z));
+					}
+				}
+			}
+		}
+	}
+	return out;
+}
+
 void VoxelNative::_bind_methods() {
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("choose_and_pack", "buf", "n"), &VoxelNative::choose_and_pack);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("pack_with_codec", "codec", "buf", "n"), &VoxelNative::pack_with_codec);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_all_positions", "buffers"), &VoxelNative::collect_all_positions);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_all_flat", "buffers"), &VoxelNative::collect_all_flat);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_bounds", "buffers"), &VoxelNative::collect_bounds);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_sphere_positions", "buffers", "center", "radius"), &VoxelNative::collect_sphere_positions);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_box_positions", "buffers", "min_p", "max_p"), &VoxelNative::collect_box_positions);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);

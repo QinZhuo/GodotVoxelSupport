@@ -32,6 +32,15 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"snapshot_chunks_halo",
 	&"crc32",
 	&"crc32_segments",
+	# QVox 块级编解码（原生）：pick+pack 一次完成，替代 GDScript 逐元素扫描
+	&"choose_and_pack",
+	&"pack_with_codec",
+	# 体素枚举（原生批量）：替代 GDScript 逐体素循环 + 逐体素 Callable / Variant 装箱
+	&"collect_all_positions",
+	&"collect_all_flat",
+	&"collect_bounds",
+	&"collect_sphere_positions",
+	&"collect_box_positions",
 ]
 
 static var _inst: Object = null
@@ -245,3 +254,72 @@ static func crc32_segments(data: PackedByteArray, offsets: PackedInt64Array,
 	if inst == null:
 		return 0
 	return int(inst.call(&"crc32_segments", data, offsets, lengths))
+
+
+# ----------------------------------------------------------------------------
+# QVox 块级编解码（原生）
+# ----------------------------------------------------------------------------
+# 字节布局权威在 QVoxSpec / docs/QVOX_FORMAT.md；GDScript 侧的 QVoxBlockCodec.unpack 仍是
+# 参考实现，编解码往返由 test_qvox_format 做 oracle。
+
+## 为一个块缓冲挑选体积最小的编解码**并直接产出负载**（一次完成，替代 pick+pack 两趟）。
+## 返回 {codec:int, payload:PackedByteArray}；EMPTY 时 codec = CODEC_EMPTY 且 payload 为空。
+static func choose_and_pack(buf: PackedInt32Array, n: int) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"choose_and_pack", buf, n)
+
+
+## 按指定 codec 打包块负载（供 codec 已知的路径与测试使用）。EMPTY / 非法 codec 返回空。
+static func pack_with_codec(codec: int, buf: PackedInt32Array, n: int) -> PackedByteArray:
+	var inst := instance()
+	if inst == null:
+		return PackedByteArray()
+	return inst.call(&"pack_with_codec", codec, buf, n)
+
+
+# ----------------------------------------------------------------------------
+# 体素枚举（原生批量）
+# ----------------------------------------------------------------------------
+# 这四个都只读 buffers（chunk key -> PackedInt32Array(32³)），不修改内容。
+
+## 全部非空体素位置（Array[Vector3i]）。
+static func collect_all_positions(buffers: Dictionary) -> Array:
+	var inst := instance()
+	if inst == null:
+		return []
+	return inst.call(&"collect_all_positions", buffers)
+
+
+## 全部非空体素的 (x, y, z, mat) 四元组扁平数组。存档载荷用：
+## 相比"每个体素一个 4 元素 Array"省掉百万级小对象与约一个数量级内存。
+static func collect_all_flat(buffers: Dictionary) -> PackedInt32Array:
+	var inst := instance()
+	if inst == null:
+		return PackedInt32Array()
+	return inst.call(&"collect_all_flat", buffers)
+
+
+## 内容包围盒 [min:Vector3i, max:Vector3i]；无体素返回空 Array。
+static func collect_bounds(buffers: Dictionary) -> Array:
+	var inst := instance()
+	if inst == null:
+		return []
+	return inst.call(&"collect_bounds", buffers)
+
+
+## 球内体素位置（判定 dx²+dy²+dz² <= radius²，float 比较）。
+static func collect_sphere_positions(buffers: Dictionary, center: Vector3, radius: float) -> Array:
+	var inst := instance()
+	if inst == null:
+		return []
+	return inst.call(&"collect_sphere_positions", buffers, center, radius)
+
+
+## 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
+static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: Vector3i) -> Array:
+	var inst := instance()
+	if inst == null:
+		return []
+	return inst.call(&"collect_box_positions", buffers, min_p, max_p)

@@ -57,15 +57,12 @@ var _materials: Array = []
 
 ## 当累计脏块达到该值自动 flush（0 = 关闭自动，仅显式 flush）。防长时间不落盘。
 ##
-## 【它同时是"单次落盘卡顿峰值"的上限】flush 在主线程重编码脏块，而重编码
-## （pick_codec + pack）是 GDScript 逐元素扫描。实测每块代价：
-##   · 纯 SOLID / 全空块：约 10~20µs（已走原生 count 快判）
-##   · 混合值块（2~4 种材质这种最常见形态）：**约 15ms/块**（pick ~7.7ms + pack ~7.9ms）
-## 故"该值 × 15ms"≈ 最坏单帧卡顿：256 → 可达数秒；调到 32 → 约 0.5s。
-## 要削掉这个峰值有两条路（都需另行改动，不在本篇注释范围）：
-##   1) 原生侧实现 pick_codec / pack（需重建 GDExtension 库）；
-##   2) 后台线程落盘（需一并设计脏集在写盘期间的新增如何补标，否则会丢存档）。
-## 现阶段最省事的缓解就是把它调小：落盘更频繁，但每次更短。
+## 【它同时是"单次落盘卡顿峰值"的上限】flush 在主线程重编码脏块。
+## 重编码（选 codec + 打包）已在原生实现（VoxelNative.choose_and_pack），每块约 0.1~0.2ms
+## ——此前 GDScript 版是逐元素扫描，混合值块实测约 15ms/块（pick ~7.7 + pack ~7.9），
+## 与 256 相乘就是数秒卡顿；原生化后同一批降到约几十毫秒。
+## 仍需留意：flush 还会把整文件序列化并原子替换落盘，超大存档的 I/O 那部分仍按此值摊分。
+## 若仍需更平滑的峰值，可再考虑"后台落盘"（须一并设计脏集在写盘期间的新增如何补标，否则丢存档）。
 @export var auto_flush_dirty: int = 256
 
 # ----------------------------------------------------------------------------
@@ -454,11 +451,13 @@ func _encode_derived_blocks() -> PackedByteArray:
 func _pack_lod_block(lod: int, key: Vector3i, buf: PackedInt32Array) -> PackedByteArray:
 	if buf.size() != CHUNK_VOLUME:
 		return PackedByteArray()
-	var pick := QVoxBlockCodec.pick_codec(buf, CHUNK_VOLUME)
-	var codec: int = pick[0]
+	# 一次完成"选 codec + 出字节"（原生）。此前 pick + pack 是两趟 GDScript 逐元素扫描，
+	# 实测约 15ms/块（CACH 重写一次可能带几百个粗层块）。
+	var picked := QVoxBlockCodec.choose_and_pack(buf, CHUNK_VOLUME)
+	var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
 	if codec == QVoxSpec.CODEC_EMPTY:
 		return PackedByteArray()
-	var data := QVoxBlockCodec.pack(codec, buf, CHUNK_VOLUME)
+	var data: PackedByteArray = picked.get("payload", PackedByteArray())
 	var out := PackedByteArray()
 	out.resize(LOD_ENTRY_HEADER)
 	out.encode_u16(0, lod & 0xFFFF)

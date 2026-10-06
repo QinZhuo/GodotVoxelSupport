@@ -1192,22 +1192,25 @@ func has_voxel(pos: Vector3i) -> bool:
 
 ## 获取所有体素位置（内存 + 磁盘流中已持久化的，磁盘部分临时加载不缓存）
 func get_positions() -> Array:
-	var out: Array = []
+	# 内存部分整体下沉原生（逐体素枚举 + 逐体素 append 装箱 → 一次调用）：
+	# GDScript 版实测约 1.28s / 200 万体素（≈20ms/chunk），原生化后约十分之一。
+	var out: Array = NativeLoader.collect_all_positions(_chunk_buffers)
+	if stream == null:
+		return out
+	# 合并"磁盘已存但不在内存"的 chunk（临时加载，不污染内存缓存）；这部分通常只有少数块
 	var seen := {}
 	for ck: Vector3i in _chunk_buffers:
 		seen[ck] = true
-	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int): out.append(pos))
-	if stream != null:
-		for ck in stream.get_all_chunk_keys(0):
-			if seen.has(ck):
-				continue
-			var buf := _load_chunk_from_stream(ck)
-			if buf.is_empty():
-				continue
-			var origin := VoxelChunk.origin_of(ck)
-			for i in CHUNK_VOLUME:
-				if buf[i] > 0:
-					out.append(origin + _local_from_index(i))
+	for ck in stream.get_all_chunk_keys(0):
+		if seen.has(ck):
+			continue
+		var buf := _load_chunk_from_stream(ck)
+		if buf.is_empty():
+			continue
+		var origin := VoxelChunk.origin_of(ck)
+		for i in CHUNK_VOLUME:
+			if buf[i] > 0:
+				out.append(origin + _local_from_index(i))
 	return out
 
 
@@ -1263,21 +1266,12 @@ func clear(notify: bool = true) -> void:
 func get_voxels_aabb() -> AABB:
 	if _voxel_count == 0:
 		return AABB()
-	var min_pos := Vector3i.MAX
-	var max_pos := Vector3i.MIN
-	for ck: Vector3i in _chunk_buffers:
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				var pos := origin + _local_from_index(i)
-				min_pos.x = mini(min_pos.x, pos.x)
-				min_pos.y = mini(min_pos.y, pos.y)
-				min_pos.z = mini(min_pos.z, pos.z)
-				max_pos.x = maxi(max_pos.x, pos.x)
-				max_pos.y = maxi(max_pos.y, pos.y)
-				max_pos.z = maxi(max_pos.z, pos.z)
-	return _bounds_to_aabb([min_pos, max_pos])
+	# 包围盒一次原生遍历（GDScript 逐体素扫描实测 1.4ms/chunk，1400 chunk 世界约 2 秒；
+	# 破坏 demo 的 1416ms 初始化里有约 275ms 来自这里）
+	var bounds: Array = NativeLoader.collect_bounds(_chunk_buffers)
+	if bounds.is_empty():
+		return AABB()
+	return _bounds_to_aabb(bounds)
 
 
 ## 计算一组体素的包围盒 (AABB)，空集合返回 null
@@ -1375,40 +1369,14 @@ func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
 	if _chunk_buffers.is_empty():
 		return result
-	var radius_sq := radius * radius
-	var overlap_chunks := _get_chunks_in_sphere(center, radius)
-	if overlap_chunks.is_empty():
-		return result
-	var cxi := floori(center.x)
-	var cyi := floori(center.y)
-	var czi := floori(center.z)
-	var r_i := ceili(radius)
-	for ck in overlap_chunks:
-		if not _chunk_buffers.has(ck):
-			if is_stored(ck):
-				# 流式：磁盘上的 chunk 载入内存再查询（保证范围查询覆盖持久化数据）
+	# 扫描与判定都在原生（VoxelNative.collect_sphere_positions）：GDScript 版是"逐候选格
+	# 判距离 + 逐体素 append"，半径 30 时实测 **74ms/次**（22.7 万候选、11.3 万次装箱）。
+	# 这里只负责"把球覆盖到的、磁盘上已有但未加载的 chunk 先载入"（原生只看内存缓冲）。
+	if stream != null:
+		for ck in _get_chunks_in_sphere(center, radius):
+			if not _chunk_buffers.has(ck) and is_stored(ck):
 				preload_chunk(ck)
-			else:
-				continue
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		# 只遍历球 AABB 与 chunk 的交集（避免整 chunk 32³ 全扫，大半径下百倍提速）
-		var min_x := maxi(origin.x, cxi - r_i)
-		var max_x := mini(origin.x + CHUNK_SIZE - 1, cxi + r_i)
-		var min_y := maxi(origin.y, cyi - r_i)
-		var max_y := mini(origin.y + CHUNK_SIZE - 1, cyi + r_i)
-		var min_z := maxi(origin.z, czi - r_i)
-		var max_z := mini(origin.z + CHUNK_SIZE - 1, czi + r_i)
-		for z in range(min_z, max_z + 1):
-			for y in range(min_y, max_y + 1):
-				for x in range(min_x, max_x + 1):
-					if buf[VoxelChunk.buf_index(x - origin.x, y - origin.y, z - origin.z)] <= 0:
-						continue
-					var dx: int = x - cxi
-					var dy: int = y - cyi
-					var dz: int = z - czi
-					if float(dx * dx + dy * dy + dz * dz) <= radius_sq:
-						result.append(Vector3i(x, y, z))
+	result.assign(NativeLoader.collect_sphere_positions(_chunk_buffers, center, radius))
 	return result
 
 
@@ -1418,31 +1386,14 @@ func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
 	if _chunk_buffers.is_empty():
 		return result
-	var overlap_chunks := _get_chunks_in_box(aabb)
-	if overlap_chunks.is_empty():
-		return result
-	for ck in overlap_chunks:
-		if not _chunk_buffers.has(ck):
-			if is_stored(ck):
-				# 流式：磁盘上的 chunk 载入内存再查询
+	# 闭区间与 GDScript 版一致：min = floori(aabb.position)，max = floori(aabb.end - 1)
+	var mn := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
+	var mx := Vector3i(floori(aabb.end.x - 1.0), floori(aabb.end.y - 1.0), floori(aabb.end.z - 1.0))
+	if stream != null:
+		for ck in _get_chunks_in_box(aabb):
+			if not _chunk_buffers.has(ck) and is_stored(ck):
 				preload_chunk(ck)
-			else:
-				continue
-		var buf = _chunk_buffers[ck]
-		var origin := VoxelChunk.origin_of(ck)
-		# 只遍历盒 AABB 与 chunk 的交集（避免整 chunk 32³ 全扫）
-		var min_x := maxi(origin.x, floori(aabb.position.x))
-		var max_x := mini(origin.x + CHUNK_SIZE - 1, floori(aabb.end.x - 1))
-		var min_y := maxi(origin.y, floori(aabb.position.y))
-		var max_y := mini(origin.y + CHUNK_SIZE - 1, floori(aabb.end.y - 1))
-		var min_z := maxi(origin.z, floori(aabb.position.z))
-		var max_z := mini(origin.z + CHUNK_SIZE - 1, floori(aabb.end.z - 1))
-		for z in range(min_z, max_z + 1):
-			for y in range(min_y, max_y + 1):
-				for x in range(min_x, max_x + 1):
-					if buf[VoxelChunk.buf_index(x - origin.x, y - origin.y, z - origin.z)] <= 0:
-						continue
-					result.append(Vector3i(x, y, z))
+	result.assign(NativeLoader.collect_box_positions(_chunk_buffers, mn, mx))
 	return result
 
 
@@ -1611,30 +1562,28 @@ func notify_changed() -> void:
 
 ## 序列化所有体素为 [[x, y, z, mat_id], ...]（统一材质契约：mat_id>=1，0=空 不存在）
 ## 只序列化内存中的 chunk（资源持久化 / save_data 的基础序列化器）
-func _serialize_voxels() -> Array:
-	var voxel_list := []
-	_for_each_non_empty_voxel(func(pos: Vector3i, mat_id: int):
-		voxel_list.append([pos.x, pos.y, pos.z, mat_id]))
-	return voxel_list
+## 全部非空体素，扁平 (x, y, z, mat) 四元组（原生一次收集）。
+## 【为什么是扁平 PackedInt32Array 而不是 Array[[x,y,z,mat], ...]】
+## 旧格式给每个体素建一个 4 元素 Array：200 万体素 = 200 万个独立小对象
+## （实测 1.97s、约 300MB 峰值）。同一份数据的扁平形式只有 32MB，且收集在原生侧
+## （逐体素 Callable + 装箱全部消失）。
+func _serialize_voxels() -> PackedInt32Array:
+	return NativeLoader.collect_all_flat(_chunk_buffers)
 
 
-## 从一组 chunk key 序列化体素为 [[x, y, z, mat_id], ...]。
+## 从一组 chunk key 收集体素为扁平 (x, y, z, mat) 四元组。
 ## 每 chunk 取缓冲：内存优先，否则从流读取（程序化修改块存于 stream._modified /
 ## 文件流存于 region 文件）。供 _serialize_voxels_for_storage（修改块集）与
-## _serialize_all_voxels（磁盘合并）两个全量入口复用同一收集循环。
-func _serialize_chunks_to_list(chunk_keys: Array) -> Array:
-	var voxel_list := []
+## _serialize_all_voxels（磁盘合并）复用同一收集入口。
+func _serialize_chunks_to_list(chunk_keys: Array) -> PackedInt32Array:
+	var sub := {}
 	for ck in chunk_keys:
-		var ck3: Vector3i = ck
-		var buf := _get_chunk_buffer_for_storage(ck3)
-		if buf.is_empty():
-			continue
-		var origin := VoxelChunk.origin_of(ck3)
-		for i in CHUNK_VOLUME:
-			if buf[i] > 0:
-				var p := origin + _local_from_index(i)
-				voxel_list.append([p.x, p.y, p.z, buf[i]])
-	return voxel_list
+		var buf := _get_chunk_buffer_for_storage(ck)
+		if not buf.is_empty():
+			sub[ck] = buf
+	if sub.is_empty():
+		return PackedInt32Array()
+	return NativeLoader.collect_all_flat(sub)
 
 
 ## 收集"需随资源持久化"的 chunk key（有生成器的世界：用户修改过的 = 内存未写盘 _dirty_chunks +
@@ -1657,11 +1606,11 @@ func _collect_modified_chunk_keys() -> Array:
 ## 有生成器：只序列化用户修改过的 chunk（未修改的由生成器确定性重算、无需存储——
 ##   全部序列化会把 .tscn 撑成上百 MB（历史上 734 万体素 → 137MB 的灾难即由此而来））。
 ## 无生成器（纯静态数据 / 文件流）：数据只存在于内存与流中，序列化全部体素。
-func _serialize_voxels_for_storage() -> Array:
+func _serialize_voxels_for_storage() -> PackedInt32Array:
 	if generator != null:
 		var keys := _collect_modified_chunk_keys()
 		if keys.is_empty():
-			return []
+			return PackedInt32Array()
 		return _serialize_chunks_to_list(keys)
 	return _serialize_voxels()
 
@@ -1680,20 +1629,22 @@ func _get_chunk_buffer_for_storage(chunk_key: Vector3i) -> PackedInt32Array:
 ## 流式模式下存储数据由 stream 管理，一次性全量存档时需合并；
 ## 存储部分临时加载，不污染内存缓存。
 ## 有生成器：未修改 chunk 可确定性重新生成，只序列化修改过的。
-## save_data()（显式存档）使用此完整版；资源持久化（_get）走 _serialize_voxels_for_storage。
-func _serialize_all_voxels() -> Array:
+## save_data()（显式存档）使用此完整版；资源持久化（_get/_encode_payload）走
+## _collect_persist_blocks（块表 {chunk: buffer}），不经过逐体素序列化。
+func _serialize_all_voxels() -> PackedInt32Array:
 	if generator != null:
 		return _serialize_voxels_for_storage()
-	var voxel_list := _serialize_voxels()
+	var flat := _serialize_voxels()
 	if stream == null:
-		return voxel_list
+		return flat
 	# 存储流（QVoxStream）：合并已存但不在内存的 chunk（临时加载，不污染内存缓存）
 	var extra: Array = []
 	for ck in stream.get_all_chunk_keys(0):
 		if not _chunk_buffers.has(ck):
 			extra.append(ck)
-	voxel_list.append_array(_serialize_chunks_to_list(extra))
-	return voxel_list
+	if not extra.is_empty():
+		flat.append_array(_serialize_chunks_to_list(extra))
+	return flat
 
 
 ## origin_mode 见 OriginMode（与 from_voxel_data 同一套语义与同一个默认值）。
@@ -1717,8 +1668,18 @@ static func from_qvox(qvox: QVoxAsset, origin_mode: int = OriginMode.WORLD_ORIGI
 
 
 ## 从 [[x, y, z, mat_id], ...] 重建体素（直接写 chunk 密集缓冲，不标记脏 chunk）
+## 反序列化体素。接受两种载荷：
+##   · 扁平 PackedInt32Array（当前格式）：(x, y, z, mat) × N
+##   · Array of [x, y, z, mat]（旧格式）：保留读取分支，旧存档/旧快照仍可载入
 func _deserialize_voxels(voxel_list: Variant) -> void:
 	if voxel_list == null:
+		return
+	if voxel_list is PackedInt32Array:
+		var flat: PackedInt32Array = voxel_list
+		var i := 0
+		while i + 3 < flat.size():
+			_write_buffer_impl(Vector3i(flat[i], flat[i + 1], flat[i + 2]), flat[i + 3], false)
+			i += 4
 		return
 	for vox in voxel_list:
 		if vox is Array and vox.size() >= 4:

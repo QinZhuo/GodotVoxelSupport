@@ -1298,11 +1298,11 @@ static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dic
 			continue
 		# 脏 chunk：重新挑 codec 并编码，就地写入
 		var buf2: PackedInt32Array = blocks[k]
-		var pick := QVoxBlockCodec.pick_codec(buf2, n)
-		var codec: int = pick[0]
+		var picked := QVoxBlockCodec.choose_and_pack(buf2, n)
+		var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
 		if codec == QVoxSpec.CODEC_EMPTY:
 			return PackedByteArray()  # 变成空块：块集合已变，退回整编码
-		var pl := QVoxBlockCodec.pack(codec, buf2, n)
+		var pl: PackedByteArray = picked.get("payload", PackedByteArray())
 		var off := out.size()
 		out.resize(off + QVoxSpec.VOX_BLOCK_HEADER_SIZE)
 		out.encode_u32(off, QVoxSpec.to_u32(k.x))
@@ -1503,11 +1503,11 @@ static func _encode_vox0(model_id: int, blocks: Dictionary, block_size: int) -> 
 		var buf: PackedInt32Array = blocks[k]
 		if buf.size() != n:
 			continue
-		var pick := QVoxBlockCodec.pick_codec(buf, n)
-		var codec: int = pick[0]
+		var picked := QVoxBlockCodec.choose_and_pack(buf, n)
+		var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
 		if codec == QVoxSpec.CODEC_EMPTY:
 			continue  # 空块不写入
-		packed_blocks.append([k, codec, QVoxBlockCodec.pack(codec, buf, n)])
+		packed_blocks.append([k, codec, picked.get("payload", PackedByteArray())])
 
 	# 先把块数组写进一个临时缓冲，得到精确的 payload_length
 	var body := PackedByteArray()

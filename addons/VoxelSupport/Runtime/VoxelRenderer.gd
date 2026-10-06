@@ -745,30 +745,36 @@ func _process_deferred_chunks() -> void:
 	var world_offset := global_position
 	var built := 0
 	var _iter := 0
-	# 直接迭代字典（避免 keys() 分配上万数组）；每帧限量扫描（避免视锥外
-	# 大量待建 chunk 全遍历 → 走近/转向时主线程持续高开销）
+	var to_build: Array = []
+	var to_drop: Array = []
+	# 【先收集、后修改】Godot 的 Dictionary 在迭代期间增删会导致漏掉元素（旧实现在循环体里
+	# 直接 `erase(ck)`）。仍按限量扫描，避免视锥外大量待建 chunk 每帧全遍历。
 	for ck in _deferred_chunks:
 		_iter += 1
 		if _iter > _stream_load_per_frame * 8:
 			break
-		if built >= _stream_load_per_frame:
+		if to_build.size() >= _stream_load_per_frame:
 			break
 		# 已构建网格的 chunk 无需补建（从待建队列移除，避免重复重建）；
 		# 无数据的空 chunk 也无需补建（否则空重建死循环，三角=0 刷日志）
 		if _lod_meshes[0].has(ck) or (data and not data.has_chunk(ck)):
-			_deferred_chunks.erase(ck)
+			to_drop.append(ck)
 			continue
 		var aabb := _chunk_world_aabb(ck, chunk_size_world, world_offset)
 		if not _aabb_has_vertex_in_frustum(aabb, cam):
 			if not (margin > 0.0 and _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) <= margin):
 				continue
+		to_drop.append(ck)
+		to_build.append(ck)
+	for ck in to_drop:
 		_deferred_chunks.erase(ck)
+	for ck in to_build:
 		if data:
 			# 强制构建标记：确保增量重建时不被视锥剔除拦截回 deferred
 			# （该 chunk 在视锥外但已在加载范围，必须真正构建）
 			_stream_force_build[ck] = true
 			data.mark_chunk_dirty(ck)
-		built += 1
+	built = to_build.size()
 	if built > 0:
 		_request_update()
 
@@ -1743,9 +1749,13 @@ func _update_mesh_async() -> void:
 
 
 ## 可见 chunk 的 halo 快照（毫秒预算版）：逐片快照、超预算即止。
-## 32³ 单 chunk 的 halo 快照（27 邻居 preload + COW）约 2~4ms，整批一次快照在
-## 波次期会拖出 130~200ms 主线程尖峰。原生 snapshot_chunks_halo 对每个请求 chunk
-## 自动外扩 27 邻居（voxel_native.cpp），故切片快照不产生边界洞。
+## 原生 snapshot_chunks_halo 对每个请求 chunk 自动外扩 27 邻居（voxel_native.cpp），
+## 故切片快照不产生边界洞。
+## 【实测基线（旧注释已严重失真，勿再按其推算）】带流、27 邻居每次都从盘重载时，
+## 单 chunk halo 快照约 **0.31ms**（无流时约 3µs）。旧注释写的"2~4ms/块、整批 130~200ms"
+## 是 `VoxelData._count_voxels` 原生化之前的数字——那时每个邻居 chunk 的体素计数都要跑
+## 一次 3.3 万次 GDScript 循环（27 × ~1.15ms ≈ 31ms/块）。也就是说：当年那个主线程尖峰
+## 主要是计数循环，现在同一批约 2.5ms。
 ## 返回 {snapshot: Dictionary(ck -> 缓冲), taken: int}；未快照尾部由调用方放回 dirty。
 func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
 	var budget_ms := 6.0
