@@ -229,8 +229,6 @@ func _configure_target(data: VoxelData) -> void:
 	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
 	_target.local_collapse = true
 
-	if not _target.voxel_hardened.is_connected(_on_voxel_hardened):
-		_target.voxel_hardened.connect(_on_voxel_hardened)
 	if not _target.voxels_about_to_collapse.is_connected(_on_voxels_collapse):
 		_target.voxels_about_to_collapse.connect(_on_voxels_collapse)
 	if not _target.mesh_updated.is_connected(_on_mesh_updated):
@@ -552,7 +550,7 @@ func _handle_input(_delta: float) -> void:
 		_saved_data = _target.data.save_data()
 		_log_perf_line("存档 (%d 体素)" % _target.data.get_voxel_count())
 	if key_l and not _prev_l and _saved_data != null:
-		_target.damage_map.clear()
+		_target.clear_damage()
 		_target.data.load_data(_saved_data)
 		_log_perf_line("读档重建")
 
@@ -837,10 +835,6 @@ func _recompute_chart() -> void:
 		chart += line + "\n"
 	chart += "      " + ("%.0f" % c_min).rpad(10) + ("%.0fms" % c_max) + "\n"
 	_cached_chart = chart
-
-
-func _on_voxel_hardened(_pos: Vector3i, _remaining: float) -> void:
-	pass
 
 
 func _on_voxels_collapse(positions: Array) -> void:

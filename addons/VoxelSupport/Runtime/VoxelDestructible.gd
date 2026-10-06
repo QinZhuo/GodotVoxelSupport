@@ -10,13 +10,8 @@ extends VoxelRenderer
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
 signal voxel_damaged(positions: Array, spawn_debris: bool)      ## 体素被移除时 (含崩塌)
-signal voxel_hardened(pos: Vector3i, remaining: float)          ## 体素受伤但未摧毁 (材质硬度未达)（单发，兼容旧用法）
-signal voxel_hardened_batch(positions: Array, remaining: Dictionary) ## 批量硬化（帧尾合并发射，避免逐体素高频信号）
+signal voxel_hardened_batch(positions: Array, remaining: PackedFloat32Array) ## 受伤但未摧毁（与 positions 平行；每次伤害调用发一次）
 signal voxels_about_to_collapse(positions: Array)               ## 悬空体素即将崩塌掉落前
-
-## 硬化反馈缓冲：pos -> remaining，_process 帧尾合并发 voxel_hardened_batch
-var _hardened_buffer: Dictionary = {}
-var _hardened_dirty: bool = false
 
 ## 崩塌掉落模式枚举
 enum CollapseMode {
@@ -98,8 +93,10 @@ var last_damage_count: int = 0     ## 最近一次破坏实际移除的体素数
 var last_damage_time_ms: float = 0 ## 最近一次破坏耗时 (ms)
 var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 
-## 逐体素累计伤害 (位置 -> 累计伤害)
-var damage_map: Dictionary[Vector3i, float] = {}
+## 逐体素累计伤害：按 chunk 惰性分配的密集缓冲（与体素同缓冲区布局、同下标）。
+## 不用"位置 -> 伤害"字典：大范围破坏下逐体素哈希是主线程主项（半径 30 的球 ≈ 11.3 万体素，
+## 实测 100ms/次），换成数组下标后降到几毫秒；只为真的受了非致命伤的 chunk 付 128KB。
+var _damage: Dictionary[Vector3i, PackedFloat32Array] = {}
 
 ## 延迟移除状态：同一帧内多次伤害的位置合并去重，下一帧统一处理
 ## key: Vector3i 体素位置，value: 是否生成碎片（任意一次伤害要求生成则生成）
@@ -258,17 +255,14 @@ func _exit_tree() -> void:
 
 ## 球形破坏: 对中心点半径内的体素造成伤害
 ## center 为体素空间坐标 (1单位 = 1体素)，radius 单位同上
-## 仅更新 damage_map（即时），实际移除在下一帧统一处理
+## 即时累加伤害；实际移除在下一帧统一处理（_pending_removed 合并去重）
 ## 返回被判定为应移除的体素位置数组（基于累计伤害）
 func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	var positions := data.get_voxels_in_sphere(center, radius)
-	var mat_map := _collect_voxel_materials(positions)
-	# 1. 即时：更新 damage_map
-	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
-	# 2. 合并去重：同一帧内多次伤害相同位置只处理一次
+	var removed := _apply_damage_immediate(positions, _materials_for(positions), damage_per_voxel)
 	if not removed.is_empty():
 		for pos in removed:
 			_pending_removed[pos] = true
@@ -276,15 +270,13 @@ func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null)
 	return removed
 
 
-## 盒形破坏
-## 仅更新 damage_map（即时），实际移除在下一帧统一处理
+## 盒形破坏（同 damage_sphere：即时累伤，下一帧统一移除）
 func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
 	var positions := data.get_voxels_in_box(aabb)
-	var mat_map := _collect_voxel_materials(positions)
-	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
+	var removed := _apply_damage_immediate(positions, _materials_for(positions), damage_per_voxel)
 	if not removed.is_empty():
 		for pos in removed:
 			_pending_removed[pos] = true
@@ -297,8 +289,7 @@ func damage_voxel(pos: Vector3i, spawn_debris: Variant = null) -> bool:
 	if not data or not data.has_voxel(pos):
 		return false
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var mat_map := _collect_voxel_materials([pos])
-	var removed := _apply_damage_immediate([pos], mat_map, damage_per_voxel)
+	var removed := _apply_damage_immediate([pos], _materials_for([pos]), damage_per_voxel)
 	if not removed.is_empty():
 		for p in removed:
 			_pending_removed[p] = true
@@ -366,7 +357,8 @@ func destroy_all(spawn_debris: Variant = null) -> void:
 	if do_spawn and not Engine.is_editor_hint():
 		_spawn_debris_with_materials(positions, mat_map)
 	data.clear()
-	# 世界已清空：作废在途检测结果（其回填没有意义，且旧坐标已不存在）
+	# 世界已清空：伤害状态与在途检测都作废（旧坐标已不存在）
+	clear_damage()
 	_clear_detect()
 	voxel_damaged.emit(positions, do_spawn)
 
@@ -381,37 +373,80 @@ func repair(amount: float) -> void:
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
 
-## 即时伤害应用：只更新 damage_map，不实际移除体素
-## 返回应被移除的体素位置（基于累计伤害判断）
-## 实际移除在 _process 中逐帧处理
-func _apply_damage_immediate(positions: Array, mat_map: Dictionary, damage: float) -> Array:
+## 即时累加伤害：positions 与 mats 平行（mats 来自 _materials_for，无体素处为 -1）。
+## 返回应被移除的体素位置；实际移除由 _process 的破坏管道逐帧处理。
+func _apply_damage_immediate(positions: Array, mats: PackedInt32Array, damage: float) -> Array:
 	var removed: Array = []
-	# 硬度表一次建好（≤256 项，实测 0.0003ms）：此前是**逐命中体素**
-	# `data.materials[id] as VoxelMaterial` + 属性读——半径 30 的球形破坏约 11 万个体素，
-	# 那就是 11 万次 Variant 转换，是该路径最大的固定开销。
+	var hardened_pos: Array[Vector3i] = []
+	var hardened_rem := PackedFloat32Array()
+	# 硬度表一次建好（≤256 项），替代逐体素 `as VoxelMaterial` + 属性读
 	var hardness_table := _material_table(&"hardness", 1.0)
 	var table_n := hardness_table.size()
-	for pos in positions:
-		var mat_id: int = mat_map.get(pos, -1)
+	var mats_n := mats.size()
+	# 同 chunk 的体素在 positions 里连续出现：缓存当前 chunk 的伤害缓冲（空 = 需取/建）
+	var cur_ck := Vector3i.ZERO
+	var cur_buf := PackedFloat32Array()
+	for i in positions.size():
+		var pos: Vector3i = positions[i]
 		if not use_voxel_health:
 			removed.append(pos)
 			continue
+		var mat_id: int = mats[i] if i < mats_n else -1
 		var hardness: float = hardness_table[mat_id] if (mat_id >= 0 and mat_id < table_n) else 1.0
 		if hardness <= 0.0:
 			removed.append(pos)
 			continue
-		var cur: float = float(damage_map.get(pos, 0.0)) + damage
+		var ck := VoxelChunk.chunk_of(pos)
+		if cur_buf.is_empty() or ck != cur_ck:
+			cur_ck = ck
+			cur_buf = _damage.get(ck, PackedFloat32Array())
+			if cur_buf.is_empty():
+				cur_buf = PackedFloat32Array()
+				cur_buf.resize(VoxelChunk.CHUNK_VOLUME)
+				_damage[ck] = cur_buf
+		var idx := VoxelChunk.buf_index_world(pos)
+		var cur := cur_buf[idx] + damage
 		if cur >= hardness:
-			damage_map.erase(pos)
+			cur_buf[idx] = 0.0   # 移除即清零：该位置日后被重建时不应继承旧伤
 			removed.append(pos)
 		else:
-			damage_map[pos] = cur
-			# 硬化反馈累积到缓冲，_process 帧尾统一发 voxel_hardened_batch
-			# （逐体素 emit 在大破坏时一次几百次信号 → 高频，合并后一次）
-			_hardened_buffer[pos] = hardness - cur
-			_hardened_dirty = true
+			cur_buf[idx] = cur
+			hardened_pos.append(pos)
+			hardened_rem.append(hardness - cur)
 	last_damage_count = removed.size()
+	if not hardened_pos.is_empty():
+		voxel_hardened_batch.emit(hardened_pos, hardened_rem)
 	return removed
+
+
+## 与 positions 平行的材质 ID 数组（原生一次收集；无体素处为 -1）。
+## 伤害判定只需要"每个候选体素的材质"，不需要"位置 -> 材质"的字典查询。
+func _materials_for(positions: Array) -> PackedInt32Array:
+	if data == null:
+		return PackedInt32Array()
+	return NativeLoader.collect_materials_flat(data.get_chunk_buffers(), positions)
+
+
+## 清空逐体素累计伤害（读档 / 重置 / 全毁后调用）。
+func clear_damage() -> void:
+	_damage.clear()
+
+
+## origin shift：累计伤害以 chunk key 为键，必须随世界一起平移，否则旧伤会挂到错坐标。
+func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
+	super._shift_render(shift, chunk_size_world)
+	var nd: Dictionary[Vector3i, PackedFloat32Array] = {}
+	for ck in _damage:
+		nd[ck + shift] = _damage[ck]
+	_damage = nd
+
+
+## 丢弃已无残留伤害的 chunk 缓冲，防 _damage 随破坏范围无界增长（低频调用，见 _process）。
+func _prune_damage() -> void:
+	for ck in _damage.keys():
+		var buf: PackedFloat32Array = _damage[ck]
+		if buf.count(0.0) == buf.size():
+			_damage.erase(ck)
 
 
 ## 破坏后的统一处理（第一阶段）：把应力传播丢到后台检测。
@@ -1656,20 +1691,6 @@ func _clear_debris() -> void:
 # 主循环
 # ----------------------------------------------------------------------------
 
-## 帧尾合并发射硬化反馈信号：一次破坏几百个体素未摧毁时，
-## 避免逐体素 emit voxel_hardened（几百次信号/破坏 → 高频轰炸外部监听器），
-## 累积后统一发一次 voxel_hardened_batch（兼发兼容性单发信号到已连接监听器）。
-func _flush_hardened_signals() -> void:
-	if not _hardened_dirty:
-		return
-	_hardened_dirty = false
-	var positions: Array = _hardened_buffer.keys()
-	if positions.is_empty():
-		return
-	voxel_hardened_batch.emit(positions, _hardened_buffer)
-	_hardened_buffer.clear()
-
-
 func _process(_delta: float) -> void:
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 	super._process(_delta)
@@ -1693,15 +1714,13 @@ func _process(_delta: float) -> void:
 	# 帧尾：GPU 忙时积压的掉落体 mesh 限量组装（add_surface_from_arrays 同步 GPU 上传）
 	_process_pending_mesh_results()
 
-	# 帧尾：合并发射硬化反馈（一次破坏几百个体素未摧毁时，避免逐体素高频信号）
-	_flush_hardened_signals()
-
-# 定期检测掉落块：按时间间隔（约 1 秒）冻结静止块 + 生命周期清理（上限/超时）。
+	# 定期任务：冻结静止掉落块 + 丢弃已无残留伤害的伤害缓冲（约 1 秒一次）。
 	# 用累计时间而非固定帧数，避免帧率下降时清理频率同步下降的恶性循环。
 	_sleep_check_counter += _delta
 	if _sleep_check_counter >= 1.0:
 		_sleep_check_counter = 0.0
 		_freeze_sleeping_chunks()
+		_prune_damage()
 
 	if diag_enabled:
 		var _total_ms := (Time.get_ticks_usec() - _diag_t0) / 1000.0

@@ -17,13 +17,9 @@ extends RefCounted
 ##   DENSE   3  N × bpp/8 字节，ZXY 顺序
 ##   INDEXED 4  uint8 n + n 个材质索引 + N×⌈log₂n⌉ 位
 ##
-## 【分工：打包在原生，解包在此做参考实现】
-## 打包（选 codec + 出字节）下沉到原生 `VoxelNative.choose_and_pack` —— GDScript 版是逐元素
-## 扫描，实测混合值块约 15ms/块（pick ~7.7ms + pack ~7.9ms），而一次落盘可能带数百个脏块
-## （QVoxStream.auto_flush_dirty 默认 256）→ 单帧秒级卡顿；原生化后同样一块约 0.1~0.2ms。
-## 解包保留 GDScript：它只走"载入时每块一次"，且保持一份独立的参考实现，正好给
-## test_qvox_format 的编解码往返做 oracle（打包原生 ↔ 解包参考，双向验证字节布局）。
-## 字节布局权威仍是 QVoxSpec / docs/QVOX_FORMAT.md，本类不定义格式。
+## 【分工】打包（选 codec + 出字节）在原生（约 0.2ms/块；GDScript 版混合值块约 15ms）；
+## 解包留在此处作为独立参考实现，正好给 test_qvox_format 的编解码往返做 oracle。
+## 字节布局权威在 QVoxSpec / docs/QVOX_FORMAT.md，本类不定义格式。
 
 
 # ----------------------------------------------------------------------------

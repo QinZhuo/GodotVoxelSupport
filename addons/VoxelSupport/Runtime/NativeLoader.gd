@@ -41,6 +41,8 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_bounds",
 	&"collect_sphere_positions",
 	&"collect_box_positions",
+	&"collect_materials_flat",
+	&"install_flat_voxels",
 ]
 
 static var _inst: Object = null
@@ -323,3 +325,19 @@ static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: V
 	if inst == null:
 		return []
 	return inst.call(&"collect_box_positions", buffers, min_p, max_p)
+
+
+## 与 positions **平行**的材质 ID 数组（无体素处为 -1）：免去"位置 -> 材质"的字典查询。
+static func collect_materials_flat(buffers: Dictionary, positions: Array) -> PackedInt32Array:
+	var inst := instance()
+	if inst == null:
+		return PackedInt32Array()
+	return inst.call(&"collect_materials_flat", buffers, positions)
+
+
+## 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}。
+static func install_flat_voxels(flat: PackedInt32Array) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"install_flat_voxels", flat)

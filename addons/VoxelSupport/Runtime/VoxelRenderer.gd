@@ -1405,11 +1405,8 @@ func _remove_lod_mesh(level: int, bk: Vector3i) -> void:
 	_clear_lod_block_state(level, bk)
 
 
-## 清除某层 block 的**全部**渲染侧状态（网格条目 + 各类待办 / 代次 / 重试账本）。
-## **单点维护**：这些表都以 block key 为键，漏清一个就会随探索范围无界增长。
-## 已知历史问题：`_lod_block_gen` / `_lod_rebuild` / `_lod_null_retries` 都不在旧
-## `_remove_lod_mesh` 的清理范围内 → 无限世界长会话下，每个曾失效过的 block 各留一条
-## （其中 `_lod_block_gen` 每条目必留，因为失效必写、移除必不删）。
+## 清除某层 block 的全部渲染侧状态（网格 + 待办 / 代次 / 重试账本）。
+## 单点维护：这些表都以 block key 为键，漏清一个就会随探索范围无界增长。
 func _clear_lod_block_state(level: int, bk: Vector3i) -> void:
 	if level < 0 or level >= _lod_meshes.size():
 		return
@@ -1749,13 +1746,8 @@ func _update_mesh_async() -> void:
 
 
 ## 可见 chunk 的 halo 快照（毫秒预算版）：逐片快照、超预算即止。
-## 原生 snapshot_chunks_halo 对每个请求 chunk 自动外扩 27 邻居（voxel_native.cpp），
-## 故切片快照不产生边界洞。
-## 【实测基线（旧注释已严重失真，勿再按其推算）】带流、27 邻居每次都从盘重载时，
-## 单 chunk halo 快照约 **0.31ms**（无流时约 3µs）。旧注释写的"2~4ms/块、整批 130~200ms"
-## 是 `VoxelData._count_voxels` 原生化之前的数字——那时每个邻居 chunk 的体素计数都要跑
-## 一次 3.3 万次 GDScript 循环（27 × ~1.15ms ≈ 31ms/块）。也就是说：当年那个主线程尖峰
-## 主要是计数循环，现在同一批约 2.5ms。
+## 原生 snapshot_chunks_halo 会自动外扩 27 邻居，故切片不产生边界洞。
+## 实测单 chunk 约 0.31ms（带流、邻居从盘重载），整批远小于预算。
 ## 返回 {snapshot: Dictionary(ck -> 缓冲), taken: int}；未快照尾部由调用方放回 dirty。
 func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
 	var budget_ms := 6.0

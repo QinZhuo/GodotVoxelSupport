@@ -1219,6 +1219,84 @@ Dictionary VoxelNative::collect_materials(const Dictionary &buffers, const Array
 	return result;
 }
 
+PackedInt32Array VoxelNative::collect_materials_flat(const Dictionary &buffers, const Array &positions) {
+	const int n = positions.size();
+	PackedInt32Array out;
+	out.resize(n);
+	if (n == 0) {
+		return out;
+	}
+	int32_t *w = out.ptrw();
+	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
+	const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	for (int i = 0; i < n; ++i) {
+		const Vector3i p = positions[i];
+		const Vector3i ck = chunk_of(p);
+		const uint64_t kk = vkey(ck);
+		auto it = chunk_bufs.find(kk);
+		if (it == chunk_bufs.end()) {
+			PackedInt32Array b;
+			if (buffers.has(ck)) {
+				b = buffers[ck];
+			}
+			it = chunk_bufs.emplace(kk, b).first;
+		}
+		if (it->second.size() < volume) {
+			w[i] = -1;
+			continue;
+		}
+		const Vector3i local = p - ck * CHUNK_BITS;
+		const int32_t m = it->second.ptr()[buf_index(local)];
+		w[i] = (m > 0) ? m : -1;
+	}
+	return out;
+}
+
+Dictionary VoxelNative::install_flat_voxels(const PackedInt32Array &flat) {
+	Dictionary out;
+	const int n = flat.size();
+	if (n < 4) {
+		return out;
+	}
+	const int32_t *p = flat.ptr();
+	const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	std::unordered_map<uint64_t, int> slot_of;
+	std::vector<Vector3i> keys;
+	std::vector<PackedInt32Array> bufs;
+	// 第一趟：登记涉及的 chunk 并分配缓冲
+	for (int i = 0; i + 3 < n; i += 4) {
+		if (p[i + 3] <= 0) {
+			continue;   // 空体素不写入（与 set_voxels 同语义）
+		}
+		const Vector3i ck = chunk_of(Vector3i(p[i], p[i + 1], p[i + 2]));
+		const uint64_t kk = vkey(ck);
+		if (slot_of.find(kk) == slot_of.end()) {
+			slot_of.emplace(kk, (int)bufs.size());
+			keys.push_back(ck);
+			bufs.push_back(PackedInt32Array());
+			bufs.back().resize(volume);
+		}
+	}
+	// 第二趟：缓存每 chunk 的写入指针（避免逐体素取 ptrw），一次填满
+	std::vector<int32_t *> ptrs(bufs.size());
+	for (size_t s = 0; s < bufs.size(); ++s) {
+		ptrs[s] = bufs[s].ptrw();
+	}
+	for (int i = 0; i + 3 < n; i += 4) {
+		const int32_t mat = p[i + 3];
+		if (mat <= 0) {
+			continue;
+		}
+		const Vector3i pos(p[i], p[i + 1], p[i + 2]);
+		const Vector3i ck = chunk_of(pos);
+		ptrs[slot_of[vkey(ck)]][buf_index(pos - ck * CHUNK_BITS)] = mat;
+	}
+	for (size_t s = 0; s < bufs.size(); ++s) {
+		out[keys[s]] = bufs[s];
+	}
+	return out;
+}
+
 // 金字塔增量降采样：只重算 block 内 [rmin, rmax] 区域的脏大格，未脏大格从 coarse 复用。
 // 与全量 build_lod_block_halo_from_buffers_native 降采样规则一致（大格值 = 覆盖 cell³ 体素中
 // 第一个非空材质），保证增量/全量结果一致。编辑体素后只影响少数大格 → 破坏成本 O(脏大格)。
@@ -2096,6 +2174,8 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials_flat", "buffers", "positions"), &VoxelNative::collect_materials_flat);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);

@@ -515,11 +515,8 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 		buf[idx] = mat_id
 
 
-## 统计一块密集缓冲的非空体素数。
-## **全项目唯一实现**：GDScript 逐元素循环（`for i in CHUNK_VOLUME: if buf[i] > 0`）实测
-## 0.53~0.85ms/块，而原生 `count(0)` 0.011ms（约 40~50 倍）。这条计数是流式回填
-## （每帧最多数十块）与粗层降采样（每块 2^lod³ 个 chunk）的必经步骤，属主线程主要固定
-## 开销之一。此前三处各写一份、其中两处还留在慢实现上（正是"改了一处漏改两处"的典型）。
+## 非空体素数（全项目唯一实现）：原生 count(0) 比 GDScript 逐元素循环快约 40 倍，
+## 而这条计数在流式回填与粗层降采样里都是必经步骤。
 static func _count_voxels(buf: PackedInt32Array) -> int:
 	return buf.size() - buf.count(0)
 
@@ -718,21 +715,10 @@ func snapshot_all_chunk_buffers() -> Dictionary:
 	return _chunk_buffers.duplicate(false)
 
 
-## 声明"即将把缓冲交给后台线程只读"。期间 _write_buffer_impl 会把目标缓冲先分叉再写。
-## 必须与 end_readonly_snapshot() 成对调用（计数，可并发多批任务）。
-##
-## 【为什么需要它】实测（Godot 4.7）：GDScript 对 PackedInt32Array 的**逐元素写**
-## （buf[i] = v）不触发 CowData 的写时拷贝，而是直接改共享底层；native 批量接口
-## （remove_voxels_bulk / set_voxels_bulk）因在本地副本上 ptrw() 才会分叉，但也依赖调用方
-## 把结果写回字典。于是"浅拷贝快照交给 worker 只读"并不安全：主线程一个 set_voxel 就能改掉
-## 在途快照。本计数补上缺失的那一半——快照活跃期内，单点写走显式拷贝，使快照真正不可变。
-##
-## 【为什么用"写侧守卫"而不是"读侧脱钩"】另一条路是让快照方在取证时把参与 chunk 深拷贝成
-## 私有数组（读者自己付拷贝）。实测否决了它：单块缓冲 128KB，而 `snapshot_chunks_halo`
-## 会外扩 27 邻居（8 chunk/批 → 约 216 个 chunk → 约 27MB、~1.4ms 固定开销，且每批都付）；
-## 写侧守卫则只在真的写时才付一次拷贝——实测带快照的 `set_voxel` 约 4.9µs/次
-## （不带快照 7.0µs/次，差异被内存带宽吸收）。"写少读多"的常规场景下写侧守卫便宜得多。
-## 例外：若应用每帧做数百次单点写且重建窗口长期开着，应改用读侧脱钩——按实测再定。
+## 声明"缓冲即将交给后台线程只读"，必须与 end_readonly_snapshot() 成对（计数，可并发多批）。
+## 实测 GDScript 对 PackedInt32Array 的逐元素写不触发写时拷贝，故浅拷贝快照并不安全：
+## 快照活跃期内单点写必须先分叉（见 _write_buffer_impl）。选写侧守卫而非读侧脱钩，是因为后者
+## 要按快照集深拷贝（约 27MB/批），写侧只在真的写时付一次（实测约 5µs/次）。
 func begin_readonly_snapshot() -> void:
 	_snapshot_readers += 1
 
@@ -1563,10 +1549,8 @@ func notify_changed() -> void:
 ## 序列化所有体素为 [[x, y, z, mat_id], ...]（统一材质契约：mat_id>=1，0=空 不存在）
 ## 只序列化内存中的 chunk（资源持久化 / save_data 的基础序列化器）
 ## 全部非空体素，扁平 (x, y, z, mat) 四元组（原生一次收集）。
-## 【为什么是扁平 PackedInt32Array 而不是 Array[[x,y,z,mat], ...]】
-## 旧格式给每个体素建一个 4 元素 Array：200 万体素 = 200 万个独立小对象
-## （实测 1.97s、约 300MB 峰值）。同一份数据的扁平形式只有 32MB，且收集在原生侧
-## （逐体素 Callable + 装箱全部消失）。
+## 不用"每体素一个 4 元素 Array"：200 万体素会变成 200 万个小对象（实测 1.97s / ~300MB，
+## 扁平形式 14ms / 32MB）。
 func _serialize_voxels() -> PackedInt32Array:
 	return NativeLoader.collect_all_flat(_chunk_buffers)
 
@@ -1667,19 +1651,17 @@ static func from_qvox(qvox: QVoxAsset, origin_mode: int = OriginMode.WORLD_ORIGI
 	return res
 
 
-## 从 [[x, y, z, mat_id], ...] 重建体素（直接写 chunk 密集缓冲，不标记脏 chunk）
 ## 反序列化体素。接受两种载荷：
-##   · 扁平 PackedInt32Array（当前格式）：(x, y, z, mat) × N
-##   · Array of [x, y, z, mat]（旧格式）：保留读取分支，旧存档/旧快照仍可载入
+##   · 扁平 PackedInt32Array（当前格式）：(x, y, z, mat) × N，原生整块装回
+##   · Array of [x, y, z, mat]（旧格式）：保留读取分支，旧存档仍可载入
+## 调用前应已 clear()（load_data 会先清），故这里按"新缓冲"直接装入，不合并旧数据。
 func _deserialize_voxels(voxel_list: Variant) -> void:
 	if voxel_list == null:
 		return
 	if voxel_list is PackedInt32Array:
-		var flat: PackedInt32Array = voxel_list
-		var i := 0
-		while i + 3 < flat.size():
-			_write_buffer_impl(Vector3i(flat[i], flat[i + 1], flat[i + 2]), flat[i + 3], false)
-			i += 4
+		var bufs := NativeLoader.install_flat_voxels(voxel_list)
+		for ck in bufs:
+			_install_block_buffer(ck, bufs[ck])
 		return
 	for vox in voxel_list:
 		if vox is Array and vox.size() >= 4:

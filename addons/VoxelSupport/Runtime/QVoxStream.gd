@@ -56,13 +56,8 @@ const CACH_LOD_ALGO := 1
 var _materials: Array = []
 
 ## 当累计脏块达到该值自动 flush（0 = 关闭自动，仅显式 flush）。防长时间不落盘。
-##
-## 【它同时是"单次落盘卡顿峰值"的上限】flush 在主线程重编码脏块。
-## 重编码（选 codec + 打包）已在原生实现（VoxelNative.choose_and_pack），每块约 0.1~0.2ms
-## ——此前 GDScript 版是逐元素扫描，混合值块实测约 15ms/块（pick ~7.7 + pack ~7.9），
-## 与 256 相乘就是数秒卡顿；原生化后同一批降到约几十毫秒。
-## 仍需留意：flush 还会把整文件序列化并原子替换落盘，超大存档的 I/O 那部分仍按此值摊分。
-## 若仍需更平滑的峰值，可再考虑"后台落盘"（须一并设计脏集在写盘期间的新增如何补标，否则丢存档）。
+## 它同时是"单次落盘卡顿峰值"的上限：脏块重编码走原生 choose_and_pack，约 0.2ms/块
+## （此前 GDScript 版混合值块约 15ms/块）。超大存档的整文件序列化与落盘 I/O 仍在此摊分。
 @export var auto_flush_dirty: int = 256
 
 # ----------------------------------------------------------------------------
@@ -366,10 +361,8 @@ func _models_to_qvox_models() -> Dictionary:
 	return out
 
 
-## 去掉全零块（空块不落盘，P2 / §5.1）。
-## 判空用原生 `count(0)`：此前是"逐体素扫到第一个非空"的 GDScript 循环，而 flush 会对
-## **所有块的所有体素**跑一遍——1400 块 / 140 万体素的世界实测是秒级主线程冻结，
-## 换成原生后是十几毫秒（同一数量级内从"秒"降到"十毫秒"）。
+## 去掉全零块（空块不落盘，P2 / §5.1）。判空用原生 count(0)：逐体素 GDScript 扫描在
+## 1400 块规模下是秒级冻结，原生是十几毫秒。
 func _prune_empty(blocks: Dictionary) -> Dictionary:
 	var out: Dictionary = {}
 	for k in blocks:

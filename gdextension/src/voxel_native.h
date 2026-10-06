@@ -145,13 +145,8 @@ public:
 	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
 
 	// ---- QVox 块级编解码（原生）----
-	// 【为什么下沉】GDScript 版 pick_codec + pack 是逐元素扫描：实测混合值块约 15ms/块
-	// （pick ~7.7ms + pack ~7.9ms），而一次落盘可能带数百个脏块（auto_flush_dirty 默认 256）
-	// → 单帧秒级卡顿。原生化后同样一块约 0.1~0.2ms（约 100 倍）。
-	//
-	// 为一个块缓冲挑选体积最小的编解码**并直接产出负载**（一次完成，替代 pick+pack 两趟）。
-	// 选择规则与字节布局以 QVoxSpec / docs/QVOX_FORMAT.md 为准：
-	//   EMPTY 0（永不写文件）/ SOLID 1 / RUN 2 / DENSE 3 / INDEXED 4
+	// GDScript 版 pick+pack 是逐元素扫描（混合值块约 15ms/块），原生化后约 0.2ms。
+	// 选择规则与字节布局以 QVoxSpec / docs/QVOX_FORMAT.md 为准。
 	// 返回 {codec:int, payload:PackedByteArray}；EMPTY 时 codec=0、payload 空。
 	static Dictionary choose_and_pack(const PackedInt32Array &buf, int n);
 
@@ -173,6 +168,12 @@ public:
 	static Array collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius);
 	// 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
 	static Array collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p);
+	// 与 positions **平行**的材质 ID 数组（无体素处为 -1）。
+	// 伤害判定只需要"每个候选体素的材质"，不需要"位置 -> 材质"的字典查询。
+	static PackedInt32Array collect_materials_flat(const Dictionary &buffers, const Array &positions);
+	// 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}（均为新缓冲）。
+	// 与 collect_all_flat 成对（收 / 装），供存档载荷重建。
+	static Dictionary install_flat_voxels(const PackedInt32Array &flat);
 
 	// ---- QVox 格式：CRC32（读写两端唯一实现） ----
 	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib 口径一致。
