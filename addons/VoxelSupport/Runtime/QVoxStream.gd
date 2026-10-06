@@ -56,9 +56,18 @@ const CACH_LOD_ALGO := 1
 var _materials: Array = []
 
 ## 当累计脏块达到该值自动 flush（0 = 关闭自动，仅显式 flush）。防长时间不落盘。
-## 它同时是"单次落盘卡顿峰值"的上限：脏块重编码走原生 choose_and_pack，约 0.2ms/块
-## （此前 GDScript 版混合值块约 15ms/块）。超大存档的整文件序列化与落盘 I/O 仍在此摊分。
+## 它同时是"单次落盘卡顿峰值"的上限：脏块重编码走原生 choose_and_pack（约 0.2ms/块），
+## 而"把几十 MB 字节写盘"这段纯 I/O 已交给后台线程（见 _write_bytes_worker），
+## 故主线程只承担序列化那部分。
 @export var auto_flush_dirty: int = 256
+
+## 在途落盘任务：I/O 在 worker、收尾在主线程。写盘期间再有改动只置脏（不会丢），
+## 由 _on_write_done 末尾补写；flush() 会等待在途任务，保持"返回即已落盘"。
+var _write_in_flight := false
+var _write_task_id: int = -1
+var _write_serial := 0
+var _write_done_serial := -1
+var _write_result: Array = []
 
 # ----------------------------------------------------------------------------
 # 内存权威数据
@@ -183,7 +192,7 @@ func _ensure_loaded() -> void:
 ## 这消除了"改一个 chunk 就重编码全世界所有 VOX0 块"的浪费（规范 §4 明示"块是编辑的
 ## 局部性单位"）。块集合变化（新增/删除 model、materials 从无到有等极端情况）自动退回全量。
 func _write_file() -> void:
-	if not _dirty:
+	if not _dirty or _write_in_flight:
 		return
 	_ensure_dir()
 	var doc := QVoxFile.QVoxDocument.new()
@@ -227,21 +236,44 @@ func _write_file() -> void:
 		_raw_bytes = bytes
 		_block_index = QVoxFile.scan_block_index(bytes)
 
+	# ---- 落盘：写临时文件 + 原子替换。纯 I/O 交 worker，收尾在主线程（见 _on_write_done）----
+	_write_serial += 1
+	_write_in_flight = true
+	_write_result = [OK]
 	var tmp_path := file_path + ".tmp"
+	_write_task_id = WorkerThreadPool.add_task(_write_bytes_worker.bind(
+		self, _write_serial, bytes, tmp_path,
+		ProjectSettings.globalize_path(tmp_path), ProjectSettings.globalize_path(file_path),
+		_write_result))
+
+
+## 后台线程：字节写入临时文件 + 原子替换（读者只会看到旧的完整文件或新的完整文件）。
+## 只做文件 I/O，不碰任何资源状态；完成后把结果交回主线程的 _on_write_done 收尾。
+static func _write_bytes_worker(owner: Object, serial: int, bytes: PackedByteArray, tmp_path: String,
+		abs_tmp: String, abs_path: String, result: Array) -> void:
 	var f := FileAccess.open(tmp_path, FileAccess.WRITE)
 	if f == null:
-		push_error("[QVoxStream] 无法写入 %s: %s" % [tmp_path, error_string(FileAccess.get_open_error())])
+		result[0] = FileAccess.get_open_error()
+	else:
+		f.store_buffer(bytes)
+		f.close()
+		if FileAccess.file_exists(abs_path):
+			DirAccess.remove_absolute(abs_path)
+		result[0] = DirAccess.rename_absolute(abs_tmp, abs_path)
+	if owner != null:
+		owner.call_deferred(&"_on_write_done", serial, result)
+
+
+## 主线程：落盘收尾。失败则作废索引基准并**保留脏标记**（下次退化为全量写，安全）；
+## 成功则清脏标记；期间又有新改动则立刻补写。过期回调（已被 _wait_pending_write 收尾）直接忽略。
+func _on_write_done(serial: int, result: Array) -> void:
+	if serial == _write_done_serial or serial != _write_serial:
 		return
-	f.store_buffer(bytes)
-	f.close()
-	# 原子替换：读者只会看到旧文件（完整）或新文件（完整）
-	var abs_tmp := ProjectSettings.globalize_path(tmp_path)
-	var abs_path := ProjectSettings.globalize_path(file_path)
-	if FileAccess.file_exists(file_path):
-		DirAccess.remove_absolute(abs_path)
-	var err := DirAccess.rename_absolute(abs_tmp, abs_path)
-	if err != OK:
-		push_error("[QVoxStream] 原子替换失败: %s" % error_string(err))
+	_write_done_serial = serial
+	_write_in_flight = false
+	_write_task_id = -1
+	if int(result[0]) != OK:
+		push_error("[QVoxStream] 原子替换失败: %s" % error_string(int(result[0])))
 		# 索引此前已按"未落盘的字节"更新过，作废以免下次增量写拿错基准（退化为全量，安全）。
 		_block_index = []
 		_raw_bytes = PackedByteArray()
@@ -255,6 +287,18 @@ func _write_file() -> void:
 	# 但它内部按"哪些 model 是脏的"决定重建范围，故必须在 _dirty_models.clear() **之前**。
 	_dirty_models.clear()
 	_dirty_chunks.clear()
+	if _dirty:
+		_write_file()   # 写盘期间又有改动 → 补写（脏标记一直保留，不会丢）
+
+
+## 等待在途落盘任务结束并就地收尾（flush 的同步语义用）。
+## 注意：不要挂到 NOTIFICATION_PREDELETE —— RefCounted 的析构通知里脚本实例已失效，调用 self 的方法会报 null instance。
+## 退出时若仍有在途写入，损失的只是"这一笔未完成"；文件是原子替换的，不会半写。
+func _wait_pending_write() -> void:
+	if _write_task_id == -1:
+		return
+	WorkerThreadPool.wait_for_task_completion(_write_task_id)
+	_on_write_done(_write_serial, _write_result)
 
 
 ## 是否可走增量路径：必须有上次的块索引与原始字节（即此前已 load 或写过一次）。
@@ -635,9 +679,12 @@ func get_chunk_count(lod: int = 0) -> int:
 	return (_models[0] as Dictionary).size() if _models.has(0) else 0
 
 
+## 同步落盘：先等掉在途任务，再写本次，再等本次完成——保证"返回时脏数据已落盘"。
 func flush() -> void:
 	_ensure_loaded()
+	_wait_pending_write()
 	_write_file()
+	_wait_pending_write()
 
 
 func get_stream_path() -> String:

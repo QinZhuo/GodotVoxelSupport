@@ -11,6 +11,7 @@
 #include <godot_cpp/variant/vector3i.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/vector2.hpp>
+#include <godot_cpp/variant/vector2i.hpp>
 
 namespace godot {
 
@@ -153,6 +154,15 @@ public:
 	// 按指定 codec 打包（供"codec 已知"的路径与测试使用）。EMPTY / 非法 codec 返回空。
 	static PackedByteArray pack_with_codec(int codec, const PackedInt32Array &buf, int n);
 
+	// 一块密集缓冲的值域 (min, max)；空缓冲返回 (0, 0)。
+	// 供"整块材质值必须 < entry_count"这类整块校验用：把 32768 次 GDScript 循环降为一次原生扫描。
+	static Vector2i voxel_value_range(const PackedInt32Array &buf);
+
+	// 按 codec 解包负载，返回长度 n 的缓冲；负载损坏（长度不符 / 游程和 ≠ n / 索引越界）返回空。
+	// 与 pack_with_codec 对称。GDScript 版是逐元素循环：实测 196 块（1MB）要 1047ms，
+	// 原生化后是毫秒级——这是"打开大存档"的主要耗时。
+	static PackedInt32Array unpack_block(int codec, const PackedByteArray &payload, int n);
+
 	// ---- 体素枚举（原生批量：替代 GDScript 逐体素循环 + 逐体素 Callable / Variant 装箱）----
 	// buffers: chunk key -> PackedInt32Array(32³)。以下四个都只读 buffers，不修改。
 	//
@@ -171,6 +181,16 @@ public:
 	// 与 positions **平行**的材质 ID 数组（无体素处为 -1）。
 	// 伤害判定只需要"每个候选体素的材质"，不需要"位置 -> 材质"的字典查询。
 	static PackedInt32Array collect_materials_flat(const Dictionary &buffers, const Array &positions);
+	// 逐体素累加伤害（原生内核）：按硬度判定"移除 / 未摧毁"，返回与 positions 平行的结果。
+	//   damage_chunks: {chunk_key: PackedFloat32Array(32³)} 现有累计伤害（缺省视为 0）
+	//   materials:     与 positions 平行（-1 = 无体素）；hardness_table: 索引 = 材质ID
+	//   use_health=false 时全部视为"应移除"，不碰伤害缓冲
+	// 返回 {removed:Array[Vector3i], hardened_pos:Array[Vector3i],
+	//       hardened_rem:PackedFloat32Array, damage_chunks:{ck: PackedFloat32Array}}
+	// **damage_chunks 必须由调用方写回**——原生在本地副本上写（同 remove_voxels_bulk 的契约）。
+	static Dictionary apply_damage(const Dictionary &damage_chunks, const Array &positions,
+			const PackedInt32Array &materials, const PackedFloat32Array &hardness_table,
+			float damage, bool use_health);
 	// 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}（均为新缓冲）。
 	// 与 collect_all_flat 成对（收 / 装），供存档载荷重建。
 	static Dictionary install_flat_voxels(const PackedInt32Array &flat);

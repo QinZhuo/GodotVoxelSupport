@@ -1227,28 +1227,110 @@ PackedInt32Array VoxelNative::collect_materials_flat(const Dictionary &buffers, 
 		return out;
 	}
 	int32_t *w = out.ptrw();
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
 	const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+	// 位置通常按 chunk 成组出现：缓存当前 chunk 的缓冲，把逐体素哈希降为逐 chunk 一次
+	Vector3i cur_ck;
+	bool cur_valid = false;
+	PackedInt32Array cur_buf;
+	const int32_t *cur_ptr = nullptr;
 	for (int i = 0; i < n; ++i) {
 		const Vector3i p = positions[i];
 		const Vector3i ck = chunk_of(p);
-		const uint64_t kk = vkey(ck);
-		auto it = chunk_bufs.find(kk);
-		if (it == chunk_bufs.end()) {
-			PackedInt32Array b;
+		if (!cur_valid || ck != cur_ck) {
+			cur_ck = ck;
+			cur_valid = true;
+			cur_buf = PackedInt32Array();
+			cur_ptr = nullptr;
 			if (buffers.has(ck)) {
-				b = buffers[ck];
+				cur_buf = buffers[ck];
+				if (cur_buf.size() >= volume) {
+					cur_ptr = cur_buf.ptr();
+				}
 			}
-			it = chunk_bufs.emplace(kk, b).first;
 		}
-		if (it->second.size() < volume) {
+		if (cur_ptr == nullptr) {
 			w[i] = -1;
 			continue;
 		}
-		const Vector3i local = p - ck * CHUNK_BITS;
-		const int32_t m = it->second.ptr()[buf_index(local)];
+		const int32_t m = cur_ptr[buf_index(p - ck * CHUNK_BITS)];
 		w[i] = (m > 0) ? m : -1;
 	}
+	return out;
+}
+
+Dictionary VoxelNative::apply_damage(const Dictionary &damage_chunks, const Array &positions,
+		const PackedInt32Array &materials, const PackedFloat32Array &hardness_table,
+		float damage, bool use_health) {
+	Dictionary out;
+	Array removed;
+	Array hardened_pos;
+	PackedFloat32Array hardened_rem;
+	Dictionary changed;
+	const int n = positions.size();
+	for (int i = 0; i < n && !use_health; ++i) {
+		removed.push_back(positions[i]);
+	}
+	if (n > 0 && use_health) {
+		const int hn = hardness_table.size();
+		const int mn = materials.size();
+		const int volume = CHUNK_BITS * CHUNK_BITS * CHUNK_BITS;
+		const float *hard = hardness_table.ptr();
+		const int32_t *mats = materials.ptr();
+		// 伤害缓冲按 chunk 惰性取出到本地（ptrw 会分叉，最后统一回填给调用方）
+		std::unordered_map<uint64_t, PackedFloat32Array> dmg;
+		std::unordered_map<uint64_t, Vector3i> ck_of;
+		Vector3i cur_ck;
+		bool cur_valid = false;
+		float *cur_ptr = nullptr;
+		for (int i = 0; i < n; ++i) {
+			const Vector3i p = positions[i];
+			const Vector3i ck = chunk_of(p);
+			if (!cur_valid || ck != cur_ck) {
+				cur_ck = ck;
+				cur_valid = true;
+				const uint64_t kk = vkey(ck);
+				auto it = dmg.find(kk);
+				if (it == dmg.end()) {
+					PackedFloat32Array b;
+					if (damage_chunks.has(ck)) {
+						b = damage_chunks[ck];
+					}
+					if (b.size() < volume) {
+						b.resize(volume);
+					}
+					it = dmg.emplace(kk, b).first;
+					ck_of[kk] = ck;
+				}
+				cur_ptr = it->second.ptrw();
+			}
+			const int32_t mid = (i < mn) ? mats[i] : -1;
+			float h = 1.0f;
+			if (mid >= 0 && mid < hn) {
+				h = hard[mid];
+			}
+			if (h <= 0.0f) {
+				removed.push_back(p);
+				continue;
+			}
+			const int32_t idx = buf_index(p - ck * CHUNK_BITS);
+			const float cur = cur_ptr[idx] + damage;
+			if (cur >= h) {
+				cur_ptr[idx] = 0.0f;   // 移除即清零：该位置日后被重建时不应继承旧伤
+				removed.push_back(p);
+			} else {
+				cur_ptr[idx] = cur;
+				hardened_pos.push_back(p);
+				hardened_rem.push_back(h - cur);
+			}
+		}
+		for (auto &kv : dmg) {
+			changed[ck_of[kv.first]] = kv.second;
+		}
+	}
+	out["removed"] = removed;
+	out["hardened_pos"] = hardened_pos;
+	out["hardened_rem"] = hardened_rem;
+	out["damage_chunks"] = changed;
 	return out;
 }
 
@@ -1904,6 +1986,145 @@ PackedByteArray VoxelNative::pack_with_codec(int codec, const PackedInt32Array &
 	return qvox_pack_any(codec, buf.ptr(), n);
 }
 
+Vector2i VoxelNative::voxel_value_range(const PackedInt32Array &buf) {
+	const int n = buf.size();
+	if (n <= 0) {
+		return Vector2i(0, 0);
+	}
+	const int32_t *p = buf.ptr();
+	int32_t mn = p[0];
+	int32_t mx = p[0];
+	for (int i = 1; i < n; ++i) {
+		const int32_t v = p[i];
+		if (v < mn) {
+			mn = v;
+		} else if (v > mx) {
+			mx = v;
+		}
+	}
+	return Vector2i(mn, mx);
+}
+
+PackedInt32Array VoxelNative::unpack_block(int codec, const PackedByteArray &payload, int n) {
+	PackedInt32Array out;
+	if (n <= 0) {
+		return out;
+	}
+	const uint8_t *p = payload.ptr();
+	const int64_t total = payload.size();
+	switch (codec) {
+		case QVOX_CODEC_SOLID: {
+			if (total < QVOX_CHANNEL_BYTES) {
+				return PackedInt32Array();
+			}
+			const int32_t v = (int32_t)(p[0] | (p[1] << 8));
+			out.resize(n);
+			int32_t *w = out.ptrw();
+			for (int i = 0; i < n; ++i) {
+				w[i] = v;
+			}
+			return out;
+		}
+		case QVOX_CODEC_RUN: {
+			if (total < 4) {
+				return PackedInt32Array();
+			}
+			const uint32_t count = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+					| ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+			out.resize(n);
+			int32_t *w = out.ptrw();
+			int64_t pos = 4;
+			int64_t idx = 0;
+			for (uint32_t k = 0; k < count; ++k) {
+				uint64_t run_len = 0;
+				int shift = 0;
+				bool ok = false;
+				while (pos < total) {
+					const uint8_t b = p[pos++];
+					run_len |= (uint64_t)(b & 0x7F) << shift;
+					if ((b & 0x80) == 0) {
+						ok = true;
+						break;
+					}
+					shift += 7;
+					if (shift > 35) {
+						break;
+					}
+				}
+				if (!ok || pos + QVOX_CHANNEL_BYTES > total) {
+					return PackedInt32Array();
+				}
+				const int32_t v = (int32_t)(p[pos] | (p[pos + 1] << 8));
+				pos += QVOX_CHANNEL_BYTES;
+				for (uint64_t j = 0; j < run_len; ++j) {
+					if (idx >= n) {
+						return PackedInt32Array();   // 游程和超过 N → 损坏
+					}
+					w[idx++] = v;
+				}
+			}
+			if (idx != n) {
+				return PackedInt32Array();   // 游程和 ≠ N → 损坏（§9 不变量）
+			}
+			return out;
+		}
+		case QVOX_CODEC_DENSE: {
+			if (total < (int64_t)n * QVOX_CHANNEL_BYTES) {
+				return PackedInt32Array();
+			}
+			out.resize(n);
+			int32_t *w = out.ptrw();
+			for (int i = 0; i < n; ++i) {
+				w[i] = (int32_t)(p[2 * i] | (p[2 * i + 1] << 8));
+			}
+			return out;
+		}
+		case QVOX_CODEC_INDEXED: {
+			if (total < 1) {
+				return PackedInt32Array();
+			}
+			const int count = p[0];
+			out.resize(n);
+			int32_t *w = out.ptrw();
+			if (count == 0) {   // 全空
+				for (int i = 0; i < n; ++i) {
+					w[i] = 0;
+				}
+				return out;
+			}
+			const int64_t table_end = 1 + (int64_t)count * QVOX_CHANNEL_BYTES;
+			if (total < table_end) {
+				return PackedInt32Array();
+			}
+			std::vector<int32_t> table(count);
+			for (int k = 0; k < count; ++k) {
+				table[k] = (int32_t)(p[1 + 2 * k] | (p[1 + 2 * k + 1] << 8));
+			}
+			const int bits = qvox_bits_for(count);
+			if (total < table_end + (((int64_t)n * bits + 7) >> 3)) {
+				return PackedInt32Array();
+			}
+			int64_t bit_pos = 0;
+			for (int i = 0; i < n; ++i) {
+				int code = 0;
+				for (int b = 0; b < bits; ++b) {
+					if ((p[table_end + (bit_pos >> 3)] >> (bit_pos & 7)) & 1) {
+						code |= (1 << b);
+					}
+					++bit_pos;
+				}
+				if (code >= count) {
+					return PackedInt32Array();   // 索引越界 → 损坏
+				}
+				w[i] = table[code];
+			}
+			return out;
+		}
+		default:
+			return PackedInt32Array();
+	}
+}
+
 Dictionary VoxelNative::choose_and_pack(const PackedInt32Array &buf, int n) {
 	if (n > buf.size()) {
 		n = buf.size();
@@ -2156,6 +2377,8 @@ Array VoxelNative::collect_box_positions(const Dictionary &buffers, const Vector
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("choose_and_pack", "buf", "n"), &VoxelNative::choose_and_pack);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("pack_with_codec", "codec", "buf", "n"), &VoxelNative::pack_with_codec);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("unpack_block", "codec", "payload", "n"), &VoxelNative::unpack_block);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("voxel_value_range", "buf"), &VoxelNative::voxel_value_range);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_all_positions", "buffers"), &VoxelNative::collect_all_positions);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_all_flat", "buffers"), &VoxelNative::collect_all_flat);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_bounds", "buffers"), &VoxelNative::collect_bounds);
@@ -2176,6 +2399,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials_flat", "buffers", "positions"), &VoxelNative::collect_materials_flat);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("apply_damage", "damage_chunks", "positions", "materials", "hardness_table", "damage", "use_health"), &VoxelNative::apply_damage);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);

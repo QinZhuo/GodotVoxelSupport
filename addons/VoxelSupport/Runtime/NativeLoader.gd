@@ -35,6 +35,8 @@ const REQUIRED_METHODS: Array[StringName] = [
 	# QVox 块级编解码（原生）：pick+pack 一次完成，替代 GDScript 逐元素扫描
 	&"choose_and_pack",
 	&"pack_with_codec",
+	&"unpack_block",
+	&"voxel_value_range",
 	# 体素枚举（原生批量）：替代 GDScript 逐体素循环 + 逐体素 Callable / Variant 装箱
 	&"collect_all_positions",
 	&"collect_all_flat",
@@ -43,6 +45,7 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_box_positions",
 	&"collect_materials_flat",
 	&"install_flat_voxels",
+	&"apply_damage",
 ]
 
 static var _inst: Object = null
@@ -281,6 +284,22 @@ static func pack_with_codec(codec: int, buf: PackedInt32Array, n: int) -> Packed
 	return inst.call(&"pack_with_codec", codec, buf, n)
 
 
+## 按 codec 解包块负载，返回长度 n 的缓冲；负载损坏（长度不符 / 游程和 ≠ n / 索引越界）返回空。
+static func unpack_block(codec: int, payload: PackedByteArray, n: int) -> PackedInt32Array:
+	var inst := instance()
+	if inst == null:
+		return PackedInt32Array()
+	return inst.call(&"unpack_block", codec, payload, n)
+
+
+## 一块密集缓冲的值域 (min, max)（Vector2i）；空缓冲返回 (0, 0)。
+static func voxel_value_range(buf: PackedInt32Array) -> Vector2i:
+	var inst := instance()
+	if inst == null:
+		return Vector2i.ZERO
+	return inst.call(&"voxel_value_range", buf)
+
+
 # ----------------------------------------------------------------------------
 # 体素枚举（原生批量）
 # ----------------------------------------------------------------------------
@@ -341,3 +360,13 @@ static func install_flat_voxels(flat: PackedInt32Array) -> Dictionary:
 	if inst == null:
 		return {}
 	return inst.call(&"install_flat_voxels", flat)
+
+
+## 逐体素累加伤害（原生内核），返回 {removed, hardened_pos, hardened_rem, damage_chunks}。
+## **damage_chunks 里是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
+static func apply_damage(damage_chunks: Dictionary, positions: Array, materials: PackedInt32Array,
+		hardness_table: PackedFloat32Array, damage: float, use_health: bool) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"apply_damage", damage_chunks, positions, materials, hardness_table, damage, use_health)

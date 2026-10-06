@@ -45,12 +45,6 @@ static func buf_index(lx: int, ly: int, lz: int) -> int:
 	return lx + ly * CHUNK_SIZE + lz * CHUNK_SLICE
 
 
-## 世界坐标 → 缓冲线性下标（免去先算 chunk 再减原点；& 掩码对负数同样正确）
-static func buf_index_world(pos: Vector3i) -> int:
-	return (pos.x & (CHUNK_SIZE - 1)) + ((pos.y & (CHUNK_SIZE - 1)) * CHUNK_SIZE) \
-		+ ((pos.z & (CHUNK_SIZE - 1)) * CHUNK_SLICE)
-
-
 ## 缓冲线性下标 → 局部坐标
 static func local_from_index(i: int) -> Vector3i:
 	return Vector3i(

@@ -373,49 +373,22 @@ func repair(amount: float) -> void:
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
 
-## 即时累加伤害：positions 与 mats 平行（mats 来自 _materials_for，无体素处为 -1）。
-## 返回应被移除的体素位置；实际移除由 _process 的破坏管道逐帧处理。
+## 即时累加伤害（原生内核：逐体素读材质 → 比硬度 → 累加 / 判移除）。
+## positions 与 mats 平行（mats 来自 _materials_for，无体素处为 -1）。
+## 返回应被移除的体素位置；伤害缓冲的修改由原生回填，**必须写回**（同 remove_voxels_bulk 契约）。
 func _apply_damage_immediate(positions: Array, mats: PackedInt32Array, damage: float) -> Array:
-	var removed: Array = []
-	var hardened_pos: Array[Vector3i] = []
-	var hardened_rem := PackedFloat32Array()
-	# 硬度表一次建好（≤256 项），替代逐体素 `as VoxelMaterial` + 属性读
-	var hardness_table := _material_table(&"hardness", 1.0)
-	var table_n := hardness_table.size()
-	var mats_n := mats.size()
-	# 同 chunk 的体素在 positions 里连续出现：缓存当前 chunk 的伤害缓冲（空 = 需取/建）
-	var cur_ck := Vector3i.ZERO
-	var cur_buf := PackedFloat32Array()
-	for i in positions.size():
-		var pos: Vector3i = positions[i]
-		if not use_voxel_health:
-			removed.append(pos)
-			continue
-		var mat_id: int = mats[i] if i < mats_n else -1
-		var hardness: float = hardness_table[mat_id] if (mat_id >= 0 and mat_id < table_n) else 1.0
-		if hardness <= 0.0:
-			removed.append(pos)
-			continue
-		var ck := VoxelChunk.chunk_of(pos)
-		if cur_buf.is_empty() or ck != cur_ck:
-			cur_ck = ck
-			cur_buf = _damage.get(ck, PackedFloat32Array())
-			if cur_buf.is_empty():
-				cur_buf = PackedFloat32Array()
-				cur_buf.resize(VoxelChunk.CHUNK_VOLUME)
-				_damage[ck] = cur_buf
-		var idx := VoxelChunk.buf_index_world(pos)
-		var cur := cur_buf[idx] + damage
-		if cur >= hardness:
-			cur_buf[idx] = 0.0   # 移除即清零：该位置日后被重建时不应继承旧伤
-			removed.append(pos)
-		else:
-			cur_buf[idx] = cur
-			hardened_pos.append(pos)
-			hardened_rem.append(hardness - cur)
+	if positions.is_empty():
+		return []
+	var res := NativeLoader.apply_damage(
+		_damage, positions, mats, _material_table(&"hardness", 1.0), damage, use_voxel_health)
+	var changed: Dictionary = res.get("damage_chunks", {})
+	for ck in changed:
+		_damage[ck] = changed[ck]
+	var removed: Array = res.get("removed", [])
 	last_damage_count = removed.size()
+	var hardened_pos: Array = res.get("hardened_pos", [])
 	if not hardened_pos.is_empty():
-		voxel_hardened_batch.emit(hardened_pos, hardened_rem)
+		voxel_hardened_batch.emit(hardened_pos, res.get("hardened_rem", PackedFloat32Array()))
 	return removed
 
 
