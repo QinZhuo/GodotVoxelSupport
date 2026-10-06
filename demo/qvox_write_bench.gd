@@ -1,15 +1,30 @@
 class_name QVoxWriteBench
 extends RefCounted
 
-## QVox 写路径分阶段基准（可在编辑器/游戏进程内直接调用，不依赖场景）。
+## QVox 写路径端到端基准（可在编辑器 / 游戏进程内直接调用，不依赖场景）。
 ##
 ## 用法（eval_code）：
 ##   QVoxWriteBench.run()   → 结果通过 print 输出，用 get_logs 读取
 ##
-## 目的：拆解 _write_file() 各段耗时，确认增量路径是否真的被走到、瓶颈在哪。
+## 【为什么只测公开接口】存储层已把"增量怎么写、旧字节怎么搬运"收进
+## QVoxFile.serialize_incremental（按块索引 + 写入覆盖层 + 删除集）。基准若再伸手去调
+## 那些内部函数，等于把实现细节抄第二遍——实现一变基准先坏。故这里只调 VoxelStream 的
+## 公开契约：save_chunk / flush / load_chunk / has_chunk / is_dirty / get_chunk_count。
+##
+## 口径：把 N 块写进空世界（无旧块可搬 → 必然全量写）作为基线，与"已落盘世界里改 1 块
+## 再写"（必然增量写）对比 —— 两者之差即增量写省下的重编码 + 重写量。
 
 const CHUNK_SIZE := 32
 const CHUNK_VOLUME := 32768
+
+## 世界尺寸：SIDE² 个 chunk（y 固定为 0）。
+const SIDE := 12
+
+## 增量写重复次数 / 全量重建对照次数（对照较慢，次数少些）。
+const INCR_ROUNDS := 10
+const FULL_ROUNDS := 3
+
+const BENCH_DIR := "user://qvox_bench"
 
 
 static func _us(t0: int) -> float:
@@ -17,7 +32,7 @@ static func _us(t0: int) -> float:
 
 
 ## 造一个"真实感"的块：低频噪声，填充率约 40%~60%，codec 非平凡但可压缩。
-static func _make_chunk(seed_pos: Vector3i, mat_base: int) -> PackedInt32Array:
+static func _make_chunk(seed_pos: Vector3i, mat_base: int = 1) -> PackedInt32Array:
 	var buf := PackedInt32Array()
 	buf.resize(CHUNK_VOLUME)
 	var s := seed_pos.x * 73856093 ^ seed_pos.y * 19349663 ^ seed_pos.z * 83492791
@@ -39,11 +54,26 @@ static func _make_chunk(seed_pos: Vector3i, mat_base: int) -> PackedInt32Array:
 	return buf
 
 
+## 模拟一次真实编辑：把约 2000 个体素换成 0 / 6。
+static func _edit(src: PackedInt32Array) -> PackedInt32Array:
+	var ed := src.duplicate()
+	for k in 2000:
+		ed[(k * 7919) % CHUNK_VOLUME] = 0 if k % 2 == 0 else 6
+	return ed
+
+
+static func _reset_files(names: Array) -> void:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(BENCH_DIR))
+	for n in names:
+		var p := ProjectSettings.globalize_path(BENCH_DIR + "/" + String(n))
+		if FileAccess.file_exists(p):
+			DirAccess.remove_absolute(p)
+
+
 static func run() -> void:
 	var lines: Array = []
-	var SIDE := 12
 	var chunk_count := SIDE * SIDE
-	lines.append("=== QVox 写路径分阶段基准 ===")
+	lines.append("=== QVox 写路径基准（端到端）===")
 	lines.append("chunk=%d (%dx%d) CHUNK_SIZE=%d VOL=%d" % [chunk_count, SIDE, SIDE, CHUNK_SIZE, CHUNK_VOLUME])
 
 	# 造数据
@@ -52,123 +82,79 @@ static func run() -> void:
 	for z in SIDE:
 		for x in SIDE:
 			var ck := Vector3i(x, 0, z)
-			chunks.append([ck, _make_chunk(ck, 1)])
+			chunks.append([ck, _make_chunk(ck)])
 	lines.append("生成 %d 块: %.1fms" % [chunk_count, _us(t0)])
-
-	# 清旧文件
-	var dir := "user://qvox_bench"
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
-	for f in ["world.qvox", "world.qvox.tmp"]:
-		var p := ProjectSettings.globalize_path(dir + "/" + f)
-		if FileAccess.file_exists(dir + "/" + f) or FileAccess.file_exists(p):
-			DirAccess.remove_absolute(p)
 
 	var mats: Array = []
 	for i in 8:
 		mats.append(null)
 
-	# ---- 阶段 1：首次全量写 ----
+	# ---- 阶段 1：首次全量写（空世界，无旧块可搬 → 必然全量）----
+	_reset_files(["world.qvox", "world2.qvox"])
 	var stream := QVoxStream.new()
-	stream.file_path = dir + "/world.qvox"
+	stream.file_path = BENCH_DIR + "/world.qvox"
 	stream.set_materials(mats)
 
 	t0 = Time.get_ticks_usec()
 	for c in chunks:
 		stream.save_chunk(c[0] as Vector3i, c[1] as PackedInt32Array, 0)
 	var t_save_all := _us(t0)
-
 	t0 = Time.get_ticks_usec()
 	stream.flush()
 	var t_full := _us(t0)
-	lines.append("首次全量: save×%d=%.1fms  flush=%.1fms  文件=%dKB  (增量可用=%s)"
+	lines.append("首次全量: save×%d=%.1fms  flush=%.1fms  文件=%dKB  落盘后仍脏=%s"
 			% [chunk_count, t_save_all, t_full, _fsize(stream.file_path) / 1024,
-				str(stream._can_write_incremental())])
+				str(stream.is_dirty())])
 
-	# ---- 阶段 2：增量写（只改 1 块），连续 10 次 ----
+	# ---- 阶段 2：增量写 ×N（每次只改 1 块）----
 	var incr: Array = []
-	for i in 10:
+	for i in INCR_ROUNDS:
 		var ck: Vector3i = chunks[i][0]
-		var ed: PackedInt32Array = (chunks[i][1] as PackedInt32Array).duplicate()
-		for k in 2000:
-			ed[(k * 7919) % CHUNK_VOLUME] = 0 if k % 2 == 0 else 6
-		stream.save_chunk(ck, ed, 0)
+		stream.save_chunk(ck, _edit(chunks[i][1] as PackedInt32Array), 0)
 		t0 = Time.get_ticks_usec()
 		stream.flush()
 		incr.append(_us(t0))
-	lines.append("增量写×10(每次改1块): 均 %.2fms  %s" % [_avg(incr), _fmt(incr)])
+	lines.append("增量写×%d(每次改1块): 均 %.2fms  %s" % [INCR_ROUNDS, _avg(incr), _fmt(incr)])
 
-	# ---- 阶段 3：对照全量 serialize（每次改 1 块）----
+	# ---- 阶段 3：对照 —— 从零重建整个世界（每次都要重编码全部块）----
 	var full: Array = []
-	var f2 := QVoxStream.new()
-	f2.file_path = dir + "/world2.qvox"
-	f2.set_materials(mats)
-	for c in chunks:
-		f2.save_chunk(c[0] as Vector3i, c[1] as PackedInt32Array, 0)
-	f2.flush()
-	for i in 10:
-		var ck: Vector3i = chunks[i][0]
-		var ed: PackedInt32Array = (chunks[i][1] as PackedInt32Array).duplicate()
-		for k in 2000:
-			ed[(k * 7919) % CHUNK_VOLUME] = 0 if k % 2 == 0 else 6
-		f2.save_chunk(ck, ed, 0)
+	for _r in FULL_ROUNDS:
+		var s := QVoxStream.new()
+		s.file_path = BENCH_DIR + "/world2.qvox"
+		s.set_materials(mats)
 		t0 = Time.get_ticks_usec()
-		var doc := QVoxFile.QVoxDocument.new()
-		doc.head = f2._build_head()
-		doc.materials = f2._materials_to_qvox()
-		doc.models = f2._models_to_qvox_models()
-		doc.node = {}
-		doc.unknown_blocks = {}
-		var bytes := QVoxFile.serialize(doc)
+		for c in chunks:
+			s.save_chunk(c[0] as Vector3i, c[1] as PackedInt32Array, 0)
+		s.flush()
 		full.append(_us(t0))
-		f2._dirty = false
-	lines.append("全量serialize×10(每次改1块): 均 %.2fms  %s" % [_avg(full), _fmt(full)])
+	lines.append("全量重建×%d(每次写全部%d块): 均 %.2fms  %s"
+			% [FULL_ROUNDS, chunk_count, _avg(full), _fmt(full)])
 
-	# ---- 阶段 4：正确性（写盘→重载→比对）----
-	var stream2 := QVoxStream.new()
-	stream2.file_path = stream.file_path
-	stream2.clear_cache()
+	# ---- 阶段 4：正确性（重载磁盘逐块比对）+ 内存有界 ----
+	var r := QVoxStream.new()
+	r.file_path = stream.file_path
 	var ok := true
-	var checked := 0
-	for i in 10:
+	for i in INCR_ROUNDS:
 		var ck: Vector3i = chunks[i][0]
-		var got := stream2.load_chunk(ck, 0)
-		var want: PackedInt32Array = (chunks[i][1] as PackedInt32Array).duplicate()
-		for k in 2000:
-			want[(k * 7919) % CHUNK_VOLUME] = 0 if k % 2 == 0 else 6
-		if got != want:
+		if r.load_chunk(ck, 0) != _edit(chunks[i][1] as PackedInt32Array):
 			ok = false
-		checked += 1
-	lines.append("正确性(重载比对 %d 块): %s" % [checked, "PASS" if ok else "FAIL"])
+	lines.append("正确性(重载比对 %d 块): %s  落盘后未写状态为空=%s  磁盘块数=%d"
+			% [INCR_ROUNDS, "PASS" if ok else "FAIL",
+				str(not stream.is_dirty()), stream.get_chunk_count(0)])
 
-	# 逐块细分：单次增量写内部各段耗时
-	lines.append("--- 单次增量写内部拆解 ---")
-	var ck0: Vector3i = chunks[0][0]
-	var ed0: PackedInt32Array = (chunks[0][1] as PackedInt32Array).duplicate()
-	for k in 2000:
-		ed0[(k * 7919) % CHUNK_VOLUME] = 0 if k % 2 == 0 else 6
-	stream.save_chunk(ck0, ed0, 0)
-	var docn := QVoxFile.QVoxDocument.new()
-	docn.head = stream._build_head()
-	docn.materials = stream._materials_to_qvox()
-	docn.models = stream._models_to_qvox_models()
-	docn.node = {}
-	docn.unknown_blocks = {}
+	# ---- 阶段 5：粗层（CACH）往返：按需读盘 + 来源校验 ----
+	var coarse := PackedInt32Array()
+	coarse.resize(CHUNK_VOLUME)
+	coarse[VoxelChunk.buf_index(3, 3, 3)] = 2
+	stream.save_chunk(Vector3i.ZERO, coarse, 1)
 	t0 = Time.get_ticks_usec()
-	var _m := stream._models_to_qvox_models()
-	var t_build := _us(t0)
-	t0 = Time.get_ticks_usec()
-	var old_doc := QVoxFile.QVoxDocument.new()
-	old_doc.block_index = stream._block_index
-	old_doc.head = stream._loaded_head
-	old_doc.materials = stream._loaded_materials
-	old_doc.node = stream._loaded_node
-	var out := QVoxFile.serialize_incremental(stream._raw_bytes, old_doc, docn, stream._dirty_models, stream._dirty_global)
-	var t_incr := _us(t0)
-	t0 = Time.get_ticks_usec()
-	var idx_doc := QVoxFile.parse_with_index(out)
-	var t_refresh := _us(t0)
-	lines.append("_models_to_qvox_models=%.2fms  serialize_incremental=%.2fms  parse_with_index(refresh)=%.2fms"
-			% [t_build, t_incr, t_refresh])
+	stream.flush()
+	var t_cach := _us(t0)
+	var r2 := QVoxStream.new()
+	r2.file_path = stream.file_path
+	var coarse_ok := r2.has_chunk(Vector3i.ZERO, 1) and r2.load_chunk(Vector3i.ZERO, 1) == coarse
+	lines.append("粗层 CACH: 写盘=%.2fms  重载命中且逐体素一致=%s  (世界文件 %dKB)"
+			% [t_cach, str(coarse_ok), _fsize(stream.file_path) / 1024])
 
 	print("\n".join(PackedStringArray(lines)))
 

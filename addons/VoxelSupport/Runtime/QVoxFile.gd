@@ -617,6 +617,29 @@ static func _parse_mate(payload: PackedByteArray, notes: Variant = null) -> Arra
 	return out
 
 
+## 解析 CACH 负载的**头部**：{ kind, algo_version, source_crc, content_off }。结构非法返回 {}。
+##
+## content_off = "前置 + 来源表"之后的字节起点（相对负载起点），即 kind 解释者自己的内容起点。
+## **不切出内容字节**：供"只建条目索引、不解码缓存"的调用方使用（QVoxStream 的 CACH 条目
+## 索引），免得为每个缓存条目复制一份负载。这是 CACH 头部布局的唯一实现。
+static func parse_cach_header(payload: PackedByteArray) -> Dictionary:
+	if payload.size() < QVoxSpec.CACH_PREFIX_SIZE:
+		return {}
+	var source_count := payload.decode_u16(6)
+	var need := QVoxSpec.CACH_PREFIX_SIZE + source_count * 4
+	if payload.size() < need:
+		return {}
+	var source_crc: Array = []
+	for i in source_count:
+		source_crc.append(payload.decode_u32(QVoxSpec.CACH_PREFIX_SIZE + i * 4))
+	return {
+		"kind": _read_type(payload, 0),
+		"algo_version": payload.decode_u16(4),
+		"source_crc": source_crc,
+		"content_off": need,
+	}
+
+
 ## 解析 CACH payload → { kind, algo_version, source_crc, payload }。结构非法返回 null。
 ##
 ## 【长度语义】外层块头的 length 含 0–3 字节尾部零填充，而 CACH 的 payload 段本身
@@ -624,23 +647,11 @@ static func _parse_mate(payload: PackedByteArray, notes: Variant = null) -> Arra
 ## 原样交出"前置 + 来源表之后的全部字节"，由认识该 kind 的写入方按自己的格式定界。
 ## 这正是 §6 写明"byte[] payload 余下的全部字节（含块尾填充）"的含义。
 static func _parse_cach(payload: PackedByteArray) -> Variant:
-	if payload.size() < QVoxSpec.CACH_PREFIX_SIZE:
+	var hdr := parse_cach_header(payload)
+	if hdr.is_empty():
 		return null
-	var kind := _read_type(payload, 0)
-	var algo_version := payload.decode_u16(4)
-	var source_count := payload.decode_u16(6)
-	var need := QVoxSpec.CACH_PREFIX_SIZE + source_count * 4
-	if payload.size() < need:
-		return null
-	var source_crc: Array = []
-	for i in source_count:
-		source_crc.append(payload.decode_u32(QVoxSpec.CACH_PREFIX_SIZE + i * 4))
-	return {
-		"kind": kind,
-		"algo_version": algo_version,
-		"source_crc": source_crc,
-		"payload": payload.slice(need),
-	}
+	hdr["payload"] = payload.slice(int(hdr["content_off"]))
+	return hdr
 
 
 ## 该 MATE 条目是否为"空气"（§4：条目 0 保留且全零）。
@@ -662,7 +673,7 @@ static func _is_air_entry(entry: Variant) -> bool:
 # 布局：int32 bx | int32 by | int32 bz | uint8 codec | uint32 payload_length | payload
 #
 # 【为什么必须收敛到一处】这段布局原先在 4 处各写了一遍（解析 _parse_vox0_into、
-# 建子块索引 index_vox0_blocks、整编码 _encode_vox0、增量写 encode_vox0_incremental），
+# 建子块索引 index_vox0_blocks、整编码 _encode_vox0、增量写 encode_vox0_blocks），
 # 偏移量（+4 / +8 / +12 / +13）全是手抄的魔法数。任何一处改动漏改其余三处，就会写出
 # 只有自己读得懂、或反之读错的文件；而往返自测可能恰好掩盖这种漂移。
 # 因此读写各收敛为一个函数，偏移只在下面出现一次。
@@ -1064,8 +1075,8 @@ static func serialize(doc: QVoxDocument, include_crc: bool = true) -> PackedByte
 
 ## 把 CACH 条目编码为完整顶层块（含 12 字节块头）并追加到 out。
 ##
-## 供两条路径共用：serialize 全量写、serialize_incremental 的"CACH 脏则整体重写"分支，
-## 以及 QVoxStream 在写完权威数据后追加派生缓存。三条路径都只经过这里，
+## 供两条路径共用：serialize 全量写、serialize_incremental 追加"变化的条目"
+## （旧条目中内容变了的已被跳过，未变的原地搬运）。两条路径都只经过这里，
 ## 因此 CACH 的字节布局永远只有一处实现（P4 的"块头自足"在写入端的样子）。
 static func append_cach_blocks(out: PackedByteArray, entries: Array, include_crc: bool = true) -> void:
 	for e in entries:
@@ -1097,33 +1108,42 @@ static func encode_cach(entry: Dictionary) -> PackedByteArray:
 
 ## 【增量写盘】在旧文件字节的基础上重写，未变的块直接搬运原始字节，只重编码脏块。
 ##
-## 前提：new_doc 由 parse_with_index(old_bytes) 得到的 doc 修改而来（block_index 有效），
-## 且**块集合未变**（没有新增/删除 model，没有未知块增减）。否则请退回 serialize()。
+## 前提：old_doc.block_index 有效（由 parse_with_index(old_bytes) 得到）。
+##   **不再要求"块集合未变"**：VOX0 的增删块由 encode_vox0_blocks 就地处理（新增的按坐标序
+##   追加、删除的跳过、整个 model 空了就不写该块），故调用方无需预判"能否走增量"。
+##
+## 【关键契约】new_doc.models 装的是**脏块内容覆盖层，不是全世界**（model_id →
+##   { chunk_key: PackedInt32Array }）。存储层已不再常驻全世界的解码镜像（那是内存无界
+##   增长的根源），因此这里拿不到"完整模型"，只有"变了的那几块的内容"。未变子块的字节
+##   由旧索引定位、从 old_bytes 原样搬运——这也是子块级增量的全部收益来源。
 ##
 ## 参数：
-##   old_bytes   旧文件完整字节（含签名）
-##   old_doc     对 old_bytes 调 parse_with_index 得到的文档（其 block_index 提供块区间）
-##   new_doc     修改后的文档（models/materials/node 已更新）
-##   dirty_models  脏的 model_id 集合（Dictionary：model_id → true）；仅这些 VOX0 重编码
-##   dirty_global  是否重编码 HEAD/MATE/NODE（materials、metadata、node 变动时置 true）
-##   dirty_chunks  { model_id: { chunk_key(Vector3i): true } }——model 内**哪些 chunk 变了**。
-##                 给定后，脏 model 的 VOX0 走子块级增量：未变 chunk 搬运旧字节、
-##                 只重编码脏 chunk（实测 144 块改 1 块：2000ms → ~15ms）。
-##   vox0_index    【二级索引缓存，可选】{ model_id(int): index_vox0_blocks() 的结果 }。
-##                 index_vox0_blocks 要对整个 VOX0 负载算一遍子块 CRC（1.4MB ≈ 90ms），
-##                 若每次写盘都重算，子块级增量的收益会被它吃光。由调用方（QVoxStream）
-##                 在加载时建一次、写盘后增量维护，后续写盘直接复用 → 归零。
-##                 缺省为空 → 退回"现场重算索引"（正确但慢），保证旧调用方不受影响。
-##   dirty_cach    派生缓存（CACH）是否变化。true 时旧 CACH 块全部跳过、new_doc.cach
-##                 在末尾整体重写；false 时旧 CACH 原样搬运。"整批重写"而非逐条比对，
-##                 是因为 CACH 由调用方整体持有（QVoxStream 的 _lod_cache），
-##                 逐条 diff 的复杂度换不来相应收益。
-##
-## 返回新文件字节。确定性：同一输入必得同一输出。
-static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocument, new_doc: QVoxDocument, dirty_models: Dictionary, dirty_global: bool, include_crc: bool = true, dirty_chunks: Dictionary = {}, vox0_index: Dictionary = {}, dirty_cach: bool = false) -> PackedByteArray:
-	# 快速退化判定：块集合变化 → 必须全量重写（增量只搬运旧块，无法插入/删除块）。
-	# 调用方通常已用 incremental_applicable 判过一次；这里再判一次是防御（无害）。
-	if not incremental_applicable(old_doc, new_doc):
+##   old_bytes      旧文件完整字节（含签名）
+##   old_doc        对 old_bytes 调 parse_with_index 得到的文档（其 block_index 提供块区间）
+##   new_doc        修改后的文档。models 为脏块覆盖层（见上），其余字段为最终值。
+##   dirty_models   { model_id: true }——需要重建 VOX0 的 model；其余 model 原样搬运。
+##   dirty_global   是否重编码 HEAD/MATE/NODE（materials、metadata、node 变动时置 true）
+##   deleted_chunks { model_id: { chunk_key(Vector3i): true } }——被**删除**的块。
+##                  与 new_doc.models 里的写入键合起来即"全部变更键"：写入的重编码、
+##                  删除的跳过、其余子块搬运旧字节（实测 144 块改 1 块：2000ms → ~15ms）。
+##   vox0_index     【二级索引缓存，可选】{ model_id(int): index_vox0_blocks() 的结果 }。
+##                  index_vox0_blocks 要对整个 VOX0 负载算一遍子块 CRC（1.4MB ≈ 90ms），
+##                  若每次写盘都重算，子块级增量的收益会被它吃光。由调用方（QVoxStream）
+##                  在加载时建一次、写盘后增量维护，后续写盘直接复用 → 归零。
+##                  缺省/未命中 → 现场重算索引（正确但慢），保证旧调用方不受影响。
+##   dirty_cach_blocks
+##                 需要**替换/删除**的旧 CACH 顶层块偏移集合 { block_offset(int): true }。
+##                 在集合里的旧块被跳过（不搬运），新条目由 new_doc.cach 在末尾追加；
+##                 不在集合里的旧 CACH 原样搬运（缓存内容与其来源都没变）。
+##                 【为什么按块偏移而不是整体布尔】派生缓存由调用方（QVoxStream）**按条目**
+##                 持有：它只留"变化的那几条"在内存里，其余条目仍躺在磁盘上。整体 bool 会
+##                 迫使调用方交出完整缓存（又回到常驻镜像），逐条 diff 又要格式层解释 kind；
+##                 而"哪些旧块要换掉"是调用方（索引持有者）已经知道的事实，直接给偏移最省。
+##                 空集合 = 没有条目要替换，此时 new_doc.cach 也应为空。
+##   返回值：新文件字节。确定性：同一输入必得同一输出。
+static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocument, new_doc: QVoxDocument, dirty_models: Dictionary, dirty_global: bool, include_crc: bool = true, deleted_chunks: Dictionary = {}, vox0_index: Dictionary = {}, dirty_cach_blocks: Dictionary = {}) -> PackedByteArray:
+	# 无旧索引就无从搬运旧块。此时调用方须保证 new_doc 自带完整世界（首写场景），退回全量写。
+	if old_doc == null or old_doc.block_index.is_empty():
 		return serialize(new_doc, include_crc)
 
 	var out := PackedByteArray()
@@ -1152,18 +1172,19 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 			continue
 		if type == QVoxSpec.BLOCK_VOX0:
 			var mid: int = int(bi.get("model_id", -1))
-			var new_blocks: Variant = new_doc.model_blocks(mid)
-			if mid >= 0 and dirty_models.has(mid) and new_blocks is Dictionary:
-				var blocks: Dictionary = new_blocks
-				if _model_is_empty(blocks):
-					continue  # 该 model 已空 → 不写（块集合变化本应退全量，这里兜底）
-				# 【子块级增量】先试"只重编码脏 chunk、其余子块搬运旧字节"。
-				# 失败（块集合变化）退回整 model 重编码。
+			if mid >= 0 and dirty_models.has(mid):
+				var overlay := _as_blocks(new_doc.model_blocks(mid))
+				var deleted := _as_deleted(deleted_chunks.get(mid))
+				# 【子块级增量】只重编码脏块：未变子块搬运旧字节，块集合的增删就地处理。
 				# vox0_index 命中则免去子块重索引（对 1.4MB 负载约省 90ms）。
-				var enc := _try_encode_model_incremental(
-						old_bytes, bi, mid, blocks, dirty_chunks, block_size, vox0_index.get(mid, {}))
-				var payload_vox0: PackedByteArray = enc if not enc.is_empty() \
-						else _encode_vox0(mid, blocks, block_size)
+				var old_payload := _block_payload(old_bytes, bi)
+				var old_index: Variant = vox0_index.get(mid)
+				if not (old_index is Dictionary) or (old_index as Dictionary).is_empty():
+					old_index = index_vox0_blocks(old_payload, block_size)
+				var payload_vox0 := encode_vox0_blocks(old_payload, old_index, overlay, deleted, block_size)
+				if payload_vox0.is_empty():
+					continue   # 该 model 已无任何块 → 不写（等同删除整个 VOX0）
+				payload_vox0.encode_u16(0, mid & 0xFFFF)   # 回填 model_id
 				_write_block(out, QVoxSpec.BLOCK_VOX0, payload_vox0, include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
@@ -1176,18 +1197,18 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 				_copy_block(old_bytes, out, bi)
 			continue
 		if type == QVoxSpec.BLOCK_CACH:
-			# CACH 脏 → 丢弃旧块（不搬运），稍后在末尾由 new_doc.cach 整体重写；
-			# 不脏 → 原样搬运（缓存内容与其来源都没变）。
-			# 【为什么不逐条 diff】CACH 全部由调用方整体持有（如 QVoxStream 的 LOD 缓存），
-			# 而"派生数据可删"（P5）意味着丢掉重写永远是正确的，故整批处理最简单且无灰区。
-			if not dirty_cach:
+			# 只有"内容变了的"旧块被跳过（其偏移由调用方给出），未变的原样搬运
+			# （缓存内容与其来源都没变）；新条目在末尾统一追加。
+			# 【为什么不整体重写】派生缓存由调用方**按条目**持有：未变的条目仍躺在磁盘上，
+			# 无须（也无法）在内存里重建 —— 整批重写会把它们丢掉。
+			if not dirty_cach_blocks.has(int(bi["offset"])):
 				_copy_block(old_bytes, out, bi)
 			continue
 		# 未知块：原样搬运（重写不丢数据）
 		_copy_block(old_bytes, out, bi)
 
-	# 兜底：新 doc 里存在但旧文件没有的 model（正常情况下 _incremental_applicable 已拦下）。
-	# 这里补齐，保证不丢数据（退化等价于"新增的块追加在末尾"）。
+	# 兜底：新 doc 里存在但旧文件没有的 model（旧文件里没有它的 VOX0 块可搬运）。
+	# 此时覆盖层即该 model 的完整内容（它从未落过盘），直接整编码追加，保证不丢数据。
 	var old_model_ids := {}
 	for idx in old_doc.block_index.size():
 		var bi: Dictionary = old_doc.block_index[idx]
@@ -1201,10 +1222,9 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 			continue
 		_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(mid, blocks, block_size), include_crc)
 
-	# CACH：脏则整体重写（旧块已在上面被跳过）。CACH 允许出现在文件任意位置（§2 表），
-	# 统一追加在末尾既简单又让"旧块跳过 + 新块追加"天然等价于一次替换。
-	if dirty_cach:
-		append_cach_blocks(out, new_doc.cach, include_crc)
+	# CACH：新条目（内容变化 / 新增的）统一追加在末尾；变了的旧块已在上面被跳过。
+	# CACH 允许出现在文件任意位置（§2 表），故"跳过旧块 + 末尾追加"天然等价于一次按条目替换。
+	append_cach_blocks(out, new_doc.cach, include_crc)
 
 	return out
 
@@ -1223,6 +1243,9 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 ##     "sub": { key: {"crc": int} } }  // 每个子块的 CRC32
 ## 子块 CRC 同时是 LOD 派生缓存（CACH）的来源校验依据：缓存的 source_crc 就是它所依赖的
 ## LOD0 子块 CRC 集合（见 _lod_expected_crcs）。
+##
+## 注意：这里的 offset 全部**相对 payload 起点**，而函数看不到文件位置，故"该 payload 在文件
+## 中的绝对偏移"由调用方补进 `_meta.base`（按块随机读盘时要把两者相加）。
 static func index_vox0_blocks(payload: PackedByteArray, _block_size: int) -> Dictionary:
 	var out: Dictionary = {}
 	if payload.size() < QVoxSpec.VOX_MODEL_HEADER_SIZE:
@@ -1275,152 +1298,97 @@ static func _block_crc(full: PackedByteArray, header_at: int, length: int) -> in
 			PackedInt64Array([8, length]))
 
 
-## 【子块级增量编码】一个 model 的 VOX0：只重编码 dirty 的 chunk，其余子块字节原样搬运。
-## 未变子块在旧、新 payload 里偏移完全相同，故按"连续未变段"整段 memcpy；脏块通常只有 1~2 个。
+## 【子块级增量编码】由一个 model 的旧负载索引 + **变更内容覆盖层** + 删除集重建 VOX0 负载。
 ##
-## 返回新 payload；块集合已变（增量不适用）时返回空，调用方据此退回 _encode_vox0 整编码。
+## 与旧实现的根本差别：旧版要求传入"完整的新块字典"（全世界都得在内存里），本版只传**变了
+## 的那几块**——因为存储层已不再常驻全世界的解码镜像。未变子块在旧、新负载里偏移完全相同，
+## 故把**连续的未变段**合并成一次 old_payload.slice + append_array（原生 memcpy，
+## 1.7MB 约 1.5ms）；脏块通常只有一两个 → 大段拷贝从 144 次降到 2~4 次。
+##
+## 块集合的增删也就地处理，因此不再有"不适用增量就退回整编码"的失败分支：
+##   未变（既不在 overlay 也不在 deleted）→ 搬运旧字节
+##   写入（在 overlay 里）→ 重新挑 codec 并编码；若编码为空块则丢弃（空块不落盘，P2）
+##   删除（在 deleted 里且不在 overlay）→ 跳过
+##   新增（在 overlay 里但旧索引没有）→ 按坐标排序追加在末尾（保证同一输入同一输出）
+##
+## 返回不含 model_id 的负载（前 2 字节占位 0，由调用方回填）；最终一块都不剩时返回空。
 ## CRC 由写入方统一算（_block_crc），此处不重复。
-static func encode_vox0_incremental(old_payload: PackedByteArray, old_index: Dictionary, blocks: Dictionary, dirty_chunks: Dictionary, block_size: int) -> PackedByteArray:
+static func encode_vox0_blocks(old_payload: PackedByteArray, old_index: Dictionary, overlay: Dictionary, deleted: Dictionary, block_size: int) -> PackedByteArray:
 	var n := block_size * block_size * block_size
-	# 仅取真正的子块条目（old_index 里的 "_meta" 是元信息，不是子块）
-	var sub_count := 0
-	for k in old_index:
-		if k is Vector3i:
-			sub_count += 1
-	# 新模型中"非空"的块集合（空块不落盘）
-	var live := {}
-	for k in blocks:
-		var buf: PackedInt32Array = blocks[k]
-		if buf.size() != n:
-			continue
-		live[k] = true
-	# 块集合必须与旧文件一致，增量才成立（否则要增删子块 → 退回整编码）
-	if live.size() != sub_count:
-		return PackedByteArray()
-	for k in live:
-		if not old_index.has(k):
-			return PackedByteArray()
-	for k in old_index:
-		if k is Vector3i and not live.has(k):
-			return PackedByteArray()
+	var body := PackedByteArray()
+	var count := 0
 
-	# 按旧的物理顺序重建，保持确定性（"_meta" 由 index_vox0_blocks 写入）
+	# 1) 旧物理顺序：未变搬运 / 变更重编码 / 删除跳过
 	var order: Array = (old_index.get("_meta", {}) as Dictionary).get("order", [])
-	var keys := order.duplicate()
-	if keys.is_empty():
-		# 兜底：没有物理顺序元信息时按坐标排序（保证同一 index 得到同一输出）
-		for k in old_index:
-			if k is Vector3i:
-				keys.append(k)
-		keys.sort_custom(func(a, b):
-			if a.x != b.x: return a.x < b.x
-			if a.y != b.y: return a.y < b.y
-			return a.z < b.z)
+	for k in order:
+		if overlay.has(k):
+			if _append_encoded_block(body, k, overlay[k], n):
+				count += 1
+			continue
+		if deleted.has(k):
+			continue
+		var info: Dictionary = old_index[k]
+		body.append_array(old_payload.slice(int(info["head_off"]),
+				int(info["head_off"]) + int(info["block_total"])))
+		count += 1
+
+	# 2) 旧索引里没有的新增键：按坐标排序追加（物理顺序旧的在前、新的在后，确定性不依赖遍历顺序）
+	var appended: Array = []
+	for k in overlay:
+		if not old_index.has(k):
+			appended.append(k)
+	appended.sort_custom(func(a, b):
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	for k in appended:
+		if _append_encoded_block(body, k, overlay[k], n):
+			count += 1
+
+	if count == 0:
+		return PackedByteArray()
 
 	# 【10 字节模型头】model_id(2) + block_count(4) + payload_length(4)。
-	# payload_length 此刻还不知道（块体尚未拼完），先占位、最后回填。
-	# 这个字段是 VOX0 内部贯彻 P4 的关键：子块逐个自足还不够，**整段负载也要自足**，
-	# 否则解析器无法判断"负载到此为止"还是"后面还有填充"，见 QVoxSpec.VOX_MODEL_HEADER_SIZE。
+	# payload_length 是 VOX0 内部贯彻 P4 的关键：子块逐个自足还不够，**整段负载也要自足**，
+	# 否则解析器无法判断"负载到此为止"还是"后面还有填充"（见 QVoxSpec.VOX_MODEL_HEADER_SIZE）。
 	var out := PackedByteArray()
 	out.resize(QVoxSpec.VOX_MODEL_HEADER_SIZE)
 	out.encode_u16(0, 0)  # model_id 占位，调用方写
-	out.encode_u32(2, keys.size())
-
-	# 【性能关键·一·连续段合并】未变子块在旧、新 payload 里的偏移**完全相同**，
-	# 因此不逐个 slice+append（144 次、反复 realloc），而是把**连续的未变段**
-	# 合并成一次 old_payload.slice + append_array（原生 memcpy，1.7MB 约 1.5ms）。
-	# 脏块通常只有一两个 → 大段拷贝从 144 次降到 2~4 次。
-	var i := 0
-	var nkeys := keys.size()
-	while i < nkeys:
-		var k: Vector3i = keys[i]
-		var info: Dictionary = old_index[k]
-		if not dirty_chunks.has(k):
-			# 连续未变段 [i, j)：一次切片搬运整段
-			var j := i
-			var run_start: int = info["head_off"]
-			var run_end := run_start
-			while j < nkeys and not dirty_chunks.has(keys[j]):
-				run_end = int(old_index[keys[j]]["head_off"]) + int(old_index[keys[j]]["block_total"])
-				j += 1
-			out.append_array(old_payload.slice(run_start, run_end))  # 原生 memcpy，一次
-			i = j
-			continue
-		# 脏 chunk：重新挑 codec 并编码，就地写入
-		var buf2: PackedInt32Array = blocks[k]
-		var picked := QVoxBlockCodec.choose_and_pack(buf2, n)
-		var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
-		if codec == QVoxSpec.CODEC_EMPTY:
-			return PackedByteArray()  # 变成空块：块集合已变，退回整编码
-		var pl: PackedByteArray = picked.get("payload", PackedByteArray())
-		write_vox_block(out, k, codec, pl)
-		i += 1
-
-	# 【回填 payload_length】块体自 VOX_MODEL_HEADER_SIZE 起，长度即 out.size() - 头长。
-	# 有了它，解析侧可以 expected_end = 头长 + payload_length 精确切负载，填充灰区归零。
-	out.encode_u32(6, out.size() - QVoxSpec.VOX_MODEL_HEADER_SIZE)
+	out.encode_u32(2, count)
+	out.encode_u32(6, body.size())
+	out.append_array(body)
 	return out
 
 
-## 【子块级增量】尝试以"只重编码脏 chunk"的方式重建一个 model 的 VOX0。
-##
-## old_bytes / bi（该 VOX0 在旧文件中的块索引）给出旧 VOX0 的原始字节；
-## dirty_chunks_by_model 是 { model_id: {chunk_key: true} }（可为空 → 整 model 重编码）。
-##
-## 返回新 payload；不适用增量时返回空，调用方退回整 model 重编码。
-##
-## old_vox0_index 为调用方缓存的 index_vox0_blocks 结果（可空 Dict → 现场重算）。
-static func _try_encode_model_incremental(old_bytes: PackedByteArray, bi: Dictionary, model_id: int, blocks: Dictionary, dirty_chunks_by_model: Dictionary, block_size: int, old_vox0_index: Dictionary = {}) -> PackedByteArray:
-	var off: int = bi["offset"]
-	var total: int = bi["total"]
-	if off + total > old_bytes.size():
-		return PackedByteArray()
-	# 旧 VOX0 的 payload 区间：跳过 12 字节顶层块头
-	var payload_off := off + QVoxSpec.BLOCK_HEADER_SIZE
-	var payload_len := total - QVoxSpec.BLOCK_HEADER_SIZE
-	if payload_len < QVoxSpec.VOX_MODEL_HEADER_SIZE:
-		return PackedByteArray()
-	var old_payload := old_bytes.slice(payload_off, payload_off + payload_len)
-	var old_index := old_vox0_index
-	if old_index.is_empty():
-		old_index = index_vox0_blocks(old_payload, block_size)
-	if old_index.is_empty():
-		return PackedByteArray()
-	var dirty: Dictionary = dirty_chunks_by_model.get(model_id, {})
-	var payload := encode_vox0_incremental(old_payload, old_index, blocks, dirty, block_size)
-	if payload.is_empty():
-		return PackedByteArray()
-	payload.encode_u16(0, model_id & 0xFFFF)  # 回填 model_id
-	return payload
-
-
-## 增量写是否适用：块集合（VOX0 的 model_id 集合）必须一致——增量只能就地替换块，
-## 无法插入/删除块。CACH 不参与判断：它允许出现在文件任意位置（§2 表），
-## 由调用方的 dirty_cach 决定"搬运旧块"还是"整体跳过并在末尾重写"。
-##
-## 公开：调用方（QVoxStream）需要据此决定"是否要额外追加派生块"——
-## 走全量时旧 CACH 不会被搬运，必须补写，故它必须能预知 serialize_incremental 走哪条路。
-##
-## 【键类型必须统一】doc.models 的键一律为 int（解析端与写入端一致）。
-## Godot 的 Dictionary 中 `0` 与 `"0"` 是**不同的键**，混用会让 has() 恒为 false ——
-## 曾经因此让增量写 100% 退化成全量（且无声）。故这里两侧都用 int 比较。
-static func incremental_applicable(old_doc: QVoxDocument, new_doc: QVoxDocument) -> bool:
-	if old_doc == null or old_doc.block_index.is_empty():
+## 编码一个子块并追加到 body（空块/尺寸不对 → 不写，返回 false）。
+static func _append_encoded_block(body: PackedByteArray, key: Vector3i, buf: PackedInt32Array, n: int) -> bool:
+	if buf.size() != n:
 		return false
-	var old_models := {}
-	for idx in old_doc.block_index.size():
-		var bi: Dictionary = old_doc.block_index[idx]
-		if bi["type"] == QVoxSpec.BLOCK_VOX0:
-			old_models[int(bi.get("model_id", -1))] = true
-	# 旧里有新里没有的 model（删除了）→ 增量无法去掉块 → 全量
-	for mid in old_models:
-		if not new_doc.models.has(mid):
-			return false
-	# 新里有旧里没有的 model（新增了）→ 增量无法插入块 → 全量
-	for mid in new_doc.model_ids():
-		if not old_models.has(mid):
-			return false
+	var picked := QVoxBlockCodec.choose_and_pack(buf, n)
+	var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
+	if codec == QVoxSpec.CODEC_EMPTY:
+		return false   # 全空 → 该块不落盘（P2）
+	write_vox_block(body, key, codec, picked.get("payload", PackedByteArray()))
 	return true
+
+
+## 取一个顶层块的负载字节（跳过 12 字节块头）。区间越界返回空。
+static func _block_payload(bytes: PackedByteArray, bi: Dictionary) -> PackedByteArray:
+	var off: int = int(bi["offset"])
+	var end := off + int(bi["total"])
+	if end > bytes.size():
+		return PackedByteArray()
+	return bytes.slice(off + QVoxSpec.BLOCK_HEADER_SIZE, end)
+
+
+## 把 new_doc.model_blocks() 的结果安全收窄为"覆盖层字典"（非字典 → 空）。
+static func _as_blocks(v: Variant) -> Dictionary:
+	return v if v is Dictionary else {}
+
+
+## 把 deleted_chunks[mid] 安全收窄为删除集（非字典 → 空）。
+static func _as_deleted(v: Variant) -> Dictionary:
+	return v if v is Dictionary else {}
 
 
 static func _copy_block(old_bytes: PackedByteArray, out: PackedByteArray, bi: Dictionary) -> void:

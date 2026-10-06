@@ -13,10 +13,14 @@ extends TestCase
 ##   ① 渲染管线端到端：数据 → 异步 worker → 帧尾 GPU 上传 → LOD0 网格落到 _lod_meshes[0]
 ##   ② 崩塌路径的材质收集（_collect_group_materials，原生批量）真跑不报错且世界被清空
 ##   ③ 全量破坏 destroy_all 走原生批量材质收集后世界清空
+##   ④ 存储层内存有界：写远超 auto_flush_dirty 的块后，未落盘状态必须回到空
 
 ## 冒烟场景根节点。cleanup 兜底释放：用例中途失败/协程被中断时也能还原场景树，
 ## 避免残留节点污染后续用例。
 var _smoke_root: Node3D = null
+
+## ④ 用的临时世界文件（cleanup 里删掉，避免污染下次运行）
+const SMOKE_STREAM_PATH := "user://voxel_smoke_stream.qvox"
 
 
 func needs_game_process() -> bool:
@@ -28,6 +32,8 @@ func cleanup() -> void:
 	if _smoke_root != null and is_instance_valid(_smoke_root):
 		_smoke_root.queue_free()
 	_smoke_root = null
+	if FileAccess.file_exists(SMOKE_STREAM_PATH):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(SMOKE_STREAM_PATH))
 
 
 # ----------------------------------------------------------------------------
@@ -115,8 +121,45 @@ func test_destroy_all_removes_every_voxel() -> void:
 
 
 # ----------------------------------------------------------------------------
+# ④ 存储层内存有界
+# ----------------------------------------------------------------------------
+
+## 写远超 auto_flush_dirty 的块并 flush：存储层内存里只应剩"块索引"，
+## 未落盘覆盖层与删除墓碑必须回到空 —— 否则内存就随世界规模无界增长。
+## auto_flush_dirty 取小值，使写盘在循环中途真的发生（覆盖"落盘在途 + 新改动"的时序）。
+func test_stream_memory_is_bounded_after_flush() -> void:
+	var s := QVoxStream.new()
+	s.file_path = SMOKE_STREAM_PATH
+	s.set_materials([_air_mate(), _air_mate()])
+	s.auto_flush_dirty = 16
+	var n := 200
+	for i in n:
+		s.save_chunk(Vector3i(i % 20, i / 20, 0), _one_voxel_block(i), 0)
+	s.flush()
+
+	assert_true(s._dirty_buffers.is_empty(), "flush 后未落盘覆盖层应为空（内存不随世界增长）")
+	assert_true(s._deleted.is_empty(), "flush 后删除墓碑应为空")
+	assert_eq(s.get_chunk_count(0), n, "磁盘上的块数应等于写入数")
+	# 抽读一块：此时流里只剩索引，数据必须真的从磁盘按块读回
+	assert_eq(s.load_chunk(Vector3i(19, 9, 0), 0), _one_voxel_block(n - 1), "块应按磁盘读回")
+
+
+# ----------------------------------------------------------------------------
 # 辅助
 # ----------------------------------------------------------------------------
+
+## 只有 1 个体素的块（位置随 seed 变化 → 内容各不相同，且保证非空）。
+func _one_voxel_block(seed_v: int) -> PackedInt32Array:
+	var buf := PackedInt32Array()
+	buf.resize(VoxelChunk.CHUNK_VOLUME)
+	buf[VoxelChunk.buf_index(seed_v % 32, (seed_v / 32) % 32, 0)] = 1
+	return buf
+
+
+## 空气材质条目（MATE 条目 0 的规范形态）；给两条使体素值 1 通过材质索引校验。
+func _air_mate() -> Dictionary:
+	return {"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0, "e_r": 0, "e_g": 0, "e_b": 0}
+
 
 ## 游戏进程的主 SceneTree（TestCase 是 RefCounted，无 get_tree()）。
 func _main_tree() -> SceneTree:

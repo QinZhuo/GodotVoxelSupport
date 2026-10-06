@@ -24,9 +24,10 @@ extends VoxelStream
 ## 块坐标 == chunk 坐标：QVox 的 block_size 与 VoxelChunk.CHUNK_SIZE 同为 32，
 ## 因此 chunk_key 可直接作为 QVox 的块索引 (bx,by,bz)，无需换算。
 ##
-## 【持久化策略】内存常驻权威数据（_model_blocks）+ 脏标记 + flush() 原子落盘。
-##   - save_chunk 只改内存并置脏，不立即写盘（避免每块一次整文件重写）
-##   - flush() / 达到 _auto_flush_dirty 阈值时才整文件序列化（临时文件 + rename）
+## 【持久化策略】内存只保留"未落盘的改动"（覆盖层 + 删除墓碑）+ 脏标记 + flush() 原子落盘。
+##   - save_chunk 只改覆盖层并置脏，不立即写盘（避免每块一次整文件重写）
+##   - flush() / 达到 auto_flush_dirty 阈值时才序列化（临时文件 + rename）；
+##     未变的块直接搬运磁盘原始字节（增量写，见 QVoxFile.serialize_incremental）
 ##   - 原子写保证读者只会看到旧的完整文件或新的完整文件，绝不半写
 
 ## QVoxSpec / QVoxFile / QVoxBlockCodec 均为全局注册类（class_name），直接按名引用，
@@ -46,7 +47,7 @@ const CACH_KIND_LOD := "LODS"
 const CACH_LOD_ALGO := 1
 
 ## LOD0（全精度权威数据）所在的 model_id。
-## 本流把"世界层"固定在 model 0：_models[LOD0_MODEL_ID] 即全部 LOD0 chunk。
+## 本流把"世界层"固定在 model 0：磁盘上的 VOX0 model 0 即全部 LOD0 chunk。
 ## 具名而不是散写 0，是为了让"世界层是哪个 model"这个约定只有一个出处；
 ## 渲染器/降采样侧读取来源 CRC 也走同一个常量（见 _lod_expected_crcs）。
 const LOD0_MODEL_ID := 0
@@ -67,61 +68,91 @@ var _materials: Array = []
 ## 故主线程只承担序列化那部分。
 @export var auto_flush_dirty: int = 256
 
-## 在途落盘任务：I/O 在 worker、收尾在主线程。写盘期间再有改动只置脏（不会丢），
-## 由 _on_write_done 末尾补写；flush() 会等待在途任务，保持"返回即已落盘"。
+## 在途落盘任务：I/O 在 worker、收尾在主线程。flush() 会等待在途任务，保持"返回即已落盘"。
 var _write_in_flight := false
 var _write_task_id: int = -1
 var _write_serial := 0
-var _write_done_serial := -1
+var _write_done_serial: int = -1
 var _write_result: Array = []
 
+## 在途写盘的**输入快照**（_write_file 换出、_on_write_done 丢弃；失败则并回）。
+## 见 _write_file 的"快照换出"注释：写盘期间的新改动落进"新的"覆盖层/墓碑，
+## 因此成功收尾只需丢弃快照——不必回头分辨"哪些条目是本次写的、哪些是飞行中新加的"。
+var _inflight: Dictionary = {}
+
 # ----------------------------------------------------------------------------
-# 内存权威数据
+# 内存状态：只留"未落盘的改动"，不留全世界的解码镜像
 # ----------------------------------------------------------------------------
-# 只有 lod=0（全精度权威数据）进这里：model 0 = { chunk_key: PackedInt32Array }。
-# 粗层（lod>=1）是派生数据，走下面的 _lod_cache（→ CACH）。
+# 【为什么不再常驻全世界】旧实现用 _models 把文件里每个 chunk 都解码后长期留在内存，
+# 内存随探索范围**无界增长**。但"已落盘的干净数据"本就由磁盘 + 数据层 VoxelData 的流式
+# 缓存（受流式半径界定）共同持有，存储层再存一份纯属重复。于是这里只留尚未落盘的部分：
+#   _dirty_buffers  写入覆盖层（save_chunk 的产物）
+#   _deleted        删除墓碑（否则已删的块会被块索引"复活"）
+# 越过它们之后取值路径只有一条：**按块索引 seek 并从文件读那一块**（见 _read_clean_chunk）。
 # block_index（Vector3i）即 chunk 坐标（block_size == CHUNK_SIZE）。
-var _models: Dictionary = {}
 
-## LOD 派生缓存（内存侧）：lod(>=1) → { block_key(Vector3i): PackedInt32Array }。
-## 落盘时编码为 CACH（见 CACH_KIND_LOD）。加载时按 source_crc 校验来源是否仍成立。
-var _lod_cache: Dictionary = {}
+## 写入覆盖层：model_id → { chunk_key(Vector3i): PackedInt32Array }。
+## 只装"改了但还没写进文件"的块；落盘成功即整体换出丢弃，条数受 auto_flush_dirty 上界约束。
+var _dirty_buffers: Dictionary = {}
 
-## CACH 是否变化（需在写盘时整体重写）。LOD 缓存任何增删改都置 true。
-var _dirty_cach := false
+## 删除墓碑：model_id → { chunk_key(Vector3i): true }。
+## 删掉的块若已在文件里，必须留墓碑——否则 has_chunk/load_chunk 会顺着块索引把它读回来。
+var _deleted: Dictionary = {}
+
+## 粗层写入覆盖层：lod(>=1) → { block_key(Vector3i): PackedInt32Array }。
+## 与 _dirty_buffers 同形（只装"改了但还没写进文件"的粗层块），落盘时编码为 CACH。
+var _dirty_lod: Dictionary = {}
+
+## 粗层删除墓碑：lod(>=1) → { block_key(Vector3i): true }。
+## 口径与 _deleted 一致：只有文件里确实有这条缓存才需要墓碑（否则墓碑无指代对象）。
+var _deleted_lod: Dictionary = {}
+
+## CACH 条目轻量索引（本流只认 kind="LODS"、algo_version=CACH_LOD_ALGO）：
+##   lod(>=1) → { block_key(Vector3i) → {
+##       "block_off": int,    顶层 CACH 块在文件中的起始偏移（增量写据此跳过/替换旧块）
+##       "payload_off": int,  内层 vox 负载在文件中的**绝对**偏移（按需读盘定位）
+##       "payload_len": int,
+##       "codec": int,
+##       "source_crc": Array, 落盘时它依赖的 LOD0 子块 CRC 集合（读时与当前比较判失效）
+##   } }
+##
+## 【为什么是索引而不是解码缓存】粗层块同样随探索范围无界增长；只记"条目在哪、来源是什么"，
+## 缓冲区按需 seek 读盘 + 解码（与 _read_clean_chunk 同构）。来源校验因此也移到**读时**：
+## 任何一次 LOD0 编辑都会即时让相关缓存失效，而不必在加载时把整批缓存解码一遍。
+var _cach_index: Dictionary = {}
 
 var _dirty := false
 var _dirty_count := 0
 var _loaded := false
 
-## 【增量写】脏 model 集合（model_id → true）。仅这些 VOX0 块在 flush 时重编码，
-## 其余块直接搬运磁盘上的原始字节。替代"改一个块就重编码全世界"的全量路径。
+## 【增量写】脏 model 集合（model_id → true）。仅这些 VOX0 块在 flush 时重建，
+## 其余块直接搬运磁盘上的原始字节。替代"改一个块就重编码全世界"的全量路径；
+## 而"重建"本身又只重编码变了的子块（内容看 _dirty_buffers、删除看 _deleted），
+## 未变子块仍按块索引搬运旧字节（见 QVoxFile.encode_vox0_blocks）。
 var _dirty_models: Dictionary = {}
 
-## 【增量写】非 model 全局块（HEAD/MATE/NODE）是否需要重编码。
-## materials/metadata/node 变动时置 true。
+## 【增量写】非 model 全局块（HEAD/MATE/NODE）是否需要重编码。materials/metadata 变动时置 true。
 var _dirty_global := false
-
-## 【增量写·第二层局部性】脏的 chunk：{ model_id: { chunk_key: true } }。
-## 比 _dirty_models 更细——一个 model（如 lod=0 的世界层）常含成百上千个 chunk，
-## 改一个 chunk 时只该重编码那一个子块，而非整层。见 QVoxFile.encode_vox0_incremental。
-var _dirty_chunks: Dictionary = {}
 
 ## 【增量写】上次解析出的块字节索引（doc.block_index 的副本）。
 ## 用于搬运未变块的原始字节；落盘失败或索引异常时置空 → 下次退化为全量写（安全）。
 ##
 ## 【为什么不再常驻"原始文件字节"】此前与它配对还留了一份 `_raw_bytes` = 整份文件的
-## 字节副本，等于在"解码后的 _models"之外又常驻了一整个世界（内存翻倍）。
+## 字节副本，等于在解码后的世界之外又常驻一份编码后的世界（内存翻倍）。
 ## 现在增量写的基准字节**按需从磁盘读一次**（见 _read_base_bytes）：读盘是 memcpy 级 I/O，
 ## 相比"重编码全世界"（CPU 密集）代价极小，而写盘的主要 I/O 本就在后台线程承担。
 var _block_index: Array = []
 
-## 【增量写·二级索引】每个 VOX0 的子块索引：{ model_id(int): index_vox0_blocks() 的结果 }。
+## 【增量写 + 单块读·二级索引】每个 VOX0 的子块索引：{ model_id(int): index_vox0_blocks() 的结果 }。
+## 除 index_vox0_blocks 给出的子块区间/CRC 外，本类还在其 `_meta` 里补一个 `base` 键
+## = 该 VOX0 负载在**文件中的绝对起始偏移**（子块区间是相对的，读单块时必须叠上它）。
 ##
 ## 【为什么必须缓存】index_vox0_blocks 要为整个 VOX0 负载（1.4MB）算一遍逐子块 CRC，
 ## 约 90ms。若每次写盘都重建，子块级增量省下的时间会被它原样吃回去 —— 实测正是如此
 ## （改 1 个 chunk 仍要 447ms）。这里把它当**持久索引**：加载时建一次，之后每次写盘
-## 只对**脏 model** 重建、未变 model 沿用旧索引（它们的字节是原样搬运的，索引自然有效）。
+## 只对**脏 model** 重建、未变 model 沿用（字节是原样搬运的，索引自然有效，只是 base 要刷新）。
+## 它同时是**唯一**的"磁盘上有哪些 chunk"账本 —— load_chunk / has_chunk / 计数都靠它，
+## 因为文件内容不再被解码常驻内存。
 var _vox0_index: Dictionary = {}
 
 ## 【增量写】上次落盘（或加载）时的 HEAD / MATE / NODE 快照，用于判断全局块是否变化。
@@ -129,11 +160,12 @@ var _loaded_head: Dictionary = {}
 var _loaded_materials: Array = []
 var _loaded_node: Dictionary = {}
 
-# 异步取数由 VoxelAsyncLoader 编排：它先问 has_chunk，命中就调 load_chunk 直读内存
-# （本类的索引常驻内存，无需后台任务），故本类不实现任何异步接口。
+# 异步取数由 VoxelAsyncLoader 编排：它先问 has_chunk，命中就调 load_chunk 直接取回
+# （本类的块索引常驻内存，故不需要后台任务；未落盘的块来自覆盖层，已落盘的按块读盘）。
+# 因此本类不实现任何异步接口。
 
 # 真未知块（格式层不认识的类型 -> [payload]）。重写时原样保留，保证不丢外部数据。
-# CACH 不在这里——它是一等块（doc.cach / _lod_cache），有自己的重写路径。
+# CACH 不在这里——它是一等块，LOD 条目走 _cach_index/_dirty_lod 自己的路径。
 var _unknown_blocks: Dictionary = {}
 
 
@@ -176,9 +208,8 @@ func _ensure_loaded() -> void:
 		push_error("[QVoxStream] %s 的 block_size=%d 与本流不兼容（本流要求 %d）"
 				% [file_path, doc.get_block_size(), CHUNK_SIZE])
 		return
-	# models → _models（键即 model_id；doc.models 与本表的键统一为 int）
-	for mid in doc.models:
-		_models[int(mid)] = doc.models[mid]
+	# 【不加载模型内容】只有块索引进内存：体素数据留在磁盘上，按块读（见 _read_clean_chunk）。
+	# doc.models 只是本次解析的中间产物，随 doc 一起在这里被丢弃。
 	# 材质：QVox MATE Dictionary → 供上层 set_materials 还原
 	_materials = doc.materials
 	# NODE 中的附加元数据原样带回
@@ -195,26 +226,29 @@ func _ensure_loaded() -> void:
 	# 避免写盘时反复对 1.4MB 负载重算 → 这是子块级增量真正生效的前提。
 	# 此时 _dirty_models 为空 → 全部 model 都建（加载后的首次写盘即命中缓存）。
 	_build_vox0_index(doc.get_block_size(), bytes)
-	# 【派生缓存】CACH 里的 LOD 缓存：逐条按 source_crc 校验来源是否仍成立，
-	# 成立的才进 _lod_cache，失效的当场丢弃（调用方会重新降采样并覆盖）。
-	# 必须建在 _build_vox0_index 之后——来源校验用的正是它算出的 LOD0 子块 CRC。
-	_load_lod_cache(doc.cach, doc.get_block_size())
+	# 【派生缓存索引】CACH 里的粗层条目：只记"在哪、来源是什么"，**不解码**缓冲区。
+	# 来源是否仍成立改到读时判定（见 _cach_entry_valid）；这里仍必须先有 _vox0_index
+	# （校验依据就是它算出的 LOD0 子块 CRC），但不必在加载时把整批缓存解出来。
+	_build_cach_index(bytes)
 
 
-## 把内存权威数据写盘（原子：写临时文件 → rename）。
+## 把未落盘的改动写盘（原子：写临时文件 → rename）。
 ##
-## 【增量写】若本次修改只动了若干 model 的内容（无块集合变化）且已有上次的块字节索引，
-## 则走 QVoxFile.serialize_incremental：未变的块直接搬运磁盘原始字节，只重编码脏 model。
-## 这消除了"改一个 chunk 就重编码全世界所有 VOX0 块"的浪费（规范 §4 明示"块是编辑的
-## 局部性单位"）。块集合变化（新增/删除 model、materials 从无到有等极端情况）自动退回全量。
+## 【增量写】磁盘上已有本文件时走 QVoxFile.serialize_incremental：只有变了的子块被重编码，
+## 其余块（含 HEAD/MATE/NODE/未知块/CACH）直接搬运磁盘原始字节。这消除了"改一个 chunk
+## 就重编码全世界所有 VOX0 块"的浪费（规范 §4 明示"块是编辑的局部性单位"）。
+## 磁盘上还没有本文件（首写）时才整文件序列化 —— 此时覆盖层即完整世界，故也正确。
 func _write_file() -> void:
 	if not _dirty or _write_in_flight:
 		return
+	# 上次落盘失败会把 _loaded 置回 false（索引已按"未落盘的字节"更新过，不可信）：
+	# 这里重新加载，用磁盘上的真实索引做增量基准，避免退化成"只写覆盖层"而丢掉磁盘数据。
+	_ensure_loaded()
 	_ensure_dir()
 	var doc := QVoxFile.QVoxDocument.new()
 	doc.head = _build_head()
 	doc.materials = _materials_to_qvox()
-	doc.models = _models_to_qvox_models()
+	doc.models = _overlay_doc_models()
 	var node := {}
 	if not metadata.is_empty():
 		node["metadata"] = metadata
@@ -227,13 +261,15 @@ func _write_file() -> void:
 	old_doc.head = _loaded_head
 	old_doc.materials = _loaded_materials
 	old_doc.node = _loaded_node
-	# 先自己判定走哪条路：serialize_incremental 在全量回退时会把 old 里的 CACH 一并丢掉，
-	# 我们必须知道"旧 CACH 有没有被搬运"，才能决定要不要补写（见下）。
-	var incremental := _can_write_incremental() and QVoxFile.incremental_applicable(old_doc, doc)
+	# 本次要替换/删除的旧 CACH 顶层块偏移：必须取自**写之前的** _cach_index（写后偏移全变）。
+	var cach_replace := _cach_replace_offsets()
+	# 磁盘上已有本文件（且已建 VOX0 子块索引）→ 走增量；否则首写，整文件序列化。
+	var incremental := _can_write_incremental()
 	var bytes: PackedByteArray
 	if incremental:
 		# 增量基准 = 磁盘上当前的完整文件字节（按需读一次，不常驻）
-		bytes = QVoxFile.serialize_incremental(_read_base_bytes(), old_doc, doc, _dirty_models, _dirty_global, true, _dirty_chunks, _vox0_index, _dirty_cach)
+		bytes = QVoxFile.serialize_incremental(_read_base_bytes(), old_doc, doc,
+				_dirty_models, _dirty_global, true, _deleted, _vox0_index, cach_replace)
 	else:
 		bytes = QVoxFile.serialize(doc)
 
@@ -242,15 +278,32 @@ func _write_file() -> void:
 	# 本次改动的 LOD0 块其 CRC 已变 → 缓存来源与实际数据错配 → 下次加载被判失效（白写）。
 	_refresh_index_from(bytes)
 
-	# 【顺序要紧·二】追加派生缓存（CACH）：
-	#   - 走增量且 CACH 未变 → 旧块已被原样搬运，不重复追加；
-	#   - 其余（全量写 / CACH 有变化）→ 旧块不在新字节里，由当前 _lod_cache 整体重写。
-	var derived := PackedByteArray()
-	if (not incremental) or _dirty_cach:
-		derived = _encode_derived_blocks()
+	# 【顺序要紧·二】追加**变化了的**粗层缓存（CACH）：未变的旧块已在 serialize_incremental
+	# 里被原样搬运，故这里只有 _dirty_lod 这几条要写（不是"整批缓存"——整批缓存已随内存镜像
+	# 一起删除，只留磁盘上的条目 + 一张轻量索引）。
+	var derived := _encode_dirty_cach_entries()
 	if not derived.is_empty():
 		bytes.append_array(derived)
 		_block_index = QVoxFile.scan_block_index(bytes)
+	# CACH 块偏移随前面块的大小变化而整体平移 → 按最终字节重建条目索引（轻量：只读头部，不解码）。
+	_build_cach_index(bytes)
+
+	# 【快照换出】索引已按新字节更新完毕，此刻把"待写状态"整体取走交给 worker，换来一套空的。
+	# 于是写盘期间的新改动落进新的一套；成功收尾只需丢弃快照（不必回头分辨"哪些条目是
+	# 本次写的、哪些是飞行中新加的"），失败则并回，一个字都不丢（见 _restore_inflight）。
+	_inflight = {
+		"overlay": _dirty_buffers, "deleted": _deleted,
+		"lod": _dirty_lod, "lod_deleted": _deleted_lod,
+		"models": _dirty_models, "global": _dirty_global,
+	}
+	_dirty_buffers = {}
+	_deleted = {}
+	_dirty_lod = {}
+	_deleted_lod = {}
+	_dirty_models = {}
+	_dirty_global = false
+	_dirty = false
+	_dirty_count = 0
 
 	# ---- 落盘：写临时文件 + 原子替换。纯 I/O 交 worker，收尾在主线程（见 _on_write_done）----
 	_write_serial += 1
@@ -280,8 +333,9 @@ static func _write_bytes_worker(owner: Object, serial: int, bytes: PackedByteArr
 		owner.call_deferred(&"_on_write_done", serial, result)
 
 
-## 主线程：落盘收尾。失败则作废索引基准并**保留脏标记**（下次退化为全量写，安全）；
-## 成功则清脏标记；期间又有新改动则立刻补写。过期回调（已被 _wait_pending_write 收尾）直接忽略。
+## 主线程：落盘收尾。成功即丢弃在途快照（待写状态在换出时已清空，写盘期间的新改动
+## 落进新的那套，因此这里什么都不用清）；失败则把快照并回并作废索引基准。
+## 过期回调（已被 _wait_pending_write 收尾）直接忽略。
 func _on_write_done(serial: int, result: Array) -> void:
 	if serial == _write_done_serial or serial != _write_serial:
 		return
@@ -290,20 +344,40 @@ func _on_write_done(serial: int, result: Array) -> void:
 	_write_task_id = -1
 	if int(result[0]) != OK:
 		push_error("[QVoxStream] 原子替换失败: %s" % error_string(int(result[0])))
-		# 索引此前已按"未落盘的字节"更新过，作废以免下次增量写拿错基准（退化为全量，安全）。
-		_block_index = []
-		_vox0_index.clear()
+		_restore_inflight()
 		return
-	_dirty = false
-	_dirty_count = 0
-	_dirty_global = false
-	_dirty_cach = false
-	# 【顺序要紧】_refresh_index_from 在写盘前已调用（派生缓存的来源 CRC 要基于新字节），
-	# 但它内部按"哪些 model 是脏的"决定重建范围，故必须在 _dirty_models.clear() **之前**。
-	_dirty_models.clear()
-	_dirty_chunks.clear()
-	if _dirty:
-		_write_file()   # 写盘期间又有改动 → 补写（脏标记一直保留，不会丢）
+	_inflight = {}   # 本次已落盘，快照可以丢了
+
+
+## 落盘失败：把在途快照并回当前待写状态，并作废"按未落盘字节"算出的索引。
+## 【为什么并回】磁盘上还是旧文件，快照里的改动一个字都没写进去；丢弃即丢数据。
+## 【为什么作废索引】_refresh_index_from 已按"将要写出的字节"更新过索引，而文件没换 →
+## 索引与文件错位。置 _loaded=false 让下次写盘重新加载磁盘（恢复真实索引），
+## 从"未落盘"退化为全量写 —— 而全量写会只写覆盖层，所以这里必须先重建索引，否则丢磁盘数据。
+func _restore_inflight() -> void:
+	var overlay: Dictionary = _inflight.get("overlay", {})
+	for mid in overlay:
+		_ensure_sub(_dirty_buffers, int(mid)).merge(overlay[mid], false)   # 飞行中的新写入优先
+	var deleted: Dictionary = _inflight.get("deleted", {})
+	for mid in deleted:
+		_ensure_sub(_deleted, int(mid)).merge(deleted[mid], false)
+	var lod_overlay: Dictionary = _inflight.get("lod", {})
+	for lod in lod_overlay:
+		_ensure_sub(_dirty_lod, int(lod)).merge(lod_overlay[lod], false)
+	var lod_deleted: Dictionary = _inflight.get("lod_deleted", {})
+	for lod in lod_deleted:
+		_ensure_sub(_deleted_lod, int(lod)).merge(lod_deleted[lod], false)
+	var models: Dictionary = _inflight.get("models", {})
+	for mid in models:
+		_dirty_models[int(mid)] = true
+	if bool(_inflight.get("global", false)):
+		_dirty_global = true
+	_inflight = {}
+	_dirty = true
+	_loaded = false
+	_block_index = []
+	_vox0_index.clear()
+	_cach_index.clear()
 
 
 ## 等待在途落盘任务结束并就地收尾（flush 的同步语义用）。
@@ -323,8 +397,7 @@ func _can_write_incremental() -> bool:
 
 ## 读取磁盘上的基准字节（增量写搬运未变块用）。
 ##
-## 【为什么不常驻】它等于"整份文件的字节副本"；`_models` 已持有一份解码后的世界，
-## 再常驻一份编码后的世界就是内存翻倍（且二者长期并存）。改为每次写盘按需读一次：
+## 【为什么不常驻】它等于"整份文件的字节副本"。改为每次写盘按需读一次：
 ## 代价是一次文件读（memcpy 级），而收益是彻底去掉一份随世界增长的内存。
 func _read_base_bytes() -> PackedByteArray:
 	if not FileAccess.file_exists(file_path):
@@ -369,12 +442,15 @@ func _refresh_vox0_index(bytes: PackedByteArray) -> void:
 	_build_vox0_index(CHUNK_SIZE, bytes)
 
 
-## 建/更新 VOX0 子块索引 { model_id: index_vox0_blocks }。工作基于 _block_index + bytes。
+## 建/更新 VOX0 子块索引 { model_id: index_vox0_blocks + _meta.base }。基于 _block_index + bytes。
 ##
-## 维护策略（"跟着写入走"）：_dirty_models 里的 model 重建索引（字节变了），
-## 其余沿用旧索引（字节原样搬运，索引里的偏移与 CRC 依旧准确）。
+## 维护策略（"跟着写入走"）：_dirty_models 里的 model 重算子块索引（其字节变了），
+## 其余沿用旧索引（字节原样搬运，子块偏移与 CRC 依旧准确）。
 ## 于是单次写盘的重索引代价 = O(脏 model 的子块数)，与全世界大小无关。
 ## bytes 必传：基准字节不再常驻（见 _block_index 注释），由调用方提供当前字节。
+##
+## `_meta.base`（本 VOX0 负载在文件中的绝对偏移）**每个 model 都要刷**：前面的块大小一变，
+## 后面所有块的绝对偏移就跟着变 —— 字节没变、索引内容仍有效，但读单块时要用它定位。
 func _build_vox0_index(block_size: int, bytes: PackedByteArray) -> void:
 	var src := bytes
 	var next_idx: Dictionary = {}
@@ -384,19 +460,23 @@ func _build_vox0_index(block_size: int, bytes: PackedByteArray) -> void:
 		var mid := int(bi.get("model_id", -1))
 		if mid < 0:
 			continue
-		# 未变 model 且已有索引：沿用（省下一次 1.4MB 负载的 CRC 扫描）
-		if not _dirty_models.has(mid) and _vox0_index.has(mid):
-			next_idx[mid] = _vox0_index[mid]
-			continue
 		var off: int = bi["offset"]
 		var total: int = bi["total"]
 		var payload_off := off + QVoxSpec.BLOCK_HEADER_SIZE
 		var payload_len := total - QVoxSpec.BLOCK_HEADER_SIZE
+		# 未变 model 且已有索引：沿用（省下一次 1.4MB 负载的 CRC 扫描），仅刷新文件基址
+		if not _dirty_models.has(mid) and _vox0_index.has(mid):
+			var kept: Dictionary = _vox0_index[mid]
+			(kept["_meta"] as Dictionary)["base"] = payload_off
+			next_idx[mid] = kept
+			continue
 		# 下界用模型头的实际长度（10 字节），而不是旧的魔法数 6——6~9 字节的负载
 		# 能通过旧判据却让 index_vox0_blocks 立刻返回空索引（静默丢块）。
 		if payload_len < QVoxSpec.VOX_MODEL_HEADER_SIZE or payload_off + payload_len > src.size():
 			continue
-		next_idx[mid] = QVoxFile.index_vox0_blocks(src.slice(payload_off, payload_off + payload_len), block_size)
+		var sub := QVoxFile.index_vox0_blocks(src.slice(payload_off, payload_off + payload_len), block_size)
+		(sub["_meta"] as Dictionary)["base"] = payload_off
+		next_idx[mid] = sub
 	_vox0_index = next_idx
 
 
@@ -430,24 +510,16 @@ func _materials_to_qvox() -> Array:
 	return out
 
 
-## 内存 _models（int model_id → {Vector3i: PackedInt32Array}）→ QVox doc.models。
+## 未落盘的写入（_dirty_buffers）→ QVox doc.models（**只含脏块**，不是全世界）。
 ## 统一输出 int 键；QVoxDocument 的 model_ids()/model_blocks() 会兼容两种键，
 ## 故读取方无需关心键类型（历史上 int/str 混用曾让增量写无声退化成全量）。
-func _models_to_qvox_models() -> Dictionary:
+## 这里不做"空块剪除"——save_chunk 早已把全空块转成 erase_chunk（见那里的注释）。
+func _overlay_doc_models() -> Dictionary:
 	var out: Dictionary = {}
-	for mid in _models:
-		out[int(mid)] = _prune_empty(_models[mid])
-	return out
-
-
-## 去掉全零块（空块不落盘，P2 / §5.1）。判空用原生 count(0)：逐体素 GDScript 扫描在
-## 1400 块规模下是秒级冻结，原生是十几毫秒。
-func _prune_empty(blocks: Dictionary) -> Dictionary:
-	var out: Dictionary = {}
-	for k in blocks:
-		var buf: PackedInt32Array = blocks[k]
-		if buf.count(0) != buf.size():
-			out[k] = buf
+	for mid in _dirty_buffers:
+		var blocks: Dictionary = _dirty_buffers[mid]
+		if not blocks.is_empty():
+			out[int(mid)] = blocks
 	return out
 
 
@@ -466,48 +538,76 @@ func _prune_empty(blocks: Dictionary) -> Dictionary:
 const LOD_ENTRY_HEADER := 2 + QVoxSpec.VOX_BLOCK_HEADER_SIZE
 
 
-## 从 doc.cach 装载 LOD 缓存：只为 (kind, algo_version) 认识且**来源仍成立**的条目建缓存。
-func _load_lod_cache(entries: Array, block_size: int) -> void:
-	_lod_cache.clear()
-	var n := block_size * block_size * block_size
-	for e in entries:
-		if not (e is Dictionary):
+## 从文件字节建 CACH 条目索引（只读头部，**不解码**内容）。
+##
+## 非本流 kind / 算法版本、结构非法、或无法定界的条目一律不入选 —— 它们既不参与"按需读"，
+## 也不会被写盘替换（serialize_incremental 只跳过 _cach_replace_offsets 给出的偏移），
+## 于是保持不透明、原样保留。这正是 §6"忽略缓存的读者与用满缓存的读者结果相同"的前提。
+##
+## payload_off 记的是**内层 vox 负载在文件中的绝对偏移**，据此按需 seek 读盘
+## （与 VOX0 的 _read_clean_chunk 同构）；block_off 记顶层 CACH 块偏移，供增量写定位旧块。
+func _build_cach_index(bytes: PackedByteArray) -> void:
+	var idx: Dictionary = {}
+	for bi in _block_index:
+		if bi["type"] != QVoxSpec.BLOCK_CACH:
 			continue
-		var d: Dictionary = e
-		if String(d.get("kind", "")) != CACH_KIND_LOD:
+		var block_off: int = bi["offset"]
+		var payload_off := block_off + QVoxSpec.BLOCK_HEADER_SIZE
+		var payload_len: int = int(bi["total"]) - QVoxSpec.BLOCK_HEADER_SIZE
+		if payload_len < LOD_ENTRY_HEADER or payload_off + payload_len > bytes.size():
 			continue
-		# §6 规则 2：算法版本不认识 → 丢弃（缓存由别的规则生成，语义未必相同）。
-		if int(d.get("algo_version", -1)) != CACH_LOD_ALGO:
+		var payload := bytes.slice(payload_off, payload_off + payload_len)
+		var hdr := QVoxFile.parse_cach_header(payload)
+		if hdr.is_empty():
 			continue
-		var parsed := _decode_lod_entry(d.get("payload", PackedByteArray()), n)
-		if parsed.is_empty():
+		# §6 规则 2/3：kind 或算法版本不认识 → 不索引（当作别的写入方的数据，原样保留）。
+		if String(hdr["kind"]) != CACH_KIND_LOD or int(hdr["algo_version"]) != CACH_LOD_ALGO:
 			continue
-		var lod: int = parsed["lod"]
-		var key: Vector3i = parsed["key"]
-		# §6 规则 1：来源集合不一致 → 丢弃（LOD0 已被编辑，缓存已过期）。
-		if not _lod_source_matches(key, lod, d.get("source_crc", [])):
+		var content_off: int = hdr["content_off"]
+		if content_off + LOD_ENTRY_HEADER > payload.size():
 			continue
-		if not _lod_cache.has(lod):
-			_lod_cache[lod] = {}
-		(_lod_cache[lod] as Dictionary)[key] = parsed["buffer"]
+		var lod := payload.decode_u16(content_off)
+		if lod < 1:
+			continue
+		# 内层子块头同样复用 QVoxFile.read_vox_block（唯一布局实现）。
+		# limit 传整个负载长度：plen 界定内容，其后至多是 CACH 块尾填充，不构成损坏。
+		var blk := QVoxFile.read_vox_block(payload, content_off + 2, payload.size())
+		if blk.is_empty() or int(blk["codec"]) == QVoxSpec.CODEC_EMPTY:
+			continue
+		if not idx.has(lod):
+			idx[lod] = {}
+		(idx[lod] as Dictionary)[blk["key"]] = {
+			"block_off": block_off,
+			# read_vox_block 返回的 payload_off 已是相对本 slice 的绝对偏移（含 content_off），
+			# 叠上 slice 在文件中的起点即可定位；此处不可再加 content_off（否则双重计数）。
+			"payload_off": payload_off + int(blk["payload_off"]),
+			"payload_len": int(blk["payload_len"]),
+			"codec": int(blk["codec"]),
+			"source_crc": hdr["source_crc"],
+		}
+	_cach_index = idx
 
 
-## 把 _lod_cache 编码为 CACH 块字节（含 12 字节块头）。无缓存时返回空。
-func _encode_derived_blocks() -> PackedByteArray:
+## 把**变化了的**粗层块编码为 CACH 块字节（含 12 字节块头）。没有变化时返回空。
+##
+## 只编码 _dirty_lod：删除的条目无需新字节（serialize_incremental 跳过其旧块即完成删除），
+## 未变的条目留在磁盘上原样搬运。source_crc 必须取**本次写出的** LOD0 子块 CRC，
+## 故调用点必须在 _refresh_index_from 之后（见 _write_file 的"顺序要紧"注释）。
+func _encode_dirty_cach_entries() -> PackedByteArray:
 	var entries: Array = []
-	var lods := _lod_cache.keys()
+	var lods := _dirty_lod.keys()
 	lods.sort()
 	for lod_v in lods:
 		var lod := int(lod_v)
 		if lod < 1:
 			continue
-		var by_key: Dictionary = _lod_cache[lod]
+		var by_key: Dictionary = _dirty_lod[lod]
 		var keys := by_key.keys()
 		keys.sort_custom(_compare_block_keys)
 		for k in keys:
 			var payload := _pack_lod_block(lod, k, by_key[k])
 			if payload.is_empty():
-				continue
+				continue   # 全空块不缓存（save_chunk 已把全空块转 erase，这里是兜底）
 			entries.append({
 				"kind": CACH_KIND_LOD,
 				"algo_version": CACH_LOD_ALGO,
@@ -517,6 +617,29 @@ func _encode_derived_blocks() -> PackedByteArray:
 	var out := PackedByteArray()
 	QVoxFile.append_cach_blocks(out, entries)
 	return out
+
+
+## 本次写盘需要替换（内容变了）或删除（墓碑）的旧 CACH 顶层块偏移集合。
+## 磁盘上还没有的新键没有旧块可跳，自然不在集合里。
+## 取自 _cach_index —— 故必须在 _build_cach_index 更新（写后）**之前**调用。
+func _cach_replace_offsets() -> Dictionary:
+	var out: Dictionary = {}
+	for lod in _dirty_lod:
+		_collect_cach_offsets(int(lod), _dirty_lod[lod].keys(), out)
+	for lod in _deleted_lod:
+		_collect_cach_offsets(int(lod), _deleted_lod[lod].keys(), out)
+	return out
+
+
+## 把 (lod, keys) 对应的旧 CACH 顶层块偏移并入 out（磁盘上没有的键自动跳过）。
+func _collect_cach_offsets(lod: int, keys: Array, out: Dictionary) -> void:
+	var by_key: Variant = _cach_index.get(lod)
+	if not (by_key is Dictionary):
+		return
+	for k in keys:
+		var e: Variant = (by_key as Dictionary).get(k)
+		if e is Dictionary:
+			out[int((e as Dictionary)["block_off"])] = true
 
 
 ## 一个粗层块 → CACH 负载（2 字节 lod + 17 字节子块头 + 打包数据）。全空块不缓存（返回空）。
@@ -538,24 +661,66 @@ func _pack_lod_block(lod: int, key: Vector3i, buf: PackedInt32Array) -> PackedBy
 	return out
 
 
-## CACH 负载 → { "lod": int, "key": Vector3i, "buffer": PackedInt32Array }。非法返回空。
-func _decode_lod_entry(payload: PackedByteArray, n: int) -> Dictionary:
-	if payload.size() < LOD_ENTRY_HEADER:
-		return {}
-	var lod := payload.decode_u16(0)
-	if lod < 1:
-		return {}
-	# 子块头同样复用 QVoxFile.read_vox_block（唯一布局实现）。
-	# limit 传整个负载长度：plen 只界定内容，其后至多是 CACH 块尾填充，不构成损坏。
-	var blk := QVoxFile.read_vox_block(payload, 2, payload.size())
-	if blk.is_empty() or int(blk["codec"]) == QVoxSpec.CODEC_EMPTY:
-		return {}
-	var poff: int = blk["payload_off"]
-	var buf := QVoxBlockCodec.unpack(int(blk["codec"]),
-			payload.slice(poff, poff + int(blk["payload_len"])), n)
-	if buf.is_empty():
-		return {}
-	return {"lod": lod, "key": blk["key"], "buffer": buf}
+## 该 (lod, key) 在磁盘 CACH 索引里的条目信息；没有返回 null。
+func _cach_entry(chunk_key: Vector3i, lod: int) -> Variant:
+	var by_key: Variant = _cach_index.get(lod)
+	if not (by_key is Dictionary):
+		return null
+	return (by_key as Dictionary).get(chunk_key)
+
+
+## 磁盘上这条粗层缓存是否**来源仍成立**（§6 规则 1）。索引里没有 → false。
+## 校验放在读时：任何一次 LOD0 编辑都会即时让相关缓存失效，无需在加载时整批解码。
+func _cach_entry_valid(chunk_key: Vector3i, lod: int) -> bool:
+	var e: Variant = _cach_entry(chunk_key, lod)
+	if not (e is Dictionary):
+		return false
+	return _lod_source_matches(chunk_key, lod, (e as Dictionary).get("source_crc", []))
+
+
+## 按索引 seek 读出**一条**粗层块并解码（不解析整个 CACH）。读取失败 → 空。
+## 与 _read_clean_chunk 同构：干净数据不在内存，内存只留"条目在哪"。
+func _read_cach_block(e: Dictionary) -> PackedInt32Array:
+	if _write_in_flight:
+		_wait_pending_write()
+	var f := FileAccess.open(file_path, FileAccess.READ)
+	if f == null:
+		return PackedInt32Array()
+	f.seek(int(e["payload_off"]))
+	var payload := f.get_buffer(int(e["payload_len"]))
+	f.close()
+	return QVoxBlockCodec.unpack(int(e["codec"]), payload, CHUNK_VOLUME)
+
+
+## 取一个粗层块：未落盘的覆盖层优先 → 墓碑视为不存在 → 磁盘索引（来源须成立）。
+func _load_lod(chunk_key: Vector3i, lod: int) -> PackedInt32Array:
+	var pending: Variant = _get_sub(_dirty_lod, lod).get(chunk_key)
+	if pending != null:
+		return (pending as PackedInt32Array).duplicate()
+	if _get_sub(_deleted_lod, lod).has(chunk_key):
+		return PackedInt32Array()
+	var e: Variant = _cach_entry(chunk_key, lod)
+	if not (e is Dictionary):
+		return PackedInt32Array()
+	if not _lod_source_matches(chunk_key, lod, (e as Dictionary).get("source_crc", [])):
+		return PackedInt32Array()   # 来源已变 → 缓存失效（调用方会重新降采样）
+	return _read_cach_block(e as Dictionary)
+
+
+## 当前**有效**的粗层键集合：磁盘索引里来源仍成立 ∪ 覆盖层新增 − 墓碑。
+## 用键集合统一 keys / count 两条查询，避免两处各写一遍同一套过滤规则。
+func _valid_lod_keys(lod: int) -> Dictionary:
+	var out: Dictionary = {}
+	var by_key: Variant = _cach_index.get(lod)
+	if by_key is Dictionary:
+		for k in (by_key as Dictionary):
+			if _lod_source_matches(k, lod, (by_key as Dictionary)[k].get("source_crc", [])):
+				out[k] = true
+	for k in _get_sub(_deleted_lod, lod):
+		out.erase(k)
+	for k in _get_sub(_dirty_lod, lod):
+		out[k] = true
+	return out
 
 
 ## 一个粗层块**当前应有**的来源 CRC 集合（升序去重，§6 的表示要求）。
@@ -603,29 +768,28 @@ func _compare_block_keys(a: Vector3i, b: Vector3i) -> bool:
 # VoxelStream 接口实现
 # ----------------------------------------------------------------------------
 
-## lod=0 → VOX0 model 0（权威数据）；lod>=1 → CACH 派生缓存（见类注释）。
+## lod=0 → 写入覆盖层（落盘时才进 VOX0 model 0）；lod>=1 → CACH 派生缓存（见类注释）。
 func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> void:
 	_ensure_loaded()
-	if buffer.is_empty():
+	# 空块 = 不存在（P2）：全零与空数组一律当"删除"处理（save_chunk 的旧实现在写盘时才剪
+	# 全零块，于是内存里会留一个永远不落盘的幽灵块，has_chunk 与磁盘分叉）。判空用原生 count(0)。
+	if buffer.is_empty() or buffer.count(0) == buffer.size():
 		erase_chunk(chunk_key, lod)
 		return
 	if lod != 0:
-		if not _lod_cache.has(lod):
-			_lod_cache[lod] = {}
-		(_lod_cache[lod] as Dictionary)[chunk_key] = buffer.duplicate()
+		_ensure_sub(_dirty_lod, lod)[chunk_key] = buffer.duplicate()
+		_get_sub(_deleted_lod, lod).erase(chunk_key)
 		_dirty = true
 		_dirty_count += 1
-		_dirty_cach = true
 		if auto_flush_dirty > 0 and _dirty_count >= auto_flush_dirty:
 			_write_file()
 		return
-	if not _models.has(LOD0_MODEL_ID):
-		_models[LOD0_MODEL_ID] = {}
-	(_models[LOD0_MODEL_ID] as Dictionary)[chunk_key] = buffer.duplicate()
+	var pending := _ensure_sub(_dirty_buffers, LOD0_MODEL_ID)
+	pending[chunk_key] = buffer.duplicate()
+	_get_sub(_deleted, LOD0_MODEL_ID).erase(chunk_key)
 	_dirty = true
 	_dirty_count += 1
-	_dirty_models[LOD0_MODEL_ID] = true   # 【增量写】只重编码这个 model
-	_mark_chunk_dirty(LOD0_MODEL_ID, chunk_key)
+	_dirty_models[LOD0_MODEL_ID] = true   # 【增量写】只重建这个 model
 	if auto_flush_dirty > 0 and _dirty_count >= auto_flush_dirty:
 		_write_file()
 
@@ -633,79 +797,162 @@ func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> 
 func load_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 	_ensure_loaded()
 	if lod != 0:
-		var c: Variant = _lod_cache.get(lod)
-		if not (c is Dictionary):
-			return PackedInt32Array()
-		var lb: Variant = (c as Dictionary).get(chunk_key)
-		return (lb as PackedInt32Array).duplicate() if lb != null else PackedInt32Array()
-	if not _models.has(LOD0_MODEL_ID):
+		return _load_lod(chunk_key, lod)
+	# 未落盘的写入才是最新 → 优先；墓碑 → 视为不存在；否则按块索引从磁盘读。
+	var pending: Variant = _get_sub(_dirty_buffers, LOD0_MODEL_ID).get(chunk_key)
+	if pending != null:
+		return (pending as PackedInt32Array).duplicate()
+	if _get_sub(_deleted, LOD0_MODEL_ID).has(chunk_key):
 		return PackedInt32Array()
-	var buf: Variant = (_models[LOD0_MODEL_ID] as Dictionary).get(chunk_key)
-	return (buf as PackedInt32Array).duplicate() if buf != null else PackedInt32Array()
+	return _read_clean_chunk(chunk_key)
 
 
 func has_chunk(chunk_key: Vector3i, lod: int = 0) -> bool:
 	_ensure_loaded()
 	if lod != 0:
-		var c: Variant = _lod_cache.get(lod)
-		return c is Dictionary and (c as Dictionary).has(chunk_key)
-	if not _models.has(LOD0_MODEL_ID):
+		# 与 load_chunk 的三段一致：覆盖层 →（墓碑排除）→ 磁盘索引 + 来源校验。
+		# 二者必须给出相同的"命中/未命中"，否则 VoxelAsyncLoader 的 has→load 两步会分叉。
+		if _get_sub(_deleted_lod, lod).has(chunk_key):
+			return false
+		if _get_sub(_dirty_lod, lod).has(chunk_key):
+			return true
+		return _cach_entry_valid(chunk_key, lod)
+	if _get_sub(_dirty_buffers, LOD0_MODEL_ID).has(chunk_key):
+		return true
+	if _get_sub(_deleted, LOD0_MODEL_ID).has(chunk_key):
 		return false
-	return (_models[LOD0_MODEL_ID] as Dictionary).has(chunk_key)
+	return _index_has(chunk_key)
 
 
 func erase_chunk(chunk_key: Vector3i, lod: int = 0) -> void:
 	_ensure_loaded()
 	if lod != 0:
-		var c: Variant = _lod_cache.get(lod)
-		if c is Dictionary and (c as Dictionary).has(chunk_key):
-			(c as Dictionary).erase(chunk_key)
+		var touched := false
+		var pending := _get_sub(_dirty_lod, lod)
+		if pending.has(chunk_key):
+			pending.erase(chunk_key)
+			touched = true
+		# 只有磁盘上确实有这条缓存才需要墓碑；否则墓碑没有指代对象（与 lod=0 同一口径）。
+		if _cach_entry(chunk_key, lod) != null:
+			_ensure_sub(_deleted_lod, lod)[chunk_key] = true
+			touched = true
+		if touched:
 			_dirty = true
 			_dirty_count += 1
-			_dirty_cach = true
 		return
-	if not _models.has(LOD0_MODEL_ID):
-		return
-	var blocks: Dictionary = _models[LOD0_MODEL_ID]
-	if blocks.has(chunk_key):
-		blocks.erase(chunk_key)
+	var touched := false
+	var pending := _get_sub(_dirty_buffers, LOD0_MODEL_ID)
+	if pending.has(chunk_key):
+		pending.erase(chunk_key)
+		touched = true
+	# 只有文件里确实有这一块才需要墓碑；否则墓碑没有指代对象，只会一直躺在内存里。
+	# （墓碑是"删除"的证据，写入是"新增/覆盖"的证据，二者互斥 —— save_chunk 会清墓碑。）
+	if _index_has(chunk_key):
+		var tombstones := _ensure_sub(_deleted, LOD0_MODEL_ID)
+		tombstones[chunk_key] = true
+		touched = true
+	if touched:
 		_dirty = true
 		_dirty_count += 1
-		_dirty_models[LOD0_MODEL_ID] = true   # 【增量写】
-		_mark_chunk_dirty(LOD0_MODEL_ID, chunk_key)
-
-
-## 登记一个脏 chunk（子块级增量用）。删除 chunk 也登记——那样该 model 的
-## 子块集合会变化，encode_vox0_incremental 会检测到并让调用方退回整编码。
-func _mark_chunk_dirty(model_id: int, chunk_key: Vector3i) -> void:
-	if not _dirty_chunks.has(model_id):
-		_dirty_chunks[model_id] = {}
-	(_dirty_chunks[model_id] as Dictionary)[chunk_key] = true
+		_dirty_models[LOD0_MODEL_ID] = true   # 【增量写】该 model 的子块集合变了
 
 
 func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
 	_ensure_loaded()
 	var out: Array[Vector3i] = []
 	if lod != 0:
-		var c: Variant = _lod_cache.get(lod)
-		if c is Dictionary:
-			for k in (c as Dictionary):
-				out.append(k)
+		for k in _valid_lod_keys(lod):
+			out.append(k)
 		return out
-	if not _models.has(LOD0_MODEL_ID):
-		return out
-	for k in (_models[LOD0_MODEL_ID] as Dictionary):
-		out.append(k)
+	var index := _l0_index()
+	var subs := _subs(index)
+	var tombstones := _get_sub(_deleted, LOD0_MODEL_ID)
+	# 按磁盘上的物理序给出全部已落盘的块（"_meta" 里的 order 就是物理序）
+	var order: Array = (index.get("_meta", {}) as Dictionary).get("order", [])
+	for k in order:
+		if not tombstones.has(k):
+			out.append(k)
+	# 覆盖层里"磁盘上还没有"的新块（本轮的净新增）
+	for k in _get_sub(_dirty_buffers, LOD0_MODEL_ID):
+		if not subs.has(k):
+			out.append(k)
 	return out
 
 
-## O(1) 计数（不构造 key 数组）。
+## 计数（不构造 key 数组）。磁盘块数取子块索引的 size（O(1)），只需再遍历
+## "待删 / 待写"这两个小集合（受 auto_flush_dirty 上界约束），故与全世界规模无关。
 func get_chunk_count(lod: int = 0) -> int:
 	_ensure_loaded()
 	if lod != 0:
-		var c: Variant = _lod_cache.get(lod)
-		return (c as Dictionary).size() if c is Dictionary else 0
-	return (_models[LOD0_MODEL_ID] as Dictionary).size() if _models.has(LOD0_MODEL_ID) else 0
+		return _valid_lod_keys(lod).size()
+	var subs := _subs(_l0_index())
+	var tombstones := _get_sub(_deleted, LOD0_MODEL_ID)
+	var n := subs.size()
+	for k in tombstones:
+		if subs.has(k):
+			n -= 1
+	for k in _get_sub(_dirty_buffers, LOD0_MODEL_ID):
+		if not subs.has(k):
+			n += 1
+	return n
+
+
+## 从文件按块索引 seek 出那一块并解码（不解析整个 model）。磁盘上没有 → 空。
+##
+## 【为什么按需读盘】干净块不再常驻内存（见 _dirty_buffers 的注释），取值路径只有两条：
+## 内存覆盖层（未落盘）/ 磁盘随机读（已落盘）。块索引已给出该子块精确的 payload 区间，
+## 因此读的是一小块（十几 KB）而非整个 VOX0，代价与块大小同阶。
+func _read_clean_chunk(chunk_key: Vector3i) -> PackedInt32Array:
+	# 在途落盘期间磁盘还是旧文件，而索引已按"将要写出的字节"更新 → 先等它落地再读，避免错位。
+	if _write_in_flight:
+		_wait_pending_write()
+	var index := _l0_index()
+	var info: Variant = index.get(chunk_key)   # 顶层条目即区间信息（"_meta" 是 String 键，不会撞车）
+	if not (info is Dictionary):
+		return PackedInt32Array()
+	var base: int = int((index.get("_meta", {}) as Dictionary).get("base", -1))
+	if base < 0:
+		return PackedInt32Array()
+	var f := FileAccess.open(file_path, FileAccess.READ)
+	if f == null:
+		return PackedInt32Array()
+	f.seek(base + int(info["payload_off"]))
+	var payload := f.get_buffer(int(info["payload_len"]))
+	f.close()
+	return QVoxBlockCodec.unpack(int(info["codec"]), payload, CHUNK_VOLUME)
+
+
+## lod=0 在磁盘上的子块索引（含 "_meta"）；没有 VOX0 块时返回空字典。
+func _l0_index() -> Dictionary:
+	var idx: Variant = _vox0_index.get(LOD0_MODEL_ID)
+	return idx if idx is Dictionary else {}
+
+
+## 取子块"存在性 / CRC"表（index 的 "_meta.sub"）：{ chunk_key(Vector3i): {"crc": int} }。
+## 它与 index 的顶层条目（{chunk_key: 区间信息}）**键集相同**，但只带 CRC —— 因此
+## "磁盘上有没有这块""有多少块"用它最省，读字节区间则要用顶层条目。缺失时返回空字典。
+static func _subs(index: Dictionary) -> Dictionary:
+	var meta: Variant = index.get("_meta")
+	if not (meta is Dictionary):
+		return {}
+	var sub: Variant = (meta as Dictionary).get("sub")
+	return sub if sub is Dictionary else {}
+
+
+## 磁盘上是否有该块（纯索引事实，不含墓碑与覆盖层）。
+func _index_has(chunk_key: Vector3i) -> bool:
+	return _subs(_l0_index()).has(chunk_key)
+
+
+static func _get_sub(d: Dictionary, key: int) -> Dictionary:
+	var v: Variant = d.get(key)
+	return v if v is Dictionary else {}
+
+
+static func _ensure_sub(d: Dictionary, key: int) -> Dictionary:
+	if not d.has(key):
+		d[key] = {}
+	return d[key]
 
 
 ## 同步落盘：先等掉在途任务，再写本次，再等本次完成——保证"返回时脏数据已落盘"。
@@ -752,16 +999,18 @@ func is_dirty() -> bool:
 	return _dirty
 
 
-## 丢弃内存权威数据（下次访问重新从磁盘载入）。不写回。
+## 丢弃全部内存状态（下次访问重新从磁盘载入索引/材质）。不写回 —— 未落盘的改动会丢。
 func clear_cache() -> void:
-	_models.clear()
-	_lod_cache.clear()
+	_dirty_buffers.clear()
+	_deleted.clear()
+	_dirty_lod.clear()
+	_deleted_lod.clear()
+	_inflight.clear()
 	_dirty = false
 	_dirty_count = 0
 	_dirty_models.clear()
-	_dirty_chunks.clear()
 	_dirty_global = false
-	_dirty_cach = false
 	_block_index = []
 	_vox0_index.clear()
+	_cach_index.clear()
 	_loaded = false
