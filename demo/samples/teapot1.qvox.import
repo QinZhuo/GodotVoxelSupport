@@ -13,7 +13,7 @@ dest_files=["res://.godot/imported/teapot1.qvox-13f0e7a95aaf0eb138d6ad2eea9c4303
 [params]
 
 mesh/scale=0.1
-mesh/origin=0
+mesh/origin=1
 mesh/shape=0
 mesh/sphere_subdivisions=0
 mesh/sphere_scale=1.0

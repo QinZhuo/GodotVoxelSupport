@@ -53,10 +53,11 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = 0.1,
 		},
 		{
+			# 与 Mesh 导入器同一默认值：默认不改动几何，要贴地居中再显式选 bottom_center。
 			name = origin,
-			default_value = VoxelData.OriginMode.BOTTOM_CENTER,
+			default_value = VoxelData.OriginMode.WORLD_ORIGIN,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
-			hint_string = "bottom_center,content_center,keep",
+			hint_string = "world_origin,bottom_center,content_center",
 		},
 	]
 

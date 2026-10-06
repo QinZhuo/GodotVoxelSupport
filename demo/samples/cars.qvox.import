@@ -13,7 +13,7 @@ dest_files=["res://.godot/imported/cars.qvox-a0c86753d705985e5c4fef09cf96913c.me
 [params]
 
 mesh/scale=0.1
-mesh/origin=0
+mesh/origin=1
 mesh/shape=0
 mesh/sphere_subdivisions=0
 mesh/sphere_scale=1.0

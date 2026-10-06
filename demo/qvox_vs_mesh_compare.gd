@@ -213,9 +213,11 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	_root.add_child(mesh_inst)
 
 	# ---------- B. QVox 路径 ----------
-	# 默认原点模式（bottom_center）与 A 段的 mesh 路径是**同一套**（见 VoxelData.OriginMode），
-	# 因此两侧不需要任何位置补偿就能对齐；_layout 会复核这一点。
-	var data := VoxelData.from_voxel_data(vox.voxel)
+	# 两侧**显式取同一个原点模式**：导入器默认值现在是 world_origin（原样保留文件里的坐标），
+	# 而本场景的排布与取景是按"模型贴地"设计的（world_origin 下 teapot1 会悬空 5.8 单位、出画）。
+	# 默认值本身的一致性由 test_qvox_import.gd 的 test_mesh_and_data_origin_agree 守着，
+	# 不靠本场景。
+	var data := VoxelData.from_voxel_data(vox.voxel, 0, VoxelData.OriginMode.BOTTOM_CENTER)
 	if data == null:
 		push_error("[QvxMeshCmp] from_voxel_data 失败: %s" % src)
 		return {}

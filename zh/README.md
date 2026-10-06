@@ -128,11 +128,12 @@ target.damage_ray(origin, direction, max_distance)
 - **原生库是硬依赖** —— 网格生成 / 破坏 / CRC 全在 `addons/VoxelSupport/Native/`（GDExtension
   `VoxelNative`）。库缺失或版本不匹配时插件只报一次明确错误、不做 GDScript 兜底。
 - **资产原点由导入选项 `mesh/origin` 统一控制（Mesh 与 Data 两个导入器同名同义）** —— 默认
-  `bottom_center` = 按内容包围盒 X/Z 居中、底面落在 `Y=0`（游戏资产通行原点），因此同一个模型
-  "导入成 Mesh"与"导入成 Voxel Data"会落在**完全同一位置**。MagicaVoxel 自己的原点是
-  **模型盒中心、且落在体素之间**（5×5×3 时是 (2,2,1) 而非 (2.5,2.5,1.5)）：`keep` 保留这套作者
-  摆放（多模型装配需要），`content_center` 给出三轴内容居中（与 Blender 导入器的
-  "Center Origins" 同思路）。
+  `world_origin` = 原样保留文件里的坐标：`.vox` 就停在作者把它放在 MagicaVoxel 世界里的位置
+  （模型自己的 `SIZE` 盒中心 + 每层 `nTRN`/`NODE` 变换）；`.qvox` 没有"世界"这一层，此时就是
+  "文件里的坐标原样"。这也正是本插件网格导入一直以来的行为，因此升级不会挪动已有资产，多模型装配
+  的相对位置也保得住。需要游戏资产惯用的原点（按内容 X/Z 居中、底面落在 `Y=0`）就显式选
+  `bottom_center`，要三轴内容居中（与 Blender 导入器的 "Center Origins" 同思路）就选
+  `content_center`。
 - **`.vox` 与 `.qvox` 各有自己的资产适配器** —— `.vox`（MagicaVoxel 场景图）走
   `VoxAsset.from_asset()`；`.qvox`（一个 `VOX0` 一个模型 + `NODE` 摆放）走
   `QVoxAsset.from_file()`。对 `.qvox` 调 `VoxAsset.from_asset()` 会**报错并返回 null**：

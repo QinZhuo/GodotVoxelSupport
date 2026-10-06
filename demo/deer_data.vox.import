@@ -14,4 +14,4 @@ dest_files=["res://.godot/imported/deer_data.vox-5eb8944a9906d3c3be9bd8059cf88fe
 
 mesh/frame_index=0
 mesh/scale=0.1
-mesh/origin=0
+mesh/origin=1

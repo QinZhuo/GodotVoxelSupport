@@ -358,34 +358,53 @@ const NEIGHBORS_6: Array[Vector3i] = [
 ## 导入时的**资产原点**模式。`.vox`/`.qvox` × mesh/data 四条链路全走同一套语义。
 ##
 ## 【为什么必须统一】同一个模型经 mesh 与 data 两条路径进场景，必须落在同一位置。此前
-## mesh 路径保留 MagicaVoxel 的"作者摆放"（顶点从 SIZE 盒中心起算，模型可能悬空或下沉），
-## data 路径把内容 AABB 的角点当原点（贴地）——本仓库实测同一个模型两侧底面差 0.35~0.50
-## （模型边长 2.2），看着就像"位置差很多"，而体素数据其实完全一致。
+## mesh 路径保留 MagicaVoxel 的"作者摆放"（顶点从 SIZE 盒中心起算），data 路径把内容 AABB
+## 的角点当原点（贴地）——本仓库实测同一个模型两侧底面差 0.35~0.50（模型边长 2.2），看着
+## 就像"位置差很多"，而体素数据其实完全一致。现在两条路径共用本枚举：同值 → 同位置。
 ##
-## 【为什么默认贴地居中】这是游戏资产的通行原点（角色/道具的原点应在脚底中心）：放进场景
-## 即站在地面上，绕原点旋转不会甩飞。MagicaVoxel 自己把原点放在**包围盒中心、且落在体素
-## 之间**（奇数尺寸如 5×5×3 时是 (2,2,1) 而非 (2.5,2.5,1.5)）——那是建模工具的内部约定，
-## 不适合直接当资产原点；Blender 上装机量最高的 `.vox` 导入器（MagicaVoxel VOX format）
-## 为此专门加了 "Center Origins" 开关来修正它。所以这里给"统一默认 + 可关闭的开关"，
-## 而不是把某一种约定写死。
+## 【为什么默认 WORLD_ORIGIN】导入器不该在没被要求时移动顶点几何：这一档原样保留文件里的
+## 坐标，也正是本插件网格导入一直以来的行为——默认沿用它，已有资产不会因升级而挪位；
+## 多模型装配在 MagicaVoxel 世界里的相对位置也只有它保得住（其余两档会把每个模型各自归位）。
+## 需要"贴地居中"这种游戏资产惯例（角色/道具原点在脚底中心）时，再显式选 `BOTTOM_CENTER`。
+##
+## 【名字的确切含义】"源文件世界的原点 (0,0,0) 就是 Godot 的原点"——模型停在作者把它放在
+## 世界里的位置，而不是被搬到原点。是 **origin** 而不是 center：`.vox` 侧的实现确实让
+## "模型自己的 SIZE 盒中心落在世界原点"（MagicaVoxel 的默认摆放本就如此，所以单模型时
+## "盒中心"与"世界原点"在数值上是同一个点），但多模型装配时位置来自**每个模型各自套自己的
+## 节点变换**，整体并不居中——`demo/cars.vox` 的 8 个模型就是这种。
+## `.qvox` 没有"世界"这一层（体素坐标就是块坐标），此档对它即"文件里的坐标原样"：
+## 与 `.vox` 同一个意思——文件里是什么就是什么。
+##
+## 顺带一提，"原点该在哪"本就没有格式级定论：MagicaVoxel 自己的原点落在**包围盒中心、
+## 且落在体素之间**（奇数尺寸如 5×5×3 时是 (2,2,1) 而非 (2.5,2.5,1.5)），而 Blender 上
+## 装机量最高的 `.vox` 导入器（MagicaVoxel VOX format）专门加了个 "Center Origins" 开关
+## 把它改成几何中心。所以这里默认忠实于文件，其余交给开关。
 enum OriginMode {
-	BOTTOM_CENTER,   ## 内容包围盒：X/Z 居中 + Y 贴底（默认，游戏资产惯例）
+	WORLD_ORIGIN,    ## 保留文件坐标：`.vox` 即 MagicaVoxel 世界里的位置——**默认**
+	BOTTOM_CENTER,   ## 内容包围盒：X/Z 居中 + Y 贴底（游戏资产惯例）
 	CONTENT_CENTER,  ## 内容包围盒三轴居中（绕自身旋转/做预览友好）
-	KEEP,            ## 保留作者摆放（SIZE 盒中心 + NODE/nTRN 位置）——多模型装配用
 }
 
 ## 体素单位的原点偏移：把内容摆成 `mode` 描述的样子，渲染顶点再叠加它。
 ##
 ## **四条链路唯一的实现**：各写一份必然漂移，而漂移的表现是"模型位置莫名错开"。
 ## 包围盒用内容 AABB（不是 .vox 的 SIZE 盒）——这正是与 MagicaVoxel 的差异所在。
-## `half` 用 floor 吸附到体素边界，与 MagicaVoxel"原点落在体素之间"同一处理，整数坐标不生小数。
-## `KEEP` 返回零向量：作者摆放已体现在顶点坐标里，不该再动。
+##
+## 【取整方式：先除再 floor，即 `-floor(extent/2)`】结果**恒为整数体素**，于是：
+##   · 奇数边长恰好居中（内容跨 [0, w-1]，其中心 (w-1)/2 = floor(w/2) 正是整数）；
+##   · 偶数边长差半个体素——无法避免（真中心是半整数），但模型至少仍落在体素格点上。
+## 反过来"先 floor 再除"（`-floor(w)/2`）对奇数边长会平白多偏半格：既没对齐格点、又没居中。
+## 本插件运行时以整数体素为单位（chunk 边界 = 32 的倍数），资产原点必须落在格点上，
+## 否则模型与体素世界错相位。这也正是改造前 `.vox → data` 的取法（`(grid_size/2).floor()`）；
+## 而改造前 QVox 走的是较差的那版，统一时以本条为准。
+##
+## `WORLD_ORIGIN` 返回零向量：文件里的摆放已体现在顶点坐标里，不该再动。
 static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
-	if bounds.is_empty() or mode == OriginMode.KEEP:
+	if bounds.is_empty() or mode == OriginMode.WORLD_ORIGIN:
 		return Vector3.ZERO
 	var lo: Vector3i = bounds["min"]
 	var hi: Vector3i = bounds["max"]
-	var half := Vector3(hi - lo + Vector3i.ONE).floor() / 2.0
+	var half := (Vector3(hi - lo + Vector3i.ONE) / 2.0).floor()
 	var y := -float(lo.y) if mode == OriginMode.BOTTOM_CENTER else -(float(lo.y) + half.y)
 	return Vector3(-(float(lo.x) + half.x), y, -(float(lo.z) + half.z))
 
@@ -393,25 +412,25 @@ static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
 ## 从 VoxAsset 构造 (编辑器导入时使用)
 ## `origin_mode` 见 `OriginMode`：决定模型摆到哪，并据此写 `center_offset`（渲染时叠加）。
 static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
-		origin_mode: int = OriginMode.BOTTOM_CENTER) -> VoxelData:
+		origin_mode: int = OriginMode.WORLD_ORIGIN) -> VoxelData:
 	var res := VoxelData.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 
 	# 体素坐标重映射到 [0, grid_size)：VoxelNode.get_voxels() 的 transform 含 VoxelModel.offset
 	# 与节点变换，故原始坐标落在 [offset, offset + size) 之间。
-	# 【KEEP 例外】保留作者摆放 → 一律不重映射（坐标为负无妨，chunk 键本就支持负数）。
+	# 【WORLD_ORIGIN 例外】原样保留文件里的摆放 → 一律不重映射（坐标为负无妨，chunk 键本就支持负数）。
 	if not raw_voxels.is_empty():
 		var bounds := voxel_bounds(raw_voxels)
 		var min_pos: Vector3i = bounds["min"]
 		var max_pos: Vector3i = bounds["max"]
-		var base := Vector3i.ZERO if origin_mode == OriginMode.KEEP else min_pos
+		var base := Vector3i.ZERO if origin_mode == OriginMode.WORLD_ORIGIN else min_pos
 
 		for pos_key in raw_voxels.keys():
 			var pos: Vector3i = pos_key
 			res._write_buffer_impl(pos - base, raw_voxels[pos_key], false)
 
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
-		# 原点偏移：非 KEEP 时体素已重映射到"内容最小角 = 0"，故把同一套公式作用在**相对**包围盒上
+		# 原点偏移：非 WORLD_ORIGIN 时体素已重映射到"内容最小角 = 0"，故把同一套公式作用在**相对**包围盒上
 		res.center_offset = origin_offset({"min": Vector3i.ZERO, "max": max_pos - base}, origin_mode)
 	else:
 		# 空模型：VoxAsset 没有 `size` 属性（那是 VoxelModel 的），此前这里会运行期报错。
@@ -1636,10 +1655,10 @@ func _serialize_all_voxels() -> Array:
 	return voxel_list
 
 
-## origin_mode 见 OriginMode（与 from_voxel_data 同一套语义，默认同为贴地居中）。
+## origin_mode 见 OriginMode（与 from_voxel_data 同一套语义与同一个默认值）。
 ## QVox 的体素坐标就是文件里的块坐标（**不重映射**），因此这里只需写对 center_offset——
 ## 渲染顶点 = (块坐标 + center_offset) * voxel_scale，结果与 .vox 路径逐体素一致。
-static func from_qvox(qvox: QVoxAsset, origin_mode: int = OriginMode.BOTTOM_CENTER) -> VoxelData:
+static func from_qvox(qvox: QVoxAsset, origin_mode: int = OriginMode.WORLD_ORIGIN) -> VoxelData:
 	var res := VoxelData.new()
 	res.materials = qvox.materials
 	if qvox.is_block_importable():

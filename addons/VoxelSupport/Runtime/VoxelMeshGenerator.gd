@@ -356,7 +356,8 @@ var sphere_subdivisions: int = 0
 var sphere_scale: float = 1.0
 ## 资产原点模式（导入选项 mesh/origin，见 VoxelData.OriginMode）：决定顶点叠加多少原点偏移。
 ## 四条链路共用同一套语义，故这里只把选项读进来，再交给 VoxelData.origin_offset 算。
-var origin_mode: int = VoxelData.OriginMode.BOTTOM_CENTER
+## 默认 WORLD_ORIGIN = 不动几何（本插件网格导入一直以来的行为）。
+var origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN
 
 ## 顶点预算：超出则由原生按采样间隔自动降采样，防止大模型在编辑器内 OOM 崩溃
 const SPHERE_VERTEX_BUDGET := 4_000_000
@@ -374,7 +375,7 @@ func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
 	shape = options.get(VoxelMeshImporter.shape, VoxelMeshImporter.Shape.cube)
 	sphere_subdivisions = clampi(options.get(VoxelMeshImporter.sphere_subdivisions, 0), 0, 2)
 	sphere_scale = clampf(options.get(VoxelMeshImporter.sphere_scale, 1.0), 0.05, 2.0)
-	origin_mode = options.get(VoxelMeshImporter.origin, VoxelData.OriginMode.BOTTOM_CENTER)
+	origin_mode = options.get(VoxelMeshImporter.origin, VoxelData.OriginMode.WORLD_ORIGIN)
 
 func generate_materials(options: Dictionary) -> Array[Material]:
 	materials.resize(2)
@@ -464,9 +465,9 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	var trans_flags := VoxelMaterial.build_trans_flags(
 			runtime_materials if not runtime_materials.is_empty() else voxel.materials)
 	# 原点偏移（体素单位）：按内容 AABB 算一次交给原生内核（cube 路径原生就支持 offset，
-	# 不必事后搬运顶点）。KEEP 模式跳过求界——那是一次 O(体素数) 的字典扫描。
+	# 不必事后搬运顶点）。WORLD_ORIGIN 模式跳过求界——那是一次 O(体素数) 的字典扫描。
 	var offset := Vector3.ZERO
-	if origin_mode != VoxelData.OriginMode.KEEP:
+	if origin_mode != VoxelData.OriginMode.WORLD_ORIGIN:
 		offset = VoxelData.origin_offset(VoxelData.voxel_bounds(voxels), origin_mode)
 	if shape == VoxelMeshImporter.Shape.sphere:
 		_native_arrays = NativeLoader.generate_spheres_native(

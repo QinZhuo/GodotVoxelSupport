@@ -337,7 +337,7 @@ func grid_size() -> Vector3i:
 
 ## 原点偏移（体素单位，叠加到渲染顶点）：按 `origin_mode`（见 VoxelData.OriginMode）。
 ## 与 `.vox` 路径共用 `VoxelData.origin_offset` 这一处实现——"两条路径位置一致"的保证就在这里。
-func origin_offset(origin_mode: int = VoxelData.OriginMode.BOTTOM_CENTER) -> Vector3:
+func origin_offset(origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN) -> Vector3:
 	return VoxelData.origin_offset(voxel_bounds(), origin_mode)
 
 

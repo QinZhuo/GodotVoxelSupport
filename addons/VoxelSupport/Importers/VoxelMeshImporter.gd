@@ -30,12 +30,14 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = 0.1,
 		},
 		{
-			# 资产原点：默认"X/Z 居中 + Y 贴底"（游戏资产惯例：放进场景即站在地面）。
-			# 与 VoxelDataImporter 的同一选项共享取值与语义，详见 VoxelData.OriginMode。
+			# 资产原点：默认 world_origin = 原样保留文件里的坐标（等于本插件网格导入一直以来的
+			# 行为，已有资产不会因升级挪位）。要"X/Z 居中 + Y 贴底"这种游戏资产惯例，
+			# 再显式选 bottom_center。与 VoxelDataImporter 的同一选项共享取值与语义，
+			# 详见 VoxelData.OriginMode。
 			name = origin,
-			default_value = VoxelData.OriginMode.BOTTOM_CENTER,
+			default_value = VoxelData.OriginMode.WORLD_ORIGIN,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
-			hint_string = "bottom_center,content_center,keep",
+			hint_string = "world_origin,bottom_center,content_center",
 		},
 		{
 			name = shape,

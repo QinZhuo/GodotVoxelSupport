@@ -226,10 +226,11 @@ func test_animation_frame_patch_applied() -> void:
 # ⑨ 原点统一：`.vox → mesh` 与 `.vox → data` 必须摆在同一个位置（同 scale）
 # ----------------------------------------------------------------------------
 
-## 守的是"同一个模型经两条导入路径进场景，位置却差一截"那个 bug：
-## 两条路径共用 `VoxelData.OriginMode`（默认 bottom_center），所以同一 scale 下
-## mesh 的世界 AABB 与 data 的 `(体素AABB + center_offset) × scale` 必须重合。
-## 谁把某一条路退回"作者摆放"、或漏设 center_offset，这条立刻失败。
+## 守两件事：
+##   ① 同一个模型经两条导入路径进场景，必须落在同一位置——mesh 的世界 AABB 与 data 的
+##      `(体素AABB + center_offset) × scale` 在**三种原点模式下**都必须重合；
+##   ② 导入器默认值必须是 `WORLD_ORIGIN`（不动几何）。它等于本插件网格导入一直以来的行为，
+##      改成别的会让已有资产升级后集体挪位。
 ##
 ## 形状固定用 cube：sphere 是另一种几何（每体素一颗球，AABB 本就更大），与原点无关。
 func test_mesh_and_data_origin_agree() -> void:
@@ -241,28 +242,34 @@ func test_mesh_and_data_origin_agree() -> void:
 	if vox == null:
 		return
 
-	# 选项取导入器默认值（scale=0.1、origin=bottom_center）
+	# 选项取导入器默认值（scale=0.1、origin=world_origin）
 	var opts := {}
 	for o in VoxelMeshImporter.new()._get_import_options("", false):
 		opts[o["name"]] = o["default_value"]
 	opts[VoxelMeshImporter.shape] = VoxelMeshImporter.Shape.cube
-	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, src)
-	assert_true(mesh != null, "应为 deer.vox 生成网格")
-	if mesh == null:
-		return
-
+	assert_eq(int(opts[VoxelMeshImporter.origin]), VoxelData.OriginMode.WORLD_ORIGIN,
+			"导入器默认原点应为 WORLD_ORIGIN（不改动几何），否则已有资产会集体挪位")
 	var scale: float = opts[VoxelMeshImporter.scale]
-	var maabb := mesh.get_aabb()
-	var data := VoxelData.from_voxel_data(vox)
-	var db := data.get_voxels_aabb()
-	var dmin := (db.position + data.center_offset) * scale
-	var dsize := db.size * scale
-	var delta := (maabb.position - dmin).length() + (maabb.size - dsize).length()
-	assert_true(delta < 0.01,
-			"mesh 与 data 的原点/尺寸必须一致（Δ=%.4f；mesh=%s data=%s）"
-			% [delta, str(maabb), str(AABB(dmin, dsize))])
-	# bottom_center 的语义：底面贴地、X/Z 居中
-	assert_true(absf(maabb.position.y) < 0.01, "默认原点应让底面落在 y=0（实得 %.3f）" % maabb.position.y)
+
+	for mode in [VoxelData.OriginMode.WORLD_ORIGIN, VoxelData.OriginMode.BOTTOM_CENTER,
+			VoxelData.OriginMode.CONTENT_CENTER]:
+		opts[VoxelMeshImporter.origin] = mode
+		var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, src)
+		assert_true(mesh != null, "应为 deer.vox 生成网格（mode=%d）" % mode)
+		if mesh == null:
+			return
+		var data := VoxelData.from_voxel_data(vox, 0, mode)
+		var maabb := mesh.get_aabb()
+		var db := data.get_voxels_aabb()
+		var dmin := (db.position + data.center_offset) * scale
+		var dsize := db.size * scale
+		var delta := (maabb.position - dmin).length() + (maabb.size - dsize).length()
+		assert_true(delta < 0.01,
+				"mode=%d 下 mesh 与 data 的原点/尺寸必须一致（Δ=%.4f；mesh=%s data=%s）"
+				% [mode, delta, str(maabb), str(AABB(dmin, dsize))])
+		if mode == VoxelData.OriginMode.BOTTOM_CENTER:
+			assert_true(absf(maabb.position.y) < 0.01,
+					"显式选 bottom_center 时底面应落在 y=0（实得 %.3f）" % maabb.position.y)
 
 
 # ----------------------------------------------------------------------------
