@@ -93,8 +93,10 @@ Features:
 - **Origin shift** — camera moving far auto-shifts the world origin so coordinates stay small (float32 precision safe) → truly unlimited world
 - **Edit persistence** — player-modified chunks are stored by `stream`, surviving restart
 - **Async generation** — chunk generation runs on background threads; main thread only submits/collects
-- **Auto-unload** — meshes and coarse LOD blocks beyond distance are dropped, and rebuilt on
-  return (LOD0 chunk data stays resident: it is the downsample source for coarse layers)
+- **Auto-unload** — meshes, LOD0 chunk data and coarse LOD blocks beyond distance are all dropped
+  and rebuilt on return. LOD0 *data* is unloaded on a wider radius than meshes (`unload_distance`
+  plus the coarsest block's extent) so coarse downsampling keeps its LOD0 source; everything is
+  re-loaded / re-generated on return — this is what keeps an infinite world's memory bounded
 
 ### Destruction & collapse
 
@@ -125,7 +127,8 @@ Related properties are **hidden in the Inspector automatically** when they have 
 
 - **Procedural world**: use `visibility_mode = STREAMING` — infinite worlds are always distance-driven (FULL/FRUSTUM previously rendered nothing; now auto-fixed)
 - `lod_count = 1` disables LOD (everything full-precision); for large worlds set `lod_count >= 2`.
-  LOD_i 半径自动 = `view_distance / 2^(lod_count-1-i)`（每级 ×2，对齐 Voxel Tools 标准做法）
+  Band radii are automatic: LOD0 = `view_distance / 2^lod_count`, LOD_i (i>=1) =
+  `view_distance / 2^(lod_count-1-i)` — each level doubles, matching Voxel Tools.
 - `unload_distance = 0` falls back to `view_distance * 1.2`
 - `generate_collision` is **false by default** — enable it for physics collision
 - `voxel_scale` = world units per voxel (data coordinates are 1-voxel units); all distances are in world units

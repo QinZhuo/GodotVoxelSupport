@@ -74,14 +74,40 @@ func set_chunk_bounds(keys: Array[Vector3i]) -> void:
 		_chunk_set[ck] = true
 
 
-## 该 chunk 是否属于本生成器可生成的范围。
-func is_in_generation_bounds(chunk_key: Vector3i) -> bool:
+## 该 chunk（lod=0）或粗层 block（lod>=1）是否属于本生成器可生成的范围。
+##
+## 【lod 语义必须分清】lod=0 时 key 是 chunk 坐标；lod>=1 时 key 是 block 坐标
+## （= chunk_key >> lod），数值比 chunk 小得多，**不能**直接按 chunk 语义比较——那会把
+## "覆盖到范围外的 block"误判为可生成（如 chunk 边界 [0,7] 时 block key 4 覆盖 chunk 8..11，
+## 却 4<=7 通过）。故 lod>=1 先把 block 展开成它覆盖的 LOD0 chunk 范围，再判"与可生成范围
+## 是否有交集"——边缘 block 必然重叠，重叠就该生成（否则地图边缘的粗层缺格）。
+func is_in_generation_bounds(key: Vector3i, lod: int = 0) -> bool:
+	if lod >= 1:
+		return _block_overlaps_bounds(key, lod)
 	if not _chunk_set.is_empty():
-		return _chunk_set.has(chunk_key)
+		return _chunk_set.has(key)
 	if _bounds_active:
-		return chunk_key.x >= _bounds_min.x and chunk_key.x <= _bounds_max.x \
-			and chunk_key.y >= _bounds_min.y and chunk_key.y <= _bounds_max.y \
-			and chunk_key.z >= _bounds_min.z and chunk_key.z <= _bounds_max.z
+		return key.x >= _bounds_min.x and key.x <= _bounds_max.x \
+			and key.y >= _bounds_min.y and key.y <= _bounds_max.y \
+			and key.z >= _bounds_min.z and key.z <= _bounds_max.z
+	return true
+
+
+## 粗层 block 覆盖的 LOD0 chunk 范围与可生成范围是否有交集。
+func _block_overlaps_bounds(block_key: Vector3i, lod: int) -> bool:
+	var span := 1 << lod
+	var lo := block_key * span
+	var hi := lo + Vector3i(span - 1, span - 1, span - 1)
+	if not _chunk_set.is_empty():
+		# 稀疏集合（有限模板）：任一覆盖 chunk 命中即可生成
+		for ck in VoxelChunk.lod_covered_chunks(block_key, lod):
+			if _chunk_set.has(ck):
+				return true
+		return false
+	if _bounds_active:
+		return lo.x <= _bounds_max.x and hi.x >= _bounds_min.x \
+			and lo.y <= _bounds_max.y and hi.y >= _bounds_min.y \
+			and lo.z <= _bounds_max.z and hi.z >= _bounds_min.z
 	return true
 
 

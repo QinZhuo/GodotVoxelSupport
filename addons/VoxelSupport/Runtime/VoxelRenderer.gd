@@ -28,7 +28,6 @@ enum VisibilityMode {
 			data.changed.connect(_on_data_changed)
 		_materials_cache.clear()
 		_materials_snapshot_dirty = true
-		_pending_chunks.clear()
 		_configure_lod()
 		_clear_lod_meshes()
 		_request_update()
@@ -119,6 +118,8 @@ func _validate_property(property: Dictionary) -> void:
 @export_range(1, 120) var visibility_check_interval: int = 8
 
 ## 各层外半径（世界单位）：_lod_outer[i] = LOD_i 显示区外边界（LOD0 区 = [0, _lod_outer[0]]）。
+## 分带：LOD0 外半径 = view_distance / 2^lod_count；LOD_i(i≥1) 外半径 = view_distance / 2^(lod_count-1-i)。
+## 即自 LOD0 起逐级 ×2（**不是**统一的 view_distance / 2^(lod_count-1-i)——那对 i=0 会多算一倍）。
 var _lod_outer: Array[float] = []
 
 ## 各 LOD 层渲染网格：_lod_meshes[lod] = {block_key: MeshInstance3D}。
@@ -235,8 +236,8 @@ func _resize_lod_layers(n: int) -> void:
 		_lod_materials.append([])
 
 
-## 各层外半径：等比 2 倍分带（LOD_i 外边界 = view_distance / 2^(lod_count-1-i)）。
-## LOD0 覆盖 [0, D/2^(n-1)]（最内层，跟随 view_distance 等比，不固定）：
+## 各层外半径：等比 2 倍分带（LOD0 = D/2^n，LOD_i(i≥1) = D/2^(n-1-i)，自 LOD0 起逐级 ×2）。
+## LOD0 覆盖 [0, D/2^n]（最内层，跟随 view_distance 等比，不固定）：
 ## 几何分带：LOD0（全精度）只覆盖 D/2^n（近处精细），粗层自 LOD1 起等比 ×2 到 D。
 ##   lod_count=1 → [D]（单层全距）
 ##   lod_count=2 → [D/4, D]（LOD0=[0,D/4]，LOD1=[D/4,D]）
@@ -308,8 +309,8 @@ const STREAM_UNLOAD_INTERVAL := 8
 # 不被可见性决策延迟到 _deferred_chunks（否则补建 chunk 因不在视锥内
 # 被挂起等待，造成"补建慢、每帧只重建几个"的瓶颈）
 var _stream_force_build: Dictionary = {}
-# 统一流式异步请求：已提交后台任务（生成 / 读流）待回填的 chunk（VoxelData.request_chunk_async）
-var _pending_chunks: Dictionary = {}
+# 统一流式异步请求的在途状态不再本地留存：账本唯一在 VoxelAsyncLoader。
+# 查询走 VoxelData.is_chunk_pending() / 列举 get_unready_chunk_keys() / 取消 cancel_chunk_request()。
 # 数据基准 chunk（origin shift 后）：相机 chunk 距基准超阈值时平移世界，保持 float 精度。
 var _origin_chunk: Vector3i = Vector3i.ZERO
 ## origin shift 阈值（chunk）：相机 chunk 距基准超此值触发平移。chunk 16³ × 0.1 = 1.6 世界单位，
@@ -321,6 +322,8 @@ var _coarse_task_ids: Array[int] = []    # 粗 LOD worker 任务 ID（退出时�
 var _pending_task_count: int = 0         # 未完成的任务数（用于限流和批次完成判断）
 var _generation_id := 0
 var _exiting := false                    # 退出中：worker 结果回调据此直接丢弃，避免访问已清理数据
+# 本批次是否已登记只读快照（配对释放用；见 VoxelData.begin_readonly_snapshot）
+var _batch_snapshot_active: bool = false
 # 数据 chunk 范围（needed 枚举剪枝：球体全高大部分是空气层，
 # 跳过空 block 的降采样派发——否则高层空块反复派发占满 worker，lod_count>1 帧率骤降）
 var _data_chunk_min := Vector3i(0, 0, 0)
@@ -410,7 +413,7 @@ func _ready() -> void:
 	# 注：viewport_set_measure_render_time 在部分驱动(如 Metal)上可能引发不稳定，
 	# 已改用帧时长(_last_frame_delta)做 GPU 忙检测，此处仅保留标记不调用。
 	_measure_render_time_enabled = false
-	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认 = view*1.5）
+	# 流式加载启用判定：visibility_mode == STREAMING 即启用（unload 默认见 _unload_d() = view*1.2）
 	_streaming_enabled = visibility_mode == VisibilityMode.STREAMING
 
 
@@ -578,6 +581,15 @@ func _cancel_async() -> void:
 	_task_ids.clear()
 	_pending_task_count = 0
 	_generation_id += 1
+	_release_batch_snapshot()
+
+
+## 配对释放本批次的只读快照登记（批次完成 / 被取消时调用）。幂等。
+func _release_batch_snapshot() -> void:
+	if _batch_snapshot_active:
+		_batch_snapshot_active = false
+		if data:
+			data.end_readonly_snapshot()
 
 
 func _update_mesh() -> void:
@@ -694,6 +706,16 @@ func _unload_d() -> float:
 	return unload_distance if unload_distance > view_distance else view_distance * 1.2
 
 
+## LOD0 **数据**卸载半径：比网格卸载半径再外扩"最粗层 block 的覆盖范围"。
+## 为什么外扩：粗层 block 在 unload_d 附近仍可能被构建 / 降采样，而降采样要读它覆盖的
+## 2^level³ 个 LOD0 chunk（还要 +1 chunk 光环）。若 LOD0 数据在 block 覆盖范围内被卸掉，
+## 降采样会读到"假空块" → 粗层缺格 / 空洞。外扩 2 个 block 边长足以覆盖"block 中心仍在
+## unload_d 内 + 覆盖 chunk 继续向外延伸"的最坏情形。
+func _lod0_data_unload_d() -> float:
+	var coarse_level := maxi(lod_count - 1, 1)
+	return _unload_d() + 2.0 * _lod_block_edge_world(coarse_level) + voxel_scale * VoxelChunk.CHUNK_SIZE
+
+
 ## 统一视锥可见性判定（对外统一接口）：世界坐标是否在当前相机视锥内。
 ## 供粒子/破碎/掉落体等"视锥外跳过"优化使用（相机看不到的位置跳过昂贵效果）。
 ## 与 _aabb_has_vertex_in_frustum 同源（is_position_in_frustum），保证判定一致。
@@ -790,9 +812,8 @@ func _process_streaming() -> void:
 		var ck: Vector3i = r[1]
 		var buf: PackedInt32Array = r[2]
 		data.accept_chunk_buffer(ck, buf, lod)
-		if lod == 0:
-			_pending_chunks.erase(ck)
-		elif lod < _lod_pending.size():
+		# lod=0 的在途登记由 VoxelAsyncLoader 在回填时自动清除，此处无需本地清理
+		if lod >= 1 and lod < _lod_pending.size():
 			_lod_pending[lod].erase(ck)
 		applied += 1
 
@@ -836,7 +857,7 @@ func _process_streaming() -> void:
 						continue
 					if data.is_chunk_loaded(ck):
 						continue
-					if _pending_chunks.has(ck):
+					if data.is_chunk_pending(ck, 0):
 						continue
 					if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > load_d:
 						continue
@@ -847,14 +868,15 @@ func _process_streaming() -> void:
 							data.mark_chunk_dirty(ck)
 							submitted += 1
 						continue
-					# 未修改（程序化可重生成）或文件流（磁盘读）：统一异步请求
+					# 未修改（程序化可重生成）或文件流（磁盘读）：统一异步请求。
+					# 在途登记由 VoxelAsyncLoader 自己完成，此处不再另记一份（账本唯一）。
 					data.request_chunk_async(ck, 0)
-					_pending_chunks[ck] = true
 					submitted += 1
 
-	# 3) 卸载超范围网格 + 粗层数据块（未修改的粗层可重算直接丢，修改过的写盘）。
-	#    LOD0 chunk 数据不在此释放：它是粗层降采样的来源，按 LOD0 带常驻（见 VoxelData.unload_chunk）。
-	#    最粗 LOD 层区数据保留（供降采样合并），否则降采样读空 → 大格缺失
+	# 3) 卸载超范围网格 + LOD0 数据 + 粗层数据块（未修改的粗层可重算直接丢，修改过的写盘）。
+	#    LOD0 数据卸载是"无限世界能长期跑下去"的前提：否则 _chunk_buffers 会随走过的区域无界增长。
+	#    但卸载半径要比网格卸载半径外扩"最粗层 block 的覆盖范围"——粗层降采样要读它覆盖的
+	#    LOD0 chunk，卸早了降采样会读到假空块（见 _lod0_data_unload_d）。
 	if _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 0:
 		var coarse_level := maxi(lod_count - 1, 1)
 		var block_edge_world := _lod_block_edge_world(coarse_level)
@@ -876,11 +898,26 @@ func _process_streaming() -> void:
 				break
 			_remove_chunk_mesh(item[1])
 			unloaded += 1
-		# 取消超范围仍未完成的异步请求（避免后台白做，结果回来由卸载逻辑丢弃）
-		if not _pending_chunks.is_empty():
-			for ck in _pending_chunks.keys():
-				if _chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > unload_d:
-					_pending_chunks.erase(ck)
+		# 3b) LOD0 数据卸载：网格卸载后，超外扩半径的 chunk 数据交还数据层
+		#     （修改过的写盘、变空的清盘、未修改且流里已有的直接丢弃）。
+		#     只在网格已卸掉时卸数据，避免"有网格没数据"的错配。
+		var data_unload_d := _lod0_data_unload_d()
+		var data_unloaded := 0
+		for item in candidates:
+			if data_unloaded >= _stream_unload_per_frame:
+				break
+			var ck_d: Vector3i = item[1]
+			if _lod_meshes[0].has(ck_d):
+				continue
+			if _chunk_center_dist(ck_d, cam_pos, chunk_size_world, world_offset) <= data_unload_d:
+				continue
+			if data.unload_chunk(ck_d):
+				data_unloaded += 1
+		# 取消超范围仍未完成的异步请求：编排器撤销登记后晚到的结果会被直接丢弃
+		# （旧实现只删本地标记，结果回来仍可能被 accept → 卸载后数据"复活"）
+		for ck_p in data.get_unready_chunk_keys(0):
+			if _chunk_center_dist(ck_p, cam_pos, chunk_size_world, world_offset) > unload_d:
+				data.cancel_chunk_request(ck_p, 0)
 		# 清理超范围的粗 LOD 独立数据块（未修改可重新生成，修改的写盘）
 		for lev in range(1, _lod_meshes.size()):
 			var edge_w := _lod_block_edge_world(lev)
@@ -946,30 +983,23 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 				mi.position = Vector3(nbk) * edge_world
 			new_c[nbk] = mi
 		_lod_meshes[level] = new_c
-	# 各类 chunk/block 集合字典 key 整体平移（typed dict 需 typed 构建，_shift_keys 仅普通 Dictionary）
+	# 各类 chunk/block 集合字典 key 整体平移（统一实现见 VoxelChunk.shift_key_dict；
+	# 其中 typed dict 需 typed 构建，故就地累加）。
 	var ndf: Dictionary[Vector3i, bool] = {}
 	for k in _deferred_chunks:
 		ndf[Vector3i(k) + shift] = true
 	_deferred_chunks = ndf
-	_stream_force_build = _shift_keys(_stream_force_build, shift)
+	_stream_force_build = VoxelChunk.shift_key_dict(_stream_force_build, shift)
 	for level in range(1, _lod_pending.size()):
-		_lod_pending[level] = _shift_keys(_lod_pending[level], shift)
-		_lod_pending_tasks[level] = _shift_keys(_lod_pending_tasks[level], shift)
-	_mesh_build_queue = _shift_keys(_mesh_build_queue, shift)
+		_lod_pending[level] = VoxelChunk.shift_key_dict(_lod_pending[level], shift)
+		_lod_pending_tasks[level] = VoxelChunk.shift_key_dict(_lod_pending_tasks[level], shift)
+	_mesh_build_queue = VoxelChunk.shift_key_dict(_mesh_build_queue, shift)
 	# 粗 LOD 挂载队列存的是旧坐标系生成的数组数据，平移会错位 → 直接清空（数据未变，重挂载）
 	_lod_mesh_apply_queue.clear()
-	_pending_chunks = _shift_keys(_pending_chunks, shift)
 	var ncr: Dictionary[Vector3i, bool] = {}
 	for k in _collision_rebuild_queue:
 		ncr[Vector3i(k) + shift] = true
 	_collision_rebuild_queue = ncr
-
-
-static func _shift_keys(d: Dictionary, shift: Vector3i) -> Dictionary:
-	var nd := {}
-	for k in d:
-		nd[Vector3i(k) + shift] = d[k]
-	return nd
 
 
 # ----------------------------------------------------------------------------
@@ -1391,6 +1421,8 @@ func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	if _lod_pending_tasks[level].has(bk):
 		return false
 	_lod_pending_tasks[level][bk] = true
+	# 快照交给 worker 只读：登记只读快照，结果回填时在 _on_lod_thread_result 配对释放
+	data.begin_readonly_snapshot()
 	var standalone: bool = data.can_mesh_lod_block_standalone(level, bk)
 	var snapshot := data.snapshot_lod_block_data(bk, level) if standalone \
 			else data.snapshot_lod_block_chunks_readonly(bk, level)
@@ -1410,6 +1442,8 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 	if _lod_pending_tasks[level].has(bk):
 		return
 	_lod_pending_tasks[level][bk] = true
+	# 快照交给 worker 只读：登记只读快照，结果回填时在 _on_lod_data_ready 配对释放
+	data.begin_readonly_snapshot()
 	var snapshot := data.snapshot_lod_block_chunks(bk, level)
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_data_only.bind(
 		snapshot, bk, level, _lod_block_gen[level].get(bk, 0))))
@@ -1474,6 +1508,9 @@ func _lod_mark_null_or_retry(level: int, bk: Vector3i) -> void:
 
 
 func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32Array) -> void:
+	# 配对释放 _build_lod_data_only 的只读快照登记（必须在任何早退之前）
+	if data:
+		data.end_readonly_snapshot()
 	if _exiting:
 		return
 	if level < 1 or level >= _lod_pending_tasks.size():
@@ -1498,6 +1535,9 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 ## 降采样回退路径会顺带返回大格数据 buf，同步粗层缓存（_coarse_buffers + 持久化），避免缓存缺口。
 func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: int,
 		buf := PackedInt32Array()) -> void:
+	# 配对释放 _build_lod_block 的只读快照登记（必须在任何早退之前）
+	if data:
+		data.end_readonly_snapshot()
 	if _exiting:
 		return
 	if level < 1 or level >= _lod_pending_tasks.size():
@@ -1556,8 +1596,9 @@ func _build_lod_from_arrays(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 ##     增量重建时 _filter_visible_chunks 会跳过空 chunk 不派发 → 不主动清除则旧 mesh 残留
 ##     （视觉上"悬空块还在"，数据其实已掉）；
 ##   · 流式卸载：超出距离直接释放网格（重进范围由统一流式扫描按 can_supply_chunk 重新补建）。
-## 【数据层不在此卸载】LOD0 数据是粗层降采样的来源，按 LOD0 带常驻；需要数据层卸载的
-## 自定义驱动请直接调 VoxelData.unload_chunk()。
+## 【数据层不在此卸载】本函数只管渲染网格；数据层卸载由流式卸载段单独按更外扩的半径调
+## VoxelData.unload_chunk()（见 _lod0_data_unload_d）——网格半径与数据半径分开，是因为
+## 粗层降采样还需要比网格更远一圈的 LOD0 数据。
 func _remove_chunk_mesh(ck: Vector3i) -> void:
 	var mi: MeshInstance3D = _lod_meshes[0].get(ck)
 	if mi != null and is_instance_valid(mi):
@@ -1576,9 +1617,11 @@ func _update_mesh_async() -> void:
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
 	# 【密集光环快照方案】不为每个 chunk 提取字典切片，而是让 VoxelData 直接从其
-	# dense chunk 缓冲构建 18³ 密集"光环"（chunk + 1 体素外缘，PackedInt32Array 深拷贝）。
-	# 每个子线程只读取自己那个私有的光环快照，主线程后续增删 data 不与之冲突，
-	# 杜绝数据竞态（块随机显示/隐藏的根因），同时避免整世界深拷贝与字典切片扫描。
+	# dense chunk 缓冲构建 34³ 密集"光环"（chunk + 1 体素外缘，PackedInt32Array）。
+	# 每个子线程只读取自己那个私有的光环快照；快照是独立字典，主线程后续对字典的
+	# 增删不与之冲突。注意快照与活动缓冲**共享底层**：GDScript 的逐元素写不会触发
+	# 写时拷贝，故批次在途期间用 VoxelData 的只读快照计数把单点写降级为显式拷贝
+	# （见 begin_readonly_snapshot），杜绝数据竞态（块随机显示/隐藏的根因）。
 	var rebuild_chunks: Array[Vector3i] = []
 	# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居）：
 	# 大崩塌移除不再主线程逐体素写 dict
@@ -1660,6 +1703,12 @@ func _update_mesh_async() -> void:
 			print("[诊断] 增量重建 gen_id=%d: 脏%d Chunk, 视锥内%d, 延迟%d" % [gen_id, rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
 	# 快照预算：超预算尾部放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位），
 	# 避免初始/切换模式一帧全量快照尖峰。
+	# 声明"只读快照"：快照与活动缓冲共享底层，而 GDScript 的逐元素写不会触发写时拷贝，
+	# 故本批次在途期间主线程的单点写必须先在目标缓冲上分叉（见 VoxelData.begin_readonly_snapshot）。
+	# 批次完成 / 被取消时在 _on_batch_complete、_cancel_async 配对释放。
+	if data and not visible.is_empty():
+		data.begin_readonly_snapshot()
+		_batch_snapshot_active = true
 	var snap := _snapshot_budgeted(visible)
 	var snapshot: Dictionary = snap["snapshot"]
 	var taken: int = snap["taken"]
@@ -2032,6 +2081,8 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 ## 处理 _pending_retrigger 并发出 mesh_updated 信号
 ## 空 Chunk 清理已在 _apply_single_chunk_result 中增量完成，无需全量遍历
 func _on_batch_complete() -> void:
+	# 配对释放本批次的只读快照登记（worker 已全部结束，快照不再被读取）
+	_release_batch_snapshot()
 	# 处理 _pending_retrigger（极少情况下被外部设置）
 	if _pending_retrigger:
 		_pending_retrigger = false

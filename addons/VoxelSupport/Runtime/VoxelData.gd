@@ -44,8 +44,9 @@ extends Resource
 ##   - 内存只保留"已加载"的 chunk，其余数据由 stream 负责读盘（磁盘为权威）
 ##   - 修改过的 chunk 写回磁盘；变空时清盘；未修改且磁盘已有的可直接丢弃
 ##   - 访问 / 范围查询 / 破坏 / 网格生成会自动从磁盘加载所需 chunk（见各方法注释）
-## unload_chunk() 由**调用方**决定何时释放内存缓冲：当前 VoxelRenderer 不调用它——
-## LOD0 数据是粗层降采样的来源，需按 LOD0 带常驻，渲染层只按距离释放网格与粗层数据块。
+## unload_chunk() 由**调用方**决定何时释放内存缓冲。
+## VoxelRenderer 在流式卸载时按距离调用它（无限世界内存回收的落脚点），但半径外扩了
+## "最粗层 block 的覆盖范围"——粗层降采样要读它覆盖的 LOD0 chunk，卸早了降采样会读到假空块。
 ## 通过 set_stream() 或 setter 赋值；切换时会先 flush 旧流。
 @export var stream: VoxelStream:
 	set(v):
@@ -319,15 +320,14 @@ var _coarse_buffers: Array[Dictionary] = []
 ## LOD0 编辑影响该 block 时标记，下次渲染走降采样（合并 LOD0 数据）而非生成器。
 var _coarse_modified: Array[Dictionary] = []
 
-## 文件流粗层降采样任务去重：_lod_downsample_pending[level-1] = {block_key: true}。
 ## 文件流（QVoxStream 无粗层生成器）的粗层数据从 LOD0 chunk 降采样生成，结果缓存到
 ## _coarse_buffers（移动复用）并持久化到文件流（重启保留），避免每次渲染都重复降采样。
-var _lod_downsample_pending: Array[Dictionary] = []
+## 【账本不在这里】它的"在途去重 + 空结果重试计数"由 VoxelAsyncLoader 统一持有
+## （begin_derived / end_derived / is_derived / note_derived_retry）——本类只负责构造快照、
+## 派发 worker、把结果交回编排器，不再另存一份并行的 pending 账本。
 
-## 降采样空结果重试计数：_lod_downsample_retries[level-1] = {block_key: n}。
-## 自动 request 可能早于 LOD0 chunk 加载（相机移动时前方 chunk 未就绪 → 快照空），
-## 空结果延迟重试（上限 3 次）等 LOD0 就绪，防空区域死循环。
-var _lod_downsample_retries: Array[Dictionary] = []
+## 只读快照持有者计数（见 begin_readonly_snapshot）。
+var _snapshot_readers: int = 0
 
 ## 每 chunk 体素计数（chunk key -> int，增量维护 O(1)）。
 ## 替代 _maybe_erase_empty_chunk 的 4096 全量扫描：增减体素时更新计数，
@@ -493,6 +493,10 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 			buf = PackedInt32Array()
 			buf.resize(CHUNK_VOLUME)
 			_chunk_buffers[ck] = buf
+	# 只读快照在途：该缓冲可能与 worker 共享底层，先分叉再写（GDScript 逐元素写不会 COW）
+	if _snapshot_readers > 0:
+		buf = (buf as PackedInt32Array).duplicate()
+		_chunk_buffers[ck] = buf
 	# 标记需要写盘：内存数据已变更（若最终变空由 _maybe_erase_empty_chunk 清盘）
 	_dirty_chunks[ck] = true
 	var idx := _buf_index(pos - ck * CHUNK_SIZE)
@@ -700,6 +704,50 @@ func get_lod_buffers(level: int) -> Dictionary:
 	return _coarse_buffers[idx]
 
 
+# ----------------------------------------------------------------------------
+# 只读快照生命周期（写时拷贝的"另一半"）
+# ----------------------------------------------------------------------------
+
+## 全部已加载 chunk 缓冲的只读快照（独立字典 + 与活动缓冲共享底层）。
+## **仅供后台线程只读**，且必须与 begin/end_readonly_snapshot 配合才是真正不可变的。
+##
+## 为什么给全量而不是局部：破坏检测（应力传播 / 失稳扫描）会沿应力链 / 支撑链任意远地读
+## chunk，缺块会被当成"空"→ 误判失稳（多塌）或漏应力。局部快照省不下多少，却会改变语义。
+func snapshot_all_chunk_buffers() -> Dictionary:
+	return _chunk_buffers.duplicate(false)
+
+
+## 声明"即将把缓冲交给后台线程只读"。期间 _write_buffer_impl 会把目标缓冲先分叉再写。
+## 必须与 end_readonly_snapshot() 成对调用（计数，可并发多批任务）。
+##
+## 【为什么需要它】实测（Godot 4.7）：GDScript 对 PackedInt32Array 的**逐元素写**
+## （buf[i] = v）不触发 CowData 的写时拷贝，而是直接改共享底层；native 批量接口
+## （remove_voxels_bulk / set_voxels_bulk）因在本地副本上 ptrw() 才会分叉，但也依赖调用方
+## 把结果写回字典。于是"浅拷贝快照交给 worker 只读"并不安全：主线程一个 set_voxel 就能改掉
+## 在途快照。本计数补上缺失的那一半——快照活跃期内，单点写走显式拷贝，使快照真正不可变。
+func begin_readonly_snapshot() -> void:
+	_snapshot_readers += 1
+
+
+func end_readonly_snapshot() -> void:
+	_snapshot_readers = maxi(_snapshot_readers - 1, 0)
+
+
+# ----------------------------------------------------------------------------
+# 取数在途查询 / 取消（账本在 VoxelAsyncLoader；查询走 is_chunk_pending）
+# ----------------------------------------------------------------------------
+
+## 撤销该 chunk/block 的在途 / 就绪登记（流式卸载：超出范围的取数结果不再需要，
+## 其迟到回填会因"登记已撤销"而被丢弃）。
+func cancel_chunk_request(chunk_key: Vector3i, lod: int = 0) -> void:
+	_async.cancel(chunk_key, lod)
+
+
+## 某层全部**在途（未就绪）**的取数 key（流式卸载时批量取消用）。
+func get_unready_chunk_keys(lod: int = 0) -> Array:
+	return _async.get_unready_keys(lod)
+
+
 ## 获取流中已存但不在内存的 chunk key 列表（流式补建调度用）
 func get_unloaded_chunk_keys() -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
@@ -769,28 +817,24 @@ func get_all_chunk_keys() -> Array[Vector3i]:
 
 ## 平移所有 chunk key（origin shift 用）：数据层坐标整体偏移，保持世界连续。
 ## 相机远离时调用，使相机附近 chunk 回到小坐标，避免 float 精度损失。
-## offset = 平移的 chunk 数（世界体素 = chunk×16）。
+## offset = 平移的 chunk 数（世界体素 = chunk × VoxelChunk.CHUNK_SIZE）。
 func shift_origin(offset: Vector3i) -> void:
 	if offset == Vector3i.ZERO:
 		return
-	_chunk_buffers = _shift_dict_keys(_chunk_buffers, offset)
-	_chunk_voxel_counts = _shift_dict_keys(_chunk_voxel_counts, offset)
-	_dirty_chunks = _shift_dict_keys(_dirty_chunks, offset)
-	_dirty_mesh_chunks = _shift_dict_keys(_dirty_mesh_chunks, offset)
+	_chunk_buffers = VoxelChunk.shift_key_dict(_chunk_buffers, offset)
+	_chunk_voxel_counts = VoxelChunk.shift_key_dict(_chunk_voxel_counts, offset)
+	_dirty_chunks = VoxelChunk.shift_key_dict(_dirty_chunks, offset)
+	_dirty_mesh_chunks = VoxelChunk.shift_key_dict(_dirty_mesh_chunks, offset)
 	for i in _lod_invalidated.size():
-		_lod_invalidated[i] = _shift_dict_keys(_lod_invalidated[i], offset)
+		_lod_invalidated[i] = VoxelChunk.shift_key_dict(_lod_invalidated[i], offset)
 	for i in _coarse_buffers.size():
-		_coarse_buffers[i] = _shift_dict_keys(_coarse_buffers[i], offset)
+		_coarse_buffers[i] = VoxelChunk.shift_key_dict(_coarse_buffers[i], offset)
 	for i in _coarse_modified.size():
-		_coarse_modified[i] = _shift_dict_keys(_coarse_modified[i], offset)
-	# 以下三张表同样以 block key 为键（脏大格区域 / 降采样去重 / 降采样重试），
-	# 漏平移会让它们与数据基准脱节（残留旧坐标条目、去重失效）。
+		_coarse_modified[i] = VoxelChunk.shift_key_dict(_coarse_modified[i], offset)
+	# 脏大格区域同样以 block key 为键，漏平移会让它与数据基准脱节（残留旧坐标条目）。
 	for i in _lod_dirty_region.size():
-		_lod_dirty_region[i] = _shift_dict_keys(_lod_dirty_region[i], offset)
-	for i in _lod_downsample_pending.size():
-		_lod_downsample_pending[i] = _shift_dict_keys(_lod_downsample_pending[i], offset)
-	for i in _lod_downsample_retries.size():
-		_lod_downsample_retries[i] = _shift_dict_keys(_lod_downsample_retries[i], offset)
+		_lod_dirty_region[i] = VoxelChunk.shift_key_dict(_lod_dirty_region[i], offset)
+	# 降采样去重 / 重试计数已收归编排器，随下面的 _async.shift_keys() 一起平移。
 	# 生成器的"可生成范围"也要跟着平移，否则无限世界平移后范围判定仍指向旧坐标。
 	if generator != null:
 		generator.shift_bounds(offset)
@@ -798,15 +842,9 @@ func shift_origin(offset: Vector3i) -> void:
 	_async.shift_keys(offset)
 
 
-static func _shift_dict_keys(d: Dictionary, offset: Vector3i) -> Dictionary:
-	var nd := {}
-	for k in d:
-		nd[Vector3i(k) + offset] = d[k]
-	return nd
 
-
-## 获取 chunk 的 18³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
-## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立的深拷贝，无数据竞态）。
+## 获取 chunk 的 34³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
+## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立缓冲，无数据竞态）。
 ## 流式模式下先确保 chunk 及其 27 邻居已加载（跨界面的面可见性需要邻居）。
 func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 	if stream != null:
@@ -981,13 +1019,13 @@ func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 		_start_lod_downsample(chunk_key, lod)
 
 
-## 文件流粗层降采样任务去重（_lod_downsample_pending[level-1]）
-## 数据在主线程构造快照（preload 磁盘回读 + 内存读取），避免后台线程读 _chunk_buffers 撞 COW 旧副本。
+## 文件流粗层降采样：数据在主线程构造快照（preload 磁盘回读 + 内存读取）。
+## 在途去重交给编排器（账本唯一）；快照构造前声明只读快照，使主线程在此期间的
+## 单点写先分叉（否则 worker 读到的可能是被 set_voxel 改过的缓冲）。
 func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
-	var pending := _layer(_lod_downsample_pending, lod - 1)
-	if pending.has(block_key):
+	if not _async.begin_derived(block_key, lod):
 		return
-	pending[block_key] = true
+	begin_readonly_snapshot()
 	var cell := 1 << lod
 	var chunks_per_block := (VoxelChunkGenerator.LOD_BLOCK_SIZE * cell) / VoxelChunk.CHUNK_SIZE
 	var base_chunk := block_key * chunks_per_block
@@ -1007,7 +1045,8 @@ func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
 
 
 ## 后台线程：从 LOD0 chunk 数据降采样生成粗层 block 数据（32³ 大格，每格 = 2^lod 体素）。
-## buffers 为主线程快照（引用共享，只读安全），结果经 call_deferred 回主线程。
+## buffers 为主线程快照（只读，配合 begin_readonly_snapshot 保证不被主线程改写），
+## 结果经 call_deferred 回主线程。
 func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, block_key, lod)
 	var buf := VoxelChunk.extract_center_from_halo(halo)
@@ -1016,29 +1055,25 @@ func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary) 
 
 ## 主线程：粗层降采样完成 → 缓存 _coarse_buffers + 持久化文件流（重启保留），供渲染器复用
 func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Array) -> void:
-	if lod - 1 < _lod_downsample_pending.size():
-		_lod_downsample_pending[lod - 1].erase(block_key)
+	end_readonly_snapshot()
 	if buf.is_empty():
 		# LOD0 chunk 可能尚未加载（自动 request 早于 LOD0 就绪，或覆盖 chunk 仅存磁盘）→
-		# 主线程 preload 覆盖 chunk 后重试，上限防空区域死循环
+		# 结束在途登记但保留重试计数，交给 _retry_lod_downsample 决定是否再试
+		_async.end_derived(block_key, lod, true)
 		_retry_lod_downsample(block_key, lod)
 		return
-	if lod - 1 < _lod_downsample_retries.size():
-		_lod_downsample_retries[lod - 1].erase(block_key)
+	_async.end_derived(block_key, lod)
 	set_lod_block(lod, block_key, buf)
 	if stream is QVoxStream:
 		stream.save_chunk(block_key, buf, lod)
 
 
 ## 粗层降采样空结果延迟重试：LOD0 chunk 常晚于粗层 request 就绪（流式加载），
-## 延迟 0.5s 跨帧重试（preload 会在 _start_lod_downsample 内执行），5 次上限防空区域死循环。
+## 延迟 0.5s 跨帧重试（preload 会在 _start_lod_downsample 内执行），上限防空区域死循环。
+## 重试计数由编排器持有（账本唯一）。
 func _retry_lod_downsample(block_key: Vector3i, lod: int) -> void:
-	var retries := _layer(_lod_downsample_retries, lod - 1)
-	var n: int = retries.get(block_key, 0)
-	if n >= 5:
-		retries.erase(block_key)
+	if not _async.note_derived_retry(block_key, lod):
 		return
-	retries[block_key] = n + 1
 	var tree := Engine.get_main_loop() as SceneTree
 	if tree:
 		tree.create_timer(0.5).timeout.connect(
@@ -1053,11 +1088,9 @@ func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
 		return true
 	if _async.is_pending(chunk_key, lod):
 		return true
-	# 粗层降采样任务进行中（防重复降采样）
-	if lod >= 1:
-		var idx := lod - 1
-		if idx < _lod_downsample_pending.size() and _lod_downsample_pending[idx].has(chunk_key):
-			return true
+	# 粗层降采样任务进行中（防重复降采样；账本在编排器）
+	if lod >= 1 and _async.is_derived(chunk_key, lod):
+		return true
 	return false
 
 
