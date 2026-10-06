@@ -98,8 +98,13 @@ var last_damage_count: int = 0     ## 最近一次破坏实际移除的体素数
 var last_damage_time_ms: float = 0 ## 最近一次破坏耗时 (ms)
 var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 
-## 逐体素累计伤害 (位置 -> 累计伤害)
-var damage_map: Dictionary[Vector3i, float] = {}
+## 逐体素累计伤害：按 chunk 的扁平 Float32 缓冲（原生伤害内核直接读写，避免逐体素字典查询；
+## 契约同 remove_voxels_bulk —— 原生在本地副本上改，调用方写回）
+var _damage: Dictionary = {}
+
+## 破坏形状常量（对应原生 damage_shape 的 shape 参数）
+const SHAPE_SPHERE: int = 0
+const SHAPE_BOX: int = 1
 
 ## 延迟移除状态：同一帧内多次伤害的位置合并去重，下一帧统一处理
 ## key: Vector3i 体素位置，value: 是否生成碎片（任意一次伤害要求生成则生成）
@@ -238,10 +243,8 @@ func damage_sphere(center: Vector3, radius: float, spawn_debris: Variant = null)
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var positions := data.get_voxels_in_sphere(center, radius)
-	var mat_map := _collect_voxel_materials(positions)
-	# 1. 即时：更新 damage_map
-	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
+	# 一趟原生内核完成：范围 → 材质 → 硬度比较 → 累伤 / 判移除（伤害结算下沉原生，语义不变）
+	var removed := _apply_damage_native(SHAPE_SPHERE, center, radius, Vector3i.ZERO, Vector3i.ZERO)
 	# 2. 合并去重：同一帧内多次伤害相同位置只处理一次
 	if not removed.is_empty():
 		for pos in removed:
@@ -256,9 +259,9 @@ func damage_box(aabb: AABB, spawn_debris: Variant = null) -> Array:
 	if not data:
 		return []
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var positions := data.get_voxels_in_box(aabb)
-	var mat_map := _collect_voxel_materials(positions)
-	var removed := _apply_damage_immediate(positions, mat_map, damage_per_voxel)
+	var mn := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
+	var mx := Vector3i(floori(aabb.end.x - 1.0), floori(aabb.end.y - 1.0), floori(aabb.end.z - 1.0))
+	var removed := _apply_damage_native(SHAPE_BOX, Vector3.ZERO, 0.0, mn, mx)
 	if not removed.is_empty():
 		for pos in removed:
 			_pending_removed[pos] = true
@@ -271,8 +274,7 @@ func damage_voxel(pos: Vector3i, spawn_debris: Variant = null) -> bool:
 	if not data or not data.has_voxel(pos):
 		return false
 	var do_spawn: bool = spawn_debris if spawn_debris is bool else spawn_debris_on_damage
-	var mat_map := _collect_voxel_materials([pos])
-	var removed := _apply_damage_immediate([pos], mat_map, damage_per_voxel)
+	var removed := _apply_damage_native(SHAPE_BOX, Vector3.ZERO, 0.0, pos, pos)
 	if not removed.is_empty():
 		for p in removed:
 			_pending_removed[p] = true
@@ -353,32 +355,43 @@ func repair(amount: float) -> void:
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
 
-## 即时伤害应用：只更新 damage_map，不实际移除体素
-## 返回应被移除的体素位置（基于累计伤害判断）
-## 实际移除在 _process 中逐帧处理
-func _apply_damage_immediate(positions: Array, mat_map: Dictionary, damage: float) -> Array:
+## 即时伤害应用（原生内核）：一趟完成 范围 → 材质 → 硬度比较 → 累伤 / 判移除。
+## 语义与原逐体素 GDScript 版完全一致（use_voxel_health / 硬度 / 累伤 / 硬化反馈），只是下沉到 C++：
+##   · 伤害账本从 Dictionary[Vector3i, float] 改为按 chunk 的扁平 Float32 缓冲（原生直接读写，不逐体素查字典）；
+##   · 材质硬度按材质ID 查表一次传下去（原实现是逐体素 materials[id] 读取）。
+## 返回应被移除的体素位置；实际移除仍由 _process 的统一管道处理。
+func _apply_damage_native(shape: int, center: Vector3, radius: float, vmin: Vector3i, vmax: Vector3i) -> Array:
+	var res := NativeLoader.damage_shape(data.get_chunk_buffers(), _damage, shape, center, radius,
+		vmin, vmax, _hardness_table(), damage_per_voxel, use_voxel_health, {})
+	# 伤害缓冲回写（原生在本地副本上改，契约同 remove_voxels_bulk）
+	var changed: Dictionary = res.get("damage_chunks", {})
+	for ck in changed:
+		_damage[ck] = changed[ck]
+	# 硬化反馈（受伤未摧毁）→ 与基线同一套缓冲与帧尾合并信号
+	var hpos: PackedVector3Array = res.get("hardened_pos", PackedVector3Array())
+	var hrem: PackedFloat32Array = res.get("hardened_rem", PackedFloat32Array())
+	for i in hpos.size():
+		_hardened_buffer[Vector3i(hpos[i])] = hrem[i] if i < hrem.size() else 0.0
+	if not hpos.is_empty():
+		_hardened_dirty = true
 	var removed: Array = []
-	for pos in positions:
-		var mat_id: int = mat_map.get(pos, -1)
-		if not use_voxel_health:
-			removed.append(pos)
-			continue
-		var hardness := _get_material_hardness(mat_id)
-		if hardness <= 0.0:
-			removed.append(pos)
-			continue
-		var cur: float = float(damage_map.get(pos, 0.0)) + damage
-		if cur >= hardness:
-			damage_map.erase(pos)
-			removed.append(pos)
-		else:
-			damage_map[pos] = cur
-			# 硬化反馈累积到缓冲，_process 帧尾统一发 voxel_hardened_batch
-			# （逐体素 emit 在大破坏时一次几百次信号 → 高频，合并后一次）
-			_hardened_buffer[pos] = hardness - cur
-			_hardened_dirty = true
+	for v in res.get("removed", PackedVector3Array()):
+		removed.append(Vector3i(v))
 	last_damage_count = removed.size()
 	return removed
+
+
+## 材质硬度查表（索引 = 材质ID）：一次 ≤256 项扫描，之后原生按 ID 直读
+func _hardness_table() -> PackedFloat32Array:
+	var mats := data.materials if data != null else []
+	var out := PackedFloat32Array()
+	out.resize(maxi(mats.size(), 1))
+	out.fill(1.0)
+	for i in mats.size():
+		var m = mats[i]
+		if m != null:
+			out[i] = m.hardness
+	return out
 
 
 func _get_material_hardness(mat_id: int) -> float:

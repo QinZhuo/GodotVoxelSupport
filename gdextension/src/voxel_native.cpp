@@ -2636,8 +2636,9 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);
-	// 【已解绑】damage_shape：破坏逻辑已回到基线版（伤害累积在 GDScript 内），不再从脚本调用。
-	// 实现保留备查；不需要时可整段删除（连同 qvox_hash01 / qvox_noise3）。
+	// 破坏内核（统一形状 + 一趟内完成 范围→材质→硬度比较→累伤/判移除）。判定/崩塌规则仍是基线那套，
+	// 这里只是把"伤害结算"这一热点下沉原生（对应 4ddfe43 的优化），不改任何判定语义。
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("damage_shape", "buffers", "damage_chunks", "shape", "center", "radius", "vmin", "vmax", "hardness_table", "damage", "use_health", "opts"), &VoxelNative::damage_shape);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);

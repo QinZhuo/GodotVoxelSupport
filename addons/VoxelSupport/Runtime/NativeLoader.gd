@@ -351,8 +351,20 @@ static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: V
 ## 返回 {removed: PackedVector3Array, hardened_pos: PackedVector3Array,
 ##       hardened_rem: PackedFloat32Array, damage_chunks: {ck: PackedFloat32Array}}。
 ## **damage_chunks 是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
-# 【已移除】damage_shape 桥接：破坏逻辑已回到基线版（伤害累积与硬度结算在 GDScript 内完成），
-# 不再从原生调用统一形状内核。原生实现保留但已解绑，不需要时可删除。
+## 统一形状破坏内核（伤害结算下沉原生）：一趟完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。
+## shape：0 = 球（用 center/radius）｜1 = 盒（用闭区间 vmin..vmax）。
+## opts（可选，默认 {} = 无附加效果）：{noise, direction, bias}
+## 返回 {removed: PackedVector3Array, hardened_pos: PackedVector3Array,
+##       hardened_rem: PackedFloat32Array, damage_chunks: {ck: PackedFloat32Array}}。
+## **damage_chunks 是被修改的伤害缓冲，调用方必须写回自己的账本**（同 remove_voxels_bulk 契约）。
+static func damage_shape(buffers: Dictionary, damage_chunks: Dictionary, shape: int, center: Vector3,
+		radius: float, vmin: Vector3i, vmax: Vector3i, hardness_table: PackedFloat32Array,
+		damage: float, use_health: bool, opts: Dictionary = {}) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"damage_shape", buffers, damage_chunks, shape, center, radius, vmin, vmax,
+		hardness_table, damage, use_health, opts)
 
 
 ## 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}。
