@@ -115,7 +115,12 @@ func _import(source_file, save_path, options, _platforms, gen_files):
 			return FAILED
 		mesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, options, source_file)
 	else:
-		mesh = VoxelMeshGenerator.generate_mesh(VoxAsset.from_asset(source_file), options, source_file)
+		# 与 QVox 分支同款守卫：解析失败返回 null，直接送进 generate_mesh 会在
+		# 内部解引用空的体素数据而崩溃。
+		var vox = VoxAsset.from_asset(source_file)
+		if vox == null:
+			return FAILED
+		mesh = VoxelMeshGenerator.generate_mesh(vox, options, source_file)
 	if not mesh:
 		return FAILED
 	return ResourceSaver.save(mesh, "%s.%s" % [save_path, _get_save_extension()])

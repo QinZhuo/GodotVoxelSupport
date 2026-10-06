@@ -278,6 +278,14 @@ func clear_lod_cache() -> void:
 		d.clear()
 
 
+## 清空所有层级的"脏大格区域"增量标记（世界级重置：clear / 载荷重建时调用）。
+## 与 clear_lod_cache 分开：两者分别服务"失效重建"与"增量降采样 patch"两条路径，
+## 只清一个会留下另一半陈旧账本继续驱动渲染器。
+func clear_lod_dirty_regions() -> void:
+	for d in _lod_dirty_region:
+		d.clear()
+
+
 ## 获取指定层级的失效 block（渲染器 _process_lod 消费后重建），并清空
 func get_invalidated_lod(lod: int) -> Array[Vector3i]:
 	var keys: Array[Vector3i] = []
@@ -1096,6 +1104,30 @@ func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
 	_coarse_modified[level - 1].erase(key)
 
 
+## 粗层降采样结果落地（**唯一入口**）：写入内存权威 + 按需持久化。
+##
+## 【为什么归数据层】粗层数据的权威在 VoxelData，"下来源是否支持 LOD 层 / 何时该落盘"
+## 这条规则此前在三个地方各写了一遍（本类的降采样回填 + 渲染器的两个结果回调），
+## 且渲染器为了落盘直接伸手去拿 `data.stream`，绕过数据层。现在渲染器只报告
+## "降采样结果就绪"，落盘判断与写入统一由本层负责；规则要变只改这一处。
+func store_lod_block(level: int, block_key: Vector3i, buf: PackedInt32Array) -> void:
+	if buf.is_empty():
+		return
+	set_lod_block(level, block_key, buf)
+	if stream != null and stream.supports_lod_layer():
+		stream.save_chunk(block_key, buf, level)
+
+
+## 擦除一个 LOD block 的**数据**，并同步清掉只对"该块数据"才有意义的附属账本。
+##
+## 【为什么必须一起清】`_coarse_modified` / `_lod_dirty_region` 都以 block key 为键，
+## 块数据被擦除后它们不会自动消失 → 随探索/编辑**无界增长**（origin shift 还会把它们整表平移）。
+## 更隐蔽的是残留 `modified=true` 会让 `can_mesh_lod_block_standalone()` 永久返回 false，
+## 使该 block 此后**永远只能走全量 LOD0 降采样**（金字塔增量失效）。
+##
+## 【为什么清 modified 是安全的】粗层数据的**唯一**生产者是 `_start_lod_downsample`，
+## 它严格从 LOD0 chunk 缓冲（含用户编辑）降采样；本工程不存在"纯生成器输出粗层"的写入路径。
+## 块数据既已擦除，该标记没有指代对象；重新创建必经 LOD0 降采样 → 编辑不会丢。
 func erase_lod_block(level: int, key: Vector3i) -> void:
 	if level == 0:
 		_chunk_buffers.erase(key)
@@ -1103,6 +1135,10 @@ func erase_lod_block(level: int, key: Vector3i) -> void:
 	var idx := level - 1
 	if idx < _coarse_buffers.size():
 		_coarse_buffers[idx].erase(key)
+	if idx < _coarse_modified.size():
+		_coarse_modified[idx].erase(key)
+	if level < _lod_dirty_region.size():
+		_lod_dirty_region[level].erase(key)
 
 
 ## 指定 LOD 层的所有数据块 key
@@ -1202,9 +1238,7 @@ func _on_lod_downsample_ready(block_key: Vector3i, lod: int, buf: PackedInt32Arr
 		_retry_lod_downsample(block_key, lod)
 		return
 	_async.end_derived(block_key, lod)
-	set_lod_block(lod, block_key, buf)
-	if stream != null and stream.supports_lod_layer():
-		stream.save_chunk(block_key, buf, lod)
+	store_lod_block(lod, block_key, buf)
 
 
 ## 粗层降采样空结果延迟重试：LOD0 chunk 常晚于粗层 request 就绪（流式加载），
@@ -1383,6 +1417,12 @@ func clear(notify: bool = true) -> void:
 	_chunk_voxel_counts.clear()
 	_voxel_count = 0
 	_dirty_chunks.clear()
+	# 渲染侧账本一并归零：`_dirty_mesh_chunks` 是**渲染增量重建集**，与上面只给 stream 用的
+	# `_dirty_chunks` 不是同一本账。漏清会让旧坐标的脏 chunk / 失效块 / 脏区域在换世界后
+	# 继续驱动渲染器重建（而它们的体素早已不存在）。
+	_dirty_mesh_chunks.clear()
+	clear_lod_cache()
+	clear_lod_dirty_regions()
 	for d in _coarse_buffers:
 		d.clear()
 	for d in _coarse_modified:
@@ -1948,6 +1988,7 @@ func _set(property: StringName, value: Variant) -> bool:
 		for d in _coarse_modified:
 			d.clear()
 		clear_lod_cache()
+		clear_lod_dirty_regions()
 		var payload: Variant = _decode_payload(str(value))
 		if payload is Dictionary:
 			var gs: Variant = payload.get("grid_size", [0, 0, 0])
@@ -2112,30 +2153,31 @@ static func partition_connected(positions: Array) -> Array:
 ## 找出"悬空"体素：与贴地(y==0)体素 6 方向连通判定，完全断开的返回
 ## 这是崩塌检测的底座：全量判定哪些与地面断开
 ## voxels_set 提供时只在该集合内判定（子集场景）；否则基于全部实体素
+##
+## 【全量路径已下沉原生】旧实现要跑**两趟** get_positions()（每趟都含一次 stream 合并，
+## 并把百万级位置装箱成 Array）再在其上做 GDScript 字典 flood fill —— 大世界是秒级
+## 主线程阻塞。现在只枚举一趟，flood fill 交给原生（见 NativeLoader.find_unsupported_positions）。
+## 【必须传"位置集合"而非 chunk 缓冲】判据经 has_voxel 会访问**仅存在于磁盘**的 chunk，
+## 只读内存缓冲会把那些体素误判成悬空。
 func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 	if voxels_set.is_empty() and _voxel_count == 0:
 		return {}
-	# 种子 = 贴地(y==0)体素
-	var seeds: Array = []
 	if voxels_set.is_empty():
-		for pos: Vector3i in get_positions():
-			if pos.y == 0:
-				seeds.append(pos)
-	else:
-		for key in voxels_set:
-			var pos: Vector3i = key
-			if pos.y == 0:
-				seeds.append(key)
+		var all_unsupported := {}
+		for pos in NativeLoader.find_unsupported_positions(get_positions()):
+			all_unsupported[pos] = true
+		return all_unsupported
+	# 子集路径（少用）：保持 GDScript 原样，避免引入"原生只认传入集合"的语义分歧
+	var seeds: Array = []
+	for key in voxels_set:
+		var pos: Vector3i = key
+		if pos.y == 0:
+			seeds.append(key)
 	var supported := flood_fill(seeds, voxels_set)
 	var unsupported := {}
-	if voxels_set.is_empty():
-		for pos: Vector3i in get_positions():
-			if not supported.has(pos):
-				unsupported[pos] = true
-	else:
-		for key in voxels_set:
-			if not supported.has(key):
-				unsupported[key] = true
+	for key in voxels_set:
+		if not supported.has(key):
+			unsupported[key] = true
 	return unsupported
 
 

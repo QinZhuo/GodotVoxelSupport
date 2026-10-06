@@ -222,6 +222,16 @@ static func collect_chunks(positions: Array) -> Array:
 	return inst.call(&"collect_chunks", positions)
 
 
+## 悬空体素**全量**检测（与地面连通性模型）：输入"全部体素位置"，返回未与 y==0 连通的位置。
+## 必须传 get_positions() 这类**已枚举好的位置集合**——它已把"内存 + 仅磁盘"的体素统一枚举；
+## 若改成传 chunk 缓冲，未加载的体素会被误判悬空（整个世界崩塌）。
+static func find_unsupported_positions(positions: Array) -> Array:
+	var inst := instance()
+	if inst == null:
+		return []
+	return inst.call(&"find_unsupported_positions", positions)
+
+
 ## 按 6 方向连通性分组：返回 Array[Array[Vector3i]]。
 static func partition_connected(positions: Array) -> Array:
 	var inst := instance()

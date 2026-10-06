@@ -189,6 +189,64 @@ func test_shift_origin_shifts_damage_keys() -> void:
 	assert_eq(_damage_at(data, moved), 8.0, "origin shift 后伤害账应随数据基准一起平移")
 
 
+## 破坏系统的在途队列存的是**体素坐标**：origin shift 必须把它们一起平移。
+## 漏平移 → 在途的破坏/崩塌/掉落体会打到平移后的错位体素（只有"长距离旅行中恰好
+## 有在途队列"才暴露，属真跑才现的一类）。
+func test_destructible_queues_follow_origin_shift() -> void:
+	var r := VoxelDestructible.new()
+	r._pending_removed = {Vector3i(5, 5, 5): true}
+	r._hardened_buffer = {Vector3i(1, 2, 3): 0.5}
+	r._cascade_check_positions = [Vector3i(1, 2, 3)]
+	r._cascade_pending_voxels = [Vector3i(4, 5, 6)]
+	r._cascade_total = [Vector3i(7, 8, 9)]
+	r._pending_falling_groups = [[Vector3i(2, 0, 0), Vector3i(3, 0, 0)]]
+	r._pending_falling_materials = [{Vector3i(2, 0, 0): 1, Vector3i(3, 0, 0): 2}]
+
+	var shift := Vector3i(10, -2, 4)
+	r._on_origin_shift(shift)
+
+	assert_true(r._pending_removed.has(Vector3i(15, 3, 9)), "待移除队列应随 origin shift 平移")
+	assert_false(r._pending_removed.has(Vector3i(5, 5, 5)), "旧键必须消失（不得新旧双份残留）")
+	assert_true(r._hardened_buffer.has(Vector3i(11, 0, 7)), "硬化反馈缓冲应平移")
+	assert_eq(r._cascade_check_positions[0], Vector3i(11, 0, 7), "级联待检查位置应平移")
+	assert_eq(r._cascade_pending_voxels[0], Vector3i(14, 3, 10), "级联待移除体素应平移")
+	assert_eq(r._cascade_total[0], Vector3i(17, 6, 13), "级联累积应平移")
+	assert_eq(r._pending_falling_groups[0][0], Vector3i(12, -2, 4), "待生成掉落体组应平移")
+	assert_true(r._pending_falling_materials[0].has(Vector3i(12, -2, 4)), "掉落体材质映射应平移")
+	assert_eq(r._pending_falling_materials[0].get(Vector3i(12, -2, 4)), 1, "平移后材质值应保持不变")
+	r.free()
+
+
+# ----------------------------------------------------------------------------
+# 全量悬空检测下沉原生：结果必须与 GDScript flood_fill 判据逐体素一致
+# ----------------------------------------------------------------------------
+
+func test_find_unsupported_matches_flood_fill_oracle() -> void:
+	var d := VoxelData.new()
+	# 一根贴地柱子 + 一块悬空体素（与地面 6 方向不连通）
+	for y in 4:
+		d.set_voxel(Vector3i(0, y, 0), 1)
+	for x in 2:
+		for z in 2:
+			d.set_voxel(Vector3i(10 + x, 5, 10 + z), 1)
+	assert_eq(d.get_voxel_count(), 8, "测试世界应有 8 个体素")
+
+	var got := d.find_unsupported()
+	# oracle：种子 = 贴地体素，6 方向 flood fill（与旧 GDScript 实现同一判据）
+	var supported := d.flood_fill([Vector3i(0, 0, 0)], {})
+	var want := {}
+	for pos in d.get_positions():
+		if not supported.has(pos):
+			want[pos] = true
+
+	assert_eq(got.size(), want.size(), "原生全量检测的悬空体素数应与 flood_fill 判据一致")
+	for k in want:
+		assert_true(got.has(k), "oracle 判为悬空的体素原生也必须判为悬空: %s" % str(k))
+	assert_false(got.has(Vector3i(0, 3, 0)), "与地面连通的体素不得被判悬空")
+	assert_true(got.has(Vector3i(10, 5, 10)), "悬空块应被判悬空")
+	assert_eq(d.find_unsupported({}).size(), want.size(), "空世界集合参数应走全量路径且结果一致")
+
+
 # ----------------------------------------------------------------------------
 # S8：bpp 非 16 必须被拒绝（接受却读错 → 改为 fail-fast）
 # ----------------------------------------------------------------------------

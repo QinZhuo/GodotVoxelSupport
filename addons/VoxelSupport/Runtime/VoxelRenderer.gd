@@ -510,6 +510,10 @@ func force_update() -> void:
 func regenerate_materials() -> void:
 	_materials_cache.clear()
 	_materials_snapshot_dirty = true
+	# 粗层材质是"按 ID 对齐后的材质快照"，同样会过期。不清的话，已失效重建的粗层 block
+	# 会先用旧对齐材质建网格（新材质只在后续 to_build 路径才刷新）→ 粗层颜色/透明度不更新。
+	for lv in _lod_materials.size():
+		_lod_materials[lv].clear()
 	_request_update()
 
 
@@ -852,7 +856,11 @@ func _process_streaming() -> void:
 					# 生成器世界里已存过的 chunk（= 用户改过）：重新生成会覆盖修改 → 同步预载已存数据
 					if data.generator != null and data.is_stored(ck):
 						if data.preload_chunk(ck):
-							_stream_force_build[ck] = true
+							# 只登记给"会消费它的可见性模式"：该表的唯一消费/擦除点是
+							# _filter_visible_chunks，而它在 FULL 下直接全量返回（早退）——
+							# FULL 下登记进去就是永久泄漏（只增不减，直到 origin shift/退出）。
+							if visibility_mode != VisibilityMode.FULL:
+								_stream_force_build[ck] = true
 							data.mark_chunk_dirty(ck)
 							submitted += 1
 						continue
@@ -909,7 +917,7 @@ func _process_streaming() -> void:
 		# 清理超范围的粗 LOD 独立数据块（未修改可重新生成，修改的写盘）
 		for lev in range(1, _lod_meshes.size()):
 			var edge_w := _lod_block_edge_world(lev)
-			for bk in data.get_lod_block_keys(lev).duplicate():
+			for bk in data.get_lod_block_keys(lev):
 				if _block_dist(bk, lev, cam_pos) > unload_d + edge_w * 0.5:
 					if data.is_lod_block_modified(lev, bk):
 						data.flush_lod_block(lev, bk)
@@ -1009,6 +1017,16 @@ func _shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 		_lod_block_gen[level] = VoxelChunk.shift_key_dict(_lod_block_gen[level], shift)
 	for level in range(1, _lod_null_retries.size()):
 		_lod_null_retries[level] = VoxelChunk.shift_key_dict(_lod_null_retries[level], shift)
+	# 子类钩子：本类只平移**渲染层**状态。子类若持有体素坐标队列（破坏系统的待移除 /
+	# 级联 / 待生成掉落体等），必须在此同步平移，否则在途操作会打到平移后的错位体素。
+	_on_origin_shift(shift)
+
+
+## origin shift 完成后的子类钩子（默认空实现）。
+## 只开一个定点钩子，而不让子类 override _shift_render：后者要连带复制上面整套渲染层
+## 平移逻辑（网格节点、碰撞体、各 block 级账本），漏一处就是幽灵节点/幽灵碰撞体。
+func _on_origin_shift(_shift: Vector3i) -> void:
+	pass
 
 
 # ----------------------------------------------------------------------------
@@ -1556,9 +1574,7 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 	if level >= _lod_block_gen.size() or gen_id != _lod_block_gen[level].get(bk, 0):
 		return
 	if buf.size() > 0 and data != null:
-		data.set_lod_block(level, bk, buf)
-		if data.stream != null and data.stream.supports_lod_layer():
-			data.stream.save_chunk(bk, buf, level)
+		data.store_lod_block(level, bk, buf)
 	else:
 		# 降采样空（LOD0 数据未就绪 或 区域外/空气层）：确定空一次设 null，其余重试计数
 		_lod_mark_null_or_retry(level, bk)
@@ -1587,9 +1603,7 @@ func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: in
 	# has_lod_block=true → _process_lod_level 判"数据就绪但 mesh 空"→ 每帧重新派发
 	# → 死循环占满跨层构建预算，更粗层永远分不到（远处空洞）。
 	if buf.size() > 0 and data != null and mesh != null and mesh.get_surface_count() > 0:
-		data.set_lod_block(level, bk, buf)
-		if data.stream != null and data.stream.supports_lod_layer():
-			data.stream.save_chunk(bk, buf, level)
+		data.store_lod_block(level, bk, buf)
 	if _lod_meshes[level].has(bk) and not _lod_rebuilding(level, bk):
 		return
 	if mesh == null or mesh.get_surface_count() == 0:
@@ -2157,6 +2171,12 @@ func _clear_lod_meshes() -> void:
 		_lod_rebuild[lv].clear()
 	for lv in _lod_null_retries.size():
 		_lod_null_retries[lv].clear()
+	# 与 _clear_lod_block_state 保持同一套账本：整表清理若不覆盖这两个，
+	# 旧坐标系的 block 代次与旧材质对齐结果会残留（前者按次泄漏，后者会让粗层用错材质）。
+	for lv in _lod_block_gen.size():
+		_lod_block_gen[lv].clear()
+	for lv in _lod_materials.size():
+		_lod_materials[lv].clear()
 	# 清理所有 LOD 层网格（LOD0 chunk + 各粗层大块；null 表示空大块标记，跳过）
 	for level in _lod_meshes.size():
 		for bk in _lod_meshes[level]:

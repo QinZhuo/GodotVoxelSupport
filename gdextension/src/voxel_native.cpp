@@ -1794,6 +1794,62 @@ Array VoxelNative::partition_connected(const Array &positions) {
 	return result;
 }
 
+// ----------------------------------------------------------------------------
+// 悬空体素**全量**检测（对应 VoxelData.find_unsupported 的全量路径）
+// ----------------------------------------------------------------------------
+// 【与 find_unsupported_around 是两套模型，别混用】后者用"支撑图(LOWER_5)"做局部增量判定；
+//   本函数用"与地面连通性"——体素稳定 ⟺ 与 y==0 的体素 6 方向连通。
+// 【为什么不收 chunk 缓冲】调用方 VoxelData.find_unsupported 的判据走 has_voxel，
+//   它会经 stream 访问**仅存在于磁盘、尚未载入内存**的 chunk。若这里只看传入的 buffers，
+//   那些块会被当成空气 → 其体素全被误判悬空 → 整个世界崩塌（数据级事故）。
+//   故只收**已枚举好的位置集合**：调用方用 get_positions()，它已把"内存 + 仅磁盘"统一枚举。
+// 返回未与地面连通的体素位置（与 GDScript 版同语义）。
+Array VoxelNative::find_unsupported_positions(const Array &positions) {
+	Array result;
+	if (positions.is_empty()) {
+		return result;
+	}
+	std::unordered_set<uint64_t> all;
+	all.reserve(positions.size() * 2);
+	for (int i = 0; i < positions.size(); ++i) {
+		all.insert(grid_vkey(positions[i]));
+	}
+	// 种子 = 贴地(y==0)体素；6 方向 flood fill 出"与地面连通"的集合
+	std::unordered_set<uint64_t> supported;
+	std::vector<Vector3i> stack;
+	for (int i = 0; i < positions.size(); ++i) {
+		const Vector3i seed = positions[i];
+		if (seed.y != 0) {
+			continue;
+		}
+		const uint64_t skey = grid_vkey(seed);
+		if (supported.count(skey)) {
+			continue;
+		}
+		supported.insert(skey);
+		stack.clear();
+		stack.push_back(seed);
+		while (!stack.empty()) {
+			const Vector3i cur = stack.back();
+			stack.pop_back();
+			for (int d = 0; d < 6; ++d) {
+				const Vector3i nb(cur.x + NEIGHBORS_6[d][0], cur.y + NEIGHBORS_6[d][1], cur.z + NEIGHBORS_6[d][2]);
+				const uint64_t nk = grid_vkey(nb);
+				if (all.count(nk) && !supported.count(nk)) {
+					supported.insert(nk);
+					stack.push_back(nb);
+				}
+			}
+		}
+	}
+	for (int i = 0; i < positions.size(); ++i) {
+		if (!supported.count(grid_vkey(positions[i]))) {
+			result.append(positions[i]);
+		}
+	}
+	return result;
+}
+
 Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks) {
 	// 快照受影响区域（chunks + 27 邻居）。用 COW 共享而非逐 buffer duplicate：
 	// PackedInt32Array 是原子引用计数，worker 只读 const（ptr），主线程后续写 buffers
@@ -2507,6 +2563,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_positions", "positions"), &VoxelNative::find_unsupported_positions);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32", "data", "start", "length"), &VoxelNative::crc32);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32_segments", "data", "offsets", "lengths"), &VoxelNative::crc32_segments);

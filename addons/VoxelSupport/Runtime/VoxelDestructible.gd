@@ -118,6 +118,23 @@ var _falling_chunk_id: int = 0
 var _falling_mesh_tasks: Array[int] = []
 var _particle_mesh_cache: Dictionary = {}  # "mat_id" -> BoxMesh
 
+## 在途任务 ID 的压缩下限（超过才做压缩，避免每次派发都白跑一趟）。
+const _FALLING_TASK_COMPACT_MIN: int = 64
+
+
+## 压缩在途掉落块 mesh 任务表：丢弃已完成任务的 ID。
+## 【为什么必须有】这些任务在结束时没有回调能摘除自己的 ID（结果回主线程时只带 body，
+## 不带 tid），此前**只增不减**（仅 _exit_tree 清空）→ 长玩内存单调增长，退出时还要把
+## 全部历史任务集体 wait。派发前做一次压缩，规模收敛到"真正在途"的数量。
+func _prune_falling_mesh_tasks() -> void:
+	if _falling_mesh_tasks.size() <= _FALLING_TASK_COMPACT_MIN:
+		return
+	var alive: Array[int] = []
+	for tid in _falling_mesh_tasks:
+		if not WorkerThreadPool.is_task_completed(tid):
+			alive.append(tid)
+	_falling_mesh_tasks = alive
+
 ## 粒子对象池：空闲的 GPUParticles3D 集合（复用，避免每次破坏新建节点）。
 ## 池上限防无限膨胀：池满时新粒子仍新建（超出直接丢，靠池上限自然限流）。
 var _particle_pool: Array[GPUParticles3D] = []
@@ -186,6 +203,13 @@ var _body_pool: Array[RigidBody3D] = []
 ## 池中所有已创建的 RigidBody3D（含使用中），用于池容量管理
 var _body_pool_total: Array[RigidBody3D] = []
 
+## 物理体代次：每次 `_acquire_body` 取出都 +1 → { body: gen }。
+## 池复用会让同一个 RigidBody3D 先后承载多个掉落块，仅凭 is_instance_valid 无法区分
+## "这个在途 mesh 结果属于当初那个块吗"。故结果随生成代次一起回传，应用前比对代次，
+## 不匹配即丢弃（否则会把上一世的网格挂到复用后的新块上）。
+var _body_gen: Dictionary = {}
+var _next_body_gen: int = 0
+
 ## 大块掉落交替策略：相邻中块连续快速生成时，物理体与粒子破碎交替出现，
 ## 防止多个中块同帧物理落地互相碰撞被推飞，同时画面表现更多样。
 ## 交替条件（仅中块 + 双条件）：组体素 > 粒子阈值 且 ≤ Box阈值 且 距上次物理块
@@ -234,6 +258,42 @@ func _exit_tree() -> void:
 	# 必须转发给父类：它负责置 _exiting、等待在途 worker、清理 LOD 网格——
 	# 漏掉会让 worker 完成时的 call_deferred 打到已释放实例。
 	super._exit_tree()
+
+
+## origin shift 钩子：把本节点持有的**体素坐标**在途队列一起平移。
+##
+## 【为什么必须做】父类只平移渲染层状态（网格节点/碰撞体/block 级账本），而破坏系统
+## 的队列里存的是体素坐标。数据坐标整体挪了 shift 后若不平移这些队列，下一帧处理时：
+##   · `_pending_removed`      → 在错位位置移除体素（破坏打到别处/静默无效）；
+##   · `_cascade_*`            → 级联检测与移除错位；
+##   · `_pending_falling_*`    → 生成错位的掉落体与材质映射。
+## 长距离旅行（触发 origin shift）时这些队列常非空，属"真跑才暴露"的一类。
+func _on_origin_shift(shift: Vector3i) -> void:
+	_pending_removed = VoxelChunk.shift_key_dict(_pending_removed, shift)
+	_hardened_buffer = VoxelChunk.shift_key_dict(_hardened_buffer, shift)
+	_cascade_check_positions = _shift_positions(_cascade_check_positions, shift)
+	_cascade_pending_voxels = _shift_positions(_cascade_pending_voxels, shift)
+	_cascade_total = _shift_positions(_cascade_total, shift)
+	if not _pending_falling_groups.is_empty():
+		var ng: Array = []
+		var nm: Array[Dictionary] = []
+		for i in _pending_falling_groups.size():
+			ng.append(_shift_positions(_pending_falling_groups[i], shift))
+			nm.append(VoxelChunk.shift_key_dict(_pending_falling_materials[i], shift)
+					if i < _pending_falling_materials.size() else {})
+		_pending_falling_groups = ng
+		_pending_falling_materials = nm
+
+
+## 平移一个 Vector3i 位置列表（逐元素 +shift），返回新数组（不就地改，避免迭代中改键）。
+static func _shift_positions(positions: Array, shift: Vector3i) -> Array:
+	if positions.is_empty():
+		return []
+	var out: Array = []
+	out.resize(positions.size())
+	for i in positions.size():
+		out[i] = Vector3i(positions[i]) + shift
+	return out
 
 
 # ----------------------------------------------------------------------------
@@ -872,23 +932,26 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	# 避免级联破坏时在主线程同步生成大量掉落块 mesh（最大主线程阻塞点）
 	var materials_snapshot: Array = data.materials.duplicate(false) if data else []
 	var spawn_scale := voxel_scale
+	# 本块所用 body 的代次：随结果一起回传，应用前比对（body 可能已回池并被复用到新块）
+	var body_gen: int = _body_gen.get(body, 0)
 	# 跟踪任务 ID：退出时必须 join（见 _exit_tree），否则未跟踪 worker 的 call_deferred
-	# 会打到已释放实例。集合随 _clear_debris 清空。
+	# 会打到已释放实例。派发前压缩一次，保证集合只保留真正在途的任务（有界）。
+	_prune_falling_mesh_tasks()
 	_falling_mesh_tasks.append(WorkerThreadPool.add_task(
-		_falling_chunk_mesh_worker.bind(local_voxels, materials_snapshot, spawn_scale, body)))
+		_falling_chunk_mesh_worker.bind(local_voxels, materials_snapshot, spawn_scale, body, body_gen)))
 
 
 ## 后台线程入口：为掉落块生成网格数组（线程安全，不触碰 ArrayMesh/节点）
 ## 完成后 call_deferred 回主线程 _on_falling_chunk_mesh_result 组装 ArrayMesh
 ## 优先走原生 dense 路径（generate_single_chunk_dense → GDExtension C++，
 ## 顶点复用 + 网格生成主循环 ~10 倍提速）；块体超 HALO_SIZE 时回退 generate_arrays_runtime
-func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D) -> void:
+func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scale: float, body: RigidBody3D, body_gen: int) -> void:
 	var arrays: Variant = _generate_falling_chunk_arrays(local_voxels, materials, scale)
 	# 【凸包后台化】在后台线程计算碰撞外壳点集（体素包围盒 8 角点，O(1) 无凸包算法），
 	# 替代主线程 create_convex_shape（实测 4096 体素块 69ms 主线程卡顿）。
 	# 传回主线程 set_points 秒完成。
 	var hull_points := _compute_hull_points(local_voxels, scale)
-	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels, hull_points)
+	call_deferred("_on_falling_chunk_mesh_result", body, arrays, local_voxels, hull_points, body_gen)
 
 
 ## 计算掉落块碰撞外壳点集：体素包围盒的 8 个角点（简化凸包）。
@@ -957,16 +1020,19 @@ func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, 
 ## 掉落体 mesh 组装入口：
 ## 结果入队，由 _process 帧尾限量组装（add_surface_from_arrays 的同步 GPU 上传
 ## 摊平到多帧，避免 Metal 满载时 fence wait() 超时）。
-func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}, hull_points: PackedVector3Array = PackedVector3Array()) -> void:
+func _on_falling_chunk_mesh_result(body: RigidBody3D, arrays: Variant, local_voxels: Dictionary = {}, hull_points: PackedVector3Array = PackedVector3Array(), body_gen: int = -1) -> void:
 	if _exiting:
 		return
 	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
+		return
+	# 代次已过期（body 回池后被复用于新块）：本结果属于上一世的块，直接丢。
+	if _body_gen.get(body, -1) != body_gen:
 		return
 	if arrays == null or not arrays is Dictionary or (arrays as Dictionary).is_empty():
 		return
 	_pending_mesh_results.append({
 		"body": body, "arrays": arrays as Dictionary, "local_voxels": local_voxels,
-		"hull_points": hull_points,
+		"hull_points": hull_points, "gen": body_gen,
 	})
 
 
@@ -980,6 +1046,9 @@ func _process_pending_mesh_results() -> void:
 		var entry: Dictionary = _pending_mesh_results.pop_front()
 		var body: RigidBody3D = entry.get("body")
 		if body != null and is_instance_valid(body) and not body.is_queued_for_deletion():
+			# 二次比对代次（入队到出队之间 body 也可能被回池复用）
+			if _body_gen.get(body, -1) != entry.get("gen", -1):
+				continue
 			_apply_falling_chunk_mesh(body, entry.get("arrays"), entry.get("local_voxels", {}), entry.get("hull_points", PackedVector3Array()))
 			count += 1
 	if diag_enabled and count > 0:
@@ -1082,6 +1151,8 @@ func _acquire_body() -> RigidBody3D:
 		body.freeze = false
 		body.rotation = Vector3.ZERO
 		body.position = Vector3.ZERO
+		_next_body_gen += 1
+		_body_gen[body] = _next_body_gen
 		return body
 	# 池空：新建（若已达总容量上限则仍新建，由 _spawn_falling_chunk 的守卫控制降级）
 	var new_body := RigidBody3D.new()
@@ -1089,6 +1160,8 @@ func _acquire_body() -> RigidBody3D:
 	_falling_chunk_id += 1
 	new_body.gravity_scale = 1.0
 	_body_pool_total.append(new_body)
+	_next_body_gen += 1
+	_body_gen[new_body] = _next_body_gen
 	return new_body
 
 
@@ -1383,14 +1456,14 @@ func _spawn_debris_with_materials(positions: Array, mat_map: Dictionary, is_coll
 			by_mat[mat_id] = []
 		by_mat[mat_id].append(pos)
 
-	# 粒子发射中心：所有碎片位置的质心
+	# 粒子发射中心：**发射集**的质心（与上面 by_mat 取的前 count 个一致）。
+	# 不能遍历全部 positions——destroy_all 时那是整个世界，会为十几个粒子走完全世界，
+	# 且算出的质心与真正发射的体素不符（粒子从块外飘出来）。
 	var center := Vector3.ZERO
-	var n := 0
-	for pos in positions:
-		center += (Vector3(pos) + Vector3(0.5, 0.5, 0.5)) * voxel_scale
-		n += 1
-	if n > 0:
-		center /= float(n)
+	for i in range(count):
+		center += (Vector3(positions[i]) + Vector3(0.5, 0.5, 0.5)) * voxel_scale
+	if count > 0:
+		center /= float(count)
 
 	# 视锥外跳过（相机看不到的破坏，不生成粒子，省 GPU）
 	# 注意：center 是局部坐标，需加 global_position 转世界坐标再判定

@@ -132,6 +132,10 @@ public:
 	// 返回 Array[Array[Vector3i]]，每组内两两 6 方向连通
 	static Array partition_connected(const Array &positions);
 
+	// 悬空体素**全量**检测（与地面连通性模型）：输入"全部体素位置"，返回未与 y==0 连通的位置。
+	// 只依据位置集合，不读 chunk 缓冲 —— 见实现处的说明（仅磁盘 chunk 会造成误判）。
+	static Array find_unsupported_positions(const Array &positions);
+
 	// 快照受影响区域的 chunk 缓冲（chunks + 27 邻居）。
 	// buffers: chunk key -> PackedInt32Array(32³)
 	// chunks: 需要快照的 chunk key 数组（含其邻居）
