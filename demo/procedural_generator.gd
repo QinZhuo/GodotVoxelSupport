@@ -1,5 +1,5 @@
 @tool
-class_name ProceduralTerrainGenerator
+class_name PcgTerrainGenerator
 extends VoxelGenerator
 
 ## 示例程序化地形生成器（覆写虚基类 _generate_chunk 实现生成算法）。

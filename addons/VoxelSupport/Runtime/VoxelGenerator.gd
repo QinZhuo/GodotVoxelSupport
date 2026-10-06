@@ -5,6 +5,9 @@ extends Resource
 
 ## 体素数据生成器抽象 —— 与 VoxelStream 并列：一个"造数据"，一个"存数据"。
 ##
+## 【职责边界】只定义"按 key 造出体素数据"的通用契约，服务所有数据源；具体算法交给子类
+## （如程序化地形 PcgTerrainGenerator、SDF 模型 PcgSdfGenerator）。
+##
 ## 【为什么与流分开】无限世界的"读取"其实是"生成"，它没有任何存储。早先把它做成
 ## VoxelStream 的子类（VoxelProceduralStream），代价是 has_chunk 一个名字要同时表示
 ## "已存在流中"和"属于可生成范围"两种含义，调用方只能靠 `is 类型` 逐处分支去猜哪个
@@ -18,6 +21,11 @@ extends Resource
 ##
 ## 【确定性要求】必须对同一 key 返回相同数据（噪声用 key 派生种子）。否则 origin shift
 ## 平移 key 后地形不连续，且同一 chunk 重复生成会得到不同结果。
+##
+## 【两种用法同一套接口】
+##   无限世界：不设范围（恒 true）→ 任意 chunk 可生成（如噪声地形）。
+##   有界模型：set_grid_size / set_chunk_bounds 限定范围（如建筑蓝图、程序化模型），
+##             配合 VoxelData.grid_size，一个模型就是一"个有界生成器 + 一个 VoxelData"。
 
 
 ## @abstract 按 chunk key 生成 32³ chunk 缓冲（值 = 材质ID，0 = 空）。

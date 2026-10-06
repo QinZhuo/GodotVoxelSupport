@@ -186,7 +186,7 @@ func _build_world_procedural() -> void:
 	data.stream = stream
 	# 生成器：子类覆写 _generate_chunk / _generate_chunk_lod 实现生成算法。
 	# 先设 stream 再设 generator：generator 的 setter 只在 stream 为空时才兜底建内存流。
-	data.generator = ProceduralTerrainGenerator.new()
+	data.generator = PcgTerrainGenerator.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	mat.color = Color(0.35, 0.55, 0.3)
