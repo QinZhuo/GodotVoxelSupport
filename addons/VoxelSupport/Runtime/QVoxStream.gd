@@ -578,9 +578,7 @@ func _build_cach_index(bytes: PackedByteArray) -> void:
 			idx[lod] = {}
 		(idx[lod] as Dictionary)[blk["key"]] = {
 			"block_off": block_off,
-			# read_vox_block 返回的 payload_off 已是相对本 slice 的绝对偏移（含 content_off），
-			# 叠上 slice 在文件中的起点即可定位；此处不可再加 content_off（否则双重计数）。
-			"payload_off": payload_off + int(blk["payload_off"]),
+			"payload_off": payload_off + content_off + int(blk["payload_off"]),
 			"payload_len": int(blk["payload_len"]),
 			"codec": int(blk["codec"]),
 			"source_crc": hdr["source_crc"],
