@@ -19,28 +19,39 @@ static func Open(path: String) -> VoxAccess:
 	file.close()
 	return vox
 
-## 0–23 朝向的解码缓存（Basis 是值类型，缓存只省重复的位运算与列构造）。
+## 朝向解码缓存（索引即 `_r` 原始值；Basis 是值类型，缓存只省重复的位运算与列构造）。
 static var _rotations: Array = []
 
 
-## `.vox` 的 `nTRN._r`：MagicaVoxel 的 0–23 轴对齐朝向编码。
+## `.vox` 的 `nTRN._r`：MagicaVoxel 把 3×3 朝向矩阵压成 **7 位整数**（0–127）。
 ##
-## 【为什么只留在这里】这是 `.vox` 独有的省字节布局——低 2 位与次 2 位分别是第 1、2 行
-## 非零元所在的列，第 3 行由"三行必须是单位轴的置换"推出，高 3 位是三个轴的符号；
-## 只有 24 种朝向且隐含 Z-up。它是 MagicaVoxel 的历史包袱而非通用表示，因此不外提成
-## 公共类，也不要求 QVox 的 NODE 去模仿（那边用四元数，见 QVoxAsset._node_transform）。
+## 【为什么只留在这里】这是 `.vox` 独有的省字节布局：低 2 位 = 第 1 行的非零元所在列、
+## 次 2 位 = 第 2 行，第 3 行由"三行必须是 {0,1,2} 的置换"推出，高 3 位是三个轴的符号；
+## 并且整个编码带 Z-up 约定。它是 MagicaVoxel 的历史包袱而非通用表示，因此不外提成公共类，
+## 也不要求 QVox 的 NODE 去模仿（那边用四元数，见 QVoxAsset._node_transform）。
+##
+## 【索引不是 0–23】"24 种朝向"说的是**结果集合**，不是取值区间：真实文件里出现的是 7 位值
+## （本仓库 cars.vox 就有 17 / 22 / 24 / 33 / 52 / 72 / 89）。所以缓存按 128 项建，
+## 且绝不能做任何"夹到 0–23"的处理——那会把多个不同朝向静默映射成同一个。
+##
+## 【非法值不崩】三个行索引必须恰好是 {0,1,2} 的置换；不满足时（`_r=0` 即其中一例：
+## MagicaVoxel 无旋转时本不写该键，但确有文件写了 0）按"无旋转"返回恒等，
+## 既不抛越界、也不构造退化矩阵。
 ##
 ## 解码结果是精确的轴对齐 Basis：整数坐标经它变换后仍是整数，往返无浮点误差。
 static func _decode_rotation(value: int) -> Basis:
+	if value < 0 or value > 127:
+		return Basis()
 	if _rotations.is_empty():
-		_rotations.resize(24)
-	value = clampi(value, 0, 23)
+		_rotations.resize(128)
 	var cached: Variant = _rotations[value]
 	if cached != null:
 		return cached
 	var row0 := value & 3
 	var row1 := (value >> 2) & 3
 	var row2 := 3 - row0 - row1
+	if row0 > 2 or row1 > 2 or row0 == row1 or row2 < 0 or row2 > 2:
+		return Basis()
 	var sign0 := 1.0 if ((value >> 4) & 1) == 0 else -1.0
 	var sign1 := 1.0 if ((value >> 5) & 1) == 0 else -1.0
 	var sign2 := 1.0 if ((value >> 6) & 1) == 0 else -1.0
