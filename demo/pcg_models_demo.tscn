@@ -32,4 +32,4 @@ light_energy = 1.2
 shadow_enabled = true
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.866, -0.5, 0, 0.5, 0.866, 0, 8, 16)
+transform = Transform3D(1, 0, 0, 0, 0.96212, -0.27260, 0, 0.27260, 0.96212, 0, 12, 30)
