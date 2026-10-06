@@ -934,6 +934,46 @@ func flush() -> void:
 	stream.flush()
 
 
+## 把本数据层「程序化生成的有界模型」烘焙（冻结）为静态存档：逐 chunk 调用 generator，
+## 非空块写入 target（典型是新建的 QVoxStream → .qvox），材质调色板一并写入，最后 flush。
+##
+## 【用途】把 SDF / 蓝图模型"烧"成普通体素文件——之后加载它不再需要生成器与逐体素采样，
+## 直接走既有 stream → 渲染 / 破坏 / 编辑链路（加载快、可手工再改、可当静态资产分发）。
+##
+## 【为何放在 VoxelData】只有它同时认识"造"(generator) 与"存"(stream)；烘焙范围就是
+## grid_size（与运行时"有界模型"同一套语义），因此生成器侧一行 I/O 都不必加。
+##
+## 【同步】在主线程直接调 generator.generate——这是显式的离线 / 编辑期操作，不进异步队列
+## （异步是运行期流式的机制，烘焙不需要）。
+##
+## 范围 = grid_size；ZERO（无限世界）无范围可烘焙，拒绝。
+## 返回写入的 chunk 数（0 = 范围内无非空块；-1 = 参数不合法）。
+func bake_to(target: VoxelStream) -> int:
+	if generator == null or target == null:
+		push_error("[VoxelData] bake_to 需要 generator 与 target stream")
+		return -1
+	if grid_size == Vector3i.ZERO:
+		push_error("[VoxelData] bake_to 需要有限 grid_size（无限世界无范围可烘焙）")
+		return -1
+	generator.set_grid_size(grid_size)
+	var qs := target as QVoxStream
+	if qs != null:
+		qs.set_materials(materials)
+	var last := VoxelChunk.chunk_of(grid_size - Vector3i.ONE)
+	var written := 0
+	for cz in range(last.z + 1):
+		for cy in range(last.y + 1):
+			for cx in range(last.x + 1):
+				var ck := Vector3i(cx, cy, cz)
+				var buf := generator.generate(ck)
+				if buf.size() != CHUNK_VOLUME or _count_voxels(buf) == 0:
+					continue
+				target.save_chunk(ck, buf)
+				written += 1
+	target.flush()
+	return written
+
+
 ## 构建期/读档批量填充 {pos: mat_id}，不标记脏 chunk、不触发信号。
 ## 适合一次性生成大量静态体素（demo 场景构建、外部数据导入）。
 func load_voxels_dict(dict: Dictionary) -> void:

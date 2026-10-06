@@ -11,6 +11,8 @@ extends Node3D
 ##   两球 SmoothUnion 焊成雪人/岩石，再用圆柱 Subtract 打穿一个洞
 ## 右（SDF 交 + 并）：
 ##   盒 ∩ 球 得到圆角块，再并上两根胶囊腿
+## 中（SDF 域重复 + 变换）：
+##   Repeat 重复圆柱得到柱林，再用 Transform 把重复图案对齐到模型中心，并上底座
 ##
 ## 验证：改 SDF 参数或 grid_size 重建，形状与有界范围随之变化。
 
@@ -23,8 +25,9 @@ extends Node3D
 func _ready() -> void:
 	_build_model_a(Vector3(-model_spacing, 0.0, 0.0))
 	_build_model_b(Vector3(model_spacing, 0.0, 0.0))
+	_build_model_c(Vector3.ZERO)
 	_setup_camera()
-	print("[PCG模型Demo] 两个独立 SDF 模型已生成")
+	print("[PCG模型Demo] 三个独立 SDF 模型已生成")
 
 
 ## 相机对准两个模型（用 look_at，避免手写基矢）
@@ -81,6 +84,33 @@ func _build_model_b(pos: Vector3) -> void:
 		_material(1, Color(0.55, 0.45, 0.3), 0.9),
 		_material(2, Color(0.35, 0.55, 0.4), 0.85),
 		_material(3, Color(0.4, 0.4, 0.45), 0.95),
+	])
+
+
+## 模型 C：域重复 + 变换 —— Repeat 重复圆柱得到柱林，再平移到模型中心，并上底座
+func _build_model_c(pos: Vector3) -> void:
+	# 重复以"原点所在格"为基准，故子形状放在原点；Y 轴不重复 → 纵向是连续柱体
+	var pillar := _cylinder(Vector3(0, 16, 0), 2.5, 30.0, 3)
+	var forest := SdfRepeat.new()
+	forest.child = pillar
+	forest.spacing = Vector3(8.0, 0.0, 8.0)
+
+	# 把重复图案整体平移，使柱子落在 4/12/20/28 而非贴着网格边
+	var centered := SdfTransform.new()
+	centered.child = forest
+	centered.transform = Transform3D(Basis.IDENTITY, Vector3(4.0, 0.0, 4.0))
+
+	var base := SdfBox.new()
+	base.center = Vector3(16, 1.5, 16)
+	base.size = Vector3(32.0, 3.0, 32.0)
+	base.material_id = 1
+
+	var model := SdfUnion.new()
+	model.a = base
+	model.b = centered
+	_add_model("ModelC_Pillars", pos, model, [
+		_material(1, Color(0.4, 0.42, 0.45), 0.95),
+		_material(3, Color(0.3, 0.5, 0.65), 0.7),
 	])
 
 

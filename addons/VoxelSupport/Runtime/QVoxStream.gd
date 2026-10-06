@@ -578,7 +578,10 @@ func _build_cach_index(bytes: PackedByteArray) -> void:
 			idx[lod] = {}
 		(idx[lod] as Dictionary)[blk["key"]] = {
 			"block_off": block_off,
-			"payload_off": payload_off + content_off + int(blk["payload_off"]),
+			# read_vox_block 的 at = content_off + 2，故它返回的 payload_off
+			# **已相对本 slice 且已含 content_off**；叠上 slice 起点即可定位，
+			# 不能再加一次 content_off（双重计数会让 seek 越过真实负载 → 读回空块）。
+			"payload_off": payload_off + int(blk["payload_off"]),
 			"payload_len": int(blk["payload_len"]),
 			"codec": int(blk["codec"]),
 			"source_crc": hdr["source_crc"],
