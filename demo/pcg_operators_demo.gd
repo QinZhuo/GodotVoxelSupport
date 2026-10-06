@@ -1,34 +1,39 @@
 @tool
 extends Node3D
 
-## 程序化体素算子演示（PCG：L-系统 / 元胞自动机 / WFC）——三个彼此独立的模型。
+## 程序化体素算子演示（PCG：L-系统 / 元胞自动机 / WFC / 重叠式 WFC）——四个彼此独立的模型。
 ##
-## 这三个算子与 SDF 走的是**两条路**：
+## 这四个算子与 SDF 走的是**两条路**：
 ##   SDF      —— 逐点函数 sample(p)，适合"由简单件组合出的实体"（见 pcg_models_demo）
 ##   PcgModel —— 整体产出 build(grid_size)，适合"必须全局迭代才算得出来的东西"
-## 三者都实现 PcgModel，因此共用同一个适配器 PcgModelGenerator——
+## 四者都实现 PcgModel，因此共用同一个适配器 PcgModelGenerator——
 ## 要加一种新算子，只需再写一个 build()，切 chunk / 缓存 / LOD 全项目只此一份。
 ##
-## 左（L-系统）：文法改写 + 3D 乌龟盖章 → 一棵树
-## 中（元胞自动机）：随机播撒 + 26 邻域平滑 → 洞穴
-## 右（WFC）：图块按六面接口拼接 → 涌现出多层遗迹
+## 左上（L-系统）：文法改写 + 3D 乌龟盖章 → 一棵树
+## 右上（元胞自动机）：随机播撒 + 26 邻域平滑 → 洞穴
+## 左下（WFC socket 式）：图块按**手写的六面接口名**拼接 → 多层遗迹
+## 右下（WFC 重叠式）：规则不手写，从一块**样例**里"数"出可重叠的图案 → 再拼出一片废墟
 ##
 ## 每个模型 = 【有界 VoxelData】+【PcgModelGenerator（内嵌一个 PcgModel）】+【VoxelRenderer 节点】。
 
 ## 体素世界尺度（模型 32³ 体素 → 世界 6.4 单位）
 @export var voxel_scale: float = 0.2
-## 模型的世界间距
+## 模型的世界间距（四模型摆成 2×2）
 @export var model_spacing: float = 13.0
 
 const GRID := Vector3i(32, 32, 32)
+## 重叠式 WFC 的网格：它每格一个图案，格数 = 输出体素数，远重于 socket 式，故用更小的网格。
+const OVERLAP_GRID := Vector3i(24, 24, 24)
 
 
 func _ready() -> void:
-	_build_lsystem(Vector3(-model_spacing, 0.0, 0.0))
-	_build_cellular(Vector3.ZERO)
-	_build_wfc(Vector3(model_spacing, 0.0, 0.0))
+	var h := model_spacing * 0.5
+	_build_lsystem(Vector3(-h, 0.0, -h))
+	_build_cellular(Vector3(h, 0.0, -h))
+	_build_wfc(Vector3(-h, 0.0, h))
+	_build_wfc_overlap(Vector3(h, 0.0, h))
 	_setup_camera()
-	print("[PCG算子Demo] L-系统 / 元胞自动机 / WFC 三个模型已生成")
+	print("[PCG算子Demo] L-系统 / 元胞自动机 / WFC / 重叠式WFC 四个模型已生成")
 
 
 func _setup_camera() -> void:
@@ -39,12 +44,12 @@ func _setup_camera() -> void:
 		add_child(cam)
 	cam.current = true
 	cam.fov = 60.0
-	cam.global_position = Vector3(0.0, 12.0, 26.0)
+	cam.global_position = Vector3(0.0, 13.0, 24.0)
 	cam.look_at(Vector3(0.0, 3.5, 0.0), Vector3.UP)
 
 
 # ----------------------------------------------------------------------------
-# 三个算子
+# 四个算子
 # ----------------------------------------------------------------------------
 
 ## L-系统：一条产生式迭代 2 次，乌龟从底面中心向上长出树冠。
@@ -105,6 +110,45 @@ func _build_wfc(pos: Vector3) -> void:
 		_material(2, Color(0.75, 0.7, 0.6), 0.95),
 		_material(3, Color(0.42, 0.4, 0.4), 0.95),
 	])
+
+
+## 重叠式 WFC：规则不手写，从一块 8³ 样例里"数"出可重叠的 N³ 图案。
+## 样例是一块多孔岩（见 _overlap_sample）—— 学出来的图案再被拼成一片同类岩体。
+func _build_wfc_overlap(pos: Vector3) -> void:
+	var sample_size := Vector3i(8, 8, 8)
+	var ov := PcgWfcOverlap.new()
+	ov.sample = _overlap_sample(sample_size)
+	ov.sample_size = sample_size
+	ov.pattern_size = 3
+	ov.seed = 20261007
+	ov.max_retries = 8
+	_add_model("ModelO_Overlap", pos, ov, OVERLAP_GRID, [
+		_material(1, Color(0.5, 0.47, 0.44), 0.95),
+		_material(2, Color(0.45, 0.6, 0.4), 0.8),
+	])
+
+
+## 样例：一块多孔岩 —— 实心岩石里挖出孔洞，部分孔洞填着另一种材质。
+##
+## 【样例怎么挑：重叠式能不能求出解，全看样例的图案有没有重复】
+##   ① 不能是"地板 + 一圈墙"这类**稀疏骨架**：8³ 里大部分为空的样例学出的图案
+##      绝大多数是纯空气，且纯空气自相容，WFC 会整体坍缩进"整块全空"的退化解。
+##   ② 也不能是**白噪声**：每个 N³ 窗口都唯一（8³ 配 N=3 即 216/216 全不同），
+##      相容图近乎一条无环长链，铺到网格边缘必然死路，8 次重试全矛盾（实测）。
+##   ③ 要的是**致密 + 图案重复**：孔洞用两族周期互质（5 与 6）的斜切取并集，
+##      于是 8³ 样例内每族各自重复数轮，学出的图案既能拼、又有多样性。
+##   单族斜切是平行平面，输出会露出明显的"格栅"；两族相交后才成团状的天然孔隙。
+func _overlap_sample(size: Vector3i) -> PackedInt32Array:
+	var v := PackedInt32Array()
+	v.resize(size.x * size.y * size.z)
+	for z in size.z:
+		for y in size.y:
+			for x in size.x:
+				var m := 0
+				if (x + 2 * y + 3 * z) % 5 < 2 or (2 * x + y - z) % 6 < 2:
+					m = 2 if (x + z) % 3 == 0 else 1
+				v[x + y * size.x + z * size.x * size.y] = m
+	return v
 
 
 # ----------------------------------------------------------------------------

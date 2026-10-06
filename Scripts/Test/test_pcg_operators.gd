@@ -195,6 +195,65 @@ func test_wfc_retries_and_gives_up_on_contradiction() -> void:
 
 
 # ----------------------------------------------------------------------------
+# ⑨ 重叠式 WFC：图案从样例"数"出来 —— 沿 x 交替的样例必须学出 2 种图案、输出严格交替
+# ----------------------------------------------------------------------------
+
+func test_wfc_overlap_learns_patterns_from_sample() -> void:
+	# 样例 4×2×2、沿 x 交替 1/2；N=2 的滑窗只有 3 个：
+	#   x=0..1 → [1,2]、x=1..2 → [2,1]、x=2..3 → [1,2] → 去重后 2 种，权重 2 与 1。
+	var ov := _overlap(_alt_sample(), Vector3i(4, 2, 2), 2)
+	ov.seed = 5
+	var gs := Vector3i(8, 2, 2)
+	var vol := ov.build(gs)
+
+	assert_eq(ov._patterns.size(), 2, "沿 x 交替的样例应去重出 2 种图案（多于 2 说明去重没按内容比较）")
+	assert_eq(ov._weights.size(), 2, "权重数组应与图案一一对应")
+	var w0 := int(ov._weights[0])
+	var w1 := int(ov._weights[1])
+	assert_true((w0 == 1 and w1 == 2) or (w0 == 2 and w1 == 1), "两种图案的出现次数应为 2 与 1")
+
+	assert_eq(vol.size(), gs.x * gs.y * gs.z, "输出长度应等于网格体积")
+	assert_eq(_distinct_values(vol).size(), 2, "输出应只用样例里出现过的材质")
+
+	# 相容表要求 [1,2] 后必接 [2,1]、[2,1] 后必接 [1,2] → 沿 x 严格交替（相邻必不同色）。
+	for z in gs.z:
+		for y in gs.y:
+			for x in gs.x - 1:
+				var i := PcgModel.index_of(x, y, z, gs)
+				assert_ne(vol[i], vol[i + 1], "沿 x 相邻格必须交替（重叠区约束生效的判据）")
+
+
+# ----------------------------------------------------------------------------
+# ⑩ 重叠式 WFC：确定性 + 退化输入（样例过小 / 全同样例）
+# ----------------------------------------------------------------------------
+
+func test_wfc_overlap_deterministic_and_degenerate() -> void:
+	var gs := Vector3i(4, 4, 4)
+	assert_eq(_overlap(_alt_sample(), Vector3i(4, 2, 2), 2).build(gs),
+			_overlap(_alt_sample(), Vector3i(4, 2, 2), 2).build(gs), "同参数同 seed 应恒得同一结果")
+
+	# 样例边长 2 < N=3 → 学不到图案：返回对齐尺寸的空模型，而不是崩溃
+	var tiny := PcgWfcOverlap.new()
+	tiny.sample_size = Vector3i(2, 2, 2)
+	tiny.sample = PackedInt32Array([1, 1, 1, 1, 1, 1, 1, 1])
+	tiny.pattern_size = 3
+	assert_eq(tiny.build(gs).size(), gs.x * gs.y * gs.z, "样例过小也应返回对齐尺寸的缓冲")
+	assert_eq(_count_solid(tiny.build(gs)), 0, "样例过小应输出空模型")
+
+	# 全同样例 → 只有 1 种图案（域一开始即为单元素）→ 输出必须全为同一材质
+	var flat := PcgWfcOverlap.new()
+	flat.sample_size = Vector3i(4, 4, 4)
+	var fv := PackedInt32Array()
+	fv.resize(64)
+	fv.fill(5)
+	flat.sample = fv
+	flat.pattern_size = 2
+	var out := flat.build(gs)
+	assert_eq(_count_solid(out), 64, "全同样例应填满")
+	assert_eq(_distinct_values(out).size(), 1, "全同样例应只有 1 种材质")
+
+
+# ----------------------------------------------------------------------------
 # 工具
 # ----------------------------------------------------------------------------
 
@@ -258,3 +317,24 @@ func _distinct_values(volume: PackedInt32Array) -> Dictionary:
 	for m in volume:
 		seen[m] = true
 	return seen
+
+
+## 重叠式 WFC：挂上样例与图案尺寸（与 demo 的组装方式一致）。
+func _overlap(sample: PackedInt32Array, sample_size: Vector3i, n: int) -> PcgWfcOverlap:
+	var ov := PcgWfcOverlap.new()
+	ov.sample = sample
+	ov.sample_size = sample_size
+	ov.pattern_size = n
+	return ov
+
+
+## 沿 x 交替 1/2、其余两轴恒定的小样例（N=2 时恰能学出 2 种图案）。
+func _alt_sample() -> PackedInt32Array:
+	var s := Vector3i(4, 2, 2)
+	var v := PackedInt32Array()
+	v.resize(s.x * s.y * s.z)
+	for z in s.z:
+		for y in s.y:
+			for x in s.x:
+				v[x + y * s.x + z * s.x * s.y] = 1 if x % 2 == 0 else 2
+	return v
