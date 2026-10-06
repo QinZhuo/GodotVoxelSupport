@@ -92,12 +92,10 @@ public:
 	static PackedInt32Array build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers,
 			const Vector3i &block_key);
 
-	// 静态岛失稳检测（连通性；与 VoxelData.find_unsupported 同一模型）：
-	//   体素稳定 ⟺ 存在实心体素组成的 6 连通路径走到锚定层（y <= anchor_y）。
-	// 从 removed 的 6 邻居洪泛：触到锚定层 → 该连通块仍锚定，返回空；否则返回整块失稳体素。
-	// buffers: chunk key -> PackedInt32Array(32³) 快照；removed: Array[Vector3i]
-	// 返回：扁平 (x, y, z) 三元组（空 = 不塌）。返回扁平而非 {pos:true} 字典，
-	// 是因为整块可达百万体素，字典 + keys() 会在主线程物化百万个 Variant。
+	static Dictionary find_unsupported_around(const Dictionary &buffers, const Array &removed, int lateral_radius);
+
+	// 【未绑定·留作对照，运行期不参与】连通性静态岛模型（返回扁平三元组）。
+	// 曾用于 A/B：与列支撑模型的差别只在"支撑定义"。保留代码备查，不需要时可直接删除本实现。
 	static PackedInt32Array find_unsupported_island(const Dictionary &buffers, const Array &removed, int anchor_y);
 
 	// 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。

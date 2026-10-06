@@ -48,9 +48,12 @@ func _validate_property(property: Dictionary) -> void:
 ## 关闭则每次全量遍历所有体素判定（结果最精确，适合小型场景/低频）
 @export var local_collapse: bool = true
 
-## 锚定层：与 y <= anchor_y 连通（6 方向实心体素路径）的体素视为稳定。
-## 世界地面不在 y=0 时才需要改。判定模型见 NativeLoader.find_unsupported_island。
-@export var anchor_y: int = 0
+## 失稳横向传播半径（体素）：连带塌落只允许在破口附近这么远内扩散。
+## 【为什么只限横向】竖向传播 = 真的失去了正下方支撑（支撑链），不限 —— 那是破坏脆感的来源；
+## 横向传播 = 连带扫落"本就下方悬空"的板，无界时就是"捅一处、整层/整世界连塌"的病根。
+## 业界同类做法都是"传播必须有界"（见原生 find_unsupported_around 注释）。
+## < 0 = 不限制（旧行为）。
+@export var collapse_spread_limit: int = 16
 
 ## 逐体素健康度系统开关：关闭时忽略材质硬度，一击即碎
 @export var use_voxel_health: bool = true
@@ -543,11 +546,11 @@ func _stress_detect_fn() -> Callable:
 		return NativeLoader.propagate_stress(snap, pos, strength, steps, force, decay)
 
 
-## 静态岛失稳检测（原生）：返回因本次破坏而与锚定层断开的整块体素（扁平三元组，空 = 不塌）。
+## 失稳检测（原生列支撑）：返回 {pos: true}。
 func _unsupported_detect_fn() -> Callable:
-	var ay := anchor_y
+	var limit := collapse_spread_limit
 	return func(snap: Dictionary, pos: Array) -> Variant:
-		return NativeLoader.find_unsupported_island(snap, pos, ay)
+		return NativeLoader.find_unsupported_around(snap, pos, limit)
 
 
 # ----------------------------------------------------------------------------
@@ -1360,14 +1363,11 @@ func _freeze_sleeping_chunks() -> void:
 func _find_unstable_voxels(around_positions: Array = []) -> Array:
 	if data.is_empty():
 		return []
-	# 局部：原生静态岛（扁平三元组）；全量：GDScript 泛洪（遍历整个世界）
+	# 局部：原生列支撑（横向传播受 collapse_spread_limit 限制）；全量：GDScript 泛洪（遍历整个世界）
 	var unstable: Array = []
 	if local_collapse and not around_positions.is_empty():
-		var flat := data.find_unsupported_island(around_positions, anchor_y)
-		var i := 0
-		while i + 2 < flat.size():
-			unstable.append(Vector3i(flat[i], flat[i + 1], flat[i + 2]))
-			i += 3
+		for key in data.find_unsupported_around(around_positions, collapse_spread_limit):
+			unstable.append(key)
 	else:
 		for key in data.find_unsupported():
 			unstable.append(key)

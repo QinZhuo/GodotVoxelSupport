@@ -1095,6 +1095,137 @@ PackedInt32Array VoxelNative::find_unsupported_island(const Dictionary &buffers,
 	return out;
 }
 
+Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Array &removed, int lateral_radius) {
+	// 列支撑失稳检测：体素稳定 ⟺ LOWER_5（正下 + 4 对角下方）中任意 1 个存在且未失稳；贴地(y==0)稳定。
+	// 从 removed 的 UPPER_5 + HORIZONTAL_4 候选出发，沿 UPPER_5（竖向）+ HORIZONTAL_4（横向）传播。
+	// 【两件事必须分开看（业界同做法：传播必须有界）】
+	//   · 竖向传播 = "真的失去了下方支撑"——支撑链，不上限，这是破坏脆感的来源；
+	//   · 横向传播 = 连带扫落"本就下方悬空"的板——无界时就是"捅一处、整层/整世界连塌"的病根。
+	//     故只允许在 removed 的 AABB 外扩 lateral_radius 体素内横向扩散（< 0 = 不限制，仅作对照）。
+	//     同类参数见插件已有的 stress_max_steps（裂纹扩散步数上限）——都是"失稳影响半径"。
+	Dictionary unstable;
+	if (buffers.is_empty() || removed.is_empty()) {
+		return unstable;
+	}
+	Vector3i bmin = removed[0];
+	Vector3i bmax = removed[0];
+	if (lateral_radius >= 0) {
+		for (int i = 1; i < removed.size(); ++i) {
+			const Vector3i p = removed[i];
+			if (p.x < bmin.x) {
+				bmin.x = p.x;
+			}
+			if (p.y < bmin.y) {
+				bmin.y = p.y;
+			}
+			if (p.z < bmin.z) {
+				bmin.z = p.z;
+			}
+			if (p.x > bmax.x) {
+				bmax.x = p.x;
+			}
+			if (p.y > bmax.y) {
+				bmax.y = p.y;
+			}
+			if (p.z > bmax.z) {
+				bmax.z = p.z;
+			}
+		}
+		bmin.x -= lateral_radius;
+		bmin.y -= lateral_radius;
+		bmin.z -= lateral_radius;
+		bmax.x += lateral_radius;
+		bmax.y += lateral_radius;
+		bmax.z += lateral_radius;
+	}
+	auto in_spread = [&](const Vector3i &p) -> bool {
+		return lateral_radius < 0
+				|| (p.x >= bmin.x && p.x <= bmax.x && p.y >= bmin.y && p.y <= bmax.y && p.z >= bmin.z && p.z <= bmax.z);
+	};
+	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
+	auto ensure_chunk = [&](const Vector3i &p) {
+		const uint64_t kk = vkey(chunk_of(p));
+		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
+			if (buffers.has(chunk_of(p))) {
+				chunk_bufs[kk] = buffers[chunk_of(p)];
+			}
+		}
+	};
+	auto has_voxel = [&](const Vector3i &p) -> bool {
+		const Vector3i ck = chunk_of(p);
+		const auto it = chunk_bufs.find(vkey(ck));
+		if (it == chunk_bufs.end()) {
+			return false;
+		}
+		const Vector3i local = p - ck * CHUNK_BITS;
+		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_BITS || local.y >= CHUNK_BITS || local.z >= CHUNK_BITS) {
+			return false;
+		}
+		return it->second.ptr()[buf_index(local)] > 0;
+	};
+	std::vector<Vector3i> stack;
+	std::unordered_set<uint64_t> seed_set;
+	for (int i = 0; i < removed.size(); ++i) {
+		const Vector3i rp = removed[i];
+		ensure_chunk(rp);
+		for (int d = 0; d < 5; ++d) {
+			const Vector3i nb(rp.x + UPPER_5[d][0], rp.y + UPPER_5[d][1], rp.z + UPPER_5[d][2]);
+			ensure_chunk(nb);
+			const uint64_t nk = vkey(nb);
+			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
+				seed_set.insert(nk);
+				stack.push_back(nb);
+			}
+		}
+		for (int d = 0; d < 4; ++d) {
+			const Vector3i nb(rp.x + HORIZONTAL_4[d][0], rp.y + HORIZONTAL_4[d][1], rp.z + HORIZONTAL_4[d][2]);
+			ensure_chunk(nb);
+			const uint64_t nk = vkey(nb);
+			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end() && in_spread(nb)) {
+				seed_set.insert(nk);
+				stack.push_back(nb);
+			}
+		}
+	}
+	while (!stack.empty()) {
+		const Vector3i cur = stack.back();
+		stack.pop_back();
+		if (unstable.has(cur)) {
+			continue;
+		}
+		if (cur.y == 0) {
+			continue;
+		}
+		int effective = 0;
+		for (int d = 0; d < 5; ++d) {
+			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
+			ensure_chunk(nb);
+			if (has_voxel(nb) && !unstable.has(nb)) {
+				effective += 1;
+			}
+		}
+		if (effective > 0) {
+			continue;
+		}
+		unstable[cur] = true;
+		for (int d = 0; d < 5; ++d) {
+			const Vector3i nb(cur.x + UPPER_5[d][0], cur.y + UPPER_5[d][1], cur.z + UPPER_5[d][2]);
+			ensure_chunk(nb);
+			if (has_voxel(nb) && !unstable.has(nb)) {
+				stack.push_back(nb);
+			}
+		}
+		for (int d = 0; d < 4; ++d) {
+			const Vector3i nb(cur.x + HORIZONTAL_4[d][0], cur.y + HORIZONTAL_4[d][1], cur.z + HORIZONTAL_4[d][2]);
+			ensure_chunk(nb);
+			if (has_voxel(nb) && !unstable.has(nb) && in_spread(nb)) {
+				stack.push_back(nb);
+			}
+		}
+	}
+	return unstable;
+}
+
 // 应力传播（裂纹扩散）：从 removed 出发，6 邻居 BFS。
 // 邻居体素材质 connection_strength < 当前 force → 断裂（加入下一层继续传播）。
 // strength_table: PackedFloat32Array（索引=材质ID），由 GDScript 预取，
@@ -2418,7 +2549,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_island", "buffers", "removed", "anchor_y"), &VoxelNative::find_unsupported_island);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed", "lateral_radius"), &VoxelNative::find_unsupported_around);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);

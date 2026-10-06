@@ -22,7 +22,7 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"patch_lod_block",
 	&"patch_lod_block_from_lod",
 	&"build_lod_block_halo_from_lod_buffers_native",
-	&"find_unsupported_island",
+	&"find_unsupported_around",
 	&"propagate_stress",
 	&"collect_materials",
 	&"remove_voxels_bulk",
@@ -179,12 +179,13 @@ static func build_lod_block_halo_from_lod_buffers_native(buffers: Dictionary,
 	return inst.call(&"build_lod_block_halo_from_lod_buffers_native", buffers, block_key)
 
 
-## 静态岛失稳检测：返回因本次破坏而与锚定层断开的整块体素（扁平 (x,y,z) 三元组，空 = 不塌）。
-static func find_unsupported_island(buffers: Dictionary, removed: Array, anchor_y: int = 0) -> PackedInt32Array:
+## 列支撑失稳检测：返回 {pos: true}。
+## lateral_radius：横向连带塌落的传播半径（体素）；竖向（失去下方支撑）不受限。见原生注释。
+static func find_unsupported_around(buffers: Dictionary, removed: Array, lateral_radius: int = 16) -> Dictionary:
 	var inst := instance()
 	if inst == null:
-		return PackedInt32Array()
-	return inst.call(&"find_unsupported_island", buffers, removed, anchor_y)
+		return {}
+	return inst.call(&"find_unsupported_around", buffers, removed, lateral_radius)
 
 
 ## 应力传播（裂纹扩散）：返回断裂体素 Array[Vector3i]。

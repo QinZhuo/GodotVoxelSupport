@@ -1875,7 +1875,7 @@ func has_chunk(chunk_key: Vector3i) -> bool:
 # ----------------------------------------------------------------------------
 # 连通性检测（崩塌支撑判定）
 # ----------------------------------------------------------------------------
-# 全量支撑检测由 find_unsupported（GDScript 泛洪）与 find_unsupported_island（原生静态岛）
+# 全量支撑检测由 find_unsupported（GDScript 泛洪）与 find_unsupported_around（原生列支撑）
 # 提供；批量分组由 partition_connected（原生）完成。
 
 ## 从种子体素位置集合出发，6 方向泛洪标记所有连通的体素，返回位置集合 (Dictionary 作 Set)
@@ -2002,9 +2002,8 @@ func find_unsupported(voxels_set: Dictionary = {}) -> Dictionary:
 ##   - 悬空分量必须完整遍历（需要移除），规模受破坏影响区域限制
 ##
 ## 实现完全在 GDExtension (C++) 中，无 GDScript 兜底。
-## 返回扁平 (x, y, z) 三元组（空 = 仍锚定）。消费方按批取用，避免百万体素在 GDScript 侧
-## 物化成位置数组（旧接口返回 {pos: true}，调用方 .keys() 就是百万个 Variant）。
-func find_unsupported_island(removed: Array, anchor_y: int = 0) -> PackedInt32Array:
+## 返回失稳体素位置集合 {pos: true}（原生列支撑检测，横向传播半径 lateral_radius）。
+func find_unsupported_around(removed: Array, lateral_radius: int = 16) -> Dictionary:
 	if removed.is_empty() or _chunk_buffers.is_empty():
-		return PackedInt32Array()
-	return NativeLoader.find_unsupported_island(_chunk_buffers, removed, anchor_y)
+		return {}
+	return NativeLoader.find_unsupported_around(_chunk_buffers, removed, lateral_radius)
