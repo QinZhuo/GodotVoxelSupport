@@ -59,7 +59,7 @@ static func is_solid(volume: PackedInt32Array, grid_size: Vector3i, x: int, y: i
 ##
 ## 【为什么是字典而不是单个实例】一个算子常要同时用两把不同尺度的噪声 ——
 ## 比如 PcgSurfaceTint 用粗噪声决定"哪些体素被改写"、用细噪声决定"改成哪一档颜色"，
-## 两者频率不同就无法共用一个实例。单槽缓存在这里会被反复覆盖，退化成每次重建。
+## 两者频率不同就无法共用一个实例。单条缓存在这里会被反复覆盖，退化成每次重建。
 ## 上限 4 把够用（超出即整体清空，避免算子被极端参数撑爆内存）。
 var _noises: Dictionary = {}
 const NOISE_CACHE_LIMIT := 4

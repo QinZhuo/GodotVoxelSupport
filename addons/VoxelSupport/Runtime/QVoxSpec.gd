@@ -5,7 +5,7 @@ extends RefCounted
 ## QVox 体素文件格式 —— 规范的唯一权威源（常量与基础原语）。
 ##
 ## 设计与理由见 docs/QVOX_FORMAT.md。本类只放"格式事实"，不含任何 I/O 或状态：
-## 签名、块头布局、块类型、块级编解码枚举、对齐规则、CRC。
+## 签名、块头布局、块类型、块级编解码枚举、块坐标布局、对齐规则、CRC。
 ##
 ## 核心结构（一句话）：文件 = 8 字节签名 + 块流；块 = 长度、类型、CRC、负载。
 ##
@@ -157,6 +157,45 @@ const SUPPORTED_CHANNEL_COUNT := 1
 ## 编解码层里所有"每通道一个值"的宽度都引用此常量，消除散落的魔法数 2。
 const CHANNEL_BPP := 16
 const CHANNEL_BYTES := CHANNEL_BPP / 8
+
+# ----------------------------------------------------------------------------
+# 块坐标 ↔ 体素坐标（布局的唯一实现）
+# ----------------------------------------------------------------------------
+# 【为什么放在这里】上面刚写过"块坐标覆盖哪个体素区间"与 ZXY 下标公式 —— 那就是布局本身，
+# 所以它的实现与事实同处一地。谁需要换算都必须来这里取，免得各处再推一遍 floor 除法与
+# 下标公式，那正是"同一个布局有两份实现"的开始。
+#
+# 【为什么 block_size 是参数，而不是用 DEFAULT_BLOCK_SIZE】B 是每个对象/文件的既有事实
+# （HEAD 的 block_size），不是全局缺省；读写别人的文件时必须跟着它走。
+
+## 体素坐标 → 所属块坐标。用 floor 除法，负坐标也正确（建模从 0 起算，但读取端不该假设）。
+static func block_of(voxel: Vector3i, block_size: int) -> Vector3i:
+	return Vector3i(
+			floori(float(voxel.x) / block_size),
+			floori(float(voxel.y) / block_size),
+			floori(float(voxel.z) / block_size))
+
+
+## 块坐标 → 该块的体素原点（= 块坐标 × 块边长）。
+static func block_origin(block_key: Vector3i, block_size: int) -> Vector3i:
+	return block_key * block_size
+
+
+## 块内局部坐标（0..block_size-1）→ 块内线性下标（ZXY：X 最快）。
+static func local_index(x: int, y: int, z: int, block_size: int) -> int:
+	return x + y * block_size + z * block_size * block_size
+
+
+## 块内元素总数 N = B³。
+static func block_volume(block_size: int) -> int:
+	return block_size * block_size * block_size
+
+
+## 体素坐标 → 块内线性下标（等价于 block_of + local_index，供单点存取少一次取模）。
+static func index_in_block(voxel: Vector3i, block_size: int) -> int:
+	var b := block_of(voxel, block_size)
+	var o := block_origin(b, block_size)
+	return local_index(voxel.x - o.x, voxel.y - o.y, voxel.z - o.z, block_size)
 
 # ----------------------------------------------------------------------------
 # MATE 材质条目（12 字节定长 → index × 12 随机访问）

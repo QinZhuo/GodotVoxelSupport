@@ -47,6 +47,65 @@ func generate(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 
 
 # ----------------------------------------------------------------------------
+# 整块体积光栅化（有界模型：一次要一整块，而不是按需逐 chunk）
+# ----------------------------------------------------------------------------
+# 【为什么放在契约类上】"把逐 chunk 输出拼成一整块"对任何生成器都成立（SDF 生成器、
+# PcgModelGenerator、未来新增的），与具体算法无关 —— 该和 generate() 待在一起。
+# 早先它被单列成一个 QVoxRasterizer 类，但那个类里没有一行自己的算法，只是转发；
+# 于是"光栅化"名下有两个实现（真正调优过的逐体素采样在 PcgSdfGenerator 里），
+# 正是双份维护的开端。合并后职责各一份：逐点算法在 PcgSdfGenerator，拼接在这里。
+
+## 把本生成器在 [0, grid_size) 上的全部输出拼成一整块密集体积。
+## 值 = 材质ID（0 = 空），下标布局 = PcgModel.index_of。
+##
+## 【为什么先调 set_grid_size】PcgModelGenerator 依赖它做边界夹取（有界模型的既有约定）；
+## 无限世界的生成器（恒可生成）忽略该限制，行为不变。
+func to_volume(grid_size: Vector3i) -> PackedInt32Array:
+	var vol := PackedInt32Array()
+	if grid_size.x <= 0 or grid_size.y <= 0 or grid_size.z <= 0:
+		return vol
+	set_grid_size(grid_size)
+	vol.resize(grid_size.x * grid_size.y * grid_size.z)
+	# 遍历覆盖该体积的全部 chunk。有界模型的体素坐标从原点 0 起算，故 chunk 键恒为非负。
+	var cs := VoxelChunk.CHUNK_SIZE
+	var c1 := Vector3i(
+			(grid_size.x - 1) / cs,
+			(grid_size.y - 1) / cs,
+			(grid_size.z - 1) / cs)
+	for cz in range(0, c1.z + 1):
+		for cy in range(0, c1.y + 1):
+			for cx in range(0, c1.x + 1):
+				_blit_chunk(Vector3i(cx, cy, cz), vol, grid_size)
+	return vol
+
+
+## 把一个 chunk 的输出散写进整块体积（越界部分丢弃 —— 体积尺寸未必是 chunk 的整数倍）。
+func _blit_chunk(ck: Vector3i, vol: PackedInt32Array, grid_size: Vector3i) -> void:
+	var buf := generate(ck, 0)
+	if buf.is_empty():
+		return
+	var origin := VoxelChunk.origin_of(ck)
+	var cs := VoxelChunk.CHUNK_SIZE
+	# 该 chunk 落在体积内的局部区间（先算区间，避免逐格判越界）。
+	var x0 := maxi(0, -origin.x)
+	var y0 := maxi(0, -origin.y)
+	var z0 := maxi(0, -origin.z)
+	var x1 := mini(cs, grid_size.x - origin.x)
+	var y1 := mini(cs, grid_size.y - origin.y)
+	var z1 := mini(cs, grid_size.z - origin.z)
+	if x0 >= x1 or y0 >= y1 or z0 >= z1:
+		return
+	for lz in range(z0, z1):
+		for ly in range(y0, y1):
+			var src := VoxelChunk.buf_index(x0, ly, lz)
+			var dst := PcgModel.index_of(origin.x + x0, origin.y + ly, origin.z + lz, grid_size)
+			for lx in range(x0, x1):
+				vol[dst] = buf[src]
+				src += 1
+				dst += 1
+
+
+# ----------------------------------------------------------------------------
 # 可生成范围
 # ----------------------------------------------------------------------------
 # 渲染器距离扫描会高频调用（view_distance 内逐 chunk），必须 O(1) 且零内存分配。

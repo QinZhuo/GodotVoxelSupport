@@ -7,6 +7,7 @@ extends RefCounted
 ##
 ## 输入 / 输出统一为 PackedInt32Array（长度 N = B³，值 = 材质ID，0 = 空），只处理单通道 material。
 ## 块内遍历顺序恒为 ZXY 线性下标：idx = x + y·B + z·B²（X 最快）。
+## 体素 ↔ 块的坐标换算与 B³ 定义在 QVoxSpec（那里是布局的唯一实现）。
 ##
 ##   EMPTY   0  保留值，永不写入文件（空块 = 块坐标缺失）
 ##   SOLID   1  负载 = 一个值（单通道 2 字节）

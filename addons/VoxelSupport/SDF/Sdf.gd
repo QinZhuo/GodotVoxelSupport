@@ -49,12 +49,12 @@ static func is_unbounded(b: AABB) -> bool:
 	return b.size.x < 0.0
 
 
-## "远在外部"的兜底采样值：组合算子的槽位未填（inspector 留空）时使用。
+## "远在外部"的兜底采样值：组合算子的入参端口（a / b）未填（inspector 留空）时使用。
 static func far() -> Vector2:
 	return Vector2(1e20, 0.0)
 
 
-## 采样兜底：字段为空时返回 far()，使组合算子在槽位留空时仍可正常工作。
+## 采样兜底：字段为空时返回 far()，使组合算子在入参端口留空时仍可正常工作。
 static func sample_field(field: Sdf, p: Vector3) -> Vector2:
 	return field.sample(p) if field != null else far()
 

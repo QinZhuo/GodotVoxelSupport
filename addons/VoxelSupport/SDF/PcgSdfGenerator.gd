@@ -100,6 +100,18 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	return buf
 
 
+## 整块体积光栅化：把一棵连续域表达式树采样成 [0, grid_size) 上的密集体积。
+##
+## 【表面开关一律不启用】surface_ramps / top_tints / erode_strength 保持默认关。它们是
+## **内联在本生成器里的体素域算子**，而链上的体素域处理由显式的修改器完成（PcgWeather /
+## PcgSurfaceTint）。有界模型（完整邻域可得）让这条合并第一次成立：同一件事只有一条路径，
+## 且体素域处理变成可重排、可旁通、可叠加的修改器。
+static func rasterize_field(field_: Sdf, grid_size: Vector3i) -> PackedInt32Array:
+	var gen := PcgSdfGenerator.new()
+	gen.field = field_
+	return gen.to_volume(grid_size)
+
+
 ## 粗层 LOD：按 2^lod 体素的大格取格心采样（远处粗粒度直接生成，无需先加载 LOD0 再降采样）。
 ## 细薄特征在粗层可能被漏掉，与程序化地形的粗层策略一致，属预期行为。
 func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
