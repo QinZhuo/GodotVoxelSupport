@@ -19,6 +19,26 @@ extends VoxelGenerator
 ## 模型产出（L-系统 / 元胞自动机 / WFC…）。
 @export var model: PcgModel
 
+## 细节层后处理链 —— 在 model.build() 产出整块体素之后、切片之前依次执行。
+## 数组顺序即执行顺序（例如"先 PcgWeather 挖出不规则表面，再 PcgSurfaceTint 给
+## 暴露面换材质"，凹坑侧面才会被判为暴露面而正常上色）。
+## 留空则完全跳过，模型逐体素等同未挂细节层。
+@export var details: Array[PcgDetail] = []:
+	set(value):
+		if details == value:
+			return
+		details = value
+		_invalidate()
+
+## 细节层随机种子。整条链共用一个种子（而不是每个算子各自随机），
+## 这样同一 seed 下"换算子顺序"不会各自掷出不同的骰子，便于逐算子比对。
+@export var detail_seed: int = 0:
+	set(value):
+		if detail_seed == value:
+			return
+		detail_seed = value
+		_invalidate()
+
 ## 精确的模型尺寸：基类只把 grid_size 转成 chunk 级 AABB（会向上取整到 32 的倍数），
 ## 而构建体积要的是精确尺寸，故在这里单独记一份。
 var _grid_size := Vector3i.ZERO
@@ -31,14 +51,21 @@ var _built := false
 var _build_mutex := Mutex.new()
 
 
+## 丢弃缓存体积，强制下次请求时重建。details / detail_seed 改动后必须调用，
+## 否则 @tool 场景里调了细节层参数却看不到任何变化。
+## 不取锁（与 set_grid_size 同理：setter 由主线程调用，不能阻塞在途 worker）。
+func _invalidate() -> void:
+	_volume = PackedInt32Array()
+	_built = false
+
+
 ## 覆写：捕获精确尺寸，并让尺寸变化作废旧缓存（基类逻辑照常保留）。
 func set_grid_size(voxel_size: Vector3i) -> void:
 	super.set_grid_size(voxel_size)
 	if _grid_size == voxel_size:
 		return
 	_grid_size = voxel_size
-	_volume = PackedInt32Array()
-	_built = false
+	_invalidate()
 
 
 ## LOD0：从缓存体积里切出 32³ 的一块。
@@ -94,6 +121,10 @@ func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
 
 ## 惰性构建一次：无模型或无界（grid_size = ZERO）时返回 false（生成全空）。
 ##
+## 【后处理链】model.build() 之后、提交缓存之前，按 details 数组顺序跑一遍细节层。
+## 此时 vol 是 build() 刚返回的新数组（引用计数为 1），**原地改写不会触发写时复制**；
+## 也依赖"细节层只改体素、不改 grid_size"这一契约（见 PcgDetail）。
+##
 ## 【并发】免锁快路径 + 锁内构建 + 提交前校验尺寸。多处要点：
 ##   ① 快路径先查 _built：稳态下每个 chunk 都走这条路，不该付锁开销；
 ##      _volume 在 _built = true 之前写毕，故读到 true 即可放心读 _volume。
@@ -109,6 +140,9 @@ func _ensure_volume() -> bool:
 	if not _built:
 		var gs := _grid_size
 		var vol := model.build(gs)
+		for d in details:
+			if d != null:
+				d.apply(vol, gs, detail_seed)
 		if gs == _grid_size:
 			_volume = vol
 			_built = true

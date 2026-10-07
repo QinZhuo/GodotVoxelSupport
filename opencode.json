@@ -3,7 +3,7 @@
 	"mcp": {
 		"devframework": {
 			"type": "remote",
-			"url": "http://127.0.0.1:8933/mcp",
+			"url": "http://127.0.0.1:8931/mcp",
 			"enabled": true
 		}
 	}

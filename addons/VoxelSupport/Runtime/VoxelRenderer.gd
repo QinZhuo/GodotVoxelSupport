@@ -356,6 +356,15 @@ var _lod_mesh_apply_scheduled: bool = false
 # 快照约 2~4ms，64 个/帧 ≈ 主线程 130~200ms → 等比换算 16³的64 ≈ 32³的8。
 # 数量之外另有毫秒预算双保险（_snapshot_budgeted）。
 @export_range(8, 512, 8) var _rebuild_batch_limit: int = 64 * 4096 / VoxelChunk.CHUNK_VOLUME
+
+## 顶点色 AO 强度 0~1（0 = 不生成 COLOR 通道，省掉每顶点 8 次采样）。
+## 在 LOD0 chunk 网格生成时计算（见 VoxelChunkGenerator.generate_ao_colors），
+## 材质侧无需额外配置：VoxelMeshGenerator._configure_*_material 已开
+## vertex_color_use_as_albedo，无 COLOR 通道的 mesh 按白色处理，故本项可随时开关。
+## 开销约为网格生成耗时的 1.5~2 倍；远景 LOD 大块不计算 AO（省成本，也看不出来）。
+@export_range(0.0, 1.0) var vertex_ao_strength: float = 0.7
+## AO 最暗值下限，避免凹处纯黑丢失材质色相。
+@export_range(0.0, 1.0) var vertex_ao_min: float = 0.4
 # 帧尾构建是否已排期（防重复 call_deferred）
 var _mesh_build_scheduled: bool = false
 # 上一帧 _delta（秒），GPU 忙检测用（帧耗时大 = GPU/渲染压力高）
@@ -1777,6 +1786,15 @@ func _update_mesh_async() -> void:
 			data.mark_chunk_dirty(visible[j])
 		_request_update()
 		visible.resize(taken)
+	# 【为什么先捕获成局部】worker 在子线程执行，约定是"只读参数、不碰节点属性"。
+	# voxel_scale / render_offset / diag_enabled 原先是在 lambda 里直接读节点属性，
+	# 属于违反约定（虽然读一个 float 实际不会崩，但会被后续改动踩成真竞态），
+	# 故连同新增的 AO 参数一并在此捕获 —— lambda 按值捕获局部变量，跨线程安全。
+	var w_scale := voxel_scale
+	var w_offset := render_offset
+	var w_diag := diag_enabled
+	var w_ao_strength := vertex_ao_strength
+	var w_ao_min := vertex_ao_min
 	for ck in visible:
 		# 【必须用 lambda 显式绑定 out 的位置】Godot 4 的 Callable.bind() 把绑定实参放在
 		# call() 实参**之后**，所以 `_generate_chunk_worker.bind(args...).call(out)` 会让 out
@@ -1785,7 +1803,7 @@ func _update_mesh_async() -> void:
 		# 下面的 lambda 只有一个自由形参 out，与 VoxelMeshBatch._wrap 的调用方式严格对应。
 		batch.spawn(func(out: Dictionary) -> void:
 			_generate_chunk_worker(snapshot, aligned_materials, trans_flags, ck,
-				voxel_scale, render_offset, diag_enabled, out))
+				w_scale, w_offset, w_diag, w_ao_strength, w_ao_min, out))
 	# 一个任务都没派发出去时必须立即结算：否则 _batch 永远"在途"，会挡住后续所有更新
 	# （旧实现用裸计数 0 天然表示"无在途"，换成对象后要显式结清）。
 	batch.settle_if_idle()
@@ -1866,11 +1884,12 @@ func _apply_stats_from_result(result: Dictionary) -> void:
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
 func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: PackedByteArray,
 		chunk_key: Vector3i, scale: float, offset: Vector3 = Vector3.ZERO,
-		diag_enabled: bool = false, out: Dictionary = {}) -> void:
+		diag_enabled: bool = false, ao_strength: float = 0.0, ao_min: float = 0.4,
+		out: Dictionary = {}) -> void:
 	var t0 := Time.get_ticks_usec()
 	var halo := VoxelChunkGenerator.build_halo_from_buffers(buffers, chunk_key)
 	var arr := VoxelChunkGenerator.generate_single_chunk_dense(
-			halo, materials, scale, chunk_key, offset, trans_flags)
+			halo, materials, scale, chunk_key, offset, trans_flags, ao_strength, ao_min)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 
 	# 诊断：每 chunk 生成耗时 > 5ms 时打印（仅诊断模式开启时）

@@ -27,6 +27,7 @@ const OVERLAP_GRID := Vector3i(24, 24, 24)
 
 
 func _ready() -> void:
+	PcgSceneKit.apply_environment(self)
 	var h := model_spacing * 0.5
 	_build_lsystem(Vector3(-h, 0.0, -h))
 	_build_cellular(Vector3(h, 0.0, -h))

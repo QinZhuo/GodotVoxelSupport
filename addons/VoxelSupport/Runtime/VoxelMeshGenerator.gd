@@ -31,6 +31,9 @@ static func _configure_solid_material(m: StandardMaterial3D) -> void:
 	m.emission_energy_multiplier = MATERIAL_EMISSION_ENERGY
 	m.metallic = 1.0
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	# 顶点色作为 albedo 乘数：承载网格生成阶段写入的环境光遮蔽（见 _face_ao_colors）。
+	# 无 ARRAY_COLOR 的旧网格缺省按白色（1,1,1,1）参与，故开启本项对既有产物无副作用。
+	m.vertex_color_use_as_albedo = true
 
 
 ## 统一配置透明材质（在实心材质基础上追加折射/透明，关闭自发光）
@@ -40,6 +43,7 @@ static func _configure_trans_material(m: StandardMaterial3D) -> void:
 	m.emission_enabled = false
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	m.vertex_color_use_as_albedo = true
 
 
 ## 从材质数组生成运行时纹理材质 (StandardMaterial3D 数组，0=实体 1=透明)
@@ -186,12 +190,14 @@ func _get_channel_images() -> Dictionary:
 # 一次 → 拼接后无重叠面、无 z-fighting。
 
 ## 由块缓冲生成网格 arrays（输出形状与 generate_arrays_native 一致）。
+## ao_strength > 0 时额外算出 solid 桶的顶点色环境光遮蔽（"solid_colors"）。
 static func generate_arrays_from_chunks(chunks: Dictionary, trans_flags: PackedByteArray,
-		scale: float, offset: Vector3) -> Dictionary:
+		scale: float, offset: Vector3, ao_strength := 0.0, ao_min := 0.4) -> Dictionary:
 	var sv := PackedVector3Array()
 	var sn := PackedVector3Array()
 	var su := PackedVector2Array()
 	var si := PackedInt32Array()
+	var sc := PackedColorArray()
 	var tv := PackedVector3Array()
 	var tn := PackedVector3Array()
 	var tu := PackedVector2Array()
@@ -211,6 +217,10 @@ static func generate_arrays_from_chunks(chunks: Dictionary, trans_flags: PackedB
 			sn.append_array(part["solid_normals"])
 			su.append_array(part["solid_uvs"])
 			si.append_array(_shift_index_array(part["solid_idxs"], base))
+			if ao_strength > 0.0:
+				sc.append_array(VoxelChunkGenerator.generate_ao_colors(
+						halo, pv, part["solid_normals"], scale, offset, ck,
+						ao_strength, ao_min, false))
 		var pt: PackedVector3Array = part.get("trans_verts", PackedVector3Array())
 		if not pt.is_empty():
 			var base_t := tv.size()
@@ -218,10 +228,18 @@ static func generate_arrays_from_chunks(chunks: Dictionary, trans_flags: PackedB
 			tn.append_array(part["trans_normals"])
 			tu.append_array(part["trans_uvs"])
 			ti.append_array(_shift_index_array(part["trans_idxs"], base_t))
-	return {
+	var out := {
 		"solid_verts": sv, "solid_normals": sn, "solid_uvs": su, "solid_idxs": si,
 		"trans_verts": tv, "trans_normals": tn, "trans_uvs": tu, "trans_idxs": ti,
 	}
+	if not sc.is_empty():
+		out["solid_colors"] = sc
+	return out
+
+
+## 逐顶点面环境光遮蔽（AO）已下沉到 VoxelChunkGenerator.generate_ao_colors：
+## 运行时 chunk 路径（generate_single_chunk_dense）与本文件的导入路径共用同一实现，
+## 避免两套 AO 逻辑随时间漂移。
 
 
 ## 索引数组整体加偏移（多块网格合并时把各自的顶点基准抬到全局）。
@@ -378,6 +396,18 @@ func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
 	sphere_subdivisions = clampi(options.get(VoxelMeshImporter.sphere_subdivisions, 0), 0, 2)
 	sphere_scale = clampf(options.get(VoxelMeshImporter.sphere_scale, 1.0), 0.05, 2.0)
 	origin_mode = options.get(VoxelMeshImporter.origin, VoxelData.OriginMode.WORLD_ORIGIN)
+	# AO 参数默认开启；调用方（如性能基准）可传 0 关闭以对比开销。
+	vertex_ao_strength = clampf(options.get("vertex_ao_strength", 0.7), 0.0, 1.0)
+	vertex_ao_min = clampf(options.get("vertex_ao_min", 0.4), 0.0, 1.0)
+
+
+## 顶点色 AO 强度 0~1（0 = 不生成 COLOR 数组）。
+## 只在块路径（generate_arrays_from_chunks）生效 —— .vox 导入路径的原生内核
+## 不产出 halo，无法在生成后反查邻域，那条路径保持原样（材质侧开着的
+## vertex_color_use_as_albedo 在无 COLOR 数组时按白色处理，故无副作用）。
+var vertex_ao_strength: float = 0.7
+## AO 最暗值下限，防止凹处纯黑丢失材质色相。
+var vertex_ao_min: float = 0.4
 
 func generate_materials(options: Dictionary) -> Array[Material]:
 	materials.resize(2)
@@ -488,7 +518,8 @@ func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3)
 		return
 	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
 	_native_arrays = generate_arrays_from_chunks(
-			chunks, VoxelMaterial.build_trans_flags(materials_src), scale, layout_offset)
+			chunks, VoxelMaterial.build_trans_flags(materials_src), scale, layout_offset,
+			vertex_ao_strength, vertex_ao_min)
 
 
 ## 生成整个 QVox 资产：恒等摆放走块级（零逐体素展开），有变换时逐体素融合。
@@ -503,7 +534,8 @@ func start_generate_mesh_from_qvox() -> void:
 	var offset := qvox.origin_offset(origin_mode)
 	if qvox.is_block_importable():
 		_native_arrays = generate_arrays_from_chunks(
-				qvox.block_buffers(), trans_flags, scale, offset)
+				qvox.block_buffers(), trans_flags, scale, offset,
+				vertex_ao_strength, vertex_ao_min)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(
 				qvox.fused_voxels(), trans_flags, scale, offset)
@@ -569,5 +601,9 @@ static func _surface_arrays(native_arrays: Dictionary, prefix: String) -> Array:
 	arrays[Mesh.ARRAY_VERTEX] = native_arrays[prefix + "_verts"]
 	arrays[Mesh.ARRAY_NORMAL] = native_arrays[prefix + "_normals"]
 	arrays[Mesh.ARRAY_TEX_UV] = native_arrays[prefix + "_uvs"]
+	# 顶点色（AO）可选：原生内核与旧路径不产出该数组时留空，材质侧按白色处理。
+	var colors: PackedColorArray = native_arrays.get(prefix + "_colors", PackedColorArray())
+	if colors.size() == arrays[Mesh.ARRAY_VERTEX].size():
+		arrays[Mesh.ARRAY_COLOR] = colors
 	arrays[Mesh.ARRAY_INDEX] = idxs
 	return arrays

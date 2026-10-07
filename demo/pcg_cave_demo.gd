@@ -32,6 +32,7 @@ const ROCK_MATERIALS := [
 
 
 func _ready() -> void:
+	PcgSceneKit.apply_environment(self)
 	_build_sdf_tunnels(Vector3(-16.0, 0.0, 0.0))
 	_build_cellular(Vector3(0.0, 0.0, 0.0))
 	_build_sdf_chamber(Vector3(16.0, 0.0, 0.0))

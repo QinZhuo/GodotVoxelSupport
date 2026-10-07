@@ -22,6 +22,7 @@ extends Node3D
 
 
 func _ready() -> void:
+	PcgSceneKit.apply_environment(self)
 	_build_model_a(Vector3(-model_spacing * 1.5, 0.0, 0.0))
 	_build_model_b(Vector3(-model_spacing * 0.5, 0.0, 0.0))
 	_build_model_c(Vector3(model_spacing * 0.5, 0.0, 0.0))
