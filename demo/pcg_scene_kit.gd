@@ -91,7 +91,7 @@ const ENVIRONMENT_PATH := "res://demo/pcg_environment.tres"
 
 ## 主光强度的实测标定值。
 ## albedo 0.33 的岩石在 3.6 时台面像素 0.47 —— 截图里是一块过曝白板，
-## 看不到材质与 AO；2.0 落在 0.35 上下，颗粒感与 AO 才读得出来。
+## 看不到材质分区；2.0 落在 0.35 上下，体素颗粒与色阶档位才读得出来。
 const LIGHT_ENERGY := 2.0
 const LIGHT_ANGULAR_DISTANCE := 0.8
 

@@ -65,124 +65,25 @@ static func build_halo_from_buffers(buffers: Dictionary, chunk: Vector3i) -> Pac
 ## 实现完全在 GDExtension (C++) 中（NativeLoader.generate_chunk_dense），无 GDScript 兜底。
 static func generate_single_chunk_dense(
 		halo: PackedInt32Array, aligned_materials: Array, scale: float, chunk_key: Vector3i,
-		offset: Vector3 = Vector3.ZERO, trans_flags: PackedByteArray = PackedByteArray(),
-		ao_strength: float = 0.0, ao_min: float = 0.4) -> Dictionary:
+		offset: Vector3 = Vector3.ZERO, trans_flags: PackedByteArray = PackedByteArray()) -> Dictionary:
 	if trans_flags.is_empty():
 		trans_flags = VoxelMaterial.build_trans_flags(aligned_materials)
 	var result: Dictionary = NativeLoader.generate_chunk_dense(halo, trans_flags, scale, chunk_key, true, offset)
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
 		return {}
-	# 顶点色 AO：本函数是运行时 chunk 路径（VoxelRenderer._generate_chunk_worker，子线程）
-	# 与导入路径共用的最后一道几何入口，故 AO 放这里可一次覆盖两条路径。
-	# 纯读 halo + 写结果字典，无共享状态，子线程安全。
-	if ao_strength > 0.0:
-		var sv: PackedVector3Array = result.get("solid_verts", PackedVector3Array())
-		if not sv.is_empty():
-			result["solid_colors"] = generate_ao_colors(halo, sv,
-					result["solid_normals"], scale, offset, chunk_key,
-					ao_strength, ao_min, true)
 	return result
 
 
-## 逐顶点面环境光遮蔽（AO），输出 Mesh.ARRAY_COLOR 用的灰度顶点色。
-##
-## 【为什么必须有顶点色】体素材质是"256×1 调色板 + UV 查表"的单色方案，整面只有
-## 一个颜色；而体素观感里很大一部分立体感来自"凹处自阴影"。烘进顶点色后，
-## 材质侧只需开 vertex_color_use_as_albedo（见 VoxelMeshGenerator._configure_*_material）
-## 即可对所有材质统一生效，不必为每种材质写一套 shader。
-##
-## 【采样语义：看"面外侧被谁挡住"】对每个顶点，取它所属面**外侧**那一层的 3×3
-## 九格（沿法线紧邻的一格 + 环绕 8 格），数其中有几格是实体：
-##   平坦大面 → 九格全是空气 → AO = 1（亮）
-##   墙内转角 → 2~3 格被挡 → 变暗
-##   凹槽 / 缝隙 → 8 格几乎都被挡 → 最暗
-## 这里不能用"沿法线采样 6 邻域"：暴露面沿法线必然是空气，6 邻域几乎恒为 5，
-## 算不出任何对比度。
-##
-## 【halo 恰好够用】halo 是 34³（chunk 32³ 加 1 圈外缘），本采样最远触及 chunk
-## 局部 -1 / 32，正好落在外缘层内，无需跨 chunk 查询。仅当 chunk 最外一格的面
-## 朝外时才会探出 halo，此时按"不遮挡"处理（保守，且只影响整场景最外一圈体素）。
-##
-## 【顶点 → 体素的反推】顶点恰在体素边界上，朝法线那侧是空气，故所属实心体素
-## 沿法线轴退一格（n > 0 时 -1），切向轴取 floor。切向轴对"贪婪合并出的大 quad"
-## 会偏出该 quad 覆盖的体素范围，但外侧九格在开阔处都是空气、结果仍为 AO = 1；
-## 而真正需要 AO 的地方（墙角、凹槽）quad 都很小、不会被合并，故误差无害。
-##
-## 【为什么不做 26 邻域】对比度更好，但每顶点 26 次采样。这里 8 次，
-## 在 GDScript 里顶点数上万时差距是数量级的。
-##
-## 【为什么不做平滑逐顶点插值】合并 quad 只有 4 个顶点，插值天然形成"面内渐变"，
-## 已足够；不做逐体素细分是因为那会让 AO 反而丢掉"面是平面"的信息。
-static func generate_ao_colors(halo: PackedInt32Array, verts: PackedVector3Array,
-		normals: PackedVector3Array, scale: float, offset: Vector3, chunk_key: Vector3i,
-		strength: float, min_ao: float, local_space: bool) -> PackedColorArray:
-	var colors := PackedColorArray()
-	var n_verts := verts.size()
-	colors.resize(n_verts)
-	if n_verts == 0 or scale == 0.0 or verts.size() != normals.size():
-		return colors
-	var inv_scale := 1.0 / scale
-	# use_local_space = true 时原生已把 chunk 原点减掉（顶点是 chunk 局部坐标）；
-	# = false 时是世界坐标，需再减去 chunk 原点才能落到 halo 索引上。
-	var chunk_origin := Vector3.ZERO
-	if not local_space:
-		chunk_origin = Vector3(chunk_key * VoxelChunk.CHUNK_SIZE)
-	var hs := VoxelChunk.HALO_SIZE
-	var h_max := hs - 1
-	var h_stride_z := hs * hs
-	var inv8 := strength / 8.0
-	for i in n_verts:
-		var lp := (verts[i] - offset) * inv_scale - chunk_origin
-		# 由法线分出"法线轴 n"与"两个切向轴 u/v"，直接写成单位向量免去后续推导
-		var n := normals[i]
-		var ax := absf(n.x)
-		var ay := absf(n.y)
-		var az := absf(n.z)
-		var nx := 0
-		var ny := 0
-		var nz := 0
-		var ux := 0
-		var uy := 0
-		var uz := 0
-		var vx := 0
-		var vy := 0
-		var vz := 0
-		if ax > 0.5:
-			nx = 1 if n.x > 0.0 else -1
-			uy = 1
-			vz = 1
-		elif ay > 0.5:
-			ny = 1 if n.y > 0.0 else -1
-			ux = 1
-			vz = 1
-		else:
-			nz = 1 if n.z > 0.0 else -1
-			ux = 1
-			uy = 1
-		var px := floori(lp.x) - (1 if nx > 0 else 0)
-		var py := floori(lp.y) - (1 if ny > 0 else 0)
-		var pz := floori(lp.z) - (1 if nz > 0 else 0)
-		# 面外侧那一层的中心格
-		var cx := px + nx
-		var cy := py + ny
-		var cz := pz + nz
-		var occ := 0
-		for su in 3:
-			var du := su - 1
-			for sv in 3:
-				if su == 1 and sv == 1:
-					continue
-				var dv := sv - 1
-				var hx := cx + ux * du + vx * dv + VoxelChunk.HALO
-				var hy := cy + uy * du + vy * dv + VoxelChunk.HALO
-				var hz := cz + uz * du + vz * dv + VoxelChunk.HALO
-				if hx < 0 or hy < 0 or hz < 0 or hx > h_max or hy > h_max or hz > h_max:
-					continue
-				if halo[hx + hy * hs + hz * h_stride_z] > 0:
-					occ += 1
-		var ao := clampf(1.0 - inv8 * float(occ), min_ao, 1.0)
-		colors[i] = Color(ao, ao, ao)
-	return colors
+# 【已移除：顶点色 AO（逐顶点环境光遮蔽烘进 Mesh.ARRAY_COLOR）】
+# 曾在本函数下方实现"按面外侧 3×3 九格数遮挡 → 灰度顶点色 → 材质侧
+# vertex_color_use_as_albedo 乘进 albedo"，实测**观感更差**：体素表面本来就靠
+# 硬边直角与方向光/投影读体积，AO 在每个凹角再压一层暗，结果是
+# ① 大面出现不该有的亮度渐变（"面是平面"这条信息被抹掉）；
+# ② 转角/缝隙糊成一团黑，体素颗粒反而看不清；③ 网格生成耗时涨 1.5~2 倍。
+# 结论：本渲染器不提供几何级 AO。需要"凹处更暗"的场合请用**材质分档**
+#（PcgSurfaceTint 那套：把凹处换成同色系更暗的一档体素）—— 那才是体素画法。
+# 同时 VoxelMeshGenerator._configure_*_material 也不再开 vertex_color_use_as_albedo。
+
 
 
 # LOD1 大块：32³ 大格（每大格 = 2³ 体素），覆盖 64³ 体素 = 2×2×2 LOD0 chunk（CHUNK_SIZE=32 时）。
@@ -258,7 +159,7 @@ static func _merge_meshes(arrays: Dictionary) -> ArrayMesh:
 	var trans_idxs: PackedInt32Array = arrays.get("trans_idxs", PackedInt32Array())
 	if not solid_idxs.is_empty():
 		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,
-			_make_arrays(arrays.get("solid_verts"), arrays.get("solid_normals"), arrays.get("solid_uvs"), solid_idxs, arrays.get("solid_colors")))
+			_make_arrays(arrays.get("solid_verts"), arrays.get("solid_normals"), arrays.get("solid_uvs"), solid_idxs))
 		has_any = true
 	if not trans_idxs.is_empty():
 		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,
@@ -269,17 +170,12 @@ static func _merge_meshes(arrays: Dictionary) -> ArrayMesh:
 	return result
 
 
-## colors 为可选的 AO 顶点色（见 generate_ao_colors）；为空或长度不匹配时
-## 不写入 ARRAY_COLOR —— 材质侧 vertex_color_use_as_albedo 在缺该通道时按白色处理。
 static func _make_arrays(verts: PackedVector3Array, normals: PackedVector3Array,
-		uvs: PackedVector2Array, idxs: PackedInt32Array,
-		colors: Variant = null) -> Array:
+		uvs: PackedVector2Array, idxs: PackedInt32Array) -> Array:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
-	if colors is PackedColorArray and (colors as PackedColorArray).size() == verts.size() and not verts.is_empty():
-		arrays[Mesh.ARRAY_COLOR] = colors
 	arrays[Mesh.ARRAY_INDEX] = idxs
 	return arrays
