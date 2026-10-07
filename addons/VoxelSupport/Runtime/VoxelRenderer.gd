@@ -1326,6 +1326,15 @@ func _process_chunk_level(loaded_chunks: Array, cam: Camera3D, cam_pos: Vector3,
 							continue
 						if _block_dist(ck, 0, cam_pos) > lod0_d + lod0_margin:
 							continue
+						# 该 cube 是以**相机**为心枚举的，与数据实际范围无关。有界程序化模型
+						# （如 PCG 场景里 32³ 的单个模型）只有 1 个 chunk 在生成范围内，其余
+						# 上万键都是"取不到数据"的幻影：若照标脏，它们会永久滞留
+						# _dirty_mesh_chunks（_update_mesh_async 超批次上限就把余量放回 dirty，
+						# 每帧只消费固定个数）→ 每帧白转 2 万+ 键（实测 25 个渲染器 308ms/帧），
+						# 且真正有几何的 chunk 淹没在幻影里永不建网格。用与 _process_streaming
+						# 同款的"存在性判定"（廉价无 IO）先剪枝。
+						if not data.can_supply_chunk(ck):
+							continue
 						if not data.has_chunk(ck):
 							data.request_chunk_async(ck, 0)  # LOD0 数据加载（文件流读盘/程序化生成）
 						data.mark_chunk_dirty(ck)

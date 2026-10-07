@@ -277,6 +277,79 @@ func test_bpp_16_is_accepted() -> void:
 
 
 # ----------------------------------------------------------------------------
+# PCG：同一模型被并发请求多个 chunk 时，只能构建一次
+# ----------------------------------------------------------------------------
+# 模型覆盖多个 chunk 时，首帧会有多个 worker 线程同时请求不同 chunk，每个都走到
+# PcgModelGenerator._ensure_volume()。无锁则各自 build 一遍：L-系统 / 元胞 / WFC 只是
+# N× 白算，而 PcgWfcOverlap 的 _learn() 会写实例成员 _patterns/_weights/_allow
+# —— 并发即正确性 bug（读者会拿到"新相容表 + 半个图案表"）。
+# 32³ 的 demo 只有 1 个 chunk，故这条路径此前从未被走到。
+
+## 并发构建探针：统计 build 次数、检测是否真的发生过重入。
+## build 内故意撑住一段时间，把并发窗口放大到必然重叠（无锁时多个线程会同时停在里面）。
+class ConcurrentProbeModel:
+	extends PcgModel
+
+	const STALL_MS := 30
+
+	var build_calls := 0
+	var reentered := false
+	var _inside := 0
+
+	func build(grid_size: Vector3i) -> PackedInt32Array:
+		build_calls += 1
+		_inside += 1
+		if _inside > 1:
+			reentered = true
+		var t0 := Time.get_ticks_msec()
+		while Time.get_ticks_msec() - t0 < STALL_MS:
+			pass
+		var v := PcgModel.empty_volume(grid_size)
+		PcgModel.set_voxel(v, 3, 3, 3, grid_size, 9)
+		_inside -= 1
+		return v
+
+
+func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
+	# 64 宽 = 2 个 chunk（x 方向），两个 key 分属不同 chunk → 并发下都会走到 _ensure_volume
+	var keys: Array[Vector3i] = [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
+	var probe := ConcurrentProbeModel.new()
+	var gen := PcgModelGenerator.new()
+	gen.model = probe
+	gen.set_grid_size(Vector3i(64, 32, 32))
+
+	# 照 VoxelAsyncLoader.request 的方式派发：每个 chunk 一个后台任务，互不等待。
+	# 每个任务写自己那份单元素数组（数组是引用语义，外层容器共享）——两个线程
+	# 写同一个外层容器是未定义行为，会让这条回归偶发假红。
+	# 内层必须**预置 1 个元素**：空数组上做 `[0] = ...` 是越界写（Invalid access of index
+	# '0'），任务会静默失败、后面所有断言都不再执行 → 测试"通过"但什么都没验证。
+	var got: Array = [[null], [null]]
+	var ids: Array[int] = []
+	for i in keys.size():
+		var slot := i
+		var ck := keys[i]
+		ids.append(WorkerThreadPool.add_task(func() -> void:
+			got[slot][0] = gen.generate(ck)))
+	for id in ids:
+		WorkerThreadPool.wait_for_task_completion(id)
+	var r0: PackedInt32Array = got[0][0]
+	var r1: PackedInt32Array = got[1][0]
+
+	assert_eq(probe.build_calls, 1,
+			"并发请求多个 chunk 时模型必须只 build 一次（无锁会等于请求数）")
+	assert_false(probe.reentered, "build 绝不能被并发重入")
+
+	# 加锁不得改变产出：逐 chunk 与串行结果比对
+	var serial := PcgModelGenerator.new()
+	serial.model = ConcurrentProbeModel.new()
+	serial.set_grid_size(Vector3i(64, 32, 32))
+	assert_eq(r0, serial.generate(keys[0]), "第 1 个 chunk 的切片内容应与串行一致")
+	assert_eq(r1, serial.generate(keys[1]), "第 2 个 chunk 的切片内容应与串行一致")
+	assert_eq(r0[VoxelChunk.buf_index(3, 3, 3)], 9,
+			"体素 (3,3,3) 应落在第 1 个 chunk 的局部同位置")
+
+
+# ----------------------------------------------------------------------------
 # 辅助
 # ----------------------------------------------------------------------------
 

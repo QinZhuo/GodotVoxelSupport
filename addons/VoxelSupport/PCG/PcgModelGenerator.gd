@@ -25,6 +25,11 @@ var _grid_size := Vector3i.ZERO
 var _volume := PackedInt32Array()
 var _built := false
 
+## 构建互斥：模型覆盖多个 chunk 时，首帧会有多个 worker 线程同时请求不同 chunk，
+## 每个都走到 _ensure_volume。无锁则各自 build 一遍（N× 白算），且 PcgWfcOverlap._learn()
+## 会写实例成员 _patterns/_allow —— 并发即正确性 bug，不只是浪费。
+var _build_mutex := Mutex.new()
+
 
 ## 覆写：捕获精确尺寸，并让尺寸变化作废旧缓存（基类逻辑照常保留）。
 func set_grid_size(voxel_size: Vector3i) -> void:
@@ -42,22 +47,24 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	buf.resize(VoxelChunk.CHUNK_VOLUME)
 	if not _ensure_volume():
 		return buf
+	var gs := _grid_size
+	var vol := _volume
 	var base := VoxelChunk.origin_of(chunk_key)
 	for lz in VoxelChunk.CHUNK_SIZE:
 		var gz := base.z + lz
-		if gz < 0 or gz >= _grid_size.z:
+		if gz < 0 or gz >= gs.z:
 			continue
 		for ly in VoxelChunk.CHUNK_SIZE:
 			var gy := base.y + ly
-			if gy < 0 or gy >= _grid_size.y:
+			if gy < 0 or gy >= gs.y:
 				continue
-			var src := gy * _grid_size.x + gz * _grid_size.x * _grid_size.y
+			var src := gy * gs.x + gz * gs.x * gs.y
 			var dst := VoxelChunk.buf_index(0, ly, lz)
 			for lx in VoxelChunk.CHUNK_SIZE:
 				var gx := base.x + lx
-				if gx < 0 or gx >= _grid_size.x:
+				if gx < 0 or gx >= gs.x:
 					continue
-				var m := _volume[src + gx]
+				var m := vol[src + gx]
 				if m > 0:
 					buf[dst + lx] = m
 	return buf
@@ -74,42 +81,59 @@ func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
 		return buf
 	var cell := 1 << lod
 	var base := block_key * (grid * cell)
+	var gs := _grid_size
+	var vol := _volume
 	for lz in grid:
 		for ly in grid:
 			for lx in grid:
-				var m := _sample_cell(base + Vector3i(lx, ly, lz) * cell, cell)
+				var m := _sample_cell(vol, gs, base + Vector3i(lx, ly, lz) * cell, cell)
 				if m > 0:
 					buf[lx + ly * grid + lz * grid * grid] = m
 	return buf
 
 
 ## 惰性构建一次：无模型或无界（grid_size = ZERO）时返回 false（生成全空）。
+##
+## 【并发】免锁快路径 + 锁内构建 + 提交前校验尺寸。多处要点：
+##   ① 快路径先查 _built：稳态下每个 chunk 都走这条路，不该付锁开销；
+##      _volume 在 _built = true 之前写毕，故读到 true 即可放心读 _volume。
+##   ② 锁内再查一次 _built：等锁期间别人可能已经建好（这就是"只 build 一次"的实现）。
+##   ③ 提交前校验 _grid_size 未变：set_grid_size() 由主线程调用且**不能取锁**
+##      （否则主线程被在途构建阻塞），故用"构建完比对"来丢弃过期结果，而不是让 setter 抢锁。
 func _ensure_volume() -> bool:
 	if _built:
 		return true
 	if model == null or _grid_size == Vector3i.ZERO:
 		return false
-	_volume = model.build(_grid_size)
-	_built = true
-	return true
+	_build_mutex.lock()
+	if not _built:
+		var gs := _grid_size
+		var vol := model.build(gs)
+		if gs == _grid_size:
+			_volume = vol
+			_built = true
+	_build_mutex.unlock()
+	return _built
 
 
-## 粗格内任一非空体素的材质（无则 0）。
-func _sample_cell(origin: Vector3i, cell: int) -> int:
+## 粗格内任一非空体素的材质（无则 0）。volume / grid_size 由调用方捕获传入
+## （而不是读成员）：PackedInt32Array 是写时复制，局部句柄即使期间被重建也安全，
+## 避免"循环中途换手"读到另一尺寸的数组。
+func _sample_cell(volume: PackedInt32Array, grid_size: Vector3i, origin: Vector3i, cell: int) -> int:
 	for dz in cell:
 		var z := origin.z + dz
-		if z < 0 or z >= _grid_size.z:
+		if z < 0 or z >= grid_size.z:
 			continue
 		for dy in cell:
 			var y := origin.y + dy
-			if y < 0 or y >= _grid_size.y:
+			if y < 0 or y >= grid_size.y:
 				continue
-			var row := y * _grid_size.x + z * _grid_size.x * _grid_size.y
+			var row := y * grid_size.x + z * grid_size.x * grid_size.y
 			for dx in cell:
 				var x := origin.x + dx
-				if x < 0 or x >= _grid_size.x:
+				if x < 0 or x >= grid_size.x:
 					continue
-				var m := _volume[row + x]
+				var m := volume[row + x]
 				if m > 0:
 					return m
 	return 0
