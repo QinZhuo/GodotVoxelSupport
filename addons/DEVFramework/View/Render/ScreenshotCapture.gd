@@ -6,7 +6,10 @@ class_name ScreenshotCapture extends Node
 
 @export_file_path("*.png") var save_path: String = "res://screenshot.png"
 @export var custom_resolution: Vector2i = Vector2i(256, 256)
-@export var linear_to_srgb: bool = true
+## 颜色处理模式: auto(默认) = 按读回缓冲的实际数据格式自动判定要不要补 sRGB 编码,
+## 出图即所见, 一般不需要动; srgb = 强制补编码(认定线性光值); raw = 强制不转换(认定已是显示值)。
+## 只有确认出图偏色时才需要手动指定 —— 判定交给看得见数据格式的那一层(ScreenshotTool)。
+@export_enum("auto", "srgb", "raw") var color_mode: String = "auto"
 ## 量化到 8 位时是否做误差扩散抖动(dithering), 用于消除大面积渐变上的色阶断层(banding)。
 ## 代价是一次全图逐像素处理(高分辨率出图时较可观); 画面细节多、或不需要防 banding 时可关掉。
 @export var dithering: bool = false
@@ -82,8 +85,9 @@ func _take_screenshot() -> void:
 		return
 
 	img.resize(custom_resolution.x, custom_resolution.y, Image.INTERPOLATE_LANCZOS)
-	# 统一走 ScreenshotTool: 转 RGBA8 + 可选 sRGB 校正 + 可选抖动(dithering 开时先转 sRGB 浮点再量化扩散)
-	ScreenshotTool.normalize(img, {"srgb": linear_to_srgb, "dither": dithering})
+	# 统一走 ScreenshotTool: 转 RGBA8 + 颜色处理(默认 auto 判定) + 可选抖动
+	# (dithering 开时先在浮点上做 sRGB 编码再量化扩散)
+	ScreenshotTool.normalize(img, {"color_mode": color_mode, "dither": dithering})
 	var err := img.save_png(save_path)
 	if err != OK:
 		LogTool.error("截图", "保存图像失败: %s 错误码=%d" % [save_path, err])

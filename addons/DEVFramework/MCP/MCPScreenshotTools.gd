@@ -28,11 +28,12 @@ const MCPEditorEnv := preload("res://addons/DEVFramework/MCP/MCPEditorEnv.gd")
 static func spec() -> Dictionary:
 	return {
 		"name": "take_screenshot",
-		"desc": "画面感知工具, 只回答画面长什么样。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可include_text=false关)。'editor'编辑器视口截图,'scene'场景缩略图。截图默认已做 sRGB 校正(颜色正确), 如确需原始线性图可传 srgb=false。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。要找可点的东西并按下, 别截图, 改用 get_interactables(给 ref; 2D 免坐标换算, 3D 直接激活)。",
+		"desc": "画面感知工具, 只回答画面长什么样。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可include_text=false关)。'editor'编辑器视口截图,'scene'场景缩略图。真实截图默认自动判定颜色空间(color_mode=auto: 按渲染缓冲的实际格式决定要不要补 sRGB 编码), 出图与实际看到的画面一致, 一般无需干预; 仅在极少数偏色场合用 color_mode 覆盖。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。要找可点的东西并按下, 别截图, 改用 get_interactables(给 ref; 2D 免坐标换算, 3D 直接激活)。",
 		"schema": {"type": "object", "properties": {
 			"capture_type": {"type": "string", "enum": ["text", "game", "editor", "scene"], "description": "模式: text=文本化截图(默认, 推荐, 需游戏运行), game=真实游戏截图(需游戏运行), editor=编辑器视口截图, scene=当前场景缩略图。传错值会直接报错而非静默回落到 editor"},
 			"max_width": {"type": "integer", "description": "仅真实截图生效: 最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
-			"srgb": {"type": "boolean", "description": "仅真实截图生效: 是否做 sRGB 颜色校正, 默认 true(颜色正确)。传 false 保留原始线性图"},
+			"color_mode": {"type": "string", "enum": ["auto", "srgb", "raw"], "description": "仅真实截图生效: 颜色处理模式, 默认 auto(按渲染缓冲的实际数据格式自动判定, 出图即所见)。srgb=强制补一次 linear→sRGB 编码(认定读回的是线性光值), raw=强制不转换(认定读回的已是显示值)。只有确认出图偏色时才需要手动指定"},
+			"srgb": {"type": "boolean", "description": "[已废弃, 请用 color_mode] 仅真实截图生效: 旧的强制开关, 等价 color_mode=srgb(true)/raw(false); 与 color_mode 同时传时以 color_mode 为准。不传则走 auto"},
 			"include_text": {"type": "boolean", "description": "仅真实截图生效: 是否附带文本化截图(text 字段), 默认 true"},
 			"text_max_nodes": {"type": "integer", "description": "文本化截图最多节点数, 默认 50"}
 		}},
@@ -79,15 +80,16 @@ static func capture_editor_side(capture_type: String, args: Dictionary) -> Dicti
 			# 成游戏画面继续推理, 基于错的前提一路往下走。这正是必须显式报错的场合。
 			# 曾长期靠这个兜底当默认值, 代价就是上面那条静默错图。
 			return MCPResult.fail("capture_type=%s 不是本域支持的模式(本域只做 editor / scene; text / game 由主服务器转发去游戏进程)" % capture_type)
-	# 统一走 ScreenshotTool: sRGB 校正(保证颜色正确) -> 缩放 -> 保存。
+	# 统一走 ScreenshotTool: 颜色处理(auto 判定) -> 缩放 -> 保存。
 	# 缺省降采样到 1280 宽以控制截图体积(大视口/高分屏尤其明显), 传更大的 max_width 可保留更高分辨率。
-	var shot: Dictionary = ScreenshotTool.save_image(img, {
+	var opts := {
 		"dir": ScreenshotTool.DEFAULT_DIR_RES,
 		"prefix": "mcp",
 		"max_width": VariantTool.get_int(args, "max_width", ScreenshotTool.DEFAULT_MAX_WIDTH),
-		"srgb": VariantTool.get_bool(args, "srgb", true),
 		"capture_type": capture_type,
-	})
+	}
+	opts.merge(color_opts(args))
+	var shot: Dictionary = ScreenshotTool.save_image(img, opts)
 	if not shot.get("ok", false):
 		return MCPResult.fail(str(shot.get("error", "截图失败")))
 	return MCPResult.ok_json({
@@ -97,7 +99,23 @@ static func capture_editor_side(capture_type: String, args: Dictionary) -> Dicti
 		"height": int(shot.get("height", 0)),
 		"bytes": int(shot.get("bytes", 0)),
 		"capture_type": capture_type,
+		"color_mode": str(shot.get("color_mode", "")),
 	})
+
+
+## 从 MCP 入参里挑出**调用方显式指定**的颜色处理项, 交给 ScreenshotTool 的 opts。
+##
+## ⚠️ 刻意只透传"传了什么": 不传就一个键都不放, 让 ScreenshotTool 走 auto 自己判。
+## 以前这里是 `srgb: get_bool(args, "srgb", true)` —— 由本层替引擎补默认值, 于是 8 位缓冲
+## 也被强制编码一次, 出图比实际画面发灰发白。判定的位置只能是"看得见数据格式"的那一层。
+## 两个键都在 spec 的 properties 里声明过, 故此处读取不会触发入参自检的"读了未声明"。
+static func color_opts(args: Dictionary) -> Dictionary:
+	var out := {}
+	if args.has("color_mode"):
+		out["color_mode"] = VariantTool.get_string(args, "color_mode", ScreenshotTool.COLOR_AUTO)
+	if args.has("srgb"):
+		out["srgb"] = VariantTool.get_bool(args, "srgb", true)
+	return out
 
 
 ## ======= 接缝自检 =======
@@ -120,7 +138,7 @@ static func capture_editor_side(capture_type: String, args: Dictionary) -> Dicti
 
 ## ======= 捕获实现(本域专属辅助) =======
 
-## 捕获编辑器视口截图(已做 sRGB 校正)
+## 捕获编辑器视口截图(原始读回数据; 颜色处理由 save_image 自动判定)
 static func _capture_editor_viewport() -> Image:
 	if not Engine.is_editor_hint():
 		return null
@@ -139,7 +157,7 @@ static func _capture_editor_viewport() -> Image:
 	return await ScreenshotTool.grab(viewport, {"await_draw": false})
 
 
-## 生成当前编辑场景的缩略图(已做 sRGB 校正)
+## 生成当前编辑场景的缩略图(原始读回数据; 颜色处理由 save_image 自动判定)
 static func _capture_scene_thumbnail(_args: Dictionary) -> Image:
 	if not Engine.is_editor_hint():
 		return null

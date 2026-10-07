@@ -10,6 +10,7 @@ extends EditorScript
 ## 而截图能力在游戏运行时同样需要。故核心逻辑放普通类, 此处仅负责菜单触发。
 ##
 ## 点击后: 捕获编辑器主视口 -> 存到 res://.godot/mcp_screenshots/ -> 打印路径。
+## 颜色处理不在此指定: 走 ScreenshotTool 的 auto, 按读回缓冲的实际格式自己判。
 ## 需要别的目录/分辨率时, 直接调 ScreenshotTool.capture(viewport, opts),
 ## 参数与返回结构见 ScreenshotTool 文件头说明。
 
@@ -46,7 +47,6 @@ func _capture_editor() -> Dictionary:
 		"dir": ScreenshotTool.DEFAULT_DIR_RES,
 		"prefix": "editor",
 		"max_width": MAX_WIDTH,
-		"srgb": true,
 		"await_draw": false,
 		"capture_type": "editor",
 	})

@@ -1411,7 +1411,7 @@ func _call_take_screenshot(args: Dictionary) -> Dictionary:
 		return await _runtime_take_screenshot(args)
 
 	# editor / scene 两模式只取编辑器进程自己的像素, 整段搬进了 MCPScreenshotTools
-	# (含 SubViewport 渲染、frame_post_draw 那三条禁令、sRGB 校正与 1280 降采样)。
+	# (含 SubViewport 渲染、frame_post_draw 那三条禁令、颜色处理 auto 判定与 1280 降采样)。
 	# 本函数必须留在主文件的只有上面 text/game 那段: 它要 _call_runtime_proxy 与
 	# _runtime_take_screenshot, 两者都依赖 _pending / debugger_plugin, 静态化不了。
 	# 那边**刻意不叫 _call_take_screenshot**: 跨文件同名会让"按函数名取实现"(grep、审计切源码)
@@ -2125,14 +2125,16 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 	var viewport := get_viewport()
 	if viewport == null:
 		return _fail("无法获取游戏视口")
-	# 统一走 ScreenshotTool: 取图 -> sRGB 校正(保证颜色正确) -> 缩放 -> 保存。
+	# 统一走 ScreenshotTool: 取图 -> 颜色处理(auto 判定, 出图即所见) -> 缩放 -> 保存。
 	# 缺省降采样到 1280 宽以控制体积, 传更大的 max_width 可保留更高分辨率。
-	var shot: Dictionary = await ScreenshotTool.capture(viewport, {
+	# 颜色处理项只透传调用方显式传了的(见 MCPScreenshotTools.color_opts), 不替引擎补默认值。
+	var shot_opts := {
 		"path": "%s/%s" % [dir_path, filename],
 		"max_width": VariantTool.get_int(args, "max_width", ScreenshotTool.DEFAULT_MAX_WIDTH),
-		"srgb": VariantTool.get_bool(args, "srgb", true),
 		"capture_type": "game",
-	})
+	}
+	shot_opts.merge(MCPScreenshotTools.color_opts(args))
+	var shot: Dictionary = await ScreenshotTool.capture(viewport, shot_opts)
 	if not shot.get("ok", false):
 		return _fail(str(shot.get("error", "截图失败")))
 	var img_w := int(shot.get("width", 0))
@@ -2144,6 +2146,7 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 		"height": img_h,
 		"bytes": int(shot.get("bytes", 0)),
 		"capture_type": "game",
+		"color_mode": str(shot.get("color_mode", "")),
 	}
 	# 整合文本化截图快照(text): 截图同时返回画面可见节点布局,
 	# 供 AI 在无图像输入时也能理解画面。可用 include_text=false 关闭, text_max_nodes 控制节点数。
