@@ -66,7 +66,7 @@ func _build() -> void:
 	row.add_child(_action("新建", "清空并新建一个模型", func(): new_requested.emit()))
 	row.add_child(_action("打开", "打开一个 .qvox 工程（也可直接把文件拖进窗口）",
 			func(): open_requested.emit()))
-	# 保存是主操作：整条栏里唯一的实心强调色，视线自然落上去。
+	# 保存是主操作：整条栏里唯一带强调描边与强调字的按钮（样式见 QVoxUi.VARIATION_ACCENT）。
 	row.add_child(_action("保存", "保存工程（Ctrl+S）", func(): save_requested.emit(),
 			QVoxUi.VARIATION_ACCENT))
 	row.add_child(_action("另存", "另存为新文件（Ctrl+Shift+S）", func(): save_as_requested.emit()))
@@ -86,6 +86,9 @@ func _build() -> void:
 	row.add_child(_undo)
 	row.add_child(_redo)
 
+	# 历史与视图是两类东西（改数据 / 只看不改），隔一条线比让它们连成一片好读。
+	# 左侧不再加线：居中的工程名本身就是文件组与历史组之间的分隔。
+	row.add_child(QVoxUi.vdivider())
 	row.add_child(_view_group())
 	_sync_project()
 
@@ -189,5 +192,7 @@ func _sync_project() -> void:
 	if _project == null:
 		return
 	_project.text = "%s%s" % [_project_name, "  *" if _project_dirty else ""]
+	# 常态用正文色而不是弱色：它是这条栏上唯一"是什么"的信息，此前弱色让它读起来像占位符。
+	# 变脏才升到强调色 —— 于是强调色仍然只承担"状态"这一件事。
 	_project.add_theme_color_override("font_color",
-			QVoxUi.ACCENT if _project_dirty else QVoxUi.TEXT_DIM)
+			QVoxUi.ACCENT if _project_dirty else QVoxUi.TEXT)

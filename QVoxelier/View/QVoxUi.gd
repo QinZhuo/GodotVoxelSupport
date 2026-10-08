@@ -56,9 +56,11 @@ const TEXT_FAINT := Color(0.4196, 0.4549, 0.5098, 1.0)
 
 ## 唯一强调色。
 const ACCENT := Color(0.4353, 0.8275, 1.0, 1.0)
-## 强调色的低透明度底（选中态背景）。
+## 强调色的低透明度底（选中态背景 / 主操作按钮的常态底）。
 const ACCENT_DIM := Color(0.4353, 0.8275, 1.0, 0.16)
-## 铺在强调色上的文字色（深色，保证对比度）。
+## 主操作按钮的悬停底（比常态略实一档）。
+const ACCENT_HOVER := Color(0.4353, 0.8275, 1.0, 0.28)
+## 铺在强调色上的文字色（深色，保证对比度）。用于主操作按钮"按下"那一瞬的实心反馈。
 const ON_ACCENT := Color(0.0431, 0.0784, 0.1098, 1.0)
 const WARN := Color(1.0, 0.5412, 0.4471, 1.0)
 const OK := Color(0.4196, 0.8902, 0.6275, 1.0)
@@ -71,10 +73,12 @@ const SPACE_S := 8
 const SPACE_M := 12
 const SPACE_L := 16
 
-const FONT_S := 11
-const FONT_M := 12
-const FONT_L := 13
-const FONT_TITLE := 15
+# 字号阶：整体比"网页习惯"大一档。这是长期注视的建模工具，11/12 那套在
+# 1152×648 的实际窗口里读起来是"眯着看"（实测截图里状态栏与分组小标题尤其吃力）。
+const FONT_S := 12
+const FONT_M := 13
+const FONT_L := 14
+const FONT_TITLE := 16
 
 ## 最小命中区边长（触摸可点 / 鼠标不笨重的共同下限）。见类文档第 3 段。
 const MIN_TOUCH := 44
@@ -82,7 +86,7 @@ const MIN_TOUCH := 44
 const ICON_SIZE := MIN_TOUCH
 ## 顶部应用栏 / 底部状态栏高度。
 const BAR_HEIGHT := 52
-const STATUS_HEIGHT := 30
+const STATUS_HEIGHT := 36
 
 ## type_variation 名：主操作按钮（保存、确认），强调色实心。
 const VARIATION_ACCENT := &"AccentButton"
@@ -129,13 +133,16 @@ static func _theme_button(t: Theme) -> void:
 	t.set_font_size("font_size", "Button", FONT_L)
 	t.set_constant("h_separation", "Button", SPACE_S)
 
-	# 主操作：实心强调（一个界面上最多一个，否则强调就不成其为强调）。
+	# 主操作：强调色 tonal（低透明底 + 强调字 + 强调描边），只在"按下"那一瞬给实心。
+	# 【为什么不做成常驻的实心高亮块】实测它会是整屏最亮的东西（比模型还亮），把视线从
+	# 视口拉走；而且强调色在本层的约定是"当前选中 / 可交互"，一个常驻亮块会稀释这条约定。
+	# 主操作靠"整条栏里唯一带强调描边与强调字"依然一眼可辨 —— 区分度没丢，噪声降了。
 	t.set_type_variation(VARIATION_ACCENT, "Button")
-	t.set_stylebox("normal", VARIATION_ACCENT, box(ACCENT, ACCENT, 0, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("hover", VARIATION_ACCENT, box(ACCENT.lightened(0.15), ACCENT, 0, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("pressed", VARIATION_ACCENT, box(ACCENT.darkened(0.15), ACCENT, 0, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_color("font_color", VARIATION_ACCENT, ON_ACCENT)
-	t.set_color("font_hover_color", VARIATION_ACCENT, ON_ACCENT)
+	t.set_stylebox("normal", VARIATION_ACCENT, box(ACCENT_DIM, ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
+	t.set_stylebox("hover", VARIATION_ACCENT, box(ACCENT_HOVER, ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
+	t.set_stylebox("pressed", VARIATION_ACCENT, box(ACCENT, ACCENT, 0, RADIUS_S, SPACE_M, SPACE_S))
+	t.set_color("font_color", VARIATION_ACCENT, ACCENT)
+	t.set_color("font_hover_color", VARIATION_ACCENT, Color.WHITE)
 	t.set_color("font_pressed_color", VARIATION_ACCENT, ON_ACCENT)
 
 	# 工具按钮：常态继承 Button，只改写"选中"（toggle 按下）—— 触摸下这是唯一的选中线索。
@@ -155,6 +162,7 @@ static func _theme_label(t: Theme) -> void:
 static func _theme_container(t: Theme) -> void:
 	t.set_stylebox("panel", "PanelContainer", box(SURFACE, BORDER, 1, RADIUS_M, SPACE_M, SPACE_M))
 	t.set_stylebox("separator", "HSeparator", line(BORDER))
+	t.set_stylebox("separator", "VSeparator", vline(BORDER))
 	t.set_stylebox("panel", "Panel", box(BAR, BORDER, 0, 0, SPACE_S, SPACE_XS))
 	t.set_constant("separation", "VBoxContainer", SPACE_S)
 	t.set_constant("separation", "HBoxContainer", SPACE_S)
@@ -198,10 +206,18 @@ static func box(bg: Color, border := BORDER, border_w := 1, radius := RADIUS_S,
 
 
 static func line(color := BORDER, thickness := 1) -> StyleBoxLine:
+	return _style_line(color, thickness, false)
+
+
+static func vline(color := BORDER, thickness := 1) -> StyleBoxLine:
+	return _style_line(color, thickness, true)
+
+
+static func _style_line(color: Color, thickness: int, vertical: bool) -> StyleBoxLine:
 	var sb := StyleBoxLine.new()
 	sb.color = color
 	sb.thickness = thickness
-	sb.vertical = false
+	sb.vertical = vertical
 	return sb
 
 
@@ -297,6 +313,15 @@ static func hbox(sep := SPACE_S) -> HBoxContainer:
 
 static func divider() -> HSeparator:
 	return HSeparator.new()
+
+
+## 竖分隔：把同一行里的若干组控件隔开（应用栏的 文件 | 历史 | 视图）。
+## 定高居中而不是顶满 —— 满高会被读成"分栏"，而它们只是同一层里的分组。
+static func vdivider(height := 24) -> VSeparator:
+	var s := VSeparator.new()
+	s.custom_minimum_size = Vector2(SPACE_L, height)
+	s.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	return s
 
 
 ## 弹性占位（把同一行里的两组控件推向两端）。

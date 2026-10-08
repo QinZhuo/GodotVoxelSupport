@@ -119,18 +119,22 @@ func _build_status() -> void:
 
 	_tool = _readout(QVoxUi.FONT_L, QVoxUi.ACCENT)
 	row.add_child(_tool)
-	_hint = _readout(QVoxUi.FONT_S, QVoxUi.TEXT_DIM)
+	_hint = _readout(QVoxUi.FONT_M, QVoxUi.TEXT_DIM)
 	_hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_hint.clip_text = true
 	_hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	row.add_child(_hint)
-	_cursor = _readout(QVoxUi.FONT_S, QVoxUi.TEXT)
+	# 隔一条线：左边是"你现在能做什么"（提示），右边是"你现在是什么状态"（读数）。
+	row.add_child(QVoxUi.vdivider(18))
+	_cursor = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
 	row.add_child(_cursor)
-	_brush = _readout(QVoxUi.FONT_S, QVoxUi.TEXT)
+	_brush = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
 	row.add_child(_brush)
-	_material = _readout(QVoxUi.FONT_S, QVoxUi.TEXT)
+	_material = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
 	row.add_child(_material)
-	_history = _readout(QVoxUi.FONT_S, QVoxUi.TEXT_DIM)
+	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。
+	row.add_child(QVoxUi.vdivider(18))
+	_history = _readout(QVoxUi.FONT_M, QVoxUi.TEXT_DIM)
 	row.add_child(_history)
 
 
@@ -191,4 +195,7 @@ const _LEGEND := [
 
 func _readout(font_size: int, color: Color) -> Label:
 	# 压在 3D 画面上，故一律带暗描边（见 QVoxUi.label 的 outlined）。
-	return QVoxUi.label("", font_size, color, true)
+	var l := QVoxUi.label("", font_size, color, true)
+	# 状态栏比一行字高，Label 默认顶对齐会让整排读数贴在上边；显式居中。
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	return l

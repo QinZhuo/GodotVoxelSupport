@@ -35,7 +35,9 @@ func _build() -> void:
 	offset_left = QVoxUi.SPACE_M
 	offset_right = -QVoxUi.SPACE_M
 	offset_bottom = -(QVoxUi.STATUS_HEIGHT + QVoxUi.SPACE_S)
-	offset_top = offset_bottom - (SWATCH + 2 * QVoxUi.SPACE_S + 20)
+	# 面板高度 = 色块行 + 上下内边距。此前多留了 20px，是给左侧那个竖排的"材质"小标题
+	# 兜底的；现在标题与色块同一行，这 20px 只剩一片空白。
+	offset_top = offset_bottom - (SWATCH + 2 * QVoxUi.SPACE_S)
 
 	# 中间层只负责"把调色板摆在底边正中"：它自己不吃事件，故色板两侧的底边
 	# 仍然是可点击的视口区域。
@@ -51,7 +53,14 @@ func _build() -> void:
 
 	var row := QVoxUi.hbox(QVoxUi.SPACE_S)
 	panel.add_child(row)
-	row.add_child(QVoxUi.heading("材质"))
+
+	# 当前材质：数字键与点击色块共用的状态回显。放在最左与色板相邻 —— 此前它孤零零挂在
+	# 整排色块的最右端，与"选中了哪个"隔着一整排，读起来像另一件事的读数。
+	# 宽度定死：面板是居中的，一旦从 9 切到 10 文字变宽，整排色块会被推着平移。
+	_current = QVoxUi.label("材质 —", QVoxUi.FONT_M, QVoxUi.TEXT)
+	_current.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_current.custom_minimum_size.x = 60
+	row.add_child(_current)
 
 	_group.allow_unpress = false
 	_scroll = ScrollContainer.new()
@@ -62,12 +71,6 @@ func _build() -> void:
 
 	_row = QVoxUi.hbox(QVoxUi.SPACE_XS)
 	_scroll.add_child(_row)
-
-	_current = QVoxUi.label("—", QVoxUi.FONT_L, QVoxUi.TEXT)
-	_current.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_current.custom_minimum_size.x = 28
-	_current.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	row.add_child(_current)
 
 
 func _notification(what: int) -> void:
@@ -101,7 +104,7 @@ func set_palette(colors: Array[Color]) -> void:
 
 ## 高亮当前材质（点击与数字键共用同一条回写路径）。
 func set_current(material_id: int) -> void:
-	_current.text = str(material_id)
+	_current.text = "材质 %d" % material_id
 	for id in _swatches:
 		var b: Button = _swatches[id]
 		b.set_pressed_no_signal(id == material_id)
@@ -115,8 +118,12 @@ func set_current(material_id: int) -> void:
 func _clamp_width() -> void:
 	if _scroll == null:
 		return
-	var avail := maxf(size.x - 2 * QVoxUi.SPACE_L, 200.0)
-	_scroll.custom_minimum_size.x = minf(_need, avail)
+	# 色板条可用宽度 = 面板总宽 − 左侧"材质 N"标签 − 面板左右内边距 − 标签与色板间的间距。
+	# **这四样都得减掉**：只减内边距的话，面板会比可用宽度更宽，被顶出屏幕右缘（色块被裁一截）。
+	# 再取 PALETTE_MAX_W 为上限 —— 宽屏上色板也不该铺满整条底边（底边要尽量透给 3D 视口）。
+	var chrome := 3.0 * QVoxUi.SPACE_S + _current.custom_minimum_size.x
+	var avail := maxf(size.x - chrome, 200.0)
+	_scroll.custom_minimum_size.x = minf(_need, minf(PALETTE_MAX_W, avail))
 
 
 ## 选中的色块滚进可见范围：用键盘切材质时，色板也要跟着走，
