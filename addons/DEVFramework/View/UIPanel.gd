@@ -73,6 +73,18 @@ func close() -> void:
 	on_close.emit()
 	if show_tween:
 		await show_tween.playback().finished
+
+
+## 节点离开场景树时自动注销。
+##
+## 面板被 free（场景被换掉 / 节点被释放）时 close() 未必有机会被调用，而栈里留一个已释放的
+## 引用，会让后续 get_top() / _sort() 拿到悬空对象（实测报 "previously freed instance"）。
+## 这里是唯一能兜住"没调 close 就没了"的位置 —— 各面板不必自己记得。
+func _exit_tree() -> void:
+	if not is_open:
+		return
+	is_open = false
+	UITool.unregister(self)
 	on_closed.emit()
 	hide()
 

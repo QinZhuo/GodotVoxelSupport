@@ -62,6 +62,14 @@ func close() -> void:
 	on_close.emit()
 	if show_tween:
 		await show_tween.playback().finished
+
+
+## 节点离开场景树时自动注销（与 UIPanel 同一条兜底：避免栈里留下已释放的引用）。
+func _exit_tree() -> void:
+	if not is_open:
+		return
+	is_open = false
+	UITool.unregister(self)
 	on_closed.emit()
 
 ## 切换打开/关闭。完整流程见 [method open] / [method close]。

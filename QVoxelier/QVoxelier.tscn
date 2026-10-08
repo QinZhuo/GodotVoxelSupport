@@ -1,0 +1,54 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://QVoxelier/View/QVoxelierApp.gd" id="1_app"]
+[ext_resource type="Script" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="2_renderer"]
+[ext_resource type="Script" path="res://QVoxelier/View/QVoxGridFloor.gd" id="3_floor"]
+[ext_resource type="Script" path="res://QVoxelier/View/QVoxOrbitCamera.gd" id="4_camera"]
+[ext_resource type="Script" path="res://QVoxelier/View/QVoxelierHud.gd" id="5_hud"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
+sky_top_color = Color(0.15, 0.2, 0.3, 1)
+sky_horizon_color = Color(0.5, 0.55, 0.6, 1)
+ground_bottom_color = Color(0.12, 0.12, 0.14, 1)
+ground_horizon_color = Color(0.45, 0.48, 0.5, 1)
+
+[sub_resource type="Sky" id="Sky_1"]
+sky_material = SubResource("ProceduralSkyMaterial_1")
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 2
+sky = SubResource("Sky_1")
+ambient_light_source = 3
+ambient_light_sky_contribution = 0.7
+reflected_light_source = 3
+tonemap_mode = 2
+ssao_enabled = true
+ssao_radius = 0.6
+ssao_intensity = 1.4
+
+[node name="QVoxelier" type="Node3D" unique_id=1001]
+script = ExtResource("1_app")
+
+[node name="Model" type="MeshInstance3D" parent="." unique_id=1002]
+script = ExtResource("2_renderer")
+voxel_scale = 0.1
+visibility_mode = 0
+lod_count = 1
+
+[node name="Floor" type="MeshInstance3D" parent="Model" unique_id=1003]
+script = ExtResource("3_floor")
+
+[node name="Camera" type="Camera3D" parent="." unique_id=1004]
+current = true
+script = ExtResource("4_camera")
+
+[node name="KeyLight" type="DirectionalLight3D" parent="." unique_id=1005]
+transform = Transform3D(-0.5, 0, 0.866, 0.35, 0.866, 0.35, -0.75, 0.5, 0.433, 0, 6, 0)
+light_energy = 1.1
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1006]
+environment = SubResource("Environment_1")
+
+[node name="Hud" type="Control" parent="." unique_id=1007]
+script = ExtResource("5_hud")
