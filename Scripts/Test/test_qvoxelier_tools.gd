@@ -102,6 +102,43 @@ func test_dilate_dedupes_overlaps() -> void:
 	assert_eq(QVoxBrushGeometry.dilate(cells, 0), cells, "半径 0 原样返回")
 
 
+func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
+	# dilate 走的是分离式距离变换（代价 O(输出体积)），而它的定义是"每格盖一个球"（代价 O(格 × 球)）。
+	# 性能优化不得改变笔刷形状：这条把"快"钉在"对"上 —— 两条路径必须给出同一集合。
+	var seeds: Array[Vector3i] = []
+	for x in range(4):
+		for y in range(2):
+			seeds.append(Vector3i(x * 3 - 2, y * 2 + 1, x - y))
+	for r in [1, 2, 3, 5]:
+		var got := _cells_of(QVoxBrushGeometry.dilate(seeds, r))
+		var want := {}
+		for c in seeds:
+			for off in QVoxBrushGeometry.ball_offsets(r):
+				want[c + off] = true
+		# 只报差异格：出问题时能一眼看出"多算了什么 / 漏了什么"，而不是抛两个大字典
+		var only_got: Array[Vector3i] = []
+		var only_want: Array[Vector3i] = []
+		for k: Vector3i in got:
+			if not want.has(k):
+				only_got.append(k)
+		for k: Vector3i in want:
+			if not got.has(k):
+				only_want.append(k)
+		assert_eq(only_got.size(), 0, "半径 %d 多算了（距离变换偏小）: %s" % [r, str(only_got.slice(0, 8))])
+		assert_eq(only_want.size(), 0, "半径 %d 漏算了（距离变换偏大）: %s" % [r, str(only_want.slice(0, 8))])
+
+
+func test_ball_offsets_are_one_shared_cached_table() -> void:
+	# 球偏移只由半径决定，因此全类共用一张表：按格盖章的用法会反复算同一个球，
+	# 若每次都新建一张表，就是一串无谓的三重循环（半径 15 时每次 31³）。
+	var r2 := QVoxBrushGeometry.ball_offsets(2)
+	assert_eq(QVoxBrushGeometry.ball(Vector3i.ZERO, 2), r2, "以原点为中心的球就是偏移表本身")
+	assert_eq(QVoxBrushGeometry.ball_offsets(2), r2, "重复取用必须给出同一张表")
+	assert_eq(QVoxBrushGeometry.ball_offsets(-3), QVoxBrushGeometry.ball_offsets(0),
+		"半径 <= 0 一律归到 0（只有中心偏移），与 ball() 的旧语义一致")
+	assert_eq(r2.count(Vector3i.ZERO), 1, "偏移表内不得有重复（去重由生成方式保证）")
+
+
 func test_region_stops_at_gaps() -> void:
 	var solid := {}
 	for z in range(5):
@@ -172,6 +209,47 @@ func test_begin_rejects_hits_without_an_incidence_face() -> void:
 	assert_false(tool.begin(_pick(solid, Vector3i.MIN, Vector3i.ZERO)), "没命中 → 不能落笔")
 	assert_false(tool.begin(_pick(solid, Vector3i(1, 1, 1), Vector3i.ZERO)),
 		"起点就在实心格内（没有入射面）→ 无处可长，不能落笔")
+
+
+## 回归：拖动时把鼠标移出模型（射线落空 → 拾取里是 Vector3i.MIN 哨兵）不得污染端点。
+##
+## 【这条曾经是"画几下整机卡死"的现场】MIN 是"没有落笔点"的哨兵，不是坐标。它一旦写进端点，
+## 盒 / 线笔就会拿 -2^31 当角点去生成格子：`box()` 的 range 变成 21 亿次 append，
+## 内存打穿后引擎**逐次**报 OOM（连调用栈一起打），实测刷出 1.27GB 日志、游戏与编辑器双双卡死。
+## 所以这里断言的不是"行为好看"，而是**产物规模必须有界** —— 它一旦随"鼠标跑到多远"增长，就是灾难。
+func test_drag_ignores_picks_that_missed_the_model() -> void:
+	var solid := _plate(MAT)
+	var grid := Vector3i(8, 8, 8)
+	var miss := _pick(solid, Vector3i.MIN, Vector3i.ZERO, {"grid": grid})
+	assert_false(miss.valid(), "前提：落空的拾取本身是无效的（place 也是 MIN）")
+	for m in [QVoxBrushTool.Mode.VOXEL, QVoxBrushTool.Mode.LINE, QVoxBrushTool.Mode.BOX]:
+		var tool := _tool(m)
+		tool.begin(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"grid": grid}))
+		assert_true(tool.drag(miss).is_empty(), "%s：落空的拖动不产出格子" % tool.label())
+		var cells := tool.release()
+		assert_true(cells.size() <= grid.x * grid.y * grid.z,
+			"%s：产物必须被网格体积限住（松手时端点仍是最后一次有效落笔点）" % tool.label())
+		for c in cells:
+			assert_true(absi(c.x) < 1000 and absi(c.y) < 1000 and absi(c.z) < 1000,
+				"%s：产物里混进了哨兵坐标 %s" % [tool.label(), str(c)])
+
+
+## 回归：两个角点离得极远时，产物规模也必须被限住 —— 端点裁剪要在**生成形状之前**。
+## 先生成再裁是"先造再扔"：间距一大就是拿内存换垃圾（与上一条同源，只是入口不同）。
+func test_far_away_corners_cannot_blow_up_the_box() -> void:
+	var solid := _plate(MAT)
+	var grid := Vector3i(8, 8, 8)
+	var tool := _tool(QVoxBrushTool.Mode.BOX)
+	tool.begin(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"grid": grid}))
+	# 合法但越界很远的坐标（正常拖动全程都可能出现这种点：射线打在网格外沿之外）
+	tool.drag(_pick(solid, Vector3i(10_000, 0, 10_000), Vector3i(0, 1, 0), {"grid": grid}))
+	var cells := tool.release()
+	assert_eq(_cells_of(cells).size(), cells.size(), "产物不得有重复格")
+	assert_true(cells.size() <= grid.x * grid.y * grid.z,
+		"产物规模必须被网格限住，而不是随角点间距增长（got=%d）" % cells.size())
+	for c in cells:
+		assert_true(c.x >= 0 and c.x < grid.x and c.z >= 0 and c.z < grid.z, "全在网格内")
+
 
 
 func test_hover_previews_without_starting_a_gesture() -> void:

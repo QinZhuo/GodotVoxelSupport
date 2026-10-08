@@ -1,0 +1,130 @@
+@tool
+class_name QVoxelierPalette
+extends QVoxelierPanel
+## 底部调色板 —— 材质色块条。**颜色本身就是内容**，故块面取自材质而不是主题色。
+##
+## 【为什么调色板必须有 UI】此前材质只能靠数字键 1..8 选，且工程里到底有几个材质、
+## 分别是什么颜色，界面上完全看不到。打开一个别人做的 256 色工程时，那等于没有色板。
+##
+## 【为什么面板宽度按内容算】色块数量由世界决定（8 个起步，导入的工程可能上百）。
+## 让面板只占它真正需要的宽度（上限 PALETTE_MAX_W 后转横向滚动），两侧留白直接透给
+## 3D 视口 —— 底边是唯一一条"最不想被拦住"的区域，全宽色板会在平板上平白吃掉一截画布。
+##
+## 【为什么选中靠描边而不是变色】色块颜色就是"这个材质长什么样"，若用变色表示选中，
+## 用户就看不出自己选的是什么颜色了。于是选中态用一圈加粗强调描边（见 QVoxUi.swatch）。
+##
+## 【与热键同源】数字键 1..8 与点击色块走的是同一个状态（App 的 _material_id），
+## 由 App 在两边都调用 set_current() 回写 —— 不存在"点了色块但下次按键又跳回去"。
+
+signal material_selected(material_id: int)
+
+const SWATCH := QVoxUi.MIN_TOUCH
+## 色板条最大宽度，超出转横向滚动。
+const PALETTE_MAX_W := 520.0
+
+var _scroll: ScrollContainer
+var _row: HBoxContainer
+var _current: Label
+var _group := ButtonGroup.new()
+var _swatches := {}         # material_id → Button
+var _need := 0.0            # 色块行完整展开所需的宽度
+
+
+func _build() -> void:
+	set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	offset_left = QVoxUi.SPACE_M
+	offset_right = -QVoxUi.SPACE_M
+	offset_bottom = -(QVoxUi.STATUS_HEIGHT + QVoxUi.SPACE_S)
+	offset_top = offset_bottom - (SWATCH + 2 * QVoxUi.SPACE_S + 20)
+
+	# 中间层只负责"把调色板摆在底边正中"：它自己不吃事件，故色板两侧的底边
+	# 仍然是可点击的视口区域。
+	var center := QVoxUi.hbox()
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	center.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(center)
+
+	var panel := QVoxUi.panel(QVoxUi.SPACE_S)
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	center.add_child(panel)
+
+	var row := QVoxUi.hbox(QVoxUi.SPACE_S)
+	panel.add_child(row)
+	row.add_child(QVoxUi.heading("材质"))
+
+	_group.allow_unpress = false
+	_scroll = ScrollContainer.new()
+	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_scroll.custom_minimum_size.y = SWATCH
+	row.add_child(_scroll)
+
+	_row = QVoxUi.hbox(QVoxUi.SPACE_XS)
+	_scroll.add_child(_row)
+
+	_current = QVoxUi.label("—", QVoxUi.FONT_L, QVoxUi.TEXT)
+	_current.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_current.custom_minimum_size.x = 28
+	_current.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	row.add_child(_current)
+
+
+func _notification(what: int) -> void:
+	# 视口尺寸变化（平板横竖屏切换、桌面改窗口大小）时重算色板可用宽度。
+	if what == NOTIFICATION_RESIZED:
+		_clamp_width()
+
+
+# ----------------------------------------------------------------------------
+# 对外：状态同步（只由 App 调用）
+# ----------------------------------------------------------------------------
+
+## 重建色板。colors 的**下标即材质 ID**（0 位是空气占位，直接跳过）。
+func set_palette(colors: Array[Color]) -> void:
+	for c in _row.get_children():
+		_row.remove_child(c)
+		c.queue_free()
+	_swatches.clear()
+
+	for id in range(1, colors.size()):
+		var b := QVoxUi.swatch(colors[id], "材质 %d · %s" % [id, colors[id].to_html(false)])
+		b.button_group = _group
+		var captured := id
+		b.toggled.connect(func(on: bool): if on: material_selected.emit(captured))
+		_swatches[id] = b
+		_row.add_child(b)
+
+	_need = maxf(float(colors.size() - 1) * (SWATCH + QVoxUi.SPACE_XS) - QVoxUi.SPACE_XS, SWATCH)
+	_clamp_width()
+
+
+## 高亮当前材质（点击与数字键共用同一条回写路径）。
+func set_current(material_id: int) -> void:
+	_current.text = str(material_id)
+	for id in _swatches:
+		var b: Button = _swatches[id]
+		b.set_pressed_no_signal(id == material_id)
+	_scroll_into_view(material_id)
+
+
+# ----------------------------------------------------------------------------
+# 内部
+# ----------------------------------------------------------------------------
+
+func _clamp_width() -> void:
+	if _scroll == null:
+		return
+	var avail := maxf(size.x - 2 * QVoxUi.SPACE_L, 200.0)
+	_scroll.custom_minimum_size.x = minf(_need, avail)
+
+
+## 选中的色块滚进可见范围：用键盘切材质时，色板也要跟着走，
+## 否则"按了 9 但屏幕上什么都没动"，用户会以为没生效。
+func _scroll_into_view(material_id: int) -> void:
+	if not _swatches.has(material_id) or _scroll == null:
+		return
+	var b: Button = _swatches[material_id]
+	await get_tree().process_frame
+	if is_instance_valid(b) and is_instance_valid(_scroll):
+		_scroll.ensure_control_visible(b)

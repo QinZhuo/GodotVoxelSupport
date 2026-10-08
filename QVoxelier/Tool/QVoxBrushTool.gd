@@ -133,8 +133,18 @@ func begin(pick: Pick) -> bool:
 
 ## 拖动：更新端点。live 工具顺带交出"上一采样点 → 现在"这一段要写的格子，
 ## 由视口立即写进命令（于是拖拽是连续的，而不是只留下离散的采样点）。
+##
+## 【必须挡掉无效 pick —— 这里曾是"画几下整机卡死"的根因】
+## 射线既没打到体素、也没打到地板时（鼠标拖出模型外、视角朝天），拾取信息是空字典，
+## 而 `placement_of(MIN, ZERO)` 返回的 `Vector3i.MIN` 是**"没有落笔点"的哨兵，不是坐标**。
+## 它一旦写进 `_current`，盒 / 线笔就会拿着 -2^31 这个角点去生成格子：`box()` 的
+## `range(lo, hi+1)` 变成 21 亿次 `append`，内存耗尽后引擎开始**逐次**报
+## `realloc_static: Parameter "mem" is null`（连 GDScript 调用栈一起打）—— 实测刷出 1.27GB
+## 日志、游戏彻底卡死、附带的编辑器也被输出缓冲拖死，整台机器一起卡。
+## 处置：无效拾取一律**保持上一个有效端点**。语义上也对 —— 把鼠标拖出模型再松手，
+## 用户的意思就是"这一笔画到模型边上为止"，而不是"画到无穷远"。
 func drag(pick: Pick) -> Array[Vector3i]:
-	if not _active or pick == null:
+	if not _active or pick == null or not pick.valid():
 		return []
 	_pick = pick
 	_current = _anchor_of(pick)
@@ -203,12 +213,12 @@ func _stroke(a: Vector3i, b: Vector3i, pick: Pick) -> Array[Vector3i]:
 		Mode.FILL:
 			return _stroke_fill(pick)
 		Mode.BOX:
-			return QVoxBrushGeometry.box(a, b)
+			return QVoxBrushGeometry.box(_clip(a, pick), _clip(b, pick))
 		Mode.LINE:
-			return QVoxBrushGeometry.line(a, b)
+			return QVoxBrushGeometry.line(_clip(a, pick), _clip(b, pick))
 		_:
 			# 体素笔：相邻采样点之间补一条线。鼠标事件是离散的，不补线则快速拖动会断成虚点。
-			return QVoxBrushGeometry.line(a, b)
+			return QVoxBrushGeometry.line(_clip(a, pick), _clip(b, pick))
 
 
 ## 面笔：铺满与拾取点连通的一片"暴露面"。
@@ -254,6 +264,24 @@ func _take() -> Array[Vector3i]:
 	var cells := _finish(_stroke(from, _current, _pick), _pick)
 	_written = _current
 	return cells
+
+
+## 端点裁剪：把角点夹回网格（含外沿一格）—— 注意是**生成形状之前**。
+##
+## 【为什么必须在生成之前】盒 / 线笔的产物数量由**两个角点的间距**决定：`box()` 遍历
+## `range(lo, hi+1)` 的三重循环，`line()` 遍历最大轴跨度。而网格外的产物反正在
+## `_finish` 里会被丢掉，等生成完再裁就是"先造再扔"，间距一大就是拿内存换垃圾
+## （角点跑到 2^31 那次实测直接把内存打穿，详见 drag() 的注释）。
+## 夹在生成之前，代价就被钉在网格体积上。
+##
+## 范围取 [-1, 网格尺寸]：这是**合法落笔点**能达到的最外沿 —— 命中边界面 + 法线会落到
+## `尺寸` 那一格，地板层的命中格是 y = -1。留出这一格，语义才与 `_finish` 的裁剪一致。
+## 无网格上下文（`grid = ZERO`，纯逻辑场合）时原样返回，裁剪责任交给调用方。
+static func _clip(p: Vector3i, pick: Pick) -> Vector3i:
+	if pick == null or pick.grid == Vector3i.ZERO:
+		return p
+	var g := pick.grid
+	return Vector3i(clampi(p.x, -1, g.x), clampi(p.y, -1, g.y), clampi(p.z, -1, g.z))
 
 
 ## 收尾：按笔刷尺寸加粗 + 裁掉网格外的格子。

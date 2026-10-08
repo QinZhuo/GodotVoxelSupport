@@ -1,0 +1,131 @@
+@tool
+class_name QVoxelierTools
+extends QVoxelierPanel
+## 左侧工具坞 —— 画笔模式 / 笔刷尺寸 / 擦除开关。
+##
+## 【工具列表从哪来】直接读 [QVoxBrushTool.MODES]（表即配置）：加一种笔只需在表里加一行，
+## 本面板与 HUD 的提示文案会一起跟着变。界面上**不允许**再抄一份工具名或热键 ——
+## 那样迟早出现"按钮写着线笔、提示还在讲盒笔"。
+##
+## 【为什么擦除要做成常驻开关】桌面上的擦除是**右键**，而平板没有右键。若不补这个开关，
+## 触摸用户就只剩"画"一个动作，擦不掉 —— 这不是少个便利，是功能缺失。
+## （鼠标用户仍可用右键，开关只是让两条输入路径汇到同一个状态。）
+##
+## 【为什么笔刷是 [−] 数值 [+] 而不是滑块】手指与鼠标在滑块上的定位精度都远不如按钮，
+## 而笔刷尺寸是 1..16 的小整数（16 档），加减比拖动更快也更准。不可调的工具（面笔/填充）
+## 让整行置灰并给出说明，而不是把行藏起来 —— 位置固定，界面不跳。
+
+## 选中了某个画笔模式（值同 QVoxBrushTool.Mode）。
+signal tool_selected(mode: int)
+## 笔刷尺寸加减请求（delta = ±1；钳制与语义归调用方，面板只管按键）。
+signal brush_step(delta: int)
+signal erase_toggled(enabled: bool)
+
+## 工具坞**面板**的目标宽度。这不是硬约束：见下面 resized 的处理 —— 它只是"最窄别窄过这个"。
+const DOCK_WIDTH := 132
+
+var _buttons := {}          # Mode → Button
+var _group := ButtonGroup.new()
+var _brush_value: Label
+var _brush_minus: Button
+var _brush_plus: Button
+var _brush_title: Label
+var _erase: Button
+var _size := 1
+
+
+func _build() -> void:
+	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	position = Vector2(QVoxUi.SPACE_M, QVoxUi.BAR_HEIGHT + QVoxUi.SPACE_M)
+	# 注意用 size 而不是 offset_right：anchors 全 0 时 offset_right 是"右边界坐标"，
+	# 直接写 DOCK_WIDTH 会得到 DOCK_WIDTH - SPACE_M 的宽度（差一个左边距）。
+	size.x = DOCK_WIDTH
+
+	var panel := QVoxUi.panel(QVoxUi.SPACE_S)
+	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	add_child(panel)
+	# 非容器父节点下的子控件是"自由摆放"的：这个 Control 自身的矩形会停在 0 高 —— 画得出来，
+	# 但任何按矩形度量的东西（调试器、自动化工具、以后的对齐逻辑）都会读到 0。
+	# 取"设计宽度 vs 内容实际需要"的较大者：换文案 / 换语言时按钮不会被挤出面板，
+	# 同时矩形始终如实反映画出来的东西。此式有唯一不动点，不会来回抖。
+	panel.resized.connect(func():
+		size = Vector2(maxf(DOCK_WIDTH, panel.size.x), panel.size.y))
+
+	var col := QVoxUi.vbox(QVoxUi.SPACE_XS)
+	panel.add_child(col)
+
+	col.add_child(QVoxUi.heading("工具"))
+	_group.allow_unpress = false
+	for row in QVoxBrushTool.MODES:
+		var b := QVoxUi.toggle_button("%s（%s）" % [row.label, row.hint])
+		# 热键字母直接写进按钮文字当"键帽"：既省一层子控件，也让按钮的 text 是可读的
+		# （界面上每个按钮都该有能被人和自动化工具读到的名字，空 text 的按钮等于匿名）。
+		b.text = "%s   %s" % [String.chr(row.hotkey), row.label]
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.button_group = _group
+		b.toggled.connect(func(on: bool): if on: tool_selected.emit(row.mode))
+		_buttons[row.mode] = b
+		col.add_child(b)
+
+	col.add_child(QVoxUi.divider())
+	_brush_title = QVoxUi.heading("笔刷")
+	col.add_child(_brush_title)
+	col.add_child(_build_brush_row())
+
+	col.add_child(QVoxUi.divider())
+	_erase = QVoxUi.toggle_button("擦除模式：画的时候挖掉体素（触摸屏上代替右键）")
+	_erase.text = "E   擦除"
+	_erase.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_erase.toggled.connect(func(on: bool): erase_toggled.emit(on))
+	col.add_child(_erase)
+
+
+## 笔刷尺寸步进：减 / 当前值 / 加。数值用 Label 而不是按钮 —— 它无可点击的语义，
+## 做成按钮只会让人以为按下去还有下文。
+func _build_brush_row() -> HBoxContainer:
+	var row := QVoxUi.hbox(QVoxUi.SPACE_XS)
+	_brush_minus = QVoxUi.icon_button("−", "调小笔刷（[ 或 -）")
+	_brush_minus.pressed.connect(func(): brush_step.emit(-1))
+	row.add_child(_brush_minus)
+
+	_brush_value = QVoxUi.label("1", QVoxUi.FONT_TITLE, QVoxUi.TEXT)
+	_brush_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_brush_value.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_brush_value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(_brush_value)
+
+	_brush_plus = QVoxUi.icon_button("+", "调大笔刷（] 或 =）")
+	_brush_plus.pressed.connect(func(): brush_step.emit(1))
+	row.add_child(_brush_plus)
+	return row
+
+
+# ----------------------------------------------------------------------------
+# 对外：状态同步（只由 App 调用）
+# ----------------------------------------------------------------------------
+
+## 高亮当前工具。用 set_pressed_no_signal 是必须的 —— 否则回写会再触发一次
+## tool_selected，形成"App 设界面、界面又通知 App"的回环。
+func set_tool(mode: int) -> void:
+	var b: Button = _buttons.get(mode)
+	if b != null:
+		b.set_pressed_no_signal(true)
+
+
+## 刷新笔刷显示。supported = false（面笔 / 填充不吃笔刷）时整行置灰并说明原因。
+func set_brush(size: int, supported: bool) -> void:
+	_size = size
+	_brush_value.text = str(size)
+	_brush_value.add_theme_color_override("font_color",
+			QVoxUi.TEXT if supported else QVoxUi.TEXT_FAINT)
+	_brush_minus.disabled = not supported or size <= 1
+	_brush_plus.disabled = not supported
+	_brush_title.text = "笔刷" if supported else "笔刷（此工具不用）"
+
+
+func set_erase(on: bool) -> void:
+	_erase.set_pressed_no_signal(on)
+
+
+func erase_mode() -> bool:
+	return _erase.button_pressed
