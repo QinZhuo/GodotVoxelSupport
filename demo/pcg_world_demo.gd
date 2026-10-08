@@ -94,6 +94,8 @@ const PLATEAU_VOXEL_SPAN := Vector3(100, 34, 100)
 ## 基底 SDF 拿它挖坑，散布器的地面查询拿它拒收"树不能种在洞里"。
 const CRATER_VOXEL_CENTER := Vector3(44, 36, 23)
 const CRATER_VOXEL_RADIUS := 10.0
+## 岛体表面层的噪声种子（风化 / 苔藓斑 / 色阶三档共用一条链种子，各自的内部偏移由算子负责）。
+const SURFACE_SEED := 20261007
 
 ## 所有 PCG 模型节点（HUD 统计用）。
 var _models: Array[Node3D] = []
@@ -350,41 +352,25 @@ func _build_base() -> void:
 	field.a = weld
 	field.b = crater
 
-	var gen := PcgSdfGenerator.new()
-	gen.field = field
-	# 【SDF 也有自己的细节层，不必绕开】PcgSdfGenerator 直接实现 VoxelGenerator 的
-	# 逐 chunk 采样，绕开了 PcgModelGenerator 那条需要完整邻域的 details 链 ——
-	# 于是岛体（画面里面积最大的表面）过去没有任何表面层次，台面就是一块纯灰平板。
-	# 现在用 SDF 自带的距离值替代邻域（`s.x > -surface_shell` 即暴露面），
-	# 在**不额外采一次 SDF** 的前提下拿到风化 + 色阶 + 朝上染色，
-	# 详见 PcgSdfGenerator 的"表面层"注释。
-	#
-	# 参数标定：shade_cell 取 4 体素（= 0.8 世界单位）—— 台面宽 100 体素，
-	# 2 体素的分档远看每块只有 3~4 像素，会退化成"迷彩布"（在 pcg_forest_demo
-	# 的地面上实测过）。5 体素的苔斑（tint_cell）是"一片苔"而不是"雀斑"的量级。
-	gen.surface_ramps = {
-		1: PackedInt32Array([10, 11, 12]),   # 岩石 → 暗/中/亮三档
-		2: PackedInt32Array([13, 14, 15]),   # 苔原 → 暗/中/亮三档
-	}
-	# 【shade_noise=true 是实测改出来的】第一版用分块哈希 + shade_cell 4，
-	# 结果台面与崖壁排出一张**方格迷彩**：每格 0.8 世界单位、边界笔直，
-	# 20 单位宽的崖壁上看就是"贴图错位"，比原来的纯灰平板更糟。
-	# 换成噪声挑档后，色阶变成"这片岩层偏亮、那片偏暗"的软边界 → 才读作岩体。
-	gen.shade_noise = true
-	# shade_cell 同时也是**挑档噪声的特征尺寸**，从 6 拉到 14（= 2.8 世界单位）：
-	# 6 体素的色阶在 30 单位外只有 10 来个像素，台面上就是一层"迷彩绒"；
-	# 拉到 14 之后它变成"这片岩层偏亮、那片偏暗"的大区域，才读作岩体而不是噪点。
-	gen.shade_cell = 14.0
-	gen.shade_coverage = 1.0
-	gen.top_tints = {1: 16}                  # 岩石的**朝上面** → 苔藓
-	# 苔藓覆盖率与斑块尺寸同步放大：0.22/8 在原始色空间下只剩几个绿点（几乎看不见），
-	# 起不到"给台面分区域"的作用。0.3/10 之后台面上会出现成片的苔原。
-	gen.tint_coverage = 0.3
-	gen.tint_cell = 10.0
-	# 风化收到 0.06：0.1 时崖壁被啃出 10% 的成片缺口，配上色阶分档过碎。
-	gen.erode_strength = 0.06
-	gen.erode_cell = 4.0
-	gen.surface_seed = 20261007
+	# 【岛体改走修改器链（P3-2）】过去 PcgSdfGenerator 自带一层"内联表面层"，用 SDF 的
+	# 距离值当暴露度，在采样循环里顺手做风化 / 色阶 / 朝上染色。它有效，但把
+	# PcgWeather + PcgSurfaceTint 的同一套逻辑复制了第二份，而且只有 SDF 形态吃得到。
+	# 现在链上只有"一个只出几何的 SDF 生产者 + 一串通用体素域算子"：
+	#   SDF → 风化 → 朝上染色 → 岩石色阶 → 苔原色阶
+	# 顺序即语义：风化先挖出表面不平，后三步才对**剩下的**表面着色 ——
+	# 反过来会让新挖出的坑侧面保持原色，坑就成了一块突兀的补丁。
+	# 代价是完整体积要常驻一份（细节算子需要完整邻域，按 chunk 懒算会在 32³ 边界留接缝）。
+	var obj := QVoxObject.new()
+	obj.grid_size = BASE_GRID
+	var chain: Array[QVoxModifier] = [QVoxSdfModifier.of(field)]
+	chain.append(QVoxVolumeModifier.of(_island_erode()))
+	chain.append(QVoxVolumeModifier.of(_island_moss()))
+	chain.append(QVoxVolumeModifier.of(_island_shade(1, PackedInt32Array([10, 11, 12]))))
+	chain.append(QVoxVolumeModifier.of(_island_shade(2, PackedInt32Array([13, 14, 15]))))
+	obj.modifiers = chain
+	var gen := QVoxObjectGenerator.new()
+	gen.object = obj
+	gen.eval_seed = SURFACE_SEED
 	_base_node = PcgSceneKit.add_model(self, "Base_Island", BASE_ORIGIN, gen, BASE_GRID,
 			PcgSceneKit.materials([
 				# albedo 是**反射率**，不是最终显示色。真实岩石大约 0.15~0.35，
@@ -408,9 +394,70 @@ func _build_base() -> void:
 				[13, Color(0.19, 0.27, 0.15), 0.9],     # 苔原·暗
 				[14, Color(0.24, 0.33, 0.17), 0.9],     # 苔原·中
 				[15, Color(0.30, 0.40, 0.21), 0.9],     # 苔原·亮
-				[16, Color(0.20, 0.31, 0.14), 0.85],    # 苔藓（仅由 top_tints 写到朝上面）
+				[16, Color(0.20, 0.31, 0.14), 0.85],    # 苔藓（仅由朝上染色写到朝上面）
 			]))
 	_register(_base_node)
+
+
+## 岛体风化：**只啃朝上的表面**。
+##
+## 【up_only 的实测依据（原文见已删除的 PcgSdfGenerator 表面层）】竖直崖壁上挖 1 体素深的
+## 坑，在掠射视角下坑的侧壁受光量低、坑底还被邻格挡住直射光，一排坑连起来看就是**竖条纹**
+## ——台地会像一块瓦楞铁皮（world 场景实测：崖面一行像素在 0.45~0.55 与 0.05~0.13 之间
+## 反复跳，间距 1~2 体素）。平台面没有这个问题：坑就是坑，从上往下看仍然是地面。
+## 所以"破平板"只该做在顶面，崖壁的层次交给色阶。
+##
+## 【强度换算】PcgWeather 的阈值为 `strength * (0.35 + 0.65 * 棱角偏好)`，平顶处偏好项为 0，
+## 故要复现原表面层实测的 0.06 等效挖空概率，strength 取 0.06 / 0.35 ≈ 0.17。
+## 0.1 等效值时崖壁（在旧写法下）被啃出 10% 的成片缺口，配上色阶分档过碎。
+func _island_erode() -> PcgWeather:
+	var w := PcgWeather.new()
+	w.strength = 0.17
+	w.cell = 4.0
+	w.up_only = true
+	w.min_exposure = 1
+	w.protect_ground = true
+	return w
+
+
+## 岛体朝上染色：岩石的**朝上面**（台顶、缓坡、台阶）→ 苔藓 16。
+##
+## 【为什么必须硬过滤，而不是靠 up_bias】苔藓"只长朝上的面"是这条染色唯一想要的效果；
+## up_bias 只让它"更偏向"朝上，崖壁上仍会零星冒出绿点，在 20 单位宽的崖面上看就是随机噪点。
+## coverage = 0.3 沿用的是原表面层的苔斑覆盖率标定：0.22 在原色空间下只剩几个绿点
+## （几乎看不见），起不到"给台面分区域"的作用；0.3 配上 cell = 10 之后台面上会出现成片的苔原。
+func _island_moss() -> PcgSurfaceTint:
+	var t := PcgSurfaceTint.new()
+	t.material_ids = PackedInt32Array([16])
+	t.only_source_material_id = 1
+	t.up_only = true
+	t.coverage = 0.3
+	t.cell = 10.0
+	t.min_exposure = 1
+	t.protect_ground = false
+	return t
+
+
+## 岛体色阶（源材质 → 暗/中/亮三档）。岩石走 [10,11,12]，苔原走 [13,14,15]。
+##
+## 【shade_noise = true 是实测改出来的】第一版用分块哈希 + shade_cell = 4，结果台面与崖壁
+## 排出一张**方格迷彩**：每格 0.8 世界单位、边界笔直，20 单位宽的崖壁上看就是"贴图错位"，
+## 比原来的纯灰平板更糟。换成噪声挑档后，色阶变成"这片岩层偏亮、那片偏暗"的软边界 → 才读作岩体。
+##
+## 【shade_cell 从 6 拉到 14】它同时是"挑档噪声的特征尺寸"：6 体素的色阶在 30 单位外只剩
+## 10 来个像素，台面上就是一层"迷彩绒"；14（= 2.8 世界单位）才变成"一片偏亮、一片偏暗"的大区域。
+## coverage = 1.0 = 近表面体素全部参与分档（留白交给苔藓那一层去占）。
+func _island_shade(src_id: int, ramp: PackedInt32Array) -> PcgSurfaceTint:
+	var t := PcgSurfaceTint.new()
+	t.material_ids = ramp
+	t.only_source_material_id = src_id
+	t.shade_noise = true
+	t.shade_cell = 14.0
+	t.coverage = 1.0
+	t.cell = 4.0
+	t.min_exposure = 1
+	t.protect_ground = false
+	return t
 
 
 # ----------------------------------------------------------------------------

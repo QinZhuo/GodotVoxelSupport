@@ -19,7 +19,7 @@ extends RefCounted
 ##
 ## 【无状态】逐体素累计伤害账归 `VoxelData`（体素相邻状态，必须与 chunk 缓冲同生共死——
 ##   卸载 / 清空 / origin shift / 载荷重建都要同步清理），内核通过
-##   `data.get_damage_buffers()` / `data.set_damage_buffers()` 读写，自己不持有任何状态。
+##   `data._damage_buffers_view()` / `data._set_damage_buffers()` 读写，自己不持有任何状态。
 ##   因此同一个内核实例可以长期复用、可以跨多个 `VoxelData` 使用。
 ##
 ## 【与原生库的关系】原生库（`NativeLoader`）是强制依赖，本内核不做 GDScript 回退：
@@ -45,11 +45,11 @@ func apply_damage(data: VoxelData, shape: int, center: Vector3, radius: float,
 		vmin: Vector3i, vmax: Vector3i, damage_per_voxel: float, use_voxel_health: bool) -> Dictionary:
 	if data == null:
 		return {"removed": [], "hardened": {}, "hardened_dirty": false}
-	var res := NativeLoader.damage_shape(data.get_chunk_buffers(), data.get_damage_buffers(),
+	var res := NativeLoader.damage_shape(data._chunk_buffers_view(), data._damage_buffers_view(),
 		shape, center, radius, vmin, vmax, hardness_table(data), damage_per_voxel,
 		use_voxel_health, {})
 	# 伤害缓冲回写（原生在本地副本上改，契约同 remove_voxels_bulk）
-	data.set_damage_buffers(res.get("damage_chunks", {}))
+	data._set_damage_buffers(res.get("damage_chunks", {}))
 	var hpos: PackedVector3Array = res.get("hardened_pos", PackedVector3Array())
 	var hrem: PackedFloat32Array = res.get("hardened_rem", PackedFloat32Array())
 	var hardened := {}
@@ -84,7 +84,7 @@ func propagate_stress(data: VoxelData, removed: Array,
 		max_steps: int, force: float, decay: float) -> Array:
 	if data == null or removed.is_empty():
 		return []
-	return NativeLoader.propagate_stress(data.get_chunk_buffers(), removed,
+	return NativeLoader.propagate_stress(data._chunk_buffers_view(), removed,
 		strength_table(data), max_steps, force, decay)
 
 

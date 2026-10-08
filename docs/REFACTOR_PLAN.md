@@ -5,6 +5,12 @@
 > 顶层容器概念叫**世界（World）**。
 >
 > 本计划基于一次全量代码审计（13,700 行 GDScript + `gdextension/` C++）。
+>
+> **进度（2026-10-08）：P0 → P4 五个阶段全部完成。** 施工记录与验证证据见 §3 各阶段表
+> （P0 安全网 / P1 搬家 / P2 抽离与内核契约 / P3 统一生成流水线 / P4 格式与 API 面收口）。
+> 最新一次全量验证：编辑器 **130/130** + 游戏进程 **9/9**。
+> **两项开放项均已收口（2026-10-08）**：内核名保持 `VoxelSupport`（否决改名为 `VoxelCore`）；
+> 无限层与表现层**留在插件内**（不拆独立插件、不拆独立仓库）—— 见 §6 待确认。
 
 ---
 
@@ -290,7 +296,7 @@ P2-1 要搬约 **1300 行**视点调度代码（`VoxelRenderer` 79 处 `# [INF]`
 
 | # | 动作 | 理由 |
 |---|---|---|
-| P2-1 ✅ | 把 LOD 分带、流式加载/卸载、视锥剔除、原点漂移、异步块供需**抽离**为独立的"无限层"（单独插件/组件），依赖单向：无限层 → 内核 | 这是耦合与冲突的主要来源。内核不需要知道相机、LOD、流式、原点的存在。**见 §4**。**已并入 P1-1**：`VoxelRenderer` 不再先做"插件内拆类"，直接按本边界一次抽离（见 §3 决议）。**施工分期见 §3「P2-1 施工分期」**（期 0 安全网 ✅ / 期 1 几何数学 ✅ / 期 2 剔除+流式 ✅ / 期 3 原点漂移 ✅ / 期 4 LOD 调度 ✅）。**期 4 收尾时一并处置了 `VoxelData` 的 52 处 `# [INF]` 标记：逐条判定为「留内核（数据层）」，标记删除**（见 §3 P0-7 归宿）。**仍未决**：无限层最终落点（同仓库独立插件 vs 独立仓库），见 §6 待确认。 |
+| P2-1 ✅ | 把 LOD 分带、流式加载/卸载、视锥剔除、原点漂移、异步块供需**抽离**为独立的"无限层"（单独插件/组件），依赖单向：无限层 → 内核 | 这是耦合与冲突的主要来源。内核不需要知道相机、LOD、流式、原点的存在。**见 §4**。**已并入 P1-1**：`VoxelRenderer` 不再先做"插件内拆类"，直接按本边界一次抽离（见 §3 决议）。**施工分期见 §3「P2-1 施工分期」**（期 0 安全网 ✅ / 期 1 几何数学 ✅ / 期 2 剔除+流式 ✅ / 期 3 原点漂移 ✅ / 期 4 LOD 调度 ✅）。**期 4 收尾时一并处置了 `VoxelData` 的 52 处 `# [INF]` 标记：逐条判定为「留内核（数据层）」，标记删除**（见 §3 P0-7 归宿）。**已决（2026-10-08）**：无限层与表现层的落点是**留在 `addons/VoxelSupport/` 内**（同插件、同仓库）—— 见 §6 待确认。"抽离"指抽离出**内核的视点职责**，不是拆成第二个插件。 |
 | P2-2 ✅ | 内核 API 保持**按 chunk 索引 + 脏区域事件**的形态，供无限层套在外层 | 这是"抽离"能成立的前提；若内核 API 是"整块重算"式的，无限层挂不上去。**已落地**：① `VoxelRenderer.gd` 顶部新增权威的"内核对外契约（P2-2）"块，把公开面固化为 A 脏区域事件 / B 按 chunk 写 / C 按 chunk 查 / D 只读环境 / E 生命周期覆盖点 / F 兼容别名（P4 收口），并写明"不在契约内"（相机、LOD 分带、流式、剔除、原点漂移、异步供需全在无限层）与**双向依赖边界**（无限层 → 内核走公开面 + 5 个 `@export` 私有旋钮；内核 → 无限层只走其公开方法，不碰私有字段）。② 新增契约锁定测试 `Scripts/Test/test_voxel_kernel_contract.gd`：公开方法清单与契约表一一对应（多一个少一个都失败，`get_script_method_list()` 逐条比对），并断言脏区域粒度——内部点编辑恰好 1 个脏 chunk、chunk 角点恰好 4 个（自身 + 3 个负向邻块），**永不**退化为"全部 chunk"（"按 chunk 索引"的可观测反证）。核验 `request_update()` 并非"整块重算"，只是"下一帧重建"唤醒位，粒度始终由 `VoxelData` 脏账本（`get_dirty_chunks()`）决定。3/3 通过。 |
 | P2-3 ✅ | 把粒子碎片 / 掉落物理 / 健康度 / 级联崩塌抽离为独立的"表现层"组件 | 几何内核已在 C++，但**表现逻辑与编辑逻辑在同一函数里交织**（`_process` R1672 一条链里既有级联也有 mesh 组装）。**已落地（抽出真·表现层双子系统，分离目标达成）**：新增 `addons/VoxelSupport/Runtime/VoxelDestructionPresenter.gd`（`class_name` + `Node3D`，由宿主惰性挂为 identity 变换的子节点 → `global_position` 即宿主世界位置）。抽出：① **碎片粒子**（GPU 粒子池 / 淡出渐变 / 网格缓存；`ensure_debris_root` / `spawn_debris_with_materials` / `spawn_chunk_break_debris` / `spawn_chunk_break_at_body`）；② **掉落物理**（`RigidBody3D` 对象池 + 代次防串号、在途 mesh worker 任务、待生成/待组装分帧队列、超时与数量上限清理、落地冻结、origin shift 队列平移、退出前 join）。宿主只保留 `@export` 旋钮（唯一真值），每帧经 `configure(...)` 单向推给表现层；表现层**只读**宿主公开面（`host.data` / `host.voxel_scale` / `host.infinite_layer` / `host.diag_enabled` / 新增 `host.surface_materials()`），**不碰宿主私有成员**。为让表现层取到与渲染**同一份** Material 对象，内核 `VoxelRenderer` 新增公开查询 `surface_materials()`（走唯一材质缓存 `_materials.surfaces()`），契约表与 `test_voxel_kernel_contract` 方法清单同步登记；origin shift 的位置列表平移下沉为 `VoxelChunk.shift_positions()`（与既有 `shift_key_dict` 并列，消除"宿主与表现层各写一份"）。**健康度 / 级联崩塌刻意留在宿主**：二者都要写 `VoxelData`（移除体素）并发射宿主信号（`voxels_about_to_collapse` / `voxel_damaged`），按 P2-2/P2-4 冻结的内核边界属**编辑侧**而非表现侧；塞进只读宿主的表现层会破坏"表现层不写数据"的契约。**分离已达成**：级联/破坏管道只调 `_presenter.spawn_falling_chunks_from_groups(...)`，`_process` 帧尾只调 `_presenter.process_pending_falling_groups/process_pending_mesh_results/freeze_sleeping_chunks()`。验证：**编辑器 100/100 + 游戏进程 9/9 全通过**；另在游戏内直驱探针确认掉落物理端到端（100 体素组 → `spawned=1`、`_falling_chunk_root` 确为表现层子节点、body 入池 `pool_total=1`、mesh 数帧内组装完 `pending_mesh=0`）。 |
 | P2-4 ✅ | 抽出 `VoxelEditKernel`（无场景节点、无 `_process`、可无头调用） | 建模软件的"画笔"直接调它，不需要一个 `VoxelDestructible` 节点。**已落地**：新增 `addons/VoxelSupport/Runtime/VoxelEditKernel.gd`（`RefCounted`）承载**纯编辑数学**——`apply_damage`（伤害结算：范围 → 材质 → 硬度比较 → 累伤 / 判移除，含伤害缓冲回写与硬化反馈产出）、`propagate_stress`（裂纹扩散）、`find_unstable`（悬空检测）、`hardness_table` / `strength_table`（材质查表，索引 = 材质ID，表长下界 `MAX_MATERIAL_ID` 防原生越界读）。**无 Node / 无场景树 / 无物理 / 无粒子 / 无信号**，因此服务端与建模工具只需 `VoxelEditKernel.new()` + 一个 `VoxelData` 即可算完破坏，**不需要挂 `VoxelDestructible`**。三条边界写进类头文档：① **配置旋钮不在内核里**（`RefCounted` 挂不了 `@export`，`damage_per_voxel` / `use_voxel_health` / 应力三参数一律按参数传入，旋钮留在节点）；② **表现层职责不在内核里**（粒子碎片、掉落刚体、级联分帧调度、信号发射、帧尾合并、诊断输出全留节点）；③ **内核只产出"发生了什么"**——`apply_damage` 返回 `{removed, hardened, hardened_dirty}` 但**不自行移除体素**，何时落地由调用方决定。**无状态**：逐体素累伤账归 `VoxelData`（经 `get_damage_buffers()` / `set_damage_buffers()` 读写），故内核实例可长期复用、可跨多个 `VoxelData`。`VoxelDestructible` 改为持有 `_edit := VoxelEditKernel.new()` 并全部委托（删除本地 `_hardness_table` / `_build_strength_table`；`_apply_damage_native` 只保留"硬化反馈并入帧尾缓冲 + 置脏"与 `last_damage_count`；`_find_unstable_voxels` 只保留诊断输出）——**数学只有一份**，不存在第二套 GDScript 实现。验证：`test_voxel_kernel_contract.gd` 扩为 7 项（新增：内核非 Node 且不实现任何帧/生命周期回调、公开方法清单 = 契约、无头伤害结算、无头应力 + 失稳、节点与内核直调给出**同一批**被摧毁体素），**编辑器 98/98 + 游戏进程 9/9 全通过**（含 `test_voxel_runtime_smoke` 的破坏 / 碎片 / 崩塌端到端）。 |
@@ -302,11 +308,15 @@ P2-1 要搬约 **1300 行**视点调度代码（`VoxelRenderer` 79 处 `# [INF]`
 
 | # | 动作 | 理由 |
 |---|---|---|
-| P3-1 | 定义修改器的两类契约：**生产者**（`build(grid_size) -> PackedInt32Array`）与**改写者**（`apply(volume, grid_size, seed)`） | 现有 `PcgDetail.apply` 已是改写者契约，直接升华；`PcgModel.build` 已是生产者契约。**不需要改任何已有算子** |
-| P3-2 | 消除 `PcgSdfGenerator` 内联表面层，改为"先生成完整体积，再进链" | 让 (a)(b) 两条路合并成一条。这是本计划最重要的**架构**收益 |
-| P3-3 | 生成层也纳入链（生产者步骤可多个，按顺序覆盖/合成） | 让"地形 + 洞穴 + 建筑"可组合，而不是只有一个 `field` 变量 |
-| P3-4 | `PcgWfcOverlap` / `PcgScatter` 显式标为"链外节点"（需要全局信息或非体积语义） | 审计已确认它们不适合线性链，强行塞入会引入错误语义 |
-| P3-5 | 手绘基础体素（`blocks`）作为链的**输入/种子**接入（手绘是链的输入，**不是**链上的一环，见 `QVoxelier/DESIGN.md` §5.2） | 让"手绘 + 程序化"可组合 —— 这正是建模软件需要的 |
+| P3-1 ✅ | 定义修改器的两类契约：**生产者**（`build(grid_size) -> PackedInt32Array`）与**改写者**（`apply(volume, grid_size, seed)`） | 现有 `PcgDetail.apply` 已是改写者契约，直接升华；`PcgModel.build` 已是生产者契约。**不需要改任何已有算子**。**已落地**：契约由 `QVoxModifier` 的子类表达（`QVoxSdfModifier` / `QVoxModelModifier` 是生产者核，`QVoxVolumeModifier` 是改写者核），`is_source()` 判据 = 白名单（`KIND_SDF` / `KIND_MODEL`）；`QVoxEvalEngine` 按域分派 `op.build(gs)` / `op.apply(...)`，**一行已有算子都没改**。 |
+| P3-2 ✅ | 消除 `PcgSdfGenerator` 内联表面层，改为"先生成完整体积，再进链" | 让 (a)(b) 两条路合并成一条。这是本计划最重要的**架构**收益。**已落地**：`rasterize_field()` 已纯几何化（内联表面层删除），表面效果改由链上的通用算子承担；`demo/pcg_world_demo.gd` 的岛体即为迁移样板 `SDF → 风化(PcgWeather, up_only) → 苔藓(PcgSurfaceTint, up_only) → 岩石色阶(1→[10,11,12]) → 苔原色阶(2→[13,14,15])`，链种子 `SURFACE_SEED`。游戏内实测：128³×48 网格出 328,230 实心格、材质分布含全部 5 段产物。 |
+| P3-3 ✅ | 生成层也纳入链（生产者步骤可多个，按顺序覆盖/合成） | 让"地形 + 洞穴 + 建筑"可组合，而不是只有一个 `field` 变量。**已落地**：`QVoxModelModifier` 让生产者成为链条目，`QVoxEvalEngine` 按 `combine`（REPLACE / UNION / SUBTRACT / INTERSECT / SMOOTH_UNION）依次合成体积；体积深度不足时与手绘体素同一条 `_combine_volume` 路径。新增适配器 `QVoxObjectGenerator`（`VoxelGenerator` 子类）把链产出**逐 32³ chunk** 切片喂渲染管线，并支持 LOD 块。链的入口收口为 `PcgModelGenerator._has_source()` / `_build_volume()` 两个可覆写钩子，"空体积"也照常提交（不再有"两条生成路径"）。 |
+| P3-4 ✅ | `PcgWfcOverlap` / `PcgScatter` 显式标为"链外节点"（需要全局信息或非体积语义） | 审计已确认它们不适合线性链，强行塞入会引入错误语义。**已落地**：新增能力查询 `PcgModel.chainable()` / `PcgDetail.chainable()`（默认 `true`，编辑器据此把链外算子从"可加入链"候选里灰掉）；`PcgWfcOverlap.chainable() = false`（要全局迭代收敛 + 内部可变学习缓存）；`PcgScatter` 连链条目基类都不是（`extends RefCounted`）——它的输入输出是"世界坐标 + 变换"，属链**之后**的摆放阶段，故对它调 `chainable()` 是 `Nonexistent function`，判据是"它根本不是链上类型"。 |
+| P3-5 ✅ | 手绘基础体素（`blocks`）作为链的**输入/种子**接入（手绘是链的输入，**不是**链上的一环，见 `QVoxelier/DESIGN.md` §5.2） | 让"手绘 + 程序化"可组合 —— 这正是建模软件需要的。**已落地**：`obj.to_volume()` 作为链的种子，**链首那条的 `combine` 决定"链产出如何与手绘相合"**（REPLACE 作废手绘 / UNION 并 / SUBTRACT 挖洞 / INTERSECT 当裁刀 / SMOOTH_UNION 退化并，见 `QVoxEvalEngine` 文件头）；空数组语义 = "还没有既有体积"，但它**不等于"链首没有左操作数"**：链首那条的 `combine` 要作用在**手绘体素**上，故引擎合并前显式取一次 `obj.to_volume()` 当左操作数（`QVoxEvalEngine._left_operand`）—— 否则 UNION 会退化成 REPLACE（手绘石料凭空消失）、SUBTRACT 会退化成"挖不动"，恰恰是"手绘 + 程序化混着用"的两种用法（**这是本次补上的 bug**：原先只有场域链首走了这条规则，体素域链首漏了，见 P3-6 的回归测试）。**链首直接是体素算子且手绘为空**时补一块全零整块（`PcgModel.empty_volume`）—— 否则所有 `PcgDetail` 的 `for x in grid_size.x` 遍历一律按下标越界。 |
+| P3-6 ✅ | 修改器链**逐步骤判脏**：改链尾一条 → 只从该条起重算，前面的结果复用（§5.2 末条 / §4.2 第 3 条） | 只缓存"最终体积"时，复用只发生在"整链一字未改"的场合；改链尾一条仍要从前到后重跑整条链，而链首往往恰好是最贵的一条（程序化生成整块体积）。**已落地**：`QVoxEvalResult.states` 存**逐步骤检查点**（`states[i]` = 跑完前 i 条，`states[0]` = 链的输入；FIELD 段的检查点只持一棵 Sdf 树、零体积开销，VOXEL 段各持一份体积副本，32³ = 128 KB / 256³ = 67 MB 已在文档里记账），签名拆成 `inputs_key`（链之前的输入）+ `step_signatures`（逐条），`_resume_index` 取**最长公共前缀**当起点续跑（链首直接是场算子时连折叠都不重跑）。三条安全约束都钉了断言：① 检查点体积必须 `duplicate()` —— `PackedInt32Array` 赋值是**共享缓冲**，`PcgDetail.apply` 是就地改写型算子，不复制就会把检查点改成"后来的状态"；② epoch 不同、或链之前的输入（手绘版本号 / 网格 / 种子 / 块大小）变了 → 全部检查点作废；③ 取消求值 → 清空轨迹与逐条签名，截断的结果不得冒充完整结果（否则下一次会被当缓存命中）。回归测试：`test_step_dirty_only_recomputes_the_tail`（数 `build()` 次数证明链首**没**被重跑，并比对"复用来的前缀"与"全量重算的前缀"逐格一致）、`test_cancelled_result_is_never_reused`、`test_voxel_source_head_also_meets_hand_drawn`（P3-5 那条 bug 的钉子）。 |
+
+> 新增契约测试 `Scripts/Test/test_qvox_eval_engine.gd`（14 项，钉死五条硬承诺：手绘为链输入（含**体素域链首**）/ 域单向降级 + 链校验 / 无状态纯函数 + 输入签名复用 / **逐步骤判脏**（P3-6）/ 链产出逐 chunk 与整块体积逐格一致）。
+> **验证：编辑器 133/133 全通过**（另 2 项需游戏进程）；P3 落地时曾在游戏内直读 `Base_Island` 的 `QVoxObjectGenerator` 核对体积与材质分布。
 
 > P3 的产物就是"核心能力 API"：**一条有序、可插拔、可旁通、可无头求值的修改器链**。
 > 建模软件只是给它画一个面板，并把用户动作翻译成对链的操作。
@@ -315,10 +325,22 @@ P2-1 要搬约 **1300 行**视点调度代码（`VoxelRenderer` 79 处 `# [INF]`
 
 | # | 动作 |
 |---|---|
-| P4-1 | QVox 已是原生格式：支持多模型（`VOX0`，`model_id` uint16 → 最多 65536）、场景图（`NODE`：节点树 / 变换 / 图层名 / 动画）、文件级调色板（`MATE`）、稀疏分块（空块零字节）、4 种块内编解码 |
-| P4-2 | **未知块会被跳过且重写时原样保留**（`QVoxFile.gd:362-367` + `:1068-1071`）→ 加工程数据块对旧解析器天然安全；块类型是 4×ASCII，空间充足 |
-| P4-3 | 为工程数据补**字段**（**不新增块类型**，见 §5）：逐对象修改器链 → `NODE.nodes[].steps`、图层属性 → `NODE.layers`、相机书签 → `NODE.cameras`、世界级 `voxel_size` → `HEAD.world`。只动 GDScript（`QVoxSpec` 常量、`QVoxFile` parse/serialize/validate、`QVoxWorld`），**不需要动 C++** |
-| P4-4 | 把"能力 API"标注稳定等级（公开 / 实验 / 内部），并让内部协议（`get_chunk_buffers`、`snapshot_*`、`accept_chunk_buffer` 等）不再对内核外可见 |
+| P4-1 ✅ | QVox 已是原生格式：支持多模型（`VOX0`，`model_id` uint16 → 最多 65536）、场景图（`NODE`：节点树 / 变换 / 图层名 / 动画）、文件级调色板（`MATE`）、稀疏分块（空块零字节）、4 种块内编解码。**已核验并顺手贯彻"长度前置"到 VOX0 内部**：`VOX0` 模型头 6 → 10 字节，新增 `uint32 payload_length`（`QVoxSpec` 记 v2），使"模型负载的精确边界"成为头内事实，读取端不必再靠"顶层块尾填充 0–3 字节"模糊判断解析终点。 |
+| P4-2 ✅ | **未知块会被跳过且重写时原样保留**（`QVoxFile.gd:368-373` 读侧留字节 + `:1142-1145` 全量写侧回写 + `:1281-1282` 增量写侧搬运）→ 加工程数据块对旧解析器天然安全；块类型是 4×ASCII，空间充足。**未知 JSON 键同理**（`HEAD` / `NODE` 未解释的键在重写时原样保留）。`HEAD.require` 是 glTF `extensionsRequired` 式的**硬门**：列在其中的块类型读者必须理解，否则整文件拒绝——与"未知块安全跳过"分工明确（见 `_check_capabilities`）。 |
+| P4-3 ✅ | 为工程数据补**字段**（**不新增块类型**，见 §5）：逐对象修改器链 → `NODE.nodes[].steps`（`QVoxModifierSerializer` 序列化，`QVoxObject.modifiers` 承载，撤销走 `QVoxPropertyCommand`）、图层属性 → `NODE.layers`（对象数组 `{name, visible, locked}` + `nodes[].layer` 索引）、相机书签 → `NODE.cameras`（`{name, projection, transform}`，projection 白名单 `persp`/`ortho`）、世界级 `voxel_size` → `HEAD.world`（`QVoxWorld.voxel_size`）。只动 GDScript（`QVoxSpec` 常量、`QVoxFile` parse/serialize/validate、`QVoxWorld`），**未动 C++**。 |
+| P4-4 ✅ | 把"能力 API"标注稳定等级（公开 / 实验 / 内部），并让内部协议（`get_chunk_buffers`、`snapshot_*`、`accept_chunk_buffer` 等）不再对内核外可见。**已落地**：① `VoxelData.gd` 顶部新增权威的"API 稳定等级（P4-4）"块，把 **87 个公开方法**逐条钉进【公开】47 /【实验】40 两级；② 11 个内部协议降为 `_` 前缀（`_chunk_buffers_view` / `_lod_buffers_view` / `_damage_buffers_view` / `_set_damage_buffers` / `_accept_chunk_buffer` / `_chunk_halo` / `_snapshot_chunks_halo` / `_snapshot_lod_block_chunks` / `_snapshot_lod_block_chunks_readonly` / `_snapshot_lod_block_data` / `_can_mesh_lod_block_standalone`），旧公开名一律不得复活；③ 为内核外补两个**封装后的公开入口**，把"绕过封装"的两条主路彻底堵死——`patch_lod_block(level, bk)`（把"取源缓冲 → 重算脏大格 → 写回"收进数据层，无限层不再触碰 `get_chunk_buffers` / `get_lod_buffers` 整表）与 `apply_ready_results(max_count)`（poll + accept 一步到位，无限层 / bench 不再自行拼半截异步协议）。④ 契约锁定测试 `test_voxel_kernel_contract.gd` 新增 `VOXEL_DATA_PUBLIC_API` / `VOXEL_DATA_EXPERIMENTAL_API` / `VOXEL_DATA_INTERNAL_PROTOCOLS` 三表与两条用例：**数据层不带 `_` 的公开方法 = 公开 ∪ 实验**（多一个少一个都失败），且 11 个内部协议只以 `_` 前缀存在、旧公开名不得出现。 |
+
+> **验证：编辑器 130/130 + 游戏进程 9/9 全通过**（编辑器侧 2 项、游戏侧 13 项按设计互跳）；
+> 契约测试 `test_voxel_kernel_contract` 单跑 **11/11**（P2-2 的 3 条 + P4-4 的 2 条 + 其余内核契约断言），
+> 即"公开面被钉死"这件事本身也有回归保护。
+>
+> **文档同步**：`docs/QVOX_FORMAT.md` §3.1 补 `HEAD.world`（世界名 / `voxel_size`），
+> §7 补 `layers` / `nodes[].layer` / `cameras` 的字段、隐含缺省层规则与宽容度，
+> 并写明"格式层不解释 `steps`，只原样回写"——文档与实现之间不再有未记录的字段。
+>
+> P4 的产物是"**对外可承诺的面**"：格式层只做结构切分（未知块 / 未知键原样保留），
+> 数据层把公开面逐条钉死、把内部协议收进 `_` 前缀。于是"改动什么才算破坏兼容"
+> 成为一份**可枚举**的清单，而不是靠感觉。
 
 ### 顺序理由
 
@@ -376,35 +398,37 @@ P4 决定"能不能对外稳定"。**没有 P0 的安全网就做 P1，是在给
 
 ---
 
-## 5. QVox 世界结构（qvox 3，不兼容改版）
+## 5. QVox 世界结构（已并入 `qvox: 2`，见 §5.3）
 
 QVox 已经把"结构"与"数据"分开，这正是它适合当工程格式的原因：
 
 | 块 | 现在承载 | 世界结构需要它承载什么 |
 |---|---|---|
-| `HEAD` (JSON) | `qvox` / `channels` / `up_axis` / `block_size` / `bounds` / `require` | 加世界级设置（名称、`voxel_size`、作者…） |
+| `HEAD` (JSON) | `qvox` / `channels` / `up_axis` / `block_size` / `bounds` / `require` | 加世界级设置（名称、`voxel_size`、作者…） → **已落地为 `HEAD.world`** |
 | `MATE` | 文件级调色板（≤1 个，12 字节/条：rgba + metal/rough/hardness/mass + 自发光） | 不变（材质名作为可选追加字段） |
-| `VOX0` | 每 `model_id` 一份稀疏分块体素（4 种块内编解码） | = **对象的基础体素**（手工编辑结果） |
-| `NODE` (JSON) | `nodes` 树 / `layers`（仅名字表）/ `animations` | = **世界结构**：对象、层级、图层属性、**修改器链**、相机书签 |
-| `CACH` | 派生数据（LOD 等，按 kind 区分，可删） | 加 `kind="EVAL"`（修改器链求值缓存）、缩略图 |
+| `VOX0` | 每 `model_id` 一份稀疏分块体素（4 种块内编解码） | = **对象的基础体素**（手工编辑结果）**✅ 已落地** |
+| `NODE` (JSON) | `nodes` 树 / `layers`（仅名字表）/ `animations` | = **世界结构**：对象、层级、图层属性、**修改器链**、相机书签 → **✅ 全部已落地** |
+| `CACH` | 派生数据（LOD 等，按 kind 区分，可删） | 加 `kind="EVAL"`（修改器链求值缓存）、缩略图 —— 仍是**设计保留位**：现有唯一写入方是 `QVoxStream` 的 `kind="LODS"` |
 
 **不需要新增块类型**：`NODE` 与 `HEAD` 本来就是 JSON，扩展它们是零机械成本、零 C++ 改动。
+**这一判断已被实践证实**：P4-3 的四个字段（`HEAD.world` / `layers` / `nodes[].layer` / `cameras`）
+落地时**一行 C++ 都没动**。
 （这正是"未知块跳过 + 重写保留"之外的另一个好消息：工程数据基本不需要新块。）
 
 ### 5.1 结构草案
 
 ```json
 // HEAD
-{ "qvox": 3,
+{ "qvox": 2,
   "channels": [ { "name": "material", "bpp": 16 } ],
   "up_axis": "y", "block_size": 32,
-  "bounds": { "min": [0,0,0], "max": [256,256,256] } }
+  "bounds": { "min": [0,0,0], "max": [256,256,256] },
+  "world": { "name": "chair", "voxel_size": 0.1 } }
 ```
 
 ```json
-// NODE —— 世界结构块
-{ "world": { "name": "chair", "voxel_size": 0.1 },
-  "layers": [ { "name": "default", "visible": true,  "locked": false },
+// NODE —— 世界结构块（世界级设置不放这里，见上：它属 HEAD）
+{ "layers": [ { "name": "default", "visible": true,  "locked": false },
               { "name": "detail",  "visible": true,  "locked": false } ],
   "cameras": [ { "name": "front", "projection": "ortho", "size": 128,
                  "transform": { "t": [0,0,0], "r": [0,0,0,1] } } ],
@@ -420,9 +444,12 @@ QVox 已经把"结构"与"数据"分开，这正是它适合当工程格式的�
   "animations": [ /* 同现状 */ ] }
 ```
 
-与原结构的差异只有四处：
+与原结构的差异只有四处（**均已落地，见 P4-3**）：
 
-1. 顶层加 `world`（世界级设置，含 `voxel_size`）。
+1. `HEAD` 加 `world`（世界级设置，含 `name` / `voxel_size`）。**放在 `HEAD` 而不是 `NODE`**：
+   它是**标量级**的工程参数，而 `NODE` 描述的是**场景图**（可增删的对象、图层、相机）；
+   "一个世界叫什么名字"与"场景里有几个物体"是两件事，混在一处会让只想读场景图的读者
+   先穿过一层世界设置。
 2. `layers` 从"名字字符串数组"变成"对象数组"（可见/锁定/顺序/颜色）。
 3. 节点加 `layer`（图层下标，缺省 0）与 `steps`（有序修改器链，缺省空）。
 4. 加 `cameras`（相机书签，缺省空）。
@@ -441,7 +468,12 @@ QVox 已经把"结构"与"数据"分开，这正是它适合当工程格式的�
 
 ### 5.3 版本策略
 
-`qvox: 3`。**不读 qvox 2 文件**（仍在开发阶段，无外部使用，用户已确认不需要兼容）。
+**已按事实收敛为 `qvox: 2`**（`QVoxSpec.VERSION`），本计划原先写的 `qvox: 3` 不成立——
+两处结构改动（"长度前置"贯彻到 `VOX0` 内部，即模型头的 `payload_length`；以及本节的世界结构字段）
+**一并落在 v2**。理由：v1 与 v2 之间**从未有文件落盘**，所以"不兼容改版"这件事本身是零成本的
+——既然没有旧文件要与新文件区分，就没有必要为纯理论上的"上一版"占掉一个版本号。
+读者遇到更高版本拒绝（宁可不解，不可误读）；v1 **不提供兼容读取路径**
+（格式尚在设计阶段，无外部使用，用户已确认不需要兼容）。
 换来的好处是可以把结构一次做对，而不是靠 `VSDS` 之类的补丁块堆出来。
 
 ---
@@ -456,18 +488,33 @@ QVox 已经把"结构"与"数据"分开，这正是它适合当工程格式的�
 |---|---|---|
 | `VsDocument` | `QVoxWorld` | 一个 `.qvox` 文件 = 一个世界 |
 | `VsObject` / `VsSlot` / `VsDomain` / `VsEvalContext` | `QVoxObject` / `QVoxModifier` / `QVoxDomain` / `QVoxEvalContext` | 已落地，位于 `addons/VoxelSupport/Modifier/` |
-| `VsCommand` | `QVoxCommand`（+ `QVoxUndoStack` / `QVoxVoxelEditCommand`） | 已落地，但位于 **`QVoxelier/Core/`**（应用层，`extends GameCommand`/`CommandHistory`，见 §6.1） |
+| `VsCommand` | `QVoxCommand`（+ `QVoxUndoStack` / `QVoxVoxelEditCommand`） | 已落地，但位于 **`QVoxelier/Command/`**（应用层，`extends GameCommand`/`CommandHistory`，见 §6.1） |
 | `VsRasterizer` | （无） | 已**折叠**进 `PcgSdfGenerator.rasterize_field()`，不再单独存在 |
 | 文档级 `voxel_size` | 世界级 `voxel_size` | 存在 `HEAD.world` |
 | 文档调色板 | 世界调色板 | 存在 `MATE`（单块，文件级） |
 
 **已决议并已执行**：
 
-1. 软件名 `QVoxelier`；插件内核改名（如 `VoxelCore`），`plugin.cfg` 描述同步更新 —— **待做（P4-3）**。
+1. 软件名 `QVoxelier` **已完成**（`VoxelStudio/` → `QVoxelier/`，见下第 4 条）。
+   插件内核的**物理改名不做**（原先写着"如 `VoxelCore`"，那只是个提议名）：`addons/VoxelSupport/`
+   这个目录名已经烙进**原生构建**，不是纯路径——`Native/voxelnative.gdextension`（6 处库路径）、
+   `gdextension/CMakeLists.txt`（5 处）、`gdextension/src/voxel_native.cpp`、`project.godot`（插件启用项），
+   外加 `plugin.gd` 的 4 条 `preload` 与 5 个 demo 场景的 `ext_resource`，共 21 个文件。
+   为一次纯审美的改名去动 C++ 构建系统，收益为零而风险不为零（`preload` 路径与 `.gdextension`
+   库路径都会当场失效）——故**决定保持 `VoxelSupport`**。
+   **2026-10-08 的往返（记在案）**：本条先记为"不改名"；用户随后要求"该做也得做，C++ 也无所谓"，
+   于是照做 —— `git mv addons/VoxelSupport addons/VoxelCore` 被**运行中的编辑器**当场拒绝
+   （`fatal: renaming 'addons/VoxelSupport' failed: Permission denied`）。实测排除了"DLL 被占用"的猜测：
+   单独改 `Native/*.dll` 的文件名**可以**通过，卡点是**目录句柄**本身，即必须先关编辑器。
+   用户随即改判"`VoxelSupport` 挺好，`VoxelCore` 才奇怪" → **维持原名，工作区零改动**
+   （`addons/VoxelCore` 不存在、代码内零处 `VoxelCore`、`git status` 无改名痕迹）。
+   结论：**提议名不该成为施工理由**；目录一旦烙进原生构建，改名就是"施工"而非"整理"。`plugin.cfg` 的 `description` 已同步更新为
+   如实描述三层能力（原生 `.qvox` 格式 / 稀疏分块运行时与 LOD 流式 / 破坏物理，另含 `.vox` 导入），
+   不再只有"MagicaVoxel importer"一句。
 2. 分期按 P0 → P1 → P2 → P3 → P4 推进。
 3. 世界结构（对象模型 + 修改器链）**落在插件内核内**（`addons/VoxelSupport/Modifier/`），并
    **原生进入 QVox**（§5）；QVoxelier 只做显示与操作翻译。**撤销命令例外**：它位于
-   `QVoxelier/Core/`（见 §6.1 第 4 条）。
+   `QVoxelier/Command/`（见 §6.1 第 4 条）。
 4. **已完成**：`VoxelStudio/` → `QVoxelier/`；原 `Core/*.gd` 的对象模型文件移入
    `addons/VoxelSupport/Modifier/` 并按 `QVox*` 前缀改名（后又按域拆分为 `Sdf/` 与 `Model/`，
    并依次去掉 `Operators/` 中间层与 `Volume/`、`Generator/` 薄目录）。这一步顺带消掉了一个反向依赖：
@@ -484,12 +531,25 @@ QVox 已经把"结构"与"数据"分开，这正是它适合当工程格式的�
 | 1 | `QVoxWorld` 与 `QVoxFile.QVoxDocument` 都能代表一份工程 → **双真值** | `QVoxWorld` 为**唯一常驻真值**；`QVoxDocument` 降为"读写那一瞬"的传输结构，两者由 `to_document()` / `from_document()` 一对显式转换连接，**不允许同时常驻** |
 | 2 | `QVoxObject` 的基础体素是 dense 数组 → 与"分块稀疏"内核原则相悖（512³ dense = 537 MB） | 改为**分块稀疏** `blocks: Dictionary`（块坐标 → `PackedInt32Array(B³)`，0 = 空、空块缺失），块布局权威统一到 `QVoxSpec`；并与 `VOX0` 落盘同形，读写零转换 |
 | 3 | `QVoxRasterizer` 与 `PcgSdfGenerator` 各有一份"FIELD 域 → 体素"的光栅化 | 删 `QVoxRasterizer`，折叠为 `PcgSdfGenerator.rasterize_field()`（内部 `to_volume(grid_size)` + `_blit_chunk()` 走 `VoxelChunk.CHUNK_SIZE`） |
-| 4 | `QVoxCommand` 放在插件内 → 一旦复用框架 `GameCommand` 就会逼出插件交叉引用 | `QVoxCommand` / `QVoxUndoStack` / `QVoxVoxelEditCommand` 移入 **`QVoxelier/Core/`**（`extends GameCommand` / `CommandHistory`）。两插件保持**互不引用** |
+| 4 | `QVoxCommand` 放在插件内 → 一旦复用框架 `GameCommand` 就会逼出插件交叉引用 | `QVoxCommand` / `QVoxUndoStack` / `QVoxVoxelEditCommand` 移入 **`QVoxelier/Command/`**（`extends GameCommand` / `CommandHistory`）。两插件保持**互不引用** |
 
-**仍未做**：`QVoxEvalEngine`（求值引擎）与 `QVoxPropertyCommand` / `QVoxMacroCommand` 仍停留在
-设计（`QVoxelier/DESIGN.md` §6.1/§6.2），代码里尚无实现。
+**已落地**：`QVoxEvalEngine`（求值引擎，见 P3）与 `QVoxPropertyCommand` / `QVoxMacroCommand`
+（`QVoxelier/DESIGN.md` §6.1/§6.2）均已实现，不再停留在设计：
 
-**待确认**：
+- `QVoxEvalEngine` 见 P3 那节；契约测试 `Scripts/Test/test_qvox_eval_engine.gd`。
+- `QVoxPropertyCommand`（`QVoxelier/Command/`）：一次属性赋值的 O(1) 撤销，**顺带覆盖链的增删重排** ——
+  `modifiers` 本来就是对象上的一个属性，加/删/排都是它的前后两份数组，因此不需要第二个命令类。
+  它同时负责给宿主对象补发 `content_changed`（`Resource` 参数不会自动发信号）。
+- `QVoxMacroCommand` + `QVoxUndoStack.begin_macro()` / `end_macro()`：多步折叠成一条撤销单位，
+  支持嵌套、空宏不入栈。契约测试 `Scripts/Test/test_qvox_commands.gd`。
 
-- 无限层与表现层抽离后放在哪里：同仓库独立插件，还是独立仓库。
-- 插件内核改名的具体名字（`VoxelCore` 只是建议）。
+**验证（2026-10-08，P4 收尾时复跑）**：编辑器 **130/130** + 游戏进程 **9/9** 全通过。
+
+**待确认**：**两项均已收口（2026-10-08）**。
+
+- ~~无限层与表现层抽离后放在哪里：同仓库独立插件，还是独立仓库~~ —— **已决：都留在 `addons/VoxelSupport/` 内**
+  （同插件、同仓库）。这里的"抽离"指**抽离出内核的视点相关职责**（P2-1 ✅ 已成独立组件
+  `VoxelInfiniteLayer` / `VoxelDestructionPresenter`），**不是**拆成第二个插件或第二个仓库：
+  插件本身就是"有限内核 + 可选的无限层 / 表现层"一个整体，装上即用；拆仓库只会把 `.gdextension`
+  与 `project.godot` 的启用项切成两份，而换不到边界收益（边界已由 P2-2 的内核契约测试钉死）。
+- ~~插件内核改名的具体名字（`VoxelCore` 只是建议）~~ —— **已决：不改名**，往返经过与理由见 §6 第 1 条。

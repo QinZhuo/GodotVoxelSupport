@@ -116,7 +116,7 @@ var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 ## 逐体素累计伤害账**不在这里**：它归 VoxelData（体素相邻状态，必须与 chunk 缓冲同生共死——
 ## 卸载 / 清空 / origin shift / 载荷重建都要同步清理）。放在本节点上时无人负责清理，
 ## 残留伤害会"继承"给后来放上去的新体素（一放上去就被秒杀），且随卸载无限增长。
-## 本节点只负责"发起伤害"，通过 data.get_damage_buffers() / data.set_damage_buffers() 读写。
+## 本节点只负责"发起伤害"，伤害账读写由编辑内核经 data 的内部协议完成（见 VoxelEditKernel）。
 
 ## 破坏形状常量（对应原生 damage_shape 的 shape 参数）
 const SHAPE_SPHERE: int = 0
@@ -271,44 +271,11 @@ func damage_ray(origin: Vector3, direction: Vector3, max_distance: float = 100.0
 	return hit
 
 
-## 射线检测体素 (DDA 算法)
+## 射线检测体素（DDA）。委托 [VoxelRay] —— 走格实现全项目只此一份，
+## 编辑器的拾取（还要入射面法线）与这里的破坏因此不会各走一套。
+## 注：direction 为零向量时返回 MIN（旧实现会沿 -z 一直推进，属退化输入的修复）。
 func raycast_voxel(origin: Vector3, direction: Vector3, max_distance: float = 100.0) -> Vector3i:
-	if not data:
-		return Vector3i.MIN
-	var dir := direction.normalized()
-	var pos := Vector3i(floor(origin.x), floor(origin.y), floor(origin.z))
-	var step := Vector3i(
-		1 if dir.x > 0 else -1,
-		1 if dir.y > 0 else -1,
-		1 if dir.z > 0 else -1
-	)
-	var t_delta := Vector3(
-		abs(1.0 / dir.x) if dir.x != 0 else INF,
-		abs(1.0 / dir.y) if dir.y != 0 else INF,
-		abs(1.0 / dir.z) if dir.z != 0 else INF
-	)
-	var t_max := Vector3(
-		(float(pos.x + (1 if step.x > 0 else 0)) - origin.x) / dir.x if dir.x != 0 else INF,
-		(float(pos.y + (1 if step.y > 0 else 0)) - origin.y) / dir.y if dir.y != 0 else INF,
-		(float(pos.z + (1 if step.z > 0 else 0)) - origin.z) / dir.z if dir.z != 0 else INF
-	)
-	var traveled := 0.0
-	while traveled < max_distance:
-		if data.has_voxel(pos):
-			return pos
-		if t_max.x < t_max.y and t_max.x < t_max.z:
-			pos.x += step.x
-			traveled = t_max.x
-			t_max.x += t_delta.x
-		elif t_max.y < t_max.z:
-			pos.y += step.y
-			traveled = t_max.y
-			t_max.y += t_delta.y
-		else:
-			pos.z += step.z
-			traveled = t_max.z
-			t_max.z += t_delta.z
-	return Vector3i.MIN
+	return VoxelRay.hit_voxel(data, origin, direction, max_distance)
 
 
 ## 完全破坏: 移除所有体素
@@ -634,7 +601,7 @@ func validate_stability() -> void:
 
 func _collect_voxel_materials(positions: Array) -> Dictionary:
 	# 原生批量收集（chunk 缓冲直读，替代逐体素 get_voxel 字典查询）；原生库为强制依赖。
-	return NativeLoader.collect_materials(data.get_chunk_buffers() if data else {}, positions)
+	return NativeLoader.collect_materials(data._chunk_buffers_view() if data else {}, positions)
 
 
 ## 按连通分组逐组建立 pos→材质ID 映射（移除前调用，供掉落体使用）。

@@ -40,7 +40,7 @@ func test_bake_then_reload_matches_generator() -> void:
 	# 参照物：把生成器产出直接装进另一个数据层，用同一套公开读取路径取快照
 	var reference := VoxelData.new()
 	reference.materials = model.materials
-	reference.accept_chunk_buffer(Vector3i.ZERO, produced.duplicate())
+	reference._accept_chunk_buffer(Vector3i.ZERO, produced.duplicate())
 
 	assert_ne(reference.get_voxels_dict_snapshot(), {}, "生成器本身应产出实心体素（前置条件）")
 	assert_eq(reload.get_voxels_dict_snapshot(), reference.get_voxels_dict_snapshot(),

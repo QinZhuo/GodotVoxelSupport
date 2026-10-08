@@ -15,7 +15,7 @@ extends RefCounted
 ## 统一的好处：标记 / 取走 / 擦除 / 平移 / 清空都只经过这里，"漏清一处"不再可能散落在
 ## VoxelData 的十几个函数里。区域账不是布尔（带 [min,max] 数据）故单独一张表。
 ##
-## 注意 level 0 的 key 空间是 chunk key 与粗层 block key **共用**的：accept_chunk_buffer
+## 注意 level 0 的 key 空间是 chunk key 与粗层 block key **共用**的：_accept_chunk_buffer
 ## 对 lod>=1 的块回填也会往 level 0 打 MESH 标记，渲染器 is_chunk_mesh_dirty 读的就是它。
 ## 该约定是历史行为，收拢时原样保留。
 

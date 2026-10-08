@@ -14,6 +14,14 @@ extends QVoxModifier
 @export var field: Sdf
 
 
+## 便捷构造（见 QVoxVolumeModifier.of）。combine 默认 REPLACE：链首一条 SDF 通常就是"定义模型"。
+static func of(field_: Sdf, combine_: QVoxDomain.Combine = QVoxDomain.Combine.REPLACE) -> QVoxSdfModifier:
+	var m := QVoxSdfModifier.new()
+	m.field = field_
+	m.combine = combine_
+	return m
+
+
 func kind() -> String:
 	return KIND_SDF
 

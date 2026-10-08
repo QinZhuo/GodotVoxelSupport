@@ -21,6 +21,13 @@ extends QVoxCommand
 ## 【为什么工具不该"先写数据、事后补命令"】那样 before 已经被覆盖，只能靠"重跑一遍反向
 ## 操作"来撤销 —— 而反向操作对笔刷/雕刻这类算子不总是可逆的（浮点、随机种子）。
 ## 快照式撤销永远精确，代价是内存，而懒采集把内存压到了"实际改动量"。
+##
+## 【快照必须是独立副本：`get_block()` 给的是活视图】本类存下的 before/after 是"点时刻的值"，
+## 而 `QVoxObject.get_block()` 返回的数组与内部 `blocks[bk]` **共享同一缓冲**（见其注释），
+## `_write_box` 的逐元素写会就地改到它。曾经没拷贝的后果很隐蔽：擦除一笔时 before 被同一次
+## 写入抹成"和 after 一样"，于是 commit() 判定"什么都没变"→ 返回值 false、命令不入栈、
+## `undo()` 无内容可回滚，而屏幕上明明看到格子没了。所以本类**每一处留存块内容的地方**
+## 都必须 `duplicate()`（共三处：抓 before、封口收 after、回放时交出），一处漏掉就会重新长出这个 bug。
 
 ## 被编辑的对象。为 null（对象已删）时撤销会明确报错，而不是静默改错对象。
 var object: QVoxObject
@@ -75,7 +82,8 @@ func commit() -> bool:
 	var keys: Array = before.keys()
 	var changed := 0
 	for bk: Vector3i in keys:
-		var now := object.get_block(bk)
+		# duplicate：after 要活到这条命令被淘汰为止，不能是活视图（见类头注释）
+		var now := object.get_block(bk).duplicate()
 		if _same_block(before[bk], now):
 			before.erase(bk)  # 前后一样：这次没真改到它，不该让撤销栈为它付内存
 			continue
@@ -98,6 +106,17 @@ func changed_voxels() -> int:
 	if params.size() < 8:
 		return 0
 	return int(params[7])
+
+
+## 只影响被抓过快照的那些块所覆盖的体素范围 —— 视口据此只让这些 chunk 重新取数。
+## 未抓过快照（空手势）返回空数组；那种命令本来也不会入栈。
+func dirty_bounds() -> Array[Vector3i]:
+	var out: Array[Vector3i] = []
+	if not _dirty:
+		return out
+	out.append(dirty_lo)
+	out.append(dirty_hi)
+	return out
 
 
 func get_label() -> String:
@@ -132,7 +151,8 @@ func _restore(src: Dictionary) -> void:
 		push_error("[QVox] 体素编辑命令的目标对象已不存在（model_id=%d）" % int(params[0]))
 		return
 	for bk: Vector3i in src:
-		object.set_block(bk, src[bk])
+		# duplicate：set_block 会接管这份缓冲，而 src 还要留给下一次 undo/redo（见类头注释）
+		object.set_block(bk, (src[bk] as PackedInt32Array).duplicate())
 
 
 func _snapshot_voxel(x: int, y: int, z: int) -> void:
@@ -161,7 +181,8 @@ func _snapshot_box(a: Vector3i, b: Vector3i) -> void:
 
 func _snapshot_block(bk: Vector3i) -> void:
 	if not before.has(bk):
-		before[bk] = object.get_block(bk)
+		# duplicate：这一份要在整笔手势期间扛住后续写入，活视图会被就地改写（见类头注释）
+		before[bk] = object.get_block(bk).duplicate()
 		# 脏范围按**块**扩张：逐格记 min/max 要付出每格 6 次比较，而块粒度已经足够精确
 		# （视口本来也按块刷新）。
 		var o := QVoxSpec.block_origin(bk, object.block_size)

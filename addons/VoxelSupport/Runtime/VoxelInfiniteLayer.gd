@@ -404,17 +404,10 @@ func process_streaming() -> void:
 	if data.generator != null:
 		check_origin_shift(cam)
 
-	# 1) 回填后台异步结果（生成器产出 / 流里直读），统一 poll → accept（按 lod 分流）
-	# poll 限量 = 加载预算的 2 倍：避免来回移动时每帧 accept 过多（主线程写入 + 失效开销大 → 掉帧）
-	var applied := 0
-	var results := data.poll_all_ready(maxi(load_per_frame * 2, 32))
-	for r in results:
-		var lod: int = r[0]
-		var ck: Vector3i = r[1]
-		var buf: PackedInt32Array = r[2]
-		data.accept_chunk_buffer(ck, buf, lod)
-		# lod=0 的在途登记由 VoxelAsyncLoader 在回填时自动清除，此处无需本地清理
-		applied += 1
+	# 1) 回填后台异步结果（生成器产出 / 流里直读），poll → 回填一步到位（数据层封装）
+	# 限量 = 加载预算的 2 倍：避免来回移动时每帧回填过多（主线程写入 + 失效开销大 → 掉帧）
+	# lod=0 的在途登记由 VoxelAsyncLoader 在回填时自动清除，此处无需本地清理
+	var applied := data.apply_ready_results(maxi(load_per_frame * 2, 32))
 
 	# 2) 距离内扫描缺失 chunk 并提交（限量每帧；降频扫描，相机不动时结果不变）
 	_streaming_check_tick += 1
@@ -677,20 +670,11 @@ func process_lod() -> void:
 				data.erase_lod_block(level, bk)
 				remove_lod_block(level, bk)
 				continue
-			# 【金字塔增量】coarse 已有缓存：主线程 patch 只重算脏大格（未脏复用），
+			# 【金字塔增量】coarse 已有缓存：数据层 patch 只重算脏大格（未脏复用），
 			# 再派发 mesh worker 从 coarse 生成（set_lod_block 已清 modified → 不走全量降采样）。
 			# L1 从 L0 chunk 降采样；L2+ 逐级上推从上一层 coarse 降采样（省 64 倍 L0 读取）。
-			var region := data.get_lod_dirty_region(level, bk)
-			if not region.is_empty() and data.has_lod_block(level, bk):
-				var coarse := data.get_lod_block(level, bk)
-				var patched: PackedInt32Array
-				if level == 1:
-					patched = VoxelChunkGenerator.patch_lod_block(
-						data.get_chunk_buffers(), bk, level, coarse, region[0], region[1])
-				else:
-					patched = VoxelChunkGenerator.patch_lod_block_from_lod(
-						data.get_lod_buffers(level - 1), bk, level, coarse, region[0], region[1])
-				data.set_lod_block(level, bk, patched)
+			# 源缓冲是数据层内部存储，故"取源 → 重算 → 写回"收在 data.patch_lod_block 里。
+			if data.patch_lod_block(level, bk):
 				if bdist >= _inner - _margin:
 					_build_lod_block(level, bk)
 				continue
@@ -1024,9 +1008,9 @@ func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	# 快照句柄随任务走到底、由 _on_lod_thread_result 释放：不依赖 LIFO 配对，
 	# 故与渲染批次的快照并发时也不会互相释放错。
 	var handle := data.begin_readonly_snapshot()
-	var standalone: bool = data.can_mesh_lod_block_standalone(level, bk)
-	var snapshot := data.snapshot_lod_block_data(bk, level) if standalone \
-			else data.snapshot_lod_block_chunks_readonly(bk, level)
+	var standalone: bool = data._can_mesh_lod_block_standalone(level, bk)
+	var snapshot := data._snapshot_lod_block_data(bk, level) if standalone \
+			else data._snapshot_lod_block_chunks_readonly(bk, level)
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_build.bind(
 		snapshot, standalone, bk, level, _lod_block_gen[level].get(bk, 0), kernel.voxel_scale,
 		data.center_offset, kernel.lod_materials(level).duplicate(), handle)))
@@ -1046,7 +1030,7 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 	_lod_pending_tasks[level][bk] = true
 	# 同上：句柄由 _on_lod_data_ready 释放。
 	var handle := data.begin_readonly_snapshot()
-	var snapshot := data.snapshot_lod_block_chunks(bk, level)
+	var snapshot := data._snapshot_lod_block_chunks(bk, level)
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_data_only.bind(
 		snapshot, bk, level, _lod_block_gen[level].get(bk, 0), handle)))
 

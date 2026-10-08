@@ -206,16 +206,11 @@ static func _e2e(make: Callable, grid: Vector3i) -> Dictionary:
 	var accepted := 0
 	var deadline := Time.get_ticks_msec() + 30000
 	while accepted < keys.size() and Time.get_ticks_msec() < deadline:
-		var ready := data.poll_all_ready(256)
-		if ready.is_empty():
+		var n := data.apply_ready_results(256)
+		if n == 0:
 			OS.delay_msec(1)
 			continue
-		for r in ready:
-			var ck: Vector3i = r[1]
-			var buf: PackedInt32Array = r[2]
-			var lod: int = r[0]
-			data.accept_chunk_buffer(ck, buf, lod)
-			accepted += 1
+		accepted += n
 	return {"ms": _us(t0), "accepted": accepted}
 
 

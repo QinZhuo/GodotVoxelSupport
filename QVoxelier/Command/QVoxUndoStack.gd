@@ -23,15 +23,59 @@ var max_cost := 256 * 1024 * 1024
 ## 栈发生变化（push/undo/redo/淘汰），UI 据此刷新菜单项可用性。
 signal changed
 
+## 正在累积的宏（**栈式**：允许嵌套 —— 内层结束后并入外层，等最外层 end_macro 一次入栈）。
+var _macro_open: Array[QVoxMacroCommand] = []
+
 
 ## 入栈一条**已经生效**的命令。
 ##
 ## 【为什么入栈时调 redo()】工具是"先改数据、再登记命令"，数据已经是 after 状态，
 ## 所以这次 redo() 必须是无副作用的幂等重放（见 QVoxCommand.redo 的说明）。这样做的好处是
 ## 全项目只有一条时间线：任何让状态前进的路径都必须经过 redo()，不必区分"首次执行"与"重放"。
+##
+## 【宏内入栈只攒着】这里转发给当前宏而不真正入栈 —— 于是"宏 = 一条命令"对游标、
+## changed 通知与预算淘汰三处同时成立，这三处都不必知道宏的存在。
 func push(cmd: QVoxCommand) -> void:
 	if cmd == null:
 		return
+	if not _macro_open.is_empty():
+		_macro_open.back().add(cmd)
+		return
+	_push_now(cmd)
+
+
+## 开始一段宏：其间的 push() 都攒进同一条，end_macro() 一次性入栈。
+##
+## 【为什么值得有】"改参数 + 重命名"在用户眼里是一次操作。攒起来还有个附带好处：
+## 中间过程不触碰游标、不发信号 —— UI 不会在拖拽中闪出一串中间态的历史项。
+func begin_macro(label := "") -> QVoxMacroCommand:
+	var m := QVoxMacroCommand.new(label)
+	_macro_open.append(m)
+	return m
+
+
+## 结束最近的宏，返回入栈的那条（空宏返回 null）。**空宏不入栈** —— 与"空手势不入栈"同一约定。
+func end_macro() -> QVoxMacroCommand:
+	if _macro_open.is_empty():
+		push_error("[QVox] end_macro() 没有配对的 begin_macro()")
+		return null
+	var m: QVoxMacroCommand = _macro_open.pop_back()
+	if m.is_empty():
+		return null
+	if not _macro_open.is_empty():
+		_macro_open.back().add(m)  # 嵌套：并入外层，等外层结束再一起入栈
+		return m
+	_push_now(m)
+	return m
+
+
+## 当前是否有未结束的宏（UI 据此禁用"新建操作"之类的入口）。
+func in_macro() -> bool:
+	return not _macro_open.is_empty()
+
+
+## 真正入栈。宏内外共用这一条路径，宏只走它一次。
+func _push_now(cmd: QVoxCommand) -> void:
 	truncate_redo()
 	cmd.tick = commands.size()  # 会话时序号：tick 单调，供回放/审计排序
 	append(cmd)
@@ -94,6 +138,7 @@ func total_cost() -> int:
 
 func clear() -> void:
 	super()
+	_macro_open.clear()  # 开着的宏一并丢弃：clear() 的语义是"完全重置"，留半截宏只会让下次 end_macro 打在对不上的地方
 	cursor = 0
 	changed.emit()
 

@@ -17,7 +17,7 @@ extends RefCounted
 var _buffers: Dictionary = {}
 
 
-## 原始字典（**仅供原生批量接口直接读写**，与 get_chunk_buffers 同契约）
+## 原始字典（**仅供原生批量接口直接读写**，与 _chunk_buffers_view 同契约）
 func buffers() -> Dictionary:
 	return _buffers
 

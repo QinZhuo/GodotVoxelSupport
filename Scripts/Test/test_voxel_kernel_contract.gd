@@ -267,10 +267,134 @@ func test_empty_chunk_erased_but_mesh_still_marked_dirty() -> void:
 		"变空的 chunk 必须留下 mesh 脏标记，否则渲染器不会重建来清掉旧网格")
 
 
+# ----------------------------------------------------------------------------
+# P4-4：数据层 VoxelData 的 API 稳定等级（公开 / 实验 / 内部）
+# ----------------------------------------------------------------------------
+#
+# 【为什么要有这张网】GDScript 没有访问修饰符，"内部协议"只能靠 `_` 前缀表达。
+#   收口前 get_chunk_buffers / accept_chunk_buffer / snapshot_* 等是**不带 `_` 的公开方法**，
+#   内核外调用者于是能拿到整张 chunk 缓冲表就地改写、或自行拼 poll+accept 半截协议——
+#   这类"绕过封装"没有运行期症状，只会让存储的不变式（体素计数账 / 脏标记 / 快照保护）静默失效。
+#   故把它们钉成断言：① 数据层**不带 `_` 的公开方法 = 【公开】∪【实验】**（多一个少一个都失败）；
+#   ② 内部协议**只以 `_` 前缀存在**，旧公开名一律不得复活。
+#
+# 【与文档的对应】两张分级表与 VoxelData.gd 顶部"API 稳定等级（P4-4）"清单一一对应。
+
+## 数据层【公开】稳定 API —— 承诺向后兼容，破坏性改动须走弃用期。
+const VOXEL_DATA_PUBLIC_API: Array[String] = [
+	# 读写
+	"set_voxel", "remove_voxel", "get_voxel", "has_voxel",
+	"set_voxels", "remove_voxels", "clear",
+	# 区域批量
+	"get_voxels_in_sphere", "get_voxels_in_box",
+	"remove_voxels_in_sphere", "remove_voxels_in_box",
+	"ensure_sphere_loaded", "ensure_box_loaded",
+	# 查询统计
+	"get_voxel_count", "is_empty", "get_positions", "get_voxels_aabb",
+	"get_chunk_voxels", "has_chunk", "get_voxels_dict_snapshot",
+	"voxel_bounds", "origin_offset",
+	# 材质
+	"add_material", "get_material", "get_material_by_id",
+	# 脏账事件
+	"mark_chunk_dirty", "is_chunk_mesh_dirty", "get_dirty_mesh_chunk_count",
+	"get_dirty_chunks", "notify_changed",
+	# 存档生命周期
+	"save_data", "load_data", "flush", "bake_to", "load_voxels_dict",
+	"from_voxel_data", "from_qvox",
+	# 连通塌落
+	"flood_fill", "find_connected", "connectivity", "neighbors",
+	"partition_connected", "find_unsupported", "find_unsupported_around",
+	# 数据源
+	"set_stream", "is_streaming", "shift_origin",
+	# 源失效（源内容变了 → 该块按需重新取数，区别于 unload_chunk 的"卸载"语义）
+	"invalidate_chunk_source", "invalidate_chunk_source_range",
+]
+
+
+## 数据层【实验】API —— 可用但形态可能变（收口期仍在动；用前请确认版本）。
+const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
+	# 两级存储查询
+	"is_chunk_loaded", "is_stored", "can_supply_chunk", "get_vertical_half_span",
+	"get_unloaded_chunk_keys", "get_unloaded_chunk_count", "get_all_chunk_keys",
+	"get_loaded_chunk_keys", "preload_chunk", "unload_chunk",
+	# 异步取数
+	"request_chunk_async", "cancel_chunk_request", "poll_all_ready",
+	"apply_ready_results", "is_chunk_pending", "get_unready_chunk_keys",
+	# 只读快照
+	"begin_readonly_snapshot", "end_readonly_snapshot",
+	# 粗层 LOD
+	"get_lod_block", "has_lod_block", "set_lod_block", "store_lod_block",
+	"erase_lod_block", "get_lod_block_keys", "flush_lod_block",
+	"is_lod_block_modified", "patch_lod_block",
+	# LOD 脏账
+	"invalidate_lod", "invalidate_lod_for_chunk", "mark_lod_modified",
+	"mark_lod_modified_for_chunk", "get_lod_dirty_region", "clear_lod_cache",
+	"clear_lod_dirty_regions", "get_invalidated_lod", "has_lod_invalidated",
+	# 伤害账
+	"get_damage", "clear_damage", "clear_damage_bulk", "clear_all_damage",
+]
+
+
+## 数据层【内部】协议（`_` 前缀，内核外不可见）。它们曾是公开 API，内核外调用者
+## 能借此绕过封装直改存储 / 拼半截异步协议——P4-4 降为内部，并补了两个封装入口
+## （patch_lod_block / apply_ready_results）。
+const VOXEL_DATA_INTERNAL_PROTOCOLS: Array[String] = [
+	"_chunk_buffers_view", "_lod_buffers_view", "_damage_buffers_view", "_set_damage_buffers",
+	"_accept_chunk_buffer", "_chunk_halo", "_snapshot_chunks_halo",
+	"_snapshot_lod_block_chunks", "_snapshot_lod_block_chunks_readonly",
+	"_snapshot_lod_block_data", "_can_mesh_lod_block_standalone",
+]
+
+
+func test_data_layer_api_tiers_match_contract() -> void:
+	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelData.gd")
+	assert_true(script != null, "数据层脚本应能加载")
+	var actual: Array[String] = []
+	for m in script.get_script_method_list():
+		var n: String = m["name"]
+		if n.begins_with("_") or n.begins_with("@"):
+			continue
+		actual.append(n)
+	actual.sort()
+	var declared: Array[String] = []
+	declared.append_array(VOXEL_DATA_PUBLIC_API)
+	declared.append_array(VOXEL_DATA_EXPERIMENTAL_API)
+	declared.sort()
+	var extra: Array[String] = []
+	for n in actual:
+		if not declared.has(n):
+			extra.append(n)
+	var missing: Array[String] = []
+	for n in declared:
+		if not actual.has(n):
+			missing.append(n)
+	assert_true(extra.is_empty(),
+		"数据层多出未分级的公开方法: %s —— 要么标进【公开/实验】表，要么降为 `_` 内部协议" % str(extra))
+	assert_true(missing.is_empty(), "契约声明但数据层缺失的公开方法: %s" % str(missing))
+
+
+func test_data_internal_protocols_are_underscored() -> void:
+	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelData.gd")
+	var names: Array[String] = []
+	for m in script.get_script_method_list():
+		names.append(m["name"])
+	# ① 内部协议必须存在，且带 `_` 前缀（内核外不可见）
+	for n in VOXEL_DATA_INTERNAL_PROTOCOLS:
+		assert_true(names.has(n), "内部协议 %s 应存在" % n)
+		assert_true(n.begins_with("_"), "内部协议必须以 `_` 前缀（内核外不可见）: %s" % n)
+	# ② 它们绝不能再以"公开"旧名出现（P4-4 前的名字）
+	for legacy in ["get_chunk_buffers", "get_lod_buffers", "get_damage_buffers",
+			"set_damage_buffers", "accept_chunk_buffer", "snapshot_chunks_halo",
+			"snapshot_lod_block_chunks", "snapshot_lod_block_chunks_readonly",
+			"snapshot_lod_block_data", "can_mesh_lod_block_standalone", "get_chunk_halo"]:
+		assert_false(names.has(legacy),
+			"内部协议旧名 %s 不得再作为公开方法存在（应已降为 `_` 前缀）" % legacy)
+
+
 ## 全量重数（独立于增量账本）：用于交叉验证计数账本没有漂移。
 func _recount(d: VoxelData) -> int:
 	var total := 0
-	var buffers := d.get_chunk_buffers()
+	var buffers := d._chunk_buffers_view()
 	for ck in buffers:
 		var buf: PackedInt32Array = buffers[ck]
 		total += buf.size() - buf.count(0)

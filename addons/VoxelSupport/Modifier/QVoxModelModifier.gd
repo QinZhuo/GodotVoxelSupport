@@ -13,6 +13,14 @@ extends QVoxModifier
 @export var model: PcgModel
 
 
+## 便捷构造（见 QVoxVolumeModifier.of）。
+static func of(model_: PcgModel, combine_: QVoxDomain.Combine = QVoxDomain.Combine.REPLACE) -> QVoxModelModifier:
+	var m := QVoxModelModifier.new()
+	m.model = model_
+	m.combine = combine_
+	return m
+
+
 func kind() -> String:
 	return KIND_MODEL
 

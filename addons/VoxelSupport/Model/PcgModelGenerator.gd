@@ -76,6 +76,8 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 		return buf
 	var gs := _grid_size
 	var vol := _volume
+	if vol.is_empty():
+		return buf  # 源产出了空体积（例如空链 + 无手绘体素）：直接给全空，别去下标越界
 	var base := VoxelChunk.origin_of(chunk_key)
 	for lz in VoxelChunk.CHUNK_SIZE:
 		var gz := base.z + lz
@@ -110,6 +112,8 @@ func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
 	var base := block_key * (grid * cell)
 	var gs := _grid_size
 	var vol := _volume
+	if vol.is_empty():
+		return buf
 	for lz in grid:
 		for ly in grid:
 			for lx in grid:
@@ -119,11 +123,33 @@ func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
 	return buf
 
 
-## 惰性构建一次：无模型或无界（grid_size = ZERO）时返回 false（生成全空）。
+## 有产出源吗？无源时 _ensure_volume 直接返回 false（生成全空）。
+##
+## 子类覆写点：换一个体积来源只需覆写本函数 + _build_volume()，
+## 缓存 / 切片 / LOD 逻辑原样复用，全项目仍只有一份。
+func _has_source() -> bool:
+	return model != null
+
+
+## 产出整块体积。
 ##
 ## 【后处理链】model.build() 之后、提交缓存之前，按 details 数组顺序跑一遍细节层。
 ## 此时 vol 是 build() 刚返回的新数组（引用计数为 1），**原地改写不会触发写时复制**；
 ## 也依赖"细节层只改体素、不改 grid_size"这一契约（见 PcgDetail）。
+##
+## 【并发契约】**本函数在 worker 线程内被调用**：只读，可重入，不改本对象的可观测状态。
+## 子类实现（如 QVoxObjectGenerator 跑修改器链）必须守同一条规矩。
+func _build_volume(grid_size: Vector3i) -> PackedInt32Array:
+	if model == null:
+		return PackedInt32Array()
+	var vol := model.build(grid_size)
+	for d in details:
+		if d != null:
+			d.apply(vol, grid_size, detail_seed)
+	return vol
+
+
+## 惰性构建一次：无源或无界（grid_size = ZERO）时返回 false（生成全空）。
 ##
 ## 【并发】免锁快路径 + 锁内构建 + 提交前校验尺寸。多处要点：
 ##   ① 快路径先查 _built：稳态下每个 chunk 都走这条路，不该付锁开销；
@@ -131,18 +157,17 @@ func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
 ##   ② 锁内再查一次 _built：等锁期间别人可能已经建好（这就是"只 build 一次"的实现）。
 ##   ③ 提交前校验 _grid_size 未变：set_grid_size() 由主线程调用且**不能取锁**
 ##      （否则主线程被在途构建阻塞），故用"构建完比对"来丢弃过期结果，而不是让 setter 抢锁。
+##   ④ **空体积也要提交 _built**：否则每个 chunk 都会重跑一次 _build_volume（链求值可能是
+##      整块体积的开销）。空体积由切片侧用 is_empty() 早退拦下，不再走下标访问。
 func _ensure_volume() -> bool:
 	if _built:
 		return true
-	if model == null or _grid_size == Vector3i.ZERO:
+	if not _has_source() or _grid_size == Vector3i.ZERO:
 		return false
 	_build_mutex.lock()
 	if not _built:
 		var gs := _grid_size
-		var vol := model.build(gs)
-		for d in details:
-			if d != null:
-				d.apply(vol, gs, detail_seed)
+		var vol := _build_volume(gs)
 		if gs == _grid_size:
 			_volume = vol
 			_built = true

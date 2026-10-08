@@ -46,6 +46,62 @@ extends Resource
 #   `get_unloaded_chunk_*` / `is_chunk_pending`）主要供视点层扫描用，但都是**只读查询**。
 #   教训：归属判定要看**依赖方向与数据所有权**，不能按名字命中关键词。
 
+# ============================================================================
+# 【API 稳定等级】（P4-4 收口，2026-10-08）
+# ----------------------------------------------------------------------------
+# 本文件是内核的**数据层**。GDScript 没有访问修饰符，对外可见性只有两种表达：
+#   · 不带 `_` 的公开方法 = **公开 / 实验** 两级（见下）；
+#   · 带 `_` 前缀 = **内部协议**，只有同插件的内核层（VoxelRenderer /
+#     VoxelEditKernel / VoxelInfiniteLayer）可以调用；插件消费者（QVoxelier、
+#     用户脚本、demo）一律不得调用。
+#
+# 【公开】稳定能力 API —— 承诺向后兼容，破坏性改动须走弃用期：
+#   读写       set_voxel / remove_voxel / get_voxel / has_voxel /
+#              set_voxels / remove_voxels / clear
+#   区域批量   get_voxels_in_sphere / get_voxels_in_box /
+#              remove_voxels_in_sphere / remove_voxels_in_box /
+#              ensure_sphere_loaded / ensure_box_loaded
+#   查询统计   get_voxel_count / is_empty / get_positions / get_voxels_aabb /
+#              get_chunk_voxels / has_chunk / get_voxels_dict_snapshot /
+#              voxel_bounds(静态) / origin_offset(静态)
+#   材质       add_material / get_material / get_material_by_id
+#   脏账事件   mark_chunk_dirty / is_chunk_mesh_dirty / get_dirty_mesh_chunk_count /
+#              get_dirty_chunks / notify_changed
+#   存档生命周期 save_data / load_data / flush / bake_to / load_voxels_dict /
+#              from_voxel_data(静态) / from_qvox(静态)
+#   连通塌落   flood_fill / find_connected / connectivity / neighbors /
+#              partition_connected(静态) / find_unsupported / find_unsupported_around
+#   数据源     set_stream / is_streaming / shift_origin / invalidate_chunk_source /
+#              invalidate_chunk_source_range
+#
+# 【实验】可用但形态可能变（收口期仍在动；用前请确认版本）：
+#   两级存储查询 is_chunk_loaded / is_stored / can_supply_chunk / get_vertical_half_span /
+#              get_unloaded_chunk_keys / get_unloaded_chunk_count / get_all_chunk_keys /
+#              get_loaded_chunk_keys / preload_chunk / unload_chunk
+#   异步取数   request_chunk_async / cancel_chunk_request / poll_all_ready /
+#              apply_ready_results / is_chunk_pending / get_unready_chunk_keys
+#   只读快照   begin_readonly_snapshot / end_readonly_snapshot（写时拷贝的读侧句柄）
+#   粗层 LOD   get_lod_block / has_lod_block / set_lod_block / store_lod_block /
+#              erase_lod_block / get_lod_block_keys / flush_lod_block /
+#              is_lod_block_modified / patch_lod_block
+#   LOD 脏账   invalidate_lod / invalidate_lod_for_chunk / mark_lod_modified /
+#              mark_lod_modified_for_chunk / get_lod_dirty_region / clear_lod_cache /
+#              clear_lod_dirty_regions / get_invalidated_lod / has_lod_invalidated
+#   伤害账     get_damage / clear_damage / clear_damage_bulk / clear_all_damage
+#
+# 【内部】`_` 前缀协议（内核外不可见：缓冲整表 / 快照原料 / 原生回填通道）：
+#   _chunk_buffers_view / _lod_buffers_view / _damage_buffers_view / _set_damage_buffers
+#   _accept_chunk_buffer / _chunk_halo / _snapshot_chunks_halo /
+#   _snapshot_lod_block_chunks / _snapshot_lod_block_chunks_readonly /
+#   _snapshot_lod_block_data / _can_mesh_lod_block_standalone
+#   —— 它们曾是不带 `_` 的"公开 API"（get_chunk_buffers / accept_chunk_buffer /
+#      snapshot_* 等），内核外调用者因此能绕过封装直改存储。P4-4 将其降为内部，
+#      并给无限层补了两个**封装后的公开入口**：patch_lod_block / apply_ready_results。
+#
+# 锁：Scripts/Test/test_voxel_kernel_contract.gd 的 VOXEL_DATA_PUBLIC_API /
+#     VOXEL_DATA_INTERNAL_PROTOCOLS 与本清单一一对应（多一个少一个都失败）。
+# ============================================================================
+
 ## 材质数组 (索引即材质ID，使用 VoxelMaterial)
 @export var materials: Array[VoxelMaterial] = []
 
@@ -169,6 +225,55 @@ func mark_chunk_dirty(ck: Vector3i) -> void:
 	_dirty.mark(0, ck, VoxelDirtyLedger.MESH)
 
 
+## 让一个 chunk 的**来源数据**作废：丢掉内存副本，下次取数重新按"流 > 生成器"读入。
+##
+## 【为什么内核必须提供这一条】数据源不是常量：QVoxelier 里用户手绘一笔，该块要重新求值
+## 再重新生成；运行时改程序化世界的参数同理。过去唯一的"重取"入口是 unload_chunk()，
+## 而它会先把内存缓冲**写回流**（把生成结果固化成用户数据），此后该块永远不会再重新生成
+## —— 那是**卸载**语义，不是**失效**语义，两者混用会让程序化地形被"冻结"在第一帧的形态。
+##
+## 【为什么连 LOD 一起失效】粗层块由 LOD0 降采样而来；LOD0 换了而粗层不换，远处就继续显示旧形状。
+##
+## 调用方（渲染器 / 编辑器）拿到脏账后照常 request_update()，实际重取由流式泵按需发起
+## （见 preload_chunk → _async.request），所以本方法是"作废"而非"同步重载"。
+func invalidate_chunk_source(ck: Vector3i) -> void:
+	# 在途 / 就绪登记属于旧内容，留着会被回填进已作废的块（与换源时 _async.clear() 同理）
+	_async.cancel(ck, 0)
+	_chunk_buffers.erase(ck)
+	_chunk_voxel_counts.erase(ck)
+	# 伤害账随内容一起作废：重新生成后的形态与旧账无关，留着会变成幽灵伤害
+	_damage.erase_chunk(ck)
+	invalidate_lod_for_chunk(ck)
+	# 待写盘标记随内存副本一起清（没有缓冲可写）；MESH 标记必须留，否则旧网格不会被清掉
+	_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
+	_dirty.mark(0, ck, VoxelDirtyLedger.MESH)
+	_mark_neighbors_dirty(ck)
+
+
+## 让一个**体素范围**覆盖的所有 chunk 的来源数据作废（闭区间，含端点）。返回覆盖的 chunk 数。
+##
+## 【为什么要有范围形式】单块形式要求调用方自己把"改了哪些体素"翻成 chunk 键，而"体素范围 →
+## chunk 键"是数据层的换算（`VoxelChunk.chunk_of` + 越界语义），让每个消费者各写一遍只会
+## 各自漏掉边界情形。本函数与 `get_voxels_in_box` / `remove_voxels_in_box` / `ensure_box_loaded`
+## 同族：单块/单点能力 + 一个范围便利形式，范围形式只做换算与转发，语义一字不差。
+##
+## 【典型调用方：编辑器的一笔手势】QVoxVoxelEditCommand 封口时给出 block 粒度的脏范围
+## （dirty_lo..dirty_hi），视口把它交给本函数即可；范围外的 chunk 缓冲保留旧内容 ——
+## 那些内容对未编辑区域仍然正确，故不必整对象重算。
+func invalidate_chunk_source_range(lo: Vector3i, hi: Vector3i) -> int:
+	var a := Vector3i(mini(lo.x, hi.x), mini(lo.y, hi.y), mini(lo.z, hi.z))
+	var b := Vector3i(maxi(lo.x, hi.x), maxi(lo.y, hi.y), maxi(lo.z, hi.z))
+	var c0 := _chunk_of(a)
+	var c1 := _chunk_of(b)
+	var n := 0
+	for cz in range(c0.z, c1.z + 1):
+		for cy in range(c0.y, c1.y + 1):
+			for cx in range(c0.x, c1.x + 1):
+				invalidate_chunk_source(Vector3i(cx, cy, cz))
+				n += 1
+	return n
+
+
 ## 该 chunk 是否已标脏待重建。**不取走**（取走并清空请用 get_dirty_chunks）。
 func is_chunk_mesh_dirty(ck: Vector3i) -> bool:
 	return _dirty.has(0, ck, VoxelDirtyLedger.MESH)
@@ -213,7 +318,7 @@ static func _layer(layers: Array[Dictionary], level: int) -> Dictionary:
 
 
 ## 失效体素所在 chunk 对应的所有更高层 LOD block（LOD0 数据变化后调用）。
-## 仅失效网格重建（数据回填/程序化生成也会触发，见 accept_chunk_buffer）；
+## 仅失效网格重建（数据回填/程序化生成也会触发，见 _accept_chunk_buffer）；
 ## 用户编辑额外标记 modified 用 mark_lod_modified*。
 func invalidate_lod(pos: Vector3i) -> void:
 	var ck := _chunk_of(pos)
@@ -620,7 +725,7 @@ func get_vertical_half_span() -> int:
 ##   流里已存 → 同步直读。存储取数是确定的、快的（QVoxStream 索引常驻内存），
 ##             没有理由为此绕一趟异步队列。
 ##   只有生成器 → 交给异步。生成慢，而网格 / LOD halo 会成片调用它，
-##             同步生成会把主线程卡死；就绪后由 accept_chunk_buffer 回填。
+##             同步生成会把主线程卡死；就绪后由 _accept_chunk_buffer 回填。
 func preload_chunk(chunk_key: Vector3i) -> bool:
 	if _chunk_buffers.has(chunk_key):
 		return true
@@ -640,10 +745,11 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 	return false
 
 
-## 回填统一异步流式结果（程序化后台生成 / 文件流 region 读盘，主线程调用）。
+## 【内部】回填统一异步流式结果（程序化后台生成 / 文件流 region 读盘，主线程调用）。
 ## 按 lod 分流：lod=0 存全精度 chunk；lod>=1 存粗层 32³ 大格数据。
 ## 已存在则忽略。与 preload_chunk 不同：数据来自异步队列，无需再走 stream.load_chunk。
-func accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int = 0) -> void:
+## 内核外请用公开入口 apply_ready_results（poll + accept 的封装）。
+func _accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int = 0) -> void:
 	if lod == 0:
 		if _chunk_buffers.has(chunk_key):
 			return
@@ -711,13 +817,14 @@ func get_loaded_chunk_keys() -> Array[Vector3i]:
 	return keys
 
 
-## 内存中的 chunk 缓冲字典（chunk_key → PackedInt32Array(CHUNK_VOLUME)）。
+## 【内部】内存中的 chunk 缓冲字典（chunk_key → PackedInt32Array(CHUNK_VOLUME)）。
 ##
 ## **仅供原生批量接口直接读取**（C++ 侧按字典取缓冲，省掉逐体素走 GDScript 字典查询）；
 ## 不要持有引用、也不要就地改写——写入请走 set_voxel / set_voxels_bulk。
 ## 之所以返回内部字典而非副本：这些调用点每次都是整世界量级的读取，拷贝一份 32³×N 的
 ## 缓冲比"绕过封装"代价更大，故把这条通道显式化并写清约束，而不是让它散落成私有访问。
-func get_chunk_buffers() -> Dictionary:
+## 内核外调用者拿不到整表：粗层增量重算请走 patch_lod_block。
+func _chunk_buffers_view() -> Dictionary:
 	return _chunk_buffers
 
 
@@ -725,14 +832,14 @@ func get_chunk_buffers() -> Dictionary:
 # 逐体素累计伤害账（体素相邻状态，随 chunk 生命周期同步）
 # ----------------------------------------------------------------------------
 
-## 累计伤害缓冲字典（chunk_key -> PackedFloat32Array(CHUNK_VOLUME)）。
-## 与 get_chunk_buffers 同样**仅供原生批量接口直接读写**。
-func get_damage_buffers() -> Dictionary:
+## 【内部】累计伤害缓冲字典（chunk_key -> PackedFloat32Array(CHUNK_VOLUME)）。
+## 与 _chunk_buffers_view 同样**仅供原生批量接口直接读写**。
+func _damage_buffers_view() -> Dictionary:
 	return _damage.buffers()
 
 
-## 写回原生伤害内核修改过的伤害缓冲（契约同 remove_voxels_bulk 的 buffers 回写）。
-func set_damage_buffers(changed: Dictionary) -> void:
+## 【内部】写回原生伤害内核修改过的伤害缓冲（契约同 remove_voxels_bulk 的 buffers 回写）。
+func _set_damage_buffers(changed: Dictionary) -> void:
 	_damage.write_back(changed)
 
 
@@ -758,9 +865,9 @@ func clear_all_damage() -> void:
 	_damage.clear_all()
 
 
-## 指定 LOD 层（level >= 1）的粗层大格数据字典（block_key → PackedInt32Array(LOD_GRID³)）。
-## 与 get_chunk_buffers 同样**仅供原生批量接口读取**。
-func get_lod_buffers(level: int) -> Dictionary:
+## 【内部】指定 LOD 层（level >= 1）的粗层大格数据字典（block_key → PackedInt32Array(LOD_GRID³)）。
+## 与 _chunk_buffers_view 同样**仅供原生批量接口读取**；内核外的粗层重算走 patch_lod_block。
+func _lod_buffers_view(level: int) -> Dictionary:
 	var idx := level - 1
 	if idx < 0 or idx >= _coarse_buffers.size():
 		return {}
@@ -993,10 +1100,10 @@ func shift_origin(offset: Vector3i) -> void:
 
 
 
-## 获取 chunk 的 34³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
+## 【内部】获取 chunk 的 34³ 密集"光环缓冲"（值 = 材质ID，0 = 空）。
 ## 覆盖 chunk 内部 + 1 体素外缘，供网格生成在子线程中只读使用（独立缓冲，无数据竞态）。
 ## 流式模式下先确保 chunk 及其 27 邻居已加载（跨界面的面可见性需要邻居）。
-func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
+func _chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 	if stream != null:
 		for nz in 3:
 			for ny in 3:
@@ -1005,13 +1112,13 @@ func get_chunk_halo(chunk: Vector3i) -> PackedInt32Array:
 	return VoxelChunkGenerator.build_halo_from_buffers(_chunk_buffers, chunk)
 
 
-## 生成"受影响区域"的 chunk 缓冲深拷贝快照（chunk key → PackedInt32Array 独立副本）。
+## 【内部】生成"受影响区域"的 chunk 缓冲深拷贝快照（chunk key → PackedInt32Array 独立副本）。
 ## 只快照 rebuild_chunks 及其 27 邻居（构建 halo 需要），避免整世界深拷贝。
 ## 主线程一次性调用，随后供各子线程 worker 从快照构建自己的 halo（线程安全只读）。
 ## 流式模式下先把相关 chunk 从磁盘载入内存，确保快照包含磁盘上的数据。
 ## 快照本身由原生 C++ 完成：COW 共享 PackedInt32Array（原子 refcount，worker 只读，
 ## 主线程后续写 buffers 触发写时拷贝）→ 省去逐 chunk 64KB 深拷贝（大场景快照提速）。
-func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
+func _snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 	if stream != null:
 		for ck in rebuild_chunks:
 			for nz in 3:
@@ -1021,11 +1128,11 @@ func snapshot_chunks_halo(rebuild_chunks: Array[Vector3i]) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, rebuild_chunks)
 
 
-## LOD 大块（LOD_GRID³ 大格 = 每格 2^lod 体素，覆盖 2^lod³ 个 chunk）异步生成快照：
+## 【内部】LOD 大块（LOD_GRID³ 大格 = 每格 2^lod 体素，覆盖 2^lod³ 个 chunk）异步生成快照：
 ## 大块覆盖的 2^lod³ 个 chunk + 外扩 ±2^lod 层 chunk（halo 边界大格降采样需要），COW 共享。
 ## 仅 preload 大块自身 chunk（必须）；外部从内存快照（LOD 区数据保留，磁盘不 preload）。
 ## lod=1 即原 LOD1（2×2×2 chunk）。
-func snapshot_lod_block_chunks(block_key: Vector3i, lod: int) -> Dictionary:
+func _snapshot_lod_block_chunks(block_key: Vector3i, lod: int) -> Dictionary:
 	var chunks_per_axis := 1 << lod
 	var cks: Array[Vector3i] = []
 	var seen := {}
@@ -1047,11 +1154,11 @@ func snapshot_lod_block_chunks(block_key: Vector3i, lod: int) -> Dictionary:
 	return NativeLoader.snapshot_chunks_halo(_chunk_buffers, cks)
 
 
-## 纯只读 chunk halo 快照：不 preload / 不写任何状态，仅快照 _chunk_buffers 中已存在的数据
-## （缺失 chunk 视为空——真空区域正常）。与 snapshot_lod_block_chunks 一致地外扩 ±2^lod 层
+## 【内部】纯只读 chunk halo 快照：不 preload / 不写任何状态，仅快照 _chunk_buffers 中已存在的数据
+## （缺失 chunk 视为空——真空区域正常）。与 _snapshot_lod_block_chunks 一致地外扩 ±2^lod 层
 ## 收集 halo 邻居 chunk：LOD halo 构建需要边界邻居数据（6 外缘面），否则 block 边界缺面 → 空洞。
 ## 调用方在**主线程**构造好后交给 worker 只读（worker 不得触碰活动字典）。
-func snapshot_lod_block_chunks_readonly(block_key: Vector3i, lod: int) -> Dictionary:
+func _snapshot_lod_block_chunks_readonly(block_key: Vector3i, lod: int) -> Dictionary:
 	var chunks_per_axis := 1 << lod
 	var cks: Array[Vector3i] = []
 	var seen := {}
@@ -1129,7 +1236,7 @@ func store_lod_block(level: int, block_key: Vector3i, buf: PackedInt32Array) -> 
 ##
 ## 【为什么必须一起清】COARSE_MODIFIED / 脏大格区域都以 block key 为键，
 ## 块数据被擦除后它们不会自动消失 → 随探索/编辑**无界增长**（origin shift 还会把它们整表平移）。
-## 更隐蔽的是残留 `modified=true` 会让 `can_mesh_lod_block_standalone()` 永久返回 false，
+## 更隐蔽的是残留 `modified=true` 会让 `_can_mesh_lod_block_standalone()` 永久返回 false，
 ## 使该 block 此后**永远只能走全量 LOD0 降采样**（金字塔增量失效）。
 ##
 ## 【为什么清 modified 是安全的】粗层数据的**唯一**生产者是 `_start_lod_downsample`，
@@ -1173,9 +1280,33 @@ func is_lod_block_modified(level: int, key: Vector3i) -> bool:
 	return _dirty.has(level, key, VoxelDirtyLedger.COARSE_MODIFIED)
 
 
-## 该粗层 block 能否**只靠自身与 6 邻居的大格数据**网格化（无需回退 LOD0 降采样）。
+## 【金字塔增量】重算该粗层 block 的脏大格并就地更新其数据（消费脏区域）。
+## level==1 从 LOD0 chunk 降采样；level>=2 从上一层粗层降采样（省 64 倍 LOD0 读取）。
+## 返回 true = 确实 patch 了（调用方随后应重建该 block 的 mesh）；false = 无脏区域或 block 不存在。
+##
+## 【为何收进数据层】源缓冲（_chunk_buffers / _coarse_buffers）是内部存储，内核外不该拿整表；
+## 把"取源 → 重算 → 写回"绑成一个动作，无限层不再触碰 get_chunk_buffers / get_lod_buffers。
+func patch_lod_block(level: int, block_key: Vector3i) -> bool:
+	if level < 1:
+		return false
+	var region := get_lod_dirty_region(level, block_key)
+	if region.is_empty() or not has_lod_block(level, block_key):
+		return false
+	var coarse := get_lod_block(level, block_key)
+	var patched: PackedInt32Array
+	if level == 1:
+		patched = VoxelChunkGenerator.patch_lod_block(
+			_chunk_buffers, block_key, level, coarse, region[0], region[1])
+	else:
+		patched = VoxelChunkGenerator.patch_lod_block_from_lod(
+			_lod_buffers_view(level - 1), block_key, level, coarse, region[0], region[1])
+	set_lod_block(level, block_key, patched)
+	return true
+
+
+## 【内部】该粗层 block 能否**只靠自身与 6 邻居的大格数据**网格化（无需回退 LOD0 降采样）。
 ## 供渲染器在派发 worker 前判定数据来源，从而把快照构造留在主线程（线程安全）。
-func can_mesh_lod_block_standalone(level: int, key: Vector3i) -> bool:
+func _can_mesh_lod_block_standalone(level: int, key: Vector3i) -> bool:
 	if is_lod_block_modified(level, key) or not has_lod_block(level, key):
 		return false
 	for d in NEIGHBORS_6:
@@ -1274,8 +1405,8 @@ func is_chunk_pending(chunk_key: Vector3i, lod: int = 0) -> bool:
 	return false
 
 
-## 粗 LOD 数据块快照（block 自身 + 27 邻居大格，COW 共享）：供独立数据层网格生成 worker 使用。
-func snapshot_lod_block_data(block_key: Vector3i, level: int) -> Dictionary:
+## 【内部】粗 LOD 数据块快照（block 自身 + 27 邻居大格，COW 共享）：供独立数据层网格生成 worker 使用。
+func _snapshot_lod_block_data(block_key: Vector3i, level: int) -> Dictionary:
 	var out := {}
 	var idx := level - 1
 	if idx >= _coarse_buffers.size():
@@ -1293,6 +1424,19 @@ func snapshot_lod_block_data(block_key: Vector3i, level: int) -> Dictionary:
 ## 主线程批量取回异步就绪的 chunk/block 数据。返回 [[lod, key, PackedInt32Array], ...]。
 func poll_all_ready(max_count: int) -> Array:
 	return _async.poll_ready(max_count)
+
+
+## 主线程批量取回异步结果并**直接回填**（poll + accept 的封装），返回回填条数。
+##
+## 这是内核外驱动数据供给的**唯一公开入口**：缓冲格式校验、体素计数、网格脏标记、
+## 粗层失效全在数据层内部完成，调用方不必也不该持有 accept 那一半协议。
+## 典型用法（无限层每帧）：`data.apply_ready_results(load_per_frame * 2)`。
+func apply_ready_results(max_count: int) -> int:
+	var applied := 0
+	for r in _async.poll_ready(max_count):
+		_accept_chunk_buffer(r[1], r[2], r[0])
+		applied += 1
+	return applied
 
 
 # ----------------------------------------------------------------------------

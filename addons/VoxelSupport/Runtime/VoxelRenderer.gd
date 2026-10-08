@@ -909,7 +909,7 @@ func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
 	var taken := 0
 	while taken < visible.size():
 		var endi := mini(taken + 4, visible.size())
-		snapshot.merge(data.snapshot_chunks_halo(visible.slice(taken, endi)))
+		snapshot.merge(data._snapshot_chunks_halo(visible.slice(taken, endi)))
 		taken = endi
 		if taken < visible.size() and (Time.get_ticks_usec() - t0) / 1000.0 > budget_ms:
 			break

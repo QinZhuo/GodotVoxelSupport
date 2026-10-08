@@ -31,6 +31,13 @@ extends PcgDetail
 @export var protect_ground: bool = true
 ## 保护顶层不挖。留给需要完整顶面（地板、屋顶）的模型。
 @export var protect_top: bool = false
+## 只侵蚀**朝上**的表面（跳过正上方非空的体素）。
+##
+## 【为什么需要这个开关】侵蚀用邻域暴露度当判据，而**崖壁天然是高暴露**
+## （上、前、后都空），于是崖壁被啃出的缺口是竖条状的 —— 在 20 单位宽的崖面上
+## 看就是"竖条纹 / Pipes"，比不侵蚀更难看。把侵蚀限制在水平面（台顶、缓坡、台阶）
+## 才只得到"表面不平"，而不破坏侧壁的连续轮廓。
+@export var up_only: bool = false
 
 ## 阈值上限：即便参数拉满也不会把侵蚀概率推到 1，
 ## 否则 strength=1 时会整片消失（对树这类稀疏模型是灾难）。
@@ -50,6 +57,9 @@ func apply(volume: PackedInt32Array, grid_size: Vector3i, seed: int) -> void:
 				if protect_ground and y == 0:
 					continue
 				if protect_top and y == grid_size.y - 1:
+					continue
+				# 便宜筛子放前面：挑朝上面只是一次数组访问，而暴露度要 6 次。
+				if up_only and not PcgDetail.open_above(volume, grid_size, x, y, z):
 					continue
 				var exp := PcgDetail.exposure(volume, grid_size, x, y, z)
 				if exp < min_exposure:

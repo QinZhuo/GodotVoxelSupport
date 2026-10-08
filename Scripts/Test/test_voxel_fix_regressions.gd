@@ -164,9 +164,9 @@ func test_unload_chunk_drops_its_damage() -> void:
 	data.set_voxel(pos, 5)
 	_seed_damage(data, pos, 12.0)
 	var ck := VoxelChunk.chunk_of(pos)
-	assert_true(data.get_damage_buffers().has(ck), "前置：伤害账里有该 chunk")
+	assert_true(data._damage_buffers_view().has(ck), "前置：伤害账里有该 chunk")
 	data.unload_chunk(ck)
-	assert_false(data.get_damage_buffers().has(ck), "卸载 chunk 必须丢弃其伤害账（防无界增长）")
+	assert_false(data._damage_buffers_view().has(ck), "卸载 chunk 必须丢弃其伤害账（防无界增长）")
 
 
 func test_clear_drops_all_damage() -> void:
@@ -175,7 +175,7 @@ func test_clear_drops_all_damage() -> void:
 	data.set_voxel(pos, 5)
 	_seed_damage(data, pos, 3.0)
 	data.clear()
-	assert_eq(data.get_damage_buffers().size(), 0, "clear 必须清空伤害账")
+	assert_eq(data._damage_buffers_view().size(), 0, "clear 必须清空伤害账")
 
 
 func test_shift_origin_shifts_damage_keys() -> void:
@@ -405,13 +405,13 @@ func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
 # 辅助
 # ----------------------------------------------------------------------------
 
-## 在指定位置种入累计伤害（直接写公开的伤害账，避免依赖原生破坏内核）。
+## 在指定位置种入累计伤害（直接写数据层的伤害账内部协议，避免依赖原生破坏内核）。
 func _seed_damage(data: VoxelData, pos: Vector3i, amount: float) -> void:
 	var ck := VoxelChunk.chunk_of(pos)
 	var buf := PackedFloat32Array()
 	buf.resize(VOL)
 	buf[VoxelChunk.buf_index(pos.x - ck.x * CHUNK, pos.y - ck.y * CHUNK, pos.z - ck.z * CHUNK)] = amount
-	data.get_damage_buffers()[ck] = buf
+	data._damage_buffers_view()[ck] = buf
 
 
 ## 读取指定位置的累计伤害（无该 chunk 视为 0）。

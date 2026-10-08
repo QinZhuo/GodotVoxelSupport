@@ -439,6 +439,180 @@ func test_source_format_dispatch() -> void:
 
 
 # ----------------------------------------------------------------------------
+# 图层与相机（P4-3：NODE 下的工程数据，§5.1）
+# ----------------------------------------------------------------------------
+# 这一组钉死三件事：
+#   ① 图层/相机的字段**逐字段存活**，缺省只在缺失时补（文件里明写的 false 不能被改回来）；
+#   ② 坏数据只丢它自己 —— 非对象项、越界 layer、不在白名单的投影都不该拖垮整块；
+#   ③ 编辑模型（QVoxWorld）与文件之间的往返一致，且删层会把对象的 layer 一起搬。
+
+func test_layers_and_cameras_roundtrip() -> void:
+	var bytes := QVoxFile.serialize(_make_doc_with_engineering_data())
+	var rep := QVoxFile.QVoxReport.new()
+	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	assert_true(doc != null, "应解析成功（%s）" % rep.summary())
+	if doc == null:
+		return
+	var sg := doc.scene
+
+	assert_eq(sg.layers.size(), 2, "两条图层都要在")
+	assert_eq(sg.layers[0]["name"], "base")
+	assert_eq(sg.layers[0]["visible"], true, "缺失的 visible 补缺省")
+	assert_eq(sg.layers[0]["locked"], false, "缺失的 locked 补缺省")
+	assert_eq(sg.layers[1]["visible"], false, "文件里明写的 false 不能被缺省值 true 改回来")
+	assert_eq(sg.layers[1]["locked"], true)
+	# JSON 数字读回一律是 float（[1,2,3] → [1.0,2.0,3.0]），这不是丢精度，是 JSON 的类型事实。
+	assert_eq(sg.layers[1]["color"], [1.0, 2.0, 3.0], "未知键原样保留（同 HEAD 的未知键策略）")
+
+	assert_eq(sg.cameras.size(), 2, "两台相机都要在")
+	assert_eq(sg.cameras[0]["name"], "front")
+	assert_eq(sg.cameras[0]["projection"], "ortho")
+	assert_eq(sg.cameras[0]["size"], 128, "正交视高是可选字段，写了就留")
+	assert_eq(sg.cameras[1]["projection"], "persp", "缺失的 projection 补缺省")
+	assert_false(sg.cameras[1].has("size"), "没写的可选字段不凭空补出来（未设 ≠ 设成 0）")
+
+	assert_eq(_find_node(sg.nodes, "body").get("layer"), 1, "节点层下标要存活")
+	assert_false(_find_node(sg.nodes, "root").has("layer"),
+			"没写 layer 的节点不该被补上 0 —— 缺省即 0，写 0 是冗语（P2）")
+
+
+func test_layers_lenient_and_validated() -> void:
+	var doc := _make_doc()
+	doc.node = {
+		QVoxSpec.NODE_LAYERS_KEY: ["legacy", 42, {"name": "ok"}],
+		QVoxSpec.NODE_CAMERAS_KEY: [{"projection": "weird"}, {"projection": "ortho"}],
+		"nodes": [
+			{"name": "a", "kind": "model", "model_id": 0, "layer": 9},
+			{"name": "b", "kind": "model", "model_id": 0, "layer": 1},
+		],
+	}
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	var sg := parsed.scene
+
+	# 字符串层名（§5.1 改版前的写法）按 {"name": …} 救回；数字项丢弃。两者都不该拖垮整块。
+	assert_eq(sg.layers.size(), 2, "字符串项救回、非对象项丢弃")
+	assert_eq(sg.layers[0]["name"], "legacy")
+	assert_true(_warnings_contain(rep, "不是对象"), "丢弃非对象项要告警")
+
+	assert_eq(sg.cameras[0]["projection"], "persp", "不在白名单的投影按缺省处理")
+	assert_true(_warnings_contain(rep, "白名单"), "越白名单要告警")
+
+	assert_eq(sg.nodes.size(), 2, "layer 越界只丢字段，不该牵连节点")
+	assert_false(_find_node(sg.nodes, "a").has("layer"), "越界的 layer 被丢弃")
+	assert_eq(_find_node(sg.nodes, "b").get("layer"), 1, "合法 layer 保留")
+	assert_true(_warnings_contain(rep, "layer 越界"), "越界要告警")
+
+
+## "只有相机、还没有对象"是新建工程的常态，不该在 nodes 的提前返回里被丢掉。
+func test_cameras_survive_without_nodes() -> void:
+	var doc := _make_doc()
+	doc.node = {QVoxSpec.NODE_CAMERAS_KEY: [{"name": "front"}]}
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	assert_eq(parsed.scene.cameras.size(), 1, "没有 nodes 键不该连相机一起丢")
+	assert_eq(parsed.scene.cameras[0]["name"], "front")
+	assert_true(parsed.scene.nodes.is_empty(), "节点树为空")
+	assert_false(_warnings_contain(rep, "nodes"), "缺 nodes 键 = 空世界，不是错误")
+
+
+func test_world_layers_edit_model() -> void:
+	var w := QVoxWorld.create_empty()
+	var mat := w.add_material(Color.RED)
+	var o := w.create_object("body")
+	o.fill_box(Vector3i.ZERO, Vector3i(3, 3, 3), mat)
+
+	assert_eq(w.layer_count(), 1, "空数组 = 只有一条隐含缺省层")
+	assert_true(w.layers().is_empty(), "新建世界不写 layers 键（缺省才是常态）")
+
+	var l1 := w.add_layer("detail")
+	assert_eq(l1, 1, "第一层显式图层是下标 1 —— 0 已被隐含缺省层占着")
+	assert_eq(w.layer_count(), 2)
+	assert_eq(w.layer_field(0, "name"), QVoxSpec.LAYER_DEFAULT_NAME, "隐含缺省层被实体化")
+
+	# 改一个字段要能撤销：面板把它包成 QVoxPropertyCommand(world, &"node")。
+	# 这一条同时钉死了"写入必须整体替换"——就地改的话 before 会跟着变，撤销就撤了个寂寞。
+	var cmd := QVoxPropertyCommand.begin(w, &"node")
+	assert_true(w.set_layer_field(0, "visible", false), "值变了 → 应产生撤销单位")
+	assert_false(w.set_layer_field(0, "visible", false), "值没变 → 不该占一次撤销")
+	assert_true(cmd.commit(), "整体替换 node 下的数组，浅快照才抓得住改前值")
+	assert_eq(w.layer_field(0, "visible"), false)
+	cmd.undo()
+	assert_eq(w.layer_field(0, "visible"), true, "撤销回到改前值")
+	cmd.redo()
+	assert_eq(w.layer_field(0, "visible"), false)
+
+	# 删层必须把对象的 layer 一起左移，否则存盘后被判越界、静默漂移回缺省层。
+	o.layer = l1
+	var l2 := w.add_layer("third")
+	o.layer = l2
+	assert_eq(o.layer, 2)
+	assert_true(w.remove_layer(1), "删中间那层")
+	assert_eq(w.layer_count(), 2)
+	assert_eq(o.layer, 1, "原来指向 2 的对象左移到 1")
+	assert_eq(w.layer_field(1, "name"), "third")
+
+
+func test_world_engineering_data_roundtrip() -> void:
+	var w := QVoxWorld.create_empty()
+	var mat := w.add_material(Color.RED)
+	var o := w.create_object("body")
+	o.fill_box(Vector3i.ZERO, Vector3i(3, 3, 3), mat)
+	var l1 := w.add_layer("detail")
+	o.layer = l1
+	w.add_camera("front")
+	assert_true(w.set_camera_field(0, "projection", "ortho"), "相机改成正交")
+	assert_true(w.set_camera_field(0, "size", 128), "正交视高")
+
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(
+			QVoxFile.serialize(w.to_document()), true, rep, true)
+	assert_true(rep.warnings.is_empty(), "回环不该有任何告警（%s）" % str(rep.warnings))
+	var w2 := QVoxWorld.from_document(parsed)
+
+	assert_eq(w2.layers().size(), 2, "图层条数")
+	for i in 2:
+		for k in ["name", "visible", "locked"]:
+			assert_eq(w2.layer_field(i, k), w.layer_field(i, k), "层 %d 的 %s 要逐字段相等" % [i, k])
+	assert_eq(w2.cameras().size(), 1, "相机条数")
+	assert_eq(w2.camera_field(0, "name"), "front")
+	assert_eq(w2.camera_field(0, "projection"), "ortho")
+	assert_eq(int(w2.camera_field(0, "size")), 128, "正交视高存活（JSON 数字读回是 float）")
+
+	assert_eq(w2.objects.size(), 1, "对象条数")
+	assert_eq(w2.objects[0].object_name, "body")
+	assert_eq(w2.objects[0].layer, l1, "层归属存活")
+
+
+# --- 本节的局部辅助 ---------------------------------------------------------
+
+func _make_doc_with_engineering_data() -> QVoxFile.QVoxDocument:
+	var doc := _make_doc()
+	doc.node = {
+		QVoxSpec.NODE_LAYERS_KEY: [
+			{"name": "base"},
+			{"name": "detail", "visible": false, "locked": true, "color": [1, 2, 3]},
+		],
+		QVoxSpec.NODE_CAMERAS_KEY: [
+			{"name": "front", "projection": "ortho", "size": 128},
+			{"name": "persp_cam"},
+		],
+		"nodes": [
+			{"name": "root", "kind": "group", "children": [1]},
+			{"name": "body", "kind": "model", "model_id": 0, "layer": 1},
+		],
+	}
+	return doc
+
+
+func _find_node(nodes: Array, node_name: String) -> Dictionary:
+	for n in nodes:
+		if n is Dictionary and str((n as Dictionary).get("name", "")) == node_name:
+			return n
+	return {}
+
+
+# ----------------------------------------------------------------------------
 # 辅助
 # ----------------------------------------------------------------------------
 

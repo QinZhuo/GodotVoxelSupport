@@ -54,6 +54,18 @@ extends PcgDetail
 @export_range(0, 6) var min_exposure: int = 1
 ## 保护最底层不染色。
 @export var protect_ground: bool = true
+## 只染**朝上**的表面（硬过滤"正上方非空"的体素）。
+## 与 up_bias 的区别：up_bias 只是"更容易命中"，朝下的面仍可能被染到；
+## up_only 是硬性排除 —— 用在"苔藓只铺在台顶、绝不爬上崖壁"这类明确要求上。
+@export var up_only: bool = false
+## 挑档方式（仅在 `material_ids` 多于 1 档时生效）：
+##   false = 分块哈希 + 噪声微扰（默认）。档位分布最均匀（三档各约 1/3），
+##           同一格内同色 → 成片结构；适合**小尺度颗粒**（每格几个体素）。
+##   true  = 直接用噪声挑档。边界是软的、档位分布偏中间档，
+##           但**没有笔直的格线**；适合**大尺度平缓表面**——
+##           宽 100 体素的台面用哈希会排出方格迷彩，20 单位宽的崖壁上看像"贴图错位"，
+##           此时必须换噪声才读作"这片岩层偏亮、那片偏暗"。
+@export var shade_noise: bool = false
 
 
 func apply(volume: PackedInt32Array, grid_size: Vector3i, seed: int) -> void:
@@ -86,10 +98,14 @@ func apply(volume: PackedInt32Array, grid_size: Vector3i, seed: int) -> void:
 					continue
 				if protect_ground and y == 0:
 					continue
+				# 便宜筛子放前面：挑朝上面只是一次数组访问，而噪声与暴露度都更贵。
+				var is_up := PcgDetail.open_above(volume, grid_size, x, y, z)
+				if up_only and not is_up:
+					continue
 				# 阈值：朝上的表面更易被染（阈值下调），朝下的更难（阈值上调）。
 				var threshold := coverage
 				if up_bias > 0.0:
-					if PcgDetail.open_above(volume, grid_size, x, y, z):
+					if is_up:
 						threshold *= inv
 					else:
 						threshold *= 1.0 + up_bias
@@ -101,6 +117,9 @@ func apply(volume: PackedInt32Array, grid_size: Vector3i, seed: int) -> void:
 					continue
 				if n_ramp == 1:
 					volume[idx] = ramp[0]
+				elif shade_noise:
+					volume[idx] = ramp[clampi(int(sample01(shade, x, y, z) * float(n_ramp)),
+							0, n_ramp - 1)]
 				else:
 					volume[idx] = ramp[_shade_index(x, y, z, shade, shade_cell, seed, n_ramp)]
 

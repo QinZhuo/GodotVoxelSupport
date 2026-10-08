@@ -12,8 +12,8 @@ extends TestCase
 ## 若确实要合法地改结果（内核调优等），必须同期更新常量并说明原因
 ## （与 test_voxel_mesh_kernel 的黄金三角形数同一约定）。
 ##
-## 【覆盖路径】PcgModelGenerator(PcgTerrain) → VoxelData.accept_chunk_buffer
-##   → get_all_chunk_keys / get_chunk_buffers → VoxelMeshGenerator.generate_arrays_from_chunks
+## 【覆盖路径】PcgModelGenerator(PcgTerrain) → VoxelData._accept_chunk_buffer
+##   → get_all_chunk_keys / _chunk_buffers_view → VoxelMeshGenerator.generate_arrays_from_chunks
 ##   （内部 = build_halo_from_buffers + NativeLoader.generate_chunk_dense，
 ##    与 VoxelRenderer 逐 chunk 构建用的是同一条内核）。
 ##
@@ -92,7 +92,7 @@ func _build_data(seed_v: int) -> VoxelData:
 		for cy in range(0, last.y + 1):
 			for cx in range(0, last.x + 1):
 				var ck := Vector3i(cx, cy, cz)
-				d.accept_chunk_buffer(ck, gen.generate(ck, 0))
+				d._accept_chunk_buffer(ck, gen.generate(ck, 0))
 	return d
 
 
@@ -107,7 +107,7 @@ func _build_arrays(d: VoxelData) -> Dictionary:
 func _sorted_chunks(d: VoxelData) -> Dictionary:
 	var keys := d.get_all_chunk_keys()
 	keys.sort_custom(func(a, b): return _key_rank(a) < _key_rank(b))
-	var bufs := d.get_chunk_buffers()
+	var bufs := d._chunk_buffers_view()
 	var out := {}
 	for k in keys:
 		out[k] = bufs[k]

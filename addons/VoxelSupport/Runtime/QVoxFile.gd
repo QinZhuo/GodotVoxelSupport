@@ -102,8 +102,12 @@ class QVoxDocument extends RefCounted:
 class QVoxSceneGraph extends RefCounted:
 	## 保留下来的节点（Dictionary 原样，下标已重编为连续、可安全遍历）。
 	var nodes: Array = []
-	## 层名列表。
+	## 图层（§5.1）：每项都是 Dictionary，缺失键已按 QVoxSpec.LAYER_FIELD_DEFAULTS 补齐，
+	## 未知键原样保留。**空数组**表示文件没写 layers 键 —— 此时世界只有一条隐含缺省层，
+	## 故节点上写 `"layer": 0` 仍然合法（判据见 _build_scene）。
 	var layers: Array = []
+	## 相机书签（§5.1）。相机是纯工程数据，不参与几何渲染，故为空时一切照旧。
+	var cameras: Array = []
 	## 保留下来的动画（frames 已过滤）。
 	var animations: Array = []
 	## 因引用无效被丢弃的节点数（诊断用）。
@@ -111,6 +115,8 @@ class QVoxSceneGraph extends RefCounted:
 	## 因引用无效被丢弃的帧数（诊断用）。
 	var dropped_frames := 0
 
+	## 【只算"有几何/有动画"】图层与相机不算：一个"只有相机、还没有对象"的工程
+	## 是合法状态（新建即如此），但导入器据此判断"这文件有没有可摆的东西"。
 	func is_empty() -> bool:
 		return nodes.is_empty() and animations.is_empty()
 
@@ -827,9 +833,20 @@ static func _read_type(bytes: PackedByteArray, at: int) -> String:
 ## 从 doc.node 构造已校验的只读视图。丢弃的节点/帧数记入 rep.warnings。
 static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 	var sg := QVoxSceneGraph.new()
+	# 图层与相机**先于 nodes**处理：它们不引用任何东西，且"有相机、还没摆对象"是新建工程的
+	# 常态。若放在下面 nodes 的提前返回之后，这种文件一存一读就会把 cameras 丢掉。
+	sg.layers = _normalize_object_array(
+			doc.node.get(QVoxSpec.NODE_LAYERS_KEY), QVoxSpec.LAYER_FIELD_DEFAULTS,
+			QVoxSpec.NODE_LAYERS_KEY, rep)
+	sg.cameras = _normalize_object_array(
+			doc.node.get(QVoxSpec.NODE_CAMERAS_KEY), QVoxSpec.CAMERA_FIELD_DEFAULTS,
+			QVoxSpec.NODE_CAMERAS_KEY, rep,
+			{"projection": QVoxSpec.ALLOWED_CAMERA_PROJECTIONS})
 	var raw_nodes: Variant = doc.node.get("nodes")
 	if not (raw_nodes is Array):
-		rep.warnings.append("NODE 缺少 nodes 数组，已忽略场景图")
+		# 只在"写了 nodes 但不是数组"时告警；键缺失 = 空世界，不是错误。
+		if doc.node.has("nodes"):
+			rep.warnings.append("NODE 的 nodes 不是数组，已忽略节点树")
 		return sg
 	var arr: Array = raw_nodes
 	var count := arr.size()
@@ -905,7 +922,26 @@ static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 
 	sg.nodes = kept
 	sg.dropped_nodes = dropped
-	sg.layers = doc.node.get("layers", []) if doc.node.get("layers") is Array else []
+
+	# 4.5) 层下标必须落在图层范围内（§7：越界即该**字段**无效，而非该节点无效）。
+	#      只丢字段、不丢节点 —— 图层是组织信息，不该因为它丢掉整个模型。
+	#      上界取 max(1, ...)：文件没写 layers 时世界仍有隐含缺省层 0，
+	#      否则最简单的 `"layer": 0` 会被误判成越界。
+	var layer_count := maxi(1, sg.layers.size())
+	var bad_layer := 0
+	for n in kept:
+		if not (n as Dictionary).has("layer"):
+			continue
+		var li := as_index((n as Dictionary).get("layer"))
+		if li < 0 or li >= layer_count:
+			(n as Dictionary).erase("layer")   # 缺省即 0，写 0 是冗语（P2）
+			bad_layer += 1
+		else:
+			# JSON 把整数解析成 float（同 as_index 的注释），这里落成 int，
+			# 免得"读回来是 0.0、写出去变 0"在回环比较里表现为不等。
+			(n as Dictionary)["layer"] = li
+	if bad_layer > 0:
+		rep.warnings.append("NODE 有 %d 个节点的 layer 越界，已按缺省层处理（§7）" % bad_layer)
 
 	# 5) 动画：frames 的键必须是合法（存活的）节点下标。
 	var anims: Variant = doc.node.get("animations")
@@ -951,6 +987,44 @@ static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 			rep.warnings.append("NODE 有 %d 帧因引用无效节点被丢弃（§7）" % dropped_frames)
 
 	return sg
+
+
+## 把 NODE 里的"对象数组"（`layers` / `cameras`）规范成合法项：
+## 丢弃非对象项并记警告，按 defaults 补齐**缺失**键，未知键原样保留。
+##
+## 【为什么字符串项也算合法】`layers` 在本版之前是"名字字符串数组"（§5.1 改版前）。
+## 一个字符串按 `{"name": <str>}` 解读即可，零成本救回；这比"丢弃 + 告警"更贴合
+## §9 的取向：坏引用只丢**它自己**，别连着整块数据一起丢。
+static func _normalize_object_array(raw: Variant, defaults: Dictionary,
+		what: String, rep: QVoxReport, enums := {}) -> Array:
+	var out: Array = []
+	if raw == null:
+		return out
+	if not (raw is Array):
+		rep.warnings.append("NODE 的 %s 不是数组，已忽略" % what)
+		return out
+	for item in raw:
+		var d: Dictionary = {}
+		if item is Dictionary:
+			d = (item as Dictionary).duplicate()
+		elif item is String:
+			d = {"name": item}
+		else:
+			rep.warnings.append("NODE 的 %s 里有一项不是对象，已丢弃" % what)
+			continue
+		for k in defaults:
+			# 只在**缺失**时补。文件里明写的值（含 false）一律不动 ——
+			# 否则 "visible": false 会被缺省值 true 悄悄改回来，且不报错。
+			if not d.has(k):
+				d[k] = defaults[k]
+		# 枚举字段：不在白名单 → 按缺省处理并告警（与 up_axis 同一处置，不拒绝文件）
+		for k in enums:
+			if d.has(k) and not (d[k] in (enums[k] as Array)):
+				rep.warnings.append("NODE 的 %s 有一项 %s=%s 不在白名单，已按缺省处理"
+						% [what, k, str(d[k])])
+				d[k] = defaults[k]
+		out.append(d)
+	return out
 
 
 ## 单个节点"自身"是否有效（不看 children，那在可达性收敛中处理）。

@@ -16,12 +16,13 @@
    `addons/VoxelSupport/Modifier/`，类名前缀统一为 `QVox*`
    （`QVoxWorld` / `QVoxObject` / `QVoxModifier` / `QVoxDomain` / `QVoxEvalContext`）；
    撤销命令（`QVoxCommand` / `QVoxUndoStack` / `QVoxVoxelEditCommand`）在
-   **`QVoxelier/Core/`**（它要引用 `DEVFramework.GameCommand`，而两个插件之间必须零引用）。
+   **`QVoxelier/Command/`**（它要引用 `DEVFramework.GameCommand`，而两个插件之间必须零引用）。
    原 `QVoxRasterizer` 已**折叠**为 `PcgSdfGenerator.rasterize_field()`，不再单独存在。
 2. **插件需要重构**，而不是"一行不改"（见 `docs/REFACTOR_PLAN.md` 的 P0~P4）。
 3. **QVoxelier 是独立仓库**的薄壳应用：一个可运行的独立场景，"根据输入合理调用插件功能"，
    让普通用户能方便地建模。它不实现任何体素算法。
-4. **`.qvox` 是唯一工程文件格式**（qvox 3 起原生承载世界结构，**不兼容 qvox 2**）。
+4. **`.qvox` 是唯一工程文件格式**（世界结构已原生承载在 `qvox: 2` 内；v1 从未有文件落盘，
+   故两处结构改动一并落在 v2，见 `docs/REFACTOR_PLAN.md` §5.3）。
    初稿提过的 ZIP 容器与 `.vstudio` 扩展名均作废。
 5. 术语：顶层容器叫**世界（World）**，不叫"文档（Document）"。
 
@@ -304,8 +305,9 @@ renderer
 │               EditorPlugin / Dock / 视口 / 工具栏 / 参数面板     │
 │               只管 UI，不含算法                                 │
 ├───────────────────────────────────────────────────────────────┤
-│ App/Core 层    QVoxelier/Core（应用能力）                        │
+│ App/Command 层 QVoxelier/Command + Editing（应用能力）           │
 │               QVoxCommand ─ QVoxUndoStack ─ QVoxVoxelEditCommand │
+│               QVoxEditSession：手势 → 命令 → 数据失效 → 刷新     │
 │               （撤销 = 应用能力；extends 框架 GameCommand/History）│
 ├───────────────────────────────────────────────────────────────┤
 │ Modifier 层    addons/VoxelSupport/Modifier（插件内的编辑模型）  │
@@ -353,11 +355,30 @@ addons/VoxelSupport/
 > 原 `Shaders/voxel_raymarch.gdshader`（光线步进渲染器）已删除：全仓无任何引用 —— 没有脚本、
 > 场景或材质指向它，渲染只走 `VoxelRenderer` 的网格路径。
 
+**应用物理布局**（同一把尺子量 QVoxelier）：
+
+```
+QVoxelier/
+├── Command/   撤销命令族：QVoxCommand / QVoxUndoStack / QVoxVoxelEditCommand
+│              / QVoxPropertyCommand / QVoxMacroCommand
+├── Editing/   QVoxEditSession：手势 → 命令 → 数据源失效 → 渲染刷新 的接线
+└── Tool/      画笔工具族：QVoxBrushGeometry（几何）+ QVoxBrushTool（交互）
+```
+
+> **目录名一律单数**（`Command/` 而非 `Commands/`、`Tool/` 而非 `Tools/`），与
+> `addons/DEVFramework/Tool/`、`addons/VoxelSupport/Modifier/` 同一约定：目录名回答的是
+> "这一类东西是什么"，不是"这里有几件东西"。
+>
+> 也**不用 `Core/` 这种包罗万象的名字** —— 它回答不了"新文件该放哪"（任何东西都能自称 core），
+> 于是所有一时想不清归属的文件都会流进去，最后它就是个筐。这与 §4.1 去掉 `Operators/`
+> 的理由是同一条判据：**目录即域，且域要能被名字说清**。`Command/`（可撤销的操作）、
+> `Editing/`（编辑会话）、`Tool/`（交互工具）各自能当场判一个文件该不该进来。
+
 **红线（不可违反）**：
 
 1. 依赖方向只有向下。`addons/VoxelSupport` 与 `addons/DEVFramework` **两插件互不引用**，
    也**永不 import `QVoxelier`**；只有 `QVoxelier` 单向依赖两者。
-2. 因此**撤销命令**（需引用 `GameCommand`）只能待在 `QVoxelier/Core`，不能放进 World 层；
+2. 因此**撤销命令**（需引用 `GameCommand`）只能待在 `QVoxelier/Command`，不能放进 World 层；
    World 层只提供被操作的数据与链，不懂"谁按了 Ctrl+Z"。
 3. QVoxelier 是纯消费者，内核稳定，且 QVoxelier 可以整体删掉而不影响任何现有功能。
 
@@ -489,7 +510,7 @@ Blender 的答案是把"编辑模式改网格"与"物体模式挂修改器"分�
 
 于是两条编辑路径职责彻底清晰：
 - 手绘 → 写 `blocks`，`base_revision++`，手势封口成一条 `QVoxVoxelEditCommand` 入栈；
-- 程序化 → 改 `slot`/`op` 参数，入栈一条参数命令（规划的 `QVoxPropertyCommand`），链的对应前缀被脏化。
+- 程序化 → 改修改器 / 对象属性，入栈一条 `QVoxPropertyCommand`，链的对应部分被脏化。
 
 而**两者可以组合**：手绘一块石头（`blocks`），再挂 SDF 修改器挖洞
 （`slot0.combine = SUBTRACT`）—— 这正是"基础建模能力 + 修改器"的落点，也是
@@ -584,7 +605,7 @@ class Result:
 
 ### 6.2 撤销（`QVoxCommand` / `QVoxUndoStack`）
 
-**位置**：`QVoxelier/Core/`（应用层）。`QVoxCommand extends GameCommand`、
+**位置**：`QVoxelier/Command/`（应用层）。`QVoxCommand extends GameCommand`、
 `QVoxUndoStack extends CommandHistory` —— 撤销栈与命令日志本是同一串数据，只差一个游标
 （`commands[0..cursor)` 已生效，`[cursor..]` 是 redo 分支），于是"撤销栈"与"可回放日志"
 不必各存一份、各写一遍序列化（`save_data()` 白得）。放在应用层而非 World 层，是因为它要引用
@@ -595,7 +616,8 @@ class Result:
 | 命令 | 记录什么 | 代价 |
 |---|---|---|
 | `QVoxVoxelEditCommand` | 被改动的块坐标 → 该块 `before` / `after` 整块内容（`PackedInt32Array`） | 与实际改动的块数成正比，通常几十 KB |
-| `QVoxPropertyCommand`（规划） | 对象 `set(prop, old)` / `set(prop, new)` | O(1) |
+| `QVoxPropertyCommand` | 一次属性赋值：对象改名、修改器参数、**链的增删重排** → `(目标, 属性名, 改前, 改后)` | O(1)：只存前后两个值（数组属性存**引用**的浅副本） |
+| `QVoxMacroCommand` | 一组子命令（按序 redo / 逆序 undo），子命令不进栈 | 子命令代价之和 |
 
 **体素编辑命令为何既不用全量快照、也不用"手势包围盒"**：一块 256³ 体积是 64 MB，每次落笔存
 一份会瞬间爆内存；而一条长对角线笔画的包围盒又是整整 256³。故改为**按块懒采集**：写入时若
@@ -620,7 +642,26 @@ stack.push(cmd)                         → 入栈并调一次幂等 redo()
 **刻意不从存档恢复撤销历史**：存档里只有参数记录、没有 `undo()` 能用的差值，恢复出来会是一个
 "看着能撤销、按下去就报错"的假栈；明确报错好过静默给假栈（`QVoxUndoStack.load_data` 直接报错）。
 
-**宏**（规划的 `begin_macro` / `end_macro`）：把"改参数 + 重命名"这类多步 UI 操作折叠成一条。
+**宏**（`begin_macro` / `end_macro`）：把"改参数 + 重命名"这类多步 UI 操作折叠成一条。
+其间的 `push()` 只攒进当前宏、不真正入栈 —— 于是"宏 = 一条命令"对**游标、`changed` 通知、
+预算淘汰**三处同时成立，这三处都不必知道宏的存在。支持嵌套（内层结束并入外层）、
+空宏不入栈（与"空手势不入栈"同一约定）。
+
+**链编辑为什么不需要第二个命令类**：`modifiers` 本身就是对象上的一个属性 ——
+加一条修改器 = 它的前后两份数组，重排 = 同一个数组的两种顺序。既然撤销要的料完全一样
+（`(目标, 属性名, 改前, 改后)`），让增 / 删 / 排各写一个命令类就是把同一段采集逻辑抄三遍，
+且迟早有一处忘了采"改后"。于是工具只剩一件事：**把改动夹在 `begin()` 与 `commit()` 之间**
+（`QVoxObject` 的链编辑入口注释即此约定）。封口判据只看**首尾值**，不看"中间写过没有"——
+拖拽的中间值没有意义，而记住"写过"反而会把这条主用法误判成空手势。
+
+**属性命令不能干什么**：**不能撤销 `resize_grid()`** —— 改分辨率会丢掉超出新尺寸的体素，
+而"被丢掉的体素"只有记差值的 `QVoxVoxelEditCommand` 记得住。改分辨率必须走体素命令。
+
+**标脏由命令负责**：`QVoxModifier` 是 `Resource`，Godot 不会替我们监听它的 `@export` 改动，
+所以 `QVoxObject.content_changed` 只在自身结构变化时发；"改参数要标脏"由 `QVoxPropertyCommand`
+在 `redo()` / `undo()` 之后补发（含"宿主对象"参数，故改修改器参数时能标到对象上）。
+`set_value()` 刻意**不发信号**：改参数会触发整链重算，一次拖拽若逐帧发信号就是成千上万次重算，
+live 预览由发起手势的面板自己刷新。
 
 ### 6.3 工程文件
 
@@ -659,7 +700,7 @@ QVoxelier 是**独立仓库/独立场景**，插件是它依赖的内核：
 | `addons/VoxelSupport` ↔ `addons/DEVFramework` | ❌ **禁止互引** | 否则任一插件都无法独立装卸、独立演化 |
 | `addons/*` → `QVoxelier` | ❌ **禁止** | 反向依赖会让内核不能独立演化，且 QVoxelier 无法整体删除 |
 | 世界结构（`Modifier/`）放哪 | **插件内** | 它是内核能力（对象模型 + 修改器链），不是应用层。QVoxelier 只做显示与操作翻译 |
-| 撤销命令（`QVoxelier/Core/`）放哪 | **应用层** | 它要引用 `GameCommand`；放进插件会逼出插件间引用。且"谁响应 Ctrl+Z"本就是应用问题 |
+| 撤销命令（`QVoxelier/Command/`）放哪 | **应用层** | 它要引用 `GameCommand`；放进插件会逼出插件间引用。且"谁响应 Ctrl+Z"本就是应用问题 |
 
 **DEVFramework 的复用点**（遵循"实现功能优先用框架"）：
 
