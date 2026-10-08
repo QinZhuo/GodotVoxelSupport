@@ -4,7 +4,7 @@ extends RefCounted
 ## 编辑会话 —— 一次「手势 → 数据 → 撤销 → 刷新」的完整链路，**不依赖任何节点**。
 ##
 ## 【为什么把这条链收在一个类里】它横跨四个模块：工具的纯几何（QVoxBrushTool）、命令与撤销
-## （QVoxVoxelEditCommand / QVoxUndoStack）、插件的数据层（VoxelData / QVoxObjectGenerator）、
+## （QVoxVoxelEditCommand / QVoxUndoStack）、插件的数据层（VoxelData / QVoxModelGenerator）、
 ## 以及渲染器。每个环节的接口都很窄，但**接线本身**有语义，散在视口脚本里的话：
 ##   ① 视口要同时懂"手势协议""命令封口""chunk 键换算""渲染器刷新"四件事 —— 一个只该翻译
 ##      输入的角色被撑成全能类；
@@ -20,13 +20,13 @@ extends RefCounted
 ## "让数据源作废"是**真逻辑**，"通知渲染器"只是**唤醒**。
 
 ## 被编辑的对象（手绘体素 + 修改器链，全项目唯一的常驻真值）。
-var object: QVoxObject
+var object: QVoxModel
 
 ## 显示几何：视口渲染的那份数据层。对象改动后由本类负责让它按需重新取数。
 var data: VoxelData
 
-## 供数源。手绘体素是链的输入，故它必须能被作废（QVoxObjectGenerator.invalidate）。
-var generator: QVoxObjectGenerator
+## 供数源。手绘体素是链的输入，故它必须能被作废（QVoxModelGenerator.invalidate）。
+var generator: QVoxModelGenerator
 
 ## 撤销栈（会话内）。刻意叫 history 而不是 undo：本类另有 undo() 方法，同名成员与方法冲突。
 var history := QVoxUndoStack.new()
@@ -45,20 +45,22 @@ var _cmd: QVoxVoxelEditCommand = null
 # 装配
 # ----------------------------------------------------------------------------
 
-## 按对象装配显示层（VoxelData + QVoxObjectGenerator + 调色板）并绑成一个会话。
+## 按对象装配显示层（VoxelData + QVoxModelGenerator + 调色板）并绑成一个会话。
 ##
 ## 【为什么要有这个工厂】"对象 → 可渲染数据层"的接线步骤固定但零散（分辨率、块尺寸、材质表、
 ## 生成器指向），漏一步的表现是"画了没反应"或"颜色全错"，而不是报错。收在这里之后，
 ## 视口与测试走的是同一条装配路径 —— 测试里绿的接线，运行时也一定是同一条。
 ##
 ## world 只用来取调色板（材质表就是它的 materials），可为 null（不渲染颜色的场合）。
-static func create_for(obj: QVoxObject, world: QVoxWorld = null) -> QVoxEditSession:
+static func create_for(obj: QVoxModel, world: QVoxWorld = null) -> QVoxEditSession:
 	var s := QVoxEditSession.new()
 	s.object = obj
-	var gen := QVoxObjectGenerator.new()
+	var gen := QVoxModelGenerator.new()
 	gen.object = obj
 	var d := VoxelData.new()
-	d.grid_size = obj.grid_size
+	# 显示尺寸取**求值输出盒**而不是 object.grid_size：链里若有重排型修改器（镜像 / 旋转 / 平铺），
+	# 渲染出来的尺寸与手绘种子的尺寸不同（见 QVoxModelGenerator.output_grid_size）。
+	d.grid_size = gen.output_grid_size()
 	if world != null:
 		_copy_palette(world, d)
 	# 顺序要紧：先 grid_size 再 generator —— generator 的 setter 会把数据层的 grid_size
@@ -215,11 +217,40 @@ func _refresh(bounds: Array[Vector3i]) -> void:
 	if generator != null:
 		generator.invalidate()
 	if data != null:
+		var size := output_size()
 		var whole := bounds.size() < 2
 		var lo := Vector3i.ZERO if whole else bounds[0]
-		var hi := object.grid_size - Vector3i.ONE if whole else bounds[1]
+		var hi := size - Vector3i.ONE if whole else bounds[1]
+		# 【分辨率变了（链里加了 / 改了 / 撤了重排型修改器）必须在此同步】数据层的 grid_size 同时是
+		# 生成器的可生成范围（见 VoxelData._sync_generator_bounds）：落后一步，新长出来的区域就永远
+		# 不渲染。作废范围取**新旧并集** —— 若分辨率缩了，旧的缓存 chunk 会落到新范围之外，不纳入
+		# 作废就会以鬼影形式留在画面上。撤销 / 重做与首次施展都经过本函数，故这一处就够。
+		if data.grid_size != size:
+			hi = Vector3i(maxi(hi.x, data.grid_size.x - 1), maxi(hi.y, data.grid_size.y - 1),
+					maxi(hi.z, data.grid_size.z - 1))
+			data.grid_size = size
 		data.invalidate_chunk_source_range(lo, hi)
 	_wake_renderer()
+
+
+## 链作用后的盒尺寸（= 显示层的 grid_size）。只有重排型修改器会改变它。
+##
+## 【为什么问生成器而不是照抄 object.grid_size】见 QVoxModelGenerator.output_grid_size：
+## 渲染的是**求值输出**，不是手绘种子；链里一旦有镜像 / 旋转 / 平铺，两者尺寸就不同。
+func output_size() -> Vector3i:
+	if object == null:
+		return Vector3i.ZERO
+	if generator != null:
+		return generator.output_grid_size()
+	return QVoxEvalEngine.output_grid_size(object.modifiers, object.grid_size)
+
+
+## 结构性改动之后的整体重算：分辨率与体素都可能全变（整对象变换），没有"局部"可言。
+##
+## 【为什么另给一个公开入口，而不是让调用方写 _refresh([])】空数组"影响整对象"是 QVoxCommand
+## 的默认语义，直接对外暴露一个空参调用只会让人猜"为什么是空数组"；给它一个名字，意图自明。
+func rebuild() -> void:
+	_refresh([])
 
 
 # ----------------------------------------------------------------------------

@@ -65,6 +65,12 @@ class Pick extends RefCounted:
 
 var mode: Mode = Mode.VOXEL
 var brush_size := 1
+## 对称轴掩码：分量为 1 表示该轴镜像（X / Y / Z 各自独立勾选），ZERO = 关。
+##
+## 【为什么镜像放在 _finish 这一个出口】预览（hover）与落笔（release/drag）都汇到 _finish，
+## 镜像接在这里，两边就自动一致 —— 预览里看到的镜像格，落笔时一定也画。这正是本类
+## "所见即所画由构造保证"的又一处兑现，而不是在预览与落笔里各写一遍镜像。
+var symmetry := Vector3i.ZERO
 
 var _pick: Pick = null
 var _anchor := Vector3i.MIN
@@ -294,10 +300,50 @@ func _finish(cells: Array[Vector3i], pick: Pick) -> Array[Vector3i]:
 		cells = QVoxBrushGeometry.dilate(cells, radius)
 	if pick == null or pick.grid == Vector3i.ZERO:
 		return cells
+	if symmetry != Vector3i.ZERO:
+		cells = _mirror(cells, pick.grid)
 	var g := pick.grid
 	var out: Array[Vector3i] = []
 	for c in cells:
 		if c.x < 0 or c.y < 0 or c.z < 0 or c.x >= g.x or c.y >= g.y or c.z >= g.z:
 			continue
 		out.append(c)
+	return out
+
+
+## 把一批格按勾选的对称轴展开成"原格 + 各镜像"。
+##
+## 【镜像面取在网格正中】x ↔ grid.x-1-x：32 格时 0 ↔ 31，中缝落在 16 与 15 之间。
+## 这与 MagicaVoxel 的对称以网格中心为轴一致，也与"边界体素仍落在网格内"一致
+## （镜像一个网格内坐标仍是网格内坐标，故镜像不会产生越界格，后面的裁剪只是保险）。
+## 【先去重】多轴勾选时组合出的像会互相重合（如格正好在对称面上），
+## 交给销毁命令前先去重，撤销里就不会出现同一格被写两次的冗余快照。
+func _mirror(cells: Array[Vector3i], g: Vector3i) -> Array[Vector3i]:
+	var seen := {}
+	var out: Array[Vector3i] = []
+	for c in cells:
+		for m in _images(c, g):
+			if seen.has(m):
+				continue
+			seen[m] = true
+			out.append(m)
+	return out
+
+
+## 单格的像集：每个勾选轴独立给出"原值 / 镜像值"两档，笛卡尔组合。
+func _images(c: Vector3i, g: Vector3i) -> Array[Vector3i]:
+	var xs: Array[int] = [c.x]
+	if symmetry.x != 0:
+		xs.append(g.x - 1 - c.x)
+	var ys: Array[int] = [c.y]
+	if symmetry.y != 0:
+		ys.append(g.y - 1 - c.y)
+	var zs: Array[int] = [c.z]
+	if symmetry.z != 0:
+		zs.append(g.z - 1 - c.z)
+	var out: Array[Vector3i] = []
+	for x in xs:
+		for y in ys:
+			for z in zs:
+				out.append(Vector3i(x, y, z))
 	return out

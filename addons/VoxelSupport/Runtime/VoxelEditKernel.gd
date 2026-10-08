@@ -1,7 +1,7 @@
 class_name VoxelEditKernel
 extends RefCounted
 
-## 体素编辑内核：**无场景节点、无 `_process`、可无头调用**（P2-4）。
+## 体素编辑内核：**无场景节点、无 `_process`、可无头调用**。
 ##
 ## 【定位】把"编辑数学"从表现层节点里抽出来，只依赖 `VoxelData` + `NativeLoader`：
 ##   · 无 Node / 无场景树 / 无物理 / 无粒子 / 无信号 —— 服务端、建模"画笔"、批处理工具

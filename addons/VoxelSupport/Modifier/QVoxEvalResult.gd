@@ -22,7 +22,22 @@ extends RefCounted
 var domain: QVoxDomain.Kind = QVoxDomain.Kind.VOXEL
 
 ## 本次求值的体积尺寸（体素）。
+##
+## 【它是**产出**的尺寸，不一定是输入的尺寸】重排型修改器（QVoxTransformModifier）会改盒尺寸，
+## 故本字段是"链跑完之后有多大"。调用方（生成器 / UI）据此设置 VoxelData.grid_size 与显示读数；
+## 而链的**输入**盒尺寸是 QVoxModel.grid_size（见 QVoxEvalEngine 的输入键）。
 var grid_size := Vector3i.ZERO
+
+## 本体积的 (0,0,0) 在**父画布**里的整数偏移 —— 树形求值的"摆放"结果。
+##
+## 【为什么体积不能总是"按父画布尺寸的整张"】组的内容按"子树并集包围盒"（紧致盒）给，
+## 于是每个结果都自带"我这个盒的左下角在父画布里是哪儿"，合成由调用方按本字段对齐。
+## 组因此不必按世界画布分配（512³ 一次分配就是 537 MB，见 DESIGN §2.3）。
+##
+## 【它是链的产出，不是节点字段】链上的平移条目（PcgTransform 的 TRANSLATE）把整块结果挪到
+## 别处，累加结果就写在这里（见 QVoxEvalEngine._run_chain）。于是"摆放"与镜像 / 旋转一样
+## 只是一条链条目 —— 节点上没有第二份摆放，也没有第二套"谁先谁后"的答案。
+var origin := Vector3i.ZERO
 
 ## FIELD 段折叠出的 Sdf 树（没有 FIELD 修改器时为 null）。降级后仍保留，供上层复用/调试。
 var field: Sdf = null
@@ -86,12 +101,25 @@ class StepState:
 	## 降级点是否已越过。不能只看 volume 空不空：光栅化出全零是合法的"降级完了但结果为空"。
 	var degraded := false
 
+	## 这一步之后**当前盒的尺寸**。重排型修改器会改它，而后续的就地改写型算子必须拿到正确的
+	## 尺寸（`PcgDetail.apply(volume, grid_size, seed)` 会按下标遍历整块），故它属于累积状态本身，
+	## 而不是"链的输入尺寸"。
+	var box := Vector3i.ZERO
+
+	## 这一步之后**整块结果被挪到哪儿**（链上平移条目累积，见 PcgTransform.origin_delta）。
+	##
+	## 【为什么它也必须进检查点】与 box 同理：它是累积状态，不是链的输入。漏了它，"从中间接着跑"
+	## 就会把前面平移过的位移丢掉 —— 表现为"改链尾一条参数，模型突然跳回原点"。
+	var shift := Vector3i.ZERO
+
 	## 复制一份。复用检查点时必须走这里：PcgDetail 就地改写会顺着共享缓冲改到原检查点。
 	func duplicate_state() -> StepState:
 		var s := StepState.new()
 		s.field = field
 		s.volume = volume.duplicate()
 		s.degraded = degraded
+		s.box = box
+		s.shift = shift
 		return s
 
 

@@ -12,9 +12,11 @@ extends RefCounted
 ## 不必记得"再 override 一遍"。差异态（主操作按钮）用 type_variation 表达 ——
 ## 与默认按钮共享底色，只覆盖不同项，于是"改一处基调 = 全应用一起变"。
 ##
-## 【为什么所有命中区都 ≥ 44】同一套设计要同时喂给平板（手指，无 hover / 无右键 /
-## 无中键 / 无键盘）与桌面（鼠标）。44 是触摸可点、鼠标也不显笨重的公认下限，
-## 所以它是基线而不是"触摸设备才放大"的分支 —— 一套尺寸，处处可用。
+## 【密度档：同一套界面，两种输入形态】命中区与栏高原本为**手指**而设（44 / 52），
+## 但桌面建模软件的惯例是鼠标 24~32 就够（Blender 的按钮约 20~26），
+## 用 44 的骨架会白白吃掉近四分之一画布。于是骨架尺寸按输入形态取两档
+## （见 compact() 起的一组函数）：**触摸 44 / 52，桌面 32 / 40**，间距同时收一档
+## （6/8/12 对 8/12/16），而**配色、圆角、字号两档完全一致** —— 紧凑的是骨架，不是观感。
 ## 由此推出三条硬约定，写新控件时照做：
 ##   ① 状态**不能只靠 hover 表达**（触摸没有悬停）—— 选中态必须是常驻可见的底色变化；
 ##   ② 每个操作都要有**可见按钮**，快捷键只是加速器而不是唯一入口；
@@ -68,25 +70,16 @@ const OK := Color(0.4196, 0.8902, 0.6275, 1.0)
 const RADIUS_S := 6
 const RADIUS_M := 10
 
+## 间距最小一档。**两档共用** —— 它已经是"元素挨在一起"的下限，再收就要粘成一块。
 const SPACE_XS := 4
-const SPACE_S := 8
-const SPACE_M := 12
-const SPACE_L := 16
 
 # 字号阶：整体比"网页习惯"大一档。这是长期注视的建模工具，11/12 那套在
 # 1152×648 的实际窗口里读起来是"眯着看"（实测截图里状态栏与分组小标题尤其吃力）。
+# **字号不分档**：密度该由骨架（命中区 / 栏高 / 间距）让出来，压字号只会换来难读。
 const FONT_S := 12
 const FONT_M := 13
 const FONT_L := 14
 const FONT_TITLE := 16
-
-## 最小命中区边长（触摸可点 / 鼠标不笨重的共同下限）。见类文档第 3 段。
-const MIN_TOUCH := 44
-## 扁平小按钮（撤销、加减号这类成组出现的）边长 —— 仍不低于 MIN_TOUCH。
-const ICON_SIZE := MIN_TOUCH
-## 顶部应用栏 / 底部状态栏高度。
-const BAR_HEIGHT := 52
-const STATUS_HEIGHT := 36
 
 ## type_variation 名：主操作按钮（保存、确认），强调色实心。
 const VARIATION_ACCENT := &"AccentButton"
@@ -94,6 +87,59 @@ const VARIATION_ACCENT := &"AccentButton"
 const VARIATION_TOOL := &"ToolButton"
 
 static var _theme: Theme = null
+
+
+# ----------------------------------------------------------------------------
+# 密度档（界面骨架尺寸的唯一来源）
+# ----------------------------------------------------------------------------
+
+## 是否用桌面紧凑档。
+##
+## 【判据为什么是 mobile 而不是"有没有触摸屏"】带触摸屏的笔记本两者都报，
+## 而那类机器的主输入仍是鼠标键盘；真正需要 44 命中区的是**手指操作的移动设备**。
+## 宁可在触摸屏桌面上偏紧凑（鼠标毫无压力），也不要让平板收到 32。
+##
+## 【为什么档位是函数而不是 static var】本项目实测：**新建**脚本里的 static var 在
+## 编辑器热加载下可能读回全 0（静态初值没落地）；而 const 又必须是编译期常量，
+## 容不下 OS.has_feature() 这种运行时判断。于是"两档数值写在函数里、由 compact()
+## 现算"是唯一没有时序依赖的写法（已存在脚本里的 static var 是好的，但没必要赌）。
+static func compact() -> bool:
+	return not OS.has_feature("mobile")
+
+
+## 最小命中区边长。44 = 公认的手指下限；32 = 鼠标的舒适下限（Blender 约 20~26）。
+static func hit_size() -> int:
+	return 32 if compact() else 44
+
+
+## 顶部应用栏高度。
+static func bar_height() -> int:
+	return 40 if compact() else 52
+
+
+## 底部状态栏高度。
+static func status_height() -> int:
+	return 30 if compact() else 36
+
+
+## 左侧工具坞的目标宽度（下限：内容更宽时以内容为准）。
+static func dock_width() -> int:
+	return 116 if compact() else 132
+
+
+## 小间距：同组控件之间、面板内边距。
+static func space_s() -> int:
+	return 6 if compact() else 8
+
+
+## 中间距：分组之间、面板外边距。
+static func space_m() -> int:
+	return 8 if compact() else 12
+
+
+## 大间距：标题与内容之间这类大块区隔。
+static func space_l() -> int:
+	return 12 if compact() else 16
 
 
 # ----------------------------------------------------------------------------
@@ -113,6 +159,7 @@ static func _build_theme() -> Theme:
 	_theme_label(t)
 	_theme_container(t)
 	_theme_scrollbar(t)
+	_theme_slider(t)
 	_theme_tooltip(t)
 	return t
 
@@ -120,36 +167,36 @@ static func _build_theme() -> Theme:
 ## 按钮：常态 / 悬停 / 按下 / 禁用 / 焦点五态。**键盘焦点框刻意不做醒目**（本应用
 ## 的按钮一律 FOCUS_NONE，键盘归视口），只留一条细描边以防将来接入手柄导航。
 static func _theme_button(t: Theme) -> void:
-	t.set_stylebox("normal", "Button", box(SURFACE_HI, BORDER, 1, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("hover", "Button", box(SURFACE_HOVER, ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("pressed", "Button", box(SURFACE_ACTIVE, ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("disabled", "Button", box(SURFACE_HI.darkened(0.3), BORDER, 1, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("focus", "Button", box(Color(0, 0, 0, 0), ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
+	t.set_stylebox("normal", "Button", box(SURFACE_HI, BORDER, 1, RADIUS_S))
+	t.set_stylebox("hover", "Button", box(SURFACE_HOVER, ACCENT, 1, RADIUS_S))
+	t.set_stylebox("pressed", "Button", box(SURFACE_ACTIVE, ACCENT, 1, RADIUS_S))
+	t.set_stylebox("disabled", "Button", box(SURFACE_HI.darkened(0.3), BORDER, 1, RADIUS_S))
+	t.set_stylebox("focus", "Button", box(Color(0, 0, 0, 0), ACCENT, 1, RADIUS_S))
 	t.set_color("font_color", "Button", TEXT)
 	t.set_color("font_hover_color", "Button", Color.WHITE)
 	t.set_color("font_pressed_color", "Button", ACCENT)
 	t.set_color("font_disabled_color", "Button", TEXT_FAINT)
 	t.set_color("font_focus_color", "Button", TEXT)
 	t.set_font_size("font_size", "Button", FONT_L)
-	t.set_constant("h_separation", "Button", SPACE_S)
+	t.set_constant("h_separation", "Button", space_s())
 
 	# 主操作：强调色 tonal（低透明底 + 强调字 + 强调描边），只在"按下"那一瞬给实心。
 	# 【为什么不做成常驻的实心高亮块】实测它会是整屏最亮的东西（比模型还亮），把视线从
 	# 视口拉走；而且强调色在本层的约定是"当前选中 / 可交互"，一个常驻亮块会稀释这条约定。
 	# 主操作靠"整条栏里唯一带强调描边与强调字"依然一眼可辨 —— 区分度没丢，噪声降了。
 	t.set_type_variation(VARIATION_ACCENT, "Button")
-	t.set_stylebox("normal", VARIATION_ACCENT, box(ACCENT_DIM, ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("hover", VARIATION_ACCENT, box(ACCENT_HOVER, ACCENT, 1, RADIUS_S, SPACE_M, SPACE_S))
-	t.set_stylebox("pressed", VARIATION_ACCENT, box(ACCENT, ACCENT, 0, RADIUS_S, SPACE_M, SPACE_S))
+	t.set_stylebox("normal", VARIATION_ACCENT, box(ACCENT_DIM, ACCENT, 1, RADIUS_S))
+	t.set_stylebox("hover", VARIATION_ACCENT, box(ACCENT_HOVER, ACCENT, 1, RADIUS_S))
+	t.set_stylebox("pressed", VARIATION_ACCENT, box(ACCENT, ACCENT, 0, RADIUS_S))
 	t.set_color("font_color", VARIATION_ACCENT, ACCENT)
 	t.set_color("font_hover_color", VARIATION_ACCENT, Color.WHITE)
 	t.set_color("font_pressed_color", VARIATION_ACCENT, ON_ACCENT)
 
 	# 工具按钮：常态继承 Button，只改写"选中"（toggle 按下）—— 触摸下这是唯一的选中线索。
 	t.set_type_variation(VARIATION_TOOL, "Button")
-	t.set_stylebox("pressed", VARIATION_TOOL, box(ACCENT_DIM, ACCENT, 1, RADIUS_S, SPACE_S, SPACE_XS))
-	t.set_stylebox("hover", VARIATION_TOOL, box(SURFACE_HOVER, BORDER_STRONG, 1, RADIUS_S, SPACE_S, SPACE_XS))
-	t.set_stylebox("normal", VARIATION_TOOL, box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 0, RADIUS_S, SPACE_S, SPACE_XS))
+	t.set_stylebox("pressed", VARIATION_TOOL, box(ACCENT_DIM, ACCENT, 1, RADIUS_S, space_s(), SPACE_XS))
+	t.set_stylebox("hover", VARIATION_TOOL, box(SURFACE_HOVER, BORDER_STRONG, 1, RADIUS_S, space_s(), SPACE_XS))
+	t.set_stylebox("normal", VARIATION_TOOL, box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 0, RADIUS_S, space_s(), SPACE_XS))
 	t.set_color("font_pressed_color", VARIATION_TOOL, ACCENT)
 	t.set_font_size("font_size", VARIATION_TOOL, FONT_L)
 
@@ -160,12 +207,12 @@ static func _theme_label(t: Theme) -> void:
 
 
 static func _theme_container(t: Theme) -> void:
-	t.set_stylebox("panel", "PanelContainer", box(SURFACE, BORDER, 1, RADIUS_M, SPACE_M, SPACE_M))
+	t.set_stylebox("panel", "PanelContainer", box(SURFACE, BORDER, 1, RADIUS_M, space_m(), space_m()))
 	t.set_stylebox("separator", "HSeparator", line(BORDER))
 	t.set_stylebox("separator", "VSeparator", vline(BORDER))
-	t.set_stylebox("panel", "Panel", box(BAR, BORDER, 0, 0, SPACE_S, SPACE_XS))
-	t.set_constant("separation", "VBoxContainer", SPACE_S)
-	t.set_constant("separation", "HBoxContainer", SPACE_S)
+	t.set_stylebox("panel", "Panel", box(BAR, BORDER, 0, 0, space_s(), SPACE_XS))
+	t.set_constant("separation", "VBoxContainer", space_s())
+	t.set_constant("separation", "HBoxContainer", space_s())
 	t.set_constant("separation", "GridContainer", SPACE_XS)
 
 
@@ -178,9 +225,19 @@ static func _theme_scrollbar(t: Theme) -> void:
 		t.set_stylebox("grabber_pressed", type, box(ACCENT, Color(0, 0, 0, 0), 0, 4, 0, 0))
 
 
+## 滑条：颜色分组的 RGBA 通道用它。槽做得极窄极暗、已填充段用强调色 ——
+## 与滚动条同一思路：控件本身低调，"当前值"才是信息。
+## grabber（滑块）图标沿用引擎默认 —— 那是图标不是样式盒，自绘成本远超收益。
+static func _theme_slider(t: Theme) -> void:
+	for type in ["HSlider", "VSlider"]:
+		t.set_stylebox("slider", type, box(SURFACE_HI, BORDER, 1, 4, 0, 0))
+		t.set_stylebox("grabber_area", type, box(ACCENT_DIM, Color(0, 0, 0, 0), 0, 4, 0, 0))
+		t.set_stylebox("grabber_area_highlight", type, box(ACCENT, Color(0, 0, 0, 0), 0, 4, 0, 0))
+
+
 ## 提示气泡：鼠标的专属福利（触摸看不到），但也给个统一长相。
 static func _theme_tooltip(t: Theme) -> void:
-	t.set_stylebox("panel", "TooltipPanel", box(Color(0.0353, 0.0431, 0.0588, 0.98), BORDER_STRONG, 1, RADIUS_S, SPACE_S, SPACE_XS))
+	t.set_stylebox("panel", "TooltipPanel", box(Color(0.0353, 0.0431, 0.0588, 0.98), BORDER_STRONG, 1, RADIUS_S, space_s(), SPACE_XS))
 	t.set_color("font_color", "TooltipLabel", TEXT)
 	t.set_font_size("font_size", "TooltipLabel", FONT_S)
 
@@ -192,16 +249,21 @@ static func _theme_tooltip(t: Theme) -> void:
 ## 通用圆角矩形：底色 + 描边 + 内边距。所有面板 / 按钮底都出自这一个函数，
 ## 于是"改圆角 = 全应用一起改"。
 static func box(bg: Color, border := BORDER, border_w := 1, radius := RADIUS_S,
-		pad_x := SPACE_M, pad_y := SPACE_S) -> StyleBoxFlat:
+		pad_x := -1, pad_y := -1) -> StyleBoxFlat:
+	# 【为什么默认值是 -1 而不是直接写 space_m()】GDScript 的默认参数必须是**编译期常量**，
+	# 而间距要随密度档变（见 compact()），于是用 -1 当"未指定"哨兵、进函数再解析。
+	# 传 0 是合法值（色块这类就要零内边距），不会被当成哨兵。
+	var px := space_m() if pad_x < 0 else pad_x
+	var py := space_s() if pad_y < 0 else pad_y
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = bg
 	sb.set_corner_radius_all(radius)
 	sb.set_border_width_all(border_w)
 	sb.border_color = border
-	sb.content_margin_left = pad_x
-	sb.content_margin_right = pad_x
-	sb.content_margin_top = pad_y
-	sb.content_margin_bottom = pad_y
+	sb.content_margin_left = px
+	sb.content_margin_right = px
+	sb.content_margin_top = py
+	sb.content_margin_bottom = py
 	return sb
 
 
@@ -261,9 +323,10 @@ static func button(text: String, tooltip := "", variation := &"") -> Button:
 
 
 ## 纯文字小按钮（撤销、加减号）：定死方形命中区，不随文字长度跳动。
-static func icon_button(text: String, tooltip := "", size := ICON_SIZE) -> Button:
+static func icon_button(text: String, tooltip := "", size := -1) -> Button:
 	var b := button(text, tooltip)
-	b.custom_minimum_size = Vector2(size, size)
+	var s := hit_size() if size < 0 else size
+	b.custom_minimum_size = Vector2(s, s)
 	return b
 
 
@@ -271,17 +334,18 @@ static func icon_button(text: String, tooltip := "", size := ICON_SIZE) -> Butto
 static func toggle_button(tooltip := "", variation := VARIATION_TOOL) -> Button:
 	var b := button("", tooltip, variation)
 	b.toggle_mode = true
-	b.custom_minimum_size = Vector2(0, MIN_TOUCH)
+	b.custom_minimum_size = Vector2(0, hit_size())
 	return b
 
 
 ## 材质色块：颜色本身就是内容，故底色取自材质，不是主题色。
 ## 选中靠 **加粗强调描边**（不用变色 —— 变色会让"这个色块代表什么颜色"失真）。
-static func swatch(color: Color, tooltip := "", size := MIN_TOUCH) -> Button:
+static func swatch(color: Color, tooltip := "", size := -1) -> Button:
 	var b := Button.new()
 	b.toggle_mode = true
 	b.focus_mode = Control.FOCUS_NONE
-	b.custom_minimum_size = Vector2(size, size)
+	var s := hit_size() if size < 0 else size
+	b.custom_minimum_size = Vector2(s, s)
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if not tooltip.is_empty():
 		b.tooltip_text = tooltip
@@ -293,21 +357,22 @@ static func swatch(color: Color, tooltip := "", size := MIN_TOUCH) -> Button:
 	return b
 
 
-static func panel(margin := SPACE_M, bg := SURFACE) -> PanelContainer:
+static func panel(margin := -1, bg := SURFACE) -> PanelContainer:
+	var m := space_m() if margin < 0 else margin
 	var p := PanelContainer.new()
-	p.add_theme_stylebox_override("panel", box(bg, BORDER, 1, RADIUS_M, margin, margin))
+	p.add_theme_stylebox_override("panel", box(bg, BORDER, 1, RADIUS_M, m, m))
 	return p
 
 
-static func vbox(sep := SPACE_S) -> VBoxContainer:
+static func vbox(sep := -1) -> VBoxContainer:
 	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation", sep)
+	v.add_theme_constant_override("separation", space_s() if sep < 0 else sep)
 	return v
 
 
-static func hbox(sep := SPACE_S) -> HBoxContainer:
+static func hbox(sep := -1) -> HBoxContainer:
 	var h := HBoxContainer.new()
-	h.add_theme_constant_override("separation", sep)
+	h.add_theme_constant_override("separation", space_s() if sep < 0 else sep)
 	return h
 
 
@@ -319,7 +384,7 @@ static func divider() -> HSeparator:
 ## 定高居中而不是顶满 —— 满高会被读成"分栏"，而它们只是同一层里的分组。
 static func vdivider(height := 24) -> VSeparator:
 	var s := VSeparator.new()
-	s.custom_minimum_size = Vector2(SPACE_L, height)
+	s.custom_minimum_size = Vector2(space_l(), height)
 	s.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	return s
 

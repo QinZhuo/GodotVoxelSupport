@@ -10,14 +10,14 @@ extends TestCase
 ##   ④ 宏 = 一条撤销单位：一次 undo 全撤、一次 redo 全恢复，且空宏 / 嵌套有确定行为。
 
 
-func _obj() -> QVoxObject:
-	var obj := QVoxObject.new()
+func _obj() -> QVoxModel:
+	var obj := QVoxModel.new()
 	obj.grid_size = Vector3i(32, 32, 32)
 	return obj
 
 
 ## 计数宿主对象的标脏次数（content_changed）。
-func _count_hits(obj: QVoxObject) -> Array:
+func _count_hits(obj: QVoxModel) -> Array:
 	var hits := [0]
 	obj.content_changed.connect(func() -> void: hits[0] += 1)
 	return hits
@@ -29,29 +29,31 @@ func _count_hits(obj: QVoxObject) -> Array:
 
 func test_property_command_restores_exact_value() -> void:
 	var obj := _obj()
-	var cmd := QVoxPropertyCommand.apply(obj, &"object_name", "石山", null, "重命名")
+	var original := obj.node_name   # 原值由 QVoxModel 的默认命名决定，不在断言里写死字面量
+	var cmd := QVoxPropertyCommand.apply(obj, &"node_name", "石山", null, "重命名")
 	assert_true(cmd != null, "改名应产生一条命令")
-	assert_eq(obj.object_name, "石山", "命令应已把新值写进去")
-	assert_eq(cmd.params[0], "object_name", "params 首个是属性名（可审计）")
+	assert_eq(obj.node_name, "石山", "命令应已把新值写进去")
+	assert_eq(cmd.params[0], "node_name", "params 首个是属性名（可审计）")
 	assert_eq(cmd.get_label(), "重命名", "自定义显示名直接用于撤销菜单")
 	assert_eq(cmd.get_cost(), 1, "属性命令是 O(1)，不抓体素")
 
 	cmd.undo()
-	assert_eq(obj.object_name, "Voxel Object", "撤销必须回到原值，而不是反向重算")
+	assert_eq(obj.node_name, original, "撤销必须回到原值，而不是反向重算")
 	cmd.redo()
-	assert_eq(obj.object_name, "石山", "重做必须回到新值")
+	assert_eq(obj.node_name, "石山", "重做必须回到新值")
 
 
 func test_no_real_change_is_not_a_command() -> void:
 	var obj := _obj()
-	assert_true(QVoxPropertyCommand.apply(obj, &"object_name", obj.object_name) == null,
+	var original := obj.node_name
+	assert_true(QVoxPropertyCommand.apply(obj, &"node_name", obj.node_name) == null,
 			"把值设成原样不该占一次撤销")
-	var cmd := QVoxPropertyCommand.begin(obj, &"object_name")
+	var cmd := QVoxPropertyCommand.begin(obj, &"node_name")
 	assert_false(cmd.commit(), "从头到尾没写入的手势不入栈")
 	# 拖出去又拖回来：首尾相同 → 同样不该入栈
-	var drag := QVoxPropertyCommand.begin(obj, &"object_name")
+	var drag := QVoxPropertyCommand.begin(obj, &"node_name")
 	drag.set_value("临时")
-	drag.set_value("Voxel Object")
+	drag.set_value(original)   # 必须先捕获原值：此刻 obj.node_name 已是"临时"
 	assert_false(drag.commit(), "滑条拖回原位的空手势不入栈")
 
 
@@ -109,8 +111,8 @@ func test_modifier_param_marks_owner_dirty() -> void:
 func test_object_property_marks_itself_dirty() -> void:
 	var obj := _obj()
 	var hits := _count_hits(obj)
-	var cmd := QVoxPropertyCommand.apply(obj, &"object_name", "山")
-	assert_true(cmd != null, "target 就是 QVoxObject 时 owner 自动取它")
+	var cmd := QVoxPropertyCommand.apply(obj, &"node_name", "山")
+	assert_true(cmd != null, "target 就是 QVoxModel 时 owner 自动取它")
 	cmd.undo()
 	assert_eq(hits[0], 1, "对象自身属性同样要标脏")
 
@@ -122,28 +124,29 @@ func test_object_property_marks_itself_dirty() -> void:
 func test_macro_folds_multiple_steps() -> void:
 	var stack := QVoxUndoStack.new()
 	var obj := _obj()
+	var original := obj.node_name
 	var mod := QVoxModifierSerializer.new_modifier(QVoxModifier.KIND_SDF)
 	obj.add_modifier(mod)
 
 	stack.begin_macro("改参数并改名")
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "山"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "山"))
 	stack.push(QVoxPropertyCommand.apply(mod, &"blend", 6.0, obj))
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "山"))  # 无变化 → null
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "山"))  # 无变化 → null
 	var macro := stack.end_macro()
 
 	assert_true(macro != null, "有两条真实改动，宏应入栈")
 	assert_eq(macro.size(), 2, "无变化的子命令不进宏")
 	assert_eq(stack.size(), 1, "整段宏只占一条历史")
-	assert_eq(obj.object_name, "山")
+	assert_eq(obj.node_name, "山")
 	assert_eq(mod.blend, 6.0)
 	assert_eq(macro.get_cost(), 2, "宏的代价 = 子命令之和（预算淘汰按大单位衡量）")
 	assert_eq(stack.undo_label(), "改参数并改名（2 步）", "菜单项文字概括整段")
 
 	stack.undo()
-	assert_eq(obj.object_name, "Voxel Object", "一次撤销撤掉整段")
+	assert_eq(obj.node_name, original, "一次撤销撤掉整段")
 	assert_eq(mod.blend, 2.0, "参数也一并回退")
 	stack.redo()
-	assert_eq(obj.object_name, "山", "一次重做恢复整段")
+	assert_eq(obj.node_name, "山", "一次重做恢复整段")
 	assert_eq(mod.blend, 6.0)
 
 
@@ -155,8 +158,8 @@ func test_macro_notifies_once_and_keeps_stack_quiet() -> void:
 
 	stack.begin_macro("批量")
 	assert_true(stack.in_macro())
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "A"))
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "B"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "A"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "B"))
 	assert_eq(stack.size(), 0, "宏累积期间不入栈")
 	assert_eq(n[0], 0, "宏累积期间不通知 —— UI 不该看到中间态的历史项")
 	stack.end_macro()
@@ -168,6 +171,7 @@ func test_macro_notifies_once_and_keeps_stack_quiet() -> void:
 func test_empty_and_nested_macro() -> void:
 	var stack := QVoxUndoStack.new()
 	var obj := _obj()
+	var original := obj.node_name
 
 	stack.begin_macro("什么都没干")
 	assert_true(stack.end_macro() == null, "空宏不入栈（与空手势同一约定）")
@@ -176,27 +180,27 @@ func test_empty_and_nested_macro() -> void:
 
 	# 嵌套：内层并入外层，等最外层结束才入栈
 	stack.begin_macro("外层")
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "甲"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "甲"))
 	stack.begin_macro("内层")
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "乙"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "乙"))
 	stack.end_macro()
 	assert_eq(stack.size(), 0, "外层还没结束，栈上仍应为空")
 	stack.end_macro()
 	assert_eq(stack.size(), 1, "内层并入外层，仍只占一条")
-	assert_eq(obj.object_name, "乙")
+	assert_eq(obj.node_name, "乙")
 
 	stack.undo()
-	assert_eq(obj.object_name, "Voxel Object", "一次撤销撤掉内外两层")
+	assert_eq(obj.node_name, original, "一次撤销撤掉内外两层")
 
 
 func test_tick_is_monotonic_across_macro() -> void:
 	var stack := QVoxUndoStack.new()
 	var obj := _obj()
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "一"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "一"))
 	stack.begin_macro("宏")
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "二"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "二"))
 	stack.end_macro()
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "三"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "三"))
 	assert_eq(stack.size(), 3, "宏只占一条，故总长为 3")
 	assert_eq(stack.commands[0].tick, 0)
 	assert_eq(stack.commands[1].tick, 1, "宏自己占一个 tick，子命令不占")
@@ -207,7 +211,7 @@ func test_clear_drops_open_macro() -> void:
 	var stack := QVoxUndoStack.new()
 	var obj := _obj()
 	stack.begin_macro("半截宏")
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "A"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "A"))
 	stack.clear()
 	assert_false(stack.in_macro(), "clear() 是完全重置，不留半截宏")
 	assert_eq(stack.size(), 0)
@@ -220,14 +224,14 @@ func test_clear_drops_open_macro() -> void:
 func test_push_truncates_redo_branch() -> void:
 	var stack := QVoxUndoStack.new()
 	var obj := _obj()
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "A"))
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "B"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "A"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "B"))
 	stack.undo()
-	assert_eq(obj.object_name, "A")
+	assert_eq(obj.node_name, "A")
 	assert_true(stack.can_redo())
-	stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "C"))
+	stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "C"))
 	assert_false(stack.can_redo(), "新操作入栈必须丢掉 redo 分支（标准撤销语义）")
-	assert_eq(obj.object_name, "C")
+	assert_eq(obj.node_name, "C")
 	assert_eq(stack.size(), 2)
 
 
@@ -236,7 +240,7 @@ func test_budget_evicts_oldest() -> void:
 	stack.max_cost = 3
 	var obj := _obj()
 	for i in 5:
-		stack.push(QVoxPropertyCommand.apply(obj, &"object_name", "N%d" % i))
+		stack.push(QVoxPropertyCommand.apply(obj, &"node_name", "N%d" % i))
 	assert_eq(stack.size(), 3, "超预算时从队首淘汰最老的历史")
 	assert_true(stack.can_undo(), "淘汰后剩余历史仍可撤销")
-	assert_eq(stack.undo_label(), "属性 object_name", "未给 label 时退化为\"属性 <名>\"")
+	assert_eq(stack.undo_label(), "属性 node_name", "未给 label 时退化为\"属性 <名>\"")

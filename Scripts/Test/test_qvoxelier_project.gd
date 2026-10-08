@@ -7,7 +7,7 @@ extends TestCase
 ## 还是不是同一份世界、写坏了能不能退回上一版"是**应用层新加的一环**，不测就是靠信仰。
 ##
 ## 钉三件事：
-##   ① 往返不丢：体素 / 网格尺寸 / 材质 / 图层 / 相机 / 对象名 —— 存了再读必须一模一样；
+##   ① 往返不丢：体素 / 网格尺寸 / 材质 / 相机 / 节点树（组 + 组内坐标 + 链上的条目）—— 存了再读必须一模一样；
 ##   ② 落盘走 `SaveTool`（原子写 + 滚动备份），所以主档损坏还能退回上一次的存档；
 ##   ③ 坏输入一律返回 null：视口据此提示用户，而不是半路换掉正在编辑的东西。
 
@@ -34,7 +34,7 @@ func cleanup() -> void:
 # 夹具
 # ----------------------------------------------------------------------------
 
-## 一份"每个维度都有东西"的世界：体素、材质、图层、相机、对象名、所属图层。
+## 一份"每个维度都有东西"的世界：体素、材质、相机、组、对象名、链上的摆放与条目。
 ## 单测一个空世界会漏掉"存了但读回是空"的假绿。
 func _world() -> QVoxWorld:
 	var w := QVoxWorld.create_empty()
@@ -42,9 +42,11 @@ func _world() -> QVoxWorld:
 	w.add_material(Color(1.0, 0.0, 0.0))
 	w.add_material(Color(0.0, 1.0, 0.0))
 	w.add_camera("主视角")
-	w.add_layer("图层一")
-	var obj := w.create_object("方块", Vector3i(16, 16, 16))
-	obj.layer = 1
+	var g := w.create_group("组一")
+	var obj := w.create_model("方块", Vector3i(16, 16, 16), g)
+	# 组内坐标不再挂在节点上：它是一条平移条目（见 PcgTransform 类头）
+	obj.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(2, 0, 0))))
+	obj.add_modifier(QVoxTransformModifier.of(PcgTransform.repeat(0, 2)))
 	obj.set_voxel(1, 2, 3, 1)
 	obj.set_voxel(4, 0, 0, 2)
 	return w
@@ -68,14 +70,17 @@ func test_round_trip_keeps_the_world() -> void:
 
 	assert_eq(back.world_name(), "测试世界", "世界名")
 	assert_eq(back.materials.size(), w.materials.size(), "材质数")
-	assert_eq(back.layers().size(), w.layers().size(), "图层数")
 	assert_eq(back.cameras().size(), w.cameras().size(), "相机数")
-	assert_eq(back.objects.size(), 1, "对象数")
+	assert_eq(back.nodes.size(), 1, "顶层只有那个组（模型是它的子节点，不是平级）")
+	assert_eq(back.all_models().size(), 1, "模型数")
 
-	var obj := back.objects[0]
-	assert_eq(obj.object_name, "方块", "对象名")
+	var obj := back.all_models()[0]
+	assert_eq(obj.node_name, "方块", "对象名")
 	assert_eq(obj.grid_size, Vector3i(16, 16, 16), "网格尺寸")
-	assert_eq(obj.layer, 1, "对象所属图层")
+	assert_eq(obj.modifiers.size(), 2, "链上的条目")
+	var place := (obj.modifiers[0] as QVoxTransformModifier).transform
+	assert_eq(place.mode, PcgTransform.Mode.TRANSLATE, "组内坐标是链上的平移条目")
+	assert_eq(place.offset, Vector3i(2, 0, 0), "组内坐标存活")
 	assert_eq(obj.count_solid(), 2, "实心格数")
 	assert_eq(obj.get_voxel(1, 2, 3), 1, "第一笔的体素与材质")
 	assert_eq(obj.get_voxel(4, 0, 0), 2, "第二笔的体素与材质")
@@ -91,8 +96,8 @@ func test_save_then_load_lands_on_disk() -> void:
 	if back == null:
 		return
 	assert_eq(back.world_name(), "测试世界", "世界名")
-	assert_eq(back.objects[0].get_voxel(1, 2, 3), 1, "体素在")
-	assert_eq(back.objects[0].count_solid(), 2, "实心格数")
+	assert_eq(back.all_models()[0].get_voxel(1, 2, 3), 1, "体素在")
+	assert_eq(back.all_models()[0].count_solid(), 2, "实心格数")
 
 
 func test_saving_nothing_is_refused() -> void:
@@ -127,7 +132,7 @@ func test_corrupt_main_falls_back_to_backup() -> void:
 
 	var second := _world()
 	second.set_world_name("第二版")
-	second.objects[0].set_voxel(7, 7, 7, 1)
+	second.all_models()[0].set_voxel(7, 7, 7, 1)
 	assert_eq(QVoxProject.save(second, MAIN), OK, "第二版落盘（第一版被滚成 .1.bak）")
 	assert_true(FileAccess.file_exists(MAIN + ".1.bak"), "滚动备份确实生成了")
 
@@ -140,7 +145,7 @@ func test_corrupt_main_falls_back_to_backup() -> void:
 	if back == null:
 		return
 	assert_eq(back.world_name(), "测试世界", "退回的是第一版")
-	assert_eq(back.objects[0].get_voxel(7, 7, 7), 0, "第二版那一笔不该出现在退回的版本里")
+	assert_eq(back.all_models()[0].get_voxel(7, 7, 7), 0, "第二版那一笔不该出现在退回的版本里")
 
 
 func test_extension_helpers() -> void:

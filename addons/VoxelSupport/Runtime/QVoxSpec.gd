@@ -21,12 +21,15 @@ extends RefCounted
 # ----------------------------------------------------------------------------
 # HEAD 的 qvox 键必须等于此值。读者遇到更高版本应拒绝（宁可不解，不可误读）。
 #
-# v2（当前）：VOX0 模型头 6 → 10 字节，新增 uint32 payload_length，
-#             使"模型负载的精确边界"成为头内事实（P4 贯彻到 VOX0 内部）。
-#             v1 与本版不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，
-#             从未有实际落盘的 v1 文件，无需背负历史包袱。
+# v3（当前）：场景图从 `layers` 下标体系改为 NODE 嵌套节点树 —— 层就是一个 QVoxGroup
+#             节点，归属即父子关系；旧 `layers` 键读盘时忽略、写盘时显式抹掉。
+#             VOX0 / MATE 等块布局与 v2 一致（本次只动工程数据键）。
+# v2：VOX0 模型头 6 → 10 字节，新增 uint32 payload_length，
+#     使"模型负载的精确边界"成为头内事实（P4 贯彻到 VOX0 内部）。
+# v1 与后续版本不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，
+# 从未有实际落盘的 v1 文件，无需背负历史包袱。
 
-const VERSION := 2
+const VERSION := 3
 
 ## 文件扩展名（不带点，与 `String.get_extension()` 的返回形态一致）。
 ## 唯一出处：导入器按扩展名分派、QVoxStream 组文件名都引用它。
@@ -252,25 +255,17 @@ const VOX_BLOCK_HEADER_SIZE := 17
 # 判据是"有几方在各自使用同一份事实"：
 #   修改器链（nodes[].steps）的读写全在 QVoxModifierSerializer 一家手里，键名连同
 #   缺省值写在它内部就是单一出处（规则同 P2：每条事实只存一次）；
-#   图层与相机则是**工程数据**（§5.1）：QVoxFile 补缺省、QVoxWorld 建新条目、
+#   节点树与相机则是**工程数据**（§5.1）：QVoxFile 补缺省、QVoxWorld 建新条目、
 #   QVoxelier 的面板再读一遍。若三方各写一遍字面量，"存进去叫 visible、读回来找 shown"
 #   这类错位不会有任何报错，只会静默丢字段。故键名与缺省值一律放这里，三方引用同一份。
 
-## 工程数据的两个数组键名。只提取这两个（`nodes` / `steps` 等既有键名留在各自唯一的
-## 读写实现里）—— 因为它们恰好是"被三方各引一遍"的那两个，正是错位的重灾区。
-const NODE_LAYERS_KEY := "layers"
+## 工程数据的两个数组键名。只提取这两个（`steps` 等既有键名留在各自唯一的读写实现里）
+## —— 因为它们恰好是"被三方各引一遍"的那两个，正是错位的重灾区。
+##
+## 【为什么没有 NODE_LAYERS_KEY】图层已被场景树取代（qvox 3）：层就是一个 QVoxGroup 节点，
+## 归属即父子关系。旧键在读盘时被忽略、在写盘时被显式抹掉（见 QVoxWorld._node_json）。
+const NODE_NODES_KEY := "nodes"
 const NODE_CAMERAS_KEY := "cameras"
-
-## 层名缺省值。文件里没有 `layers` 键时，世界仍有**一条隐含的缺省层**（下标 0）。
-const LAYER_DEFAULT_NAME := "default"
-
-## `layers` 每项的键与缺省值。缺失即取缺省；**未知键原样保留**（同 HEAD 的未知键策略）。
-## 顺序由数组下标表达，不另设 `order`（P2：不存可由他字段推导的值）。
-const LAYER_FIELD_DEFAULTS := {
-	"name": LAYER_DEFAULT_NAME,
-	"visible": true,
-	"locked": false,
-}
 
 ## `cameras` 每项的键与缺省值。
 ##

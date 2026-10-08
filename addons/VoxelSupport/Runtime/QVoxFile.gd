@@ -98,24 +98,18 @@ class QVoxDocument extends RefCounted:
 
 
 ## NODE 块（§7）的已校验只读视图。
-## 所有引用按下标解析，越界/成环/悬空的节点或帧已在构造时被丢弃。
+## 节点是**嵌套**的：类型未知 / 非对象的条目已在构造时（连同子树）被丢弃，无下标、无环可言。
 class QVoxSceneGraph extends RefCounted:
-	## 保留下来的节点（Dictionary 原样，下标已重编为连续、可安全遍历）。
+	## 保留下来的顶层节点（Dictionary 原样，`children` 仍是嵌套结构，**不做下标重编号**）。
 	var nodes: Array = []
-	## 图层（§5.1）：每项都是 Dictionary，缺失键已按 QVoxSpec.LAYER_FIELD_DEFAULTS 补齐，
-	## 未知键原样保留。**空数组**表示文件没写 layers 键 —— 此时世界只有一条隐含缺省层，
-	## 故节点上写 `"layer": 0` 仍然合法（判据见 _build_scene）。
-	var layers: Array = []
 	## 相机书签（§5.1）。相机是纯工程数据，不参与几何渲染，故为空时一切照旧。
 	var cameras: Array = []
-	## 保留下来的动画（frames 已过滤）。
+	## 动画**原样透传**（§3）：本层不解释它，故不做任何过滤或补缺省。
 	var animations: Array = []
-	## 因引用无效被丢弃的节点数（诊断用）。
+	## 因类型未知 / 非对象被丢弃的节点数（含子树，诊断用）。
 	var dropped_nodes := 0
-	## 因引用无效被丢弃的帧数（诊断用）。
-	var dropped_frames := 0
 
-	## 【只算"有几何/有动画"】图层与相机不算：一个"只有相机、还没有对象"的工程
+	## 【只算"有几何/有动画"】相机不算：一个"只有相机、还没有模型"的工程
 	## 是合法状态（新建即如此），但导入器据此判断"这文件有没有可摆的东西"。
 	func is_empty() -> bool:
 		return nodes.is_empty() and animations.is_empty()
@@ -821,180 +815,108 @@ static func _read_type(bytes: PackedByteArray, at: int) -> String:
 
 
 # ----------------------------------------------------------------------------
-# NODE 场景图（§7）
+# NODE 场景树（§7）
 # ----------------------------------------------------------------------------
-# 节点是数组，身份即位置（下标就是 id）。所有引用按下标解析：
-#   children[] 下标必须 < nodes.length，且不得成环；
-#   kind="model" 的 model_id 必须存在对应 VOX0；
-#   animations[].frames[] 的键必须是合法节点下标。
-# 任一引用无效时【只丢弃该节点或该帧】，不拒绝整个文件（§9）——
-# 场景图是易变部分，不该因为一个坏引用毁掉整个模型。
+# 节点是**嵌套**的：顶层 nodes[] 里每一项自己带 children[]（组）或 model_id（模型）。
+# 嵌套天然不可能成环（子节点就写在父节点内部），于是不再需要"下标重编号 + 可达性收敛 +
+# 三色环检测"那一整套 —— 那些复杂度全部来自"身份即位置"的扁平表示，而扁平表示是 qvox 3 之前的事。
+# 校验只剩两件事：非对象项丢弃；kind 不在白名单（group / model）的条目**连同子树**丢弃。
+# 任一节点无效时【只丢弃该节点】，不拒绝整个文件（§9）——
+# 场景树是易变部分，不该因为一个坏节点毁掉整个模型。
 
-## 从 doc.node 构造已校验的只读视图。丢弃的节点/帧数记入 rep.warnings。
+## 从 doc.node 构造已校验的只读视图。丢弃的节点数记入 rep.warnings。
 static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 	var sg := QVoxSceneGraph.new()
-	# 图层与相机**先于 nodes**处理：它们不引用任何东西，且"有相机、还没摆对象"是新建工程的
-	# 常态。若放在下面 nodes 的提前返回之后，这种文件一存一读就会把 cameras 丢掉。
-	sg.layers = _normalize_object_array(
-			doc.node.get(QVoxSpec.NODE_LAYERS_KEY), QVoxSpec.LAYER_FIELD_DEFAULTS,
-			QVoxSpec.NODE_LAYERS_KEY, rep)
+	# 相机**先于 nodes**处理：它不引用任何东西，且"有相机、还没摆模型"是新建工程的常态。
+	# 若放在下面 nodes 的提前返回之后，这种文件一存一读就会把 cameras 丢掉。
 	sg.cameras = _normalize_object_array(
 			doc.node.get(QVoxSpec.NODE_CAMERAS_KEY), QVoxSpec.CAMERA_FIELD_DEFAULTS,
 			QVoxSpec.NODE_CAMERAS_KEY, rep,
 			{"projection": QVoxSpec.ALLOWED_CAMERA_PROJECTIONS})
-	var raw_nodes: Variant = doc.node.get("nodes")
+	var raw_nodes: Variant = doc.node.get(QVoxSpec.NODE_NODES_KEY)
 	if not (raw_nodes is Array):
 		# 只在"写了 nodes 但不是数组"时告警；键缺失 = 空世界，不是错误。
-		if doc.node.has("nodes"):
+		if doc.node.has(QVoxSpec.NODE_NODES_KEY):
 			rep.warnings.append("NODE 的 nodes 不是数组，已忽略节点树")
 		return sg
-	var arr: Array = raw_nodes
-	var count := arr.size()
-
-	# 1) 逐节点判定"自身是否有效"（不看 children，避免相互依赖）。
-	var self_ok := PackedByteArray()
-	self_ok.resize(count)
-	for i in count:
-		self_ok[i] = 1 if _node_self_ok(arr[i], doc, i, rep) else 0
-
-	# 2) 剪掉越界引用后，再消除环。两件事都必须做，且顺序是：
-	#    a) 只保留"引用全部落在存活集合内"的节点（可达性收敛，处理悬空/越界）；
-	#    b) 在收敛后的图上做环检测，把参与环的节点全部标记为失效，再回到 (a)。
-	#    重复直到稳定。（自环是最简单的一类环：节点直接引用自己。）
-	var alive := self_ok.duplicate()
-	var changed := true
-	while changed:
-		changed = false
-		# (a) 引用越界/失效 → 该节点失效
-		for i in count:
-			if alive[i] == 0:
-				continue
-			var n: Variant = arr[i]
-			if not (n is Dictionary):
-				alive[i] = 0
-				changed = true
-				continue
-			var kids: Variant = n.get("children")
-			if kids is Array:
-				for c in kids:
-					var ci := as_index(c)
-					if ci < 0 or ci >= count or alive[ci] == 0:
-						alive[i] = 0
-						changed = true
-						break
-		# (b) 在"只含存活节点"的导出图上找环，环上所有节点失效
-		var in_cycle := _find_cycle_nodes(arr, alive, count)
-		if not in_cycle.is_empty():
-			for ci in in_cycle:
-				if alive[ci] == 1:
-					alive[ci] = 0
-					changed = true
-
-	# 3) 收集存活节点，建立 旧下标 → 新下标 映射（保证输出下标连续可安全遍历）。
-	var remap := {}
-	var kept: Array = []
-	for i in count:
-		if alive[i] == 1:
-			remap[i] = kept.size()
-			kept.append((arr[i] as Dictionary).duplicate(true))
-
-	# 4) 存活节点的 children 重编号；已被丢弃的下标从 children 中剔除。
-	var dropped := 0
-	for i in count:
-		if alive[i] == 0:
-			dropped += 1
-			continue
-		var ni := int(remap[i])
-		var n: Dictionary = kept[ni]
-		var kids: Variant = n.get("children")
-		if kids is Array:
-			var nk: Array = []
-			for c in kids:
-				var ci := as_index(c)
-				if ci >= 0 and remap.has(ci):
-					nk.append(remap[ci])
-			if nk.is_empty():
-				n.erase("children")
-			else:
-				n["children"] = nk
-	if dropped > 0:
-		rep.warnings.append("NODE 有 %d 个节点因引用无效/成环被丢弃（§7）" % dropped)
-
-	sg.nodes = kept
-	sg.dropped_nodes = dropped
-
-	# 4.5) 层下标必须落在图层范围内（§7：越界即该**字段**无效，而非该节点无效）。
-	#      只丢字段、不丢节点 —— 图层是组织信息，不该因为它丢掉整个模型。
-	#      上界取 max(1, ...)：文件没写 layers 时世界仍有隐含缺省层 0，
-	#      否则最简单的 `"layer": 0` 会被误判成越界。
-	var layer_count := maxi(1, sg.layers.size())
-	var bad_layer := 0
-	for n in kept:
-		if not (n as Dictionary).has("layer"):
-			continue
-		var li := as_index((n as Dictionary).get("layer"))
-		if li < 0 or li >= layer_count:
-			(n as Dictionary).erase("layer")   # 缺省即 0，写 0 是冗语（P2）
-			bad_layer += 1
-		else:
-			# JSON 把整数解析成 float（同 as_index 的注释），这里落成 int，
-			# 免得"读回来是 0.0、写出去变 0"在回环比较里表现为不等。
-			(n as Dictionary)["layer"] = li
-	if bad_layer > 0:
-		rep.warnings.append("NODE 有 %d 个节点的 layer 越界，已按缺省层处理（§7）" % bad_layer)
-
-	# 5) 动画：frames 的键必须是合法（存活的）节点下标。
+	var cleaned := _clean_nodes(raw_nodes as Array)
+	sg.nodes = cleaned[0]
+	sg.dropped_nodes = int(cleaned[1])
+	if sg.dropped_nodes > 0:
+		rep.warnings.append("NODE 有 %d 个节点因类型未知/非对象被丢弃（§7）" % sg.dropped_nodes)
+	# 动画**原样透传**（§3：本层不解释它）。帧键在扁平表示里是节点下标，而嵌套表示没有下标 ——
+	# 于是"校验帧键"在本层无从谈起，交给认识动画语义的调用方（QVoxAsset）。
 	var anims: Variant = doc.node.get("animations")
 	if anims is Array:
-		var kept_anims: Array = []
-		var dropped_frames := 0
-		for a in anims:
-			if not (a is Dictionary):
-				continue
-			var anim: Dictionary = (a as Dictionary).duplicate(true)
-			var frames: Variant = anim.get("frames")
-			if frames is Array:
-				var kf: Array = []
-				for f in frames:
-					if not (f is Dictionary):
-						continue
-					var nf: Dictionary = {}
-					for key in (f as Dictionary):
-						if key == "t":
-							nf["t"] = f[key]
-							continue
-						# 键是节点下标（JSON 里表现为字符串 "1"；也容忍数值键）。
-						# 无效 → 按 §7"只丢弃该帧"处理：任一节点键无效即整帧丢弃。
-						var idx := -1
-						var ks := String(key)
-						if ks.is_valid_int():
-							idx = ks.to_int()
-						elif key is float or key is int:
-							idx = int(key)
-						if idx >= 0 and remap.has(idx):
-							nf[key] = f[key]
-						else:
-							nf = {}
-							dropped_frames += 1
-							break
-					if not nf.is_empty():
-						kf.append(nf)
-				anim["frames"] = kf
-			kept_anims.append(anim)
-		sg.animations = kept_anims
-		sg.dropped_frames = dropped_frames
-		if dropped_frames > 0:
-			rep.warnings.append("NODE 有 %d 帧因引用无效节点被丢弃（§7）" % dropped_frames)
-
+		sg.animations = anims
 	return sg
 
 
-## 把 NODE 里的"对象数组"（`layers` / `cameras`）规范成合法项：
-## 丢弃非对象项并记警告，按 defaults 补齐**缺失**键，未知键原样保留。
+## 递归清洗嵌套节点树，返回 `[干净数组, 丢弃数]`（含子树内的丢弃）。
 ##
-## 【为什么字符串项也算合法】`layers` 在本版之前是"名字字符串数组"（§5.1 改版前）。
-## 一个字符串按 `{"name": <str>}` 解读即可，零成本救回；这比"丢弃 + 告警"更贴合
-## §9 的取向：坏引用只丢**它自己**，别连着整块数据一起丢。
+## 【丢弃规则】① 非 Dictionary 项丢弃；② kind 不在白名单（group / model）的条目丢弃；
+## ③ 模型带 children 时只丢 **children**（模型是叶子，组才是唯一容器）——
+##    不丢整个节点：children 是冗余键，清掉它这个节点仍然完全可用。
+##
+## 【为什么 kind 未知要丢整棵子树，而不是"只丢这一层、留下子节点"】kind 未知 = 这一层的语义
+## 无法解读，而子节点的坐标 / 合成方式都是**相对它**表达的 —— 留下子节点等于把它们搬进一个
+## 不存在的父坐标系里，结果是"内容跑到了错误的位置"。那比直接丢弃更难排查：
+## §9 的取向是宁可少给，不可给错。
+##
+## 【为什么返回两元数组】GDScript 的 int 按值传递，只好用数组把计数带回来。
+static func _clean_nodes(arr: Array) -> Array:
+	var kept: Array = []
+	var dropped := 0
+	for item in arr:
+		var r := _clean_node(item)
+		if not (r[0] as Dictionary).is_empty():
+			kept.append(r[0])
+		dropped += int(r[1])
+	return [kept, dropped]
+
+
+## 统计一棵（可能非法的）子树里的"节点条目"总数：自身 + 递归所有 children。
+## 只在 kind 未知时用：那一支要把整棵子树都算进丢弃数（行为与文档一致）。
+static func _count_subtree(item: Variant) -> int:
+	if not (item is Dictionary):
+		return 1
+	var n := 1
+	var kids: Variant = (item as Dictionary).get("children")
+	if kids is Array:
+		for k in (kids as Array):
+			n += _count_subtree(k)
+	return n
+
+
+## 清洗单个节点。返回 `[节点字典, 被丢弃的节点数（含本节点与整棵子树）]`；
+## 节点字典为 `{}` 表示本节点也被丢弃。
+static func _clean_node(item: Variant) -> Array:
+	if not (item is Dictionary):
+		return [{}, 1]
+	var src: Dictionary = item
+	var kind := String(src.get("kind", ""))
+	if kind != "group" and kind != "model":
+		# kind 未知 → 整棵子树一起丢，丢弃数也按整棵子树计（否则诊断数字对不上实际丢掉的内容）
+		return [{}, _count_subtree(src)]
+	var out: Dictionary = src.duplicate(true)
+	if kind == "model":
+		out.erase("children")
+		return [out, 0]
+	var kids: Variant = out.get("children")
+	if not (kids is Array):
+		# 非数组的 children 按"没有子节点"处理：键清掉，不留半截结构
+		out.erase("children")
+		return [out, 0]
+	var cleaned := _clean_nodes(kids as Array)
+	if (cleaned[0] as Array).is_empty():
+		out.erase("children")   # 空数组是冗语（P2）
+	else:
+		out["children"] = cleaned[0]
+	return [out, int(cleaned[1])]
+
+
+## 把 NODE 里的"对象数组"（当前只有 `cameras`）规范成合法项：
+## 丢弃非对象项并记警告，按 defaults 补齐**缺失**键，未知键原样保留。
 static func _normalize_object_array(raw: Variant, defaults: Dictionary,
 		what: String, rep: QVoxReport, enums := {}) -> Array:
 	var out: Array = []
@@ -1007,8 +929,6 @@ static func _normalize_object_array(raw: Variant, defaults: Dictionary,
 		var d: Dictionary = {}
 		if item is Dictionary:
 			d = (item as Dictionary).duplicate()
-		elif item is String:
-			d = {"name": item}
 		else:
 			rep.warnings.append("NODE 的 %s 里有一项不是对象，已丢弃" % what)
 			continue
@@ -1027,32 +947,10 @@ static func _normalize_object_array(raw: Variant, defaults: Dictionary,
 	return out
 
 
-## 单个节点"自身"是否有效（不看 children，那在可达性收敛中处理）。
-static func _node_self_ok(n: Variant, doc: QVoxDocument, index: int, _rep: QVoxReport) -> bool:
-	if not (n is Dictionary):
-		return false
-	var kind := String(n.get("kind", ""))
-	match kind:
-		"group":
-			return true
-		"model":
-			# kind="model" 的 model_id 必须存在对应 VOX0（§7）
-			var mid := as_index(n.get("model_id"))
-			if mid < 0 or not doc.models.has(mid):
-				return false
-			var buf: Variant = doc.models.get(mid)
-			if not (buf is Dictionary) or (buf as Dictionary).is_empty():
-				return false
-			return true
-		_:
-			# 未知 kind：格式本身不解释，但按"只丢弃该节点"处理更安全。
-			return false
-
-
-## 把 JSON 里的节点下标（int / float / 字符串数字）转成非负下标；非数值/负数返回 -1。
+## 把 JSON 里的整数（int / float / 字符串数字）转成非负整数；非数值/负数返回 -1。
 ## 注意：Godot 的 JSON 解析把整数也解析为 float，故不能直接用 `is int` 判定。
-## 公开：本类用它校验 children / frames / model_id 的引用，QVoxAsset 解析动画帧的节点键也复用它
-## （同一套 JSON 下标语义只该有一份实现）。
+## 公开：QVoxWorld 读 `model_id` / `combine` 这类整数字段、QVoxAsset 解析动画帧的节点键都复用它
+## （同一套 JSON 整数语义只该有一份实现）。
 static func as_index(v: Variant) -> int:
 	if v is int:
 		return int(v) if int(v) >= 0 else -1
@@ -1066,52 +964,6 @@ static func as_index(v: Variant) -> int:
 		var i := (v as String).to_int()
 		return i if i >= 0 else -1
 	return -1
-
-
-## 在"仅存活节点"构成的 children 有向图上，返回所有参与环的节点下标（去重）。
-## 用迭代式三色 DFS：0=白（未访问）1=灰（在栈上）2=黑（已完成）。
-## 遇到灰节点即发现环，把从该灰节点到当前路径末端的整段标记为环。
-static func _find_cycle_nodes(arr: Array, alive: PackedByteArray, count: int) -> Array:
-	var color := PackedByteArray()
-	color.resize(count)
-	var in_cycle := {}
-	for start in count:
-		if alive[start] == 0 or color[start] != 0:
-			continue
-		# 显式栈，避免深递归
-		var stack: Array = [start]
-		var path: Array = []
-		while not stack.is_empty():
-			var cur: int = stack[-1]
-			if color[cur] == 0:
-				color[cur] = 1
-				path.append(cur)
-			# 找到第一条尚未访问的出边
-			var n: Variant = arr[cur]
-			var kids: Array = []
-			if n is Dictionary and (n as Dictionary).get("children") is Array:
-				kids = (n as Dictionary)["children"]
-			var advanced := false
-			for c in kids:
-				var ci := as_index(c)
-				if ci < 0 or ci >= count or alive[ci] == 0:
-					continue
-				if color[ci] == 0:
-					stack.append(ci)
-					advanced = true
-					break
-				elif color[ci] == 1:
-					# 回边 → 从 path 中 ci 起直到末端都处于环中
-					var from := path.find(ci)
-					if from >= 0:
-						for k in range(from, path.size()):
-							in_cycle[path[k]] = true
-			if not advanced:
-				color[cur] = 2
-				stack.pop_back()
-				if not path.is_empty() and path[-1] == cur:
-					path.pop_back()
-	return in_cycle.keys()
 
 
 # ----------------------------------------------------------------------------

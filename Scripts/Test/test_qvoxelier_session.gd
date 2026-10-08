@@ -27,7 +27,7 @@ func _session(grid := Vector3i(128, 128, 128)) -> QVoxEditSession:
 	# 断言浮点相等会变成在测"取整误差"而不是在测接线。
 	w.add_material(Color(1, 0, 0)) # ID 1
 	w.add_material(Color(0, 0, 1)) # ID 2
-	var obj := w.create_object("m", grid)
+	var obj := w.create_model("m", grid)
 	return QVoxEditSession.create_for(obj, w)
 
 

@@ -439,14 +439,14 @@ func test_source_format_dispatch() -> void:
 
 
 # ----------------------------------------------------------------------------
-# 图层与相机（P4-3：NODE 下的工程数据，§5.1）
+# 相机与节点树（NODE 下的工程数据，§5.1 / qvox 3）
 # ----------------------------------------------------------------------------
 # 这一组钉死三件事：
-#   ① 图层/相机的字段**逐字段存活**，缺省只在缺失时补（文件里明写的 false 不能被改回来）；
-#   ② 坏数据只丢它自己 —— 非对象项、越界 layer、不在白名单的投影都不该拖垮整块；
-#   ③ 编辑模型（QVoxWorld）与文件之间的往返一致，且删层会把对象的 layer 一起搬。
+#   ① 相机的字段**逐字段存活**，缺省只在缺失时补（文件里明写的 false 不能被改回来）；
+#   ② 坏数据只丢它自己 —— 非对象项、不在白名单的投影、未知 kind 都不该拖垮整块；
+#   ③ 编辑模型（QVoxWorld）与文件之间的往返一致，且节点树是**嵌套**的（不再有下标与图层）。
 
-func test_layers_and_cameras_roundtrip() -> void:
+func test_cameras_and_nested_nodes_roundtrip() -> void:
 	var bytes := QVoxFile.serialize(_make_doc_with_engineering_data())
 	var rep := QVoxFile.QVoxReport.new()
 	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
@@ -455,15 +455,6 @@ func test_layers_and_cameras_roundtrip() -> void:
 		return
 	var sg := doc.scene
 
-	assert_eq(sg.layers.size(), 2, "两条图层都要在")
-	assert_eq(sg.layers[0]["name"], "base")
-	assert_eq(sg.layers[0]["visible"], true, "缺失的 visible 补缺省")
-	assert_eq(sg.layers[0]["locked"], false, "缺失的 locked 补缺省")
-	assert_eq(sg.layers[1]["visible"], false, "文件里明写的 false 不能被缺省值 true 改回来")
-	assert_eq(sg.layers[1]["locked"], true)
-	# JSON 数字读回一律是 float（[1,2,3] → [1.0,2.0,3.0]），这不是丢精度，是 JSON 的类型事实。
-	assert_eq(sg.layers[1]["color"], [1.0, 2.0, 3.0], "未知键原样保留（同 HEAD 的未知键策略）")
-
 	assert_eq(sg.cameras.size(), 2, "两台相机都要在")
 	assert_eq(sg.cameras[0]["name"], "front")
 	assert_eq(sg.cameras[0]["projection"], "ortho")
@@ -471,37 +462,66 @@ func test_layers_and_cameras_roundtrip() -> void:
 	assert_eq(sg.cameras[1]["projection"], "persp", "缺失的 projection 补缺省")
 	assert_false(sg.cameras[1].has("size"), "没写的可选字段不凭空补出来（未设 ≠ 设成 0）")
 
-	assert_eq(_find_node(sg.nodes, "body").get("layer"), 1, "节点层下标要存活")
-	assert_false(_find_node(sg.nodes, "root").has("layer"),
-			"没写 layer 的节点不该被补上 0 —— 缺省即 0，写 0 是冗语（P2）")
+	# 嵌套树：组是容器、模型是叶子，子节点在 children 里。**没有下标**正是 qvox 3 的要点 ——
+	# 下标会随增删整体平移，一漏改就把节点挂到别的父下面（那类错既不报错、位置也看不出异常）。
+	var root := _find_node(sg.nodes, "root")
+	assert_eq(root.get("kind"), "group", "顶层是组")
+	assert_false(root.has("visible"), "缺省 visible=true 不写出来（P2：缺省才是常态）")
+	var body := _find_node(root.get("children", []), "body")
+	assert_eq(body.get("kind"), "model", "子节点在父的 children 里")
+	assert_eq(body.get("model_id"), 0, "模型下标存活")
+	var steps: Array = body.get("steps", [])
+	assert_eq(steps.size(), 1, "组内坐标是链上的一条")
+	assert_eq(steps[0].get("type"), "PcgTransform", "条目认得出是哪种算子")
+	assert_eq((steps[0].get("params") as Dictionary).get("offset"), [1.0, 2.0, 3.0],
+			"组内坐标存活（JSON 数字读回是 float）")
+	assert_false(body.has("children"), "模型是叶子 —— children 是冗余键，不该出现在模型上")
 
 
-func test_layers_lenient_and_validated() -> void:
+func test_cameras_lenient_and_validated() -> void:
 	var doc := _make_doc()
 	doc.node = {
-		QVoxSpec.NODE_LAYERS_KEY: ["legacy", 42, {"name": "ok"}],
 		QVoxSpec.NODE_CAMERAS_KEY: [{"projection": "weird"}, {"projection": "ortho"}],
-		"nodes": [
-			{"name": "a", "kind": "model", "model_id": 0, "layer": 9},
-			{"name": "b", "kind": "model", "model_id": 0, "layer": 1},
-		],
+		"nodes": [{"name": "a", "kind": "model", "model_id": 0}],
 	}
 	var rep := QVoxFile.QVoxReport.new()
 	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
 	var sg := parsed.scene
 
-	# 字符串层名（§5.1 改版前的写法）按 {"name": …} 救回；数字项丢弃。两者都不该拖垮整块。
-	assert_eq(sg.layers.size(), 2, "字符串项救回、非对象项丢弃")
-	assert_eq(sg.layers[0]["name"], "legacy")
-	assert_true(_warnings_contain(rep, "不是对象"), "丢弃非对象项要告警")
-
 	assert_eq(sg.cameras[0]["projection"], "persp", "不在白名单的投影按缺省处理")
 	assert_true(_warnings_contain(rep, "白名单"), "越白名单要告警")
+	assert_eq(sg.nodes.size(), 1, "坏相机不该牵连节点树")
 
-	assert_eq(sg.nodes.size(), 2, "layer 越界只丢字段，不该牵连节点")
-	assert_false(_find_node(sg.nodes, "a").has("layer"), "越界的 layer 被丢弃")
-	assert_eq(_find_node(sg.nodes, "b").get("layer"), 1, "合法 layer 保留")
-	assert_true(_warnings_contain(rep, "layer 越界"), "越界要告警")
+
+## 未知 kind 要连**子树**一起丢：子节点的坐标是相对它表达的，留下子节点等于把内容搬进一个
+## 不存在的父坐标系里（§9：宁可少给，不可给错）。
+func test_unknown_kind_drops_the_whole_subtree() -> void:
+	var doc := _make_doc()
+	doc.node = {
+		"nodes": [
+			{"name": "ok", "kind": "model", "model_id": 0},
+			{"name": "weird", "kind": "warp",
+					"children": [{"name": "inner", "kind": "model", "model_id": 0}]},
+		],
+	}
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	var sg := parsed.scene
+	assert_eq(sg.nodes.size(), 1, "未知 kind 的节点被丢弃")
+	assert_eq(sg.dropped_nodes, 2, "它和它的子树一起算丢弃（否则 inner 会飘到顶层）")
+	assert_true(_warnings_contain(rep, "丢弃"), "丢弃要告警")
+
+
+## 模型带 children 是冗余键（模型是叶子）：只清 children，不丢整个模型。
+func test_model_with_children_keeps_the_model() -> void:
+	var doc := _make_doc()
+	doc.node = {"nodes": [{"name": "m", "kind": "model", "model_id": 0,
+			"children": [{"name": "x", "kind": "model", "model_id": 0}]}]}
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	var n := _find_node(parsed.scene.nodes, "m")
+	assert_false(n.is_empty(), "模型本身仍然可用")
+	assert_false(n.has("children"), "冗余的 children 被清掉")
 
 
 ## "只有相机、还没有对象"是新建工程的常态，不该在 nodes 的提前返回里被丢掉。
@@ -516,50 +536,38 @@ func test_cameras_survive_without_nodes() -> void:
 	assert_false(_warnings_contain(rep, "nodes"), "缺 nodes 键 = 空世界，不是错误")
 
 
-func test_world_layers_edit_model() -> void:
+## 相机字段改一下要能撤销。
+func test_world_camera_edit_is_undoable() -> void:
 	var w := QVoxWorld.create_empty()
-	var mat := w.add_material(Color.RED)
-	var o := w.create_object("body")
-	o.fill_box(Vector3i.ZERO, Vector3i(3, 3, 3), mat)
+	assert_eq(w.cameras().size(), 0, "新建世界没有相机")
+	assert_eq(w.add_camera("front"), 0, "第一台相机")
+	assert_eq(w.camera_field(0, "name"), "front")
 
-	assert_eq(w.layer_count(), 1, "空数组 = 只有一条隐含缺省层")
-	assert_true(w.layers().is_empty(), "新建世界不写 layers 键（缺省才是常态）")
-
-	var l1 := w.add_layer("detail")
-	assert_eq(l1, 1, "第一层显式图层是下标 1 —— 0 已被隐含缺省层占着")
-	assert_eq(w.layer_count(), 2)
-	assert_eq(w.layer_field(0, "name"), QVoxSpec.LAYER_DEFAULT_NAME, "隐含缺省层被实体化")
-
-	# 改一个字段要能撤销：面板把它包成 QVoxPropertyCommand(world, &"node")。
-	# 这一条同时钉死了"写入必须整体替换"——就地改的话 before 会跟着变，撤销就撤了个寂寞。
+	# 面板把它包成 QVoxPropertyCommand(world, &"node")。这一条同时钉死了"写入必须整体替换"——
+	# 就地改的话 before 会跟着变，撤销就撤了个寂寞。
 	var cmd := QVoxPropertyCommand.begin(w, &"node")
-	assert_true(w.set_layer_field(0, "visible", false), "值变了 → 应产生撤销单位")
-	assert_false(w.set_layer_field(0, "visible", false), "值没变 → 不该占一次撤销")
+	assert_true(w.set_camera_field(0, "projection", "ortho"), "值变了 → 应产生撤销单位")
+	assert_false(w.set_camera_field(0, "projection", "ortho"), "值没变 → 不该占一次撤销")
 	assert_true(cmd.commit(), "整体替换 node 下的数组，浅快照才抓得住改前值")
-	assert_eq(w.layer_field(0, "visible"), false)
+	assert_eq(w.camera_field(0, "projection"), "ortho")
 	cmd.undo()
-	assert_eq(w.layer_field(0, "visible"), true, "撤销回到改前值")
+	assert_eq(w.camera_field(0, "projection"), "persp", "撤销回到改前值")
 	cmd.redo()
-	assert_eq(w.layer_field(0, "visible"), false)
+	assert_eq(w.camera_field(0, "projection"), "ortho")
 
-	# 删层必须把对象的 layer 一起左移，否则存盘后被判越界、静默漂移回缺省层。
-	o.layer = l1
-	var l2 := w.add_layer("third")
-	o.layer = l2
-	assert_eq(o.layer, 2)
-	assert_true(w.remove_layer(1), "删中间那层")
-	assert_eq(w.layer_count(), 2)
-	assert_eq(o.layer, 1, "原来指向 2 的对象左移到 1")
-	assert_eq(w.layer_field(1, "name"), "third")
+	assert_true(w.remove_camera(0), "删相机")
+	assert_eq(w.cameras().size(), 0)
 
 
 func test_world_engineering_data_roundtrip() -> void:
 	var w := QVoxWorld.create_empty()
 	var mat := w.add_material(Color.RED)
-	var o := w.create_object("body")
+	var g := w.create_group("root")
+	var o := w.create_model("body", Vector3i(8, 8, 8), g)
 	o.fill_box(Vector3i.ZERO, Vector3i(3, 3, 3), mat)
-	var l1 := w.add_layer("detail")
-	o.layer = l1
+	var solid := o.count_solid()   # 闭区间盒 → 4³，不写死数字，测的是"存活"而非某个计数
+	# 组内坐标是一条链上条目（不再是节点字段）—— 它必须和别的条目一样往返
+	o.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(1, 2, 3))))
 	w.add_camera("front")
 	assert_true(w.set_camera_field(0, "projection", "ortho"), "相机改成正交")
 	assert_true(w.set_camera_field(0, "size", 128), "正交视高")
@@ -570,18 +578,58 @@ func test_world_engineering_data_roundtrip() -> void:
 	assert_true(rep.warnings.is_empty(), "回环不该有任何告警（%s）" % str(rep.warnings))
 	var w2 := QVoxWorld.from_document(parsed)
 
-	assert_eq(w2.layers().size(), 2, "图层条数")
-	for i in 2:
-		for k in ["name", "visible", "locked"]:
-			assert_eq(w2.layer_field(i, k), w.layer_field(i, k), "层 %d 的 %s 要逐字段相等" % [i, k])
 	assert_eq(w2.cameras().size(), 1, "相机条数")
 	assert_eq(w2.camera_field(0, "name"), "front")
 	assert_eq(w2.camera_field(0, "projection"), "ortho")
 	assert_eq(int(w2.camera_field(0, "size")), 128, "正交视高存活（JSON 数字读回是 float）")
 
-	assert_eq(w2.objects.size(), 1, "对象条数")
-	assert_eq(w2.objects[0].object_name, "body")
-	assert_eq(w2.objects[0].layer, l1, "层归属存活")
+	assert_eq(w2.nodes.size(), 1, "顶层只有那个组（模型是它的子节点，不是平级）")
+	var g2 := w2.nodes[0] as QVoxGroup
+	assert_eq(g2.node_name, "root", "组名存活")
+	assert_eq(g2.child_nodes.size(), 1, "组里的模型存活")
+	var o2 := g2.child_nodes[0] as QVoxModel
+	assert_eq(o2.node_name, "body")
+	assert_eq(o2.modifiers.size(), 1, "组内坐标是一条链上条目")
+	var place := (o2.modifiers[0] as QVoxTransformModifier).transform
+	assert_eq(place.mode, PcgTransform.Mode.TRANSLATE, "它是平移条目")
+	assert_eq(place.offset, Vector3i(1, 2, 3), "组内坐标存活")
+	assert_eq(o2.count_solid(), solid, "体素存活")
+
+
+## 链上的条目要跟着节点树一起往返 —— 这是 qvox 3 新增的 steps 字段。
+##
+## 【为什么连"输出盒尺寸"也一起断言】链的意义全在"它会改变求值结果"；只比条数等于没测，
+## 参数读丢 / 旁通位读丢都能让条数一样而对不上。
+func test_node_modifiers_roundtrip() -> void:
+	var w := QVoxWorld.create_empty()
+	w.add_material(Color.RED)
+	var o := w.create_model("body", Vector3i(8, 8, 8))
+	# 三条覆盖三种"该存活的东西"：合成方式（差集）/ 核的参数（平铺份数）/ 旁通位。
+	# 差集挂在 SDF 条目上：体素域的变换型条目合成方式只能是「替换」（见 QVoxDomain.chain_errors）。
+	var hole := SdfSphere.new()
+	hole.center = Vector3(4.0, 4.0, 4.0)
+	hole.radius = 2.0
+	o.add_modifier(QVoxSdfModifier.of(hole, QVoxDomain.Combine.SUBTRACT))
+	o.add_modifier(QVoxTransformModifier.of(PcgTransform.repeat(0, 3)))
+	o.add_modifier(QVoxTransformModifier.of(PcgTransform.mirror(1)))
+	o.modifiers[2].enabled = false
+
+	var rep := QVoxFile.QVoxReport.new()
+	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(
+			QVoxFile.serialize(w.to_document()), true, rep, true)
+	assert_true(rep.warnings.is_empty(), "回环不该有任何告警（%s）" % str(rep.warnings))
+	var o2 := QVoxWorld.from_document(parsed).all_models()[0]
+
+	assert_eq(o2.modifiers.size(), 3, "链上三条都要回来")
+	assert_eq(o2.modifiers[0].kind(), QVoxModifier.KIND_SDF, "种类存活")
+	assert_eq(o2.modifiers[0].combine, QVoxDomain.Combine.SUBTRACT, "合成方式存活")
+	assert_eq(o2.modifiers[1].kind(), QVoxModifier.KIND_TRANSFORM, "种类存活")
+	var t := (o2.modifiers[1] as QVoxTransformModifier).transform
+	assert_eq(t.mode, PcgTransform.Mode.REPEAT, "核的种类存活")
+	assert_eq(t.times, 3, "核的参数存活")
+	assert_false(o2.modifiers[2].enabled, "旁通位存活（它不改变条数，只有尺寸/结果能证明它回来了）")
+	assert_eq(QVoxEvalEngine.output_grid_size(o2.modifiers, o2.grid_size), Vector3i(24, 8, 8),
+			"链的尺寸语义存活（平铺 ×3，镜像不改盒尺寸）")
 
 
 # --- 本节的局部辅助 ---------------------------------------------------------
@@ -589,17 +637,18 @@ func test_world_engineering_data_roundtrip() -> void:
 func _make_doc_with_engineering_data() -> QVoxFile.QVoxDocument:
 	var doc := _make_doc()
 	doc.node = {
-		QVoxSpec.NODE_LAYERS_KEY: [
-			{"name": "base"},
-			{"name": "detail", "visible": false, "locked": true, "color": [1, 2, 3]},
-		],
 		QVoxSpec.NODE_CAMERAS_KEY: [
 			{"name": "front", "projection": "ortho", "size": 128},
 			{"name": "persp_cam"},
 		],
 		"nodes": [
-			{"name": "root", "kind": "group", "children": [1]},
-			{"name": "body", "kind": "model", "model_id": 0, "layer": 1},
+			{"name": "root", "kind": "group", "children": [
+				# 组内坐标是 steps 里的一条平移条目（combine=0 即「替换」，体素域变换型只允许它）
+				{"name": "body", "kind": "model", "model_id": 0, "steps": [
+					{"kind": "transform", "combine": 0,
+						"type": "PcgTransform", "params": {"mode": 3, "offset": [1, 2, 3]}},
+				]},
+			]},
 		],
 	}
 	return doc

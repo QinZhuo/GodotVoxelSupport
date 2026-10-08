@@ -1,7 +1,7 @@
 extends TestCase
 
 ## P3「统一生成流水线」的契约测试：求值引擎（QVoxEvalEngine）+ 链的 VoxelGenerator 适配器
-## （QVoxObjectGenerator）。
+## （QVoxModelGenerator）。
 ##
 ## 钉死四条硬承诺 —— 每一条都对应一个"以后重构很容易悄悄弄坏"的点：
 ##   ① 手绘体素是链的**输入/种子**，不是链的一环 → 链首那条的 combine 决定它怎么与手绘相合；
@@ -47,8 +47,8 @@ func _chain(mods: Array) -> Array[QVoxModifier]:
 
 
 ## 角落一小块手绘石料。球够不到这里 → 可用于区分"手绘"与"链产出"。
-func _obj_with_blocks() -> QVoxObject:
-	var obj := QVoxObject.new()
+func _obj_with_blocks() -> QVoxModel:
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	obj.fill_box(Vector3i(1, 1, 1), Vector3i(3, 4, 4), 9)
 	return obj
@@ -168,7 +168,7 @@ func test_voxel_source_head_also_meets_hand_drawn() -> void:
 ## 链首直接是体素算子、且手绘体素为空 —— 输入是"整块空网格"，不是"没有体积"。
 ## 这是引擎里最容易踩的下标越界：所有 PcgDetail 都按 `for x in grid_size.x` 遍历。
 func test_voxel_operator_on_empty_hand_drawn_grid() -> void:
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	var tint := PcgSurfaceTint.new()
 	tint.material_ids = PackedInt32Array([1, 2])
@@ -183,7 +183,7 @@ func test_voxel_operator_on_empty_hand_drawn_grid() -> void:
 # ----------------------------------------------------------------------------
 
 func test_field_chain_is_downgraded_to_volume_automatically() -> void:
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	obj.modifiers = _chain([QVoxSdfModifier.of(_sphere(10.0, 3))])
 	var res := QVoxEvalEngine.evaluate(obj, QVoxEvalContext.make(GS, 0))
@@ -196,7 +196,7 @@ func test_field_chain_is_downgraded_to_volume_automatically() -> void:
 
 ## 体力算子的输入是上一步累积出的体积。改完 SDF 之后再改体素 —— 顺序即语义。
 func test_volume_operator_runs_after_sdf_downgrade() -> void:
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	var w := PcgWeather.new()
 	w.strength = 1.0  # 阈值拉满（PcgWeather 内部上限 0.72）→ 保证一定挖得动
@@ -259,7 +259,7 @@ func test_off_chain_nodes_are_marked() -> void:
 # ----------------------------------------------------------------------------
 
 func test_incremental_reuse_and_signature_busting() -> void:
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	var tint := PcgSurfaceTint.new()
 	tint.material_ids = PackedInt32Array([4, 5])
@@ -293,7 +293,7 @@ func test_incremental_reuse_and_signature_busting() -> void:
 ## 体积）；能区分它们的唯一证据是"链首算子有没有被再调一次"，故这里数 build() 的调用次数。
 func test_step_dirty_only_recomputes_the_tail() -> void:
 	_CountingModel.builds = 0
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	var gen := _sphere_model(10.0, 1)
 	var tint := PcgSurfaceTint.new()
@@ -330,7 +330,7 @@ func test_step_dirty_only_recomputes_the_tail() -> void:
 ## 取消 = 本次求值作废：截断的轨迹既不能冒充完整结果，也不能被当作复用起点。
 func test_cancelled_result_is_never_reused() -> void:
 	_CountingModel.builds = 0
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = GS
 	var gen := _sphere_model(10.0, 1)
 	var tint := PcgSurfaceTint.new()
@@ -359,7 +359,7 @@ func test_cancelled_result_is_never_reused() -> void:
 func test_engine_is_stateless_across_objects() -> void:
 	# 同一引擎跑两个对象，结果不得互相污染（引擎无状态、纯函数）
 	var a := _obj_with_blocks()
-	var b := QVoxObject.new()
+	var b := QVoxModel.new()
 	b.grid_size = GS
 	b.fill_box(Vector3i(10, 10, 10), Vector3i(11, 11, 11), 6)
 	var ctx := QVoxEvalContext.make(GS, 0)
@@ -370,13 +370,13 @@ func test_engine_is_stateless_across_objects() -> void:
 
 
 # ----------------------------------------------------------------------------
-# ④ 链的产出逐 chunk 供数（QVoxObjectGenerator）
+# ④ 链的产出逐 chunk 供数（QVoxModelGenerator）
 # ----------------------------------------------------------------------------
 
 func test_generator_slices_match_engine_volume_exactly() -> void:
 	var obj := _obj_with_blocks()
 	obj.modifiers = _chain([QVoxSdfModifier.of(_sphere(10.0, 2))])
-	var gen := QVoxObjectGenerator.new()
+	var gen := QVoxModelGenerator.new()
 	gen.object = obj
 	gen.eval_seed = 3
 	gen.set_grid_size(GS)
@@ -417,7 +417,7 @@ func test_generator_slices_match_engine_volume_exactly() -> void:
 func test_generator_lod_and_empty_source() -> void:
 	var obj := _obj_with_blocks()
 	obj.modifiers = _chain([QVoxSdfModifier.of(_sphere(10.0, 2))])
-	var gen := QVoxObjectGenerator.new()
+	var gen := QVoxModelGenerator.new()
 	gen.object = obj
 	gen.set_grid_size(GS)
 	var grid := VoxelChunkGenerator.LOD_BLOCK_SIZE
@@ -430,9 +430,9 @@ func test_generator_lod_and_empty_source() -> void:
 	assert_true(solid > 0, "LOD1 采样球体应有实心格")
 
 	# 空对象（空链 + 无手绘）：必须返回全空缓冲，而不是越界崩溃
-	var blank := QVoxObject.new()
+	var blank := QVoxModel.new()
 	blank.grid_size = GS
-	var gen_blank := QVoxObjectGenerator.new()
+	var gen_blank := QVoxModelGenerator.new()
 	gen_blank.object = blank
 	gen_blank.set_grid_size(GS)
 	var buf := gen_blank.generate(Vector3i.ZERO)
@@ -444,7 +444,7 @@ func test_generator_lod_and_empty_source() -> void:
 	assert_eq(blank_solid, 0, "空源必须全空")
 
 	# 无源（object = null）：同样全空，不崩
-	var gen_none := QVoxObjectGenerator.new()
+	var gen_none := QVoxModelGenerator.new()
 	gen_none.set_grid_size(GS)
 	var buf2 := gen_none.generate(Vector3i.ZERO)
 	assert_eq(buf2.size(), VoxelChunk.CHUNK_VOLUME, "无源也要返回对齐长度")

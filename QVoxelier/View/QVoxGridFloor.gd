@@ -60,6 +60,14 @@ const SHADER := preload("res://QVoxelier/View/QVoxGridFloor.gdshader")
 		cage_color = v
 		rebuild()
 
+## 是否画底面格线。关掉只剩外框与短立棱 —— 密集格线在斜视角下会糊成一层雾，
+## 想看形状（尤其是曲面/斜面）时需要能把它摘掉。**外框始终保留**：它不是装饰，
+## 是"合法范围的正面告知"（见类文档第 ② 条），关掉会让越界落笔重新变成"坏了"。
+@export var grid_lines_visible := true:
+	set(v):
+		grid_lines_visible = v
+		_push_grid_colors()
+
 var _grid_mat: ShaderMaterial
 var _line_mat: StandardMaterial3D
 
@@ -142,11 +150,26 @@ func _grid_material() -> ShaderMaterial:
 	if _grid_mat == null:
 		_grid_mat = ShaderMaterial.new()
 		_grid_mat.shader = SHADER
-	_grid_mat.set_shader_parameter("line_color", line_color)
-	_grid_mat.set_shader_parameter("major_color", major_color)
-	_grid_mat.set_shader_parameter("cell_count", Vector2(grid_size.x, grid_size.z))
-	_grid_mat.set_shader_parameter("major_step", float(major_step))
+		_grid_mat.set_shader_parameter("cell_count", Vector2(grid_size.x, grid_size.z))
+		_grid_mat.set_shader_parameter("major_step", float(major_step))
+	_push_grid_colors()
 	return _grid_mat
+
+
+## 把颜色推到着色器。**显隐也用同一组 uniform 表达**（alpha 置 0），而不是换材质或摘面 ——
+## 摘面要重建整个网格，换材质要多留一份实例；而颜色 uniform 本来就要推，顺手复用最省。
+func _push_grid_colors() -> void:
+	if _grid_mat == null:
+		return
+	_grid_mat.set_shader_parameter("line_color",
+			line_color if grid_lines_visible else Color(line_color, 0.0))
+	_grid_mat.set_shader_parameter("major_color",
+			major_color if grid_lines_visible else Color(major_color, 0.0))
+
+
+## 对外：网格线显隐（由视图栏开关调用）。
+func set_grid_lines_visible(on: bool) -> void:
+	grid_lines_visible = on
 
 
 ## 线材质：不受光、顶点色即颜色、透明。线本身是参照物，不该被光照改变明暗。

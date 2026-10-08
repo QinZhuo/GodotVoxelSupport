@@ -36,12 +36,13 @@ func test_multi_model_with_node_placement() -> void:
 	assert_true(data != null, "应能构造 VoxelData")
 	if data == null:
 		return
-	# 模型 0：块 (0,0,0) 内 (1,1,1) → 世界 (1,1,1)
-	# 模型 1：块 (5,0,0) 内 (1,1,1) → 世界 (161,1,1)，再叠加 NODE 位移 (0,64,0)
+	# 组 root 位移 (0,32,0)（**组变换要累积给子节点**），再叠加各自节点的 transform：
+	#   模型 0：块 (0,0,0) 内 (1,1,1) → (1,1,1) + (0,32,0) = (1,33,1)
+	#   模型 1：块 (5,0,0) 内 (1,1,1) → (161,1,1) + (0,32,0) + (0,64,0) = (161,97,1)
 	assert_eq(data.get_voxel_count(), 2, "两模型各 1 个体素（此前只剩第一个模型）")
 	assert_eq(data.get_all_chunk_keys().size(), 2, "两个模型应落在两个不同 chunk")
-	assert_true(data.has_voxel(Vector3i(1, 1, 1)), "模型 0 的体素应在原处")
-	assert_true(data.has_voxel(Vector3i(161, 65, 1)), "模型 1 的体素应叠加 NODE 位移")
+	assert_true(data.has_voxel(Vector3i(1, 33, 1)), "模型 0：组变换应累积到子节点")
+	assert_true(data.has_voxel(Vector3i(161, 97, 1)), "模型 1：组变换与自身位移都应叠加")
 
 
 # ----------------------------------------------------------------------------
@@ -189,37 +190,32 @@ func test_node_scale_and_translation_applied() -> void:
 
 
 # ----------------------------------------------------------------------------
-# ⑧ NODE.animations 的帧补丁必须真的被消费（此前只被解析/校验，没有任何读取方）
+# ⑧ NODE.animations：格式层原样透传，**不解释**（v3 没有可寻址的节点下标）
 # ----------------------------------------------------------------------------
 
-## `frame_index` 选第几帧，节点摆放就取那一帧的覆盖值。
-## 守的是"帧补丁不是死数据"：若哪天有人删掉 QVoxAsset._frame_patches 的调用，
-## 这里会立刻变成"两帧位置一样"而失败。
-func test_animation_frame_patch_applied() -> void:
+## `animations[].frames` 的键是**节点下标**，而 v3 的节点树是嵌套的、没有下标这层身份。
+## 于是动画退化为"扁平时代的遗留键"：格式层原样保留（重写不丢数据），但不参与摆放。
+## 守两件事：① 带动画的文件照样能读；② 帧不再改变任何摆放（按下标叠加补丁的行为已废除）。
+func test_animation_frames_are_passed_through_not_interpreted() -> void:
 	var path := TEST_DIR + "/anim.qvox"
-	# 本 helper 只有一个节点 → 帧补丁的键是下标 0。
-	# 第 0 帧覆盖 t=(0,0,0)，第 1 帧覆盖 t=(0,64,0)。
+	# 第 1 帧声称把下标 0 的节点抬高 64 —— v3 不解释它，故必须与第 0 帧给出同一个世界
 	_write_single_voxel_qvox(path, {},
 			[{"t": 0, "0": {"t": [0, 0, 0]}}, {"t": 100, "0": {"t": [0, 64, 0]}}])
-	var f0 := QVoxAsset.from_file(path, 0)
-	var f1 := QVoxAsset.from_file(path, 1)
-	assert_true(f0 != null and f1 != null, "应能解析带动画的 .qvox")
-	if f0 == null or f1 == null:
+	var qvox := QVoxAsset.from_file(path)
+	assert_true(qvox != null, "带动画的 .qvox 应能解析")
+	if qvox == null:
 		return
-	assert_eq(f0.placements.size(), 1, "每帧都应有 1 条摆放")
-	assert_eq(f1.placements.size(), 1, "每帧都应有 1 条摆放")
-	var d0 := VoxelData.from_qvox(f0)
-	var d1 := VoxelData.from_qvox(f1)
-	# 体素位于块 (0,0,0) 的局部 (1,1,1)
-	assert_true(d0.has_voxel(Vector3i(1, 1, 1)), "第 0 帧：模型应落在原点")
-	assert_true(d1.has_voxel(Vector3i(1, 65, 1)), "第 1 帧：帧补丁应把模型抬高 64")
-	assert_false(d1.has_voxel(Vector3i(1, 1, 1)), "第 1 帧：原位置不应残留")
-	# 越界帧号安全退化：不崩、按"无补丁"处理（等价静态摆放）
-	var out := QVoxAsset.from_file(path, 9)
-	assert_true(out != null, "越界 frame_index 不应导致失败")
-	if out != null:
-		assert_true(VoxelData.from_qvox(out).has_voxel(Vector3i(1, 1, 1)),
-				"越界 frame_index 应退化为无补丁")
+	assert_eq(qvox.placements.size(), 1, "应恰好一条摆放")
+	# 体素位于块 (0,0,0) 的局部 (1,1,1)；节点未写 transform → 恒等
+	var data := VoxelData.from_qvox(qvox)
+	assert_true(data.has_voxel(Vector3i(1, 1, 1)), "帧键不参与摆放：模型应落在自身 transform（原点）")
+	assert_false(data.has_voxel(Vector3i(1, 65, 1)), "帧里的位移不得被应用")
+	# 原样透传：格式层的只读视图仍应看得到这段动画
+	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(
+			FileAccess.get_file_as_bytes(path), true, QVoxFile.QVoxReport.new(), true)
+	assert_true(doc != null and doc.scene != null, "应能解析出场景视图")
+	if doc != null and doc.scene != null:
+		assert_eq(doc.scene.animations.size(), 1, "动画应原样透传（不丢数据）")
 
 
 # ----------------------------------------------------------------------------
@@ -301,7 +297,8 @@ func _one_voxel_block() -> PackedInt32Array:
 
 ## 造一个"单模型单体素"的 .qvox：块 (0,0,0) 内的 (1,1,1) 有一个体素，
 ## NODE 里一个 model 节点带给定的 transform（空字典 = 不写 NODE 块，即恒等摆放）。
-## frames 非空时写入一段动画（帧补丁以**节点下标**为键；本 helper 只有一个节点 → 下标 0）。
+## frames 非空时写入一段动画（`frames` 的键是**节点下标**；本 helper 只有一个节点 → 下标 0）。
+## 注意：v3 不解释动画（见 ⑧），它只用来验证"原样透传、不影响摆放"。
 ## 变换相关的用例共用它，使"看的是变换，而不是文档构造"。
 func _write_single_voxel_qvox(path: String, transform: Dictionary, frames: Array = []) -> void:
 	var doc := _new_doc()
@@ -316,7 +313,10 @@ func _write_single_voxel_qvox(path: String, transform: Dictionary, frames: Array
 
 ## 造一个"双模型 + 可选 NODE 摆放"的 .qvox。
 ## 模型 0：块 (0,0,0) 内 (1,1,1)；模型 1：块 (5,0,0) 内 (1,1,1)。
-## with_node 时给出 NODE：模型 1 额外位移 (0,64,0)，用于验证场景图不再被丢弃。
+## with_node 时给出 NODE：组 root 位移 (0,32,0)、模型 1 再位移 (0,64,0)，
+## 于是既验证"场景图不再被丢弃"，也验证**组变换累积到子节点**。
+##
+## 节点树是**嵌套**的：组自己带 children[]（v3 起不再是"子节点下标"那套扁平表示）。
 func _write_two_model_qvox(path: String, with_node: bool) -> void:
 	var doc := _new_doc()
 	doc.models = {
@@ -325,11 +325,12 @@ func _write_two_model_qvox(path: String, with_node: bool) -> void:
 	}
 	if with_node:
 		doc.node = {"nodes": [
-			{"name": "root", "kind": "group", "children": [1, 2]},
-			{"name": "body", "kind": "model", "model_id": 0,
-					"transform": {"t": [0, 0, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1]}},
-			{"name": "wheel", "kind": "model", "model_id": 1,
-					"transform": {"t": [0, 64, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1]}},
+			{"name": "root", "kind": "group", "transform": {"t": [0, 32, 0]}, "children": [
+				{"name": "body", "kind": "model", "model_id": 0,
+						"transform": {"t": [0, 0, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1]}},
+				{"name": "wheel", "kind": "model", "model_id": 1,
+						"transform": {"t": [0, 64, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1]}},
+			]},
 		]}
 	_write_bytes(path, QVoxFile.serialize(doc))
 

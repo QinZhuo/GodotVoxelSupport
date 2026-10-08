@@ -28,8 +28,12 @@ var materials: Array[VoxelMaterial] = []
 var models: Dictionary = {}
 
 ## 摆放表：每项 { "model_id": int, "transform": Transform3D, "name": String }。
-## 来自 NODE 场景图；NODE 缺失或未引用某个模型时，为该模型补一条恒等摆放。
-## 若构造时给了 `frame_index`，选定动画帧的节点补丁已并入各条的 `transform`（见 _frame_patches）。
+## 来自 NODE 场景图（组的 transform 逐层累积到模型节点）；NODE 缺失或未引用某个模型时，
+## 为该模型补一条恒等摆放。
+##
+## 【为什么没有"帧"这一维】`animations[].frames` 的键是**节点下标**，而 v3 的节点树是嵌套的、
+## 没有下标这层身份（见 QVoxFile 的 NODE 清洗）。于是动画在 v3 里只是"原样透传的遗留键"，
+## 不参与摆放 —— 同一个文件无论看哪一帧，摆放都相同。
 var placements: Array = []
 
 ## HEAD 原始元数据（up_axis / bounds / 自定义键原样保留，供调用方按需读取）
@@ -55,8 +59,7 @@ static func handles(path: String) -> bool:
 
 
 ## 读文件并解析（CRC 校验开启）。失败返回 null 并报错。
-## frame_index 选择动画帧（语义见 _frame_patches）；缺省 0 = 静态摆放叠加第 0 帧补丁。
-static func from_file(path: String, frame_index: int = 0) -> QVoxAsset:
+static func from_file(path: String) -> QVoxAsset:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		push_error("[QVoxAsset] 无法读取 %s" % path)
@@ -70,11 +73,11 @@ static func from_file(path: String, frame_index: int = 0) -> QVoxAsset:
 		return null
 	for w in rep.warnings:
 		push_warning("[QVoxAsset] %s: %s" % [path.get_file(), w])
-	return from_document(doc, frame_index)
+	return from_document(doc)
 
 
-## 由已解析文档构造（不做任何逐体素展开）。frame_index 见 _frame_patches。
-static func from_document(doc: QVoxFile.QVoxDocument, frame_index: int = 0) -> QVoxAsset:
+## 由已解析文档构造（不做任何逐体素展开）。
+static func from_document(doc: QVoxFile.QVoxDocument) -> QVoxAsset:
 	var out := QVoxAsset.new()
 	out.metadata = doc.head.duplicate(true)
 	out.up_axis = str(doc.head.get("up_axis", QVoxSpec.DEFAULT_UP_AXIS))
@@ -91,87 +94,52 @@ static func from_document(doc: QVoxFile.QVoxDocument, frame_index: int = 0) -> Q
 		var blocks: Variant = doc.models[mid]
 		if blocks is Dictionary and not (blocks as Dictionary).is_empty():
 			out.models[int(mid)] = (blocks as Dictionary).duplicate()
-	out.placements = _placements_from_scene(doc, out.models, frame_index)
+	out.placements = _placements_from_scene(doc, out.models)
 	return out
 
 
 ## NODE 场景图 → 摆放表（含每个节点累积后的世界变换）。
 ## 未出现在场景图中的模型补恒等摆放，保证"文件里有几个 VOX0 就导入几个"。
-## frame_index 的动画补丁叠加在各节点自身的 transform 上（见 _frame_patches）。
-static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionary, frame_index: int = 0) -> Array:
+##
+## 【嵌套树直接递归下行】v3 的 nodes[] 每个节点自带 children[]（组）或 model_id（模型），
+## "谁是根、谁是子"是结构本身 —— 不再需要"扫一遍 children 反查父表 + 挑出无父者"那一套
+## （那套复杂度全部来自"身份即位置"的扁平表示，见 QVoxFile 的 NODE 清洗）。
+static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionary) -> Array:
 	var pending := {}
 	for mid in models:
 		pending[mid] = true
 	var out: Array = []
-	var patches := _frame_patches(doc, frame_index)
 	var scene: QVoxFile.QVoxSceneGraph = doc.scene
-	if scene != null and not scene.nodes.is_empty():
-		var nodes: Array = scene.nodes
-		var parent := {}
-		for i in nodes.size():
-			var kids: Variant = (nodes[i] as Dictionary).get("children")
-			if kids is Array:
-				for c in (kids as Array):
-					parent[int(c)] = i
-		var stack: Array = []
-		# 逆序压栈 + pop_back = 按作者书写顺序的先序遍历（摆放顺序稳定且符合直觉：
-		# MeshLibrary 的项名/顺序直接来自这里）
-		for i in range(nodes.size() - 1, -1, -1):
-			if not parent.has(i):
-				# [节点下标, 累积变换]；根节点的父变换为恒等
-				stack.append([i, Transform3D.IDENTITY])
-		while not stack.is_empty():
-			var item: Array = stack.pop_back()
-			var node_index := int(item[0])
-			var node: Dictionary = nodes[node_index]
-			var world: Transform3D = (item[1] as Transform3D) * _node_transform(node, patches.get(node_index, {}))
-			if String(node.get("kind", "")) == "model":
-				var mid := int(node.get("model_id", -1))
-				if models.has(mid):
-					out.append({
-						"model_id": mid,
-						"transform": world,
-						"name": String(node.get("name", "")),
-					})
-					pending.erase(mid)
-			var kids2: Variant = node.get("children")
-			if kids2 is Array:
-				var kids_arr: Array = kids2
-				for ci in range(kids_arr.size() - 1, -1, -1):
-					stack.append([int(kids_arr[ci]), world])
+	if scene != null:
+		_walk_nodes(scene.nodes, Transform3D.IDENTITY, models, pending, out)
 	for mid in pending:
 		out.append({"model_id": mid, "transform": Transform3D.IDENTITY, "name": ""})
 	return out
 
 
-## 取某一帧的**节点补丁表** `{ 节点下标: {t?, r?, s?} }`；无动画 / 越界 → 空表（全用自身 transform）。
-##
-## 【QVox 的动画帧就是"该时刻各节点的局部变换覆盖值"】`frames[i]` 里 `t` 是时间，其余键是
-## **节点下标**（与 NODE 的 `transform` 同字段名、同类型），因此补丁与 `transform` 覆盖式合并。
-##
-## 【frame_index 的语义】取**第一段动画**的 `frames[]` 下标：0 = 该动画的起始姿态，叠加在节点
-## 自身 `transform` 之上；0 也是缺省值，于是"没有动画的文件"与"看第 0 帧"走同一条路。
-## QVox 允许多段动画，而导入入口只暴露一个帧号——多动画的选择留到确实需要时再加，不预先猜。
-static func _frame_patches(doc: QVoxFile.QVoxDocument, frame_index: int) -> Dictionary:
-	if frame_index < 0 or doc.scene == null:
-		return {}
-	var anims: Array = doc.scene.animations
-	if anims.is_empty():
-		return {}
-	var frames: Variant = (anims[0] as Dictionary).get("frames")
-	if not (frames is Array) or frame_index >= (frames as Array).size():
-		return {}
-	var frame: Variant = (frames as Array)[frame_index]
-	if not (frame is Dictionary):
-		return {}
-	var out := {}
-	for key in (frame as Dictionary):
-		var idx := QVoxFile.as_index(key)
-		var patch: Variant = (frame as Dictionary)[key]
-		# 空补丁 = "该帧不改这个节点"，不进表（省一次无意义的字典写入）
-		if idx >= 0 and patch is Dictionary and not (patch as Dictionary).is_empty():
-			out[idx] = patch
-	return out
+## 递归一层：按作者书写顺序先序下行（摆放顺序稳定且符合直觉 —— MeshLibrary 的项名/顺序
+## 直接来自这里）。`parent_xf` 是父组累积下来的世界变换。
+static func _walk_nodes(nodes: Array, parent_xf: Transform3D, models: Dictionary,
+		pending: Dictionary, out: Array) -> void:
+	for item in nodes:
+		# 防御：scene 已清洗过，这里只是不让一个坏项把整棵树带崩（与 QVoxFile 的取向一致）
+		if not (item is Dictionary):
+			continue
+		var node: Dictionary = item
+		var world := parent_xf * _node_transform(node)
+		if String(node.get("kind", "")) == "model":
+			var mid := int(node.get("model_id", -1))
+			if models.has(mid):
+				out.append({
+					"model_id": mid,
+					"transform": world,
+					"name": String(node.get("name", "")),
+				})
+				pending.erase(mid)
+			continue   # 模型是叶子，不必再看 children
+		var kids: Variant = node.get("children")
+		if kids is Array:
+			_walk_nodes(kids, world, models, pending, out)
 
 
 ## 单个节点的局部变换。三个字段全部可选，缺省即恒等：
@@ -187,14 +155,9 @@ static func _frame_patches(doc: QVoxFile.QVoxDocument, frame_index: int) -> Dict
 ## 三者按 T·R·S 组合（与 glTF / 常规场景图层级一致：缩放先于旋转作用于节点自身坐标系）。
 ## 非单位缩放会破坏"体素坐标是整数"这一前提，因此带缩放的摆放自动落到逐体素融合路径
 ## （`is_block_importable()` 为假），由 `fused_voxels()` 取整投影。
-## `patch` 非空时按字段覆盖本节点的 `transform`（动画帧补丁，见 `_frame_patches`）。
-static func _node_transform(node: Dictionary, patch: Dictionary = {}) -> Transform3D:
+static func _node_transform(node: Dictionary) -> Transform3D:
 	var xf: Variant = node.get("transform")
 	var d: Dictionary = xf if xf is Dictionary else {}
-	if not patch.is_empty():
-		d = d.duplicate()
-		for k in patch:
-			d[k] = patch[k]
 	if d.is_empty():
 		return Transform3D.IDENTITY
 	var basis := Basis(_quaternion(d.get("r")))

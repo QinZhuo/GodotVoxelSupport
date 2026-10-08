@@ -35,6 +35,8 @@ static func new_modifier(kind: String) -> QVoxModifier:
 			return QVoxModelModifier.new()
 		QVoxModifier.KIND_VOLUME:
 			return QVoxVolumeModifier.new()
+		QVoxModifier.KIND_TRANSFORM:
+			return QVoxTransformModifier.new()
 	return null
 
 

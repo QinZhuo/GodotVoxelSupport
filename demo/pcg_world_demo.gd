@@ -360,7 +360,7 @@ func _build_base() -> void:
 	# 顺序即语义：风化先挖出表面不平，后三步才对**剩下的**表面着色 ——
 	# 反过来会让新挖出的坑侧面保持原色，坑就成了一块突兀的补丁。
 	# 代价是完整体积要常驻一份（细节算子需要完整邻域，按 chunk 懒算会在 32³ 边界留接缝）。
-	var obj := QVoxObject.new()
+	var obj := QVoxModel.new()
 	obj.grid_size = BASE_GRID
 	var chain: Array[QVoxModifier] = [QVoxSdfModifier.of(field)]
 	chain.append(QVoxVolumeModifier.of(_island_erode()))
@@ -368,7 +368,7 @@ func _build_base() -> void:
 	chain.append(QVoxVolumeModifier.of(_island_shade(1, PackedInt32Array([10, 11, 12]))))
 	chain.append(QVoxVolumeModifier.of(_island_shade(2, PackedInt32Array([13, 14, 15]))))
 	obj.modifiers = chain
-	var gen := QVoxObjectGenerator.new()
+	var gen := QVoxModelGenerator.new()
 	gen.object = obj
 	gen.eval_seed = SURFACE_SEED
 	_base_node = PcgSceneKit.add_model(self, "Base_Island", BASE_ORIGIN, gen, BASE_GRID,

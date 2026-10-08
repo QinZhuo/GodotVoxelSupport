@@ -9,45 +9,19 @@ extends Resource
 ## 注: 直接使用 Resource 内置的 changed 信号 (通过 emit_changed() 发射)
 ##
 ## 【存储方案】chunk 分区密集缓冲（性能关键）
-## 旧方案：整个世界用 Dictionary[Vector3i, int]，每个体素一个 Vector3i 哈希键，
-##         邻居查询/切片/网格生成全部命中字典哈希 → 大型场景慢一个量级。
-## 新方案：非空 chunk 各持一块 PackedInt32Array(32³)，值 = 材质ID（0=空）。
-##         体素读写 = 1 次 chunk 字典查询 + 1 次数组下标；稀疏性只存在于 chunk 层。
-##         网格生成使用 18³ 密集"光环缓冲"，邻居读取全为数组下标、无越界检查。
+## 非空 chunk 各持一块 PackedInt32Array(32³)，值 = 材质ID（0=空）。体素读写 = 1 次 chunk
+## 字典查询 + 1 次数组下标，稀疏性只存在于 chunk 层；网格生成使用 18³ 密集"光环缓冲"，
+## 邻居读取全为数组下标、无越界检查。
+## （对比"每体素一个 Vector3i 哈希键"的字典方案：邻居查询/切片/网格生成全部命中哈希，
+## 大型场景慢一个量级。）
 ##
 ## 【统一材质契约】（全项目权威，见 VoxelMaterial.gd）
 ##   - 材质ID 0 = 空/空气：既没有体素也没有材质
 ##   - 存储值 == 材质ID（0 = 空），无任何 +1/-1 编码偏移
 ##   - 对齐后材质数组索引 == 材质ID，索引 0 恒为 null 占位
 
-# 【INF 标记的改判】（P2-1 期 4 收尾，2026-10-08）
-#   P0-7 曾按**关键词**给本文件打了 52 处 `# [INF]`（497 行）标记，一律标注"P2-1 迁出"。
-#   期 4 收尾时逐条判定：**全部改判为留内核（数据层）**，标记已删（本文件 2113 → 2061 行）。
-#
-#   判据：本文件是**数据层**（Resource），不是渲染节点。§4.1 已定"分块稀疏存储 + 脏区域账本
-#   留在内核"。这 52 处全部落在**存储 / 账本 / 算法**三类，无一处含相机、视锥或距离判定：
-#     ① 粗层存储 `_coarse_buffers` 与 `get/set/has/erase_lod_block` / `snapshot_lod_block_*`
-#        —— 与 `_chunk_buffers` 同族（分块稀疏的两级）。序列化 / shift_origin / clear / 快照
-#        都要同时处理两者，拆开即成反向依赖。
-#     ② LOD 脏账本写入 `invalidate_lod*` / `mark_lod_modified*` / `get_invalidated_lod`
-#        —— 账本 `_dirty`（VoxelDirtyLedger）在内核，写入方是本层自己的编辑路径。
-#     ③ 降采样 `_start_lod_downsample` / `_lod_downsample_worker` / `_retry_lod_downsample`
-#        —— 几何内核（C++ `build_lod_block_halo_from_buffers`）的调度，与视点无关。
-#     ④ 流式读写 `set_stream` / `unload_chunk` / `_load_chunk_from_stream` / `can_supply_chunk`
-#        / `is_stored` / `is_chunk_loaded` —— 数据层的两级存储（内存 / 磁盘）**机制**，
-#        而非"何时加载卸载"的**调度**（后者在 VoxelInfiniteLayer）。
-#     ⑤ 取数编排 `_async` / `request_chunk_async` / `cancel_chunk_request` / `poll_all_ready`
-#        —— `VoxelAsyncLoader` 账本的唯一持有者，属数据层。
-#     ⑥ 原点漂移的数据侧 `shift_origin` —— 与期 3 的 `shift_render` 同判据：
-#        **决策（何时平移）在无限层，平移动作在各账本的所有者**。
-#
-#   真正迁出的是 `VoxelRenderer` 侧的调度（期 0~4，见 VoxelInfiniteLayer）。本文件的成员都是
-#   数据层公开 API；其中若干（`can_supply_chunk` / `get_vertical_half_span` /
-#   `get_unloaded_chunk_*` / `is_chunk_pending`）主要供视点层扫描用，但都是**只读查询**。
-#   教训：归属判定要看**依赖方向与数据所有权**，不能按名字命中关键词。
-
 # ============================================================================
-# 【API 稳定等级】（P4-4 收口，2026-10-08）
+# 【API 稳定等级】
 # ----------------------------------------------------------------------------
 # 本文件是内核的**数据层**。GDScript 没有访问修饰符，对外可见性只有两种表达：
 #   · 不带 `_` 的公开方法 = **公开 / 实验** 两级（见下）；
@@ -94,9 +68,8 @@ extends Resource
 #   _accept_chunk_buffer / _chunk_halo / _snapshot_chunks_halo /
 #   _snapshot_lod_block_chunks / _snapshot_lod_block_chunks_readonly /
 #   _snapshot_lod_block_data / _can_mesh_lod_block_standalone
-#   —— 它们曾是不带 `_` 的"公开 API"（get_chunk_buffers / accept_chunk_buffer /
-#      snapshot_* 等），内核外调用者因此能绕过封装直改存储。P4-4 将其降为内部，
-#      并给无限层补了两个**封装后的公开入口**：patch_lod_block / apply_ready_results。
+#   —— 内核外调用者不得绕过封装直改存储；无限层需要的两个入口已封装为公开 API：
+#      patch_lod_block / apply_ready_results。
 #
 # 锁：Scripts/Test/test_voxel_kernel_contract.gd 的 VOXEL_DATA_PUBLIC_API /
 #     VOXEL_DATA_INTERNAL_PROTOCOLS 与本清单一一对应（多一个少一个都失败）。
@@ -2178,7 +2151,7 @@ func has_chunk(chunk_key: Vector3i) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# 连通性检测（崩塌支撑判定）—— 算法已抽到 VoxelConnectivity（P1-2）
+# 连通性检测（崩塌支撑判定）—— 算法已抽到 VoxelConnectivity
 # ----------------------------------------------------------------------------
 # 泛洪 / 连通分组 / 支撑失稳的实现与 NEIGHBORS_6 真值都在 VoxelConnectivity；
 # 本类只保留公开 API 的薄转发，判据以 Callable 传入（has_voxel / get_positions）。

@@ -7,17 +7,15 @@ extends MeshInstance3D
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
 ## 提供与编辑器导入等价的纹理材质 (基于材质ID的UV采样)
 
-# 【INF】视点相关成员标记约定（P2-1 施工图）
+# 【INF】视点相关成员标记约定
 #   被 `# [INF]` 标注的成员属于"无限层"（视点相关调度）：① LOD 分带/块调度 ② 流式加载卸载
-#   ③ 视锥剔除 ④ 原点漂移 ⑤ 异步块供需。**P2-1 期 0~4 已全部迁出**（2026-10-08），
-#   现仅剩两类标记：**留节点的 `@export` 配置旋钮**（无限层是 RefCounted，挂不了 @export）
+#   ③ 视锥剔除 ④ 原点漂移 ⑤ 异步块供需。调度逻辑与账本已迁至 VoxelInfiniteLayer，
+#   本文件仅剩两类标记：**留节点的 `@export` 配置旋钮**（无限层是 RefCounted，挂不了 @export）
 #   与 **1 个 deferred 委托壳**（`_flush_lod_mesh_apply_queue`：deferred 目标须是节点，
-#   避免 RefCounted 被释放后野调用）。分带/调度逻辑与账本见 VoxelInfiniteLayer。
+#   避免 RefCounted 被释放后野调用）。
 #   约定：标记行紧贴成员的 `##` 文档块上方；一个成员的区间 = 标记行起，至下一个顶格非空行止。
-#   未标注但相关：_process（视点编排入口，本身留在内核）、_record_perf_stats（统计）。
-#   行数/标记数逐期只记在 docs/REFACTOR_PLAN.md §3 P2-1 施工分期，不在此维护。
 #
-# ── 内核对外契约（P2-2）────────────────────────────────────────────────────────
+# ── 内核对外契约────────────────────────────────────────────────────────
 # 【目标形态】内核公开 API 只有两种形状：**按 chunk 索引** 与 **脏区域事件**。
 #   "整块重算"式接口（重算全部 chunk / 返回整个世界）一律不提供 —— 那是无限层挂不上来的根因。
 #   注意 `request_update()` **不是**"整块重算"：它只置一个"下一帧重建"的唤醒位，真正的重建
@@ -76,7 +74,7 @@ var infinite_layer: VoxelInfiniteLayer:
 
 var _infinite_layer: VoxelInfiniteLayer
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## 网格生成模式
 ## 可见性管理模式（决定哪些 chunk 生成网格）
 enum VisibilityMode {
@@ -118,7 +116,7 @@ enum VisibilityMode {
 ## 对大型动态场景(如水模拟)可显著降低重建频率，值越大越流畅但更新越滞后
 @export_range(1, 30) var update_throttle_frames: int = 1
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## 可见性管理模式（统一视锥剔除与流式加载）
 ## - FULL     ：全量生成所有 chunk（中小世界）
 ## - FRUSTUM  ：视锥剔除，仅生成视锥内/附近 chunk（大型世界，省生成与显存）
@@ -141,7 +139,7 @@ enum VisibilityMode {
 		notify_property_list_changed()
 
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## Inspector 动态可见性：条件不生效时隐藏对应属性（避免用户设置后无效）。
 ## Godot 4 在 Inspector 刷新时对每个属性调用此方法，可修改 usage 隐藏。
 func _validate_property(property: Dictionary) -> void:
@@ -163,19 +161,19 @@ func _validate_property(property: Dictionary) -> void:
 	if hide:
 		property["usage"] = int(property["usage"]) & ~PROPERTY_USAGE_EDITOR
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## 可见性加载距离（世界单位）：FRUSTUM 时视锥外仍生成的半径；STREAMING 时网格加载半径
 @export var view_distance: float = 40.0:
 	set(v):
 		view_distance = v
 		infinite_layer.configure_lod(lod_count, view_distance)
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## 流式卸载距离（世界单位，仅 STREAMING）：超过此距离的 chunk 网格被卸载释放
 ## 默认 0 = 自动取 view_distance * 1.2
 @export var unload_distance: float = 0.0
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## LOD 层级数（含 LOD0）：1=仅全精度（默认，等价旧版 lod0_distance=0 关闭 LOD）；
 ## 2=LOD0+LOD1(2×)；3=+LOD2(4×)；4=+LOD3(8×)…
 ## 各层自动按 view_distance 等比（×2）分带：LOD_i 外半径 = view_distance / 2^(lod_count-1-i)。
@@ -185,7 +183,7 @@ func _validate_property(property: Dictionary) -> void:
 		_configure_lod()
 		notify_property_list_changed()
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## 可见性检查间隔（帧）：视锥/流式统一每隔 N 帧检查一次相机位置。
 ## 值越大 CPU 开销越低，但进入视锥/加载距离后的补建响应越慢。
 @export_range(1, 120) var visibility_check_interval: int = 8
@@ -290,13 +288,13 @@ var _update_counter: int = 0
 
 # 流式卸载每帧限量：相机移动跨越边界时分批进行，避免一次 queue_free 大量节点
 # 造成掉帧。卸载只释放资源+写盘（便宜），限量可稍大。
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 @export_range(1, 200, 1) var _stream_unload_per_frame: int = 24
 # 流式加载每帧限量：走近时优先补建最近的 chunk（磁盘读回 + 入异步重建）。
 # 加载标脏后由 WorkerThreadPool 异步生成 + _process_mesh_build_queue 帧尾限量构建
 # （GPU 上传限流 8 个/帧 + 3ms 预算），因此标脏量可适当放大：走近时每帧进入
 # 管线的新块多，但实际 mesh 出现仍由 GPU 限流平滑分摊，不会掉帧也不会"一帧一块"。
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 @export_range(1, 200, 1) var _stream_load_per_frame: int = 32
 # 统一流式异步请求的在途状态不再本地留存：账本唯一在 VoxelAsyncLoader。
 # 查询走 VoxelData.is_chunk_pending() / 列举 get_unready_chunk_keys() / 取消 cancel_chunk_request()。
@@ -536,7 +534,7 @@ func _exit_tree() -> void:
 	_clear_lod_meshes()
 
 
-# [INF] 视点相关（P2-1 迁出）
+# [INF] 视点相关
 ## 取消尚未完成的异步网格生成任务。
 ## 批次自己负责结算：cancel() 释放只读快照并停止发射结果，wait_tasks() 保证 worker
 ## 在节点释放前全部结束（否则其 call_deferred 会打到已释放实例）。

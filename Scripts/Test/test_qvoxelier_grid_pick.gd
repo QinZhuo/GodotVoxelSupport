@@ -23,7 +23,7 @@ const GRID := Vector3i(8, 8, 8)
 func _session(solid := {}) -> QVoxEditSession:
 	var w := QVoxWorld.create_empty()
 	w.add_material(Color(1, 0, 0)) # ID 1
-	var obj := w.create_object("m", GRID)
+	var obj := w.create_model("m", GRID)
 	var s := QVoxEditSession.create_for(obj, w)
 	for p: Vector3i in solid:
 		s.data.set_voxel(p, solid[p], false)
@@ -32,7 +32,7 @@ func _session(solid := {}) -> QVoxEditSession:
 
 ## 打一条竖直向下的射线（相机在地板上方），返回拾取结果。
 func _look_down(s: QVoxEditSession, xz := Vector2(2.5, 3.5)) -> Dictionary:
-	return QVoxGridPick.hit(s.data, Vector3(xz.x, 5.0, xz.y), Vector3.DOWN, s.object.grid_size)
+	return QVoxGridPick.hit(s.data, Vector3(xz.x, 5.0, xz.y), Vector3.DOWN, s.output_size())
 
 
 # ----------------------------------------------------------------------------

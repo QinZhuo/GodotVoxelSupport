@@ -75,7 +75,7 @@ var _origin_chunk: Vector3i = Vector3i.ZERO
 ## 256 chunk ≈ 410 世界单位，远小于 float32 精度上限（~1677 万），安全。
 const ORIGIN_SHIFT_THRESHOLD := 256
 
-# ── LOD 调度状态（P2-1 期 4 自内核迁入）────────────────────────────────────────
+# ── LOD 调度状态────────────────────────────────────────
 # 分带 / 待办 / 重建 / 重试 / 代次五张表按 LOD 层级平行（index 0 = LOD0，占位不用）；
 # 长度唯一维护点是 configure_lod（由内核 _configure_lod 调用）。
 
@@ -528,7 +528,7 @@ func process_streaming() -> void:
 		kernel.request_update()
 
 
-# ── LOD 分带调度（P2-1 期 4 自内核迁入）────────────────────────────────────────
+# ── LOD 分带调度────────────────────────────────────────
 # 各层严格在自身 band 内生成/保留：level 0 = 全精度 chunk 网格；level >=1 = 粗层 block
 # （覆盖 32×2^level 体素），band = (inner-margin, upper]（最粗层延伸至 unload），
 # 避免多层重叠 z-fight。粗层 mesh 由工作线程构建，本层只做派发与帧尾限量挂载；

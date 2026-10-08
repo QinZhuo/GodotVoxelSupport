@@ -15,8 +15,8 @@ extends Resource
 ## 于是"格式细节"会渗透到每个面板里。转换一次（而不是每处各转一次）才能把格式关在 QVoxFile 内。
 ##
 ## 【head / materials / node / cach 原样保留】HEAD 与 NODE 都是 JSON，格式层不解释未知键
-## （QVoxSpec §3/§7）。本类只解释自己拥有的键（world 设置、nodes[].steps / .size / .layer、
-## layers、cameras），其余**原样写回** —— 于是"读进来再存出去"不会丢掉任何我们还没实现的东西。
+## （QVoxSpec §3/§7）。本类只解释自己拥有的键（world 设置、nodes 树、cameras），
+## 其余**原样写回** —— 于是"读进来再存出去"不会丢掉任何我们还没实现的东西。
 ##
 ## 【铁律：写入 = "替换"，绝不就地改嵌套结构】本类的改动由 QVoxPropertyCommand 撤销，
 ## 而它的快照是**浅**副本（见该类 _snapshot）。浅副本与活数据**共享**嵌套容器，所以
@@ -31,12 +31,15 @@ extends Resource
 ## 索引即材质 ID，[0] 恒为空气。**这就是调色板本身**，不再另存一份"ID → Color"的映射。
 @export var materials: Array = []
 
-## NODE JSON（场景图 / 图层 / 相机）。本类只写 nodes[].steps / .size / .layer 与
-## layers / cameras，其余键与其余节点**原样保留**。
+## NODE JSON（场景树 / 相机）。本类只写 nodes 树与 cameras，其余键**原样保留**。
 @export var node: Dictionary = {}
 
-## 对象列表。
-@export var objects: Array[QVoxObject] = []
+## 场景树顶层（有序）。**唯一真值** —— 组/模型的父子关系全在这里。
+##
+## 【为什么不再有"图层"这张平行表】层与对象本是同一件事的两半：层管分组/可见/顺序，
+## 对象管内容。两张表就得同步（"删层要把层内对象的 layer 一起搬"就是这么来的），
+## 而同步总有漏掉一处的时候。合成一棵树后，层就是一个 QVoxGroup 节点、归属就是父子关系。
+@export var nodes: Array[QVoxNode] = []
 
 ## CACH 块（派生数据，删掉语义为零）。求解缓存、缩略图这类东西放这里。
 var cach: Array = []
@@ -77,24 +80,55 @@ static func from_document(doc: QVoxFile.QVoxDocument) -> QVoxWorld:
 	w.cach = doc.cach
 
 	var bs := doc.get_block_size()
-	var entries := _nodes_by_model(doc.node)
-	for mid in doc.model_ids():
-		var obj := QVoxObject.new()
-		obj.model_id = mid
-		obj.block_size = bs
-		var blocks: Variant = doc.model_blocks(mid)
-		obj.blocks = blocks if blocks is Dictionary else {}
-		var entry: Variant = entries.get(mid)
-		if entry is Dictionary:
-			obj.object_name = str((entry as Dictionary).get("name", ""))
-			obj.grid_size = _size_of_entry(entry, obj.blocks, bs)
-			obj.layer = maxi(0, QVoxFile.as_index((entry as Dictionary).get("layer")))
-			obj.modifiers = _modifiers_of_entry(entry)
-		else:
-			obj.object_name = "Model %d" % mid
-			obj.grid_size = _infer_grid(obj.blocks, bs)
-		w.objects.append(obj)
+	var raw: Variant = doc.node.get("nodes")
+	if raw is Array:
+		for e in (raw as Array):
+			var n := _node_from_entry(e, doc, bs)
+			if n != null:
+				w.nodes.append(n)
 	return w
+
+
+## 节点条目 → 节点对象（递归）。
+##
+## 【认不出来就丢弃，不造空壳】未知 kind 意味着这份文件来自更新的版本或别的工具。
+## 凭猜补一个空节点出来，用户会以为数据还在（然后在保存时把真正的数据覆盖掉）。
+static func _node_from_entry(e: Variant, doc: QVoxFile.QVoxDocument, bs: int) -> QVoxNode:
+	if not (e is Dictionary):
+		return null
+	var entry: Dictionary = e
+	var kind := str(entry.get("kind", ""))
+	if kind == QVoxNode.KIND_GROUP:
+		var g := QVoxGroup.new()
+		_read_common(g, entry)
+		var kids: Variant = entry.get("children")
+		if kids is Array:
+			for c in (kids as Array):
+				var cn := _node_from_entry(c, doc, bs)
+				if cn != null:
+					g.child_nodes.append(cn)
+		return g
+	if kind == QVoxNode.KIND_MODEL:
+		var m := QVoxModel.new()
+		_read_common(m, entry)
+		m.model_id = maxi(0, QVoxFile.as_index(entry.get("model_id")))
+		m.block_size = bs
+		var blocks: Variant = doc.model_blocks(m.model_id)
+		m.blocks = blocks if blocks is Dictionary else {}
+		m.grid_size = _size_of_entry(entry, m.blocks, bs)
+		return m
+	return null
+
+
+## 节点条目里"两种节点共有"的那部分。
+##
+## 【为什么没有 position / combine】摆放已是链上的一条平移条目，而"怎么并进父画布"是父侧
+## 恒定的并集（见 QVoxEvalEngine._composite），两者都不再是节点自己的属性。
+static func _read_common(n: QVoxNode, entry: Dictionary) -> void:
+	n.node_name = str(entry.get("name", ""))
+	n.visible = bool(entry.get("visible", true))
+	n.locked = bool(entry.get("locked", false))
+	n.modifiers = _modifiers_of_entry(entry)
 
 
 # ----------------------------------------------------------------------------
@@ -107,14 +141,12 @@ func to_document() -> QVoxFile.QVoxDocument:
 	doc.head = head.duplicate(true)
 	doc.head["block_size"] = block_size()  # 对象按它分块，必须与 HEAD 一致
 	doc.materials = materials
-	doc.node = _node_with_objects()
+	doc.node = _node_json()
 	doc.cach = cach
-	for o in objects:
-		if o == null:
-			continue
-		var blocks := _dense_blocks_of(o)
+	for m in all_models():
+		var blocks := _dense_blocks_of(m)
 		if not blocks.is_empty():
-			doc.models[o.model_id] = blocks
+			doc.models[m.model_id] = blocks
 	return doc
 
 
@@ -181,76 +213,36 @@ func add_material(color: Color) -> int:
 
 func used_materials() -> Dictionary:
 	var used := {}
-	for o in objects:
-		if o == null:
-			continue
-		for m in o.used_materials():
-			used[m] = true
+	for m in all_models():
+		for mid in m.used_materials():
+			used[mid] = true
 	return used
 
 
 # ----------------------------------------------------------------------------
-# 图层与相机（NODE 下的工程数据，§5.1）
+# 相机（NODE 下的工程数据，§5.1）
 # ----------------------------------------------------------------------------
-# 【为什么它们没有自己的 Resource 类】图层与相机的唯一归宿是 `node` 这个 JSON 字典：
+# 【为什么相机没有自己的 Resource 类】相机的唯一归宿是 `node` 这个 JSON 字典：
 # 存盘要 JSON、读盘要 JSON。中间再过一层 Resource，只会凭空多出两处"字段改名"的机会 ——
 # 而改名错位不报错，只静默丢字段。故本类直接读写 node 下的键，
 # 与 HEAD 的 world 设置（_settings / _write_settings）同一手法。
 #
-# 【改图层怎么撤销】面板把一次改动包成 QVoxPropertyCommand(world, &"node") 即可 ——
+# 【改相机怎么撤销】面板把一次改动包成 QVoxPropertyCommand(world, &"node") 即可 ——
 # 本节 setter 一律**整体替换** node 下的数组，于是浅快照里的旧数组原封不动（见类头铁律）。
-# "对象属于哪一层"则是 QVoxObject.layer，撤销走 QVoxPropertyCommand(obj, &"layer")。
 
-## 图层数组（活引用，供面板遍历；**改动一律走下面的 setter**）。
-func layers() -> Array:
-	return _json_array_of(QVoxSpec.NODE_LAYERS_KEY)
-
-
-## 相机书签数组（同上）。
+## 相机书签数组（活引用，供面板遍历；**改动一律走下面的 setter**）。
 func cameras() -> Array:
 	return _json_array_of(QVoxSpec.NODE_CAMERAS_KEY)
-
-
-## 图层数。**至少为 1** —— 文件没写 layers 时世界仍有隐含缺省层 0。
-## 这个下界必须与 QVoxFile._build_scene 的判定一致，否则会出现
-## "读得进来的 layer 值，写出去就被判越界"。
-func layer_count() -> int:
-	return maxi(1, layers().size())
-
-
-## 图层某项的字段。越界 / 键缺失都回落到该键的缺省值（QVoxSpec.LAYER_FIELD_DEFAULTS），
-## 于是调用方不必到处写 `get("visible", true)` —— 缺省只有一处。
-func layer_field(index: int, key: String) -> Variant:
-	return _entry_field(QVoxSpec.NODE_LAYERS_KEY, index, key, QVoxSpec.LAYER_FIELD_DEFAULTS)
 
 
 func camera_field(index: int, key: String) -> Variant:
 	return _entry_field(QVoxSpec.NODE_CAMERAS_KEY, index, key, QVoxSpec.CAMERA_FIELD_DEFAULTS)
 
 
-## 改图层 / 相机某一项的一个字段。返回"是否真的改了"—— false 表示越界或值本来就相同，
+## 改相机某一项的一个字段。返回"是否真的改了"—— false 表示越界或值本来就相同，
 ## 调用方据此**不要**产生撤销单位（同"空手势不入栈"的约定）。
-func set_layer_field(index: int, key: String, value: Variant) -> bool:
-	return _set_entry_field(QVoxSpec.NODE_LAYERS_KEY, index, key, value)
-
-
 func set_camera_field(index: int, key: String, value: Variant) -> bool:
 	return _set_entry_field(QVoxSpec.NODE_CAMERAS_KEY, index, key, value)
-
-
-## 追加图层，返回新下标（= 节点的 layer 值）。其余字段取缺省。
-##
-## 【为什么数组为空时要先落一条缺省层】"缺省层"隐含在"layers 为空"里，占着下标 0。
-## 若直接 append，新层就顶掉了下标 0 —— 所有 layer == 0 的对象**当场换了层**，
-## 而且没有任何提示（它们在文件里都写着 0）。所以先把这个隐含层实体化，再追加。
-## 空数组这一状态本身仍保留给"从没建过图层"的最简文件（P2：缺省才是常态）。
-func add_layer(layer_name := QVoxSpec.LAYER_DEFAULT_NAME) -> int:
-	var next: Array = _json_array_of(QVoxSpec.NODE_LAYERS_KEY).duplicate()
-	if next.is_empty():
-		next.append(_seeded_entry(QVoxSpec.LAYER_FIELD_DEFAULTS, {}))
-	next.append(_seeded_entry(QVoxSpec.LAYER_FIELD_DEFAULTS, {"name": layer_name}))
-	_write_json_array(QVoxSpec.NODE_LAYERS_KEY, next)
-	return next.size() - 1
 
 
 ## 追加相机书签，返回新下标。
@@ -259,67 +251,187 @@ func add_camera(camera_name := "camera") -> int:
 			{"name": camera_name})
 
 
-## 删除一条图层，并把受影响的对象的 layer **整体左移**（被删层上的对象落到缺省层 0）。
-##
-## 【为什么删层必须连带搬 layer】不搬就会留下越界的 layer，存盘后 QVoxFile 会把它当越界
-## 丢掉（§7）—— 对象的归属静默漂移到缺省层，而此刻界面上一切看起来都正常。
-## 允许删到空数组：空数组 = 只有隐含缺省层，回到那个最简状态。
-func remove_layer(index: int) -> bool:
-	if not _remove_entry_at(QVoxSpec.NODE_LAYERS_KEY, index):
-		return false
-	for o in objects:
-		if o == null:
-			continue
-		if o.layer == index:
-			o.layer = 0
-		elif o.layer > index:
-			o.layer -= 1
-	return true
-
-
 func remove_camera(index: int) -> bool:
 	return _remove_entry_at(QVoxSpec.NODE_CAMERAS_KEY, index)
 
 
 # ----------------------------------------------------------------------------
-# 对象
+# 场景树
 # ----------------------------------------------------------------------------
+# 【为什么"层"没有了】层与对象本是同一件事的两半。合成一棵树后，分组 = 父子关系，
+# 可见 / 锁定 / 摆放 / 滤镜全是节点属性 —— **只有一处真值**，也不再需要"删层要连带搬 layer"
+# 这种跨表同步（那条规则的存在本身就是"有两张表"的证据）。
+#
+# 【为什么没有 parent 指针】父 → 子只朝一个方向，引用图是 DAG、没有环。Resource 是
+# RefCounted：存反向指针就造出环，环永远不被释放（静默泄漏）。需要"我在谁下面"时从根往下找。
 
-## 新建对象并接进世界。model_id 取"现有最大值 + 1"（而不是 size()）：
-## 删掉中间某个对象后，ID 不会被新对象复用 —— 复用会让仍在引用旧 ID 的撤销命令改错对象。
-func create_object(object_name := "", grid := Vector3i.ZERO) -> QVoxObject:
-	var obj := QVoxObject.new()
-	obj.model_id = next_model_id()
-	obj.block_size = block_size()
-	obj.grid_size = grid if grid.x > 0 and grid.y > 0 and grid.z > 0 else Vector3i(32, 32, 32)
-	obj.object_name = object_name if not object_name.is_empty() else "Model %d" % obj.model_id
-	objects.append(obj)
-	_touch()
-	return obj
+## 新建模型并接进世界。parent 为 null 则挂到顶层。
+##
+## model_id 取"现有最大值 + 1"（而不是 size()）：删掉中间某个模型后，ID 不会被新模型复用
+## —— 复用会让仍在引用旧 ID 的撤销命令改错模型。
+func create_model(node_name := "", grid := Vector3i.ZERO, parent: QVoxGroup = null) -> QVoxModel:
+	var m := QVoxModel.new()
+	m.model_id = next_model_id()
+	m.block_size = block_size()
+	m.grid_size = grid if grid.x > 0 and grid.y > 0 and grid.z > 0 else Vector3i(32, 32, 32)
+	m.node_name = node_name if not node_name.is_empty() else "Model %d" % m.model_id
+	_attach(m, parent, -1)
+	return m
+
+
+## 新建组并接进世界。
+func create_group(group_name := "Group", parent: QVoxGroup = null) -> QVoxGroup:
+	var g := QVoxGroup.new()
+	g.node_name = group_name
+	_attach(g, parent, -1)
+	return g
 
 
 func next_model_id() -> int:
 	var top := -1
-	for o in objects:
-		if o != null:
-			top = maxi(top, o.model_id)
+	for m in all_models():
+		top = maxi(top, m.model_id)
 	return top + 1
 
 
-func find_object(model_id: int) -> QVoxObject:
-	for o in objects:
-		if o != null and o.model_id == model_id:
-			return o
+func find_model(model_id: int) -> QVoxModel:
+	for m in all_models():
+		if m.model_id == model_id:
+			return m
 	return null
 
 
-func remove_object(model_id: int) -> bool:
-	var target := find_object(model_id)
-	if target == null:
+## 深度优先遍历整棵树（先父后子，按树上的顺序）。
+func walk(visitor: Callable) -> void:
+	_walk_list(nodes, visitor)
+
+
+## 全部节点（深度优先）。
+func all_nodes() -> Array[QVoxNode]:
+	var out: Array[QVoxNode] = []
+	_collect_nodes(nodes, out)
+	return out
+
+
+## 全部模型（深度优先，保持树上的顺序）。**这是"世界里的模型"的唯一枚举入口**。
+func all_models() -> Array[QVoxModel]:
+	var out: Array[QVoxModel] = []
+	_collect_models(nodes, out)
+	return out
+
+
+## 包含 target 的那个数组（顶层 nodes，或某组的 child_nodes）。不在树上返回空数组。
+func _list_holding(target: QVoxNode) -> Array[QVoxNode]:
+	if nodes.has(target):
+		return nodes
+	for n in all_nodes():
+		if n.is_group() and (n as QVoxGroup).child_nodes.has(target):
+			return (n as QVoxGroup).child_nodes
+	return [] as Array[QVoxNode]
+
+
+## target 的父组（顶层节点的父为 null）。
+func find_parent(target: QVoxNode) -> QVoxGroup:
+	for n in all_nodes():
+		if n.is_group() and (n as QVoxGroup).child_nodes.has(target):
+			return n as QVoxGroup
+	return null
+
+
+## target 的同级列表（顶层节点的同级 = 顶层数组）。
+func siblings_of(target: QVoxNode) -> Array[QVoxNode]:
+	var lst := _list_holding(target)
+	return lst if not lst.is_empty() else nodes
+
+
+## target 在同级里的下标（不在树上返回 -1）。
+func node_index(target: QVoxNode) -> int:
+	return _list_holding(target).find(target)
+
+
+## 从树上摘下来（不删数据，节点对象仍被调用方持有）。**递归删除请用 remove_node**。
+func detach_node(target: QVoxNode) -> bool:
+	var lst := _list_holding(target)
+	if lst.is_empty():
 		return false
-	objects.erase(target)
+	lst.erase(target)
 	_touch()
 	return true
+
+
+## 把已有节点挂到 parent 下的 index 位置（index < 0 = 末尾）。会先把它从原位置摘下来。
+##
+## 【为什么"移动"和"插入"是同一个操作】树上没有"移动"这回事 —— 移动就是"从原父摘下来、
+## 挂到新父"。分成两套只会让"跨组拖拽"和"组内重排"各有一套边界条件。
+## 【为什么必须挡祖先】把组挂进自己的子树会造出环 —— 环上的节点既不在任何根的可达集合里、
+## 又互相引用，求值会无限递归、存盘会写出悬空引用。这里直接拒绝，而不是事后检测。
+func attach_node(target: QVoxNode, parent: QVoxGroup, index := -1) -> bool:
+	if target == null:
+		return false
+	if parent != null and (parent == target or _is_ancestor(target, parent)):
+		return false
+	var lst := _list_holding(target)
+	if not lst.is_empty():
+		lst.erase(target)
+	_attach(target, parent, index)
+	return true
+
+
+## 删除节点（连同其子树）。
+func remove_node(target: QVoxNode) -> bool:
+	var lst := _list_holding(target)
+	if lst.is_empty():
+		return false
+	lst.erase(target)
+	_touch()
+	return true
+
+
+func _attach(target: QVoxNode, parent: QVoxGroup, index: int) -> void:
+	var lst: Array[QVoxNode] = nodes if parent == null else parent.child_nodes
+	if index < 0 or index >= lst.size():
+		lst.append(target)
+	else:
+		lst.insert(index, target)
+	_touch()
+
+
+## anc 是不是 node 的祖先（或就是 node 自己）。
+func _is_ancestor(anc: QVoxNode, node: QVoxNode) -> bool:
+	if not anc.is_group():
+		return false
+	for c in (anc as QVoxGroup).child_nodes:
+		if c == node or _is_ancestor(c, node):
+			return true
+	return false
+
+
+func _walk_list(list: Array[QVoxNode], visitor: Callable) -> void:
+	for n in list:
+		if n == null:
+			continue
+		visitor.call(n)
+		if n.is_group():
+			_walk_list((n as QVoxGroup).child_nodes, visitor)
+
+
+func _collect_nodes(list: Array[QVoxNode], out: Array[QVoxNode]) -> void:
+	for n in list:
+		if n == null:
+			continue
+		out.append(n)
+		if n.is_group():
+			_collect_nodes((n as QVoxGroup).child_nodes, out)
+
+
+func _collect_models(list: Array[QVoxNode], out: Array[QVoxModel]) -> void:
+	for n in list:
+		if n == null:
+			continue
+		if n.is_model():
+			out.append(n as QVoxModel)
+		elif n.is_group():
+			_collect_models((n as QVoxGroup).child_nodes, out)
 
 
 # ----------------------------------------------------------------------------
@@ -416,7 +528,7 @@ func _remove_entry_at(key: String, index: int) -> bool:
 ## 对象 → 文件块表：丢掉全零块（= 空块不写入），并**排序键**。
 ## 【为什么排序】Dictionary 迭代顺序不保证稳定，而落盘字节、增量写的块搬运、
 ## 回归测试的逐字节哈希都要求"同一份数据 ⇒ 同一串字节"。
-func _dense_blocks_of(o: QVoxObject) -> Dictionary:
+func _dense_blocks_of(o: QVoxModel) -> Dictionary:
 	var out := {}
 	var bs := o.block_size
 	for k in o.block_keys():
@@ -433,62 +545,54 @@ func _dense_blocks_of(o: QVoxObject) -> Dictionary:
 	return out
 
 
-## NODE JSON：把对象的 name / size / steps 写回各节点，其余键与其余节点**原样保留**。
+## NODE JSON：把场景树写进 nodes，其余键**原样保留**。
 ##
-## 【为什么是"打补丁"而不是"重新生成"】NODE 里还有变换、父子关系、动画、我们的未知键。
+## 【为什么是"打补丁"而不是"重新生成"】NODE 里还有相机、动画、我们的未知键。
 ## 重新生成会静默丢掉它们；打补丁则只碰自己拥有的键（§7：格式不解释未知键）。
-func _node_with_objects() -> Dictionary:
+##
+## 【为什么显式 erase("layers")】图层已被树取代（qvox 3）。node 里若还留着旧的 layers 键，
+## 写回去就等于"存盘时复活了一个已经删掉的概念"，下次读盘还会被当成有效数据。
+func _node_json() -> Dictionary:
 	var out := node.duplicate(true)
-	var nodes: Array = []
-	var raw: Variant = out.get("nodes")
-	if raw is Array:
-		nodes = raw
-	# 现有节点按 model_id 建索引（保留顺序，只改匹配项）
-	var at := {}
-	for i in nodes.size():
-		var e: Variant = nodes[i]
-		if e is Dictionary and (e as Dictionary).has("model_id"):
-			at[int((e as Dictionary)["model_id"])] = i
-	for o in objects:
-		if o == null:
-			continue
-		var idx: Variant = at.get(o.model_id)
-		var entry: Dictionary = {}
-		if idx != null:
-			entry = (nodes[idx] as Dictionary).duplicate(true)
-		entry["kind"] = "model"
-		entry["model_id"] = o.model_id
-		entry["name"] = o.object_name
-		entry["size"] = [o.grid_size.x, o.grid_size.y, o.grid_size.z]
-		# layer 缺省即 0（隐含缺省层），写 0 是冗语（P2）→ 只在非 0 时写。
-		# 反向那次必须**删键**：不删的话"把对象挪回缺省层"会因为旧键残留而存不进去。
-		if o.layer > 0:
-			entry["layer"] = o.layer
-		else:
-			entry.erase("layer")
-		var steps: Array = []
-		for m in o.modifiers:
-			if m != null:
-				steps.append(QVoxModifierSerializer.modifier_to_dict(m))
-		entry["steps"] = steps
-		if idx != null:
-			nodes[idx] = entry
-		else:
-			nodes.append(entry)
-	if not nodes.is_empty() or out.has("nodes"):
-		out["nodes"] = nodes
+	out.erase("layers")
+	var arr: Array = []
+	for n in nodes:
+		if n != null:
+			arr.append(_entry_of_node(n))
+	if not arr.is_empty() or out.has("nodes"):
+		out["nodes"] = arr
 	return out
 
 
-static func _nodes_by_model(node: Dictionary) -> Dictionary:
-	var out := {}
-	var nodes: Variant = node.get("nodes")
-	if not (nodes is Array):
-		return out
-	for e in (nodes as Array):
-		if e is Dictionary and (e as Dictionary).has("model_id"):
-			out[int((e as Dictionary)["model_id"])] = e
-	return out
+## 节点 → JSON 条目（递归）。缺省值一律**不写**（P2：缺省才是常态）：
+## visible=true / locked=false 都是冗语，写了只会让文件更长、且"改回缺省"时需要记得删键。
+##
+## 【摆放为什么不在这里】它已是 steps 里的一条平移条目 —— 节点的摆放与链上的旋转 / 镜像
+## 走同一条序列化路径，于是"文件里有两份摆放"这种可能根本不存在。
+func _entry_of_node(n: QVoxNode) -> Dictionary:
+	var e := {}
+	e["kind"] = n.kind()
+	e["name"] = n.node_name
+	if not n.visible:
+		e["visible"] = false
+	if n.locked:
+		e["locked"] = true
+	var steps: Array = []
+	for m in n.modifiers:
+		if m != null:
+			steps.append(QVoxModifierSerializer.modifier_to_dict(m))
+	e["steps"] = steps
+	if n.is_model():
+		var mo := n as QVoxModel
+		e["model_id"] = mo.model_id
+		e["size"] = [mo.grid_size.x, mo.grid_size.y, mo.grid_size.z]
+	else:
+		var kids: Array = []
+		for c in (n as QVoxGroup).child_nodes:
+			if c != null:
+				kids.append(_entry_of_node(c))
+		e["children"] = kids
+	return e
 
 
 ## 节点里的 steps → 修改器链。认不出来的条目**跳过**（而不是让整份工程加载失败）：

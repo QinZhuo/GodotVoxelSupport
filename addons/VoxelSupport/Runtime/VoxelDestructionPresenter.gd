@@ -1,7 +1,7 @@
 class_name VoxelDestructionPresenter
 extends Node3D
 
-## 破坏表现层（P2-3）：把"怎么演"从编辑逻辑里彻底分开。
+## 破坏表现层：把"怎么演"从编辑逻辑里彻底分开。
 ##
 ## 【边界】编辑侧（`VoxelEditKernel` 的编辑数学 + `VoxelDestructible` 的编辑管道）只产出
 ##   **数据**——"哪些体素没了 / 哪些体素失稳 / 材质快照"；本组件负责**演出**——粒子碎片、

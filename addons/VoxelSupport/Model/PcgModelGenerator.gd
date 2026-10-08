@@ -138,7 +138,7 @@ func _has_source() -> bool:
 ## 也依赖"细节层只改体素、不改 grid_size"这一契约（见 PcgDetail）。
 ##
 ## 【并发契约】**本函数在 worker 线程内被调用**：只读，可重入，不改本对象的可观测状态。
-## 子类实现（如 QVoxObjectGenerator 跑修改器链）必须守同一条规矩。
+## 子类实现（如 QVoxModelGenerator 跑修改器链）必须守同一条规矩。
 func _build_volume(grid_size: Vector3i) -> PackedInt32Array:
 	if model == null:
 		return PackedInt32Array()

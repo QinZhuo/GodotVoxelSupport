@@ -62,8 +62,8 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 	]
 
 
-## frame_index 对两种源格式都有效（都有"帧"的概念）：`.vox` 取动画帧；`.qvox` 取 NODE 里
-## 第一段动画的 frames[] 下标——它是"该时刻各节点的局部变换覆盖值"，缺省 0 即起始姿态。
+## frame_index 只对 `.vox` 有效（MagicaVoxel 的体素动画帧）。`.qvox` 的 `animations[].frames`
+## 是按**节点下标**寻址的变换补丁，而 v3 的节点树是嵌套的、没有下标 → 该选项对 `.qvox` 无作用。
 func _get_option_visibility(_path: String, _option_name: StringName, _options: Dictionary) -> bool:
 	return true
 
@@ -71,7 +71,7 @@ func _get_option_visibility(_path: String, _option_name: StringName, _options: D
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var res: VoxelData
 	if QVoxAsset.handles(source_file):
-		var qvox := QVoxAsset.from_file(source_file, options[frame_index])
+		var qvox := QVoxAsset.from_file(source_file)
 		if qvox == null:
 			return FAILED
 		res = VoxelData.from_qvox(qvox, options[origin])

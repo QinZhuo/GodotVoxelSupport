@@ -109,12 +109,12 @@ func _build() -> void:
 func _build_status() -> void:
 	var bar := PanelContainer.new()
 	bar.add_theme_stylebox_override("panel",
-			QVoxUi.box(QVoxUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxUi.SPACE_M, 0))
+			QVoxUi.box(QVoxUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxUi.space_m(), 0))
 	bar.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	bar.offset_top = -QVoxUi.STATUS_HEIGHT
+	bar.offset_top = -QVoxUi.status_height()
 	add_child(bar)
 
-	var row := QVoxUi.hbox(QVoxUi.SPACE_M)
+	var row := QVoxUi.hbox(QVoxUi.space_m())
 	bar.add_child(row)
 
 	_tool = _readout(QVoxUi.FONT_L, QVoxUi.ACCENT)
@@ -125,7 +125,7 @@ func _build_status() -> void:
 	_hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	row.add_child(_hint)
 	# 隔一条线：左边是"你现在能做什么"（提示），右边是"你现在是什么状态"（读数）。
-	row.add_child(QVoxUi.vdivider(18))
+	row.add_child(QVoxUi.vdivider(QVoxUi.status_height() / 2))
 	_cursor = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
 	row.add_child(_cursor)
 	_brush = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
@@ -133,7 +133,7 @@ func _build_status() -> void:
 	_material = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
 	row.add_child(_material)
 	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。
-	row.add_child(QVoxUi.vdivider(18))
+	row.add_child(QVoxUi.vdivider(QVoxUi.status_height() / 2))
 	_history = _readout(QVoxUi.FONT_M, QVoxUi.TEXT_DIM)
 	row.add_child(_history)
 
@@ -144,8 +144,8 @@ func _build_toast() -> void:
 	_toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
 	_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	var bottom := QVoxUi.STATUS_HEIGHT + QVoxUi.MIN_TOUCH + 2 * QVoxUi.SPACE_S + QVoxUi.SPACE_M
-	_toast.offset_top = -float(bottom) - QVoxUi.FONT_TITLE - QVoxUi.SPACE_S
+	var bottom := QVoxUi.status_height() + QVoxUi.hit_size() + 2 * QVoxUi.space_s() + QVoxUi.space_m()
+	_toast.offset_top = -float(bottom) - QVoxUi.FONT_TITLE - QVoxUi.space_s()
 	_toast.offset_bottom = -float(bottom)
 	add_child(_toast)
 
@@ -153,14 +153,14 @@ func _build_toast() -> void:
 ## 操作说明浮层：鼠标与触摸两套并列。默认隐藏（视口第一印象要干净），
 ## 由应用栏的「?」开关 —— 说明是查得到的东西，不该常驻占地方。
 func _build_legend() -> void:
-	_legend = QVoxUi.panel(QVoxUi.SPACE_M, QVoxUi.SURFACE_SOLID)
+	_legend = QVoxUi.panel(QVoxUi.space_m(), QVoxUi.SURFACE_SOLID)
 	_legend.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 	# 锚在右上角、向左下方生长：浮层宽度由文案决定（不写死宽度，改文案不必调这里）。
 	_legend.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	_legend.offset_left = -QVoxUi.SPACE_M
-	_legend.offset_right = -QVoxUi.SPACE_M
-	_legend.offset_top = QVoxUi.BAR_HEIGHT + QVoxUi.SPACE_M
-	_legend.offset_bottom = QVoxUi.BAR_HEIGHT + QVoxUi.SPACE_M
+	_legend.offset_left = -QVoxUi.space_m()
+	_legend.offset_right = -QVoxUi.space_m()
+	_legend.offset_top = QVoxUi.bar_height() + QVoxUi.space_m()
+	_legend.offset_bottom = QVoxUi.bar_height() + QVoxUi.space_m()
 	_legend.visible = false
 	add_child(_legend)
 
@@ -169,7 +169,7 @@ func _build_legend() -> void:
 	col.add_child(QVoxUi.heading("操作说明"))
 	for block in _LEGEND:
 		var section := QVoxUi.label(block[0], QVoxUi.FONT_M, QVoxUi.ACCENT)
-		section.custom_minimum_size.y = QVoxUi.SPACE_L
+		section.custom_minimum_size.y = QVoxUi.space_l()
 		col.add_child(section)
 		for line in block[1]:
 			col.add_child(QVoxUi.label(line, QVoxUi.FONT_S, QVoxUi.TEXT_DIM))
@@ -188,7 +188,7 @@ const _LEGEND := [
 	["触摸屏", [
 		"单指拖动 画 · 用左侧「擦除」开关代替右键",
 		"「导航」模式下单指拖动 = 转视角 · −/+ 缩放 ·「取景」把模型框回画面",
-		"色板与按钮命中区均为 44 像素，无需键盘即可完成全部操作",
+		"色块与按钮都按手指尺寸留足命中区，无需键盘即可完成全部操作",
 	]],
 ]
 

@@ -19,29 +19,38 @@ extends QVoxelierPanel
 signal tool_selected(mode: int)
 ## 笔刷尺寸加减请求（delta = ±1；钳制与语义归调用方，面板只管按键）。
 signal brush_step(delta: int)
+## 笔刷尺寸的乘除请求（up = true 表示 ×2，false 表示 ÷2）。
+## 与 brush_step 分开是因为语义不同：一个是"细调一格"，一个是"粗调一档"，
+## 面板只报方向，钳制与上限一样归 App —— 界面不认识"上限"这个数。
+signal brush_scale_requested(up: bool)
 signal erase_toggled(enabled: bool)
+## 对称轴开关：axis 0 / 1 / 2 = X / Y / Z。
+signal symmetry_toggled(axis: int, on: bool)
 
-## 工具坞**面板**的目标宽度。这不是硬约束：见下面 resized 的处理 —— 它只是"最窄别窄过这个"。
-const DOCK_WIDTH := 132
+## 工具坞**面板**的目标宽度取自 [method QVoxUi.dock_width]（随密度档变）。
+## 它不是硬约束：见下面 resized 的处理 —— 它只是"最窄别窄过这个"。
 
 var _buttons := {}          # Mode → Button
 var _group := ButtonGroup.new()
 var _brush_value: Label
 var _brush_minus: Button
 var _brush_plus: Button
+var _brush_half: Button
+var _brush_dbl: Button
 var _brush_title: Label
 var _erase: Button
+var _sym: Array[Button] = []
 var _size := 1
 
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
-	position = Vector2(QVoxUi.SPACE_M, QVoxUi.BAR_HEIGHT + QVoxUi.SPACE_M)
+	position = Vector2(QVoxUi.space_m(), QVoxUi.bar_height() + QVoxUi.space_m())
 	# 注意用 size 而不是 offset_right：anchors 全 0 时 offset_right 是"右边界坐标"，
-	# 直接写 DOCK_WIDTH 会得到 DOCK_WIDTH - SPACE_M 的宽度（差一个左边距）。
-	size.x = DOCK_WIDTH
+	# 直接写宽度会得到"宽度 − 左边距"（差一个左边距）。
+	size.x = QVoxUi.dock_width()
 
-	var panel := QVoxUi.panel(QVoxUi.SPACE_S)
+	var panel := QVoxUi.panel(QVoxUi.space_s())
 	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	add_child(panel)
 	# 非容器父节点下的子控件是"自由摆放"的：这个 Control 自身的矩形会停在 0 高 —— 画得出来，
@@ -49,7 +58,7 @@ func _build() -> void:
 	# 取"设计宽度 vs 内容实际需要"的较大者：换文案 / 换语言时按钮不会被挤出面板，
 	# 同时矩形始终如实反映画出来的东西。此式有唯一不动点，不会来回抖。
 	panel.resized.connect(func():
-		size = Vector2(maxf(DOCK_WIDTH, panel.size.x), panel.size.y))
+		size = Vector2(maxf(QVoxUi.dock_width(), panel.size.x), panel.size.y))
 
 	var col := QVoxUi.vbox(QVoxUi.SPACE_XS)
 	panel.add_child(col)
@@ -71,6 +80,7 @@ func _build() -> void:
 	_brush_title = QVoxUi.heading("笔刷")
 	col.add_child(_brush_title)
 	col.add_child(_build_brush_row())
+	col.add_child(_build_brush_scale_row())
 
 	col.add_child(QVoxUi.divider())
 	_erase = QVoxUi.toggle_button("擦除模式：画的时候挖掉体素（触摸屏上代替右键）")
@@ -78,6 +88,25 @@ func _build() -> void:
 	_erase.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_erase.toggled.connect(func(on: bool): erase_toggled.emit(on))
 	col.add_child(_erase)
+
+	col.add_child(QVoxUi.divider())
+	col.add_child(QVoxUi.heading("对称"))
+	var sym_row := QVoxUi.hbox(QVoxUi.SPACE_XS)
+	col.add_child(sym_row)
+	for i in 3:
+		var axis := String.chr("X".unicode_at(0) + i)
+		var b := QVoxUi.toggle_button("沿 %s 轴镜像：画一笔，网格对侧同步出现" % axis)
+		b.text = axis
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		# 用 bind 而不是闭包捕获 i：捕获写法在不同 GDScript 版本下取值时机有歧义，
+		# bind 把 i 钉死在参数里，三个按钮各连各的，不会一起变成 Z。
+		b.toggled.connect(_on_sym_toggled.bind(i))
+		_sym.append(b)
+		sym_row.add_child(b)
+
+
+func _on_sym_toggled(on: bool, axis: int) -> void:
+	symmetry_toggled.emit(axis, on)
 
 
 ## 笔刷尺寸步进：减 / 当前值 / 加。数值用 Label 而不是按钮 —— 它无可点击的语义，
@@ -97,6 +126,23 @@ func _build_brush_row() -> HBoxContainer:
 	_brush_plus = QVoxUi.icon_button("+", "调大笔刷（] 或 =）")
 	_brush_plus.pressed.connect(func(): brush_step.emit(1))
 	row.add_child(_brush_plus)
+	return row
+
+
+## 笔刷的 ×2 / ÷2（MagicaVoxel 的粗调档）。[−]/[+] 是逐格细调，这两个是按倍数跳 ——
+## 从 1 调到 16 要按 15 下，而 ×2 只要 4 下。两行并排，细调在上、粗调在下，位置固定。
+## 未知上限（归 App），故只有"减半"在 size == 1 时置灰 —— 那是唯一能本地判定的边界。
+func _build_brush_scale_row() -> HBoxContainer:
+	var row := QVoxUi.hbox(QVoxUi.SPACE_XS)
+	_brush_dbl = QVoxUi.button("2X", "笔刷尺寸翻倍")
+	_brush_dbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_brush_dbl.pressed.connect(func(): brush_scale_requested.emit(true))
+	row.add_child(_brush_dbl)
+
+	_brush_half = QVoxUi.button("1÷2", "笔刷尺寸减半")
+	_brush_half.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_brush_half.pressed.connect(func(): brush_scale_requested.emit(false))
+	row.add_child(_brush_half)
 	return row
 
 
@@ -120,11 +166,21 @@ func set_brush(size: int, supported: bool) -> void:
 			QVoxUi.TEXT if supported else QVoxUi.TEXT_FAINT)
 	_brush_minus.disabled = not supported or size <= 1
 	_brush_plus.disabled = not supported
+	_brush_half.disabled = not supported or size <= 1
+	_brush_dbl.disabled = not supported
 	_brush_title.text = "笔刷" if supported else "笔刷（此工具不用）"
 
 
 func set_erase(on: bool) -> void:
 	_erase.set_pressed_no_signal(on)
+
+
+## 回写对称轴状态（App 在切对象 / 撤销后调用；同样用 no_signal 避免回环）。
+func set_symmetry(mask: Vector3i) -> void:
+	var flags := [mask.x, mask.y, mask.z]
+	for i in 3:
+		if i < _sym.size():
+			_sym[i].set_pressed_no_signal(flags[i] != 0)
 
 
 func erase_mode() -> bool:

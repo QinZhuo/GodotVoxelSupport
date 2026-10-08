@@ -53,7 +53,7 @@ var _weights: PackedFloat32Array = PackedFloat32Array()  ## 图案出现次数�
 var _allow: Array = []                       ## _allow[d][p] = Dictionary（与 p 在方向 d 相容的 q 集合）
 
 
-## 链外节点（P3-4）：重叠式 WFC 要**全局**迭代收敛（矛盾回退、约束传播看的是整块体积的
+## 链外节点：重叠式 WFC 要**全局**迭代收敛（矛盾回退、约束传播看的是整块体积的
 ## 接缝邻域），且 `_learn()` 会写本对象的可变缓存 —— 线性链既给不了它全局视窗，
 ## 也不该替它决定"该在第几步重新学习"。它只作为**整体产出**使用
 ## （PcgModelGenerator / VoxelGenerator，见 qvoxelier 的"链外节点"分层）。

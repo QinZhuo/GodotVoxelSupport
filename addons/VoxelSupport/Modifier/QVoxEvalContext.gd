@@ -31,6 +31,26 @@ static func make(grid_size_: Vector3i, seed_ := 0) -> QVoxEvalContext:
 	return ctx
 
 
+## 复制一份、只换盒尺寸。盒尺寸相同时直接返回自己（零分配）。
+##
+## 【为什么不就地改 grid_size】ctx 由调用方持有，树形求值时同一份 ctx 会喂给**多个**节点；
+## 就地改它会让"下一个节点拿到上一个节点的尺寸"这类错误在很远处才爆出来。
+##
+## 【为什么复制逻辑住在本类而不是引擎里】它是"本类全部字段的一次列举"；放在字段旁边，
+## 将来加字段时改这里就在改字段的同一条视线内。放在引擎里则加一个字段就会静默漏拷，
+## 症状是"新字段在树形求值路径下永远是默认值"——极难定位。
+func at_grid_size(gs: Vector3i) -> QVoxEvalContext:
+	if grid_size == gs:
+		return self
+	var c := QVoxEvalContext.new()
+	c.grid_size = gs
+	c.seed = seed
+	c.progress = progress
+	c.is_cancelled_callable = is_cancelled_callable
+	c.epoch = epoch
+	return c
+
+
 ## 算子主动查询是否应放弃（长循环里定期调用）。
 func cancelled() -> bool:
 	if not is_cancelled_callable.is_valid():

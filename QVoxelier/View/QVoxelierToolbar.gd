@@ -48,12 +48,12 @@ var _view := VIEW_PAINT
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	offset_bottom = QVoxUi.BAR_HEIGHT
+	offset_bottom = QVoxUi.bar_height()
 
 	# 应用栏贴屏幕顶边，故圆角留空、只做上下的层次（描边留给左右两侧的浮层面板）。
 	var bar := PanelContainer.new()
 	bar.add_theme_stylebox_override("panel",
-			QVoxUi.box(QVoxUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxUi.SPACE_M, 0))
+			QVoxUi.box(QVoxUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxUi.space_m(), 0))
 	# 非容器父节点下的子控件不会自动撑满：不写这一句，栏底只会包住按钮那一段宽度，
 	# 而工程名（靠 EXPAND_FILL 抢剩余空间）会因为没有剩余空间被压成 1 像素宽 —— 看不见。
 	bar.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -181,7 +181,7 @@ func set_help(on: bool) -> void:
 ## 鼠标够用、手指却点不准；钉住下限后所有栏内按钮都是 ≥44×44 的可点面。
 func _action(text: String, tooltip: String, cb: Callable, variation := &"") -> Button:
 	var b := QVoxUi.button(text, tooltip, variation)
-	b.custom_minimum_size = Vector2(QVoxUi.MIN_TOUCH, QVoxUi.BAR_HEIGHT - QVoxUi.SPACE_S)
+	b.custom_minimum_size = Vector2(QVoxUi.hit_size(), QVoxUi.bar_height() - QVoxUi.space_s())
 	b.pressed.connect(cb)
 	return b
 

@@ -23,14 +23,14 @@ extends QVoxCommand
 ## 快照式撤销永远精确，代价是内存，而懒采集把内存压到了"实际改动量"。
 ##
 ## 【快照必须是独立副本：`get_block()` 给的是活视图】本类存下的 before/after 是"点时刻的值"，
-## 而 `QVoxObject.get_block()` 返回的数组与内部 `blocks[bk]` **共享同一缓冲**（见其注释），
+## 而 `QVoxModel.get_block()` 返回的数组与内部 `blocks[bk]` **共享同一缓冲**（见其注释），
 ## `_write_box` 的逐元素写会就地改到它。曾经没拷贝的后果很隐蔽：擦除一笔时 before 被同一次
 ## 写入抹成"和 after 一样"，于是 commit() 判定"什么都没变"→ 返回值 false、命令不入栈、
 ## `undo()` 无内容可回滚，而屏幕上明明看到格子没了。所以本类**每一处留存块内容的地方**
 ## 都必须 `duplicate()`（共三处：抓 before、封口收 after、回放时交出），一处漏掉就会重新长出这个 bug。
 
 ## 被编辑的对象。为 null（对象已删）时撤销会明确报错，而不是静默改错对象。
-var object: QVoxObject
+var object: QVoxModel
 
 ## 块坐标 → 该块**首次被改动前**的整块内容。空数组 = 该块当时不存在（撤销时要删掉它）。
 var before: Dictionary = {}
@@ -46,13 +46,13 @@ var dirty_hi := Vector3i.ZERO
 var _dirty := false
 
 
-func _init(obj: QVoxObject) -> void:
+func _init(obj: QVoxModel) -> void:
 	super(&"voxel_edit", -1, [])
 	object = obj
 
 
 ## 开始一次手势。**必须在任何写入之前调用**（before 只能从"还没改过"的状态里抓）。
-static func begin(obj: QVoxObject) -> QVoxVoxelEditCommand:
+static func begin(obj: QVoxModel) -> QVoxVoxelEditCommand:
 	return QVoxVoxelEditCommand.new(obj)
 
 
@@ -72,6 +72,21 @@ func fill_box(a: Vector3i, b: Vector3i, material_id: int) -> int:
 		return 0
 	_snapshot_box(a, b)
 	return object.fill_box(a, b, material_id)
+
+
+## 密集体积写入（整对象变换 / 导入用）。data 布局 = QVoxModel.apply_box（PcgModel.index_of）。
+##
+## 【为什么必须有这个入口】整对象变换要一次重写整片网格：逐格走 set_voxel 会为每一格
+## 各付一次"算块号 + 查字典 + 记脏"，256³ 就是 1600 万次；而 object.apply_box 本就按块推进。
+##
+## 【快照范围直接取整个盒，而不是懒采集】`_snapshot_box` 会把盒覆盖的**所有已分配块**
+## 一次抓完 —— 变换必然改写盒内每一格，懒采集到头来也要碰到同一批块，显式声明更直白，
+## 也让 dirty 范围（视口据此只重算这些 chunk）一次算准，不会漏。
+func apply_box(lo: Vector3i, dims: Vector3i, data: PackedInt32Array) -> int:
+	if object == null:
+		return 0
+	_snapshot_box(lo, lo + dims - Vector3i.ONE)
+	return object.apply_box(lo, dims, data)
 
 
 ## 手势结束，封口成一条可入栈的命令。返回"是否真的改了东西" ——

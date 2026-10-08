@@ -1,7 +1,8 @@
 @tool
-class_name QVoxObject
-extends Resource
-## 建模对象 —— 世界里的"一块可编辑体素模型"（对标 MagicaVoxel 的「模型」）。
+class_name QVoxModel
+extends QVoxNode
+## 模型 —— 树上的叶子，也是**唯一持有手绘体素**的节点（对标 MagicaVoxel 的「模型」、
+## 作图软件里的「图层」）。
 ##
 ## 【结构 = 手绘基础体素 + 非破坏链】
 ##   blocks    用户手绘出来的体素（画笔/盒/填充/克隆都写这里）。是"所见即所得"的那部分，
@@ -21,11 +22,20 @@ extends Resource
 ##      同一形状，落盘/读盘**零转换**（不必在保存时把 dense 切一遍，那正是双份布局的开端）。
 ##   块内布局权威是 QVoxBlockCodec（block_of / local_index），本类不另写下标公式。
 
-## 显示名（同时写进 NODE 节点的 name 键）。
-@export var object_name := "Voxel Object"
-
-## 本对象在文件里的 model_id（VOX0 块的键；NODE 节点按它回指）。由 QVoxWorld 分配。
+## 本模型在文件里的 model_id（VOX0 块的键；NODE 节点按它回指）。由 QVoxWorld 分配。
 @export var model_id := 0
+
+
+## 本模型的节点类型（QVoxNode 的唯一抽象方法）。
+func kind() -> String:
+	return KIND_MODEL
+
+
+## UI 显示名：优先 node_name，其次带 model_id 的默认名。
+func display_name() -> String:
+	if not node_name.is_empty():
+		return node_name
+	return "Model %d" % model_id
 
 ## 分辨率（体素），同时是体积的上限。采纳 MagicaVoxel 的语义：一块对象 = 一块有界体素。
 ##
@@ -46,29 +56,6 @@ var blocks: Dictionary = {}
 ## 基础体素的版本号 —— 每次手绘编辑自增。求值引擎用它判断能否复用上一次结果。
 ## （不哈希数组内容：几百万元素的哈希本身就不便宜，而编辑点已经知道它变了。）
 var base_revision := 0
-
-## 非破坏链。顺序即语义（与 Blender 的修改器栈同理：换位置就是换语义）。
-## 条目类型只有一种 —— QVoxModifier；域的差别由它的子类表达，不是靠探测算子。
-@export var modifiers: Array[QVoxModifier] = []
-
-## 所属图层下标（写进 NODE 节点的 layer 键，§5.1）。缺省 0 = 隐含缺省层。
-##
-## 【为什么是对象自己的字段，而不是让世界去改 JSON】与 modifiers → nodes[].steps 同一道理：
-## 编辑模型里能改的东西必须是**编辑模型自己的属性**。若把它做成"世界去 node 里找那个节点、
-## 改它的键"，那么刚 create_object() 出来、还没写进 node 的对象就无处安放（静默改不动），
-## 而且撤销要绕一大圈。放这里则改它就是改一个属性，落盘点由 _node_with_objects() 统一补。
-@export var layer := 0
-
-## 结构性改动（链增删/重排、修改器参数变化、清空、改分辨率）。
-##
-## 【体素写入刻意不发这个信号】一笔画下来可能改几千格，逐格发信号会把 UI 拖死。
-## 手绘的刷新时机由"手势封口"决定：工具在松手时构造 QVoxVoxelEditCommand 并入栈，
-## 视口监听撤销栈的通知（或直接读命令的 dirty_lo/dirty_hi）做局部重算。
-##
-## 【修改器参数变化为什么不在这里自动监听】QVoxModifier 是 Resource，Godot 不会替我们监听
-## 它的 @export 改动，所以"改参数要标脏"由改参数的那条命令负责（QVoxPropertyCommand 在
-## redo/undo 之后 emit 本信号），本类只管自己结构变化时发出。
-signal content_changed
 
 
 # ----------------------------------------------------------------------------
@@ -177,7 +164,7 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 ## 于是"手绘为空"这个情形不必特判，也省掉一次无谓的全量分配 + 扫描（512³ = 537 MB）。
 ##
 ## 【但它不代表"链首没有左操作数"】链首那条的 combine 仍要作用在**手绘体素**上（见引擎文件头），
-## 故引擎在合并前会显式取一次本函数的结果当左操作数（QVoxEvalEngine._left_operand）：若把
+## 故引擎在合并前会显式取一次本函数的结果当左操作数（QVoxEvalEngine._current）：若把
 ## "空数组"直接当左操作数，UNION 会退化成 REPLACE（手绘石料凭空消失）、SUBTRACT 会退化成
 ## "挖不动"—— 恰恰是"手绘 + 程序化混着用"的两种用法。
 func to_volume() -> PackedInt32Array:
@@ -298,50 +285,6 @@ func resize_grid(new_size: Vector3i) -> void:
 						_set_solid(gx, gy, gz, m)
 	base_revision += 1
 	content_changed.emit()
-
-
-# ----------------------------------------------------------------------------
-# 链的编辑入口（UI 把这些包进 QVoxPropertyCommand 后再调用，以保证撤销正确）
-# ----------------------------------------------------------------------------
-
-## 追加一条修改器。
-##
-## 【为什么不接受"算子 + 合成方式"两个裸参数】条目必须自带开关与合成方式，而这些属于修改器
-## 而不属于算子（同一棵 Sdf 树既能被并进去，也能被减掉）。所以由调用方先
-## `QVoxModifierSerializer.new_modifier(kind)` 造一个空条目、填好核再追加，而不是在这里替它猜默认值。
-func add_modifier(modifier: QVoxModifier) -> QVoxModifier:
-	if modifier == null:
-		return null
-	modifiers.append(modifier)
-	content_changed.emit()
-	return modifier
-
-
-func remove_modifier(index: int) -> void:
-	if index < 0 or index >= modifiers.size():
-		return
-	modifiers.remove_at(index)
-	content_changed.emit()
-
-
-## 重排（纯数据操作，不依赖任何 context —— 与 Blender 的 modifiers.move 同理）。
-func move_modifier(from: int, to: int) -> void:
-	var n := modifiers.size()
-	if from < 0 or from >= n or to < 0 or to >= n or from == to:
-		return
-	var m := modifiers[from]
-	modifiers.remove_at(from)
-	modifiers.insert(to, m)
-	content_changed.emit()
-
-
-## 参与求值的修改器（保持原顺序）。
-func active_modifiers() -> Array[QVoxModifier]:
-	var out: Array[QVoxModifier] = []
-	for m in modifiers:
-		if m != null and m.is_active():
-			out.append(m)
-	return out
 
 
 # ----------------------------------------------------------------------------

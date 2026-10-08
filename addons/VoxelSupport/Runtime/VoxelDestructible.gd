@@ -18,14 +18,14 @@ signal voxels_about_to_collapse(positions: Array)               ## 悬空体素�
 var _hardened_buffer: Dictionary = {}
 var _hardened_dirty: bool = false
 
-## 编辑内核（P2-4）：伤害结算 / 应力传播 / 失稳检测的**纯编辑数学**。
+## 编辑内核：伤害结算 / 应力传播 / 失稳检测的**纯编辑数学**。
 ## 无节点、无 _process、可无头调用 —— 服务端 / 建模"画笔" / 批处理工具不需要本节点，
 ## 直接 `VoxelEditKernel.new()` 即可复用同一套数学。
 ## 本节点只负责：Inspector 旋钮（@export，RefCounted 挂不了）、在途队列分帧调度、
 ## 表现层（粒子 / 掉落刚体 / 信号 / 帧尾合并 / 诊断输出）。
 var _edit := VoxelEditKernel.new()
 
-## 破坏表现层（P2-3）：粒子碎片 / 掉落物理由它演出，宿主只产出数据并委托。
+## 破坏表现层：粒子碎片 / 掉落物理由它演出，宿主只产出数据并委托。
 ## 【为何惰性创建】与父类 infinite_layer 同因：脚本热重载不会对既有实例重跑 _init，
 ## 用 getter 可自愈，避免"重载后旧实例的 _presenter_impl 仍为 null"这类只在编辑器里冒出来的空引用。
 ## 【为何 configure 在 _process 里同步】碎片手感旋钮是本节点的 @export（Inspector 唯一真值），
@@ -128,7 +128,7 @@ var _pending_removed: Dictionary = {}  # key: Vector3i(pos), value: bool(spawn_d
 var _pending_spawn_debris: bool = false
 
 ## 粒子对象池 / 淡出渐变 / 碎片根节点 / 掉落物理（对象池、在途队列、生命周期账本）
-## 等**表现层状态**已全部迁往 VoxelDestructionPresenter（P2-3）。
+## 等**表现层状态**已全部迁往 VoxelDestructionPresenter。
 ## 掉落块材质也由表现层经 `host.surface_materials()` 取内核唯一材质缓存，与渲染共用同一份对象。
 
 ## 级联崩塌状态：逐帧处理，每帧只处理一个级联层级
@@ -301,7 +301,7 @@ func repair(amount: float) -> void:
 # 逐体素健康度 + 伤害应用
 # ----------------------------------------------------------------------------
 
-## 即时伤害应用：委托编辑内核（P2-4）做数学，本节点只做"表现层收尾"。
+## 即时伤害应用：委托编辑内核做数学，本节点只做"表现层收尾"。
 ##   · 伤害结算 / 硬度比较 / 累伤 / 判移除 → `_edit.apply_damage()`（无节点、可无头调用）
 ##   · Inspector 旋钮（damage_per_voxel / use_voxel_health）按参数传入内核，内核不存配置
 ##   · 硬化反馈（受伤未摧毁）并入帧尾合并缓冲 + 置脏 → 本节点（表现层职责）
@@ -376,7 +376,7 @@ func _after_removal(removed: Array) -> void:
 # ----------------------------------------------------------------------------
 
 ## 应力传播：从被移除的体素出发，向邻居传播应力，材质 `connection_strength` 不足则断裂。
-## 委托编辑内核（P2-4）；应力参数是本节点的 Inspector 旋钮，按参数传入。
+## 委托编辑内核；应力参数是本节点的 Inspector 旋钮，按参数传入。
 ## 返回所有因应力传播而断裂的体素位置
 func _propagate_stress(removed: Array) -> Array:
 	return _edit.propagate_stress(data, removed, stress_max_steps, stress_force, stress_decay)

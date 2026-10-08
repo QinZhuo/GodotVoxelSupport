@@ -11,9 +11,10 @@ extends Resource
 ##
 ## 【共同基类】本类管一条修改器**怎么用**（开关 / 合成方式 / 平滑量 / 种子 / 显示名 / 落盘）；
 ## 子类只回答**算法核是谁**，并把核的类型收紧到自己的域：
-##     QVoxSdfModifier     核 = Sdf 子树     域 = 连续（FIELD）    引擎调 op.sample(p)
-##     QVoxModelModifier   核 = PcgModel     域 = 体素（VOXEL）源  引擎调 op.build(grid)
-##     QVoxVolumeModifier  核 = PcgDetail    域 = 体素（VOXEL）改写 引擎调 op.apply(...)
+##     QVoxSdfModifier       核 = Sdf 子树      域 = 连续（FIELD）     引擎调 op.sample(p)
+##     QVoxModelModifier     核 = PcgModel      域 = 体素（VOXEL）源   引擎调 op.build(grid)
+##     QVoxVolumeModifier    核 = PcgDetail     域 = 体素（VOXEL）改写  引擎调 op.apply(...)
+##     QVoxTransformModifier 核 = PcgTransform  域 = 体素（VOXEL）变换  引擎调 op.reshape(...)
 ## 域因此是**类型**而不是探测结果：不可能构造出"自称连续域、核却只会 apply"的状态；
 ## 引擎也不必再问"你有没有 sample 方法"——子类本身就是那份契约。
 ##
@@ -30,11 +31,12 @@ extends Resource
 const KIND_SDF := "sdf"
 const KIND_MODEL := "model"
 const KIND_VOLUME := "volume"
+const KIND_TRANSFORM := "transform"
 
-const KINDS: PackedStringArray = [KIND_SDF, KIND_MODEL, KIND_VOLUME]
+const KINDS: PackedStringArray = [KIND_SDF, KIND_MODEL, KIND_VOLUME, KIND_TRANSFORM]
 
 ## 判别键的中文名（UI 下拉框用）。
-const KIND_NAMES: PackedStringArray = ["SDF 场", "体素生成", "体素处理"]
+const KIND_NAMES: PackedStringArray = ["SDF 场", "体素生成", "体素处理", "体素变换"]
 
 
 ## 旁通开关（Houdini 的 bypass）。false 时不参与求值，但不从链上移除。
@@ -84,16 +86,29 @@ func domain() -> QVoxDomain.Kind:
 	match kind():
 		KIND_SDF:
 			return QVoxDomain.Kind.FIELD
-		KIND_MODEL, KIND_VOLUME:
+		KIND_MODEL, KIND_VOLUME, KIND_TRANSFORM:
 			return QVoxDomain.Kind.VOXEL
 	return QVoxDomain.Kind.MESH
 
 
-## 是否为"自足产出"（源）。就地改写 / 就地转换型不是源：核被调用时已拿到输入，引擎无法在
+## 是否为"自足产出"（源）。就地改写 / 重排型不是源：核被调用时已拿到输入，引擎无法在
 ## 事后替它做布尔，所以它的合成方式只能是「替换」（见 QVoxDomain.validate_chain）。
 ## 白名单而非"非 volume 即源"：将来加网格算子时不会意外把它算成源。
 func is_source() -> bool:
 	return kind() == KIND_SDF or kind() == KIND_MODEL
+
+
+## 是否为"变换"型（镜像 / 旋转 90° / 平铺 / 平移）—— 整块结果的形态与摆放由核自己决定。
+##
+## 【为什么单独给一个判据】它是体素域里唯一会改盒尺寸 / 摆放的能力（就地改写型不得改尺寸，
+## 见 PcgDetail 契约），引擎与 UI 都要据此分道走：求值要跟着更新当前盒尺寸与摆放偏移，
+## 生成器要据此把 data.grid_size 同步成"求值后的尺寸"。
+##
+## 【平移也归这里，尽管它不改盒尺寸】判据回答的是"核自己说了算吗"，而不是"尺寸会不会变"——
+## 平移与镜像走同一条 reshape 通道、同一条合成方式规则（只能是「替换」），拆成两个判据只会
+## 让每处调用点都要多问一次，而答案永远一样。
+func is_reshape() -> bool:
+	return kind() == KIND_TRANSFORM
 
 
 ## 是否参与求值。

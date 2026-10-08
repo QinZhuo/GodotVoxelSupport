@@ -18,7 +18,6 @@ extends QVoxelierPanel
 
 signal material_selected(material_id: int)
 
-const SWATCH := QVoxUi.MIN_TOUCH
 ## 色板条最大宽度，超出转横向滚动。
 const PALETTE_MAX_W := 520.0
 
@@ -32,12 +31,12 @@ var _need := 0.0            # 色块行完整展开所需的宽度
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	offset_left = QVoxUi.SPACE_M
-	offset_right = -QVoxUi.SPACE_M
-	offset_bottom = -(QVoxUi.STATUS_HEIGHT + QVoxUi.SPACE_S)
+	offset_left = QVoxUi.space_m()
+	offset_right = -QVoxUi.space_m()
+	offset_bottom = -(QVoxUi.status_height() + QVoxUi.space_s())
 	# 面板高度 = 色块行 + 上下内边距。此前多留了 20px，是给左侧那个竖排的"材质"小标题
 	# 兜底的；现在标题与色块同一行，这 20px 只剩一片空白。
-	offset_top = offset_bottom - (SWATCH + 2 * QVoxUi.SPACE_S)
+	offset_top = offset_bottom - (QVoxUi.hit_size() + 2 * QVoxUi.space_s())
 
 	# 中间层只负责"把调色板摆在底边正中"：它自己不吃事件，故色板两侧的底边
 	# 仍然是可点击的视口区域。
@@ -47,11 +46,11 @@ func _build() -> void:
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(center)
 
-	var panel := QVoxUi.panel(QVoxUi.SPACE_S)
+	var panel := QVoxUi.panel(QVoxUi.space_s())
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	center.add_child(panel)
 
-	var row := QVoxUi.hbox(QVoxUi.SPACE_S)
+	var row := QVoxUi.hbox(QVoxUi.space_s())
 	panel.add_child(row)
 
 	# 当前材质：数字键与点击色块共用的状态回显。放在最左与色板相邻 —— 此前它孤零零挂在
@@ -66,7 +65,7 @@ func _build() -> void:
 	_scroll = ScrollContainer.new()
 	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_scroll.custom_minimum_size.y = SWATCH
+	_scroll.custom_minimum_size.y = QVoxUi.hit_size()
 	row.add_child(_scroll)
 
 	_row = QVoxUi.hbox(QVoxUi.SPACE_XS)
@@ -98,7 +97,7 @@ func set_palette(colors: Array[Color]) -> void:
 		_swatches[id] = b
 		_row.add_child(b)
 
-	_need = maxf(float(colors.size() - 1) * (SWATCH + QVoxUi.SPACE_XS) - QVoxUi.SPACE_XS, SWATCH)
+	_need = maxf(float(colors.size() - 1) * (QVoxUi.hit_size() + QVoxUi.SPACE_XS) - QVoxUi.SPACE_XS, QVoxUi.hit_size())
 	_clamp_width()
 
 
@@ -121,7 +120,7 @@ func _clamp_width() -> void:
 	# 色板条可用宽度 = 面板总宽 − 左侧"材质 N"标签 − 面板左右内边距 − 标签与色板间的间距。
 	# **这四样都得减掉**：只减内边距的话，面板会比可用宽度更宽，被顶出屏幕右缘（色块被裁一截）。
 	# 再取 PALETTE_MAX_W 为上限 —— 宽屏上色板也不该铺满整条底边（底边要尽量透给 3D 视口）。
-	var chrome := 3.0 * QVoxUi.SPACE_S + _current.custom_minimum_size.x
+	var chrome := 3.0 * QVoxUi.space_s() + _current.custom_minimum_size.x
 	var avail := maxf(size.x - chrome, 200.0)
 	_scroll.custom_minimum_size.x = minf(_need, minf(PALETTE_MAX_W, avail))
 
