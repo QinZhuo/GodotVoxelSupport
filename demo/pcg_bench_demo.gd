@@ -8,7 +8,7 @@ extends Node3D
 ##
 ## 【为什么把阵列压成固定面积，而不是固定间距】
 ## 每个 VoxelRenderer 每帧都有一段**与 N 无关、只与 view_distance 相关**的固定开销：
-##   `_process` → `get_camera_3d()` → `poll_all_ready()` → `_check_origin_shift()`，
+##   `_process` → `infinite_layer.process_streaming()` → `poll_all_ready()` → `check_origin_shift()`，
 ##   以及每 8 帧一次、半径 `view_distance / chunk_size_world` 的距离扫描。
 ## 若随 N 一起放大间距，`view_distance` 就得一起放大，于是"每渲染器固定开销"也一起变大——
 ## 两个变量纠缠在一起，测出来的曲线无法归因。
@@ -31,7 +31,7 @@ extends Node3D
 ##   L = 循环 lod_count（1 → 2 → 3）
 ##   R = 重建当前档位（重新开始计时）
 ##
-## 【注意】程序化有界数据的流式驱动**恒开**（`data.generator != null` 即走 `_process_streaming`，
+## 【注意】程序化有界数据的流式驱动**恒开**（`data.generator != null` 即走 `infinite_layer.process_streaming`，
 ## 与 visibility_mode 无关），所以 V 切 FULL/FRUSTUM 不会让远处的模型"免于加载"——
 ## 它改变的是"已加载 chunk 的可见性筛选"，不是"是否加载"。这一点正是本场景想让人亲眼看到。
 

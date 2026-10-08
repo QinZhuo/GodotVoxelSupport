@@ -199,11 +199,13 @@ func test_destructible_queues_follow_origin_shift() -> void:
 	r._cascade_check_positions = [Vector3i(1, 2, 3)]
 	r._cascade_pending_voxels = [Vector3i(4, 5, 6)]
 	r._cascade_total = [Vector3i(7, 8, 9)]
-	r._pending_falling_groups = [[Vector3i(2, 0, 0), Vector3i(3, 0, 0)]]
-	r._pending_falling_materials = [{Vector3i(2, 0, 0): 1, Vector3i(3, 0, 0): 2}]
+	# 掉落物理在途队列已迁往表现层（P2-3）：经宿主 getter 取到该子节点后直接注入
+	var presenter: VoxelDestructionPresenter = r._presenter
+	presenter._pending_falling_groups = [[Vector3i(2, 0, 0), Vector3i(3, 0, 0)]]
+	presenter._pending_falling_materials = [{Vector3i(2, 0, 0): 1, Vector3i(3, 0, 0): 2}]
 
 	var shift := Vector3i(10, -2, 4)
-	r._on_origin_shift(shift)
+	r.on_origin_shift(shift)
 
 	assert_true(r._pending_removed.has(Vector3i(15, 3, 9)), "待移除队列应随 origin shift 平移")
 	assert_false(r._pending_removed.has(Vector3i(5, 5, 5)), "旧键必须消失（不得新旧双份残留）")
@@ -211,9 +213,9 @@ func test_destructible_queues_follow_origin_shift() -> void:
 	assert_eq(r._cascade_check_positions[0], Vector3i(11, 0, 7), "级联待检查位置应平移")
 	assert_eq(r._cascade_pending_voxels[0], Vector3i(14, 3, 10), "级联待移除体素应平移")
 	assert_eq(r._cascade_total[0], Vector3i(17, 6, 13), "级联累积应平移")
-	assert_eq(r._pending_falling_groups[0][0], Vector3i(12, -2, 4), "待生成掉落体组应平移")
-	assert_true(r._pending_falling_materials[0].has(Vector3i(12, -2, 4)), "掉落体材质映射应平移")
-	assert_eq(r._pending_falling_materials[0].get(Vector3i(12, -2, 4)), 1, "平移后材质值应保持不变")
+	assert_eq(presenter._pending_falling_groups[0][0], Vector3i(12, -2, 4), "待生成掉落体组应平移")
+	assert_true(presenter._pending_falling_materials[0].has(Vector3i(12, -2, 4)), "掉落体材质映射应平移")
+	assert_eq(presenter._pending_falling_materials[0].get(Vector3i(12, -2, 4)), 1, "平移后材质值应保持不变")
 	r.free()
 
 
@@ -245,6 +247,56 @@ func test_find_unsupported_matches_flood_fill_oracle() -> void:
 	assert_false(got.has(Vector3i(0, 3, 0)), "与地面连通的体素不得被判悬空")
 	assert_true(got.has(Vector3i(10, 5, 10)), "悬空块应被判悬空")
 	assert_eq(d.find_unsupported({}).size(), want.size(), "空世界集合参数应走全量路径且结果一致")
+
+
+# ----------------------------------------------------------------------------
+# 集合受限泛洪下沉原生：restrict 分支（原生）必须与判据分支（GDScript oracle）一致
+# ----------------------------------------------------------------------------
+
+func test_flood_fill_restrict_branch_matches_predicate_oracle() -> void:
+	var d := VoxelData.new()
+	# 地面行 + 斜向"台阶"（靠 (3,1,0) 竖直连接地面）+ 负坐标柱 + 悬空 2x2 平面
+	for x in 4:
+		d.set_voxel(Vector3i(x, 0, 0), 1)
+	d.set_voxel(Vector3i(3, 1, 0), 1)
+	d.set_voxel(Vector3i(3, 1, 1), 1)
+	d.set_voxel(Vector3i(-3, 0, -3), 1)
+	d.set_voxel(Vector3i(-3, 1, -3), 1)
+	for x in 2:
+		for z in 2:
+			d.set_voxel(Vector3i(10 + x, 5, 10 + z), 1)
+
+	var restrict := {}
+	for pos in d.get_positions():
+		restrict[pos] = true
+
+	# oracle：判据分支（restrict 为空 → 逐点回调 has_voxel 的 GDScript BFS）
+	var via_pred := d.flood_fill([Vector3i(0, 0, 0)], {})
+	# 被测：restrict 分支（restrict = 实体素全集 → 走原生 flood_fill_positions）
+	var via_set := d.flood_fill([Vector3i(0, 0, 0)], restrict)
+
+	assert_eq(via_set.size(), via_pred.size(), "restrict 分支（原生）应与判据分支（oracle）结果一致")
+	for k in via_pred:
+		assert_true(via_set.has(k), "oracle 判为连通的体素 restrict 分支也必须连通: %s" % str(k))
+	assert_true(via_set.has(Vector3i(3, 1, 1)), "斜向台阶应经 (3,1,0) 连到地面")
+	assert_false(via_set.has(Vector3i(10, 5, 10)), "悬空块不得被泛洪连通")
+	assert_false(via_set.has(Vector3i(-3, 0, -3)), "负坐标柱与主分量不连通，不得被纳入")
+
+	# 负坐标分量：从负坐标种子出发应正确标记（哈希键须正确处理负坐标）
+	var neg := d.flood_fill([Vector3i(-3, 0, -3)], restrict)
+	assert_eq(neg.size(), 2, "负坐标柱应为 2 体素连通块")
+	assert_true(neg.has(Vector3i(-3, 1, -3)), "负坐标连通体素应被标记")
+
+	# 从悬空块种子出发：只应连通该 4 体素平面
+	var only_hang := d.flood_fill([Vector3i(10, 5, 10)], restrict)
+	assert_eq(only_hang.size(), 4, "从悬空块种子出发只应连通该 4 体素平面")
+	assert_false(only_hang.has(Vector3i(0, 0, 0)), "与种子不连通的地面柱不得被纳入")
+
+	# 种子不在 restrict 内 → 必须跳过（不得凭空纳入）
+	assert_eq(d.flood_fill([Vector3i(50, 50, 50)], restrict).size(), 0, "种子不在 restrict 内时必须被跳过")
+
+	# 子集路径（find_unsupported 的非空集合分支）现在也走原生泛洪
+	assert_eq(d.find_unsupported(restrict).size(), 4, "子集路径应把悬空 4 体素判为悬空")
 
 
 # ----------------------------------------------------------------------------

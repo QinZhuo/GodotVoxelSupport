@@ -26,6 +26,58 @@ func test_spec_channel_constants() -> void:
 	assert_eq(QVoxSpec.SUPPORTED_CHANNEL_COUNT, 1, "当前版本通道数")
 
 
+## 【跨语言常量镜像】CODEC_* 与 CHANNEL_BYTES 在原生侧另有一份
+## （gdextension/src/voxel_native.cpp 的 QvoxCodec 枚举 / QVOX_CHANNEL_BPP，见那里的【常量单源】）。
+## 跨语言共享不了编译期常量，只能**用行为反证**：把 QVoxSpec 的取值送进原生接口，
+## 看它是否恰好按规范里那个编解码动作。任一边改号或改位宽而另一边没跟 → 这里必红，
+## 不必依赖人工比对两处数字。
+func test_native_codec_id_mirror() -> void:
+	var b := 32
+	var n := b * b * b
+
+	var uniform := PackedInt32Array()
+	uniform.resize(n)
+	for i in n:
+		uniform[i] = 7
+
+	var layered := PackedInt32Array()
+	layered.resize(n)
+	for i in n:
+		layered[i] = 1 if (i / (b * 4)) % 2 == 0 else 2
+
+	var few := PackedInt32Array()
+	few.resize(n)
+	for i in n:
+		few[i] = [1, 1, 1, 2, 3][i % 5]
+
+	var entropy := PackedInt32Array()
+	entropy.resize(n)
+	for i in n:
+		entropy[i] = (i * 2654435761) % 500
+
+	var cbytes := QVoxSpec.CHANNEL_BYTES
+
+	# 0 是保留值：原生必须不认（否则"空块"会被写成一份合法负载）
+	assert_true(QVoxBlockCodec.pack(QVoxSpec.CODEC_EMPTY, uniform, n).is_empty(),
+			"原生 codec 0 应是保留值（pack 返回空）")
+
+	# SOLID / DENSE 的负载长度由规范唯一确定 → 一次钉住编号与位宽
+	assert_eq(QVoxBlockCodec.pack(QVoxSpec.CODEC_SOLID, uniform, n).size(), cbytes,
+			"原生 SOLID 应恰为 CHANNEL_BYTES 字节（编号或位宽漂移？）")
+	assert_eq(QVoxBlockCodec.pack(QVoxSpec.CODEC_DENSE, entropy, n).size(), n * cbytes,
+			"原生 DENSE 应恰为 N×CHANNEL_BYTES 字节（编号或位宽漂移？）")
+
+	# RUN / INDEXED 的长度随数据而定，但一定远小于 DENSE → 用"必须压缩 + 往返无损"钉住编号
+	for pair in [["RUN", QVoxSpec.CODEC_RUN, layered], ["INDEXED", QVoxSpec.CODEC_INDEXED, few]]:
+		var name: String = pair[0]
+		var codec: int = pair[1]
+		var buf: PackedInt32Array = pair[2]
+		var payload := QVoxBlockCodec.pack(codec, buf, n)
+		assert_true(payload.size() > 0 and payload.size() < n * cbytes,
+				"原生 %s 应压缩编码（编号漂移？得到 %d 字节）" % [name, payload.size()])
+		assert_eq(QVoxBlockCodec.unpack(codec, payload, n), buf, "原生 %s 往返不一致" % name)
+
+
 ## 四个编解码各自 pack → unpack 必须无损。用高/低熵两种块各扫一遍，
 ## 保证 pick_codec 真的会选到 RUN / DENSE / INDEXED / SOLID 而不是只测了某一个。
 func test_codec_roundtrip() -> void:

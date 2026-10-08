@@ -17,6 +17,7 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"generate_lod1_block_dense",
 	&"build_halo_from_buffers",
 	&"generate_arrays_native",
+	&"generate_arrays_from_chunks_native",
 	&"generate_spheres_native",
 	&"build_lod_block_halo_from_buffers_native",
 	&"patch_lod_block",
@@ -29,6 +30,8 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"set_voxels_bulk",
 	&"collect_chunks",
 	&"partition_connected",
+	&"find_unsupported_positions",
+	&"flood_fill_positions",
 	&"snapshot_chunks_halo",
 	&"crc32",
 	&"crc32_segments",
@@ -125,14 +128,26 @@ static func generate_arrays_native(voxels: Dictionary, trans_flags: PackedByteAr
 	return inst.call(&"generate_arrays_native", voxels, trans_flags, scale, offset)
 
 
+## 块缓冲字典 → 网格 arrays（QVox 块级导入：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全在原生）。
+## 与 GDScript 侧 VoxelMeshGenerator.generate_arrays_from_chunks 逐位等价（后者保留为测试 oracle）。
+static func generate_arrays_from_chunks_native(chunks: Dictionary, trans_flags: PackedByteArray,
+		scale: float, offset: Vector3) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"generate_arrays_from_chunks_native", chunks, trans_flags, scale, offset)
+
+
 ## 球体网格（每体素一颗 icosphere，按顶点预算自动降采样）。另含 "step"（实际采样间隔）。
+## offset 为原点偏移（**体素单位**，内部乘 scale）——与 cube 路径同一约定，无需事后平移顶点。
 static func generate_spheres_native(voxels: Dictionary, trans_flags: PackedByteArray,
-		subdivisions: int, sphere_scale: float, scale: float, vertex_budget: int) -> Dictionary:
+		subdivisions: int, sphere_scale: float, scale: float, vertex_budget: int,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
 	var inst := instance()
 	if inst == null:
 		return {}
 	return inst.call(&"generate_spheres_native", voxels, trans_flags,
-			subdivisions, sphere_scale, scale, vertex_budget)
+			subdivisions, sphere_scale, scale, vertex_budget, offset)
 
 
 ## 由 chunk 缓冲降采样构建 LOD 大块 34³ 大格光环（lod_shift = 每大格 2^shift 体素）。
@@ -230,6 +245,15 @@ static func find_unsupported_positions(positions: Array) -> Array:
 	if inst == null:
 		return []
 	return inst.call(&"find_unsupported_positions", positions)
+
+
+## 集合受限泛洪：在 allowed（Dictionary 作 Set）内，从 seeds（Array[Vector3i]）出发做 6 方向
+## 连通扩散，返回 {pos: true}。对应 VoxelConnectivity.flood_fill 的 restrict 分支。
+static func flood_fill_positions(seeds: Array, allowed: Dictionary) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"flood_fill_positions", seeds, allowed)
 
 
 ## 按 6 方向连通性分组：返回 Array[Array[Vector3i]]。

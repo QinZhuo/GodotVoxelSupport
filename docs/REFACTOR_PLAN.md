@@ -118,36 +118,185 @@ LOD 降采样、方块生成、破坏形状、压力传播、QVox 块编解码�
 
 | # | 动作 | 理由 | 涉及 |
 |---|---|---|---|
-| P0-1 | 材质 3 份 → 1 份 `VoxelMaterialCache` | 5 处清空点，漏一处就显示旧材质 | `VoxelRenderer` R283/R327/R143 |
-| P0-2 | 脏账本 3 本 → 1 个 `ChunkDirtyLedger`（带"为何脏"的位标记） | `clear()` R1449-1465 现在要手写三处 | `VoxelData` D372/D116/D228 |
-| P0-3 | LOD 失效 2 本 → 合并到 P0-2 的位标记 | 注释 D1161-1170 自陈的隐患 | `VoxelData` D179/D346 |
-| P0-4 | 体素计数 2 份 → 单一权威 + 派生查询 | 3 处手工同步 | `VoxelData` D376/D366 |
-| P0-5 | 常量单源：C++ 从一份清单派生，删陈旧注释 | 漂移已存在 | `QVoxSpec.gd` / `voxel_native.cpp` |
-| P0-6 | 建一个**无头回归测试**：固定种子生成 → 网格 → 快照哈希（含逐字节体积哈希） | **P1/P2 拆分的安全网，没有它不能动 P1** | `Scripts/Test/` |
-| P0-7 | 给"视点相关"代码打标记（`# [INF]`），精确统计 §4.1 估算的 2,100 行 | P2-1 的施工图 | `VoxelRenderer` / `VoxelData` |
+| P0-1 ✅ | 材质 3 份 → 1 份 `VoxelMaterialCache` | 5 处清空点，漏一处就显示旧材质 | `VoxelRenderer` R283/R327/R143 |
+| P0-2 ✅ | 脏账本 3 本 → 1 个 `VoxelDirtyLedger`（带"为何脏"的位标记） | `clear()` R1449-1465 现在要手写三处 | `VoxelData` D372/D116/D228 |
+| P0-3 ✅ | LOD 失效 2 本 → 合并到 P0-2 的位标记 | 注释 D1161-1170 自陈的隐患 | `VoxelData` D179/D346 |
+| P0-4 ✅ | 体素计数 2 份 → 单一权威 + 派生查询 | 3 处手工同步 | `VoxelData` D376/D366 |
+| P0-5 ✅ | 常量单源：C++ 从一份清单派生，删陈旧注释 | 漂移已存在 | `QVoxSpec.gd` / `voxel_native.cpp` |
+| P0-6 ✅ | 建一个**无头回归测试**：固定种子生成 → 网格 → 快照哈希（含逐字节体积哈希） | **P1/P2 拆分的安全网，没有它不能动 P1** | `Scripts/Test/` |
+| P0-7 ✅ | 给"视点相关"代码打标记（`# [INF]`），精确统计 §4.1 估算的 2,100 行 | P2-1 的施工图 | `VoxelRenderer` / `VoxelData` |
+
+#### P0 执行记录
+
+| # | 结论 |
+|---|---|
+| P0-1 | 新增 `VoxelMaterialCache`（`addons/VoxelSupport/Runtime/VoxelMaterialCache.gd`），三份派生（snapshot 深拷贝 / surfaces 运行时 Material / 各层 aligned）收在一处，权威仍是 `VoxelData.materials`。失效只有 `invalidate()`（内容变）与 `invalidate_aligned()`（block 账本整清）两个入口，另有"源引用比对"自动通道兜住换 `data.materials` 的情况。`VoxelRenderer` 的 `_materials := VoxelMaterialCache.new()`（R321）替换了原先散落的清空点（R38/R562 改调 `invalidate()`）；`VoxelDestructible` 不再自建缓存，掉落块材质直接复用父类 `_materials.surfaces()`（R1133-1136）。 |
+| P0-2 | 新增 `VoxelDirtyLedger`（`addons/VoxelSupport/Runtime/VoxelDirtyLedger.gd`，计划里的 `ChunkDirtyLedger` 落地为此名），"为何脏"用位标记而非三本独立账本；`VoxelData` 内 54 处调用点统一走它，整表清理只剩一个入口。 |
+| P0-3 | LOD 失效并入 P0-2 的位标记（`VoxelDirtyLedger` 内区分 mesh / LOD 失效位），原先"注释自陈的隐患"（两本账本手工同步）消失。 |
+| P0-4 | 体素计数收敛为唯一权威 `_chunk_voxel_counts`（`VoxelData` R356），写入口只有 `_count_delta` / `_count_set`，全局总数由 `get_voxel_count()`（R1453）求和派生，不再有第二份可漂移的存储。 |
+| P0-5 | C++ 侧不另立真值：`voxel_native.cpp` R1963-1968 的注释改为指向**行为反证**用例 `test_qvox_format.gd::test_native_codec_id_mirror`（把 `QVoxSpec.CODEC_*`/`CHANNEL_BYTES` 送进原生接口，用返回行为断言一致），删掉了"GDScript 有参考实现"的陈旧注释。 |
+| P0-6 | 落地 `Scripts/Test/test_voxel_snapshot_baseline.gd`（编辑器侧，纯数据 + 几何内核，无需场景树）。口径：`PcgModelGenerator(PcgTerrain, seed=12345)` 生成 48³（跨 8 个 chunk）→ `VoxelData.accept_chunk_buffer` 回填 → **按 chunk key 排序**后拼接 `PackedInt32Array.to_byte_array()` 取 FNV-1a 32 位哈希；网格走 `VoxelMeshGenerator.generate_arrays_from_chunks`（= `build_halo_from_buffers` + `generate_chunk_dense`，与 `VoxelRenderer` 逐 chunk 同一内核）。**基线（2026-10-08）**：体积 `1837387656`、网格 `1739196767`、体素 11548、chunk 8、三角 5790。另含"同 seed 逐字节一致 + 换 seed 必变"两条防假绿断言。自实现 FNV 而非用 `PackedByteArray.hash()`，使基线不随引擎哈希算法变化而飘。 |
+| P0-7 | 标记口径：`# [INF] 视点相关（P2-1 迁出）` 紧贴成员 `##` 文档块上方；一个成员的区间 = 标记行起，至下一个顶格非空行止（含标记行）。**实测（2026-10-08）**：`VoxelRenderer` 79 处覆盖 **1315 / 2349 行（56.0%）**；`VoxelData` 52 处覆盖 **497 / 2261 行（22.0%）**；合计 **1812 行**，低于 §4.1 估算的 2,100 行（差值即"视点编排入口"本身留在内核：`_process` 与 `_record_perf_stats`）。误插 0（无标记落在文档块与声明之间）。约定文字随两文件头部的 `# 【INF】` 注释块走。 |
+| P0-7 归宿 | **两文件的标记已在 P2-1 期 4 收尾时全部处置完（2026-10-08）**：`VoxelRenderer` 79 处 → 迁移完成，剩 **11 处**（留在节点的 `@export` 旋钮 + 1 个 deferred 委托壳），文件 2349 → **1253 行**；`VoxelData` 52 处 → **全部改判为「留内核（数据层）」并删除标记**（2261 → **2061 行**）—— 逐条判定后无一处含相机 / 视锥 / 距离判定，全是**存储 / 账本 / 算法**（粗层 `_coarse_buffers` 与 `_chunk_buffers` 同族、LOD 脏账写入、降采样调度、流式读写机制、取数编排、`shift_origin` 的数据侧）。详见 `VoxelData.gd` 头部「INF 标记的改判」。**教训：P0-7 的标记是按关键词命中的产物（`lod`/`stream`/`chunk` 命中即标），归属必须逐条看依赖方向与数据所有权。** |
 
 ### P1 —— 拆 God 类（行为等价，纯搬迁）
 
 | # | 动作 | 拆出 |
 |---|---|---|
-| P1-1 | `VoxelRenderer` 拆 5 类 | LOD 调度 / mesh 构建管线 / 流式 / 碰撞 / 材质缓存 |
-| P1-2 | `VoxelData` 拆 3 类 | 损坏存储 / 序列化编解码 / 连通性 |
+| P1-1 | ~~`VoxelRenderer` 拆 5 类~~ → **并入 P2-1**（见下方决议） | LOD 调度 / mesh 构建管线 / 流式 / 碰撞 / 材质缓存 |
+| P1-2 ✅ | `VoxelData` 拆 3 类 | 损坏存储 ✅ / 序列化编解码 ✅ / 连通性 ✅ |
 | P1-3 | `VoxelDestructible` 按"内核 vs 表现"纵切（见 P2-1） | 编辑内核 / 表现层 |
 
 判据：P1 全部做完后，`VoxelRenderer` / `VoxelData` 应各自降到 400~600 行，
 且**跑 P0-6 的快照哈希逐字节一致**。
 
+> **P1-2 完成后的实测（2026-10-08）**：`VoxelData` 2261 → **2113 行**（P1-2 三块共移出 148 行），
+> 离 400~600 很远。原因是 P1-2 的目标只是"把**不属数据层**的三块收口"，它本身不是行数主力：
+> `VoxelData` 的 INF 视点相关部分实测也只有 497 行（≈23%），而 P1-2 移出的三块合计 295 行。
+> 故 400~600 这条判据应视为 **P2 结束**时才可能达成（需连同"存储 / 查询 / 快照 / LOD 数据层"一起再分层），
+> **P1 结束时不要用它验收**，否则会误判为失败。
+
+#### 决议（2026-10-08）：P1-1 与 P2-1 合并
+
+`VoxelRenderer` 的四个待拆类（LOD 调度 / 流式 / 碰撞 / mesh 管线）与 P2-1 的"无限层"
+**是同一批代码**。若按原计划先"插件内拆类"、再"抽成独立模块"，同一批代码要搬两次
+（第二次还得重做依赖方向）。故合并为一步：**直接按 P2-1 的无限层边界抽离**，
+`VoxelRenderer` 只留有限内核（`_process` 编排入口 + mesh 组装 + 材质采样）。
+材质缓存不受影响（P0-1 已提前完成，且它属内核）。
+`VoxelData` 的 P1-2 不变 —— 损坏存储 / 编解码 / 连通性与视点无关，先拆干净。
+
+#### P1 执行记录
+
+| # | 结论 |
+|---|---|
+| P1-2① | 抽出 `VoxelConnectivity`（`addons/VoxelSupport/Runtime/VoxelConnectivity.gd`，155 行）：`flood_fill` / `find_connected` / `connectivity` / `neighbors` / `partition_connected` / `find_unsupported` / `find_unsupported_around` 七个算法 + `NEIGHBORS_6` 真值。**不反向依赖 `VoxelData`**：实体素判据与全量位置枚举以 `Callable` 传入（`is_solid` / `all_positions`）；热路径（`partition_connected` / `find_unsupported_around`）完全在原生 C++，不经 Callable。`VoxelData` 留 7 个**薄转发**以不破坏公开 API（`VoxelDestructible` 仍按 `VoxelData.partition_connected` 静态调用；`find_connected` / `connectivity` / `neighbors` 全项目零调用但属插件公开 API，不在 P1 删 —— 留给 P4 的 API 收口）。`NEIGHBORS_6` 在 `VoxelData` 降为指向新类真值的别名，不再有第二份。**行数：`VoxelData` 2261 → 2166**（标记数与覆盖行数不变：连通性区块本就无 `# [INF]` 标记）。验证：`validate` 通过；全量测试 **90/90 通过**（1 项需游戏进程按设计跳过），其中 **P0-6 快照哈希逐字节未变**（体积 `1837387656` / 网格 `1739196767`）→ 搬迁行为等价。附带收益：P2-6（连通性下移 C++）从此有唯一落点。 |
+| P1-2② | 抽出 `VoxelDamageStore`（`addons/VoxelSupport/Runtime/VoxelDamageStore.gd`，80 行）：伤害账本体 `chunk_key → PackedFloat32Array(CHUNK_VOLUME)` + `buffers` / `write_back` / `get_chunk` / `erase_chunk` / `clear_all` / `is_empty` / `shift` / `clear_at` / `clear_at_bulk`。坐标换算复用 `VoxelChunk.chunk_of` / `origin_of` / `buf_index` / `shift_key_dict`，**零反向依赖**。`VoxelData` 留 6 个公开转发（`get_damage_buffers` / `set_damage_buffers` / `get_damage` / `clear_damage` / `clear_damage_bulk` / `clear_all_damage` —— 外部调用方零改动），6 处内部生命周期点（写时清零 / 空 chunk 回收 / chunk 卸载 / origin shift / 世界清空 / 载荷重建）改为调存储方法，删掉私有的 `_clear_damage_at`。与 P0-2 的 `VoxelDirtyLedger` 同一模式：状态 + 生命周期规则内聚到一处。 |
+| P1-2③ | 抽出 `VoxelPayloadCodec`（`addons/VoxelSupport/Runtime/VoxelPayloadCodec.gd`，60 行）：帧格式（`"GZIP"` 魔数 + GZIP + base64）与版本校验的唯一实现；`MAGIC` / `VERSION` 随之下移，`VoxelData.PAYLOAD_MAGIC` / `PAYLOAD_VERSION` 删除。**有意的不对称**：`encode` 只过帧（处理可信内存状态，不写版本号），`decode` 过帧 + 校验（面对磁盘/场景文件的不可信输入，必须校验）—— 这样测试也能用同一个 `encode` 造"版本不符"载荷。`VoxelData` 留 `_encode_payload`（组装内容，VoxelData 特有）/ `_decode_payload`（一行转发）。**顺带消除重复**：`Scripts/Test/test_qvox_import.gd` 原先手工复制了一份帧格式（`_encode_payload` 辅助函数）来构造异常输入，现改用 `VoxelPayloadCodec.encode` 并删掉该重复实现。**未复用 `DEVFramework.SaveTool.gzip_encode`**：帧格式确实同款，但 `VoxelSupport` 对框架零代码依赖（可独立拖入任意项目），为 8 行帧封装反向依赖框架会破坏这条边界 —— 已在类注释写明这是**有意重复**，不是漏看。 |
+| P1-2 收口 | 三块合计移出 **295 行**（连通性 155 + 伤害账 80 + 编解码 60，其中 `VoxelData` 净减 148 行：2261 → **2113**）。`VoxelData` 的 `# [INF]` 标记仍为 **52 处**（三块本就无标记，覆盖行数不变）。验证：4 个脚本 `validate` 全通过；全量测试 **90/90 通过**，**P0-6 快照哈希逐字节未变**（体积 `1837387656` / 网格 `1739196767`）。 |
+
+#### P2-1 施工分期（2026-10-08 起）
+
+P2-1 要搬约 **1300 行**视点调度代码（`VoxelRenderer` 79 处 `# [INF]` 标记），
+**而这批代码此前零自动化覆盖** —— 唯一相关的冒烟测试只用 `VisibilityMode.FULL`
+（其原注释："不依赖相机，全量构建"），等于 LOD 分带 / 视锥剔除 / 流式加载卸载 /
+原点漂移四块**从没被任何断言碰过**。所以顺序是：先补网，再动刀；每期独立可验证、随时可停。
+
+| 期 | 动作 | 验收 |
+|---|---|---|
+| **0. 安全网** ✅ | 新增 `Scripts/Test/test_voxel_infinite_layer.gd`（`needs_game_process`，5 例）：① LOD 分带公式（n=1..4 取值表 + 层平行数组长度一致）② 视锥剔除（锥内保留 / 锥外剔除并登记 `_deferred_chunks`）③ 近处 LOD0 区不参与视锥剔除 ④ 原点漂移（数据 key / mesh key 与节点位置 / 相机补偿**三者同步**）⑤ 流式距离过滤 | 游戏进程 **9/9 通过**（新 5 例 + 既有 smoke 4 例） |
+| **1. 几何数学** ✅ | 新增 `VoxelLodGrid`（77 行）：`block_of_chunk` / `block_edge_world` / `block_center` / `block_dist` / `margin` / `preload_extent` / `bands`。**无状态纯静态** —— 这是它能被两侧共享而不把视点信息拖进内核的前提。`VoxelRenderer` 留 7 个同名转发壳 + `_recompute_lod_bands` 委托；`LOD_GRID` 降为指向 `VoxelLodGrid.GRID` 的别名 | `validate` 通过；编辑器 **90/90**、游戏进程 **9/9**；`VoxelRenderer` 2349 → **2333** 行，79 处标记不变 |
+| **2. 剔除 + 流式调度** ✅ | 新增 `VoxelInfiniteLayer`（`class_name` + `RefCounted`，持内核单向引用，404 行）：`set_visibility_mode` / `unload_d` / `lod0_data_unload_d` / `is_world_visible` / `is_deferred` / `deferred_is_empty` / `on_mesh_removed` / `shift_keys` / `clear_deferred` / `sync_cam_pos` / `filter_visible_chunks` / `process_deferred_chunks` / `process_streaming`，连同延迟队列 / 强制构建标记 / 扫描 tick / 上次相机位置四个账本一并迁入。内核切除 6 个视点方法 + 6 个视点状态成员，`_process` / `_ready` / `visibility_mode` setter / `remove_chunk_mesh` / `_update_mesh_async` / `_shift_render` / `_clear_lod_meshes` 全部改为委托；另新增 `current_camera` / `has_chunk_mesh` / `lod_level_count` / `lod_outer` 四个只读访问器（收编内核里 4 处散落的相机直取）。`VoxelDestructible` 的 4 处 `is_world_visible` 调用改走 `infinite_layer` | `validate` 全通过；编辑器 **90/90**、游戏进程 **9/9**；`VoxelRenderer` 2333 → **2029** 行（−304），`# [INF]` 标记 79 → **69** 处 |
+| **3. 原点漂移** ✅ | `_origin_chunk` / `ORIGIN_SHIFT_THRESHOLD` / `check_origin_shift` 收进无限层（判定"何时平移"+"相机反向补偿"）；**`_shift_render` 未整体迁入**，改名为内核公开 API `shift_render(shift, chunk_size_world)` 由无限层调用（理由见下），`_on_origin_shift` 同时去掉前导下划线成为公开覆盖点 `on_origin_shift`。新增 `origin_chunk()` 访问器（HUD/调试/测试读取，替代直取私有字段） | ① ② ③ ④ ⑤ 保持绿：编辑器 **90/90**、游戏进程 **9/9**、`validate` 全通过；`VoxelRenderer` 2029 → **1992** 行（−37），`# [INF]` 标记 69 → **64** 处 |
+| **4. LOD 分带调度 + 异步供需** ✅ | 分带表 `_lod_outer` + 全部调度账本（`_lod_pending_tasks` / `_lod_rebuild` / `_lod_null_retries` / `_lod_block_gen` / `_data_chunk_min/max` / `_cull_check_counter` / `_lod_build_this_frame` / `_lod_submit_this_frame` / `_coarse_task_ids` / `_exiting` / `_lod_mesh_apply_queue` / `_lod_mesh_apply_scheduled`）连同决策 / 构建 / worker 全部方法（`process_lod` / `_process_lod_level` / `_process_chunk_level` / `_chunk_render_level` / `_level_finer_ready` / `_lod_rebuilding` / `_lod_load_priority` / `_build_lod_block` / `_build_lod_data_only` / `_lod_worker_*` / `_lod_mark_null_or_retry` / `_on_lod_data_ready` / `_on_lod_thread_result` / `process_lod_mesh_apply_queue` / `remove_lod_block` / `_clear_block_state`）迁入无限层。**`_lod_meshes` 有意留内核**（网格账本，见执行记录）；`VoxelData` 的粗层数据未动（`has_lod_block` 等按层访问已是内核 API，搬它无收益）。`configure_lod` 成为 4 张调度表 + 内核网格账本长度的**唯一维护点** | ① ④ + 网格内核用例保持绿：`validate` **3/3**；编辑器 **53/53**、游戏进程 **9/9**；`VoxelRenderer` 1992 → **1253** 行（−739），`# [INF]` 标记 64 → **11** 处（余下 11 处全是留在节点的 `@export` 旋钮 + 1 个 `_flush_lod_mesh_apply_queue` 委托壳） |
+
+**边界实测（期 1 动刀前先量过，不靠猜）**：LOD 数学的 50 处使用点里 **49 处在 `# [INF]` 成员内，
+只有 1 处在内核** —— `_build_lod_from_arrays`（L1714）需要"该层 block 的世界边长"来摆节点位置。
+这条实测就是 §4 接口的形状：**内核只要几何数值，不要视点状态**。因此 `VoxelLodGrid` 定位是
+**两侧共享的纯数学模块**，不是无限层的一部分；内核调它不构成"内核 → 无限层"的反向依赖。
+
+**期 2 执行记录（2026-10-08）**：
+- **内核接口面（P2-2 的雏形）**：内核对外收敛为 `request_update` / `remove_chunk_mesh` /
+  `has_chunk_mesh` / `lod_level_count` / `lod_outer` / `current_camera`
+  \+ `data` / `voxel_scale` / `global_position`。无限层**只读**这些，不回写内核状态。
+  （`check_origin_shift` 当时还在内核，**期 3 已移出**；期 3 另加 `shift_render` / `on_origin_shift`。）
+- **`infinite_layer` 用惰性 getter 而非 `_init` 里建**：实测脚本热重载**不会**对既有节点实例
+  重跑 `_init` —— 若在 `_init` 建层，编辑器里已打开的 demo 场景实例会持续报
+  `Nonexistent function 'process_deferred_chunks' in base 'Nil'`（实测 23 条/轮，清日志后复现）。
+  getter 版本可自愈，且清日志后 30 帧零运行期错误。
+- **新增 4 个访问器而非让无限层直取私有成员**：`current_camera()` 同时收编了内核里 4 处
+  一模一样的 `get_viewport().get_camera_3d() if is_inside_tree() else null`；`has_chunk_mesh`
+  对 `_lod_meshes` 为空加了保护（原代码直取 `_lod_meshes[0]`，无保护）；`lod_outer()` 返回
+  分带表引用，**期 4 已随 LOD 调度迁出**（`_lod_outer` 归无限层，`lod_outer()` 改为无限层公开
+  方法）。
+- **配置仍暂挂内核**：`_stream_load_per_frame` / `_stream_unload_per_frame` 是 `@export_range`
+  的检视面板参数，期 4 随组件一起搬；无限层暂时读 `kernel._stream_*`。`_cull_check_counter`
+  （LOD 检查降频计数）同理留内核，属期 4。
+  ——**期 4 修正**：① `_cull_check_counter` 已随 LOD 调度迁入无限层；② `_stream_*` / `_lod_build_*`
+  等 `@export` 旋钮**不再搬**（无限层是 `RefCounted`，挂不了 `@export`），无限层继续读
+  `kernel._stream_*` / `kernel._lod_build_per_frame`，见「期 4 执行记录」。
+- **一处易漏点**：`is_world_visible` 被 `VoxelDestructible` 以"隐式 self 调用"用了 4 次，
+  按名字搜"视点方法"时不会命中（它不以 `_` 开头、也不在 `VoxelRenderer` 里出现），
+  靠**运行期错误日志**才发现。搬迁后应把子类调用点一并纳入检索名单。
+
+**期 3 执行记录（2026-10-08）**：
+
+- **对原计划的一处有意偏离：`_shift_render` 没有整体搬进无限层**。原文写的是"`_shift_render` 收进
+  无限层"，但动刀前实测它的函数体**没有一个字节的视点逻辑** —— 它只是在平移内核自己的 10+ 个
+  渲染层私有账本（`_lod_meshes` 各层节点与位置 / `_chunk_collisions` 键与节点位置与名字 /
+  `_mesh_build_queue` / `_collision_rebuild_queue` / `_lod_pending_tasks` / `_lod_rebuild` /
+  `_lod_block_gen` / `_lod_null_retries` / `_lod_mesh_apply_queue`）。真按原计划搬，无限层就得
+  逐个去摸这些私有成员 —— 那要么加 10+ 个访问器（比一个整体入口更宽的接口），要么直接破坏
+  封装。故改为：**决策（何时平移 + 平移多少 + 相机反向补偿）归无限层，机械平移归内核**，
+  内核只多开一个 `shift_render(shift, chunk_size_world)`。这与期 1 的 `VoxelLodGrid` 是同一个
+  判据 —— **按"是视点逻辑还是机械操作"切，不按"在哪个函数里"切**。
+- **`on_origin_shift` 保留在内核并去掉前导下划线**：它是给 `VoxelDestructible` 平移体素坐标
+  在途队列的覆盖点（待移除 / 硬化 / 级联 / 掉落体），宿主必须是节点子类，不能搬到 `RefCounted`
+  的无限层。去掉下划线是因为它已从"内部钩子"变成**公开覆盖点**（`test_voxel_fix_regressions`
+  现在直接调 `r.on_origin_shift(shift)`）。
+- **`shift_keys` 的调用位置从内核挪到无限层**：原 `_shift_render` 尾部有一行
+  `infinite_layer.shift_keys(shift)`（内核伸手改无限层的账本）。期 3 把它挪到无限层的
+  `check_origin_shift` 里 —— 平移内核与平移自己各自收口，内核不再触碰无限层的字典。
+- **`origin_chunk()` 访问器**：`streaming_demo` 的 HUD 与安全网测试原先直取 `_target._origin_chunk`
+  私有字段，现统一走 `infinite_layer.origin_chunk()`。
+- **`_chunk_from_world` 转发壳保留**：它曾被 `check_origin_shift` 使用，移出后内核另有 2 处
+  （`_process_lod` 的块映射、LOD 分带）仍在用，故不删；无限层改用 `VoxelWorldUtil.chunk_from_world`
+  直调，不反向依赖内核私有辅助函数。
+- **热重载窗口再次制造假象（与期 2 同一类）**：改完脚本后立刻用 `eval_code` 探针读编辑器里
+  已打开的 demo 场景实例，`origin_chunk()` 一度返回 `Nil`（`typeof` 报 TYPE_NIL），而
+  `has_method("shift_render")` 已为 true —— 即内核脚本已换、被惰性 getter 缓存的无限层对象
+  还没换。等重载传播后再读即正常（新建实例当场就正常）。**判定顺序：先看新建实例，再看活实例，
+  最后才怀疑逻辑**。
+
+**期 4 执行记录（2026-10-08）**：
+
+- **对原计划的一处有意偏离：`_lod_meshes` 留在内核，不搬**。原计划写"`_lod_meshes` 收进无限层"，
+  但动刀前实测它有 **11 个使用点**：内核自身 5 处（`remove_chunk_mesh` / `_update_chunk_collision`
+  / `has_chunk_mesh` / `shift_render` / `_clear_lod_meshes`）+ 外部 6 处（`demo/test_world_demo`、
+  `demo/streaming_demo`、`demo/destruction_demo` 的 HUD 直接读它统计 chunk 数，smoke 测试亦然）。
+  搬走它，内核就得反向伸手到无限层取"本节点挂了哪些 mesh" —— 恰好破坏单向依赖。判据与期 3 的
+  `_shift_render` 同源：**按"是视点决策还是机械账本"切**。`_lod_meshes` 是"本节点挂了什么"的账本，
+  归内核；`_lod_outer` / `_lod_pending_tasks` / `_lod_rebuild` 等是"何时该建、建什么"的调度，
+  归无限层。**分带表 `_lod_outer` 与网格账本同长**，故 `configure_lod(count, view_distance)` 是
+  两者长度的唯一维护点（一次 `while` 循环里 resize 4 张调度表 + `kernel.set_lod_level_count(n)`）。
+- **`@export` 配置旋钮仍留节点，不随逻辑迁出**：无限层是 `RefCounted`，**挂不了 `@export`**
+  （Inspector 不显示、无法存进场景）。故 `lod_count` / `view_distance` / `unload_distance` /
+  `_lod_build_per_frame` / `_lod_preload_blocks` / `_lod_build_budget_ms` / `_lod_submit_per_frame`
+  留内核节点，无限层按需读（`kernel.view_distance` 走公开属性，`kernel._lod_build_per_frame` 等
+  仍是私有旋钮 —— 这是**既有约定**，期 2 的 `kernel._stream_load_per_frame` 已如此）。
+- **新开 8 个窄访问器而非暴露整表**：`has_lod_mesh` / `lod_mesh` / `lod_mesh_keys` /
+  `mark_lod_block_empty` / `mount_lod_mesh` / `clear_lod_mesh` / `is_mesh_build_queued` /
+  `lod_materials`，外加 `set_lod_level_count` / `clear_lod_level`。无限层**只通过这些按键接口**
+  摸网格账本，拿不到整张 `_lod_meshes`（避免"两个类共同维护一张表"的隐性耦合）。
+- **deferred 排期的归属拆成两半**：排期标记 `_lod_mesh_apply_scheduled` 归无限层（与队列
+  `_lod_mesh_apply_queue` 同处，决策内聚）；但 `call_deferred` 的**目标必须是内核节点**
+  （`RefCounted` 没有节点释放保护，节点 `_exit_tree` 时 deferred 调用会打到野对象）。故无限层只
+  置标记、由内核 `_process` 调 `take_lod_mesh_flush_request()` 后 `call_deferred` 自己。
+- **迁移动刀时漏掉的 `data`（原内核成员）—— 由 `validate` 抓出**：`_process_lod_level` /
+  `_process_chunk_level` / `_level_finer_ready` / `_lod_mark_null_or_retry` 四处在原内核里直接引用
+  成员 `data`，迁到无限层后成了**未声明标识符**（`validate` 报 19 处 `Identifier "data" not
+  declared`）。修法是各函数首行补 `var data := kernel.data`（与期 2 迁入的
+  `filter_visible_chunks` / `process_streaming` 写法一致）。**教训：搬函数体时，"隐式 self 成员"
+  是静默断点**（期 3 的 `is_world_visible` 也是同一类）。
+- **内核 ↔ 无限层互持引用构成类型环，`:=` 推导会失败**：`VoxelRenderer._apply_built_chunk` 里
+  `var lod_outer := infinite_layer.lod_outer()` 报 `Cannot infer the type`（`VoxelInfiniteLayer`
+  与 `VoxelRenderer` 互相 `class_name` 引用，返回类型推导不出）。修法：**显式标注**
+  `var lod_outer: Array[float] = ...`。这是该类型环下唯一稳定的写法。
+- **安全网测试的 3 处私有字段直取改到新归属**：`test_voxel_infinite_layer` 的 LOD 分带用例原读
+  `r._lod_outer` / `r._lod_pending_tasks` / `r._lod_rebuild`，现改读 `r.infinite_layer._lod_*`
+  （该文件本就直读 `infinite_layer._deferred_chunks`，风格一致）；内核 `r._lod_meshes` 的断言不动。
+  demo 侧无任何已迁字段的访问点（HUD 只读 `_lod_meshes`，它没搬）。
+
 ### P2 —— 边界重划：有限内核 + 可选的无限层与表现层（**建模软件的前提**）
 
 | # | 动作 | 理由 |
 |---|---|---|
-| P2-1 | 把 LOD 分带、流式加载/卸载、视锥剔除、原点漂移、异步块供需**抽离**为独立的"无限层"（单独插件/组件），依赖单向：无限层 → 内核 | 这是耦合与冲突的主要来源。内核不需要知道相机、LOD、流式、原点的存在。**见 §4** |
-| P2-2 | 内核 API 保持**按 chunk 索引 + 脏区域事件**的形态，供无限层套在外层 | 这是"抽离"能成立的前提；若内核 API 是"整块重算"式的，无限层挂不上去 |
-| P2-3 | 把粒子碎片 / 掉落物理 / 健康度 / 级联崩塌抽离为独立的"表现层"组件 | 几何内核已在 C++，但**表现逻辑与编辑逻辑在同一函数里交织**（`_process` R1672 一条链里既有级联也有 mesh 组装） |
-| P2-4 | 抽出 `VoxelEditKernel`（无场景节点、无 `_process`、可无头调用） | 建模软件的"画笔"直接调它，不需要一个 `VoxelDestructible` 节点 |
-| P2-5 | 热路径下移：`_shift_index_array`、`generate_arrays_from_chunks`、`_translate_native_verts` 进 C++ | 每 chunk 全量 `PackedInt32Array` 拷贝，是网格化的固定开销 |
-| P2-6 | `flood_fill` / `partition_connected` / `find_unsupported` 进 C++ 或改原生实现 | 现在每节点 `in result` 的 GDScript BFS，破坏一堵墙就卡帧 |
-| P2-7 | 编辑路径改为**脏区域增量重建**（抽走 LOD 之后仍必须保留） | 见 §4，这是"有限内核"唯一真正的性能风险 |
+| P2-1 ✅ | 把 LOD 分带、流式加载/卸载、视锥剔除、原点漂移、异步块供需**抽离**为独立的"无限层"（单独插件/组件），依赖单向：无限层 → 内核 | 这是耦合与冲突的主要来源。内核不需要知道相机、LOD、流式、原点的存在。**见 §4**。**已并入 P1-1**：`VoxelRenderer` 不再先做"插件内拆类"，直接按本边界一次抽离（见 §3 决议）。**施工分期见 §3「P2-1 施工分期」**（期 0 安全网 ✅ / 期 1 几何数学 ✅ / 期 2 剔除+流式 ✅ / 期 3 原点漂移 ✅ / 期 4 LOD 调度 ✅）。**期 4 收尾时一并处置了 `VoxelData` 的 52 处 `# [INF]` 标记：逐条判定为「留内核（数据层）」，标记删除**（见 §3 P0-7 归宿）。**仍未决**：无限层最终落点（同仓库独立插件 vs 独立仓库），见 §6 待确认。 |
+| P2-2 ✅ | 内核 API 保持**按 chunk 索引 + 脏区域事件**的形态，供无限层套在外层 | 这是"抽离"能成立的前提；若内核 API 是"整块重算"式的，无限层挂不上去。**已落地**：① `VoxelRenderer.gd` 顶部新增权威的"内核对外契约（P2-2）"块，把公开面固化为 A 脏区域事件 / B 按 chunk 写 / C 按 chunk 查 / D 只读环境 / E 生命周期覆盖点 / F 兼容别名（P4 收口），并写明"不在契约内"（相机、LOD 分带、流式、剔除、原点漂移、异步供需全在无限层）与**双向依赖边界**（无限层 → 内核走公开面 + 5 个 `@export` 私有旋钮；内核 → 无限层只走其公开方法，不碰私有字段）。② 新增契约锁定测试 `Scripts/Test/test_voxel_kernel_contract.gd`：公开方法清单与契约表一一对应（多一个少一个都失败，`get_script_method_list()` 逐条比对），并断言脏区域粒度——内部点编辑恰好 1 个脏 chunk、chunk 角点恰好 4 个（自身 + 3 个负向邻块），**永不**退化为"全部 chunk"（"按 chunk 索引"的可观测反证）。核验 `request_update()` 并非"整块重算"，只是"下一帧重建"唤醒位，粒度始终由 `VoxelData` 脏账本（`get_dirty_chunks()`）决定。3/3 通过。 |
+| P2-3 ✅ | 把粒子碎片 / 掉落物理 / 健康度 / 级联崩塌抽离为独立的"表现层"组件 | 几何内核已在 C++，但**表现逻辑与编辑逻辑在同一函数里交织**（`_process` R1672 一条链里既有级联也有 mesh 组装）。**已落地（抽出真·表现层双子系统，分离目标达成）**：新增 `addons/VoxelSupport/Runtime/VoxelDestructionPresenter.gd`（`class_name` + `Node3D`，由宿主惰性挂为 identity 变换的子节点 → `global_position` 即宿主世界位置）。抽出：① **碎片粒子**（GPU 粒子池 / 淡出渐变 / 网格缓存；`ensure_debris_root` / `spawn_debris_with_materials` / `spawn_chunk_break_debris` / `spawn_chunk_break_at_body`）；② **掉落物理**（`RigidBody3D` 对象池 + 代次防串号、在途 mesh worker 任务、待生成/待组装分帧队列、超时与数量上限清理、落地冻结、origin shift 队列平移、退出前 join）。宿主只保留 `@export` 旋钮（唯一真值），每帧经 `configure(...)` 单向推给表现层；表现层**只读**宿主公开面（`host.data` / `host.voxel_scale` / `host.infinite_layer` / `host.diag_enabled` / 新增 `host.surface_materials()`），**不碰宿主私有成员**。为让表现层取到与渲染**同一份** Material 对象，内核 `VoxelRenderer` 新增公开查询 `surface_materials()`（走唯一材质缓存 `_materials.surfaces()`），契约表与 `test_voxel_kernel_contract` 方法清单同步登记；origin shift 的位置列表平移下沉为 `VoxelChunk.shift_positions()`（与既有 `shift_key_dict` 并列，消除"宿主与表现层各写一份"）。**健康度 / 级联崩塌刻意留在宿主**：二者都要写 `VoxelData`（移除体素）并发射宿主信号（`voxels_about_to_collapse` / `voxel_damaged`），按 P2-2/P2-4 冻结的内核边界属**编辑侧**而非表现侧；塞进只读宿主的表现层会破坏"表现层不写数据"的契约。**分离已达成**：级联/破坏管道只调 `_presenter.spawn_falling_chunks_from_groups(...)`，`_process` 帧尾只调 `_presenter.process_pending_falling_groups/process_pending_mesh_results/freeze_sleeping_chunks()`。验证：**编辑器 100/100 + 游戏进程 9/9 全通过**；另在游戏内直驱探针确认掉落物理端到端（100 体素组 → `spawned=1`、`_falling_chunk_root` 确为表现层子节点、body 入池 `pool_total=1`、mesh 数帧内组装完 `pending_mesh=0`）。 |
+| P2-4 ✅ | 抽出 `VoxelEditKernel`（无场景节点、无 `_process`、可无头调用） | 建模软件的"画笔"直接调它，不需要一个 `VoxelDestructible` 节点。**已落地**：新增 `addons/VoxelSupport/Runtime/VoxelEditKernel.gd`（`RefCounted`）承载**纯编辑数学**——`apply_damage`（伤害结算：范围 → 材质 → 硬度比较 → 累伤 / 判移除，含伤害缓冲回写与硬化反馈产出）、`propagate_stress`（裂纹扩散）、`find_unstable`（悬空检测）、`hardness_table` / `strength_table`（材质查表，索引 = 材质ID，表长下界 `MAX_MATERIAL_ID` 防原生越界读）。**无 Node / 无场景树 / 无物理 / 无粒子 / 无信号**，因此服务端与建模工具只需 `VoxelEditKernel.new()` + 一个 `VoxelData` 即可算完破坏，**不需要挂 `VoxelDestructible`**。三条边界写进类头文档：① **配置旋钮不在内核里**（`RefCounted` 挂不了 `@export`，`damage_per_voxel` / `use_voxel_health` / 应力三参数一律按参数传入，旋钮留在节点）；② **表现层职责不在内核里**（粒子碎片、掉落刚体、级联分帧调度、信号发射、帧尾合并、诊断输出全留节点）；③ **内核只产出"发生了什么"**——`apply_damage` 返回 `{removed, hardened, hardened_dirty}` 但**不自行移除体素**，何时落地由调用方决定。**无状态**：逐体素累伤账归 `VoxelData`（经 `get_damage_buffers()` / `set_damage_buffers()` 读写），故内核实例可长期复用、可跨多个 `VoxelData`。`VoxelDestructible` 改为持有 `_edit := VoxelEditKernel.new()` 并全部委托（删除本地 `_hardness_table` / `_build_strength_table`；`_apply_damage_native` 只保留"硬化反馈并入帧尾缓冲 + 置脏"与 `last_damage_count`；`_find_unstable_voxels` 只保留诊断输出）——**数学只有一份**，不存在第二套 GDScript 实现。验证：`test_voxel_kernel_contract.gd` 扩为 7 项（新增：内核非 Node 且不实现任何帧/生命周期回调、公开方法清单 = 契约、无头伤害结算、无头应力 + 失稳、节点与内核直调给出**同一批**被摧毁体素），**编辑器 98/98 + 游戏进程 9/9 全通过**（含 `test_voxel_runtime_smoke` 的破坏 / 碎片 / 崩塌端到端）。 |
+| P2-5 ✅ | 热路径下移：`_shift_index_array`、`generate_arrays_from_chunks`、`_translate_native_verts` 进 C++ | 每 chunk 全量 `PackedInt32Array` 拷贝，是网格化的固定开销。**已落地**：新增原生 `generate_arrays_from_chunks_native`（逐 chunk `build_halo_from_buffers` + `generate_chunk_dense` + 复用 `append_arrays_native` 合并/索引偏移，全 C++），生产路径（`start_generate_mesh_from_chunks` / `start_generate_mesh_from_qvox`）改调它；`generate_spheres_native` 增 `offset` 参数（体素单位、内部乘 scale），删除 `_translate_native_verts` 事后遍历。GDScript 版 `generate_arrays_from_chunks` + `_shift_index_array` 保留为**测试 oracle**（`test_voxel_snapshot_baseline` 逐位对照，两处需同步改）。已核验：块级网格与 oracle 逐字节一致（三角 5790 命中基线）；球体路径与原"事后平移"仅差 ≤3e-7 相对误差（浮点结合律，非行为变更）。`NativeLoader.REQUIRED_METHODS` 同步新增该方法。 |
+| P2-6 ✅ | `flood_fill` / `partition_connected` / `find_unsupported` 进 C++ 或改原生实现（**落点已就位：`VoxelConnectivity`，见 §3 P1-2①**） | 现在每节点 `in result` 的 GDScript BFS，破坏一堵墙就卡帧。**已落地**：新增原生 `flood_fill_positions(seeds, allowed)`——集合受限（restrict 非空）分支全 C++（`std::unordered_set<uint64_t>` + 64 位 `grid_vkey`，负坐标安全）；`VoxelConnectivity.flood_fill` 据此分流：restrict 非空 → 原生，restrict 为空 → 保留 GDScript（判据是 Callable，`has_voxel` 可能触发磁盘 chunk 流式载入，无法脱离宿主语言）。`partition_connected` / `find_unsupported`（全量）此前已在原生，其**子集路径**（`find_unsupported(voxels_set)`）现也自动走原生泛洪。`NativeLoader.REQUIRED_METHODS` 补上此前漏列的 `find_unsupported_positions` + 新增 `flood_fill_positions`。验证：新增交叉断言（`test_flood_fill_restrict_branch_matches_predicate_oracle`）——restrict = 实体素全集时两分支结果必须逐体素一致，并覆盖负坐标、种子越界、子集悬空检测；全量 **54/54 通过**。 |
+| P2-7 ✅ | 编辑路径改为**脏区域增量重建**（抽走 LOD 之后仍必须保留） | 见 §4，这是"有限内核"唯一真正的性能风险。**已落地（机制在位 + 本次补上锁定断言）**：§4.2 的三条里，第 1、2 条已由 P2-1 的脏账本与计数账本实现，本次逐条核实并写成断言——① **增量网格重建**：编辑只写 `VoxelDirtyLedger` 的 chunk 级 MESH 脏位，渲染器每帧 `VoxelData.get_dirty_chunks()` **take 一次**重建，粒度是脏 chunk 而非全量（内部点恰好 1 个、chunk 角点恰好 4 个，见 P2-2 断言）；② **只改变化的块 + 计数增量维护**：`_chunk_voxel_counts` 是体素数的**唯一权威**，`get_voxel_count()` 由它派生（不重扫体积），`_maybe_erase_empty_chunk` 用计数归零 O(1) 擦除，**替代了原先的 4096 全量扫描**；`is_empty()` 与"总数为 0"由不变式保证等价且 O(1)。新增断言（`test_voxel_kernel_contract.gd` P2-7 段）：单点编辑只脏 1 chunk、脏账**读取即消费**（第二次读取必空，否则会重复重建）、增量计数与**全量重数恒等**（证明不存在第二份可漂移的存储）、变空的 chunk 被擦除后**仍留 mesh 脏标记**（否则渲染器不会重建来清掉旧网格）。**未做成增量的两处及其判定**：`get_aabb()` 走原生 `collect_bounds` 全扫、连通性走原生 `find_unsupported` 按需计算——两者都**不在每次落笔的同步路径上**（前者按需调用、后者本就只在破坏后触发），且做成增量会引入"只扩不缩"的过近似语义（边界/连通性变宽松会静默改变消费者行为）。故按"够用即可"保留按需计算，§4.2 第 3 条（修改器链逐修改器缓存）属 §5 `steps` 模型，不在此项。全量 **9/9 通过**。 |
 
 ### P3 —— 统一生成流水线（把三个硬编码步骤变成一条链）
 
@@ -202,7 +351,9 @@ P4 决定"能不能对外稳定"。**没有 P0 的安全网就做 P1，是在给
 - `_process_lod` 每帧对 `loaded_chunks` 全表扫一遍求范围（R1061-1063）→ 消失
 - `_process_chunk_level` 三重循环枚举相机周围 cube（R1322-1342）→ 消失
 - `_lod_mark_null_or_retry` 三重循环 `span³` 判空（R1550-1560）→ 消失
-- `_shift_render` 对 10+ 个字典逐个重建（R966-1020）→ 消失
+- `shift_render`（原 `_shift_render`）对 10+ 个字典逐个重建（R966-1020）：**期 3 判定它留在内核**
+  （见 §3 期 3 执行记录）—— 它是 origin shift 的**一次性**开销（相机跨越 256 chunk 才触发），
+  不在每帧路径上，所以"随无限层移走"既不成立也不必要；真正的优化落点是 P2-7 的脏区域增量重建
 - 每次派发 `_lod_materials[i].duplicate()` 全量深拷贝（R1481）→ 消失
 - LOD 失效双账本、`_coarse_*` 账本、块快照协议 → 消失
 - 修改器链只需**求值一次**（完整体积），不再需要"惰性路径 + 完整路径"两套代码

@@ -190,6 +190,11 @@ func _get_channel_images() -> Dictionary:
 # 一次 → 拼接后无重叠面、无 z-fighting。
 
 ## 由块缓冲生成网格 arrays（输出形状与 generate_arrays_native 一致）。
+##
+## 【测试 oracle，非生产路径】生产路径已全量下沉原生
+## （NativeLoader.generate_arrays_from_chunks_native，见 P2-5）：本函数保留的唯一用途是
+## test_voxel_snapshot_baseline 的逐位对照。原生实现与本 oracle 的产物字节序列必须一致，
+## 故两处需同步修改。
 static func generate_arrays_from_chunks(chunks: Dictionary, trans_flags: PackedByteArray,
 		scale: float, offset: Vector3) -> Dictionary:
 	var sv := PackedVector3Array()
@@ -478,9 +483,9 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	if origin_mode != VoxelData.OriginMode.WORLD_ORIGIN:
 		offset = VoxelData.origin_offset(VoxelData.voxel_bounds(voxels), origin_mode)
 	if shape == VoxelMeshImporter.Shape.sphere:
+		# offset 为体素单位，原生内部乘 scale（与 cube 路径同一约定）——不必再事后遍历平移顶点。
 		_native_arrays = NativeLoader.generate_spheres_native(
-			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET)
-		_translate_native_verts(offset * scale)
+			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET, offset)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
 
@@ -493,7 +498,7 @@ func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3)
 	if chunks.is_empty():
 		return
 	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	_native_arrays = generate_arrays_from_chunks(
+	_native_arrays = NativeLoader.generate_arrays_from_chunks_native(
 			chunks, VoxelMaterial.build_trans_flags(materials_src), scale, layout_offset)
 
 
@@ -508,7 +513,7 @@ func start_generate_mesh_from_qvox() -> void:
 	# 原点偏移与 .vox 路径同一套（qvox.origin_offset 内部调 VoxelData.origin_offset）
 	var offset := qvox.origin_offset(origin_mode)
 	if qvox.is_block_importable():
-		_native_arrays = generate_arrays_from_chunks(
+		_native_arrays = NativeLoader.generate_arrays_from_chunks_native(
 				qvox.block_buffers(), trans_flags, scale, offset)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(
@@ -529,25 +534,6 @@ func wait_finished(gen_uv2: bool, uv2_texel_size: float) -> ArrayMesh:
 	if shape != VoxelMeshImporter.Shape.sphere and gen_uv2:
 		mesh.lightmap_unwrap(Transform3D.IDENTITY, uv2_texel_size)
 	return mesh
-
-
-## 平移原生顶点（世界单位）。delta 为 0 时直接返回，不做无谓的遍历。
-##
-## 【为什么球体路径需要它】原生 `generate_spheres_native` 没有 offset 参数（只有 cube 路径的
-## `generate_arrays_native` 有），而原点模式是四条链路共用的语义，不能只在 cube 下生效。
-## 代价是一次 O(顶点数) 的 GDScript 遍历——球体模式本就是"每体素一颗球"的表现型用法，
-## 且只在导入时跑一次，可接受。
-func _translate_native_verts(delta: Vector3) -> void:
-	if delta.is_zero_approx():
-		return
-	for prefix: String in ["solid", "trans"]:
-		var key := prefix + "_verts"
-		var verts: PackedVector3Array = _native_arrays.get(key, PackedVector3Array())
-		if verts.is_empty():
-			continue
-		for i in verts.size():
-			verts[i] += delta
-		_native_arrays[key] = verts
 
 
 ## 把原生几何内核返回的 arrays 变成 surface（0=实体 / 1=透明），并绑定对应材质

@@ -104,7 +104,7 @@ func test_resource_payload_roundtrip() -> void:
 
 	# 版本不符 → 明确拒绝（报错 + 空载荷），而不是按当前格式猜着读
 	var bad := VoxelData.new()
-	bad.set("voxel_data_payload", _encode_payload({"v": VoxelData.PAYLOAD_VERSION + 1, "blocks": {}}))
+	bad.set("voxel_data_payload", VoxelPayloadCodec.encode({"v": VoxelPayloadCodec.VERSION + 1, "blocks": {}}))
 	assert_eq(bad.get_voxel_count(), 0, "版本不符的载荷应被拒绝")
 
 
@@ -351,13 +351,6 @@ func _make_data() -> VoxelData:
 	var d := VoxelData.new()
 	d.materials = mats
 	return d
-
-
-## 手工编码一个载荷（用于构造"版本不符"等异常输入）。
-func _encode_payload(data: Dictionary) -> String:
-	var out := VoxelData.PAYLOAD_MAGIC.to_utf8_buffer()
-	out.append_array(var_to_bytes(data).compress(FileAccess.COMPRESSION_GZIP))
-	return Marshalls.raw_to_base64(out)
 
 
 func _write_bytes(path: String, bytes: PackedByteArray) -> void:

@@ -63,13 +63,18 @@ public:
 	static Dictionary generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
 			float scale, const Vector3 &offset);
 
+	// 块缓冲字典 → 网格 arrays（QVox 块级导入路径：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全 C++）。
+	// 与 GDScript 侧 VoxelMeshGenerator.generate_arrays_from_chunks 逐位等价（后者保留为测试 oracle）。
+	static Dictionary generate_arrays_from_chunks_native(const Dictionary &chunks, const PackedByteArray &trans_flags,
+			float scale, const Vector3 &offset);
+
 	// 球体网格（导入 shape=sphere）：每体素一颗 icosphere，按顶点预算自动降采样。
 	// subdivisions: icosphere 细分级别(0..2)；sphere_scale: 小球半径/体素边长；
-	// vertex_budget: 顶点上限（超出则自动放大采样间隔）。
+	// vertex_budget: 顶点上限（超出则自动放大采样间隔）；offset: 原点偏移（**体素单位**，内部乘 scale）。
 	// 返回 Dictionary：{solid_verts, solid_normals, solid_uvs, solid_idxs,
 	//                   trans_verts, trans_normals, trans_uvs, trans_idxs, step}
 	static Dictionary generate_spheres_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
-			int subdivisions, float sphere_scale, float scale, int vertex_budget);
+			int subdivisions, float sphere_scale, float scale, int vertex_budget, const Vector3 &offset);
 
 	// 从 LOD0 chunk buffers 降采样构建 LOD 大块 34³ halo（lod_shift>=2 通用降采样，文件流粗层缓存用）
 	static PackedInt32Array build_lod_block_halo_from_buffers_native(const Dictionary &buffers,
@@ -135,6 +140,13 @@ public:
 	// 悬空体素**全量**检测（与地面连通性模型）：输入"全部体素位置"，返回未与 y==0 连通的位置。
 	// 只依据位置集合，不读 chunk 缓冲 —— 见实现处的说明（仅磁盘 chunk 会造成误判）。
 	static Array find_unsupported_positions(const Array &positions);
+
+	// 集合受限泛洪：在 allowed 集合内，从 seeds 出发做 6 方向连通扩散。
+	// seeds: Array[Vector3i]；allowed: Dictionary 作 Set（键 Vector3i，值任意）。
+	// 返回 {pos: true}（Dictionary 作 Set），与 GDScript 版 flood_fill 的 restrict 分支同语义。
+	// 【为什么不带判据】判据版必须逐点回调宿主 Callable（可能触发磁盘 chunk 流式载入），
+	// 只能留在 GDScript；本函数只认传入集合，正是"每节点一次 `in result` 字典查找"的原生替代。
+	static Dictionary flood_fill_positions(const Array &seeds, const Dictionary &allowed);
 
 	// 快照受影响区域的 chunk 缓冲（chunks + 27 邻居）。
 	// buffers: chunk key -> PackedInt32Array(32³)

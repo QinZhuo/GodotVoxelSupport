@@ -583,6 +583,55 @@ inline int grid_floor_div(int v, int d) {
 }
 } // namespace
 
+// 块缓冲字典 → 网格 arrays：逐 chunk 构建 34³ halo → 原生 dense 面生成 → 合并 + 索引偏移。
+//
+// 【为什么搬进 C++】原 GDScript 版每个 chunk 要跨语言往返 3 次（build_halo_from_buffers /
+// generate_chunk_dense / 逐元素索引偏移），QVox 大资产（整资产或 MeshLibrary 分项）导入时是主要
+// 等待时间。此处循环与拼接全在 C++，索引偏移复用 append_arrays_native，不再产生中间数组。
+//
+// 【与 GDScript 版的关系】VoxelMeshGenerator.generate_arrays_from_chunks 保留为**测试 oracle**
+// （test_voxel_snapshot_baseline 用它对照本函数产物逐位一致），故**两处必须同步修改**。
+// 结构上与 generate_arrays_native 同构（同一个 append_arrays_native 拼接器）。
+//
+// 坐标约定：use_local_space=false → 顶点 = (体素坐标 + offset) × scale，即**绝对世界坐标**，
+// 于是各块结果可直接拼接；块边界面"负方向本块负责、正方向看邻居"的约定保证每个跨界只生成一次。
+Dictionary VoxelNative::generate_arrays_from_chunks_native(const Dictionary &chunks, const PackedByteArray &trans_flags,
+		float scale, const Vector3 &offset) {
+	PackedVector3Array sv, sn, tv, tn;
+	PackedVector2Array su, tu;
+	PackedInt32Array si, ti;
+	int solid_base = 0;
+	int trans_base = 0;
+	const Array keys = chunks.keys();
+	for (int i = 0; i < keys.size(); ++i) {
+		const Vector3i ck = keys[i];
+		if (!chunks.has(ck)) {
+			continue;
+		}
+		const PackedInt32Array halo = build_halo_from_buffers(chunks, ck);
+		if (halo.is_empty()) {
+			continue;
+		}
+		const Dictionary arr = generate_chunk_dense(halo, trans_flags, scale, ck, false, offset);
+		append_arrays_native(sv, sn, su, si, arr, "solid", solid_base);
+		append_arrays_native(tv, tn, tu, ti, arr, "trans", trans_base);
+		solid_base = sv.size();
+		trans_base = tv.size();
+	}
+	// 总是返回 8 个键（与 GDScript oracle 逐位一致，即使全空）——不学 generate_arrays_native 的
+	// "全空则返回空字典"，因为那条约定属于 .vox 路径，会让 oracle 比较出现键集差异。
+	Dictionary result;
+	result["solid_verts"] = sv;
+	result["solid_normals"] = sn;
+	result["solid_uvs"] = su;
+	result["solid_idxs"] = si;
+	result["trans_verts"] = tv;
+	result["trans_normals"] = tn;
+	result["trans_uvs"] = tu;
+	result["trans_idxs"] = ti;
+	return result;
+}
+
 // 球体网格（导入 shape=sphere）：每体素一颗 icosphere，按顶点预算自动降采样。
 // 语义与旧 GDScript 导入实现一致：
 //   - 先用包围盒表面积估算采样间隔 step，再按实际外露格子数兜底放大（step 上限 32）
@@ -591,7 +640,7 @@ inline int grid_floor_div(int v, int d) {
 // 返回 Dictionary：{solid_verts, solid_normals, solid_uvs, solid_idxs,
 //                   trans_verts, trans_normals, trans_uvs, trans_idxs, step}
 Dictionary VoxelNative::generate_spheres_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
-		int subdivisions, float sphere_scale, float scale, int vertex_budget) {
+		int subdivisions, float sphere_scale, float scale, int vertex_budget, const Vector3 &offset) {
 	const uint8_t *tflags = trans_flags.ptr();
 	const int n_mats = trans_flags.size();
 	const int subs = subdivisions < 0 ? 0 : (subdivisions > 2 ? 2 : subdivisions);
@@ -710,7 +759,9 @@ Dictionary VoxelNative::generate_spheres_native(const Dictionary &voxels, const 
 		PackedVector3Array &ns = is_trans ? tn : sn;
 		PackedVector2Array &us = is_trans ? tu : su;
 		PackedInt32Array &is = is_trans ? ti : si;
-		const Vector3 center = (cell_origin + Vector3(cell.first) * step_f) * scale;
+		// offset 为体素单位，与 generate_dense_impl 同一约定（内部乘 scale）——
+		// 于是球体路径不必再由 GDScript 事后遍历平移顶点（原 _translate_native_verts）。
+		const Vector3 center = (cell_origin + Vector3(cell.first) * step_f) * scale + offset * scale;
 		const float u = (float(cell.second) + 0.5f) / 256.0f;
 		const int vbase = vs.size();
 		for (int k = 0; k < nv; ++k) {
@@ -1794,6 +1845,53 @@ Array VoxelNative::partition_connected(const Array &positions) {
 	return result;
 }
 
+Dictionary VoxelNative::flood_fill_positions(const Array &seeds, const Dictionary &allowed) {
+	// 集合受限泛洪：只在 allowed 内扩散（不查世界体素）。与 VoxelConnectivity.flood_fill 的
+	// restrict 分支逐体素等价：种子不在 allowed 内则跳过；邻居不在 allowed 内则不扩散。
+	// BFS 用 std::vector 收集，最后一次性构建返回字典（避免逐体素跨语言 Dictionary 写入）。
+	Dictionary result;
+	if (allowed.is_empty() || seeds.is_empty()) {
+		return result;
+	}
+	std::unordered_set<uint64_t> allowed_keys;
+	allowed_keys.reserve(allowed.size() * 2);
+	const Array allowed_list = allowed.keys();
+	for (int i = 0; i < allowed_list.size(); ++i) {
+		const Vector3i pos = allowed_list[i];
+		allowed_keys.insert(grid_vkey(pos));
+	}
+	std::unordered_set<uint64_t> visited;
+	std::vector<Vector3i> stack;
+	std::vector<Vector3i> collected;
+	for (int i = 0; i < seeds.size(); ++i) {
+		const Vector3i seed = seeds[i];
+		const uint64_t skey = grid_vkey(seed);
+		if (visited.count(skey) || !allowed_keys.count(skey)) {
+			continue;
+		}
+		visited.insert(skey);
+		stack.clear();
+		stack.push_back(seed);
+		while (!stack.empty()) {
+			const Vector3i cur = stack.back();
+			stack.pop_back();
+			collected.push_back(cur);
+			for (int d = 0; d < 6; ++d) {
+				const Vector3i nb(cur.x + NEIGHBORS_6[d][0], cur.y + NEIGHBORS_6[d][1], cur.z + NEIGHBORS_6[d][2]);
+				const uint64_t nk = grid_vkey(nb);
+				if (allowed_keys.count(nk) && !visited.count(nk)) {
+					visited.insert(nk);
+					stack.push_back(nb);
+				}
+			}
+		}
+	}
+	for (auto &p : collected) {
+		result[p] = true;
+	}
+	return result;
+}
+
 // ----------------------------------------------------------------------------
 // 悬空体素**全量**检测（对应 VoxelData.find_unsupported 的全量路径）
 // ----------------------------------------------------------------------------
@@ -1958,18 +2056,30 @@ int64_t VoxelNative::crc32_segments(const PackedByteArray &p_data, const PackedI
 // ----------------------------------------------------------------------------
 // QVox 块级编解码（原生）
 // ----------------------------------------------------------------------------
-// 字节布局权威在 QVoxSpec / docs/QVOX_FORMAT.md；这里只做实现，且与 GDScript 参考实现
-// （QVoxBlockCodec 的 unpack 仍是 GDScript，由 test_qvox_format 的往返用例做 oracle）逐字节一致。
-//   块内线性顺序 idx = x + y·B + z·B²（X 最快）；数值一律小端。
+// 块内线性顺序 idx = x + y·B + z·B²（X 最快）；数值一律小端。
+//
+// 【常量单源】规范文本是 docs/QVOX_FORMAT.md，运行时权威是
+// addons/VoxelSupport/Runtime/QVoxSpec.gd —— 本文件只是它的**原生镜像**，不另立一套真值。
+// 跨语言共享不了编译期常量，故用"镜像 + 机器校验"代替"注释保证"：
+// test_qvox_format.gd 的 test_native_codec_id_mirror 把 QVoxSpec.CODEC_* / CHANNEL_BYTES
+// 送进下面的原生接口，用**实现行为**反证一致性（保留值 0 必返空、SOLID 必为 bytes 字节、
+// DENSE 必为 N×bytes 字节、RUN/INDEXED 必压缩）。任一边改了而另一边没跟 → 该用例变红。
 
 namespace {
 
-constexpr int QVOX_CHANNEL_BYTES = 2;
-constexpr int QVOX_CODEC_EMPTY = 0;
-constexpr int QVOX_CODEC_SOLID = 1;
-constexpr int QVOX_CODEC_RUN = 2;
-constexpr int QVOX_CODEC_DENSE = 3;
-constexpr int QVOX_CODEC_INDEXED = 4;
+// 位宽是唯一真值，字节数由它派生（与 QVoxSpec.CHANNEL_BYTES := CHANNEL_BPP / 8 同构）
+constexpr int QVOX_CHANNEL_BPP = 16;
+constexpr int QVOX_CHANNEL_BYTES = QVOX_CHANNEL_BPP / 8;
+
+// 编解码枚举：一份清单，取值必须与 QVoxSpec.CODEC_* 一致
+enum QvoxCodec : int {
+	QVOX_CODEC_EMPTY = 0,   // 保留值，永不写入文件（空块 = 块坐标缺失）
+	QVOX_CODEC_SOLID = 1,   // 所有通道各一个值
+	QVOX_CODEC_RUN = 2,     // uint32 count + count×(varint 游程长度, 每通道一个值)
+	QVOX_CODEC_DENSE = 3,   // 每通道 N×bpp/8 字节，ZXY 顺序，通道连续成段
+	QVOX_CODEC_INDEXED = 4, // uint8 n + n 个材质索引 + N×⌈log₂n⌉ 位（只索引 channels[0]）
+};
+
 constexpr int QVOX_U8_MAX = 255;
 
 // LEB128 长度
@@ -2547,7 +2657,8 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_spheres_native", "voxels", "trans_flags", "subdivisions", "sphere_scale", "scale", "vertex_budget"), &VoxelNative::generate_spheres_native);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_from_chunks_native", "chunks", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_from_chunks_native);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_spheres_native", "voxels", "trans_flags", "subdivisions", "sphere_scale", "scale", "vertex_budget", "offset"), &VoxelNative::generate_spheres_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelNative::build_lod_block_halo_from_buffers_native);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);
@@ -2564,6 +2675,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_positions", "positions"), &VoxelNative::find_unsupported_positions);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("flood_fill_positions", "seeds", "allowed"), &VoxelNative::flood_fill_positions);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32", "data", "start", "length"), &VoxelNative::crc32);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32_segments", "data", "offsets", "lengths"), &VoxelNative::crc32_segments);

@@ -333,5 +333,5 @@ func _update_hud() -> void:
 			"LOD: %d层  %s\n" % [_target.lod_count, lod_counts] + \
 			"相机位置: (%d, %d, %d)\n" % [int(_camera.global_position.x), int(_camera.global_position.y), int(_camera.global_position.z)]
 	if _current_mode == Mode.PROCEDURAL:
-		_hud.text += "origin shift: %s\n" % _target._origin_chunk
+		_hud.text += "origin shift: %s\n" % _target.infinite_layer.origin_chunk()
 	_hud.text += "\nWASD移动 Q/E升降 空格加速\n0: 切换数据源   数字1-4: 切换LOD层数"

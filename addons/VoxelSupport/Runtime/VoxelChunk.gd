@@ -77,6 +77,18 @@ static func shift_key_dict(d: Dictionary, offset: Vector3i) -> Dictionary:
 	return nd
 
 
+## 把"位置列表"（Array[Vector3i]）整体平移（origin shift）。
+## 与 shift_key_dict 同因：各层各写一份相同实现，漏改一处就会出现"平移后某队列仍指旧坐标"。
+static func shift_positions(positions: Array, offset: Vector3i) -> Array:
+	if positions.is_empty():
+		return []
+	var out: Array = []
+	out.resize(positions.size())
+	for i in positions.size():
+		out[i] = Vector3i(positions[i]) + offset
+	return out
+
+
 # ----------------------------------------------------------------------------
 # LOD 大块几何
 # ----------------------------------------------------------------------------

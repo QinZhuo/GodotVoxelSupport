@@ -275,7 +275,8 @@ func _extract_chunks(data: VoxelData) -> Dictionary:
 ##
 ## 与 VoxelData.get_voxels_aabb() 同语义（origin_of + _local_from_index + buf>0 +
 ## bounds→AABB），区别只是本函数直接吃"尚未落盘的 chunk 缓冲字典"，
-## 不依赖内存计数 _voxel_count（流式数据源下它为 0，会导致引擎函数返回空 AABB）。
+## 不依赖 VoxelData 的内存计数（这些 chunk 尚未装载，内存计数看不到它们，
+## 会让引擎函数返回空 AABB）。
 func _chunk_extent(chunks: Dictionary, _data: VoxelData) -> AABB:
 	if chunks.is_empty():
 		return AABB()
