@@ -6,7 +6,8 @@ extends Node3D
 ## 【它只做三件事】
 ##   ① 装配：新建世界/对象 → 建会话 → 把显示层交给渲染器、把网格交给地板、把会话交给状态栏；
 ##   ② 翻译：鼠标事件 → 相机射线 → 网格拾取 → `QVoxEditSession` 的手势（begin/drag/release）；
-##   ③ 快捷键：工具表里的热键切笔、[ ] 改笔刷、Ctrl+Z / Ctrl+Shift+Z 撤销重做、Esc 取消、Home 取景。
+##   ③ 快捷键：工具表里的热键切笔、[ ] 改笔刷、Ctrl+Z / Ctrl+Shift+Z 撤销重做、Esc 取消、Home 取景；
+##      工程文件 Ctrl+S / Ctrl+Shift+S / Ctrl+O（`.qvox` 也能直接拖进窗口）。
 ##
 ## 【为什么"翻译"值得单独一层】会话刻意不认识鼠标：它要的是"这一次落笔打在哪"（Pick）。
 ## 视口是唯一知道屏幕坐标、相机与渲染节点的地方 —— 于是换算只在这里发生一次，
@@ -39,16 +40,27 @@ extends Node3D
 var world: QVoxWorld
 var session: QVoxEditSession
 
+## 当前工程文件路径（空 = 还没存过盘的新工程，"保存"会转成"另存为"）。
+var project_path := ""
+
 var _material_id := 1
 var _stroke := false
 var _erase := false
 var _orbit := false
 var _pan := false
+## 有未落盘的改动（状态栏与窗口标题上的 *）。
+var _dirty := false
+
+var _open_dialog: FileDialog
+var _save_dialog: FileDialog
 
 const ACTION_UNDO := &"qvoxelier_undo"
 const ACTION_REDO := &"qvoxelier_redo"
 const ACTION_BRUSH_UP := &"qvoxelier_brush_up"
 const ACTION_BRUSH_DOWN := &"qvoxelier_brush_down"
+const ACTION_SAVE := &"qvoxelier_save"
+const ACTION_SAVE_AS := &"qvoxelier_save_as"
+const ACTION_OPEN := &"qvoxelier_open"
 
 
 # ----------------------------------------------------------------------------
@@ -57,27 +69,38 @@ const ACTION_BRUSH_DOWN := &"qvoxelier_brush_down"
 
 func _ready() -> void:
 	_bind_actions()
+	_build_dialogs()
 	new_model()
 	# 编辑器里只装配外观（网格地板与取景），输入留给编辑器自己 —— @tool 脚本不该抢编辑器的键。
 	if Engine.is_editor_hint():
 		return
-	hud.session = session
+	get_window().files_dropped.connect(_on_files_dropped)
 
 
-## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 建会话 → 接线。
-## 载入 / 换模型也走这里 —— "装配"只有这一条路径，不存在第二套初始化。
+## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
 func new_model(grid := Vector3i.ZERO) -> void:
 	var g: Vector3i = grid if grid.x > 0 and grid.y > 0 and grid.z > 0 else grid_size
-	world = QVoxWorld.create_empty()
+	var w := QVoxWorld.create_empty()
 	for c in default_palette:
-		world.add_material(c)
-	var obj := world.create_object("Model", g)
-	session = QVoxEditSession.create_for(obj, world)
-	session.request_render_update = model.request_update
-	session.history.changed.connect(_refresh_hud)
-	_material_id = 1
+		w.add_material(c)
+	_install(w, w.create_object("Model", g))
+	project_path = ""
+	_dirty = false
+	_update_title()
 
-	model.voxel_scale = world.voxel_size()
+
+## 装配：世界 + 待编辑对象 → 会话 / 渲染器 / 地板 / 状态栏。
+## **新建与打开共用这一条路径** —— 两套初始化迟早会分叉出"新建能画、打开画不了"这类怪病。
+func _install(w: QVoxWorld, obj: QVoxObject) -> void:
+	world = w
+	session = QVoxEditSession.create_for(obj, w)
+	session.request_render_update = model.request_update
+	session.history.changed.connect(_on_history_changed)
+	_material_id = 1
+	_stroke = false
+	_erase = false
+
+	model.voxel_scale = w.voxel_size()
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	model.data = session.data
 	grid_floor.grid_size = obj.grid_size
@@ -88,12 +111,15 @@ func new_model(grid := Vector3i.ZERO) -> void:
 	_refresh_hud()
 
 
-## 取景：让整块网格落进画面（新建 / Home 键）。
+## 取景：把"有东西可落笔"的范围落进画面（新建 / 打开 / Home 键）。
+## 空图时唯一能落笔的是网格底面（`QVoxGridPick` 的落笔面），所以对准底面 —— 若照搬"框住整块
+## 32³ 网格"，默认 25° 视角下屏幕上半尽是空体积，点正中只会换来一句"这儿落不了笔"。
 func frame_view() -> void:
 	if session == null:
 		return
-	var size := Vector3(session.object.grid_size) * model.voxel_scale
-	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, size), true)
+	var g := Vector3(session.object.grid_size) * model.voxel_scale
+	var extent := g if not session.object.is_empty() else Vector3(g.x, 0.0, g.z)
+	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, extent), true)
 
 
 # ----------------------------------------------------------------------------
@@ -147,15 +173,21 @@ func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 
 
 func _on_key(e: InputEventKey) -> void:
-	# 撤销 / 重做走框架 InputTool（key_event 管修饰键，且动作名可被重映射）。
+	# 撤销 / 重做 / 存开走框架 InputTool（key_event 管修饰键，动作名可被重映射）。
 	# 模式热键直接查工具表 —— 表即配置，不需要修饰键语义，也就没必要再声明一遍动作名。
-	if e.is_action_pressed(ACTION_UNDO):
+	if _pressed(e, ACTION_UNDO):
 		_undo()
-	elif e.is_action_pressed(ACTION_REDO):
+	elif _pressed(e, ACTION_REDO):
 		_redo()
-	elif e.is_action_pressed(ACTION_BRUSH_UP):
+	elif _pressed(e, ACTION_SAVE_AS):
+		save_project_as()
+	elif _pressed(e, ACTION_SAVE):
+		save_project()
+	elif _pressed(e, ACTION_OPEN):
+		_open_dialog.popup_centered_ratio(0.7)
+	elif _pressed(e, ACTION_BRUSH_UP):
 		_set_brush(session.tool.brush_size + 1)
-	elif e.is_action_pressed(ACTION_BRUSH_DOWN):
+	elif _pressed(e, ACTION_BRUSH_DOWN):
 		_set_brush(session.tool.brush_size - 1)
 	elif e.keycode == KEY_ESCAPE:
 		_cancel()
@@ -166,6 +198,13 @@ func _on_key(e: InputEventKey) -> void:
 		_set_material(e.keycode - KEY_0)
 	else:
 		_switch_by_hotkey(e.keycode)
+
+
+## 动作命中判定：**必须精确比对修饰键**（第 3 个参数 exact_match）。
+## `is_action_pressed` 默认只比键码、不比修饰键 —— 于是 Ctrl+Shift+Z 会连"撤销"一起命中、
+## Ctrl+Shift+S 会连"保存"一起命中，谁先判谁赢、另一个永远轮不到（"重做"就是这么坏的）。
+func _pressed(e: InputEventKey, action: StringName) -> bool:
+	return e.is_action_pressed(action, false, true)
 
 
 func _switch_by_hotkey(key: Key) -> void:
@@ -266,8 +305,126 @@ func _set_material(id: int) -> void:
 
 
 # ----------------------------------------------------------------------------
+# 工程文件（.qvox）
+# ----------------------------------------------------------------------------
+
+## 打开工程：读盘 → 接管世界 → 重建会话。**失败时视口保持原样**（绝不半途换掉用户正编辑的东西）。
+func open_project(path: String) -> bool:
+	if _stroke:
+		session.cancel()
+		_stroke = false
+	var loaded := QVoxProject.load_world(path)
+	if loaded == null:
+		hud.flash("打不开这个工程（缺失或已损坏）：%s" % path.get_file())
+		return false
+	var obj := _pick_editable(loaded)
+	if obj == null:
+		hud.flash("这个工程里没有可编辑的对象：%s" % path.get_file())
+		return false
+	_install(loaded, obj)
+	project_path = path
+	_dirty = false
+	_update_title()
+	var extra := loaded.objects.size() - 1
+	hud.flash("已打开 %s%s" % [path.get_file(),
+			"（另有 %d 个对象，一期只编辑这个）" % extra if extra > 0 else ""])
+	return true
+
+
+## 一期只编辑一个对象：优先挑"有内容"的那个（打开样例时第一眼就有东西看），都没有就取第一个。
+## 多对象 / 图层是二期的事（DESIGN §4.5）。
+func _pick_editable(w: QVoxWorld) -> QVoxObject:
+	var first: QVoxObject = null
+	for o in w.objects:
+		if o == null:
+			continue
+		if first == null:
+			first = o
+		if not o.is_empty():
+			return o
+	return first
+
+
+## 保存到当前工程文件；还没存过盘就转"另存为"。
+func save_project() -> void:
+	if _stroke:
+		session.cancel()
+		_stroke = false
+	if project_path.is_empty():
+		save_project_as()
+		return
+	_write_project(project_path)
+
+
+## 另存为：弹文件对话框，默认文件名取世界名。
+func save_project_as() -> void:
+	_save_dialog.current_file = "%s.%s" % [world.world_name(), QVoxProject.EXTENSION]
+	_save_dialog.popup_centered_ratio(0.7)
+
+
+func _write_project(path: String) -> bool:
+	var err := QVoxProject.save(world, path)
+	if err != OK:
+		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
+		return false
+	project_path = path
+	_dirty = false
+	_update_title()
+	hud.flash("已保存 %s" % path.get_file())
+	return true
+
+
+func _on_save_path_selected(path: String) -> void:
+	_write_project(QVoxProject.ensure_extension(path))
+
+
+## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
+## 工程文件本就该落在用户自己的目录里（导出打包后 `res://` 更是读不到的）。
+func _build_dialogs() -> void:
+	_open_dialog = _make_dialog(FileDialog.FILE_MODE_OPEN_FILE)
+	_open_dialog.file_selected.connect(open_project)
+	_save_dialog = _make_dialog(FileDialog.FILE_MODE_SAVE_FILE)
+	_save_dialog.file_selected.connect(_on_save_path_selected)
+
+
+func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
+	var d := FileDialog.new()
+	d.file_mode = mode
+	d.access = FileDialog.ACCESS_FILESYSTEM
+	d.current_dir = ProjectSettings.globalize_path("user://")
+	d.add_filter("*.%s" % QVoxProject.EXTENSION, "QVoxelier 工程")
+	d.title = "打开工程" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存工程"
+	add_child(d)
+	return d
+
+
+## 把 `.qvox` 拖进窗口即打开（建模时最顺手的一步）；非工程文件一律忽略。
+func _on_files_dropped(files: PackedStringArray) -> void:
+	for f in files:
+		if QVoxProject.is_project_path(f):
+			open_project(f)
+			return
+	hud.flash("只认得 .%s 工程文件" % QVoxProject.EXTENSION)
+
+
+func _update_title() -> void:
+	var name := project_path.get_file() if not project_path.is_empty() else "未命名"
+	hud.set_project(name, _dirty)
+	if not Engine.is_editor_hint() and get_window() != null:
+		get_window().title = "QVoxelier — %s%s" % [name, " *" if _dirty else ""]
+
+
+# ----------------------------------------------------------------------------
 # 状态栏
 # ----------------------------------------------------------------------------
+
+## 撤销栈一动就说明内容变了 —— 脏标记与状态栏由同一个信号驱动，不会各说各话。
+func _on_history_changed() -> void:
+	if not _dirty:
+		_dirty = true
+		_update_title()
+	_refresh_hud()
+
 
 func _refresh_hud() -> void:
 	if hud.session == session:
@@ -295,3 +452,6 @@ func _bind_actions() -> void:
 	InputTool.register_action(ACTION_BRUSH_DOWN, [
 		InputTool.key_event(KEY_BRACKETLEFT), InputTool.key_event(KEY_MINUS),
 	])
+	InputTool.register_action(ACTION_SAVE, [InputTool.key_event(KEY_S, true)])
+	InputTool.register_action(ACTION_SAVE_AS, [InputTool.key_event(KEY_S, true, true)])
+	InputTool.register_action(ACTION_OPEN, [InputTool.key_event(KEY_O, true)])

@@ -18,6 +18,7 @@ extends UIPanel
 ## 会话（由视口装配后设进来；为空时只显示静态提示）。
 var session: QVoxEditSession = null
 
+var _project: Label
 var _tool: Label
 var _hint: Label
 var _cursor: Label
@@ -25,6 +26,8 @@ var _brush: Label
 var _history: Label
 var _toast: Label
 var _toast_left := 0.0
+var _project_name := ""
+var _project_dirty := false
 
 const TOAST_SECONDS := 2.5
 const DIM := Color(1, 1, 1, 0.55)
@@ -75,6 +78,16 @@ func set_cursor(cell: Vector3i) -> void:
 	_cursor.text = "格 —" if cell == Vector3i.MIN else "格 (%d, %d, %d)" % [cell.x, cell.y, cell.z]
 
 
+## 当前工程文件名 + "有改动未落盘"（* 号）。改动会染色强调 —— 关窗前看一眼就知道该不该存。
+func set_project(file_name: String, dirty: bool) -> void:
+	_project_name = file_name
+	_project_dirty = dirty
+	if _project == null:
+		return
+	_project.text = "%s%s" % [_project_name, " *" if _project_dirty else ""]
+	_project.add_theme_color_override("font_color", ACCENT if _project_dirty else DIM)
+
+
 ## 一行短提示（2.5 秒后自动消失）：越界、无可撤销、模式已切换这类"刚发生的事"。
 func flash(text: String) -> void:
 	_toast.text = text
@@ -103,6 +116,7 @@ func _build_legend() -> void:
 		"左键画 · 右键擦 · 拖动连续涂抹",
 		"中键转视角 · Shift+中键平移 · 滚轮缩放 · Home 取景",
 		"V/F/B/L/C 切工具 · [ ] 改笔刷 · Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消",
+		"Ctrl+S 保存 · Ctrl+Shift+S 另存为 · Ctrl+O 打开（.qvox 也可直接拖进窗口）",
 	]:
 		var l := _label(line, 12, DIM)
 		box.add_child(l)
@@ -141,6 +155,8 @@ func _build_bar() -> void:
 	row.add_theme_constant_override("separation", 14)
 	bar.add_child(row)
 
+	_project = _label("", 13, DIM)
+	row.add_child(_project)
 	_tool = _label("", 14, BRIGHT)
 	row.add_child(_tool)
 	_hint = _label("", 13, DIM)

@@ -1,0 +1,152 @@
+extends TestCase
+
+## 工程文件（`QVoxProject`）的契约测试 —— **世界 ⇄ 字节 ⇄ 磁盘** 这一段接线。
+##
+## 为什么值得单独钉：这一段是"看着能跑、其实在丢东西"的重灾区。插件侧的序列化本身有测试
+## （`test_world_engineering_data_roundtrip`），但"编好字节之后有没有原样落到盘上、读回来
+## 还是不是同一份世界、写坏了能不能退回上一版"是**应用层新加的一环**，不测就是靠信仰。
+##
+## 钉三件事：
+##   ① 往返不丢：体素 / 网格尺寸 / 材质 / 图层 / 相机 / 对象名 —— 存了再读必须一模一样；
+##   ② 落盘走 `SaveTool`（原子写 + 滚动备份），所以主档损坏还能退回上一次的存档；
+##   ③ 坏输入一律返回 null：视口据此提示用户，而不是半路换掉正在编辑的东西。
+
+const DIR := "user://qvoxelier_project_test"
+const MAIN := DIR + "/a.qvox"
+
+## 本用例写过的路径，cleanup 里无条件清掉。
+var _paths: Array[String] = []
+
+
+## 收尾（每个 test_ 之后无条件调用，必须幂等）：写盘用例绝不能在 user:// 里留垃圾。
+func cleanup() -> void:
+	for p in _paths:
+		_remove(p)
+	_paths.clear()
+	for i in range(1, SaveTool.MAX_BACKUPS + 1):
+		_remove("%s.%d.bak" % [MAIN, i])
+	_remove(MAIN)
+	_remove(MAIN + ".tmp")
+	DirAccess.remove_absolute(DIR)
+
+
+# ----------------------------------------------------------------------------
+# 夹具
+# ----------------------------------------------------------------------------
+
+## 一份"每个维度都有东西"的世界：体素、材质、图层、相机、对象名、所属图层。
+## 单测一个空世界会漏掉"存了但读回是空"的假绿。
+func _world() -> QVoxWorld:
+	var w := QVoxWorld.create_empty()
+	w.set_world_name("测试世界")
+	w.add_material(Color(1.0, 0.0, 0.0))
+	w.add_material(Color(0.0, 1.0, 0.0))
+	w.add_camera("主视角")
+	w.add_layer("图层一")
+	var obj := w.create_object("方块", Vector3i(16, 16, 16))
+	obj.layer = 1
+	obj.set_voxel(1, 2, 3, 1)
+	obj.set_voxel(4, 0, 0, 2)
+	return w
+
+
+func _remove(path: String) -> void:
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(path)
+
+
+# ----------------------------------------------------------------------------
+# 用例
+# ----------------------------------------------------------------------------
+
+func test_round_trip_keeps_the_world() -> void:
+	var w := _world()
+	var back := QVoxProject.decode(QVoxProject.encode(w))
+	assert_ne(back, null, "编成字节再读回来不该是 null")
+	if back == null:
+		return
+
+	assert_eq(back.world_name(), "测试世界", "世界名")
+	assert_eq(back.materials.size(), w.materials.size(), "材质数")
+	assert_eq(back.layers().size(), w.layers().size(), "图层数")
+	assert_eq(back.cameras().size(), w.cameras().size(), "相机数")
+	assert_eq(back.objects.size(), 1, "对象数")
+
+	var obj := back.objects[0]
+	assert_eq(obj.object_name, "方块", "对象名")
+	assert_eq(obj.grid_size, Vector3i(16, 16, 16), "网格尺寸")
+	assert_eq(obj.layer, 1, "对象所属图层")
+	assert_eq(obj.count_solid(), 2, "实心格数")
+	assert_eq(obj.get_voxel(1, 2, 3), 1, "第一笔的体素与材质")
+	assert_eq(obj.get_voxel(4, 0, 0), 2, "第二笔的体素与材质")
+
+
+func test_save_then_load_lands_on_disk() -> void:
+	_paths.append(MAIN)
+	assert_eq(QVoxProject.save(_world(), MAIN), OK, "落盘成功")
+	assert_true(FileAccess.file_exists(MAIN), "文件真的写出来了")
+
+	var back := QVoxProject.load_world(MAIN)
+	assert_ne(back, null, "读得回来")
+	if back == null:
+		return
+	assert_eq(back.world_name(), "测试世界", "世界名")
+	assert_eq(back.objects[0].get_voxel(1, 2, 3), 1, "体素在")
+	assert_eq(back.objects[0].count_solid(), 2, "实心格数")
+
+
+func test_saving_nothing_is_refused() -> void:
+	assert_eq(QVoxProject.save(null, MAIN), ERR_INVALID_PARAMETER, "没有世界就不该写盘")
+	assert_eq(QVoxProject.save(_world(), ""), ERR_INVALID_PARAMETER, "没有路径就不该写盘")
+	assert_false(FileAccess.file_exists(MAIN), "以上两种都不该留下文件")
+	assert_eq(QVoxProject.encode(null), PackedByteArray(), "空世界的编码是空字节")
+
+
+func test_missing_or_empty_input_is_null() -> void:
+	assert_eq(QVoxProject.load_world(DIR + "/never_written.qvox"), null, "文件不存在 ⇒ null")
+	assert_eq(QVoxProject.load_world(""), null, "空路径 ⇒ null")
+	assert_eq(QVoxProject.decode(PackedByteArray()), null, "空字节 ⇒ null")
+
+
+## 坏字节不能让应用崩。这里会打出一行引擎错误日志 —— 那是插件故意的 FATAL 记录
+## （`QVoxFile._flush_fatal`），正是"不崩、只返回 null"这条路径的证明，不是用例出错了。
+func test_garbage_bytes_are_rejected() -> void:
+	_paths.append(MAIN)
+	DirAccess.make_dir_recursive_absolute(DIR)
+	var f := FileAccess.open(MAIN, FileAccess.WRITE)
+	f.store_buffer("这不是一个 qvox 文件".to_utf8_buffer())
+	f.close()
+	assert_eq(QVoxProject.load_world(MAIN), null, "垃圾字节 ⇒ null")
+	assert_eq(QVoxProject.decode("不是 qvox".to_utf8_buffer()), null, "垃圾字节 ⇒ null")
+
+
+## 主档损坏必须能退回上一次的存档 —— 这是"原子写 + 滚动备份"存在的全部理由。
+func test_corrupt_main_falls_back_to_backup() -> void:
+	_paths.append(MAIN)
+	assert_eq(QVoxProject.save(_world(), MAIN), OK, "第一版落盘")
+
+	var second := _world()
+	second.set_world_name("第二版")
+	second.objects[0].set_voxel(7, 7, 7, 1)
+	assert_eq(QVoxProject.save(second, MAIN), OK, "第二版落盘（第一版被滚成 .1.bak）")
+	assert_true(FileAccess.file_exists(MAIN + ".1.bak"), "滚动备份确实生成了")
+
+	var f := FileAccess.open(MAIN, FileAccess.WRITE)
+	f.store_buffer("写坏了".to_utf8_buffer())
+	f.close()
+
+	var back := QVoxProject.load_world(MAIN)
+	assert_ne(back, null, "主档坏了要能退回备份，而不是报 null")
+	if back == null:
+		return
+	assert_eq(back.world_name(), "测试世界", "退回的是第一版")
+	assert_eq(back.objects[0].get_voxel(7, 7, 7), 0, "第二版那一笔不该出现在退回的版本里")
+
+
+func test_extension_helpers() -> void:
+	assert_true(QVoxProject.is_project_path("a/b/c.qvox"), "小写后缀")
+	assert_true(QVoxProject.is_project_path("C:/tmp/C.QVOX"), "大写后缀也要认")
+	assert_false(QVoxProject.is_project_path("a/b/c.vox"), ".vox 不是工程文件")
+	assert_false(QVoxProject.is_project_path("a/b/c"), "没有后缀不算")
+	assert_eq(QVoxProject.ensure_extension("a/b/c"), "a/b/c.qvox", "缺后缀要补上")
+	assert_eq(QVoxProject.ensure_extension("a/b/c.qvox"), "a/b/c.qvox", "已有后缀不动它")

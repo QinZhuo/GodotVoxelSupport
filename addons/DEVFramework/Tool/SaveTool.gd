@@ -1,10 +1,11 @@
 @tool
-## 存档工具 - JSON 明文 / GZIP 压缩二进制
+## 存档工具 - JSON 明文 / GZIP 压缩二进制 / 原样字节
 class_name SaveTool
 
 enum Mode {
 	JSON, ## 纯 JSON 明文
-	GZIP, ## GZIP 压缩二进制
+	GZIP, ## GZIP 压缩二进制（路径会被哈希成文件名，属"存档槽"语义，不适合用户可见文件）
+	BYTES, ## 原样字节：内容由调用方自带编码（如 .qvox）；写入不做变换、路径不改名
 }
 
 const MAX_BACKUPS := 3  ## 保留的滚动备份数
@@ -177,7 +178,7 @@ static func gzip_decode(raw: PackedByteArray) -> Variant:
 # 文件 I/O
 # ============================================================
 
-## 保存数据。JSON: 纯文本。GZIP: gzip_encode → 文件（原子写入 + 滚动备份）
+## 保存数据。JSON: 纯文本。GZIP: gzip_encode。BYTES: 原样落盘（均为原子写入 + 滚动备份）
 static func save_data(path: String, data, mode: Mode = Mode.JSON) -> Error:
 	var _t := LogTool.timer("存档", str("保存 ", path))
 	var actual_path := _actual_path(path, mode)
@@ -186,23 +187,31 @@ static func save_data(path: String, data, mode: Mode = Mode.JSON) -> Error:
 	var err: Error
 	if mode == Mode.JSON:
 		err = _atomic_write(actual_path, JSON.stringify(data).to_utf8_buffer())
+	elif mode == Mode.BYTES:
+		err = _atomic_write(actual_path, data if data is PackedByteArray else PackedByteArray())
 	else:
 		err = _atomic_write(actual_path, gzip_encode(data))
 
 	_t.stop()
-	if err == OK and OS.has_feature("editor") and path.begins_with("user://"):
+	# 调试副本只对"人能读"的 JSON 有意义：BYTES 是调用方自带的二进制格式，再抄一份纯属浪费。
+	if err == OK and mode != Mode.BYTES and OS.has_feature("editor") and path.begins_with("user://"):
 		_save_debug_copy(path, data)
 	return err
 
 
-## 加载数据（主档 → .bak 三级回退）
-static func load_data(path: String, mode: Mode = Mode.JSON) -> Variant:
+## 加载数据（主档 → .bak 三级回退）。
+##
+## `decode` 只在 JSON/GZIP 之外需要：这两种模式自带"解码失败 = 这份内容不能用"的判据，而
+## BYTES 是调用方自带的编码，框架无从判断"字节读出来了、但内容已经坏了"。传一个
+## `decode.call(bytes) -> Variant`（返回 null 即视为损坏）就把 BYTES 接进了同一条回退流水线 ——
+## 于是"文件被截断/写坏"与"文件读不出来"在框架眼里是同一种失败，都退回上一次的存档。
+static func load_data(path: String, mode: Mode = Mode.JSON, decode: Callable = Callable()) -> Variant:
 	var _t := LogTool.timer("存档", str("加载 ", path))
 	var actual_path := _actual_path(path, mode)
-	var result: Variant = _read_file(actual_path, mode, path)
+	var result: Variant = _read_file(actual_path, mode, path, decode)
 	if result != null:
 		_t.stop(); return result
-	result = _try_restore_from_bak(actual_path, mode, path)
+	result = _try_restore_from_bak(actual_path, mode, path, decode)
 	_t.stop()
 	return result
 
@@ -254,8 +263,9 @@ static func _flush_pending(path: String, last_err: Error) -> Error:
 	return last_err
 
 ## 异步加载（主线程读 → 后台解码；损坏时同步回退 .bak）
+## 只有 GZIP 有"解码"这一 CPU 密集环节；JSON / BYTES 直接走同步路径
 static func load_async(path: String, mode: Mode = Mode.JSON) -> Variant:
-	if mode == Mode.JSON:
+	if mode != Mode.GZIP:
 		return load_data(path, mode)
 
 	var actual_path := _actual_path(path, mode)
@@ -267,14 +277,14 @@ static func load_async(path: String, mode: Mode = Mode.JSON) -> Variant:
 
 
 ## 尝试从最近备份恢复：依次尝试 .1.bak .2.bak ...，首次成功即写回主档
-static func _try_restore_from_bak(actual_path: String, mode: Mode, original_path: String = "") -> Variant:
+static func _try_restore_from_bak(actual_path: String, mode: Mode, original_path: String = "", decode: Callable = Callable()) -> Variant:
 	for i in range(1, MAX_BACKUPS + 1):
 		var bak_path := _backup_path(actual_path, i)
 		if not FileAccess.file_exists(bak_path):
 			continue
 		var bak_display = "%s.bak (%s)" % [original_path, bak_path] if not original_path.is_empty() else bak_path
 		LogTool.warn("存档", "主档损坏，尝试备份恢复(%d): %s" % [i, bak_display])
-		var result: Variant = _read_file(bak_path, mode, original_path)
+		var result: Variant = _read_file(bak_path, mode, original_path, decode)
 		if result != null:
 			DirAccess.copy_absolute(bak_path, actual_path)
 			LogTool.log("存档", "备份恢复成功 (第%d次备份)" % i)
@@ -285,8 +295,8 @@ static func _try_restore_from_bak(actual_path: String, mode: Mode, original_path
 	return null
 
 
-## 同步读文件
-static func _read_file(actual_path: String, mode: Mode, original_path: String = "") -> Variant:
+## 同步读文件。`decode` 非 null 且 mode == BYTES 时接管"字节 → 可用内容"：返回 null 即视为损坏。
+static func _read_file(actual_path: String, mode: Mode, original_path: String = "", decode: Callable = Callable()) -> Variant:
 	var display := original_path if not original_path.is_empty() else actual_path
 	if not FileAccess.file_exists(actual_path):
 		LogTool.warn("存档", "文件不存在: %s" % display)
@@ -316,6 +326,13 @@ static func _read_file(actual_path: String, mode: Mode, original_path: String = 
 		return null
 	var bytes := file.get_buffer(size)
 	file.close()
+	if mode == Mode.BYTES:
+		if not decode.is_valid():
+			return bytes
+		var value: Variant = decode.call(bytes)
+		if value == null:
+			LogTool.warn("存档", "内容校验未通过: %s" % display)
+		return value
 	var decoded = gzip_decode(bytes)
 	if decoded == null:
 		LogTool.warn("存档", "GZIP解码失败: %s" % display)
