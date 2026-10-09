@@ -165,7 +165,7 @@ static func _to_res_path(ref: String) -> String:
 	var s := ref.strip_edges()
 	if s.begins_with("uid://"):
 		return ResourceUID.uid_to_path(s)
-	return s if s.begins_with("res://") else "res://" + s
+	return FileTool.to_res_path(s)
 
 
 ## 项目设置项读写统一入口: value 缺省=读取, 提供=写入并保存

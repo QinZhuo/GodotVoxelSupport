@@ -5,12 +5,12 @@ class_name BakedPoolManager extends Node3D
 static var singleton: BakedPoolManager
 
 static func find_pool(key: String) -> BakedPool:
-	if not singleton:
+	if not is_instance_valid(singleton):
 		return null
 	return singleton.find_child(key, false)
 
 static func pool_get(key: String) -> Node3D:
-	if singleton:
+	if is_instance_valid(singleton):
 		var pool := singleton.find_child(key, false)
 		if pool is BakedPool:
 			return pool.pool_get()
@@ -23,7 +23,7 @@ static func pool_push(key: String, item: Node3D):
 	if Engine.is_editor_hint():
 		item.queue_free()
 		return
-	if singleton:
+	if is_instance_valid(singleton):
 		var pool := singleton.find_child(key, false)
 		if pool is BakedPool:
 			pool.pool_push(item)
@@ -33,6 +33,13 @@ static func pool_push(key: String, item: Node3D):
 
 func _enter_tree() -> void:
 	singleton = self
+
+
+func _exit_tree() -> void:
+	# 退出场景树(换场景/队列释放)后必须解除静态引用, 否则 singleton 悬空,
+	# 后续 find_pool/pool_get/pool_push 会在已释放实例上调用(换场景即可能崩)。
+	if singleton == self:
+		singleton = null
 
 @export var mesh_pool: Array[ArrayMesh]
 

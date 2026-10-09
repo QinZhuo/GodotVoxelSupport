@@ -5,8 +5,9 @@
 class_name DefTableGrid
 extends Container
 
-## 行高最小值: set_row_heights 统一钳制, 偏移/渲染共用同一份 row_heights,
-## 保证摆位与渲染高度一致, 避免单元格溢出到下一行造成重叠
+## 行高下限(全表唯一来源): set_row_heights 统一钳制, 偏移/渲染共用同一份 row_heights,
+## 保证摆位与渲染高度一致, 避免单元格溢出到下一行造成重叠。
+## DefTableView 的兜底行高与 DefTableCell 的初始高度都引用本常量, 不要再写第二份字面量。
 const MIN_ROW_HEIGHT := 32.0
 
 ## 每列宽度

@@ -307,7 +307,7 @@ static func resolve_scene_path(ref: String) -> String:
 	if s.is_empty():
 		return ""
 	if not s.begins_with("uid://"):
-		return s if s.begins_with("res://") else "res://" + s
+		return FileTool.to_res_path(s)
 	var resolved := ResourceUID.uid_to_path(s)
 	if resolved.is_empty() or not resolved.begins_with("res://"):
 		# UID 缓存未就绪(典型: 编辑器刚重启), 重建后再试一次

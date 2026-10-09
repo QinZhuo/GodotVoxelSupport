@@ -182,7 +182,7 @@ static func gzip_decode(raw: PackedByteArray) -> Variant:
 static func save_data(path: String, data, mode: Mode = Mode.JSON) -> Error:
 	var _t := LogTool.timer("存档", str("保存 ", path))
 	var actual_path := _actual_path(path, mode)
-	_make_dir(actual_path)
+	FileTool.ensure_dir(actual_path)
 
 	var err: Error
 	if mode == Mode.JSON:
@@ -240,10 +240,22 @@ static func save_async(path: String, data, mode: Mode = Mode.JSON) -> Error:
 	# 先做快照：后台线程编码期间主线程仍会修改原容器（Array/Dictionary 非线程安全），
 	# 直接共享可能导致序列化结果错乱（如字典被平铺成"键/值"交替的元素），必须先深拷贝
 	var snapshot: Variant = data.duplicate(true) if (data is Array or data is Dictionary) else data
-	var bytes: PackedByteArray = await AsyncTool.thread_call(func(): return gzip_encode(snapshot))
-	var err := _write_file(path, bytes)
+	var bytes: PackedByteArray = PackedByteArray()
+	if mode == Mode.BYTES:
+		# BYTES: 调用方自带编码, 原样落盘(与同步 save_data 一致, 不做 gzip)
+		bytes = snapshot if snapshot is PackedByteArray else PackedByteArray()
+	else:
+		var enc = await AsyncTool.thread_call(func(): return gzip_encode(snapshot))
+		if enc == null:
+			# 后台编码失败: 走统一收尾(清理保存态), 避免该路径永久卡在"正在保存中"
+			LogTool.error("存档", "GZIP 编码失败: %s" % path)
+			_t.stop()
+			return await _flush_pending(path, FAILED)
+		bytes = enc
+	var err := _write_file(path, bytes, mode)
 	_t.stop()
-	if err == OK and OS.has_feature("editor") and path.begins_with("user://"):
+	# 调试副本仅对"人能读"的 JSON 有意义(与 save_data 一致): GZIP 是压缩二进制、BYTES 是调用方自带格式
+	if err == OK and mode == Mode.GZIP and OS.has_feature("editor") and path.begins_with("user://"):
 		_save_debug_copy(path, data)
 
 	return await _flush_pending(path, err)
@@ -362,25 +374,16 @@ static func _read_file_async(actual_path: String, original_path: String = "") ->
 	return decoded
 
 
-## 写入文件
-static func _write_file(path: String, bytes: PackedByteArray) -> Error:
-	return _atomic_write(_actual_path(path, Mode.GZIP), bytes)
+## 写入文件（按 mode 计算实际落盘路径，与同步 save_data 的 _actual_path 保持一致）
+static func _write_file(path: String, bytes: PackedByteArray, mode: Mode) -> Error:
+	return _atomic_write(_actual_path(path, mode), bytes)
 
-## 原子写入：.tmp 写完后，滚动备份（主档 → .1.bak → .2.bak → ...），.tmp rename 为主档
+## 原子写入：先滚动备份（主档 → .1.bak → .2.bak → ...），再由 FileTool 统一原子落盘
 static func _atomic_write(actual_path: String, bytes: PackedByteArray) -> Error:
-	_make_dir(actual_path)
-	var tmp_path := actual_path + ".tmp"
-	var file = FileAccess.open(tmp_path, FileAccess.WRITE)
-	if not file:
-		LogTool.error("存档", "无法打开文件:", tmp_path)
-		return FAILED
-	file.store_buffer(bytes)
-	file.close()
-
+	FileTool.ensure_dir(actual_path)
 	if FileAccess.file_exists(actual_path):
 		_rotate_backups(actual_path)
-
-	return DirAccess.rename_absolute(tmp_path, actual_path)
+	return FileTool.atomic_write_bytes(actual_path, bytes)
 
 
 ## 滚动备份：.N.bak → .(N+1).bak，主档 → .1.bak，超出 MAX_BACKUPS 则删除
@@ -401,17 +404,9 @@ static func _rotate_backups(actual_path: String) -> void:
 static func _backup_path(actual_path: String, index: int) -> String:
 	return actual_path + ".%d.bak" % index
 
-static func _make_dir(path: String) -> void:
-	var dir := path.get_base_dir()
-	if not dir.is_empty() and not DirAccess.dir_exists_absolute(dir):
-		DirAccess.make_dir_recursive_absolute(dir)
-
 ## 编辑器调试副本
 static func _save_debug_copy(path: String, data) -> void:
-	var df := FileAccess.open(path + ".debug.json", FileAccess.WRITE)
-	if df:
-		df.store_string(JSON.stringify(data))
-		df.close()
+	FileTool.write_text(path + ".debug.json", JSON.stringify(data))
 
 
 ## 检查文件是否存在
@@ -463,26 +458,13 @@ static func _sha256(input: String) -> String:
 # 资源扫描（支持打包后的 .remap 路径）
 # ============================================================
 
-## 递归扫描 res:// 目录，用回调过滤资源
-static func load_defs(dir_path: String, filter: Callable) -> Array[Def]:
+## 递归扫描 res:// 目录、用回调过滤资源（.remap 归一由 FileTool.list_files 统一处理）。
+## extensions 默认只认 .tres；表格浏览等需要同时看 .res 时可显式传入。
+static func load_defs(dir_path: String, filter: Callable,
+		extensions: PackedStringArray = PackedStringArray([".tres"])) -> Array[Def]:
 	var result: Array[Def] = []
-	var dir := DirAccess.open(dir_path)
-	if not dir:
-		return result
-	dir.list_dir_begin()
-	var file_name := dir.get_next()
-	while not file_name.is_empty():
-		var full_path := dir_path.path_join(file_name)
-		if dir.current_is_dir():
-			result.append_array(load_defs(full_path + "/", filter))
-		elif file_name.ends_with(".tres") or file_name.ends_with(".tres.remap"):
-			var true_path := full_path.trim_suffix(".remap")
-			if not ResourceLoader.exists(true_path):
-				file_name = dir.get_next()
-				continue
-			var res = load(true_path)
-			if filter.call(res):
-				result.append(res)
-		file_name = dir.get_next()
-	dir.list_dir_end()
+	for true_path in FileTool.list_files(dir_path, extensions):
+		var res := FileTool.load_resource(true_path)
+		if res != null and filter.call(res):
+			result.append(res)
 	return result

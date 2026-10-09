@@ -36,4 +36,4 @@ func _to_string() -> String:
 	return str(tr(name),get_desc(null))
 
 func get_csv_path() -> String:
-	return "res://Assets/Translation/task.csv"
+	return Def.csv_path("task")

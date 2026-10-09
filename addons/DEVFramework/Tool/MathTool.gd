@@ -1,5 +1,5 @@
 @tool
-class_name ValueTool extends RefCounted
+class_name MathTool extends RefCounted
 
 ## 数值安全上限（10⁹ = 1,000,000,000）
 ##
@@ -27,13 +27,13 @@ static func clamp_signed(v: int) -> int:
 ## 除法向上取整。
 ## `ceil_div(10, 3)` → 4，等价于 `ceili(10 / 3.0)`
 static func ceil_div(n: int, d: int) -> int:
-	assert(d != 0, "ValueTool.ceil_div: divisor cannot be zero")
+	assert(d != 0, "MathTool.ceil_div: divisor cannot be zero")
 	return ceili(n / float(d))
 
 ## 除法向下取整。
 ## `floor_div(10, 3)` → 3，等价于 `floori(10 / 3.0)`
 static func floor_div(n: int, d: int) -> int:
-	assert(d != 0, "ValueTool.floor_div: divisor cannot be zero")
+	assert(d != 0, "MathTool.floor_div: divisor cannot be zero")
 	return floori(n / float(d))
 
 # ============================================================
@@ -51,18 +51,14 @@ static func percent_round(value: int, percent: float) -> int:
 	return roundi(value * percent / 100.0)
 
 # ============================================================
-# 范围重映射（等价于 Unity Mathf.Remap / Unreal FMath::MapRange）
+# 范围重映射
 # ============================================================
 
-## 将一个值从源范围映射到目标范围。
+## 整数版范围重映射，结果四舍五入。
 ##
-## `remap(5, 0, 10, 100, 200)` → 150
-## `remap(0, 0, 10, 100, 200)` → 100
-## `remap(10, 0, 10, 100, 200)` → 200
-static func remap(value: float, from_min: float, from_max: float, to_min: float, to_max: float) -> float:
-	return lerp(to_min, to_max, inverse_lerp(from_min, from_max, value))
-
-## 整数版 remap，结果四舍五入。
+## 浮点版直接用引擎内置 [method @GlobalScope.remap]（与 Unity Mathf.Remap /
+## Unreal FMath::MapRange 同义），本类不再重复实现一份。
+## `remap_int(5, 0, 10, 100, 200)` → 150
 static func remap_int(value: int, from_min: int, from_max: int, to_min: int, to_max: int) -> int:
 	return roundi(remap(value, from_min, from_max, to_min, to_max))
 
@@ -70,14 +66,12 @@ static func remap_int(value: int, from_min: int, from_max: int, to_min: int, to_
 # 数值趋近（等效于 Unity Mathf.MoveTowards）
 # ============================================================
 
-## 从 current 向 target 移动 step 步，不会越过 target。
-## `move_toward(5, 10, 3)` → 8
-## `move_toward(5, 10, 1)` → 6
-## `move_toward(5, 3, 3)` → 3
-static func move_toward(current: int, target: int, step: int) -> int:
-	if step <= 0: return current
-	if current < target:
-		return mini(current + step, target)
-	elif current > target:
-		return maxi(current - step, target)
-	return current
+## 整数版 move_toward：内置 [method @GlobalScope.move_toward] 只接受 float，这里保证
+## 整数进整数出，且 step <= 0 时保持不动（内置版本传负步长会朝反方向移动）。
+## `move_toward_int(5, 10, 3)` → 8
+## `move_toward_int(5, 10, 1)` → 6
+## `move_toward_int(5, 3, 3)` → 3
+static func move_toward_int(current: int, target: int, step: int) -> int:
+	if step <= 0:
+		return current
+	return int(move_toward(float(current), float(target), float(step)))

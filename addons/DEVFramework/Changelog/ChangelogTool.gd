@@ -18,8 +18,8 @@ class_name ChangelogTool
 ## 当前版本号：Godot 内置项目设置（项目设置 → Application → Config → Version）
 const SETTING_VERSION := "application/config/version"
 
-## 更新日志 Def 扫描目录（对齐 Def.DEFS_BASE）
-const DEFS_DIR := "res://Assets/Def/"
+## 更新日志 Def 扫描目录(直接引用 Def 的唯一常量, 避免字面量复制漂移)
+const DEFS_DIR := Def.DEFS_BASE
 
 ## 玩家上次已见版本（首次运行 / 未并入存档时为空 ""）
 static var _seen_version := ""

@@ -35,10 +35,15 @@ func get_desc(_data) -> String:
 static func get_def_desc(def: Def, data):
 	return def.get_desc(data) if def else ""
 
+## 翻译 CSV 路径统一构造: 目录只有 TranslationTool.TRANSLATION_DIR 一处,
+## 子类覆写 get_csv_path 时只给出文件名(如 Def.csv_path("signal"))。
+static func csv_path(file_stem: String) -> String:
+	return TranslationTool.TRANSLATION_DIR.path_join(file_stem + ".csv")
+
+## 默认按类名推导文件名: 去掉 Def 后缀转 snake_case。
 func get_csv_path() -> String:
-	var csv_name: String = get_script().get_global_name()
-	csv_name = csv_name.trim_suffix("Def").to_snake_case()
-	return "res://Assets/Translation/{0}.csv".format([csv_name])
+	var csv_name: String = get_script().get_global_name().trim_suffix("Def").to_snake_case()
+	return Def.csv_path(csv_name)
 
 ## 写入翻译到 CSV 文件（仅编辑器下生效）
 func _set_tr_name(value: String) -> void:
@@ -70,16 +75,13 @@ static func load_defs_in_dir(dir_path: String, filter: Callable, sort_key: Calla
 	return defs
 
 ## 从存档数据中加载 Def（兼容旧存档的完整路径格式）
-## 文件不存在时返回 null 并输出日志
+## 文件不存在 / 非 Def 资源时返回 null 并输出日志
 static func load_data(path: String) -> Def:
-	var full_path: String
-	if path.begins_with("res://"):
-		full_path = path
-	else:
-		full_path = DEFS_BASE + path
-	if ResourceLoader.exists(full_path):
-		return load(full_path)
-	LogTool.warn("存档", "Def 文件不存在: %s (来源路径: %s)" % [full_path, path])
+	var full_path: String = path if path.begins_with("res://") else DEFS_BASE + path
+	var res := FileTool.load_resource(full_path)
+	if res is Def:
+		return res
+	LogTool.warn("存档", "Def 文件不存在或类型不符: %s (来源路径: %s)" % [full_path, path])
 	return null
 
 func _validate_property(property: Dictionary) -> void:

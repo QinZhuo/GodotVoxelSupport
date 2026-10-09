@@ -125,8 +125,11 @@ func _teardown_camera_viewfinder() -> void:
 	_camera_viewfinder_button = null
 
 
+## 插件标识(与 plugin.cfg 的 name 一致): 主屏幕标签与插件列表都取这里。
+## 不能写 "DefTable" —— DefTable 只是本插件提供的一个面板, 写成面板名会让整个框架插件
+## 在编辑器里显示成单个面板。
 func _get_plugin_name() -> String:
-	return "DefTable"
+	return "DEVFramework"
 
 
 func _has_main_screen() -> bool:
@@ -137,7 +140,7 @@ func _make_visible(visible: bool) -> void:
 	if is_instance_valid(_def_table):
 		_def_table.visible = visible
 		if visible:
-			_def_table._on_refresh_pressed()
+			_def_table.refresh()
 
 
 func _get_plugin_icon() -> Texture2D:
@@ -153,8 +156,8 @@ func _get_plugin_icon() -> Texture2D:
 ## 不触碰 dev_framework/mcp/enabled —— 那是独立的项目设置主开关, 由 MCPDevServer 读取。
 func _set_mcp_enabled(enable: bool) -> void:
 	if enable:
-		_write_autoload_row(true)   # 只添加单例; enable=false 不删除(保持 project.godot 稳定)
-	if enable:
+		# 只添加单例(enable=false 不删除, 见上方说明)
+		_add_autoload_row()
 		if _mcp == null:
 			_mcp = MCPDevServer.new()
 			add_child(_mcp)
@@ -183,12 +186,11 @@ func _set_mcp_enabled(enable: bool) -> void:
 			_mcp = null
 
 
-## 写入/移除 project.godot 的 autoload 行(供游戏运行进程的运行时服务器使用)
-func _write_autoload_row(enable: bool) -> void:
-	if enable:
-		ProjectSettings.set_setting("autoload/" + AUTOLOAD_NAME, "*" + AUTOLOAD_PATH)
-	else:
-		ProjectSettings.set_setting("autoload/" + AUTOLOAD_NAME, null)
+## 写入 project.godot 的 autoload 行(供游戏运行进程的运行时服务器使用)。
+## 刻意只提供"添加"这一个方向: 关闭游戏/禁用插件都不删单例, 保持 project.godot 稳定
+## (删除只在导出时由 _PackMcpFilter 临时完成)。
+func _add_autoload_row() -> void:
+	ProjectSettings.set_setting("autoload/" + AUTOLOAD_NAME, "*" + AUTOLOAD_PATH)
 	ProjectSettings.save()
 
 

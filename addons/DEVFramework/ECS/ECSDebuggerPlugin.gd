@@ -22,7 +22,6 @@ var _entity_edit: LineEdit = null
 var _entity_list: Tree = null
 var _entity_tree: Tree = null
 var _time_hist := {}   # 系统名 -> Array[ms] 历史(算 avg/max)
-var _value_edit: LineEdit = null
 var _type_hint: Label = null
 
 

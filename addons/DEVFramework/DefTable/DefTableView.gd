@@ -7,8 +7,10 @@ extends Control
 
 const DefTableGridClass := preload("res://addons/DEVFramework/DefTable/DefTableGrid.gd")
 const DefTableCellClass := preload("res://addons/DEVFramework/DefTable/DefTableCell.gd")
-const ROW_HEIGHT := 24.0
-const DEFS_BASE := "res://Assets/Def/"
+## 兜底行高(未进树/未测量时): 与 [DefTableGrid] 的行高下限同源, 避免两处各写一个字面量
+const ROW_HEIGHT := DefTableGrid.MIN_ROW_HEIGHT
+## Def 根目录: 复用 Def 的唯一常量, 避免多处各写一份字面量而漂移
+const DEFS_BASE := Def.DEFS_BASE
 const MAX_COL_WIDTH := 600.0
 ## 单元格内容左右内边距(与 DefTableCell 的 CELL_MARGIN_L/R 一致):
 ## 列宽测量/行高测量都减此值得到"渲染可用宽", 保证测量与渲染同一口径
@@ -111,24 +113,7 @@ func _ready() -> void:
 
 ## 递归收集 base 下的所有子目录(含子孙), 返回完整 res:// 路径(带尾部 /)
 func _list_dirs(base: String) -> Array[String]:
-	var out: Array[String] = []
-	var stack: Array[String] = [base]
-	while stack.size() > 0:
-		var dir: String = stack.pop_back()
-		var d := DirAccess.open(dir)
-		if d == null:
-			continue
-		d.list_dir_begin()
-		var f := d.get_next()
-		while f != "":
-			if d.current_is_dir() and not f.begins_with("."):
-				var sub := dir.path_join(f)
-				out.append(sub + "/")
-				stack.append(sub + "/")
-			f = d.get_next()
-		d.list_dir_end()
-	out.sort()
-	return out
+	return FileTool.list_dirs(base)
 
 
 ## 刷新左侧目录树: 按 DEFS_BASE 下的目录层级构建 Tree(父目录可折叠, 选中加载整个子树)
@@ -200,8 +185,13 @@ func _on_dir_selected() -> void:
 	_load_dir(_current_dir)
 
 
-func _on_refresh_pressed() -> void:
+## 重新加载当前目录(公开入口: 插件在面板首次可见时调用)。
+func refresh() -> void:
 	_load_dir(_current_dir)
+
+
+func _on_refresh_pressed() -> void:
+	refresh()
 
 
 func _on_filesystem_changed() -> void:
@@ -232,13 +222,7 @@ func _on_filesystem_changed() -> void:
 func _load_dir(path: String) -> void:
 	if path == "":
 		return
-	var all_tres := _collect_tres_recursive(path)
-	var loaded: Array[Resource] = []
-	for p in all_tres:
-		if ResourceLoader.exists(p):
-			var res: Resource = load(p)
-			if res != null and _is_def(res):
-				loaded.append(res)
+	var loaded := SaveTool.load_defs(path, _is_def, PackedStringArray([".tres", ".res"]))
 	rows = loaded
 	_build_columns()
 	_sort_rows()
@@ -260,26 +244,6 @@ func _clear_grid_cells() -> void:
 	_recycle_all_rows()
 	first_row = 0
 	last_row = 0
-
-
-func _collect_tres_recursive(path: String) -> PackedStringArray:
-	var out := PackedStringArray()
-	var stack: Array[String] = [path]
-	while stack.size() > 0:
-		var dir: String = stack.pop_back()
-		var d := DirAccess.open(dir)
-		if d == null:
-			continue
-		d.list_dir_begin()
-		var f := d.get_next()
-		while f != "":
-			if d.current_is_dir() and not f.begins_with("."):
-				stack.append(dir.path_join(f) + "/")
-			elif f.ends_with(".tres") or f.ends_with(".res"):
-				out.append(dir.path_join(f))
-			f = d.get_next()
-		d.list_dir_end()
-	return out
 
 
 func _is_def(res: Resource) -> bool:
@@ -990,7 +954,7 @@ func _take_row() -> Control:
 
 func _materialize_row(row: int) -> void:
 	var ctl := _take_row()
-	var rh: float = grid.row_heights[row] if row < grid.row_heights.size() else 32.0
+	var rh: float = grid.row_heights[row] if row < grid.row_heights.size() else ROW_HEIGHT
 	grid.fit_child_in_rect(ctl, Rect2(
 		Vector2(0.0, grid.row_offsets[row] if row < grid.row_offsets.size() else 0.0),
 		Vector2(_scroll_total_width(), rh)))
@@ -998,7 +962,7 @@ func _materialize_row(row: int) -> void:
 	var fcell := _pool_take_cell(0, true, frozen_grid)
 	frozen_grid.fit_child_in_rect(fcell, Rect2(
 		Vector2(0.0, frozen_grid.row_offsets[row] if row < frozen_grid.row_offsets.size() else 0.0),
-		Vector2(column_widths[0], frozen_grid.row_heights[row] if row < frozen_grid.row_heights.size() else 32.0)))
+		Vector2(column_widths[0], frozen_grid.row_heights[row] if row < frozen_grid.row_heights.size() else ROW_HEIGHT)))
 	var cells := {}
 	_live_rows[row] = {"ctl": ctl, "frozen": fcell, "cells": cells}
 	# 收编行容器携带的旧格子: 列在新窗口内且类型匹配 → 直接复用(内容稍后统一填充)
@@ -1060,7 +1024,7 @@ func _fill_row(row: int) -> void:
 		return
 	var tint := _row_tint_for(row)
 	var ctl: Control = entry.get("ctl")
-	var rh: float = grid.row_heights[row] if row < grid.row_heights.size() else 32.0
+	var rh: float = grid.row_heights[row] if row < grid.row_heights.size() else ROW_HEIGHT
 	ctl.set_meta(&"row_index", row)
 	ctl.size = Vector2(_scroll_total_width(), rh)
 	grid.fit_child_in_rect(ctl, Rect2(
@@ -1071,7 +1035,7 @@ func _fill_row(row: int) -> void:
 		f.custom_minimum_size = Vector2.ZERO
 		frozen_grid.fit_child_in_rect(f, Rect2(
 			Vector2(0.0, frozen_grid.row_offsets[row] if row < frozen_grid.row_offsets.size() else 0.0),
-			Vector2(column_widths[0], frozen_grid.row_heights[row] if row < frozen_grid.row_heights.size() else 32.0)))
+			Vector2(column_widths[0], frozen_grid.row_heights[row] if row < frozen_grid.row_heights.size() else ROW_HEIGHT)))
 		_fill_cell(f, Vector2i(0, row), tint)
 	var cells: Dictionary = entry.get("cells")
 	for col in cells:
@@ -1235,7 +1199,7 @@ func _fill_cell(cell: DefTableCellClass, pos: Vector2i, tint: Color = Color(1, 1
 	var cache_key := cell.get_instance_id()
 	if _cell_fill_cache.get(cache_key, "") == fingerprint:
 		# 仅更新位置相关的最小属性(尺寸/选中态), 跳过文本/tooltip/预览重建
-		cell.custom_minimum_size = Vector2(column_widths[pos.x], grid.row_heights[pos.y] if pos.y < grid.row_heights.size() else 24.0)
+		cell.custom_minimum_size = Vector2(column_widths[pos.x], grid.row_heights[pos.y] if pos.y < grid.row_heights.size() else ROW_HEIGHT)
 		cell.set_selected(pos in edited_cells)
 		return
 	_cell_fill_cache[cache_key] = fingerprint
@@ -1698,4 +1662,3 @@ func _ensure_row_visible(row: int) -> void:
 	if row < first_row or row >= last_row:
 		if row < grid.row_offsets.size():
 			grid_scroll.scroll_vertical = grid.row_offsets[row]
-# touch to trigger godot reload

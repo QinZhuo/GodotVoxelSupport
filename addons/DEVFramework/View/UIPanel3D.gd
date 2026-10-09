@@ -1,9 +1,11 @@
 ## 3D UI 面板基类
 ##
-## 与 [Panel2D] 接口完全对齐，提供统一的打开/关闭生命周期。
+## 与 [UIPanel] 接口完全对齐，提供统一的打开/关闭生命周期。
 ## [method open] — 先注册到 [UITool] 进行栈管理与层级互斥，然后执行进入动画。
-## [method close] — 先执行离开动画，然后从 [UITool] 自动注销。
+## [method close] — 执行离开动画并从 [UITool] 自动注销，动画结束后隐藏。
 ## 继承自 [Node3D]，适用于 3D 空间的 UI 面板。
+##
+## 状态机实现见 [UIPanelTool]（与 [UIPanel] 共用，避免两份实现漂移）。
 class_name UIPanel3D extends Node3D
 
 # ============================================================
@@ -41,54 +43,29 @@ signal on_closed()
 # 公开接口
 # ============================================================
 
-## 打开面板
-##
-## 完整流程：注册到 [UITool] 栈（处理层级互斥）→ 触发 [signal on_open] → 播放进入动画 → 触发 [signal on_opened]。
+## 打开面板。完整流程见 [UIPanelTool.open]。
 func open() -> void:
-	_open_version += 1
-	# 注册到 UITool 栈（处理层级互斥）
-	UITool.register(self)
-	is_open = true
-	on_open.emit()
-	if show_tween:
-		await show_tween.play().finished
-	on_opened.emit()
+	await UIPanelTool.open(self)
 
-## 关闭面板
+## 关闭面板。完整流程见 [UIPanelTool.close]。
 func close() -> void:
-	is_open = false
-	# 从 UITool 栈注销
-	UITool.unregister(self)
-	on_close.emit()
-	if show_tween:
-		await show_tween.playback().finished
+	await UIPanelTool.close(self)
 
-
-## 节点离开场景树时自动注销（与 UIPanel 同一条兜底：避免栈里留下已释放的引用）。
+## 节点离开场景树时自动注销（兜底，见 [UIPanelTool.on_exit_tree]）。
 func _exit_tree() -> void:
-	if not is_open:
-		return
-	is_open = false
-	UITool.unregister(self)
-	on_closed.emit()
+	UIPanelTool.on_exit_tree(self)
 
-## 切换打开/关闭。完整流程见 [method open] / [method close]。
+## 切换打开/关闭。
 func toggle() -> void:
-	if is_open:
-		await close()
-	else:
-		await open()
+	await UIPanelTool.toggle(self)
 
 ## 弹窗模式：打开面板并等待关闭（可用于异步等待面板交互结果）。
 func popup() -> void:
-	open()
-	await on_closed
+	await UIPanelTool.popup(self)
 
 ## 等待面板关闭，返回关闭时版本是否仍为本轮（面板被重新 open() 后旧等待返回 false）。
 func await_closed() -> bool:
-	var ver := _open_version
-	await on_closed
-	return ver == _open_version
+	return await UIPanelTool.await_closed(self)
 
 ## 返回键处理，由 UITool.back() 调用。子类可重写自定义返回行为，默认关闭面板。
 func _back() -> void:

@@ -1,8 +1,9 @@
 class_name ScreenshotCapture extends Node
 
 ## 截图触发节点: 窗口就绪后延迟若干秒自动截图保存(时机见 auto_capture_delay)。
-## 颜色空间处理统一委托给 ScreenshotTool,
-## 保证与 MCP take_screenshot / EditorScript 入口使用同一条管线(默认颜色正确)。
+## 取图 / 颜色处理 / 落盘全部走 ScreenshotTool(唯一的画面捕获管线), 与 MCP take_screenshot /
+## 编辑器菜单入口同一条实现; 本节点只负责它特有的两件事: 窗口尺寸适配(见 _apply_resolution)
+## 与截取期间临时的透明背景开关。
 
 @export_file_path("*.png") var save_path: String = "res://screenshot.png"
 @export var custom_resolution: Vector2i = Vector2i(256, 256)
@@ -65,9 +66,11 @@ func _auto_capture() -> void:
 	await _take_screenshot()
 
 
-## 取一帧并保存: 取图 → 缩放 → 归一化(转 RGBA8 + sRGB 校正 + 可选抖动) → 存到 save_path。
-## 背景是否透明由 transparent_background 决定(缺省不透明, 保留景深/泛光)。
-## 日志覆盖 开始 / 取图失败 / 保存失败 / 保存成功(含路径与尺寸)。
+## 取一帧并保存: 整条管线(取图 / 精确缩放 / 颜色处理 / 落盘)交给 ScreenshotTool.capture。
+## 本节点只剩它特有的两件事: 截取期间临时开透明背景(截完还原)、窗口尺寸适配(见 _apply_resolution)。
+## 出图尺寸是**精确**的 custom_resolution 而不是"最大宽度", 所以给 exact_size 而非 max_width ——
+## 嵌入编辑器运行时窗口 resize 会被引擎拒绝, 尺寸只能靠这一步保证。
+## 日志覆盖 开始 / 保存失败 / 保存成功(含路径与尺寸)。
 func _take_screenshot() -> void:
 	var viewport := get_viewport()
 	var original_bg := viewport.transparent_bg
@@ -75,21 +78,13 @@ func _take_screenshot() -> void:
 	LogTool.log("截图", "开始截图: 输出=%s 目标尺寸=%s 透明背景=%s" % [save_path, custom_resolution, transparent_background])
 
 	viewport.transparent_bg = transparent_background
-	await RenderingServer.frame_post_draw
-
-	# 取一帧画面(颜色/量化处理统一交给下面的 ScreenshotTool.normalize)
-	var img := viewport.get_texture().get_image()
+	var res: Dictionary = await ScreenshotTool.capture(viewport, {
+		"path": save_path, "exact_size": custom_resolution,
+		"color_mode": color_mode, "dither": dithering,
+	})
 	viewport.transparent_bg = original_bg
-	if img == null or img.is_empty():
-		LogTool.error("截图", "截图失败: 视口纹理为空")
+	if not res.get("ok", false):
+		LogTool.error("截图", str(res.get("error", "保存图像失败")))
 		return
-
-	img.resize(custom_resolution.x, custom_resolution.y, Image.INTERPOLATE_LANCZOS)
-	# 统一走 ScreenshotTool: 转 RGBA8 + 颜色处理(默认 auto 判定) + 可选抖动
-	# (dithering 开时先在浮点上做 sRGB 编码再量化扩散)
-	ScreenshotTool.normalize(img, {"color_mode": color_mode, "dither": dithering})
-	var err := img.save_png(save_path)
-	if err != OK:
-		LogTool.error("截图", "保存图像失败: %s 错误码=%d" % [save_path, err])
-		return
-	LogTool.log("截图", "保存图像成功: %s (%dx%d)" % [save_path, img.get_width(), img.get_height()])
+	LogTool.log("截图", "保存图像成功: %s (%dx%d)" % [
+		str(res.get("res_path", save_path)), int(res.get("width", 0)), int(res.get("height", 0))])

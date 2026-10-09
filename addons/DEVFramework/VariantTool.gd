@@ -4,8 +4,8 @@ class_name VariantTool extends RefCounted
 ## ======= Variant 规范化(全项目唯一入口) =======
 ##
 ## 职责: 任何"从不可信来源取出一个值、当成某类型使用"的地方都走这里。
-## 与 ValueTool 的分工 —— 两者不重叠:
-##   ValueTool   管**数值运算**: clamp / 除法取整 / 百分比 / remap / move_toward
+## 与 MathTool 的分工 —— 两者不重叠:
+##   MathTool    管**数值运算**: clamp / 除法取整 / 百分比 / remap / move_toward
 ##   VariantTool 管**类型规范化**: 取值( get_* )与转换( as_* )
 ##
 ## ## 为什么必须是单一入口(不是风格问题, 是正确性问题)

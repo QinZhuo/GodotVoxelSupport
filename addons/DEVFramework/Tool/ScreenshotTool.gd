@@ -158,6 +158,7 @@ static func normalize(image: Image, opts: Dictionary = {}) -> Image:
 
 
 ## 按最大宽度等比缩放 Image(就地修改)。max_width <= 0 或未超宽时不处理。
+## 语义是**上限**(只缩不放、保持长宽比); 要"定死尺寸"用 resize_exact() / opts 的 exact_size。
 static func fit_width(image: Image, max_width: int) -> Image:
 	if image == null or max_width <= 0:
 		return image
@@ -168,7 +169,20 @@ static func fit_width(image: Image, max_width: int) -> Image:
 	return image
 
 
-## 完整管线: 取图 -> 颜色处理(默认 auto 判定) -> 缩放 -> 保存为 PNG -> 返回结果字典。
+## 缩放到**精确**尺寸(就地修改), 可放大、**不保持长宽比**(要保比例就先自己按比例算好 target)。
+## target 任一分量 <= 0、或已是该尺寸时不处理。
+## 与 fit_width 互为对照: 前者"装进包围盒", 本函数"定死输出" —— 对应 opts 的 exact_size。
+static func resize_exact(image: Image, target: Vector2i) -> Image:
+	if image == null or image.is_empty() or target.x <= 0 or target.y <= 0:
+		return image
+	if image.get_width() == target.x and image.get_height() == target.y:
+		return image
+	image.resize(target.x, target.y, Image.INTERPOLATE_LANCZOS)
+	return image
+
+
+## 完整管线: 取图 -> 缩放(exact_size / max_width) -> 颜色处理(默认 auto 判定, 含可选抖动)
+## -> 保存为 PNG -> 返回结果字典。
 ## 这是各调用方(编辑器脚本 / MCP 工具 / 游戏内)应使用的统一入口。
 ##
 ## viewport  : 目标视口
@@ -176,9 +190,11 @@ static func fit_width(image: Image, max_width: int) -> Image:
 ##   path       : String  完整保存路径(res:// 或 user://); 缺省自动生成到 DEFAULT_DIR_RES
 ##   dir        : String  保存目录(res:// 或 user://); path 未给时使用
 ##   prefix     : String  自动文件名前缀; 默认 "screenshot"
-##   max_width  : int     最大宽度; 默认 DEFAULT_MAX_WIDTH
+##   max_width  : int     最大宽度的**上限**(只缩不放, 超出才等比缩小); 默认 DEFAULT_MAX_WIDTH
+##   exact_size : Vector2i **强制精确**输出尺寸(可放大, 不保比例); 给了它则忽略 max_width
 ##   color_mode : String  颜色处理模式, 见 COLOR_*; 默认 COLOR_AUTO(**出图即所见**)
 ##   srgb       : bool    [旧参数] 等价 color_mode=srgb/raw, 仅在显式传入时生效
+##   dither     : bool    量化到 8 位时是否做误差扩散抖动(防 banding); 默认 false
 ##   await_draw : bool    取图前是否等待 frame_post_draw; 默认 true
 ##   capture_type: String 记录进结果的类型; 默认 "texture"
 ## 返回: 结果字典(见文件头结构说明)。
@@ -194,6 +210,8 @@ static func capture(viewport: Viewport, opts: Dictionary = {}) -> Dictionary:
 
 
 ## 把已有一张 Image 保存为 PNG(用于场景缩略图等已在别处渲染好的图)。
+## 可用 opts 与 capture() 相同(exact_size / max_width / color_mode / srgb / dither / path /
+## dir / prefix), 只有 capture_type 缺省不同(此处默认 "image")。
 static func save_image(image: Image, opts: Dictionary = {}) -> Dictionary:
 	var capture_type := str(opts.get("capture_type", "image"))
 	if image == null or image.is_empty():
@@ -201,8 +219,10 @@ static func save_image(image: Image, opts: Dictionary = {}) -> Dictionary:
 	# 模式必须在 normalize 之前解析: 那之后格式已被统一成 RGBA8, 再判就永远是"非浮点"了。
 	# 结果里回显它, 出图偏色时一眼能看出是引擎判定(auto)还是调用方强指定的。
 	var color_mode := resolve_color_mode(image, opts)
+	# 几何(缩放)排在颜色归一化之前 —— 缩放作用在原始读回数据上: 线性缓冲按线性值平均(物理正确),
+	# 且 normalize 里的抖动噪声不会被随后的重采样抹平(banding 是最终尺寸上的台阶, 顺序反了白做)。
+	image = _apply_geometry(image, opts)
 	image = normalize(image, opts)
-	image = fit_width(image, int(opts.get("max_width", DEFAULT_MAX_WIDTH)))
 	var path := _resolve_path(opts)
 	if path.is_empty():
 		return _fail("保存失败: 无法解析保存路径", capture_type)
@@ -362,6 +382,30 @@ static func _with_type(opts: Dictionary, capture_type: String) -> Dictionary:
 	var merged := opts.duplicate()
 	merged["capture_type"] = capture_type
 	return merged
+
+
+## 输出几何: 有合法的 exact_size 就强制精确缩放, 否则退到 max_width 上限(就地修改并返回)。
+## 两者互斥(exact_size 优先), 不设"同时生效"的组合 —— 那只会让调用方搞不清最终按哪个算。
+static func _apply_geometry(image: Image, opts: Dictionary) -> Image:
+	var exact := _read_exact_size(opts)
+	if exact.x > 0 and exact.y > 0:
+		return resize_exact(image, exact)
+	return fit_width(image, int(opts.get("max_width", DEFAULT_MAX_WIDTH)))
+
+
+## 读 opts 的 exact_size: 接受 Vector2i / Vector2 / [w, h](MCP 侧 JSON 传参只能是后两者)。
+## 缺省、类型不符或含非正分量一律返回 ZERO(= 未指定), 避免拿 0 尺寸去 resize。
+static func _read_exact_size(opts: Dictionary) -> Vector2i:
+	var raw: Variant = opts.get("exact_size")
+	if raw is Vector2i:
+		return raw
+	if raw is Vector2:
+		return Vector2i(raw)
+	if raw is Array:
+		var arr := raw as Array
+		if arr.size() >= 2:
+			return Vector2i(int(arr[0]), int(arr[1]))
+	return Vector2i.ZERO
 
 
 static func _resolve_path(opts: Dictionary) -> String:

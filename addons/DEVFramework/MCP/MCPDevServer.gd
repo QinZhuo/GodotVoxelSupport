@@ -202,7 +202,7 @@ const ERR_UNSUPPORTED_VERSION := -32022
 ## 重新拉取"是错的 —— 那不是本服务器能保证的事, 别再让文案暗示它。
 const LIST_TTL_MS := 600000
 
-const SERVER_NAME := "devframework-godot-mcp"
+const SERVER_NAME := "godot-dev-mcp"
 const SERVER_VERSION := "0.3.0"
 
 ## 模式
@@ -2119,8 +2119,7 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 			"text": text_data,
 			"hint": "文本化截图(text, 默认): 用于点击/拖拽游玩模拟与无图像输入的AI, 省token。大部分场景用此模式即可; 仅需查看具体画面表现时才用 capture_type='game' 真实截图。",
 		})
-	var filename := "mcp_%s" % Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
-	filename += ".png"
+	var filename := ScreenshotTool.make_filename("mcp")
 	var dir_path := "user://mcp_screenshots"
 	var viewport := get_viewport()
 	if viewport == null:

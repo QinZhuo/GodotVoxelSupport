@@ -33,4 +33,4 @@ static func get_root(data) -> Node:
 	return null
 
 func get_csv_path() -> String:
-	return "res://Assets/Translation/signal.csv"
+	return Def.csv_path("signal")

@@ -61,10 +61,12 @@ var _components: Array[Script] = []
 
 # ---------------- 系统调度 ----------------
 var _systems: Array[ECSSystem] = []
+var _system_index := {}          # ECSSystem -> _systems 下标(注册/移除时增量维护, 取代 _systems.find)
 var _system_priorities: Array[int] = []
 var _system_before: Array = []   # 每系统: 必须在其后执行的系统引用数组
 var _system_after: Array = []    # 每系统: 必须在其前执行的系统引用数组
 var _sorted: Array[ECSSystem] = []
+var _sorted_index := {}          # ECSSystem -> _sorted 下标(随 _resort 重建, 供批分组排序/依赖判定)
 var _dirty_schedule := true
 
 # ---------------- 系统级并行调度 ----------------
@@ -198,7 +200,6 @@ func registered_components() -> Array[Script]:
 ## 创建实体, 返回实体 id(int32: index|version<<24)
 ## 注意: 新实体无组件, 不影响任何查询结果 → 不失效查询缓存。
 func create_entity() -> int:
-	_all_rows_cache.clear()
 	var e: int = -1
 	_struct_mutex.lock()
 	e = _core.create_entity()
@@ -213,7 +214,6 @@ func is_alive(entity: int) -> bool:
 ## 若注册了组件 remove 钩子, 会在实体真正销毁前枚举组件并触发 remove;
 ## 随后触发 on_entity_destroyed 钩子。
 func destroy_entity(entity: int) -> void:
-	_all_rows_cache.clear()
 	_cleanup_relations(entity)   # 关系清理: 解除该实体的父/子关联(索引 + 对端 target)
 	var pending_comps: Array = []
 	if _has_any_component_hooks or not _entity_destroyed_hooks.is_empty():
@@ -292,7 +292,6 @@ func _cleanup_relations(entity: int) -> void:
 ## def_data 可覆盖部分字段初值(其余用 schema 默认值)。
 ## 只失效该组件相关的查询缓存。成功后触发该组件的 on_component_added 钩子(若有注册)。
 func add_component(entity: int, component, def_data: Dictionary = {}) -> bool:
-	_all_rows_cache.clear()
 	# 一参数实例模式: 传入实例(非 Script/名字), 自动反射其 @export 数据字段为初值
 	if not (component is Script or component is String or component is StringName):
 		if def_data.is_empty():
@@ -305,7 +304,7 @@ func add_component(entity: int, component, def_data: Dictionary = {}) -> bool:
 	if component is Script and not _component_registered.get(component, false):
 		if not register_component(component):
 			return false
-	var name := _resolve_component_name(component)
+	var name := resolve_component_name(component)
 	if name == &"":
 		return false
 	_struct_mutex.lock()
@@ -321,12 +320,11 @@ func add_component(entity: int, component, def_data: Dictionary = {}) -> bool:
 	return ok
 
 func has_component(entity: int, component) -> bool:
-	var name := _resolve_component_name(component)
+	var name := resolve_component_name(component)
 	return name != &"" and _core.has_component(entity, name)
 
 func remove_component(entity: int, component) -> void:
-	_all_rows_cache.clear()
-	var name := _resolve_component_name(component)
+	var name := resolve_component_name(component)
 	if name != &"":
 		_struct_mutex.lock()
 		_core.remove_component(entity, name)
@@ -334,7 +332,9 @@ func remove_component(entity: int, component) -> void:
 		_struct_mutex.unlock()
 		_fire_component_remove(name, entity)
 
-func _resolve_component_name(component) -> StringName:
+## 统一的组件名解析入口(全框架唯一实现): Script -> 注册名 / 反射类名; String(Name) 原样返回。
+## 未注册的 Script 回退到资源路径反射出的类名, 保证"附加组件"与"查询条件"两侧解析出同一个名字。
+func resolve_component_name(component) -> StringName:
 	if component is Script:
 		var n: StringName = _component_names.get(component, &"")
 		if n != &"":
@@ -353,12 +353,12 @@ func _resolve_component_name(component) -> StringName:
 # ============================================================
 
 func get_field(entity: int, component, field: StringName):
-	var cn := _resolve_component_name(component)
+	var cn := resolve_component_name(component)
 	_record_access(cn)
 	return _core.get_field(entity, cn, field)
 
 func set_field(entity: int, component, field: StringName, value) -> void:
-	var cn := _resolve_component_name(component)
+	var cn := resolve_component_name(component)
 	_record_access(cn)
 	_core.set_field(entity, cn, field, value)
 	_mark_dirty(cn)
@@ -378,11 +378,11 @@ func set_field(entity: int, component, field: StringName, value) -> void:
 ## 配合 query_rows(返回聚合行号) 使用: 先 query_rows 拿行号, 再 get_entity_at 转实体 ID,
 ## 再 get_field(实体ID, ...) 读取。
 func get_entity_at(component, row: int) -> int:
-	return _core.get_entity_at(_resolve_component_name(component), row)
+	return _core.get_entity_at(resolve_component_name(component), row)
 
 ## 变更检测: 返回该组件所有"写版本 > since"的聚合行号(增量同步/系统只处理变更实体用)。
 func get_changed(component, since: int) -> PackedInt32Array:
-	return _core.get_changed(_resolve_component_name(component), since)
+	return _core.get_changed(resolve_component_name(component), since)
 
 ## 变更检测开关(false 默认: 避免全量写标记开销; 开启后 batch 写递增行版本, get_changed 增量查询有效)。
 var change_detection: bool:
@@ -394,64 +394,92 @@ var change_detection: bool:
 ## 查询匹配实体, 直接返回实体 ID 数组(archetype 下最直观: 配 get_field/set_field 使用)。
 ## 例: var ents = world.query_entities(BallComponent); for e in ents: world.get_field(e, BallComponent, &"hp")
 func query_entities(anchor, must: Array = [], without: Array = []) -> PackedInt32Array:
-	var anchor_name := _resolve_component_name(anchor)
+	var anchor_name := resolve_component_name(anchor)
 	if anchor_name == &"":
 		return PackedInt32Array()
 	_record_access(anchor_name)
 	var must_names := PackedStringArray()
 	for m in must:
-		var mn := _resolve_component_name(m)
+		var mn := resolve_component_name(m)
 		if mn == &"":
 			continue
 		must_names.append(mn)
 		_record_access(mn)
 	var without_names := PackedStringArray()
 	for w in without:
-		var wn := _resolve_component_name(w)
+		var wn := resolve_component_name(w)
 		if wn == &"":
 			continue
 		without_names.append(wn)
 		_record_access(wn)
 	return _core.query_entities(anchor_name, must_names, without_names)
 
-## 全量聚合行号(无条件查询, 结构不变时缓存复用): 返回该组件所有实体的聚合行号(0..N-1)。
+## 全量聚合行号(无条件查询): 返回该组件所有实体的聚合行号(0..N-1)。
+## 与 query_rows 采用同一套失效契约(组件版本 + 全局版本), 因此命令缓冲 / Prefab /
+## 反序列化 / 条件批量等任意结构变更路径都无需手动清缓存 —— 版本号变化即自动重算。
 var _all_rows_cache := {}
 
 func query_all_rows(anchor) -> PackedInt32Array:
-	var cn: StringName = _resolve_component_name(anchor)
+	var cn: StringName = resolve_component_name(anchor)
 	if cn == &"":
 		return PackedInt32Array()
 	_record_access(cn)
-	if _all_rows_cache.has(cn):
-		return _all_rows_cache[cn]
+	# 并行批内主线程可能正在改结构 → 绕过缓存, 避免读到陈旧行集(与 query_rows 一致)
+	if _parallel_batch_active:
+		return _core.query_rows(cn, [], [])
+	var cv: int = _comp_versions.get(cn, 0)
+	var entry: Dictionary = _all_rows_cache.get(cn, {})
+	if not entry.is_empty() and entry.comp_v == cv and entry.world_v == _world_version:
+		return entry.result
 	var rows: PackedInt32Array = _core.query_rows(cn, [], [])
-	_all_rows_cache[cn] = rows
+	_all_rows_cache[cn] = {"result": rows, "comp_v": cv, "world_v": _world_version}
 	return rows
 
-## 带缓存(增量失效): 相同签名查询复用结果, 仅当涉及组件结构变化时才失效。
-func query_rows(anchor, must: Array = [], without: Array = []) -> PackedInt32Array:
-	var anchor_name := _resolve_component_name(anchor)
+## 统一解析查询参数: anchor/must/without 的类名解析 + 访问记录(三条查询路径共用)。
+## 返回 [anchor_name, must_names, without_names]; anchor 无效时返回空数组。
+func _resolve_query_args(anchor, must: Array, without: Array) -> Array:
+	var anchor_name: StringName = resolve_component_name(anchor)
 	if anchor_name == &"":
-		return PackedInt32Array()
+		return []
 	_record_access(anchor_name)
 	var must_names := PackedStringArray()
 	for m in must:
-		var mn := _resolve_component_name(m)
+		var mn := resolve_component_name(m)
 		if mn == &"":
 			continue
 		must_names.append(mn)
 		_record_access(mn)
 	var without_names := PackedStringArray()
 	for w in without:
-		var wn := _resolve_component_name(w)
+		var wn := resolve_component_name(w)
 		if wn == &"":
 			continue
 		without_names.append(wn)
 		_record_access(wn)
+	return [anchor_name, must_names, without_names]
+
+## 查询缓存键: 扁平字符串键(字段间用 \u001e, 数组元素间用 \u001f),
+## 免去 str(PackedStringArray) 的括号/引号/逗号格式化开销。
+const _QKEY_FIELD := "\u001e"
+const _QKEY_ITEM := "\u001f"
+
+func _query_cache_key(kind: String, anchor_name: StringName,
+		must_names: PackedStringArray, without_names: PackedStringArray) -> String:
+	return (kind + _QKEY_FIELD + anchor_name + _QKEY_FIELD
+			+ _QKEY_ITEM.join(must_names) + _QKEY_FIELD + _QKEY_ITEM.join(without_names))
+
+## 带缓存(增量失效): 相同签名查询复用结果, 仅当涉及组件结构变化时才失效。
+func query_rows(anchor, must: Array = [], without: Array = []) -> PackedInt32Array:
+	var args := _resolve_query_args(anchor, must, without)
+	if args.is_empty():
+		return PackedInt32Array()
+	var anchor_name: StringName = args[0]
+	var must_names: PackedStringArray = args[1]
+	var without_names: PackedStringArray = args[2]
 	# 并行批内跳过查询缓存: 主线程系统可能正在改结构, 用缓存会读到陈旧结果
 	if _parallel_batch_active:
 		return _core.query_rows(anchor_name, must_names, without_names)
-	var key := "r|" + str(anchor_name) + "|" + str(must_names) + "|" + str(without_names)
+	var key := _query_cache_key("r", anchor_name, must_names, without_names)
 	_cache_mutex.lock()
 	var entry: Dictionary = _query_cache.get(key, {})
 	if not entry.is_empty() and _entry_valid(entry):
@@ -475,27 +503,15 @@ func query_rows(anchor, must: Array = [], without: Array = []) -> PackedInt32Arr
 ##       pos[aligned[0][i]].x += ...      # 移动组件行
 ##       hp[aligned[1][i]] -= 5           # 血量组件行(同一实体)
 func query_aligned(anchor, must: Array = [], without: Array = []) -> Array:
-	var anchor_name := _resolve_component_name(anchor)
-	if anchor_name == &"":
+	var args := _resolve_query_args(anchor, must, without)
+	if args.is_empty():
 		return []
-	_record_access(anchor_name)
-	var must_names := PackedStringArray()
-	for m in must:
-		var mn := _resolve_component_name(m)
-		if mn == &"":
-			continue
-		must_names.append(mn)
-		_record_access(mn)
-	var without_names := PackedStringArray()
-	for w in without:
-		var wn := _resolve_component_name(w)
-		if wn == &"":
-			continue
-		without_names.append(wn)
-		_record_access(wn)
+	var anchor_name: StringName = args[0]
+	var must_names: PackedStringArray = args[1]
+	var without_names: PackedStringArray = args[2]
 	if _parallel_batch_active:
 		return _core.query_rows_aligned(anchor_name, must_names, without_names)
-	var key := "a|" + str(anchor_name) + "|" + str(must_names) + "|" + str(without_names)
+	var key := _query_cache_key("a", anchor_name, must_names, without_names)
 	_cache_mutex.lock()
 	var entry: Dictionary = _query_cache.get(key, {})
 	if not entry.is_empty() and _entry_valid(entry):
@@ -513,33 +529,21 @@ func query_aligned(anchor, must: Array = [], without: Array = []) -> Array:
 ## 不缓存(条件变化无稳定签名)。conditions 格式同 batch_apply_where。
 func query_aligned_where(anchor, must: Array = [], without: Array = [],
 		conditions: Array = [], comps: Array = []) -> Array:
-	var anchor_name := _resolve_component_name(anchor)
-	if anchor_name == &"":
+	var args := _resolve_query_args(anchor, must, without)
+	if args.is_empty():
 		return []
-	_record_access(anchor_name)
-	var must_names := PackedStringArray()
-	for m in must:
-		var mn := _resolve_component_name(m)
-		if mn == &"":
-			continue
-		must_names.append(mn)
-		_record_access(mn)
-	var without_names := PackedStringArray()
-	for w in without:
-		var wn := _resolve_component_name(w)
-		if wn == &"":
-			continue
-		without_names.append(wn)
-		_record_access(wn)
+	var anchor_name: StringName = args[0]
+	var must_names: PackedStringArray = args[1]
+	var without_names: PackedStringArray = args[2]
 	var comps_names := PackedStringArray()
 	for c in comps:
-		var cn := _resolve_component_name(c)
+		var cn := resolve_component_name(c)
 		if cn == &"":
 			continue
 		comps_names.append(cn)
 		_record_access(cn)
 	for c in conditions:
-		_record_access(_resolve_component_name(c.get("comp", &"")))
+		_record_access(resolve_component_name(c.get("comp", &"")))
 	return _core.query_rows_aligned_where(anchor_name, must_names, without_names,
 		_normalize_conds(conditions), comps_names)
 
@@ -548,7 +552,7 @@ func query_aligned_where(anchor, must: Array = [], without: Array = [],
 func set_columns(values: Dictionary) -> void:
 	var norm := {}
 	for comp in values:
-		var cn := _resolve_component_name(comp)
+		var cn := resolve_component_name(comp)
 		if cn == &"":
 			continue
 		_record_access(cn)
@@ -562,7 +566,7 @@ func set_columns(values: Dictionary) -> void:
 func borrow_columns(comps_fields: Array) -> Dictionary:
 	var norm := []
 	for cf in comps_fields:
-		var cn := _resolve_component_name(cf.get("comp", &""))
+		var cn := resolve_component_name(cf.get("comp", &""))
 		if cn == &"":
 			continue
 		_record_access(cn)
@@ -573,7 +577,7 @@ func borrow_columns(comps_fields: Array) -> Dictionary:
 func return_columns(borrowed: Dictionary) -> void:
 	_core.return_columns(borrowed)
 	for comp in borrowed:
-		_mark_dirty(_resolve_component_name(comp))
+		_mark_dirty(resolve_component_name(comp))
 
 ## 是否有未归还的借出列(调试/防御)。
 func is_column_borrowed() -> bool:
@@ -585,16 +589,16 @@ func is_column_borrowed() -> bool:
 func batch_apply_col(anchor, must: Array, op_comp, op_field: StringName,
 		src_comp, src_field: StringName, op: int, factor: float = 1.0,
 		addend: float = 0.0, conditions: Array = []) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
-	var scn := _resolve_component_name(src_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
+	var scn := resolve_component_name(src_comp)
 	_record_access(an)
 	_record_access(ocn)
 	_record_access(scn)
 	for mn in _names(must):
 		_record_access(mn)
 	for c in conditions:
-		_record_access(_resolve_component_name(c.get("comp", &"")))
+		_record_access(resolve_component_name(c.get("comp", &"")))
 	_mark_dirty(ocn)
 	return _core.batch_apply_col(an, _names(must), ocn, op_field, scn, src_field,
 		op, factor, addend, _normalize_conds(conditions))
@@ -603,10 +607,10 @@ func batch_apply_col(anchor, must: Array, op_comp, op_field: StringName,
 func batch_clamp_where(anchor, must: Array, op_comp, op_field: StringName,
 		min_comp, min_field: StringName, max_comp, max_field: StringName,
 		conditions: Array = []) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
-	var mincn := _resolve_component_name(min_comp)
-	var maxcn := _resolve_component_name(max_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
+	var mincn := resolve_component_name(min_comp)
+	var maxcn := resolve_component_name(max_comp)
 	_record_access(an)
 	_record_access(ocn)
 	_record_access(mincn)
@@ -614,7 +618,7 @@ func batch_clamp_where(anchor, must: Array, op_comp, op_field: StringName,
 	for mn in _names(must):
 		_record_access(mn)
 	for c in conditions:
-		_record_access(_resolve_component_name(c.get("comp", &"")))
+		_record_access(resolve_component_name(c.get("comp", &"")))
 	_mark_dirty(ocn)
 	var col = _core.get_column(ocn, op_field)
 	if col is PackedInt32Array:
@@ -683,13 +687,13 @@ func _bump_comp(comp: StringName) -> void:
 
 ## 取整列数据(返回 Packed 数组拷贝, 按 anchor 组件的 dense 行号索引)。
 func get_column(component, field: StringName):
-	var cn := _resolve_component_name(component)
+	var cn := resolve_component_name(component)
 	_record_access(cn)
 	return _core.get_column(cn, field)
 
 ## 整列写回(按行号)。
 func set_column(component, field: StringName, values) -> void:
-	var cn := _resolve_component_name(component)
+	var cn := resolve_component_name(component)
 	_record_access(cn)
 	_core.set_column(cn, field, values)
 	_mark_dirty(cn)
@@ -701,7 +705,7 @@ func set_column(component, field: StringName, values) -> void:
 func get_columns(comps_fields: Array) -> Dictionary:
 	var norm := []
 	for cf in comps_fields:
-		var cn := _resolve_component_name(cf.get("comp", &""))
+		var cn := resolve_component_name(cf.get("comp", &""))
 		if cn == &"":
 			continue
 		_record_access(cn)
@@ -710,19 +714,19 @@ func get_columns(comps_fields: Array) -> Dictionary:
 
 ## 行号 -> 实体 id(anchor 组件的 dense 行号转实体)。
 func entity_of_row(component, row: int) -> int:
-	return _core.entity_of_row(_resolve_component_name(component), row)
+	return _core.entity_of_row(resolve_component_name(component), row)
 
 ## 实体 id -> 行号(某组件的 dense 行号, 用于跨组件列访问)。
 func row_of_entity(component, entity: int) -> int:
-	return _core.row_of_entity(_resolve_component_name(component), entity)
+	return _core.row_of_entity(resolve_component_name(component), entity)
 
 # ---- 原生API层: 批量运算(纯 C++ 循环, 无 GDScript 解释开销) ----
 
 ## 批量数值变换(anchor 组件中同时拥有 must 的实体, 对 op 字段原地运算)。
 ## op: ECSWorld.BatchOp(ADD=0 加法, MUL_ADD=1 乘加, SET=2 赋值)
 func batch_apply(anchor, must: Array, op_comp, op_field: StringName, op: int, factor: float, addend: float) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
 	_record_access(an)
 	_record_access(ocn)
 	for mn in _names(must):
@@ -733,10 +737,10 @@ func batch_apply(anchor, must: Array, op_comp, op_field: StringName, op: int, fa
 ## 批量边界钳制: col = clamp(col, min, max), min/max 取自其他组件字段
 ## 注: 原生实现仅支持 float 列; int 列自动走 GDScript 兜底(否则静默不写回)
 func batch_clamp(anchor, must: Array, op_comp, op_field: StringName, min_comp, min_field: StringName, max_comp, max_field: StringName) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
-	var mincn := _resolve_component_name(min_comp)
-	var maxcn := _resolve_component_name(max_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
+	var mincn := resolve_component_name(min_comp)
+	var maxcn := resolve_component_name(max_comp)
 	_record_access(an)
 	_record_access(ocn)
 	_record_access(mincn)
@@ -752,9 +756,9 @@ func batch_clamp(anchor, must: Array, op_comp, op_field: StringName, min_comp, m
 
 ## 批量向量积分: pos += vel * delta (Vector2/3)
 func batch_vec_add(anchor, must: Array, pos_comp, pos_field: StringName, vel_comp, vel_field: StringName, delta: float) -> int:
-	var an := _resolve_component_name(anchor)
-	var pcn := _resolve_component_name(pos_comp)
-	var vcn := _resolve_component_name(vel_comp)
+	var an := resolve_component_name(anchor)
+	var pcn := resolve_component_name(pos_comp)
+	var vcn := resolve_component_name(vel_comp)
 	_record_access(an)
 	_record_access(pcn)
 	_record_access(vcn)
@@ -766,12 +770,12 @@ func batch_vec_add(anchor, must: Array, pos_comp, pos_field: StringName, vel_com
 func _names(arr: Array) -> PackedStringArray:
 	var out := PackedStringArray()
 	for a in arr:
-		out.append(_resolve_component_name(a))
+		out.append(resolve_component_name(a))
 	return out
 
 ## 拥有某组件的实体总数。
 func count(component) -> int:
-	return _core.count_entities(_resolve_component_name(component))
+	return _core.count_entities(resolve_component_name(component))
 
 # ============================================================
 #  Command Buffer (延迟结构变更)
@@ -800,7 +804,7 @@ func cmd_destroy(entity: int) -> void:
 
 ## 排队: 给实体加组件(flush 时执行)。
 func cmd_add_component(entity: int, component) -> void:
-	var name := _resolve_component_name(component)
+	var name := resolve_component_name(component)
 	if name != &"":
 		_cmd_mutex.lock()
 		_core.cmd_add_component(entity, name)
@@ -809,7 +813,7 @@ func cmd_add_component(entity: int, component) -> void:
 
 ## 排队: 给实体移除组件(flush 时执行)。
 func cmd_remove_component(entity: int, component) -> void:
-	var name := _resolve_component_name(component)
+	var name := resolve_component_name(component)
 	if name != &"":
 		_cmd_mutex.lock()
 		_core.cmd_remove_component(entity, name)
@@ -893,11 +897,12 @@ var _cmd_ops: Array = []   # 本帧排队的命令操作记录(供 flush 精确�
 ## 注册系统。priority 越大越先执行。
 ## before/after: 依赖声明的系统引用数组(该系统须在 after 之后、before 之前执行)。
 func register_system(system: ECSSystem, priority: int = 0, before: Array = [], after: Array = []) -> void:
-	if system == null or _systems.has(system):
+	if system == null or _system_index.has(system):
 		return
 	# 系统内所需的组件必须在注册前已注册
 	for comp in system.required_components():
 		register_component(comp)
+	_system_index[system] = _systems.size()
 	_systems.append(system)
 	_system_priorities.append(priority)
 	_system_before.append(before)
@@ -905,11 +910,11 @@ func register_system(system: ECSSystem, priority: int = 0, before: Array = [], a
 	# 预解析声明组件(静态, 供并行冲突检测)
 	var declared := {}
 	for c in system.read_components():
-		var cn := _resolve_component_name(c)
+		var cn := resolve_component_name(c)
 		if cn != &"":
 			declared[cn] = true
 	for c in system.write_components():
-		var cn := _resolve_component_name(c)
+		var cn := resolve_component_name(c)
 		if cn != &"":
 			declared[cn] = true
 	_system_access_declared[system] = declared
@@ -927,16 +932,21 @@ func register_system(system: ECSSystem, priority: int = 0, before: Array = [], a
 	LogTool.log("ECS", "注册系统 %s (优先级 %d, 组件: %s)" % [sname, priority, ", ".join(used)])
 
 func remove_system(system: ECSSystem) -> void:
-	var i := _systems.find(system)
-	if i >= 0:
-		_systems.remove_at(i)
-		_system_priorities.remove_at(i)
-		_system_before.remove_at(i)
-		_system_after.remove_at(i)
-		_system_access_declared.erase(system)
-		_access_sets.erase(system)
-		_pending_access.erase(system)
-		_dirty_schedule = true
+	var i: int = _system_index.get(system, -1)
+	if i < 0:
+		return
+	_systems.remove_at(i)
+	_system_priorities.remove_at(i)
+	_system_before.remove_at(i)
+	_system_after.remove_at(i)
+	_system_index.erase(system)
+	# 被删位置之后的元素整体前移一位, 增量重建其下标
+	for k in range(i, _systems.size()):
+		_system_index[_systems[k]] = k
+	_system_access_declared.erase(system)
+	_access_sets.erase(system)
+	_pending_access.erase(system)
+	_dirty_schedule = true
 
 ## 每帧驱动全部系统。内部先按依赖图拓扑排序(优先级仅作同层平级次序)。
 ## 帧末自动 flush Command Buffer(延迟结构变更)。
@@ -971,6 +981,7 @@ func _resort() -> void:
 	if not _dirty_schedule:
 		return
 	_sorted.clear()
+	_sorted_index.clear()
 	_dirty_schedule = false
 	if _systems.is_empty():
 		return
@@ -985,20 +996,20 @@ func _resort() -> void:
 	for i in n:
 		var w: Array[StringName] = []
 		for c in _systems[i].write_components():
-			var cn: StringName = _resolve_component_name(c)
+			var cn: StringName = resolve_component_name(c)
 			if cn != &"":
 				w.append(cn)
 		sys_writes.append(w)
 		var r: Array[StringName] = []
 		for c in _systems[i].read_components():
-			var cn: StringName = _resolve_component_name(c)
+			var cn: StringName = resolve_component_name(c)
 			if cn != &"":
 				r.append(cn)
 		sys_reads.append(r)
 	for i in n:
 		var pre: Array = []
 		for other in _system_after[i]:
-			if other is ECSSystem and _systems.has(other):
+			if other is ECSSystem and _system_index.has(other):
 				pre.append(other)
 		# before[b] = x 表示 x 必须在 b 之前 => 对 x 而言 b 是其 after
 		for j in n:
@@ -1030,7 +1041,7 @@ func _resort() -> void:
 				continue
 			var ready := true
 			for pre in prerequisites[i]:
-				if not done.has(_systems.find(pre)):
+				if not done.has(_system_index.get(pre, -1)):
 					ready = false
 					break
 			if not ready:
@@ -1047,8 +1058,11 @@ func _resort() -> void:
 		done[best] = true
 		result.append(_systems[best])
 	_sorted.clear()
-	for s in result:
+	_sorted_index.clear()
+	for k in result.size():
+		var s: ECSSystem = result[k]
 		_sorted.append(s)
+		_sorted_index[s] = k
 
 # ============================================================
 #  系统级并行执行
@@ -1220,7 +1234,7 @@ func _flush_parallel(groups: Array, cur: Array, barrier: Array) -> void:
 		blocks.append(cur)
 	for bs in barrier:
 		blocks.append([bs])
-	blocks.sort_custom(func(a, b): return _sorted.find(a[0]) < _sorted.find(b[0]))
+	blocks.sort_custom(func(a, b): return _sorted_index.get(a[0], -1) < _sorted_index.get(b[0], -1))
 	for blk in blocks:
 		groups.append(blk)
 
@@ -1245,15 +1259,15 @@ func _build_parallel_groups() -> Array:
 		var declared: Dictionary = _system_access_declared.get(s, {})
 		var conflict := _sig_conflicts(acc, declared, cur_comps)
 		if not conflict:
-			var si := _systems.find(s)
+			var si: int = _system_index.get(s, -1)
 			for cs in cur:
-				var ci := _systems.find(cs)
+				var ci: int = _system_index.get(cs, -1)
 				if _system_depends(si, ci) or _system_depends(ci, si):
 					conflict = true
 					break
 			if not conflict:
 				for bs in barrier:
-					var bi := _systems.find(bs)
+					var bi: int = _system_index.get(bs, -1)
 					if _system_depends(si, bi) or _system_depends(bi, si):
 						conflict = true
 						break
@@ -1328,7 +1342,7 @@ func debug_parallel_stats() -> Dictionary:
 
 ## 注册组件 add 钩子: 实体获得该组件后触发。
 func on_component_added(comp, callable: Callable) -> void:
-	var cn := _resolve_component_name(comp)
+	var cn := resolve_component_name(comp)
 	if cn == &"":
 		return
 	if not _component_hooks.has(cn):
@@ -1339,13 +1353,13 @@ func on_component_added(comp, callable: Callable) -> void:
 	_has_any_component_hooks = true
 
 func off_component_added(comp, callable: Callable) -> void:
-	var cn := _resolve_component_name(comp)
+	var cn := resolve_component_name(comp)
 	if _component_hooks.has(cn):
 		(_component_hooks[cn]["add"] as Array).erase(callable)
 
 ## 注册组件 remove 钩子: 实体失去该组件后触发(显式移除或实体销毁时)。
 func on_component_removed(comp, callable: Callable) -> void:
-	var cn := _resolve_component_name(comp)
+	var cn := resolve_component_name(comp)
 	if cn == &"":
 		return
 	if not _component_hooks.has(cn):
@@ -1356,7 +1370,7 @@ func on_component_removed(comp, callable: Callable) -> void:
 	_has_any_component_hooks = true
 
 func off_component_removed(comp, callable: Callable) -> void:
-	var cn := _resolve_component_name(comp)
+	var cn := resolve_component_name(comp)
 	if _component_hooks.has(cn):
 		(_component_hooks[cn]["remove"] as Array).erase(callable)
 
@@ -1403,7 +1417,7 @@ func _mark_dirty(comp: StringName) -> void:
 
 ## 本帧内该组件是否被任何写 API 修改过(组件级, 非实体级)。
 func is_component_dirty(comp) -> bool:
-	var cn := _resolve_component_name(comp)
+	var cn := resolve_component_name(comp)
 	if cn == &"":
 		return false
 	return _dirty_comps.get(cn, -1) == _frame_count
@@ -1503,7 +1517,7 @@ func _entity_matches_conds(eid: int, conditions: Array) -> bool:
 		return true
 	# 用 batch_count 单实体判断: 构造一个临时条件直接查
 	for c in conditions:
-		var comp_name := _resolve_component_name(c.get("comp", &""))
+		var comp_name := resolve_component_name(c.get("comp", &""))
 		var field: StringName = c.get("field", &"")
 		var op: int = int(c.get("op", 0))
 		var value = c.get("value", 0.0)
@@ -1584,14 +1598,14 @@ func debug_stats() -> Dictionary:
 ##       [{comp: HealthComponent, field: &"hp", op: ECSWorld.CondOp.LESS_THAN, value: 50}])
 func batch_apply_where(anchor, must: Array, op_comp, op_field: StringName,
 		op: int, factor: float, addend: float, conditions: Array) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
 	_record_access(an)
 	_record_access(ocn)
 	for mn in _names(must):
 		_record_access(mn)
 	for c in conditions:
-		_record_access(_resolve_component_name(c.get("comp", &"")))
+		_record_access(resolve_component_name(c.get("comp", &"")))
 	_mark_dirty(ocn)
 	return _core.batch_apply_where(an, _names(must),
 		ocn, op_field, op, factor, addend, _normalize_conds(conditions))
@@ -1602,12 +1616,12 @@ func batch_apply_where(anchor, must: Array, op_comp, op_field: StringName,
 ##   world.batch_count_where(HealthComponent, [],
 ##       [{comp: HealthComponent, field: &"hp", op: ECSWorld.CondOp.LESS_THAN, value: 100}])
 func batch_count_where(anchor, must: Array, conditions: Array) -> int:
-	var an := _resolve_component_name(anchor)
+	var an := resolve_component_name(anchor)
 	_record_access(an)
 	for mn in _names(must):
 		_record_access(mn)
 	for c in conditions:
-		_record_access(_resolve_component_name(c.get("comp", &"")))
+		_record_access(resolve_component_name(c.get("comp", &"")))
 	return _core.batch_count(an, _names(must), _normalize_conds(conditions))
 
 ## 批量收集: 单次遍历匹配 anchor+must(不含 without)的签名实体, 同时判定多组条件,
@@ -1615,7 +1629,7 @@ func batch_count_where(anchor, must: Array, conditions: Array) -> int:
 ## groups: Array, 每组 = 条件列表(格式同 batch_apply_where, 空组 = 无条件 = 全部实体)。
 ## 返回 Array[PackedInt32Array], 第 i 组对应 groups[i] 满足条件的实体 anchor 行号。
 func batch_collect(anchor, must: Array, without: Array, groups: Array) -> Array:
-	var an := _resolve_component_name(anchor)
+	var an := resolve_component_name(anchor)
 	_record_access(an)
 	for mn in _names(must):
 		_record_access(mn)
@@ -1624,13 +1638,13 @@ func batch_collect(anchor, must: Array, without: Array, groups: Array) -> Array:
 	var norm_groups: Array = []
 	for g in groups:
 		for c in g:
-			_record_access(_resolve_component_name(c.get("comp", &"")))
+			_record_access(resolve_component_name(c.get("comp", &"")))
 		norm_groups.append(_normalize_conds(g))
 	return _core.batch_collect(an, _names(must), _names(without), norm_groups)
 
 ## 批量收集(条件已规范化, 跳过 _normalize_conds 开销; 查询链合并内部用, 配合 ECSQuery.get_norm_conditions 缓存)。
 func batch_collect_norm(anchor, must: Array, without: Array, norm_groups: Array) -> Array:
-	var an := _resolve_component_name(anchor)
+	var an := resolve_component_name(anchor)
 	_record_access(an)
 	for mn in _names(must):
 		_record_access(mn)
@@ -1642,8 +1656,8 @@ func batch_collect_norm(anchor, must: Array, without: Array, norm_groups: Array)
 ## rows: anchor 行号(PackedInt32Array)。op: ECSWorld.BatchOp。支持向量分量字段(如 &"vel.x")。
 func batch_apply_rows(anchor, rows: PackedInt32Array, op_comp, op_field: StringName,
 		op: int, factor: float, addend: float) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
 	_record_access(an)
 	_record_access(ocn)
 	_mark_dirty(ocn)
@@ -1652,9 +1666,9 @@ func batch_apply_rows(anchor, rows: PackedInt32Array, op_comp, op_field: StringN
 ## 对预收集的行集做列间动作(跳过收集): 目标列 = 目标列 OP (src列 * factor + addend)。
 func batch_apply_col_rows(anchor, rows: PackedInt32Array, op_comp, op_field: StringName,
 		src_comp, src_field: StringName, op: int, factor: float, addend: float) -> int:
-	var an := _resolve_component_name(anchor)
-	var ocn := _resolve_component_name(op_comp)
-	var scn := _resolve_component_name(src_comp)
+	var an := resolve_component_name(anchor)
+	var ocn := resolve_component_name(op_comp)
+	var scn := resolve_component_name(src_comp)
 	_record_access(an)
 	_record_access(ocn)
 	_record_access(scn)
@@ -1664,7 +1678,7 @@ func batch_apply_col_rows(anchor, rows: PackedInt32Array, op_comp, op_field: Str
 ## 批量执行多个动作(一次跨语言, 免逐动作跨语言调用)。
 ## actions: Array[Dictionary], 每项 {t:0=col列间,1=scalar标量, of, sf/sc?, op, f, v/add}。
 func batch_apply_actions(anchor, rows: PackedInt32Array, actions: Array) -> int:
-	var an := _resolve_component_name(anchor)
+	var an := resolve_component_name(anchor)
 	_record_access(an)
 	_mark_dirty(an)
 	return _core.batch_apply_actions(an, rows, actions)
@@ -1674,7 +1688,7 @@ func _normalize_conds(conditions: Array) -> Array:
 	var out: Array = []
 	for c in conditions:
 		var d := {}
-		d["comp"] = _resolve_component_name(c.get("comp", &""))
+		d["comp"] = resolve_component_name(c.get("comp", &""))
 		d["field"] = str(c.get("field", &""))
 		d["op"] = int(c.get("op", 0))
 		d["value"] = c.get("value", 0.0)
@@ -1697,7 +1711,7 @@ func is_prefab(entity: int) -> bool:
 ## values: Dictionary {字段名: 初始值}
 func prefab_add(prefab: int, component, values: Dictionary) -> bool:
 	register_component(component) if component is Script else null
-	var name := _resolve_component_name(component)
+	var name := resolve_component_name(component)
 	if name != &"":
 		_bump_comp(name)
 	return _core.prefab_add(prefab, name, values)
@@ -1709,7 +1723,7 @@ func instantiate(prefab: int, count: int, overrides: Dictionary = {}) -> Array:
 	# overrides 的 key 可能是 Script, 归一化为类名
 	var norm_overrides := {}
 	for k in overrides:
-		norm_overrides[_resolve_component_name(k)] = overrides[k]
+		norm_overrides[resolve_component_name(k)] = overrides[k]
 	_world_version += 1  # 批量生成实体 + 组件, 无法精确追踪 → 全局失效
 	return _core.instantiate(prefab, count, norm_overrides)
 

@@ -328,7 +328,7 @@ LogTool.disable_tag("战斗")               # 忽略某个标签
 - `SaveTool.save_async()` / `load_async()`：异步保存（同路径连续请求只保留最新数据）。
 - `SaveTool.merge_data(local, cloud, rules)`：本地/云端合并（用于云存档冲突处理）。
 - `SaveTool.check_version(data, version, defaults)`：版本迁移 + 缺失字段补齐。
-- `SaveTool.load_defs(dir, filter)`：递归扫描目录加载 Def 资源（兼容导出后的 `.remap`）。
+- `SaveTool.load_defs(dir, filter, extensions = [".tres"])`：递归扫描目录加载 Def 资源（兼容导出后的 `.remap`；需要同时认 `.res` 时显式传 `extensions`）。
 
 ```gdscript
 # 合并规则示例
@@ -450,7 +450,7 @@ AudioTool.setup_audio_buses()                       # 一键生成 Master/SFX/BG
 面向玩家的「版本更新提示」：框架只负责**版本判定 / 条目过滤 / 已见状态记录**，**UI 由项目自行实现**。
 
 - 当前版本：Godot 内置项目设置 `application/config/version`（项目设置 → Application → Config → Version，发布时修改；未配置时回退到日志 Def 中的最高版本）。
-- 内容：在 `Assets/Def/` 下建 `ChangelogDef` 的 .tres，每个 `ChangelogEntryDef` 介绍**一个**功能更新（`version / date / category / text / player_visible`）；`target` 可指向任意资源（配置 Def / 图片 / 模型等），如何展示由项目决定。示例见 `Assets/Def/Changelog/ChangelogExample.tres`。
+- 内容：在 `Assets/Def/` 下建 `ChangelogDef` 的 .tres，每个 `ChangelogEntryDef` 介绍**一个**功能更新（`version / date / category / text / debug_only`）；`target` 可指向任意资源（配置 Def / 图片 / 模型等），如何展示由项目决定；`debug_only = true` 的条目只在 Debug 模式（编辑器 / 调试分支）展示。示例见 `Assets/Def/Changelog/ChangelogExample.tres`。
 - 已见版本：**不单独存储文件**，由项目并入自己的游戏存档持久化（读 `get_seen_version()`，写入用 `mark_seen()`/`load_seen_version()`）；不并入则视为首次运行，不弹窗。
 
 ```gdscript

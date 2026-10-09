@@ -2,8 +2,10 @@
 ##
 ## 编写 2D UI 时继承此类，提供统一的打开/关闭生命周期。
 ## [method open] — 先注册到 [UITool] 进行栈管理与层级互斥，然后执行进入动画。
-## [method close] — 先执行离开动画，然后从 [UITool] 自动注销。
+## [method close] — 执行离开动画并从 [UITool] 自动注销，动画结束后隐藏。
 ## 通过连接 [signal on_open] / [signal on_close] 等信号实现自定义动画。
+##
+## 状态机实现见 [UIPanelTool]（与 [UIPanel3D] 共用，避免两份实现漂移）。
 ##
 ## 使用方式：
 ##   [codeblock]
@@ -51,60 +53,29 @@ signal on_closed()
 # 公开接口
 # ============================================================
 
-## 打开面板
-##
-## 完整流程：注册到 [UITool] 栈（处理层级互斥）→ 触发 [signal on_open] → 显示 → 播放进入动画 → 触发 [signal on_opened]。
+## 打开面板。完整流程见 [UIPanelTool.open]。
 func open() -> void:
-	_open_version += 1
-	# 注册到 UITool 栈（处理层级互斥）
-	UITool.register(self)
-	is_open = true
-	on_open.emit()
-	show()
-	if show_tween:
-		await show_tween.play().finished
-	on_opened.emit()
+	await UIPanelTool.open(self)
 
-## 关闭面板。
+## 关闭面板。完整流程见 [UIPanelTool.close]。
 func close() -> void:
-	is_open = false
-	# 从 UITool 栈注销
-	UITool.unregister(self)
-	on_close.emit()
-	if show_tween:
-		await show_tween.playback().finished
+	await UIPanelTool.close(self)
 
-
-## 节点离开场景树时自动注销。
-##
-## 面板被 free（场景被换掉 / 节点被释放）时 close() 未必有机会被调用，而栈里留一个已释放的
-## 引用，会让后续 get_top() / _sort() 拿到悬空对象（实测报 "previously freed instance"）。
-## 这里是唯一能兜住"没调 close 就没了"的位置 —— 各面板不必自己记得。
+## 节点离开场景树时自动注销（兜底，见 [UIPanelTool.on_exit_tree]）。
 func _exit_tree() -> void:
-	if not is_open:
-		return
-	is_open = false
-	UITool.unregister(self)
-	on_closed.emit()
-	hide()
+	UIPanelTool.on_exit_tree(self)
 
-## 切换打开/关闭。完整流程见 [method open] / [method close]。
+## 切换打开/关闭。
 func toggle() -> void:
-	if is_open:
-		await close()
-	else:
-		await open()
+	await UIPanelTool.toggle(self)
 
 ## 弹窗模式：打开面板并等待关闭（可用于异步等待面板交互结果）。
 func popup() -> void:
-	await open()
-	await on_closed
+	await UIPanelTool.popup(self)
 
 ## 等待面板关闭，返回关闭时版本是否仍为本轮（面板被重新 open() 后旧等待返回 false）。
 func await_closed() -> bool:
-	var ver := _open_version
-	await on_closed
-	return ver == _open_version
+	return await UIPanelTool.await_closed(self)
 
 ## 返回键处理，由 UITool.back() 调用。子类可重写自定义返回行为，默认关闭面板。
 func _back() -> void:

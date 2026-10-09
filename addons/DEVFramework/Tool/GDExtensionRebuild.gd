@@ -62,6 +62,17 @@ const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # �
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
 const KEY_BUILD_TYPES := "dev_framework/gdextension_build/build_types"   # 要构建的构建类型(Array[String], 如 ["release"]=仅 release); 空=当前编辑器类型+另一版本
 
+## 异步构建轮询节拍: 每 0.2s 一拍; 下面所有间隔都按"拍"从秒换算, 改节拍即整体缩放
+const POLL_INTERVAL_SEC := 0.2
+const TICKS_PER_SEC := 5                                      # = 1 / POLL_INTERVAL_SEC
+const DISK_REPORT_SEC := 2                                    # 磁盘产物进度上报间隔(秒)
+const HEARTBEAT_INTERVAL_SEC := 10                            # 输出静默后的心跳间隔(秒)
+const DISK_REPORT_TICKS := DISK_REPORT_SEC * TICKS_PER_SEC     # 10 拍
+const HEARTBEAT_SILENT_TICKS := HEARTBEAT_INTERVAL_SEC * TICKS_PER_SEC   # 50 拍
+const STALL_TIMEOUT_SEC := 500                                # 无新目标累计 500s 且无编译器进程 → 判卡死
+const MIN_JOBS := 2                                           # 自动并行度下限
+const MAX_JOBS := 16                                          # 自动并行度上限
+
 static var _me: GDExtensionRebuild   # 异步构建期间持有自身(菜单调用方不持有实例)
 
 var _lines: Array[String] = []
@@ -323,10 +334,7 @@ static func _cond_key(cond: String) -> String:
 
 ## 绝对路径 → res:// 路径(项目根内); 项目根外原样返回
 func _abs_to_res(p: String) -> String:
-	var root := _abs("res://")
-	if p.begins_with(root):
-		return "res://" + p.substr(root.length())
-	return p
+	return FileTool.abs_to_res(p)
 
 
 ## 自动发现工程目录候选(静态, 供外部/MCP 复用): 项目根 gdextension/ + 各 addons/*/
@@ -1004,7 +1012,7 @@ func _build(build_dir: String, type: String) -> bool:
 	_log("开始编译 (", type, ")…… 编辑器保持可用, 输出实时回显。")
 	var jobs := int(ProjectSettings.get_setting(KEY_JOBS, 0))
 	if jobs <= 0:
-		jobs = clampi(OS.get_processor_count(), 2, 16)
+		jobs = clampi(OS.get_processor_count(), MIN_JOBS, MAX_JOBS)
 	# 子进程输出重定向到文件, 本进程定时尾读回显 —— 不经过 Godot execute_with_pipe 管道。
 	# 原因: Godot Windows 的管道实现存在读取竞态(高频起停子进程时读线程停摆 → 子进程写管道被堵 → 构建死锁),
 	# ninja/make 下均已复现。文件 IO 无此问题, 编辑器仍可用, 输出仍实时(受 stdout 块缓冲影响略有分批)。
@@ -1054,22 +1062,22 @@ func _build(build_dir: String, type: String) -> bool:
 		else:
 			silent += 1
 		tick += 1
-		if tick % 10 == 0:   # ~每 2s: 磁盘产物进度(独立于输出, 兜底可量化)
+		if tick % DISK_REPORT_TICKS == 0:   # 每 DISK_REPORT_SEC 秒: 磁盘产物进度(独立于输出, 兜底可量化)
 			_report_disk_progress(build_dir)
-		if silent >= 50 and silent % 50 == 0:   # 静默 ≥10s 后每 10s 心跳一次
+		if silent >= HEARTBEAT_SILENT_TICKS and silent % HEARTBEAT_SILENT_TICKS == 0:   # 静默够久后每 HEARTBEAT_INTERVAL_SEC 秒心跳一次
 			var d := _count_build_objects(build_dir)
 			var t := _total_compile_units(build_dir)
 			if t > 0:
-				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d/%d 目标文件" % [silent / 5, d, t])
+				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d/%d 目标文件" % [silent / TICKS_PER_SEC, d, t])
 			else:
-				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d 个目标(总数未知)" % [silent / 5, d])
+				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d 个目标(总数未知)" % [silent / TICKS_PER_SEC, d])
 			# 卡死熔断: 目标长期不增长 + 无编译器子进程存活 → 构建系统在等不存在的子进程(非编译慢)
 			if d == _prev_done_count:
-				_no_advance += 10
+				_no_advance += HEARTBEAT_INTERVAL_SEC
 			else:
 				_no_advance = 0
 				_prev_done_count = d
-			if _no_advance >= 500 and not _stall_checked and not _stall_killed:
+			if _no_advance >= STALL_TIMEOUT_SEC and not _stall_checked and not _stall_killed:
 				var active := _active_compile_procs()
 				if active == 0:
 					_stall_checked = true
@@ -1084,7 +1092,7 @@ func _build(build_dir: String, type: String) -> bool:
 					_log_raw("%d 秒无新目标, 仍有 %d 个编译器进程在跑(可能正在编译超大文件), 继续等待。" % [_no_advance, active])
 		if _stall_killed:
 			break
-		await tree.create_timer(0.2).timeout
+		await tree.create_timer(POLL_INTERVAL_SEC).timeout
 	_drain_log(raw)   # 进程退出会 flush 全部缓冲, 收尾再读一次
 	if _stall_killed:
 		_log("构建已被工具终止(疑似卡死)。")
@@ -1284,10 +1292,6 @@ func _final_cleanup(info: Dictionary, gdext_res: String, target: String) -> void
 		_log("无清理白名单, 跳过 Native 清理。")
 		return
 	_cleanup_native(native_dir, keep)
-	if keep.is_empty():
-		_log("无清理白名单, 跳过 Native 清理。")
-		return
-	_cleanup_native(native_dir, keep)
 
 
 ## 在产物输出目录(*_OUTPUT_DIRECTORY)里定位 *.gdextension(与产物同目录是框架约定)。
@@ -1406,12 +1410,9 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 		if remove_lines.has(i):
 			continue   # 删除多余架构键行
 		out.append(String(lines[i]))
-	var f := FileAccess.open(gdext_res, FileAccess.WRITE)
-	if f == null:
+	if FileTool.atomic_write_text(gdext_res, "\n".join(out)) != OK:
 		_log("声明写回失败: ", gdext_res)
 		return
-	f.store_string("\n".join(out))
-	f.close()
 
 
 ## 从声明收集本平台键中的架构 tag 集合(去重; 无架构/仅 universal 键则返回空 —— 不需要架构文件保护)
@@ -1566,12 +1567,9 @@ func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: St
 		lines.insert(at, "%s = %s" % [new_key, value])
 		_synced.append("%s → %s(新增)" % [new_key, file_res])
 		_log("已同步声明(新增): ", gdext_res, " [", new_key, "] = ", value)
-	var f := FileAccess.open(gdext_res, FileAccess.WRITE)
-	if f == null:
+	if FileTool.atomic_write_text(gdext_res, "\n".join(lines)) != OK:
 		_log("声明写回失败: ", gdext_res)
 		return
-	f.store_string("\n".join(lines))
-	f.close()
 
 
 ## sync 关闭时的退化模式: 只校验不回写 —— 声明与实盘不一致时明确告警(引擎将加载失败)。
@@ -1729,9 +1727,7 @@ func _plan_build_types() -> Array[String]:
 # ------------------------------------------------------------ 小工具
 
 func _res(p: String) -> String:
-	if p.begins_with("res://"):
-		return p
-	return "res://%s" % p.trim_prefix("/")
+	return FileTool.to_res_path(p)
 
 
 func _abs(p: String) -> String:
@@ -1778,19 +1774,13 @@ func _toast(text: String) -> void:
 
 ## 阶段/结果状态文件(实时阶段/进度; 供查看, 非必要)
 func _state_write(text: String) -> void:
-	var f := FileAccess.open(_abs("res://.godot/gdextension_build/state.txt"), FileAccess.WRITE)
-	if f:
-		f.store_string(text)
-		f.close()
+	FileTool.write_text(_abs("res://.godot/gdextension_build/state.txt"), text)
 
 
 ## 最终摘要(成败/用时/产物/下一步): 自动重载前落盘 + 同步进 build.log/Output,
 ## 让 build.log 尾部即可看到最终结果(不依赖任何手动查询入口)
 func _summary_write(text: String) -> void:
-	var f := FileAccess.open(_abs("res://.godot/gdextension_build/last_build.txt"), FileAccess.WRITE)
-	if f:
-		f.store_string(text)
-		f.close()
+	FileTool.write_text(_abs("res://.godot/gdextension_build/last_build.txt"), text)
 	for line in text.split("\n"):
 		if line != "":
 			_log_raw(line)

@@ -17,11 +17,14 @@ extends Control
 ## 显示类型(与列无关的展示类别)
 enum Kind { TEXT, NUMBER, BOOL, COLOR, RESOURCE, ARRAY, DICT, ENUM }
 
-const ROW_HEIGHT := 32.0
+## 行高下限: 全表唯一来源在 [DefTableGrid](它统一钳制行高), 此处仅作单元格初始高度
+const ROW_HEIGHT := DefTableGrid.MIN_ROW_HEIGHT
 const CELL_MARGIN_L := 4.0
 const CELL_MARGIN_R := 2.0
 const CELL_MARGIN_T := 2.0
 const CELL_MARGIN_B := 2.0
+## 资源单元格缩略图边长: 撑满行高可用高度(减去上下边距), 避免图标明显小于同行文字
+const RESOURCE_PREVIEW_SIZE := ROW_HEIGHT - CELL_MARGIN_T - CELL_MARGIN_B
 
 ## 当前显示类型
 var kind: int = Kind.TEXT
@@ -216,10 +219,11 @@ func _build_resource_cell() -> void:
 	var tex := TextureRect.new()
 	tex.name = &"Preview"
 	tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	tex.custom_minimum_size = Vector2(18, 18)
+	tex.custom_minimum_size = Vector2(RESOURCE_PREVIEW_SIZE, RESOURCE_PREVIEW_SIZE)
 	tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	tex.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	# 行变高(多行内容)时缩略图跟着长高, 保持"与同行文字同级"的可见度
+	tex.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tex.visible = false
 	box.add_child(tex)
 
@@ -285,4 +289,3 @@ func set_resource_preview(texture: Texture2D) -> void:
 		tex.visible = texture != null
 		if texture != null:
 			tex.texture = texture
-# touch

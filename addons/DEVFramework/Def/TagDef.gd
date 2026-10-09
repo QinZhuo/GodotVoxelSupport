@@ -24,4 +24,4 @@ static func in_all_tags(tags: Array[TagDef], target_tags: Array[TagDef]) -> bool
 	return true
 
 func get_csv_path() -> String:
-	return "res://Assets/Translation/tag.csv"
+	return Def.csv_path("tag")

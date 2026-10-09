@@ -71,7 +71,7 @@ func _recompute(modifier: Modifier = null):
 			percent *= m.value / 100.0
 	var v := int(round(acc * percent))
 	# 安全钳位：属性值超过 10⁹ 已无游戏意义，仅防范 64-bit 溢出（9.2×10¹⁸）
-	v = ValueTool.clamp_signed(v)
+	v = MathTool.clamp_signed(v)
 	if _value == v:
 		return
 	_value = v

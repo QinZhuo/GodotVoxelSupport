@@ -23,7 +23,7 @@ var conditions: Array = []   # [{comp, field, op, value}]
 var actions: Array = []      # [{type, ...}]
 var _with_fields: Array = [] # with() 声明的锚组件遍历字段(顺序 = 回调参数顺序)
 var _executed := false
-var _norm_conds := []  # 规范化条件缓存(comp 已 resolve 类名, 免每帧 _normalize_conds; 条件固定时可跨帧复用)
+var _norm_conds := []  # 规范化条件缓存(comp 已 resolve 类名); 由 _add_condition/_reset 失效, 绝不跨帧残留
 
 
 func _init(p_world: ECSWorld = null, p_anchor = null) -> void:
@@ -49,9 +49,9 @@ func _reset(p_world: ECSWorld, p_anchor, p_must: Array = [], p_without: Array = 
 	actions.clear()
 	_with_fields.clear()
 	_executed = false
-	# 保留 _norm_conds 缓存(条件结构固定时跨帧复用, 免每帧 _normalize_conds)
+	_norm_conds.clear()   # 对象被池化复用: 条件即将重建, 规范化缓存必须失效(否则跨帧返回陈旧条件)
 
-## 规范化条件(comp 已 resolve 类名), 供批量收集/执行直接使用(首次构建缓存)。
+## 规范化条件(comp 已 resolve 类名), 供批量收集/执行直接使用(按需构建, 条件变更即失效)。
 func get_norm_conditions() -> Array:
 	if conditions.is_empty():
 		return []
@@ -66,9 +66,11 @@ func get_norm_conditions() -> Array:
 func where(field: StringName) -> ECSCond:
 	return ECSCond.new(self, field)
 
-## 直接指定完整条件(等价 where().xxx())
+## 直接指定完整条件(等价 where().xxx())。**唯一的条件写入点**: ECSCond 的全部比较操作符
+## 都收敛到此, 在此统一失效规范化缓存, 保证查询对象被池化复用时不会读到上一帧的条件。
 func where_cond(field: StringName, op: int, value) -> ECSQuery:
 	conditions.append({"comp": anchor, "field": field, "op": op, "value": value})
+	_norm_conds.clear()
 	return self
 
 
@@ -217,17 +219,17 @@ func _apply_rows(rows: PackedInt32Array) -> int:
 				var item := {"t": 0, "of": str(act.field), "sf": str(act.src_field),
 						"op": act.op, "f": act.factor, "add": act.addend}
 				if act.src != anchor:
-					item["sc"] = world.component_name(act.src)
+					item["sc"] = _comp_name(act.src)
 				acts.append(item)
 	return world.batch_apply_actions(anchor, rows, acts)
 
 
 func _comp_name(c) -> StringName:
-	if c is Script:
-		var n: StringName = world.component_name(c)
-		if n != &"":
-			return n
-	return StringName(str(c))
+	# 统一走 ECSWorld 的解析器(全框架唯一实现): 避免此处回退成脚本资源字符串,
+	# 与写入侧(类名)解析出两个名字, 导致查询静默落空。
+	if world == null:
+		return StringName(str(c))
+	return world.resolve_component_name(c)
 
 
 func _run() -> int:

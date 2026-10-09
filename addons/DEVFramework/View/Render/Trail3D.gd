@@ -13,6 +13,9 @@ enum TextureMode {
 	PER_SEGMENT
 }
 
+## 两个点是否"重合"的平方距离阈值(1e-8 ⇒ 实际距离约 0.1mm), 低于它就不生成新段
+const MIN_SEGMENT_DIST_SQ := 0.00000001
+
 #region Trail Settings
 
 @export var lifetime: float = 1.0:
@@ -161,7 +164,7 @@ func _build_mesh() -> void:
 	elif emitting:
 		var last_p := _points[0]
 		var current_pos := global_position
-		if last_p.position.distance_squared_to(current_pos) > 0.00000001:
+		if last_p.position.distance_squared_to(current_pos) > MIN_SEGMENT_DIST_SQ:
 			_immediate_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 			_build_virtual_only(origin)
 			_immediate_mesh.surface_end()
@@ -190,7 +193,7 @@ func _build_virtual_segment(origin: Vector3) -> void:
 	var last_p := _points[_points.size() - 1]
 	var current_pos := global_position
 	var dist_sq := last_p.position.distance_squared_to(current_pos)
-	if dist_sq < 0.00000001:
+	if dist_sq < MIN_SEGMENT_DIST_SQ:
 		return
 
 	var t_last := last_p.age / lifetime
@@ -222,7 +225,7 @@ func _build_virtual_segment(origin: Vector3) -> void:
 func _build_virtual_only(origin: Vector3) -> void:
 	var last_p := _points[0]
 	var current_pos := global_position
-	if last_p.position.distance_squared_to(current_pos) <= 0.00000001:
+	if last_p.position.distance_squared_to(current_pos) <= MIN_SEGMENT_DIST_SQ:
 		return
 
 	var right := _get_right_for_virtual(last_p, current_pos)
