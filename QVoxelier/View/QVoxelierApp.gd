@@ -72,18 +72,23 @@ var _selection_box: QVoxelSelectionBox
 ## 光标处最近一次的落笔点。粘贴要落在"用户正指着的地方"，而光标只在移动事件里出现 ——
 ## 于是把它记下来，按钮 / 快捷键按下时才有得用（没有它，粘贴只能贴回原地）。
 var _hover_pick: QVoxelBrushTool.Pick
-## 每个对象一条展示会话：model_id → QVoxelEditSession。**活动那条就是 session**。
-## 非活动会话不接鼠标，只负责把它那份 QVoxelSource 喂给对应渲染器。
-var _sessions: Dictionary = {}
 ## 非活动对象的渲染器：model_id → VoxelRenderer。
 var _display: Dictionary = {}
 
-## 当前世界与编辑会话（装配产物；换模型时整体重建）。
-var world: QVoxelWorld
-var session: QVoxelEditSession
+## 应用会话：世界 + 每对象一条编辑会话 + 工程状态 + 应用能力（见 QVoxelierSession）。
+## 视口脚本只做装配 / 翻译 / 刷新，故这里**只读**地投影出最常用的两份数据。
+var _sess: QVoxelierSession
 
-## 当前工程文件路径（空 = 还没存过盘的新工程，"保存"会转成"另存为"）。
-var project_path := ""
+## 当前世界与当前活动编辑会话 —— 是 `_sess` 的**只读投影**，不是第二份真相。
+## 【为什么是只读属性而不是各自的字段】换世界与切对象必须走 install / activate 两条路径
+## （它们才会把显示层一起换掉）；只读属性把"绕过会话直接赋值"这件事变成编译期错误。
+var world: QVoxelWorld:
+	get:
+		return _sess.world if _sess != null else null
+
+var session: QVoxelEditSession:
+	get:
+		return _sess.session if _sess != null else null
 
 var _material_id := 1
 var _stroke := false
@@ -98,8 +103,6 @@ var _pan := false
 ## 是**跨手势的粘性模式**，所以排在状态区而不是手势区。
 var _nav := false
 var _pan_mode := false
-## 有未落盘的改动（状态栏与窗口标题上的 *）。
-var _dirty := false
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
 var _eyedropper := false
@@ -136,6 +139,12 @@ const ACTION_CLEAR := &"qvoxelier_clear"
 # ----------------------------------------------------------------------------
 
 func _ready() -> void:
+	_sess = QVoxelierSession.new()
+	# 会话不认识渲染器：唤醒回调与三条对外信号都在这里接上（见 QVoxelierSession 类文档）。
+	_sess.render_update = model.request_update
+	_sess.hint.connect(hud.flash)
+	_sess.changed.connect(_on_session_changed)
+	_sess.dirty_changed.connect(_on_dirty_changed)
 	_bind_actions()
 	_build_dialogs()
 	_build_ui()
@@ -212,13 +221,13 @@ func _build_ui() -> void:
 
 	_tree_section = QVoxelierTreeSection.new()
 	_tree_section.node_selected.connect(_on_tree_selected)
-	_tree_section.model_add_requested.connect(_add_model)
-	_tree_section.group_add_requested.connect(_add_group)
-	_tree_section.node_remove_requested.connect(_remove_node)
-	_tree_section.node_visible_changed.connect(_set_node_visible)
-	_tree_section.node_locked_changed.connect(_set_node_locked)
-	_tree_section.node_rename_requested.connect(_rename_node)
-	_tree_section.node_move_requested.connect(_move_node)
+	_tree_section.model_add_requested.connect(_sess.add_model)
+	_tree_section.group_add_requested.connect(_sess.add_group)
+	_tree_section.node_remove_requested.connect(_sess.remove_node)
+	_tree_section.node_visible_changed.connect(_sess.set_node_visible)
+	_tree_section.node_locked_changed.connect(_sess.set_node_locked)
+	_tree_section.node_rename_requested.connect(_sess.rename_node)
+	_tree_section.node_move_requested.connect(_sess.move_node)
 	_tree_section.modifier_add_requested.connect(_add_modifier)
 	_tree_section.modifier_remove_requested.connect(_remove_modifier)
 	_tree_section.modifier_enabled_changed.connect(_set_modifier_enabled)
@@ -255,56 +264,41 @@ func _build_ui() -> void:
 
 
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
+## 尺寸与色板是视口的 @export（场景里可调），故由这里喂给会话 —— 会话只认"多大、哪些色"。
 func new_model(grid := Vector3i.ZERO) -> void:
-	var g: Vector3i = grid if grid.x > 0 and grid.y > 0 and grid.z > 0 else grid_size
-	var w := QVoxelWorld.create_empty()
-	for c in default_palette:
-		w.add_material(c)
-	_install(w, w.create_model("Model", g))
-	project_path = ""
-	_dirty = false
-	_update_title()
+	_sess.new_model(grid, grid_size, default_palette)
 
 
 ## 装配：世界 + 待编辑对象 → 会话 / 渲染器 / 地板 / 状态栏。
 ## **新建与打开共用这一条路径** —— 两套初始化迟早会分叉出"新建能画、打开画不了"这类怪病。
+##
+## 【分工】世界与"每对象一条会话"由 `_sess` 装配（应用层）；这里只做显示层那一半。
+## 刷新时机也不在这里：会话装完会发 `changed`，_on_session_changed 会把显示层重挂一遍。
 func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
-	world = w
-	# 每个对象一条展示会话：活动那条随后由 _activate 选出，其余只喂渲染器
-	# （理由见 _sessions 的注释 —— 多对象世界才能"看见全部、只编辑一个"）。
-	_sessions.clear()
-	for o in w.all_models():
-		if o != null:
-			_sessions[o.model_id] = QVoxelEditSession.create_for(o, w)
-	for s in _sessions.values():
-		(s as QVoxelEditSession).request_render_update = model.request_update
-		(s as QVoxelEditSession).history.changed.connect(_on_history_changed)
+	# 这几个是"手势 / 工具"级的界面状态，换世界即作废。
 	_material_id = 1
 	_stroke = false
 	_erase = false
 	_eyedropper = false
 	_color_cmd = null
 
-	model.voxel_scale = w.voxel_size()
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
-	grid_floor.voxel_scale = model.voxel_scale
-	_selection_box.voxel_scale = model.voxel_scale
 	# 调色板取**世界的材质表**（而不是 default_palette）：打开别人做的 256 色工程时也照显，
 	# 否则界面上会是一排与工程无关的颜色。
 	_palette.set_palette(_material_colors(w))
 
-	session = null
-	_activate(obj.model_id, false)
-	hud.session = session
+	_sess.install(w, obj)
 	frame_view()
-	_refresh_hud()
 
 
 ## 切换"当前编辑对象"。三条入口共用这一条路径：对象列表点击、新建对象、打开工程挑初始对象。
 ##
-## 【为什么不重建会话】非活动对象也早就有一条展示会话（见 _install），切换只是把 model.data
-## 换成新活动对象那份、并把它的渲染器交回给 model。于是撤销栈按对象各自保留 ——
-## 切走再切回来，那一个对象的撤销历史还在，不会因为"看了一眼别的对象"就清空。
+## 【为什么不重建会话】非活动对象也早就有一条展示会话（见 _install），切换只是把活动引用换掉。
+## 于是撤销栈按对象各自保留 —— 切走再切回来，那一个对象的撤销历史还在，
+## 不会因为"看了一眼别的对象"就清空。
+##
+## 【为什么刷新的活不在这里】换活动对象是"数据变了"的一种，由会话发 `changed` 带出刷新；
+## 这里只处理两件**界面专有**的事：停播放预览、收掉正按着的那一笔。
 func _activate(model_id: int, flash := true) -> void:
 	if world == null:
 		return
@@ -318,20 +312,52 @@ func _activate(model_id: int, flash := true) -> void:
 	if _stroke and session != null:
 		session.cancel()
 		_stroke = false
-	session = _sessions.get(model_id)
-	if session == null:
+	if not _sess.activate(model_id):
 		return
-	model.data = session.data
-	model.voxel_scale = world.voxel_size()
-	# 地面网格框按**输出盒**画：链里一旦有重排（镜像 / 旋转 / 平铺），它就与手绘种子不同尺寸。
-	grid_floor.grid_size = session.output_size()
-	grid_floor.voxel_scale = model.voxel_scale
-	_selection_box.voxel_scale = model.voxel_scale
-	hud.session = session
-	_rebuild_view()
-	_refresh_hud()
 	if flash:
 		hud.flash("已切换到 %s" % o.node_name)
+
+
+## 把"当前活动对象"附着到显示层：model 渲染活动对象，地板与线框跟着它的输出盒。
+##
+## 【为什么每条都要比一遍再赋】本函数在**每次数据变化**时都会被调到（改名、拖层级也算），
+## 而这几个 setter 都是**无条件重建网格**的：`VoxelRenderer.data` 会断开重连信号、清掉 LOD
+## 并排一次更新；`QVoxelGridFloor` 的 grid_size / voxel_scale 会重建整块地板网格。
+## 不比一遍就等于"改个名字重铺一次场景"，白白吃掉一帧。
+## （线框的 voxel_scale 只改 scale、HUD 的 session 是普通字段，都无需比。）
+func _attach_active() -> void:
+	if session == null or world == null:
+		return
+	var vs := world.voxel_size()
+	if model.data != session.data:
+		model.data = session.data
+	if not is_equal_approx(model.voxel_scale, vs):
+		model.voxel_scale = vs
+	# 地面网格框按**输出盒**画：链里一旦有重排（镜像 / 旋转 / 平铺），它就与手绘种子不同尺寸。
+	var out := session.output_size()
+	if grid_floor.grid_size != out:
+		grid_floor.grid_size = out
+	if not is_equal_approx(grid_floor.voxel_scale, model.voxel_scale):
+		grid_floor.voxel_scale = model.voxel_scale
+	_selection_box.voxel_scale = model.voxel_scale
+	hud.session = session
+
+
+## 会话数据变了 → 重挂显示层 + 重建视口 + 一处刷新界面。
+##
+## 【为什么这是唯一的刷新出口】改世界、切对象、撤销 / 重做、改材质、改帧都会发这条信号。
+## 分散写"谁该刷什么"迟早漏一处 —— 表现为"按钮高亮着、提示还写着上一个工具"。
+## `_refresh_hud` 自己会带上右列三组（见 _refresh_panels），故这里不再逐个面板点名。
+func _on_session_changed() -> void:
+	_attach_active()
+	_rebuild_view()
+	_refresh_hud()
+	# 参数组要重看一眼数据：撤销 / 重做会把数据退回到"面板控件被建出来时"之外的状态。
+	_rebind_inspector()
+
+
+func _on_dirty_changed(_on: bool) -> void:
+	_update_title()
 
 
 ## 让"世界的全部对象"都显示出来：活动对象用 model，其余各挂一个渲染器到 _extra_root。
@@ -362,11 +388,12 @@ func _rebuild_view() -> void:
 			old.queue_free()
 		_display.erase(id)
 
-	for id in _sessions:
-		var o := world.find_model(id)
-		if o == null or id == active_id:
+	# 非活动对象：一条会话一个渲染器。数据源是那条会话自己的 QVoxelSource（它自己会重建），
+	# 唤醒回调改指向**它对应的渲染器** —— 会话不认识渲染器，只认这个 Callable（见类文档）。
+	for s in _sess.all_sessions():
+		var id: int = s.object.model_id
+		if world.find_model(id) == null or id == active_id:
 			continue
-		var shown := _node_visible(o)
 		var r: VoxelRenderer = _display.get(id)
 		if r == null or not is_instance_valid(r):
 			r = VoxelRenderer.new()
@@ -374,12 +401,12 @@ func _rebuild_view() -> void:
 			_extra_root.add_child(r)
 			r.voxel_scale = model.voxel_scale
 			r.visibility_mode = VoxelRenderer.VisibilityMode.FULL
-			r.data = (_sessions[id] as QVoxelEditSession).data
-			(_sessions[id] as QVoxelEditSession).request_render_update = r.request_update
+			r.data = s.data
+			s.request_render_update = r.request_update
 			_display[id] = r
-		r.visible = shown
+		r.visible = _sess.node_visible(s.object)
 
-	model.visible = _node_visible(session.object)
+	model.visible = _sess.node_visible(session.object)
 
 
 ## 取景：把"有东西可落笔"的范围落进画面（新建 / 打开 / Home 键）。
@@ -540,7 +567,7 @@ func _erasing() -> bool:
 # ----------------------------------------------------------------------------
 
 func _begin_stroke(screen: Vector2, erase: bool) -> void:
-	if _node_locked(session.object):
+	if _sess.node_locked(session.object):
 		hud.flash("这一层已锁定：先在右侧「图层」里解锁")
 		return
 	# 预览中落笔 = 这一笔会画在"播放头正好停住的那一帧"上，而播放头还在动 —— 用户根本
@@ -808,14 +835,14 @@ func _end_prop_edit(_target: Object, _prop: StringName) -> void:
 ## 【为什么统一走这里，而不是各入口各刷一遍】"链变了"的入口有四个（挂 / 删 / 旁通 / 改参数），
 ## 它们要刷的东西一模一样；分散写迟早漏一处 —— 表现为"撤销回去树上是旧名字"。
 func _chain_changed() -> void:
-	_mark_dirty()
+	_sess.mark_dirty()
 	_rebuild_view()
 	_refresh_hud()
 	_tree_section.refresh()
 	_rebind_inspector()
 
 
-## 让参数组重看一眼数据。**两个出口共用**：链变了（_chain_changed）与撤销 / 重做（_on_history_changed）
+## 让参数组重看一眼数据。**两个出口共用**：链变了（_chain_changed）与撤销 / 重做（_on_session_changed）
 ## —— 两者都会把数据改到"面板控件被建出来时"之外的状态：
 ##   · 选中算子会顺带校正合成方式（见 QVoxelVolumeModifier.detail），而下拉框还停在旧值；
 ##   · 撤销一次改参数会把值退回去，滑条却还停在拖完的位置；
@@ -854,7 +881,7 @@ func _node_output_size(node: QVoxelNode) -> Vector3i:
 	if node == null:
 		return Vector3i.ZERO
 	if node.is_model():
-		var s: QVoxelEditSession = _sessions.get((node as QVoxelModel).model_id)
+		var s := _sess.session_for((node as QVoxelModel).model_id)
 		return s.output_size() if s != null else (node as QVoxelModel).grid_size
 	# ctx 的 grid_size 随便给 —— 组求值第一件事就是把它换成"子树并集包围盒"（见 QVoxelEvalEngine）。
 	var ctx := QVoxelEvalContext.make(Vector3i.ONE, 0)
@@ -952,7 +979,7 @@ func _open_now(path: String) -> void:
 
 ## 有未落盘改动时先问一句；没有就直接执行 —— 绝大多数情况下不该多出这一步。
 func _confirm_discard(action: String, cb: Callable) -> void:
-	if not _dirty:
+	if not _sess.dirty:
 		cb.call()
 		return
 	_confirm.dialog_text = "当前工程有未保存的改动。\n继续「%s」会丢掉这些改动。" % action
@@ -975,13 +1002,13 @@ func open_project(path: String) -> bool:
 	if loaded == null:
 		hud.flash("打不开这个工程（缺失或已损坏）：%s" % path.get_file())
 		return false
-	var obj := _pick_editable(loaded)
+	var obj := QVoxelierSession.pick_editable(loaded)
 	if obj == null:
 		hud.flash("这个工程里没有可编辑的对象：%s" % path.get_file())
 		return false
 	_install(loaded, obj)
-	project_path = path
-	_dirty = false
+	_sess.project_path = path
+	_sess.clear_dirty()
 	_update_title()
 	var total := loaded.all_models().size()
 	hud.flash("已打开 %s%s" % [path.get_file(),
@@ -989,29 +1016,15 @@ func open_project(path: String) -> bool:
 	return true
 
 
-## 一期只编辑一个模型：优先挑"有内容"的那个（打开样例时第一眼就有东西看），都没有就取第一个。
-## 多模型 / 组是二期的事（DESIGN §4.5）。
-func _pick_editable(w: QVoxelWorld) -> QVoxelModel:
-	var first: QVoxelModel = null
-	for o in w.all_models():
-		if o == null:
-			continue
-		if first == null:
-			first = o
-		if not o.is_empty():
-			return o
-	return first
-
-
 ## 保存到当前工程文件；还没存过盘就转"另存为"。
 func save_project() -> void:
 	if _stroke:
 		session.cancel()
 		_stroke = false
-	if project_path.is_empty():
+	if _sess.project_path.is_empty():
 		save_project_as()
 		return
-	_write_project(project_path)
+	_write_project(_sess.project_path)
 
 
 ## 另存为：弹文件对话框，默认文件名取世界名。
@@ -1025,8 +1038,8 @@ func _write_project(path: String) -> bool:
 	if err != OK:
 		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
 		return false
-	project_path = path
-	_dirty = false
+	_sess.project_path = path
+	_sess.clear_dirty()
 	_update_title()
 	hud.flash("已保存 %s" % path.get_file())
 	return true
@@ -1164,38 +1177,19 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 
 
 func _update_title() -> void:
-	var name := project_path.get_file() if not project_path.is_empty() else "未命名"
-	_toolbar.set_project(name, _dirty)
+	var name := _sess.project_path.get_file() if not _sess.project_path.is_empty() else "未命名"
+	_toolbar.set_project(name, _sess.dirty)
 	if not Engine.is_editor_hint() and get_window() != null:
-		get_window().title = "QVoxelier — %s%s" % [name, " *" if _dirty else ""]
+		get_window().title = "QVoxelier — %s%s" % [name, " *" if _sess.dirty else ""]
 
 
 # ----------------------------------------------------------------------------
 # 状态栏
 # ----------------------------------------------------------------------------
 
-## 撤销栈一动就说明内容变了 —— 脏标记与状态栏由同一个信号驱动，不会各说各话。
-func _on_history_changed() -> void:
-	_mark_dirty()
-	_refresh_hud()
-	# 撤销 / 重做一条"图层可见性"命令时，node 回了去、视口还没换 —— 故这里补一次重建。
-	# _rebuild_view 复用既有渲染器（见其注释），单对象场景等于空操作，不心疼。
-	_rebuild_view()
-	# 链上的重排条目（旋转 / 镜像 / 平铺）会改分辨率，撤销 / 重做同样会把它改回去 ——
-	# 地面网格框是按输出盒画的，不同步就出现"模型缩回去了、外框还停在放大后的尺寸"。
-	# 放在这里是因为本函数是**一切历史变化的唯一出口**（push / undo / redo 都发 changed）。
-	if session != null:
-		grid_floor.grid_size = session.output_size()
-	# 参数组同样要重看一眼：撤销 / 重做会把数据退回到面板之外的状态（见 _rebind_inspector）。
-	_rebind_inspector()
-
-
-## 标记"有未落盘改动"。对象增删这类不入撤销栈的操作也走这里，保证标题星号不漏。
-func _mark_dirty() -> void:
-	if _dirty:
-		return
-	_dirty = true
-	_update_title()
+# 撤销 / 重做、结构增删、材质与帧的改动都不在这里逐个接管了：它们统一由应用会话发 `changed`，
+# 由 _on_session_changed 一处处理（其中"链上重排改了分辨率 → 地面网格框要跟着换"那条，
+# 落在 _attach_active 里，因为它是"按输出盒画地板"这件事的一部分）。
 
 
 ## 界面刷新的**唯一入口**：一处改状态（工具 / 笔刷 / 材质 / 撤销栈），所有界面跟着走。
@@ -1392,140 +1386,8 @@ func _owns_modifier(node: QVoxelNode, m: QVoxelModifier) -> bool:
 	return node != null and m != null and node.modifiers.has(m)
 
 
-## 新建模型：尺寸随当前模型（"再做一个同样大小的"是最常见的心智模型）。
-## 新模型会挂一条展示会话并**直接切过去** —— 建了却停在旧的上面，用户会以为没建成。
-func _add_model(parent: QVoxelGroup) -> void:
-	if world == null or session == null:
-		return
-	# 尺寸随**当前输出盒**（= 屏幕上看到的那个大小），而不是手绘种子的尺寸：
-	# 当前模型若挂了平铺，照抄种子尺寸会做出一个明显更小的"同样大小"的模型。
-	var o := world.create_model("", session.output_size(), parent)
-	_sessions[o.model_id] = QVoxelEditSession.create_for(o, world)
-	(_sessions[o.model_id] as QVoxelEditSession).request_render_update = model.request_update
-	(_sessions[o.model_id] as QVoxelEditSession).history.changed.connect(_on_history_changed)
-	_mark_dirty()
-	_activate(o.model_id)
-
-
-## 新建组。组没有内容，故只标脏 + 刷新（不切换编辑对象）。
-func _add_group(parent: QVoxelGroup) -> void:
-	if world == null:
-		return
-	world.create_group("Group", parent)
-	_mark_dirty()
-	_tree_section.refresh()
-	hud.flash("已新建组")
-
-
-## 删除节点（连同子树）。
-##
-## 【为什么删组不先拆散】"删掉这个组"在用户心里就是"这一坨不要了"；想留内容就先把它拖出来。
-## 拆散是另一个动作，混进来会让"删除"变得不可预期。
-##
-## 【为什么不入撤销栈】结构增删与体素编辑是两类东西：后者才是高频、真正需要逐笔回退的手势。
-func _remove_node(node: QVoxelNode) -> void:
-	if world == null or node == null:
-		return
-	# 至少留一个模型：世界空了就无物可编。
-	if node.is_model() and world.all_models().size() <= 1:
-		hud.flash("至少要留一个模型")
-		return
-	var gone: Array[QVoxelModel] = []
-	for n in world.all_nodes():
-		if n.is_model() and _is_under(node, n):
-			gone.append(n as QVoxelModel)
-	for m in gone:
-		var s: QVoxelEditSession = _sessions.get(m.model_id)
-		if s != null and s.history.changed.is_connected(_on_history_changed):
-			s.history.changed.disconnect(_on_history_changed)
-		_sessions.erase(m.model_id)
-	var was_active := session != null and gone.has(session.object)
-	world.remove_node(node)
-	_mark_dirty()
-	if was_active:
-		session = null
-		var rest := world.all_models()
-		if not rest.is_empty():
-			_activate(rest[0].model_id, false)
-			hud.flash("已删除当前模型，切到 %s" % rest[0].display_name())
-		return
-	_rebuild_view()
-	_refresh_hud()
-	_tree_section.refresh()
-	hud.flash("已删除 %s" % node.display_name())
-
-
-## node 是否在 root 的子树里（含 root 自己）。
-func _is_under(root: QVoxelNode, node: QVoxelNode) -> bool:
-	if root == node:
-		return true
-	if not root.is_group():
-		return false
-	for c in (root as QVoxelGroup).child_nodes:
-		if c != null and _is_under(c, node):
-			return true
-	return false
-
-
-## 沿树往上看：任何一层隐藏都算数（可见性**沿树继承**）。
-func _node_visible(node: QVoxelNode) -> bool:
-	var n := node
-	while n != null:
-		if not n.visible:
-			return false
-		n = world.find_parent(n)
-	return true
-
-
-## 沿树往上看：任何一层锁定都算数（锁定**沿树继承**）。
-func _node_locked(node: QVoxelNode) -> bool:
-	var n := node
-	while n != null:
-		if n.locked:
-			return true
-		n = world.find_parent(n)
-	return false
-
-
-func _set_node_visible(node: QVoxelNode, on: bool) -> void:
-	_write_node_field(node, &"visible", on, "可见性")
-
-
-func _set_node_locked(node: QVoxelNode, on: bool) -> void:
-	_write_node_field(node, &"locked", on, "锁定")
-
-
-func _rename_node(node: QVoxelNode, new_name: String) -> void:
-	_write_node_field(node, &"node_name", new_name, "重命名")
-
-
-## 拖拽落位：把节点挂到新父下的 index 位置。
-##
-## 【为什么"移动"和"插入"是同一个操作】树上没有"移动"这回事 —— 移动就是"从原父摘下来、
-## 挂到新父"。QVoxelWorld.attach_node 直接拒绝"把组挂进自己的子树"（那会造出环）。
-func _move_node(node: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
-	if world == null or node == null:
-		return
-	if not world.attach_node(node, parent, index):
-		hud.flash("不能把组放进它自己里面")
-		return
-	_mark_dirty()
-	_tree_section.refresh()
-
-
-## 改节点的一个字段并记成一条可撤销命令。
-##
-## 【为什么改完要 _rebuild_view】可见性不只是个数据字段 —— 它决定该节点渲染与否；
-## 而这条命令的 undo() 只写属性、不会替我们叫醒视口，故两条路径都得手动重建。
-func _write_node_field(node: QVoxelNode, prop: StringName, value: Variant, label: String) -> void:
-	if world == null or node == null or session == null:
-		return
-	var cmd := QVoxelPropertyCommand.apply(node, prop, value, node, label)
-	if cmd != null:
-		session.history.push(cmd)
-	_rebuild_view()
-	_refresh_hud()
-	_tree_section.refresh()
+# 层级的增 / 删 / 移 / 改字段全在 QVoxelierSession（应用能力），本层只做两件事：
+# 把面板信号接过去（见 _build_ui），以及"点了树上的行就切过去编辑"这一个界面动作。
 
 
 
@@ -1563,8 +1425,8 @@ func _sync_material(id: int) -> void:
 	if world == null or id <= 0 or id >= world.materials.size():
 		return
 	var mat := VoxelMaterial.from_mate(world.materials[id], id)
-	for s in _sessions.values():
-		(s as QVoxelEditSession).data.add_material(mat)
+	for s in _sess.all_sessions():
+		s.data.add_material(mat)
 	_rerender_materials()
 
 
@@ -1664,8 +1526,8 @@ func _export_palette(path: String) -> void:
 func _push_palette_into_all() -> void:
 	if world == null:
 		return
-	for s in _sessions.values():
-		var data: QVoxelSource = (s as QVoxelEditSession).data
+	for s in _sess.all_sessions():
+		var data: QVoxelSource = s.data
 		for id in range(1, world.materials.size()):
 			data.add_material(VoxelMaterial.from_mate(world.materials[id], id))
 	_rerender_materials()
@@ -1690,7 +1552,7 @@ func _select_frame(index: int) -> void:
 
 
 ## 帧结构 / 元数据改动后的统一收尾：重算 + 刷界面（标脏由撤销栈的 changed 信号带出来，
-## 见 _on_history_changed —— 帧操作都入栈，故不在这里重复标）。
+## 见 QVoxelierSession._on_history_changed —— 帧操作都入栈，故不在这里重复标）。
 func _after_frame_change() -> void:
 	if session == null:
 		return
