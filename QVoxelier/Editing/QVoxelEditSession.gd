@@ -34,6 +34,19 @@ var history := QVoxelUndoStack.new()
 ## 当前工具（模式 / 笔刷尺寸由界面直接设）。
 var tool := QVoxelBrushTool.new()
 
+## 选区（体素坐标的整数盒）。空 = 没框任何东西。
+##
+## 【为什么选区住在会话里，而不是视口里】它是"编辑操作的输入"（复制 / 剪切 / 清空 / 移动都要
+## 读它），而编辑的唯一入口是会话。放视口里的话，每个用到它的操作都得先把视口的盒子翻译一遍，
+## 而无头测试也就没法构造"先框一块再复制"这类场景。
+var selection := QVoxelSelection.new()
+
+## 剪贴板（复制 / 剪切 / 粘贴的载体）。跨对象、跨会话共用一份 —— 这就是"复制到另一个模型"。
+var clipboard := QVoxelClipboard.new()
+
+## 选区变化（视口据此重画线框）。粘贴 / 移动会连带改选区，故它不是一个只被"框选"触发的信号。
+signal selection_changed
+
 ## 数据层被改动后唤醒渲染器的回调（一般传 `renderer.request_update`）。
 ## 为空 = 只作废数据源、不通知渲染（无头测试与"离线批量改数据"都走这条路）。
 var request_render_update := Callable()
@@ -109,6 +122,10 @@ func begin(pick: QVoxelBrushTool.Pick) -> bool:
 		cancel()
 	if not tool.begin(pick):
 		return false
+	if tool.selection_mode():
+		# 选区手势不写任何格，故不建命令：产物是"框住了哪一块"，由 release() 从
+		# tool.gesture_corners() 取走。省下这条命令，也让 release() 的封口逻辑对选区完全无感。
+		return true
 	# 落笔的帧在**按下时**定死并写进命令：手势期间即使用户切帧（面板不会，但接口允许），
 	# 这一笔的撤销也仍然只回滚它真正改过的那一帧（见 QVoxelEditCommand.frame）。
 	_cmd = QVoxelEditCommand.begin(object, edit_frame())
@@ -154,6 +171,17 @@ func drag(pick: QVoxelBrushTool.Pick) -> int:
 
 ## 松手：封口成一条命令并入栈。返回"是否真的改了东西" —— false 时这一笔不占撤销单位。
 func release() -> bool:
+	if tool.selection_mode():
+		# 角点必须在 tool.release() **之前**取：那一下会把手势状态清掉（选区手势的产物为空，
+		# 调用它只为收摊）。
+		var corners := tool.gesture_corners()
+		var mode := tool.mode
+		tool.release()
+		if corners.size() < 2:
+			return false
+		if mode == QVoxelBrushTool.Mode.SELECT:
+			return _set_box_selection(corners[0], corners[1])
+		return move_selection(corners[1] - corners[0]) > 0
 	if _cmd == null:
 		return false
 	var cmd := _cmd
@@ -191,8 +219,100 @@ func hover(pick: QVoxelBrushTool.Pick) -> Array[Vector3i]:
 	return tool.hover(pick)
 
 
+## 是否有进行中的手势。选区手势没有命令，故不能只看 _cmd —— 否则"正在框选"会被报成空闲。
 func active() -> bool:
-	return _cmd != null
+	return _cmd != null or tool.active()
+
+
+# ----------------------------------------------------------------------------
+# 选区与剪贴板（一次性操作，不走手势协议）
+# ----------------------------------------------------------------------------
+
+## 全选（"整个网格"）。已有相同选区时返回 false，让调用方不必自己比对。
+func select_all() -> bool:
+	if object == null:
+		return false
+	var all := QVoxelSelection.all(object.grid_size)
+	if all.equals(selection):
+		return false
+	_set_selection(all)
+	return true
+
+
+## 清掉选区（只清"框"，不碰数据）。
+func deselect() -> bool:
+	if selection.is_empty():
+		return false
+	_set_selection(QVoxelSelection.new())
+	return true
+
+
+## 复制选区里的体素到剪贴板。返回复制的体素数（0 = 选区里什么都没有）。
+func copy_selection() -> int:
+	if selection.is_empty():
+		return 0
+	clipboard = QVoxelClipboard.capture(selection, _material_at)
+	return clipboard.count()
+
+
+## 剪切 = 复制 + 挖空。剪贴板内容与"复制"完全一致（故用户可以连剪两处再贴两次）。
+func cut_selection() -> int:
+	if object == null or selection.is_empty():
+		return 0
+	var clip := QVoxelClipboard.capture(selection, _material_at)
+	if clip.is_empty():
+		return 0
+	clipboard = clip
+	_clear_clip(clip, selection.lo(), "剪切")
+	return clip.count()
+
+
+## 挖空选区（保留剪贴板不动）。
+func clear_selection() -> int:
+	if object == null or selection.is_empty():
+		return 0
+	var clip := QVoxelClipboard.capture(selection, _material_at)
+	if clip.is_empty():
+		return 0
+	return _clear_clip(clip, selection.lo(), "清空")
+
+
+## 把剪贴板贴到 `at`（下角对齐）。返回真正落下的格数。
+##
+## 【为什么贴完要把选区落到新片上】用户粘完几乎必然接着要移动它 / 再复制它。选区留在原处
+## 的话，下一次"移动"会作用在源位置上，而用户刚看到的是新位置 —— 那是个必然踩的坑。
+func paste(at: Vector3i) -> int:
+	if object == null or clipboard.is_empty():
+		return 0
+	var target := clipboard.target(at)
+	var clip := clipboard
+	var n := _commit_once(func(cmd: QVoxelEditCommand) -> void:
+		_stamp_into(cmd, clip, target.lo()), "粘贴")
+	if n <= 0:
+		return 0
+	_set_selection(target)
+	return n
+
+
+## 把选区里的体素整体搬到 +delta。
+##
+## 【源与目标必须写进同一条命令】否则"挖空"与"落位"会变成两次独立撤销 —— 用户按一次 Ctrl+Z
+## 只回滚一半，剩下的半截留在画面上，看着像撤销坏了。
+func move_selection(delta: Vector3i) -> int:
+	if object == null or selection.is_empty() or delta == Vector3i.ZERO:
+		return 0
+	var clip := QVoxelClipboard.capture(selection, _material_at)
+	if clip.is_empty():
+		return 0
+	var target := selection.offset_by(delta)
+	var from := selection.lo()
+	var n := _commit_once(func(cmd: QVoxelEditCommand) -> void:
+		_clear_into(cmd, clip, from)
+		_stamp_into(cmd, clip, target.lo()), "移动")
+	if n <= 0:
+		return 0
+	_set_selection(target)
+	return n
 
 
 # ----------------------------------------------------------------------------
@@ -308,6 +428,79 @@ func _apply(cmd: QVoxelEditCommand, cells: Array[Vector3i], mat: int) -> int:
 		# notify=false：唤醒交给本类的回调，刷新时机只有一处（渲染器另有每帧限流）。
 		data.set_voxels(cells, mat, false)
 	return written
+
+
+## 显示层的材质读取（0 = 空）。选区与剪贴板的取数**一律走显示层**：用户框的是他看得见的东西，
+## 而看得见的那份含修改器链的产出（手绘种子里没有程序化生成的那部分）。
+func _material_at(p: Vector3i) -> int:
+	if data == null:
+		return 0
+	return maxi(data.get_voxel(p), 0)
+
+
+func _set_selection(sel: QVoxelSelection) -> void:
+	selection = sel
+	selection_changed.emit()
+
+
+## 把一次框选落到选区上。**夹进网格** —— 框到网格外的部分不是"选中了虚空"，是没框到。
+func _set_box_selection(a: Vector3i, b: Vector3i) -> bool:
+	if object == null:
+		return false
+	var top := object.grid_size - Vector3i.ONE
+	var lo := Vector3i(mini(a.x, b.x), mini(a.y, b.y), mini(a.z, b.z)).clamp(Vector3i.ZERO, top)
+	var hi := Vector3i(maxi(a.x, b.x), maxi(a.y, b.y), maxi(a.z, b.z)).clamp(Vector3i.ZERO, top)
+	if hi.x < lo.x or hi.y < lo.y or hi.z < lo.z:
+		return false
+	var sel := QVoxelSelection.from_corners(lo, hi)
+	if sel.equals(selection):
+		return false
+	_set_selection(sel)
+	return true
+
+
+## 一次性写入的公共流程：建命令 → 由 `build` 填格 → 封口 → 入栈 → 刷新。返回真正改动的格数。
+##
+## 【为什么不复用 begin/drag/release】那套协议的前提是"产物要等手势结束才知道"。复制 / 剪切 /
+## 粘贴 / 清空 / 移动的产物在按下按钮的那一刻就定了 —— 硬套手势只会凭空多出一段手势状态，
+## 还要向用户解释"为什么按了复制之后必须松手才算数"。
+func _commit_once(build: Callable, label: String) -> int:
+	if object == null:
+		return 0
+	var cmd := QVoxelEditCommand.begin(object, edit_frame())
+	cmd.label_override = label
+	build.call(cmd)
+	if not cmd.commit():
+		return 0
+	history.push(cmd)
+	_refresh(cmd.dirty_bounds())
+	return cmd.changed_voxels()
+
+
+## 把剪贴板里的格从 `origin` 处挖空（写 0）。只遍历**有内容的格**，空选区不产生任何写入。
+func _clear_into(cmd: QVoxelEditCommand, clip: QVoxelClipboard, origin: Vector3i) -> void:
+	var cells := clip.cells()
+	for i in cells.size():
+		var p := origin + cells[i]
+		cmd.set_voxel(p.x, p.y, p.z, 0)
+
+
+## 把剪贴板里的格贴到 `at`，每格带上它原来的材质。
+##
+## 【为什么不能借 _apply】`_apply` 给整批格同一个材质，而剪贴板里每格材质不同 ——
+## 那正是"复制"要保住的东西。
+func _stamp_into(cmd: QVoxelEditCommand, clip: QVoxelClipboard, at: Vector3i) -> void:
+	var cells := clip.cells()
+	var mats := clip.materials()
+	for i in cells.size():
+		var p := at + cells[i]
+		cmd.set_voxel(p.x, p.y, p.z, mats[i])
+
+
+## 挖空一份剪贴板（剪切 / 清空共用）。选区与 clip 同源，故原点直接取选区下角。
+func _clear_clip(clip: QVoxelClipboard, origin: Vector3i, label: String) -> int:
+	return _commit_once(func(cmd: QVoxelEditCommand) -> void:
+		_clear_into(cmd, clip, origin), label)
 
 
 func _wake_renderer() -> void:

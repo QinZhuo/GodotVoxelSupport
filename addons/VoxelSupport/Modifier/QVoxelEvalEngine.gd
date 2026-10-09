@@ -17,8 +17,7 @@ extends RefCounted
 ## 改链尾一条就只重算那一条之后的部分，链首那条最贵的程序化生成完全不重跑（§5.2 / §4.2 第 3 条）。
 ##
 ## 【域与降级】链的域只能单向降级（见 QVoxelDomain）。引擎负责在需要的位置**自动插入**降级：
-##   ① FIELD → VOXEL：把折叠好的 Sdf 树交给 PcgSdfGenerator.rasterize_field() 采样成体积；
-##   ② VOXEL → MESH：网格算子（预留，见 mesh_ops）。
+##   FIELD → VOXEL：把折叠好的 Sdf 树交给 PcgSdfGenerator.rasterize_field() 采样成体积。
 ## 用户看不见降级点，只说"我在这儿加个侵蚀"，引擎自己知道那意味着"先把前面的场光栅化"。
 ##
 ## 【手绘体素（blocks）在链里的位置】blocks 是链的**输入/种子**，不是链的一环（见 QVoxelModel）。
@@ -226,11 +225,7 @@ static func _run_chain(res: QVoxelEvalResult, obj: QVoxelModel, base: PackedInt3
 		var m := mods[i]
 		var op := m.op()
 		var d := m.domain()
-		if d == QVoxelDomain.Kind.MESH:
-			# MESH 段（预留）：只登记算子，不改累积状态 —— 但检查点照样拍，好让
-			# "states[i] 与第 i 条一一对应"这条不变量对任何链都成立（_resume_index 依赖它）
-			res.mesh_ops.append(op)
-		elif d == QVoxelDomain.Kind.FIELD:
+		if d == QVoxelDomain.Kind.FIELD:
 			# degraded 之后还有 FIELD = 域回升（非法链）：什么都不改，报错交给 validate_chain
 			if not degraded:
 				field = _fold_sdf(field, op as Sdf, m.combine, m.blend)
@@ -489,8 +484,6 @@ static func _resume_index(previous: QVoxelEvalResult, ctx: QVoxelEvalContext, ke
 	while k < n:
 		if previous.step_signatures[k] != sigs[k]:
 			break
-		if mods[k].domain() == QVoxelDomain.Kind.MESH:
-			break  # MESH 段是预留（无实现、无检查点），故不越过它续跑
 		k += 1
 	return k
 

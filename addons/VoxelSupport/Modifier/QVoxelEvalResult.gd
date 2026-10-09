@@ -17,7 +17,7 @@ extends RefCounted
 ## 【它是"链的终点"，不是"产出数据的形态"】引擎总是把结果物化成一块体积（本项目的消费者
 ## 都在体素侧），故这里报 FIELD 时 volume 同样有值 —— 报 FIELD 的含义是
 ## "这条链还能继续追加场域算子"。编辑器据此决定菜单里哪些算子可加、哪些要灰掉；
-## "我拿到的到底是什么"由 `field` / `volume` / `mesh_ops` 哪个非空直接回答。
+## "我拿到的到底是什么"由 `field` / `volume` 哪个非空直接回答。
 ## 需要"链停在哪"而不想求值一遍时，用 QVoxelDomain.final_domain(obj.modifiers)。
 var domain: QVoxelDomain.Kind = QVoxelDomain.Kind.VOXEL
 
@@ -45,9 +45,6 @@ var field: Sdf = null
 ## 产出体积（布局 = PcgModel.index_of）。手绘体素为空、链也没产出时才为空数组。
 ## 只要链里有 FIELD 或 VOXEL 算子就会有值（降级点由引擎自动插入，见 QVoxelEvalEngine）。
 var volume := PackedInt32Array()
-
-## MESH 段算子（当前无实现，预留：倒角 / 减面 / 平滑）。
-var mesh_ops: Array = []
 
 ## 输入签名（见 QVoxelEvalEngine.input_signature）。同签名 + 同 epoch = 结果可复用。
 var input_signature := ""

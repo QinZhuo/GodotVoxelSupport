@@ -83,17 +83,12 @@ func set_op(value: Resource) -> bool
 
 ## 该条目所属的求值域。由 kind 唯一决定 —— kind 比域更细：体素域分"自足产出"与"就地改写"。
 func domain() -> QVoxelDomain.Kind:
-	match kind():
-		KIND_SDF:
-			return QVoxelDomain.Kind.FIELD
-		KIND_MODEL, KIND_VOLUME, KIND_TRANSFORM:
-			return QVoxelDomain.Kind.VOXEL
-	return QVoxelDomain.Kind.MESH
+	return QVoxelDomain.Kind.FIELD if kind() == KIND_SDF else QVoxelDomain.Kind.VOXEL
 
 
 ## 是否为"自足产出"（源）。就地改写 / 重排型不是源：核被调用时已拿到输入，引擎无法在
 ## 事后替它做布尔，所以它的合成方式只能是「替换」（见 QVoxelDomain.validate_chain）。
-## 白名单而非"非 volume 即源"：将来加网格算子时不会意外把它算成源。
+## 白名单而非"非 volume 即源"：将来加新算子时不会意外把它算成源。
 func is_source() -> bool:
 	return kind() == KIND_SDF or kind() == KIND_MODEL
 

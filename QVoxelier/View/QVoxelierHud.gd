@@ -26,6 +26,8 @@ var _hint: Label
 var _cursor: Label
 var _brush: Label
 var _material: Label
+var _model: Label
+var _selection: Label
 var _history: Label
 var _toast: Label
 var _legend: PanelContainer
@@ -56,6 +58,11 @@ func refresh() -> void:
 	_brush.text = "笔刷 %d" % t.brush_size if t.supports_brush_size() else "笔刷 —"
 	_brush.add_theme_color_override("font_color",
 			QVoxelUi.TEXT if t.supports_brush_size() else QVoxelUi.TEXT_FAINT)
+	_model.text = _model_readout()
+	_selection.text = _selection_readout()
+	# 有选区时点亮：选区是"下次复制 / 移动会作用在哪"的答案，用户必须一眼能看出它在不在。
+	_selection.add_theme_color_override("font_color",
+			QVoxelUi.ACCENT if not session.selection.is_empty() else QVoxelUi.TEXT_FAINT)
 	var undo := session.history.undo_label()
 	var redo := session.history.redo_label()
 	# 可重做条数 = 命令流里游标之后的那一段（游标把一条命令流切成"已生效 / 可重做"两半）。
@@ -76,6 +83,35 @@ func set_cursor(cell: Vector3i) -> void:
 ## 签名不匹配直接编译不过。
 func set_material_id(material_id: int) -> void:
 	_material.text = "材质 %d" % material_id
+
+
+## 模型读数：**链作用后**的盒尺寸 + 屏幕上真实存在的体素数。
+##
+## 【为什么两个数都取自显示层，而不是手绘种子】用户看的是求值输出：链里有镜像 / 平铺时
+## `object.grid_size` 与看到的盒尺寸不同；程序化修改器产出的体素也不在手绘种子里。
+## 报种子数会变成"屏幕上有 8000 个体素，读数说 0"。
+##
+## 【为什么尺寸报 output_size 而体素数报 data】尺寸是**声明**（盒多大），体素数是**事实**
+## （现在有多少个非空格）。前者由链的结构决定，后者只有数据层知道 —— 两处各取权威来源。
+func _model_readout() -> String:
+	if session == null or session.object == null:
+		return "模型 —"
+	var g := session.output_size()
+	var n := session.data.get_voxel_count() if session.data != null else 0
+	return "模型 %d×%d×%d · %d 体素" % [g.x, g.y, g.z, n]
+
+
+## 选区 / 剪贴板读数。
+##
+## 【为什么剪贴板空时不显示】"剪贴板空"常驻在状态栏上是纯噪音 —— 它只在用户按过复制之后
+## 才有意义。空选区则必须显示（"无选区"），因为它是"按了复制却没反应"的唯一解释。
+func _selection_readout() -> String:
+	if session == null:
+		return "无选区"
+	var s := session.selection.describe()
+	if not session.clipboard.is_empty():
+		s += " · " + session.clipboard.describe()
+	return s
 
 
 ## 一行短提示（2.5 秒后自动消失）：越界、无可撤销、模式已切换这类"刚发生的事"。
@@ -126,12 +162,17 @@ func _build_status() -> void:
 	row.add_child(_hint)
 	# 隔一条线：左边是"你现在能做什么"（提示），右边是"你现在是什么状态"（读数）。
 	row.add_child(QVoxelUi.vdivider(QVoxelUi.status_height() / 2))
+	# 选区排在读数区最前：它是"接下来那一下会作用在哪"，比"光标在哪一格"更需要一眼看到。
+	_selection = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_FAINT)
+	row.add_child(_selection)
 	_cursor = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_cursor)
 	_brush = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_brush)
 	_material = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_material)
+	_model = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
+	row.add_child(_model)
 	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。
 	row.add_child(QVoxelUi.vdivider(QVoxelUi.status_height() / 2))
 	_history = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
@@ -181,9 +222,11 @@ const _LEGEND := [
 	["鼠标 + 键盘", [
 		"左键拖动 画 · 右键 擦（或开左侧「擦除」）",
 		"中键拖动 转视角 · Shift+中键 平移 · 滚轮 缩放 · Home 取景",
-		"V/F/B/L/C 切工具 · E 擦除 · [ ] 改笔刷 · 1..8 选材质",
-		"Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消这一笔",
+		"V/F/B/L/C 切工具 · T 选择 · M 移动 · E 擦除 · [ ] 改笔刷 · 1..8 选材质",
+		"Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消这一笔 / 退掉选区",
+		"Ctrl+A 全选 · Ctrl+C/X/V 复制 / 剪切 / 粘贴 · Del 清空选区",
 		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开（.qvx 可直接拖进窗口）",
+		"Ctrl+E 导出 .vox（MagicaVoxel 等外部工具可打开）",
 	]],
 	["触摸屏", [
 		"单指拖动 画 · 用左侧「擦除」开关代替右键",

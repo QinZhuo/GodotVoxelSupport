@@ -65,6 +65,13 @@ var _modifier_owner: QVoxelNode
 ## 非活动对象的渲染节点容器：多对象世界里只有"当前对象"用 model，其余挂在这里。
 ## （见 _rebuild_view —— 切换活动对象只换 model.data，其余渲染器复用。）
 var _extra_root: Node3D
+
+## 选区线框（挂在 model 下，与体素网格同一套坐标换算）。看不见的选区等于没有选区 ——
+## 用户按了"复制"却不知道复制了什么，故它随 _refresh_hud 一起重画。
+var _selection_box: QVoxelSelectionBox
+## 光标处最近一次的落笔点。粘贴要落在"用户正指着的地方"，而光标只在移动事件里出现 ——
+## 于是把它记下来，按钮 / 快捷键按下时才有得用（没有它，粘贴只能贴回原地）。
+var _hover_pick: QVoxelBrushTool.Pick
 ## 每个对象一条展示会话：model_id → QVoxelEditSession。**活动那条就是 session**。
 ## 非活动会话不接鼠标，只负责把它那份 VoxelData 喂给对应渲染器。
 var _sessions: Dictionary = {}
@@ -105,6 +112,7 @@ var _frame_dur_cmd: QVoxelPropertyCommand
 
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
+var _export_dialog: FileDialog
 var _palette_import_dialog: FileDialog
 var _palette_export_dialog: FileDialog
 
@@ -115,6 +123,12 @@ const ACTION_BRUSH_DOWN := &"qvoxelier_brush_down"
 const ACTION_SAVE := &"qvoxelier_save"
 const ACTION_SAVE_AS := &"qvoxelier_save_as"
 const ACTION_OPEN := &"qvoxelier_open"
+const ACTION_EXPORT := &"qvoxelier_export"
+const ACTION_SELECT_ALL := &"qvoxelier_select_all"
+const ACTION_COPY := &"qvoxelier_copy"
+const ACTION_CUT := &"qvoxelier_cut"
+const ACTION_PASTE := &"qvoxelier_paste"
+const ACTION_CLEAR := &"qvoxelier_clear"
 
 
 # ----------------------------------------------------------------------------
@@ -143,6 +157,7 @@ func _build_ui() -> void:
 	_toolbar.open_requested.connect(request_open)
 	_toolbar.save_requested.connect(save_project)
 	_toolbar.save_as_requested.connect(save_project_as)
+	_toolbar.export_requested.connect(export_vox)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
 	_toolbar.frame_requested.connect(func(): frame_view(); hud.flash("已取景"))
@@ -158,6 +173,8 @@ func _build_ui() -> void:
 	_tools.brush_scale_requested.connect(_scale_brush)
 	_tools.erase_toggled.connect(func(on: bool): hud.flash("擦除模式：%s" % ("开" if on else "关")))
 	_tools.symmetry_toggled.connect(_set_symmetry_axis)
+	# 选区面板的五个按钮共用一条信号（带动作 id）—— 面板不必为每个动作各开一条连接。
+	_tools.selection_action.connect(_on_selection_action)
 
 	_palette = QVoxelierPalette.new()
 	_palette.name = "Palette"
@@ -230,6 +247,12 @@ func _build_ui() -> void:
 	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
 	_dock.add_section(_timeline_section)
 
+	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
+	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
+	_selection_box = QVoxelSelectionBox.new()
+	_selection_box.name = "Selection"
+	model.add_child(_selection_box)
+
 
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
 func new_model(grid := Vector3i.ZERO) -> void:
@@ -265,6 +288,7 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 	model.voxel_scale = w.voxel_size()
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	grid_floor.voxel_scale = model.voxel_scale
+	_selection_box.voxel_scale = model.voxel_scale
 	# 调色板取**世界的材质表**（而不是 default_palette）：打开别人做的 256 色工程时也照显，
 	# 否则界面上会是一排与工程无关的颜色。
 	_palette.set_palette(_material_colors(w))
@@ -302,6 +326,7 @@ func _activate(model_id: int, flash := true) -> void:
 	# 地面网格框按**输出盒**画：链里一旦有重排（镜像 / 旋转 / 平铺），它就与手绘种子不同尺寸。
 	grid_floor.grid_size = session.output_size()
 	grid_floor.voxel_scale = model.voxel_scale
+	_selection_box.voxel_scale = model.voxel_scale
 	hud.session = session
 	_rebuild_view()
 	_refresh_hud()
@@ -447,6 +472,18 @@ func _on_key(e: InputEventKey) -> void:
 		save_project()
 	elif _pressed(e, ACTION_OPEN):
 		request_open()
+	elif _pressed(e, ACTION_EXPORT):
+		export_vox()
+	elif _pressed(e, ACTION_SELECT_ALL):
+		_select_all()
+	elif _pressed(e, ACTION_COPY):
+		_copy_selection()
+	elif _pressed(e, ACTION_CUT):
+		_cut_selection()
+	elif _pressed(e, ACTION_PASTE):
+		_paste_clipboard()
+	elif _pressed(e, ACTION_CLEAR):
+		_clear_selection()
 	elif _pressed(e, ACTION_BRUSH_UP):
 		_step_brush(1)
 	elif _pressed(e, ACTION_BRUSH_DOWN):
@@ -521,10 +558,19 @@ func _end_stroke() -> void:
 	if not _stroke:
 		return
 	_stroke = false
+	var picking := session.tool.selection_mode()
 	if not session.release():
-		hud.flash("这一笔没有改动（网格外 / 同色覆盖 / 没东西可擦）")
+		hud.flash(_no_change_hint(picking))
 	_erase = false
 	_refresh_hud()
+
+
+## "这一笔没改动"的原因随工具而不同：画笔是网格外 / 同色覆盖，选区是"没框到网格内的格子"。
+## 提示词照抄画笔那套会让用户以为选区坏了（其实只是原地没动）。
+func _no_change_hint(picking: bool) -> String:
+	if picking:
+		return "选区没变（没框到网格内的格子）"
+	return "这一笔没有改动（网格外 / 同色覆盖 / 没东西可擦）"
 
 
 func _cancel() -> void:
@@ -533,6 +579,12 @@ func _cancel() -> void:
 		_stroke = false
 		_erase = false
 		hud.flash("已取消这一笔")
+		return
+	# 不在手势中时，Esc 退掉选区：选区是"模式之外的临时状态"，用户需要一个不碰数据的退出键。
+	# 退选区**不记撤销** —— 它没改任何体素，进撤销栈只会让 Ctrl+Z 多按一次才回到真正的改动。
+	if session != null and session.deselect():
+		hud.flash("已取消选区")
+		_refresh_hud()
 	elif hud.legend_visible():
 		# 说明浮层挡着视口，Esc 应先关它 —— 与"Esc 先关最上面那层"的普遍习惯一致。
 		hud.set_legend_visible(false)
@@ -984,6 +1036,42 @@ func _on_save_path_selected(path: String) -> void:
 	_write_project(QVoxelProject.ensure_extension(path))
 
 
+## 导出成 `.vox`：**与"保存"是两件事**，别合并。保存（.qvx）留的是"下次还能接着编辑"的全套
+## （修改器链 / 材质 PBR / 相机 / 帧）；导出只留**烘出来的体素与调色板**，给别的工具用。
+## 两者的产物与失败原因都不同，所以按钮、对话框、提示都分开。
+##
+## 【为什么不要求"先存盘"】导出读的是内存里的世界（`VoxAsset.from_world` 现算），与工程文件
+## 在哪、存没存过都无关 —— 一个刚新建、从没存过的世界照样能导出。少一条前置条件就少一处
+## "为什么按钮是灰的"的疑问。
+func export_vox() -> void:
+	_export_dialog.current_file = "%s.vox" % world.world_name()
+	_export_dialog.popup_centered_ratio(0.7)
+
+
+func _on_export_path_selected(path: String) -> void:
+	var asset := VoxAsset.from_world(world)
+	# 【为什么先查尺寸、再落盘】MagicaVoxel 的模型上限是 256³（`VoxAccess.MODEL_LIMIT`），超了
+	# 它**不报错、直接截断**；而 XYZI 的坐标是单字节，写口会把 256 以外的体素丢掉。那对用户就是
+	# "导出成功了，可我的模型少了一层壳"。宁可在这里明确拒绝，也不产出悄悄少一块的文件。
+	var box := Vector3i.ZERO
+	for model in asset.models:
+		box.x = maxi(box.x, int(model.size.x))
+		box.y = maxi(box.y, int(model.size.y))
+		box.z = maxi(box.z, int(model.size.z))
+	if maxi(maxi(box.x, box.y), box.z) > VoxAccess.MODEL_LIMIT:
+		hud.flash("未导出：世界盒 %d×%d×%d 超过 MagicaVoxel 的 %d 上限（超出部分会被它截掉）"
+				% [box.x, box.y, box.z, VoxAccess.MODEL_LIMIT])
+		return
+	var err := VoxAccess.Save(path, asset)
+	if err != OK:
+		hud.flash("导出失败（错误码 %d）：%s" % [err, path.get_file()])
+		return
+	var voxels := 0
+	for model in asset.models:
+		voxels += model.voxels.size()
+	hud.flash("已导出 %s（%d 体素）" % [path.get_file(), voxels])
+
+
 ## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
 ## 工程文件本就该落在用户自己的目录里（导出打包后 `res://` 更是读不到的）。
 func _build_dialogs() -> void:
@@ -991,10 +1079,15 @@ func _build_dialogs() -> void:
 	_open_dialog.file_selected.connect(open_project)
 	_save_dialog = _make_dialog(FileDialog.FILE_MODE_SAVE_FILE)
 	_save_dialog.file_selected.connect(_on_save_path_selected)
+	_export_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.vox",
+			"MagicaVoxel 体素", "导出 .vox")
+	_export_dialog.file_selected.connect(_on_export_path_selected)
 
-	_palette_import_dialog = _make_palette_dialog(FileDialog.FILE_MODE_OPEN_FILE)
+	_palette_import_dialog = _make_format_dialog(FileDialog.FILE_MODE_OPEN_FILE, "*.png",
+			"调色板 PNG（256×1）", "导入调色板")
 	_palette_import_dialog.file_selected.connect(_import_palette)
-	_palette_export_dialog = _make_palette_dialog(FileDialog.FILE_MODE_SAVE_FILE)
+	_palette_export_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.png",
+			"调色板 PNG（256×1）", "导出调色板")
 	_palette_export_dialog.file_selected.connect(_export_palette)
 
 	_confirm = ConfirmationDialog.new()
@@ -1026,16 +1119,20 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	return d
 
 
-## 调色板用的文件对话框。**PNG 而不是自定义格式**：MagicaVoxel 的调色板就是 256×1 的 PNG，
-## 沿用它就能与其它体素工具互相倒色板，也不用再定义一套只有本程序认得的格式。
-func _make_palette_dialog(mode: FileDialog.FileMode) -> FileDialog:
+## 调色板 / 导出用的文件对话框：**"筛什么、叫什么"是唯一随用途变的东西**，其余（系统文件
+## 系统、主题、首路径、按钮文案的中文化）三种用途一字不差 —— 复制成三份，迟早有一份忘了改。
+##
+## 为什么调色板走 PNG 而不是自定义格式：MagicaVoxel 的调色板就是 256×1 的 PNG，沿用它就能与
+## 其它体素工具互相倒色板，也不用再定义一套只有本程序认得的格式。
+func _make_format_dialog(mode: FileDialog.FileMode, filter: String, filter_name: String,
+		title: String) -> FileDialog:
 	var d := FileDialog.new()
 	d.file_mode = mode
 	d.access = FileDialog.ACCESS_FILESYSTEM
 	d.current_dir = _default_dir()
 	d.theme = QVoxelUi.theme()
-	d.add_filter("*.png", "调色板 PNG（256×1）")
-	d.title = "导入调色板" if mode == FileDialog.FILE_MODE_OPEN_FILE else "导出调色板"
+	d.add_filter(filter, filter_name)
+	d.title = title
 	d.ok_button_text = "打开" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存"
 	d.cancel_button_text = "取消"
 	d.use_native_dialog = false
@@ -1115,6 +1212,11 @@ func _refresh_hud() -> void:
 	# 对称是 App 级设置 → 每次刷新都把它压回当前对象的笔刷，并回写三个按钮的按下态。
 	_apply_symmetry()
 	_tools.set_symmetry(_symmetry)
+	# 选区 / 剪贴板：线框、按钮可用性、状态栏读数三处都跟着同一份数据走（一处刷新，三处跟上）。
+	_tools.set_selection_state(not session.selection.is_empty(), not session.clipboard.is_empty())
+	_selection_box.set_box(session.selection.lo(), session.selection.size())
+	# 状态栏里的选区 / 剪贴板读数由 HUD 自己按会话算（见 QVoxelierHud._selection_readout），
+	# 不在这里再喂一份字符串 —— 同一事实两处拼装迟早会各说各话。
 	_palette.set_current(_material_id)
 	hud.set_material_id(_material_id)
 	_refresh_panels()
@@ -1145,6 +1247,7 @@ func _material_colors(w: QVoxelWorld) -> Array[Color]:
 ## 屏幕坐标由调用方传入（鼠标事件里有，不必再问视口要一次 —— 内嵌视口时那个答案还是错的）。
 func _refresh_cursor(screen: Vector2) -> void:
 	var pick := _pick_at(screen)
+	_hover_pick = pick if pick.valid() else null
 	if not pick.valid():
 		hud.set_cursor(Vector3i.MIN)
 		return
@@ -1165,6 +1268,106 @@ func _bind_actions() -> void:
 	InputTool.register_action(ACTION_SAVE, [InputTool.key_event(KEY_S, true)])
 	InputTool.register_action(ACTION_SAVE_AS, [InputTool.key_event(KEY_S, true, true)])
 	InputTool.register_action(ACTION_OPEN, [InputTool.key_event(KEY_O, true)])
+	InputTool.register_action(ACTION_EXPORT, [InputTool.key_event(KEY_E, true)])
+	# 选区 / 剪贴板：与"存 / 开"同属"带修饰键的操作"，故一律走 InputTool 注册的动作，
+	# 而不是在 _on_key 里手写 ctrl 判断 —— 键位因此能在项目设置里改。
+	InputTool.register_action(ACTION_SELECT_ALL, [InputTool.key_event(KEY_A, true)])
+	InputTool.register_action(ACTION_COPY, [InputTool.key_event(KEY_C, true)])
+	InputTool.register_action(ACTION_CUT, [InputTool.key_event(KEY_X, true)])
+	InputTool.register_action(ACTION_PASTE, [InputTool.key_event(KEY_V, true)])
+	InputTool.register_action(ACTION_CLEAR, [
+		InputTool.key_event(KEY_DELETE), InputTool.key_event(KEY_BACKSPACE),
+	])
+
+
+# ----------------------------------------------------------------------------
+# 选区与剪贴板
+# ----------------------------------------------------------------------------
+# 本段只做三件事：把界面意图翻成会话调用、把结果说给用户听（flash）、刷新界面。
+# 选区盒与剪贴板**住在会话里**（它们是"编辑操作的输入"），本类不持有第二份真相 ——
+# 否则线框、按钮可用性、状态栏读数会各读各的，迟早对不上。
+
+## 选区面板的五个按钮共用这一条入口（面板发 id，这里分派）：加动作时只改这一处。
+func _on_selection_action(action: StringName) -> void:
+	match action:
+		&"all":
+			_select_all()
+		&"copy":
+			_copy_selection()
+		&"cut":
+			_cut_selection()
+		&"paste":
+			_paste_clipboard()
+		&"clear":
+			_clear_selection()
+
+
+func _select_all() -> void:
+	if session == null or session.object == null:
+		return
+	if session.select_all():
+		hud.flash("已全选：%s" % session.selection.describe())
+		_refresh_hud()
+	else:
+		hud.flash("已经是全选了")
+
+
+func _copy_selection() -> void:
+	if session == null:
+		return
+	if session.selection.is_empty():
+		hud.flash("先框一块再复制")
+		return
+	_report_edit(session.copy_selection(), "已复制 %d 个体素", "选区里没有体素")
+
+
+func _cut_selection() -> void:
+	if session == null:
+		return
+	if session.selection.is_empty():
+		hud.flash("先框一块再剪切")
+		return
+	_report_edit(session.cut_selection(), "已剪切 %d 个体素", "选区里没有体素")
+
+
+func _clear_selection() -> void:
+	if session == null:
+		return
+	if session.selection.is_empty():
+		hud.flash("先框一块再清空")
+		return
+	_report_edit(session.clear_selection(), "已清空 %d 个体素", "选区里没有体素")
+
+
+## 粘贴落点：优先落在**光标指着的地方**（所见即所得），光标不在网格上时退回选区下角，
+## 再不行才退回原点。
+##
+## 【为什么不一律贴回选区原处】"复制一块、贴到另一处"是这套功能的全部意义；贴回原处等于什么
+## 都没做，用户还得再按一次「移动」把它挪走 —— 那一步本来可以省掉。
+func _paste_clipboard() -> void:
+	if session == null:
+		return
+	if session.clipboard.is_empty():
+		hud.flash("剪贴板是空的：先框一块并复制")
+		return
+	var at := Vector3i.ZERO
+	if _hover_pick != null:
+		at = _hover_pick.place
+	elif not session.selection.is_empty():
+		at = session.selection.lo()
+	_report_edit(session.paste(at), "已粘贴 %d 个体素", "这儿贴不下（越界或已被同色占满）")
+
+
+## 一次性选区操作的统一收尾：报数 + 刷新界面。五个动作的差异只在"调谁、说什么"。
+##
+## 【为什么成功与失败要分开措辞】"已复制 0 个体素"读起来像成功了但没东西，用户会以为复制坏了；
+## 明说"选区里没有体素"才能把他指向真正的原因（框了一片空气）。
+func _report_edit(n: int, ok_text: String, empty_text: String) -> void:
+	if n > 0:
+		hud.flash(ok_text % n)
+	else:
+		hud.flash(empty_text)
+	_refresh_hud()
 
 
 # ----------------------------------------------------------------------------

@@ -47,6 +47,26 @@ static func index_of(x: int, y: int, z: int, grid_size: Vector3i) -> int:
 	return x + y * grid_size.x + z * grid_size.x * grid_size.y
 
 
+## 一维下标 → 三维下标（index_of 的逆）。**布局公式只此一处**：凡是要"反过来扫一遍体积"的
+## 消费方（`.vox` 导出、缩略图、统计）都调它，而不是各自再抄一遍取模 —— 抄错一格不会报错，
+## 只会让导出的模型在某一个轴上整体错位。
+##
+## 越界（负数 / 空盒 / 下标超出体积）返回 Vector3i.ZERO：调用方拿到的是"安全但无意义"的值，
+## 而不是一个会污染下游数据的乱码坐标。
+static func pos_of(index: int, grid_size: Vector3i) -> Vector3i:
+	if index < 0 or grid_size.x <= 0 or grid_size.y <= 0 or grid_size.z <= 0:
+		return Vector3i.ZERO
+	if index >= grid_size.x * grid_size.y * grid_size.z:
+		return Vector3i.ZERO
+	@warning_ignore("integer_division")
+	var x := index % grid_size.x
+	@warning_ignore("integer_division")
+	var y := (index / grid_size.x) % grid_size.y
+	@warning_ignore("integer_division")
+	var z := index / (grid_size.x * grid_size.y)
+	return Vector3i(x, y, z)
+
+
 ## 全空体积（长度已对齐 grid_size）——所有实现的绘制起点。
 static func empty_volume(grid_size: Vector3i) -> PackedInt32Array:
 	var v := PackedInt32Array()

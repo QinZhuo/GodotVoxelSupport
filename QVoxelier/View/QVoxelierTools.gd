@@ -26,6 +26,20 @@ signal brush_scale_requested(up: bool)
 signal erase_toggled(enabled: bool)
 ## 对称轴开关：axis 0 / 1 / 2 = X / Y / Z。
 signal symmetry_toggled(axis: int, on: bool)
+## 选区 / 剪贴板动作请求（值 = [constant SELECT_ACTIONS] 里的 id）。
+signal selection_action(action: StringName)
+
+## 选区面板的动作表（表即配置，与 [QVoxelBrushTool.MODES] 同一套路数）。
+##
+## 【为什么"全选"也在这里】它就是"框选整个网格"的快捷键化 —— 用户不必从一角拖到另一角。
+## 五条动作共用一条信号（带 id），面板因此不必为每个动作各开一个信号与一条连接。
+const SELECT_ACTIONS := [
+	{"id": &"all", "text": "全选", "tip": "选中整个网格（Ctrl+A）"},
+	{"id": &"copy", "text": "复制", "tip": "复制选区里的体素（Ctrl+C）"},
+	{"id": &"cut", "text": "剪切", "tip": "剪下选区里的体素（Ctrl+X）"},
+	{"id": &"paste", "text": "粘贴", "tip": "把剪贴板贴到光标处（Ctrl+V）"},
+	{"id": &"clear", "text": "清空", "tip": "挖掉选区里的体素（Delete）"},
+]
 
 ## 工具坞**面板**的目标宽度取自 [method QVoxelUi.dock_width]（随密度档变）。
 ## 它不是硬约束：见下面 resized 的处理 —— 它只是"最窄别窄过这个"。
@@ -40,6 +54,7 @@ var _brush_dbl: Button
 var _brush_title: Label
 var _erase: Button
 var _sym: Array[Button] = []
+var _select_buttons := {}   # id → Button
 var _size := 1
 
 
@@ -104,9 +119,35 @@ func _build() -> void:
 		_sym.append(b)
 		sym_row.add_child(b)
 
+	col.add_child(QVoxelUi.divider())
+	col.add_child(QVoxelUi.heading("选区"))
+	col.add_child(_build_selection_rows())
+
 
 func _on_sym_toggled(on: bool, axis: int) -> void:
 	symmetry_toggled.emit(axis, on)
+
+
+## 选区动作按钮。排成两行（3 + 2）而不是一行 5 个：工具坞宽度固定，五个按钮挤一行时
+## 中文字会被压到"复…"这种读不出来的程度。
+func _build_selection_rows() -> VBoxContainer:
+	var box := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
+	var rows := [QVoxelUi.hbox(QVoxelUi.SPACE_XS), QVoxelUi.hbox(QVoxelUi.SPACE_XS)]
+	for r in rows:
+		box.add_child(r)
+	for i in SELECT_ACTIONS.size():
+		var row: Dictionary = SELECT_ACTIONS[i]
+		var b := QVoxelUi.button(row.text, row.tip)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		# bind 而不是闭包捕获 i：三个按钮各连各的 id，不会一起变成最后一个（同对称轴的处理）。
+		b.pressed.connect(_on_select_action.bind(row.id))
+		_select_buttons[row.id] = b
+		rows[0 if i < 3 else 1].add_child(b)
+	return box
+
+
+func _on_select_action(id: StringName) -> void:
+	selection_action.emit(id)
 
 
 ## 笔刷尺寸步进：减 / 当前值 / 加。数值用 Label 而不是按钮 —— 它无可点击的语义，
@@ -181,6 +222,22 @@ func set_symmetry(mask: Vector3i) -> void:
 	for i in 3:
 		if i < _sym.size():
 			_sym[i].set_pressed_no_signal(flags[i] != 0)
+
+
+## 回写选区 / 剪贴板的可用性。**置灰而不是隐藏** —— 位置固定，界面不跳（同笔刷行的原则）。
+## "全选"恒可用：它不依赖任何既有状态。
+func set_selection_state(has_selection: bool, has_clipboard: bool) -> void:
+	_set_action_enabled(&"all", true)
+	_set_action_enabled(&"copy", has_selection)
+	_set_action_enabled(&"cut", has_selection)
+	_set_action_enabled(&"paste", has_clipboard)
+	_set_action_enabled(&"clear", has_selection)
+
+
+func _set_action_enabled(id: StringName, on: bool) -> void:
+	var b: Button = _select_buttons.get(id)
+	if b != null:
+		b.disabled = not on
 
 
 func erase_mode() -> bool:

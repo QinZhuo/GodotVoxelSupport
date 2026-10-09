@@ -2,7 +2,7 @@
 class_name QVoxelDomain
 extends RefCounted
 
-## 求值域 —— 一条链上只允许存在三种数据形态，且只能单向降级。
+## 求值域 —— 一条链上只允许存在两种数据形态，且只能单向降级。
 ##
 ## 【为什么需要"域"这个概念】Blender 的修改器只有一个域（Mesh），因为网格拓扑可以随便变。
 ## 体素不行：体素被钉死在格点上，一旦光栅化就再也回不到连续距离场。若假装只有"一种数据"，
@@ -11,11 +11,13 @@ extends RefCounted
 ##
 ## 把域显式化之后：
 ##   ① 每个算子只声明"我吃哪个域、吐哪个域"，引擎据此校验链的合法性；
-##   ② 降级点（FIELD→VOXEL 的光栅化、VOXEL→MESH 的网格化）由引擎自动插入，用户看不见
-##      —— 这就是"简单易用"的来源：用户只说"我要在这儿加个侵蚀"，引擎自己知道那意味着
-##      "先把前面的 SDF 光栅化，再侵蚀"；
-##   ③ 反向降级被明确禁止，于是"体素能不能做重拓扑"这类争论有了确定性答案：不能，
-##      要重拓扑就把链降到 MESH 域用网格算子。
+##   ② 降级点（FIELD→VOXEL 的光栅化）由引擎自动插入，用户看不见 —— 这就是"简单易用"的
+##      来源：用户只说"我要在这儿加个侵蚀"，引擎自己知道那意味着"先把前面的 SDF 光栅化，
+##      再侵蚀"；
+##   ③ 反向降级被明确禁止，于是"体素能不能做重拓扑"这类争论有了确定性答案：不能。
+##      体素格点本身就是这种表现形式的最小可改元素（同像素画的像素），倒角 / 减面 / 平滑
+##      是对**网格拓扑**的改写，不属于体素的表达范围 —— 想让体素"看起来更精致"，办法是
+##      把它画得更细，而不是回头改拓扑。
 ##
 ## 【与 Blender / Houdini 的差异（刻意的）】Blender 用单域换简单，Houdini 用全 DAG 换
 ## 表达力。本设计取第三条路：线性链 + 每个修改器可挂子图（见 DESIGN.md「线性链承载 DAG」）。
@@ -25,15 +27,14 @@ extends RefCounted
 ## "这个条目属于哪个域""它是不是源"都是类型问题；本类只保留"这样排合不合法"的规则。
 
 
-## 三种数据形态。数值大小即"降级程度"，链上的域序号必须非递减。
+## 两种数据形态。数值大小即"降级程度"，链上的域序号必须非递减。
 enum Kind {
 	FIELD, ## 连续距离场：p → Vector2(有符号距离, 材质ID)。分辨率无关。
-	VOXEL, ## 离散体素体积：有界 grid 上的 PackedInt32Array（材质ID，0 = 空）。
-	MESH,  ## 多边形网格：Mesh.ARRAY_* 组成的 arrays。
+	VOXEL, ## 离散体素体积：有界 grid 上的 PackedInt32Array（材质ID，0 = 空）。链的终点。
 }
 
 ## 域的中文名（UI 徽标与报错文案用）。
-const KIND_NAMES: PackedStringArray = ["连续", "体素", "网格"]
+const KIND_NAMES: PackedStringArray = ["连续", "体素"]
 
 ## 合成方式 —— 第 i 个修改器"如何并进已累积的结果"。
 ## 于是线性链天然表达了一棵左结合二叉树，用户不需要理解树。
@@ -69,7 +70,6 @@ const CAP_SAMPLE := &"sample"          ## FIELD：逐点采样
 const CAP_BUILD := &"build"            ## VOXEL 源：整体产出
 const CAP_APPLY := &"apply"            ## VOXEL 就地改写（不得改盒尺寸）
 const CAP_RESHAPE := &"reshape"        ## VOXEL 重排（**可改盒尺寸**）
-const CAP_APPLY_MESH := &"apply_mesh"  ## MESH（预留）
 
 
 ## 校验一条修改器链，返回**结构化**错误列表（空 = 合法）。
@@ -105,10 +105,6 @@ static func chain_errors(modifiers: Array) -> Array:
 				errs.append({"index": i,
 						"message": "修改器 %d（%s）在体素域，体素没有「%s」这种连续语义"
 						% [i, m.display_name(), COMBINE_NAMES[m.combine]]})
-		if d == Kind.MESH and m.combine != Combine.REPLACE:
-			errs.append({"index": i,
-					"message": "修改器 %d（%s）在网格域，网格算子只能「替换」结果"
-					% [i, m.display_name()]})
 		prev = maxi(prev, d)
 	return errs
 

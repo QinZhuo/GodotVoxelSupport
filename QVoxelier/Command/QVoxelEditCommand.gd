@@ -52,6 +52,10 @@ var dirty_hi := Vector3i.ZERO
 
 var _dirty := false
 
+## 撤销栈里显示的名字（空 = 用默认的"体素编辑"）。粘贴 / 移动 / 剪切这类**一次性**写入
+## 给一个更具体的名字 —— 撤销栈里清一色"体素编辑"时，用户根本认不出哪一条是刚才的粘贴。
+var label_override := ""
+
 
 func _init(obj: QVoxelModel, p_frame: int = -1) -> void:
 	super(&"voxel_edit", -1, [])
@@ -151,6 +155,8 @@ func dirty_bounds() -> Array[Vector3i]:
 
 
 func get_label() -> String:
+	if not label_override.is_empty():
+		return label_override
 	# 动画模型标出帧号：撤销栈里"体素编辑"与"体素编辑（第 3 帧）"是两个不同的东西，
 	# 用户点错了帧要能从历史里看出来（静态模型不标，-1 只是内部表示）。
 	return "体素编辑（第 %d 帧）" % frame if frame >= 0 else "体素编辑"

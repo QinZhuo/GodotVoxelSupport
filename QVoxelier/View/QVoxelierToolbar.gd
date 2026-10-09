@@ -17,6 +17,10 @@ signal new_requested
 signal open_requested
 signal save_requested
 signal save_as_requested
+## 导出成别的工具能读的格式（当前只有 `.vox`）。**与"保存"分开**：保存是"下次还能接着编辑"
+## （.qvx，含修改器链 / 材质 PBR / 相机），导出是"拿去用"（.vox，只剩烘出来的体素与调色板）。
+## 两件事的产物与失败原因都不同，合成一个按钮会让用户在"我到底存的是哪个"上犹豫。
+signal export_requested
 signal undo_requested
 signal redo_requested
 signal frame_requested
@@ -70,6 +74,8 @@ func _build() -> void:
 	row.add_child(_action("保存", "保存工程（Ctrl+S）", func(): save_requested.emit(),
 			QVoxelUi.VARIATION_ACCENT))
 	row.add_child(_action("另存", "另存为新文件（Ctrl+Shift+S）", func(): save_as_requested.emit()))
+	row.add_child(_action("导出", "导出为 MagicaVoxel 的 .vox（其它体素工具都能打开）",
+			func(): export_requested.emit()))
 
 	_project = QVoxelUi.label("未命名", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

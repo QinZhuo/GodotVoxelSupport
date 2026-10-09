@@ -24,6 +24,55 @@ static func from_asset(path: String) -> VoxAsset:
 	return access.voxel if access != null else null
 
 
+## 世界 → `.vox` 资产（"走出去"的出口，与 from_asset 恰成一对进出）。
+##
+## 【为什么整世界合成**一个**模型，而不是"每模型一个 nSHP + 场景图摆放"】
+## QVoxelier 的树是**编辑期**的层级，MagicaVoxel 的多模型场景图是另一套东西：它要求每个模型
+## 自带摆放，而摆放必须抵消 VoxelModel.offset 那套"按尺寸居中"的约定（见 QVoxelAsset 类注释
+## 列出的三处失真）。硬凑出来的结果是"在 MagicaVoxel 里看着对、回到本项目就错位"这类只在
+## 跨工具时才暴露的问题。而用户要的其实是一块**能拿去用的体素** —— 那就直接用框架里已有的
+## 世界级求值（evaluate_world 已把各顶层节点按 origin 合成进一个紧致盒），导出的语义与画面上
+## 看到的一致，且"世界怎么合成"这件事全项目仍然只有一份实现。
+##
+## 【多模型的结构去哪了】并入这一块体积，不保留。`.vox` 里想表达"多个对象"要靠场景图，
+## 而那是另一条语义路径（需 QVoxelier 侧先有"每个模型独立摆放"的概念，当前没有）。
+static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> VoxAsset:
+	var out := VoxAsset.new()
+	# 索引 0 恒为 null 空气占位；1..255 预建并设好 id —— 与 VoxAccess._init 同一套约定，
+	# 这样写出的 RGBA 块与读入的资产在"下标 == 材质ID"上完全对齐。
+	out.materials.resize(256)
+	for i in range(1, 256):
+		var mat := VoxelMaterial.new()
+		mat.id = i
+		out.materials[i] = mat
+	if world == null:
+		return out
+	for i in range(1, mini(256, world.materials.size())):
+		out.materials[i].color = world.material_color(i)
+
+	var res := QVoxelEvalEngine.evaluate_world(world,
+			ctx if ctx != null else QVoxelEvalContext.new())
+	var size := res.grid_size
+	if res.volume.is_empty() or size.x <= 0 or size.y <= 0 or size.z <= 0:
+		return out  # 世界为空（或全被差集挖空）：给一份"只有调色板"的资产，不造 0 尺寸模型
+
+	var model := VoxelModel.new()
+	model.size = Vector3(size)
+	# 【为什么 Z 要平移 size.z - 1】原始坐标（.vox 的体素坐标经 `(x,y,z)→(x,z,-y)` 旋转后的样子）
+	# 其 Z 轴落在 (-size.z, 0]，而世界盒的 z 在 [0, size.z)。平移后既落回合法区间、又**不镜像**
+	# —— 若写成更"对称"的 -z，导出的模型会沿 Z 前后翻转（在 MagicaVoxel 里一眼看不出，
+	# 因为对称的模型翻转后长得一样）。
+	var z_shift := size.z - 1
+	for i in res.volume.size():
+		var material: int = res.volume[i]
+		if material == 0:
+			continue
+		var p := PcgModel.pos_of(i, size)
+		model.voxels[Vector3i(p.x, p.y, p.z - z_shift)] = material
+	out.models.append(model)
+	return out
+
+
 var models: Array[VoxelModel]
 
 var materials: Array[VoxelMaterial]

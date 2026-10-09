@@ -15,6 +15,12 @@ extends RefCounted
 ## 【live 与 span 的区别】体素笔边拖边写（拖拽涂抹是它的语义），盒/线/面/填充松手才写
 ## （盒笔若边拖边写，拖动过程会在画布上留下一串盒子）。这个区分不是细节，它决定了
 ## "产物什么时候交给命令"，所以由 MODES 表显式声明而不是靠子类隐式决定。
+##
+## 【为什么选区 / 移动也在这张表里】它们是**同一次手势的另外两种产物**：按下取锚点、拖动更新
+## 端点、松手交结果 —— 骨架一模一样，只是"结果"不是要写的格子，而是"框住了哪一块"（选择）
+## 或"搬了多远"（移动）。做成两套状态机等于把"按下 / 拖动 / 松手"抄三遍；放进同一张表后，
+## 热键、工具坞按钮、HUD 提示依旧只有一处来源，而**产物分派**（写格子还是改选区）由会话
+## 看 `is_selection_mode()` 一处决定。
 
 enum Mode {
 	VOXEL, ## 体素笔：单格（可加粗），拖拽连续涂抹
@@ -22,6 +28,8 @@ enum Mode {
 	BOX,   ## 盒笔：两个角点之间的实心长方体
 	LINE,  ## 线笔：两个角点之间的直线
 	FILL,  ## 填充：与拾取点连通的同材质整块
+	SELECT, ## 选择：拖出一个选区盒（不写任何格）
+	MOVE,   ## 移动：把选区里的体素搬到拖到的位置
 }
 
 ## 工具表：界面（热键 / 工具栏 / 提示）与行为（live / 笔刷尺寸）的唯一来源。
@@ -36,6 +44,10 @@ const MODES := [
 		"live": false, "brush": true, "hint": "按住拖出直线，松手落笔"},
 	{"mode": Mode.FILL, "id": &"fill", "label": "填充", "hotkey": KEY_C,
 		"live": false, "brush": false, "hint": "替换与拾取点连通的同材质整块"},
+	{"mode": Mode.SELECT, "id": &"select", "label": "选择", "hotkey": KEY_T,
+		"live": false, "brush": false, "hint": "拖出选区盒 · 再按 复制 / 剪切 / 粘贴 / 清空"},
+	{"mode": Mode.MOVE, "id": &"move", "label": "移动", "hotkey": KEY_M,
+		"live": false, "brush": false, "hint": "按住拖动，把选区里的体素搬到新位置"},
 ]
 
 
@@ -114,6 +126,16 @@ func live() -> bool:
 	return info(mode).live
 
 
+## 是否是"选区手势"（选择 / 移动）：它们**不产出要写的格**，产物是选区盒 / 位移，
+## 由会话从 [method gesture_corners] 取。会话据此把产物分派到选区而不是命令。
+static func is_selection_mode(m: Mode) -> bool:
+	return m == Mode.SELECT or m == Mode.MOVE
+
+
+func selection_mode() -> bool:
+	return is_selection_mode(mode)
+
+
 func set_mode(m: Mode) -> void:
 	if mode == m:
 		return
@@ -160,8 +182,14 @@ func drag(pick: Pick) -> Array[Vector3i]:
 
 
 ## 松手：交出这一笔剩余的产物（span 工具在这里才第一次产出）。
+##
+## 选区手势（选择 / 移动）在这里只收摊：它们的产物不是格子，会话会在调用本方法**之前**
+## 用 [method gesture_corners] 取走两个角点（本方法一返回，角点就被 cancel 掉了）。
 func release() -> Array[Vector3i]:
 	if not _active:
+		return []
+	if selection_mode():
+		cancel()
 		return []
 	var cells: Array[Vector3i] = []
 	if live():
@@ -177,10 +205,20 @@ func release() -> Array[Vector3i]:
 ## 悬停预览：不改手势状态，只算"如果现在按下会画出什么"。
 ## 与落笔共用 _stroke 与 _finish —— 所见即所画由构造保证，不靠两处对齐。
 func hover(pick: Pick) -> Array[Vector3i]:
-	if pick == null or not pick.valid():
+	if pick == null or not pick.valid() or selection_mode():
 		return []
 	var a := _anchor_of(pick)
 	return _finish(_stroke(a, a, pick), pick)
+
+
+## 当前手势的两个角点（锚点 → 当前端点）。选区手势据此造选区盒 / 位移；不在手势中返回空。
+##
+## 【为什么返回值而不是 Box】选择只要"框了哪一块"，移动只要"搬了多远"（= 两端点之差）。
+## 两者都能从这两个点推出来，于是工具不必知道"选区"或"位移"这两个概念 —— 它只管手势。
+func gesture_corners() -> Array[Vector3i]:
+	if not _active or _anchor == Vector3i.MIN or _current == Vector3i.MIN:
+		return []
+	return [_anchor, _current]
 
 
 func cancel() -> void:
