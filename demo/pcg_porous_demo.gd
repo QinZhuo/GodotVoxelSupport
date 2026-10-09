@@ -80,9 +80,7 @@ func _add_carved(model_name: String, pos: Vector3, holes: Sdf) -> void:
 	field.a = block
 	field.b = holes
 
-	var gen := PcgSdfGenerator.new()
-	gen.field = field
-	var node := PcgSceneKit.add_model(self, model_name, pos, gen, GRID,
+	var node := PcgSceneKit.add_model(self, model_name, pos, QVoxelModel.of_source(field, GRID), GRID,
 			PcgSceneKit.materials(ROCK_MATERIALS), false, voxel_scale)
 	(node as VoxelRenderer).view_distance = view_distance
 

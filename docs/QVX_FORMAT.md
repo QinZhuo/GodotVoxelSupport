@@ -14,7 +14,7 @@
 >
 > 编辑器导入器（`addons/VoxelSupport/Importers/`）**同时识别 `.vox` 与 `.qvx`**，
 > 在导入面板可选四种产物：
-> - `Voxel Data Resource` → `VoxelData` (.res)：运行时体素数据（可破坏 / 动态修改）
+> - `Voxel Data Resource` → `QVoxelSource` (.res)：运行时体素数据（可破坏 / 动态修改）
 > - `Voxel Mesh` → `ArrayMesh` (.mesh)：静态网格
 > - `Voxel MeshLibrary` → `MeshLibrary` (.res)：网格库（by model / node / frame）
 > - `Voxel No Import` → 空 `Resource`：只要原始文件、不做导入

@@ -111,6 +111,25 @@ func is_active() -> bool:
 	return enabled and op() != null
 
 
+## 按算子造出对应子类的条目 —— **装配期入口**：调用方手上往往只有一个算子（程序化产出的
+## 源、用户拖进来的资源），不必先想清楚"它算场还是算体素、是源还是改写"。
+##
+## 【为什么由类型决定，而不是探测方法】域本就是**类型**（见类头：核的类型即域的类型），
+## 于是这里与引擎的分道规则同源，不会出现"装配期按方法名猜、求值期按类型走"两套判据。
+## 【合成方式默认「替换」】本函数服务的是"这条链的产出就是全部内容"的装配场景
+## （程序化模型 = 有界数据层 + 一条源条目）；要与既有体素做布尔，调用方自己设 combine。
+static func of_op(op_: Resource) -> QVoxelModifier:
+	if op_ is Sdf:
+		return QVoxelSdfModifier.of(op_ as Sdf)
+	if op_ is PcgModel:
+		return QVoxelModelModifier.of(op_ as PcgModel)
+	if op_ is PcgTransform:
+		return QVoxelTransformModifier.of(op_ as PcgTransform)
+	if op_ is PcgDetail:
+		return QVoxelVolumeModifier.of(op_ as PcgDetail)
+	return null
+
+
 ## UI 显示名：优先自定义 label，其次算子类名。
 func display_name() -> String:
 	if not label.is_empty():

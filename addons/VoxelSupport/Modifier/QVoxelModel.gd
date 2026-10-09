@@ -39,6 +39,28 @@ func display_name() -> String:
 		return node_name
 	return "Model %d" % model_id
 
+
+## 造一个"以算子为链"的模型 —— **程序化产出的标准装配**：有界盒 + 一条链，模型自身不含手绘体素。
+##
+## 【为什么收成一个入口】"造一个程序化模型"在 demos / 测试里出现几十次。原先每处都要先 new 一个
+## 适配器再接线，而接线漏一步的表现是"画了没反应"而不是报错；收成一句之后那种空间就不存在了。
+##
+## op_ 可以是 PcgModel（整体产出）/ Sdf（逐点采样）/ PcgTransform（重排）/ PcgDetail（体素域改写），
+## 域由 QVoxelModifier.of_op 按类型判定；details 是接在源之后的条目（如风化 / 染色），
+## detail_seed 是它们共用的种子 —— 同一 seed 下"换算子顺序"不会各自掷出不同的骰子，
+## 便于逐算子比对（沿用原 detail_seed 的既定语义）。
+## 某一条要单独的随机时，直接设它的 QVoxelModifier.seed 覆盖。
+static func of_source(op_: Resource, grid_size: Vector3i, details: Array = [],
+		detail_seed := 0) -> QVoxelModel:
+	var m := QVoxelModel.new()
+	m.grid_size = grid_size
+	m.add_op(op_)
+	for item in details:
+		var mod := m.add_op(item)
+		if mod != null:
+			mod.seed = detail_seed
+	return m
+
 ## 分辨率（体素），同时是体积的上限。采纳 MagicaVoxel 的语义：一块对象 = 一块有界体素。
 ##
 ## 【为什么是有界】体素域算子（侵蚀/风化/连通性清理）需要完整邻域，与"惰性按 chunk 生成、

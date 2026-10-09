@@ -252,9 +252,9 @@ func _attach(tree: SceneTree, node: Node3D, cam_pos: Vector3 = Vector3.ZERO) -> 
 	return cam
 
 
-## 一个挂单材质（ID=1）的空 VoxelData。材质表由 add_material 自动补索引 0 空占位。
-func _make_data_with_material() -> VoxelData:
-	var d := VoxelData.new()
+## 一个挂单材质（ID=1）的空 QVoxelSource。材质表由 add_material 自动补索引 0 空占位。
+func _make_data_with_material() -> QVoxelSource:
+	var d := QVoxelSource.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	mat.color = Color(0.6, 0.6, 0.65)
@@ -267,6 +267,6 @@ func _make_data_with_material() -> VoxelData:
 
 ## 在每个指定 chunk 的中心附近各放 1 个体素（保证 has_chunk 为真 ——
 ## 无数据的空 chunk 会被 filter_visible_chunks 直接跳过，不参与网格管理）。
-func _seed_chunks(d: VoxelData, chunk_keys: Array) -> void:
+func _seed_chunks(d: QVoxelSource, chunk_keys: Array) -> void:
 	for ck in chunk_keys:
 		d.set_voxel(Vector3i(ck) * VoxelChunk.CHUNK_SIZE + Vector3i(16, 16, 16), 1)

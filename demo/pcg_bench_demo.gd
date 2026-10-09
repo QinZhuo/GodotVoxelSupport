@@ -31,7 +31,7 @@ extends Node3D
 ##   L = 循环 lod_count（1 → 2 → 3）
 ##   R = 重建当前档位（重新开始计时）
 ##
-## 【注意】程序化有界数据的流式驱动**恒开**（`data.generator != null` 即走 `infinite_layer.process_streaming`，
+## 【注意】程序化有界数据的流式驱动**恒开**（`data.node != null` 即走 `infinite_layer.process_streaming`，
 ## 与 visibility_mode 无关），所以 V 切 FULL/FRUSTUM 不会让远处的模型"免于加载"——
 ## 它改变的是"已加载 chunk 的可见性筛选"，不是"是否加载"。这一点正是本场景想让人亲眼看到。
 
@@ -63,9 +63,9 @@ var _tier := 0
 var _state: RunState = RunState.LOADING
 var _container: Node3D
 var _models: Array[Node3D] = []
-## 所有模型共用的**同一个** PcgModelGenerator：隔离"模型构建"这个变量，
+## 所有模型共用的**同一个** QVoxelModel：隔离"模型构建"这个变量，
 ## 同时让那份稀疏体积只留 1 份（否则 900 份 × 128 KiB）。
-var _generator: PcgModelGenerator
+var _model: QVoxelModel
 var _materials: Array = []
 
 var _camera: Camera3D
@@ -84,7 +84,7 @@ var _prev := {}
 
 func _ready() -> void:
 	_setup_environment()
-	_build_generator()
+	_build_model()
 	_rebuild()
 
 
@@ -118,8 +118,8 @@ func _setup_environment() -> void:
 	layer.add_child(_hud)
 
 
-## 唯一一份 PcgModelGenerator：模型是 4³ 图块拼出的多层遗迹（确定性、快、1 chunk）。
-func _build_generator() -> void:
+## 唯一一份 QVoxelModel：模型是 4³ 图块拼出的多层遗迹（确定性、快、1 chunk）。
+func _build_model() -> void:
 	var tile := Vector3i(4, 4, 4)
 	var open := PcgSceneKit.wfc_tile(tile, ["air", "air", "air", "air", "air", "air"], 2.0, 0,
 			func(_x, _y, _z): return false)
@@ -135,8 +135,7 @@ func _build_generator() -> void:
 	wfc.seed = 20261007
 	wfc.max_retries = 12
 
-	_generator = PcgModelGenerator.new()
-	_generator.model = wfc
+	_model = QVoxelModel.of_source(wfc, GRID)
 	_materials = PcgSceneKit.materials([
 		[1, Color(0.55, 0.45, 0.3), 0.9],
 		[2, Color(0.75, 0.7, 0.6), 0.95],
@@ -170,7 +169,7 @@ func _rebuild() -> void:
 				break
 			var pos := Vector3(-half + c * spacing, 0.0, -half + r * spacing)
 			var node := PcgSceneKit.add_model(_container, "R_%d_%d" % [r, c], pos,
-					_generator, GRID, _materials, false, voxel_scale)
+					_model, GRID, _materials, false, voxel_scale)
 			(node as VoxelRenderer).view_distance = view_distance
 			_models.append(node)
 			built += 1
@@ -307,7 +306,7 @@ func _expected_chunks() -> int:
 func _built_chunks() -> int:
 	var n := 0
 	for m in _models:
-		var d: VoxelData = (m as VoxelRenderer).data
+		var d: QVoxelSource = (m as VoxelRenderer).data
 		if d != null and d.is_chunk_loaded(Vector3i.ZERO):
 			n += 1
 	return n
@@ -325,7 +324,7 @@ func _mesh_nodes() -> int:
 func _snapshot_readers() -> int:
 	var n := 0
 	for m in _models:
-		var d: VoxelData = (m as VoxelRenderer).data
+		var d: QVoxelSource = (m as VoxelRenderer).data
 		if d != null:
 			n += d._snapshot_readers
 	return n

@@ -1,7 +1,7 @@
 extends TestCase
 
-## P3「统一生成流水线」的契约测试：求值引擎（QVoxelEvalEngine）+ 链的 VoxelGenerator 适配器
-## （QVoxelModelGenerator）。
+## P3「统一生成流水线」的契约测试：求值引擎（QVoxelEvalEngine）+ 数据层的逐 chunk 供数
+## （QVoxelSource）。
 ##
 ## 钉死四条硬承诺 —— 每一条都对应一个"以后重构很容易悄悄弄坏"的点：
 ##   ① 手绘体素是链的**输入/种子**，不是链的一环 → 链首那条的 combine 决定它怎么与手绘相合；
@@ -207,7 +207,7 @@ func test_volume_operator_runs_after_sdf_downgrade() -> void:
 	obj.modifiers = _chain([QVoxelSdfModifier.of(_sphere(10.0, 1)), QVoxelVolumeModifier.of(w)])
 	var res := QVoxelEvalEngine.evaluate(obj, QVoxelEvalContext.make(GS, 20261007))
 
-	var bare := PcgSdfGenerator.rasterize_field(_sphere(10.0, 1), GS)
+	var bare := QVoxelEvalEngine.rasterize_field(_sphere(10.0, 1), GS)
 	assert_eq(res.volume.size(), bare.size(), "体积尺寸与纯光栅化一致")
 	var removed := 0
 	var added := 0
@@ -370,19 +370,19 @@ func test_engine_is_stateless_across_objects() -> void:
 
 
 # ----------------------------------------------------------------------------
-# ④ 链的产出逐 chunk 供数（QVoxelModelGenerator）
+# ④ 链的产出逐 chunk 供数（QVoxelSource）
 # ----------------------------------------------------------------------------
 
-func test_generator_slices_match_engine_volume_exactly() -> void:
+func test_source_slices_match_engine_volume_exactly() -> void:
 	var obj := _obj_with_blocks()
 	obj.modifiers = _chain([QVoxelSdfModifier.of(_sphere(10.0, 2))])
-	var gen := QVoxelModelGenerator.new()
-	gen.object = obj
-	gen.eval_seed = 3
-	gen.set_grid_size(GS)
+	var data := QVoxelSource.new()
+	data.node = obj
+	data.seed = 3
+	data.grid_size = GS
 
 	var expect := QVoxelEvalEngine.evaluate(obj, QVoxelEvalContext.make(GS, 3)).volume
-	var chunk := gen.generate(Vector3i.ZERO)
+	var chunk := data.generate(Vector3i.ZERO)
 	assert_eq(chunk.size(), VoxelChunk.CHUNK_VOLUME, "chunk 缓冲长度固定")
 
 	var mismatch_a := 0
@@ -395,7 +395,7 @@ func test_generator_slices_match_engine_volume_exactly() -> void:
 
 	# 第二个 chunk：切片偏移写错时第一个 chunk 仍会通过，故必须验第二块
 	var side := VoxelChunk.CHUNK_SIZE
-	var chunk_b := gen.generate(Vector3i(1, 0, 0))
+	var chunk_b := data.generate(Vector3i(1, 0, 0))
 	var mismatch_b := 0
 	for z in side:
 		for y in side:
@@ -405,7 +405,7 @@ func test_generator_slices_match_engine_volume_exactly() -> void:
 	assert_eq(mismatch_b, 0, "chunk (1,0,0) 必须与引擎体积对应区段逐格一致")
 
 	# 网格之外（gs.x = 64，chunk 3 从 96 开始）必须全空，而不是回绕成别的块
-	var far := gen.generate(Vector3i(3, 0, 0))
+	var far := data.generate(Vector3i(3, 0, 0))
 	assert_eq(far.size(), VoxelChunk.CHUNK_VOLUME, "越界 chunk 也要返回对齐长度")
 	var far_solid := 0
 	for m in far:
@@ -414,14 +414,14 @@ func test_generator_slices_match_engine_volume_exactly() -> void:
 	assert_eq(far_solid, 0, "越界 chunk 必须全空")
 
 
-func test_generator_lod_and_empty_source() -> void:
+func test_source_lod_and_empty_source() -> void:
 	var obj := _obj_with_blocks()
 	obj.modifiers = _chain([QVoxelSdfModifier.of(_sphere(10.0, 2))])
-	var gen := QVoxelModelGenerator.new()
-	gen.object = obj
-	gen.set_grid_size(GS)
+	var data := QVoxelSource.new()
+	data.node = obj
+	data.grid_size = GS
 	var grid := VoxelChunkGenerator.LOD_BLOCK_SIZE
-	var lod := gen.generate(Vector3i.ZERO, 1)
+	var lod := data.generate(Vector3i.ZERO, 1)
 	assert_eq(lod.size(), grid * grid * grid, "LOD 块缓冲长度 = LOD_BLOCK_SIZE³")
 	var solid := 0
 	for m in lod:
@@ -432,10 +432,10 @@ func test_generator_lod_and_empty_source() -> void:
 	# 空对象（空链 + 无手绘）：必须返回全空缓冲，而不是越界崩溃
 	var blank := QVoxelModel.new()
 	blank.grid_size = GS
-	var gen_blank := QVoxelModelGenerator.new()
-	gen_blank.object = blank
-	gen_blank.set_grid_size(GS)
-	var buf := gen_blank.generate(Vector3i.ZERO)
+	var data_blank := QVoxelSource.new()
+	data_blank.node = blank
+	data_blank.grid_size = GS
+	var buf := data_blank.generate(Vector3i.ZERO)
 	assert_eq(buf.size(), VoxelChunk.CHUNK_VOLUME, "空源也要返回对齐长度")
 	var blank_solid := 0
 	for m in buf:
@@ -443,8 +443,8 @@ func test_generator_lod_and_empty_source() -> void:
 			blank_solid += 1
 	assert_eq(blank_solid, 0, "空源必须全空")
 
-	# 无源（object = null）：同样全空，不崩
-	var gen_none := QVoxelModelGenerator.new()
-	gen_none.set_grid_size(GS)
-	var buf2 := gen_none.generate(Vector3i.ZERO)
+	# 无节点：同样全空，不崩
+	var data_none := QVoxelSource.new()
+	data_none.grid_size = GS
+	var buf2 := data_none.generate(Vector3i.ZERO)
 	assert_eq(buf2.size(), VoxelChunk.CHUNK_VOLUME, "无源也要返回对齐长度")

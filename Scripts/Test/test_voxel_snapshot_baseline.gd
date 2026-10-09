@@ -2,7 +2,7 @@ extends TestCase
 
 ## P0-6 无头回归测试：固定种子生成 → 网格 → 快照哈希（逐字节）。
 ##
-## 【为什么需要它】P1/P2 要把 VoxelRenderer / VoxelData 拆开（声明为"纯搬迁、行为等价"），
+## 【为什么需要它】P1/P2 要把 VoxelRenderer / QVoxelSource 拆开（声明为"纯搬迁、行为等价"），
 ## 但"搬迁没改变行为"不能靠肉眼 —— 需要一份**逐字节基线**：同 seed 生成同一块体积、
 ## 切成同样的 chunk、过同一个几何内核，产物字节序列必须与基线完全一致。任一环节漂移
 ## （生成算法、chunk 存储布局、halo/面生成、实心-透明分桶、索引偏移、材质判定）都会改变哈希。
@@ -12,7 +12,7 @@ extends TestCase
 ## 若确实要合法地改结果（内核调优等），必须同期更新常量并说明原因
 ## （与 test_voxel_mesh_kernel 的黄金三角形数同一约定）。
 ##
-## 【覆盖路径】PcgModelGenerator(PcgTerrain) → VoxelData._accept_chunk_buffer
+## 【覆盖路径】QVoxelSource(node = PcgTerrain) → _accept_chunk_buffer
 ##   → get_all_chunk_keys / _chunk_buffers_view → VoxelMeshGenerator.generate_arrays_from_chunks
 ##   （内部 = build_halo_from_buffers + NativeLoader.generate_chunk_dense，
 ##    与 VoxelRenderer 逐 chunk 构建用的是同一条内核）。
@@ -63,7 +63,7 @@ func test_snapshot_baseline_is_stable() -> void:
 
 ## 同 seed 两次生成必须逐字节一致；换 seed 必须改变体积哈希。
 ## 前者保证基线是确定性的（否则上面的常量会随机飘），后者保证基线不是"恒为某常数"
-## 的空壳（比如生成器整块返回空时，任何 seed 都会得到同一个哈希）。
+## 的空壳（比如数据层整块返回空时，任何 seed 都会得到同一个哈希）。
 func test_generation_is_deterministic_and_seed_sensitive() -> void:
 	var a := _volume_hash(_build_data(SEED))
 	var b := _volume_hash(_build_data(SEED))
@@ -77,34 +77,33 @@ func test_generation_is_deterministic_and_seed_sensitive() -> void:
 # 辅助
 # ----------------------------------------------------------------------------
 
-## 固定 seed 的程序化地形 → VoxelData（逐 chunk 回填，绕过异步加载，纯主线程确定性）。
-func _build_data(seed_v: int) -> VoxelData:
+## 固定 seed 的程序化地形 → QVoxelSource（逐 chunk 回填，绕过异步加载，纯主线程确定性）。
+func _build_data(seed_v: int) -> QVoxelSource:
 	var terrain := PcgTerrain.new()
 	terrain.seed = seed_v
-	var gen := PcgModelGenerator.new()
-	gen.model = terrain
-	gen.set_grid_size(GRID)
 
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	d.materials = _materials()
+	d.grid_size = GRID
+	d.node = QVoxelModel.of_source(terrain, GRID)
 	var last := VoxelChunk.chunk_of(GRID - Vector3i.ONE)
 	for cz in range(0, last.z + 1):
 		for cy in range(0, last.y + 1):
 			for cx in range(0, last.x + 1):
 				var ck := Vector3i(cx, cy, cz)
-				d._accept_chunk_buffer(ck, gen.generate(ck, 0))
+				d._accept_chunk_buffer(ck, d.generate(ck, 0))
 	return d
 
 
 ## 走与 VoxelRenderer 同一条内核：块缓冲 → halo → 原生 dense 面生成 → 合并 arrays。
-func _build_arrays(d: VoxelData) -> Dictionary:
+func _build_arrays(d: QVoxelSource) -> Dictionary:
 	var trans := VoxelMaterial.build_trans_flags(VoxelMaterial.align_by_id(_materials()))
 	return VoxelMeshGenerator.generate_arrays_from_chunks(_sorted_chunks(d), trans, VOXEL_SCALE, Vector3.ZERO)
 
 
 ## chunk 键排序后重建的字典：Dictionary 迭代顺序 = 插入顺序，而生成/回填顺序不保证稳定，
 ## 故必须显式排序，否则哈希会随调用顺序漂移（那是假失败，不是真回归）。
-func _sorted_chunks(d: VoxelData) -> Dictionary:
+func _sorted_chunks(d: QVoxelSource) -> Dictionary:
 	var keys := d.get_all_chunk_keys()
 	keys.sort_custom(func(a, b): return _key_rank(a) < _key_rank(b))
 	var bufs := d._chunk_buffers_view()
@@ -120,7 +119,7 @@ func _key_rank(k: Vector3i) -> int:
 
 
 ## 逐字节体积哈希：排序后的各 chunk 缓冲按 int32 小端字节依次拼接。
-func _volume_hash(d: VoxelData) -> int:
+func _volume_hash(d: QVoxelSource) -> int:
 	var bytes := PackedByteArray()
 	var bufs := _sorted_chunks(d)
 	for k in bufs:

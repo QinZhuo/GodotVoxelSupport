@@ -22,29 +22,29 @@
 ### 架构
 
 ```
-VoxelData                    — 体素数据存储与修改（材质、chunk 缓冲）
+QVoxelSource                    — 体素数据存储与修改（材质、chunk 缓冲）
   ├─ VoxelStream (@abstract)     — 存储：chunk 级持久化 API（全部方法 @abstract）
   │    ├─ QVoxelStream             — .qvx 单文件块流世界存档（磁盘）
   │    └─ VoxelMemoryStream      — 纯内存（不落盘；程序化世界的编辑落脚处）
-  └─ VoxelGenerator (@abstract)  — 生成：给定 key 算出数据（不碰 I/O、无状态）
-       └─ 子类覆写 @abstract `_generate_chunk()` / `_generate_chunk_lod()`
+  └─ node: QVoxelNode            — 生成：数据层的唯一求值来源
+       └─ QVoxelModel            — 有界盒 + 修改器链（由 QVoxelEvalEngine 求值）
 VoxelRenderer              — 异步网格生成、LOD、流式加载、碰撞
 VoxelDestructible          — 继承 VoxelRenderer：破坏、崩塌、掉落碎片
 ```
 
-**"存"与"造"是两个并列的部件**：`stream` 负责存（磁盘 / 内存），`generator` 负责造
-（程序化地形）。二者可以同时存在（程序化世界 + 破坏存档），取数优先级恒为
-**流 > 生成器**——存过的必须权威，不能被重新生成覆盖。
+**"存"与"造"是两个并列的部件**：`stream` 负责存（磁盘 / 内存），`node` 负责造
+（程序化地形经由它的修改器链）。二者可以同时存在（程序化世界 + 破坏存档），取数优先级恒为
+**流 > 节点**——存过的必须权威，不能被重新生成覆盖。
 登记 / 去重 / 后台派发 / 回填集中在 `VoxelAsyncLoader` 一处，两个数据源都只回答
-"存了吗"与"能造吗"两个同步问题。
+"存了吗"与"能造吗"两个同步问题（后者是虚函数 `can_generate_chunk()`，无限世界扩展覆写它）。
 
-**数据访问顺序**（每 chunk）：内存缓冲 → 流 → 生成器。
+**数据访问顺序**（每 chunk）：内存缓冲 → 流 → 节点。
 所有网格生成在后台线程（`WorkerThreadPool`），主线程不阻塞于体素生成/建网格。
 
 ### 静态世界（磁盘流式）
 
 ```gdscript
-var data := VoxelData.new()
+var data := QVoxelSource.new()
 # ... 添加材质、填充体素（set_voxels / load_voxels_dict）
 
 var stream := QVoxelStream.new()
@@ -65,24 +65,28 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 
 ```gdscript
 class_name MyWorld
-extends VoxelGenerator
+extends QVoxelSource
 
-## 覆写基类 @abstract 方法：返回 32³ PackedInt32Array（值 = 材质ID，0 = 空）。
+## 无限世界：先声明，再覆写供数钩子。
+func can_generate_chunk(_chunk_key: Vector3i) -> bool:
+	return true
+
+## 返回 32³ PackedInt32Array（值 = 材质ID，0 = 空）。
 ## 必须确定性：同 chunk_key → 同地形。
 func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	# 例如基于噪声的高度图 —— 用【绝对体素 y】判断，保证跨层连续
 	...
 
-# 使用：生成器"造"，存储"存"（可自由替换，互不影响）
-var data := VoxelData.new()
+# 使用：数据层"造"，存储"存"（可自由替换，互不影响）
+var data := MyWorld.new()
+data.infinite = true                      # 开启 origin shift
 data.stream = QVoxelStream.new()          # 玩家修改落盘，重启保留
 data.stream.file_path = "user://world_edits/world.qvx"
-data.generator = MyWorld.new()          # 未编辑的部分按 key 确定性生成
 # 赋值给 VoxelRenderer.data（建议 visibility_mode = STREAMING）
 ```
 
 > `stream` 换成 `VoxelMemoryStream` 即"修改只存内存、退出即丢"；留空则由引擎自动兜底
-> 建一个内存流。生成器代码一行都不用改。
+> 建一个内存流。生成代码一行都不用改。
 
 特性：
 - **确定性** — 同 chunk_key → 同地形，chunk 边界与 origin shift 后世界连续

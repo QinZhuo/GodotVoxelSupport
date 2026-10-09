@@ -13,8 +13,8 @@ extends TestCase
 ## 断言用区间，避免边缘 1~2 格抖动即红。
 
 
-func _make(positions: Array) -> VoxelData:
-	var data := VoxelData.new()
+func _make(positions: Array) -> QVoxelSource:
+	var data := QVoxelSource.new()
 	var mats: Array[VoxelMaterial] = []
 	mats.resize(2)
 	var mat := VoxelMaterial.new()
@@ -28,7 +28,7 @@ func _make(positions: Array) -> VoxelData:
 
 
 ## 移除 removed 后跑一次失稳判定，返回失稳体素数
-func _unstable_count(data: VoxelData, removed: Array) -> int:
+func _unstable_count(data: QVoxelSource, removed: Array) -> int:
 	data.remove_voxels(removed)
 	return data.find_unsupported_around(removed).size()
 

@@ -17,7 +17,7 @@ extends Resource
 ##
 ## 【采样坐标】是**体素坐标**（非世界坐标）：SDF 参数与体素尺寸同单位。
 ## 世界尺度由 VoxelRenderer.voxel_scale 负责，几何定义与渲染尺度解耦。
-## 采样点由 PcgSdfGenerator 按 chunk 逐格心喂入。
+## 采样点由 QVoxelEvalEngine.rasterize_field() 按体素中心喂入。
 ##
 ## 【材质传递】组合算子按"离表面更近"的分支传材质（见 pick / pick_far）：
 ## 并 / 平滑并 / 差集取更近者（差集恒取 a），交集取约束更紧（距离更大）者，
@@ -30,7 +30,7 @@ func sample(p: Vector3) -> Vector2
 
 
 ## 实体所在的大致包围盒（体素单位）。默认无界。
-## 仅作上层推导 grid_size 的参考——真正的裁剪由 VoxelData.grid_size → set_grid_size 负责。
+## 仅作上层推导 grid_size 的参考——真正的裁剪由 QVoxelSource.grid_size / 求值盒负责。
 func bounds() -> AABB:
 	return unbounded()
 

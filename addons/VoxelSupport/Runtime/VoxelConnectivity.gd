@@ -3,17 +3,17 @@ extends RefCounted
 
 ## 6 方向连通性内核：泛洪、连通分组、支撑（悬空）判定。
 ##
-## 【为什么单独成类】这些算法原先长在 `VoxelData`（2200+ 行的 God 类）里，但它们与
+## 【为什么单独成类】这些算法原先长在 `QVoxelSource`（2200+ 行的 God 类）里，但它们与
 ## "体素怎么存"无关 —— 只依赖"某位置是不是实体素"这一个判据。抽成纯函数库后，
-## 存储/序列化不再被连通性代码挤占，连通性也能脱离 `VoxelData` 单测（传个 lambda 当判据即可）。
+## 存储/序列化不再被连通性代码挤占，连通性也能脱离 `QVoxelSource` 单测（传个 lambda 当判据即可）。
 ##
-## 【依赖方向】本类**不引用** `VoxelData`（无反向依赖），判据由调用方以参数传入：
+## 【依赖方向】本类**不引用** `QVoxelSource`（无反向依赖），判据由调用方以参数传入：
 ##   `is_solid: Callable(pos: Vector3i) -> bool`  实体素判据
 ##   `all_positions: Callable() -> Array`         全量位置枚举（只在确实需要全量时才会被调用）
 ## 热路径（`partition_connected` / `find_unsupported_around`）完全在原生 C++，不经 Callable、
 ## 无额外开销；Callable 只出现在"少用"的 GDScript 子集路径与辅助查询上。
 ##
-## 【为什么判据是 Callable 而不是直接传 VoxelData】`VoxelData.has_voxel` 会访问**仅存在于磁盘**
+## 【为什么判据是 Callable 而不是直接传 QVoxelSource】`QVoxelSource.has_voxel` 会访问**仅存在于磁盘**
 ## 的 chunk（必要时流式载入）。抽成判据后，本类既不需要知道存储布局，也不会有人误用
 ## "只读内存缓冲"当判据——那会把磁盘上的体素误判成空（见 find_unsupported 的注释）。
 
@@ -34,7 +34,7 @@ const NEIGHBORS_6: Array[Vector3i] = [
 ##   restrict 非空 → 不查世界体素、只认传入集合 → 完全下沉原生
 ##     （NativeLoader.flood_fill_positions）：BFS 的"每节点一次 `in result` 字典查找"开销归零，
 ##     破坏一堵墙这类大集合泛洪不再卡帧。
-##   restrict 为空 → 判据 is_solid 是 Callable，会回调宿主（`VoxelData.has_voxel` 可能触发
+##   restrict 为空 → 判据 is_solid 是 Callable，会回调宿主（`QVoxelSource.has_voxel` 可能触发
 ##     磁盘 chunk 流式载入）→ 无法脱离宿主语言，只能留在 GDScript。
 ##   两分支对"restrict 恰好等于实体素全集"的输入结果相同（见 test_voxel_fix_regressions 的交叉断言）。
 static func flood_fill(seeds, is_solid: Callable, restrict: Dictionary = {}) -> Dictionary:

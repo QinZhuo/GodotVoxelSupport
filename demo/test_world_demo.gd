@@ -148,9 +148,9 @@ func _build_target() -> void:
 	# 标记为可编辑（场景编辑器里可选中调参）
 	_target.owner = get_tree().edited_scene_root if Engine.is_editor_hint() else null
 
-	var data: VoxelData
+	var data: QVoxelSource
 	if voxel_data_source != null:
-		# 用户可在编辑器场景里给 DestructibleVoxels 的 data 属性直接赋 VoxelData 资源
+		# 用户可在编辑器场景里给 DestructibleVoxels 的 data 属性直接赋 QVoxelSource 资源
 		data = voxel_data_source
 	elif _target.data != null:
 		# 场景里已预置 data（或节点属性已设）
@@ -172,9 +172,9 @@ func _build_target() -> void:
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
 
 
-## 可选数据源：在编辑器里给此属性赋一个 VoxelData 资源，
+## 可选数据源：在编辑器里给此属性赋一个 QVoxelSource 资源，
 ## 或直接选场景里的 DestructibleVoxels 节点设置它的 data 属性
-@export var voxel_data_source: VoxelData:
+@export var voxel_data_source: QVoxelSource:
 	set(v):
 		voxel_data_source = v
 		if is_inside_tree():
@@ -192,8 +192,8 @@ func _visibility_mode() -> VoxelRenderer.VisibilityMode:
 
 
 ## 创建大型测试世界：多栋建筑 + 地面
-func _create_test_world_data() -> VoxelData:
-	var data := VoxelData.new()
+func _create_test_world_data() -> QVoxelSource:
+	var data := QVoxelSource.new()
 
 	# 材质
 	var concrete := VoxelMaterial.new()

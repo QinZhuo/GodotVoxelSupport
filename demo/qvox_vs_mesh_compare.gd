@@ -9,7 +9,7 @@ extends Node3D
 ##        这条路径就是 demo.tscn 里 deer.vox 作为 ArrayMesh 使用的路径，
 ##        用户确认「导入 mesh 显示的 mesh 是正确的」。
 ##   右：QVX 路径（待验证）
-##        .vox → VoxelData → .qvx (QVoxelStream.save_chunk) → 回读 → VoxelRenderer
+##        .vox → QVoxelSource → .qvx (QVoxelStream.save_chunk) → 回读 → VoxelRenderer
 ##
 ## 两侧都用同一套 256×1 材质纹理（VoxelMaterial.albedo_color 采样），
 ## 因此**颜色差异只能来自 UV 或网格几何**。
@@ -55,7 +55,7 @@ extends Node3D
 ## 两侧**显式同取**的原点模式（见 `_build_group` / `_build_reference_mesh`）。
 ## 抽成常量是为了让"烘焙文件名 + 数据构造 + mesh 选项"三处不可能各写一个值——
 ## 这三处一旦不一致，表现就是逐体素比对 FAIL 而位置看着还对（最难查的那类 bug）。
-const ORIGIN_MODE := VoxelData.OriginMode.BOTTOM_CENTER
+const ORIGIN_MODE := QVoxelSource.OriginMode.BOTTOM_CENTER
 
 ## 覆盖 QVX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
 @export var qvox_uv_v_override: float = -1.0
@@ -228,7 +228,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	# 而本场景的排布与取景是按"模型贴地"设计的（world_origin 下 teapot1 会悬空 5.8 单位、出画）。
 	# 默认值本身的一致性由 test_qvox_import.gd 的 test_mesh_and_data_origin_agree 守着，
 	# 不靠本场景。
-	var data := VoxelData.from_voxel_data(vox.voxel, 0, ORIGIN_MODE)
+	var data := QVoxelSource.from_voxel_data(vox.voxel, 0, ORIGIN_MODE)
 	if data == null:
 		push_error("[QvxMeshCmp] from_voxel_data 失败: %s" % src)
 		return {}
@@ -306,9 +306,9 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 				geo_bad_normal += 1
 
 	# ---------- D. QVX 渲染器 ----------
-	var rdata := VoxelData.new()
+	var rdata := QVoxelSource.new()
 	rdata.stream = reader
-	# 【关键】渲染顶点 = (体素坐标 + data.center_offset) * voxel_scale，故这个新 VoxelData 必须
+	# 【关键】渲染顶点 = (体素坐标 + data.center_offset) * voxel_scale，故这个新 QVoxelSource 必须
 	# 继承同一份原点偏移——否则右侧会按"内容角点即原点"渲染，与左侧 mesh 差出一截
 	# （这正是本场景此前"基础位置差很多"的第二半原因：脚本新建 rdata 时漏了 center_offset）。
 	rdata.center_offset = data.center_offset
@@ -371,7 +371,7 @@ func _mesh_aabb(mesh: ArrayMesh) -> AABB:
 	return mesh.get_aabb()
 
 
-func _bake_qvox(qpath: String, data: VoxelData, chunks: Dictionary) -> void:
+func _bake_qvox(qpath: String, data: QVoxelSource, chunks: Dictionary) -> void:
 	var stream := QVoxelStream.new()
 	stream.file_path = qpath
 	var mats: Array = []
@@ -384,7 +384,7 @@ func _bake_qvox(qpath: String, data: VoxelData, chunks: Dictionary) -> void:
 	stream.flush()
 
 
-func _extract_chunks(data: VoxelData) -> Dictionary:
+func _extract_chunks(data: QVoxelSource) -> Dictionary:
 	var out: Dictionary = {}
 	var raw: Dictionary = data.get("_chunk_buffers")
 	for ck in raw:
@@ -431,7 +431,7 @@ static func _local_from_index(i: int) -> Vector3i:
 
 ## 排布：左侧 mesh（正确基准），右侧 qvx，各自直接摆到槽位，**不做任何位置补偿**。
 ##
-## 【为什么不再需要补偿】两条路径现在共用同一套原点语义（`VoxelData.OriginMode`，
+## 【为什么不再需要补偿】两条路径现在共用同一套原点语义（`QVoxelSource.OriginMode`，
 ## 默认 bottom_center = 内容 X/Z 居中 + Y 贴底）。历史上这里两边的原点不同——mesh 走 .vox 的
 ## SIZE 盒中心（模型可能悬空/下沉）、data 走内容角点（贴地）——实测差 0.35~0.50（模型边长 2.2），
 ## 当时靠"各自按 AABB 底面对齐"来掩盖。统一约定之后，那种补偿只会掩盖回归，故改为**校验并报告**。
@@ -448,7 +448,7 @@ func _layout() -> void:
 		var qvox_r: VoxelRenderer = g["qvox_r"]
 
 		# qvx 侧体素 AABB
-		# 注意：qvox_r.data 是由 reader 支撑的 VoxelData（只含 stream，无 _chunk_buffers），
+		# 注意：qvox_r.data 是由 reader 支撑的 QVoxelSource（只含 stream，无 _chunk_buffers），
 		# 因此必须用最初 from_voxel_data 得到的 data 来算体素范围。
 		var va: AABB = _chunk_extent(g["chunks_raw"])
 		if va.size.length() < 0.0001 or ma.size.length() < 0.0001:
@@ -466,7 +466,7 @@ func _layout() -> void:
 		mesh_inst.scale = Vector3.ONE * mesh_scale
 		qvox_r.voxel_scale = vs
 
-		# 两侧原点已统一（VoxelData.OriginMode.BOTTOM_CENTER）：X/Z 在内容中心、Y 在底面，
+		# 两侧原点已统一（QVoxelSource.OriginMode.BOTTOM_CENTER）：X/Z 在内容中心、Y 在底面，
 		# 因此各自直接摆到槽位即可，**不需要任何位置补偿**。
 		var group_x := (i - (count - 1) * 0.5) * group_gap
 		var left_x := group_x - pair_gap * 0.5

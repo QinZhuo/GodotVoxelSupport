@@ -5,7 +5,7 @@ extends Node3D
 ##
 ## 【这是什么】把两条 PCG 技术栈、四种算子、一条可交互破坏链路放进同一张图里，
 ## 用来回答两个问题：
-##   ① 结合是否优雅 —— 每个模型都只是"一个普通 VoxelData + 一个 VoxelRenderer 节点"，
+##   ① 结合是否优雅 —— 每个模型都只是"一个普通 QVoxelSource + 一个 VoxelRenderer 节点"，
 ##      所以编辑 / 破坏 / 物理 / 碰撞 / LOD 全部自动可用。本场景里那座可破坏塔就是证据：
 ##      它和其他模型的组装代码完全一样，唯一区别是容器类从 `VoxelRenderer.new()`
 ##      换成了 `VoxelDestructible.new()`（见 PcgSceneKit.add_model 的 destructible 参数）。
@@ -15,10 +15,10 @@ extends Node3D
 ##      32 不是 6 的倍数，图块会跨 block 边界把柱列对齐切断。代价是每座遗迹
 ##      从 2 个 chunk 变成 8 个，具体数字看 HUD 的"已建 chunk / 期望 chunk"。）
 ##
-## 【两条技术栈的分工】
-##   SDF（PcgSdfGenerator）：逐点采样 sample(p) —— 适合"由简单件组合出的实体"。
+## 【两条技术栈的分工】两者都是链上的**源条目**，区别只在算子契约（见 QVoxelDomain）：
+##   Sdf：逐点采样 sample(p) —— 适合"由简单件组合出的实体"。
 ##     这里的岛体就是 Plane ∪ SmoothUnion{台地, 山丘} ⊖ 火山口。
-##   PcgModel（PcgModelGenerator）：整体产出 build(grid_size) —— 适合"必须全局迭代
+##   PcgModel：整体产出 build(grid_size) —— 适合"必须全局迭代
 ##     才算得出来的东西"。L-系统 / 元胞自动机 / 两种 WFC 都只能这样算。
 ##
 ## 【曾经的两条硬约束：一条已解除，一条仍然成立】
@@ -117,7 +117,7 @@ func _ready() -> void:
 	_setup_environment()
 	_setup_ground()
 	_build_base()
-	# 基底的体素是**异步**灌进 VoxelData 的，而地表物件的落脚高度要查它
+	# 基底的体素是**异步**灌进 QVoxelSource 的，而地表物件的落脚高度要查它
 	# （见 _ground_y_at）。所以必须等基底 chunk 全部就位再摆遗迹与树，
 	# 否则 _ground_y_at 全都返回兜底高度，风化啃出的浅坑就会被架空。
 	await _await_base_ready()
@@ -180,7 +180,7 @@ func _ground_y_at(wx: float, wz: float) -> float:
 	var fallback := _plateau_world_y()
 	if _base_node == null:
 		return fallback
-	var d: VoxelData = _base_node.data
+	var d: QVoxelSource = _base_node.data
 	var bx := int(round((wx - BASE_ORIGIN.x) / voxel_scale))
 	var bz := int(round((wz - BASE_ORIGIN.z) / voxel_scale))
 	var gz: Vector3i = d.grid_size
@@ -368,10 +368,9 @@ func _build_base() -> void:
 	chain.append(QVoxelVolumeModifier.of(_island_shade(1, PackedInt32Array([10, 11, 12]))))
 	chain.append(QVoxelVolumeModifier.of(_island_shade(2, PackedInt32Array([13, 14, 15]))))
 	obj.modifiers = chain
-	var gen := QVoxelModelGenerator.new()
-	gen.object = obj
-	gen.eval_seed = SURFACE_SEED
-	_base_node = PcgSceneKit.add_model(self, "Base_Island", BASE_ORIGIN, gen, BASE_GRID,
+	# 【种子】全链共用一个世界种子（QVoxelSource.seed 的语义）：
+	# 同 seed 下换算子顺序不会各自掷出不同的骰子，便于逐算子比对。
+	_base_node = PcgSceneKit.add_model(self, "Base_Island", BASE_ORIGIN, obj, BASE_GRID,
 			PcgSceneKit.materials([
 				# albedo 是**反射率**，不是最终显示色。真实岩石大约 0.15~0.35，
 				# 早先按"好看的颜色"写 0.5+，加上方向光就直接过曝成一张白板，
@@ -395,7 +394,7 @@ func _build_base() -> void:
 				[14, Color(0.24, 0.33, 0.17), 0.9],     # 苔原·中
 				[15, Color(0.30, 0.40, 0.21), 0.9],     # 苔原·亮
 				[16, Color(0.20, 0.31, 0.14), 0.85],    # 苔藓（仅由朝上染色写到朝上面）
-			]))
+			]), false, PcgSceneKit.DEFAULT_VOXEL_SCALE, SURFACE_SEED)
 	_register(_base_node)
 
 
@@ -617,19 +616,17 @@ func _build_ruins_and_wall() -> void:
 		# 同参数不同 seed → 两座遗迹形态不同，但各自仍是确定的（同 seed 恒同结果）。
 		wfc.seed = 20261007 + i * 977
 		wfc.max_retries = 40
-		var gen := PcgModelGenerator.new()
-		gen.model = wfc
 		# 细节层：先风化出缺角与凹坑，再给朝上的石头挂苔藓，最后把剩下的墙面/地板
 		# 拆成同色系三档（本项目不用贴图，层次靠"更多不同颜色的体素"）。
 		# 顺序有意义——暴露判定在风化之后算，新挖出的凹坑侧面也会被判为暴露面而正常上色。
-		gen.details = [_weather(0.15), _moss(2), _wall_shade(), _floor_shade()]
-		gen.detail_seed = 20261007 + i * 977
+		var node := QVoxelModel.of_source(wfc, RUIN_GRID,
+				[_weather(0.15), _moss(2), _wall_shade(), _floor_shade()], 20261007 + i * 977)
 		# 两座并排、居中：x 从 -span 到 0，合计正好铺满 2×span。
 		# 落脚高度按占地四角里最低的那个点定（见 _ground_y_under_rect），
 		# 不能写死台地高度 —— 风化在顶面啃出的浅坑会让写死的值悬空。
 		var x := -span + i * span
 		var pos := Vector3(x, _ground_y_under_rect(Vector2(x + span * 0.5, -5.6 + span * 0.5), span * 0.5, span * 0.5), -5.6)
-		_register(PcgSceneKit.add_model(self, "Ruin_%d" % (i + 1), pos, gen, RUIN_GRID,
+		_register(PcgSceneKit.add_model(self, "Ruin_%d" % (i + 1), pos, node, RUIN_GRID,
 				PcgSceneKit.materials(RUIN_MATERIALS)))
 
 	# 有机岩壁：规则不手写，从一块 8³ 样例里"数"出可重叠的 3³ 图案，再拼成一片同类岩体。
@@ -640,8 +637,6 @@ func _build_ruins_and_wall() -> void:
 	overlap.pattern_size = 3
 	overlap.seed = 20261007
 	overlap.max_retries = 8
-	var ov_gen := PcgModelGenerator.new()
-	ov_gen.model = overlap
 	# 多孔岩吃很重的风化 + 一层苔藓染色。
 	#
 	# 【strength 必须顶到 0.7 才有效—— 踩过三次坑】重叠式 WFC 的孔洞是**全局周期**的
@@ -669,8 +664,8 @@ func _build_ruins_and_wall() -> void:
 	#（实测：顶面出现大量单格高的尖刺，读作砂砾堆而不是岩床）。
 	# 收到 0.45 并把 cell 从 1.2 放到 1.6 之后，坑变成成片的浅凹，
 	# 周期性靠"更大的苔斑 + 三档色阶"来打散，而不是靠把表面啃碎。
-	ov_gen.details = [_weather_at(0.45, 1.6), moss, _overlap_shade()]
-	ov_gen.detail_seed = 4242
+	var ov_node := QVoxelModel.of_source(overlap, OVERLAP_GRID,
+			[_weather_at(0.45, 1.6), moss, _overlap_shade()], 4242)
 	# 有机岩壁摆在遗迹群的前一排（z = 2.4 起）。两排用**z** 让开而不是 x：
 	# 前排遗迹 z∈[-5.6, 0.4]，后排岩壁/塔 z 从 2.4 起 —— 中间 2 单位的空档既是
 	# 免穿插的余量，也让台面留出一条能走人的通路。摆放不开两个渲染器会互相穿插，
@@ -682,7 +677,7 @@ func _build_ruins_and_wall() -> void:
 	_register(PcgSceneKit.add_model(self, "Organic_Wall",
 			Vector3(4.0, _ground_y_under_rect(
 					Vector2(4.0 + half_x, 2.4 + half_z), half_x, half_z), 2.4),
-			ov_gen, OVERLAP_GRID,
+			ov_node, OVERLAP_GRID,
 			PcgSceneKit.materials([
 				[1, Color(0.33, 0.31, 0.29), 0.95],
 				[2, Color(0.28, 0.36, 0.25), 0.8],
@@ -702,10 +697,8 @@ func _build_tower() -> void:
 	wfc.tiles = _make_ruin_tiles()
 	wfc.seed = 424242
 	wfc.max_retries = 40
-	var gen := PcgModelGenerator.new()
-	gen.model = wfc
-	gen.details = [_weather(0.15), _moss(2), _wall_shade(), _floor_shade()]
-	gen.detail_seed = 424242
+	var node := QVoxelModel.of_source(wfc, RUIN_GRID,
+			[_weather(0.15), _moss(2), _wall_shade(), _floor_shade()], 424242)
 
 	# destructible = true 是这里与其余场景模型的**唯一**区别。
 	# 位置：前排左侧，与有机岩壁（x 起 4.0）留 2.0 单位间隙，且整座落在台地内
@@ -715,7 +708,7 @@ func _build_tower() -> void:
 	_register(PcgSceneKit.add_model(self, "Tower_Destructible",
 			Vector3(-4.0, _ground_y_under_rect(Vector2(-4.0 + tower_span * 0.5, 2.4 + tower_span * 0.5),
 					tower_span * 0.5, tower_span * 0.5), 2.4),
-			gen, RUIN_GRID, PcgSceneKit.materials(RUIN_MATERIALS), true))
+			node, RUIN_GRID, PcgSceneKit.materials(RUIN_MATERIALS), true))
 	_tower = _models.back() as VoxelDestructible
 	# 伤害必须**单次**越过材质硬度才能立刻出洞：材质 hardness = 5.0（见 PcgSceneKit），
 	# 而 PcgSceneKit 给破坏容器配的 damage_per_voxel = 1.0 是"按住连打"式的（destruction_demo
@@ -819,15 +812,14 @@ func _build_forest() -> void:
 		# 树冠被网格边界削掉一片）。0.15 → 最大 9.5°，树是"歪着长"而不是"倒着长"。
 		tree.seed = pl.variant_seed
 		tree.variation = 0.4
-		var gen := PcgModelGenerator.new()
-		gen.model = tree
 		var weather := PcgWeather.new()
 		# 树体大了 30 倍，风化跟着加重：原来的 0.1 是"别让 100 体素的小树散架"，
 		# 3300 体素的树经得起啃，而叶团表面那些锯齿缺口正是体素植物的质感来源。
 		weather.strength = 0.16
 		weather.cell = 2.5
 		weather.min_exposure = 2   # 只蚀细枝末端，保住主干的完整感
-		gen.details = [weather, _leaf_shade(), _trunk_shade()]
+		var tree_node := QVoxelModel.of_source(tree, TREE_GRID,
+				[weather, _leaf_shade(), _trunk_shade()])
 		# 落点必须落在**树干**上，而不是节点原点。PcgLsystem 从网格中心 (x/2, 1, z/2)
 		# 生长，而 add_model 把节点原点钉在网格最小角 —— 于是树干比落点偏了半个网格
 		# （16 体素 × 0.2 = 3.2 单位）。这正是原来"半径 14 的圆里有一半树悬空在岛外"
@@ -835,7 +827,7 @@ func _build_forest() -> void:
 		# 节点自身还要绕 Y 转 yaw，所以偏移要一起转到世界空间再减掉。
 		var trunk_offset := Vector3(TREE_GRID.x * 0.5, 0.0, TREE_GRID.z * 0.5) * (voxel_scale * scale_mul)
 		var pos := pl.xform.origin - Basis(Vector3.UP, yaw) * trunk_offset
-		var node := PcgSceneKit.add_model(self, "Tree_%d" % (i + 1), pos, gen, TREE_GRID,
+		var node := PcgSceneKit.add_model(self, "Tree_%d" % (i + 1), pos, tree_node, TREE_GRID,
 				PcgSceneKit.materials([
 					[1, Color(0.30, 0.22, 0.14), 0.95],   # 树干
 					[2, Color(0.22, 0.38, 0.16), 0.85],   # 叶片
@@ -1007,7 +999,7 @@ func _expected_chunks() -> int:
 func _built_chunks() -> int:
 	var n := 0
 	for node in _models:
-		var data: VoxelData = (node as VoxelRenderer).data
+		var data: QVoxelSource = (node as VoxelRenderer).data
 		var gs: Vector3i = data.grid_size
 		var span := Vector3i(
 			(gs.x + VoxelChunk.CHUNK_SIZE - 1) / VoxelChunk.CHUNK_SIZE,

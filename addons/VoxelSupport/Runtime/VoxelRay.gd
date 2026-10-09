@@ -3,8 +3,8 @@ class_name VoxelRay
 extends RefCounted
 ## 体素射线（Amanatides & Woo 的 DDA 走格）。
 ##
-## 【为什么单独一个类，而不是长进 VoxelData】射线查询是"按 chunk 查"之上的**派生查询**：
-## 它只需要 has_voxel / get_voxel 两个公开面，不该扩内核契约（VoxelData 的公开 API 由
+## 【为什么单独一个类，而不是长进 QVoxelSource】射线查询是"按 chunk 查"之上的**派生查询**：
+## 它只需要 has_voxel / get_voxel 两个公开面，不该扩内核契约（QVoxelSource 的公开 API 由
 ## test_voxel_kernel_contract 逐条钉死）。放在这里，编辑器的拾取与运行时的破坏
 ## （VoxelDestructible）共用同一份实现 —— 这段 DDA 过去只存在于 VoxelDestructible 里，
 ## 编辑器要拾取就得抄第二份，正是 P4「统一接口」要消掉的东西。
@@ -14,7 +14,7 @@ extends RefCounted
 ## 一个轴，故 hit - prev 恰好是单轴 ±1 —— 不必另算浮点交点，也不会在斜射时抖成斜向量。
 
 ## 命中结果字典的键（未命中返回空字典）：
-##   hit      Vector3i  命中的体素（**体素坐标**，与 VoxelData.has_voxel 同一套）
+##   hit      Vector3i  命中的体素（**体素坐标**，与 QVoxelSource.has_voxel 同一套）
 ##   prev     Vector3i  进入 hit 之前的那一格（起点就在实心格内时 == hit）
 ##   normal   Vector3i  入射面法线（朝外，单轴 ±1）；起点在实心格内时为 ZERO（没有入射面）
 ##   distance float     沿射线走到命中格的距离（体素单位）
@@ -30,7 +30,7 @@ const KEY_MATERIAL := &"material"
 ##
 ## 【起点落在实心格内】直接命中该格，normal = ZERO（"没有入射面"比"编一个法线"诚实：
 ## 调用方要么拒绝对这种命中落笔，要么按自己的规则处理）。
-static func cast(data: VoxelData, origin: Vector3, direction: Vector3,
+static func cast(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		max_distance: float = 100.0) -> Dictionary:
 	if data == null:
 		return {}
@@ -74,7 +74,7 @@ static func cast(data: VoxelData, origin: Vector3, direction: Vector3,
 
 
 ## 只要命中格坐标（未命中 → Vector3i.MIN）。破坏类接口的既有形状，避免调用方解字典。
-static func hit_voxel(data: VoxelData, origin: Vector3, direction: Vector3,
+static func hit_voxel(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		max_distance: float = 100.0) -> Vector3i:
 	var r := cast(data, origin, direction, max_distance)
 	return r[KEY_HIT] if r.has(KEY_HIT) else Vector3i.MIN
@@ -88,7 +88,7 @@ static func placement_of(hit: Vector3i, normal: Vector3i) -> Vector3i:
 	return hit + normal
 
 
-static func _result(data: VoxelData, hit: Vector3i, prev: Vector3i, distance: float) -> Dictionary:
+static func _result(data: QVoxelSource, hit: Vector3i, prev: Vector3i, distance: float) -> Dictionary:
 	var normal := Vector3i.ZERO
 	if prev != hit:
 		normal = hit - prev

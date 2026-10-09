@@ -17,16 +17,16 @@ extends RefCounted
 ## 【为什么单独一个类】它是"屏幕 → 落笔"这条链里唯一一段纯数学（无节点、无场景树），
 ## 单拎出来才能在 TestCase 里把地板命中的边界（背后、平行、出界、beyond 距离）逐条钉住。
 ##
-## 【依赖方向】只读插件的 VoxelData / VoxelRay 与结果字典的既有键，不认 QVoxelier 的其他类。
+## 【依赖方向】只读插件的 QVoxelSource / VoxelRay 与结果字典的既有键，不认 QVoxelier 的其他类。
 
 ## 底面那层的编号。命中它的 hit.y 恒为此值、normal 恒为 +Y。
 const FLOOR_LAYER := -1
 
 
 ## 射线拾取：先走体素 DDA（内核），未命中再看是否打在地板上。
-## origin / direction 与 VoxelData 同处**体素单位**空间（视口负责把世界坐标除一次 voxel_size）。
+## origin / direction 与 QVoxelSource 同处**体素单位**空间（视口负责把世界坐标除一次 voxel_size）。
 ## 返回 VoxelRay 同形字典（键见 VoxelRay.KEY_*）；两处都没命中 → 空字典。
-static func hit(data: VoxelData, origin: Vector3, direction: Vector3,
+static func hit(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		grid_size: Vector3i, max_distance: float = 100.0) -> Dictionary:
 	var info := VoxelRay.cast(data, origin, direction, max_distance)
 	if not info.is_empty():

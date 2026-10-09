@@ -55,7 +55,7 @@ const MODES := [
 ##
 ## 做成"值对象"而不是让工具去反问视口，是为了工具能脱离场景树测试；
 ## solid / material_at 两个闭包把"几何判据从哪来"也一并外部化 ——
-## 编辑器传的是**显示几何**（VoxelData），测试传的是字典，工具两边都不用改。
+## 编辑器传的是**显示几何**（QVoxelSource），测试传的是字典，工具两边都不用改。
 class Pick extends RefCounted:
 	var hit := Vector3i.MIN       ## 命中的体素；MIN = 没命中
 	var normal := Vector3i.ZERO   ## 入射面法线（朝外，单轴 ±1）

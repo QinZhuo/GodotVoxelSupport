@@ -174,9 +174,9 @@ func _attach(tree: SceneTree, node: Node) -> void:
 	_smoke_root.add_child(node)
 
 
-## 一个挂单材质（ID=1）的空 VoxelData。材质表由 add_material 自动补索引 0 空占位。
-func _make_data_with_material() -> VoxelData:
-	var d := VoxelData.new()
+## 一个挂单材质（ID=1）的空 QVoxelSource。材质表由 add_material 自动补索引 0 空占位。
+func _make_data_with_material() -> QVoxelSource:
+	var d := QVoxelSource.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	mat.color = Color(0.6, 0.6, 0.65)
@@ -188,7 +188,7 @@ func _make_data_with_material() -> VoxelData:
 
 
 ## edge³ 实心块（单 chunk 内），材质 1。
-func _make_solid_data(edge: int) -> VoxelData:
+func _make_solid_data(edge: int) -> QVoxelSource:
 	var d := _make_data_with_material()
 	var positions: Array = []
 	for x in edge:

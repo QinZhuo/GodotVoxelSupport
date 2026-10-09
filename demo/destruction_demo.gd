@@ -42,7 +42,7 @@ extends Node
 @export var continuous_interval: int = 3
 
 ## 可选的数据源
-@export var voxel_data_source: VoxelData:
+@export var voxel_data_source: QVoxelSource:
 	set(v):
 		voxel_data_source = v
 		if is_inside_tree():
@@ -190,8 +190,8 @@ func _build_target() -> void:
 	var scene_target := get_node_or_null("DestructibleVoxels") as VoxelDestructible
 	if scene_target != null:
 		_target = scene_target
-		# 若已有 data 且是用户手动赋的 VoxelData，保留它；否则生成默认结构
-		var data: VoxelData
+		# 若已有 data 且是用户手动赋的 QVoxelSource，保留它；否则生成默认结构
+		var data: QVoxelSource
 		if voxel_data_source != null:
 			data = voxel_data_source
 		elif _target.data != null:
@@ -208,7 +208,7 @@ func _build_target() -> void:
 	_target.name = "DestructibleVoxels"
 	add_child(_target)
 
-	var data2: VoxelData
+	var data2: QVoxelSource
 	if voxel_data_source != null:
 		data2 = voxel_data_source
 	else:
@@ -217,7 +217,7 @@ func _build_target() -> void:
 
 
 ## 统一配置破坏目标（场景节点与动态创建共用）
-func _configure_target(data: VoxelData) -> void:
+func _configure_target(data: QVoxelSource) -> void:
 	_target.data = data
 	_target.voxel_scale = voxel_scale
 	_target.lod_count = 3
@@ -246,8 +246,8 @@ func _configure_target(data: VoxelData) -> void:
 
 ## 创建超大型体素结构
 ## 包含：外壳 + 多层地板 + 内部隔墙 + 窗户/门洞，模拟大型建筑群
-func _create_large_structure_data() -> VoxelData:
-	var data := VoxelData.new()
+func _create_large_structure_data() -> QVoxelSource:
+	var data := QVoxelSource.new()
 	var S := structure_size
 	var t := shell_thickness
 

@@ -26,7 +26,7 @@ extends Node3D
 ## 所以迭代次数与步长不能无脑加大 —— 但实测"能塞进 32×48×32 的量级"离这个上限
 ## 还很远：it=5 / step=2.5 展开后约 4 万符号、树高 26 体素。见下面 TREE 常量。
 ##
-## 【与框架的关系】每个模型仍是"有界 VoxelData + PcgModelGenerator + VoxelRenderer"，
+## 【与框架的关系】每个模型仍是"有界 QVoxelSource + QVoxelModel + VoxelRenderer"，
 ## 组装走 PcgSceneKit——场景脚本只描述"造什么树、摆在哪"。
 
 @export var voxel_scale: float = 0.2
@@ -193,7 +193,7 @@ func _ready() -> void:
 ## 地表世界高度：地形高度是纯函数，直接问，不必等网格建完。
 ##
 ## 【为什么不让调用方查体素】物件的落脚点必须在"摆放时"就确定，而地形的体素是
-## 异步灌进 VoxelData 的 —— 查体素就得 await 整个地形建完（pcg_world_demo 的
+## 异步灌进 QVoxelSource 的 —— 查体素就得 await 整个地形建完（pcg_world_demo 的
 ## _ground_y_at 正是为此不得不 await 基底）。纯函数查询把摆放与生成解耦。
 func _ground_y(wx: float, wz: float) -> float:
 	var gx := (wx - GROUND_ORIGIN.x) / voxel_scale
@@ -208,9 +208,8 @@ func _ground_query(p: Vector2) -> Variant:
 
 func _build_ground() -> void:
 	_terrain = _make_terrain()
-	var gen := PcgModelGenerator.new()
-	gen.model = _terrain
-	var node := PcgSceneKit.add_model(self, "Ground", GROUND_ORIGIN, gen, GROUND_GRID,
+	var node := PcgSceneKit.add_model(self, "Ground", GROUND_ORIGIN,
+			QVoxelModel.of_source(_terrain, GROUND_GRID), GROUND_GRID,
 			PcgSceneKit.materials(GROUND_MATERIALS), false, voxel_scale)
 	(node as VoxelRenderer).view_distance = view_distance
 
@@ -300,8 +299,6 @@ func _trunk_shade() -> PcgSurfaceTint:
 
 func _add_tree(model_name: String, pos: Vector3, tree: PcgLsystem, color_i: int,
 		yaw: float = 0.0, scale_mul: float = 1.0) -> void:
-	var gen := PcgModelGenerator.new()
-	gen.model = tree
 	# 风化让枝叶表面出现缺角，抵消"纯数学体素"的规整感。
 	# strength 从 0.1 提到 0.16：树体一轮从 104 体素涨到 3300+，
 	# 这个量级经得起啃，且叶团表面的"锯齿缺口"正是体素植物的关键质感。
@@ -309,8 +306,9 @@ func _add_tree(model_name: String, pos: Vector3, tree: PcgLsystem, color_i: int,
 	weather.strength = 0.16
 	weather.cell = 2.5
 	weather.min_exposure = 2   # 只蚀细枝末端，保住主干的完整感
-	gen.details = [weather, _leaf_shade(), _trunk_shade()]
-	var node := PcgSceneKit.add_model(self, model_name, pos, gen, GRID,
+	var tree_node := QVoxelModel.of_source(tree, GRID,
+			[weather, _leaf_shade(), _trunk_shade()])
+	var node := PcgSceneKit.add_model(self, model_name, pos, tree_node, GRID,
 			_tree_materials(color_i), false, voxel_scale * scale_mul)
 	if node is VoxelRenderer:
 		(node as VoxelRenderer).view_distance = view_distance

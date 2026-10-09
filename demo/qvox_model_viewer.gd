@@ -5,7 +5,7 @@ extends Node3D
 ## 与其它 demo 的区别：本场景**不做程序化生成**，数据全部来自 .vox 模型文件，
 ## 且强制走完整 QVX 容器读写链路，用来肉眼确认 QVX 格式的存储/加载/渲染是否正确：
 ##
-##   .vox (MagicaVoxel)  →  VoxAccess 解析  →  VoxelData
+##   .vox (MagicaVoxel)  →  VoxAccess 解析  →  QVoxelSource
 ##        →  QVoxelStream.save_chunk()  写进 .qvx 容器（HEAD/MATE/NODE/VXEL）
 ##        →  QVoxelStream.load_chunk()  从 .qvx 读回
 ##        →  VoxelRenderer 渲染成体素模型
@@ -151,17 +151,17 @@ func _build_all(rebake: bool) -> void:
 	_update_hud()
 
 
-## 单个模型：.vox → VoxelData → .qvx → 回读 → 渲染
+## 单个模型：.vox → QVoxelSource → .qvx → 回读 → 渲染
 func _build_one(src: String, index: int, total: int) -> Dictionary:
 	var name := src.get_file().get_basename()
 	var t_all := Time.get_ticks_usec()
 
-	# --- 1. 解析 .vox 为 VoxelData ---
+	# --- 1. 解析 .vox 为 QVoxelSource ---
 	var vox := VoxAccess.Open(src)
 	if vox == null:
 		push_error("[QVoxelViewer] VoxAccess 打开失败: %s" % src)
 		return {}
-	var data := VoxelData.from_voxel_data(vox.voxel)
+	var data := QVoxelSource.from_voxel_data(vox.voxel)
 	if data == null:
 		push_error("[QVoxelViewer] from_voxel_data 失败: %s" % src)
 		return {}
@@ -216,7 +216,7 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 	var t_read := Time.get_ticks_usec()
 
 	# --- 4. 用回读到的数据渲染（数据源 = QVX 文件）---
-	var rdata := VoxelData.new()
+	var rdata := QVoxelSource.new()
 	rdata.stream = reader
 	for m in mats:
 		if m != null:
@@ -252,10 +252,10 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 	return st
 
 
-## 从 VoxelData 提取每个 chunk 的 32³ 密集缓冲（键 = chunk 坐标）。
-## QVoxelStream.save_chunk 需要的正是这个形态。VoxelData 内部就存成 _chunk_buffers，
+## 从 QVoxelSource 提取每个 chunk 的 32³ 密集缓冲（键 = chunk 坐标）。
+## QVoxelStream.save_chunk 需要的正是这个形态。QVoxelSource 内部就存成 _chunk_buffers，
 ## 直接取用可避免经由逐体素 API 重建（那份代价是 32³ 级别的）。
-func _extract_chunks(data: VoxelData) -> Dictionary:
+func _extract_chunks(data: QVoxelSource) -> Dictionary:
 	var out: Dictionary = {}
 	var raw: Dictionary = data.get("_chunk_buffers")
 	for ck in raw:
@@ -273,11 +273,11 @@ func _extract_chunks(data: VoxelData) -> Dictionary:
 ## 而且"中心"变成 chunk 格心而非模型几何中心，导致模型偏移、大小不一。
 ## 所以这里必须扫真实体素。
 ##
-## 与 VoxelData.get_voxels_aabb() 同语义（origin_of + _local_from_index + buf>0 +
+## 与 QVoxelSource.get_voxels_aabb() 同语义（origin_of + _local_from_index + buf>0 +
 ## bounds→AABB），区别只是本函数直接吃"尚未落盘的 chunk 缓冲字典"，
-## 不依赖 VoxelData 的内存计数（这些 chunk 尚未装载，内存计数看不到它们，
+## 不依赖 QVoxelSource 的内存计数（这些 chunk 尚未装载，内存计数看不到它们，
 ## 会让引擎函数返回空 AABB）。
-func _chunk_extent(chunks: Dictionary, _data: VoxelData) -> AABB:
+func _chunk_extent(chunks: Dictionary, _data: QVoxelSource) -> AABB:
 	if chunks.is_empty():
 		return AABB()
 	var mn := Vector3i.MAX
@@ -301,7 +301,7 @@ func _chunk_extent(chunks: Dictionary, _data: VoxelData) -> AABB:
 			found = true
 	if not found:
 		return AABB()
-	# 与 VoxelData._bounds_to_aabb 一致：体素 p 占据 [p, p+1)
+	# 与 QVoxelSource._bounds_to_aabb 一致：体素 p 占据 [p, p+1)
 	return AABB(Vector3(mn), Vector3(mx - mn + Vector3i.ONE))
 
 

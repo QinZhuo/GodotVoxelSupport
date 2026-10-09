@@ -7,7 +7,7 @@ extends RefCounted
 ## 画出来的"。让两边调**同一个函数**，一致性就成了构造保证，而不是靠两处逻辑各自对齐。
 ## 因此这里不碰 QVoxelModel、不碰节点、不碰输入：全 static，可无头测试。
 ##
-## 【坐标约定】一律**对象局部体素坐标**（与 QVoxelModel.get_voxel / VoxelData.has_voxel 同一套）。
+## 【坐标约定】一律**对象局部体素坐标**（与 QVoxelModel.get_voxel / QVoxelSource.has_voxel 同一套）。
 ## 越界与否由调用方（QVoxelBrushTool）统一裁剪，几何函数只管形状本身。
 ##
 ## 【为什么用 Array[Vector3i] 而不是 PackedVector3Array】写入侧（QVoxelEditCommand.set_voxel）

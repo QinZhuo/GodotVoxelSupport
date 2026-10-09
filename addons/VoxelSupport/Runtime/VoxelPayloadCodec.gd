@@ -1,11 +1,11 @@
 class_name VoxelPayloadCodec
 extends RefCounted
 
-## VoxelData 资源载荷的**帧格式唯一实现**：
+## QVoxelSource 资源载荷的**帧格式唯一实现**：
 ##   Dictionary ⇄ base64( "GZIP" + gzip( var_to_bytes(dict) ) )
 ##
 ## 载荷随资源保存/加载（隐藏 storage 属性 `voxel_data_payload`），内容字典为
-## `{v, grid_size, blocks}` —— 具体组装与回填在 VoxelData（`_encode_payload` /
+## `{v, grid_size, blocks}` —— 具体组装与回填在 QVoxelSource（`_encode_payload` /
 ## `_set`），本类只负责"过帧"与"拆帧 + 校验"。
 ##
 ## 【为什么 encode 不写版本号、decode 却校验版本】不对称是有意的：

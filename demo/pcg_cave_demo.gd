@@ -14,9 +14,9 @@ extends Node3D
 ## 【为什么 SDF 的洞能看见】减集是**真的挖空**（`max(a, -b)`）——被挖处体素为空，
 ## 于是光线能照进内壁。PcgModel 栈没有这种算子（它一次写满、后写覆盖先写）。
 ##
-## 【与框架的关系】两条路都只实现 VoxelGenerator 的"按 key 造数"：
-##   元胞 → PcgModelGenerator（整体 build 后切 chunk）
-##   SDF  → PcgSdfGenerator（逐点 sample）
+## 【与框架的关系】两条路都是链上的**源条目**，差别只在算子契约：
+##   元胞 → PcgModel（整体 build 后切 chunk）
+##   SDF  → Sdf（逐点 sample，遇到第一个体素域算子时由引擎降级成体积）
 ## 输出形态一致，后续渲染 / 编辑 / LOD 链路完全相同。
 
 @export var voxel_scale: float = 0.2
@@ -51,9 +51,7 @@ func _build_cellular(pos: Vector3) -> void:
 	# 关掉封闭外壳：内腔要在外部可见（要"正宗"的封闭洞穴把它打开即可）。
 	cave.shell_is_solid = false
 	cave.material_id = 1
-	var gen := PcgModelGenerator.new()
-	gen.model = cave
-	_add("Cellular_Cave", pos, gen)
+	_add("Cellular_Cave", pos, QVoxelModel.of_source(cave, GRID))
 
 
 ## SDF 挖洞（一）：石台里减掉两条交叉的圆管 → 十字通道，两端通到石台外侧。
@@ -113,13 +111,11 @@ func _cylinder_on(dir: Vector3, center: Vector3, radius := 9.0, height := 80.0) 
 
 
 func _add_sdf(model_name: String, pos: Vector3, field: Sdf) -> void:
-	var gen := PcgSdfGenerator.new()
-	gen.field = field
-	_add(model_name, pos, gen)
+	_add(model_name, pos, QVoxelModel.of_source(field, GRID))
 
 
-func _add(model_name: String, pos: Vector3, gen: VoxelGenerator) -> void:
-	var node := PcgSceneKit.add_model(self, model_name, pos, gen, GRID,
+func _add(model_name: String, pos: Vector3, model_node: QVoxelNode) -> void:
+	var node := PcgSceneKit.add_model(self, model_name, pos, model_node, GRID,
 			PcgSceneKit.materials(ROCK_MATERIALS), false, voxel_scale)
 	(node as VoxelRenderer).view_distance = view_distance
 

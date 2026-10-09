@@ -10,10 +10,10 @@ extends RefCounted
 ## 【为什么 headless 只测"造 / 存"】
 ## headless 的渲染驱动是 dummy：draw call、显存、三角面数恒为 0，测渲染毫无意义。
 ## 它的价值是把**纯 CPU 的那一半**测干净：
-##   ① 各算子的 model.build() 耗时 —— 隔离掉生成器开销，看算子本身多重。
-##   ② 经 PcgModelGenerator 按 chunk 切片 —— 全量切片耗时 / 吞吐（体素每秒）。
-##   ③ 经 VoxelData + 异步编排的**端到端 chunk 就绪时间** —— 真实链路（含线程派发与回填）。
-##   ④ `_volume` 常驻内存 —— 每个 Worker 生成器都会永久留一份密集体积。
+##   ① 各算子的 model.build() 耗时 —— 隔离掉数据层开销，看算子本身多重。
+##   ② 经 QVoxelSource 按 chunk 切片 —— 全量切片耗时 / 吞吐（体素每秒）。
+##   ③ 经 QVoxelSource + 异步编排的**端到端 chunk 就绪时间** —— 真实链路（含线程派发与回填）。
+##   ④ `_volume` 常驻内存 —— 每个数据层都会永久留一份密集体积。
 ##   ⑤ 确定性哈希 —— 同参数两次构建必须逐字节一致（否则"同 seed 同世界"不成立）。
 ##   ⑥ `build_calls == 1` —— Step 1 并发修复的无头证据（多 chunk 并发请求只 build 一次）。
 ##
@@ -136,7 +136,7 @@ static func _bench_case(lines: PackedStringArray, case: Dictionary) -> void:
 	var chunk_count := span.x * span.y * span.z
 	lines.append("[BENCH] --- %s grid=%s cells=%d chunks=%d ---" % [name, str(grid), cells, chunk_count])
 
-	# ① 算子本身：直接 build() 一次（不经生成器）
+	# ① 算子本身：直接 build() 一次（不经数据层）
 	var t0 := Time.get_ticks_usec()
 	var model := (case["make"] as Callable).call() as PcgModel
 	var t_new := _us(t0)
@@ -150,24 +150,24 @@ static func _bench_case(lines: PackedStringArray, case: Dictionary) -> void:
 	var again: PackedInt32Array = (case["make"] as Callable).call().build(grid)
 	lines.append("[BENCH] %s.deterministic=%s hash=%d" % [name, str(again == volume), hash(volume)])
 
-	# ③ 经生成器切片：全量 chunk 一次跑完（单线程，测纯吞吐）
-	var gen := PcgModelGenerator.new()
-	gen.model = (case["make"] as Callable).call() as PcgModel
-	gen.set_grid_size(grid)
+	# ③ 经数据层切片：全量 chunk 一次跑完（单线程，测纯吞吐）
+	var slicer := QVoxelSource.new()
+	slicer.node = QVoxelModel.of_source((case["make"] as Callable).call() as PcgModel, grid)
+	slicer.grid_size = grid
 	var total := 0
 	t0 = Time.get_ticks_usec()
 	for cz in span.z:
 		for cy in span.y:
 			for cx in span.x:
-				var buf: PackedInt32Array = gen.generate(Vector3i(cx, cy, cz))
+				var buf: PackedInt32Array = slicer.generate(Vector3i(cx, cy, cz))
 				total += buf.size()
 	var t_slice := _us(t0)
 	var cps := 0.0 if t_slice <= 0.0 else float(cells) / (t_slice / 1000.0)
 	lines.append("[BENCH] %s.slice_total_ms=%.1f  per_chunk_ms=%.2f  cells_per_sec=%.0f  sliced_cells=%d"
 			% [name, t_slice, t_slice / float(chunk_count), cps, total])
-	lines.append("[BENCH] %s.volume_mem_kb=%.0f" % [name, gen._volume.size() * 4 / 1024.0])
+	lines.append("[BENCH] %s.volume_mem_kb=%.0f" % [name, slicer._volume.size() * 4 / 1024.0])
 
-	# ④ 端到端：VoxelData + 异步编排（线程派发 + 主线程回填），直到全部 chunk 就绪
+	# ④ 端到端：QVoxelSource + 异步编排（线程派发 + 主线程回填），直到全部 chunk 就绪
 	var e2e := _e2e(case["make"] as Callable, grid)
 	lines.append("[BENCH] %s.e2e_ms=%.1f  e2e_chunks=%d/%d  ok=%s"
 			% [name, e2e["ms"], e2e["accepted"], chunk_count, str(e2e["accepted"] == chunk_count)])
@@ -177,20 +177,18 @@ static func _bench_case(lines: PackedStringArray, case: Dictionary) -> void:
 # 端到端（真实链路）
 # ----------------------------------------------------------------------------
 
-## 造一个 VoxelData（有界 + 生成器），把所有 chunk 异步请求出去，
+## 造一个 QVoxelSource（有界 + 节点），把所有 chunk 异步请求出去，
 ## 然后按"轮询就绪 → 回填"跑到全部就绪；返回耗时与就绪数。
 ##
 ## 这里刻意**不经过 VoxelRenderer**：渲染器会把 chunk 切成 mesh 再算绘制，
 ## 那是另一回事；本项只量"数据从请求到落地"这一段，与 GPU 完全无关。
 static func _e2e(make: Callable, grid: Vector3i) -> Dictionary:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	data.add_material(mat)
-	var gen := PcgModelGenerator.new()
-	gen.model = make.call() as PcgModel
-	# 与 PcgSceneKit.add_model 同序：先挂生成器（会自动补内存流），再定 grid_size
-	data.generator = gen
+	# 与 PcgSceneKit.add_model 同序：先挂节点（会自动补内存流），再定 grid_size
+	data.node = QVoxelModel.of_source(make.call() as PcgModel, grid)
 	data.grid_size = grid
 
 	var span := _span(grid)
@@ -221,13 +219,13 @@ static func _e2e(make: Callable, grid: Vector3i) -> Dictionary:
 static func _bench_build_calls(lines: PackedStringArray) -> void:
 	# 64 宽 = x 方向 2 个 chunk，两个 key 分属不同 chunk → 无锁时两个 worker 都会走到 _ensure_volume
 	var probe := CountingModel.new()
-	var gen := PcgModelGenerator.new()
-	gen.model = probe
-	gen.set_grid_size(Vector3i(64, 32, 32))
+	var slicer := QVoxelSource.new()
+	slicer.node = QVoxelModel.of_source(probe, Vector3i(64, 32, 32))
+	slicer.grid_size = Vector3i(64, 32, 32)
 	var ids: Array[int] = []
 	for i in 2:
 		var ck := Vector3i(i, 0, 0)
-		ids.append(WorkerThreadPool.add_task(func() -> void: gen.generate(ck)))
+		ids.append(WorkerThreadPool.add_task(func() -> void: slicer.generate(ck)))
 	for id in ids:
 		WorkerThreadPool.wait_for_task_completion(id)
 	lines.append("[BENCH] concurrent.build_calls=%d (期望 1)  reentered=%s"

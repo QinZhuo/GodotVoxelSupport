@@ -224,7 +224,7 @@ func origin_chunk() -> Vector3i:
 
 ## 动态原点重定位：相机 chunk 距数据基准超阈值时，平移数据层 + 渲染层 + 相机，
 ## 使相机附近 chunk 回到小坐标，避免 float32 精度损失（无限移动世界）。
-## 调用方：process_streaming（仅程序化无限世界 data.generator != null 时）。
+## 调用方：process_streaming（仅无限世界 data.infinite 时）。
 func check_origin_shift(cam: Camera3D) -> void:
 	if kernel == null or cam == null:
 		return
@@ -368,13 +368,13 @@ func process_deferred_chunks() -> void:
 
 ## 统一流式 / 程序化驱动（合并原 _process_streaming / _process_procedural）：
 ## 按相机距离管理 chunk 数据与网格。数据源分成两个**并列**的抽象，差异不再靠类型分支猜：
-##   - generator（VoxelGenerator）：未存过的 chunk 后台确定性生成。
+##   - 数据层（QVoxelSource 及其扩展）：未存过的 chunk 后台确定性产出（can_generate_chunk）。
 ##     存过的（= 用户改过）必须优先从流取，否则重新生成会覆盖用户修改。
 ##   - stream（VoxelStream）：已存的数据（QVoxelStream 常驻内存索引 → 直读）。
 ## 统一流程：① poll 回填异步结果 → ② 距离内扫描缺失 chunk 提交（限量 / 降频）→
 ## ③ 卸载超范围网格与粗层数据块。
-## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走 VoxelData.can_supply_chunk
-## （流里已存 或 生成器可生成），不再维护 _streamed_out_chunks 渲染层注册表。
+## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走 QVoxelSource.can_supply_chunk
+## （流里已存 或 本层造得出），不再维护 _streamed_out_chunks 渲染层注册表。
 func process_streaming() -> void:
 	if kernel == null or not kernel.is_inside_tree():
 		return
@@ -401,7 +401,7 @@ func process_streaming() -> void:
 	var cam_ck := VoxelWorldUtil.chunk_from_world(cam_pos, chunk_size_world, world_offset)
 
 	# 程序化无限世界：origin shift（相机 chunk 距基准超阈值 → 平移数据 + 渲染 + 相机）
-	if data.generator != null:
+	if data.infinite:
 		check_origin_shift(cam)
 
 	# 1) 回填后台异步结果（生成器产出 / 流里直读），poll → 回填一步到位（数据层封装）
@@ -443,8 +443,8 @@ func process_streaming() -> void:
 					# 按带请求独立数据（生成器 _generate_chunk_lod 直接生成，省内存 / 生成量）。
 					if VoxelLodGrid.chunk_render_level(ck, cam_pos, world_offset, voxel_scale, lod_outer, lod_count) > 0:
 						continue
-					# 存在性统一判定（廉价，无 IO）：流里已存 或 生成器可生成。
-					# 两个抽象各表达一个含义，不再靠类型分支猜（见 VoxelData.can_supply_chunk）。
+					# 存在性统一判定（廉价，无 IO）：流里已存 或 本层造得出。
+					# 两个抽象各表达一个含义，不再靠类型分支猜（见 QVoxelSource.can_supply_chunk）。
 					if not data.can_supply_chunk(ck):
 						continue
 					if data.is_chunk_loaded(ck):
@@ -453,8 +453,8 @@ func process_streaming() -> void:
 						continue
 					if VoxelWorldUtil.chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset) > load_d:
 						continue
-					# 生成器世界里已存过的 chunk（= 用户改过）：重新生成会覆盖修改 → 同步预载已存数据
-					if data.generator != null and data.is_stored(ck):
+					# 无限世界里已存过的 chunk（= 用户改过）：重新生成会覆盖修改 → 同步预载已存数据
+					if data.infinite and data.is_stored(ck):
 						if data.preload_chunk(ck):
 							# 只登记给"会消费它的可见性模式"：该表的唯一消费 / 擦除点是
 							# filter_visible_chunks，而它在 FULL 下直接全量返回（早退）——
@@ -689,7 +689,7 @@ func process_lod() -> void:
 	# 程序化生成：粗层独立数据生成较慢（噪声），收紧每帧粗层 request 预算，
 	# 让出 WorkerThreadPool 给 LOD0 chunk 生成（切换后快速看到地形，粗层随后补充）。
 	var submit_budget: int = kernel._lod_submit_per_frame
-	if data.generator != null:
+	if data.infinite:
 		submit_budget = 40
 	# 每层独立构建预算 = 总数均分（保证近层建完前更粗层也能推进，不被近层 in-flight
 	# 队列饿死——否则 LOD1 海量候选每帧占满共享配额，LOD2 永远 0 个 → 远处空洞）。
@@ -993,7 +993,7 @@ func _lod_load_priority(bk: Vector3i, level: int, cam_pos: Vector3, cam_dir: Vec
 
 
 ## 派发粗 LOD 大块异步生成。**数据快照在主线程构造**后交给 worker（与 _build_lod_data_only 同一模式）：
-##   · worker 只读快照，不触碰 VoxelData 的活动字典/缓冲 → 无跨线程读取（线程安全）；
+##   · worker 只读快照，不触碰 QVoxelSource 的活动字典/缓冲 → 无跨线程读取（线程安全）；
 ##   · 数据来源由主线程判定：独立粗层大格数据自足则直接网格化，否则回退 LOD0 降采样。
 ## 返回是否真正派发（已 pending / 无效 level 时 false——调用方据此决定是否消耗构建预算）。
 func _build_lod_block(level: int, bk: Vector3i) -> bool:
@@ -1035,12 +1035,12 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 		snapshot, bk, level, _lod_block_gen[level].get(bk, 0), handle)))
 
 
-## 工作线程：粗 LOD 大块 mesh 生成。只读主线程构造好的数据快照（线程安全，不触碰 VoxelData）。
+## 工作线程：粗 LOD 大块 mesh 生成。只读主线程构造好的数据快照（线程安全，不触碰 QVoxelSource）。
 ##   standalone=true：快照是独立粗层大格数据（直接拷大格，无降采样）；
 ##   false：快照是 LOD0 chunk 缓冲（降采样），顺带回传大格数据供粗层缓存复用。
 func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, level: int,
 		gen_id: int, scale: float, offset: Vector3, aligned_materials: Array,
-		handle: VoxelData.ReadonlySnapshot) -> void:
+		handle: QVoxelSource.ReadonlySnapshot) -> void:
 	var halo: PackedInt32Array
 	var buf := PackedInt32Array()
 	if standalone:
@@ -1056,7 +1056,7 @@ func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, lev
 ## 工作线程：内带失效 block 只降采样大格数据（不生成 mesh——mesh 由 LOD0 chunk 反映）。
 ## 拆分两阶段：内带 block 的粗层 mesh 应用会被 _should_apply 丢弃，省去 arrays/mesh 构建。
 func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int,
-		handle: VoxelData.ReadonlySnapshot) -> void:
+		handle: QVoxelSource.ReadonlySnapshot) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
 	var buf := VoxelChunk.extract_center_from_halo(halo)
 	call_deferred("_on_lod_data_ready", bk, level, gen_id, buf, handle)
@@ -1111,7 +1111,7 @@ func _lod_mark_null_or_retry(level: int, bk: Vector3i) -> void:
 
 ## 主线程：内带失效 block 的降采样数据回填（mesh 由 LOD0 chunk 反映，不挂载）。
 func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32Array,
-		handle: VoxelData.ReadonlySnapshot) -> void:
+		handle: QVoxelSource.ReadonlySnapshot) -> void:
 	# 释放本任务自己的快照句柄（必须在任何早退之前）
 	handle.release()
 	if _exiting:
@@ -1135,7 +1135,7 @@ func _on_lod_data_ready(bk: Vector3i, level: int, gen_id: int, buf: PackedInt32A
 ## mesh 已在工作线程构建（ArrayMesh），此处仅轻量挂载——避免主线程同步构建大 mesh 卡顿。
 ## 降采样回退路径会顺带返回大格数据 buf，同步粗层缓存（+ 持久化），避免缓存缺口。
 func _on_lod_thread_result(bk: Vector3i, level: int, mesh: ArrayMesh, gen_id: int,
-		buf := PackedInt32Array(), handle: VoxelData.ReadonlySnapshot = null) -> void:
+		buf := PackedInt32Array(), handle: QVoxelSource.ReadonlySnapshot = null) -> void:
 	# 释放本任务自己的快照句柄（必须在任何早退之前）
 	if handle != null:
 		handle.release()

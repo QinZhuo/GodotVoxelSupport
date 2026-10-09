@@ -20,7 +20,7 @@ extends RefCounted
 ##
 ## 【为什么与 VoxelAsyncLoader 分开】后者是**取数账本**：按 (chunk_key, lod) 键、
 ## 跨多个渲染批次存活、由 configure()/clear() 失效。本类是**渲染扇出账本**：
-## 同时至多一个、随 origin shift / 退出 / 世界重建失效，且必须携带 VoxelData 的快照句柄。
+## 同时至多一个、随 origin shift / 退出 / 世界重建失效，且必须携带 QVoxelSource 的快照句柄。
 ## 合并两者会让取数层被迫理解快照生命周期，并混淆两套 epoch。
 
 ## 单个 worker 产出的结果（主线程发射）。已取消的批次不再发射。
@@ -33,7 +33,7 @@ signal finished
 static var _serial_counter: int = 0
 
 var _serial: int = 0
-var _snapshot: VoxelData.ReadonlySnapshot = null
+var _snapshot: QVoxelSource.ReadonlySnapshot = null
 var _pending: int = 0
 var _task_ids: Array[int] = []
 var _dispatched: bool = false
@@ -42,7 +42,7 @@ var _cancelled: bool = false
 
 
 ## snapshot 可后置附加（见 attach_snapshot）：调用方通常先建批次、算完可见集后才登记快照。
-func _init(snapshot: VoxelData.ReadonlySnapshot = null) -> void:
+func _init(snapshot: QVoxelSource.ReadonlySnapshot = null) -> void:
 	_serial_counter += 1
 	_serial = _serial_counter
 	_snapshot = snapshot
@@ -64,7 +64,7 @@ func pending_count() -> int:
 
 
 ## 登记只读快照句柄（本批次负责在结算时释放）。仅可在派发前调用一次。
-func attach_snapshot(snapshot: VoxelData.ReadonlySnapshot) -> void:
+func attach_snapshot(snapshot: QVoxelSource.ReadonlySnapshot) -> void:
 	if _settled or _snapshot != null:
 		return
 	_snapshot = snapshot

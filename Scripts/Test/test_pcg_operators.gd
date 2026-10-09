@@ -4,7 +4,7 @@ extends TestCase
 ##
 ## 盯的是三样东西的**契约**，不是"好不好看"：
 ##   1. PcgModel 的下标 / 越界工具 —— 所有算子共用的那一层，错了全体错。
-##   2. PcgModelGenerator 的切片换算 —— "整体产出 → 按 chunk / 粗层取数"全项目只此一份实现，
+##   2. QVoxelSource 的切片换算 —— "整体产出 → 按 chunk / 粗层取数"全项目只此一份实现，
 ##      LOD0 的 chunk 偏移与粗层的"格内折叠"都必须与 VoxelChunk 的布局公式严格对齐。
 ##   3. 三个算子（L-系统 / 元胞自动机 / WFC）的**确定性**与**退化行为**（展开截断、矛盾重试）。
 ##
@@ -57,59 +57,61 @@ func test_model_index_and_bounds_helpers() -> void:
 
 
 # ----------------------------------------------------------------------------
-# ② PcgModelGenerator：把整块体积切成 32³ chunk
+# ② QVoxelSource：把整块体积切成 32³ chunk
 # ----------------------------------------------------------------------------
 
-func test_model_generator_slices_chunks() -> void:
+func test_source_slices_chunks() -> void:
 	# 体素落在 (33,1,2) → 第 2 个 chunk（key=(1,0,0)）内，局部坐标 (1,1,2)
-	var gen := _generator(ProbeModel.new(Vector3i(33, 1, 2), 9), Vector3i(64, 8, 8))
+	var data := _source(ProbeModel.new(Vector3i(33, 1, 2), 9), Vector3i(64, 8, 8))
 
-	assert_eq(_count_solid(gen.generate(Vector3i(0, 0, 0))), 0, "第 1 个 chunk 应全空")
-	var buf := gen.generate(Vector3i(1, 0, 0))
+	assert_eq(_count_solid(data.generate(Vector3i(0, 0, 0))), 0, "第 1 个 chunk 应全空")
+	var buf := data.generate(Vector3i(1, 0, 0))
 	assert_eq(buf.size(), VoxelChunk.CHUNK_VOLUME, "chunk 缓冲长度应为 32³")
 	assert_eq(buf[VoxelChunk.buf_index(1, 1, 2)], 9, "体素应切到局部坐标 (1,1,2)")
 	assert_eq(_count_solid(buf), 1, "第 2 个 chunk 应只含这一个体素")
 
 
 # ----------------------------------------------------------------------------
-# ③ PcgModelGenerator：粗层把 2^lod 立方折叠成一格
+# ③ QVoxelSource：粗层把 2^lod 立方折叠成一格
 # ----------------------------------------------------------------------------
 
-func test_model_generator_lod_folds_cells() -> void:
-	var gen := _generator(ProbeModel.new(Vector3i(5, 5, 5), 9), Vector3i(64, 64, 64))
+func test_source_lod_folds_cells() -> void:
+	var data := _source(ProbeModel.new(Vector3i(5, 5, 5), 9), Vector3i(64, 64, 64))
 	var grid := VoxelChunkGenerator.LOD_BLOCK_SIZE
 
 	# lod=1：每格 2 体素 → (5,5,5) 落在格 (2,2,2)
-	var lod1 := gen.generate(Vector3i(0, 0, 0), 1)
+	var lod1 := data.generate(Vector3i(0, 0, 0), 1)
 	assert_eq(lod1.size(), grid * grid * grid, "粗层缓冲长度应为 LOD_BLOCK_SIZE³")
 	assert_eq(lod1[2 + 2 * grid + 2 * grid * grid], 9, "lod=1 应把体素折叠到格 (2,2,2)")
 	assert_eq(_count_solid(lod1), 1, "lod=1 应只折叠出一个实心大格")
 
 	# lod=2：每格 4 体素 → (5,5,5) 落在格 (1,1,1)；同一体素在更粗层归到更大的格
-	var lod2 := gen.generate(Vector3i(0, 0, 0), 2)
+	var lod2 := data.generate(Vector3i(0, 0, 0), 2)
 	assert_eq(lod2[1 + grid + grid * grid], 9, "lod=2 应把体素折叠到格 (1,1,1)")
 	assert_eq(_count_solid(lod2), 1, "lod=2 应只折叠出一个实心大格")
 
 
 # ----------------------------------------------------------------------------
-# ④ PcgModelGenerator：grid_size 变化必须作废旧缓存并重建
+# ④ QVoxelSource：改盒必须作废旧缓存并重建
 # ----------------------------------------------------------------------------
 
-func test_model_generator_rebuilds_on_grid_change() -> void:
-	var gen := _generator(ProbeModel.new(Vector3i(40, 0, 0), 3), Vector3i(64, 4, 4))
-	assert_eq(gen.generate(Vector3i(1, 0, 0))[VoxelChunk.buf_index(8, 0, 0)], 3,
+func test_source_rebuilds_on_grid_change() -> void:
+	var node := QVoxelModel.of_source(ProbeModel.new(Vector3i(40, 0, 0), 3), Vector3i(64, 4, 4))
+	var data := QVoxelSource.new()
+	data.grid_size = Vector3i(64, 4, 4)
+	data.node = node
+	assert_eq(data.generate(Vector3i(1, 0, 0))[VoxelChunk.buf_index(8, 0, 0)], 3,
 			"64 宽时应能在第 2 个 chunk 的 x=8 处取到体素")
 
-	# 缩小到 32 宽：x=40 已在界外 —— 若缓存没作废会读到旧体积，这里就会非空
-	gen.set_grid_size(Vector3i(32, 4, 4))
-	assert_eq(_count_solid(gen.generate(Vector3i(1, 0, 0))), 0, "改小尺寸后应重建为全空")
+	# 缩小到 32 宽：x=40 已在界外 —— 改盒后必须作废求值缓存（data.grid_size 的 setter 会做），
+	# 否则会读到旧体积、这里就非空
+	node.grid_size = Vector3i(32, 4, 4)
+	data.grid_size = Vector3i(32, 4, 4)
+	assert_eq(_count_solid(data.generate(Vector3i(1, 0, 0))), 0, "改小尺寸后应重建为全空")
 
-	# 无界（ZERO）与无模型都必须产出全空，而不是崩溃或复用旧体积
-	gen.set_grid_size(Vector3i.ZERO)
-	assert_eq(_count_solid(gen.generate(Vector3i(0, 0, 0))), 0, "无界尺寸应产出全空")
-	gen.set_grid_size(Vector3i(32, 4, 4))
-	gen.model = null
-	assert_eq(_count_solid(gen.generate(Vector3i(0, 0, 0))), 0, "无模型应产出全空")
+	# 无节点必须产出全空，而不是崩溃或复用旧体积
+	data.node = null
+	assert_eq(_count_solid(data.generate(Vector3i(0, 0, 0))), 0, "无节点应产出全空")
 
 
 # ----------------------------------------------------------------------------
@@ -257,12 +259,12 @@ func test_wfc_overlap_deterministic_and_degenerate() -> void:
 # 工具
 # ----------------------------------------------------------------------------
 
-## 把模型挂到生成器上并设好尺寸（与 demo / VoxelData 的组装方式一致）。
-func _generator(model: PcgModel, grid_size: Vector3i) -> PcgModelGenerator:
-	var gen := PcgModelGenerator.new()
-	gen.model = model
-	gen.set_grid_size(grid_size)
-	return gen
+## 把模型挂到数据层上并设好尺寸（与 demo / QVoxelSource 的组装方式一致）。
+func _source(model: PcgModel, grid_size: Vector3i) -> QVoxelSource:
+	var data := QVoxelSource.new()
+	data.grid_size = grid_size
+	data.node = QVoxelModel.of_source(model, grid_size)
+	return data
 
 
 ## 元胞自动机洞穴：关掉实心外壳以便看到内腔（与 demo 同参数风格）。

@@ -46,7 +46,7 @@ const DIRS: Array[Vector3i] = [
 ## 矛盾后的重试次数（第 n 次用 seed + n）。
 @export var max_retries: int = 8
 
-# --- 学习结果（每次 build 重建；PcgModelGenerator 会缓存产出，故无需自己再缓存） ---
+# --- 学习结果（每次 build 重建；数据层会缓存产出，故无需自己再缓存） ---
 var _n := 0                                  ## 图案边长
 var _patterns: Array[PackedInt32Array] = []  ## 去重后的图案内容
 var _weights: PackedFloat32Array = PackedFloat32Array()  ## 图案出现次数（作选择权重）
@@ -56,7 +56,7 @@ var _allow: Array = []                       ## _allow[d][p] = Dictionary（与 
 ## 链外节点：重叠式 WFC 要**全局**迭代收敛（矛盾回退、约束传播看的是整块体积的
 ## 接缝邻域），且 `_learn()` 会写本对象的可变缓存 —— 线性链既给不了它全局视窗，
 ## 也不该替它决定"该在第几步重新学习"。它只作为**整体产出**使用
-## （PcgModelGenerator / VoxelGenerator，见 qvoxelier 的"链外节点"分层）。
+## （数据层整块供数，见 qvoxelier 的"链外节点"分层）。
 func chainable() -> bool:
 	return false
 

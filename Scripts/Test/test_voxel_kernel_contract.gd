@@ -149,7 +149,7 @@ func test_edit_kernel_is_headless_node_free() -> void:
 	assert_true(missing.is_empty(), "契约声明但编辑内核缺失的公开方法: %s" % str(missing))
 
 
-## 无头破坏：全程只有 VoxelData + 内核实例，没有任何节点 / 场景树 / 物理 / 粒子。
+## 无头破坏：全程只有 QVoxelSource + 内核实例，没有任何节点 / 场景树 / 物理 / 粒子。
 func test_edit_kernel_resolves_damage_with_no_node() -> void:
 	var d := _make_solid(8)
 	var k := VoxelEditKernel.new()
@@ -268,7 +268,7 @@ func test_empty_chunk_erased_but_mesh_still_marked_dirty() -> void:
 
 
 # ----------------------------------------------------------------------------
-# P4-4：数据层 VoxelData 的 API 稳定等级（公开 / 实验 / 内部）
+# P4-4：数据层 QVoxelSource 的 API 稳定等级（公开 / 实验 / 内部）
 # ----------------------------------------------------------------------------
 #
 # 【为什么要有这张网】GDScript 没有访问修饰符，"内部协议"只能靠 `_` 前缀表达。
@@ -278,7 +278,7 @@ func test_empty_chunk_erased_but_mesh_still_marked_dirty() -> void:
 #   故把它们钉成断言：① 数据层**不带 `_` 的公开方法 = 【公开】∪【实验】**（多一个少一个都失败）；
 #   ② 内部协议**只以 `_` 前缀存在**，旧公开名一律不得复活。
 #
-# 【与文档的对应】两张分级表与 VoxelData.gd 顶部"API 稳定等级（P4-4）"清单一一对应。
+# 【与文档的对应】两张分级表与 QVoxelSource.gd 顶部"API 稳定等级（P4-4）"清单一一对应。
 
 ## 数据层【公开】稳定 API —— 承诺向后兼容，破坏性改动须走弃用期。
 const VOXEL_DATA_PUBLIC_API: Array[String] = [
@@ -306,8 +306,9 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"partition_connected", "find_unsupported", "find_unsupported_around",
 	# 数据源
 	"set_stream", "is_streaming", "shift_origin",
+	"generate", "can_generate_chunk", "is_in_node_bounds", "output_grid_size",
 	# 源失效（源内容变了 → 该块按需重新取数，区别于 unload_chunk 的"卸载"语义）
-	"invalidate_chunk_source", "invalidate_chunk_source_range",
+	"invalidate_chunk_source", "invalidate_chunk_source_range", "invalidate",
 	# 帧动画（整份块表替换，切帧的唯一入口）
 	"apply_block_table",
 ]
@@ -316,7 +317,8 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 ## 数据层【实验】API —— 可用但形态可能变（收口期仍在动；用前请确认版本）。
 const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	# 两级存储查询
-	"is_chunk_loaded", "is_stored", "can_supply_chunk", "get_vertical_half_span",
+	"is_chunk_loaded", "is_stored", "has_stored_chunk", "load_stored_chunk",
+	"can_supply_chunk", "get_vertical_half_span",
 	"get_unloaded_chunk_keys", "get_unloaded_chunk_count", "get_all_chunk_keys",
 	"get_loaded_chunk_keys", "preload_chunk", "unload_chunk",
 	# 异步取数
@@ -349,7 +351,7 @@ const VOXEL_DATA_INTERNAL_PROTOCOLS: Array[String] = [
 
 
 func test_data_layer_api_tiers_match_contract() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelData.gd")
+	var script: Script = load("res://addons/VoxelSupport/Runtime/QVoxelSource.gd")
 	assert_true(script != null, "数据层脚本应能加载")
 	var actual: Array[String] = []
 	for m in script.get_script_method_list():
@@ -376,7 +378,7 @@ func test_data_layer_api_tiers_match_contract() -> void:
 
 
 func test_data_internal_protocols_are_underscored() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelData.gd")
+	var script: Script = load("res://addons/VoxelSupport/Runtime/QVoxelSource.gd")
 	var names: Array[String] = []
 	for m in script.get_script_method_list():
 		names.append(m["name"])
@@ -394,7 +396,7 @@ func test_data_internal_protocols_are_underscored() -> void:
 
 
 ## 全量重数（独立于增量账本）：用于交叉验证计数账本没有漂移。
-func _recount(d: VoxelData) -> int:
+func _recount(d: QVoxelSource) -> int:
 	var total := 0
 	var buffers := d._chunk_buffers_view()
 	for ck in buffers:
@@ -403,8 +405,8 @@ func _recount(d: VoxelData) -> int:
 	return total
 
 
-func _make_data() -> VoxelData:
-	var d := VoxelData.new()
+func _make_data() -> QVoxelSource:
+	var d := QVoxelSource.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	d.materials = [mat]
@@ -413,8 +415,8 @@ func _make_data() -> VoxelData:
 
 ## edge³ 实心块（材质 ID=1，硬度 1.0，连接强度 9999）。索引 0 留空占位以覆盖
 ## 材质表含 null 的路径（hardness_table / strength_table 必须跳过空条目）。
-func _make_solid(edge: int) -> VoxelData:
-	var d := VoxelData.new()
+func _make_solid(edge: int) -> QVoxelSource:
+	var d := QVoxelSource.new()
 	var mats: Array[VoxelMaterial] = []
 	mats.resize(2)
 	var mat := VoxelMaterial.new()

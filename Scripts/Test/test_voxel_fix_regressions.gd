@@ -24,7 +24,7 @@ const VOL := VoxelChunk.CHUNK_VOLUME
 # ----------------------------------------------------------------------------
 
 func test_snapshot_handle_releases_counter() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	assert_eq(data._snapshot_readers, 0, "初始无快照")
 	var h := data.begin_readonly_snapshot()
 	assert_eq(data._snapshot_readers, 1, "begin 后计数应为 1")
@@ -35,7 +35,7 @@ func test_snapshot_handle_releases_counter() -> void:
 
 
 func test_snapshot_handles_are_independent() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var a := data.begin_readonly_snapshot()
 	var b := data.begin_readonly_snapshot()
 	assert_eq(data._snapshot_readers, 2, "两个快照并发持有")
@@ -48,7 +48,7 @@ func test_snapshot_handles_are_independent() -> void:
 func test_clear_force_releases_leaked_snapshot() -> void:
 	# 模拟"提前返回漏释放"：句柄被丢弃但从未 release。
 	# 若 clear() 不强制回收，_snapshot_readers 会永久 >0，此后每次单点写都复制整块缓冲。
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	data.begin_readonly_snapshot()
 	assert_eq(data._snapshot_readers, 1, "泄漏句柄使计数为 1")
 	data.clear()
@@ -57,7 +57,7 @@ func test_clear_force_releases_leaked_snapshot() -> void:
 
 func test_missing_end_release_leaves_counter_stuck_unless_forced() -> void:
 	# 反证：不调 clear() 也不 release 时，计数确实停在 1（说明该不变量有意义）。
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	data.begin_readonly_snapshot()
 	assert_eq(data._snapshot_readers, 1, "未释放则计数值保持 1")
 	data._force_release_snapshots()
@@ -81,7 +81,7 @@ func test_batch_settles_once_for_empty_batch() -> void:
 
 
 func test_batch_releases_snapshot_on_settle() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var b := VoxelMeshBatch.new()
 	var fin := [0]
 	b.finished.connect(func() -> void: fin[0] += 1)
@@ -112,7 +112,7 @@ func test_batch_spawn_then_cancel_releases_snapshot_once() -> void:
 	# S1 回归核心：worker 可能"不产出任何结果"（被丢弃/空块）。
 	# 旧实现里结果处理的早退路径各减一次计数 → 计数提前归零 → 快照提前释放。
 	# 现在计数只在批次内部结算一次，故"无产出 worker"绝不能让它失衡。
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var b := VoxelMeshBatch.new()
 	var fin := [0]
 	b.finished.connect(func() -> void: fin[0] += 1)
@@ -136,7 +136,7 @@ func test_batch_spawn_then_cancel_releases_snapshot_once() -> void:
 # ----------------------------------------------------------------------------
 
 func test_removing_voxel_zeroes_its_damage() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var pos := Vector3i(3, 4, 5)
 	data.set_voxel(pos, 7)
 	_seed_damage(data, pos, 99.0)
@@ -147,7 +147,7 @@ func test_removing_voxel_zeroes_its_damage() -> void:
 
 
 func test_placing_voxel_on_damaged_spot_resets_damage() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var pos := Vector3i(1, 2, 3)
 	data.set_voxel(pos, 7)
 	_seed_damage(data, pos, 50.0)
@@ -157,7 +157,7 @@ func test_placing_voxel_on_damaged_spot_resets_damage() -> void:
 
 
 func test_unload_chunk_drops_its_damage() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var stream := VoxelMemoryStream.new()
 	data.stream = stream
 	var pos := Vector3i(2, 2, 2)
@@ -170,7 +170,7 @@ func test_unload_chunk_drops_its_damage() -> void:
 
 
 func test_clear_drops_all_damage() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var pos := Vector3i(4, 4, 4)
 	data.set_voxel(pos, 5)
 	_seed_damage(data, pos, 3.0)
@@ -179,7 +179,7 @@ func test_clear_drops_all_damage() -> void:
 
 
 func test_shift_origin_shifts_damage_keys() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	var pos := Vector3i(6, 0, 0)
 	data.set_voxel(pos, 5)
 	_seed_damage(data, pos, 8.0)
@@ -224,7 +224,7 @@ func test_destructible_queues_follow_origin_shift() -> void:
 # ----------------------------------------------------------------------------
 
 func test_find_unsupported_matches_flood_fill_oracle() -> void:
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	# 一根贴地柱子 + 一块悬空体素（与地面 6 方向不连通）
 	for y in 4:
 		d.set_voxel(Vector3i(0, y, 0), 1)
@@ -254,7 +254,7 @@ func test_find_unsupported_matches_flood_fill_oracle() -> void:
 # ----------------------------------------------------------------------------
 
 func test_flood_fill_restrict_branch_matches_predicate_oracle() -> void:
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	# 地面行 + 斜向"台阶"（靠 (3,1,0) 竖直连接地面）+ 负坐标柱 + 悬空 2x2 平面
 	for x in 4:
 		d.set_voxel(Vector3i(x, 0, 0), 1)
@@ -332,7 +332,7 @@ func test_bpp_16_is_accepted() -> void:
 # PCG：同一模型被并发请求多个 chunk 时，只能构建一次
 # ----------------------------------------------------------------------------
 # 模型覆盖多个 chunk 时，首帧会有多个 worker 线程同时请求不同 chunk，每个都走到
-# PcgModelGenerator._ensure_volume()。无锁则各自 build 一遍：L-系统 / 元胞 / WFC 只是
+# QVoxelSource._ensure_volume()。无锁则各自 build 一遍：L-系统 / 元胞 / WFC 只是
 # N× 白算，而 PcgWfcOverlap 的 _learn() 会写实例成员 _patterns/_weights/_allow
 # —— 并发即正确性 bug（读者会拿到"新相容表 + 半个图案表"）。
 # 32³ 的 demo 只有 1 个 chunk，故这条路径此前从未被走到。
@@ -366,9 +366,9 @@ func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
 	# 64 宽 = 2 个 chunk（x 方向），两个 key 分属不同 chunk → 并发下都会走到 _ensure_volume
 	var keys: Array[Vector3i] = [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
 	var probe := ConcurrentProbeModel.new()
-	var gen := PcgModelGenerator.new()
-	gen.model = probe
-	gen.set_grid_size(Vector3i(64, 32, 32))
+	var src := QVoxelSource.new()
+	src.grid_size = Vector3i(64, 32, 32)
+	src.node = QVoxelModel.of_source(probe, Vector3i(64, 32, 32))
 
 	# 照 VoxelAsyncLoader.request 的方式派发：每个 chunk 一个后台任务，互不等待。
 	# 每个任务写自己那份单元素数组（数组是引用语义，外层容器共享）——两个线程
@@ -381,7 +381,7 @@ func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
 		var slot := i
 		var ck := keys[i]
 		ids.append(WorkerThreadPool.add_task(func() -> void:
-			got[slot][0] = gen.generate(ck)))
+			got[slot][0] = src.generate(ck)))
 	for id in ids:
 		WorkerThreadPool.wait_for_task_completion(id)
 	var r0: PackedInt32Array = got[0][0]
@@ -392,9 +392,9 @@ func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
 	assert_false(probe.reentered, "build 绝不能被并发重入")
 
 	# 加锁不得改变产出：逐 chunk 与串行结果比对
-	var serial := PcgModelGenerator.new()
-	serial.model = ConcurrentProbeModel.new()
-	serial.set_grid_size(Vector3i(64, 32, 32))
+	var serial := QVoxelSource.new()
+	serial.grid_size = Vector3i(64, 32, 32)
+	serial.node = QVoxelModel.of_source(ConcurrentProbeModel.new(), Vector3i(64, 32, 32))
 	assert_eq(r0, serial.generate(keys[0]), "第 1 个 chunk 的切片内容应与串行一致")
 	assert_eq(r1, serial.generate(keys[1]), "第 2 个 chunk 的切片内容应与串行一致")
 	assert_eq(r0[VoxelChunk.buf_index(3, 3, 3)], 9,
@@ -406,7 +406,7 @@ func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
 # ----------------------------------------------------------------------------
 
 ## 在指定位置种入累计伤害（直接写数据层的伤害账内部协议，避免依赖原生破坏内核）。
-func _seed_damage(data: VoxelData, pos: Vector3i, amount: float) -> void:
+func _seed_damage(data: QVoxelSource, pos: Vector3i, amount: float) -> void:
 	var ck := VoxelChunk.chunk_of(pos)
 	var buf := PackedFloat32Array()
 	buf.resize(VOL)
@@ -415,7 +415,7 @@ func _seed_damage(data: VoxelData, pos: Vector3i, amount: float) -> void:
 
 
 ## 读取指定位置的累计伤害（无该 chunk 视为 0）。
-func _damage_at(data: VoxelData, pos: Vector3i) -> float:
+func _damage_at(data: QVoxelSource, pos: Vector3i) -> float:
 	var ck := VoxelChunk.chunk_of(pos)
 	var buf := data.get_damage(ck)
 	if buf.is_empty():

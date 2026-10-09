@@ -3,8 +3,7 @@
 [ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="1_renderer"]
 [ext_resource type="Resource" uid="uid://dwlsmke33vkb6" path="res://demo/deer_data.vox" id="2_deer"]
 [ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Runtime/VoxelMaterial.gd" id="4_rgb08"]
-[ext_resource type="Script" uid="uid://clnfkmvkg10qe" path="res://addons/VoxelSupport/Runtime/VoxelData.gd" id="5_ly2s3"]
-[ext_resource type="Script" uid="uid://bjoj5mqll8orw" path="res://demo/procedural_generator.gd" id="6_vmvxb"]
+[ext_resource type="Script" path="res://demo/procedural_terrain_source.gd" id="6_vmvxb"]
 
 [sub_resource type="Resource" id="Resource_w68vc"]
 script = ExtResource("4_rgb08")
@@ -12,13 +11,10 @@ id = 1
 color = Color(0.35, 0.55, 0.3, 1)
 rough = 0.9
 
-[sub_resource type="Resource" id="Resource_lsd7j"]
-script = ExtResource("6_vmvxb")
-
 [sub_resource type="Resource" id="Resource_h5cn6"]
-script = ExtResource("5_ly2s3")
+script = ExtResource("6_vmvxb")
 materials = Array[ExtResource("4_rgb08")]([null, SubResource("Resource_w68vc")])
-stream = SubResource("Resource_lsd7j")
+infinite = true
 lod_count = 4
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]

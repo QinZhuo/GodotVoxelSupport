@@ -324,7 +324,7 @@ static func _items_by_frame(qvx: QVoxelAsset) -> Array:
 
 
 ## 按 items（[{name, chunks}]）逐项生成网格写入 MeshLibrary。
-## 每项按 origin_mode 各自摆正（VoxelData.origin_offset）—— MeshLibrary 的每一项都是独立资产，
+## 每项按 origin_mode 各自摆正（QVoxelSource.origin_offset）—— MeshLibrary 的每一项都是独立资产，
 ## 本就该各自有原点，否则往场景里放第 N 项时位置会带着别的模型的偏移。
 static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 		options: Dictionary, path: String) -> void:
@@ -347,7 +347,7 @@ static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 		gen.runtime_materials = materials
 		gen.generate_materials(options)
 		gen.start_generate_mesh_from_chunks(
-				chunks, VoxelData.origin_offset(QVoxelAsset.bounds_for_blocks(chunks), gen.origin_mode))
+				chunks, QVoxelSource.origin_offset(QVoxelAsset.bounds_for_blocks(chunks), gen.origin_mode))
 		gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
 		if child.get_surface_count() == 0:
 			continue
@@ -381,10 +381,10 @@ var shape: int = VoxelMeshImporter.Shape.cube
 var sphere_subdivisions: int = 0
 ## 小球半径相对体素边长的比例，仅 sphere 形状生效
 var sphere_scale: float = 1.0
-## 资产原点模式（导入选项 mesh/origin，见 VoxelData.OriginMode）：决定顶点叠加多少原点偏移。
-## 四条链路共用同一套语义，故这里只把选项读进来，再交给 VoxelData.origin_offset 算。
+## 资产原点模式（导入选项 mesh/origin，见 QVoxelSource.OriginMode）：决定顶点叠加多少原点偏移。
+## 四条链路共用同一套语义，故这里只把选项读进来，再交给 QVoxelSource.origin_offset 算。
 ## 默认 WORLD_ORIGIN = 不动几何（本插件网格导入一直以来的行为）。
-var origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN
+var origin_mode: int = QVoxelSource.OriginMode.WORLD_ORIGIN
 
 ## 顶点预算：超出则由原生按采样间隔自动降采样，防止大模型在编辑器内 OOM 崩溃
 const SPHERE_VERTEX_BUDGET := 4_000_000
@@ -402,7 +402,7 @@ func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
 	shape = options.get(VoxelMeshImporter.shape, VoxelMeshImporter.Shape.cube)
 	sphere_subdivisions = clampi(options.get(VoxelMeshImporter.sphere_subdivisions, 0), 0, 2)
 	sphere_scale = clampf(options.get(VoxelMeshImporter.sphere_scale, 1.0), 0.05, 2.0)
-	origin_mode = options.get(VoxelMeshImporter.origin, VoxelData.OriginMode.WORLD_ORIGIN)
+	origin_mode = options.get(VoxelMeshImporter.origin, QVoxelSource.OriginMode.WORLD_ORIGIN)
 
 
 func generate_materials(options: Dictionary) -> Array[Material]:
@@ -495,8 +495,8 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	# 原点偏移（体素单位）：按内容 AABB 算一次交给原生内核（cube 路径原生就支持 offset，
 	# 不必事后搬运顶点）。WORLD_ORIGIN 模式跳过求界——那是一次 O(体素数) 的字典扫描。
 	var offset := Vector3.ZERO
-	if origin_mode != VoxelData.OriginMode.WORLD_ORIGIN:
-		offset = VoxelData.origin_offset(VoxelData.voxel_bounds(voxels), origin_mode)
+	if origin_mode != QVoxelSource.OriginMode.WORLD_ORIGIN:
+		offset = QVoxelSource.origin_offset(QVoxelSource.voxel_bounds(voxels), origin_mode)
 	if shape == VoxelMeshImporter.Shape.sphere:
 		# offset 为体素单位，原生内部乘 scale（与 cube 路径同一约定）——不必再事后遍历平移顶点。
 		_native_arrays = NativeLoader.generate_spheres_native(
@@ -506,7 +506,7 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 
 
 ## 由块缓冲生成网格（QVX 路径的实例入口：整资产 / MeshLibrary 分项共用）。
-## layout_offset 为体素单位的原点偏移（见 VoxelData.origin_offset）。
+## layout_offset 为体素单位的原点偏移（见 QVoxelSource.origin_offset）。
 func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3) -> void:
 	_reset_mesh()
 	_native_arrays = {}
@@ -525,7 +525,7 @@ func start_generate_mesh_from_qvx() -> void:
 		return
 	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else qvx.materials
 	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
-	# 原点偏移与 .vox 路径同一套（qvx.origin_offset 内部调 VoxelData.origin_offset）。
+	# 原点偏移与 .vox 路径同一套（qvx.origin_offset 内部调 QVoxelSource.origin_offset）。
 	# 单网格取第 frame_index 帧（静态资产恒等于第 0 帧，§12.7）—— 于是"逐帧导出"只需改这一个选项。
 	var offset := qvx.origin_offset(origin_mode, frame_index)
 	if qvx.is_block_importable():

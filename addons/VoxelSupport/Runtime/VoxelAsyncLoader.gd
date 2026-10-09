@@ -3,25 +3,26 @@ extends RefCounted
 
 ## 体素取数的异步编排 —— 全项目**唯一**持有"在途 / 就绪"状态的地方。
 ##
-## 【为什么集中在这里】存储（VoxelStream）与生成（VoxelGenerator）本身都是同步的纯操作，
-## 各自不该背"谁在跑、跑完没有"这本账；而两个数据源又必须共用同一套去重 / 限流 / 回填
-## 规则。于是把账本与规则放在编排方，数据源只回答两个同步问题：
-##     "你存了吗？"（has_chunk / load_chunk）  "你能造吗？"（is_in_generation_bounds / generate）
-## 新增数据源（如网络流）只需实现同步读或同步生成，异步部分零改动。
+## 【单输入】数据源只有一个：`QVoxelSource`。它自己回答两个同步问题 ——
+##     "这一层存了吗？"（has_stored_chunk / load_stored_chunk，主线程直读，无 IO 等待）
+##     "这一层造得出来吗？"（is_in_node_bounds / generate，可丢后台线程）
+## 于是"流 / 节点"两种来源的差异全收在数据层内部，本类只负责去重 / 限流 / 派发 / 回填。
 ##
-## 【取数优先级】流里已存 > 生成器可生成 > 无从获取。
-## 流优先是因为"存"必须权威：用户破坏过的 chunk 不能被生成结果覆盖掉。
+## 【取数优先级】存过 > 节点可造 > 无从获取。存过优先是因为"存"必须权威：
+## 用户破坏过的 chunk 不能被重新求值的结果覆盖掉。
 ##
 ## 分层（与 poll_ready 的 lod 语义一致）：lod=0 为 LOD0 chunk，lod>=1 为粗层 block。
 ##
-## 【账本唯一】除"流 / 生成器"两个数据源外，粗层降采样（LOD0 → 粗层大格）也是取数的一条
-## 路径。它的在途去重与重试计数一并收在这里（_derived_*）——此前这份账在 VoxelData 里另存
-## 一份（_lod_downsample_pending/_retries），于是"在途"这一概念散落两处、规则各写一遍。
-## VoxelData 只负责构造快照 + 派发 worker + 把结果交回本类登记。
+## 【账本唯一】粗层降采样（LOD0 → 粗层大格）也是取数的一条路径，它的在途去重与重试计数
+## 一并收在这里（_derived_*）。数据层只负责构造快照 + 派发 worker + 把结果交回本类登记。
 ##
 ## 【数据源切换的原子性】configure() 在锁内替换数据源并递增 _source_epoch；后台任务在派发时
-## 捕获"生成器实例 + 当时的 epoch"，回填时 epoch 不符即丢弃。于是"运行中换源 / 换世界"不会让
-## 旧源的结果落进新源，也不会让 worker 读到半切换的成员（此前 worker 在锁外直读 _generator）。
+## 捕获"数据源强引用 + 当时的 epoch"，回填时 epoch 不符即丢弃。于是"运行中换源 / 换世界"不会让
+## 旧源的结果落进新源，也不会让 worker 读到半切换的成员。
+##
+## 【为什么持弱引用】数据层持有本编排器（`QVoxelSource._async`），若这里再强引用回去就形成
+## 引用环，RefCounted 的环永不被回收 —— 编辑器里每换一份数据层就泄漏一份（含其整份 chunk 缓冲）。
+## 故这里只存 WeakRef；而 worker 任务在派发时把数据源**强引用**捕获进参数，任务执行期间必然存活。
 
 ## 粗层（lod>=1）在途上限：程序化生成较慢，无上限会让 WorkerThreadPool 被粗层任务占满，
 ## LOD0 长时间空洞。超限直接丢弃该 request（渲染器后续帧会重试）。
@@ -31,8 +32,8 @@ const MAX_COARSE_PENDING := 96
 ## 超过上限即放弃（区域外 / 空气层），否则会对着真空反复派发。
 const MAX_DERIVED_RETRIES := 5
 
-var _stream: VoxelStream = null
-var _generator: VoxelGenerator = null
+## 数据源的弱引用（见文件头"为什么持弱引用"）。
+var _source_ref: WeakRef = null
 
 ## 数据源代次：configure() / clear() 递增。在途任务的回填必须与它一致才被接受。
 var _source_epoch: int = 0
@@ -48,18 +49,17 @@ var _derived_retries: Array[Dictionary] = []
 var _mutex := Mutex.new()
 
 
-## 配置数据源（任一可为 null）。切换数据源时应先 clear()。
-func configure(stream: VoxelStream, generator: VoxelGenerator) -> void:
+## 配置数据源（可为 null）。切换数据源时应先 clear()。
+func configure(source: QVoxelSource) -> void:
 	_mutex.lock()
-	_stream = stream
-	_generator = generator
+	_source_ref = weakref(source) if source != null else null
 	_source_epoch += 1
 	_mutex.unlock()
 
 
 ## 提交一次取数请求（同 key 在途或已就绪则忽略）。
-##   ① 流里已存 → 主线程直读并立即置为就绪（QVoxelStream 的索引常驻内存，不产生 IO 等待）
-##   ② 否则生成器可生成 → 丢给 WorkerThreadPool 后台生成
+##   ① 存过 → 主线程直读并立即置为就绪（QVoxelStream 的索引常驻内存，不产生 IO 等待）
+##   ② 否则节点可造 → 丢给 WorkerThreadPool 后台求值
 ##   ③ 两者都不行 → 立即撤销登记（否则调用方会一直等一个永远不来的结果）
 func request(chunk_key: Vector3i, lod: int = 0) -> void:
 	_mutex.lock()
@@ -69,31 +69,35 @@ func request(chunk_key: Vector3i, lod: int = 0) -> void:
 		return
 	_pending[lod][chunk_key] = true
 	# 数据源与代次在锁内取一份快照：worker 不再直读成员，切换数据源时也不会读到半状态。
-	var stream := _stream
-	var generator := _generator
+	var source: QVoxelSource = _source_ref.get_ref() if _source_ref != null else null
 	var epoch := _source_epoch
 	_mutex.unlock()
 
-	if stream != null and stream.has_chunk(chunk_key, lod):
-		_resolve(chunk_key, lod, stream.load_chunk(chunk_key, lod), epoch)
+	if source == null:
+		_drop_pending(chunk_key, lod)
 		return
 
-	# 可生成判定按 lod 分流由生成器内部处理（lod>=1 的 key 是 block 坐标，不是 chunk 坐标）
-	if generator != null and generator.is_in_generation_bounds(chunk_key, lod):
+	if source.has_stored_chunk(chunk_key, lod):
+		_resolve(chunk_key, lod, source.load_stored_chunk(chunk_key, lod), epoch)
+		return
+
+	# 可造判定按 lod 分流由数据层内部处理（lod>=1 的 key 是 block 坐标，不是 chunk 坐标）
+	if source.can_generate_chunk(chunk_key, lod):
 		# 粗层限流：超限时撤销登记（不留幽灵在途），调用方下帧再试
 		if lod >= 1 and pending_total() >= MAX_COARSE_PENDING:
 			_drop_pending(chunk_key, lod)
 			return
-		WorkerThreadPool.add_task(_generate_task.bind(generator, epoch, chunk_key, lod))
+		WorkerThreadPool.add_task(_generate_task.bind(source, epoch, chunk_key, lod))
 		return
 
 	_drop_pending(chunk_key, lod)
 
 
-## 后台线程：调用生成器产出数据后回填。生成器必须是纯函数（不碰主线程状态）。
-## generator / epoch 由派发方捕获传入（不在 worker 里读成员，避免与 configure 竞争）。
-func _generate_task(generator: VoxelGenerator, epoch: int, chunk_key: Vector3i, lod: int) -> void:
-	var buf := generator.generate(chunk_key, lod)
+## 后台线程：向数据源要一个 chunk 后回填。数据源侧必须是纯函数（不碰主线程状态）。
+## source / epoch 由派发方捕获传入（不在 worker 里读成员，避免与 configure 竞争）；
+## 强引用捕获同时保证任务执行期间数据源不被释放。
+func _generate_task(source: QVoxelSource, epoch: int, chunk_key: Vector3i, lod: int) -> void:
+	var buf := source.generate(chunk_key, lod)
 	_resolve(chunk_key, lod, buf, epoch)
 
 

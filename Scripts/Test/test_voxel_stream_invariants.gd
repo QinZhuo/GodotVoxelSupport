@@ -6,7 +6,7 @@ extends TestCase
 ## "编辑 → 落盘 → 重载"这条数据通路。而重构（VoxelStream 退化为纯 IO、
 ## LOD 从独立 model 迁往 CACH）恰恰整条都动在这条路上，所以先把不变式钉死再动刀。
 ##
-## 前四条从 VoxelData 的**公开行为**出发，不依赖 VoxelStream 的内部形态，
+## 前四条从 QVoxelSource 的**公开行为**出发，不依赖 VoxelStream 的内部形态，
 ## 因此重构换掉 VoxelStream 接口后这些用例依然有效：
 ##   ① 编辑 → 卸载 → 重载：数据逐体素一致（磁盘为权威）
 ##   ② 空 chunk 不落盘；chunk 变空立即清盘（不留幽灵数据）
@@ -420,14 +420,14 @@ func _many_chunks() -> Dictionary:
 		out[keys[i]] = buf
 	return out
 
-## 造一个挂了文件流的 VoxelData。材质表给 2 条（索引 0 = 空占位 + 索引 1 可用），
+## 造一个挂了文件流的 QVoxelSource。材质表给 2 条（索引 0 = 空占位 + 索引 1 可用），
 ## 使体素值 1 通过 QVX 的 MATE 索引校验（VXEL 内材质值必须 < entry_count）。
-func _make_data(path: String) -> VoxelData:
+func _make_data(path: String) -> QVoxelSource:
 	var s := QVoxelStream.new()
 	s.file_path = path
 	var mats: Array[VoxelMaterial] = []
 	mats.resize(2)
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	d.materials = mats
 	d.stream = s
 	return d
@@ -438,7 +438,7 @@ func _air() -> Dictionary:
 	return {"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0, "e_r": 0, "e_g": 0, "e_b": 0}
 
 
-## 一个挂了材质表的文件流（直接用流而不经 VoxelData，聚焦存储层本身的契约）。
+## 一个挂了材质表的文件流（直接用流而不经 QVoxelSource，聚焦存储层本身的契约）。
 ## 必须给足材质条目，否则 VXEL 内的材质值 1 会被语义校验判为"引用了不存在的材质"。
 func _make_stream(path: String) -> QVoxelStream:
 	var s := QVoxelStream.new()

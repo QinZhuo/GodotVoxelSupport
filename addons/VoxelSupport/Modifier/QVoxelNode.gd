@@ -118,6 +118,12 @@ func signature() -> String:
 # 链的编辑入口（UI 把这些包进 QVoxelPropertyCommand 后再调用，以保证撤销正确）
 # ----------------------------------------------------------------------------
 
+## 追加一条"以算子为核"的条目 —— 装配期入口，是 add_modifier 的便捷写法。
+## 返回 null 表示该算子不属于任何已知域（调用方据此报错，而不是静默少一条）。
+func add_op(op_: Resource) -> QVoxelModifier:
+	return add_modifier(QVoxelModifier.of_op(op_))
+
+
 ## 追加一条修改器。
 ##
 ## 【为什么不接受"算子 + 合成方式"两个裸参数】条目必须自带开关与合成方式，而这些属于修改器

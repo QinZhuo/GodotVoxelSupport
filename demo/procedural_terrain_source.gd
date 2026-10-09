@@ -1,13 +1,18 @@
 @tool
-class_name PcgTerrainGenerator
-extends VoxelGenerator
+class_name PcgTerrainSource
+extends QVoxelSource
 
-## 示例程序化地形生成器（覆写虚基类 _generate_chunk 实现生成算法）。
+## 示例**无限世界数据层**（扩展 QVoxelSource，覆写"按 key 造数"的虚函数）。
 ## 用 FastNoiseLite 连续噪声（世界坐标）生成高度场地形，同 chunk_key 确定性地形。
 ##
-## 注意它**不是** VoxelStream：生成器只管"造"，不碰存储。用户破坏的数据由与之并列的
-## stream（QVoxelStream 落盘 / VoxelMemoryStream 只存内存）负责，两者在 VoxelData 上各占一个
-## 属性，取数时流优先（存过的必须权威，不能被重新生成覆盖）。
+## 【为什么是扩展，而不是内核的一种造法】内核的造法是"求值一个有界节点 → 切出 chunk"
+## （见 QVoxelSource.can_generate_chunk），因为"链"这套机制只在有界数据上有意义；
+## 而无限地形是**无节点、无整块体积**的 —— 任何 chunk 都能按 key 现算。这正是 §2.12 的扩展位：
+## 扩展依赖内核（复用 QVoxelSource 的流 / 材质表 / origin shift / 异步编排），内核不认识扩展。
+##
+## 注意它**不是** VoxelStream：数据层只管"造"，不碰存储。用户破坏的数据由与之并列的
+## stream（QVoxelStream 落盘 / VoxelMemoryStream 只存内存）负责，两者在同一个 QVoxelSource 上
+## 各占一个属性，取数时流优先（存过的必须权威，不能被重新生成覆盖）。
 ## 高度用**绝对体素 y** 判断：任意 y 层 chunk 按世界高度填，地形跨层连续。
 ##
 ## 【地面底】只填充 [GROUND_FLOOR_VOXEL, 表面高度) 之间的体素：
@@ -35,6 +40,13 @@ static func _ensure_noise() -> void:
 		_noise_det.noise_type = FastNoiseLite.TYPE_SIMPLEX
 		_noise_det.frequency = 0.08
 		_noise_det.seed = 1234
+
+
+## 覆写：本层没有节点，任何 chunk 都造得出来（这正是"无限"的定义）。
+## 内核实现问的是"这个 chunk 落在节点求值盒内吗"，对无限世界不成立，故必须覆写。
+func can_generate_chunk(_chunk_key: Vector3i, _lod: int = 0) -> bool:
+	return true
+
 
 ## 覆写虚基类：生成 CHUNK_SIZE³ chunk 缓冲（值 = 材质ID，0=空）。
 ## 确定性：同 chunk_key 同地形（连续噪声），origin shift 平移 chunk key 后世界连续。

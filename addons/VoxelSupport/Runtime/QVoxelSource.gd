@@ -1,5 +1,5 @@
 @tool
-class_name VoxelData
+class_name QVoxelSource
 extends Resource
 
 ## 可序列化的体素数据资源
@@ -46,11 +46,13 @@ extends Resource
 #   连通塌落   flood_fill / find_connected / connectivity / neighbors /
 #              partition_connected(静态) / find_unsupported / find_unsupported_around
 #   数据源     set_stream / is_streaming / shift_origin / invalidate_chunk_source /
-#              invalidate_chunk_source_range
+#              invalidate_chunk_source_range / invalidate / generate / can_generate_chunk /
+#              is_in_node_bounds / output_grid_size
 #   帧动画     apply_block_table（整份块表替换，切帧的唯一入口）
 #
 # 【实验】可用但形态可能变（收口期仍在动；用前请确认版本）：
-#   两级存储查询 is_chunk_loaded / is_stored / can_supply_chunk / get_vertical_half_span /
+#   两级存储查询 is_chunk_loaded / is_stored / has_stored_chunk / load_stored_chunk /
+#              can_supply_chunk / get_vertical_half_span /
 #              get_unloaded_chunk_keys / get_unloaded_chunk_count / get_all_chunk_keys /
 #              get_loaded_chunk_keys / preload_chunk / unload_chunk
 #   异步取数   request_chunk_async / cancel_chunk_request / poll_all_ready /
@@ -82,19 +84,31 @@ extends Resource
 ## 帧数量 (保留用于未来动画扩展)
 @export var frame_count: int = 1
 
-## 体素网格尺寸 (体素个数，由导入时计算)。
-## 有限尺寸同时就是**生成器的可生成范围**（见 _sync_generator_bounds），故变化时要立刻同步：
-## 否则"先设 generator、后设 grid_size"的调用方会拿到一个范围没生效的生成器
-## （渲染器于是对 view_distance 内每个 chunk 都提交生成 → 海量空 chunk）。
+## 体素网格尺寸 (体素个数，由导入时计算)。有限尺寸同时就是**求值输出的边界盒**。
+## 变化时作废已缓存的求值体积 —— 尺寸变了，旧体积的下标布局就错了。
 @export var grid_size: Vector3i = Vector3i.ZERO:
 	set(v):
 		if grid_size == v:
 			return
 		grid_size = v
-		_sync_generator_bounds()
+		_invalidate_volume()
 
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
+
+## 全链共用的**主种子**（→ QVoxelEvalContext.seed）。逐条修改器的种子在它之上叠加
+## （见 QVoxelEvalEngine：`ctx.seed + m.seed`），于是"同一 seed 下换算子顺序"不会各自掷出
+## 不同的骰子，便于逐算子比对。
+##
+## 【为什么种子在数据层而不是在每条修改器上】同一次求值里所有算子必须看到同一个世界种子；
+## 把它放在链上任何一条上都会让"谁才是主种子"变成隐式约定。逐条要不同随机时用
+## QVoxelModifier.seed 叠加即可。
+@export var seed: int = 0:
+	set(v):
+		if seed == v:
+			return
+		seed = v
+		_invalidate_volume()
 
 ## 数据层磁盘流（VoxelStream / QVoxelStream）。非空时启用数据层按需加载：
 ##   - 内存只保留"已加载"的 chunk，其余数据由 stream 负责读盘（磁盘为权威）
@@ -119,46 +133,238 @@ extends Resource
 		for ck in _chunk_buffers:
 			if stream == null or not stream.has_chunk(ck, 0):
 				_dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
-		_sync_sources()
+		_sync_source()
 
-## 生成器（VoxelGenerator 子类）。与 stream 是**并列**的两个数据源：
-##   stream    "存"：用户编辑、存档、导入的静态数据（见上）
-##   generator "造"：程序化地形 —— 未编辑部分按 key 确定性生成，零存储
-## 二者可并存（程序化世界 + 破坏存档）。取数优先级恒为 **流 > 生成器**：
-## 存过的东西必须权威，不能被生成结果覆盖。
+## 数据源：任意 `QVoxelNode`（World / Group / Model）。
 ##
-## 只设 generator 不设 stream 时，会自动补一个 VoxelMemoryStream 作编辑的落脚处
-## （否则编辑过的 chunk 无处可存，卸载后被重新生成覆盖 → 破坏成果丢失）。
-@export var generator: VoxelGenerator:
+## 【为什么是"节点"而不是"生成器"】`QVoxelNode` 的契约对世界 / 组 / 模型完全一致，而
+## `QVoxelEvalEngine` 已经能求值任意节点（`evaluate_node` 按 `kind()` 分派：模型跑链，
+## 组 / 世界合成子树）。于是**同一份渲染数据既能承载整个世界，也能只承载一堆数据里的
+## 某一个 node** —— 预览单个模型、只显示某棵子树，都不需要第二条渲染路径。
+##
+## 与 stream 的关系：stream 是"存"（用户编辑 / 存档 / 导入的静态数据），node 是"造"
+## （链求值产出）。二者可并存，取数优先级恒为 **流 > 节点**：存过的东西必须权威，
+## 不能被重新求值的结果覆盖。
+##
+## 不再需要"只设生成器时自动补一个 VoxelMemoryStream 作编辑落脚处"——编辑落在 node 上
+## （模型的 blocks / 修改器链），本来就有地方可存。
+@export var node: QVoxelNode:
 	set(v):
-		if generator == v:
+		if node == v:
 			return
-		generator = v
-		if generator != null and stream == null:
-			stream = VoxelMemoryStream.new()
-		_sync_sources()
+		node = v
+		_sync_source()
 
 ## 取数编排器（在途 / 就绪 / 去重 / 限流 / 后台派发）。全项目唯一持有这本账的地方。
 var _async := VoxelAsyncLoader.new()
 
 
-## 把两个数据源同步给编排器，并把本数据层的 grid_size 转成生成器的可生成范围。
-func _sync_sources() -> void:
-	_sync_generator_bounds()
+## 换源：丢弃在途 / 就绪登记（那些请求属于旧源，回填进新数据会写出错坐标的数据）、
+## 作废已缓存的求值体积，并把新源交给编排器。
+func _sync_source() -> void:
+	_invalidate_volume()
 	if _async == null:
 		return
-	# 换源时丢弃在途 / 就绪登记：那些请求属于旧数据源，回填进新世界会写出错坐标的数据。
-	# （早先这本账挂在流对象上，换流自然带走；现在它归本数据层所有，必须显式清。）
 	_async.clear()
-	_async.configure(stream, generator)
+	_async.configure(self)
 
 
-## 把 grid_size 转成生成器的可生成范围 AABB（ZERO = 无限世界，自动关闭）。
-## 生成器只生成世界范围内的 chunk（矩形地图），否则渲染器会对 view_distance 内每个 chunk
-## 都提交生成 → 海量空 chunk。数据源与尺寸任一变化都要重跑，故单独成一个函数供两处调用。
-func _sync_generator_bounds() -> void:
-	if generator != null:
-		generator.set_grid_size(grid_size)
+# ────────────────────────────────────────────────────────────────────────────
+# 求值体积与切片（吸收自 VoxelGenerator / PcgModelGenerator）
+# ────────────────────────────────────────────────────────────────────────────
+# 这一层原本是独立的"生成器"抽象，好让渲染器不认识 node。但它做的每一件事都已在别处存在：
+#   体积从哪来       → QVoxelEvalEngine.evaluate_node（已能求值任意节点）
+#   整块 → 逐 chunk  → PcgModelGenerator._generate_chunk
+#   缓存体积         → PcgModelGenerator._ensure_volume
+# 于是三个类塌成一个字段：node。缓存 / 切片 / LOD 逻辑全项目仍只有一份 —— 就在这里。
+
+## 最近一次求值结果：作为下一次求值的 previous 传入，让链只重算脏步骤。
+var _last: QVoxelEvalResult = null
+## 整块求值结果（惰性构建一次，之后只读）。值 = 材质ID，0 = 空。
+var _volume := PackedInt32Array()
+var _volume_origin := Vector3i.ZERO
+var _volume_grid_size := Vector3i.ZERO
+var _volume_built := false
+
+## 构建互斥：节点覆盖多个 chunk 时，首帧会有多个 worker 同时请求不同 chunk，
+## 每个都走到 _ensure_volume。无锁则各自求值一遍（N× 白算）。
+var _volume_mutex := Mutex.new()
+
+
+## 作废缓存的求值体积（换源 / 改尺寸 / 手绘编辑后必须调用）。
+## 不取锁：由主线程调用，不能阻塞在途 worker；用"提交前比对尺寸"丢弃过期结果。
+func _invalidate_volume() -> void:
+	_volume = PackedInt32Array()
+	_volume_built = false
+	_last = null
+
+
+## **求值缓存作废**：手绘体素或链参数被改动后由编辑侧调用（编辑器会话封口一笔手势时）。
+##
+## 【为什么必须由调用方显式说，而不是数据层自己嗅探】手绘一笔可能逐格写几万次，QVoxelModel
+## 刻意不发逐格信号（见其 content_changed 注释）——"这一笔画完了"这个时刻只有手势封口方知道。
+## 于是作废的时机由编辑侧给出，数据层不猜。
+##
+## 【与 invalidate_chunk_source 的分工】那个作废**切出来的 chunk 缓冲**（改哪块重取哪块）；
+## 这个作废**整块求值体积**（链的输入变了，整块必须重求值）。两者都要，顺序无关。
+func invalidate() -> void:
+	_invalidate_volume()
+
+
+## 节点求值输出盒 —— 链末端的实际尺寸。
+##
+## 【为什么未必等于 node.grid_size】重排型修改器（镜像 / 旋转 90° / 平铺 / 平移）会改变尺寸，
+## 而 node.grid_size 是**输入**盒。这里只问引擎要盒，不做光栅化（QVoxelEvalEngine.output_grid_size
+## 是纯盒运算），故可在装配期 / 每帧调用。
+## 组与世界返回 ZERO：它们没有声明盒，由内容算紧致盒（求值结果自带，见 _ensure_volume）。
+func output_grid_size() -> Vector3i:
+	var m := node as QVoxelModel
+	if m == null:
+		return Vector3i.ZERO
+	return QVoxelEvalEngine.output_grid_size(m.modifiers, m.grid_size)
+
+
+## 求值 / 边界判定用的基础盒：数据层显式声明的 grid_size 优先，未声明时问节点自己。
+## 于是"单模型"这一最常见情形不必再由调用方同步 grid_size —— 真值只有一处（§2.11）。
+func _base_grid_size() -> Vector3i:
+	if grid_size != Vector3i.ZERO:
+		return grid_size
+	return output_grid_size()
+
+
+## 节点求值输出的边界盒（chunk 坐标）是否包含该 key。
+## 渲染器距离扫描高频调用（view_distance 内逐 chunk），故 O(1)、零分配。
+func is_in_node_bounds(key: Vector3i, lod: int = 0) -> bool:
+	if node == null:
+		return false
+	var gs := _base_grid_size()
+	if gs == Vector3i.ZERO:
+		return true  # 无界：任意 chunk 可求值（组 / 世界自己按内容算紧致盒）
+	var lo := Vector3i.ZERO
+	var hi := VoxelChunk.chunk_of(gs - Vector3i.ONE)
+	if lod >= 1:
+		var span := 1 << lod
+		var blo := key * span
+		var bhi := blo + Vector3i(span - 1, span - 1, span - 1)
+		return blo.x <= hi.x and bhi.x >= lo.x \
+			and blo.y <= hi.y and bhi.y >= lo.y \
+			and blo.z <= hi.z and bhi.z >= lo.z
+	return key.x >= lo.x and key.x <= hi.x \
+		and key.y >= lo.y and key.y <= hi.y \
+		and key.z >= lo.z and key.z <= hi.z
+
+
+## 统一生成入口：按 lod 分流（lod=0 → chunk，>=1 → 粗层 block）。
+## 供 VoxelAsyncLoader 在后台线程调用。
+func generate(key: Vector3i, lod: int = 0) -> PackedInt32Array:
+	return _generate_chunk(key) if lod == 0 else _generate_chunk_lod(key, lod)
+
+
+## 惰性求值一次：无节点时返回 false（生成全空）。
+##
+## 【为什么不判 grid_size 为零】求值结果自带盒与原点（§2.11）：模型走自己的 grid_size、
+## 组 / 世界走内容紧致盒，两种情况都不依赖调用方预先告知尺寸。故"盒为零"只是"数据层没声明
+## 盒"，不是"没有体积"。
+##
+## 【并发】免锁快路径 + 锁内构建 + 提交前校验尺寸。四处要点：
+##   ① 快路径先查 _volume_built：稳态下每个 chunk 都走这条路，不该付锁开销。
+##   ② 锁内再查一次：等锁期间别人可能已经建好（这就是"只求值一次"的实现）。
+##   ③ 提交前校验 grid_size 未变：setter 由主线程调用且不能取锁，故用"构建完比对"丢弃过期结果。
+##   ④ **空体积也要提交 _volume_built**：否则每个 chunk 都会重跑一次整块求值。
+func _ensure_volume() -> bool:
+	if _volume_built:
+		return true
+	if node == null:
+		return false
+	_volume_mutex.lock()
+	if not _volume_built:
+		var gs := grid_size
+		var res := QVoxelEvalEngine.evaluate_node(node, QVoxelEvalContext.make(gs, seed), _last)
+		if gs == grid_size:
+			_volume = res.volume
+			_volume_origin = res.origin
+			_volume_grid_size = res.grid_size
+			_last = res
+			_volume_built = true
+	_volume_mutex.unlock()
+	return _volume_built
+
+
+## LOD0：从缓存体积里切出 32³ 的一块。
+func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
+	var buf := PackedInt32Array()
+	buf.resize(VoxelChunk.CHUNK_VOLUME)
+	if not _ensure_volume():
+		return buf
+	var vol := _volume
+	if vol.is_empty():
+		return buf  # 源产出空体积（空链 + 无手绘体素）：直接给全空，别去下标越界
+	var gs := _volume_grid_size
+	var base := VoxelChunk.origin_of(chunk_key) - _volume_origin
+	for lz in VoxelChunk.CHUNK_SIZE:
+		var gz := base.z + lz
+		if gz < 0 or gz >= gs.z:
+			continue
+		for ly in VoxelChunk.CHUNK_SIZE:
+			var gy := base.y + ly
+			if gy < 0 or gy >= gs.y:
+				continue
+			var src := gy * gs.x + gz * gs.x * gs.y
+			var dst := VoxelChunk.buf_index(0, ly, lz)
+			for lx in VoxelChunk.CHUNK_SIZE:
+				var gx := base.x + lx
+				if gx < 0 or gx >= gs.x:
+					continue
+				var m := vol[src + gx]
+				if m > 0:
+					buf[dst + lx] = m
+	return buf
+
+
+## 粗层 LOD：每个大格取 2^lod 立方内**任一非空**体素的材质（取到即实心）。
+## 与 SDF 侧"取格心采样"不同：整体产出的模型常有薄壁，取格心会把它整片采没；
+## "格内任一非空"是保守策略 —— 宁可粗层偏实心，也不在远处凭空开洞。
+func _generate_chunk_lod(block_key: Vector3i, lod: int) -> PackedInt32Array:
+	var grid := VoxelChunkGenerator.LOD_BLOCK_SIZE
+	var buf := PackedInt32Array()
+	buf.resize(grid * grid * grid)
+	if not _ensure_volume():
+		return buf
+	var cell := 1 << lod
+	var base := block_key * (grid * cell) - _volume_origin
+	var gs := _volume_grid_size
+	var vol := _volume
+	if vol.is_empty():
+		return buf
+	for lz in grid:
+		for ly in grid:
+			for lx in grid:
+				var m := _sample_cell(vol, gs, base + Vector3i(lx, ly, lz) * cell, cell)
+				if m > 0:
+					buf[lx + ly * grid + lz * grid * grid] = m
+	return buf
+
+
+## 粗格内任一非空体素的材质（无则 0）。volume / grid_size 由调用方捕获传入
+## （而不是读成员）：PackedInt32Array 是写时复制，局部句柄即使期间被重建也安全。
+func _sample_cell(volume: PackedInt32Array, gs: Vector3i, origin: Vector3i, cell: int) -> int:
+	for dz in cell:
+		var z := origin.z + dz
+		if z < 0 or z >= gs.z:
+			continue
+		for dy in cell:
+			var y := origin.y + dy
+			if y < 0 or y >= gs.y:
+				continue
+			var row := y * gs.x + z * gs.x * gs.y
+			for dx in cell:
+				var x := origin.x + dx
+				if x < 0 or x >= gs.x:
+					continue
+				var m := volume[row + x]
+				if m > 0:
+					return m
+	return 0
 
 ## 居中偏移 (体素单位，运行时渲染时叠加到网格顶点)
 ## 导入时若 center 选项开启，自动计算使模型左右前后居中(X/Z)、上下贴底(Y=0)
@@ -502,8 +708,8 @@ static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
 ## 从 VoxAsset 构造 (编辑器导入时使用)
 ## `origin_mode` 见 `OriginMode`：决定模型摆到哪，并据此写 `center_offset`（渲染时叠加）。
 static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
-		origin_mode: int = OriginMode.WORLD_ORIGIN) -> VoxelData:
-	var res := VoxelData.new()
+		origin_mode: int = OriginMode.WORLD_ORIGIN) -> QVoxelSource:
+	var res := QVoxelSource.new()
 	var raw_voxels := voxel_data.get_voxels(frame_index)
 
 	# 体素坐标重映射到 [0, grid_size)：VoxelNode.get_voxels() 的 transform 含 VoxelModel.offset
@@ -632,7 +838,7 @@ func _count_set(ck: Vector3i, n: int) -> void:
 ## 直接装入一块密集缓冲（导入 / 资源载荷恢复专用）：不做逐体素写。
 func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
 	if buf.size() != CHUNK_VOLUME:
-		push_error("[VoxelData] 块 %s 的缓冲长度 %d != %d，已跳过" % [chunk_key, buf.size(), CHUNK_VOLUME])
+		push_error("[QVoxelSource] 块 %s 的缓冲长度 %d != %d，已跳过" % [chunk_key, buf.size(), CHUNK_VOLUME])
 		return
 	_chunk_buffers[chunk_key] = buf
 	_count_set(chunk_key, _count_voxels(buf))
@@ -659,7 +865,7 @@ func apply_block_table(blocks: Dictionary, notify: bool = true) -> int:
 	for ck: Vector3i in blocks:
 		var b: PackedInt32Array = blocks[ck]
 		if b.size() != CHUNK_VOLUME:
-			push_error("[VoxelData] 块 %s 的缓冲长度 %d != %d，已跳过" % [ck, b.size(), CHUNK_VOLUME])
+			push_error("[QVoxelSource] 块 %s 的缓冲长度 %d != %d，已跳过" % [ck, b.size(), CHUNK_VOLUME])
 			continue
 		if _count_voxels(b) == 0:
 			continue
@@ -725,9 +931,17 @@ func set_stream(s: VoxelStream) -> void:
 	stream = s
 
 
-## 数据层流式是否启用（有流可读/写，或能程序化生成）
+## 无限世界：本数据层按 **origin shift** 供数（相机走远 → 整层坐标整体平移，世界逻辑上无限延伸）。
+##
+## 【为什么必须是显式声明，而不是"有节点就无限"】有界模型同样有节点，但它相对世界是**固定**的：
+## 平移原点会让模型在世界里滑走。旧实现用 `generator != null` 推断无限，于是"有界模型也配一个
+## 生成器"时被误判成无限世界。无限与否是数据层的**用法**，由装配方声明（消费方见无限层）。
+@export var infinite := false
+
+
+## 数据层流式是否启用（有流可读/写，或有节点可求值）
 func is_streaming() -> bool:
-	return stream != null or generator != null
+	return stream != null or node != null
 
 
 ## chunk 是否在内存中（有密集缓冲）。has_chunk 的严格子集（仅内存，不含存储）。
@@ -743,16 +957,43 @@ func is_stored(chunk_key: Vector3i) -> bool:
 	return stream != null and stream.has_chunk(chunk_key, 0)
 
 
-## 该 chunk 的数据能否取到：流里已存 或 生成器可生成。廉价、无 IO，供渲染器距离扫描用。
+## 【异步编排契约】该层数据是否**已存在流中**。VoxelAsyncLoader 派发前问的第一句
+## （主线程同步、无 IO 等待）。无流恒 false。lod 语义与编排器一致。
+func has_stored_chunk(chunk_key: Vector3i, lod: int = 0) -> bool:
+	return stream != null and stream.has_chunk(chunk_key, lod)
+
+
+## 【异步编排契约】同步读出该层数据（调用方须先 has_stored_chunk 判定）。
+func load_stored_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
+	return stream.load_chunk(chunk_key, lod) if stream != null else PackedInt32Array()
+
+
+## 该 chunk 的数据能否取到：流里已存 或 本层造得出来。廉价、无 IO，供渲染器距离扫描用。
 func can_supply_chunk(chunk_key: Vector3i) -> bool:
 	if stream != null and stream.has_chunk(chunk_key, 0):
 		return true
-	return generator != null and generator.is_in_generation_bounds(chunk_key)
+	return can_generate_chunk(chunk_key)
 
 
-## 渲染器距离扫描的垂直半跨度（无生成器时只有 ±1 层）。
+## 本层能否**造出**该 chunk 的数据（不含"存过"这一支）。派发侧（VoxelAsyncLoader / 无限层 /
+## 渲染器）统一问这一句，于是"造"的来源可以有多种实现而派发逻辑只有一份。
+##
+## 【为什么单独一个虚函数】内核的造法是"求值节点 → 切出 chunk"（有界、O(1) 盒判定）；
+## 而**无限世界**的造法是"按 key 确定性产出"（无节点、无整块体积）。后者是扩展能力
+## （§2.12：扩展可以依赖内核，内核不知道扩展），内核不该认识它，但必须能问出同一个问题。
+## 覆写时连带覆写 generate（或 _generate_chunk / _generate_chunk_lod）与 get_vertical_half_span。
+func can_generate_chunk(chunk_key: Vector3i, lod: int = 0) -> bool:
+	return node != null and is_in_node_bounds(chunk_key, lod)
+
+
+## 渲染器距离扫描的垂直半跨度（chunk 数）：节点存在时按输出盒高度算，否则 ±1 层。
 func get_vertical_half_span() -> int:
-	return generator.get_vertical_half_span() if generator != null else 1
+	if node == null:
+		return 1
+	var gs := _base_grid_size()
+	if gs == Vector3i.ZERO:
+		return 1
+	return maxi(VoxelChunk.chunk_of(gs - Vector3i.ONE).y, 1)
 
 
 ## 把 chunk 数据**同步**载入内存。已加载返回 true；取不到返回 false。
@@ -777,7 +1018,7 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 		# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合）
 		_mark_neighbors_dirty(chunk_key)
 		return true
-	if generator != null and generator.is_in_generation_bounds(chunk_key):
+	if node != null and is_in_node_bounds(chunk_key):
 		_async.request(chunk_key, 0)
 	return false
 
@@ -925,10 +1166,10 @@ func _lod_buffers_view(level: int) -> Dictionary:
 ## 【为什么必须是句柄而不是 bool】粗层降采样与渲染批次可并发持有多个快照，
 ## 裸计数无法区分"这次该释放哪一个"，句柄天然区分。
 class ReadonlySnapshot extends RefCounted:
-	var _data: VoxelData = null
+	var _data: QVoxelSource = null
 	var _released := false
 
-	func _init(d: VoxelData) -> void:
+	func _init(d: QVoxelSource) -> void:
 		_data = d
 
 	## 释放快照（幂等）。调用后不得再使用本句柄。
@@ -938,7 +1179,7 @@ class ReadonlySnapshot extends RefCounted:
 		_released = true
 		var d := _data
 		_data = null
-		# VoxelData 可能已先被释放（资源换世界/退出）：此时没有账可还，直接返回。
+		# QVoxelSource 可能已先被释放（资源换世界/退出）：此时没有账可还，直接返回。
 		if d != null and is_instance_valid(d):
 			d._on_snapshot_released(self)
 
@@ -1057,22 +1298,21 @@ func flush() -> void:
 ## 【用途】把 SDF / 蓝图模型"烧"成普通体素文件——之后加载它不再需要生成器与逐体素采样，
 ## 直接走既有 stream → 渲染 / 破坏 / 编辑链路（加载快、可手工再改、可当静态资产分发）。
 ##
-## 【为何放在 VoxelData】只有它同时认识"造"(generator) 与"存"(stream)；烘焙范围就是
-## grid_size（与运行时"有界模型"同一套语义），因此生成器侧一行 I/O 都不必加。
+## 【为何放在 QVoxelSource】只有它同时认识"造"(node) 与"存"(stream)；烘焙范围就是
+## grid_size（与运行时"有界模型"同一套语义），因此节点侧一行 I/O 都不必加。
 ##
-## 【同步】在主线程直接调 generator.generate——这是显式的离线 / 编辑期操作，不进异步队列
+## 【同步】在主线程直接调 generate——这是显式的离线 / 编辑期操作，不进异步队列
 ## （异步是运行期流式的机制，烘焙不需要）。
 ##
 ## 范围 = grid_size；ZERO（无限世界）无范围可烘焙，拒绝。
 ## 返回写入的 chunk 数（0 = 范围内无非空块；-1 = 参数不合法）。
 func bake_to(target: VoxelStream) -> int:
-	if generator == null or target == null:
-		push_error("[VoxelData] bake_to 需要 generator 与 target stream")
+	if node == null or target == null:
+		push_error("[QVoxelSource] bake_to 需要 node 与 target stream")
 		return -1
 	if grid_size == Vector3i.ZERO:
-		push_error("[VoxelData] bake_to 需要有限 grid_size（无限世界无范围可烘焙）")
+		push_error("[QVoxelSource] bake_to 需要有限 grid_size（无限世界无范围可烘焙）")
 		return -1
-	generator.set_grid_size(grid_size)
 	var qs := target as QVoxelStream
 	if qs != null:
 		qs.set_materials(materials)
@@ -1082,7 +1322,7 @@ func bake_to(target: VoxelStream) -> int:
 		for cy in range(last.y + 1):
 			for cx in range(last.x + 1):
 				var ck := Vector3i(cx, cy, cz)
-				var buf := generator.generate(ck)
+				var buf := generate(ck)
 				if buf.size() != CHUNK_VOLUME or _count_voxels(buf) == 0:
 					continue
 				target.save_chunk(ck, buf)
@@ -1129,10 +1369,8 @@ func shift_origin(offset: Vector3i) -> void:
 	for i in _coarse_buffers.size():
 		_coarse_buffers[i] = VoxelChunk.shift_key_dict(_coarse_buffers[i], offset)
 	# 降采样去重 / 重试计数已收归编排器，随下面的 _async.shift_keys() 一起平移。
-	# 生成器的"可生成范围"也要跟着平移，否则无限世界平移后范围判定仍指向旧坐标。
-	if generator != null:
-		generator.shift_bounds(offset)
 	# 在途 / 就绪登记的 key 同样要平移，否则回填会写到旧坐标（数据落在错误的 chunk 上）。
+	# 节点自身坐标由 node 负责平移（QVoxelNode.shift_origin），本层不再持有可平移的范围。
 	_async.shift_keys(offset)
 
 
@@ -1257,7 +1495,7 @@ func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
 
 ## 粗层降采样结果落地（**唯一入口**）：写入内存权威 + 按需持久化。
 ##
-## 【为什么归数据层】粗层数据的权威在 VoxelData，"下来源是否支持 LOD 层 / 何时该落盘"
+## 【为什么归数据层】粗层数据的权威在 QVoxelSource，"下来源是否支持 LOD 层 / 何时该落盘"
 ## 这条规则此前在三个地方各写了一遍（本类的降采样回填 + 渲染器的两个结果回调），
 ## 且渲染器为了落盘直接伸手去拿 `data.stream`，绕过数据层。现在渲染器只报告
 ## "降采样结果就绪"，落盘判断与写入统一由本层负责；规则要变只改这一处。
@@ -1958,7 +2196,7 @@ func _serialize_chunks_to_list(chunk_keys: Array) -> PackedInt32Array:
 ## 流中已存的覆盖层）。无生成器返回空（由 _serialize_voxels 全量覆盖）。
 func _collect_modified_chunk_keys() -> Array:
 	var keys := {}
-	if generator != null:
+	if node != null:
 		for ck in _dirty.keys(0, VoxelDirtyLedger.PERSIST):
 			keys[ck] = true
 		if stream != null:
@@ -1975,7 +2213,7 @@ func _collect_modified_chunk_keys() -> Array:
 ##   全部序列化会把 .tscn 撑成上百 MB（历史上 734 万体素 → 137MB 的灾难即由此而来））。
 ## 无生成器（纯静态数据 / 文件流）：数据只存在于内存与流中，序列化全部体素。
 func _serialize_voxels_for_storage() -> PackedInt32Array:
-	if generator != null:
+	if node != null:
 		var keys := _collect_modified_chunk_keys()
 		if keys.is_empty():
 			return PackedInt32Array()
@@ -2000,7 +2238,7 @@ func _get_chunk_buffer_for_storage(chunk_key: Vector3i) -> PackedInt32Array:
 ## save_data()（显式存档）使用此完整版；资源持久化（_get/_encode_payload）走
 ## _collect_persist_blocks（块表 {chunk: buffer}），不经过逐体素序列化。
 func _serialize_all_voxels() -> PackedInt32Array:
-	if generator != null:
+	if node != null:
 		return _serialize_voxels_for_storage()
 	var flat := _serialize_voxels()
 	if stream == null:
@@ -2020,12 +2258,12 @@ func _serialize_all_voxels() -> PackedInt32Array:
 ## 渲染顶点 = (块坐标 + center_offset) * voxel_scale，结果与 .vox 路径逐体素一致。
 ##
 ## 【frame 只在这里切，不做"当前帧"状态】本函数产出的是**某一帧的静态快照**（默认第 0 帧）。
-## 运行时连续播放需要 VoxelData 自己持有"当前帧"并按帧重建（§12.7 明确不在本次范围）——
-## 现在把帧做成本函数的入参，是为了让"逐帧导出一份 VoxelData / 一份网格"立刻可用，
-## 且不给 VoxelData 引入一个"哪帧生效"的隐式状态（那会污染它的存档与哈希语义）。
+## 运行时连续播放需要 QVoxelSource 自己持有"当前帧"并按帧重建（§12.7 明确不在本次范围）——
+## 现在把帧做成本函数的入参，是为了让"逐帧导出一份 QVoxelSource / 一份网格"立刻可用，
+## 且不给 QVoxelSource 引入一个"哪帧生效"的隐式状态（那会污染它的存档与哈希语义）。
 static func from_qvx(qvx: QVoxelAsset, origin_mode: int = OriginMode.WORLD_ORIGIN,
-		frame: int = 0) -> VoxelData:
-	var res := VoxelData.new()
+		frame: int = 0) -> QVoxelSource:
+	var res := QVoxelSource.new()
 	res.materials = qvx.materials
 	if qvx.is_block_importable():
 		var blocks: Dictionary = qvx.block_buffers(frame)
@@ -2059,7 +2297,7 @@ func _deserialize_voxels(voxel_list: Variant) -> void:
 			_write_buffer_impl(pos, int(vox[3]), false)
 
 
-# --- 资源持久化（编辑器导入 .vox 为 VoxelData 后，体素数据随资源保存/加载） ---
+# --- 资源持久化（编辑器导入 .vox 为 QVoxelSource 后，体素数据随资源保存/加载） ---
 # materials/grid_size/default_scale/center_offset/frame_count 已由 @export 持久化；
 # _chunk_buffers 非 @export，通过隐藏 storage 属性在此序列化（编辑器不可见，随资源保存）。
 #
@@ -2104,7 +2342,7 @@ func _encode_payload() -> String:
 ##   无生成器 → 存内存中全部块（磁盘流中的部分由 stream 自己负责，不进资源载荷）。
 func _collect_persist_blocks() -> Dictionary:
 	var out := {}
-	if generator != null:
+	if node != null:
 		for ck in _collect_modified_chunk_keys():
 			var buf := _get_chunk_buffer_for_storage(ck)
 			if not buf.is_empty():

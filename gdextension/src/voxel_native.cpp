@@ -981,7 +981,7 @@ PackedInt32Array VoxelNative::build_lod_block_halo_from_lod_buffers_native(const
 }
 
 // ----------------------------------------------------------------------------
-// 支撑图失稳检测（对应 VoxelData.find_unsupported_around）
+// 支撑图失稳检测（对应 QVoxelSource.find_unsupported_around）
 // ----------------------------------------------------------------------------
 
 namespace {
@@ -1796,7 +1796,7 @@ Array VoxelNative::collect_chunks(const Array &positions) {
 }
 
 Array VoxelNative::partition_connected(const Array &positions) {
-	// 连通分组：positions 按 6 方向连通性分组（与 VoxelData.partition_connected 一致）。
+	// 连通分组：positions 按 6 方向连通性分组（与 QVoxelSource.partition_connected 一致）。
 	// 只依据 positions 集合内连通（不查世界体素），供大崩塌掉落体分组使用。
 	// BFS 阶段用 std::vector 收集（避免逐体素跨语言 Array.append），最后一次性构建。
 	Array result;
@@ -1893,11 +1893,11 @@ Dictionary VoxelNative::flood_fill_positions(const Array &seeds, const Dictionar
 }
 
 // ----------------------------------------------------------------------------
-// 悬空体素**全量**检测（对应 VoxelData.find_unsupported 的全量路径）
+// 悬空体素**全量**检测（对应 QVoxelSource.find_unsupported 的全量路径）
 // ----------------------------------------------------------------------------
 // 【与 find_unsupported_around 是两套模型，别混用】后者用"支撑图(LOWER_5)"做局部增量判定；
 //   本函数用"与地面连通性"——体素稳定 ⟺ 与 y==0 的体素 6 方向连通。
-// 【为什么不收 chunk 缓冲】调用方 VoxelData.find_unsupported 的判据走 has_voxel，
+// 【为什么不收 chunk 缓冲】调用方 QVoxelSource.find_unsupported 的判据走 has_voxel，
 //   它会经 stream 访问**仅存在于磁盘、尚未载入内存**的 chunk。若这里只看传入的 buffers，
 //   那些块会被当成空气 → 其体素全被误判悬空 → 整个世界崩塌（数据级事故）。
 //   故只收**已枚举好的位置集合**：调用方用 get_positions()，它已把"内存 + 仅磁盘"统一枚举。

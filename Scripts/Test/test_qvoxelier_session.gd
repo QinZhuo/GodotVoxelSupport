@@ -4,7 +4,7 @@ extends TestCase
 ##
 ## 会话刻意不依赖任何节点，于是"手势 → 命令 → 撤销 → 数据源失效 → 唤醒渲染器"这整条链
 ## 可以在无头环境里跑完并逐项断言。这里钉死六条承诺：
-##   ① 装配：对象 → 显示层（数据层 + 生成器 + 调色板）由 create_for 一条路径铺好；
+##   ① 装配：对象 → 显示层（数据层 + 节点 + 调色板）由 create_for 一条路径铺好；
 ##   ② 拾取的几何判据取自**显示层**（链的产出只在那儿），落笔格 = 命中格 + 法线；
 ##   ③ 一笔手势 = 一个撤销单位；空手势（没改到任何格）不入栈；
 ##   ④ 作废（cancel）必须回滚 —— 否则 live 工具拖动中改的东西永远撤不掉；
@@ -47,17 +47,15 @@ func _dirty_set(s: QVoxelEditSession) -> Dictionary:
 # 装配
 # ----------------------------------------------------------------------------
 
-func test_create_for_wires_object_data_generator_and_palette() -> void:
+func test_create_for_wires_object_data_and_palette() -> void:
 	var s := _session()
 	assert_ne(s.object, null, "会话要有被编辑的对象")
 	assert_ne(s.data, null, "会话要有显示层")
-	assert_ne(s.generator, null, "会话要有供数源")
-	assert_eq(s.data.generator, s.generator, "显示层的供数源就是会话的生成器")
-	assert_eq(s.generator.object, s.object, "生成器指向被编辑的对象")
+	assert_eq(s.data.node, s.object, "显示层的节点就是被编辑的对象")
 	assert_eq(s.data.grid_size, s.object.grid_size, "数据层分辨率必须与对象一致")
-	assert_true(s.generator.is_in_generation_bounds(Vector3i(3, 3, 3)),
-		"生成器范围随数据层自动同步：网格内的块可生成")
-	assert_false(s.generator.is_in_generation_bounds(Vector3i(99, 0, 0)),
+	assert_true(s.data.can_generate_chunk(Vector3i(3, 3, 3)),
+		"供数范围随数据层自动同步：网格内的块可生成")
+	assert_false(s.data.can_generate_chunk(Vector3i(99, 0, 0)),
 		"网格外的块不可生成（128³ 只覆盖 chunk 0..3；漏了同步会当自己是无限世界）")
 
 

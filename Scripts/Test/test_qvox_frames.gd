@@ -95,8 +95,8 @@ func test_bounds_grid_and_origin_vary_per_frame() -> void:
 		return
 	assert_eq(qvx.grid_size(0), Vector3i(1, 1, 1), "帧 0 的包围盒尺寸")
 	assert_eq(qvx.grid_size(1), Vector3i(1, 9, 1), "帧 1 的包围盒随内容变高")
-	var o0 := qvx.origin_offset(VoxelData.OriginMode.CONTENT_CENTER, 0)
-	var o1 := qvx.origin_offset(VoxelData.OriginMode.CONTENT_CENTER, 1)
+	var o0 := qvx.origin_offset(QVoxelSource.OriginMode.CONTENT_CENTER, 0)
+	var o1 := qvx.origin_offset(QVoxelSource.OriginMode.CONTENT_CENTER, 1)
 	assert_ne(o0, o1, "原点由包围盒导出，必须逐帧各算（否则第 1 帧整体偏移）")
 
 
@@ -120,7 +120,7 @@ func test_fused_path_applies_placement_per_frame() -> void:
 
 
 # ----------------------------------------------------------------------------
-# ③ 导入器：VoxelData 快照 / 逐帧 MeshLibrary
+# ③ 导入器：QVoxelSource 快照 / 逐帧 MeshLibrary
 # ----------------------------------------------------------------------------
 
 func test_voxel_data_snapshot_per_frame() -> void:
@@ -132,9 +132,9 @@ func test_voxel_data_snapshot_per_frame() -> void:
 	var qvx := QVoxelAsset.from_file(path)
 	if qvx == null:
 		return
-	var mode := VoxelData.OriginMode.CONTENT_CENTER
-	var d0 := VoxelData.from_qvx(qvx, mode, 0)
-	var d1 := VoxelData.from_qvx(qvx, mode, 1)
+	var mode := QVoxelSource.OriginMode.CONTENT_CENTER
+	var d0 := QVoxelSource.from_qvx(qvx, mode, 0)
+	var d1 := QVoxelSource.from_qvx(qvx, mode, 1)
 	assert_eq(d0.get_voxel_count(), 1, "帧 0 快照 1 个体素")
 	assert_eq(d1.get_voxel_count(), 2, "帧 1 快照 2 个体素")
 	assert_true(d0.has_voxel(Vector3i(1, 1, 1)), "帧 0 含 (1,1,1)")
@@ -499,7 +499,7 @@ func test_clock_single_frame_is_not_playable() -> void:
 ## `apply_block_table` 是"整份内容替换"的唯一入口。返回"真改了几块"——
 ## 未变的块必须整块跳过（FRAM 的块级增量就是靠这个才省下来）。
 func test_apply_block_table_diffs_at_chunk_level() -> void:
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	d.grid_size = Vector3i(64, 64, 64)
 	var k0 := Vector3i(0, 0, 0)
 	var k1 := Vector3i(1, 0, 0)
@@ -524,7 +524,7 @@ func test_apply_block_table_diffs_at_chunk_level() -> void:
 
 ## 全空缓冲等同"该块没有内容"：不能装进去，否则 `is_empty()` 与"一个体素都没有"脱钩。
 func test_apply_block_table_drops_empty_buffers() -> void:
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	assert_eq(d.apply_block_table({Vector3i(0, 0, 0): _block([])}), 0, "全空缓冲不算装载")
 	assert_true(d.is_empty(), "装完仍是空（不变式没被破坏）")
 
@@ -545,7 +545,7 @@ func test_animator_plays_frames_into_voxel_data() -> void:
 	assert_true(qvx != null, "应能解析 FRAM 文件")
 	if qvx == null:
 		return
-	var d := VoxelData.from_qvx(qvx, VoxelData.OriginMode.WORLD_ORIGIN, 0)
+	var d := QVoxelSource.from_qvx(qvx, QVoxelSource.OriginMode.WORLD_ORIGIN, 0)
 	var animator := VoxelAnimator.new()
 	assert_true(animator.setup(qvx, d, 0, false), "有帧动画 → 装配成功")
 	assert_eq(animator.frame_count(), 2, "内核拿到 2 帧")
@@ -580,7 +580,7 @@ func test_animator_rejects_static_asset() -> void:
 	var qvx := QVoxelAsset.from_file(path)
 	if qvx == null:
 		return
-	var d := VoxelData.from_qvx(qvx, VoxelData.OriginMode.WORLD_ORIGIN, 0)
+	var d := QVoxelSource.from_qvx(qvx, QVoxelSource.OriginMode.WORLD_ORIGIN, 0)
 	var animator := VoxelAnimator.new()
 	assert_false(animator.setup(qvx, d, 0, false), "静态模型没有帧 → 装配失败")
 	assert_eq(animator.frame_count(), 0, "内核没有帧")
@@ -659,11 +659,10 @@ func _write_static_qvx(path: String) -> void:
 
 
 ## 导入器全套默认选项（含 MeshLibrary 的 mesh_mode / import_meshes）。
+## 走静态默认值：`EditorImportPlugin` 在 headless/CI 进程里 new() 会失败，
+## 走实例方法会静默拿到空字典（缺键 → 生成器整条链路失败）。
 func _mesh_options() -> Dictionary:
-	var opts := {}
-	for o in VoxelMeshLibraryImporter.new()._get_import_options("", false):
-		opts[o["name"]] = o["default_value"]
-	return opts
+	return VoxelMeshLibraryImporter.default_options()
 
 
 func _solid_material(color: Color) -> VoxelMaterial:

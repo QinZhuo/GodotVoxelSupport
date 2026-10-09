@@ -8,14 +8,14 @@ extends Resource
 ## 【为什么需要两个基类】SDF 的表达方式是 `sample(p) → 距离`（适合"由简单件组合出的实体"）；
 ## 而 L-系统 / 元胞自动机 / WFC 这类算法的产出方式是**全局迭代**——先生成一整块体素，
 ## 再切成 chunk，无法写成逐点函数。于是各有一个基类：
-##     Sdf      —— 逐点采样（配 PcgSdfGenerator）    —— 局部、可无限延伸
-##     PcgModel —— 整体产出（配 PcgModelGenerator）  —— 全局、天然有界
+##     Sdf      —— 逐点采样（配 QVoxelSource 的场降级）  —— 局部、可无限延伸
+##     PcgModel —— 整体产出（配 QVoxelSource 的整块供数）—— 全局、天然有界
 ##
 ## 【契约】`build(grid_size)` 返回长度 = x*y*z 的密集 PackedInt32Array，
 ## 值 = 材质ID（0 = 空），下标 = `index_of()`（x 连续，再 y，再 z）。
 ## 必须**确定性**：同 grid_size 恒得同一结果（用固定种子，不要依赖全局随机）。
 ##
-## 【有界】grid_size 来自 VoxelData.grid_size（与 SDF 模型同一套有界语义），
+## 【有界】grid_size 来自 QVoxelSource.grid_size（与 SDF 模型同一套有界语义），
 ## 实现只在给定尺寸内绘制，越界写入由 set_voxel 自动忽略。
 
 

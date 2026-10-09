@@ -1,6 +1,6 @@
 extends TestCase
 
-## QVX 导入链路测试：`.qvx` → QVoxelAsset → VoxelData / 网格 / 材质。
+## QVX 导入链路测试：`.qvx` → QVoxelAsset → QVoxelSource / 网格 / 材质。
 ##
 ## 钉死的是"QVX 的语义不能被中间表示压缩"这件事。此前 `.qvx` 走 VoxAsset
 ## （MagicaVoxel 场景图形状的适配器）导致三处**静默**失真，本文件逐条覆盖：
@@ -32,8 +32,8 @@ func test_multi_model_with_node_placement() -> void:
 	assert_eq(qvx.placements.size(), 2, "NODE 里两个 model 节点都应在")
 	assert_false(qvx.is_block_importable(), "带位移的摆放必须走融合路径")
 
-	var data := VoxelData.from_qvx(qvx)
-	assert_true(data != null, "应能构造 VoxelData")
+	var data := QVoxelSource.from_qvx(qvx)
+	assert_true(data != null, "应能构造 QVoxelSource")
 	if data == null:
 		return
 	# 组 root 位移 (0,32,0)（**组变换要累积给子节点**），再叠加各自节点的 transform：
@@ -56,7 +56,7 @@ func test_block_import_matches_fused() -> void:
 	assert_true(qvx.is_block_importable(), "无 NODE → 应可块级直连（零逐体素展开）")
 	if not qvx.is_block_importable():
 		return
-	var via_blocks := VoxelData.from_qvx(qvx)
+	var via_blocks := QVoxelSource.from_qvx(qvx)
 	# fused_voxels() 是"有变换时"的参考实现：两条路必须给出同一个世界
 	assert_eq(via_blocks.get_voxels_dict_snapshot(), qvx.fused_voxels(),
 			"块级直连与逐体素融合必须逐体素一致")
@@ -72,9 +72,7 @@ func test_mesh_covers_all_models() -> void:
 	var path := TEST_DIR + "/mesh_two.qvx"
 	_write_two_model_qvx(path, false)
 	var qvx := QVoxelAsset.from_file(path)
-	var opts := {}
-	for o in VoxelMeshImporter.new()._get_import_options("", false):
-		opts[o["name"]] = o["default_value"]
+	var opts := VoxelMeshImporter.default_options()
 	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvx(qvx, opts, path)
 	assert_true(mesh != null, "应能为 .qvx 生成网格")
 	if mesh == null:
@@ -97,14 +95,14 @@ func test_resource_payload_roundtrip() -> void:
 	var payload: Variant = d.get("voxel_data_payload")
 	assert_true(payload is String and not (payload as String).is_empty(), "应产出载荷字符串")
 
-	var r := VoxelData.new()
+	var r := QVoxelSource.new()
 	r.set("voxel_data_payload", payload)
 	assert_eq(r.get_voxels_dict_snapshot(), d.get_voxels_dict_snapshot(), "载荷往返应逐体素一致")
 	assert_eq(r.get_all_chunk_keys().size(), 2, "两个 chunk 都应恢复")
 	assert_eq(r.grid_size, d.grid_size, "grid_size 应随载荷恢复")
 
 	# 版本不符 → 明确拒绝（报错 + 空载荷），而不是按当前格式猜着读
-	var bad := VoxelData.new()
+	var bad := QVoxelSource.new()
 	bad.set("voxel_data_payload", VoxelPayloadCodec.encode({"v": VoxelPayloadCodec.VERSION + 1, "blocks": {}}))
 	assert_eq(bad.get_voxel_count(), 0, "版本不符的载荷应被拒绝")
 
@@ -151,7 +149,7 @@ func test_samples_import_without_loss() -> void:
 		if qvx == null:
 			continue
 		assert_true(not qvx.is_empty(), "%s 应含非空块" % path.get_file())
-		var data := VoxelData.from_qvx(qvx)
+		var data := QVoxelSource.from_qvx(qvx)
 		assert_true(data.get_voxel_count() > 0, "%s 应导入出体素" % path.get_file())
 
 
@@ -171,7 +169,7 @@ func test_node_quaternion_rotation_applied() -> void:
 	if qvx == null:
 		return
 	assert_false(qvx.is_block_importable(), "带旋转的摆放必须走逐体素融合路径")
-	var data := VoxelData.from_qvx(qvx)
+	var data := QVoxelSource.from_qvx(qvx)
 	assert_eq(data.get_voxel_count(), 1, "旋转后仍应恰好一个体素")
 	assert_true(data.has_voxel(Vector3i(1, 1, -1)), "90° 绕 Y：(1,1,1) → (1,1,-1)")
 	assert_false(data.has_voxel(Vector3i(1, 1, 1)), "原位置不应残留")
@@ -185,7 +183,7 @@ func test_node_scale_and_translation_applied() -> void:
 	assert_true(qvx != null, "应能解析带缩放的 .qvx")
 	if qvx == null:
 		return
-	var data := VoxelData.from_qvx(qvx)
+	var data := QVoxelSource.from_qvx(qvx)
 	assert_true(data.has_voxel(Vector3i(12, 2, 2)), "先缩放 2× 再平移 (10,0,0)：(1,1,1) → (12,2,2)")
 
 
@@ -207,7 +205,7 @@ func test_animation_frames_are_passed_through_not_interpreted() -> void:
 		return
 	assert_eq(qvx.placements.size(), 1, "应恰好一条摆放")
 	# 体素位于块 (0,0,0) 的局部 (1,1,1)；节点未写 transform → 恒等
-	var data := VoxelData.from_qvx(qvx)
+	var data := QVoxelSource.from_qvx(qvx)
 	assert_true(data.has_voxel(Vector3i(1, 1, 1)), "帧键不参与摆放：模型应落在自身 transform（原点）")
 	assert_false(data.has_voxel(Vector3i(1, 65, 1)), "帧里的位移不得被应用")
 	# 原样透传：格式层的只读视图仍应看得到这段动画
@@ -239,22 +237,20 @@ func test_mesh_and_data_origin_agree() -> void:
 		return
 
 	# 选项取导入器默认值（scale=0.1、origin=world_origin）
-	var opts := {}
-	for o in VoxelMeshImporter.new()._get_import_options("", false):
-		opts[o["name"]] = o["default_value"]
+	var opts := VoxelMeshImporter.default_options()
 	opts[VoxelMeshImporter.shape] = VoxelMeshImporter.Shape.cube
-	assert_eq(int(opts[VoxelMeshImporter.origin]), VoxelData.OriginMode.WORLD_ORIGIN,
+	assert_eq(int(opts[VoxelMeshImporter.origin]), QVoxelSource.OriginMode.WORLD_ORIGIN,
 			"导入器默认原点应为 WORLD_ORIGIN（不改动几何），否则已有资产会集体挪位")
 	var scale: float = opts[VoxelMeshImporter.scale]
 
-	for mode in [VoxelData.OriginMode.WORLD_ORIGIN, VoxelData.OriginMode.BOTTOM_CENTER,
-			VoxelData.OriginMode.CONTENT_CENTER]:
+	for mode in [QVoxelSource.OriginMode.WORLD_ORIGIN, QVoxelSource.OriginMode.BOTTOM_CENTER,
+			QVoxelSource.OriginMode.CONTENT_CENTER]:
 		opts[VoxelMeshImporter.origin] = mode
 		var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, src)
 		assert_true(mesh != null, "应为 deer.vox 生成网格（mode=%d）" % mode)
 		if mesh == null:
 			return
-		var data := VoxelData.from_voxel_data(vox, 0, mode)
+		var data := QVoxelSource.from_voxel_data(vox, 0, mode)
 		var maabb := mesh.get_aabb()
 		var db := data.get_voxels_aabb()
 		var dmin := (db.position + data.center_offset) * scale
@@ -263,7 +259,7 @@ func test_mesh_and_data_origin_agree() -> void:
 		assert_true(delta < 0.01,
 				"mode=%d 下 mesh 与 data 的原点/尺寸必须一致（Δ=%.4f；mesh=%s data=%s）"
 				% [mode, delta, str(maabb), str(AABB(dmin, dsize))])
-		if mode == VoxelData.OriginMode.BOTTOM_CENTER:
+		if mode == QVoxelSource.OriginMode.BOTTOM_CENTER:
 			assert_true(absf(maabb.position.y) < 0.01,
 					"显式选 bottom_center 时底面应落在 y=0（实得 %.3f）" % maabb.position.y)
 
@@ -345,11 +341,11 @@ func _solid_material(color: Color) -> VoxelMaterial:
 	return mat
 
 
-func _make_data() -> VoxelData:
+func _make_data() -> QVoxelSource:
 	var mats: Array[VoxelMaterial] = []
 	mats.resize(2)
 	mats[1] = _solid_material(Color(0.3, 0.7, 0.2))
-	var d := VoxelData.new()
+	var d := QVoxelSource.new()
 	d.materials = mats
 	return d
 

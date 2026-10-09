@@ -20,7 +20,7 @@ var progress := Callable()
 var is_cancelled_callable := Callable()
 
 ## 本次求值的序号 —— 用于丢弃过期结果（主线程改了对象参数时，在途 worker 的产物作废）。
-## 与 PcgModelGenerator._ensure_volume() 的"提交前比对尺寸"是同一思路。
+## 与 QVoxelSource._ensure_volume() 的"提交前比对尺寸"是同一思路。
 var epoch := 0
 
 

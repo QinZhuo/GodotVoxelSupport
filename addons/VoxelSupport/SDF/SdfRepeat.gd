@@ -6,7 +6,7 @@ extends Sdf
 ## 做法是标准域操作——把采样点折回单个周期内再交给子字段，因此与子字段形状无关。
 ##
 ## 【无界】重复是无限的，故 bounds() 恒为无界；实际生成多少份完全由采样范围决定，
-## 也就是由 VoxelData.grid_size 裁剪——与框架"真正裁剪交给 grid_size"的约定一致。
+## 也就是由 QVoxelSource.grid_size 裁剪——与框架"真正裁剪交给 grid_size"的约定一致。
 
 @export var child: Sdf
 ## 各轴重复周期（体素单位）。某轴 <= 0 表示该轴不重复（退化为原样采样）。

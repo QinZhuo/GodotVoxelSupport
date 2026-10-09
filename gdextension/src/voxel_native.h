@@ -132,7 +132,7 @@ public:
 	// 避免 GDScript 逐体素计算 chunk 的字典开销（遍历在原生，返回去重 chunk 列表）。
 	static Array collect_chunks(const Array &positions);
 
-	// 连通分组：positions 按 6 方向连通性分组（与 VoxelData.partition_connected 一致）
+	// 连通分组：positions 按 6 方向连通性分组（与 QVoxelSource.partition_connected 一致）
 	// positions: Array[Vector3i]
 	// 返回 Array[Array[Vector3i]]，每组内两两 6 方向连通
 	static Array partition_connected(const Array &positions);

@@ -11,7 +11,7 @@ extends VoxelStream
 ##   3. 缓存可删：LOD 降采样、杂项派生数据可选写入 CACH（读取时忽略），
 ##      删掉 CACH 块不损失语义（P5）。
 ##
-## 与上层契约（VoxelStream 抽象）完全一致，VoxelData / VoxelRenderer 无感知：
+## 与上层契约（VoxelStream 抽象）完全一致，QVoxelSource / VoxelRenderer 无感知：
 ##   buffer = PackedInt32Array(CHUNK_VOLUME)，值 = 材质ID（0 = 空）。
 ##   lod=0 走 VXEL model 0（唯一的权威体素数据）；lod>=1 走 CACH（派生缓存）。
 ##
@@ -59,7 +59,7 @@ const LOD0_MODEL_ID := 0
 @export var metadata: Dictionary = {}
 
 ## 材质条目（按材质 ID 索引的 Array[Dictionary]，QVX MATE 结构）。
-## 由 VoxelData 在 flush 前通过 set_materials() 注入；索引 0 = 空气。
+## 由 QVoxelSource 在 flush 前通过 set_materials() 注入；索引 0 = 空气。
 var _materials: Array = []
 
 ## 当累计脏块达到该值自动 flush（0 = 关闭自动，仅显式 flush）。防长时间不落盘。
@@ -84,7 +84,7 @@ var _inflight: Dictionary = {}
 # 内存状态：只留"未落盘的改动"，不留全世界的解码镜像
 # ----------------------------------------------------------------------------
 # 【为什么不再常驻全世界】旧实现用 _models 把文件里每个 chunk 都解码后长期留在内存，
-# 内存随探索范围**无界增长**。但"已落盘的干净数据"本就由磁盘 + 数据层 VoxelData 的流式
+# 内存随探索范围**无界增长**。但"已落盘的干净数据"本就由磁盘 + 数据层 QVoxelSource 的流式
 # 缓存（受流式半径界定）共同持有，存储层再存一份纯属重复。于是这里只留尚未落盘的部分：
 #   _dirty_buffers  写入覆盖层（save_chunk 的产物）
 #   _deleted        删除墓碑（否则已删的块会被块索引"复活"）
@@ -982,7 +982,7 @@ func supports_lod_layer() -> bool:
 # 上层注入 / 查询
 # ----------------------------------------------------------------------------
 
-## 注入材质数组（VoxelData.materials）。flush 时写入 MATE 块。
+## 注入材质数组（QVoxelSource.materials）。flush 时写入 MATE 块。
 func set_materials(mats: Array) -> void:
 	_materials = mats
 	_dirty = true

@@ -26,8 +26,9 @@ enum MeshMode {
 const mesh_mode := "mesh/mode"
 const import_meshes := "mesh/import_meshes"
 
-func _get_import_options(path, preset) -> Array[Dictionary]:
-	var options = super._get_import_options(path, preset)
+## 在网格导入器选项之上追加 MeshLibrary 专属项（见基类 option_specs 的静态化说明）。
+static func option_specs() -> Array[Dictionary]:
+	var options := VoxelMeshImporter.option_specs()
 	options.append_array([ {
 			name = mesh_mode,
 			default_value = MeshMode.split_by_model,
@@ -38,6 +39,15 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = false,
 		}])
 	return options
+
+
+func _get_import_options(_path, _preset) -> Array[Dictionary]:
+	return option_specs()
+
+
+## 必须重写：静态调用按定义所在脚本解析，基类的 default_options() 看不到上面追加的两项。
+static func default_options() -> Dictionary:
+	return _defaults_of(option_specs())
 
 func _get_priority() -> float:
 	# 排在 Mesh 之后、Data 之前：网格库是"要自己拼装"的进阶用法

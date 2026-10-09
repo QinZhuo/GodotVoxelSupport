@@ -4,7 +4,7 @@ extends Node
 ##
 ## 目的：直观展示距离 LOD 卸载（Streaming）与两种数据流，测试内容高度关联：
 ##   - 文件流模式：手工构建的大地面+散布建筑（QVoxelStream 单文件流式，破坏可写盘）
-##   - 程序化模式：VoxelGenerator 子类（_generate_chunk 噪声地形）+ QVoxelStream 存破坏 + origin shift 无限世界
+##   - 程序化模式：QVoxelSource 扩展（_generate_chunk 噪声地形）+ QVoxelStream 存破坏 + origin shift 无限世界
 ## 两种模式共用同一渲染器与 LOD/流式逻辑，相机 WASD 自由移动。
 ##
 ## 操作：
@@ -91,7 +91,7 @@ func _apply_renderer_config() -> void:
 
 ## 文件流模式：手工构建大地面 + 随机散布建筑（QVoxelStream 单文件流式，破坏可写盘）
 func _build_world_file() -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	# 文件流必须在 set_voxels 前绑定：否则构建的 chunk 数据只存内存不写盘，
 	# 流式卸载（相机远离）后数据丢失（磁盘无）→ 粗层降采样空 → 矩形空洞。
 	var stream := QVoxelStream.new()
@@ -173,10 +173,12 @@ func _build_world_file() -> void:
 	_target.global_position = -Vector3(bounds.size.x, 0, bounds.size.z) * voxel_scale * 0.5
 
 
-## 程序化模式：VoxelGenerator 子类（_generate_chunk 噪声地形）+ origin shift 无限世界。
-## "造"与"存"是两个并列的部件：generator 造未编辑的部分，stream 存编辑过的覆盖层。
+## 程序化模式：QVoxelSource 扩展（_generate_chunk 噪声地形）+ origin shift 无限世界。
+## "造"与"存"是两个并列的部件：数据层造未编辑的部分，stream 存编辑过的覆盖层。
 func _build_world_procedural() -> void:
-	var data := VoxelData.new()
+	# 数据层本身即"无限地形源"（覆写 can_generate_chunk 声明任何 chunk 都造得出来）。
+	var data := PcgTerrainSource.new()
+	data.infinite = true
 	# 存储：用户破坏的 chunk 写盘，重启后保留（跨进程验证程序化 + 破坏存档）。
 	# 换成 VoxelMemoryStream 即"只存内存、退出即丢"，上层代码一行都不用改。
 	var dir := "user://voxel_procedural_stream"
@@ -184,9 +186,6 @@ func _build_world_procedural() -> void:
 	var stream := QVoxelStream.new()
 	stream.file_path = dir.path_join(QVoxelStream.WORLD_FILE_NAME)
 	data.stream = stream
-	# 生成器：子类覆写 _generate_chunk / _generate_chunk_lod 实现生成算法。
-	# 先设 stream 再设 generator：generator 的 setter 只在 stream 为空时才兜底建内存流。
-	data.generator = PcgTerrainGenerator.new()
 	var mat := VoxelMaterial.new()
 	mat.id = 1
 	mat.color = Color(0.35, 0.55, 0.3)
@@ -310,7 +309,7 @@ func _update_hud() -> void:
 	var chunk_meshes := _target._lod_meshes[0].size() if _target._lod_meshes.size() > 0 else 0
 	# 磁盘/修改已持久化但不在内存的 chunk 数（原 _streamed_out_chunks 已合并进统一流式）
 	# 只取数量：get_unloaded_chunk_keys() 要构造整个 key 数组，每帧调等于白付一次分配
-	# （见 VoxelData.get_unloaded_chunk_count 的说明）。
+	# （见 QVoxelSource.get_unloaded_chunk_count 的说明）。
 	var streamed := _target.data.get_unloaded_chunk_count() if _target.data != null else 0
 	var data_loaded := 0
 	var data_unloaded := 0

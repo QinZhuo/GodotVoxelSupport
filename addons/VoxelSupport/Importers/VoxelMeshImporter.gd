@@ -23,7 +23,14 @@ enum Shape {
 	sphere,
 }
 
-func _get_import_options(path, preset) -> Array[Dictionary]:
+## 导入选项描述表 —— 选项定义的**单一出处**，且是静态的。
+##
+## 【为什么必须静态】`EditorImportPlugin` 只能在编辑器进程实例化：headless/CI 里
+## `VoxelMeshImporter.new()` 直接失败（"Class 'EditorImportPlugin' can only be instantiated
+## by editor."）。此前测试只能靠"缺键 → 消费方各自读默认值"侥幸通过，一旦某个选项是硬取键
+## （如 `options[import_materials_textures]`）就会整条链路静默失败。把"选项定义"与"插件实例"
+## 解耦后，编辑器与 headless 测试读到的是同一份定义。
+static func option_specs() -> Array[Dictionary]:
 	return [
 		{
 			name = scale,
@@ -33,9 +40,9 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			# 资产原点：默认 world_origin = 原样保留文件里的坐标（等于本插件网格导入一直以来的
 			# 行为，已有资产不会因升级挪位）。要"X/Z 居中 + Y 贴底"这种游戏资产惯例，
 			# 再显式选 bottom_center。与 VoxelDataImporter 的同一选项共享取值与语义，
-			# 详见 VoxelData.OriginMode。
+			# 详见 QVoxelSource.OriginMode。
 			name = origin,
-			default_value = VoxelData.OriginMode.WORLD_ORIGIN,
+			default_value = QVoxelSource.OriginMode.WORLD_ORIGIN,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
 			hint_string = "world_origin,bottom_center,content_center",
 		},
@@ -79,6 +86,26 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 			default_value = false,
 		},
 	]
+
+
+func _get_import_options(_path, _preset) -> Array[Dictionary]:
+	return option_specs()
+
+
+## 选项名 → 默认值：给拿不到插件实例的调用方用（headless 测试、工具脚本）。
+## 实例方法 `_get_import_options()` 只在编辑器里可用，这条路径才与进程无关。
+##
+## ⚠️ GDScript 的静态调用按**定义所在脚本**解析，不走虚函数派发：继承来的 `default_options()`
+## 里调 `option_specs()` 只会拿到基类那张表。所以子类必须重写本方法转发自己的表。
+static func default_options() -> Dictionary:
+	return _defaults_of(option_specs())
+
+
+static func _defaults_of(specs: Array[Dictionary]) -> Dictionary:
+	var opts := {}
+	for o in specs:
+		opts[o["name"]] = o["default_value"]
+	return opts
 
 ## 选项名统一取自 VoxAsset 单一出处（与 VoxelDataImporter 共用，避免同值重复定义）
 const frame_index := VoxAsset.OPT_FRAME_INDEX

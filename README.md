@@ -24,31 +24,33 @@ You can see the rendering effects of voxel models imported using this plugin in 
 ### Architecture
 
 ```
-VoxelData                    — voxel storage & editing (materials, chunk buffers)
+QVoxelSource                    — voxel storage & editing (materials, chunk buffers)
   ├─ VoxelStream (@abstract)     — STORAGE: chunk-level persistence API (all @abstract)
   │    ├─ QVoxelStream             — single-file .qvx block-stream world storage (disk)
   │    └─ VoxelMemoryStream      — memory only (no persistence; a home for edits)
-  └─ VoxelGenerator (@abstract)  — GENERATION: compute data from a key (no I/O, no state)
-       └─ your subclass overrides @abstract `_generate_chunk()` / `_generate_chunk_lod()`
+  └─ node: QVoxelNode            — GENERATION: the data layer's single source of truth
+       └─ QVoxelModel            — bounded grid + modifier chain (run by QVoxelEvalEngine)
 VoxelRenderer              — async mesh generation, LOD, streaming, collision
 VoxelDestructible          — extends VoxelRenderer: destruction, collapse, falling debris
 ```
 
-**Storage and generation are two parallel parts**: `stream` stores (disk or memory),
-`generator` generates (procedural terrain). They can coexist (procedural world + persisted
-destruction); lookup order is always **stream first** — anything stored is authoritative and
-must never be overwritten by a freshly generated result.
+**Storage and generation are two parallel parts**: `stream` stores (disk or memory), the
+`node` describes what to generate (a bounded `QVoxelModel` whose modifier chain the eval
+engine runs). They can coexist (procedural world + persisted destruction); lookup order is
+always **stream first** — anything stored is authoritative and must never be overwritten by a
+freshly generated result.
 Pending/ready bookkeeping, dedup, throttling and background dispatch live in one place
 (`VoxelAsyncLoader`); each source only answers two synchronous questions: "is it stored?" and
-"can you generate it?".
+"can you generate it?" (the latter is the virtual `can_generate_chunk()`, which an infinite
+world extension overrides).
 
-**Data access order** (per chunk): memory buffer → stream → generator.
+**Data access order** (per chunk): memory buffer → stream → node.
 All mesh generation runs on background threads (`WorkerThreadPool`); the main thread never builds voxel meshes or generates chunks synchronously.
 
 ### Static world (disk streaming)
 
 ```gdscript
-var data := VoxelData.new()
+var data := QVoxelSource.new()
 # ... add materials, fill voxels (set_voxels / load_voxels_dict)
 
 var stream := QVoxelStream.new()
@@ -69,24 +71,28 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 
 ```gdscript
 class_name MyWorld
-extends VoxelGenerator
+extends QVoxelSource
 
-## Override the base @abstract method: return a 32³ PackedInt32Array
-## (value = material id, 0 = empty). Must be deterministic: same chunk_key → same terrain.
+## Infinite world: declare it, then override the chunk-supply hooks.
+func can_generate_chunk(_chunk_key: Vector3i) -> bool:
+	return true
+
+## Return a 32³ PackedInt32Array (value = material id, 0 = empty).
+## Must be deterministic: same chunk_key → same terrain.
 func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	# e.g. noise-based heightmap — use ABSOLUTE voxel y for cross-layer continuity
 	...
 
-# usage: the generator GENERATES, the stream STORES (swap freely, independently)
-var data := VoxelData.new()
+# usage: the source GENERATES, the stream STORES (swap freely, independently)
+var data := MyWorld.new()
+data.infinite = true                      # enables origin shift
 data.stream = QVoxelStream.new()          # player edits go to disk, survive restart
 data.stream.file_path = "user://world_edits/world.qvx"
-data.generator = MyWorld.new()          # untouched parts generated from the key
 # assign to VoxelRenderer.data (recommend visibility_mode = STREAMING)
 ```
 
 > Swap `stream` for `VoxelMemoryStream` to keep edits in memory only; leave it unset and the
-> engine falls back to a memory stream automatically. The generator code never changes.
+> engine falls back to a memory stream automatically. The generation code never changes.
 
 Features:
 - **Deterministic** — same chunk_key → same terrain, continuous across borders and origin shifts

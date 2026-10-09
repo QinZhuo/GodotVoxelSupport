@@ -1,6 +1,6 @@
 ## 材质缓存：把原先散落在 VoxelRenderer / VoxelDestructible 里的四份材质派生数据收成一份。
 ##
-## 权威始终是 VoxelData.materials（材质表），本类只做派生与惰性重建：
+## 权威始终是 QVoxelSource.materials（材质表），本类只做派生与惰性重建：
 ##   派生 1  snapshot     —— 权威表的深拷贝，供子线程只读（避免跨线程访问 Resource）
 ##   派生 2  surfaces     —— 运行时 Material 对象数组（渲染用，索引 0/1 对应两个表面）
 ##   派生 3  aligned[层]  —— 各 LOD 层"按材质 ID 对齐"的数组（生成器要求 索引 == 材质ID）

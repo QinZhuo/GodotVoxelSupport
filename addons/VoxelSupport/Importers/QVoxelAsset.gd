@@ -397,7 +397,7 @@ func fused_voxels(frame: int = 0) -> Dictionary:
 						var wp := full * Vector3(origin.x + lx, origin.y + ly, origin.z + lz)
 						out[Vector3i(int(round(wp.x)), int(round(wp.y)), int(round(wp.z)))] = m
 	_fused_cache[frame] = out
-	_fused_bounds_cache[frame] = VoxelData.voxel_bounds(out)
+	_fused_bounds_cache[frame] = QVoxelSource.voxel_bounds(out)
 	return out
 
 
@@ -432,14 +432,14 @@ func grid_size(frame: int = 0) -> Vector3i:
 	return (b["max"] as Vector3i) - (b["min"] as Vector3i) + Vector3i.ONE
 
 
-## 原点偏移（体素单位，叠加到渲染顶点）：按 `origin_mode`（见 VoxelData.OriginMode）。
-## 与 `.vox` 路径共用 `VoxelData.origin_offset` 这一处实现——"两条路径位置一致"的保证就在这里。
+## 原点偏移（体素单位，叠加到渲染顶点）：按 `origin_mode`（见 QVoxelSource.OriginMode）。
+## 与 `.vox` 路径共用 `QVoxelSource.origin_offset` 这一处实现——"两条路径位置一致"的保证就在这里。
 ##
 ## 【为什么原点要按帧算】原点由**包围盒**导出，而包围盒随帧变（第 3 帧才长出的部分会把
 ## bottom_center 的原点往下推）。逐帧导出网格时若沿用第 0 帧的原点，后面几帧会整体偏移。
-func origin_offset(origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN,
+func origin_offset(origin_mode: int = QVoxelSource.OriginMode.WORLD_ORIGIN,
 		frame: int = 0) -> Vector3:
-	return VoxelData.origin_offset(voxel_bounds(frame), origin_mode)
+	return QVoxelSource.origin_offset(voxel_bounds(frame), origin_mode)
 
 
 # ----------------------------------------------------------------------------
@@ -448,7 +448,7 @@ func origin_offset(origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN,
 
 ## 任意块集合的精确体素包围盒（逐体素判空，只取非空体素）。
 ## 分项导出（每模型/每节点一份网格）也要各自居中，故做成静态可复用。
-## 注：体素字典（{Vector3i: 材质ID}）求界已统一到 `VoxelData.voxel_bounds`，此处只保留
+## 注：体素字典（{Vector3i: 材质ID}）求界已统一到 `QVoxelSource.voxel_bounds`，此处只保留
 ## "块缓冲"这一种输入形状（按 chunk 展开、逐体素判空是它唯一的差别）。
 static func bounds_for_blocks(blocks: Dictionary) -> Dictionary:
 	var lo := Vector3i(2147483647, 2147483647, 2147483647)

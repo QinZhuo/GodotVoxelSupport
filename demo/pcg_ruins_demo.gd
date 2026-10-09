@@ -84,14 +84,12 @@ func _build_ruins() -> void:
 		wfc.tiles = tiles
 		wfc.seed = 20261007 + i * 977
 		wfc.max_retries = 16
-		var gen := PcgModelGenerator.new()
-		gen.model = wfc
 		# 细节层顺序有意义：先风化挖出不规则表面，再挂苔藓。
 		# 暴露判定是在风化之后算的，故新挖出的凹坑侧面也会被判为暴露面而正常上色。
-		gen.details = [_make_weather(0.16), _make_moss(),
-				_make_wall_shade(), _make_floor_shade()]
-		gen.detail_seed = 20261007 + i * 977
-		_add("Ruin_%d" % (i + 1), Vector3(-16.0 + i * 10.5, 0.0, 0.0), gen, RUIN_GRID,
+		var node := QVoxelModel.of_source(wfc, RUIN_GRID,
+				[_make_weather(0.16), _make_moss(), _make_wall_shade(), _make_floor_shade()],
+				20261007 + i * 977)
+		_add("Ruin_%d" % (i + 1), Vector3(-16.0 + i * 10.5, 0.0, 0.0), node, RUIN_GRID,
 				PcgSceneKit.materials(RUIN_MATERIALS))
 
 
@@ -171,18 +169,18 @@ func _build_walls() -> void:
 		overlap.pattern_size = 3
 		overlap.seed = 20261007 + i * 977
 		overlap.max_retries = 8
-		var gen := PcgModelGenerator.new()
-		gen.model = overlap
 		# 多孔岩同样吃风化，否则强重叠样本只会产出规整的孔洞方块。
 		# 再叠一层分档换色：孔洞边缘的石块逐体素挑暗/中/亮，破掉整片平涂。
-		gen.details = [_make_weather(0.12), _make_rock_shade()]
-		gen.detail_seed = 4242 + i * 31
-		_add("Porous_%d" % (i + 1), Vector3(6.5 + i * 10.0, 0.0, 0.0), gen, OVERLAP_GRID,
+		var node := QVoxelModel.of_source(overlap, OVERLAP_GRID,
+				[_make_weather(0.12), _make_rock_shade()], 4242 + i * 31)
+		_add("Porous_%d" % (i + 1), Vector3(6.5 + i * 10.0, 0.0, 0.0), node, OVERLAP_GRID,
 				PcgSceneKit.materials(POROUS_MATERIALS))
 
 
-func _add(model_name: String, pos: Vector3, gen: VoxelGenerator, grid_size: Vector3i, mats: Array) -> void:
-	var node := PcgSceneKit.add_model(self, model_name, pos, gen, grid_size, mats, false, voxel_scale)
+func _add(model_name: String, pos: Vector3, model_node: QVoxelNode, grid_size: Vector3i,
+		mats: Array) -> void:
+	var node := PcgSceneKit.add_model(self, model_name, pos, model_node, grid_size, mats,
+			false, voxel_scale)
 	if node is VoxelRenderer:
 		(node as VoxelRenderer).view_distance = view_distance
 

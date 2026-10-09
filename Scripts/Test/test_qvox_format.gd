@@ -353,13 +353,13 @@ func test_stream_end_to_end() -> void:
 	assert_eq(r2.load_chunk(ck_a, 0), buf_a, "擦除后 A 仍应存在")
 	assert_true(r2.load_chunk(ck_b, 0).is_empty(), "擦除后 B 应消失")
 	# lod1 是 CACH（派生数据）：B 正是它的来源之一，来源集合变了 §6 规则 1 就判失效。
-	# 真实流程里 VoxelData 会立刻重算并覆盖它；这里直接操作存储层，故表现为"未命中"。
+	# 真实流程里 QVoxelSource 会立刻重算并覆盖它；这里直接操作存储层，故表现为"未命中"。
 	# （曾经这里是 assert_eq(..., buf_l1)：那时 lod1 存成独立 model，没有来源校验。）
 	assert_true(r2.load_chunk(Vector3i.ZERO, 1).is_empty(), "来源变更后 lod1 缓存应失效（§6）")
 
-	# 异步取数路径：登记 / 去重 / 后台派发 / 回填全部集中在 VoxelData 的 VoxelAsyncLoader
+	# 异步取数路径：登记 / 去重 / 后台派发 / 回填全部集中在 QVoxelSource 的 VoxelAsyncLoader
 	# （存储本身已不含任何异步接口），渲染器的流式加载正是走这条路，必须有覆盖。
-	var dq := VoxelData.new()
+	var dq := QVoxelSource.new()
 	dq.stream = r2
 	dq.request_chunk_async(ck_a, 0)
 	assert_true(dq.is_chunk_pending(ck_a, 0), "异步请求应登记为在途")
@@ -394,7 +394,7 @@ func test_stream_end_to_end() -> void:
 
 
 # ----------------------------------------------------------------------------
-# .qvx 作为一等资产：解析 → QVoxelAsset → VoxelData / Mesh
+# .qvx 作为一等资产：解析 → QVoxelAsset → QVoxelSource / Mesh
 # （导入链路本身的用例在 test_qvox_import.gd；这里只钉"源格式 ↔ 适配器"的分派契约）
 # ----------------------------------------------------------------------------
 
@@ -402,6 +402,12 @@ func test_stream_end_to_end() -> void:
 ##
 ## 【为什么用 load 而不是类名】全局注册类的可见性依赖编辑器完成一次文件系统扫描；
 ## 用路径加载则与注册时机无关，测试在任何时刻都稳定可跑（也顺带验证脚本可加载）。
+##
+## 【为什么逐项检查要挂在 is_editor_hint 上】四个导入器都是 `EditorImportPlugin` 子类，只能在
+## 编辑器进程实例化：headless/CI 里 `script.new()` 返回 null，紧接着对 null 调
+## `_get_recognized_extensions()` 会**中断整个用例**，后面的断言一条都不跑 —— 表现为"静默通过"。
+## 所以这里显式判断：实例化不了就只钉共享列表（四个导入器共用 `VoxAsset.SUPPORTED_EXTENSIONS`），
+## 编辑器进程里再逐项验证每个导入器真的把它报了出来。
 func test_importers_recognize_qvx() -> void:
 	var paths := [
 		"res://addons/VoxelSupport/Importers/VoxelNoopImporter.gd",
@@ -412,12 +418,13 @@ func test_importers_recognize_qvx() -> void:
 	for p in paths:
 		var script: Script = load(p)
 		assert_true(script != null, "%s 应能加载" % p)
-		if script == null:
+		if script == null or not Engine.is_editor_hint():
 			continue
-		var imp = script.new()
-		var exts: Array = imp._get_recognized_extensions()
+		var exts: Array = script.new()._get_recognized_extensions()
 		assert_true("qvx" in exts, "%s 应识别 qvx" % p.get_file())
 		assert_true("vox" in exts, "%s 应仍识别 vox" % p.get_file())
+	assert_true("qvx" in VoxAsset.SUPPORTED_EXTENSIONS, "共享扩展名列表应含 qvx")
+	assert_true("vox" in VoxAsset.SUPPORTED_EXTENSIONS, "共享扩展名列表应含 vox（不破坏既有导入）")
 
 
 ## 扩展名分派契约：`.qvx` 归 QVoxelAsset，`.vox` 归 VoxAsset，绝不互相冒充。

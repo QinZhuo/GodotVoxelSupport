@@ -22,7 +22,7 @@ var _empty := true
 
 ## 从选区里取数。`material_at` 是"取某格材质"的回调（返回 0 = 空）。
 ##
-## 【为什么收回调，而不是直接收 QVoxelModel 或 VoxelData】取数来源是**显示层**（用户框的是
+## 【为什么收回调，而不是直接收 QVoxelModel 或 QVoxelSource】取数来源是**显示层**（用户框的是
 ## 他看得见的东西，而显示层含修改器链的产出），不是手绘种子。本类不该认识其中任何一个，
 ## 于是只收一个取数函数 —— 谁提供数据由会话决定。
 static func capture(sel: QVoxelSelection, material_at: Callable) -> QVoxelClipboard:

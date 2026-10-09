@@ -10,8 +10,8 @@ extends RefCounted
 ## 【为什么不重构既有两个 demo】它们已验证可用，且组织方式与各自讲的主题耦合，
 ## 动它们只有风险没有收益。新场景一律走本工具。
 ##
-## 【一个程序化模型 = 什么】有界 VoxelData（grid_size 即生成范围）
-## + 一个 VoxelGenerator（PcgModelGenerator 或 PcgSdfGenerator）
+## 【一个程序化模型 = 什么】有界 QVoxelSource（grid_size 即生成范围）
+## + 一个 QVoxelModel（链上挂着产出算子）
 ## + 一个 VoxelRenderer / VoxelDestructible 节点。
 ## 因为产出就是一个普通节点，"编辑 / 破坏 / 物理 / 碰撞 / LOD"全部自动可用——
 ## 换可破坏版本只是 `VoxelDestructible.new()` 替掉 `VoxelRenderer.new()`，其余一字不改。
@@ -143,17 +143,19 @@ static func apply_environment(root: Node3D) -> void:
 
 ## 组装一个模型并挂到 parent 上，返回该节点（供场景持有引用 / 做破坏目标 / 统计）。
 ##
-## generator 直接传入（`PcgModelGenerator` 或 `PcgSdfGenerator`），因为"用哪种注入方式"
-## 恰是各场景要展示的内容之一，不该被本工具藏掉。
+## model_node 直接传入（一个 QVoxelModel —— 用 QVoxelModel.of_source 造，或一个组 / 世界），
+## 因为"链上挂了什么"恰是各场景要展示的内容之一，不该被本工具藏掉。
+## seed 是全链共用的主种子（→ QVoxelSource.seed）；细节算子的种子在 of_source 里定。
 ## destructible = true 时用 VoxelDestructible 替掉 VoxelRenderer（见 destruction_demo 的接线）。
-static func add_model(parent: Node3D, model_name: String, pos: Vector3, generator: VoxelGenerator,
-		grid_size: Vector3i, mats: Array, destructible := false,
-		voxel_scale := DEFAULT_VOXEL_SCALE) -> Node3D:
-	var data := VoxelData.new()
+static func add_model(parent: Node3D, model_name: String, pos: Vector3,
+		model_node: QVoxelNode, grid_size: Vector3i, mats: Array, destructible := false,
+		voxel_scale := DEFAULT_VOXEL_SCALE, seed := 0) -> Node3D:
+	var data := QVoxelSource.new()
 	for m in mats:
 		data.add_material(m)
-	data.generator = generator
+	data.node = model_node
 	data.grid_size = grid_size
+	data.seed = seed
 
 	var node: Node3D
 	if destructible:

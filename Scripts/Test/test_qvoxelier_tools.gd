@@ -19,7 +19,7 @@ const OTHER := 3
 # ----------------------------------------------------------------------------
 
 ## 造一个拾取上下文。solid 字典的键 = 实心格，值 = 材质 id ——
-## 用它替代真实的 VoxelData，测试就能在纯内存里描述任意形状。
+## 用它替代真实的 QVoxelSource，测试就能在纯内存里描述任意形状。
 func _pick(solid: Dictionary, hit: Vector3i, normal: Vector3i, opts := {}) -> QVoxelBrushTool.Pick:
 	var p := QVoxelBrushTool.Pick.new()
 	p.hit = hit

@@ -24,7 +24,7 @@ var domain: QVoxelDomain.Kind = QVoxelDomain.Kind.VOXEL
 ## 本次求值的体积尺寸（体素）。
 ##
 ## 【它是**产出**的尺寸，不一定是输入的尺寸】重排型修改器（QVoxelTransformModifier）会改盒尺寸，
-## 故本字段是"链跑完之后有多大"。调用方（生成器 / UI）据此设置 VoxelData.grid_size 与显示读数；
+## 故本字段是"链跑完之后有多大"。调用方（生成器 / UI）据此设置 QVoxelSource.grid_size 与显示读数；
 ## 而链的**输入**盒尺寸是 QVoxelModel.grid_size（见 QVoxelEvalEngine 的输入键）。
 var grid_size := Vector3i.ZERO
 

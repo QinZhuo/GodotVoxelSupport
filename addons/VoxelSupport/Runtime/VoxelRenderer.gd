@@ -3,7 +3,7 @@ class_name VoxelRenderer
 extends MeshInstance3D
 
 ## 体素专属渲染器
-## 持有 VoxelData，在运行时动态生成并更新 mesh
+## 持有 QVoxelSource，在运行时动态生成并更新 mesh
 ## 监听数据变化自动重新生成，支持运行时动态修改体素
 ## 提供与编辑器导入等价的纹理材质 (基于材质ID的UV采样)
 
@@ -24,7 +24,7 @@ extends MeshInstance3D
 # 【A. 脏区域事件（内核 → 外层，唯一载体）】
 #   内核在 `_update_mesh_async` 把脏 chunk 列表交给外层做可见性决策：
 #     `infinite_layer.filter_visible_chunks(rebuild_chunks)`（首次全量时传的是全部 chunk 列表）。
-#   脏区域真值只有一份：`VoxelData` 的 mesh 脏位（`get_dirty_chunks()` / `mark_chunk_dirty()`）。
+#   脏区域真值只有一份：`QVoxelSource` 的 mesh 脏位（`get_dirty_chunks()` / `mark_chunk_dirty()`）。
 #   粒度可断言（见 Scripts/Test/test_voxel_kernel_contract.gd）：内部点编辑 → 恰好 1 个 chunk；
 #   chunk 角点编辑 → 恰好 4 个（自身 + 3 个负向邻块）；**永不**退化为"全部 chunk"。
 #
@@ -84,7 +84,7 @@ enum VisibilityMode {
 }
 
 ## 体素数据资源
-@export var data: VoxelData:
+@export var data: QVoxelSource:
 	set(v):
 		# setter 内部赋值不会递归，可直接设置底层存储
 		if data and data.changed.is_connected(_on_data_changed):
@@ -297,7 +297,7 @@ var _update_counter: int = 0
 # [INF] 视点相关
 @export_range(1, 200, 1) var _stream_load_per_frame: int = 32
 # 统一流式异步请求的在途状态不再本地留存：账本唯一在 VoxelAsyncLoader。
-# 查询走 VoxelData.is_chunk_pending() / 列举 get_unready_chunk_keys() / 取消 cancel_chunk_request()。
+# 查询走 QVoxelSource.is_chunk_pending() / 列举 get_unready_chunk_keys() / 取消 cancel_chunk_request()。
 # 当前渲染扇出批次：同时持有"任务计数"与"只读快照句柄"，结算点唯一（见 VoxelMeshBatch）。
 # 任务计数与快照不再各自散落维护——旧实现里结果处理的两条早退路径各减一次计数，
 # 导致计数提前归零、快照在 worker 仍在读时被释放，COW 写保护被击穿。
@@ -397,7 +397,7 @@ func _process(_delta: float) -> void:
 	# 统一流式/程序化驱动：程序化无限世界总是按距离生成（不依赖 visibility_mode——
 	# 无限世界只能按距离生成，设 FULL/FRUSTUM 若不走流式会导致数据永不生成 → 画面空白）；
 	# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
-	if infinite_layer.streaming_enabled or (data and data.generator != null):
+	if infinite_layer.streaming_enabled or (data and data.node != null):
 		infinite_layer.process_streaming()
 	# LOD 管理：每 interval 帧限量生成/移除（降低每帧遍历开销，近处 LOD0 / 远处各粗层互补）。
 	# 降频与"数据变化立即处理"的判定都在无限层内部（它持有 _cull_check_counter）。
@@ -485,7 +485,7 @@ func regenerate_materials() -> void:
 
 
 ## 获取当前体素数据
-func get_data() -> VoxelData:
+func get_data() -> QVoxelSource:
 	return data
 
 
@@ -748,7 +748,7 @@ func surface_materials() -> Array:
 ##     （视觉上"悬空块还在"，数据其实已掉）；
 ##   · 流式卸载：超出距离直接释放网格（重进范围由统一流式扫描按 can_supply_chunk 重新补建）。
 ## 【数据层不在此卸载】本函数只管渲染网格；数据层卸载由流式卸载段单独按更外扩的半径调
-## VoxelData.unload_chunk()（见 VoxelInfiniteLayer.lod0_data_unload_d）——网格半径与数据半径分开，
+## QVoxelSource.unload_chunk()（见 VoxelInfiniteLayer.lod0_data_unload_d）——网格半径与数据半径分开，
 ## 是因为粗层降采样还需要比网格更远一圈的 LOD0 数据。
 func remove_chunk_mesh(ck: Vector3i) -> void:
 	var mi: MeshInstance3D = _lod_meshes[0].get(ck)
@@ -767,11 +767,11 @@ func _update_mesh_async() -> void:
 	# 若旧任务已完成但还未轮询应用（极端情况），不阻塞，直接启动新任务覆盖
 	# 旧任务子线程完成后会因 gen_id 不匹配而不写入结果（自然丢弃）
 
-	# 【密集光环快照方案】不为每个 chunk 提取字典切片，而是让 VoxelData 直接从其
+	# 【密集光环快照方案】不为每个 chunk 提取字典切片，而是让 QVoxelSource 直接从其
 	# dense chunk 缓冲构建 34³ 密集"光环"（chunk + 1 体素外缘，PackedInt32Array）。
 	# 每个子线程只读取自己那个私有的光环快照；快照是独立字典，主线程后续对字典的
 	# 增删不与之冲突。注意快照与活动缓冲**共享底层**：GDScript 的逐元素写不会触发
-	# 写时拷贝，故批次在途期间用 VoxelData 的只读快照计数把单点写降级为显式拷贝
+	# 写时拷贝，故批次在途期间用 QVoxelSource 的只读快照计数把单点写降级为显式拷贝
 	# （见 begin_readonly_snapshot），杜绝数据竞态（块随机显示/隐藏的根因）。
 	var rebuild_chunks: Array[Vector3i] = []
 	# chunk 级脏标记（_mark_voxel_dirty 已含跨界面的边界邻居）：
@@ -856,7 +856,7 @@ func _update_mesh_async() -> void:
 	# 快照预算：超预算尾部放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位），
 	# 避免初始/切换模式一帧全量快照尖峰。
 	# 声明"只读快照"：快照与活动缓冲共享底层，而 GDScript 的逐元素写不会触发写时拷贝，
-	# 故本批次在途期间主线程的单点写必须先在目标缓冲上分叉（见 VoxelData.begin_readonly_snapshot）。
+	# 故本批次在途期间主线程的单点写必须先在目标缓冲上分叉（见 QVoxelSource.begin_readonly_snapshot）。
 	# 句柄交给批次，由它在结算（完成 / 取消）时唯一一次释放。
 	if data and not visible.is_empty():
 		batch.attach_snapshot(data.begin_readonly_snapshot())
@@ -1056,7 +1056,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 			_t_get_chunk = (Time.get_ticks_usec() - _t1) / 1000.0
 		# 程序化生成：数据已被 LOD1 区释放（超 LOD0 区、由 LOD1 覆盖）→ 该异步结果过期丢弃。
 		# 否则释放后异步 mesh 结果回来仍建网格 → 地块"显示→消失→再显示"闪烁。
-		if data and data.generator != null and not has_voxels_in_data:
+		if data and data.node != null and not has_voxels_in_data:
 			# 同上：结果过期丢弃，不碰计数
 			return
 

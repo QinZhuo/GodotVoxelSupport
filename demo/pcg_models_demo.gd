@@ -3,8 +3,8 @@ extends Node3D
 
 ## 程序化体素模型演示（PCG / SDF）——四个彼此独立的模型。
 ##
-## 每个模型 = 【有界 VoxelData】+【PcgSdfGenerator（内嵌一棵 SDF 树）】+【VoxelRenderer 节点】，
-## 各自持有独立 VoxelData 实例。因为就是一个普通节点，所以可以单独平移/旋转、单独挂脚本、
+## 每个模型 = 【有界 QVoxelSource（node = 内嵌一棵 SDF 树）】+【VoxelRenderer 节点】，
+## 各自持有独立 QVoxelSource 实例。因为就是一个普通节点，所以可以单独平移/旋转、单独挂脚本、
 ## 单独开碰撞（VoxelRenderer.generate_collision），互不干扰——无需任何新的节点类。
 ##
 ## 沿 X 轴依次排开：
@@ -152,15 +152,14 @@ func _build_model_d(pos: Vector3) -> void:
 	])
 
 
-## 组装一个模型：有界 VoxelData（grid_size 即生成范围）+ PcgSdfGenerator + VoxelRenderer 节点。
+## 组装一个模型：有界 QVoxelSource（grid_size 即生成范围）+ QVoxelModel（链上挂 SDF 算子）
+## + VoxelRenderer 节点。
 func _add_model(model_name: String, pos: Vector3, field: Sdf, materials: Array) -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	for m in materials:
 		data.add_material(m)
 
-	var generator := PcgSdfGenerator.new()
-	generator.field = field
-	data.generator = generator
+	data.node = QVoxelModel.of_source(field, Vector3i(32, 32, 32))
 	data.grid_size = Vector3i(32, 32, 32)
 
 	var renderer := VoxelRenderer.new()

@@ -2,7 +2,7 @@ class_name VoxelChunk
 extends RefCounted
 ## Chunk 几何常量的唯一权威源 + 共享坐标换算。
 ##
-## VoxelData 与 VoxelChunkGenerator 通过别名引用这里的常量，
+## QVoxelSource 与 VoxelChunkGenerator 通过别名引用这里的常量，
 ## 防止两边重复定义导致漂移（如 HALO_SIZE 写错 → 光环下标 Y/Z 步长错位）。
 ## 两种线性下标约定：
 ##   缓冲下标   = lx + ly*CHUNK_SIZE + lz*CHUNK_SLICE       （32³ 密集缓冲）
@@ -92,7 +92,7 @@ static func shift_positions(positions: Array, offset: Vector3i) -> Array:
 # ----------------------------------------------------------------------------
 # LOD 大块几何
 # ----------------------------------------------------------------------------
-# 约定（见 VoxelData.LOD_GRID / VoxelChunkGenerator.LOD_BLOCK_SIZE）：
+# 约定（见 QVoxelSource.LOD_GRID / VoxelChunkGenerator.LOD_BLOCK_SIZE）：
 #   LOD 大块 = CHUNK_SIZE³ 个大格，每格代表 2^lod 体素。
 #   故边长 = CHUNK_SIZE × 2^lod 体素 → 每轴覆盖 2^lod 个 LOD0 chunk。
 # 这两个函数是"哪些 LOD0 chunk 属于某个 LOD 大块"的唯一权威算法：

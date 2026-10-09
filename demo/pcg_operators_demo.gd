@@ -6,7 +6,7 @@ extends Node3D
 ## 这四个算子与 SDF 走的是**两条路**：
 ##   SDF      —— 逐点函数 sample(p)，适合"由简单件组合出的实体"（见 pcg_models_demo）
 ##   PcgModel —— 整体产出 build(grid_size)，适合"必须全局迭代才算得出来的东西"
-## 四者都实现 PcgModel，因此共用同一个适配器 PcgModelGenerator——
+## 四者都实现 PcgModel，因此共用同一个数据层组装——
 ## 要加一种新算子，只需再写一个 build()，切 chunk / 缓存 / LOD 全项目只此一份。
 ##
 ## 左上（L-系统）：文法改写 + 3D 乌龟盖章 → 一棵树
@@ -14,7 +14,7 @@ extends Node3D
 ## 左下（WFC socket 式）：图块按**手写的六面接口名**拼接 → 多层遗迹
 ## 右下（WFC 重叠式）：规则不手写，从一块**样例**里"数"出可重叠的图案 → 再拼出一片废墟
 ##
-## 每个模型 = 【有界 VoxelData】+【PcgModelGenerator（内嵌一个 PcgModel）】+【VoxelRenderer 节点】。
+## 每个模型 = 【有界 QVoxelSource（node = 内嵌一个 PcgModel）】+【VoxelRenderer 节点】。
 
 ## 体素世界尺度（模型 32³ 体素 → 世界 6.4 单位）
 @export var voxel_scale: float = 0.2
@@ -156,16 +156,15 @@ func _overlap_sample(size: Vector3i) -> PackedInt32Array:
 # 组装
 # ----------------------------------------------------------------------------
 
-## 一个模型 = 有界 VoxelData（grid_size 即生成范围）+ PcgModelGenerator + VoxelRenderer 节点。
+## 一个模型 = 有界 QVoxelSource（grid_size 即生成范围）+ QVoxelModel（链上挂产出算子）
+## + VoxelRenderer 节点。
 func _add_model(model_name: String, pos: Vector3, pcg: PcgModel, grid_size: Vector3i,
 		materials: Array) -> void:
-	var data := VoxelData.new()
+	var data := QVoxelSource.new()
 	for m in materials:
 		data.add_material(m)
 
-	var generator := PcgModelGenerator.new()
-	generator.model = pcg
-	data.generator = generator
+	data.node = QVoxelModel.of_source(pcg, grid_size)
 	data.grid_size = grid_size
 
 	var renderer := VoxelRenderer.new()

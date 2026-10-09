@@ -20,7 +20,7 @@ extends Node3D
 ## 会话与工具因此都能无头测试（换成 Dock 内嵌视口时，本类只换相机与渲染节点两行）。
 ##
 ## 【坐标换算】渲染器的局部空间是"体素单位 × voxel_scale"（网格顶点按 voxel_scale 放大），
-## 故世界射线先 to_local、再除一次 voxel_scale，才落进 VoxelData 的体素坐标里。
+## 故世界射线先 to_local、再除一次 voxel_scale，才落进 QVoxelSource 的体素坐标里。
 ## 这条换算只此一处 —— 拾取、地板、网格尺寸三处用的都是同一套单位。
 
 ## 新建模型的网格尺寸（MagicaVoxel 的默认有界网格就是 32³）。
@@ -73,7 +73,7 @@ var _selection_box: QVoxelSelectionBox
 ## 于是把它记下来，按钮 / 快捷键按下时才有得用（没有它，粘贴只能贴回原地）。
 var _hover_pick: QVoxelBrushTool.Pick
 ## 每个对象一条展示会话：model_id → QVoxelEditSession。**活动那条就是 session**。
-## 非活动会话不接鼠标，只负责把它那份 VoxelData 喂给对应渲染器。
+## 非活动会话不接鼠标，只负责把它那份 QVoxelSource 喂给对应渲染器。
 var _sessions: Dictionary = {}
 ## 非活动对象的渲染器：model_id → VoxelRenderer。
 var _display: Dictionary = {}
@@ -1556,8 +1556,8 @@ func _end_color_edit() -> void:
 	_refresh_hud()
 
 
-## 把世界上某个材质刷进所有会话的 VoxelData（渲染器读的是那份），再重生成材质纹理。
-## 【为什么每个会话都要刷】非活动对象也显示着，各自的 VoxelData 里也存着一份材质 ——
+## 把世界上某个材质刷进所有会话的 QVoxelSource（渲染器读的是那份），再重生成材质纹理。
+## 【为什么每个会话都要刷】非活动对象也显示着，各自的 QVoxelSource 里也存着一份材质 ——
 ## 只刷活动对象的话，换个色会看到"当前对象变了、旁边的对象还是旧色"。
 func _sync_material(id: int) -> void:
 	if world == null or id <= 0 or id >= world.materials.size():
@@ -1660,12 +1660,12 @@ func _export_palette(path: String) -> void:
 	hud.flash("已导出调色板：%s" % path.get_file())
 
 
-## 把整张材质表刷进每一条会话的 VoxelData（导入后一次性对齐，比逐色 _sync_material 省事）。
+## 把整张材质表刷进每一条会话的 QVoxelSource（导入后一次性对齐，比逐色 _sync_material 省事）。
 func _push_palette_into_all() -> void:
 	if world == null:
 		return
 	for s in _sessions.values():
-		var data: VoxelData = (s as QVoxelEditSession).data
+		var data: QVoxelSource = (s as QVoxelEditSession).data
 		for id in range(1, world.materials.size()):
 			data.add_material(VoxelMaterial.from_mate(world.materials[id], id))
 	_rerender_materials()

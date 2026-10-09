@@ -5,7 +5,7 @@ extends VoxelRenderer
 ## 动态体素破坏系统
 ## 继承 VoxelRenderer，在渲染基础上提供体素破坏能力
 ## 支持球形/盒形/单体素/射线破坏 + 逐体素健康度 + 悬空崩塌 + 粒子碎片
-## 破坏直接修改 VoxelData，自动触发 mesh 重新生成
+## 破坏直接修改 QVoxelSource，自动触发 mesh 重新生成
 ## 碎片使用 GPU 粒子系统，无物理碰撞体，高性能
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
@@ -113,7 +113,7 @@ func _validate_property(property: Dictionary) -> void:
 var last_damage_count: int = 0     ## 最近一次破坏实际移除的体素数
 var last_collapse_count: int = 0   ## 最近一次崩塌的悬空体素数
 
-## 逐体素累计伤害账**不在这里**：它归 VoxelData（体素相邻状态，必须与 chunk 缓冲同生共死——
+## 逐体素累计伤害账**不在这里**：它归 QVoxelSource（体素相邻状态，必须与 chunk 缓冲同生共死——
 ## 卸载 / 清空 / origin shift / 载荷重建都要同步清理）。放在本节点上时无人负责清理，
 ## 残留伤害会"继承"给后来放上去的新体素（一放上去就被秒杀），且随卸载无限增长。
 ## 本节点只负责"发起伤害"，伤害账读写由编辑内核经 data 的内部协议完成（见 VoxelEditKernel）。
@@ -341,7 +341,7 @@ func _after_removal(removed: Array) -> void:
 			var stress_groups := []
 			if not Engine.is_editor_hint():
 				# 按连通性分组，每组生成一个物理体掉落
-				stress_groups = VoxelData.partition_connected(stress_removed)
+				stress_groups = QVoxelSource.partition_connected(stress_removed)
 				# 为每组构建材质映射
 				var stress_group_materials: Array[Dictionary] = []
 				for sgroup in stress_groups:
@@ -435,7 +435,7 @@ func _process_full_cascade() -> void:
 		return
 
 	# 按连通性分组，每组生成一个 FallingChunk
-	var groups := VoxelData.partition_connected(total_unstable)
+	var groups := QVoxelSource.partition_connected(total_unstable)
 	# 收集每组体素的材质ID（在移除前）
 	var group_materials := _collect_group_materials(groups, total_unstable)
 	data.remove_voxels(total_unstable)
@@ -510,7 +510,7 @@ func _process_cascade_batch(unstable: Array) -> void:
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 按连通性分组
-	var groups := VoxelData.partition_connected(unstable)
+	var groups := QVoxelSource.partition_connected(unstable)
 	var _diag_t2 := Time.get_ticks_usec() if diag_enabled else 0
 
 	# 收集材质快照（在移除前）
@@ -586,7 +586,7 @@ func validate_stability() -> void:
 	if unstable.is_empty():
 		return
 	# 按连通性分组，每组生成一个 FallingChunk
-	var groups := VoxelData.partition_connected(unstable)
+	var groups := QVoxelSource.partition_connected(unstable)
 	# 收集每组体素的材质ID（在移除前）
 	var group_materials := _collect_group_materials(groups, unstable)
 	data.remove_voxels(unstable)

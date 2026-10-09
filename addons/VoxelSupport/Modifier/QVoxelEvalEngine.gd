@@ -17,7 +17,7 @@ extends RefCounted
 ## 改链尾一条就只重算那一条之后的部分，链首那条最贵的程序化生成完全不重跑（§5.2 / §4.2 第 3 条）。
 ##
 ## 【域与降级】链的域只能单向降级（见 QVoxelDomain）。引擎负责在需要的位置**自动插入**降级：
-##   FIELD → VOXEL：把折叠好的 Sdf 树交给 PcgSdfGenerator.rasterize_field() 采样成体积。
+##   FIELD → VOXEL：把折叠好的 Sdf 树交给 rasterize_field() 采样成体积。
 ## 用户看不见降级点，只说"我在这儿加个侵蚀"，引擎自己知道那意味着"先把前面的场光栅化"。
 ##
 ## 【手绘体素（blocks）在链里的位置】blocks 是链的**输入/种子**，不是链的一环（见 QVoxelModel）。
@@ -146,8 +146,8 @@ static func evaluate_world(world: QVoxelWorld, ctx: QVoxelEvalContext,
 ## 链的输出盒尺寸 —— "这条链跑完，模型是多大"。
 ##
 ## 【为什么能纯函数算出来，而不必真的跑一遍】只有重排型条目会改盒尺寸（就地改写型不得改尺寸，
-## 见 PcgDetail 契约），故只需沿链把 reshape 的尺寸映射叠起来。UI 据此在**求值之前**把
-## `VoxelData.grid_size` 同步成"求值后的尺寸"，生成器据此知道该产出多大的体积。
+## 见 PcgDetail 契约），故只需沿链把 reshape 的尺寸映射叠起来。UI / 装配方据此在**求值之前**
+## 就知道输出盒（`QVoxelSource.output_grid_size()` 即此），不必再让调用方手工同步。
 static func output_grid_size(mods: Array, base: Vector3i) -> Vector3i:
 	var size := base
 	for item in mods:
@@ -158,6 +158,26 @@ static func output_grid_size(mods: Array, base: Vector3i) -> Vector3i:
 		if t != null:
 			size = t.output_size(size)
 	return size
+
+
+## 把一棵连续域表达式树采样成 [0, size) 上的密集体积 —— **FIELD → VOXEL 的降级步**。
+##
+## 【纯几何】只问 field 要符号距离，不做任何表面处理：风化 / 染色 / 挖空都是链上后续体素域
+## 算子的事，降级只负责"让体积存在"。
+## 【为什么在这里】"连续域物化成体素"是求值引擎自己的降级动作（链上遇到第一个体素域算子时
+## 触发），不是一个可插拔的"生成器"；采样点取体素中心 (x+0.5, y+0.5, z+0.5)，与手绘体素的
+## 坐标语义一致。s.y 是材质 ID（见 Sdf 契约），0 为空气。
+static func rasterize_field(field_: Sdf, size: Vector3i) -> PackedInt32Array:
+	var vol := PcgModel.empty_volume(size)
+	if field_ == null:
+		return vol
+	for z in size.z:
+		for y in size.y:
+			for x in size.x:
+				var s := field_.sample(Vector3(x + 0.5, y + 0.5, z + 0.5))
+				if s.x <= 0.0:
+					vol[PcgModel.index_of(x, y, z, size)] = maxi(int(s.y), 0)
+	return vol
 
 
 ## 建一个空结果（公共字段一次填齐，树形与单模型两条路径共用）。
@@ -235,7 +255,7 @@ static func _run_chain(res: QVoxelEvalResult, obj: QVoxelModel, base: PackedInt3
 				degraded = true
 				if field != null:
 					acc = _combine_volume(_current(obj, base, acc),
-							PcgSdfGenerator.rasterize_field(field, box), lead)
+							rasterize_field(field, box), lead)
 			if m.is_reshape():
 				# ---- 重排型（PcgTransform）：整块重排，**盒尺寸随之改变** ----
 				#
@@ -289,7 +309,7 @@ static func _run_chain(res: QVoxelEvalResult, obj: QVoxelModel, base: PackedInt3
 	if not degraded and field != null:
 		degraded = true
 		acc = _combine_volume(_current(obj, base, acc),
-				PcgSdfGenerator.rasterize_field(field, box), lead)
+				rasterize_field(field, box), lead)
 
 	# ---- ④ 只有手绘体素（空链 / 全旁通）：链的输入就是结果 ----
 	if acc.is_empty():
