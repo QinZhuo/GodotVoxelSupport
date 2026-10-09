@@ -113,9 +113,17 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 		_read_common(m, entry)
 		m.model_id = maxi(0, QVoxelFile.as_index(entry.get("model_id")))
 		m.block_size = bs
-		var blocks: Variant = doc.model_blocks(m.model_id)
-		m.blocks = blocks if blocks is Dictionary else {}
-		m.grid_size = _size_of_entry(entry, m.blocks, bs)
+		# 【为什么"有帧就用帧，没有才读 blocks"】一个 model_id 只有一个体素源（§12.2 的互斥）。
+		# 两个都读会造出"既有静态体素又有动画"的模型 —— 而格式层已经在解析期把这种文件拒了，
+		# 这里再挑一次是防"手改过的文件"，也让内存占用与文件里的实际源一致。
+		var frames: Variant = doc.model_frames(m.model_id)
+		if frames is Array and not (frames as Array).is_empty():
+			m.frames = _frames_of_array(frames)
+		else:
+			var blocks: Variant = doc.model_blocks(m.model_id)
+			m.blocks = blocks if blocks is Dictionary else {}
+		_read_anim(m, entry)
+		m.grid_size = _size_of_entry(entry, m, bs)
 		return m
 	return null
 
@@ -143,11 +151,94 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 	doc.materials = materials
 	doc.node = _node_json()
 	doc.cach = cach
+	var animated := false
 	for m in all_models():
+		# 【为什么是 if/else 而不是两个独立分支】模型只有一个体素源（§12.2 互斥）。
+		# 写成"动画也写、静态也写"会让同一 model_id 同时进 models 与 frames —— 序列化时
+		# 格式层会直接判 FATAL（这正是我们想要的兜底），但真到了那一步就说明本函数有 bug。
+		if m.is_animated():
+			doc.frames[m.model_id] = _frames_to_array(m.frames)
+			animated = true
+			continue
 		var blocks := _dense_blocks_of(m)
 		if not blocks.is_empty():
 			doc.models[m.model_id] = blocks
+	# §12.2：含 FRAM 的文件必须在 HEAD.require 里声明 "FRAM" —— 不认识它的读者**拒绝整个文件**
+	# （fail-fast），而不是静默少几个模型。反过来，全是静态模型时**不声明**：声明了等于
+	# 让老读者白白拒掉一份它们本来完全能读的文件。
+	if animated:
+		doc.head["require"] = _with_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_FRAM)
+	else:
+		doc.head["require"] = _without_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_FRAM)
 	return doc
+
+
+## 往 require 列表里加一项（已存在则原样返回，不重复）。
+static func _with_requirement(req: Variant, type_tag: String) -> Array:
+	var out: Array = (req as Array).duplicate() if req is Array else []
+	if not out.has(type_tag):
+		out.append(type_tag)
+	return out
+
+
+## 从 require 列表里去掉一项。**必须在"不再含 FRAM"时也跑一次**：用户删掉最后一帧后
+## 若还留着 `require:["FRAM"]`，文件就会莫名其妙地被不支持的读者整份拒掉（残留声明）。
+static func _without_requirement(req: Variant, type_tag: String) -> Array:
+	if not (req is Array):
+		return []
+	var out: Array = []
+	for t in (req as Array):
+		if t != type_tag:
+			out.append(t)
+	return out
+
+
+## 帧数组 → 传输结构（QVoxelFrame → `{"duration_ms", "blocks"}`）。**不拷贝块缓冲**：
+## doc 是瞬时 DTO、用完即弃（同 from_document 的"接管"约定）。
+static func _frames_to_array(frames: Array[QVoxelFrame]) -> Array:
+	var out: Array = []
+	for f in frames:
+		if f != null:
+			out.append(f.to_dict())
+	return out
+
+
+## 传输结构 → 帧数组（每项经 QVoxelFrame.from_dict 补齐缺省）。
+static func _frames_of_array(arr: Array) -> Array[QVoxelFrame]:
+	var out: Array[QVoxelFrame] = []
+	for d in arr:
+		out.append(QVoxelFrame.from_dict(d))
+	return out
+
+
+## 节点条目的 `anim` 键 → 时间轴元数据（§12.3）。
+##
+## 【为什么只认 anim，不认旧的 animations】旧键按"节点下标"寻址，而 v3 的嵌套树没有下标
+## 这层身份（§12.4），与旧 layers 键同一处置：读盘忽略、写盘抹掉。
+static func _read_anim(m: QVoxelModel, entry: Dictionary) -> void:
+	var a: Variant = entry.get("anim")
+	if not (a is Dictionary):
+		return
+	var d: Dictionary = a
+	m.anim_loop = bool(d.get("loop", true))
+	m.anim_fps = maxi(1, int(d.get("fps", 12)))
+	var tags: Variant = d.get("tags")
+	m.anim_tags = (tags as Array).duplicate() if tags is Array else []
+
+
+## 时间轴元数据 → `anim` 键。**静态模型不写**（没有帧就没有时间轴）；
+## 各字段**取缺省值同样不写**（P2：缺省才是常态）—— 于是"整条 anim 全缺省"时根本不落键。
+static func _anim_of_model(m: QVoxelModel) -> Dictionary:
+	if not m.is_animated():
+		return {}
+	var a := {}
+	if not m.anim_loop:
+		a["loop"] = false
+	if m.anim_fps != 12:
+		a["fps"] = m.anim_fps
+	if not m.anim_tags.is_empty():
+		a["tags"] = m.anim_tags
+	return a
 
 
 # ----------------------------------------------------------------------------
@@ -552,9 +643,14 @@ func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 ##
 ## 【为什么显式 erase("layers")】图层已被树取代（qvx 3）。node 里若还留着旧的 layers 键，
 ## 写回去就等于"存盘时复活了一个已经删掉的概念"，下次读盘还会被当成有效数据。
+##
+## 【为什么也要 erase("animations")】旧动画键按"节点下标"寻址，与 v3 的嵌套树对不上号
+## （§12.4：动画已并入各模型节点的 `anim` 键）。留着它 → 下次读盘拿到一份指向错误节点的
+## 动画元数据，且与 `anim` 并存时谁生效取决于读取顺序（这类"两处真值"正是要消掉的）。
 func _node_json() -> Dictionary:
 	var out := node.duplicate(true)
 	out.erase("layers")
+	out.erase("animations")
 	var arr: Array = []
 	for n in nodes:
 		if n != null:
@@ -586,6 +682,9 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 		var mo := n as QVoxelModel
 		e["model_id"] = mo.model_id
 		e["size"] = [mo.grid_size.x, mo.grid_size.y, mo.grid_size.z]
+		var anim := _anim_of_model(mo)
+		if not anim.is_empty():
+			e["anim"] = anim
 	else:
 		var kids: Array = []
 		for c in (n as QVoxelGroup).child_nodes:
@@ -610,11 +709,18 @@ static func _modifiers_of_entry(entry: Dictionary) -> Array[QVoxelModifier]:
 
 
 ## 节点里显式写了 size 就用它；否则从块范围推断（外来文件可能没写 size）。
-static func _size_of_entry(entry: Dictionary, blocks: Dictionary, bs: int) -> Vector3i:
+##
+## 【为什么推断要并上**所有**帧】动画模型的分辨率是整份 FRAM 共用的（§12.2），
+## 只看第 0 帧会让"第 5 帧才长出外圈"的模型分辨率偏小 → 那些体素一进来就被判越界丢掉。
+static func _size_of_entry(entry: Dictionary, m: QVoxelModel, bs: int) -> Vector3i:
 	var s: Variant = entry.get("size")
 	if s is Array and (s as Array).size() == 3:
 		return Vector3i(int(s[0]), int(s[1]), int(s[2]))
-	return _infer_grid(blocks, bs)
+	var mx := _infer_grid(m.blocks, bs)
+	for f in m.frames:
+		var fg := _infer_grid(f.blocks, bs)
+		mx = Vector3i(maxi(mx.x, fg.x), maxi(mx.y, fg.y), maxi(mx.z, fg.z))
+	return mx
 
 
 ## 从块范围推断分辨率：取"最高块边界"，并向下取整到块边长的整数倍。

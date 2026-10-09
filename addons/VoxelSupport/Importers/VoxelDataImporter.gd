@@ -62,8 +62,13 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 	]
 
 
-## frame_index 只对 `.vox` 有效（MagicaVoxel 的体素动画帧）。`.qvx` 的 `animations[].frames`
-## 是按**节点下标**寻址的变换补丁，而 v3 的节点树是嵌套的、没有下标 → 该选项对 `.qvx` 无作用。
+## frame_index = 取哪一帧烤进这份 VoxelData：`.vox` 是 MagicaVoxel 的体素动画帧；
+## `.qvx` 是 `FRAM` 帧动画（§12）。两者都产出**单帧静态快照**——静态 `.qvx` 只有第 0 帧，
+## 该选项恒等于 0、无副作用。
+##
+## 【为什么对 .qvx 也生效了】早先 `.qvx` 的 `animations[].frames` 是按**节点下标**寻址的
+## 变换补丁（v3 的嵌套树没有下标，故无作用）；现在 `.qvx` 的帧是真正的体素帧（FRAM），
+## 与 `.vox` 同义，该选项自然通用。运行时连续播放仍不在本层（见 VoxelData.from_qvx 的注释）。
 func _get_option_visibility(_path: String, _option_name: StringName, _options: Dictionary) -> bool:
 	return true
 
@@ -74,7 +79,7 @@ func _import(source_file, save_path, options, _platforms, gen_files):
 		var qvx := QVoxelAsset.from_file(source_file)
 		if qvx == null:
 			return FAILED
-		res = VoxelData.from_qvx(qvx, options[origin])
+		res = VoxelData.from_qvx(qvx, options[origin], options[frame_index])
 	else:
 		var voxel_data := VoxAsset.from_asset(source_file)
 		if voxel_data == null:

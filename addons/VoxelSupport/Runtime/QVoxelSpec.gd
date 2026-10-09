@@ -23,9 +23,9 @@ extends RefCounted
 #
 # v3（当前）：场景图从 `layers` 下标体系改为 NODE 嵌套节点树 —— 层就是一个 QVoxelGroup
 #             节点，归属即父子关系；旧 `layers` 键读盘时忽略、写盘时显式抹掉。
-#             VOX0 / MATE 等块布局与 v2 一致（本次只动工程数据键）。
-# v2：VOX0 模型头 6 → 10 字节，新增 uint32 payload_length，
-#     使"模型负载的精确边界"成为头内事实（P4 贯彻到 VOX0 内部）。
+#             VXEL / MATE 等块布局与 v2 一致（本次只动工程数据键）。
+# v2：VXEL 模型头 6 → 10 字节，新增 uint32 payload_length，
+#     使"模型负载的精确边界"成为头内事实（P4 贯彻到 VXEL 内部）。
 # v1 与后续版本不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，
 # 从未有实际落盘的 v1 文件，无需背负历史包袱。
 
@@ -69,22 +69,24 @@ const BLOCK_HEADER_SIZE := 12
 const BLOCK_ALIGN := 4
 
 # ----------------------------------------------------------------------------
-# 块类型（当前版本共五种）
+# 块类型（当前版本共六种）
 # ----------------------------------------------------------------------------
 # HEAD  恰好 1 个，必须第一，必需。JSON 声明文件。
 # MATE  ≤ 1，材质调色板（12 字节定长条目）。
-# VOX0  ≥ 0，体素数据（每个 model_id 一个）。
+# VXEL  ≥ 0，体素数据（每个 model_id 一个）。
+# FRAM  ≥ 0，体素帧动画（每个 model_id 一个；与 VXEL 互斥，见下）。
 # NODE  ≤ 1，场景图 / 变换 / 动画（JSON）。
 # CACH  任意，任何可重算的数据（可删）。
 
 const BLOCK_HEAD := "HEAD"
 const BLOCK_MATE := "MATE"
-const BLOCK_VOX0 := "VOX0"
+const BLOCK_VXEL := "VXEL"
+const BLOCK_FRAM := "FRAM"
 const BLOCK_NODE := "NODE"
 const BLOCK_CACH := "CACH"
 
 ## 当前版本全部块类型（用于校验 / 调试）。
-const KNOWN_BLOCK_TYPES := [BLOCK_HEAD, BLOCK_MATE, BLOCK_VOX0, BLOCK_NODE, BLOCK_CACH]
+const KNOWN_BLOCK_TYPES := [BLOCK_HEAD, BLOCK_MATE, BLOCK_VXEL, BLOCK_FRAM, BLOCK_NODE, BLOCK_CACH]
 
 # ----------------------------------------------------------------------------
 # CACH 负载的定长前置（8 字节）
@@ -102,7 +104,7 @@ const KNOWN_BLOCK_TYPES := [BLOCK_HEAD, BLOCK_MATE, BLOCK_VOX0, BLOCK_NODE, BLOC
 const CACH_PREFIX_SIZE := 8
 
 # ----------------------------------------------------------------------------
-# 块级编解码（VOX0 内每个块一个 codec 字节）
+# 块级编解码（VXEL 内每个块一个 codec 字节）
 # ----------------------------------------------------------------------------
 # 值 0 被【保留】给 EMPTY：读者若在文件中读到 codec=0，应视为数据损坏。
 # 保留而非剔除，是为了让"内存中的块状态"与"文件中的编解码"共用一套枚举——
@@ -218,25 +220,25 @@ static func index_in_block(voxel: Vector3i, block_size: int) -> int:
 const MATE_ENTRY_SIZE := 12
 
 # ----------------------------------------------------------------------------
-# VOX0 模型头（10 字节，刻意不 4 对齐）
+# VXEL 模型头（10 字节，刻意不 4 对齐）
 # ----------------------------------------------------------------------------
 # uint16  model_id          模型编号，供 NODE 的 kind="model" 节点引用
 # uint32  block_count       本模型包含的块数（只计非空块）
 # uint32  payload_length    block[] 的实际字节数（不含任何填充）
 # byte[]  payload           payload_length 个字节的块数组
 #
-# 【为什么必须有 payload_length】（P4「长度前置」贯彻到 VOX0 内部）
-# 顶层块用 length 让读者无需理解内容即可跳过；VOX0 内部同理——block_count 只说明
+# 【为什么必须有 payload_length】（P4「长度前置」贯彻到 VXEL 内部）
+# 顶层块用 length 让读者无需理解内容即可跳过；VXEL 内部同理——block_count 只说明
 # "有几块"，但每块的长度虽有、**模型总长却没有**。缺了它，读取端切出的 payload 必然
 # 含顶层块的 0–3 字节尾部填充，于是"解析到哪里才算正好用完"变成模糊判断：
 # 只能退化为"剩余 < 4 字节就算合法"，留下 1–3 字节的篡改灰区（曾是一处语义漏洞）。
 # 显式存 payload_length 后，判定退化成一次等式比较：pos == 10 + payload_length。
 # 代价恒定 4 字节/模型（一个文件通常 1–3 个模型，总计 < 12 字节），换来零灰区。
 
-const VOX_MODEL_HEADER_SIZE := 10
+const VXEL_MODEL_HEADER_SIZE := 10
 
 # ----------------------------------------------------------------------------
-# VOX0 块内块头（17 字节，刻意不 4 对齐）
+# VXEL 块内块头（17 字节，刻意不 4 对齐）
 # ----------------------------------------------------------------------------
 # int32   bx, by, bz        块坐标（块索引，非体素坐标）
 # uint8   codec             块级编解码
@@ -247,6 +249,31 @@ const VOX_MODEL_HEADER_SIZE := 10
 # codec 只有 1 字节，为凑对齐补 3 字节等于每块白付 3 字节，违背 P2。
 
 const VOX_BLOCK_HEADER_SIZE := 17
+
+# ----------------------------------------------------------------------------
+# FRAM 帧动画（设计见 docs/QVX_FORMAT.md §12）
+# ----------------------------------------------------------------------------
+# 一个模型一套帧，按 model_id 绑定。**不变式**：一个 model_id 恰好对应一个体素源 ——
+# VXEL（静态）或 FRAM（动画），二者互斥（同时出现即损坏，FATAL）。
+#
+# FRAM 模型头（8 字节）：uint16 model_id + uint16 frame_count + uint32 payload_length。
+#   payload_length = 其后全部帧数据的字节数（不含本头、不含顶层填充）—— 与 VXEL 同构，
+#   让"解析到哪里才算正好用完"退化成一次等式比较（P4）。
+# 每帧（6 字节定长前置）：uint16 duration_ms + uint32 payload_length + byte[] 块级增量。
+#   duration_ms = 0 表示"用 NODE 里 anim.fps 的缺省帧率"。
+#
+# 【帧增量的语义】第 0 帧基线为空（其 delta 即全量块表，与一个 VXEL 的负载逐字节同构）；
+# 第 k 帧 = 第 k-1 帧的块表**应用本帧 delta**：
+#   codec ∈ {SOLID,RUN,DENSE,INDEXED} → 设置该块；
+#   codec = 0（EMPTY）                → **清空**该块；
+#   未出现的块                        → 继承上一帧。
+# 于是"一帧的成本 = 它相对上一帧改了多少块"，与模型总大小无关（P2）。
+#
+# 【为什么 codec=0 在 FRAM 里合法】§5.2 说"读到 codec=0 视为损坏"约束的是 VXEL 的块
+# （那里空块用"坐标缺失"表示，0 因此是冗余值）；而增量的本质是"与上一帧的**差异**"，
+# "变成空"也是一种差异、必须有编码。给 FRAM 一个自己的命名空间即可，不污染 VXEL 语义。
+const FRAM_MODEL_HEADER_SIZE := 8
+const FRAM_FRAME_HEADER_SIZE := 6
 
 # ----------------------------------------------------------------------------
 # NODE 块的图层与相机（§7）
@@ -321,7 +348,7 @@ static func is_known_block_type(t: String) -> bool:
 
 ## 读者在 HEAD.require 校验里"能处理"的块类型（§10）。
 ##
-## 语义 = "能产出正确结果"，而非"名字见过"：五种内建类型都算能处理，
+## 语义 = "能产出正确结果"，而非"名字见过"：六种内建类型都算能处理，
 ## 其中 CACH 本就允许被忽略（忽略它即为正确处理，P5），故同样算"能处理"。
 ## require 里出现此外的任何类型 → 必须拒绝整个文件（而非静默跳过）。
 static func can_handle_block_type(t: String) -> bool:

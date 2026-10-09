@@ -32,6 +32,13 @@ extends QVoxelCommand
 ## 被编辑的对象。为 null（对象已删）时撤销会明确报错，而不是静默改错对象。
 var object: QVoxelModel
 
+## 这一笔手势改的是**第几帧**（-1 = 静态源 `blocks`，§12.6）。
+##
+## 【为什么帧号记在命令上，而不是"撤销时看 object.active_frame"】用户在第 2 帧落笔、
+## 随后把预览游标切到第 5 帧、再按撤销 —— 若命令跟着游标走，它会把第 5 帧改回去：
+## 静默改错帧，且屏幕上"第 2 帧的笔迹还在"。帧号是这一笔的属性，必须随命令一起入栈。
+var frame := -1
+
 ## 块坐标 → 该块**首次被改动前**的整块内容。空数组 = 该块当时不存在（撤销时要删掉它）。
 var before: Dictionary = {}
 
@@ -46,14 +53,16 @@ var dirty_hi := Vector3i.ZERO
 var _dirty := false
 
 
-func _init(obj: QVoxelModel) -> void:
+func _init(obj: QVoxelModel, p_frame: int = -1) -> void:
 	super(&"voxel_edit", -1, [])
 	object = obj
+	frame = p_frame
 
 
 ## 开始一次手势。**必须在任何写入之前调用**（before 只能从"还没改过"的状态里抓）。
-static func begin(obj: QVoxelModel) -> QVoxelEditCommand:
-	return QVoxelEditCommand.new(obj)
+## `frame < 0` = 静态源；动画模型传它当前正在编辑的那一帧。
+static func begin(obj: QVoxelModel, frame: int = -1) -> QVoxelEditCommand:
+	return QVoxelEditCommand.new(obj, frame)
 
 
 # ----------------------------------------------------------------------------
@@ -64,14 +73,14 @@ func set_voxel(x: int, y: int, z: int, material_id: int) -> bool:
 	if object == null:
 		return false
 	_snapshot_voxel(x, y, z)
-	return object.set_voxel(x, y, z, material_id)
+	return object.set_frame_voxel(frame, x, y, z, material_id)
 
 
 func fill_box(a: Vector3i, b: Vector3i, material_id: int) -> int:
 	if object == null:
 		return 0
 	_snapshot_box(a, b)
-	return object.fill_box(a, b, material_id)
+	return object.fill_frame_box(frame, a, b, material_id)
 
 
 ## 密集体积写入（整对象变换 / 导入用）。data 布局 = QVoxelModel.apply_box（PcgModel.index_of）。
@@ -86,7 +95,7 @@ func apply_box(lo: Vector3i, dims: Vector3i, data: PackedInt32Array) -> int:
 	if object == null:
 		return 0
 	_snapshot_box(lo, lo + dims - Vector3i.ONE)
-	return object.apply_box(lo, dims, data)
+	return object.apply_frame_box(frame, lo, dims, data)
 
 
 ## 手势结束，封口成一条可入栈的命令。返回"是否真的改了东西" ——
@@ -98,7 +107,7 @@ func commit() -> bool:
 	var changed := 0
 	for bk: Vector3i in keys:
 		# duplicate：after 要活到这条命令被淘汰为止，不能是活视图（见类头注释）
-		var now := object.get_block(bk).duplicate()
+		var now := object.get_frame_block(frame, bk).duplicate()
 		if _same_block(before[bk], now):
 			before.erase(bk)  # 前后一样：这次没真改到它，不该让撤销栈为它付内存
 			continue
@@ -108,11 +117,13 @@ func commit() -> bool:
 		before.clear()
 		after.clear()
 		return false
-	# params 只放**可序列化的描述**（可审计/可回放"用户做了什么"），体素差值留在本对象里
+	# params 只放**可序列化的描述**（可审计/可回放"用户做了什么"），体素差值留在本对象里。
+	# frame 追加在**末尾**：既有下标（model_id / dirty 范围 / changed）一个都不动。
 	params = [object.model_id,
 			dirty_lo.x, dirty_lo.y, dirty_lo.z,
 			dirty_hi.x, dirty_hi.y, dirty_hi.z,
-			changed]
+			changed,
+			frame]
 	return true
 
 
@@ -121,6 +132,11 @@ func changed_voxels() -> int:
 	if params.size() < 8:
 		return 0
 	return int(params[7])
+
+
+## 这一笔改的是第几帧（-1 = 静态源；commit 后有效）。
+func edited_frame() -> int:
+	return int(params[8]) if params.size() >= 9 else frame
 
 
 ## 只影响被抓过快照的那些块所覆盖的体素范围 —— 视口据此只让这些 chunk 重新取数。
@@ -135,7 +151,9 @@ func dirty_bounds() -> Array[Vector3i]:
 
 
 func get_label() -> String:
-	return "体素编辑"
+	# 动画模型标出帧号：撤销栈里"体素编辑"与"体素编辑（第 3 帧）"是两个不同的东西，
+	# 用户点错了帧要能从历史里看出来（静态模型不标，-1 只是内部表示）。
+	return "体素编辑（第 %d 帧）" % frame if frame >= 0 else "体素编辑"
 
 
 ## 代价 = 前后两份快照的元素数 × 4 字节（int32）。撤销栈按它淘汰最老的历史。
@@ -167,7 +185,7 @@ func _restore(src: Dictionary) -> void:
 		return
 	for bk: Vector3i in src:
 		# duplicate：set_block 会接管这份缓冲，而 src 还要留给下一次 undo/redo（见类头注释）
-		object.set_block(bk, (src[bk] as PackedInt32Array).duplicate())
+		object.set_frame_block(frame, bk, (src[bk] as PackedInt32Array).duplicate())
 
 
 func _snapshot_voxel(x: int, y: int, z: int) -> void:
@@ -197,7 +215,7 @@ func _snapshot_box(a: Vector3i, b: Vector3i) -> void:
 func _snapshot_block(bk: Vector3i) -> void:
 	if not before.has(bk):
 		# duplicate：这一份要在整笔手势期间扛住后续写入，活视图会被就地改写（见类头注释）
-		before[bk] = object.get_block(bk).duplicate()
+		before[bk] = object.get_frame_block(frame, bk).duplicate()
 		# 脏范围按**块**扩张：逐格记 min/max 要付出每格 6 次比较，而块粒度已经足够精确
 		# （视口本来也按块刷新）。
 		var o := QVoxelSpec.block_origin(bk, object.block_size)

@@ -3,7 +3,7 @@ extends RefCounted
 
 ## MagicaVoxel（`.vox`）资产的宿主：模型 / 材质 / 场景图（nTRN·nGRP·nSHP·LAYR）/ 动画帧。
 ##
-## 【只服务 `.vox`】`.qvx` 的对应概念形状不同（一个 `model_id` 一个 `VOX0` + `NODE` 定位，
+## 【只服务 `.vox`】`.qvx` 的对应概念形状不同（一个 `model_id` 一个 `VXEL` + `NODE` 定位，
 ## 没有 `nSHP`/frame/`Z` 翻转那套约定），由 `QVoxelAsset` 承载。把 `.qvx` 塞进本类会丢
 ## NODE 与多模型信息（详见 QVoxelAsset 类注释），故 `from_asset()` 遇到 `.qvx` 会直接报错。
 

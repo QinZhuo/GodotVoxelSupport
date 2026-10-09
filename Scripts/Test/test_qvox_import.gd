@@ -28,7 +28,7 @@ func test_multi_model_with_node_placement() -> void:
 	assert_true(qvx != null, "应能解析双模型 .qvx")
 	if qvx == null:
 		return
-	assert_eq(qvx.models.size(), 2, "两个 VOX0 都应在")
+	assert_eq(qvx.models.size(), 2, "两个 VXEL 都应在")
 	assert_eq(qvx.placements.size(), 2, "NODE 里两个 model 节点都应在")
 	assert_false(qvx.is_block_importable(), "带位移的摆放必须走融合路径")
 

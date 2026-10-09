@@ -41,6 +41,17 @@ var after: Variant
 ## 就定义在 QVoxelNode 上 —— 收窄成 QVoxelModel 会让"改组的可见性 / 改组的链参数"当场类型报错。
 var owner: QVoxelNode
 
+## 与主属性**一起**撤销/重做的附加属性写入，每项 = {target, property, before, after}。
+##
+## 【为什么需要它】"静态 ⇄ 动画"必须**同时**改 `frames` 与 `blocks` 两个字段：§12.2 要求一个
+## model_id 恰好一个体素源，动画生效即静态源让位。拆成两条命令不只是"一次操作占两格撤销"——
+## 撤销到一半时两个源都非空，那时若恰好落盘，写出的就是 VXEL + FRAM 并存的 FATAL 文件。
+##
+## 【为什么不做成"属性名数组"】绝大多数调用只有一项（改名 / 改参数 / 增删链 / 增删帧），
+## 而 `cmd.before` / `cmd.params[0]` 是既有调用方与单测在读的形状。把主属性留在原位、
+## 附加项另开一个数组，改动面最小：不用它的地方一行都不用改，且语义一眼可辨（谁是主、谁是陪）。
+var extras: Array = []
+
 var _label := ""
 
 
@@ -52,6 +63,19 @@ func _init(p_target: Object, p_property: StringName, p_owner: QVoxelNode = null,
 	owner = p_owner if p_owner != null else (p_target as QVoxelNode)
 	_label = p_label
 	before = _snapshot(_read())
+
+
+## 追加一项"与本命令同生共死"的属性写入。**必须在 commit() 之前调用** ——
+## 与主属性同理：改前值只能在改动之前抓。
+func also_write(p_target: Object, p_property: StringName) -> void:
+	if p_target == null:
+		return
+	extras.append({
+		"target": p_target,
+		"property": p_property,
+		"before": _snapshot(p_target.get(p_property)),
+		"after": null,
+	})
 
 
 # ----------------------------------------------------------------------------
@@ -92,7 +116,13 @@ func commit() -> bool:
 	if target == null:
 		return false
 	after = _snapshot(_read())
-	if before == after:
+	var changed: bool = before != after
+	for e in extras:
+		# 附加项只要有一项真变了，这一笔就该入栈 —— 否则"只搬了体素源、帧数组恰好没变"的操作会丢
+		e["after"] = _snapshot((e["target"] as Object).get(e["property"]))
+		if e["before"] != e["after"]:
+			changed = true
+	if not changed:
 		return false
 	params = [String(property)]
 	if _is_audit_safe(after):
@@ -111,10 +141,14 @@ func get_cost() -> int:
 
 func redo() -> void:
 	_apply(after)
+	for e in extras:
+		_write(e, e["after"])
 
 
 func undo() -> void:
 	_apply(before)
+	for e in extras:
+		_write(e, e["before"])
 
 
 # ----------------------------------------------------------------------------
@@ -129,6 +163,16 @@ func _apply(v: Variant) -> void:
 	target.set(property, v)
 	if owner != null:
 		owner.content_changed.emit()
+
+
+## 写回一项附加属性。附加项不再单独发 content_changed：它们与主属性属于同一次结构变化，
+## 一次操作发两次刷新信号只会让视口多算一遍（而 owner 是同一个对象）。
+func _write(e: Dictionary, v: Variant) -> void:
+	var t: Object = e["target"]
+	if t == null:
+		push_error("[QVX] 属性命令的附加目标已不存在（%s）" % String(e["property"]))
+		return
+	t.set(e["property"], v)
 
 
 func _read() -> Variant:

@@ -44,8 +44,11 @@ func _get_priority() -> float:
 	return 1.5
 
 
-## .qvx 的 split_by_frame 会被当作 split_by_model 处理——QVX 的 frames 是**节点变换补丁**
-## 而非"整模型体素帧"，给不出 .vox 那种每帧一网格；frame_index 亦对 `.qvx` 无作用。
+## `.vox` 与 `.qvx` 的选项集一致（都继承自 VoxelMeshImporter），无额外可见性规则。
+##
+## 【为什么这里不再写"split_by_frame 对 .qvx 无作用"】FRAM 落地后 `.qvx` 真的有体素动画帧：
+## split_by_frame → 整个资产逐帧一项（frame_<k>）；split_by_model / split_by_node 则取
+## `frame_index` 那一帧（静态资产恒为第 0 帧）。见 VoxelMeshGenerator 的分项实现。
 func _get_option_visibility(path: String, option_name: StringName, options: Dictionary) -> bool:
 	return super._get_option_visibility(path, option_name, options)
 

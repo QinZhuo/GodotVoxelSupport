@@ -145,7 +145,7 @@ Related properties are **hidden in the Inspector automatically** when they have 
   `content_center` for a three-axis content-centred origin (the same idea as Blender's
   "Center Origins" option).
 - **`.vox` and `.qvx` have separate asset adapters** — `.vox` (MagicaVoxel scene graph) uses
-  `VoxAsset.from_asset()`; `.qvx` (one `VOX0` per model + `NODE` placement) uses
+  `VoxAsset.from_asset()`; `.qvx` (one `VXEL` per model + `NODE` placement) uses
   `QVoxelAsset.from_file()`. `VoxAsset.from_asset()` on a `.qvx` **returns null with an error**:
   forcing the MagicaVoxel shape onto QVX silently dropped the `NODE` graph and every model after
   the first. The import plugins dispatch by extension for you.

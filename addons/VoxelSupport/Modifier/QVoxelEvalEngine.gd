@@ -315,7 +315,7 @@ static func _run_chain(res: QVoxelEvalResult, obj: QVoxelModel, base: PackedInt3
 ## —— 变了则**所有**检查点作废（连 states[0] 都不再成立）；② "哪一条修改器变了"
 ## （step_signatures）—— 它定位复用起点。合成一个字符串只能回答"整链有没有变"。
 ##
-## 【含 base_revision 而不是哈希体素】手绘编辑点自己知道它改了体素（QVoxelEditCommand 封口时
+## 【含 base_revision 而不是哈希体素】写入点自己知道它改了体素（QVoxelModel 的写 API 在真改动时
 ## 自增 base_revision），而几百万个 int 的哈希本身就不便宜。故用版本号当"体素有没有变"的答案。
 ##
 ## 【含 block_size】它决定稀疏块的下标换算（QVoxelBlockCodec）；换掉它等于换了一套存储布局。
@@ -324,6 +324,11 @@ static func _run_chain(res: QVoxelEvalResult, obj: QVoxelModel, base: PackedInt3
 ## **每对象各自**的手绘版本号：两个内容不同的对象完全可以同为 0（或恰好同值），只凭它
 ## 会把 A 的结果当成 B 的可复用结果 —— 于是"引擎无状态"被一句复用判断破坏，两个对象互相污染。
 ## 实例 id 是稳定且廉价的判别项，加进来即让缓存键天然按对象分桶。
+##
+## 【为什么必须含 active_frame】链的输入是 `obj.source_blocks()`，而它按 `active_frame` 取帧
+## （§12.6）—— 帧因此是一份**外部输入**，与手绘版本号同级。漏掉它的话：切帧后签名一字不差，
+## 求值会把上一帧的缓存体积原样返回（`evaluate` 的第 ① 条复用），画面停在旧帧且不报错。
+## 静态模型恒为 0，加进来零代价。
 static func inputs_key(obj: QVoxelModel, ctx: QVoxelEvalContext) -> String:
 	if obj == null:
 		return ""
@@ -333,6 +338,7 @@ static func inputs_key(obj: QVoxelModel, ctx: QVoxelEvalContext) -> String:
 	parts.append(str(ctx.seed))
 	parts.append(str(obj.block_size))
 	parts.append(str(obj.base_revision))
+	parts.append(str(obj.active_frame))
 	return "|".join(parts)
 
 

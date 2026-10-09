@@ -109,8 +109,33 @@ func begin(pick: QVoxelBrushTool.Pick) -> bool:
 		cancel()
 	if not tool.begin(pick):
 		return false
-	_cmd = QVoxelEditCommand.begin(object)
+	# 落笔的帧在**按下时**定死并写进命令：手势期间即使用户切帧（面板不会，但接口允许），
+	# 这一笔的撤销也仍然只回滚它真正改过的那一帧（见 QVoxelEditCommand.frame）。
+	_cmd = QVoxelEditCommand.begin(object, edit_frame())
 	return true
+
+
+# ----------------------------------------------------------------------------
+# 帧（§12.6）
+# ----------------------------------------------------------------------------
+
+## 切换"正在编辑 / 预览的帧"。**只动游标**，不重渲染 —— 调用方接着调 `rebuild()`
+## （时间轴面板把"切帧 + 重渲染"合成一步，见 QVoxelierTimelineSection）。
+func set_active_frame(index: int) -> void:
+	if object == null:
+		return
+	object.active_frame = maxi(0, index)
+
+
+## 本会话落笔的目标帧：静态模型 = -1（静态源）；动画模型 = 当前帧（夹到有效范围）。
+##
+## 【为什么不另存一个 session.frame 字段】编辑的帧与渲染的帧**必须是同一个**（用户改的正是他看到的），
+## 存两份迟早会分叉 —— 而分叉的表现是"画在第 2 帧、屏幕上第 5 帧多了几个体素"，极难自查。
+## `object.active_frame` 已经是那份唯一游标，这里只是把它翻译成命令要的帧号。
+func edit_frame() -> int:
+	if object == null or not object.is_animated():
+		return -1
+	return clampi(object.active_frame, 0, object.frames.size() - 1)
 
 
 ## 拖动。返回本次写入的格数（live 工具 > 0，span 工具恒 0 —— 它们松手才产出）。

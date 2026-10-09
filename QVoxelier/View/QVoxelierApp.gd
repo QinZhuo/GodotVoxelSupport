@@ -54,6 +54,7 @@ var _dock: QVoxelierDock
 var _color_section: QVoxelierColorSection
 var _tree_section: QVoxelierTreeSection
 var _inspector_section: QVoxelierInspectorSection
+var _timeline_section: QVoxelierTimelineSection
 var _confirm: ConfirmationDialog
 
 ## 参数面板当前绑定的修改器（选中树上某条修改器时置入，用于撤销 / 重做后重绑）。
@@ -99,6 +100,8 @@ var _eyedropper := false
 var _color_cmd: QVoxelPropertyCommand
 ## 正在进行的"改修改器参数"手势对应的属性命令（同上，只是目标换成链上的某条条目）。
 var _prop_cmd: QVoxelPropertyCommand
+## 正在进行的"改帧时长"手势对应的属性命令（同上，目标是那一帧 QVoxelFrame 的 duration_ms）。
+var _frame_dur_cmd: QVoxelPropertyCommand
 
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
@@ -212,6 +215,21 @@ func _build_ui() -> void:
 	_inspector_section.edit_ended.connect(_end_prop_edit)
 	_dock.add_section(_inspector_section)
 
+	# 时间轴分组（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。与其余分组同一约定 ——
+	# 面板只说"用户想干什么"，改哪个属性、记成哪条命令全在本类一处完成（见文件末的"时间轴"段）。
+	_timeline_section = QVoxelierTimelineSection.new()
+	_timeline_section.frame_selected.connect(_select_frame)
+	_timeline_section.insert_requested.connect(_insert_frame)
+	_timeline_section.remove_requested.connect(_remove_frame)
+	_timeline_section.move_requested.connect(_move_frame)
+	_timeline_section.duration_edit_began.connect(_begin_frame_duration)
+	_timeline_section.duration_changed.connect(_live_frame_duration)
+	_timeline_section.duration_edit_ended.connect(_end_frame_duration)
+	_timeline_section.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
+	_timeline_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
+	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
+	_dock.add_section(_timeline_section)
+
 
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
 func new_model(grid := Vector3i.ZERO) -> void:
@@ -269,6 +287,8 @@ func _activate(model_id: int, flash := true) -> void:
 	var o := world.find_model(model_id)
 	if o == null:
 		return
+	# 换对象前先停预览：时间轴马上要绑到另一个模型上，让计时器继续跑就成了"播着 A、突然跳去播 B"。
+	_timeline_section.stop_playback()
 	if session != null and session.object == o:
 		return
 	if _stroke and session != null:
@@ -486,6 +506,9 @@ func _begin_stroke(screen: Vector2, erase: bool) -> void:
 	if _node_locked(session.object):
 		hud.flash("这一层已锁定：先在右侧「图层」里解锁")
 		return
+	# 预览中落笔 = 这一笔会画在"播放头正好停住的那一帧"上，而播放头还在动 —— 用户根本
+	# 说不清自己画到了第几帧。先停下播放再落笔（停在哪一帧就是哪一帧，看得见）。
+	_timeline_section.stop_playback()
 	_erase = erase
 	if not session.begin(_pick_at(screen)):
 		hud.flash("这儿落不了笔：把光标放到网格上，或已经画出来的体素上")
@@ -1104,6 +1127,9 @@ func _refresh_panels() -> void:
 	var has := _material_id > 0 and _material_id < world.materials.size()
 	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0))
 	_tree_section.set_world(world, session.object.model_id)
+	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
+	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimelineSection.bind），播放期间不重建控件。
+	_timeline_section.bind(session.object)
 
 
 ## 世界的材质表 → 调色板用的颜色数组：**下标即材质 ID**，0 位留空气占位。
@@ -1440,3 +1466,121 @@ func _push_palette_into_all() -> void:
 		for id in range(1, world.materials.size()):
 			data.add_material(VoxelMaterial.from_mate(world.materials[id], id))
 	_rerender_materials()
+
+
+# ----------------------------------------------------------------------------
+# 时间轴（右侧抽屉·时间轴组，QVoxelSpec §12.6）
+# ----------------------------------------------------------------------------
+# 与层级树那一段同构：本段只做一件事 —— 把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"。
+# 帧的结构改动走 QVoxelPropertyCommand（`frames` 就是属性），而切帧 / 播放**不入栈**：
+# active_frame 是"正在看第几帧"，是游标不是数据（§12.6）。
+
+## 切帧：改游标 → 重算 → 刷界面。**不标脏、不入栈**。
+##
+## 【为什么不记进历史】"我看了第 3 帧"不是一次内容改动。若它也占一格，用户画一笔再翻十帧，
+## 想撤掉那一笔就得连按十一次 —— 撤销栈会被浏览动作灌满，而里面 90% 是空操作。
+func _select_frame(index: int) -> void:
+	if session == null or not session.object.is_animated():
+		return
+	session.set_active_frame(index)
+	_after_frame_change()
+
+
+## 帧结构 / 元数据改动后的统一收尾：重算 + 刷界面（标脏由撤销栈的 changed 信号带出来，
+## 见 _on_history_changed —— 帧操作都入栈，故不在这里重复标）。
+func _after_frame_change() -> void:
+	if session == null:
+		return
+	session.rebuild()
+	_refresh_hud()
+
+
+## 把一次"帧结构编辑"夹成一条属性命令：`mutate` 里做真正的改动（begin 之后、commit 之前）。
+##
+## 【为什么是"传一个闭包"而不是每种操作各写一遍】§12.6 的增 / 删 / 重排走的是同一条包裹：
+## begin（抓旧值）→ 改 → commit → push → 刷界面，差异只有中间那两行。复制三遍就等着某一遍
+## 忘了 also_write(blocks) —— 而漏掉它的那次撤销会把模型的体素源整个丢掉（见下）。
+func _run_frame_edit(label: String, mutate: Callable) -> void:
+	if session == null or world == null:
+		return
+	var m := session.object
+	var cmd := QVoxelPropertyCommand.begin(m, &"frames", m, label)
+	# §12.2：动画生效即静态源让位。`blocks` 因此必须进**同一条**命令的撤销范围 ——
+	# 否则撤销"做成动画"会只把 frames 清空，而 blocks 早在转换时就被搬进第 0 帧了，内容凭空消失。
+	# 对已经是动画的模型，blocks 恒为空字典、前后相同，这一行等于零开销（commit 会忽略未变项）。
+	cmd.also_write(m, &"blocks")
+	mutate.call(m)
+	if cmd.commit():
+		session.history.push(cmd)
+	_after_frame_change()
+
+
+## 在当前帧之后插入一帧（`duplicate` = 复制当前帧，否则空帧）。
+##
+## 【静态模型上插入为什么要先 make_animated】静态模型的体素住在 `blocks` 里，而帧动画的
+## 体素住在 `frames[i].blocks`（§12.2 一个 model_id 只能有一个源）。做成动画不是"多一个空帧"，
+## 而是把现有内容搬进第 0 帧 —— 否则用户点一下「＋」就会看见模型整个消失。
+func _insert_frame(duplicate: bool) -> void:
+	_run_frame_edit("复制帧" if duplicate else "新增帧", func(m: QVoxelModel) -> void:
+		if not m.is_animated():
+			m.make_animated()
+		var at := m.active_frame + 1
+		var f: QVoxelFrame = m.frame_at(m.active_frame).clone() if duplicate else QVoxelFrame.new()
+		m.add_frame(f, at)
+		m.active_frame = at   # 新帧就是接下来要画的那一帧（否则用户得再点一下帧条）
+	)
+
+
+func _remove_frame(index: int) -> void:
+	_run_frame_edit("删除帧", func(m: QVoxelModel) -> void:
+		m.remove_frame(index)
+	)
+
+
+func _move_frame(from: int, to: int) -> void:
+	_run_frame_edit("移动帧", func(m: QVoxelModel) -> void:
+		if m.move_frame(from, to):
+			# 游标跟帧走：用户按「◀」想继续编辑的是**同一帧**，不是同一个序号
+			m.active_frame = to
+	)
+
+
+## 改帧时长的三段手势（与改色 / 改参数同一时间线：见 QVoxelPropertyCommand 的"手势即命令"）。
+## 目标是**那一帧对象本身**的 duration_ms，而不是模型的 frames 数组 —— 后者是"整数组替换"的
+## 属性命令，就地改一帧的时长不会让数组前后不同（元素是同一个 QVoxelFrame），commit 会当成没改。
+func _begin_frame_duration(index: int) -> void:
+	if session == null or index < 0 or index >= session.object.frame_count():
+		return
+	_frame_dur_cmd = QVoxelPropertyCommand.begin(session.object.frame_at(index), &"duration_ms",
+			session.object, "改帧时长")
+
+
+func _live_frame_duration(index: int, ms: int) -> void:
+	if _frame_dur_cmd == null or session == null:
+		return
+	var m := session.object
+	if index < 0 or index >= m.frame_count():
+		return
+	m.frame_at(index).duration_ms = ms
+	# 实时预览只重刷面板（播放头读数要跟着变），**不重建渲染** —— 时长不改变任何体素，
+	# 而且重建会把正在拖的那根滑条销毁、手势当场断掉（与改色同理）。
+
+
+func _end_frame_duration(_index: int) -> void:
+	var cmd := _frame_dur_cmd
+	_frame_dur_cmd = null
+	if cmd != null and cmd.commit():
+		session.history.push(cmd)
+	_after_frame_change()
+
+
+## 时间轴元数据（loop / fps / tags，落进 NODE 条目的 `anim` 键 —— §12.3）。
+func _set_anim_meta(prop: StringName, value: Variant, label: String) -> void:
+	if session == null or not session.object.is_animated():
+		return
+	var m := session.object
+	var cmd := QVoxelPropertyCommand.begin(m, prop, m, label)
+	m.set(prop, value)
+	if cmd.commit():
+		session.history.push(cmd)
+	_after_frame_change()

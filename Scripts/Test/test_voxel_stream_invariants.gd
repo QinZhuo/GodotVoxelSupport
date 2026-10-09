@@ -12,7 +12,7 @@ extends TestCase
 ##   ② 空 chunk 不落盘；chunk 变空立即清盘（不留幽灵数据）
 ##   ③ 切换 stream：旧流上的未落盘数据先落盘，且内存数据不因切换而丢
 ##   ④ CACH / 未知块经"加载 → 改块 → 增量写盘"逐字节保真；且删掉 CACH 世界语义不变
-##   ⑤ LOD 是 CACH 而非 VOX0 模型：往返命中、来源变更即失效、删 CACH 语义不变
+##   ⑤ LOD 是 CACH 而非 VXEL 模型：往返命中、来源变更即失效、删 CACH 语义不变
 
 const TEST_DIR := "user://voxel_stream_invariants"
 
@@ -133,7 +133,7 @@ func test_cach_and_unknown_blocks_survive_incremental_flush() -> void:
 	assert_true(doc != null, "改块后文件应仍可解析")
 	if doc == null:
 		return
-	assert_true(doc.models.has(0), "VOX0 应仍在")
+	assert_true(doc.models.has(0), "VXEL 应仍在")
 	if doc.models.has(0):
 		var blocks: Dictionary = doc.models[0]
 		assert_eq(blocks[Vector3i.ZERO][VoxelChunk.buf_index(2, 2, 2)], 1, "改动应已落盘")
@@ -157,7 +157,7 @@ func test_cach_and_unknown_blocks_survive_incremental_flush() -> void:
 
 
 # ----------------------------------------------------------------------------
-# ⑤ LOD 是 CACH（派生数据），不是 VOX0 模型
+# ⑤ LOD 是 CACH（派生数据），不是 VXEL 模型
 # ----------------------------------------------------------------------------
 
 ## 粗层块往返：落盘为 CACH，重载后来源未变 → 直接命中（不重算）。
@@ -421,7 +421,7 @@ func _many_chunks() -> Dictionary:
 	return out
 
 ## 造一个挂了文件流的 VoxelData。材质表给 2 条（索引 0 = 空占位 + 索引 1 可用），
-## 使体素值 1 通过 QVX 的 MATE 索引校验（VOX0 内材质值必须 < entry_count）。
+## 使体素值 1 通过 QVX 的 MATE 索引校验（VXEL 内材质值必须 < entry_count）。
 func _make_data(path: String) -> VoxelData:
 	var s := QVoxelStream.new()
 	s.file_path = path
@@ -439,7 +439,7 @@ func _air() -> Dictionary:
 
 
 ## 一个挂了材质表的文件流（直接用流而不经 VoxelData，聚焦存储层本身的契约）。
-## 必须给足材质条目，否则 VOX0 内的材质值 1 会被语义校验判为"引用了不存在的材质"。
+## 必须给足材质条目，否则 VXEL 内的材质值 1 会被语义校验判为"引用了不存在的材质"。
 func _make_stream(path: String) -> QVoxelStream:
 	var s := QVoxelStream.new()
 	s.file_path = path

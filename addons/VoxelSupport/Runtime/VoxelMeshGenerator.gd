@@ -258,10 +258,13 @@ static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: 
 	return gen.mesh
 
 
-## .qvx → MeshLibrary。split_by_model / split_by_node 都是"每项一个网格"：
-##   模型分项：每个 VOX0 一项（项名 model_<id>）；
-##   节点分项：NODE 里每个 kind="model" 节点一项（项名取节点名）。
-## QVX 没有 .vox 那种"体素动画帧"，故 split_by_frame 退化为按模型分项。
+## .qvx → MeshLibrary。三种分项都是"每项一个网格"：
+##   模型分项：每个体素源一项（项名 model_<id>；动画模型取 `frame_index` 那一帧）；
+##   节点分项：NODE 里每个 kind="model" 节点一项（项名取节点名）；
+##   帧分项：整个资产在每一帧的样子（项名 frame_<k>），与 .vox 的 split_by_frame 同构。
+##
+## 【为什么 split_by_frame 对 .qvx 不再降级】FRAM 落地后 .qvx 真的有体素动画帧了（§12.7）。
+## 继续按 split_by_model 处理会让"逐帧导出"的用户拿到 N 个模型而不是 N 帧 —— 静默的错产物。
 static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary,
 		path: String = "") -> MeshLibrary:
 	var lib: MeshLibrary = null
@@ -271,29 +274,29 @@ static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary
 			lib = res
 	if lib == null:
 		lib = MeshLibrary.new()
+	var frame := int(options.get(VoxelMeshImporter.frame_index, 0))
 	var items: Array
 	match int(options[VoxelMeshLibraryImporter.mesh_mode]):
 		VoxelMeshLibraryImporter.MeshMode.split_by_node:
-			items = _items_by_node(qvx)
+			items = _items_by_node(qvx, frame)
 		VoxelMeshLibraryImporter.MeshMode.split_by_frame:
-			push_warning("[VoxelMeshGenerator] .qvx 没有体素动画帧，split_by_frame 按 split_by_model 处理")
-			items = _items_by_model(qvx)
+			items = _items_by_frame(qvx)
 		_:
-			items = _items_by_model(qvx)
+			items = _items_by_model(qvx, frame)
 	_fill_mesh_library(lib, qvx.materials, items, options, path)
 	return lib
 
 
-static func _items_by_model(qvx: QVoxelAsset) -> Array:
+## 每个体素源一项。**动画模型不能只查 models 字典**（它们不在里面）—— 走 all_model_ids()
+## 并取 `frame` 帧的块表，于是"带 FRAM 的文件按模型分项"不再少几项。
+static func _items_by_model(qvx: QVoxelAsset, frame: int = 0) -> Array:
 	var out: Array = []
-	var ids: Array = qvx.models.keys()
-	ids.sort()
-	for mid in ids:
-		out.append({"name": "model_%d" % int(mid), "chunks": qvx.model_blocks(int(mid))})
+	for mid in qvx.all_model_ids():
+		out.append({"name": "model_%d" % int(mid), "chunks": qvx.frame_blocks(int(mid), frame)})
 	return out
 
 
-static func _items_by_node(qvx: QVoxelAsset) -> Array:
+static func _items_by_node(qvx: QVoxelAsset, frame: int = 0) -> Array:
 	var out: Array = []
 	var used := {}
 	var seq := 0
@@ -304,7 +307,19 @@ static func _items_by_node(qvx: QVoxelAsset) -> Array:
 			nm = "node_%d" % seq
 			seq += 1
 		used[nm] = true
-		out.append({"name": nm, "chunks": qvx.model_blocks(int(p["model_id"]))})
+		out.append({"name": nm, "chunks": qvx.frame_blocks(int(p["model_id"]), frame)})
+	return out
+
+
+## 逐帧一项：整个资产在第 k 帧长什么样（与 .vox 的 split_by_frame 同构）。
+## 帧数取所有动画模型的最大帧数；全静态资产 = 1 帧（即"整资产一项"）。
+##
+## 【为什么要按帧各算一次包围盒】原点由包围盒导出，而包围盒随帧变（§12.7 的 origin_offset）。
+## 沿用第 0 帧的原点会让"第 3 帧才长出来的部分"整体偏移 —— 逐帧项各自摆正才是对的。
+static func _items_by_frame(qvx: QVoxelAsset) -> Array:
+	var out: Array = []
+	for k in qvx.total_frame_count():
+		out.append({"name": "frame_%d" % k, "chunks": qvx.block_buffers(k)})
 	return out
 
 
@@ -510,14 +525,15 @@ func start_generate_mesh_from_qvx() -> void:
 		return
 	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else qvx.materials
 	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
-	# 原点偏移与 .vox 路径同一套（qvx.origin_offset 内部调 VoxelData.origin_offset）
-	var offset := qvx.origin_offset(origin_mode)
+	# 原点偏移与 .vox 路径同一套（qvx.origin_offset 内部调 VoxelData.origin_offset）。
+	# 单网格取第 frame_index 帧（静态资产恒等于第 0 帧，§12.7）—— 于是"逐帧导出"只需改这一个选项。
+	var offset := qvx.origin_offset(origin_mode, frame_index)
 	if qvx.is_block_importable():
 		_native_arrays = NativeLoader.generate_arrays_from_chunks_native(
-				qvx.block_buffers(), trans_flags, scale, offset)
+				qvx.block_buffers(frame_index), trans_flags, scale, offset)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(
-				qvx.fused_voxels(), trans_flags, scale, offset)
+				qvx.fused_voxels(frame_index), trans_flags, scale, offset)
 
 
 func _reset_mesh() -> void:

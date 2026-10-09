@@ -100,9 +100,10 @@ func _get_priority() -> float:
 
 ## sphere_* 选项仅在形状选择 sphere 时显示
 ## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
-## frame_index 只对 `.vox` 有效：MagicaVoxel 的 `.vox` 有"体素动画帧"，每帧一套体素。
-## `.qvx` **没有**这个概念——它的 `animations[].frames` 是"按**节点下标**寻址的变换补丁"，
-## 而 v3 的节点树是嵌套的、不再有下标（见 QVoxelAsset.placements），故该选项对 `.qvx` 无作用。
+##
+## frame_index = 取哪一帧生成**单个**网格：`.vox` 是 MagicaVoxel 的体素动画帧；
+## `.qvx` 是 `FRAM` 帧动画（§12）—— 静态 `.qvx` 只有第 0 帧，该选项恒等于 0、无副作用。
+## 选项始终可见（不按文件内容隐藏）：可见性回调拿不到已解析的资产，为它多load一次文件不值当。
 func _get_option_visibility(_path: String, option_name: StringName, options: Dictionary) -> bool:
 	if String(option_name).begins_with("mesh/sphere_"):
 		return options.get(VoxelMeshImporter.shape, Shape.cube) == Shape.sphere

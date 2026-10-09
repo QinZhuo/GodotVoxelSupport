@@ -308,6 +308,8 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"set_stream", "is_streaming", "shift_origin",
 	# 源失效（源内容变了 → 该块按需重新取数，区别于 unload_chunk 的"卸载"语义）
 	"invalidate_chunk_source", "invalidate_chunk_source_range",
+	# 帧动画（整份块表替换，切帧的唯一入口）
+	"apply_block_table",
 ]
 
 

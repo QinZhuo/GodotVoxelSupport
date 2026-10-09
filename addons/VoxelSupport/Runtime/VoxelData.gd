@@ -47,6 +47,7 @@ extends Resource
 #              partition_connected(静态) / find_unsupported / find_unsupported_around
 #   数据源     set_stream / is_streaming / shift_origin / invalidate_chunk_source /
 #              invalidate_chunk_source_range
+#   帧动画     apply_block_table（整份块表替换，切帧的唯一入口）
 #
 # 【实验】可用但形态可能变（收口期仍在动；用前请确认版本）：
 #   两级存储查询 is_chunk_loaded / is_stored / can_supply_chunk / get_vertical_half_span /
@@ -635,6 +636,69 @@ func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
 		return
 	_chunk_buffers[chunk_key] = buf
 	_count_set(chunk_key, _count_voxels(buf))
+
+
+## 用一份块表**替换**体素内容：`{Vector3i chunk_key: PackedInt32Array}`，缓冲长度须为 CHUNK_VOLUME。
+## 返回实际改动的块数（0 = 新表与当前内容逐块相同，什么都没发生）。
+##
+## 【为什么要有这条】`_install_block_buffer` 只解决"把一块塞进去"，不含"新表里没有的旧块要删掉"
+## 与"变了才标脏"。这两件事一起做才构成"替换"，拆开很容易漏掉一半：漏删 → 上一帧的残留块
+## 永远留在场景里；漏标脏 → 网格不重建，表现成"播放没生效"。逐帧动画切帧正需要"整体替换"这一语义。
+##
+## 【为什么逐块比对，而不是全清再全装】FRAM 的价值就是**块级增量**——帧间未变的块占绝大多数。
+## 比对走的是原生 PackedInt32Array 比较（memcmp 量级，不是 GDScript 逐元素循环），
+## 命中相等就整块跳过，连 `.duplicate()` 的分配都省掉。于是切帧代价与"这一帧改了多少块"成正比，
+## 而不是与模型体积成正比，渲染器也不会被无谓地叫去重建整棵树。
+##
+## 【为什么装入的是副本】本资源随后会就地改缓冲（`set_voxel` 等），而传入的块表常来自
+## `QVoxelAsset` 的**共享**帧数据——共享会互相污染（同一份 .qvx 的多个实例会串帧）。
+func apply_block_table(blocks: Dictionary, notify: bool = true) -> int:
+	# 归一化：全空缓冲等同"该块没有内容"。丢掉它，维持 "is_empty() ⟺ 一个体素都没有" 的不变式
+	# （_install_block_buffer 会保留零计数块，那条不变式就断了）。
+	var table := {}
+	for ck: Vector3i in blocks:
+		var b: PackedInt32Array = blocks[ck]
+		if b.size() != CHUNK_VOLUME:
+			push_error("[VoxelData] 块 %s 的缓冲长度 %d != %d，已跳过" % [ck, b.size(), CHUNK_VOLUME])
+			continue
+		if _count_voxels(b) == 0:
+			continue
+		table[ck] = b
+
+	var changed := 0
+	# 1) 新表里没有的块 → 删掉。先收键再删（边遍历边 erase 是未定义行为）。
+	var dropped: Array[Vector3i] = []
+	for ck: Vector3i in _chunk_buffers:
+		if not table.has(ck):
+			dropped.append(ck)
+	for ck in dropped:
+		_chunk_buffers.erase(ck)
+		_chunk_voxel_counts.erase(ck)
+		_damage.erase_chunk(ck)
+		# 只清"待写盘"：MESH 标记必须留着，否则渲染器不会重建来清掉该块残留的旧网格
+		_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
+		mark_chunk_dirty(ck)
+		_mark_neighbors_dirty(ck)
+		changed += 1
+	# 2) 新表里的块 → 变了才装
+	for ck: Vector3i in table:
+		var buf: PackedInt32Array = table[ck]
+		var cur: Variant = _chunk_buffers.get(ck)
+		if cur != null and (cur as PackedInt32Array) == buf:
+			continue
+		# 整块换掉：旧缓冲不动（在途的只读快照仍持有它），字典指向新副本
+		_install_block_buffer(ck, buf.duplicate())
+		# 该块的体素已被整体换掉 → 累计伤害不再属于任何体素，留着会让新体素"一出现就带伤"
+		_damage.erase_chunk(ck)
+		# 内存已是权威内容 → 标待写盘（有流时否则卸载即丢，或旧数据复活）；并失效高层 LOD
+		_dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
+		mark_chunk_dirty(ck)
+		_mark_neighbors_dirty(ck)
+		invalidate_lod_for_chunk(ck)
+		changed += 1
+	if changed > 0 and notify:
+		emit_changed()
+	return changed
 
 
 ## 若 chunk 体素计数归零则移除该 chunk 键（O(1)，替代 4096 全量扫描）
@@ -1954,20 +2018,26 @@ func _serialize_all_voxels() -> PackedInt32Array:
 ## origin_mode 见 OriginMode（与 from_voxel_data 同一套语义与同一个默认值）。
 ## QVX 的体素坐标就是文件里的块坐标（**不重映射**），因此这里只需写对 center_offset——
 ## 渲染顶点 = (块坐标 + center_offset) * voxel_scale，结果与 .vox 路径逐体素一致。
-static func from_qvx(qvx: QVoxelAsset, origin_mode: int = OriginMode.WORLD_ORIGIN) -> VoxelData:
+##
+## 【frame 只在这里切，不做"当前帧"状态】本函数产出的是**某一帧的静态快照**（默认第 0 帧）。
+## 运行时连续播放需要 VoxelData 自己持有"当前帧"并按帧重建（§12.7 明确不在本次范围）——
+## 现在把帧做成本函数的入参，是为了让"逐帧导出一份 VoxelData / 一份网格"立刻可用，
+## 且不给 VoxelData 引入一个"哪帧生效"的隐式状态（那会污染它的存档与哈希语义）。
+static func from_qvx(qvx: QVoxelAsset, origin_mode: int = OriginMode.WORLD_ORIGIN,
+		frame: int = 0) -> VoxelData:
 	var res := VoxelData.new()
 	res.materials = qvx.materials
 	if qvx.is_block_importable():
-		var blocks: Dictionary = qvx.block_buffers()
+		var blocks: Dictionary = qvx.block_buffers(frame)
 		for key in blocks:
 			# duplicate：本资源随后会就地修改缓冲，不得与 QVoxelAsset 共享
 			res._install_block_buffer(key, (blocks[key] as PackedInt32Array).duplicate())
 	else:
-		var voxels: Dictionary = qvx.fused_voxels()
+		var voxels: Dictionary = qvx.fused_voxels(frame)
 		for pos in voxels:
 			res._write_buffer_impl(pos, voxels[pos], false)
-	res.grid_size = qvx.grid_size()
-	res.center_offset = qvx.origin_offset(origin_mode)
+	res.grid_size = qvx.grid_size(frame)
+	res.center_offset = qvx.origin_offset(origin_mode, frame)
 	return res
 
 

@@ -160,6 +160,7 @@ static func _build_theme() -> Theme:
 	_theme_container(t)
 	_theme_scrollbar(t)
 	_theme_slider(t)
+	_theme_line_edit(t)
 	_theme_tooltip(t)
 	return t
 
@@ -233,6 +234,23 @@ static func _theme_slider(t: Theme) -> void:
 		t.set_stylebox("slider", type, box(SURFACE_HI, BORDER, 1, 4, 0, 0))
 		t.set_stylebox("grabber_area", type, box(ACCENT_DIM, Color(0, 0, 0, 0), 0, 4, 0, 0))
 		t.set_stylebox("grabber_area_highlight", type, box(ACCENT, Color(0, 0, 0, 0), 0, 4, 0, 0))
+
+
+## 单行文本输入：时间轴分组的标签编辑用它。
+##
+## 【为什么必须进主题、而不是就地 override】QVoxelUi 是"面板长相的唯一来源"（见类文档）。
+## LineEdit 的引擎默认长相是**亮底深字**，压在深空冷调的面板上会像一块贴错的便签；
+## 收进主题后它和其它控件共享同一套底色 / 描边 / 字号，"改一处基调 = 全应用一起变"仍然成立。
+static func _theme_line_edit(t: Theme) -> void:
+	t.set_stylebox("normal", "LineEdit", box(SURFACE_HI, BORDER, 1, RADIUS_S, space_s(), SPACE_XS))
+	t.set_stylebox("focus", "LineEdit", box(SURFACE_HI, ACCENT, 1, RADIUS_S, space_s(), SPACE_XS))
+	t.set_stylebox("read_only", "LineEdit", box(SURFACE_HI.darkened(0.3), BORDER, 1, RADIUS_S, space_s(), SPACE_XS))
+	t.set_color("font_color", "LineEdit", TEXT)
+	t.set_color("font_placeholder_color", "LineEdit", TEXT_FAINT)
+	t.set_color("font_uneditable_color", "LineEdit", TEXT_FAINT)
+	t.set_color("caret_color", "LineEdit", ACCENT)
+	t.set_color("selection_color", "LineEdit", ACCENT_DIM)
+	t.set_font_size("font_size", "LineEdit", FONT_M)
 
 
 ## 提示气泡：鼠标的专属福利（触摸看不到），但也给个统一长相。
@@ -336,6 +354,32 @@ static func toggle_button(tooltip := "", variation := VARIATION_TOOL) -> Button:
 	b.toggle_mode = true
 	b.custom_minimum_size = Vector2(0, hit_size())
 	return b
+
+
+## 单行文本输入（长相由 _theme_line_edit 统一）。placeholder 为空则不留提示。
+static func text_field(text := "", placeholder := "", tooltip := "") -> LineEdit:
+	var e := LineEdit.new()
+	e.text = text
+	e.placeholder_text = placeholder
+	e.focus_mode = Control.FOCUS_NONE
+	e.caret_blink = true
+	e.custom_minimum_size = Vector2(0, hit_size())
+	if not tooltip.is_empty():
+		e.tooltip_text = tooltip
+	return e
+
+
+## 数值滑条（时间轴分组的时长 / 帧率用它）：与颜色通道同一套长相，右侧留出数值位。
+static func value_slider(minimum: float, maximum: float, step: float, value: float) -> HSlider:
+	var s := HSlider.new()
+	s.min_value = minimum
+	s.max_value = maximum
+	s.step = step
+	s.value = value
+	s.focus_mode = Control.FOCUS_NONE
+	s.custom_minimum_size = Vector2(0, hit_size())
+	s.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	return s
 
 
 ## 材质色块：颜色本身就是内容，故底色取自材质，不是主题色。

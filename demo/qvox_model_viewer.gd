@@ -6,7 +6,7 @@ extends Node3D
 ## 且强制走完整 QVX 容器读写链路，用来肉眼确认 QVX 格式的存储/加载/渲染是否正确：
 ##
 ##   .vox (MagicaVoxel)  →  VoxAccess 解析  →  VoxelData
-##        →  QVoxelStream.save_chunk()  写进 .qvx 容器（HEAD/MATE/NODE/VOX0）
+##        →  QVoxelStream.save_chunk()  写进 .qvx 容器（HEAD/MATE/NODE/VXEL）
 ##        →  QVoxelStream.load_chunk()  从 .qvx 读回
 ##        →  VoxelRenderer 渲染成体素模型
 ##

@@ -5,7 +5,7 @@ extends RefCounted
 ##
 ## 【为什么不复用 VoxAsset】VoxAsset 的形状是 MagicaVoxel 专属的：`nTRN/nGRP/nSHP` 场景图、
 ## `frames` 动画帧、`LAYR` 可见性、Z-up、以及 `VoxelModel.size` 的"按尺寸居中 + Z 翻转"约定。
-## QVX 的对应概念完全不同——**一个 `model_id` 就是一个 `VOX0`，摆放由 `NODE` 的 transform 决定**。
+## QVX 的对应概念完全不同——**一个 `model_id` 就是一个 `VXEL`，摆放由 `NODE` 的 transform 决定**。
 ## 把 QVX 塞进 VoxAsset 会有三处失真（此前实测）：
 ##   1. `check_nodes()` 伪造成"每模型一个 frame"，而 `VoxelFrame` 合并分支在 index==0 时短路
 ##      → **多模型只导入第一个，其余静默丢失**；
@@ -24,16 +24,26 @@ const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
 ## 材质（**索引 == 材质ID**；索引 0 恒为 null 空气占位，遵循全项目统一材质契约）
 var materials: Array[VoxelMaterial] = []
 
-## model_id(int) → { block_key(Vector3i): PackedInt32Array(CHUNK_VOLUME) }
+## model_id(int) → { block_key(Vector3i): PackedInt32Array(CHUNK_VOLUME) }。
+## **只装静态模型**（`VXEL`）；帧动画模型的块在 `animations` 里（§12.2 互斥）。
 var models: Dictionary = {}
+
+## 帧动画（§12，`FRAM`）：model_id(int) → { "loop": bool, "fps": int, "tags": Array,
+##                                        "frames": Array[{"duration_ms": int, "blocks": Dictionary}] }
+## 帧的块表在解析期已由格式层**还原为完整块表**（块级增量只存在于文件里），所以这里直接可用。
+##
+## 【为什么与 models 分成两个表，而不是给 models 的每项加一个 frames 数组】两者互斥
+## （一个 model_id 只有一个体素源，§12.2），合成一张表就要在每个消费点判"这次该看 frames
+## 还是看块"，而漏判一处就是静默渲染错帧。分表让"有没有动画"在类型层面就看得见。
+var animations: Dictionary = {}
 
 ## 摆放表：每项 { "model_id": int, "transform": Transform3D, "name": String }。
 ## 来自 NODE 场景图（组的 transform 逐层累积到模型节点）；NODE 缺失或未引用某个模型时，
 ## 为该模型补一条恒等摆放。
 ##
-## 【为什么没有"帧"这一维】`animations[].frames` 的键是**节点下标**，而 v3 的节点树是嵌套的、
-## 没有下标这层身份（见 QVoxelFile 的 NODE 清洗）。于是动画在 v3 里只是"原样透传的遗留键"，
-## 不参与摆放 —— 同一个文件无论看哪一帧，摆放都相同。
+## 【为什么没有"帧"这一维】摆放属于**模型**（NODE 节点），动画属于**模型的体素**（FRAM 块）。
+## 一份 FRAM 的每一帧共用同一个摆放 —— 所以"摆放 × 帧"是个伪维度：给它加一维，只会得到
+## N 份完全相同的 transform。切帧要切的是 `frame_blocks()`，不是 `placements`。
 var placements: Array = []
 
 ## HEAD 原始元数据（up_axis / bounds / 自定义键原样保留，供调用方按需读取）
@@ -41,12 +51,14 @@ var metadata: Dictionary = {}
 
 var up_axis: String = QVoxelSpec.DEFAULT_UP_AXIS
 
-# 惰性缓存
-var _block_buffers: Dictionary = {}
-var _fused: Variant = null
-var _fused_bounds: Dictionary = {}
-var _block_bounds: Dictionary = {}
-var _block_count: int = -1
+# 惰性缓存。**按帧分别缓存**（键 = 帧号）：动画资产会被"逐帧生成网格"反复查询，
+# 不缓存则 N 帧各重算一遍融合；而单一槽位缓存在切帧时会反复互相踢掉（抖动，等于没缓存）。
+# 静态资产只会有 frame=0 这一个键，与"单一槽位"等价。
+var _block_buffers_cache: Dictionary = {}
+var _fused_cache: Dictionary = {}
+var _fused_bounds_cache: Dictionary = {}
+var _block_bounds_cache: Dictionary = {}
+var _block_count_cache: Dictionary = {}
 
 
 # ----------------------------------------------------------------------------
@@ -94,24 +106,45 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 		var blocks: Variant = doc.models[mid]
 		if blocks is Dictionary and not (blocks as Dictionary).is_empty():
 			out.models[int(mid)] = (blocks as Dictionary).duplicate()
-	out.placements = _placements_from_scene(doc, out.models)
+	# 帧动画（§12）：格式层已把块级增量还原成每帧的**完整块表**，这里只需键类型归一 + 补元数据。
+	var anim_meta := _anim_meta_from_scene(doc)
+	for mid in doc.frames:
+		var frames: Variant = doc.frames[mid]
+		if not (frames is Array) or (frames as Array).is_empty():
+			continue
+		var id := int(mid)
+		var meta: Dictionary = anim_meta.get(id, {})
+		var tags: Variant = meta.get("tags")
+		out.animations[id] = {
+			"loop": bool(meta.get("loop", true)),
+			"fps": maxi(1, int(meta.get("fps", 12))),
+			"tags": (tags as Array).duplicate() if tags is Array else [],
+			"frames": (frames as Array).duplicate(),
+		}
+	out.placements = _placements_from_scene(doc, out.all_model_ids())
 	return out
 
 
 ## NODE 场景图 → 摆放表（含每个节点累积后的世界变换）。
-## 未出现在场景图中的模型补恒等摆放，保证"文件里有几个 VOX0 就导入几个"。
+## 未出现在场景图中的模型补恒等摆放，保证"文件里有几个体素源就导入几个"。
+##
+## 【为什么入参是 model_id 列表而不是"块表字典"】体素源有两个（静态 `VXEL` 与动画 `FRAM`），
+## 而摆放枚举只关心"有哪些模型" —— 传 `models` 字典会让动画模型**一个都进不来**
+## （它们不在 models 里），表现为"带 FRAM 的文件导入后少了几个模型"。
 ##
 ## 【嵌套树直接递归下行】v3 的 nodes[] 每个节点自带 children[]（组）或 model_id（模型），
 ## "谁是根、谁是子"是结构本身 —— 不再需要"扫一遍 children 反查父表 + 挑出无父者"那一套
 ## （那套复杂度全部来自"身份即位置"的扁平表示，见 QVoxelFile 的 NODE 清洗）。
-static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, models: Dictionary) -> Array:
+static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, model_ids: Array[int]) -> Array:
+	var known := {}
 	var pending := {}
-	for mid in models:
+	for mid in model_ids:
+		known[mid] = true
 		pending[mid] = true
 	var out: Array = []
 	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
 	if scene != null:
-		_walk_nodes(scene.nodes, Transform3D.IDENTITY, models, pending, out)
+		_walk_nodes(scene.nodes, Transform3D.IDENTITY, known, pending, out)
 	for mid in pending:
 		out.append({"model_id": mid, "transform": Transform3D.IDENTITY, "name": ""})
 	return out
@@ -119,7 +152,12 @@ static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, models: Dicti
 
 ## 递归一层：按作者书写顺序先序下行（摆放顺序稳定且符合直觉 —— MeshLibrary 的项名/顺序
 ## 直接来自这里）。`parent_xf` 是父组累积下来的世界变换。
-static func _walk_nodes(nodes: Array, parent_xf: Transform3D, models: Dictionary,
+##
+## `known` = 文件里确实有体素的模型集合（判"这个节点指向的模型存不存在"）；
+## `pending` = 还没被任何节点引用的模型（走完树后给它们补恒等摆放）。
+## 两者分开：同一个模型被两个节点引用时，`known` 仍为真（两次引用都记进摆放，
+## 由 is_block_importable() 判"能否零展开"，而不是在这里悄悄吞掉第二次）。
+static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
 		pending: Dictionary, out: Array) -> void:
 	for item in nodes:
 		# 防御：scene 已清洗过，这里只是不让一个坏项把整棵树带崩（与 QVoxelFile 的取向一致）
@@ -129,7 +167,7 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, models: Dictionary
 		var world := parent_xf * _node_transform(node)
 		if String(node.get("kind", "")) == "model":
 			var mid := int(node.get("model_id", -1))
-			if models.has(mid):
+			if known.has(mid):
 				out.append({
 					"model_id": mid,
 					"transform": world,
@@ -139,7 +177,35 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, models: Dictionary
 			continue   # 模型是叶子，不必再看 children
 		var kids: Variant = node.get("children")
 		if kids is Array:
-			_walk_nodes(kids, world, models, pending, out)
+			_walk_nodes(kids, world, known, pending, out)
+
+
+## NODE 场景图里各模型节点的 `anim` 元数据：model_id → {loop, fps, tags}（§12.3）。
+##
+## 【为什么从场景图取，而不是从 doc.frames 取】`anim` 是**节点**的属性（时间轴元数据与
+## "模型是谁"绑在一起），而 frames 只装体素。两者在文件里就是分开的两处，读的时候也照原样各取各的。
+static func _anim_meta_from_scene(doc: QVoxelFile.QVoxelDocument) -> Dictionary:
+	var out := {}
+	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
+	if scene == null:
+		return out
+	_collect_anim_meta(scene.nodes, out)
+	return out
+
+
+static func _collect_anim_meta(nodes: Array, out: Dictionary) -> void:
+	for item in nodes:
+		if not (item is Dictionary):
+			continue
+		var node: Dictionary = item
+		if String(node.get("kind", "")) == "model":
+			var a: Variant = node.get("anim")
+			if a is Dictionary:
+				out[int(node.get("model_id", -1))] = a
+			continue
+		var kids: Variant = node.get("children")
+		if kids is Array:
+			_collect_anim_meta(kids, out)
 
 
 ## 单个节点的局部变换。三个字段全部可选，缺省即恒等：
@@ -191,7 +257,7 @@ static func _quaternion(v: Variant) -> Quaternion:
 # ----------------------------------------------------------------------------
 
 func is_empty() -> bool:
-	return models.is_empty()
+	return models.is_empty() and animations.is_empty()
 
 
 ## up_axis 轴向修正（QVX 体素坐标 → 引擎 Y-up）。
@@ -216,40 +282,107 @@ func is_block_importable() -> bool:
 		var xf: Transform3D = p["transform"]
 		if not (xf.basis.is_equal_approx(Basis.IDENTITY) and xf.origin.is_zero_approx()):
 			return false
-	return seen.size() == models.size()
+	return seen.size() == all_model_ids().size()
 
 
-## 指定模型的块表（不拷贝，只读使用）。
+## 指定模型的块表（不拷贝，只读使用）。**只对静态模型有意义**（动画模型返回空）。
 func model_blocks(model_id: int) -> Dictionary:
 	var blocks: Variant = models.get(model_id)
 	return blocks if blocks is Dictionary else {}
 
 
+## 全部"有体素的" model_id（静态 + 动画），升序。摆放枚举 / 可搬运判定 / 分项导出都读它。
+func all_model_ids() -> Array[int]:
+	var ids: Array[int] = []
+	for mid in models:
+		ids.append(int(mid))
+	for mid in animations:
+		ids.append(int(mid))
+	ids.sort()
+	return ids
+
+
+## 某个 model_id 的动画项（非动画返回空字典）。
+func animation_of(model_id: int) -> Dictionary:
+	var a: Variant = animations.get(model_id)
+	return a if a is Dictionary else {}
+
+
+## 动画帧数（非动画模型返回 0）。
+func frame_count(model_id: int) -> int:
+	var anim := animation_of(model_id)
+	if anim.is_empty():
+		return 0
+	return (anim.get("frames", []) as Array).size()
+
+
+## 整份资产可切的帧数 = 所有动画模型的最大帧数；全静态资产返回 1（"只有一帧"）。
+##
+## 【为什么取 max 而不是"各模型各自的帧数"】"整个资产在第 k 帧长什么样"要求所有模型都在
+## 同一个 k 上有定义；取 max 后，帧数少的模型在 k 越界时 `frame_blocks()` 返回空（它不参与这一帧），
+## 这正是 split_by_frame 逐帧导出想要的语义。
+func total_frame_count() -> int:
+	var n := 1
+	for mid in animations:
+		n = maxi(n, frame_count(int(mid)))
+	return n
+
+
+## 第 k 帧的块表。**动画模型切帧渲染/导出的唯一入口**（静态模型则恒等于其静态块表）。
+##
+## 【为什么越界返回空字典，而不是 clamp 到最后一帧】越界 = 调用方算错帧号或数据被改小。
+## 悄悄返回最后一帧会让"播到头了"和"帧号算错了"长得一模一样；返回空块表则表现为"这帧是空的"，
+## 同样一眼可见。取模/回绕属于**播放器**（它才知道 loop 与 direction），不该藏进这个纯查询里。
+func frame_blocks(model_id: int, frame: int) -> Dictionary:
+	var anim := animation_of(model_id)
+	if anim.is_empty():
+		return model_blocks(model_id)
+	var frames: Array = anim.get("frames", [])
+	if frame < 0 or frame >= frames.size():
+		return {}
+	var f: Variant = frames[frame]
+	if not (f is Dictionary):
+		return {}
+	var b: Variant = (f as Dictionary).get("blocks")
+	return b if b is Dictionary else {}
+
+
+## 该模型是否带帧动画。
+func is_animated(model_id: int) -> bool:
+	return animations.has(model_id)
+
+
 ## 全部模型的块表合并（块坐标即 chunk 坐标；仅在 is_block_importable() 时有意义）。
-func block_buffers() -> Dictionary:
-	if _block_buffers.is_empty():
-		var out := {}
-		for mid in models:
-			out.merge(model_blocks(mid))
-		_block_buffers = out
-	return _block_buffers
+##
+## `frame` 只对**动画模型**有影响（静态模型的块与帧无关），于是"静态资产传什么 frame 都一样"，
+## 调用方不必先判有没有动画。合并顺序取 all_model_ids()（升序）—— 块键撞车时"谁赢"必须确定，
+## 否则同一份文件两次导入可能得到不同网格（Dictionary 迭代序不保证稳定）。
+func block_buffers(frame: int = 0) -> Dictionary:
+	if _block_buffers_cache.has(frame):
+		return _block_buffers_cache[frame]
+	var out := {}
+	for mid in all_model_ids():
+		out.merge(frame_blocks(int(mid), frame))
+	_block_buffers_cache[frame] = out
+	return out
 
 
 ## 逐体素融合（应用轴向修正 + 各模型摆放）。仅在需要变换时调用。
-func fused_voxels() -> Dictionary:
-	if _fused != null:
-		return _fused
+func fused_voxels(frame: int = 0) -> Dictionary:
+	if _fused_cache.has(frame):
+		return _fused_cache[frame]
 	var out := {}
 	if placements.is_empty():
-		_fused = out
+		_fused_cache[frame] = out
+		_fused_bounds_cache[frame] = {}
 		return out
 	var fix := Transform3D(axis_fix())
 	for p in placements:
 		var mid: int = p["model_id"]
-		if not models.has(mid):
+		var blocks := frame_blocks(mid, frame)
+		if blocks.is_empty():
 			continue
 		var full: Transform3D = fix * (p["transform"] as Transform3D)
-		var blocks: Dictionary = models[mid]
 		for bk in blocks:
 			var buf: PackedInt32Array = blocks[bk]
 			var origin: Vector3i = (bk as Vector3i) * CHUNK_SIZE
@@ -263,36 +396,37 @@ func fused_voxels() -> Dictionary:
 							continue
 						var wp := full * Vector3(origin.x + lx, origin.y + ly, origin.z + lz)
 						out[Vector3i(int(round(wp.x)), int(round(wp.y)), int(round(wp.z)))] = m
-	_fused = out
-	_fused_bounds = VoxelData.voxel_bounds(out)
-	return _fused
+	_fused_cache[frame] = out
+	_fused_bounds_cache[frame] = VoxelData.voxel_bounds(out)
+	return out
 
 
 ## 输出坐标系下的体素包围盒 {"min": Vector3i, "max": Vector3i}（含端点）；无体素返回 {}。
-func voxel_bounds() -> Dictionary:
+func voxel_bounds(frame: int = 0) -> Dictionary:
 	if is_block_importable():
-		if _block_bounds.is_empty():
-			_block_bounds = bounds_for_blocks(block_buffers())
-		return _block_bounds
-	fused_voxels()
-	return _fused_bounds
+		if not _block_bounds_cache.has(frame):
+			_block_bounds_cache[frame] = bounds_for_blocks(block_buffers(frame))
+		return _block_bounds_cache[frame]
+	fused_voxels(frame)
+	return _fused_bounds_cache.get(frame, {})
 
 
-func voxel_count() -> int:
+func voxel_count(frame: int = 0) -> int:
 	if is_block_importable():
-		if _block_count < 0:
+		if not _block_count_cache.has(frame):
 			var n := 0
-			for ck in block_buffers():
-				var buf: PackedInt32Array = block_buffers()[ck]
+			var bufs := block_buffers(frame)
+			for ck in bufs:
+				var buf: PackedInt32Array = bufs[ck]
 				n += buf.size() - buf.count(0)   # 原生计数（PackedInt32Array.count）
-			_block_count = n
-		return _block_count
-	return fused_voxels().size()
+			_block_count_cache[frame] = n
+		return _block_count_cache[frame]
+	return fused_voxels(frame).size()
 
 
 ## 体素网格尺寸（体素个数）。
-func grid_size() -> Vector3i:
-	var b := voxel_bounds()
+func grid_size(frame: int = 0) -> Vector3i:
+	var b := voxel_bounds(frame)
 	if b.is_empty():
 		return Vector3i.ZERO
 	return (b["max"] as Vector3i) - (b["min"] as Vector3i) + Vector3i.ONE
@@ -300,8 +434,12 @@ func grid_size() -> Vector3i:
 
 ## 原点偏移（体素单位，叠加到渲染顶点）：按 `origin_mode`（见 VoxelData.OriginMode）。
 ## 与 `.vox` 路径共用 `VoxelData.origin_offset` 这一处实现——"两条路径位置一致"的保证就在这里。
-func origin_offset(origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN) -> Vector3:
-	return VoxelData.origin_offset(voxel_bounds(), origin_mode)
+##
+## 【为什么原点要按帧算】原点由**包围盒**导出，而包围盒随帧变（第 3 帧才长出的部分会把
+## bottom_center 的原点往下推）。逐帧导出网格时若沿用第 0 帧的原点，后面几帧会整体偏移。
+func origin_offset(origin_mode: int = VoxelData.OriginMode.WORLD_ORIGIN,
+		frame: int = 0) -> Vector3:
+	return VoxelData.origin_offset(voxel_bounds(frame), origin_mode)
 
 
 # ----------------------------------------------------------------------------

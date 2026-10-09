@@ -164,7 +164,7 @@ func test_require_unknown_type_rejected() -> void:
 ## require 只声明已知类型 → 正常读入。
 func test_require_known_type_accepted() -> void:
 	var doc := _make_doc()
-	doc.head["require"] = ["MATE", "VOX0", "NODE", "CACH"]
+	doc.head["require"] = ["MATE", "VXEL", "NODE", "CACH"]
 	var bytes := QVoxelFile.serialize(doc)
 	var rep := QVoxelFile.QVoxelReport.new()
 	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
@@ -632,6 +632,128 @@ func test_node_modifiers_roundtrip() -> void:
 			"链的尺寸语义存活（平铺 ×3，镜像不改盒尺寸）")
 
 
+# ----------------------------------------------------------------------------
+# 帧动画 FRAM（§12）
+# ----------------------------------------------------------------------------
+
+## FRAM 往返：帧时长与**完整块表**必须一字不差地回来。
+##
+## 【为什么断言"完整块表"而不只是"帧数"】存储层是块级增量（帧 k 只写相对帧 k-1 的变化），
+## 解析层必须把它**展开**成完整块表——否则调用方拿到的第 k 帧会缺掉所有没变的块。
+## 只比帧数的话，"增量没展开、继承的块全丢了"也照样通过。
+func test_fram_roundtrip_expands_deltas() -> void:
+	var k0 := Vector3i(0, 0, 0)
+	var k1 := Vector3i(1, 0, 0)
+	var a := _frame_buf(1)
+	var b := _frame_buf(2)
+	var doc := _make_fram_doc([
+		{"duration_ms": 100, "blocks": {k0: a}},
+		{"duration_ms": 120, "blocks": {k0: a, k1: b}},   # 相对帧 0 只新增了 k1
+	])
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
+	assert_true(parsed != null, "FRAM 往返解析应成功（%s）" % rep.summary())
+	if parsed == null:
+		return
+	assert_true(rep.ok(), "往返不应有 FATAL（%s）" % rep.summary())
+
+	var fr: Variant = parsed.model_frames(0)
+	assert_true(fr is Array and (fr as Array).size() == 2, "应有 2 帧")
+	var f0: Dictionary = (fr as Array)[0]
+	var f1: Dictionary = (fr as Array)[1]
+	assert_eq(int(f0["duration_ms"]), 100, "帧 0 时长")
+	assert_eq(int(f1["duration_ms"]), 120, "帧 1 时长")
+	assert_eq((f0["blocks"] as Dictionary).size(), 1, "帧 0 只有一个块")
+	# 帧 1 的 k0 在增量里没出现（继承），展开后必须仍在
+	assert_eq((f1["blocks"] as Dictionary).size(), 2, "帧 1 应展开为两块（k0 继承 + k1 新增）")
+	assert_eq((f1["blocks"] as Dictionary)[k0], a, "继承块的内容应与帧 0 相同")
+	assert_eq((f1["blocks"] as Dictionary)[k1], b, "新增块的内容")
+
+
+## 帧增量的收益：一帧的成本 = 它相对上一帧改了多少块，与模型总大小无关。
+##
+## 【为什么盯 FRAM 块自己的 length 而不是文件总大小】总大小里混着 HEAD/MATE/填充，
+## 想钉住"相同的块不重写"这件事，只能只看 FRAM 块负载。
+func test_fram_delta_skips_unchanged_blocks() -> void:
+	var k0 := Vector3i(0, 0, 0)
+	var buf := _frame_buf(1)
+	var one := QVoxelFile.serialize(_make_fram_doc([{"duration_ms": 100, "blocks": {k0: buf}}]))
+	var one_off := _fram_block_offset(one)
+	var full := one.decode_u32(one_off) - QVoxelSpec.FRAM_MODEL_HEADER_SIZE - QVoxelSpec.FRAM_FRAME_HEADER_SIZE
+	assert_true(full > 0, "单帧的增量负载应非空")
+
+	var same3 := QVoxelFile.serialize(_make_fram_doc([
+		{"duration_ms": 100, "blocks": {k0: buf}},
+		{"duration_ms": 100, "blocks": {k0: buf}},
+		{"duration_ms": 100, "blocks": {k0: buf}},
+	]))
+	assert_eq(same3.decode_u32(_fram_block_offset(same3)),
+			QVoxelSpec.FRAM_MODEL_HEADER_SIZE + 3 * QVoxelSpec.FRAM_FRAME_HEADER_SIZE + full,
+			"内容相同的帧不该重复写块负载（增量收益消失？）")
+
+
+## FRAM 里 codec=0 = "把该块清空"，与 VXEL 里 codec=0 = 损坏的语义**不同**（§12 / QVoxelSpec）。
+##
+## 【为什么单独测】"块消失"在增量里必须与"块没变"区分开：前者写 codec=0，后者不写。
+## 若把 codec=0 当损坏丢弃，这一帧就会静默继承上一帧的块——画面里凭空多出一块。
+func test_fram_frame_can_clear_a_block() -> void:
+	var k0 := Vector3i(0, 0, 0)
+	var k1 := Vector3i(1, 0, 0)
+	var doc := _make_fram_doc([
+		{"duration_ms": 100, "blocks": {k0: _frame_buf(1), k1: _frame_buf(2)}},
+		{"duration_ms": 100, "blocks": {k0: _frame_buf(1)}},   # k1 被清空
+	])
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
+	assert_true(parsed != null and rep.ok(), "清空帧应能往返（%s）" % rep.summary())
+	if parsed == null:
+		return
+	var fr: Array = parsed.model_frames(0)
+	assert_eq(fr.size(), 2, "帧数不变")
+	var f1: Dictionary = fr[1]
+	assert_eq((f1["blocks"] as Dictionary).size(), 1, "被清空的块不该继承回来")
+	assert_true((f1["blocks"] as Dictionary).has(k0), "未变的块应保留")
+
+
+## §12 不变式：一个 model_id 只能有一个体素源。VXEL 与 FRAM 撞车 → 拒绝整个文件（FATAL）。
+func test_fram_vxel_conflict_is_fatal() -> void:
+	var doc := _make_doc()   # 已含 models[0]
+	doc.frames = {0: [{"duration_ms": 100, "blocks": {Vector3i(0, 0, 0): _frame_buf(1)}}]}
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
+	assert_true(parsed == null, "同一 model_id 同时有 VXEL 与 FRAM 应拒绝整个文件")
+	assert_true(_errors_contain(rep, "冲突"), "report.errors 应说明冲突原因（%s）" % rep.summary())
+
+
+## require 声明 FRAM → 本读者必须认得它，否则含动画的文件会被整个拒掉。
+## （这也是 FRAM 作为"新块类型"对旧读取器的唯一告知手段。）
+func test_fram_require_gate_accepted() -> void:
+	var doc := _make_fram_doc([{"duration_ms": 100, "blocks": {Vector3i(0, 0, 0): _frame_buf(1)}}])
+	doc.head["require"] = ["MATE", "FRAM", "NODE"]
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
+	assert_true(parsed != null, "require 含 FRAM 应可读入（%s）" % rep.summary())
+
+
+## 一段动画内部结构损坏 → 只丢这段动画（DROP_MODEL），文件其余部分照常可用（§9.0 判据：
+## 顶层块流由块头自己的 length 定界，坏掉的负载声明不影响"下一个块头在哪儿"）。
+func test_fram_bad_payload_length_drops_animation() -> void:
+	var doc := _make_fram_doc([{"duration_ms": 100, "blocks": {Vector3i(0, 0, 0): _frame_buf(1)}}])
+	var bytes := QVoxelFile.serialize(doc)
+	var off := _fram_block_offset(bytes)
+	assert_true(off >= 0, "应能定位 FRAM 块")
+	# FRAM 头里的 payload_length 改成荒谬大值；顺带 crc=0（= 作者未写校验值，读取端跳过）
+	bytes.encode_u32(off + QVoxelSpec.BLOCK_HEADER_SIZE + 4, 0xFFFFFF)
+	bytes.encode_u32(off + 8, 0)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
+	assert_true(parsed != null, "单个动画损坏不该让整个文件不可用（%s）" % rep.summary())
+	assert_true(rep.ok(), "应是 DROP_MODEL 而非 FATAL（%s）" % rep.summary())
+	assert_eq(rep.dropped_models, 1, "应记一次 DROP_MODEL")
+	var fr: Variant = parsed.model_frames(0)
+	assert_true(fr == null or (fr as Array).is_empty(), "被丢弃的动画不该留下帧")
+
+
 # --- 本节的局部辅助 ---------------------------------------------------------
 
 func _make_doc_with_engineering_data() -> QVoxelFile.QVoxelDocument:
@@ -686,6 +808,34 @@ func _make_doc() -> QVoxelFile.QVoxelDocument:
 		buf[i] = (i % 3)   # 0 / 1 / 2
 	doc.models = {0: {Vector3i(0, 0, 0): buf}}
 	return doc
+
+
+func _frame_buf(value: int) -> PackedInt32Array:
+	var b := QVoxelSpec.DEFAULT_BLOCK_SIZE
+	var buf := PackedInt32Array()
+	buf.resize(b * b * b)
+	buf.fill(value)
+	return buf
+
+
+## 造一个"只有帧动画、没有静态模型"的 doc。
+## （同一 model_id 不能既是 VXEL 又是 FRAM，见 §12，故必须清掉 _make_doc 的 models。）
+func _make_fram_doc(frames: Array) -> QVoxelFile.QVoxelDocument:
+	var doc := _make_doc()
+	doc.models = {}
+	doc.frames = {0: frames}
+	return doc
+
+
+## 定位序列化结果里 FRAM 块的块头偏移（没有则 -1）。块头自足，故顺序扫即可。
+func _fram_block_offset(bytes: PackedByteArray) -> int:
+	var pos := QVoxelSpec.SIGNATURE_SIZE
+	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
+		var length := bytes.decode_u32(pos)
+		if bytes.slice(pos + 4, pos + 8).get_string_from_ascii() == QVoxelSpec.BLOCK_FRAM:
+			return pos
+		pos += QVoxelSpec.BLOCK_HEADER_SIZE + length
+	return -1
 
 
 func _errors_contain(rep: QVoxelFile.QVoxelReport, needle: String) -> bool:

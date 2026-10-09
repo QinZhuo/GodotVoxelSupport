@@ -137,7 +137,7 @@ target.damage_ray(origin, direction, max_distance)
   `bottom_center`，要三轴内容居中（与 Blender 导入器的 "Center Origins" 同思路）就选
   `content_center`。
 - **`.vox` 与 `.qvx` 各有自己的资产适配器** —— `.vox`（MagicaVoxel 场景图）走
-  `VoxAsset.from_asset()`；`.qvx`（一个 `VOX0` 一个模型 + `NODE` 摆放）走
+  `VoxAsset.from_asset()`；`.qvx`（一个 `VXEL` 一个模型 + `NODE` 摆放）走
   `QVoxelAsset.from_file()`。对 `.qvx` 调 `VoxAsset.from_asset()` 会**报错并返回 null**：
   把 MagicaVoxel 的形状硬套到 QVX 上会静默丢掉 `NODE` 场景图与除第一个之外的全部模型。
   编辑器的导入插件已按扩展名自动分派，无需手动区分。
