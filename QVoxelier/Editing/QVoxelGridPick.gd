@@ -1,5 +1,5 @@
 @tool
-class_name QVoxGridPick
+class_name QVoxelGridPick
 extends RefCounted
 ## 网格拾取：一条射线 → 一次落笔的命中信息（**空图上也能落笔**）。
 ##

@@ -1,6 +1,6 @@
 @tool
-class_name QVoxTransformModifier
-extends QVoxModifier
+class_name QVoxelTransformModifier
+extends QVoxelModifier
 
 ## 体素域（VOXEL）修改器（**重排 / 摆放**型）—— 算法核是一个 PcgTransform，变换整块体积
 ## （镜像 / 旋转 90° / 平铺改盒尺寸；平移只改摆放）。
@@ -14,23 +14,23 @@ extends QVoxModifier
 ## "对内容做一次变换"要回答的是同一组问题（顺序、旁通、撤销、落盘），分开存就等于两套答案。
 ##
 ## 【域恒为 VOXEL，且必然在 FIELD 段之后】它消费的是"已光栅化的当前累积结果"——
-## 连续距离场谈不上"重排到格点上"（体素一旦光栅化就回不到连续域，见 QVoxDomain）。
+## 连续距离场谈不上"重排到格点上"（体素一旦光栅化就回不到连续域，见 QVoxelDomain）。
 ##
 ## 【合成方式恒为「替换」】整块结果的盒尺寸 / 摆放由它自己决定，谈不上"并进已累积结果"；
-## 这条规则由 QVoxDomain.chain_errors 统一报出（重排型不是源，见 QVoxModifier.is_source）。
+## 这条规则由 QVoxelDomain.chain_errors 统一报出（重排型不是源，见 QVoxelModifier.is_source）。
 
 ## 体素重排算子。
 ##
-## 【挂核即校正 combine】同 QVoxVolumeModifier：本类唯一合法的合成方式是「替换」，钉在赋值处。
+## 【挂核即校正 combine】同 QVoxelVolumeModifier：本类唯一合法的合成方式是「替换」，钉在赋值处。
 @export var transform: PcgTransform:
 	set(v):
 		transform = v
-		combine = QVoxDomain.Combine.REPLACE
+		combine = QVoxelDomain.Combine.REPLACE
 
 
-## 便捷构造（见 QVoxVolumeModifier.of）。
-static func of(transform_: PcgTransform) -> QVoxTransformModifier:
-	var m := QVoxTransformModifier.new()
+## 便捷构造（见 QVoxelVolumeModifier.of）。
+static func of(transform_: PcgTransform) -> QVoxelTransformModifier:
+	var m := QVoxelTransformModifier.new()
 	m.transform = transform_
 	return m
 

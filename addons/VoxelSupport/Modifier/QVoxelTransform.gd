@@ -1,5 +1,5 @@
 @tool
-class_name QVoxVoxelTransform
+class_name QVoxelTransform
 extends RefCounted
 ## 整对象体素重排：轴置换 + 各轴取反（旋转 90° / 镜像的全部可能），外加平铺（复制族）。
 ##
@@ -37,22 +37,22 @@ func _init(p_perm := Vector3i(0, 1, 2), p_sign := Vector3i.ONE) -> void:
 # 构造：双射族（旋转 / 镜像）
 # ----------------------------------------------------------------------------
 
-static func identity() -> QVoxVoxelTransform:
-	return QVoxVoxelTransform.new()
+static func identity() -> QVoxelTransform:
+	return QVoxelTransform.new()
 
 
 ## 沿 axis 镜像（axis：0 = X，1 = Y，2 = Z）。网格尺寸不变。
-static func mirror(axis: int) -> QVoxVoxelTransform:
+static func mirror(axis: int) -> QVoxelTransform:
 	var s := [1, 1, 1]
 	s[axis] = -1
-	return QVoxVoxelTransform.new(Vector3i(0, 1, 2), Vector3i(s[0], s[1], s[2]))
+	return QVoxelTransform.new(Vector3i(0, 1, 2), Vector3i(s[0], s[1], s[2]))
 
 
 ## 绕 axis 轴转 90°（dir = +1 / -1 为两个方向）。两个非轴尺寸互换。
 ##
 ## 【轴对 (u, v) 取 (axis+1, axis+2) mod 3 的循环序】于是"绕 X 时 Y→Z"这类右手系约定
 ## 由公式统一给出，三个轴共用一个实现，不必三份手写的轴字母表（那种表迟早有一处写反）。
-static func rotate90(axis: int, dir: int) -> QVoxVoxelTransform:
+static func rotate90(axis: int, dir: int) -> QVoxelTransform:
 	var u := (axis + 1) % 3
 	var v := (axis + 2) % 3
 	var p := [0, 1, 2]
@@ -61,7 +61,7 @@ static func rotate90(axis: int, dir: int) -> QVoxVoxelTransform:
 	s[u] = dir
 	p[v] = u
 	s[v] = -dir
-	return QVoxVoxelTransform.new(Vector3i(p[0], p[1], p[2]), Vector3i(s[0], s[1], s[2]))
+	return QVoxelTransform.new(Vector3i(p[0], p[1], p[2]), Vector3i(s[0], s[1], s[2]))
 
 
 func is_identity() -> bool:

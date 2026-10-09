@@ -26,7 +26,7 @@ You can see the rendering effects of voxel models imported using this plugin in 
 ```
 VoxelData                    — voxel storage & editing (materials, chunk buffers)
   ├─ VoxelStream (@abstract)     — STORAGE: chunk-level persistence API (all @abstract)
-  │    ├─ QVoxStream             — single-file .qvox block-stream world storage (disk)
+  │    ├─ QVoxelStream             — single-file .qvx block-stream world storage (disk)
   │    └─ VoxelMemoryStream      — memory only (no persistence; a home for edits)
   └─ VoxelGenerator (@abstract)  — GENERATION: compute data from a key (no I/O, no state)
        └─ your subclass overrides @abstract `_generate_chunk()` / `_generate_chunk_lod()`
@@ -51,8 +51,8 @@ All mesh generation runs on background threads (`WorkerThreadPool`); the main th
 var data := VoxelData.new()
 # ... add materials, fill voxels (set_voxels / load_voxels_dict)
 
-var stream := QVoxStream.new()
-stream.file_path = "user://my_world/world.qvox"
+var stream := QVoxelStream.new()
+stream.file_path = "user://my_world/world.qvx"
 data.stream = stream
 
 var renderer := VoxelDestructible.new()
@@ -79,8 +79,8 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 
 # usage: the generator GENERATES, the stream STORES (swap freely, independently)
 var data := VoxelData.new()
-data.stream = QVoxStream.new()          # player edits go to disk, survive restart
-data.stream.file_path = "user://world_edits/world.qvox"
+data.stream = QVoxelStream.new()          # player edits go to disk, survive restart
+data.stream.file_path = "user://world_edits/world.qvx"
 data.generator = MyWorld.new()          # untouched parts generated from the key
 # assign to VoxelRenderer.data (recommend visibility_mode = STREAMING)
 ```
@@ -137,17 +137,17 @@ Related properties are **hidden in the Inspector automatically** when they have 
   the plugin logs one clear error and draws nothing; there is no GDScript fallback.
 - **Asset origin is one shared import option: `mesh/origin`** — default `world_origin` = keep the file's
   coordinates: a `.vox` stays where the author put it in the MagicaVoxel world (model `SIZE`-box centre
-  plus every `nTRN`/`NODE` transform), and a `.qvox` — which has no world layer — simply uses its stored
+  plus every `nTRN`/`NODE` transform), and a `.qvx` — which has no world layer — simply uses its stored
   coordinates as-is. This is also what the Mesh import always did, so upgrading never shifts existing
   assets and multi-model assemblies keep their relative layout. The Mesh and the Voxel Data importer
   read the same option with the same meaning, so a model lands in the same spot either way. Pick
   `bottom_center` for the usual game-asset pivot (X/Z centred on the content, bottom at `Y = 0`), or
   `content_center` for a three-axis content-centred origin (the same idea as Blender's
   "Center Origins" option).
-- **`.vox` and `.qvox` have separate asset adapters** — `.vox` (MagicaVoxel scene graph) uses
-  `VoxAsset.from_asset()`; `.qvox` (one `VOX0` per model + `NODE` placement) uses
-  `QVoxAsset.from_file()`. `VoxAsset.from_asset()` on a `.qvox` **returns null with an error**:
-  forcing the MagicaVoxel shape onto QVox silently dropped the `NODE` graph and every model after
+- **`.vox` and `.qvx` have separate asset adapters** — `.vox` (MagicaVoxel scene graph) uses
+  `VoxAsset.from_asset()`; `.qvx` (one `VOX0` per model + `NODE` placement) uses
+  `QVoxelAsset.from_file()`. `VoxAsset.from_asset()` on a `.qvx` **returns null with an error**:
+  forcing the MagicaVoxel shape onto QVX silently dropped the `NODE` graph and every model after
   the first. The import plugins dispatch by extension for you.
 
 ### Streaming demo

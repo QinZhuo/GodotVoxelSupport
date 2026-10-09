@@ -1,6 +1,6 @@
 @tool
-class_name QVoxModel
-extends QVoxNode
+class_name QVoxelModel
+extends QVoxelNode
 ## 模型 —— 树上的叶子，也是**唯一持有手绘体素**的节点（对标 MagicaVoxel 的「模型」、
 ## 作图软件里的「图层」）。
 ##
@@ -18,15 +18,15 @@ extends QVoxNode
 ## 【为什么是分块稀疏，而不是一整块 dense 数组】
 ##   ① 内存：512³ dense 是 5.4 亿格 ≈ 537 MB（int32），而实体往往只占其中少数几块；
 ##      分块稀疏只在"画到哪一块"时分配一块 32³（128 KB），空块根本不占内存。
-##   ② 一致性：`.qvox` 的 VOX0 本来就是"块坐标 → 块内缓冲"（QVoxSpec §5）。常驻内存用
+##   ② 一致性：`.qvx` 的 VOX0 本来就是"块坐标 → 块内缓冲"（QVoxelSpec §5）。常驻内存用
 ##      同一形状，落盘/读盘**零转换**（不必在保存时把 dense 切一遍，那正是双份布局的开端）。
-##   块内布局权威是 QVoxBlockCodec（block_of / local_index），本类不另写下标公式。
+##   块内布局权威是 QVoxelBlockCodec（block_of / local_index），本类不另写下标公式。
 
-## 本模型在文件里的 model_id（VOX0 块的键；NODE 节点按它回指）。由 QVoxWorld 分配。
+## 本模型在文件里的 model_id（VOX0 块的键；NODE 节点按它回指）。由 QVoxelWorld 分配。
 @export var model_id := 0
 
 
-## 本模型的节点类型（QVoxNode 的唯一抽象方法）。
+## 本模型的节点类型（QVoxelNode 的唯一抽象方法）。
 func kind() -> String:
 	return KIND_MODEL
 
@@ -43,13 +43,13 @@ func display_name() -> String:
 ## 只持有 32³"的流式架构天然冲突（插件注释里已承认过这个矛盾）。有界模型让矛盾消失。
 @export var grid_size := Vector3i(32, 32, 32)
 
-## 块边长 B（= HEAD 的 block_size）。世界级设定，由 QVoxWorld 在创建/加载时注入。
-@export var block_size := QVoxSpec.DEFAULT_BLOCK_SIZE
+## 块边长 B（= HEAD 的 block_size）。世界级设定，由 QVoxelWorld 在创建/加载时注入。
+@export var block_size := QVoxelSpec.DEFAULT_BLOCK_SIZE
 
 ## 手绘基础体素：块坐标（Vector3i）→ PackedInt32Array(B³，块内 ZXY，值 = 材质ID，0 = 空）。
 ##
 ## 【为什么不是 @export / 不进 .tres】几千万个 int 存成文本 .tres 是灾难。持久化由工程文件
-## 负责（QVoxWorld.to_document → QVoxFile.serialize），.tres 只当"参数容器"。
+## 负责（QVoxelWorld.to_document → QVoxelFile.serialize），.tres 只当"参数容器"。
 ## 【空块不存在】全零块 = 块坐标缺失（与文件里的"空块不写入"同一语义）。compact() 负责回收。
 var blocks: Dictionary = {}
 
@@ -83,11 +83,11 @@ func is_empty() -> bool:
 func get_voxel(x: int, y: int, z: int) -> int:
 	if not _in_bounds(x, y, z):
 		return 0
-	var bk := QVoxSpec.block_of(Vector3i(x, y, z), block_size)
+	var bk := QVoxelSpec.block_of(Vector3i(x, y, z), block_size)
 	var blk: Variant = blocks.get(bk)
 	if not (blk is PackedInt32Array):
 		return 0
-	return (blk as PackedInt32Array)[QVoxSpec.local_index(
+	return (blk as PackedInt32Array)[QVoxelSpec.local_index(
 			x - bk.x * block_size, y - bk.y * block_size, z - bk.z * block_size, block_size)]
 
 
@@ -128,8 +128,8 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 	var bs := block_size
 	var dx := dims.x
 	var dxy := dx * dims.y
-	var b0 := QVoxSpec.block_of(lo, bs)
-	var b1 := QVoxSpec.block_of(lo + dims - Vector3i.ONE, bs)
+	var b0 := QVoxelSpec.block_of(lo, bs)
+	var b1 := QVoxelSpec.block_of(lo + dims - Vector3i.ONE, bs)
 	for bz in range(b0.z, b1.z + 1):
 		for by in range(b0.y, b1.y + 1):
 			for bx in range(b0.x, b1.x + 1):
@@ -137,7 +137,7 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 				var blk: Variant = blocks.get(bk)
 				if not (blk is PackedInt32Array):
 					continue  # 未分配的块 = 全空，整块跳过
-				var o := QVoxSpec.block_origin(bk, bs)
+				var o := QVoxelSpec.block_origin(bk, bs)
 				# 该块与盒的交集（块内局部闭区间）
 				var l0 := Vector3i(maxi(lo.x - o.x, 0), maxi(lo.y - o.y, 0), maxi(lo.z - o.z, 0))
 				var l1 := Vector3i(mini(lo.x + dims.x - 1 - o.x, bs - 1),
@@ -149,7 +149,7 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 				for lz in range(l0.z, l1.z + 1):
 					for ly in range(l0.y, l1.y + 1):
 						var dst := base + l0.x + ly * dx + lz * dxy
-						var src := QVoxSpec.local_index(l0.x, ly, lz, bs)
+						var src := QVoxelSpec.local_index(l0.x, ly, lz, bs)
 						for lx in range(l0.x, l1.x + 1):
 							out[dst] = (blk as PackedInt32Array)[src]
 							dst += 1
@@ -164,7 +164,7 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 ## 于是"手绘为空"这个情形不必特判，也省掉一次无谓的全量分配 + 扫描（512³ = 537 MB）。
 ##
 ## 【但它不代表"链首没有左操作数"】链首那条的 combine 仍要作用在**手绘体素**上（见引擎文件头），
-## 故引擎在合并前会显式取一次本函数的结果当左操作数（QVoxEvalEngine._current）：若把
+## 故引擎在合并前会显式取一次本函数的结果当左操作数（QVoxelEvalEngine._current）：若把
 ## "空数组"直接当左操作数，UNION 会退化成 REPLACE（手绘石料凭空消失）、SUBTRACT 会退化成
 ## "挖不动"—— 恰恰是"手绘 + 程序化混着用"的两种用法。
 func to_volume() -> PackedInt32Array:
@@ -194,9 +194,9 @@ func set_block(block_key: Vector3i, buf: PackedInt32Array) -> void:
 		if blocks.erase(block_key):
 			base_revision += 1
 		return
-	if buf.size() != QVoxSpec.block_volume(block_size):
-		push_error("[QVox] 块缓冲长度必须为 %d，收到 %d"
-				% [QVoxSpec.block_volume(block_size), buf.size()])
+	if buf.size() != QVoxelSpec.block_volume(block_size):
+		push_error("[QVX] 块缓冲长度必须为 %d，收到 %d"
+				% [QVoxelSpec.block_volume(block_size), buf.size()])
 		return
 	blocks[block_key] = buf
 	base_revision += 1
@@ -268,7 +268,7 @@ func resize_grid(new_size: Vector3i) -> void:
 	blocks = {}
 	grid_size = new_size
 	for bk: Vector3i in old:
-		var o := QVoxSpec.block_origin(bk, block_size)
+		var o := QVoxelSpec.block_origin(bk, block_size)
 		if o.x >= new_size.x or o.y >= new_size.y or o.z >= new_size.z:
 			continue  # 整块在外：直接丢，不必逐格判
 		var blk: PackedInt32Array = old[bk]
@@ -280,7 +280,7 @@ func resize_grid(new_size: Vector3i) -> void:
 					var gz := o.z + lz
 					if gx >= new_size.x or gy >= new_size.y or gz >= new_size.z:
 						continue
-					var m := blk[QVoxSpec.local_index(lx, ly, lz, block_size)]
+					var m := blk[QVoxelSpec.local_index(lx, ly, lz, block_size)]
 					if m != 0:
 						_set_solid(gx, gy, gz, m)
 	base_revision += 1
@@ -305,15 +305,15 @@ func _write_box(a: Vector3i, b: Vector3i, material_id: int, data: PackedInt32Arr
 	var dx := dims.x
 	var dxy := dx * dims.y
 	var bs := block_size
-	var b0 := QVoxSpec.block_of(lo, bs)
-	var b1 := QVoxSpec.block_of(hi, bs)
+	var b0 := QVoxelSpec.block_of(lo, bs)
+	var b1 := QVoxelSpec.block_of(hi, bs)
 	var n := 0
 	var touched: Array[Vector3i] = []
 	for bz in range(b0.z, b1.z + 1):
 		for by in range(b0.y, b1.y + 1):
 			for bx in range(b0.x, b1.x + 1):
 				var bk := Vector3i(bx, by, bz)
-				var o := QVoxSpec.block_origin(bk, bs)
+				var o := QVoxelSpec.block_origin(bk, bs)
 				# 该块与盒的交集（块内局部闭区间）
 				var l0 := Vector3i(maxi(lo.x - o.x, 0), maxi(lo.y - o.y, 0), maxi(lo.z - o.z, 0))
 				var l1 := Vector3i(mini(hi.x - o.x, bs - 1), mini(hi.y - o.y, bs - 1),
@@ -323,11 +323,11 @@ func _write_box(a: Vector3i, b: Vector3i, material_id: int, data: PackedInt32Arr
 					if const_fill and material_id == 0:
 						continue  # 擦空一个未分配的块：本就不存在，不必创建
 					blk = PackedInt32Array()
-					blk.resize(QVoxSpec.block_volume(bs))
+					blk.resize(QVoxelSpec.block_volume(bs))
 				var base := (o.x - lo.x) + (o.y - lo.y) * dx + (o.z - lo.z) * dxy
 				for lz in range(l0.z, l1.z + 1):
 					for ly in range(l0.y, l1.y + 1):
-						var dst := QVoxSpec.local_index(l0.x, ly, lz, bs)
+						var dst := QVoxelSpec.local_index(l0.x, ly, lz, bs)
 						var src := base + l0.x + ly * dx + lz * dxy
 						for lx in range(l0.x, l1.x + 1):
 							var v := material_id if const_fill else data[src]
@@ -351,12 +351,12 @@ func _write_box(a: Vector3i, b: Vector3i, material_id: int, data: PackedInt32Arr
 
 
 func _set_solid(x: int, y: int, z: int, material_id: int) -> void:
-	var bk := QVoxSpec.block_of(Vector3i(x, y, z), block_size)
+	var bk := QVoxelSpec.block_of(Vector3i(x, y, z), block_size)
 	var blk := get_block(bk)
 	if blk.is_empty():
 		blk = PackedInt32Array()
-		blk.resize(QVoxSpec.block_volume(block_size))
-	blk[QVoxSpec.index_in_block(Vector3i(x, y, z), block_size)] = material_id
+		blk.resize(QVoxelSpec.block_volume(block_size))
+	blk[QVoxelSpec.index_in_block(Vector3i(x, y, z), block_size)] = material_id
 	blocks[bk] = blk
 
 

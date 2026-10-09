@@ -42,7 +42,7 @@ extends Resource
 #   脏账事件   mark_chunk_dirty / is_chunk_mesh_dirty / get_dirty_mesh_chunk_count /
 #              get_dirty_chunks / notify_changed
 #   存档生命周期 save_data / load_data / flush / bake_to / load_voxels_dict /
-#              from_voxel_data(静态) / from_qvox(静态)
+#              from_voxel_data(静态) / from_qvx(静态)
 #   连通塌落   flood_fill / find_connected / connectivity / neighbors /
 #              partition_connected(静态) / find_unsupported / find_unsupported_around
 #   数据源     set_stream / is_streaming / shift_origin / invalidate_chunk_source /
@@ -95,7 +95,7 @@ extends Resource
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
-## 数据层磁盘流（VoxelStream / QVoxStream）。非空时启用数据层按需加载：
+## 数据层磁盘流（VoxelStream / QVoxelStream）。非空时启用数据层按需加载：
 ##   - 内存只保留"已加载"的 chunk，其余数据由 stream 负责读盘（磁盘为权威）
 ##   - 修改过的 chunk 写回磁盘；变空时清盘；未修改且磁盘已有的可直接丢弃
 ##   - 访问 / 范围查询 / 破坏 / 网格生成会自动从磁盘加载所需 chunk（见各方法注释）
@@ -230,7 +230,7 @@ func invalidate_chunk_source(ck: Vector3i) -> void:
 ## 各自漏掉边界情形。本函数与 `get_voxels_in_box` / `remove_voxels_in_box` / `ensure_box_loaded`
 ## 同族：单块/单点能力 + 一个范围便利形式，范围形式只做换算与转发，语义一字不差。
 ##
-## 【典型调用方：编辑器的一笔手势】QVoxVoxelEditCommand 封口时给出 block 粒度的脏范围
+## 【典型调用方：编辑器的一笔手势】QVoxelEditCommand 封口时给出 block 粒度的脏范围
 ## （dirty_lo..dirty_hi），视口把它交给本函数即可；范围外的 chunk 缓冲保留旧内容 ——
 ## 那些内容对未编辑区域仍然正确，故不必整对象重算。
 func invalidate_chunk_source_range(lo: Vector3i, hi: Vector3i) -> int:
@@ -408,7 +408,7 @@ var _coarse_buffers: Array[Dictionary] = []
 ## 需降采样回退的粗 LOD block 记在 _dirty 的粗层账里（见 VoxelDirtyLedger.COARSE_MODIFIED）。
 ## LOD0 编辑影响该 block 时标记，下次渲染走降采样（合并 LOD0 数据）而非生成器。
 
-## 文件流（QVoxStream 无粗层生成器）的粗层数据从 LOD0 chunk 降采样生成，结果缓存到
+## 文件流（QVoxelStream 无粗层生成器）的粗层数据从 LOD0 chunk 降采样生成，结果缓存到
 ## _coarse_buffers（移动复用）并持久化到文件流（重启保留），避免每次渲染都重复降采样。
 ## 【账本不在这里】它的"在途去重 + 空结果重试计数"由 VoxelAsyncLoader 统一持有
 ## （begin_derived / end_derived / is_derived / note_derived_retry）——本类只负责构造快照、
@@ -444,7 +444,7 @@ const NEIGHBORS_6: Array[Vector3i] = VoxelConnectivity.NEIGHBORS_6
 # ----------------------------------------------------------------------------
 # 资产原点（导入选项 mesh/origin）—— 四条链路共用的唯一约定
 # ----------------------------------------------------------------------------
-## 导入时的**资产原点**模式。`.vox`/`.qvox` × mesh/data 四条链路全走同一套语义。
+## 导入时的**资产原点**模式。`.vox`/`.qvx` × mesh/data 四条链路全走同一套语义。
 ##
 ## 【为什么必须统一】同一个模型经 mesh 与 data 两条路径进场景，必须落在同一位置。此前
 ## mesh 路径保留 MagicaVoxel 的"作者摆放"（顶点从 SIZE 盒中心起算），data 路径把内容 AABB
@@ -461,7 +461,7 @@ const NEIGHBORS_6: Array[Vector3i] = VoxelConnectivity.NEIGHBORS_6
 ## "模型自己的 SIZE 盒中心落在世界原点"（MagicaVoxel 的默认摆放本就如此，所以单模型时
 ## "盒中心"与"世界原点"在数值上是同一个点），但多模型装配时位置来自**每个模型各自套自己的
 ## 节点变换**，整体并不居中——`demo/cars.vox` 的 8 个模型就是这种。
-## `.qvox` 没有"世界"这一层（体素坐标就是块坐标），此档对它即"文件里的坐标原样"：
+## `.qvx` 没有"世界"这一层（体素坐标就是块坐标），此档对它即"文件里的坐标原样"：
 ## 与 `.vox` 同一个意思——文件里是什么就是什么。
 ##
 ## 顺带一提，"原点该在哪"本就没有格式级定论：MagicaVoxel 自己的原点落在**包围盒中心、
@@ -485,7 +485,7 @@ enum OriginMode {
 ## 反过来"先 floor 再除"（`-floor(w)/2`）对奇数边长会平白多偏半格：既没对齐格点、又没居中。
 ## 本插件运行时以整数体素为单位（chunk 边界 = 32 的倍数），资产原点必须落在格点上，
 ## 否则模型与体素世界错相位。这也正是改造前 `.vox → data` 的取法（`(grid_size/2).floor()`）；
-## 而改造前 QVox 走的是较差的那版，统一时以本条为准。
+## 而改造前 QVX 走的是较差的那版，统一时以本条为准。
 ##
 ## `WORLD_ORIGIN` 返回零向量：文件里的摆放已体现在顶点坐标里，不该再动。
 static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
@@ -674,7 +674,7 @@ func is_chunk_loaded(chunk_key: Vector3i) -> bool:
 ## 该 chunk 是否**已存在流中**（纯存储事实，与"能否生成"无关）。
 ## 取代早先的 _persisted_chunks 镜像——那时它靠 save/erase 处手工同步，
 ## origin shift 一平移就与流的真实内容脱节（镜像的经典失效方式）。
-## 直接问流既是权威的，也是 O(1) 的（QVoxStream 的键索引常驻内存）。
+## 直接问流既是权威的，也是 O(1) 的（QVoxelStream 的键索引常驻内存）。
 func is_stored(chunk_key: Vector3i) -> bool:
 	return stream != null and stream.has_chunk(chunk_key, 0)
 
@@ -695,7 +695,7 @@ func get_vertical_half_span() -> int:
 ## 流式补建/网格生成前调用，保证后续读操作走内存数组。
 ##
 ## 两条路分开处理（这正是"存"与"造"分工的价值）：
-##   流里已存 → 同步直读。存储取数是确定的、快的（QVoxStream 索引常驻内存），
+##   流里已存 → 同步直读。存储取数是确定的、快的（QVoxelStream 索引常驻内存），
 ##             没有理由为此绕一趟异步队列。
 ##   只有生成器 → 交给异步。生成慢，而网格 / LOD halo 会成片调用它，
 ##             同步生成会把主线程卡死；就绪后由 _accept_chunk_buffer 回填。
@@ -970,8 +970,8 @@ func get_unloaded_chunk_count() -> int:
 func flush() -> void:
 	if stream == null:
 		return
-	# QVox 流：先注入材质调色板，使 .qvox 自带 MATE（文件自包含，P2 每条事实只存一次）
-	var qs := stream as QVoxStream
+	# QVX 流：先注入材质调色板，使 .qvx 自带 MATE（文件自包含，P2 每条事实只存一次）
+	var qs := stream as QVoxelStream
 	if qs != null:
 		qs.set_materials(materials)
 	for ck in _dirty.keys(0, VoxelDirtyLedger.PERSIST):
@@ -988,7 +988,7 @@ func flush() -> void:
 
 
 ## 把本数据层「程序化生成的有界模型」烘焙（冻结）为静态存档：逐 chunk 调用 generator，
-## 非空块写入 target（典型是新建的 QVoxStream → .qvox），材质调色板一并写入，最后 flush。
+## 非空块写入 target（典型是新建的 QVoxelStream → .qvx），材质调色板一并写入，最后 flush。
 ##
 ## 【用途】把 SDF / 蓝图模型"烧"成普通体素文件——之后加载它不再需要生成器与逐体素采样，
 ## 直接走既有 stream → 渲染 / 破坏 / 编辑链路（加载快、可手工再改、可当静态资产分发）。
@@ -1009,7 +1009,7 @@ func bake_to(target: VoxelStream) -> int:
 		push_error("[VoxelData] bake_to 需要有限 grid_size（无限世界无范围可烘焙）")
 		return -1
 	generator.set_grid_size(grid_size)
-	var qs := target as QVoxStream
+	var qs := target as QVoxelStream
 	if qs != null:
 		qs.set_materials(materials)
 	var last := VoxelChunk.chunk_of(grid_size - Vector3i.ONE)
@@ -1293,7 +1293,7 @@ func _can_mesh_lod_block_standalone(level: int, key: Vector3i) -> bool:
 func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
 	if has_lod_block(lod, chunk_key):
 		return
-	# 统一编排：流里已存（含 QVox 的粗层 CACH 缓存）→ 主线程直读；否则生成器可生成 → 后台生成。
+	# 统一编排：流里已存（含 QVX 的粗层 CACH 缓存）→ 主线程直读；否则生成器可生成 → 后台生成。
 	_async.request(chunk_key, lod)
 	# 粗层再兜底：两个数据源都没有（如纯文件流且没存过粗层缓存）→ 从 LOD0 降采样得到。
 	# 粗层本就是 LOD0 的派生数据，降采样是最保底的来源（结果同样落 CACH 缓存）。
@@ -1583,7 +1583,7 @@ static func _bounds_to_aabb(bounds: Array) -> AABB:
 ## 体素字典 `{Vector3i: 材质ID}` 的精确包围盒 `{"min": Vector3i, "max": Vector3i}`（含端点）；
 ## 空集合返回 `{}`。
 ##
-## **全项目唯一的"体素字典求界"实现**：`.vox`/`.qvox` 导入、原点偏移、网格生成都调它——
+## **全项目唯一的"体素字典求界"实现**：`.vox`/`.qvx` 导入、原点偏移、网格生成都调它——
 ## 同类公式各写一份必然漂移（本仓库已经因为"两条路径各有一套原点"出过一次 bug）。
 static func voxel_bounds(voxels: Dictionary) -> Dictionary:
 	if voxels.is_empty():
@@ -1941,7 +1941,7 @@ func _serialize_all_voxels() -> PackedInt32Array:
 	var flat := _serialize_voxels()
 	if stream == null:
 		return flat
-	# 存储流（QVoxStream）：合并已存但不在内存的 chunk（临时加载，不污染内存缓存）
+	# 存储流（QVoxelStream）：合并已存但不在内存的 chunk（临时加载，不污染内存缓存）
 	var extra: Array = []
 	for ck in stream.get_all_chunk_keys(0):
 		if not _chunk_buffers.has(ck):
@@ -1952,22 +1952,22 @@ func _serialize_all_voxels() -> PackedInt32Array:
 
 
 ## origin_mode 见 OriginMode（与 from_voxel_data 同一套语义与同一个默认值）。
-## QVox 的体素坐标就是文件里的块坐标（**不重映射**），因此这里只需写对 center_offset——
+## QVX 的体素坐标就是文件里的块坐标（**不重映射**），因此这里只需写对 center_offset——
 ## 渲染顶点 = (块坐标 + center_offset) * voxel_scale，结果与 .vox 路径逐体素一致。
-static func from_qvox(qvox: QVoxAsset, origin_mode: int = OriginMode.WORLD_ORIGIN) -> VoxelData:
+static func from_qvx(qvx: QVoxelAsset, origin_mode: int = OriginMode.WORLD_ORIGIN) -> VoxelData:
 	var res := VoxelData.new()
-	res.materials = qvox.materials
-	if qvox.is_block_importable():
-		var blocks: Dictionary = qvox.block_buffers()
+	res.materials = qvx.materials
+	if qvx.is_block_importable():
+		var blocks: Dictionary = qvx.block_buffers()
 		for key in blocks:
-			# duplicate：本资源随后会就地修改缓冲，不得与 QVoxAsset 共享
+			# duplicate：本资源随后会就地修改缓冲，不得与 QVoxelAsset 共享
 			res._install_block_buffer(key, (blocks[key] as PackedInt32Array).duplicate())
 	else:
-		var voxels: Dictionary = qvox.fused_voxels()
+		var voxels: Dictionary = qvx.fused_voxels()
 		for pos in voxels:
 			res._write_buffer_impl(pos, voxels[pos], false)
-	res.grid_size = qvox.grid_size()
-	res.center_offset = qvox.origin_offset(origin_mode)
+	res.grid_size = qvx.grid_size()
+	res.center_offset = qvx.origin_offset(origin_mode)
 	return res
 
 

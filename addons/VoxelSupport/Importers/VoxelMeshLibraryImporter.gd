@@ -44,19 +44,19 @@ func _get_priority() -> float:
 	return 1.5
 
 
-## .qvox 的 split_by_frame 会被当作 split_by_model 处理——QVox 的 frames 是**节点变换补丁**
-## 而非"整模型体素帧"，给不出 .vox 那种每帧一网格；frame_index 亦对 `.qvox` 无作用。
+## .qvx 的 split_by_frame 会被当作 split_by_model 处理——QVX 的 frames 是**节点变换补丁**
+## 而非"整模型体素帧"，给不出 .vox 那种每帧一网格；frame_index 亦对 `.qvx` 无作用。
 func _get_option_visibility(path: String, option_name: StringName, options: Dictionary) -> bool:
 	return super._get_option_visibility(path, option_name, options)
 
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var lib: MeshLibrary
-	if QVoxAsset.handles(source_file):
-		var qvox := QVoxAsset.from_file(source_file)
-		if qvox == null:
+	if QVoxelAsset.handles(source_file):
+		var qvx := QVoxelAsset.from_file(source_file)
+		if qvx == null:
 			return FAILED
-		lib = VoxelMeshGenerator.generate_mesh_library_from_qvox(qvox, options, source_file)
+		lib = VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, options, source_file)
 	else:
 		var voxel_data := VoxAsset.from_asset(source_file)
 		if voxel_data == null:

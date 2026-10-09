@@ -370,7 +370,7 @@ func process_deferred_chunks() -> void:
 ## 按相机距离管理 chunk 数据与网格。数据源分成两个**并列**的抽象，差异不再靠类型分支猜：
 ##   - generator（VoxelGenerator）：未存过的 chunk 后台确定性生成。
 ##     存过的（= 用户改过）必须优先从流取，否则重新生成会覆盖用户修改。
-##   - stream（VoxelStream）：已存的数据（QVoxStream 常驻内存索引 → 直读）。
+##   - stream（VoxelStream）：已存的数据（QVoxelStream 常驻内存索引 → 直读）。
 ## 统一流程：① poll 回填异步结果 → ② 距离内扫描缺失 chunk 提交（限量 / 降频）→
 ## ③ 卸载超范围网格与粗层数据块。
 ## "想要集合"统一 = 相机加载半径内缺失 chunk；存在性判定统一走 VoxelData.can_supply_chunk

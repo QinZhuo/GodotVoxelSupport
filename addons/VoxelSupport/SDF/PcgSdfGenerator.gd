@@ -18,7 +18,7 @@ extends VoxelGenerator
 ##
 ## 【职责边界】本生成器只做一件事：**把连续域采样成体素**。
 ## 风化 / 色阶 / 朝上染色是链上的通用体素域算子（PcgWeather / PcgSurfaceTint），
-## 走 QVoxModelGenerator 的"先取完整体积，再进链"路径。于是表面处理对所有形态来源
+## 走 QVoxelModelGenerator 的"先取完整体积，再进链"路径。于是表面处理对所有形态来源
 ## 一视同仁（SDF / WFC / 元胞 / L-系统都吃得到），顺序可在链上重排、旁通、叠加。
 ## 代价是有界模型要常驻一份完整体积 —— 细节算子需要**完整邻域**，按 chunk 懒算会在
 ## chunk 边界留下接缝。
@@ -50,7 +50,7 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 ## 整块体积光栅化：把一棵连续域表达式树采样成 [0, grid_size) 上的密集体积。
 ##
 ## 【纯几何】本函数只采样 field，不做任何表面处理 —— 风化 / 染色由调用方在链上接着做
-## （求值引擎的 SDF 生产步骤走的正是这里，见 QVoxEvalEngine）。
+## （求值引擎的 SDF 生产步骤走的正是这里，见 QVoxelEvalEngine）。
 static func rasterize_field(field_: Sdf, grid_size: Vector3i) -> PackedInt32Array:
 	var gen := PcgSdfGenerator.new()
 	gen.field = field_

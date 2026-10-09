@@ -35,7 +35,7 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"snapshot_chunks_halo",
 	&"crc32",
 	&"crc32_segments",
-	# QVox 块级编解码（原生）：pick+pack 一次完成，替代 GDScript 逐元素扫描
+	# QVX 块级编解码（原生）：pick+pack 一次完成，替代 GDScript 逐元素扫描
 	&"choose_and_pack",
 	&"pack_with_codec",
 	&"unpack_block",
@@ -128,7 +128,7 @@ static func generate_arrays_native(voxels: Dictionary, trans_flags: PackedByteAr
 	return inst.call(&"generate_arrays_native", voxels, trans_flags, scale, offset)
 
 
-## 块缓冲字典 → 网格 arrays（QVox 块级导入：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全在原生）。
+## 块缓冲字典 → 网格 arrays（QVX 块级导入：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全在原生）。
 ## 与 GDScript 侧 VoxelMeshGenerator.generate_arrays_from_chunks 逐位等价（后者保留为测试 oracle）。
 static func generate_arrays_from_chunks_native(chunks: Dictionary, trans_flags: PackedByteArray,
 		scale: float, offset: Vector3) -> Dictionary:
@@ -290,9 +290,9 @@ static func crc32_segments(data: PackedByteArray, offsets: PackedInt64Array,
 
 
 # ----------------------------------------------------------------------------
-# QVox 块级编解码（原生）
+# QVX 块级编解码（原生）
 # ----------------------------------------------------------------------------
-# 字节布局权威在 QVoxSpec / docs/QVOX_FORMAT.md；GDScript 侧的 QVoxBlockCodec.unpack 仍是
+# 字节布局权威在 QVoxelSpec / docs/QVX_FORMAT.md；GDScript 侧的 QVoxelBlockCodec.unpack 仍是
 # 参考实现，编解码往返由 test_qvox_format 做 oracle。
 
 ## 为一个块缓冲挑选体积最小的编解码**并直接产出负载**（一次完成，替代 pick+pack 两趟）。

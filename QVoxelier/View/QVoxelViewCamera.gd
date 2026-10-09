@@ -1,5 +1,5 @@
 @tool
-class_name QVoxViewCamera
+class_name QVoxelViewCamera
 extends Camera3D
 ## 建模视口的相机：轨道手感 + 投影模式 + 标准视图预设。
 ##

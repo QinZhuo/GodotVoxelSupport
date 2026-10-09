@@ -1,6 +1,6 @@
 extends TestCase
 
-## PCG 烘焙测试：把「有界生成器的产出」冻结成 .qvox 静态存档，重载后逐体素一致。
+## PCG 烘焙测试：把「有界生成器的产出」冻结成 .qvx 静态存档，重载后逐体素一致。
 ##
 ## 盯的是 PCG → 存储 这条接缝：生成器只在烘焙时跑一次，之后加载完全走既有 stream 通路
 ## （不再需要生成器、不再逐体素采样）。故这里的比对对象是"生成器直接产出"与
@@ -22,18 +22,18 @@ func cleanup() -> void:
 # ----------------------------------------------------------------------------
 
 func test_bake_then_reload_matches_generator() -> void:
-	var path := TEST_DIR + "/ball.qvox"
+	var path := TEST_DIR + "/ball.qvx"
 	var model := _make_model()
 	var produced := model.generator.generate(Vector3i.ZERO)
 
-	var stream := QVoxStream.new()
+	var stream := QVoxelStream.new()
 	stream.file_path = path
 	assert_eq(model.bake_to(stream), 1, "32³ 有界模型应写出 1 个非空 chunk")
 
 	# 重载侧：只给流、**不给生成器** —— 烘焙若漏写，这里必然读不到体素
 	var reload := VoxelData.new()
 	reload.materials = model.materials
-	var rs := QVoxStream.new()
+	var rs := QVoxelStream.new()
 	rs.file_path = path
 	reload.stream = rs
 
@@ -55,8 +55,8 @@ func test_bake_rejects_unbounded_data() -> void:
 	var model := _make_model()
 	model.grid_size = Vector3i.ZERO   # 无限世界：没有范围可烘焙
 
-	var stream := QVoxStream.new()
-	stream.file_path = TEST_DIR + "/reject.qvox"
+	var stream := QVoxelStream.new()
+	stream.file_path = TEST_DIR + "/reject.qvx"
 	# 该分支会 push_error（有意为之的 API 误用告警），故此处只看返回值
 	assert_eq(model.bake_to(stream), -1, "无限世界应拒绝烘焙")
 

@@ -11,7 +11,7 @@ extends QVoxelierPanel
 ## 3D 视口 —— 底边是唯一一条"最不想被拦住"的区域，全宽色板会在平板上平白吃掉一截画布。
 ##
 ## 【为什么选中靠描边而不是变色】色块颜色就是"这个材质长什么样"，若用变色表示选中，
-## 用户就看不出自己选的是什么颜色了。于是选中态用一圈加粗强调描边（见 QVoxUi.swatch）。
+## 用户就看不出自己选的是什么颜色了。于是选中态用一圈加粗强调描边（见 QVoxelUi.swatch）。
 ##
 ## 【与热键同源】数字键 1..8 与点击色块走的是同一个状态（App 的 _material_id），
 ## 由 App 在两边都调用 set_current() 回写 —— 不存在"点了色块但下次按键又跳回去"。
@@ -31,32 +31,32 @@ var _need := 0.0            # 色块行完整展开所需的宽度
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	offset_left = QVoxUi.space_m()
-	offset_right = -QVoxUi.space_m()
-	offset_bottom = -(QVoxUi.status_height() + QVoxUi.space_s())
+	offset_left = QVoxelUi.space_m()
+	offset_right = -QVoxelUi.space_m()
+	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
 	# 面板高度 = 色块行 + 上下内边距。此前多留了 20px，是给左侧那个竖排的"材质"小标题
 	# 兜底的；现在标题与色块同一行，这 20px 只剩一片空白。
-	offset_top = offset_bottom - (QVoxUi.hit_size() + 2 * QVoxUi.space_s())
+	offset_top = offset_bottom - (QVoxelUi.hit_size() + 2 * QVoxelUi.space_s())
 
 	# 中间层只负责"把调色板摆在底边正中"：它自己不吃事件，故色板两侧的底边
 	# 仍然是可点击的视口区域。
-	var center := QVoxUi.hbox()
+	var center := QVoxelUi.hbox()
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	center.alignment = BoxContainer.ALIGNMENT_CENTER
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(center)
 
-	var panel := QVoxUi.panel(QVoxUi.space_s())
+	var panel := QVoxelUi.panel(QVoxelUi.space_s())
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	center.add_child(panel)
 
-	var row := QVoxUi.hbox(QVoxUi.space_s())
+	var row := QVoxelUi.hbox(QVoxelUi.space_s())
 	panel.add_child(row)
 
 	# 当前材质：数字键与点击色块共用的状态回显。放在最左与色板相邻 —— 此前它孤零零挂在
 	# 整排色块的最右端，与"选中了哪个"隔着一整排，读起来像另一件事的读数。
 	# 宽度定死：面板是居中的，一旦从 9 切到 10 文字变宽，整排色块会被推着平移。
-	_current = QVoxUi.label("材质 —", QVoxUi.FONT_M, QVoxUi.TEXT)
+	_current = QVoxelUi.label("材质 —", QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	_current.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_current.custom_minimum_size.x = 60
 	row.add_child(_current)
@@ -65,10 +65,10 @@ func _build() -> void:
 	_scroll = ScrollContainer.new()
 	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_scroll.custom_minimum_size.y = QVoxUi.hit_size()
+	_scroll.custom_minimum_size.y = QVoxelUi.hit_size()
 	row.add_child(_scroll)
 
-	_row = QVoxUi.hbox(QVoxUi.SPACE_XS)
+	_row = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	_scroll.add_child(_row)
 
 
@@ -90,14 +90,14 @@ func set_palette(colors: Array[Color]) -> void:
 	_swatches.clear()
 
 	for id in range(1, colors.size()):
-		var b := QVoxUi.swatch(colors[id], "材质 %d · %s" % [id, colors[id].to_html(false)])
+		var b := QVoxelUi.swatch(colors[id], "材质 %d · %s" % [id, colors[id].to_html(false)])
 		b.button_group = _group
 		var captured := id
 		b.toggled.connect(func(on: bool): if on: material_selected.emit(captured))
 		_swatches[id] = b
 		_row.add_child(b)
 
-	_need = maxf(float(colors.size() - 1) * (QVoxUi.hit_size() + QVoxUi.SPACE_XS) - QVoxUi.SPACE_XS, QVoxUi.hit_size())
+	_need = maxf(float(colors.size() - 1) * (QVoxelUi.hit_size() + QVoxelUi.SPACE_XS) - QVoxelUi.SPACE_XS, QVoxelUi.hit_size())
 	_clamp_width()
 
 
@@ -120,7 +120,7 @@ func _clamp_width() -> void:
 	# 色板条可用宽度 = 面板总宽 − 左侧"材质 N"标签 − 面板左右内边距 − 标签与色板间的间距。
 	# **这四样都得减掉**：只减内边距的话，面板会比可用宽度更宽，被顶出屏幕右缘（色块被裁一截）。
 	# 再取 PALETTE_MAX_W 为上限 —— 宽屏上色板也不该铺满整条底边（底边要尽量透给 3D 视口）。
-	var chrome := 3.0 * QVoxUi.space_s() + _current.custom_minimum_size.x
+	var chrome := 3.0 * QVoxelUi.space_s() + _current.custom_minimum_size.x
 	var avail := maxf(size.x - chrome, 200.0)
 	_scroll.custom_minimum_size.x = minf(_need, minf(PALETTE_MAX_W, avail))
 

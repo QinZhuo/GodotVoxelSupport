@@ -48,30 +48,30 @@ var _view := VIEW_PAINT
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	offset_bottom = QVoxUi.bar_height()
+	offset_bottom = QVoxelUi.bar_height()
 
 	# 应用栏贴屏幕顶边，故圆角留空、只做上下的层次（描边留给左右两侧的浮层面板）。
 	var bar := PanelContainer.new()
 	bar.add_theme_stylebox_override("panel",
-			QVoxUi.box(QVoxUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxUi.space_m(), 0))
+			QVoxelUi.box(QVoxelUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxelUi.space_m(), 0))
 	# 非容器父节点下的子控件不会自动撑满：不写这一句，栏底只会包住按钮那一段宽度，
 	# 而工程名（靠 EXPAND_FILL 抢剩余空间）会因为没有剩余空间被压成 1 像素宽 —— 看不见。
 	bar.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(bar)
 
-	var row := QVoxUi.hbox(QVoxUi.SPACE_XS)
+	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	bar.add_child(row)
 
 	# ── 文件组 ──
 	row.add_child(_action("新建", "清空并新建一个模型", func(): new_requested.emit()))
-	row.add_child(_action("打开", "打开一个 .qvox 工程（也可直接把文件拖进窗口）",
+	row.add_child(_action("打开", "打开一个 .qvx 工程（也可直接把文件拖进窗口）",
 			func(): open_requested.emit()))
-	# 保存是主操作：整条栏里唯一带强调描边与强调字的按钮（样式见 QVoxUi.VARIATION_ACCENT）。
+	# 保存是主操作：整条栏里唯一带强调描边与强调字的按钮（样式见 QVoxelUi.VARIATION_ACCENT）。
 	row.add_child(_action("保存", "保存工程（Ctrl+S）", func(): save_requested.emit(),
-			QVoxUi.VARIATION_ACCENT))
+			QVoxelUi.VARIATION_ACCENT))
 	row.add_child(_action("另存", "另存为新文件（Ctrl+Shift+S）", func(): save_as_requested.emit()))
 
-	_project = QVoxUi.label("未命名", QVoxUi.FONT_M, QVoxUi.TEXT_DIM)
+	_project = QVoxelUi.label("未命名", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_project.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_project.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -88,14 +88,14 @@ func _build() -> void:
 
 	# 历史与视图是两类东西（改数据 / 只看不改），隔一条线比让它们连成一片好读。
 	# 左侧不再加线：居中的工程名本身就是文件组与历史组之间的分隔。
-	row.add_child(QVoxUi.vdivider())
+	row.add_child(QVoxelUi.vdivider())
 	row.add_child(_view_group())
 	_sync_project()
 
 
 ## 视图组：导航 / 取景 / 缩放。触摸屏上这三件分别顶替中键、Home 键与滚轮。
 func _view_group() -> HBoxContainer:
-	var g := QVoxUi.hbox(QVoxUi.SPACE_XS)
+	var g := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 
 	# 导航 / 平移同组互斥，且允许"再按一次取消" —— 于是"不用视角工具"也是一个能走到的状态，
 	# 不必为它再加第三个按钮。
@@ -110,7 +110,7 @@ func _view_group() -> HBoxContainer:
 	g.add_child(_action("−", "缩小", func(): zoom_requested.emit(-1.0)))
 	g.add_child(_action("+", "放大", func(): zoom_requested.emit(1.0)))
 
-	_help = _action("?", "查看鼠标与触摸的操作说明", func(): pass, QVoxUi.VARIATION_TOOL)
+	_help = _action("?", "查看鼠标与触摸的操作说明", func(): pass, QVoxelUi.VARIATION_TOOL)
 	_help.toggle_mode = true
 	_help.toggled.connect(func(on: bool): help_toggled.emit(on))
 	g.add_child(_help)
@@ -119,7 +119,7 @@ func _view_group() -> HBoxContainer:
 
 ## 视图模式开关：同组的按钮彼此互斥（含"全都不按 = 绘制"）。
 func _mode_toggle(text: String, tooltip: String, group: ButtonGroup, mode: int) -> Button:
-	var b := _action(text, tooltip, func(): pass, QVoxUi.VARIATION_TOOL)
+	var b := _action(text, tooltip, func(): pass, QVoxelUi.VARIATION_TOOL)
 	b.toggle_mode = true
 	b.button_group = group
 	b.toggled.connect(func(_on: bool): _emit_view_mode.call_deferred())
@@ -180,8 +180,8 @@ func set_help(on: bool) -> void:
 ## 宽度也钉在 MIN_TOUCH 以上 —— "−/+/?" 这类单字按钮若按文字宽度算只有 22~32 像素，
 ## 鼠标够用、手指却点不准；钉住下限后所有栏内按钮都是 ≥44×44 的可点面。
 func _action(text: String, tooltip: String, cb: Callable, variation := &"") -> Button:
-	var b := QVoxUi.button(text, tooltip, variation)
-	b.custom_minimum_size = Vector2(QVoxUi.hit_size(), QVoxUi.bar_height() - QVoxUi.space_s())
+	var b := QVoxelUi.button(text, tooltip, variation)
+	b.custom_minimum_size = Vector2(QVoxelUi.hit_size(), QVoxelUi.bar_height() - QVoxelUi.space_s())
 	b.pressed.connect(cb)
 	return b
 
@@ -195,4 +195,4 @@ func _sync_project() -> void:
 	# 常态用正文色而不是弱色：它是这条栏上唯一"是什么"的信息，此前弱色让它读起来像占位符。
 	# 变脏才升到强调色 —— 于是强调色仍然只承担"状态"这一件事。
 	_project.add_theme_color_override("font_color",
-			QVoxUi.ACCENT if _project_dirty else QVoxUi.TEXT)
+			QVoxelUi.ACCENT if _project_dirty else QVoxelUi.TEXT)

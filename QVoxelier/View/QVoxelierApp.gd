@@ -5,9 +5,9 @@ extends Node3D
 ##
 ## 【它只做三件事】
 ##   ① 装配：新建世界/对象 → 建会话 → 把显示层交给渲染器、把网格交给地板、把会话交给状态栏；
-##   ② 翻译：鼠标事件 → 相机射线 → 网格拾取 → `QVoxEditSession` 的手势（begin/drag/release）；
+##   ② 翻译：鼠标事件 → 相机射线 → 网格拾取 → `QVoxelEditSession` 的手势（begin/drag/release）；
 ##   ③ 快捷键：工具表里的热键切笔、[ ] 改笔刷、Ctrl+Z / Ctrl+Shift+Z 撤销重做、Esc 取消、Home 取景；
-##      工程文件 Ctrl+S / Ctrl+Shift+S / Ctrl+O（`.qvox` 也能直接拖进窗口）。
+##      工程文件 Ctrl+S / Ctrl+Shift+S / Ctrl+O（`.qvx` 也能直接拖进窗口）。
 ##
 ## 【快捷键是加速器，不是入口】本应用要同时跑在平板（无键盘 / 无中键 / 无滚轮 / 无右键）与桌面，
 ## 于是每个动作都先在界面上有一个按钮，键盘只让熟练用户少点两下 —— 按钮与快捷键改的是**同一份状态**
@@ -38,8 +38,8 @@ extends Node3D
 @export var max_brush_size := 16
 
 @onready var model: VoxelRenderer = $Model
-@onready var camera: QVoxViewCamera = $Camera
-@onready var grid_floor: QVoxGridFloor = $Model/Floor
+@onready var camera: QVoxelViewCamera = $Camera
+@onready var grid_floor: QVoxelGridFloor = $Model/Floor
 @onready var hud: QVoxelierHud = $Hud
 
 ## 应用栏 / 工具坞 / 调色板：**在代码里建**而不是摆进 .tscn —— 它们的内容完全由运行时数据决定
@@ -57,22 +57,22 @@ var _inspector_section: QVoxelierInspectorSection
 var _confirm: ConfirmationDialog
 
 ## 参数面板当前绑定的修改器（选中树上某条修改器时置入，用于撤销 / 重做后重绑）。
-var _modifier: QVoxModifier
+var _modifier: QVoxelModifier
 ## 该修改器的宿主节点（改参数的命令要挂在它的 content_changed 上标脏）。
-var _modifier_owner: QVoxNode
+var _modifier_owner: QVoxelNode
 
 ## 非活动对象的渲染节点容器：多对象世界里只有"当前对象"用 model，其余挂在这里。
 ## （见 _rebuild_view —— 切换活动对象只换 model.data，其余渲染器复用。）
 var _extra_root: Node3D
-## 每个对象一条展示会话：model_id → QVoxEditSession。**活动那条就是 session**。
+## 每个对象一条展示会话：model_id → QVoxelEditSession。**活动那条就是 session**。
 ## 非活动会话不接鼠标，只负责把它那份 VoxelData 喂给对应渲染器。
 var _sessions: Dictionary = {}
 ## 非活动对象的渲染器：model_id → VoxelRenderer。
 var _display: Dictionary = {}
 
 ## 当前世界与编辑会话（装配产物；换模型时整体重建）。
-var world: QVoxWorld
-var session: QVoxEditSession
+var world: QVoxelWorld
+var session: QVoxelEditSession
 
 ## 当前工程文件路径（空 = 还没存过盘的新工程，"保存"会转成"另存为"）。
 var project_path := ""
@@ -96,9 +96,9 @@ var _dirty := false
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
 var _eyedropper := false
 ## 正在进行的改色手势对应的属性命令（松手时封口入栈；见 QVoxelierColorSection 的"手势即命令"）。
-var _color_cmd: QVoxPropertyCommand
+var _color_cmd: QVoxelPropertyCommand
 ## 正在进行的"改修改器参数"手势对应的属性命令（同上，只是目标换成链上的某条条目）。
-var _prop_cmd: QVoxPropertyCommand
+var _prop_cmd: QVoxelPropertyCommand
 
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
@@ -216,7 +216,7 @@ func _build_ui() -> void:
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
 func new_model(grid := Vector3i.ZERO) -> void:
 	var g: Vector3i = grid if grid.x > 0 and grid.y > 0 and grid.z > 0 else grid_size
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	for c in default_palette:
 		w.add_material(c)
 	_install(w, w.create_model("Model", g))
@@ -227,17 +227,17 @@ func new_model(grid := Vector3i.ZERO) -> void:
 
 ## 装配：世界 + 待编辑对象 → 会话 / 渲染器 / 地板 / 状态栏。
 ## **新建与打开共用这一条路径** —— 两套初始化迟早会分叉出"新建能画、打开画不了"这类怪病。
-func _install(w: QVoxWorld, obj: QVoxModel) -> void:
+func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 	world = w
 	# 每个对象一条展示会话：活动那条随后由 _activate 选出，其余只喂渲染器
 	# （理由见 _sessions 的注释 —— 多对象世界才能"看见全部、只编辑一个"）。
 	_sessions.clear()
 	for o in w.all_models():
 		if o != null:
-			_sessions[o.model_id] = QVoxEditSession.create_for(o, w)
+			_sessions[o.model_id] = QVoxelEditSession.create_for(o, w)
 	for s in _sessions.values():
-		(s as QVoxEditSession).request_render_update = model.request_update
-		(s as QVoxEditSession).history.changed.connect(_on_history_changed)
+		(s as QVoxelEditSession).request_render_update = model.request_update
+		(s as QVoxelEditSession).history.changed.connect(_on_history_changed)
 	_material_id = 1
 	_stroke = false
 	_erase = false
@@ -329,8 +329,8 @@ func _rebuild_view() -> void:
 			_extra_root.add_child(r)
 			r.voxel_scale = model.voxel_scale
 			r.visibility_mode = VoxelRenderer.VisibilityMode.FULL
-			r.data = (_sessions[id] as QVoxEditSession).data
-			(_sessions[id] as QVoxEditSession).request_render_update = r.request_update
+			r.data = (_sessions[id] as QVoxelEditSession).data
+			(_sessions[id] as QVoxelEditSession).request_render_update = r.request_update
 			_display[id] = r
 		r.visible = shown
 
@@ -338,7 +338,7 @@ func _rebuild_view() -> void:
 
 
 ## 取景：把"有东西可落笔"的范围落进画面（新建 / 打开 / Home 键）。
-## 空图时唯一能落笔的是网格底面（`QVoxGridPick` 的落笔面），所以对准底面 —— 若照搬"框住整块
+## 空图时唯一能落笔的是网格底面（`QVoxelGridPick` 的落笔面），所以对准底面 —— 若照搬"框住整块
 ## 32³ 网格"，默认 25° 视角下屏幕上半尽是空体积，点正中只会换来一句"这儿落不了笔"。
 func frame_view() -> void:
 	if session == null:
@@ -456,18 +456,18 @@ func _pressed(e: InputEventKey, action: StringName) -> bool:
 
 ## 热键切笔：与点工具坞走同一条 `_set_tool`，于是按钮高亮与提示文案不可能与实况不一致。
 func _switch_by_hotkey(key: Key) -> void:
-	for row in QVoxBrushTool.MODES:
+	for row in QVoxelBrushTool.MODES:
 		if row.hotkey == key:
 			_set_tool(row.mode)
 			return
 
 
 ## 把屏幕坐标解成"这一次落笔打在哪"：相机射线 → 体素空间 → 网格拾取（含空图落在地板上）。
-func _pick_at(screen: Vector2) -> QVoxBrushTool.Pick:
+func _pick_at(screen: Vector2) -> QVoxelBrushTool.Pick:
 	var scale := model.voxel_scale
 	var origin: Vector3 = model.to_local(camera.project_ray_origin(screen)) / scale
 	var dir: Vector3 = model.global_transform.basis.inverse() * camera.project_ray_normal(screen)
-	var info := QVoxGridPick.hit(session.data, origin, dir, session.output_size())
+	var info := QVoxelGridPick.hit(session.data, origin, dir, session.output_size())
 	return session.pick_from_hit(info, _erasing(), _material_id)
 
 
@@ -615,34 +615,34 @@ func _apply_symmetry() -> void:
 # ----------------------------------------------------------------------------
 # 修改器链（右侧抽屉·层级组挂链 + 参数组改参数）
 # ----------------------------------------------------------------------------
-# 旋转 / 镜像 / 平铺不再是"一次性重写整片网格"的动作，而是链上一条 QVoxTransformModifier。
+# 旋转 / 镜像 / 平铺不再是"一次性重写整片网格"的动作，而是链上一条 QVoxelTransformModifier。
 # 于是本段只剩三件事：把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"，
-# 并在动手前用 PcgTransform.within_budget 拦一次（那条命令本身在 QVoxPropertyCommand）。
+# 并在动手前用 PcgTransform.within_budget 拦一次（那条命令本身在 QVoxelPropertyCommand）。
 
 
 ## 往 node 的链上追加一条修改器（一条可撤销的属性命令）。
 ##
 ## 【为什么先造条目再追加，而不是把"算子 + 合成方式"传进来】条目自带开关与合成方式，
 ## 而这些属于修改器而不属于算子（同一棵 Sdf 树既能被并进去、也能被减掉），
-## 故由 QVoxModifierSerializer.new_modifier 造空条目、本处填好默认核，见 QVoxNode.add_modifier。
+## 故由 QVoxelModifierSerializer.new_modifier 造空条目、本处填好默认核，见 QVoxelNode.add_modifier。
 ##
 ## 【为什么默认核是"镜像 X"而不是空】空条目求值为恒等 —— 挂上去画面纹丝不动，
 ## 用户会以为按钮坏了。镜像既是重排（看得出效果），又不改盒尺寸（不会突然撑大网格）。
-func _add_modifier(node: QVoxNode, kind: String) -> void:
+func _add_modifier(node: QVoxelNode, kind: String) -> void:
 	if world == null or session == null or node == null:
 		return
-	var m := QVoxModifierSerializer.new_modifier(kind)
+	var m := QVoxelModifierSerializer.new_modifier(kind)
 	if m == null:
 		return
-	if kind == QVoxModifier.KIND_TRANSFORM:
-		(m as QVoxTransformModifier).transform = PcgTransform.mirror(0)
+	if kind == QVoxelModifier.KIND_TRANSFORM:
+		(m as QVoxelTransformModifier).transform = PcgTransform.mirror(0)
 	var too_big := _over_budget(node, m)
 	if too_big != Vector3i.ZERO:
 		hud.flash("挂上「%s」会把网格撑到 %d×%d×%d，超过 %d 格的上限，未执行"
 				% [m.display_name(), too_big.x, too_big.y, too_big.z,
 						PcgTransform.MAX_OUTPUT_VOXELS])
 		return
-	var cmd := QVoxPropertyCommand.begin(node, &"modifiers", node, "挂修改器 %s" % m.display_name())
+	var cmd := QVoxelPropertyCommand.begin(node, &"modifiers", node, "挂修改器 %s" % m.display_name())
 	node.add_modifier(m)
 	if not cmd.commit():
 		return
@@ -653,13 +653,13 @@ func _add_modifier(node: QVoxNode, kind: String) -> void:
 
 
 ## 从链上移除第 index 条（同样只记一条属性命令 —— modifiers 就是一个 @export 数组）。
-func _remove_modifier(node: QVoxNode, index: int) -> void:
+func _remove_modifier(node: QVoxelNode, index: int) -> void:
 	if world == null or session == null or node == null:
 		return
 	if index < 0 or index >= node.modifiers.size():
 		return
-	var m: QVoxModifier = node.modifiers[index]
-	var cmd := QVoxPropertyCommand.begin(node, &"modifiers", node, "移除修改器 %s" % m.display_name())
+	var m: QVoxelModifier = node.modifiers[index]
+	var cmd := QVoxelPropertyCommand.begin(node, &"modifiers", node, "移除修改器 %s" % m.display_name())
 	node.remove_modifier(index)
 	if not cmd.commit():
 		return
@@ -672,15 +672,15 @@ func _remove_modifier(node: QVoxNode, index: int) -> void:
 
 ## 旁通 / 启用链上第 index 条。**不删条目** —— 与 Blender 的修改器眼睛同义：
 ## 试比较两种参数配置时不必反复删了重加。
-func _set_modifier_enabled(node: QVoxNode, index: int, on: bool) -> void:
+func _set_modifier_enabled(node: QVoxelNode, index: int, on: bool) -> void:
 	if world == null or session == null or node == null:
 		return
 	if index < 0 or index >= node.modifiers.size():
 		return
-	var m: QVoxModifier = node.modifiers[index]
+	var m: QVoxelModifier = node.modifiers[index]
 	if m.enabled == on:
 		return
-	var cmd := QVoxPropertyCommand.apply(m, &"enabled", on, node,
+	var cmd := QVoxelPropertyCommand.apply(m, &"enabled", on, node,
 			"%s修改器 %s" % ["启用" if on else "旁通", m.display_name()])
 	if cmd != null:
 		session.history.push(cmd)
@@ -688,25 +688,25 @@ func _set_modifier_enabled(node: QVoxNode, index: int, on: bool) -> void:
 
 
 ## 选中链上某条修改器 → 参数组显示它的参数。
-func _on_modifier_selected(node: QVoxNode, index: int) -> void:
+func _on_modifier_selected(node: QVoxelNode, index: int) -> void:
 	if node == null or index < 0 or index >= node.modifiers.size():
 		return
 	_select_modifier(node, node.modifiers[index])
 
 
 ## 把参数组绑到 m（null = 清空）。宿主节点一并记下 —— 改参数的命令要挂在它的 content_changed 上。
-func _select_modifier(node: QVoxNode, m: QVoxModifier) -> void:
+func _select_modifier(node: QVoxelNode, m: QVoxelModifier) -> void:
 	_modifier = m
 	_modifier_owner = node if m != null else null
 	_inspector_section.bind(m)
 
 
 ## 改参数的手势三段：开始（抓改前值）→ 连续写（不入栈，实时预览）→ 结束（封口入栈）。
-## 与改色 / 体素笔同一时间线（见 QVoxPropertyCommand 的"手势即命令"）。
+## 与改色 / 体素笔同一时间线（见 QVoxelPropertyCommand 的"手势即命令"）。
 func _begin_prop_edit(target: Object, prop: StringName) -> void:
 	if session == null or _modifier_owner == null or target == null:
 		return
-	_prop_cmd = QVoxPropertyCommand.begin(target, prop, _modifier_owner, "修改器参数")
+	_prop_cmd = QVoxelPropertyCommand.begin(target, prop, _modifier_owner, "修改器参数")
 
 
 func _live_prop(target: Object, prop: StringName, value: Variant) -> void:
@@ -742,7 +742,7 @@ func _chain_changed() -> void:
 
 ## 让参数组重看一眼数据。**两个出口共用**：链变了（_chain_changed）与撤销 / 重做（_on_history_changed）
 ## —— 两者都会把数据改到"面板控件被建出来时"之外的状态：
-##   · 选中算子会顺带校正合成方式（见 QVoxVolumeModifier.detail），而下拉框还停在旧值；
+##   · 选中算子会顺带校正合成方式（见 QVoxelVolumeModifier.detail），而下拉框还停在旧值；
 ##   · 撤销一次改参数会把值退回去，滑条却还停在拖完的位置；
 ##   · 撤销掉"挂修改器"会让绑着的那条**不在链上**了 —— 再改它就是写进孤儿，还白占一次撤销。
 ## 故这里一并做"清理 + 重绑"：绑着的那条已不在链上就清空，否则重绑。
@@ -765,7 +765,7 @@ func _rebind_inspector() -> void:
 ## 超限时"静静地原样返回"——于是 UI 看到的尺寸与没挂时一样，压根发现不了超限。
 ## 而界面上先拦一次只是为了给一句人话；真正生效的那道闸在 PcgTransform（撤销 / 读盘也过它），
 ## 判据共用 within_budget，故"提示"与"实际生效"不会说两套话。
-func _over_budget(node: QVoxNode, candidate: QVoxModifier) -> Vector3i:
+func _over_budget(node: QVoxelNode, candidate: QVoxelModifier) -> Vector3i:
 	var t := candidate.op() as PcgTransform
 	if t == null:
 		return Vector3i.ZERO
@@ -775,15 +775,15 @@ func _over_budget(node: QVoxNode, candidate: QVoxModifier) -> Vector3i:
 
 ## node 当前的输出盒尺寸。模型问会话（与显示层同源，且那份结果本来就算过）；
 ## 组要问引擎 —— 组的输入盒是"子树并集包围盒"，那是求值的产物，没有更便宜的来源。
-func _node_output_size(node: QVoxNode) -> Vector3i:
+func _node_output_size(node: QVoxelNode) -> Vector3i:
 	if node == null:
 		return Vector3i.ZERO
 	if node.is_model():
-		var s: QVoxEditSession = _sessions.get((node as QVoxModel).model_id)
-		return s.output_size() if s != null else (node as QVoxModel).grid_size
-	# ctx 的 grid_size 随便给 —— 组求值第一件事就是把它换成"子树并集包围盒"（见 QVoxEvalEngine）。
-	var ctx := QVoxEvalContext.make(Vector3i.ONE, 0)
-	return QVoxEvalEngine.evaluate_node(node, ctx, null, null).grid_size
+		var s: QVoxelEditSession = _sessions.get((node as QVoxelModel).model_id)
+		return s.output_size() if s != null else (node as QVoxelModel).grid_size
+	# ctx 的 grid_size 随便给 —— 组求值第一件事就是把它换成"子树并集包围盒"（见 QVoxelEvalEngine）。
+	var ctx := QVoxelEvalContext.make(Vector3i.ONE, 0)
+	return QVoxelEvalEngine.evaluate_node(node, ctx, null, null).grid_size
 
 
 ## 视图模式：绘制 / 转视角 / 平移。触摸屏上没有中键，故左键会被借去当视角键，
@@ -814,7 +814,7 @@ func _set_view_mode(mode: int) -> void:
 func _set_lens(mode: int) -> void:
 	camera.set_lens(mode)
 	_view_bar.set_lens(mode)
-	hud.flash("镜头：%s" % QVoxViewCamera.LENS_NAMES[mode])
+	hud.flash("镜头：%s" % QVoxelViewCamera.LENS_NAMES[mode])
 
 
 ## 切标准视角。**三个入口共用这一条路径**：视图栏七个预设、朝向指示器点轴、小键盘 ——
@@ -822,10 +822,10 @@ func _set_lens(mode: int) -> void:
 func _apply_view(view: int) -> void:
 	camera.apply_view(view)
 	_view_bar.set_view(view)
-	hud.flash("%s视图" % QVoxViewCamera.VIEW_NAMES[view])
+	hud.flash("%s视图" % QVoxelViewCamera.VIEW_NAMES[view])
 
 
-## 网格线显隐（视图栏开关）。只摘格线、保留外框 —— 外框是"合法范围"的告知，见 QVoxGridFloor。
+## 网格线显隐（视图栏开关）。只摘格线、保留外框 —— 外框是"合法范围"的告知，见 QVoxelGridFloor。
 func _set_grid_lines(on: bool) -> void:
 	grid_floor.set_grid_lines_visible(on)
 	_view_bar.set_grid_lines(on)
@@ -838,23 +838,23 @@ func _set_grid_lines(on: bool) -> void:
 ## 返回是否命中，供 _on_key 的 elif 链判断。
 func _numpad_view(key: Key) -> bool:
 	match key:
-		KEY_KP_1: _apply_view(QVoxViewCamera.View.FRONT)
-		KEY_KP_2: _apply_view(QVoxViewCamera.View.BACK)
-		KEY_KP_3: _apply_view(QVoxViewCamera.View.RIGHT)
-		KEY_KP_4: _apply_view(QVoxViewCamera.View.LEFT)
-		KEY_KP_7: _apply_view(QVoxViewCamera.View.TOP)
-		KEY_KP_8: _apply_view(QVoxViewCamera.View.BOTTOM)
-		KEY_KP_0: _apply_view(QVoxViewCamera.View.ISO)
-		KEY_KP_5: _set_lens(QVoxViewCamera.Lens.ORTHO
-				if camera.lens == QVoxViewCamera.Lens.PERSPECTIVE
-				else QVoxViewCamera.Lens.PERSPECTIVE)
+		KEY_KP_1: _apply_view(QVoxelViewCamera.View.FRONT)
+		KEY_KP_2: _apply_view(QVoxelViewCamera.View.BACK)
+		KEY_KP_3: _apply_view(QVoxelViewCamera.View.RIGHT)
+		KEY_KP_4: _apply_view(QVoxelViewCamera.View.LEFT)
+		KEY_KP_7: _apply_view(QVoxelViewCamera.View.TOP)
+		KEY_KP_8: _apply_view(QVoxelViewCamera.View.BOTTOM)
+		KEY_KP_0: _apply_view(QVoxelViewCamera.View.ISO)
+		KEY_KP_5: _set_lens(QVoxelViewCamera.Lens.ORTHO
+				if camera.lens == QVoxelViewCamera.Lens.PERSPECTIVE
+				else QVoxelViewCamera.Lens.PERSPECTIVE)
 		_:
 			return false
 	return true
 
 
 # ----------------------------------------------------------------------------
-# 工程文件（.qvox）
+# 工程文件（.qvx）
 # ----------------------------------------------------------------------------
 
 ## 新建 / 打开都会**整体换掉**当前世界，故先过一道"未保存的改动"确认。
@@ -896,7 +896,7 @@ func open_project(path: String) -> bool:
 	if _stroke:
 		session.cancel()
 		_stroke = false
-	var loaded := QVoxProject.load_world(path)
+	var loaded := QVoxelProject.load_world(path)
 	if loaded == null:
 		hud.flash("打不开这个工程（缺失或已损坏）：%s" % path.get_file())
 		return false
@@ -916,8 +916,8 @@ func open_project(path: String) -> bool:
 
 ## 一期只编辑一个模型：优先挑"有内容"的那个（打开样例时第一眼就有东西看），都没有就取第一个。
 ## 多模型 / 组是二期的事（DESIGN §4.5）。
-func _pick_editable(w: QVoxWorld) -> QVoxModel:
-	var first: QVoxModel = null
+func _pick_editable(w: QVoxelWorld) -> QVoxelModel:
+	var first: QVoxelModel = null
 	for o in w.all_models():
 		if o == null:
 			continue
@@ -941,12 +941,12 @@ func save_project() -> void:
 
 ## 另存为：弹文件对话框，默认文件名取世界名。
 func save_project_as() -> void:
-	_save_dialog.current_file = "%s.%s" % [world.world_name(), QVoxProject.EXTENSION]
+	_save_dialog.current_file = "%s.%s" % [world.world_name(), QVoxelProject.EXTENSION]
 	_save_dialog.popup_centered_ratio(0.7)
 
 
 func _write_project(path: String) -> bool:
-	var err := QVoxProject.save(world, path)
+	var err := QVoxelProject.save(world, path)
 	if err != OK:
 		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
 		return false
@@ -958,7 +958,7 @@ func _write_project(path: String) -> bool:
 
 
 func _on_save_path_selected(path: String) -> void:
-	_write_project(QVoxProject.ensure_extension(path))
+	_write_project(QVoxelProject.ensure_extension(path))
 
 
 ## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
@@ -979,7 +979,7 @@ func _build_dialogs() -> void:
 	_confirm.cancel_button_text = "返回"
 	# 对话框是独立的 Window，不会从 Node3D 父链上继承主题，得手挂一份 —— 否则它会顶着一套
 	# 与全应用无关的默认皮，风格统一在这里破功。
-	_confirm.theme = QVoxUi.theme()
+	_confirm.theme = QVoxelUi.theme()
 	add_child(_confirm)
 
 
@@ -991,8 +991,8 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	# 与 _confirm 同因：对话框的父链是 Node3D，主题传不下来，不挂就是一套 Godot 默认皮
 	#（本应用是内嵌子窗口样式，所以这层皮是看得见的）。 Theme 是**叠加**而不是替换：
 	# 本主题没定义的条目（Tree / LineEdit / OptionButton）继续走引擎默认值，不会把对话框弄坏。
-	d.theme = QVoxUi.theme()
-	d.add_filter("*.%s" % QVoxProject.EXTENSION, "QVoxelier 工程")
+	d.theme = QVoxelUi.theme()
+	d.add_filter("*.%s" % QVoxelProject.EXTENSION, "QVoxelier 工程")
 	d.title = "打开工程" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存工程"
 	# 引擎自建文案在游戏进程里没有内置翻译，会显示成 "Save" / "Cancel"。
 	# 其余（Path: / 列头 / 新建文件夹）同样来自引擎，改不动；但这两个是每次操作都要读、
@@ -1010,7 +1010,7 @@ func _make_palette_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	d.file_mode = mode
 	d.access = FileDialog.ACCESS_FILESYSTEM
 	d.current_dir = _default_dir()
-	d.theme = QVoxUi.theme()
+	d.theme = QVoxelUi.theme()
 	d.add_filter("*.png", "调色板 PNG（256×1）")
 	d.title = "导入调色板" if mode == FileDialog.FILE_MODE_OPEN_FILE else "导出调色板"
 	d.ok_button_text = "打开" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存"
@@ -1033,14 +1033,14 @@ static func _default_dir() -> String:
 	return ProjectSettings.globalize_path("user://")
 
 
-## 把 `.qvox` 拖进窗口即打开（建模时最顺手的一步）；非工程文件一律忽略。
+## 把 `.qvx` 拖进窗口即打开（建模时最顺手的一步）；非工程文件一律忽略。
 func _on_files_dropped(files: PackedStringArray) -> void:
 	for f in files:
-		if QVoxProject.is_project_path(f):
+		if QVoxelProject.is_project_path(f):
 			# 拖进来同样是"整体换掉当前世界"，走 request_open 才有那道未保存确认。
 			request_open(f)
 			return
-	hud.flash("只认得 .%s 工程文件" % QVoxProject.EXTENSION)
+	hud.flash("只认得 .%s 工程文件" % QVoxelProject.EXTENSION)
 
 
 func _update_title() -> void:
@@ -1108,7 +1108,7 @@ func _refresh_panels() -> void:
 
 ## 世界的材质表 → 调色板用的颜色数组：**下标即材质 ID**，0 位留空气占位。
 ## 不直接用 default_palette，是因为打开别人的工程时色板得跟着工程走。
-func _material_colors(w: QVoxWorld) -> Array[Color]:
+func _material_colors(w: QVoxelWorld) -> Array[Color]:
 	var colors: Array[Color] = [Color(0, 0, 0, 0)]
 	for id in range(1, w.materials.size()):
 		colors.append(w.material_color(id))
@@ -1145,41 +1145,41 @@ func _bind_actions() -> void:
 # 层级树（右侧抽屉·层级组）
 # ----------------------------------------------------------------------------
 # 本段只做一件事：把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"。
-# 树视图本身是 QVoxWorld.nodes 的**纯投影**（见 QVoxelierTreeSection）。
+# 树视图本身是 QVoxelWorld.nodes 的**纯投影**（见 QVoxelierTreeSection）。
 
 ## 点树上的行：模型就切过去编辑；组只是容器，不改变当前编辑对象。
 ##
 ## 【为什么要顺手清掉参数组】选中的是"节点"，而参数组显示的是"链上某一条修改器"。
 ## 换了节点还留着上一条的参数，滑一下就把改动写进了另一个对象的链里（且看不出来）。
-func _on_tree_selected(node: QVoxNode) -> void:
+func _on_tree_selected(node: QVoxelNode) -> void:
 	if _modifier != null and (_modifier_owner != node or not _owns_modifier(node, _modifier)):
 		_select_modifier(null, null)
 	if node != null and node.is_model():
-		_activate((node as QVoxModel).model_id)
+		_activate((node as QVoxelModel).model_id)
 
 
 ## m 是否还在 node 的链上（撤销 / 重做会换掉整个数组，条目可能已经不在了）。
-func _owns_modifier(node: QVoxNode, m: QVoxModifier) -> bool:
+func _owns_modifier(node: QVoxelNode, m: QVoxelModifier) -> bool:
 	return node != null and m != null and node.modifiers.has(m)
 
 
 ## 新建模型：尺寸随当前模型（"再做一个同样大小的"是最常见的心智模型）。
 ## 新模型会挂一条展示会话并**直接切过去** —— 建了却停在旧的上面，用户会以为没建成。
-func _add_model(parent: QVoxGroup) -> void:
+func _add_model(parent: QVoxelGroup) -> void:
 	if world == null or session == null:
 		return
 	# 尺寸随**当前输出盒**（= 屏幕上看到的那个大小），而不是手绘种子的尺寸：
 	# 当前模型若挂了平铺，照抄种子尺寸会做出一个明显更小的"同样大小"的模型。
 	var o := world.create_model("", session.output_size(), parent)
-	_sessions[o.model_id] = QVoxEditSession.create_for(o, world)
-	(_sessions[o.model_id] as QVoxEditSession).request_render_update = model.request_update
-	(_sessions[o.model_id] as QVoxEditSession).history.changed.connect(_on_history_changed)
+	_sessions[o.model_id] = QVoxelEditSession.create_for(o, world)
+	(_sessions[o.model_id] as QVoxelEditSession).request_render_update = model.request_update
+	(_sessions[o.model_id] as QVoxelEditSession).history.changed.connect(_on_history_changed)
 	_mark_dirty()
 	_activate(o.model_id)
 
 
 ## 新建组。组没有内容，故只标脏 + 刷新（不切换编辑对象）。
-func _add_group(parent: QVoxGroup) -> void:
+func _add_group(parent: QVoxelGroup) -> void:
 	if world == null:
 		return
 	world.create_group("Group", parent)
@@ -1194,19 +1194,19 @@ func _add_group(parent: QVoxGroup) -> void:
 ## 拆散是另一个动作，混进来会让"删除"变得不可预期。
 ##
 ## 【为什么不入撤销栈】结构增删与体素编辑是两类东西：后者才是高频、真正需要逐笔回退的手势。
-func _remove_node(node: QVoxNode) -> void:
+func _remove_node(node: QVoxelNode) -> void:
 	if world == null or node == null:
 		return
 	# 至少留一个模型：世界空了就无物可编。
 	if node.is_model() and world.all_models().size() <= 1:
 		hud.flash("至少要留一个模型")
 		return
-	var gone: Array[QVoxModel] = []
+	var gone: Array[QVoxelModel] = []
 	for n in world.all_nodes():
 		if n.is_model() and _is_under(node, n):
-			gone.append(n as QVoxModel)
+			gone.append(n as QVoxelModel)
 	for m in gone:
-		var s: QVoxEditSession = _sessions.get(m.model_id)
+		var s: QVoxelEditSession = _sessions.get(m.model_id)
 		if s != null and s.history.changed.is_connected(_on_history_changed):
 			s.history.changed.disconnect(_on_history_changed)
 		_sessions.erase(m.model_id)
@@ -1227,19 +1227,19 @@ func _remove_node(node: QVoxNode) -> void:
 
 
 ## node 是否在 root 的子树里（含 root 自己）。
-func _is_under(root: QVoxNode, node: QVoxNode) -> bool:
+func _is_under(root: QVoxelNode, node: QVoxelNode) -> bool:
 	if root == node:
 		return true
 	if not root.is_group():
 		return false
-	for c in (root as QVoxGroup).child_nodes:
+	for c in (root as QVoxelGroup).child_nodes:
 		if c != null and _is_under(c, node):
 			return true
 	return false
 
 
 ## 沿树往上看：任何一层隐藏都算数（可见性**沿树继承**）。
-func _node_visible(node: QVoxNode) -> bool:
+func _node_visible(node: QVoxelNode) -> bool:
 	var n := node
 	while n != null:
 		if not n.visible:
@@ -1249,7 +1249,7 @@ func _node_visible(node: QVoxNode) -> bool:
 
 
 ## 沿树往上看：任何一层锁定都算数（锁定**沿树继承**）。
-func _node_locked(node: QVoxNode) -> bool:
+func _node_locked(node: QVoxelNode) -> bool:
 	var n := node
 	while n != null:
 		if n.locked:
@@ -1258,23 +1258,23 @@ func _node_locked(node: QVoxNode) -> bool:
 	return false
 
 
-func _set_node_visible(node: QVoxNode, on: bool) -> void:
+func _set_node_visible(node: QVoxelNode, on: bool) -> void:
 	_write_node_field(node, &"visible", on, "可见性")
 
 
-func _set_node_locked(node: QVoxNode, on: bool) -> void:
+func _set_node_locked(node: QVoxelNode, on: bool) -> void:
 	_write_node_field(node, &"locked", on, "锁定")
 
 
-func _rename_node(node: QVoxNode, new_name: String) -> void:
+func _rename_node(node: QVoxelNode, new_name: String) -> void:
 	_write_node_field(node, &"node_name", new_name, "重命名")
 
 
 ## 拖拽落位：把节点挂到新父下的 index 位置。
 ##
 ## 【为什么"移动"和"插入"是同一个操作】树上没有"移动"这回事 —— 移动就是"从原父摘下来、
-## 挂到新父"。QVoxWorld.attach_node 直接拒绝"把组挂进自己的子树"（那会造出环）。
-func _move_node(node: QVoxNode, parent: QVoxGroup, index: int) -> void:
+## 挂到新父"。QVoxelWorld.attach_node 直接拒绝"把组挂进自己的子树"（那会造出环）。
+func _move_node(node: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
 	if world == null or node == null:
 		return
 	if not world.attach_node(node, parent, index):
@@ -1288,10 +1288,10 @@ func _move_node(node: QVoxNode, parent: QVoxGroup, index: int) -> void:
 ##
 ## 【为什么改完要 _rebuild_view】可见性不只是个数据字段 —— 它决定该节点渲染与否；
 ## 而这条命令的 undo() 只写属性、不会替我们叫醒视口，故两条路径都得手动重建。
-func _write_node_field(node: QVoxNode, prop: StringName, value: Variant, label: String) -> void:
+func _write_node_field(node: QVoxelNode, prop: StringName, value: Variant, label: String) -> void:
 	if world == null or node == null or session == null:
 		return
-	var cmd := QVoxPropertyCommand.apply(node, prop, value, node, label)
+	var cmd := QVoxelPropertyCommand.apply(node, prop, value, node, label)
 	if cmd != null:
 		session.history.push(cmd)
 	_rebuild_view()
@@ -1309,7 +1309,7 @@ func _write_node_field(node: QVoxNode, prop: StringName, value: Variant, label: 
 func _begin_color_edit() -> void:
 	if world == null or _material_id <= 0 or _material_id >= world.materials.size():
 		return
-	_color_cmd = QVoxPropertyCommand.begin(world, &"materials", null, "修改材质颜色")
+	_color_cmd = QVoxelPropertyCommand.begin(world, &"materials", null, "修改材质颜色")
 
 
 func _live_color(c: Color) -> void:
@@ -1335,7 +1335,7 @@ func _sync_material(id: int) -> void:
 		return
 	var mat := VoxelMaterial.from_mate(world.materials[id], id)
 	for s in _sessions.values():
-		(s as QVoxEditSession).data.add_material(mat)
+		(s as QVoxelEditSession).data.add_material(mat)
 	_rerender_materials()
 
 
@@ -1350,7 +1350,7 @@ func _rerender_materials() -> void:
 func _add_material() -> void:
 	if world == null or session == null:
 		return
-	var cmd := QVoxPropertyCommand.begin(world, &"materials", null, "新增材质")
+	var cmd := QVoxelPropertyCommand.begin(world, &"materials", null, "新增材质")
 	var id := world.add_material(Color(0.8, 0.8, 0.8))
 	if cmd.commit():
 		session.history.push(cmd)
@@ -1402,7 +1402,7 @@ func _import_palette(path: String) -> void:
 	if width < 2:
 		hud.flash("调色板 PNG 太窄（应是 256×1）")
 		return
-	var cmd := QVoxPropertyCommand.begin(world, &"materials", null, "导入调色板")
+	var cmd := QVoxelPropertyCommand.begin(world, &"materials", null, "导入调色板")
 	for i in range(1, mini(width, 256)):
 		world.set_material_color(i, img.get_pixel(i, 0))
 	if cmd.commit():
@@ -1436,7 +1436,7 @@ func _push_palette_into_all() -> void:
 	if world == null:
 		return
 	for s in _sessions.values():
-		var data: VoxelData = (s as QVoxEditSession).data
+		var data: VoxelData = (s as QVoxelEditSession).data
 		for id in range(1, world.materials.size()):
 			data.add_material(VoxelMaterial.from_mate(world.materials[id], id))
 	_rerender_materials()

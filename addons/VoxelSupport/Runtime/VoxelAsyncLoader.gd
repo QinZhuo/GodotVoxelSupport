@@ -58,7 +58,7 @@ func configure(stream: VoxelStream, generator: VoxelGenerator) -> void:
 
 
 ## 提交一次取数请求（同 key 在途或已就绪则忽略）。
-##   ① 流里已存 → 主线程直读并立即置为就绪（QVoxStream 的索引常驻内存，不产生 IO 等待）
+##   ① 流里已存 → 主线程直读并立即置为就绪（QVoxelStream 的索引常驻内存，不产生 IO 等待）
 ##   ② 否则生成器可生成 → 丢给 WorkerThreadPool 后台生成
 ##   ③ 两者都不行 → 立即撤销登记（否则调用方会一直等一个永远不来的结果）
 func request(chunk_key: Vector3i, lod: int = 0) -> void:

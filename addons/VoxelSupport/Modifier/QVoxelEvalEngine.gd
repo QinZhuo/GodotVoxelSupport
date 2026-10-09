@@ -1,4 +1,4 @@
-class_name QVoxEvalEngine
+class_name QVoxelEvalEngine
 extends RefCounted
 
 ## 求值引擎 —— 把一条修改器链跑成一块体素体积（或一棵 Sdf 树）。
@@ -13,15 +13,15 @@ extends RefCounted
 ## 而"谁改了什么"这个问题在编辑器里本来就有明确答案（改动命令知道它动了哪一条修改器）。
 ##
 ## 【增量复用 = 逐步骤判脏】调用方把上一次结果传回来时，引擎比对两半签名（inputs_key +
-## 逐条 signature()），从**最长公共前缀**的检查点接着跑（见 evaluate 与 QVoxEvalResult.states）：
+## 逐条 signature()），从**最长公共前缀**的检查点接着跑（见 evaluate 与 QVoxelEvalResult.states）：
 ## 改链尾一条就只重算那一条之后的部分，链首那条最贵的程序化生成完全不重跑（§5.2 / §4.2 第 3 条）。
 ##
-## 【域与降级】链的域只能单向降级（见 QVoxDomain）。引擎负责在需要的位置**自动插入**降级：
+## 【域与降级】链的域只能单向降级（见 QVoxelDomain）。引擎负责在需要的位置**自动插入**降级：
 ##   ① FIELD → VOXEL：把折叠好的 Sdf 树交给 PcgSdfGenerator.rasterize_field() 采样成体积；
 ##   ② VOXEL → MESH：网格算子（预留，见 mesh_ops）。
 ## 用户看不见降级点，只说"我在这儿加个侵蚀"，引擎自己知道那意味着"先把前面的场光栅化"。
 ##
-## 【手绘体素（blocks）在链里的位置】blocks 是链的**输入/种子**，不是链的一环（见 QVoxModel）。
+## 【手绘体素（blocks）在链里的位置】blocks 是链的**输入/种子**，不是链的一环（见 QVoxelModel）。
 ## 于是链首那一条的 combine 决定"链的产出与手绘体素怎么合"：
 ##   REPLACE       → 链的产出替换手绘体素（"这条 SDF 定义模型，手绘作废"）
 ##   UNION         → 并进手绘体素（"手绘一块石头，再长出一个球"）
@@ -37,8 +37,8 @@ extends RefCounted
 ## 【树形求值：自底向上 + 紧致盒（DESIGN §2.3）】世界是一棵树，"一条链"只是树上**一个节点**的
 ## 局部计算。于是求值分两层：
 ##     eval(node) → 该节点在**自己局部盒**里的体积 + 该盒左下角在父画布里的偏移（result.origin）
-##     QVoxModel: blocks → 密集体积 → 依次应用自己的链（含重排 / 平移，可改盒尺寸与摆放）
-##     QVoxGroup: 把可见子节点的结果按各自 origin 并进"子树并集包围盒"，再依次应用自己的链
+##     QVoxelModel: blocks → 密集体积 → 依次应用自己的链（含重排 / 平移，可改盒尺寸与摆放）
+##     QVoxelGroup: 把可见子节点的结果按各自 origin 并进"子树并集包围盒"，再依次应用自己的链
 ## 关键在**紧致盒**：组的中间体积取子树内容的并集包围盒，而不是世界级画布 —— 于是"组里只有
 ## 两个小模型"不会付整张 512³ 画布的代价（那是一次 537 MB 的分配），而"组的内存成本为零"
 ## 这条承诺才成立（组自己不存体素）。
@@ -52,9 +52,9 @@ extends RefCounted
 ## 只有"链内两个同盒体积"才用 _combine_volume。
 
 
-## 【结果类型为什么是独立文件而不是内部类】设计文档里写作 `QVoxEvalEngine.Result`，但内部类
-## 无法被其它脚本当作类型标注（`previous: QVoxEvalEngine.Result` 不成立），而调用方恰恰需要
-## 用它声明"我缓存着上一次的结果"。故提成同级文件 QVoxEvalResult，代价是名字长一点。
+## 【结果类型为什么是独立文件而不是内部类】设计文档里写作 `QVoxelEvalEngine.Result`，但内部类
+## 无法被其它脚本当作类型标注（`previous: QVoxelEvalEngine.Result` 不成立），而调用方恰恰需要
+## 用它声明"我缓存着上一次的结果"。故提成同级文件 QVoxelEvalResult，代价是名字长一点。
 
 
 ## 求值：把对象的手绘体素 + 修改器链跑成结果。
@@ -68,14 +68,14 @@ extends RefCounted
 ## 主线程改了参数、在途 worker 拿着旧结果回来时，epoch 不同即可判定作废。
 ##
 ## 【逐步骤判脏（§5.2 / §4.2 第 3 条）】每条修改器的 signature() 只随它**自己**的字段变
-## （见 QVoxModifier），于是"改第 k 条"必然表现为"前 k 条签名一字不差"。引擎据此把上一次结果里的
+## （见 QVoxelModifier），于是"改第 k 条"必然表现为"前 k 条签名一字不差"。引擎据此把上一次结果里的
 ## 检查点 states[k] 当成本次求值的起点：第 k 条之前的算子（含昂贵的程序化生成 / 场光栅化）一律
 ## 不重跑 —— 判脏因此不是"整链重算"与"零成本"的二选一，而是"只重算变了的尾巴"。
 ##
 ## 【为什么不用"遇到第一条不同的就全丢"】那正是"改链尾一条也要重跑整条链"的代价，而链首往往
 ## 恰好是最贵的一条（程序化生成整块体积）。复用最长公共前缀把代价压到"尾巴有多长"。
-static func evaluate(obj: QVoxModel, ctx: QVoxEvalContext,
-		previous: QVoxEvalResult = null) -> QVoxEvalResult:
+static func evaluate(obj: QVoxelModel, ctx: QVoxelEvalContext,
+		previous: QVoxelEvalResult = null) -> QVoxelEvalResult:
 	var keys := inputs_key(obj, ctx)
 	var sigs := step_signatures(obj)
 	var sig := _join_signature(keys, sigs)
@@ -106,19 +106,19 @@ static func evaluate(obj: QVoxModel, ctx: QVoxEvalContext,
 ##
 ## 【previous 的含义】对模型 = 该模型上一次的链求值结果；对组 = 该组上一次的合成结果
 ## （见 _evaluate_group 的输入键：它由各子结果的签名拼成，故任何一个子节点变了都会失配）。
-static func evaluate_node(node: QVoxNode, ctx: QVoxEvalContext,
-		previous: QVoxEvalResult = null, cache: QVoxEvalCache = null) -> QVoxEvalResult:
+static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext,
+		previous: QVoxelEvalResult = null, cache: QVoxelEvalCache = null) -> QVoxelEvalResult:
 	if node == null:
-		return QVoxEvalResult.new()
+		return QVoxelEvalResult.new()
 	# 可见性沿树继承：父节点不可见 → 整棵子树不参与求值（父的合成循环根本不会走到这里，
 	# 但直接调用本函数时也要成立，否则"隐藏的节点"会从别的入口漏进画面）。
 	if not node.visible:
-		return QVoxEvalResult.new()
+		return QVoxelEvalResult.new()
 	if node.is_model():
-		var m := node as QVoxModel
+		var m := node as QVoxelModel
 		# origin 不必在这里补填：摆放已是链上的平移条目，_run_chain 已把它写进结果。
 		return evaluate(m, ctx.at_grid_size(m.grid_size), previous)
-	return _evaluate_group(node as QVoxGroup, ctx, previous, cache)
+	return _evaluate_group(node as QVoxelGroup, ctx, previous, cache)
 
 
 ## 世界级求值：把所有顶层节点按 position / combine 合成进世界盒。
@@ -130,12 +130,12 @@ static func evaluate_node(node: QVoxNode, ctx: QVoxEvalContext,
 ## 【为什么没有 previous 参数，而是要一个 cache】世界级结果由消费方一次性消费，而"整世界"的
 ## 复用其实等价于"每个节点各自复用"—— 把逐节点缓存传进来即可，不必为整世界再维护一份签名。
 ## cache 为 null 时退化为"每次都全量重算"（正确但慢，仅适合测试与小世界）。
-static func evaluate_world(world: QVoxWorld, ctx: QVoxEvalContext,
-		cache: QVoxEvalCache = null) -> QVoxEvalResult:
+static func evaluate_world(world: QVoxelWorld, ctx: QVoxelEvalContext,
+		cache: QVoxelEvalCache = null) -> QVoxelEvalResult:
 	if world == null:
-		return QVoxEvalResult.new()
+		return QVoxelEvalResult.new()
 	var comp := _composite(world.nodes, ctx, cache)
-	var res := QVoxEvalResult.new()
+	var res := QVoxelEvalResult.new()
 	res.volume = comp["volume"]
 	res.grid_size = comp["size"]
 	res.origin = comp["lo"]
@@ -152,7 +152,7 @@ static func evaluate_world(world: QVoxWorld, ctx: QVoxEvalContext,
 static func output_grid_size(mods: Array, base: Vector3i) -> Vector3i:
 	var size := base
 	for item in mods:
-		var m: QVoxModifier = item
+		var m: QVoxelModifier = item
 		if m == null or not m.is_active() or not m.is_reshape():
 			continue
 		var t := m.op() as PcgTransform
@@ -163,8 +163,8 @@ static func output_grid_size(mods: Array, base: Vector3i) -> Vector3i:
 
 ## 建一个空结果（公共字段一次填齐，树形与单模型两条路径共用）。
 static func _new_result(gs: Vector3i, keys: String, sigs: PackedStringArray,
-		ctx: QVoxEvalContext) -> QVoxEvalResult:
-	var res := QVoxEvalResult.new()
+		ctx: QVoxelEvalContext) -> QVoxelEvalResult:
+	var res := QVoxelEvalResult.new()
 	res.grid_size = gs
 	res.input_signature = _join_signature(keys, sigs)
 	res.inputs_key = keys
@@ -175,9 +175,9 @@ static func _new_result(gs: Vector3i, keys: String, sigs: PackedStringArray,
 
 ## 跑一条链。obj 与 base 二选一：模型路径给 obj（base 留空，按需摊平手绘体素），
 ## 组路径给 base（组不存体素，obj 为 null）。两者都为空 = 链的输入就是"空"。
-static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Array,
-		mods: Array[QVoxModifier], keys: String, sigs: PackedStringArray,
-		gs: Vector3i, ctx: QVoxEvalContext, previous: QVoxEvalResult) -> QVoxEvalResult:
+static func _run_chain(res: QVoxelEvalResult, obj: QVoxelModel, base: PackedInt32Array,
+		mods: Array[QVoxelModifier], keys: String, sigs: PackedStringArray,
+		gs: Vector3i, ctx: QVoxelEvalContext, previous: QVoxelEvalResult) -> QVoxelEvalResult:
 	var total := maxi(mods.size(), 1)
 
 	# ---- ⓪ 复用：从上一次结果里最靠后的可用检查点接着跑 ----
@@ -195,7 +195,7 @@ static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Arr
 	# 当前摆放偏移：随平移条目变化（见 StepState.shift）。与 box 一样属于累积状态，故检查点一起存。
 	var shift := Vector3i.ZERO
 	if start > 0:
-		var st: QVoxEvalResult.StepState = previous.states[start]
+		var st: QVoxelEvalResult.StepState = previous.states[start]
 		for i in start:
 			res.states.append(previous.states[i])
 		res.states.append(st)
@@ -215,7 +215,7 @@ static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Arr
 	#
 	# 【为什么合成一趟，而不是"先折完场、再跑体素"】复用点可能落在 FIELD 段**中间**，于是两者必须
 	# 能被同一条循环从中途接上：分成两趟就无法表达"从第 3 条（还在场里）接着折"。语义一字未变：
-	# 域只能单向降级（QVoxDomain.validate_chain），故 FIELD 必然连续地位于链首，循环遇到第一条
+	# 域只能单向降级（QVoxelDomain.validate_chain），故 FIELD 必然连续地位于链首，循环遇到第一条
 	# 非 FIELD 条目即进入降级分支；后面的 FIELD（非法链）在这里被跳过。
 	#
 	# 【active_modifiers() 已滤掉空条目】故循环里每条都必有算法核，逐条检查点与逐条签名一一对应
@@ -226,11 +226,11 @@ static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Arr
 		var m := mods[i]
 		var op := m.op()
 		var d := m.domain()
-		if d == QVoxDomain.Kind.MESH:
+		if d == QVoxelDomain.Kind.MESH:
 			# MESH 段（预留）：只登记算子，不改累积状态 —— 但检查点照样拍，好让
 			# "states[i] 与第 i 条一一对应"这条不变量对任何链都成立（_resume_index 依赖它）
 			res.mesh_ops.append(op)
-		elif d == QVoxDomain.Kind.FIELD:
+		elif d == QVoxelDomain.Kind.FIELD:
 			# degraded 之后还有 FIELD = 域回升（非法链）：什么都不改，报错交给 validate_chain
 			if not degraded:
 				field = _fold_sdf(field, op as Sdf, m.combine, m.blend)
@@ -247,11 +247,11 @@ static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Arr
 				# 【为什么它必须先降级】重排消费的是"已光栅化的当前累积结果"；上面那一步已保证
 				# field 被物化进 acc，故这里只需取当前左操作数。
 				#
-				# 【为什么不必 duplicate】QVoxVoxelTransform 的 remap / repeat_volume 都**新建**
+				# 【为什么不必 duplicate】QVoxelTransform 的 remap / repeat_volume 都**新建**
 				# 输出数组（从不就地改写输入），故取到 acc 本身也是安全的。
 				var t := op as PcgTransform
 				if t == null:
-					push_error("[QVox] 重排型修改器 %d 的核不是 PcgTransform" % i)
+					push_error("[QVX] 重排型修改器 %d 的核不是 PcgTransform" % i)
 				else:
 					var pair: Array = t.reshape(_current(obj, base, acc), box)
 					acc = pair[0]
@@ -305,7 +305,7 @@ static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Arr
 	res.grid_size = box
 	# 摆放 = 链上平移条目的累加。组的调用方再把"子树包围盒左下角"叠上去（见 _evaluate_group）。
 	res.origin = shift
-	res.domain = QVoxDomain.final_domain(mods)
+	res.domain = QVoxelDomain.final_domain(mods)
 	return res
 
 
@@ -315,16 +315,16 @@ static func _run_chain(res: QVoxEvalResult, obj: QVoxModel, base: PackedInt32Arr
 ## —— 变了则**所有**检查点作废（连 states[0] 都不再成立）；② "哪一条修改器变了"
 ## （step_signatures）—— 它定位复用起点。合成一个字符串只能回答"整链有没有变"。
 ##
-## 【含 base_revision 而不是哈希体素】手绘编辑点自己知道它改了体素（QVoxVoxelEditCommand 封口时
+## 【含 base_revision 而不是哈希体素】手绘编辑点自己知道它改了体素（QVoxelEditCommand 封口时
 ## 自增 base_revision），而几百万个 int 的哈希本身就不便宜。故用版本号当"体素有没有变"的答案。
 ##
-## 【含 block_size】它决定稀疏块的下标换算（QVoxBlockCodec）；换掉它等于换了一套存储布局。
+## 【含 block_size】它决定稀疏块的下标换算（QVoxelBlockCodec）；换掉它等于换了一套存储布局。
 ##
 ## 【为什么还要含对象实例 id】签名是"**这个对象的**这次求值"的缓存键。base_revision 是
 ## **每对象各自**的手绘版本号：两个内容不同的对象完全可以同为 0（或恰好同值），只凭它
 ## 会把 A 的结果当成 B 的可复用结果 —— 于是"引擎无状态"被一句复用判断破坏，两个对象互相污染。
 ## 实例 id 是稳定且廉价的判别项，加进来即让缓存键天然按对象分桶。
-static func inputs_key(obj: QVoxModel, ctx: QVoxEvalContext) -> String:
+static func inputs_key(obj: QVoxelModel, ctx: QVoxelEvalContext) -> String:
 	if obj == null:
 		return ""
 	var parts := PackedStringArray()
@@ -341,9 +341,9 @@ static func inputs_key(obj: QVoxModel, ctx: QVoxEvalContext) -> String:
 ## 【为什么逐条留一份而不是只留总签名】"改第 k 条"要靠"前 k 条签名一字不差"来证明，而总签名
 ## 只能回答"整链变了没有"。这份数组与上一次结果的逐条比对，就是复用起点的判据（见 _resume_index）。
 ##
-## 【signature() 已含 enabled / 算子实例 / 参数 / combine / blend / seed】见 QVoxModifier，
+## 【signature() 已含 enabled / 算子实例 / 参数 / combine / blend / seed】见 QVoxelModifier，
 ## 故旁通翻转、参数微调、顺序调整都会逐条反映出来。
-static func step_signatures(obj: QVoxModel) -> PackedStringArray:
+static func step_signatures(obj: QVoxelModel) -> PackedStringArray:
 	var out := PackedStringArray()
 	if obj == null:
 		return out
@@ -354,7 +354,7 @@ static func step_signatures(obj: QVoxModel) -> PackedStringArray:
 
 ## 输入签名 —— 参与判脏的**全部**外部输入（输入键 + 逐条签名）。
 ## 调用方只需比对它：同签名 + 同 epoch = 上一次结果可原样复用（见 evaluate）。
-static func input_signature(obj: QVoxModel, ctx: QVoxEvalContext) -> String:
+static func input_signature(obj: QVoxelModel, ctx: QVoxelEvalContext) -> String:
 	return _join_signature(inputs_key(obj, ctx), step_signatures(obj))
 
 
@@ -376,26 +376,26 @@ static func _join_signature(keys: String, sigs: PackedStringArray) -> String:
 ## 而不是"怎么并进空场"。故四种 combine 在这里一律返回 next，绝不吞掉整棵树 ——
 ## 否则链首 combine = SUBTRACT / INTERSECT 会把 field 折成 null，第 ② 步的降级整段失效，
 ## 手绘体素原样残留（"用 SDF 当裁刀切手绘"这一条用法直接失灵）。
-static func _fold_sdf(acc: Sdf, next: Sdf, combine: QVoxDomain.Combine, blend: float) -> Sdf:
+static func _fold_sdf(acc: Sdf, next: Sdf, combine: QVoxelDomain.Combine, blend: float) -> Sdf:
 	if acc == null:
 		return next
 	match combine:
-		QVoxDomain.Combine.UNION:
+		QVoxelDomain.Combine.UNION:
 			var u := SdfUnion.new()
 			u.a = acc
 			u.b = next
 			return u
-		QVoxDomain.Combine.SUBTRACT:
+		QVoxelDomain.Combine.SUBTRACT:
 			var s := SdfSubtract.new()
 			s.a = acc
 			s.b = next
 			return s
-		QVoxDomain.Combine.INTERSECT:
+		QVoxelDomain.Combine.INTERSECT:
 			var i := SdfIntersect.new()
 			i.a = acc
 			i.b = next
 			return i
-		QVoxDomain.Combine.SMOOTH_UNION:
+		QVoxelDomain.Combine.SMOOTH_UNION:
 			var su := SdfSmoothUnion.new()
 			su.a = acc
 			su.b = next
@@ -415,33 +415,33 @@ static func _fold_sdf(acc: Sdf, next: Sdf, combine: QVoxDomain.Combine, blend: f
 ##
 ## 【调用方要先过一遍 _left_operand】"acc 为空"在本函数里只被理解为"没有左操作数"，而"链首
 ## 直接是体素域算子"时真正的左操作数是**手绘体素**（见 _left_operand）—— 两者不能在这里合并，
-## 否则本函数就要知道 QVoxModel 与链的位置，而它只需要知道两个体积。
+## 否则本函数就要知道 QVoxelModel 与链的位置，而它只需要知道两个体积。
 ##
 ## 【SMOOTH_UNION 为何退化成 UNION】平滑并需要**两个连续**操作数才能算过渡宽度，
 ## 而这里的一方是光栅化后的离散体素。场内部的平滑并照常生效（见 _fold_sdf），
 ## 只有"场与手绘体素相合"这一步没有连续语义可用，故退化为并 —— 与
-## QVoxDomain.validate_chain 禁止体素域使用 SMOOTH_UNION 是同一条理由。
+## QVoxelDomain.validate_chain 禁止体素域使用 SMOOTH_UNION 是同一条理由。
 static func _combine_volume(a: PackedInt32Array, b: PackedInt32Array,
-		combine: QVoxDomain.Combine) -> PackedInt32Array:
-	if combine == QVoxDomain.Combine.REPLACE:
+		combine: QVoxelDomain.Combine) -> PackedInt32Array:
+	if combine == QVoxelDomain.Combine.REPLACE:
 		return b
 	if a.is_empty():
-		if combine == QVoxDomain.Combine.SUBTRACT or combine == QVoxDomain.Combine.INTERSECT:
+		if combine == QVoxelDomain.Combine.SUBTRACT or combine == QVoxelDomain.Combine.INTERSECT:
 			return a
 		return b
 	if b.is_empty():
-		return PackedInt32Array() if combine == QVoxDomain.Combine.INTERSECT else a
+		return PackedInt32Array() if combine == QVoxelDomain.Combine.INTERSECT else a
 	if a.size() != b.size():
-		push_error("[QVox] 体积布尔要求同尺寸，收到 %d 与 %d" % [a.size(), b.size()])
+		push_error("[QVX] 体积布尔要求同尺寸，收到 %d 与 %d" % [a.size(), b.size()])
 		return a
 	var n := a.size()
 	var out := PackedInt32Array()
 	out.resize(n)
 	match combine:
-		QVoxDomain.Combine.SUBTRACT:
+		QVoxelDomain.Combine.SUBTRACT:
 			for i in n:
 				out[i] = 0 if b[i] > 0 else a[i]
-		QVoxDomain.Combine.INTERSECT:
+		QVoxelDomain.Combine.INTERSECT:
 			for i in n:
 				out[i] = a[i] if b[i] > 0 else 0
 		_:
@@ -470,8 +470,8 @@ static func _combine_volume(a: PackedInt32Array, b: PackedInt32Array,
 ##
 ## 【链变长 / 变短都成立】n 取两个逐条签名数组的较短者：末尾**追加**一条时全部旧步骤都复用
 ## （k = 旧链长），中间**删掉**一条时在删除点停下（那里的状态就是删除前的前缀）。
-static func _resume_index(previous: QVoxEvalResult, ctx: QVoxEvalContext, keys: String,
-		sigs: PackedStringArray, mods: Array[QVoxModifier]) -> int:
+static func _resume_index(previous: QVoxelEvalResult, ctx: QVoxelEvalContext, keys: String,
+		sigs: PackedStringArray, mods: Array[QVoxelModifier]) -> int:
 	if previous == null or previous.inputs_key != keys or previous.epoch != ctx.epoch:
 		return 0
 	# 轨迹自洽性：states[i] 与第 i 条一一对应。取消过的结果会被清空（见 evaluate），
@@ -483,7 +483,7 @@ static func _resume_index(previous: QVoxEvalResult, ctx: QVoxEvalContext, keys: 
 	while k < n:
 		if previous.step_signatures[k] != sigs[k]:
 			break
-		if mods[k].domain() == QVoxDomain.Kind.MESH:
+		if mods[k].domain() == QVoxelDomain.Kind.MESH:
 			break  # MESH 段是预留（无实现、无检查点），故不越过它续跑
 		k += 1
 	return k
@@ -494,11 +494,11 @@ static func _resume_index(previous: QVoxEvalResult, ctx: QVoxEvalContext, keys: 
 ##
 ## 【为什么算成链的纯函数，而不是折叠循环里的"第一次遇到"】复用可能从 FIELD 段**中间**开始，
 ## 那时循环里已经看不到链首那条了，而降级点仍然要用它。纯函数则与"从哪儿开始跑"无关。
-static func _lead_combine(mods: Array[QVoxModifier]) -> QVoxDomain.Combine:
+static func _lead_combine(mods: Array[QVoxelModifier]) -> QVoxelDomain.Combine:
 	for m in mods:
-		if m.domain() == QVoxDomain.Kind.FIELD:
+		if m.domain() == QVoxelDomain.Kind.FIELD:
 			return m.combine
-	return QVoxDomain.Combine.REPLACE
+	return QVoxelDomain.Combine.REPLACE
 
 
 ## 当前的**左操作数**：acc 为空表示"还没有既有体积"，此时左操作数就是链的输入。
@@ -517,7 +517,7 @@ static func _lead_combine(mods: Array[QVoxModifier]) -> QVoxDomain.Combine:
 ##
 ## 【手绘本身为空时保持空】那是真的没有左操作数，_combine_volume 的退化规则才是对的
 ## （SUBTRACT / INTERSECT → 空，其余 → b），也省掉一次全量分配 + 扫描。
-static func _current(obj: QVoxModel, base: PackedInt32Array, acc: PackedInt32Array) -> PackedInt32Array:
+static func _current(obj: QVoxelModel, base: PackedInt32Array, acc: PackedInt32Array) -> PackedInt32Array:
 	if not acc.is_empty():
 		return acc
 	if not base.is_empty():
@@ -525,14 +525,14 @@ static func _current(obj: QVoxModel, base: PackedInt32Array, acc: PackedInt32Arr
 	return obj.to_volume() if obj != null else PackedInt32Array()
 
 
-## 给当前累积状态拍一张检查点（供下一次求值复用，见 QVoxEvalResult.states 的内存账）。
+## 给当前累积状态拍一张检查点（供下一次求值复用，见 QVoxelEvalResult.states 的内存账）。
 ##
 ## 【体积为什么必须 duplicate()】PackedInt32Array 的赋值是**共享缓冲**：后续的就地改写型算子
 ## （PcgDetail.apply）会顺着共享缓冲改到已拍下的检查点，于是复用起点记的是"后来"的状态。
 ## 场树不必复制 —— _fold_sdf 只造新节点，从不改旧节点。
 static func _snapshot(field: Sdf, acc: PackedInt32Array,
-		degraded: bool, box: Vector3i, shift: Vector3i) -> QVoxEvalResult.StepState:
-	var s := QVoxEvalResult.StepState.new()
+		degraded: bool, box: Vector3i, shift: Vector3i) -> QVoxelEvalResult.StepState:
+	var s := QVoxelEvalResult.StepState.new()
 	s.field = field
 	s.degraded = degraded
 	s.box = box
@@ -550,8 +550,8 @@ static func _snapshot(field: Sdf, acc: PackedInt32Array,
 ##
 ## 【组的链作用于"已经摆好的子树合并结果"】顺序即语义：先按各子结果的 origin 合成子树
 ## （这是组的"内容"），再依次应用组自己的滤镜（这是"在层级上挂滤镜"）。
-static func _evaluate_group(g: QVoxGroup, ctx: QVoxEvalContext,
-		previous: QVoxEvalResult, cache: QVoxEvalCache) -> QVoxEvalResult:
+static func _evaluate_group(g: QVoxelGroup, ctx: QVoxelEvalContext,
+		previous: QVoxelEvalResult, cache: QVoxelEvalCache) -> QVoxelEvalResult:
 	var comp := _composite(g.child_nodes, ctx, cache)
 	var box: Vector3i = comp["size"]
 	var keys: String = comp["key"]
@@ -564,7 +564,7 @@ static func _evaluate_group(g: QVoxGroup, ctx: QVoxEvalContext,
 	var res := _new_result(box, keys, sigs, ctx)
 	if box.x <= 0 or box.y <= 0 or box.z <= 0:
 		# 组里没有任何可见内容（或全被差集挖空）：结果为空盒，链无从作用，摆放也无从谈起
-		res.domain = QVoxDomain.final_domain(g.active_modifiers())
+		res.domain = QVoxelDomain.final_domain(g.active_modifiers())
 		return res
 	var vol: PackedInt32Array = comp["volume"]
 	var lo: Vector3i = comp["lo"]
@@ -586,14 +586,14 @@ static func _evaluate_group(g: QVoxGroup, ctx: QVoxEvalContext,
 ## 父已累积的内容与本子节点的内容，而子节点的链只能看见自己（链上的 combine 是"并进本链
 ## 已累积的结果"，两回事）。既然摆放已经入链，跨节点的差集 / 交集就不再有载体 —— 于是
 ## 这里退化成纯并集，而"挖空"改由节点自己的链表达（链上的差集条目）。
-static func _composite(nodes: Array, ctx: QVoxEvalContext,
-		cache: QVoxEvalCache) -> Dictionary:
+static func _composite(nodes: Array, ctx: QVoxelEvalContext,
+		cache: QVoxelEvalCache) -> Dictionary:
 	var acc := PackedInt32Array()
 	var lo := Vector3i.ZERO
 	var size := Vector3i.ZERO
 	var parts := PackedStringArray()
 	for item in nodes:
-		var c: QVoxNode = item
+		var c: QVoxelNode = item
 		if c == null or not c.visible:
 			continue
 		var cr := evaluate_node(c, ctx, cache.previous_of(c) if cache != null else null, cache)
@@ -614,7 +614,7 @@ static func _composite(nodes: Array, ctx: QVoxEvalContext,
 
 
 ## 各条目的 signature()（与 active_modifiers() 一一对应）。组路径用。
-static func _step_signatures_of(mods: Array[QVoxModifier]) -> PackedStringArray:
+static func _step_signatures_of(mods: Array[QVoxelModifier]) -> PackedStringArray:
 	var out := PackedStringArray()
 	for m in mods:
 		out.append(m.signature())

@@ -1,36 +1,36 @@
 @tool
-class_name QVoxFile
+class_name QVoxelFile
 extends RefCounted
 
-## QVox 文件底层读写器（.qvox）。
+## QVX 文件底层读写器（.qvx）。
 ##
-## 职责：把 addons/VoxelSupport/Runtime/QVoxSpec.gd 定义的结构落到字节。
+## 职责：把 addons/VoxelSupport/Runtime/QVoxelSpec.gd 定义的结构落到字节。
 ##   - 8 字节签名
 ##   - 块流：uint32 length（含填充）| char[4] type | uint32 crc32 | payload | padding
 ##   - HEAD（JSON）/ MATE（12B 条目）/ VOX0（块数组）/ NODE（JSON）/ CACH
 ##
-## 本类不含 VoxelStream 语义（那是 QVoxStream 的职责）；
-## 它只负责"一个 .qvox 文件 ↔ 一组内存结构"的映射，以及格式级校验。
+## 本类不含 VoxelStream 语义（那是 QVoxelStream 的职责）；
+## 它只负责"一个 .qvx 文件 ↔ 一组内存结构"的映射，以及格式级校验。
 ##
-## 校验分两档（见 docs/QVOX_FORMAT.md §9）：
+## 校验分两档（见 docs/QVX_FORMAT.md §9）：
 ##   结构完整性 —— 签名、块头、长度、对齐、CRC32。失败即跳过该块（或整体拒绝）。
 ##   逻辑一致性 —— bounds 越界、block_count 不自洽、RUN 游程和、MATE 索引越界、
 ##                  NODE 悬空引用/成环。失败只丢该块/该模型/该节点，其余保留。
 ##   parse() 同时做两档；可用 validate() 单独复跑语义档。
 ##
-## 关键不变量（见 docs/QVOX_FORMAT.md §1.2）：
+## 关键不变量（见 docs/QVX_FORMAT.md §1.2）：
 ##   填充计入 length → 跳过任意块 = seek(length)，永远落在下一块头。
 ##
-## QVoxSpec / QVoxBlockCodec 都是全局注册类（class_name），直接按名引用即可，
-## 不要再 `const QVoxSpec := preload(...)`（会遮蔽同名全局类）。
+## QVoxelSpec / QVoxelBlockCodec 都是全局注册类（class_name），直接按名引用即可，
+## 不要再 `const QVoxelSpec := preload(...)`（会遮蔽同名全局类）。
 
 # ----------------------------------------------------------------------------
 # 内存模型
 # ----------------------------------------------------------------------------
 
-## 一个已解析的 QVox 文件的内存表示。
-class QVoxDocument extends RefCounted:
-	## HEAD JSON（Dictionary）。qvox / channels 为必填键。
+## 一个已解析的 QVX 文件的内存表示。
+class QVoxelDocument extends RefCounted:
+	## HEAD JSON（Dictionary）。qvx / channels 为必填键。
 	var head: Dictionary = {}
 	## 材质条目（每项 12 字节的语义结构 Dictionary）。索引即材质 ID，[0] 为空气。
 	## 用普通 Array 而非 Array[Dictionary]：后者不接受数组字面量赋值，实用上只是负担。
@@ -41,7 +41,7 @@ class QVoxDocument extends RefCounted:
 	var node: Dictionary = {}
 	## NODE 的已校验只读视图（§7）。任一引用无效的节点/帧已被丢弃。
 	## 解析失败或无 NODE 块时为 null。
-	var scene: QVoxSceneGraph = null
+	var scene: QVoxelSceneGraph = null
 	## CACH 块（§6，派生数据：删掉语义为零）。每项：
 	##   { "kind": String, "algo_version": int, "source_crc": Array[int]（升序去重）,
 	##     "payload": PackedByteArray（定长前置之后的全部字节，含块尾填充）}
@@ -67,10 +67,10 @@ class QVoxDocument extends RefCounted:
 		return c if c is Array else []
 
 	func get_block_size() -> int:
-		return int(head.get("block_size", QVoxSpec.DEFAULT_BLOCK_SIZE))
+		return int(head.get("block_size", QVoxelSpec.DEFAULT_BLOCK_SIZE))
 
 	func get_up_axis() -> String:
-		return str(head.get("up_axis", QVoxSpec.DEFAULT_UP_AXIS))
+		return str(head.get("up_axis", QVoxelSpec.DEFAULT_UP_AXIS))
 
 	## bounds（体素坐标，半开区间 [min, max)）。未给出返回空 Dictionary。
 	func get_bounds() -> Dictionary:
@@ -79,7 +79,7 @@ class QVoxDocument extends RefCounted:
 
 	## 全部 model_id（统一为 int，升序）。
 	##
-	## 【为什么要有这个访问器】`models` 的键可能是 int（解析端与 QVoxStream 写入端产出的形式），
+	## 【为什么要有这个访问器】`models` 的键可能是 int（解析端与 QVoxelStream 写入端产出的形式），
 	## 也可能是 str（调用方手写 doc 时的常见写法）。Godot 里 `0` 与 `"0"` 是不同的键，混用会让
 	## `has()`/取值静默落空 —— 历史上正是它让增量写无声退化成全量。把"键类型"这个细节收敛到
 	## 本类，读写两侧一律经 model_ids()/model_blocks() 访问，调用方怎么写都不会踩坑。
@@ -99,7 +99,7 @@ class QVoxDocument extends RefCounted:
 
 ## NODE 块（§7）的已校验只读视图。
 ## 节点是**嵌套**的：类型未知 / 非对象的条目已在构造时（连同子树）被丢弃，无下标、无环可言。
-class QVoxSceneGraph extends RefCounted:
+class QVoxelSceneGraph extends RefCounted:
 	## 保留下来的顶层节点（Dictionary 原样，`children` 仍是嵌套结构，**不做下标重编号**）。
 	var nodes: Array = []
 	## 相机书签（§5.1）。相机是纯工程数据，不参与几何渲染，故为空时一切照旧。
@@ -119,8 +119,8 @@ class QVoxSceneGraph extends RefCounted:
 ##
 ## 取代原先裸的 `Array`（parse_notes）：那时只能存文本，无法区分"丢了模型"还是"丢了块"，
 ## 于是 §9.0 的三档在报告里退化成"errors vs warnings"两档。本类让每一档都有独立计数，
-## 解析结束一次性并入 QVoxReport。
-class QVoxNotes extends RefCounted:
+## 解析结束一次性并入 QVoxelReport。
+class QVoxelNotes extends RefCounted:
 	var texts: Array = []          ## 人类可读描述（并入 rep.warnings）
 	var drop_models := 0           ## DROP_MODEL 计数
 	var drop_blocks := 0           ## DROP_BLOCK 计数
@@ -142,8 +142,8 @@ class QVoxNotes extends RefCounted:
 	func is_empty() -> bool:
 		return texts.is_empty()
 
-	## 并入一个 QVoxReport（追加文本 + 累加两档计数）。
-	func flush_into(rep: QVoxReport) -> void:
+	## 并入一个 QVoxelReport（追加文本 + 累加两档计数）。
+	func flush_into(rep: QVoxelReport) -> void:
 		rep.warnings.append_array(texts)
 		rep.dropped_models += drop_models
 		rep.dropped_blocks += drop_blocks
@@ -156,7 +156,7 @@ class QVoxNotes extends RefCounted:
 ##
 ## `warnings` 是上面两个 drop 档的**人类可读合并视图**（保持既有调用方兼容），
 ## 内容与 dropped_models/dropped_blocks 描述的是同一批事件——前者是文本，后者是计数。
-class QVoxReport extends RefCounted:
+class QVoxelReport extends RefCounted:
 	## FATAL：文件整体不可用（如 HEAD 结构矛盾）。
 	var errors: Array = []
 	## 非致命问题的可读描述（DROP_MODEL + DROP_BLOCK 的文本合集）。
@@ -182,17 +182,17 @@ class QVoxReport extends RefCounted:
 # 读取
 # ----------------------------------------------------------------------------
 
-## 从字节缓冲解析整个 .qvox。失败返回 null（并 push_error）。
+## 从字节缓冲解析整个 .qvx。失败返回 null（并 push_error）。
 ## check_crc=false 可跳过逐块 CRC（加载大文件提速；调试时开启）。
 ## report 非 null 时，语义校验的问题会写入其中（不额外 push）。
 ## validate=false 可跳过语义校验档（只做结构层）。
-static func parse(bytes: PackedByteArray, check_crc: bool = true, report: QVoxReport = null, validate: bool = true) -> QVoxDocument:
+static func parse(bytes: PackedByteArray, check_crc: bool = true, report: QVoxelReport = null, validate: bool = true) -> QVoxelDocument:
 	return _parse_impl(bytes, check_crc, report, validate, false)
 
 
-## 同 parse，但额外填充 doc.block_index（块字节区间），供 QVoxStream 做增量写盘。
+## 同 parse，但额外填充 doc.block_index（块字节区间），供 QVoxelStream 做增量写盘。
 ## 返回的 doc.block_index[i] 可直接切片得到该块的原始字节，未变的块无需重编码。
-static func parse_with_index(bytes: PackedByteArray, check_crc: bool = true, report: QVoxReport = null, validate: bool = true) -> QVoxDocument:
+static func parse_with_index(bytes: PackedByteArray, check_crc: bool = true, report: QVoxelReport = null, validate: bool = true) -> QVoxelDocument:
 	return _parse_impl(bytes, check_crc, report, validate, true)
 
 
@@ -209,29 +209,29 @@ static func parse_with_index(bytes: PackedByteArray, check_crc: bool = true, rep
 ## 返回块索引数组（同 doc.block_index 的结构）；文件损坏（签名错、块头越界）时返回空数组。
 static func scan_block_index(bytes: PackedByteArray) -> Array:
 	var index: Array = []
-	if bytes.size() < QVoxSpec.SIGNATURE_SIZE:
+	if bytes.size() < QVoxelSpec.SIGNATURE_SIZE:
 		return index
-	for i in QVoxSpec.SIGNATURE_SIZE:
-		if bytes[i] != QVoxSpec.SIGNATURE_ARRAY[i]:
+	for i in QVoxelSpec.SIGNATURE_SIZE:
+		if bytes[i] != QVoxelSpec.SIGNATURE_ARRAY[i]:
 			return index
-	var pos := QVoxSpec.SIGNATURE_SIZE
-	while pos + QVoxSpec.BLOCK_HEADER_SIZE <= bytes.size():
+	var pos := QVoxelSpec.SIGNATURE_SIZE
+	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
 		var length := bytes.decode_u32(pos)
-		if length % QVoxSpec.BLOCK_ALIGN != 0:
+		if length % QVoxelSpec.BLOCK_ALIGN != 0:
 			return index
-		var payload_start := pos + QVoxSpec.BLOCK_HEADER_SIZE
+		var payload_start := pos + QVoxelSpec.BLOCK_HEADER_SIZE
 		if payload_start + length > bytes.size():
 			return index
 		var type := _read_type(bytes, pos + 4)
 		var model_id := -1
 		# 只为 VOX0 读前 2 字节拿 model_id（块头之外的唯一身份信息）；
 		# 其余块一律不碰负载。
-		if type == QVoxSpec.BLOCK_VOX0 and length >= 2:
+		if type == QVoxelSpec.BLOCK_VOX0 and length >= 2:
 			model_id = bytes.decode_u16(payload_start)
 		index.append({
 			"type": type,
 			"offset": pos,
-			"total": QVoxSpec.BLOCK_HEADER_SIZE + length,
+			"total": QVoxelSpec.BLOCK_HEADER_SIZE + length,
 			"model_id": model_id,
 		})
 		pos = payload_start + length
@@ -239,45 +239,45 @@ static func scan_block_index(bytes: PackedByteArray) -> Array:
 
 
 ## 致命错误统一出口：记录到 report（有则复用，无则新建），并把解析至今累积的
-## 非致命诊断（QVoxNotes）一并带出。避免"提前 return null 丢掉全部诊断"。
-static func _flush_fatal(report: QVoxReport, message: String, notes: Variant = null, push_msg: String = "") -> void:
-	push_error("[QVox] " + (push_msg if push_msg != "" else message))
-	var rep := report if report != null else QVoxReport.new()
+## 非致命诊断（QVoxelNotes）一并带出。避免"提前 return null 丢掉全部诊断"。
+static func _flush_fatal(report: QVoxelReport, message: String, notes: Variant = null, push_msg: String = "") -> void:
+	push_error("[QVX] " + (push_msg if push_msg != "" else message))
+	var rep := report if report != null else QVoxelReport.new()
 	rep.errors.append(message)
-	if notes is QVoxNotes:
-		(notes as QVoxNotes).flush_into(rep)
+	if notes is QVoxelNotes:
+		(notes as QVoxelNotes).flush_into(rep)
 
 
-static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxReport, validate: bool, collect_index: bool) -> QVoxDocument:
-	if bytes.size() < QVoxSpec.SIGNATURE_SIZE:
+static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxelReport, validate: bool, collect_index: bool) -> QVoxelDocument:
+	if bytes.size() < QVoxelSpec.SIGNATURE_SIZE:
 		_flush_fatal(report, "文件过小，缺少签名")
 		return null
-	for i in QVoxSpec.SIGNATURE_SIZE:
-		if bytes[i] != QVoxSpec.SIGNATURE_ARRAY[i]:
-			_flush_fatal(report, "签名不匹配（不是 .qvox 文件或已损坏）")
+	for i in QVoxelSpec.SIGNATURE_SIZE:
+		if bytes[i] != QVoxelSpec.SIGNATURE_ARRAY[i]:
+			_flush_fatal(report, "签名不匹配（不是 .qvx 文件或已损坏）")
 			return null
 
-	var doc := QVoxDocument.new()
-	var pos := QVoxSpec.SIGNATURE_SIZE
+	var doc := QVoxelDocument.new()
+	var pos := QVoxelSpec.SIGNATURE_SIZE
 	var first := true
-	var block_size := QVoxSpec.DEFAULT_BLOCK_SIZE
+	var block_size := QVoxelSpec.DEFAULT_BLOCK_SIZE
 	var vox0_count := 0
 	# 解析阶段的非致命问题：块级/模型级丢弃、CRC 跳过等（按 §9.0 分档累积）。
-	var notes := QVoxNotes.new()
+	var notes := QVoxelNotes.new()
 
 	while pos < bytes.size():
 		# 块头自足：length + type + crc32，全部在 payload 之前（P4）
-		if pos + QVoxSpec.BLOCK_HEADER_SIZE > bytes.size():
-			_flush_fatal(report, "块头越界 @%d" % pos, notes, "[QVox] 块头越界 @%d" % pos)
+		if pos + QVoxelSpec.BLOCK_HEADER_SIZE > bytes.size():
+			_flush_fatal(report, "块头越界 @%d" % pos, notes, "[QVX] 块头越界 @%d" % pos)
 			return null
 		var length := bytes.decode_u32(pos)
 		var type := _read_type(bytes, pos + 4)
 		var crc := bytes.decode_u32(pos + 8)
 
-		if length % QVoxSpec.BLOCK_ALIGN != 0:
+		if length % QVoxelSpec.BLOCK_ALIGN != 0:
 			_flush_fatal(report, "块 %s 的 length=%d 不是 4 的倍数（格式损坏）" % [type, length], notes)
 			return null
-		var payload_start := pos + QVoxSpec.BLOCK_HEADER_SIZE
+		var payload_start := pos + QVoxelSpec.BLOCK_HEADER_SIZE
 		if payload_start + length > bytes.size():
 			_flush_fatal(report, "块 %s 的负载越界" % type, notes)
 			return null
@@ -298,13 +298,13 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 			if computed != crc:
 				# CRC 失败：跳过该块（DROP_BLOCK），保留其余（§9.0）
 				var msg := "块 %s 的 CRC 不匹配，已跳过" % type
-				push_warning("[QVox] " + msg)
+				push_warning("[QVX] " + msg)
 				notes.block_dropped(msg)
 				pos = payload_start + length
 				first = false
 				continue
 
-		if first and type != QVoxSpec.BLOCK_HEAD:
+		if first and type != QVoxelSpec.BLOCK_HEAD:
 			_flush_fatal(report, "第一个块必须是 HEAD，实际是 %s" % type, notes)
 			return null
 
@@ -316,12 +316,12 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 			doc.block_index.append({
 				"type": type,
 				"offset": pos,
-				"total": QVoxSpec.BLOCK_HEADER_SIZE + length,
+				"total": QVoxelSpec.BLOCK_HEADER_SIZE + length,
 				"model_id": -1,
 			})
 
 		match type:
-			QVoxSpec.BLOCK_HEAD:
+			QVoxelSpec.BLOCK_HEAD:
 				var head_err: Array = [""]
 				doc.head = _parse_head(payload, head_err)
 				if doc.head.is_empty():
@@ -337,9 +337,9 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 					_flush_fatal(report, cap, notes)
 					return null
 				block_size = doc.get_block_size()
-			QVoxSpec.BLOCK_MATE:
+			QVoxelSpec.BLOCK_MATE:
 				doc.materials = _parse_mate(payload, notes)
-			QVoxSpec.BLOCK_VOX0:
+			QVoxelSpec.BLOCK_VOX0:
 				# §5：一个 model_id 恰好对应一个 VOX0 块；重复即为损坏（拒绝整个文件）。
 				var model_id: Variant = _parse_vox0_into(doc, payload, block_size, notes)
 				if model_id == null:
@@ -347,15 +347,15 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 				vox0_count += 1
 				if entry >= 0:
 					doc.block_index[entry]["model_id"] = int(model_id)
-			QVoxSpec.BLOCK_NODE:
+			QVoxelSpec.BLOCK_NODE:
 				doc.node = _parse_json(payload)
-			QVoxSpec.BLOCK_CACH:
+			QVoxelSpec.BLOCK_CACH:
 				# §6：只做结构切分（kind / algo_version / source_crc / 余下字节）。
 				# 前缀或来源表越界 → 该块损坏，按 §9 的 DROP_BLOCK 跳过，不影响其余块。
 				var cach_entry: Variant = _parse_cach(payload)
 				if cach_entry == null:
 					var msg := "CACH 结构非法（前置或 source_crc 越界），已跳过"
-					push_warning("[QVox] " + msg)
+					push_warning("[QVX] " + msg)
 					notes.block_dropped(msg)
 				else:
 					doc.cach.append(cach_entry)
@@ -376,35 +376,35 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxRep
 		return null
 
 	# 语义档（§9）。顺序在结构层之后，因为 bounds / MATE / model_id 都需要全文件的视图。
-	var rep := report if report != null else QVoxReport.new()
+	var rep := report if report != null else QVoxelReport.new()
 	notes.flush_into(rep)
 	if validate:
 		_validate(doc, rep)
 	if report == null:
 		for w in rep.warnings:
-			push_warning("[QVox] %s" % w)
+			push_warning("[QVX] %s" % w)
 		for e in rep.errors:
-			push_error("[QVox] %s" % e)
+			push_error("[QVX] %s" % e)
 	return doc
 
 
 ## 语义校验（§9「语义」一档）：文件级逻辑一致性。
 ## 在结构层全部通过后调用。doc 会被就地修正（丢弃越界数据）。
-static func validate(doc: QVoxDocument, report: QVoxReport = null) -> QVoxReport:
-	var rep := report if report != null else QVoxReport.new()
+static func validate(doc: QVoxelDocument, report: QVoxelReport = null) -> QVoxelReport:
+	var rep := report if report != null else QVoxelReport.new()
 	if doc == null:
 		rep.errors.append("doc 为 null")
 		return rep
 	_validate(doc, rep)
 	if report == null:
 		for w in rep.warnings:
-			push_warning("[QVox] %s" % w)
+			push_warning("[QVX] %s" % w)
 		for e in rep.errors:
-			push_error("[QVox] %s" % e)
+			push_error("[QVX] %s" % e)
 	return rep
 
 
-static func _validate(doc: QVoxDocument, rep: QVoxReport) -> void:
+static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 	var B := doc.get_block_size()
 	if B <= 0 or (B & (B - 1)) != 0:
 		rep.errors.append("HEAD.block_size=%d 不是 2 的幂" % B)
@@ -413,28 +413,28 @@ static func _validate(doc: QVoxDocument, rep: QVoxReport) -> void:
 
 	# --- channels[0] 必须是 material；通道数必须 == 1（§3.1，本版收敛为单通道） ---
 	var channels: Array = doc.get_channels()
-	if channels.size() != QVoxSpec.SUPPORTED_CHANNEL_COUNT:
+	if channels.size() != QVoxelSpec.SUPPORTED_CHANNEL_COUNT:
 		rep.errors.append("HEAD.channels 含 %d 个通道，当前版本仅支持 %d 个（%s）" \
-				% [channels.size(), QVoxSpec.SUPPORTED_CHANNEL_COUNT, QVoxSpec.DOMINANT_CHANNEL])
+				% [channels.size(), QVoxelSpec.SUPPORTED_CHANNEL_COUNT, QVoxelSpec.DOMINANT_CHANNEL])
 		return
 	var ch0: Variant = channels[0]
-	if not (ch0 is Dictionary) or String(ch0.get("name", "")) != QVoxSpec.DOMINANT_CHANNEL:
-		rep.errors.append("HEAD.channels[0].name 必须是 '%s'" % QVoxSpec.DOMINANT_CHANNEL)
+	if not (ch0 is Dictionary) or String(ch0.get("name", "")) != QVoxelSpec.DOMINANT_CHANNEL:
+		rep.errors.append("HEAD.channels[0].name 必须是 '%s'" % QVoxelSpec.DOMINANT_CHANNEL)
 		return
 	for ci in channels.size():
 		var c: Variant = channels[ci]
 		if not (c is Dictionary):
 			rep.errors.append("HEAD.channels[%d] 不是对象" % ci)
 			return
-		if not QVoxSpec.is_allowed_bpp(int(c.get("bpp", 0))):
-			rep.errors.append("HEAD.channels[%d].bpp=%s 不受支持（本版仅 %d 位）" % [ci, c.get("bpp"), QVoxSpec.CHANNEL_BPP])
+		if not QVoxelSpec.is_allowed_bpp(int(c.get("bpp", 0))):
+			rep.errors.append("HEAD.channels[%d].bpp=%s 不受支持（本版仅 %d 位）" % [ci, c.get("bpp"), QVoxelSpec.CHANNEL_BPP])
 			return
 
 	# --- up_axis（§3.1：只允许 x/y/z；其他值按缺省 y 处理并告警，不拒绝文件） ---
-	var up := str(doc.head.get("up_axis", QVoxSpec.DEFAULT_UP_AXIS))
-	if not (up in QVoxSpec.ALLOWED_UP_AXES):
+	var up := str(doc.head.get("up_axis", QVoxelSpec.DEFAULT_UP_AXIS))
+	if not (up in QVoxelSpec.ALLOWED_UP_AXES):
 		rep.warnings.append("HEAD.up_axis='%s' 非法（应为 %s），按默认 '%s' 处理" \
-				% [up, QVoxSpec.ALLOWED_UP_AXES, QVoxSpec.DEFAULT_UP_AXIS])
+				% [up, QVoxelSpec.ALLOWED_UP_AXES, QVoxelSpec.DEFAULT_UP_AXIS])
 
 	# --- bounds（半开区间 [min, max)，体素坐标）§5.1 / §9 ---
 	var bounds := doc.get_bounds()
@@ -527,24 +527,24 @@ static func _check_capabilities(head: Dictionary) -> String:
 	if req is Array:
 		for t in (req as Array):
 			var ts := String(t)
-			if ts != "" and not QVoxSpec.can_handle_block_type(ts):
+			if ts != "" and not QVoxelSpec.can_handle_block_type(ts):
 				return "HEAD.require 含本读者无法处理的块类型 '%s'（§10：拒绝整个文件）" % ts
 	# channels：当前版本恰好 1 个通道（material）。>1 会让单通道 codec 错读，故拒绝而非静默误读。
 	var channels: Variant = head.get("channels")
 	if not (channels is Array) or (channels as Array).is_empty():
 		return "HEAD.channels 必须是非空数组"
-	if (channels as Array).size() != QVoxSpec.SUPPORTED_CHANNEL_COUNT:
+	if (channels as Array).size() != QVoxelSpec.SUPPORTED_CHANNEL_COUNT:
 		return "HEAD.channels 含 %d 个通道，当前版本仅支持 %d 个（%s）" \
-				% [(channels as Array).size(), QVoxSpec.SUPPORTED_CHANNEL_COUNT, QVoxSpec.DOMINANT_CHANNEL]
+				% [(channels as Array).size(), QVoxelSpec.SUPPORTED_CHANNEL_COUNT, QVoxelSpec.DOMINANT_CHANNEL]
 	return ""
 
 
 ## 记录一次非致命丢弃（block 级）：同时 push 告警并写进报告。
-## 只 push 不记账的话，QVoxReport 会对此完全失明（调用方看不到文件掉了什么）。
+## 只 push 不记账的话，QVoxelReport 会对此完全失明（调用方看不到文件掉了什么）。
 static func _push_note(notes: Variant, msg: String) -> void:
-	push_warning("[QVox] " + msg)
-	if notes is QVoxNotes:
-		(notes as QVoxNotes).block_dropped(msg)
+	push_warning("[QVX] " + msg)
+	if notes is QVoxelNotes:
+		(notes as QVoxelNotes).block_dropped(msg)
 
 
 ## 解析 HEAD 的 JSON payload（剥离尾部零填充）。
@@ -558,10 +558,10 @@ static func _parse_head(payload: PackedByteArray, err: Array = []) -> Dictionary
 		reason = "缺少必填键 qvox"
 	elif not d.has("channels"):
 		reason = "缺少必填键 channels"
-	elif int(d["qvox"]) != QVoxSpec.VERSION:
-		reason = "不支持的 qvox 版本 %d（本实现仅支持 %d）" % [int(d["qvox"]), QVoxSpec.VERSION]
+	elif int(d["qvox"]) != QVoxelSpec.VERSION:
+		reason = "不支持的 qvox 版本 %d（本实现仅支持 %d）" % [int(d["qvox"]), QVoxelSpec.VERSION]
 	if reason != "":
-		push_error("[QVox] HEAD 不合法：" + reason)
+		push_error("[QVX] HEAD 不合法：" + reason)
 		if not err.is_empty():
 			err[0] = reason
 		return {}
@@ -592,13 +592,13 @@ static func _parse_mate(payload: PackedByteArray, notes: Variant = null) -> Arra
 		# §4：MATE 里至少含条目 0（空气）。entry_count=0 违反规范 → 视为"未声明材质"并告警。
 		_push_note(notes, "MATE entry_count=0（§4 要求至少含条目 0），按无材质处理")
 		return out
-	var need := 2 + count * QVoxSpec.MATE_ENTRY_SIZE
+	var need := 2 + count * QVoxelSpec.MATE_ENTRY_SIZE
 	if payload.size() < need:
 		_push_note(notes, "MATE 条目越界（声明 %d 条需 %d 字节，实际 %d），按无材质处理"
 				% [count, need, payload.size()])
 		return out
 	for i in count:
-		var off := 2 + i * QVoxSpec.MATE_ENTRY_SIZE
+		var off := 2 + i * QVoxelSpec.MATE_ENTRY_SIZE
 		var rgba := payload.decode_u32(off)
 		out.append({
 			"rgba": rgba,
@@ -620,18 +620,18 @@ static func _parse_mate(payload: PackedByteArray, notes: Variant = null) -> Arra
 ## 解析 CACH 负载的**头部**：{ kind, algo_version, source_crc, content_off }。结构非法返回 {}。
 ##
 ## content_off = "前置 + 来源表"之后的字节起点（相对负载起点），即 kind 解释者自己的内容起点。
-## **不切出内容字节**：供"只建条目索引、不解码缓存"的调用方使用（QVoxStream 的 CACH 条目
+## **不切出内容字节**：供"只建条目索引、不解码缓存"的调用方使用（QVoxelStream 的 CACH 条目
 ## 索引），免得为每个缓存条目复制一份负载。这是 CACH 头部布局的唯一实现。
 static func parse_cach_header(payload: PackedByteArray) -> Dictionary:
-	if payload.size() < QVoxSpec.CACH_PREFIX_SIZE:
+	if payload.size() < QVoxelSpec.CACH_PREFIX_SIZE:
 		return {}
 	var source_count := payload.decode_u16(6)
-	var need := QVoxSpec.CACH_PREFIX_SIZE + source_count * 4
+	var need := QVoxelSpec.CACH_PREFIX_SIZE + source_count * 4
 	if payload.size() < need:
 		return {}
 	var source_crc: Array = []
 	for i in source_count:
-		source_crc.append(payload.decode_u32(QVoxSpec.CACH_PREFIX_SIZE + i * 4))
+		source_crc.append(payload.decode_u32(QVoxelSpec.CACH_PREFIX_SIZE + i * 4))
 	return {
 		"kind": _read_type(payload, 0),
 		"algo_version": payload.decode_u16(4),
@@ -681,10 +681,10 @@ static func _is_air_entry(entry: Variant) -> bool:
 ## 追加一个 VOX0 子块（17 字节头 + 负载）到 out。
 static func write_vox_block(out: PackedByteArray, key: Vector3i, codec: int, payload: PackedByteArray) -> void:
 	var off := out.size()
-	out.resize(off + QVoxSpec.VOX_BLOCK_HEADER_SIZE)
-	out.encode_u32(off, QVoxSpec.to_u32(key.x))
-	out.encode_u32(off + 4, QVoxSpec.to_u32(key.y))
-	out.encode_u32(off + 8, QVoxSpec.to_u32(key.z))
+	out.resize(off + QVoxelSpec.VOX_BLOCK_HEADER_SIZE)
+	out.encode_u32(off, QVoxelSpec.to_u32(key.x))
+	out.encode_u32(off + 4, QVoxelSpec.to_u32(key.y))
+	out.encode_u32(off + 8, QVoxelSpec.to_u32(key.z))
 	out[off + 12] = codec & 0xFF
 	out.encode_u32(off + 13, payload.size())
 	out.append_array(payload)
@@ -694,7 +694,7 @@ static func write_vox_block(out: PackedByteArray, key: Vector3i, codec: int, pay
 ## 头越界或负载越过 limit（截断）→ 返回空字典，调用方据此判 DROP_MODEL。
 ## 返回 {key, codec, payload_off, payload_len, total}。
 static func read_vox_block(payload: PackedByteArray, at: int, limit: int) -> Dictionary:
-	var payload_off := at + QVoxSpec.VOX_BLOCK_HEADER_SIZE
+	var payload_off := at + QVoxelSpec.VOX_BLOCK_HEADER_SIZE
 	if payload_off > limit:
 		return {}
 	var plen := payload.decode_u32(at + 13)
@@ -702,13 +702,13 @@ static func read_vox_block(payload: PackedByteArray, at: int, limit: int) -> Dic
 		return {}
 	return {
 		"key": Vector3i(
-				QVoxSpec.from_u32(payload.decode_u32(at)),
-				QVoxSpec.from_u32(payload.decode_u32(at + 4)),
-				QVoxSpec.from_u32(payload.decode_u32(at + 8))),
+				QVoxelSpec.from_u32(payload.decode_u32(at)),
+				QVoxelSpec.from_u32(payload.decode_u32(at + 4)),
+				QVoxelSpec.from_u32(payload.decode_u32(at + 8))),
 		"codec": payload[at + 12],
 		"payload_off": payload_off,
 		"payload_len": plen,
-		"total": QVoxSpec.VOX_BLOCK_HEADER_SIZE + plen,
+		"total": QVoxelSpec.VOX_BLOCK_HEADER_SIZE + plen,
 	}
 
 
@@ -716,7 +716,7 @@ static func read_vox_block(payload: PackedByteArray, at: int, limit: int) -> Dic
 ##
 ## 模型头 = uint16 model_id + uint32 block_count + uint32 payload_length（共 10 字节）。
 ## payload_length 精确界定 block[] 的字节数，因此"解析是否正好用完"是一次等式比较，
-## **没有任何填充灰区**（见 QVoxSpec 里 VOX_MODEL_HEADER_SIZE 的说明）。
+## **没有任何填充灰区**（见 QVoxelSpec 里 VOX_MODEL_HEADER_SIZE 的说明）。
 ##
 ## 失败即拒绝整个文件的情形（FATAL）：头部越界、model_id 重复、codec=0、
 ##   第一个块不是 HEAD、沿用 HEAD 失败。
@@ -724,17 +724,17 @@ static func read_vox_block(payload: PackedByteArray, at: int, limit: int) -> Dic
 ## 单个块损坏（DROP_BLOCK）：解包失败（含 codec=0、游程数不对、索引越界）。
 ##   —— 只跳过该块，不牵连模型其余块。
 ## notes 非 null 时，非致命问题（块丢弃、模型丢弃）写入其中。
-static func _parse_vox0_into(doc: QVoxDocument, payload: PackedByteArray, block_size: int, notes: QVoxNotes = null) -> Variant:
-	if payload.size() < QVoxSpec.VOX_MODEL_HEADER_SIZE:
-		push_error("[QVox] VOX0 头部越界（需要 %d 字节，实得 %d）"
-				% [QVoxSpec.VOX_MODEL_HEADER_SIZE, payload.size()])
+static func _parse_vox0_into(doc: QVoxelDocument, payload: PackedByteArray, block_size: int, notes: QVoxelNotes = null) -> Variant:
+	if payload.size() < QVoxelSpec.VOX_MODEL_HEADER_SIZE:
+		push_error("[QVX] VOX0 头部越界（需要 %d 字节，实得 %d）"
+				% [QVoxelSpec.VOX_MODEL_HEADER_SIZE, payload.size()])
 		return null
 	var model_id := payload.decode_u16(0)
 	var block_count := payload.decode_u32(2)
 	var payload_length := payload.decode_u32(6)
 	# §5：一个 model_id 恰好对应一个 VOX0 块，重复即为损坏（FATAL）。
 	if doc.models.has(model_id):
-		push_error("[QVox] VOX0 重复的 model_id=%d（每个 model_id 只能有一个块）" % model_id)
+		push_error("[QVX] VOX0 重复的 model_id=%d（每个 model_id 只能有一个块）" % model_id)
 		return null
 
 	# --- 长度自洽（精确，无灰区）---
@@ -743,11 +743,11 @@ static func _parse_vox0_into(doc: QVoxDocument, payload: PackedByteArray, block_
 	#   顶层块流由块头自己的 length 定界，与其负载声明的 payload_length 无关 —— 该 VOX0
 	#   的负载声明再离谱，也不会影响"下一个块头在哪儿"，因此波及范围只到这一个模型。
 	#   （§9.0 判据：异常会不会让同一 VOX0 的其余块不可信？会 → DROP_MODEL。）
-	var expected_end := QVoxSpec.VOX_MODEL_HEADER_SIZE + payload_length
+	var expected_end := QVoxelSpec.VOX_MODEL_HEADER_SIZE + payload_length
 	if expected_end > payload.size():
 		var msg := "VOX0 model_id=%d 的 payload_length=%d 越界（需要 %d，实得 %d），已丢弃该模型" \
 				% [model_id, payload_length, expected_end, payload.size()]
-		push_warning("[QVox] " + msg)
+		push_warning("[QVX] " + msg)
 		if notes != null:
 			notes.model_dropped(msg)
 		doc.models[model_id] = {}
@@ -755,7 +755,7 @@ static func _parse_vox0_into(doc: QVoxDocument, payload: PackedByteArray, block_
 
 	var n := block_size * block_size * block_size
 	var blocks: Dictionary = {}
-	var pos := QVoxSpec.VOX_MODEL_HEADER_SIZE
+	var pos := QVoxelSpec.VOX_MODEL_HEADER_SIZE
 	var truncated := false  # 声明块数多于实际字节
 	for _i in block_count:
 		var blk := read_vox_block(payload, pos, expected_end)
@@ -767,19 +767,19 @@ static func _parse_vox0_into(doc: QVoxDocument, payload: PackedByteArray, block_
 		var payload_off: int = blk["payload_off"]
 		var plen: int = blk["payload_len"]
 		pos = payload_off + plen
-		if codec == QVoxSpec.CODEC_EMPTY:
+		if codec == QVoxelSpec.CODEC_EMPTY:
 			# codec=0 是保留值，文件中不应出现（§5.2）→ 该块损坏，跳过（DROP_BLOCK）。
 			# 判据：块头里的 plen 已读到，下一个块的位置不受影响，故波及范围只到这一块。
 			var msg0 := "VOX0 块 %d,%d,%d 使用了保留 codec=0，已跳过" % [bkey.x, bkey.y, bkey.z]
-			push_warning("[QVox] " + msg0)
+			push_warning("[QVX] " + msg0)
 			if notes != null:
 				notes.block_dropped(msg0)
 			continue
-		var buf := QVoxBlockCodec.unpack(codec, payload.slice(payload_off, payload_off + plen), n)
+		var buf := QVoxelBlockCodec.unpack(codec, payload.slice(payload_off, payload_off + plen), n)
 		if buf.is_empty():
 			# 块损坏 → 跳过该块，保留模型其余块（DROP_BLOCK）
 			var msg := "VOX0 块 %d,%d,%d 解包失败，已跳过" % [bkey.x, bkey.y, bkey.z]
-			push_warning("[QVox] " + msg)
+			push_warning("[QVX] " + msg)
 			if notes != null:
 				notes.block_dropped(msg)
 			continue
@@ -791,12 +791,12 @@ static func _parse_vox0_into(doc: QVoxDocument, payload: PackedByteArray, block_
 	#   2. 解析未完（truncated）；
 	#   3. 解析指针未恰好停在 expected_end（多读/少读都是损坏）。
 	var mismatch := truncated \
-			or (block_count > 0 and pos == QVoxSpec.VOX_MODEL_HEADER_SIZE) \
+			or (block_count > 0 and pos == QVoxelSpec.VOX_MODEL_HEADER_SIZE) \
 			or (pos != expected_end)
 	if mismatch:
 		var msg := "model_id=%d 的 block_count=%d/payload_length=%d 与负载不自洽（解析到 %d，应为 %d），已丢弃该模型" \
 				% [model_id, block_count, payload_length, pos, expected_end]
-		push_warning("[QVox] " + msg)
+		push_warning("[QVX] " + msg)
 		if notes != null:
 			notes.model_dropped(msg)
 		doc.models[model_id] = {}
@@ -819,24 +819,24 @@ static func _read_type(bytes: PackedByteArray, at: int) -> String:
 # ----------------------------------------------------------------------------
 # 节点是**嵌套**的：顶层 nodes[] 里每一项自己带 children[]（组）或 model_id（模型）。
 # 嵌套天然不可能成环（子节点就写在父节点内部），于是不再需要"下标重编号 + 可达性收敛 +
-# 三色环检测"那一整套 —— 那些复杂度全部来自"身份即位置"的扁平表示，而扁平表示是 qvox 3 之前的事。
+# 三色环检测"那一整套 —— 那些复杂度全部来自"身份即位置"的扁平表示，而扁平表示是 qvx 3 之前的事。
 # 校验只剩两件事：非对象项丢弃；kind 不在白名单（group / model）的条目**连同子树**丢弃。
 # 任一节点无效时【只丢弃该节点】，不拒绝整个文件（§9）——
 # 场景树是易变部分，不该因为一个坏节点毁掉整个模型。
 
 ## 从 doc.node 构造已校验的只读视图。丢弃的节点数记入 rep.warnings。
-static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
-	var sg := QVoxSceneGraph.new()
+static func _build_scene(doc: QVoxelDocument, rep: QVoxelReport) -> QVoxelSceneGraph:
+	var sg := QVoxelSceneGraph.new()
 	# 相机**先于 nodes**处理：它不引用任何东西，且"有相机、还没摆模型"是新建工程的常态。
 	# 若放在下面 nodes 的提前返回之后，这种文件一存一读就会把 cameras 丢掉。
 	sg.cameras = _normalize_object_array(
-			doc.node.get(QVoxSpec.NODE_CAMERAS_KEY), QVoxSpec.CAMERA_FIELD_DEFAULTS,
-			QVoxSpec.NODE_CAMERAS_KEY, rep,
-			{"projection": QVoxSpec.ALLOWED_CAMERA_PROJECTIONS})
-	var raw_nodes: Variant = doc.node.get(QVoxSpec.NODE_NODES_KEY)
+			doc.node.get(QVoxelSpec.NODE_CAMERAS_KEY), QVoxelSpec.CAMERA_FIELD_DEFAULTS,
+			QVoxelSpec.NODE_CAMERAS_KEY, rep,
+			{"projection": QVoxelSpec.ALLOWED_CAMERA_PROJECTIONS})
+	var raw_nodes: Variant = doc.node.get(QVoxelSpec.NODE_NODES_KEY)
 	if not (raw_nodes is Array):
 		# 只在"写了 nodes 但不是数组"时告警；键缺失 = 空世界，不是错误。
-		if doc.node.has(QVoxSpec.NODE_NODES_KEY):
+		if doc.node.has(QVoxelSpec.NODE_NODES_KEY):
 			rep.warnings.append("NODE 的 nodes 不是数组，已忽略节点树")
 		return sg
 	var cleaned := _clean_nodes(raw_nodes as Array)
@@ -845,7 +845,7 @@ static func _build_scene(doc: QVoxDocument, rep: QVoxReport) -> QVoxSceneGraph:
 	if sg.dropped_nodes > 0:
 		rep.warnings.append("NODE 有 %d 个节点因类型未知/非对象被丢弃（§7）" % sg.dropped_nodes)
 	# 动画**原样透传**（§3：本层不解释它）。帧键在扁平表示里是节点下标，而嵌套表示没有下标 ——
-	# 于是"校验帧键"在本层无从谈起，交给认识动画语义的调用方（QVoxAsset）。
+	# 于是"校验帧键"在本层无从谈起，交给认识动画语义的调用方（QVoxelAsset）。
 	var anims: Variant = doc.node.get("animations")
 	if anims is Array:
 		sg.animations = anims
@@ -918,7 +918,7 @@ static func _clean_node(item: Variant) -> Array:
 ## 把 NODE 里的"对象数组"（当前只有 `cameras`）规范成合法项：
 ## 丢弃非对象项并记警告，按 defaults 补齐**缺失**键，未知键原样保留。
 static func _normalize_object_array(raw: Variant, defaults: Dictionary,
-		what: String, rep: QVoxReport, enums := {}) -> Array:
+		what: String, rep: QVoxelReport, enums := {}) -> Array:
 	var out: Array = []
 	if raw == null:
 		return out
@@ -949,7 +949,7 @@ static func _normalize_object_array(raw: Variant, defaults: Dictionary,
 
 ## 把 JSON 里的整数（int / float / 字符串数字）转成非负整数；非数值/负数返回 -1。
 ## 注意：Godot 的 JSON 解析把整数也解析为 float，故不能直接用 `is int` 判定。
-## 公开：QVoxWorld 读 `model_id` / `combine` 这类整数字段、QVoxAsset 解析动画帧的节点键都复用它
+## 公开：QVoxelWorld 读 `model_id` / `combine` 这类整数字段、QVoxelAsset 解析动画帧的节点键都复用它
 ## （同一套 JSON 整数语义只该有一份实现）。
 static func as_index(v: Variant) -> int:
 	if v is int:
@@ -970,25 +970,25 @@ static func as_index(v: Variant) -> int:
 # 写入
 # ----------------------------------------------------------------------------
 
-## 把 QVoxDocument 序列化为完整 .qvox 字节（含签名）。
-static func serialize(doc: QVoxDocument, include_crc: bool = true) -> PackedByteArray:
+## 把 QVoxelDocument 序列化为完整 .qvx 字节（含签名）。
+static func serialize(doc: QVoxelDocument, include_crc: bool = true) -> PackedByteArray:
 	var out := PackedByteArray()
-	out.append_array(QVoxSpec.signature_bytes())
+	out.append_array(QVoxelSpec.signature_bytes())
 
 	# HEAD 必须第一
-	_write_block(out, QVoxSpec.BLOCK_HEAD, _encode_head(doc), include_crc)
+	_write_block(out, QVoxelSpec.BLOCK_HEAD, _encode_head(doc), include_crc)
 	# MATE：只要用到任何非空气材质就写（含条目 0）
 	if not doc.materials.is_empty():
-		_write_block(out, QVoxSpec.BLOCK_MATE, _encode_mate(doc), include_crc)
+		_write_block(out, QVoxelSpec.BLOCK_MATE, _encode_mate(doc), include_crc)
 	# VOX0：每个 model 一个块
 	for mid in doc.model_ids():
 		var blocks: Variant = doc.model_blocks(mid)
 		if blocks is Dictionary:
-			_write_block(out, QVoxSpec.BLOCK_VOX0,
+			_write_block(out, QVoxelSpec.BLOCK_VOX0,
 					_encode_vox0(mid, blocks as Dictionary, doc.get_block_size()), include_crc)
 	# NODE
 	if not doc.node.is_empty():
-		_write_block(out, QVoxSpec.BLOCK_NODE, _encode_json(doc.node), include_crc)
+		_write_block(out, QVoxelSpec.BLOCK_NODE, _encode_json(doc.node), include_crc)
 	# CACH：派生数据（可删，P5）。写入方提供什么就写什么，格式层不解释 kind。
 	append_cach_blocks(out, doc.cach, include_crc)
 	# 未知块：原样保留（重写不丢数据）
@@ -1008,7 +1008,7 @@ static func append_cach_blocks(out: PackedByteArray, entries: Array, include_crc
 	for e in entries:
 		if not (e is Dictionary):
 			continue
-		_write_block(out, QVoxSpec.BLOCK_CACH, encode_cach(e as Dictionary), include_crc)
+		_write_block(out, QVoxelSpec.BLOCK_CACH, encode_cach(e as Dictionary), include_crc)
 
 
 ## CACH 条目 → 负载字节：8 字节定长前置 + source_crc[] + 内容。
@@ -1017,17 +1017,17 @@ static func encode_cach(entry: Dictionary) -> PackedByteArray:
 	var src: Variant = entry.get("source_crc", [])
 	var crcs: Array = src if src is Array else []
 	var out := PackedByteArray()
-	out.resize(QVoxSpec.CACH_PREFIX_SIZE + crcs.size() * 4)
+	out.resize(QVoxelSpec.CACH_PREFIX_SIZE + crcs.size() * 4)
 	var k := kind.to_ascii_buffer()
 	if k.size() != 4:
-		push_error("[QVox] CACH kind 必须是 4 个 ASCII 字符: '%s'" % kind)
+		push_error("[QVX] CACH kind 必须是 4 个 ASCII 字符: '%s'" % kind)
 		k.resize(4)
 	for i in 4:
 		out[i] = k[i]
 	out.encode_u16(4, int(entry.get("algo_version", 0)) & 0xFFFF)
 	out.encode_u16(6, crcs.size() & 0xFFFF)
 	for i in crcs.size():
-		out.encode_u32(QVoxSpec.CACH_PREFIX_SIZE + i * 4, int(crcs[i]) & 0xFFFFFFFF)
+		out.encode_u32(QVoxelSpec.CACH_PREFIX_SIZE + i * 4, int(crcs[i]) & 0xFFFFFFFF)
 	out.append_array(entry.get("payload", PackedByteArray()))
 	return out
 
@@ -1054,26 +1054,26 @@ static func encode_cach(entry: Dictionary) -> PackedByteArray:
 ##                  删除的跳过、其余子块搬运旧字节（实测 144 块改 1 块：2000ms → ~15ms）。
 ##   vox0_index     【二级索引缓存，可选】{ model_id(int): index_vox0_blocks() 的结果 }。
 ##                  index_vox0_blocks 要对整个 VOX0 负载算一遍子块 CRC（1.4MB ≈ 90ms），
-##                  若每次写盘都重算，子块级增量的收益会被它吃光。由调用方（QVoxStream）
+##                  若每次写盘都重算，子块级增量的收益会被它吃光。由调用方（QVoxelStream）
 ##                  在加载时建一次、写盘后增量维护，后续写盘直接复用 → 归零。
 ##                  缺省/未命中 → 现场重算索引（正确但慢），保证旧调用方不受影响。
 ##   dirty_cach_blocks
 ##                 需要**替换/删除**的旧 CACH 顶层块偏移集合 { block_offset(int): true }。
 ##                 在集合里的旧块被跳过（不搬运），新条目由 new_doc.cach 在末尾追加；
 ##                 不在集合里的旧 CACH 原样搬运（缓存内容与其来源都没变）。
-##                 【为什么按块偏移而不是整体布尔】派生缓存由调用方（QVoxStream）**按条目**
+##                 【为什么按块偏移而不是整体布尔】派生缓存由调用方（QVoxelStream）**按条目**
 ##                 持有：它只留"变化的那几条"在内存里，其余条目仍躺在磁盘上。整体 bool 会
 ##                 迫使调用方交出完整缓存（又回到常驻镜像），逐条 diff 又要格式层解释 kind；
 ##                 而"哪些旧块要换掉"是调用方（索引持有者）已经知道的事实，直接给偏移最省。
 ##                 空集合 = 没有条目要替换，此时 new_doc.cach 也应为空。
 ##   返回值：新文件字节。确定性：同一输入必得同一输出。
-static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocument, new_doc: QVoxDocument, dirty_models: Dictionary, dirty_global: bool, include_crc: bool = true, deleted_chunks: Dictionary = {}, vox0_index: Dictionary = {}, dirty_cach_blocks: Dictionary = {}) -> PackedByteArray:
+static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxelDocument, new_doc: QVoxelDocument, dirty_models: Dictionary, dirty_global: bool, include_crc: bool = true, deleted_chunks: Dictionary = {}, vox0_index: Dictionary = {}, dirty_cach_blocks: Dictionary = {}) -> PackedByteArray:
 	# 无旧索引就无从搬运旧块。此时调用方须保证 new_doc 自带完整世界（首写场景），退回全量写。
 	if old_doc == null or old_doc.block_index.is_empty():
 		return serialize(new_doc, include_crc)
 
 	var out := PackedByteArray()
-	out.append_array(QVoxSpec.signature_bytes())
+	out.append_array(QVoxelSpec.signature_bytes())
 	var block_size := new_doc.get_block_size()
 
 	# 按旧文件的物理块顺序重建：HEAD 必须第一个（规范 §1 / §3）。
@@ -1081,22 +1081,22 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 	for idx in old_doc.block_index.size():
 		var bi: Dictionary = old_doc.block_index[idx]
 		var type: String = bi["type"]
-		if type == QVoxSpec.BLOCK_HEAD:
+		if type == QVoxelSpec.BLOCK_HEAD:
 			# HEAD：dirty_global 或 head 变化 → 重编码；否则搬运
 			if dirty_global or _head_changed(old_doc, new_doc):
-				_write_block(out, QVoxSpec.BLOCK_HEAD, _encode_head(new_doc), include_crc)
+				_write_block(out, QVoxelSpec.BLOCK_HEAD, _encode_head(new_doc), include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
-		if type == QVoxSpec.BLOCK_MATE:
+		if type == QVoxelSpec.BLOCK_MATE:
 			if dirty_global or _mate_changed(old_doc, new_doc):
 				if not new_doc.materials.is_empty():
-					_write_block(out, QVoxSpec.BLOCK_MATE, _encode_mate(new_doc), include_crc)
+					_write_block(out, QVoxelSpec.BLOCK_MATE, _encode_mate(new_doc), include_crc)
 				# materials 变空 → 丢弃 MATE 块（不写）
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
-		if type == QVoxSpec.BLOCK_VOX0:
+		if type == QVoxelSpec.BLOCK_VOX0:
 			var mid: int = int(bi.get("model_id", -1))
 			if mid >= 0 and dirty_models.has(mid):
 				var overlay := _as_blocks(new_doc.model_blocks(mid))
@@ -1111,18 +1111,18 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 				if payload_vox0.is_empty():
 					continue   # 该 model 已无任何块 → 不写（等同删除整个 VOX0）
 				payload_vox0.encode_u16(0, mid & 0xFFFF)   # 回填 model_id
-				_write_block(out, QVoxSpec.BLOCK_VOX0, payload_vox0, include_crc)
+				_write_block(out, QVoxelSpec.BLOCK_VOX0, payload_vox0, include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
-		if type == QVoxSpec.BLOCK_NODE:
+		if type == QVoxelSpec.BLOCK_NODE:
 			if dirty_global or _node_changed(old_doc, new_doc):
 				if not new_doc.node.is_empty():
-					_write_block(out, QVoxSpec.BLOCK_NODE, _encode_json(new_doc.node), include_crc)
+					_write_block(out, QVoxelSpec.BLOCK_NODE, _encode_json(new_doc.node), include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
-		if type == QVoxSpec.BLOCK_CACH:
+		if type == QVoxelSpec.BLOCK_CACH:
 			# 只有"内容变了的"旧块被跳过（其偏移由调用方给出），未变的原样搬运
 			# （缓存内容与其来源都没变）；新条目在末尾统一追加。
 			# 【为什么不整体重写】派生缓存由调用方**按条目**持有：未变的条目仍躺在磁盘上，
@@ -1138,7 +1138,7 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 	var old_model_ids := {}
 	for idx in old_doc.block_index.size():
 		var bi: Dictionary = old_doc.block_index[idx]
-		if bi["type"] == QVoxSpec.BLOCK_VOX0:
+		if bi["type"] == QVoxelSpec.BLOCK_VOX0:
 			old_model_ids[int(bi.get("model_id", -1))] = true
 	for mid in new_doc.model_ids():
 		if old_model_ids.has(mid):
@@ -1146,7 +1146,7 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 		var blocks: Variant = new_doc.model_blocks(mid)
 		if not (blocks is Dictionary) or _model_is_empty(blocks as Dictionary):
 			continue
-		_write_block(out, QVoxSpec.BLOCK_VOX0, _encode_vox0(mid, blocks, block_size), include_crc)
+		_write_block(out, QVoxelSpec.BLOCK_VOX0, _encode_vox0(mid, blocks, block_size), include_crc)
 
 	# CACH：新条目（内容变化 / 新增的）统一追加在末尾；变了的旧块已在上面被跳过。
 	# CACH 允许出现在文件任意位置（§2 表），故"跳过旧块 + 末尾追加"天然等价于一次按条目替换。
@@ -1174,20 +1174,20 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxDocum
 ## 中的绝对偏移"由调用方补进 `_meta.base`（按块随机读盘时要把两者相加）。
 static func index_vox0_blocks(payload: PackedByteArray, _block_size: int) -> Dictionary:
 	var out: Dictionary = {}
-	if payload.size() < QVoxSpec.VOX_MODEL_HEADER_SIZE:
+	if payload.size() < QVoxelSpec.VOX_MODEL_HEADER_SIZE:
 		return out
 	var block_count := payload.decode_u32(2)
 	var payload_length := payload.decode_u32(6)
 	# 精确终点：与 _parse_vox0_into 同一套判据（模型负载恰好在此结束）
-	var expected_end := mini(QVoxSpec.VOX_MODEL_HEADER_SIZE + payload_length, payload.size())
-	var pos := QVoxSpec.VOX_MODEL_HEADER_SIZE
+	var expected_end := mini(QVoxelSpec.VOX_MODEL_HEADER_SIZE + payload_length, payload.size())
+	var pos := QVoxelSpec.VOX_MODEL_HEADER_SIZE
 	var order: Array = []
 	var subs: Dictionary = {}
 	for _i in block_count:
 		var blk := read_vox_block(payload, pos, expected_end)
 		if blk.is_empty():
 			break
-		if int(blk["codec"]) == QVoxSpec.CODEC_EMPTY:
+		if int(blk["codec"]) == QVoxelSpec.CODEC_EMPTY:
 			break
 		var head_off := pos
 		var key: Vector3i = blk["key"]
@@ -1220,7 +1220,7 @@ static func _slice_crc(data: PackedByteArray, start: int, length: int) -> int:
 ## 两段不连续（中间隔着 crc 字段），交给 crc32_segments 一次算完，免去临时拼接。
 static func _block_crc(full: PackedByteArray, header_at: int, length: int) -> int:
 	return NativeLoader.crc32_segments(full,
-			PackedInt64Array([header_at, header_at + QVoxSpec.BLOCK_HEADER_SIZE]),
+			PackedInt64Array([header_at, header_at + QVoxelSpec.BLOCK_HEADER_SIZE]),
 			PackedInt64Array([8, length]))
 
 
@@ -1276,9 +1276,9 @@ static func encode_vox0_blocks(old_payload: PackedByteArray, old_index: Dictiona
 
 	# 【10 字节模型头】model_id(2) + block_count(4) + payload_length(4)。
 	# payload_length 是 VOX0 内部贯彻 P4 的关键：子块逐个自足还不够，**整段负载也要自足**，
-	# 否则解析器无法判断"负载到此为止"还是"后面还有填充"（见 QVoxSpec.VOX_MODEL_HEADER_SIZE）。
+	# 否则解析器无法判断"负载到此为止"还是"后面还有填充"（见 QVoxelSpec.VOX_MODEL_HEADER_SIZE）。
 	var out := PackedByteArray()
-	out.resize(QVoxSpec.VOX_MODEL_HEADER_SIZE)
+	out.resize(QVoxelSpec.VOX_MODEL_HEADER_SIZE)
 	out.encode_u16(0, 0)  # model_id 占位，调用方写
 	out.encode_u32(2, count)
 	out.encode_u32(6, body.size())
@@ -1290,9 +1290,9 @@ static func encode_vox0_blocks(old_payload: PackedByteArray, old_index: Dictiona
 static func _append_encoded_block(body: PackedByteArray, key: Vector3i, buf: PackedInt32Array, n: int) -> bool:
 	if buf.size() != n:
 		return false
-	var picked := QVoxBlockCodec.choose_and_pack(buf, n)
-	var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
-	if codec == QVoxSpec.CODEC_EMPTY:
+	var picked := QVoxelBlockCodec.choose_and_pack(buf, n)
+	var codec: int = picked.get("codec", QVoxelSpec.CODEC_EMPTY)
+	if codec == QVoxelSpec.CODEC_EMPTY:
 		return false   # 全空 → 该块不落盘（P2）
 	write_vox_block(body, key, codec, picked.get("payload", PackedByteArray()))
 	return true
@@ -1304,7 +1304,7 @@ static func _block_payload(bytes: PackedByteArray, bi: Dictionary) -> PackedByte
 	var end := off + int(bi["total"])
 	if end > bytes.size():
 		return PackedByteArray()
-	return bytes.slice(off + QVoxSpec.BLOCK_HEADER_SIZE, end)
+	return bytes.slice(off + QVoxelSpec.BLOCK_HEADER_SIZE, end)
 
 
 ## 把 new_doc.model_blocks() 的结果安全收窄为"覆盖层字典"（非字典 → 空）。
@@ -1323,20 +1323,20 @@ static func _copy_block(old_bytes: PackedByteArray, out: PackedByteArray, bi: Di
 	out.append_array(old_bytes.slice(off, off + total))
 
 
-static func _head_changed(a: QVoxDocument, b: QVoxDocument) -> bool:
+static func _head_changed(a: QVoxelDocument, b: QVoxelDocument) -> bool:
 	return JSON.stringify(a.head) != JSON.stringify(b.head)
 
 
-static func _mate_changed(a: QVoxDocument, b: QVoxDocument) -> bool:
+static func _mate_changed(a: QVoxelDocument, b: QVoxelDocument) -> bool:
 	return a.materials.size() != b.materials.size() or JSON.stringify(a.materials) != JSON.stringify(b.materials)
 
 
-static func _node_changed(a: QVoxDocument, b: QVoxDocument) -> bool:
+static func _node_changed(a: QVoxelDocument, b: QVoxelDocument) -> bool:
 	return JSON.stringify(a.node) != JSON.stringify(b.node)
 
 
 ## model 是否"空"（没有任何非空块）。空 model 不写 VOX0。
-## 判空用原生 `count(0)`（与 QVoxStream._prune_empty 同因：逐体素 GDScript 扫描在
+## 判空用原生 `count(0)`（与 QVoxelStream._prune_empty 同因：逐体素 GDScript 扫描在
 ## 写盘时是秒级开销，原生是毫秒级）。
 static func _model_is_empty(blocks: Dictionary) -> bool:
 	for k in blocks:
@@ -1348,13 +1348,13 @@ static func _model_is_empty(blocks: Dictionary) -> bool:
 
 ## 写一个块：length（含填充）+ type + crc32 + payload + 零填充。
 static func _write_block(out: PackedByteArray, type: String, payload: PackedByteArray, include_crc: bool) -> void:
-	var length := QVoxSpec.padded_length(payload.size())
+	var length := QVoxelSpec.padded_length(payload.size())
 	var header_at := out.size()
-	out.resize(header_at + QVoxSpec.BLOCK_HEADER_SIZE)
+	out.resize(header_at + QVoxelSpec.BLOCK_HEADER_SIZE)
 	out.encode_u32(header_at, length)
 	var t := type.to_ascii_buffer()
 	if t.size() != 4:
-		push_error("[QVox] 块类型必须是 4 个 ASCII 字符: '%s'" % type)
+		push_error("[QVX] 块类型必须是 4 个 ASCII 字符: '%s'" % type)
 		t.resize(4)
 	for i in 4:
 		out[header_at + 4 + i] = t[i]
@@ -1372,16 +1372,16 @@ static func _write_block(out: PackedByteArray, type: String, payload: PackedByte
 
 
 ## HEAD JSON 编码：紧凑序列化（无多余空白）+ UTF-8 字节。
-static func _encode_head(doc: QVoxDocument) -> PackedByteArray:
-	# §3.1：qvox 必须是**第一个键**（让读者一眼判断兼容性），而 JSON 的键序
-	# 由字典插入顺序决定 —— 直接 stringify(doc.head) 只在调用方恰好先塞 qvox 时成立，
+static func _encode_head(doc: QVoxelDocument) -> PackedByteArray:
+	# §3.1：qvx 必须是**第一个键**（让读者一眼判断兼容性），而 JSON 的键序
+	# 由字典插入顺序决定 —— 直接 stringify(doc.head) 只在调用方恰好先塞 qvx 时成立，
 	# 任何直接构造 head 的调用方都可能破坏它。这里显式重排，把规则落到编码器里，
 	# 而不是依赖每处调用方的自觉。
 	var ordered := _head_with_qvox_first(doc.head)
 	return _encode_json(ordered)
 
 
-## 返回一个 head 的副本，保证 "qvox" 位于第一个键（若原 head 无 qvox 则原样返回）。
+## 返回一个 head 的副本，保证 "qvox" 位于第一个键（若原 head 无 qvx 则原样返回）。
 static func _head_with_qvox_first(head: Dictionary) -> Dictionary:
 	var out := {}
 	if head.has("qvox"):
@@ -1395,21 +1395,21 @@ static func _head_with_qvox_first(head: Dictionary) -> Dictionary:
 ## 通用 JSON 编码：紧凑序列化（无缩进）+ UTF-8 字节。
 ## 【关键】第 3 参 sort_keys 必须为 false：Godot 的 JSON.stringify 默认会按
 ## **键名字典序** 重排，那会摧毁 §3.1 要求的 "qvox 第一键"（"channels" < "qvox"，
-## 排序后 qvox 永远排后面）。传 false 才能保留字典插入顺序。
+## 排序后 qvx 永远排后面）。传 false 才能保留字典插入顺序。
 static func _encode_json(d: Dictionary) -> PackedByteArray:
 	var text := JSON.stringify(d, "", false)  # 无缩进 + 保留插入顺序
 	return text.to_utf8_buffer()
 
 
 ## MATE 编码：uint16 count + count×12 字节。
-static func _encode_mate(doc: QVoxDocument) -> PackedByteArray:
+static func _encode_mate(doc: QVoxelDocument) -> PackedByteArray:
 	var count := doc.materials.size()
 	var out := PackedByteArray()
-	out.resize(2 + count * QVoxSpec.MATE_ENTRY_SIZE)
+	out.resize(2 + count * QVoxelSpec.MATE_ENTRY_SIZE)
 	out.encode_u16(0, count & 0xFFFF)
 	for i in count:
 		var m: Dictionary = doc.materials[i]
-		var off := 2 + i * QVoxSpec.MATE_ENTRY_SIZE
+		var off := 2 + i * QVoxelSpec.MATE_ENTRY_SIZE
 		var rgba := int(m.get("rgba", 0))
 		out.encode_u32(off, rgba & 0xFFFFFFFF)
 		out[off + 4] = int(m.get("metal", 0)) & 0xFF
@@ -1426,7 +1426,7 @@ static func _encode_mate(doc: QVoxDocument) -> PackedByteArray:
 ## VOX0 编码：uint16 model_id + uint32 block_count + uint32 payload_length + 块数组。
 ##
 ## 【payload_length 的作用】模型头里的 payload_length 精确界定 block[] 的字节数，
-## 使读取端无需再靠"剩余 < 4 字节"这种模糊判定来容忍顶层填充（见 QVoxSpec 的说明）。
+## 使读取端无需再靠"剩余 < 4 字节"这种模糊判定来容忍顶层填充（见 QVoxelSpec 的说明）。
 static func _encode_vox0(model_id: int, blocks: Dictionary, block_size: int) -> PackedByteArray:
 	var n := block_size * block_size * block_size
 	# 收集非空块（空块 = 块坐标缺失），按坐标排序保证确定性
@@ -1440,9 +1440,9 @@ static func _encode_vox0(model_id: int, blocks: Dictionary, block_size: int) -> 
 		var buf: PackedInt32Array = blocks[k]
 		if buf.size() != n:
 			continue
-		var picked := QVoxBlockCodec.choose_and_pack(buf, n)
-		var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
-		if codec == QVoxSpec.CODEC_EMPTY:
+		var picked := QVoxelBlockCodec.choose_and_pack(buf, n)
+		var codec: int = picked.get("codec", QVoxelSpec.CODEC_EMPTY)
+		if codec == QVoxelSpec.CODEC_EMPTY:
 			continue  # 空块不写入
 		packed_blocks.append([k, codec, picked.get("payload", PackedByteArray())])
 
@@ -1452,7 +1452,7 @@ static func _encode_vox0(model_id: int, blocks: Dictionary, block_size: int) -> 
 		write_vox_block(body, item[0], item[1], item[2])
 
 	var out := PackedByteArray()
-	out.resize(QVoxSpec.VOX_MODEL_HEADER_SIZE)
+	out.resize(QVoxelSpec.VOX_MODEL_HEADER_SIZE)
 	out.encode_u16(0, model_id & 0xFFFF)
 	out.encode_u32(2, packed_blocks.size())
 	out.encode_u32(6, body.size())  # payload_length：精确的 block[] 字节数

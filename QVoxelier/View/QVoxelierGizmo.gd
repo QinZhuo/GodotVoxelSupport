@@ -15,7 +15,7 @@ extends Control
 ## 相机基（x=右, y=上, z=朝后）是正交归一矩阵，故"世界轴在相机本地系下的方向"
 ## = basis.transposed() * axis（转置即逆）。取其 x/y 分量就是屏幕方向，z 分量决定前后遮挡。
 
-## 点了某个轴尖，请求切到那一侧的视图（值同 QVoxViewCamera.View）。
+## 点了某个轴尖，请求切到那一侧的视图（值同 QVoxelViewCamera.View）。
 signal view_requested(view: int)
 
 const AXIS_COLORS := [
@@ -26,9 +26,9 @@ const AXIS_COLORS := [
 const AXIS_NAMES := ["X", "Y", "Z"]
 ## 每根轴的两个方向 → 视图。+Z 从眼前指出屏幕（前视图的相机就在 +Z 侧）。
 const AXIS_VIEWS := [
-	[QVoxViewCamera.View.RIGHT, QVoxViewCamera.View.LEFT],
-	[QVoxViewCamera.View.TOP, QVoxViewCamera.View.BOTTOM],
-	[QVoxViewCamera.View.FRONT, QVoxViewCamera.View.BACK],
+	[QVoxelViewCamera.View.RIGHT, QVoxelViewCamera.View.LEFT],
+	[QVoxelViewCamera.View.TOP, QVoxelViewCamera.View.BOTTOM],
+	[QVoxelViewCamera.View.FRONT, QVoxelViewCamera.View.BACK],
 ]
 
 ## 指示器要看着的相机（由 App 注入）。
@@ -42,17 +42,17 @@ var _tips: Array = []        # [{pos: Vector2, view: int}]
 func _ready() -> void:
 	# 右下角、让开状态栏。四边锚点都钉在右下，于是窗口缩放时它跟着那个角走。
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	var s := 5 * QVoxUi.hit_size()
+	var s := 5 * QVoxelUi.hit_size()
 	custom_minimum_size = Vector2(s, s)
 	anchor_left = 1.0
 	anchor_right = 1.0
 	anchor_top = 1.0
 	anchor_bottom = 1.0
-	offset_right = -QVoxUi.space_m()
-	offset_bottom = -(QVoxUi.status_height() + QVoxUi.space_s())
+	offset_right = -QVoxelUi.space_m()
+	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
 	offset_left = offset_right - s
 	offset_top = offset_bottom - s
-	_tip_radius = s * 0.5 - QVoxUi.hit_size() * 0.25
+	_tip_radius = s * 0.5 - QVoxelUi.hit_size() * 0.25
 
 
 func _process(_delta: float) -> void:
@@ -91,7 +91,7 @@ func _draw() -> void:
 	entries.sort_custom(func(a, b): return a.depth > b.depth)
 
 	var font := ThemeDB.fallback_font
-	var font_size := QVoxUi.FONT_S
+	var font_size := QVoxelUi.FONT_S
 	for e in entries:
 		# 背向观察者的轴压暗：它们贴在底盘后面，画太亮会显得朝向反了。
 		var facing := clampf(0.5 - e.depth * 0.5, 0.25, 1.0)
@@ -100,12 +100,12 @@ func _draw() -> void:
 		draw_line(center, e.pos, color, 2.0, true)
 		# 轴尖：正方向实心 + 字母，负方向空心 —— 一个字母就分得出两端。
 		if e.sign > 0.0:
-			draw_circle(e.pos, QVoxUi.FONT_S * 0.9, color)
+			draw_circle(e.pos, QVoxelUi.FONT_S * 0.9, color)
 			draw_string(font, e.pos - Vector2(font_size * 0.32, -font_size * 0.34),
 					AXIS_NAMES[e.axis], HORIZONTAL_ALIGNMENT_LEFT, -1, font_size,
 					Color(0.04, 0.06, 0.09, facing))
 		else:
-			draw_arc(e.pos, QVoxUi.FONT_S * 0.9, 0, TAU, 16, color, 1.5, true)
+			draw_arc(e.pos, QVoxelUi.FONT_S * 0.9, 0, TAU, 16, color, 1.5, true)
 		_tips.append({"pos": e.pos, "view": AXIS_VIEWS[e.axis][0 if e.sign > 0.0 else 1],
 				"depth": e.depth, "color": color})
 
@@ -122,7 +122,7 @@ func _gui_input(event: InputEvent) -> void:
 ## 命中的轴尖（只认"最近的且在阈值内"的那个）——轴尖挨得近，取最近最不容易误点。
 func _nearest_tip(at: Vector2) -> int:
 	var best := -1
-	var best_d := QVoxUi.hit_size() * 0.6
+	var best_d := QVoxelUi.hit_size() * 0.6
 	for i in _tips.size():
 		var d: float = at.distance_to(_tips[i].pos)
 		if d < best_d:

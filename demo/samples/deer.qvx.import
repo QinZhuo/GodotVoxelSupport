@@ -3,12 +3,12 @@
 importer="voxel_mesh"
 type="Mesh"
 uid="uid://cr2hympom41e4"
-path="res://.godot/imported/deer.qvox-07fb938cc748bfe3108752497f31944a.mesh"
+path="res://.godot/imported/deer.qvx-15134841b48e62ac2701976add889886.mesh"
 
 [deps]
 
-source_file="res://demo/samples/deer.qvox"
-dest_files=["res://.godot/imported/deer.qvox-07fb938cc748bfe3108752497f31944a.mesh"]
+source_file="res://demo/samples/deer.qvx"
+dest_files=["res://.godot/imported/deer.qvx-15134841b48e62ac2701976add889886.mesh"]
 
 [params]
 

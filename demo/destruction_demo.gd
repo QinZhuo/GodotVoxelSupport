@@ -417,9 +417,9 @@ func _create_large_structure_data() -> VoxelData:
 	_perf_log.append("[生成] 实际体素数: %d" % data.get_voxel_count())
 
 	# 文件流：chunk/粗层数据按需写盘/读盘（破坏持久化可写盘 + 粗层降采样缓存复用重启保留）
-	var stream := QVoxStream.new()
+	var stream := QVoxelStream.new()
 	var dir := "user://voxel_destruction_stream"
-	stream.file_path = dir.path_join(QVoxStream.WORLD_FILE_NAME)
+	stream.file_path = dir.path_join(QVoxelStream.WORLD_FILE_NAME)
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
 	data.stream = stream
 

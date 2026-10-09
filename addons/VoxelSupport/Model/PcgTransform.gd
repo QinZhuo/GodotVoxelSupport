@@ -7,7 +7,7 @@ extends Resource
 ## 【为什么不能塞进 PcgDetail】PcgDetail 的契约明写"不得改变 grid_size"（就地改写）；而重排
 ## 天生要改盒尺寸（旋转互换两轴、平铺成倍放大）。硬塞进去会让那份契约长出一个例外，
 ## 而例外的数量正是"引擎自动插入降级点"这类能力失效的起点。于是体素域有**两类**能力，
-## 判据仍是方法存在性（不给算子加基类，见 QVoxDomain 的能力签名表）：
+## 判据仍是方法存在性（不给算子加基类，见 QVoxelDomain 的能力签名表）：
 ##     apply(volume, grid_size, seed)              —— 就地改写（PcgDetail）
 ##     reshape(volume, grid_size) -> [体积, 尺寸]   —— 重排 / 摆放（本类）
 ##
@@ -18,16 +18,16 @@ extends Resource
 ## 又得回答"我和节点摆放谁先谁后"。入链之后它自动获得链上的一切待遇，且全项目只有一种画法。
 ##
 ## 【平移为什么不改盒尺寸，也不改体积】镜像 / 旋转 / 平铺改的是"内容在盒里怎么排"；平移改的
-## 是"这个盒在父画布里站哪儿"（QVoxEvalResult.origin）。硬按"往盒里补零把内容推到偏移处"来做，
+## 是"这个盒在父画布里站哪儿"（QVoxelEvalResult.origin）。硬按"往盒里补零把内容推到偏移处"来做，
 ## 负偏移就无从表达（盒的左下角恒在 0），远处的一个模型也会撑出一只巨盒。故 reshape() 对平移
 ## 原样交还体积与尺寸，位移由 origin_delta() 单独回答 —— 两个问题各有各的出口，互不冒充。
 ##
-## 【本类不做数学】整数格语义完全复用 QVoxVoxelTransform（置换 + 符号的 48 种双射 + 平铺复制族），
+## 【本类不做数学】整数格语义完全复用 QVoxelTransform（置换 + 符号的 48 种双射 + 平铺复制族），
 ## 本类只把"用户选的那一种变换"翻译成它的一次调用 —— 于是"哪些变换是合法的"这件事
 ## 全项目只有一份实现，不会出现第二处手写的轴字母表。
 ##
-## 【为什么核是 Resource 而 QVoxVoxelTransform 不是】核要能被多个修改器共享、要能落盘、
-## 要进签名比对 —— 那三件事都要求它是 Resource；QVoxVoxelTransform 是纯函数工具，不是资源。
+## 【为什么核是 Resource 而 QVoxelTransform 不是】核要能被多个修改器共享、要能落盘、
+## 要进签名比对 —— 那三件事都要求它是 Resource；QVoxelTransform 是纯函数工具，不是资源。
 
 ## 变换种类。
 enum Mode {
@@ -106,7 +106,7 @@ static func translate(offset_: Vector3i) -> PcgTransform:
 ## 本条目把整块结果**平移**多少（体素）。只有平移会挪，其余种类恒为零。
 ##
 ## 【为什么它不在 reshape 的返回值里】见类头：平移改的是"盒站哪儿"而不是"盒里怎么排"。
-## 引擎把本值累加进 QVoxEvalResult.origin，于是负偏移、远处的模型都不必付"撑大盒"的代价。
+## 引擎把本值累加进 QVoxelEvalResult.origin，于是负偏移、远处的模型都不必付"撑大盒"的代价。
 func origin_delta() -> Vector3i:
 	return offset if mode == Mode.TRANSLATE else Vector3i.ZERO
 
@@ -127,7 +127,7 @@ func reshape(volume: PackedInt32Array, grid_size: Vector3i) -> Array:
 		# 若这里返回新尺寸而那边返回旧尺寸，data.grid_size 就会与实际体积长度不符。
 		return [volume, grid_size]
 	if mode == Mode.REPEAT:
-		return [QVoxVoxelTransform.repeat_volume(volume, grid_size, axis, times), raw]
+		return [QVoxelTransform.repeat_volume(volume, grid_size, axis, times), raw]
 	return [transform_of().remap(volume, grid_size), raw]
 
 
@@ -147,7 +147,7 @@ func output_size(grid_size: Vector3i) -> Vector3i:
 func raw_output_size(grid_size: Vector3i) -> Vector3i:
 	match mode:
 		Mode.REPEAT:
-			return QVoxVoxelTransform.repeat_size(grid_size, axis, times)
+			return QVoxelTransform.repeat_size(grid_size, axis, times)
 		Mode.ROTATE:
 			return transform_of().new_size(grid_size)
 	return grid_size
@@ -163,11 +163,11 @@ static func within_budget(size: Vector3i) -> bool:
 
 
 ## 本变换对应的双射（只有 MIRROR / ROTATE 用；REPEAT 是复制族、TRANSLATE 只挪摆放，
-## 两者都不是"格到格的双射"，见 QVoxVoxelTransform）。
-func transform_of() -> QVoxVoxelTransform:
+## 两者都不是"格到格的双射"，见 QVoxelTransform）。
+func transform_of() -> QVoxelTransform:
 	if mode == Mode.ROTATE:
-		return QVoxVoxelTransform.rotate90(axis, direction)
-	return QVoxVoxelTransform.mirror(axis)
+		return QVoxelTransform.rotate90(axis, direction)
+	return QVoxelTransform.mirror(axis)
 
 
 ## UI 显示名（"镜像 X" / "旋转 90° Z" / "平铺 X ×2" / "平移 (2, 0, -4)"）。

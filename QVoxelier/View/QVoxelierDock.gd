@@ -17,12 +17,12 @@ var _col: VBoxContainer
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	offset_right = -QVoxUi.space_m()
-	offset_top = QVoxUi.bar_height() + QVoxUi.space_m()
-	var w := float(QVoxUi.dock_width()) + QVoxUi.space_l()
+	offset_right = -QVoxelUi.space_m()
+	offset_top = QVoxelUi.bar_height() + QVoxelUi.space_m()
+	var w := float(QVoxelUi.dock_width()) + QVoxelUi.space_l()
 	offset_left = offset_right - w
 
-	_col = QVoxUi.vbox(QVoxUi.space_s())
+	_col = QVoxelUi.vbox(QVoxelUi.space_s())
 	_col.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	add_child(_col)
 	# 高度由内容决定：容器长多高，本控件（它的矩形会被调试器/自动化工具读到）就跟着多高。

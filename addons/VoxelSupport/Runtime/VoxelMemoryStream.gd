@@ -8,7 +8,7 @@ extends VoxelStream
 ## 典型组合：
 ##      generator = 噪声地形生成器（造未编辑的部分）
 ##      stream    = 本流（存编辑过的覆盖层，存优先 → 不会被重新生成覆盖）
-## 需要跨进程保留编辑时，把 stream 换成 QVoxStream（.qvox 单文件）即可，
+## 需要跨进程保留编辑时，把 stream 换成 QVoxelStream（.qvx 单文件）即可，
 ## generator 与上层代码一行都不用改 —— 这正是把"存"与"造"分开的收益。
 
 ## lod -> { key(Vector3i): PackedInt32Array }

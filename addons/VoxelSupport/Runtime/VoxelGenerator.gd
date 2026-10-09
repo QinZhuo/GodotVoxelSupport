@@ -51,7 +51,7 @@ func generate(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 # ----------------------------------------------------------------------------
 # 【为什么放在契约类上】"把逐 chunk 输出拼成一整块"对任何生成器都成立（SDF 生成器、
 # PcgModelGenerator、未来新增的），与具体算法无关 —— 该和 generate() 待在一起。
-# 早先它被单列成一个 QVoxRasterizer 类，但那个类里没有一行自己的算法，只是转发；
+# 早先它被单列成一个 QVoxelRasterizer 类，但那个类里没有一行自己的算法，只是转发；
 # 于是"光栅化"名下有两个实现（真正调优过的逐体素采样在 PcgSdfGenerator 里），
 # 正是双份维护的开端。合并后职责各一份：逐点算法在 PcgSdfGenerator，拼接在这里。
 

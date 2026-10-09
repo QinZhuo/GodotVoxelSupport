@@ -101,8 +101,8 @@ func _get_priority() -> float:
 ## sphere_* 选项仅在形状选择 sphere 时显示
 ## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
 ## frame_index 只对 `.vox` 有效：MagicaVoxel 的 `.vox` 有"体素动画帧"，每帧一套体素。
-## `.qvox` **没有**这个概念——它的 `animations[].frames` 是"按**节点下标**寻址的变换补丁"，
-## 而 v3 的节点树是嵌套的、不再有下标（见 QVoxAsset.placements），故该选项对 `.qvox` 无作用。
+## `.qvx` **没有**这个概念——它的 `animations[].frames` 是"按**节点下标**寻址的变换补丁"，
+## 而 v3 的节点树是嵌套的、不再有下标（见 QVoxelAsset.placements），故该选项对 `.qvx` 无作用。
 func _get_option_visibility(_path: String, option_name: StringName, options: Dictionary) -> bool:
 	if String(option_name).begins_with("mesh/sphere_"):
 		return options.get(VoxelMeshImporter.shape, Shape.cube) == Shape.sphere
@@ -110,13 +110,13 @@ func _get_option_visibility(_path: String, option_name: StringName, options: Dic
 
 func _import(source_file, save_path, options, _platforms, gen_files):
 	var mesh: ArrayMesh
-	if QVoxAsset.handles(source_file):
-		var qvox := QVoxAsset.from_file(source_file)
-		if qvox == null:
+	if QVoxelAsset.handles(source_file):
+		var qvx := QVoxelAsset.from_file(source_file)
+		if qvx == null:
 			return FAILED
-		mesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, options, source_file)
+		mesh = VoxelMeshGenerator.generate_mesh_from_qvx(qvx, options, source_file)
 	else:
-		# 与 QVox 分支同款守卫：解析失败返回 null，直接送进 generate_mesh 会在
+		# 与 QVX 分支同款守卫：解析失败返回 null，直接送进 generate_mesh 会在
 		# 内部解引用空的体素数据而崩溃。
 		var vox = VoxAsset.from_asset(source_file)
 		if vox == null:

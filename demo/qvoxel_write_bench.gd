@@ -1,13 +1,13 @@
-class_name QVoxWriteBench
+class_name QVoxelWriteBench
 extends RefCounted
 
-## QVox 写路径端到端基准（可在编辑器 / 游戏进程内直接调用，不依赖场景）。
+## QVX 写路径端到端基准（可在编辑器 / 游戏进程内直接调用，不依赖场景）。
 ##
 ## 用法（eval_code）：
-##   QVoxWriteBench.run()   → 结果通过 print 输出，用 get_logs 读取
+##   QVoxelWriteBench.run()   → 结果通过 print 输出，用 get_logs 读取
 ##
 ## 【为什么只测公开接口】存储层已把"增量怎么写、旧字节怎么搬运"收进
-## QVoxFile.serialize_incremental（按块索引 + 写入覆盖层 + 删除集）。基准若再伸手去调
+## QVoxelFile.serialize_incremental（按块索引 + 写入覆盖层 + 删除集）。基准若再伸手去调
 ## 那些内部函数，等于把实现细节抄第二遍——实现一变基准先坏。故这里只调 VoxelStream 的
 ## 公开契约：save_chunk / flush / load_chunk / has_chunk / is_dirty / get_chunk_count。
 ##
@@ -24,7 +24,7 @@ const SIDE := 12
 const INCR_ROUNDS := 10
 const FULL_ROUNDS := 3
 
-const BENCH_DIR := "user://qvox_bench"
+const BENCH_DIR := "user://qvx_bench"
 
 
 static func _us(t0: int) -> float:
@@ -73,7 +73,7 @@ static func _reset_files(names: Array) -> void:
 static func run() -> void:
 	var lines: Array = []
 	var chunk_count := SIDE * SIDE
-	lines.append("=== QVox 写路径基准（端到端）===")
+	lines.append("=== QVX 写路径基准（端到端）===")
 	lines.append("chunk=%d (%dx%d) CHUNK_SIZE=%d VOL=%d" % [chunk_count, SIDE, SIDE, CHUNK_SIZE, CHUNK_VOLUME])
 
 	# 造数据
@@ -90,9 +90,9 @@ static func run() -> void:
 		mats.append(null)
 
 	# ---- 阶段 1：首次全量写（空世界，无旧块可搬 → 必然全量）----
-	_reset_files(["world.qvox", "world2.qvox"])
-	var stream := QVoxStream.new()
-	stream.file_path = BENCH_DIR + "/world.qvox"
+	_reset_files(["world.qvx", "world2.qvx"])
+	var stream := QVoxelStream.new()
+	stream.file_path = BENCH_DIR + "/world.qvx"
 	stream.set_materials(mats)
 
 	t0 = Time.get_ticks_usec()
@@ -119,8 +119,8 @@ static func run() -> void:
 	# ---- 阶段 3：对照 —— 从零重建整个世界（每次都要重编码全部块）----
 	var full: Array = []
 	for _r in FULL_ROUNDS:
-		var s := QVoxStream.new()
-		s.file_path = BENCH_DIR + "/world2.qvox"
+		var s := QVoxelStream.new()
+		s.file_path = BENCH_DIR + "/world2.qvx"
 		s.set_materials(mats)
 		t0 = Time.get_ticks_usec()
 		for c in chunks:
@@ -131,7 +131,7 @@ static func run() -> void:
 			% [FULL_ROUNDS, chunk_count, _avg(full), _fmt(full)])
 
 	# ---- 阶段 4：正确性（重载磁盘逐块比对）+ 内存有界 ----
-	var r := QVoxStream.new()
+	var r := QVoxelStream.new()
 	r.file_path = stream.file_path
 	var ok := true
 	for i in INCR_ROUNDS:
@@ -150,7 +150,7 @@ static func run() -> void:
 	t0 = Time.get_ticks_usec()
 	stream.flush()
 	var t_cach := _us(t0)
-	var r2 := QVoxStream.new()
+	var r2 := QVoxelStream.new()
 	r2.file_path = stream.file_path
 	var coarse_ok := r2.has_chunk(Vector3i.ZERO, 1) and r2.load_chunk(Vector3i.ZERO, 1) == coarse
 	lines.append("粗层 CACH: 写盘=%.2fms  重载命中且逐体素一致=%s  (世界文件 %dKB)"

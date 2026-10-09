@@ -4,7 +4,7 @@ extends QVoxelierPanel
 ## 右侧抽屉里的一段**可折叠分组**：抬头一行（▾ 标题），点一下收起 / 展开。
 ##
 ## 【为什么必须能折叠】右列要放下颜色 / 对象 / 图层 / 变换四组，全展开会占掉半个视口。
-## 折叠才是"屏幕不够时让位"的正解 —— 把命中区压到手指点不中（见 QVoxUi 密度档的说明）
+## 折叠才是"屏幕不够时让位"的正解 —— 把命中区压到手指点不中（见 QVoxelUi 密度档的说明）
 ## 换来的是"按钮都在但按不准"，那是更糟的交换。
 ##
 ## 【为什么整条抬头都是按钮】触摸没有 hover、也没有 12px 的小箭头可瞄。把抬头整体做成按钮，
@@ -46,22 +46,22 @@ func content() -> VBoxContainer:
 
 
 func _build() -> void:
-	var panel := QVoxUi.panel(QVoxUi.space_s())
+	var panel := QVoxelUi.panel(QVoxelUi.space_s())
 	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	add_child(panel)
 	# 本控件通常是 VBoxContainer 的孩子 —— 容器会覆盖 size，故"我有多高"要用
 	# custom_minimum_size 报告（直接写 size 会被父容器在下一帧抹掉）。
 	panel.resized.connect(func(): custom_minimum_size.y = panel.size.y)
 
-	var col := QVoxUi.vbox(QVoxUi.SPACE_XS)
+	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	panel.add_child(col)
 
-	_header = QVoxUi.button("", "展开 / 收起这一组")
+	_header = QVoxelUi.button("", "展开 / 收起这一组")
 	_header.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_header.pressed.connect(func(): expanded = not expanded)
 	col.add_child(_header)
 
-	_body = QVoxUi.vbox(QVoxUi.SPACE_XS)
+	_body = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	col.add_child(_body)
 
 	_refresh()

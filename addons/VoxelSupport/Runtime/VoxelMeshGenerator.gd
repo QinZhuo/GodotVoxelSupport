@@ -179,9 +179,9 @@ func _get_channel_images() -> Dictionary:
 
 
 # ----------------------------------------------------------------------------
-# QVox 路径 —— 块级生成
+# QVX 路径 —— 块级生成
 # ----------------------------------------------------------------------------
-# QVox 的 block_size 恒等于 CHUNK_SIZE，块坐标就是 chunk 坐标，因此网格可以直接按块生成：
+# QVX 的 block_size 恒等于 CHUNK_SIZE，块坐标就是 chunk 坐标，因此网格可以直接按块生成：
 # build_halo_from_buffers（跨块面可见性）→ generate_chunk_dense。无需把数据摊平成
 # Dictionary[Vector3i,int] 再交给 generate_arrays_native 重新分块（那是 .vox 路径的做法）。
 #
@@ -245,24 +245,24 @@ static func _shift_index_array(idxs: PackedInt32Array, base: int) -> PackedInt32
 	return out
 
 
-## .qvox → ArrayMesh（单网格）。选项与 .vox 路径共用，故两者产物形状一致。
-static func generate_mesh_from_qvox(qvox: QVoxAsset, options: Dictionary, path: String = "") -> ArrayMesh:
+## .qvx → ArrayMesh（单网格）。选项与 .vox 路径共用，故两者产物形状一致。
+static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: String = "") -> ArrayMesh:
 	var gen := VoxelMeshGenerator.new(null, options, path)
-	gen.qvox = qvox
-	gen.runtime_materials = qvox.materials
+	gen.qvx = qvx
+	gen.runtime_materials = qvx.materials
 	gen.generate_materials(options)
-	gen.start_generate_mesh_from_qvox()
+	gen.start_generate_mesh_from_qvx()
 	gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
 	if not gen.mesh or gen.mesh.get_surface_count() == 0:
 		return null
 	return gen.mesh
 
 
-## .qvox → MeshLibrary。split_by_model / split_by_node 都是"每项一个网格"：
+## .qvx → MeshLibrary。split_by_model / split_by_node 都是"每项一个网格"：
 ##   模型分项：每个 VOX0 一项（项名 model_<id>）；
 ##   节点分项：NODE 里每个 kind="model" 节点一项（项名取节点名）。
-## QVox 没有 .vox 那种"体素动画帧"，故 split_by_frame 退化为按模型分项。
-static func generate_mesh_library_from_qvox(qvox: QVoxAsset, options: Dictionary,
+## QVX 没有 .vox 那种"体素动画帧"，故 split_by_frame 退化为按模型分项。
+static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary,
 		path: String = "") -> MeshLibrary:
 	var lib: MeshLibrary = null
 	if path != "" and FileAccess.file_exists(path):
@@ -274,37 +274,37 @@ static func generate_mesh_library_from_qvox(qvox: QVoxAsset, options: Dictionary
 	var items: Array
 	match int(options[VoxelMeshLibraryImporter.mesh_mode]):
 		VoxelMeshLibraryImporter.MeshMode.split_by_node:
-			items = _items_by_node(qvox)
+			items = _items_by_node(qvx)
 		VoxelMeshLibraryImporter.MeshMode.split_by_frame:
-			push_warning("[VoxelMeshGenerator] .qvox 没有体素动画帧，split_by_frame 按 split_by_model 处理")
-			items = _items_by_model(qvox)
+			push_warning("[VoxelMeshGenerator] .qvx 没有体素动画帧，split_by_frame 按 split_by_model 处理")
+			items = _items_by_model(qvx)
 		_:
-			items = _items_by_model(qvox)
-	_fill_mesh_library(lib, qvox.materials, items, options, path)
+			items = _items_by_model(qvx)
+	_fill_mesh_library(lib, qvx.materials, items, options, path)
 	return lib
 
 
-static func _items_by_model(qvox: QVoxAsset) -> Array:
+static func _items_by_model(qvx: QVoxelAsset) -> Array:
 	var out: Array = []
-	var ids: Array = qvox.models.keys()
+	var ids: Array = qvx.models.keys()
 	ids.sort()
 	for mid in ids:
-		out.append({"name": "model_%d" % int(mid), "chunks": qvox.model_blocks(int(mid))})
+		out.append({"name": "model_%d" % int(mid), "chunks": qvx.model_blocks(int(mid))})
 	return out
 
 
-static func _items_by_node(qvox: QVoxAsset) -> Array:
+static func _items_by_node(qvx: QVoxelAsset) -> Array:
 	var out: Array = []
 	var used := {}
 	var seq := 0
-	for p in qvox.placements:
+	for p in qvx.placements:
 		var nm: String = String(p.get("name", ""))
 		# 无名/重名时退化为稳定编号 —— 项名是 MeshLibrary 项的身份，不能撞
 		while nm == "" or used.has(nm):
 			nm = "node_%d" % seq
 			seq += 1
 		used[nm] = true
-		out.append({"name": nm, "chunks": qvox.model_blocks(int(p["model_id"]))})
+		out.append({"name": nm, "chunks": qvx.model_blocks(int(p["model_id"]))})
 	return out
 
 
@@ -332,7 +332,7 @@ static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 		gen.runtime_materials = materials
 		gen.generate_materials(options)
 		gen.start_generate_mesh_from_chunks(
-				chunks, VoxelData.origin_offset(QVoxAsset.bounds_for_blocks(chunks), gen.origin_mode))
+				chunks, VoxelData.origin_offset(QVoxelAsset.bounds_for_blocks(chunks), gen.origin_mode))
 		gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
 		if child.get_surface_count() == 0:
 			continue
@@ -351,8 +351,8 @@ static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 var scale: float = 1
 var mesh: ArrayMesh
 var voxel: VoxAsset
-## .qvox 资产（与 voxel 二选一；见 generate_mesh_from_qvox）
-var qvox: QVoxAsset = null
+## .qvx 资产（与 voxel 二选一；见 generate_mesh_from_qvx）
+var qvx: QVoxelAsset = null
 var frame_index: int
 var materials: Array[Material]
 var root_path: String
@@ -490,7 +490,7 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 		_native_arrays = NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
 
 
-## 由块缓冲生成网格（QVox 路径的实例入口：整资产 / MeshLibrary 分项共用）。
+## 由块缓冲生成网格（QVX 路径的实例入口：整资产 / MeshLibrary 分项共用）。
 ## layout_offset 为体素单位的原点偏移（见 VoxelData.origin_offset）。
 func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3) -> void:
 	_reset_mesh()
@@ -502,22 +502,22 @@ func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3)
 			chunks, VoxelMaterial.build_trans_flags(materials_src), scale, layout_offset)
 
 
-## 生成整个 QVox 资产：恒等摆放走块级（零逐体素展开），有变换时逐体素融合。
-func start_generate_mesh_from_qvox() -> void:
+## 生成整个 QVX 资产：恒等摆放走块级（零逐体素展开），有变换时逐体素融合。
+func start_generate_mesh_from_qvx() -> void:
 	_reset_mesh()
 	_native_arrays = {}
-	if qvox == null or qvox.is_empty():
+	if qvx == null or qvx.is_empty():
 		return
-	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else qvox.materials
+	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else qvx.materials
 	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
-	# 原点偏移与 .vox 路径同一套（qvox.origin_offset 内部调 VoxelData.origin_offset）
-	var offset := qvox.origin_offset(origin_mode)
-	if qvox.is_block_importable():
+	# 原点偏移与 .vox 路径同一套（qvx.origin_offset 内部调 VoxelData.origin_offset）
+	var offset := qvx.origin_offset(origin_mode)
+	if qvx.is_block_importable():
 		_native_arrays = NativeLoader.generate_arrays_from_chunks_native(
-				qvox.block_buffers(), trans_flags, scale, offset)
+				qvx.block_buffers(), trans_flags, scale, offset)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(
-				qvox.fused_voxels(), trans_flags, scale, offset)
+				qvx.fused_voxels(), trans_flags, scale, offset)
 
 
 func _reset_mesh() -> void:

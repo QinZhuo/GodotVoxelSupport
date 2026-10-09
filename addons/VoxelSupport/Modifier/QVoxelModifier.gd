@@ -1,20 +1,20 @@
 @tool
 @abstract
-class_name QVoxModifier
+class_name QVoxelModifier
 extends Resource
 
 ## 修改器 —— 非破坏链上的**唯一**条目类型。
 ##
 ## 【链条目只有一种东西】一条链完全由修改器组成，包括并 / 差 / 交：布尔不是"另一种条目"，
-## 而是修改器的 combine（见 QVoxDomain.Combine）。于是"挂一个修改器"就是引擎认识的全部操作，
+## 而是修改器的 combine（见 QVoxelDomain.Combine）。于是"挂一个修改器"就是引擎认识的全部操作，
 ## 用户也只需要理解这一件事。
 ##
 ## 【共同基类】本类管一条修改器**怎么用**（开关 / 合成方式 / 平滑量 / 种子 / 显示名 / 落盘）；
 ## 子类只回答**算法核是谁**，并把核的类型收紧到自己的域：
-##     QVoxSdfModifier       核 = Sdf 子树      域 = 连续（FIELD）     引擎调 op.sample(p)
-##     QVoxModelModifier     核 = PcgModel      域 = 体素（VOXEL）源   引擎调 op.build(grid)
-##     QVoxVolumeModifier    核 = PcgDetail     域 = 体素（VOXEL）改写  引擎调 op.apply(...)
-##     QVoxTransformModifier 核 = PcgTransform  域 = 体素（VOXEL）变换  引擎调 op.reshape(...)
+##     QVoxelSdfModifier       核 = Sdf 子树      域 = 连续（FIELD）     引擎调 op.sample(p)
+##     QVoxelModelModifier     核 = PcgModel      域 = 体素（VOXEL）源   引擎调 op.build(grid)
+##     QVoxelVolumeModifier    核 = PcgDetail     域 = 体素（VOXEL）改写  引擎调 op.apply(...)
+##     QVoxelTransformModifier 核 = PcgTransform  域 = 体素（VOXEL）变换  引擎调 op.reshape(...)
 ## 域因此是**类型**而不是探测结果：不可能构造出"自称连续域、核却只会 apply"的状态；
 ## 引擎也不必再问"你有没有 sample 方法"——子类本身就是那份契约。
 ##
@@ -47,7 +47,7 @@ const KIND_NAMES: PackedStringArray = ["SDF 场", "体素生成", "体素处理"
 
 ## 合成方式。连续域：决定它怎么并进已累积的场；体素域：只有"自足产出"的核才允许使用
 ## 「替换」之外的合成方式（就地改写型核拿不到输入，无法做布尔）。
-@export var combine: QVoxDomain.Combine = QVoxDomain.Combine.UNION
+@export var combine: QVoxelDomain.Combine = QVoxelDomain.Combine.UNION
 
 ## SMOOTH_UNION 的过渡宽度（体素单位）。建议与体素尺度同量级，过大将吞掉细节。
 @export_range(0.0, 64.0, 0.1) var blend := 2.0
@@ -82,17 +82,17 @@ func set_op(value: Resource) -> bool
 # ----------------------------------------------------------------------------
 
 ## 该条目所属的求值域。由 kind 唯一决定 —— kind 比域更细：体素域分"自足产出"与"就地改写"。
-func domain() -> QVoxDomain.Kind:
+func domain() -> QVoxelDomain.Kind:
 	match kind():
 		KIND_SDF:
-			return QVoxDomain.Kind.FIELD
+			return QVoxelDomain.Kind.FIELD
 		KIND_MODEL, KIND_VOLUME, KIND_TRANSFORM:
-			return QVoxDomain.Kind.VOXEL
-	return QVoxDomain.Kind.MESH
+			return QVoxelDomain.Kind.VOXEL
+	return QVoxelDomain.Kind.MESH
 
 
 ## 是否为"自足产出"（源）。就地改写 / 重排型不是源：核被调用时已拿到输入，引擎无法在
-## 事后替它做布尔，所以它的合成方式只能是「替换」（见 QVoxDomain.validate_chain）。
+## 事后替它做布尔，所以它的合成方式只能是「替换」（见 QVoxelDomain.validate_chain）。
 ## 白名单而非"非 volume 即源"：将来加网格算子时不会意外把它算成源。
 func is_source() -> bool:
 	return kind() == KIND_SDF or kind() == KIND_MODEL
@@ -121,7 +121,7 @@ func display_name() -> String:
 	if not label.is_empty():
 		return label
 	var o := op()
-	return "（空修改器）" if o == null else QVoxModifierSerializer.op_type_name(o)
+	return "（空修改器）" if o == null else QVoxelModifierSerializer.op_type_name(o)
 
 
 ## 参与判脏的签名 —— 供求值引擎判断"哪些条目变了、能否复用上一步结果"。
@@ -132,7 +132,7 @@ func display_name() -> String:
 ## 【为什么含实例 id】参数只改一个数字时，改动点**之前**的条目实例与参数都不变，前缀签名
 ## 自然相同。若只用类型+参数做签名，两棵参数相同的不同算子树会被误判为"没变"。
 func signature() -> String:
-	return "%d|%s|%d|%.4f|%d" % [int(enabled), QVoxModifierSerializer.op_signature(op()),
+	return "%d|%s|%d|%.4f|%d" % [int(enabled), QVoxelModifierSerializer.op_signature(op()),
 			combine, blend, seed]
 
 
@@ -154,7 +154,7 @@ func to_dict() -> Dictionary:
 		d["label"] = label
 	var o := op()
 	if o != null:
-		var od := QVoxModifierSerializer.op_to_dict(o)
+		var od := QVoxelModifierSerializer.op_to_dict(o)
 		d["type"] = od.get("type", "")
 		d["params"] = od.get("params", {})
 	return d

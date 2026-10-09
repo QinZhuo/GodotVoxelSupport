@@ -20,7 +20,7 @@ reflected_light_source = 3
 tonemap_mode = 2
 ssao_enabled = true
 
-[node name="QVoxVsMeshCompare" type="Node3D"]
+[node name="QVoxelVsMeshCompare" type="Node3D"]
 script = ExtResource("1_cmp")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]

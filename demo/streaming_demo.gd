@@ -3,8 +3,8 @@ extends Node
 ## 流式演示场景（Streaming Demo）——整合【磁盘文件流】与【程序化无限流】两种数据源
 ##
 ## 目的：直观展示距离 LOD 卸载（Streaming）与两种数据流，测试内容高度关联：
-##   - 文件流模式：手工构建的大地面+散布建筑（QVoxStream 单文件流式，破坏可写盘）
-##   - 程序化模式：VoxelGenerator 子类（_generate_chunk 噪声地形）+ QVoxStream 存破坏 + origin shift 无限世界
+##   - 文件流模式：手工构建的大地面+散布建筑（QVoxelStream 单文件流式，破坏可写盘）
+##   - 程序化模式：VoxelGenerator 子类（_generate_chunk 噪声地形）+ QVoxelStream 存破坏 + origin shift 无限世界
 ## 两种模式共用同一渲染器与 LOD/流式逻辑，相机 WASD 自由移动。
 ##
 ## 操作：
@@ -89,15 +89,15 @@ func _apply_renderer_config() -> void:
 	_target.local_collapse = true
 
 
-## 文件流模式：手工构建大地面 + 随机散布建筑（QVoxStream 单文件流式，破坏可写盘）
+## 文件流模式：手工构建大地面 + 随机散布建筑（QVoxelStream 单文件流式，破坏可写盘）
 func _build_world_file() -> void:
 	var data := VoxelData.new()
 	# 文件流必须在 set_voxels 前绑定：否则构建的 chunk 数据只存内存不写盘，
 	# 流式卸载（相机远离）后数据丢失（磁盘无）→ 粗层降采样空 → 矩形空洞。
-	var stream := QVoxStream.new()
+	var stream := QVoxelStream.new()
 	var dir := "user://voxel_demo_stream"
-	stream.file_path = dir.path_join(QVoxStream.WORLD_FILE_NAME)
-	# 每次从零开始：清空旧流数据目录（避免上一次的残留 world.qvox 干扰）
+	stream.file_path = dir.path_join(QVoxelStream.WORLD_FILE_NAME)
+	# 每次从零开始：清空旧流数据目录（避免上一次的残留 world.qvx 干扰）
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
 	var cleanup := DirAccess.open(dir)
 	if cleanup:
@@ -181,8 +181,8 @@ func _build_world_procedural() -> void:
 	# 换成 VoxelMemoryStream 即"只存内存、退出即丢"，上层代码一行都不用改。
 	var dir := "user://voxel_procedural_stream"
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
-	var stream := QVoxStream.new()
-	stream.file_path = dir.path_join(QVoxStream.WORLD_FILE_NAME)
+	var stream := QVoxelStream.new()
+	stream.file_path = dir.path_join(QVoxelStream.WORLD_FILE_NAME)
 	data.stream = stream
 	# 生成器：子类覆写 _generate_chunk / _generate_chunk_lod 实现生成算法。
 	# 先设 stream 再设 generator：generator 的 setter 只在 stream 为空时才兜底建内存流。

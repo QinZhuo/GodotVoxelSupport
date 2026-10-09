@@ -14,13 +14,13 @@ extends TestCase
 ##   · 相邻不同实心材质：接缝不可见、且不跨材质合并 → 各 5 矩形 = 10，共 20；
 ##   · 透明体素单独进 trans 桶，与实心体素相邻时接缝仍然可见（两侧各 6 面 = 12/12）；
 ##   · icosphere 细分 0/2 分别为 20 / 320 三角（20 × 4^sub）;
-##   · deer.qvox 全量走一遍真实导入路径，钉住端到端基线。
+##   · deer.qvx 全量走一遍真实导入路径，钉住端到端基线。
 ##
 ## 这些数字一旦变化就说明内核发生了非预期漂移（贪心合并粒度、面可见性规则、
 ## 分桶逻辑、球体细分等），而不是"测试写错了"——改动内核时刻意调整数字须同期说明。
 
 const SAMPLES_DIR := "res://demo/samples"
-## deer.qvox 端到端基线（Phase 0 对照实验：GDScript 旧路径与 C++ 新路径同为 1260）。
+## deer.qvx 端到端基线（Phase 0 对照实验：GDScript 旧路径与 C++ 新路径同为 1260）。
 ##
 ## 【为什么现在是 1344】贪婪合并**逐 32³ 块**进行，模型跨块时面片会在块边界被切开，所以这个
 ## 数字依赖的是**分块布局**，不只是体素排列：旧样例把坐标重映射到 (0,0,0) 起（整只鹿落在 1 个
@@ -97,21 +97,21 @@ func test_kernel_sphere_subdivisions() -> void:
 
 
 # ----------------------------------------------------------------------------
-# 端到端基线（真实 .qvox 走完整导入路径）
+# 端到端基线（真实 .qvx 走完整导入路径）
 # ----------------------------------------------------------------------------
 
-## deer.qvox 走 VoxelMeshGenerator.generate_mesh_from_qvox（真实导入入口）的三角形数基线。
+## deer.qvx 走 VoxelMeshGenerator.generate_mesh_from_qvx（真实导入入口）的三角形数基线。
 ## 与合成模型互补：合成模型测规则，这里测"真实数据 + 真实编排"的整体结果。
 ## 两条路径（旧：稀疏字典 + generate_arrays_native；新：块级 halo + dense）用的是同一个
 ## 面生成内核与同一套块边界面归属规则，故三角形数应与基线一致——这正是本用例的意义。
 func test_kernel_deer_sample_baseline() -> void:
-	var path := SAMPLES_DIR + "/deer.qvox"
+	var path := SAMPLES_DIR + "/deer.qvx"
 	if not FileAccess.file_exists(path):
-		assert_true(false, "样例 deer.qvox 应存在（端到端基线依赖它）")
+		assert_true(false, "样例 deer.qvx 应存在（端到端基线依赖它）")
 		return
-	var qvox := QVoxAsset.from_file(path)
-	if qvox == null:
-		assert_true(false, "应能从 .qvox 解析出 QVoxAsset")
+	var qvx := QVoxelAsset.from_file(path)
+	if qvx == null:
+		assert_true(false, "应能从 .qvx 解析出 QVoxelAsset")
 		return
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
@@ -123,11 +123,11 @@ func test_kernel_deer_sample_baseline() -> void:
 		VoxelMeshImporter.uv2_texel_size: 0.2,
 		VoxelMeshImporter.import_materials_textures: false,
 	}
-	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, opts, path)
-	assert_true(mesh != null, "应为 deer.qvox 生成网格")
+	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvx(qvx, opts, path)
+	assert_true(mesh != null, "应为 deer.qvx 生成网格")
 	if mesh == null:
 		return
-	assert_eq(_tris(mesh), DEER_CUBE_TRIS, "deer.qvox 立方体路径三角形数应与基线一致")
+	assert_eq(_tris(mesh), DEER_CUBE_TRIS, "deer.qvx 立方体路径三角形数应与基线一致")
 
 	# 跨格式一致性：同一个模型走 `.vox → mesh` 必须得出同一个数字。
 	# 这是"两种格式导入结果一致"在几何层面的守卫——原点模式、坐标或分块布局任一漂移都会打破它。
@@ -137,7 +137,7 @@ func test_kernel_deer_sample_baseline() -> void:
 		var vmesh: ArrayMesh = VoxelMeshGenerator.generate_mesh(vox, opts, "res://demo/deer.vox")
 		assert_true(vmesh != null, "应为 deer.vox 生成网格")
 		if vmesh != null:
-			assert_eq(_tris(vmesh), DEER_CUBE_TRIS, "同一模型 .vox→mesh 的三角形数应与 .qvox 一致")
+			assert_eq(_tris(vmesh), DEER_CUBE_TRIS, "同一模型 .vox→mesh 的三角形数应与 .qvx 一致")
 
 
 # ----------------------------------------------------------------------------

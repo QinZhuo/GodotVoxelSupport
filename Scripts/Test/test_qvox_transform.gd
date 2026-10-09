@@ -1,6 +1,6 @@
 extends TestCase
 
-## 变换测试：纯重排数学（QVoxVoxelTransform）+ 链上的变换 / 摆放条目（PcgTransform / QVoxTransformModifier）。
+## 变换测试：纯重排数学（QVoxelTransform）+ 链上的变换 / 摆放条目（PcgTransform / QVoxelTransformModifier）。
 ##
 ## 【为什么这几层要一起测】变换最容易坏的不是数学，而是"尺寸怎么传下去"：核算出新盒尺寸 →
 ## 引擎把它记进结果 → 会话把 data.grid_size 对齐。任一处落后一步都不报错，只表现为
@@ -42,7 +42,7 @@ func _nonzero_sorted(v: PackedInt32Array) -> Array:
 # ----------------------------------------------------------------------------
 
 func test_identity_is_a_no_op() -> void:
-	var t := QVoxVoxelTransform.identity()
+	var t := QVoxelTransform.identity()
 	var old := Vector3i(3, 2, 5)
 	assert_true(t.is_identity(), "默认构造就是恒等")
 	assert_eq(t.new_size(old), old, "恒等不改尺寸")
@@ -52,7 +52,7 @@ func test_identity_is_a_no_op() -> void:
 
 func test_mirror_keeps_size_and_flips_one_axis() -> void:
 	var old := Vector3i(4, 2, 2)
-	var t := QVoxVoxelTransform.mirror(0)
+	var t := QVoxelTransform.mirror(0)
 	assert_eq(t.new_size(old), old, "镜像不改尺寸")
 	var src := _distinct_volume(old)
 	var out := t.remap(src, old)
@@ -64,7 +64,7 @@ func test_mirror_keeps_size_and_flips_one_axis() -> void:
 
 func test_rotate90_swaps_the_two_off_axis_dims() -> void:
 	var old := Vector3i(4, 2, 2)
-	var t := QVoxVoxelTransform.rotate90(2, 1)
+	var t := QVoxelTransform.rotate90(2, 1)
 	assert_eq(t.new_size(old), Vector3i(2, 4, 2), "绕 Z 旋转：X/Y 尺寸互换")
 	# 目的轴 0 ← 源轴 1（原样）；目的轴 1 ← 源轴 0（取反）；目的轴 2 ← 源轴 2（原样）。
 	var src := _distinct_volume(old)
@@ -77,8 +77,8 @@ func test_remap_is_a_lossless_bijection_for_permuted_axes() -> void:
 	# 非立方 + 置换：这正是"按目的轴顺序套步长"会越界崩溃的用例。
 	var old := Vector3i(5, 3, 2)
 	var src := _distinct_volume(old)
-	for t: QVoxVoxelTransform in [QVoxVoxelTransform.rotate90(2, 1),
-			QVoxVoxelTransform.rotate90(0, -1), QVoxVoxelTransform.mirror(1)]:
+	for t: QVoxelTransform in [QVoxelTransform.rotate90(2, 1),
+			QVoxelTransform.rotate90(0, -1), QVoxelTransform.mirror(1)]:
 		var ns := t.new_size(old)
 		var out := t.remap(src, old)
 		assert_eq(out.size(), ns.x * ns.y * ns.z, "输出体积必须正好是目标尺寸")
@@ -93,7 +93,7 @@ func test_four_rotations_return_to_identity() -> void:
 	var cur := src
 	var size := old
 	for i in 4:
-		var t := QVoxVoxelTransform.rotate90(1, 1)
+		var t := QVoxelTransform.rotate90(1, 1)
 		cur = t.remap(cur, size)
 		size = t.new_size(size)
 	assert_eq(size, old, "转四次尺寸回到原样")
@@ -103,8 +103,8 @@ func test_four_rotations_return_to_identity() -> void:
 func test_repeat_tiles_the_volume() -> void:
 	var old := Vector3i(3, 1, 1)
 	var src := _distinct_volume(old)
-	assert_eq(QVoxVoxelTransform.repeat_size(old, 0, 3), Vector3i(9, 1, 1), "沿 X 铺三份")
-	var out := QVoxVoxelTransform.repeat_volume(src, old, 0, 3)
+	assert_eq(QVoxelTransform.repeat_size(old, 0, 3), Vector3i(9, 1, 1), "沿 X 铺三份")
+	var out := QVoxelTransform.repeat_volume(src, old, 0, 3)
 	var ns := Vector3i(9, 1, 1)
 	assert_eq(out[_index(Vector3i(0, 0, 0), ns)], src[_index(Vector3i(0, 0, 0), old)])
 	assert_eq(out[_index(Vector3i(3, 0, 0), ns)], src[_index(Vector3i(0, 0, 0), old)], "第二份是同一内容")
@@ -116,8 +116,8 @@ func test_repeat_tiles_the_volume() -> void:
 # ----------------------------------------------------------------------------
 
 ## 一份 4×2×2 的模型，放三个可辨认的格子（原点 / 中点 / 对角）。
-func _model() -> QVoxModel:
-	var w := QVoxWorld.create_empty()
+func _model() -> QVoxelModel:
+	var w := QVoxelWorld.create_empty()
 	w.add_material(Color(1, 0, 0)) # ID 1
 	var m := w.create_model("m", Vector3i(4, 2, 2))
 	m.set_voxel(0, 0, 0, MAT)
@@ -126,8 +126,8 @@ func _model() -> QVoxModel:
 	return m
 
 
-func _eval(m: QVoxModel) -> QVoxEvalResult:
-	return QVoxEvalEngine.evaluate_node(m, QVoxEvalContext.make(m.grid_size, 0), null, null)
+func _eval(m: QVoxelModel) -> QVoxelEvalResult:
+	return QVoxelEvalEngine.evaluate_node(m, QVoxelEvalContext.make(m.grid_size, 0), null, null)
 
 
 ## 超限时两个入口必须给出**同一个答案**。
@@ -175,8 +175,8 @@ func test_repeat_grows_the_box_and_the_volume() -> void:
 
 func test_repeat_modifier_grows_the_output_box() -> void:
 	var m := _model()
-	m.add_modifier(QVoxTransformModifier.of(PcgTransform.repeat(0, 2)))
-	assert_eq(QVoxEvalEngine.output_grid_size(m.modifiers, m.grid_size), Vector3i(8, 2, 2),
+	m.add_modifier(QVoxelTransformModifier.of(PcgTransform.repeat(0, 2)))
+	assert_eq(QVoxelEvalEngine.output_grid_size(m.modifiers, m.grid_size), Vector3i(8, 2, 2),
 			"输出盒由链算出（纯函数，UI 靠它先把 data.grid_size 对齐）")
 	var r := _eval(m)
 	assert_eq(r.grid_size, Vector3i(8, 2, 2), "求值结果的盒尺寸必须跟上链")
@@ -188,7 +188,7 @@ func test_repeat_modifier_grows_the_output_box() -> void:
 
 func test_mirror_modifier_keeps_box_and_moves_voxels() -> void:
 	var m := _model()
-	m.add_modifier(QVoxTransformModifier.of(PcgTransform.mirror(0)))
+	m.add_modifier(QVoxelTransformModifier.of(PcgTransform.mirror(0)))
 	var r := _eval(m)
 	assert_eq(r.grid_size, Vector3i(4, 2, 2), "镜像不改盒尺寸")
 	assert_eq(r.volume[_index(Vector3i(3, 0, 0), r.grid_size)], MAT, "x=0 的格子翻到 x=3")
@@ -213,7 +213,7 @@ func test_translate_modifier_keeps_box_and_moves_origin() -> void:
 	assert_eq(r[0], _distinct_volume(old), "体积逐格不变（挪的是盒，不是格）")
 
 	var m := _model()
-	m.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(-2, 3, 0))))
+	m.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(-2, 3, 0))))
 	var res := _eval(m)
 	assert_eq(res.origin, Vector3i(-2, 3, 0), "求值结果的摆放 = 链上平移条目的累加")
 	assert_eq(res.grid_size, Vector3i(4, 2, 2), "盒尺寸不变")
@@ -223,11 +223,11 @@ func test_translate_modifier_keeps_box_and_moves_origin() -> void:
 ## 多条平移要**累加**，旁通的那条不算 —— 累加量是链的累积状态（见 StepState.shift）。
 func test_translate_steps_accumulate_and_skip_bypassed() -> void:
 	var m := _model()
-	m.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(1, 0, 0))))
-	var skip := QVoxTransformModifier.of(PcgTransform.translate(Vector3i(100, 0, 0)))
+	m.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(1, 0, 0))))
+	var skip := QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(100, 0, 0)))
 	skip.enabled = false
 	m.add_modifier(skip)
-	m.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(0, -1, 0))))
+	m.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(0, -1, 0))))
 	assert_eq(_eval(m).origin, Vector3i(1, -1, 0), "旁通的条目不参与累加")
 
 
@@ -236,15 +236,15 @@ func test_translate_steps_accumulate_and_skip_bypassed() -> void:
 ## 【为什么这条最关键】"摆放从节点字段搬到链上"改的正是这里：组若仍读节点字段，
 ## 子节点的平移会被整段忽略，表现为"挪了没反应"，且不报任何错。
 func test_group_places_children_by_their_chain_origin() -> void:
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	w.add_material(Color(1, 0, 0))
 	var g := w.create_group("g")
 	var a := w.create_model("a", Vector3i(2, 2, 2), g)
 	a.set_voxel(0, 0, 0, MAT)
 	var b := w.create_model("b", Vector3i(2, 2, 2), g)
 	b.set_voxel(0, 0, 0, MAT)
-	b.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(5, 0, 0))))
-	var res := QVoxEvalEngine.evaluate_node(g, QVoxEvalContext.make(Vector3i(2, 2, 2), 0), null, null)
+	b.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(5, 0, 0))))
+	var res := QVoxelEvalEngine.evaluate_node(g, QVoxelEvalContext.make(Vector3i(2, 2, 2), 0), null, null)
 	assert_eq(res.origin, Vector3i.ZERO, "组的摆放取子树包围盒左下角")
 	assert_eq(res.grid_size, Vector3i(7, 2, 2), "包围盒把挪到 x=5 的子节点也算进去")
 	assert_eq(res.volume[_index(Vector3i(0, 0, 0), res.grid_size)], MAT, "a 留在原点")
@@ -253,15 +253,15 @@ func test_group_places_children_by_their_chain_origin() -> void:
 
 ## 负平移要把**盒的左下角**也挪出去（origin 为负）—— 这正是"往盒里补零"表达不了的半边。
 func test_negative_translate_moves_the_composite_box_origin() -> void:
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	w.add_material(Color(1, 0, 0))
 	var g := w.create_group("g")
 	var a := w.create_model("a", Vector3i(2, 2, 2), g)
 	a.set_voxel(0, 0, 0, MAT)
 	var b := w.create_model("b", Vector3i(2, 2, 2), g)
 	b.set_voxel(0, 0, 0, MAT)
-	b.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(-5, 0, 0))))
-	var res := QVoxEvalEngine.evaluate_node(g, QVoxEvalContext.make(Vector3i(2, 2, 2), 0), null, null)
+	b.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(-5, 0, 0))))
+	var res := QVoxelEvalEngine.evaluate_node(g, QVoxelEvalContext.make(Vector3i(2, 2, 2), 0), null, null)
 	assert_eq(res.origin, Vector3i(-5, 0, 0), "盒左下角被挪到 -5")
 	assert_eq(res.grid_size, Vector3i(7, 2, 2), "盒跟着变长，而不是把内容截掉")
 	assert_eq(res.volume[_index(Vector3i(0, 0, 0), res.grid_size)], MAT, "b 落在盒的最左端")
@@ -273,14 +273,14 @@ func test_negative_translate_moves_the_composite_box_origin() -> void:
 ## 【为什么钉住显示层那一半】链改了输出盒，而 data.grid_size 落后一步的话，新长出来的区域
 ## 永远不渲染、缩小时旧 chunk 又留成鬼影 —— 两者都不报错，只表现为"画面不对"。
 func test_chain_edit_is_undoable_and_box_follows() -> void:
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	w.add_material(Color(1, 0, 0))
 	var obj := w.create_model("m", Vector3i(4, 2, 2))
 	obj.set_voxel(0, 0, 0, MAT)
-	var s := QVoxEditSession.create_for(obj, w)
+	var s := QVoxelEditSession.create_for(obj, w)
 
-	var cmd := QVoxPropertyCommand.begin(obj, &"modifiers", obj, "挂修改器")
-	obj.add_modifier(QVoxTransformModifier.of(PcgTransform.repeat(0, 3)))
+	var cmd := QVoxelPropertyCommand.begin(obj, &"modifiers", obj, "挂修改器")
+	obj.add_modifier(QVoxelTransformModifier.of(PcgTransform.repeat(0, 3)))
 	assert_true(cmd.commit(), "先 commit 才抓得到 after 态（否则撤销能回、重做回不来）")
 	s.history.push(cmd)
 	s.rebuild()

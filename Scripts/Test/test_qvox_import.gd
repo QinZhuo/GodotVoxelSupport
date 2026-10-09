@@ -1,15 +1,15 @@
 extends TestCase
 
-## QVox 导入链路测试：`.qvox` → QVoxAsset → VoxelData / 网格 / 材质。
+## QVX 导入链路测试：`.qvx` → QVoxelAsset → VoxelData / 网格 / 材质。
 ##
-## 钉死的是"QVox 的语义不能被中间表示压缩"这件事。此前 `.qvox` 走 VoxAsset
+## 钉死的是"QVX 的语义不能被中间表示压缩"这件事。此前 `.qvx` 走 VoxAsset
 ## （MagicaVoxel 场景图形状的适配器）导致三处**静默**失真，本文件逐条覆盖：
 ##   ① 多模型只导入第一个（VoxelFrame 的合并分支在 index==0 时短路）；
 ##   ② NODE 场景图完全不参与 → 各模型的位置/旋转丢失；
 ##   ③ 体素被摊平成逐体素稀疏字典再重映射回块 → 大模型多趟全量字典操作 + 内存峰值。
 ## 另有两条守门用例：块级与融合结果一致、材质 MATE 互转幂等。
 
-const TEST_DIR := "user://qvox_import_test"
+const TEST_DIR := "user://qvx_import_test"
 const SAMPLES_DIR := "res://demo/samples"
 
 
@@ -22,17 +22,17 @@ func cleanup() -> void:
 # ----------------------------------------------------------------------------
 
 func test_multi_model_with_node_placement() -> void:
-	var path := TEST_DIR + "/two.qvox"
-	_write_two_model_qvox(path, true)
-	var qvox := QVoxAsset.from_file(path)
-	assert_true(qvox != null, "应能解析双模型 .qvox")
-	if qvox == null:
+	var path := TEST_DIR + "/two.qvx"
+	_write_two_model_qvx(path, true)
+	var qvx := QVoxelAsset.from_file(path)
+	assert_true(qvx != null, "应能解析双模型 .qvx")
+	if qvx == null:
 		return
-	assert_eq(qvox.models.size(), 2, "两个 VOX0 都应在")
-	assert_eq(qvox.placements.size(), 2, "NODE 里两个 model 节点都应在")
-	assert_false(qvox.is_block_importable(), "带位移的摆放必须走融合路径")
+	assert_eq(qvx.models.size(), 2, "两个 VOX0 都应在")
+	assert_eq(qvx.placements.size(), 2, "NODE 里两个 model 节点都应在")
+	assert_false(qvx.is_block_importable(), "带位移的摆放必须走融合路径")
 
-	var data := VoxelData.from_qvox(qvox)
+	var data := VoxelData.from_qvx(qvx)
 	assert_true(data != null, "应能构造 VoxelData")
 	if data == null:
 		return
@@ -50,17 +50,17 @@ func test_multi_model_with_node_placement() -> void:
 # ----------------------------------------------------------------------------
 
 func test_block_import_matches_fused() -> void:
-	var path := TEST_DIR + "/plain.qvox"
-	_write_two_model_qvox(path, false)
-	var qvox := QVoxAsset.from_file(path)
-	assert_true(qvox.is_block_importable(), "无 NODE → 应可块级直连（零逐体素展开）")
-	if not qvox.is_block_importable():
+	var path := TEST_DIR + "/plain.qvx"
+	_write_two_model_qvx(path, false)
+	var qvx := QVoxelAsset.from_file(path)
+	assert_true(qvx.is_block_importable(), "无 NODE → 应可块级直连（零逐体素展开）")
+	if not qvx.is_block_importable():
 		return
-	var via_blocks := VoxelData.from_qvox(qvox)
+	var via_blocks := VoxelData.from_qvx(qvx)
 	# fused_voxels() 是"有变换时"的参考实现：两条路必须给出同一个世界
-	assert_eq(via_blocks.get_voxels_dict_snapshot(), qvox.fused_voxels(),
+	assert_eq(via_blocks.get_voxels_dict_snapshot(), qvx.fused_voxels(),
 			"块级直连与逐体素融合必须逐体素一致")
-	assert_eq(via_blocks.grid_size, qvox.grid_size(), "grid_size 应来自体素包围盒")
+	assert_eq(via_blocks.grid_size, qvx.grid_size(), "grid_size 应来自体素包围盒")
 	assert_eq(via_blocks.get_voxel_count(), 2, "体素数应正确（块级安装用原生 count 统计）")
 
 
@@ -69,14 +69,14 @@ func test_block_import_matches_fused() -> void:
 # ----------------------------------------------------------------------------
 
 func test_mesh_covers_all_models() -> void:
-	var path := TEST_DIR + "/mesh_two.qvox"
-	_write_two_model_qvox(path, false)
-	var qvox := QVoxAsset.from_file(path)
+	var path := TEST_DIR + "/mesh_two.qvx"
+	_write_two_model_qvx(path, false)
+	var qvx := QVoxelAsset.from_file(path)
 	var opts := {}
 	for o in VoxelMeshImporter.new()._get_import_options("", false):
 		opts[o["name"]] = o["default_value"]
-	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvox(qvox, opts, path)
-	assert_true(mesh != null, "应能为 .qvox 生成网格")
+	var mesh: ArrayMesh = VoxelMeshGenerator.generate_mesh_from_qvx(qvx, opts, path)
+	assert_true(mesh != null, "应能为 .qvx 生成网格")
 	if mesh == null:
 		return
 	var verts := 0
@@ -143,15 +143,15 @@ func test_material_mate_roundtrip() -> void:
 # ----------------------------------------------------------------------------
 
 func test_samples_import_without_loss() -> void:
-	var files := _list_qvox(SAMPLES_DIR)
-	assert_true(not files.is_empty(), "%s 下应至少有一个 .qvox 样例" % SAMPLES_DIR)
+	var files := _list_qvx(SAMPLES_DIR)
+	assert_true(not files.is_empty(), "%s 下应至少有一个 .qvx 样例" % SAMPLES_DIR)
 	for path in files:
-		var qvox := QVoxAsset.from_file(str(path))
-		assert_true(qvox != null, "%s 应能解析" % path.get_file())
-		if qvox == null:
+		var qvx := QVoxelAsset.from_file(str(path))
+		assert_true(qvx != null, "%s 应能解析" % path.get_file())
+		if qvx == null:
 			continue
-		assert_true(not qvox.is_empty(), "%s 应含非空块" % path.get_file())
-		var data := VoxelData.from_qvox(qvox)
+		assert_true(not qvx.is_empty(), "%s 应含非空块" % path.get_file())
+		var data := VoxelData.from_qvx(qvx)
 		assert_true(data.get_voxel_count() > 0, "%s 应导入出体素" % path.get_file())
 
 
@@ -160,18 +160,18 @@ func test_samples_import_without_loss() -> void:
 # ----------------------------------------------------------------------------
 
 ## 90° 绕 Y 在浮点里恰好落在整数上：体素 (1,1,1) → (1,1,-1)。
-## 这条用例钉住旋转的**表示与解码**：若哪天有人把 `.vox` 的 0–23 索引搬回 QVox，
+## 这条用例钉住旋转的**表示与解码**：若哪天有人把 `.vox` 的 0–23 索引搬回 QVX，
 ## 这里会立刻变成"体素还在原地"而失败。
 func test_node_quaternion_rotation_applied() -> void:
-	var path := TEST_DIR + "/rot.qvox"
+	var path := TEST_DIR + "/rot.qvx"
 	var q := Quaternion(Vector3.UP, PI / 2.0)
-	_write_single_voxel_qvox(path, {"r": [q.x, q.y, q.z, q.w]})
-	var qvox := QVoxAsset.from_file(path)
-	assert_true(qvox != null, "应能解析带旋转的 .qvox")
-	if qvox == null:
+	_write_single_voxel_qvx(path, {"r": [q.x, q.y, q.z, q.w]})
+	var qvx := QVoxelAsset.from_file(path)
+	assert_true(qvx != null, "应能解析带旋转的 .qvx")
+	if qvx == null:
 		return
-	assert_false(qvox.is_block_importable(), "带旋转的摆放必须走逐体素融合路径")
-	var data := VoxelData.from_qvox(qvox)
+	assert_false(qvx.is_block_importable(), "带旋转的摆放必须走逐体素融合路径")
+	var data := VoxelData.from_qvx(qvx)
 	assert_eq(data.get_voxel_count(), 1, "旋转后仍应恰好一个体素")
 	assert_true(data.has_voxel(Vector3i(1, 1, -1)), "90° 绕 Y：(1,1,1) → (1,1,-1)")
 	assert_false(data.has_voxel(Vector3i(1, 1, 1)), "原位置不应残留")
@@ -179,13 +179,13 @@ func test_node_quaternion_rotation_applied() -> void:
 
 ## 缩放与平移同属 `transform`，且三个字段都可缺省（未写的 `r` 即恒等）。
 func test_node_scale_and_translation_applied() -> void:
-	var path := TEST_DIR + "/scale.qvox"
-	_write_single_voxel_qvox(path, {"t": [10, 0, 0], "s": [2, 2, 2]})
-	var qvox := QVoxAsset.from_file(path)
-	assert_true(qvox != null, "应能解析带缩放的 .qvox")
-	if qvox == null:
+	var path := TEST_DIR + "/scale.qvx"
+	_write_single_voxel_qvx(path, {"t": [10, 0, 0], "s": [2, 2, 2]})
+	var qvx := QVoxelAsset.from_file(path)
+	assert_true(qvx != null, "应能解析带缩放的 .qvx")
+	if qvx == null:
 		return
-	var data := VoxelData.from_qvox(qvox)
+	var data := VoxelData.from_qvx(qvx)
 	assert_true(data.has_voxel(Vector3i(12, 2, 2)), "先缩放 2× 再平移 (10,0,0)：(1,1,1) → (12,2,2)")
 
 
@@ -197,22 +197,22 @@ func test_node_scale_and_translation_applied() -> void:
 ## 于是动画退化为"扁平时代的遗留键"：格式层原样保留（重写不丢数据），但不参与摆放。
 ## 守两件事：① 带动画的文件照样能读；② 帧不再改变任何摆放（按下标叠加补丁的行为已废除）。
 func test_animation_frames_are_passed_through_not_interpreted() -> void:
-	var path := TEST_DIR + "/anim.qvox"
+	var path := TEST_DIR + "/anim.qvx"
 	# 第 1 帧声称把下标 0 的节点抬高 64 —— v3 不解释它，故必须与第 0 帧给出同一个世界
-	_write_single_voxel_qvox(path, {},
+	_write_single_voxel_qvx(path, {},
 			[{"t": 0, "0": {"t": [0, 0, 0]}}, {"t": 100, "0": {"t": [0, 64, 0]}}])
-	var qvox := QVoxAsset.from_file(path)
-	assert_true(qvox != null, "带动画的 .qvox 应能解析")
-	if qvox == null:
+	var qvx := QVoxelAsset.from_file(path)
+	assert_true(qvx != null, "带动画的 .qvx 应能解析")
+	if qvx == null:
 		return
-	assert_eq(qvox.placements.size(), 1, "应恰好一条摆放")
+	assert_eq(qvx.placements.size(), 1, "应恰好一条摆放")
 	# 体素位于块 (0,0,0) 的局部 (1,1,1)；节点未写 transform → 恒等
-	var data := VoxelData.from_qvox(qvox)
+	var data := VoxelData.from_qvx(qvx)
 	assert_true(data.has_voxel(Vector3i(1, 1, 1)), "帧键不参与摆放：模型应落在自身 transform（原点）")
 	assert_false(data.has_voxel(Vector3i(1, 65, 1)), "帧里的位移不得被应用")
 	# 原样透传：格式层的只读视图仍应看得到这段动画
-	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(
-			FileAccess.get_file_as_bytes(path), true, QVoxFile.QVoxReport.new(), true)
+	var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse(
+			FileAccess.get_file_as_bytes(path), true, QVoxelFile.QVoxelReport.new(), true)
 	assert_true(doc != null and doc.scene != null, "应能解析出场景视图")
 	if doc != null and doc.scene != null:
 		assert_eq(doc.scene.animations.size(), 1, "动画应原样透传（不丢数据）")
@@ -272,13 +272,13 @@ func test_mesh_and_data_origin_agree() -> void:
 # 辅助
 # ----------------------------------------------------------------------------
 
-## 最小可用 QVox 文档骨架：HEAD（单通道 material）+ 材质表（条目 0 空气 + 1 号实体）。
+## 最小可用 QVX 文档骨架：HEAD（单通道 material）+ 材质表（条目 0 空气 + 1 号实体）。
 ## 各用例只在其上挂自己的 models / node。
-func _new_doc() -> QVoxFile.QVoxDocument:
-	var doc := QVoxFile.QVoxDocument.new()
+func _new_doc() -> QVoxelFile.QVoxelDocument:
+	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
-		"qvox": QVoxSpec.VERSION,
-		"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": QVoxSpec.CHANNEL_BPP}],
+		"qvox": QVoxelSpec.VERSION,
+		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
 		"block_size": VoxelChunk.CHUNK_SIZE,
 		"up_axis": "y",
 	}
@@ -295,12 +295,12 @@ func _one_voxel_block() -> PackedInt32Array:
 	return b
 
 
-## 造一个"单模型单体素"的 .qvox：块 (0,0,0) 内的 (1,1,1) 有一个体素，
+## 造一个"单模型单体素"的 .qvx：块 (0,0,0) 内的 (1,1,1) 有一个体素，
 ## NODE 里一个 model 节点带给定的 transform（空字典 = 不写 NODE 块，即恒等摆放）。
 ## frames 非空时写入一段动画（`frames` 的键是**节点下标**；本 helper 只有一个节点 → 下标 0）。
 ## 注意：v3 不解释动画（见 ⑧），它只用来验证"原样透传、不影响摆放"。
 ## 变换相关的用例共用它，使"看的是变换，而不是文档构造"。
-func _write_single_voxel_qvox(path: String, transform: Dictionary, frames: Array = []) -> void:
+func _write_single_voxel_qvx(path: String, transform: Dictionary, frames: Array = []) -> void:
 	var doc := _new_doc()
 	doc.models = {0: {Vector3i(0, 0, 0): _one_voxel_block()}}
 	if not transform.is_empty() or not frames.is_empty():
@@ -308,16 +308,16 @@ func _write_single_voxel_qvox(path: String, transform: Dictionary, frames: Array
 				"transform": transform}]}
 		if not frames.is_empty():
 			doc.node["animations"] = [{"name": "a", "loop": false, "frames": frames}]
-	_write_bytes(path, QVoxFile.serialize(doc))
+	_write_bytes(path, QVoxelFile.serialize(doc))
 
 
-## 造一个"双模型 + 可选 NODE 摆放"的 .qvox。
+## 造一个"双模型 + 可选 NODE 摆放"的 .qvx。
 ## 模型 0：块 (0,0,0) 内 (1,1,1)；模型 1：块 (5,0,0) 内 (1,1,1)。
 ## with_node 时给出 NODE：组 root 位移 (0,32,0)、模型 1 再位移 (0,64,0)，
 ## 于是既验证"场景图不再被丢弃"，也验证**组变换累积到子节点**。
 ##
 ## 节点树是**嵌套**的：组自己带 children[]（v3 起不再是"子节点下标"那套扁平表示）。
-func _write_two_model_qvox(path: String, with_node: bool) -> void:
+func _write_two_model_qvx(path: String, with_node: bool) -> void:
 	var doc := _new_doc()
 	doc.models = {
 		0: {Vector3i(0, 0, 0): _one_voxel_block()},
@@ -332,7 +332,7 @@ func _write_two_model_qvox(path: String, with_node: bool) -> void:
 						"transform": {"t": [0, 64, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1]}},
 			]},
 		]}
-	_write_bytes(path, QVoxFile.serialize(doc))
+	_write_bytes(path, QVoxelFile.serialize(doc))
 
 
 func _solid_material(color: Color) -> VoxelMaterial:
@@ -362,7 +362,7 @@ func _write_bytes(path: String, bytes: PackedByteArray) -> void:
 	f.close()
 
 
-func _list_qvox(dir_path: String) -> Array:
+func _list_qvx(dir_path: String) -> Array:
 	var out: Array = []
 	var dir := DirAccess.open(dir_path)
 	if dir == null:
@@ -370,7 +370,7 @@ func _list_qvox(dir_path: String) -> Array:
 	dir.list_dir_begin()
 	var name := dir.get_next()
 	while name != "":
-		if not dir.current_is_dir() and name.ends_with(".qvox"):
+		if not dir.current_is_dir() and name.ends_with(".qvx"):
 			out.append(dir_path.path_join(name))
 		name = dir.get_next()
 	dir.list_dir_end()

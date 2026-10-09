@@ -300,7 +300,7 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"get_dirty_chunks", "notify_changed",
 	# 存档生命周期
 	"save_data", "load_data", "flush", "bake_to", "load_voxels_dict",
-	"from_voxel_data", "from_qvox",
+	"from_voxel_data", "from_qvx",
 	# 连通塌落
 	"flood_fill", "find_connected", "connectivity", "neighbors",
 	"partition_connected", "find_unsupported", "find_unsupported_around",

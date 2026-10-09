@@ -1,25 +1,25 @@
-# QVox 格式规范 — v3
+# QVX 格式规范 — v3
 
-> **定位**：`.qvox` 是一个**体素模型容器**，与 MagicaVoxel 的 `.vox` 同级——
+> **定位**：`.qvx` 是一个**体素模型容器**，与 MagicaVoxel 的 `.vox` 同级——
 > 可独立分发、可直接观察、可作为项目资产被编辑器导入的**源文件**，
 > 不是烘焙中间产物或临时文件。同一个容器**也**能承载"整个世界存档"
 > （多模型 + 增量写盘），但那是它的用法之一，不是它的身份。
 >
 > 配套实现（`addons/VoxelSupport/`）：
-> - **格式内核** `QVoxSpec` / `QVoxBlockCodec` / `QVoxFile`（定义、编解码、读写与校验）
-> - **资产导入** `QVoxAsset.from_file()`：`.qvox` 的块级视图（材质 + 每个 `VOX0` 的块 + `NODE` 摆放）。
->   `.vox` 由 `VoxAsset` 承载 —— 两种源格式的概念形状不同（详见 QVoxAsset 类注释），
+> - **格式内核** `QVoxelSpec` / `QVoxelBlockCodec` / `QVoxelFile`（定义、编解码、读写与校验）
+> - **资产导入** `QVoxelAsset.from_file()`：`.qvx` 的块级视图（材质 + 每个 `VOX0` 的块 + `NODE` 摆放）。
+>   `.vox` 由 `VoxAsset` 承载 —— 两种源格式的概念形状不同（详见 QVoxelAsset 类注释），
 >   导入器按扩展名分派，不共用适配器
-> - **世界存档** `QVoxStream`：可写、脏标记、增量落盘
+> - **世界存档** `QVoxelStream`：可写、脏标记、增量落盘
 >
-> 编辑器导入器（`addons/VoxelSupport/Importers/`）**同时识别 `.vox` 与 `.qvox`**，
+> 编辑器导入器（`addons/VoxelSupport/Importers/`）**同时识别 `.vox` 与 `.qvx`**，
 > 在导入面板可选四种产物：
 > - `Voxel Data Resource` → `VoxelData` (.res)：运行时体素数据（可破坏 / 动态修改）
 > - `Voxel Mesh` → `ArrayMesh` (.mesh)：静态网格
 > - `Voxel MeshLibrary` → `MeshLibrary` (.res)：网格库（by model / node / frame）
 > - `Voxel No Import` → 空 `Resource`：只要原始文件、不做导入
 >
-> `demo/samples/*.qvox` 是可直接 hexdump 对照的样例，同时是
+> `demo/samples/*.qvx` 是可直接 hexdump 对照的样例，同时是
 > `Scripts/Test/test_qvox_format.gd` 的测试夹具（随 `.gitattributes` 走 Git LFS）。
 
 > **单一文件。单一数据流。每条事实只存一次。**
@@ -42,7 +42,7 @@
 
 ## 1. 容器
 
-一个 `.qvox` 文件 = 8 字节签名 + 一个或多个块（第一个必须是 `HEAD`）。
+一个 `.qvx` 文件 = 8 字节签名 + 一个或多个块（第一个必须是 `HEAD`）。
 文件在最后一个块结束时结束，没有终止符。
 
 ```
@@ -159,7 +159,7 @@ byte[]  padding    0–3 字节的零，使 length 为 4 的倍数
 
 | 键 | 必需 | 缺省 | 含义 |
 |---|---|---|---|
-| `qvox` | ✅ | —— | 规范版本。**必须是第一个键**，让读者一眼即能判断兼容性。 |
+| `qvx` | ✅ | —— | 规范版本。**必须是第一个键**，让读者一眼即能判断兼容性。 |
 | `channels` | ✅ | —— | 通道列表，每项 `{name, bpp}`，**当前版本 `bpp` 只允许 `16`**（遇到 8/32 拒绝整个文件，理由见下"通道约束"）。**`channels[0].name` 必须为 `"material"`，且当前版本 `channels` 恰好 1 项。** |
 | `up_axis` | 否 | `"y"` | `"x"`、`"y"` 或 `"z"`。出现其他值按缺省处理（不拒绝文件）。 |
 | `block_size` | 否 | `32` | VOX0 的空间分块尺寸，**必须是 2 的幂**。 |
@@ -190,13 +190,13 @@ byte[]  padding    0–3 字节的零，使 length 为 4 的倍数
 后者会"接受却读错"（例如 `RUN` 逐游程交错 `(len, material, sdf)`，只读
 material 会从第二段起错位）。附加数据（如 `sdf`）应放入一个**独立块类型**，
 这与 P1"新功能 = 新块类型"一致（同域的 MagicaVoxel `.vox` 同样只有单一体素
-通道，附加信息全是独立 chunk）。将来确需多通道时，作为新的 `qvox` 版本引入
+通道，附加信息全是独立 chunk）。将来确需多通道时，作为新的 `qvx` 版本引入
 逐通道布局描述，格式核心不为它提前增加复杂度。
 
-**缺省才是常态**：最常见的文件只需要 `qvox` 与 `channels` 两个键。
+**缺省才是常态**：最常见的文件只需要 `qvx` 与 `channels` 两个键。
 
 **没有任何字段重述另一个字段。** 没有 `format`（签名已说明），没有 `version`
-（`qvox` 键已说明），没有 `material_count`（数 `MATE` 条目即可），没有
+（`qvx` 键已说明），没有 `material_count`（数 `MATE` 条目即可），没有
 `voxel_count`（需要时累加即可），没有 `model_count`（数 VOX0 块即可），
 没有 `animated`（`NODE` 里的 `animations` 已说明）。`require` 也不是重述——
 它声明的是**读者必须理解什么**，而不是文件里**有什么**（那是块流本身说的）。
@@ -261,7 +261,7 @@ uint8   reserved      必须为 0
 - 物理量用 `uint8` 而非 `float32`：0–255 的分档对"硬/软""重/轻"这类游戏内
   属性完全够用，且使整个条目保持 12 字节的紧致尺寸。
 
-> 条目大小是常量 **12**，由 `qvox` 版本定义，**不写入文件**（P2）。
+> 条目大小是常量 **12**，由 `qvx` 版本定义，**不写入文件**（P2）。
 > 12 字节定长 → 读者一次乘法即可索引材质。无偏移、无变长、无名称块。
 > 条目不必是 2 的幂：块负载按字节寻址，`index × 12` 直接可用。
 > 材质名属于编辑器元数据，不属于渲染必需数据；需要时写入方将其放入 HEAD JSON
@@ -505,7 +505,7 @@ byte[]  payload       余下的全部字节（含块尾填充）
   `block_size` 的整数倍），故它是**可选**的——外来文件可能没写。
 - `steps`：该节点自己的修改器链（逐对象的滤镜 / 变换 / 摆放）。它在格式层**不被解释**，
   只在"读进来再存出去"时逐字回写，含义由写入方与读者商定（§6 的 `CACH`/`kind` 是同一
-  哲学——格式层只做结构切分）。键名与缺省值见 `QVoxModifierSerializer`（唯一读写方）。
+  哲学——格式层只做结构切分）。键名与缺省值见 `QVoxelModifierSerializer`（唯一读写方）。
 - `cameras`（相机书签）也是对象数组，每项 `{name?, projection?, transform?, size?}`：
   `projection ∈ {"persp", "ortho"}`（其他值按 `persp` 处理并告警，与 `up_axis` 同策略），
   `size` 是**正交专有**的可选视口高度（透视下无意义，故"未设"就是键缺失，而不是一个与 0
@@ -592,7 +592,7 @@ byte[]  payload       余下的全部字节（含块尾填充）
 | 文件 | 8 字节签名 | `FATAL` 拒绝 |
 | 块 | 逐块 CRC32（覆盖 `length` + `type` + 负载的 `length` 个字节，含尾部填充，位于块头） | `DROP_BLOCK`（跳过该块，保留其余）；**`crc==0` 表示作者未写校验值，跳过校验**（§10） |
 | 语义·模型 | `block_count` 与负载自洽；`payload_length` 不越界 | `DROP_MODEL` |
-| 语义·文件（`HEAD`） | `qvox` 版本可读；`channels` 恰好 1 项且 `name == "material"`、`bpp == 16`；`require` 中每一项都可处理 | `FATAL` 拒绝 |
+| 语义·文件（`HEAD`） | `qvx` 版本可读；`channels` 恰好 1 项且 `name == "material"`、`bpp == 16`；`require` 中每一项都可处理 | `FATAL` 拒绝 |
 | 语义·块 | VOX0 块坐标落在 `bounds` 内（若给出）；`MATE` 索引 < `entry_count`；`RUN` 游程和 == `B³` | `DROP_BLOCK` |
 | 缓存 | `source_crc[]` 集合 + `(kind, algo_version)` | 丢弃缓存，重算 |
 
@@ -675,3 +675,185 @@ byte[]  payload       余下的全部字节（含块尾填充）
 
 > 注意 8 个块中只有 3 个存在于文件里。**"不存在"就是 `EMPTY` 的表示**——
 > 空块不付任何字节，连块头都不付。
+
+---
+
+## 12. 帧动画（设计稿 · 尚未实现）
+
+> **本节描述尚未落地的设计**：`.qvx` 如何承载体素帧动画（Aseprite 那种"逐帧作画、按时间播放"）。
+> 它**不从 MagicaVoxel `.vox` 的动画机制推导**——那套是"节点按帧交换整模型"（全量复制、
+> 无增量、帧即模型），与本格式"块是局部性单位"的前提不符。本设计**只用本格式自己的原语**
+> （块、块级编解码、块流、JSON 元数据）推出来，因此天然满足 P1–P5。
+
+### 12.1 心智模型：帧 = 一整套块
+
+Aseprite 的动画是**离散帧**：每帧一张完整图像，播放 = 按帧时长推进播放头。
+把"图像"换成"体素"，就是本设计：
+
+> **帧 = 该模型在该时刻的一整套块表。** 没有新概念——帧就是"块表的一个快照"。
+
+关键是**三态分离**：
+
+| 态 | 内容 | 谁看 |
+|---|---|---|
+| 编辑态（内存） | N 个**独立**帧，每帧是完整块表 | 编辑器 / 求值 |
+| 存储态（文件） | 帧 0 全量；帧 1…N−1 是相对上一帧的**块级增量** | 读者 |
+| 时间轴（JSON） | 每帧时长、循环、命名标签 | 编辑器 / 播放器 |
+
+**为什么必须分开**：编辑要"每帧都是完整数据"（落笔 / 求值 / 撤销都简单）；存储要"只存变化"
+（P2，省空间）。把增量做成**纯存储编解码**（写盘时算、读盘时还原），两个目标就都不牺牲——
+**编辑器与运行时永远只看独立帧，增量对它们不可见**。这与"材质只存一次、`INDEXED` 只引用"
+是同一种思路：重复的东西只存一次，用的时候展开。
+
+### 12.2 新块类型 `FRAM`
+
+一个模型一套帧，按 `model_id` 绑定（与 `VOX0` 同构）。
+
+> **不变式**：一个 `model_id` 恰好对应**一个体素源**——`VOX0`（静态）**或** `FRAM`（动画），
+> 二者互斥。同一 `model_id` 同时出现 `VOX0` 与 `FRAM` 即为损坏（§9，`FATAL`）。
+
+```
+uint16  model_id        动画归属的模型
+uint16  frame_count     帧总数（≥ 1）
+frame[] frame_count 个帧，按播放序：
+    uint16  duration_ms     本帧时长（毫秒）；0 = 用时间轴的 fps 缺省
+    uint32  payload_length  本帧增量负载的精确字节数（不含填充）
+    block[] delta           块级增量（块布局复用 §5.1：bx,by,bz + codec + plen + payload）
+```
+
+**帧增量的语义**（`FRAM` 自己的命名空间，与 §5.2 的 codec 表一致，只多一条"清空"）：
+
+- 第 k 帧的**已解析块表** = 第 k−1 帧的已解析块表，**应用本帧 `delta`**；
+- 第 0 帧的基线 = **空**（因此第 0 帧的 delta 就是全量块表，等价于一个 `VOX0` 的负载）；
+- `delta` 中每个条目：
+  - `codec ∈ {SOLID, RUN, DENSE, INDEXED}` → **设置**该块（覆盖 / 新增）；
+  - `codec = 0`（`EMPTY`）→ **清除**该块（置空）；
+  - 帧 `delta` 中**未出现**的块 → **继承**上一帧。
+- 帧内不做对齐填充（同 §5.1）；`payload_length` 界定边界。
+
+> **`codec = 0` 在 `FRAM` 里是合法的**，含义是"清空该块"。这与 §5.2"`codec=0` 视为损坏"
+> 不冲突：§5.2 约束的是 **`VOX0` 的块**（那里空块用"坐标缺失"表示，`0` 因此是冗余值）；
+> 而增量的本质是"对上一帧的**差异**"，**"变成空"也是一种差异**，必须有编码。给 `FRAM`
+> 一个自己的命名空间，就把这条需求干净地接住了，且不污染 `VOX0` 的既有语义。
+
+**为什么帧 0 负载与 `VOX0` 逐字节同构**：一个全量帧 = 一组块 = 一个 `VOX0` 的负载。
+于是读写两端**共用同一套块编解码**（§5.1 / §5.2），增量只是"多帧叠一层覆盖"。
+`FRAM` 块头 4 字节（`model_id` + `frame_count`），每帧 6 字节（`duration_ms` + `payload_length`），
+其余全是复用的块负载——**没有一处新编码**。
+
+**前向兼容**：不认识 `FRAM` 的读者会跳过它，于是"该模型只有 `FRAM`、没有 `VOX0`"会让
+`NODE` 里引用它的节点被当作损坏丢弃（§7）——**丢的是一个模型，不是整份文件**。
+这属于"不完整"而非"错误"，但为了不静默丢模型，**含 `FRAM` 的文件在 `HEAD.require` 里声明
+`"FRAM"`**（§10）：无法处理它的读者**拒绝整个文件**（fail-fast），而不是静默少几个模型。
+`require` 就是为这种情况准备的，本设计是它第一次被实际使用。
+
+### 12.3 时间轴元数据（`NODE`）
+
+帧的**体素**是负载（二进制 → `FRAM`），帧的**时间**是元数据（小 → JSON → `NODE`）。
+在模型节点条目上加一个可选键 `anim`：
+
+```json
+{"kind":"model","model_id":3,"name":"角色","size":[32,32,32],
+ "anim": {
+   "loop": true,
+   "fps": 12,
+   "tags": [
+     {"name":"walk","from":0,"to":7,"direction":"forward"},
+     {"name":"idle","from":8,"to":11,"direction":"pingpong"}
+   ]
+ }}
+```
+
+| 键 | 必需 | 缺省 | 含义 |
+|---|---|---|---|
+| `loop` | 否 | `true` | 整体是否循环播放 |
+| `fps` | 否 | `12` | 缺省帧率；某帧 `duration_ms == 0` 时用它 |
+| `tags` | 否 | `[]` | 命名区间（Aseprite 的 tag）：`{name, from, to, direction}`，`direction ∈ {forward, reverse, pingpong}`，缺省 `forward` |
+
+- **`anim` 是节点局部的**：它挂在"那个模型节点"上，用 `model_id` 天然绑定到 `FRAM`——
+  **不需要任何下标**。这正是旧 `animations` 键死掉的原因（见下），也是本设计能成立的前提。
+- **缺省才是常态**：静态模型**不写** `anim`、也**没有** `FRAM`，零成本（P2 / §3.1）。
+- **逐帧时长优先于 `fps`**：`duration_ms != 0` 用它，否则回退 `fps`——与 Aseprite 的
+  `frame.durationMs` 优先于 `header.speed` 同构（逐帧可变时长是动画的常态，全局 fps 只是兜底）。
+
+### 12.4 与旧 `animations` 键的关系
+
+v2 遗留的 `animations` 键（帧补丁以**节点下标**为键）**废弃**：读盘忽略、写盘显式抹掉——
+与旧 `layers` 键同一处置（§7）。原因见 §2.9：嵌套节点树**没有下标**这层身份，
+"按节点下标打帧补丁"在 v3 结构里无从谈起。新语义一律走节点局部的 `anim`。
+
+> **不提供兼容读取路径**（与 v2→v3 同策略）：格式尚未发布、从未有实际落盘的动画文件，
+> 不为一个死键背迁移逻辑。
+
+### 12.5 求值：动画与修改器链**正交**
+
+帧决定"体素**输入**"，节点的 `steps` 链决定"怎么**处理**它"：
+
+```
+QVoxelModel.eval(frame k):
+    v = frame[k].blocks → 密集体积        # 帧只改这一行
+    v = 依次应用 node.modifiers            # 链原样作用，不知道也不关心"这是第几帧"
+```
+
+于是"走路循环"（帧）与"整组岩石统一侵蚀"（链）可以自由组合，
+`QVoxelEvalEngine` **不需要为动画增加任何分支**——它只是"取当前帧的块表"这一行变了。
+这正是把动画做成"块表快照"而非"新算子"的回报。
+
+### 12.6 编辑器（QVoxelier）
+
+- `QVoxelModel` 增加 `frames: Array[QVoxelFrame]`（**空 = 静态模型**，零成本）；
+  `QVoxelFrame = { duration_ms: int, blocks: Dictionary }`（编辑态**不压缩**，见 §12.1）。
+- **时间轴面板**：帧条 + 播放头 + 逐帧时长 / 标签编辑 + 播放预览（复用 `steps` 面板的 UI 约定）。
+- **编辑**：在帧 k 上落笔 → 写 `frames[k].blocks` → 一条 `QVoxelEditCommand`
+  （**复用现有体素命令**，只在块坐标旁多带一个帧号采集差值）。
+- **结构编辑**：帧的增 / 删 / 重排 / 改时长 → `QVoxelPropertyCommand`（`frames` 就是属性，
+  与"链与树编辑不需要新命令类"同一论证，§2.8）。
+- **落盘**：`to_document()` 时把 `frames` 压成 `FRAM`（帧 0 全量 + 后续增量）；读盘时反向展开。
+
+### 12.7 运行时 / 导入
+
+- `QVoxelAsset` 增加 `animations: Dictionary`（`model_id → {frames, tags, loop, fps}`）；
+  `frame_blocks(model_id, k)` 返回第 k 帧块表（已应用增量）。
+- `VoxelMeshLibraryImporter` 的 `split_by_frame` 对 `.qvx` **不再降级**：逐帧生成网格
+  （现在它对 `.qvx` 是 `push_warning` + 退化为 `split_by_model`）。
+- `VoxelMeshImporter`（单网格）取第 0 帧；导入选项 `mesh/frame_index`（**已存在**）直接生效。
+- 运行时播放：后续给 `VoxelData` / `VoxelGenerator` 加"当前帧"切换（不在本次范围）。
+
+### 12.8 与业界的对照（为什么这样选）
+
+| 软件 | 内部结构 | 粒度 | 本格式的取舍 |
+|---|---|---|---|
+| **Aseprite** | frames × layers；每 cel 是**全量**图像（zlib）；逐帧 duration；tags 命名区间 | 像素 | 借它的**帧/时长/tags 心智**；但存储改**块级增量**（体素比 2D 图大得多，全量复制不可接受） |
+| **Photoshop** | 两套时间轴：①帧动画 = 每帧快照"图层可见性/位置/不透明度"（**属性级**，不重画像素）；②视频时间轴 = 图层属性关键帧 + 插值 | 图层属性 | 本设计只做①的等价物（离散帧）；②的"属性关键帧 + 插值"作为**未来扩展**（见 §12.9），落在 `steps` 参数上 |
+| **MagicaVoxel `.vox`** | 节点按帧交换 `model_id`（**帧即模型**，全量复制） | 模型 | **刻意不对齐**：改用块级增量 + 节点局部时间轴，更省、更内聚、无下标耦合 |
+
+**三者其实是同一件事**：把"时间"映射到"内容或属性"。差别只在**粒度**——
+像素 cel（Aseprite）、图层属性（Photoshop）、整模型交换（MagicaVoxel）。
+本格式选**块**作粒度，因为块已经是本格式的局部性 / 编辑 / 撤销 / 缓存单位，
+于是增量、编辑、撤销、缓存**全部白得**，不引入任何新机制。
+
+### 12.9 未来扩展（不在本次）
+
+- **属性关键帧 + 插值**（吸收 Photoshop 视频时间轴）：`anim` 支持对 `steps` 参数打关键帧，
+  于是"旋转随时间变化"不必逐帧重画体素。
+- **变换 / 骨骼动画**：帧只描述体素，变换随时间变化由上面那条覆盖。
+- **事件轨 / 音效**：`anim` 上挂时间戳事件，交给运行时。
+
+### 12.10 最小示例
+
+一个 32³ 模型，4 帧走路循环（`block_size=32`，故整模型恰好 1 个块）：
+
+```
+[HEAD]  { "qvox":3, "require":["FRAM"], "block_size":32, "channels":[{"name":"material","bpp":16}] }
+[MATE]  2 条（空气 + 角色色）
+[FRAM]  model_id=0 frame_count=4
+  frame0  duration_ms=100  payload=全量块（1 个 SOLID 块）        ← 与 VOX0 负载同构
+  frame1  duration_ms=100  delta={ (0,0,0) RUN … }               ← 只存腿变了的那块
+  frame2  duration_ms=100  delta={ }                             ← 与上一帧相同：零字节
+  frame3  duration_ms=100  delta={ (0,0,0) INDEXED … }
+[NODE]  { "nodes":[ { "kind":"model","model_id":0,"size":[32,32,32],
+           "anim":{"loop":true,"fps":12,"tags":[{"name":"walk","from":0,"to":3}]} } ] }
+```
+
+第 2 帧与第 1 帧完全相同 → `delta` 为空、`payload_length=0`，**零体素字节**。
+这就是增量存储的收益：**一帧的成本 = 它相对上一帧改了多少块**，与模型总大小无关。

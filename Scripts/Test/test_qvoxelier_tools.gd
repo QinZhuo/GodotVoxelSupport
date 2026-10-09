@@ -1,6 +1,6 @@
 extends TestCase
 
-## 一期画笔工具族的契约测试：几何（QVoxBrushGeometry）+ 手势状态机（QVoxBrushTool）。
+## 一期画笔工具族的契约测试：几何（QVoxelBrushGeometry）+ 手势状态机（QVoxelBrushTool）。
 ##
 ## 这里不碰场景树、不碰输入、不碰渲染 —— 工具被刻意设计成"产出坐标的纯逻辑"，
 ## 于是它的正确性可以在无头环境里逐格断言。钉死五条承诺：
@@ -8,7 +8,7 @@ extends TestCase
 ##   ② **所见即所画**：hover() 预览与真正落笔走同一个 _stroke/_finish（不是两处逻辑对齐）；
 ##   ③ live（边拖边写）与 span（松手才写）由工具表声明，拖动时"补线"保证笔画不断；
 ##   ④ 产物一律裁到网格内 —— 越界坐标不进命令（否则撤销里会出现从未生效的格）；
-##   ⑤ 面笔/填充的作用域判据来自外部闭包（显示几何），工具本身不认识 QVoxModel。
+##   ⑤ 面笔/填充的作用域判据来自外部闭包（显示几何），工具本身不认识 QVoxelModel。
 
 const MAT := 7
 const OTHER := 3
@@ -20,8 +20,8 @@ const OTHER := 3
 
 ## 造一个拾取上下文。solid 字典的键 = 实心格，值 = 材质 id ——
 ## 用它替代真实的 VoxelData，测试就能在纯内存里描述任意形状。
-func _pick(solid: Dictionary, hit: Vector3i, normal: Vector3i, opts := {}) -> QVoxBrushTool.Pick:
-	var p := QVoxBrushTool.Pick.new()
+func _pick(solid: Dictionary, hit: Vector3i, normal: Vector3i, opts := {}) -> QVoxelBrushTool.Pick:
+	var p := QVoxelBrushTool.Pick.new()
 	p.hit = hit
 	p.normal = normal
 	p.place = VoxelRay.placement_of(hit, normal)
@@ -42,8 +42,8 @@ func _plate(mat: int) -> Dictionary:
 	return solid
 
 
-func _tool(m: QVoxBrushTool.Mode) -> QVoxBrushTool:
-	var t := QVoxBrushTool.new()
+func _tool(m: QVoxelBrushTool.Mode) -> QVoxelBrushTool:
+	var t := QVoxelBrushTool.new()
 	t.set_mode(m)
 	return t
 
@@ -62,7 +62,7 @@ func _cells_of(v: Array[Vector3i]) -> Dictionary:
 func test_line_is_connected_and_lands_on_both_ends() -> void:
 	var a := Vector3i(0, 0, 0)
 	var b := Vector3i(5, 3, -2)
-	var cells := QVoxBrushGeometry.line(a, b)
+	var cells := QVoxelBrushGeometry.line(a, b)
 	assert_eq(cells[0], a, "直线从起点开始")
 	assert_eq(cells[cells.size() - 1], b, "直线恰好落在终点（误差累积版不漂移）")
 	assert_eq(cells.size(), 6, "26-连通直线长度 = 最长轴跨度 + 1")
@@ -75,31 +75,31 @@ func test_line_is_connected_and_lands_on_both_ends() -> void:
 
 
 func test_line_of_a_single_point_is_a_dot() -> void:
-	var cells := QVoxBrushGeometry.line(Vector3i(2, 3, 4), Vector3i(2, 3, 4))
+	var cells := QVoxelBrushGeometry.line(Vector3i(2, 3, 4), Vector3i(2, 3, 4))
 	assert_eq(cells.size(), 1, "零长度直线就是单格")
 
 
 func test_box_is_inclusive_on_both_corners() -> void:
-	var cells := QVoxBrushGeometry.box(Vector3i(2, 0, 1), Vector3i(0, 1, 3))
+	var cells := QVoxelBrushGeometry.box(Vector3i(2, 0, 1), Vector3i(0, 1, 3))
 	assert_eq(cells.size(), 18, "实心长方体：各轴跨度（含两端）之积")
 	assert_true(cells.has(Vector3i(0, 0, 1)) and cells.has(Vector3i(2, 1, 3)),
 		"两个角点都必须在内（含端点）")
 
 
 func test_ball_is_euclidean_not_chebyshev() -> void:
-	assert_eq(QVoxBrushGeometry.ball(Vector3i(5, 5, 5), 0).size(), 1, "半径 0 = 单格")
-	var r1 := QVoxBrushGeometry.ball(Vector3i(5, 5, 5), 1)
+	assert_eq(QVoxelBrushGeometry.ball(Vector3i(5, 5, 5), 0).size(), 1, "半径 0 = 单格")
+	var r1 := QVoxelBrushGeometry.ball(Vector3i(5, 5, 5), 1)
 	assert_eq(r1.size(), 7, "半径 1 = 中心 + 6 个面邻")
 	assert_false(r1.has(Vector3i(6, 6, 5)), "角格不属于欧氏球 r=1（切比雪夫球才会收它）")
 
 
 func test_dilate_dedupes_overlaps() -> void:
 	var seeds: Array[Vector3i] = [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
-	var cells := QVoxBrushGeometry.dilate(seeds, 1)
+	var cells := QVoxelBrushGeometry.dilate(seeds, 1)
 	assert_eq(cells.size(), 12, "两格相邻 → 各自膨胀后重叠 2 格，必须去重（同一格只写一次）")
 	assert_true(cells.has(Vector3i(0, 0, 0)) and cells.has(Vector3i(1, 0, 0)), "两个原始格都还在")
-	assert_eq(QVoxBrushGeometry.dilate(seeds, 1), cells, "同样的输入必须给出同样的顺序（可复现）")
-	assert_eq(QVoxBrushGeometry.dilate(cells, 0), cells, "半径 0 原样返回")
+	assert_eq(QVoxelBrushGeometry.dilate(seeds, 1), cells, "同样的输入必须给出同样的顺序（可复现）")
+	assert_eq(QVoxelBrushGeometry.dilate(cells, 0), cells, "半径 0 原样返回")
 
 
 func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
@@ -110,10 +110,10 @@ func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 		for y in range(2):
 			seeds.append(Vector3i(x * 3 - 2, y * 2 + 1, x - y))
 	for r in [1, 2, 3, 5]:
-		var got := _cells_of(QVoxBrushGeometry.dilate(seeds, r))
+		var got := _cells_of(QVoxelBrushGeometry.dilate(seeds, r))
 		var want := {}
 		for c in seeds:
-			for off in QVoxBrushGeometry.ball_offsets(r):
+			for off in QVoxelBrushGeometry.ball_offsets(r):
 				want[c + off] = true
 		# 只报差异格：出问题时能一眼看出"多算了什么 / 漏了什么"，而不是抛两个大字典
 		var only_got: Array[Vector3i] = []
@@ -131,10 +131,10 @@ func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 func test_ball_offsets_are_one_shared_cached_table() -> void:
 	# 球偏移只由半径决定，因此全类共用一张表：按格盖章的用法会反复算同一个球，
 	# 若每次都新建一张表，就是一串无谓的三重循环（半径 15 时每次 31³）。
-	var r2 := QVoxBrushGeometry.ball_offsets(2)
-	assert_eq(QVoxBrushGeometry.ball(Vector3i.ZERO, 2), r2, "以原点为中心的球就是偏移表本身")
-	assert_eq(QVoxBrushGeometry.ball_offsets(2), r2, "重复取用必须给出同一张表")
-	assert_eq(QVoxBrushGeometry.ball_offsets(-3), QVoxBrushGeometry.ball_offsets(0),
+	var r2 := QVoxelBrushGeometry.ball_offsets(2)
+	assert_eq(QVoxelBrushGeometry.ball(Vector3i.ZERO, 2), r2, "以原点为中心的球就是偏移表本身")
+	assert_eq(QVoxelBrushGeometry.ball_offsets(2), r2, "重复取用必须给出同一张表")
+	assert_eq(QVoxelBrushGeometry.ball_offsets(-3), QVoxelBrushGeometry.ball_offsets(0),
 		"半径 <= 0 一律归到 0（只有中心偏移），与 ball() 的旧语义一致")
 	assert_eq(r2.count(Vector3i.ZERO), 1, "偏移表内不得有重复（去重由生成方式保证）")
 
@@ -145,8 +145,8 @@ func test_region_stops_at_gaps() -> void:
 		solid[Vector3i(0, 0, z)] = MAT
 	solid[Vector3i(0, 0, 7)] = MAT  # 中间空两格 → 断开的柱子
 	var accept := func(p: Vector3i) -> bool: return solid.has(p)
-	var step := func(_p: Vector3i) -> Array[Vector3i]: return QVoxBrushGeometry.neighbors6()
-	var cells := QVoxBrushGeometry.region([Vector3i(0, 0, 0)], accept, step)
+	var step := func(_p: Vector3i) -> Array[Vector3i]: return QVoxelBrushGeometry.neighbors6()
+	var cells := QVoxelBrushGeometry.region([Vector3i(0, 0, 0)], accept, step)
 	assert_eq(cells.size(), 5, "只能收到连通的 5 格")
 	assert_false(cells.has(Vector3i(0, 0, 7)), "断开的部分不得被收进来")
 
@@ -156,7 +156,7 @@ func test_region_stops_at_gaps() -> void:
 # ----------------------------------------------------------------------------
 
 func test_voxel_brush_click_paints_one_cell_outside_the_face() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.VOXEL)
+	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	assert_true(tool.live(), "体素笔是边拖边写")
 	var solid := {}
 	assert_true(tool.begin(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0))), "有入射面 → 可落笔")
@@ -166,7 +166,7 @@ func test_voxel_brush_click_paints_one_cell_outside_the_face() -> void:
 
 
 func test_voxel_brush_drag_emits_continuous_increments() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.VOXEL)
+	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	var solid := {}
 	tool.begin(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
 	var first := tool.drag(_pick(solid, Vector3i(3, 0, 0), Vector3i(0, 1, 0)))
@@ -178,7 +178,7 @@ func test_voxel_brush_drag_emits_continuous_increments() -> void:
 
 
 func test_line_brush_only_emits_on_release() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.LINE)
+	var tool := _tool(QVoxelBrushTool.Mode.LINE)
 	assert_false(tool.live(), "线笔松手才落笔（否则拖动过程会留下一串线）")
 	var solid := {}
 	tool.begin(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
@@ -191,7 +191,7 @@ func test_line_brush_only_emits_on_release() -> void:
 
 
 func test_box_brush_spans_anchor_to_current() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.BOX)
+	var tool := _tool(QVoxelBrushTool.Mode.BOX)
 	var solid := {}
 	tool.begin(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
 	tool.drag(_pick(solid, Vector3i(2, 0, 3), Vector3i(0, 1, 0)))
@@ -204,7 +204,7 @@ func test_box_brush_spans_anchor_to_current() -> void:
 
 
 func test_begin_rejects_hits_without_an_incidence_face() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.VOXEL)
+	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	var solid := {}
 	assert_false(tool.begin(_pick(solid, Vector3i.MIN, Vector3i.ZERO)), "没命中 → 不能落笔")
 	assert_false(tool.begin(_pick(solid, Vector3i(1, 1, 1), Vector3i.ZERO)),
@@ -222,7 +222,7 @@ func test_drag_ignores_picks_that_missed_the_model() -> void:
 	var grid := Vector3i(8, 8, 8)
 	var miss := _pick(solid, Vector3i.MIN, Vector3i.ZERO, {"grid": grid})
 	assert_false(miss.valid(), "前提：落空的拾取本身是无效的（place 也是 MIN）")
-	for m in [QVoxBrushTool.Mode.VOXEL, QVoxBrushTool.Mode.LINE, QVoxBrushTool.Mode.BOX]:
+	for m in [QVoxelBrushTool.Mode.VOXEL, QVoxelBrushTool.Mode.LINE, QVoxelBrushTool.Mode.BOX]:
 		var tool := _tool(m)
 		tool.begin(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"grid": grid}))
 		assert_true(tool.drag(miss).is_empty(), "%s：落空的拖动不产出格子" % tool.label())
@@ -239,7 +239,7 @@ func test_drag_ignores_picks_that_missed_the_model() -> void:
 func test_far_away_corners_cannot_blow_up_the_box() -> void:
 	var solid := _plate(MAT)
 	var grid := Vector3i(8, 8, 8)
-	var tool := _tool(QVoxBrushTool.Mode.BOX)
+	var tool := _tool(QVoxelBrushTool.Mode.BOX)
 	tool.begin(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"grid": grid}))
 	# 合法但越界很远的坐标（正常拖动全程都可能出现这种点：射线打在网格外沿之外）
 	tool.drag(_pick(solid, Vector3i(10_000, 0, 10_000), Vector3i(0, 1, 0), {"grid": grid}))
@@ -253,7 +253,7 @@ func test_far_away_corners_cannot_blow_up_the_box() -> void:
 
 
 func test_hover_previews_without_starting_a_gesture() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.BOX)
+	var tool := _tool(QVoxelBrushTool.Mode.BOX)
 	var solid := {}
 	var cells := tool.hover(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
 	assert_eq(cells.size(), 1, "悬停时还没拖出第二个角点 → 只预览一格")
@@ -268,7 +268,7 @@ func test_hover_previews_without_starting_a_gesture() -> void:
 func test_face_brush_paints_the_exposed_layer_only() -> void:
 	var solid := _plate(MAT)
 	solid[Vector3i(2, 1, 2)] = MAT  # 在 (2,0,2) 上方压一块 → 那一格不再是暴露面
-	var tool := _tool(QVoxBrushTool.Mode.FACE)
+	var tool := _tool(QVoxelBrushTool.Mode.FACE)
 	var cells := tool.hover(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0)))
 	assert_eq(cells.size(), 8, "9 格板里有一格被压住 → 只铺 8 格")
 	assert_true(cells.has(Vector3i(1, 1, 1)), "画在暴露面的外侧（沿法线一格）")
@@ -278,7 +278,7 @@ func test_face_brush_paints_the_exposed_layer_only() -> void:
 
 
 func test_face_brush_erase_removes_the_exposed_layer() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.FACE)
+	var tool := _tool(QVoxelBrushTool.Mode.FACE)
 	var solid := _plate(MAT)
 	var cells := tool.hover(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"erase": true}))
 	assert_eq(cells.size(), 9, "擦除铺满整片暴露面")
@@ -293,7 +293,7 @@ func test_fill_brush_stops_at_material_boundary() -> void:
 		for z in range(2):
 			solid[Vector3i(x, 0, z)] = MAT
 			solid[Vector3i(x + 2, 0, z)] = OTHER  # 紧贴着但材质不同
-	var tool := _tool(QVoxBrushTool.Mode.FILL)
+	var tool := _tool(QVoxelBrushTool.Mode.FILL)
 	var cells := tool.hover(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
 	assert_eq(cells.size(), 4, "填充边界 = 材质边界（用户看到的色块就是范围）")
 	assert_false(cells.has(Vector3i(2, 0, 0)), "异材质的那一块不得被吞掉")
@@ -304,7 +304,7 @@ func test_fill_brush_stops_at_material_boundary() -> void:
 # ----------------------------------------------------------------------------
 
 func test_brush_size_dilates_the_stroke() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.VOXEL)
+	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	tool.brush_size = 2
 	var solid := {}
 	tool.begin(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
@@ -314,7 +314,7 @@ func test_brush_size_dilates_the_stroke() -> void:
 
 
 func test_out_of_grid_cells_are_dropped() -> void:
-	var tool := _tool(QVoxBrushTool.Mode.VOXEL)
+	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	tool.brush_size = 2
 	var solid := {}
 	var grid := Vector3i(4, 4, 4)
@@ -331,21 +331,21 @@ func test_out_of_grid_cells_are_dropped() -> void:
 
 func test_mode_table_is_complete_and_hotkeys_are_unique() -> void:
 	var seen := {}
-	for m in QVoxBrushTool.Mode.values():
-		var row := QVoxBrushTool.info(m)
+	for m in QVoxelBrushTool.Mode.values():
+		var row := QVoxelBrushTool.info(m)
 		assert_eq(row.mode, m, "每个枚举值都要在工具表里有行")
 		assert_false(seen.has(row.hotkey), "热键不得重复（单键切工具的前提）")
 		seen[row.hotkey] = true
-		assert_eq(QVoxBrushTool.mode_by_hotkey(row.hotkey), m, "热键要能反查回模式")
-	assert_eq(QVoxBrushTool.mode_by_hotkey(KEY_F), QVoxBrushTool.Mode.FACE, "F = 面笔")
-	assert_eq(QVoxBrushTool.info(QVoxBrushTool.Mode.BOX).label, "盒笔", "工具栏读的就是这张表")
+		assert_eq(QVoxelBrushTool.mode_by_hotkey(row.hotkey), m, "热键要能反查回模式")
+	assert_eq(QVoxelBrushTool.mode_by_hotkey(KEY_F), QVoxelBrushTool.Mode.FACE, "F = 面笔")
+	assert_eq(QVoxelBrushTool.info(QVoxelBrushTool.Mode.BOX).label, "盒笔", "工具栏读的就是这张表")
 
 
 func test_preview_matches_the_actual_stroke_for_every_mode() -> void:
 	# 所见即所画：悬停预览与"按下后原地松手"必须给出同一批格子。
 	# 这条断言是结构性的 —— 一旦有人把预览改成"另算一遍"，它会立刻红。
 	var solid := _plate(MAT)
-	for m in QVoxBrushTool.Mode.values():
+	for m in QVoxelBrushTool.Mode.values():
 		var tool := _tool(m)
 		var preview := tool.hover(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0)))
 		tool.begin(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0)))

@@ -1,29 +1,29 @@
 @tool
-class_name QVoxPropertyCommand
-extends QVoxCommand
+class_name QVoxelPropertyCommand
+extends QVoxelCommand
 ## 一次**属性赋值**的撤销记录 —— 对象改名、修改器参数、链的增删重排全部收敛到这一条。
 ##
 ## 【为什么"链编辑"也归它管，而不是另立一条链命令】`modifiers` 本身就是对象上的一个
 ## `@export var`：加一条修改器 = 它的前后两份数组，重排 = 同一个数组的两种顺序，删一条同理。
 ## 既然撤销要的料完全一样 ——（目标, 属性名, 改前, 改后）—— 让增/删/排各写一个命令类
 ## 就是同一段采集逻辑抄三遍，且迟早有一处忘了采"改后"。工具因此只剩一件事要做：
-## **把改动夹在 begin() 与 commit() 之间**（QVoxModel 的链编辑入口注释即此约定）。
+## **把改动夹在 begin() 与 commit() 之间**（QVoxelModel 的链编辑入口注释即此约定）。
 ##
 ## 【为什么代价是 O(1)，以及它**不能**干什么】属性命令不抓任何体素，前后两个值就是它的全部
 ## 内存（数组属性也只存**引用**的浅副本），于是它不参与撤销栈的预算淘汰考量。代价是：
 ## **不能用它撤销 resize_grid()** —— 改分辨率会丢掉超出新尺寸的体素，而"被丢掉的体素"
-## 只能由记差值的 QVoxVoxelEditCommand 记住。改分辨率请走体素命令。
+## 只能由记差值的 QVoxelEditCommand 记住。改分辨率请走体素命令。
 ##
-## 【为什么由命令标脏，而不是让对象自己监听】QVoxModifier 是 Resource，Godot 不会替我们监听
-## 它的 @export 改动，所以 QVoxModel 只在自己结构变化时发 content_changed；
-## "改参数要标脏"由本命令在 redo/undo 之后补发（见 QVoxModel.content_changed 的注释）。
+## 【为什么由命令标脏，而不是让对象自己监听】QVoxelModifier 是 Resource，Godot 不会替我们监听
+## 它的 @export 改动，所以 QVoxelModel 只在自己结构变化时发 content_changed；
+## "改参数要标脏"由本命令在 redo/undo 之后补发（见 QVoxelModel.content_changed 的注释）。
 ##
 ## 【手势即命令】滑条拖拽期间反复 set_value()，松手时 commit() 一次 —— 与体素手势同构，
 ## 于是全项目只有一条"**手势期间静默写数据、封口时才入栈**"的时间线，不需要 Qt 那种
-## mergeWith（理由见 QVoxCommand）。set_value() 刻意**不发信号**：live 预览由发起手势的面板
+## mergeWith（理由见 QVoxelCommand）。set_value() 刻意**不发信号**：live 预览由发起手势的面板
 ## 自己刷新，否则一次拖拽会触发成千上万次整链重算。
 
-## 被写属性的目标：QVoxModel，或它的某个 QVoxModifier 子资源。
+## 被写属性的目标：QVoxelModel，或它的某个 QVoxelModifier 子资源。
 var target: Object
 
 ## 属性名（即 target.set(property, ...) / target.get(property) 的键）。
@@ -36,20 +36,20 @@ var after: Variant
 ## 需要标脏的宿主对象（改它发 content_changed）。target 本身就是节点时自动取它；
 ## 改修改器参数时必须显式传入 —— 否则没有对象会收到信号，视口会一直显示旧结果。
 ##
-## 【为什么是 QVoxNode 而不是 QVoxModel】"改参数要标脏"这条对**组**的链同样成立
-## （组的链作用在子树合成结果上，见 QVoxNode 的"为什么组也能挂修改器"），而 content_changed
-## 就定义在 QVoxNode 上 —— 收窄成 QVoxModel 会让"改组的可见性 / 改组的链参数"当场类型报错。
-var owner: QVoxNode
+## 【为什么是 QVoxelNode 而不是 QVoxelModel】"改参数要标脏"这条对**组**的链同样成立
+## （组的链作用在子树合成结果上，见 QVoxelNode 的"为什么组也能挂修改器"），而 content_changed
+## 就定义在 QVoxelNode 上 —— 收窄成 QVoxelModel 会让"改组的可见性 / 改组的链参数"当场类型报错。
+var owner: QVoxelNode
 
 var _label := ""
 
 
-func _init(p_target: Object, p_property: StringName, p_owner: QVoxNode = null,
+func _init(p_target: Object, p_property: StringName, p_owner: QVoxelNode = null,
 		p_label := "") -> void:
 	super(&"property", -1, [])
 	target = p_target
 	property = p_property
-	owner = p_owner if p_owner != null else (p_target as QVoxNode)
+	owner = p_owner if p_owner != null else (p_target as QVoxelNode)
 	_label = p_label
 	before = _snapshot(_read())
 
@@ -59,22 +59,22 @@ func _init(p_target: Object, p_property: StringName, p_owner: QVoxNode = null,
 # ----------------------------------------------------------------------------
 
 ## 开始一次属性手势。**必须在任何写入之前调用**：before 只能从"还没改过"的状态里抓。
-static func begin(p_target: Object, p_property: StringName, p_owner: QVoxNode = null,
-		p_label := "") -> QVoxPropertyCommand:
-	return QVoxPropertyCommand.new(p_target, p_property, p_owner, p_label)
+static func begin(p_target: Object, p_property: StringName, p_owner: QVoxelNode = null,
+		p_label := "") -> QVoxelPropertyCommand:
+	return QVoxelPropertyCommand.new(p_target, p_property, p_owner, p_label)
 
 
 ## 一步到位：begin + set_value + commit。无实际变化时返回 null（调用方据此不要 push）。
 static func apply(p_target: Object, p_property: StringName, value: Variant,
-		p_owner: QVoxNode = null, p_label := "") -> QVoxPropertyCommand:
-	var c := QVoxPropertyCommand.new(p_target, p_property, p_owner, p_label)
+		p_owner: QVoxelNode = null, p_label := "") -> QVoxelPropertyCommand:
+	var c := QVoxelPropertyCommand.new(p_target, p_property, p_owner, p_label)
 	c.set_value(value)
 	return c if c.commit() else null
 
 
 ## 写入新值（手势期间可调用多次，after 取最后一次）。**不发信号**，理由见文件头。
 ##
-## 只是个方便入口 —— 用不用它都行：把工具自己的接口（QVoxModel.add_modifier 等）夹在
+## 只是个方便入口 —— 用不用它都行：把工具自己的接口（QVoxelModel.add_modifier 等）夹在
 ## begin() 与 commit() 之间同样成立，因为封口判据看的是**首尾值**，不是"谁写的"。
 func set_value(value: Variant) -> void:
 	if target == null:
@@ -124,7 +124,7 @@ func undo() -> void:
 ## 写回并标脏。**必须幂等**（push() 时会调一次 redo()，而数据通常已被工具改过）。
 func _apply(v: Variant) -> void:
 	if target == null:
-		push_error("[QVox] 属性命令的目标已不存在（%s）" % String(property))
+		push_error("[QVX] 属性命令的目标已不存在（%s）" % String(property))
 		return
 	target.set(property, v)
 	if owner != null:
@@ -151,6 +151,6 @@ func _snapshot(v: Variant) -> Variant:
 
 ## 该值是否适合写进 params（命令流的可审计描述）。
 ## 只收标量：数组/资源写进去会让 save_data() 变成一份资源清单，违背
-## "params 只记用户做了什么，不记状态本身"（同 QVoxCommand 的约定）。
+## "params 只记用户做了什么，不记状态本身"（同 QVoxelCommand 的约定）。
 func _is_audit_safe(v: Variant) -> bool:
 	return v == null or v is bool or v is int or v is float or v is String

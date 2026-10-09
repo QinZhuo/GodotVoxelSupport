@@ -17,7 +17,7 @@
 | 分辨率 | 世界级固定 `voxel_size`，改它触发全链重算 | 逐视点 LOD 切换 |
 | 交互 | 手绘体素 + 非破坏修改器链（可挂在任意节点上）+ 撤销重做 | 运行时破坏（`VoxelDestructible`） |
 | 时间 | **交互期（编辑器内）** | 每帧游戏循环 |
-| 输出 | 体素数据 / 网格 / `.qvox` 世界文件 | 游戏内渲染调度 |
+| 输出 | 体素数据 / 网格 / `.qvx` 世界文件 | 游戏内渲染调度 |
 
 **为什么必须先划这条界**：体素域算子（侵蚀、风化、连通性清理）需要**完整邻域**，这与
 "惰性按 chunk 生成、只持有 32³"的流式架构天然冲突。把每个模型定位成"有界盒"、世界只是
@@ -38,7 +38,7 @@
 │                                 只管 UI，不含算法                │
 ├────────────────────────────────────────────────────────────────┤
 │ App/Command 层 QVoxelier/Command + Editing（应用能力）           │
-│                QVoxCommand ─ QVoxUndoStack ─ QVoxEditSession     │
+│                QVoxelCommand ─ QVoxelUndoStack ─ QVoxelEditSession     │
 │                （撤销 = 应用能力；extends 框架 GameCommand）     │
 ├────────────────────────────────────────────────────────────────┤
 │ Modifier 层    addons/VoxelSupport/Modifier（插件内的编辑模型）  │
@@ -49,8 +49,8 @@
 │                Sdf/（FIELD）+ Model/（VOXEL）                    │
 ├────────────────────────────────────────────────────────────────┤
 │ Kernel 层      addons/VoxelSupport 其余（Runtime / Importers）   │
-│                QVoxSpec / QVoxFile / VoxelChunk / VoxelMesh      │
-│                Native（C++ 网格化 / QVox 编解码）                │
+│                QVoxelSpec / QVoxelFile / VoxelChunk / VoxelMesh      │
+│                Native（C++ 网格化 / QVX 编解码）                │
 ├────────────────────────────────────────────────────────────────┤
 │ Framework 层   addons/DEVFramework（机制库，项目通用）           │
 │                SaveTool / LogTool / AsyncTool / UITool / Def     │
@@ -75,22 +75,22 @@
 ### 2.2 数据模型：一棵节点树
 
 ```
-QVoxWorld                       一份世界 = 一个 .qvox 工程（常驻内存的唯一真值）
+QVoxelWorld                       一份世界 = 一个 .qvx 工程（常驻内存的唯一真值）
 ├── head / node / cach          HEAD、NODE、CACH 原样保留（格式层不解释未知键）
 ├── voxel_size                  世界级体素边长（改它触发全链重算）
 ├── materials / palette         材质ID → 颜色（[0] 恒为空气）
-├── nodes: Array[QVoxNode]      场景树顶层（有序）
+├── nodes: Array[QVoxelNode]      场景树顶层（有序）
 └── revision                    世界级版本号（UI 刷新用）
 
-QVoxNode（抽象基类）            树上一个节点的共同契约 —— 组与模型都继承它
+QVoxelNode（抽象基类）            树上一个节点的共同契约 —— 组与模型都继承它
 ├── node_name / visible / locked
-├── modifiers: Array[QVoxModifier]  本节点自己的滤镜链（**摆放也是其中一条**）
+├── modifiers: Array[QVoxelModifier]  本节点自己的滤镜链（**摆放也是其中一条**）
 └── parent / children           运行时结构（不入档）
 
-QVoxGroup  extends QVoxNode     组 = 文件夹（容器；唯一可持有子节点）
-└── children: Array[QVoxNode]
+QVoxelGroup  extends QVoxelNode     组 = 文件夹（容器；唯一可持有子节点）
+└── children: Array[QVoxelNode]
 
-QVoxModel  extends QVoxNode     模型 = 图层（叶子；唯一持有手绘体素）
+QVoxelModel  extends QVoxelNode     模型 = 图层（叶子；唯一持有手绘体素）
 ├── grid_size                   模型级分辨率上限（有界盒）
 ├── blocks                      手绘基础体素：块坐标 → PackedInt32Array(B³)
 │                               **分块稀疏**：空块 = 块坐标缺失（不占内存、不落盘）
@@ -108,10 +108,10 @@ QVoxModel  extends QVoxNode     模型 = 图层（叶子；唯一持有手绘体
 **为什么模型是叶子**：模型是唯一持有手绘体素的东西（§2.4）。组不存体素，它的内容是子树的合成
 结果 —— 这条界线让"组"的内存成本为零，也让"组"不需要画布尺寸（见 §2.3 紧致盒）。
 
-**命名**：`QVoxObject` → `QVoxModel`（对标 MagicaVoxel 的 model，也贴合"图层"心智）；
+**命名**：`QVoxelObject` → `QVoxelModel`（对标 MagicaVoxel 的 model，也贴合"图层"心智）；
 `layers` / `layer` 被树取代（**组就是层**；旧 `layers` 键无兼容读取路径，见 §2.9）。
 
-> **与格式层的分工**：`QVoxWorld` 是活的编辑状态，`QVoxFile.QVoxDocument` 只是解析 / 序列化那一
+> **与格式层的分工**：`QVoxelWorld` 是活的编辑状态，`QVoxelFile.QVoxelDocument` 只是解析 / 序列化那一
 > 瞬间的传输结构，两者由 `to_document()` / `from_document()` 显式转换连接，**不允许同时常驻**
 > （否则同一份体素会有两个账本）。
 
@@ -122,9 +122,9 @@ QVoxModel  extends QVoxNode     模型 = 图层（叶子；唯一持有手绘体
 
 ```
 eval(node) -> 体积 + 摆放（在 node 自己的局部盒里）
-  QVoxModel: v = blocks → 密集体积（node.grid_size 盒）
+  QVoxelModel: v = blocks → 密集体积（node.grid_size 盒）
              v = 依次应用 node.modifiers          # 含变换 / 平移条目（可改盒尺寸与摆放）
-  QVoxGroup: acc = 空
+  QVoxelGroup: acc = 空
              for child in children（可见者）:
                  cv  = eval(child)
                  acc = composite(acc, cv, cv.origin)   # 摆放取自子结果（链的产出），恒为并集
@@ -142,12 +142,12 @@ eval(node) -> 体积 + 摆放（在 node 自己的局部盒里）
 **为什么摆放（`position`）也是一条"变换修改器"，而不是节点字段**：摆放（我在父画布里站哪儿）与
 "对内容做一次变换"要回答同一组问题 —— 谁先谁后、能否旁通、怎么撤销、怎么落盘。留在节点上就等于
 给"变换"开第二个入口：链上的旋转 / 镜像得回答"我和节点摆放谁先谁后"，而"拖一下组"要另写一套命令、
-另写一套存档、另写一套重排规则。入链之后它自动获得链上的一切待遇（§2.7 的 `QVoxTransformModifier`
+另写一套存档、另写一套重排规则。入链之后它自动获得链上的一切待遇（§2.7 的 `QVoxelTransformModifier`
 + `PcgTransform` 的 `TRANSLATE`），**全项目只有一种画法**。
 
 **它为什么不改盒尺寸**：平移改的是"盒站哪儿"而不是"盒里怎么排"。硬按"往盒里补零把内容推到偏移处"
 来做，负偏移就无从表达（盒的左下角恒在 0），远处的一个模型也会撑出一只巨盒。故 `reshape()` 对平移
-原样交还体积与尺寸，位移由 `PcgTransform.origin_delta()` 单独回答、引擎累加进 `QVoxEvalResult.origin`
+原样交还体积与尺寸，位移由 `PcgTransform.origin_delta()` 单独回答、引擎累加进 `QVoxelEvalResult.origin`
 （详见 `PcgTransform` 类头）。
 
 **随之而来的取舍**：节点的 `combine`（我怎么并进父画布）也一并取消 —— 那是个**父侧**问题（要同时
@@ -165,8 +165,8 @@ eval(node) -> 体积 + 摆放（在 node 自己的局部盒里）
 于是两条编辑路径职责彻底清晰，且**可以组合**（手绘一块石头，再挂 SDF 修改器挖洞
 `combine = SUBTRACT`）：
 
-- 手绘 → 写 `blocks`，`base_revision++`，手势封口成一条 `QVoxVoxelEditCommand` 入栈；
-- 程序化 → 改修改器 / 节点属性，入栈一条 `QVoxPropertyCommand`，链的对应部分被脏化。
+- 手绘 → 写 `blocks`，`base_revision++`，手势封口成一条 `QVoxelEditCommand` 入栈；
+- 程序化 → 改修改器 / 节点属性，入栈一条 `QVoxelPropertyCommand`，链的对应部分被脏化。
 
 ### 2.5 三个域与**单向降级**
 
@@ -176,7 +176,7 @@ eval(node) -> 体积 + 摆放（在 node 自己的局部盒里）
 | VOXEL | `PackedInt32Array` + `Vector3i grid_size` | **源**：`build(grid_size)`；**就地改写**：`apply(volume, grid_size, seed)`；**重排**：`reshape(volume, grid_size) -> [volume, grid_size]` | `PcgModel` / `PcgDetail` / `PcgTransform` |
 | MESH | `Array`（`Mesh.ARRAY_*`） | `apply_mesh(arrays) -> Array` | 暂无（路线图三期） |
 
-**能力探测集中在 `QVoxDomain` 一处**（全项目只此一份签名表）：
+**能力探测集中在 `QVoxelDomain` 一处**（全项目只此一份签名表）：
 
 ```gdscript
 const CAP_SAMPLE     := &"sample"      # FIELD
@@ -188,7 +188,7 @@ const CAP_APPLY_MESH := &"apply_mesh"  # MESH
 
 **"源"与"算子"的区别**（与 `godot_voxel` 的 `VoxelGenerator` vs `VoxelModifier` 同构）：源自足产出
 （`sample` / `build`），算子就地改写既有数据（`apply` / `reshape`）。判据是"有没有 `build`"
-（`QVoxDomain.is_source()`）。这不是闲区分：**拿不到输入的算子无法做布尔** —— `PcgWeather` 已经
+（`QVoxelDomain.is_source()`）。这不是闲区分：**拿不到输入的算子无法做布尔** —— `PcgWeather` 已经
 吃到了整块体积，引擎不能在事后替它做"并/差"。
 
 **两条硬规则**：
@@ -216,16 +216,16 @@ const CAP_APPLY_MESH := &"apply_mesh"  # MESH
 ### 2.7 修改器：参数在修改器，算法核可共享（含"变换即修改器"）
 
 ```
-QVoxModifier               共同基类：管"这一次怎么用"
+QVoxelModifier               共同基类：管"这一次怎么用"
 ├── op: Resource        算法核（SdfBox / PcgWeather / PcgTransform / …），可被多个修改器共享
 ├── enabled: bool       旁通（Houdini 的 bypass）
 ├── combine: Combine    合成方式，只对 FIELD 域的**第一个**修改器有意义
 ├── blend: float        SMOOTH_UNION 的过渡宽度
 ├── seed: int           该条目的确定性骰子
-    ├── QVoxSdfModifier       核 = Sdf 子树       域 = FIELD（引擎调 op.sample）
-    ├── QVoxModelModifier     核 = PcgModel       域 = VOXEL 源（引擎调 op.build）
-    ├── QVoxVolumeModifier    核 = PcgDetail      域 = VOXEL 改写（引擎调 op.apply）
-    └── QVoxTransformModifier 核 = PcgTransform   域 = VOXEL 重排（引擎调 op.reshape）
+    ├── QVoxelSdfModifier       核 = Sdf 子树       域 = FIELD（引擎调 op.sample）
+    ├── QVoxelModelModifier     核 = PcgModel       域 = VOXEL 源（引擎调 op.build）
+    ├── QVoxelVolumeModifier    核 = PcgDetail      域 = VOXEL 改写（引擎调 op.apply）
+    └── QVoxelTransformModifier 核 = PcgTransform   域 = VOXEL 重排（引擎调 op.reshape）
 ```
 
 **域是类型而不是探测结果**：引擎不必再问"这个核有没有 `sample` 方法" —— 子类本身就是那份契约，
@@ -240,7 +240,7 @@ QVoxModifier               共同基类：管"这一次怎么用"
 镜像 / 旋转 90° / 平铺 / **平移**都不再是"独立的特殊功能模块"，而是链上的普通修改器：
 
 ```
-QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   引擎调 op.reshape(volume, grid_size)
+QVoxelTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   引擎调 op.reshape(volume, grid_size)
 ```
 
 - **好处**：变换因此**可重排、可旁通、可参数化、可撤销**（就是链上的一条），并与其它修改器共用
@@ -251,27 +251,27 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
   （"能改盒尺寸"的能力）。这是 `apply`（就地改写）之外的第二类能力，判据仍是**方法存在性**
   （§2.5 的零改动接入原则不变：不给算子加基类）。平移借用同一条通道，但它的 `reshape` 是恒等 ——
   位移由 `origin_delta()` 单独回答（§2.3 已述）。
-- **实现**：整数格语义完全复用现成的 `QVoxVoxelTransform`（置换 + 符号的 48 种双射 + 平铺复制族）
+- **实现**：整数格语义完全复用现成的 `QVoxelTransform`（置换 + 符号的 48 种双射 + 平铺复制族）
   —— 它已经是纯数据重排、可无头测试，只是从"App 的变换面板直接改写对象"改为"由链上的修改器驱动"。
 - **校验**：`reshape` 条目只能是**替换**（整块结果的盒尺寸 / 摆放由它自己决定，谈不上"并进已累积
-  结果"）—— 这条并入 `QVoxDomain.chain_errors`；且它必须消费"已光栅化的当前累积结果"，故其域恒为
+  结果"）—— 这条并入 `QVoxelDomain.chain_errors`；且它必须消费"已光栅化的当前累积结果"，故其域恒为
   VOXEL。
 
-**校验的单一真值**：`QVoxDomain.chain_errors(modifiers) -> [{"index", "message"}]` 是规则的唯一实现
+**校验的单一真值**：`QVoxelDomain.chain_errors(modifiers) -> [{"index", "message"}]` 是规则的唯一实现
 （`validate_chain()` 只是它投影出的字符串数组）。UI 据此**在出问题的那一行**打红标，而不是解析中文串。
 
 ### 2.8 撤销 = 应用能力
 
-**位置**：`QVoxelier/Command/`（应用层）。`QVoxCommand extends GameCommand`、
-`QVoxUndoStack extends CommandHistory` —— 撤销栈与命令日志本是同一串数据，只差一个游标
+**位置**：`QVoxelier/Command/`（应用层）。`QVoxelCommand extends GameCommand`、
+`QVoxelUndoStack extends CommandHistory` —— 撤销栈与命令日志本是同一串数据，只差一个游标
 （`commands[0..cursor)` 已生效，`[cursor..]` 是 redo 分支），于是"撤销栈"与"可回放日志"不必各存
 一份、各写一遍序列化（`save_data()` 白得）。
 
 | 命令 | 记录什么 | 代价 |
 |---|---|---|
-| `QVoxVoxelEditCommand` | 被改动的块坐标 → 该块 `before` / `after` 整块内容 | 与实际改动的块数成正比，通常几十 KB |
-| `QVoxPropertyCommand` | 一次属性赋值：节点改名 / 可见锁定 / 修改器参数（**含平移条目的偏移，即摆放**） / **链与树的结构增删重排** → `(目标, 属性名, 改前, 改后)` | O(1)：只存前后两个值 |
-| `QVoxMacroCommand` | 一组子命令（按序 redo / 逆序 undo），子命令不进栈 | 子命令代价之和 |
+| `QVoxelEditCommand` | 被改动的块坐标 → 该块 `before` / `after` 整块内容 | 与实际改动的块数成正比，通常几十 KB |
+| `QVoxelPropertyCommand` | 一次属性赋值：节点改名 / 可见锁定 / 修改器参数（**含平移条目的偏移，即摆放**） / **链与树的结构增删重排** → `(目标, 属性名, 改前, 改后)` | O(1)：只存前后两个值 |
+| `QVoxelMacroCommand` | 一组子命令（按序 redo / 逆序 undo），子命令不进栈 | 子命令代价之和 |
 
 - **体素命令按块懒采集**：一块 256³ 是 64 MB，全量快照会爆内存；改为写入时按块抓"改动前"、
   松手时收集"改动后"，并丢掉前后相同的块。内存只与**实际改动量**成正比。
@@ -282,18 +282,18 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
   属性的两种取值。让增 / 删 / 排各写一个命令类就是把同一段采集逻辑抄三遍，且迟早有一处忘了采
   "改后"。工具只剩一件事：**把改动夹在 `begin()` 与 `commit()` 之间**。
 - **属性命令不能撤销 `resize_grid()`**：改分辨率会丢掉超出新尺寸的体素，而"被丢掉的体素"只有记差值的
-  `QVoxVoxelEditCommand` 记得住。改分辨率必须走体素命令（`QVoxEditSession.apply_transform` 即范例）。
-- **标脏由命令负责**：`QVoxModifier` 是 `Resource`，Godot 不会替我们监听它的 `@export` 改动，所以
-  "改参数要标脏"由 `QVoxPropertyCommand` 在 `redo()` / `undo()` 之后补发；`set_value()` 刻意**不发信号**
+  `QVoxelEditCommand` 记得住。改分辨率必须走体素命令（`QVoxelEditSession.apply_transform` 即范例）。
+- **标脏由命令负责**：`QVoxelModifier` 是 `Resource`，Godot 不会替我们监听它的 `@export` 改动，所以
+  "改参数要标脏"由 `QVoxelPropertyCommand` 在 `redo()` / `undo()` 之后补发；`set_value()` 刻意**不发信号**
   （改参数触发整链重算，一次拖拽若逐帧发信号就是成千上万次重算，live 预览由发起手势的面板自己刷新）。
 - **刻意不从存档恢复撤销历史**：存档里只有参数记录、没有 `undo()` 能用的差值，恢复出来会是"看着能
   撤销、按下去就报错"的假栈；明确报错好过静默给假栈。
 - **预算淘汰**：命令流超预算时从**队首**丢最老的（游标随之前移）。**宏**（`begin_macro` / `end_macro`）
   把"改参数 + 重命名"这类多步 UI 操作折叠成一条，其间的 `push()` 只攒进当前宏。
 
-### 2.9 工程文件：单一 `.qvox`（qvox 3）
+### 2.9 工程文件：单一 `.qvx`（qvx 3）
 
-**定案：单一 `.qvox`**，不再有 ZIP 容器、也不再新增 `VSDS` 之类的文档块。
+**定案：单一 `.qvx`**，不再有 ZIP 容器、也不再新增 `VSDS` 之类的文档块。
 
 | 内容 | 落在哪 |
 |---|---|
@@ -321,18 +321,20 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
   自己的 `combine` 承载。缺省即"没有摆放条目" —— 于是"没有摆放信息"的旧文件读进来就是原样堆在原点。
 - **算子参数存"类型名 + 普通 JSON"**，不存 `Resource` 序列化（`var_to_bytes`）—— 后者不可读、
   跨版本脆弱，插件类一改名就全部失联。`Sdf` 子树按类型名 + 参数递归表达。
-- **`animations` 键原样透传，但不解释**：它的 `frames[]` 键是**节点下标**，而嵌套树没有下标这层
-  身份 → 摆放与它无关（同一个文件看哪一帧都一样）。留着只为"重写不丢数据"，不是可用功能。
+- **`animations` 键废弃**：v2 遗留，`frames[]` 以**节点下标**为键，而嵌套树没有下标这层身份 →
+  读盘忽略、写盘显式抹掉（与旧 `layers` 同处置）。**体素帧动画已另行设计**：节点局部的 `anim`
+  键（时间轴元数据）+ 新块类型 `FRAM`（块级增量帧），完整方案见 `docs/QVX_FORMAT.md` §12。
+  不再为这个死键背兼容逻辑（格式未发布、从未有实际落盘的动画文件）。
 
 **v2 文件：不提供兼容读取路径**：
 
-`HEAD.qvox` 必须等于当前版本，否则整个文件拒绝（见 `QVoxSpec.VERSION`）。格式尚未发布、从未有
+`HEAD.qvx` 必须等于当前版本，否则整个文件拒绝（见 `QVoxelSpec.VERSION`）。格式尚未发布、从未有
 实际落盘的 v2 文件，故不背历史包袱 —— 也就没有"读旧文件时自动迁移"这条路。旧 `layers` / `layer`
 键读盘时忽略、写盘时显式抹掉。
 
 > 曾经的设想是"把扁平表折成树、层平滑地变成组"。但那条路要求版本门放行 v2，等于让**每个读者**
 > 都长期背着一份只对历史文件有用的折叠逻辑；既然没有历史文件，折叠逻辑是纯负担。与 v1 同理
-> （见 `QVoxSpec.VERSION` 的注释）：**宁可拒绝，不可误读**。
+> （见 `QVoxelSpec.VERSION` 的注释）：**宁可拒绝，不可误读**。
 
 ### 2.10 复用优先（遵循"实现功能优先用框架"）
 
@@ -377,14 +379,14 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
 
 **拖拽只改模型，视图整棵重建** —— 树视图是模型（§2.2 的 `nodes`）的**纯投影**，绝不在 `TreeItem` 上
 做增删（`TreeItem` 的 `move_before` / `move_after` 只支持同父移动，跨层要 `add_child` + `free`，
-极易漏掉 `free` 或留下重复节点）。落位 → 改 `nodes` → 一条 `QVoxPropertyCommand` → 重建。
+极易漏掉 `free` 或留下重复节点）。落位 → 改 `nodes` → 一条 `QVoxelPropertyCommand` → 重建。
 
 **约束**：模型不能有子节点（拖到模型上 = 移到该模型的**父组**里、与它同级）；修改器不能拖出它所属
 节点的滤镜区（拖到别的节点 = 移入那个节点的链）。
 
 ### 3.3 实时校验
 
-`QVoxDomain.chain_errors()` 返回 `[{index, message}]`（`index = -1` 表示链级问题）。树面板据此：
+`QVoxelDomain.chain_errors()` 返回 `[{index, message}]`（`index = -1` 表示链级问题）。树面板据此：
 
 - 给**出问题的那一行**打红标 + 行尾徽标，悬停显示 `message`；
 - 组行汇总其子树内的错误数（"这组里有 2 处问题"），于是折叠着也能看见。
@@ -392,15 +394,15 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
 ### 3.4 控件选型：自绘树
 
 **不用 Godot 的 `Tree`**：它自带整套滚选 / 焦点语义，行内只能放"单元格 + 图标 + 按钮"，且触摸命中区
-不达标（这是本仓既有约定，见 `QVoxUi`）。**改用自绘树**：
+不达标（这是本仓既有约定，见 `QVoxelUi`）。**改用自绘树**：
 
-- 渲染 = `ScrollContainer` + 嵌套缩进的 `VBoxContainer`，每行是**整行按钮**（`QVoxUi` 的既定约定），
+- 渲染 = `ScrollContainer` + 嵌套缩进的 `VBoxContainer`，每行是**整行按钮**（`QVoxelUi` 的既定约定），
   行内可放任意控件（图标 / 名称 / 徽标 / 开关）；
 - 展开 / 折叠 = 组与模型行的 `expanded` 状态（与 `QVoxelierSection` 同构）；
 - 拖拽 = `Control` 的三个虚方法 `_get_drag_data` / `_can_drop_data` / `_drop_data`，落位判据用
   `get_local_mouse_position()` 落在哪一行的上 / 中 / 下三段（自己算，因为不是 `Tree`）。
 
-**代价**：滚动与拖拽要自己写；**收益**：与 QVoxUi 的触摸 / 主题约定完全一致，且行内控件不受限。
+**代价**：滚动与拖拽要自己写；**收益**：与 QVoxelUi 的触摸 / 主题约定完全一致，且行内控件不受限。
 
 ---
 
@@ -409,9 +411,10 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
 | 期 | 目标 | 交付 | 依赖 |
 |---|---|---|---|
 | **零期：内核解耦** | 把内核从 God 类 + 无限层耦合里解出来 | 一致性收敛 + 回归测试网 → 拆 God 类 → 抽离无限层 / 表现层、抽出 `VoxelEditKernel` | 无（先做） |
-| **一期：可画可存** | 能替代 MagicaVoxel 做基础建模 | 统一修改器链 + `QVoxWorld` / `QVoxModel` / `QVoxModifier` / `QVoxEvalEngine`；`.qvox`(qvox 3) 读写；画笔工具族（体素 / 面 / 盒 / 线 / 填充）；`QVoxUndoStack` / `QVoxVoxelEditCommand` | 零期 |
-| **二期：树与链可用** | 把层级与修改器链用起来 | **统一节点树**（组 / 模型 / 修改器同树显示）+ 摆放与组滤镜求值；`.qvox` v3（**嵌套节点树**，无 v2 兼容路径）；树面板（拖拽重排 / 域徽标 / 实时校验 / 内嵌 Inspector）；**变换即修改器**（`QVoxTransformModifier` + `reshape` 契约） | 一期 |
+| **一期：可画可存** | 能替代 MagicaVoxel 做基础建模 | 统一修改器链 + `QVoxelWorld` / `QVoxelModel` / `QVoxelModifier` / `QVoxelEvalEngine`；`.qvx`(qvx 3) 读写；画笔工具族（体素 / 面 / 盒 / 线 / 填充）；`QVoxelUndoStack` / `QVoxelEditCommand` | 零期 |
+| **二期：树与链可用** | 把层级与修改器链用起来 | **统一节点树**（组 / 模型 / 修改器同树显示）+ 摆放与组滤镜求值；`.qvx` v3（**嵌套节点树**，无 v2 兼容路径）；树面板（拖拽重排 / 域徽标 / 实时校验 / 内嵌 Inspector）；**变换即修改器**（`QVoxelTransformModifier` + `reshape` 契约） | 一期 |
 | **三期：建模补齐** | 把建模能力做到不输 MagicaVoxel | 选择（All / Select / Move）+ 复制 / 剪切 / 粘贴 / 清空；对称绘制（X / Y / Z）；笔刷形状补全（球 / 平面）+ 2X / 1÷2；复合修改器（子链） | 二期 |
+| **三期·补：帧动画** | 让体素也能"逐帧作画、按时间播放"（Aseprite 心智） | **设计已定**（`docs/QVX_FORMAT.md` §12）：新块类型 `FRAM`（块级增量帧）+ 节点局部 `anim` 时间轴；交付 `QVoxelModel.frames` / 时间轴面板 / `FRAM` 读写 / `split_by_frame` 对 `.qvx` 生效 | 二期（格式）＋ 三期（UI） |
 | **四期：视图与信息** | 看得清、看得准 | 正交 / 等轴视图 + 朝向立方体 + 视图预设（前 / 侧 / 顶）+ 网格 / 投影开关；模型尺寸与体素数读数；日志 / 控制台面板；快照渲染预览 | 二期 |
 | **五期：快与准** | 性能与网格域 | FIELD 段折叠成平坦指令序列（学 `VoxelGeneratorGraph` 的编译式求值）；逐步骤判脏与增量求值；MESH 段算子（倒角 / 减面 / 平滑） | 实测数据驱动 |
 | **六期：走出去** | 与游戏运行时打通 | `.vox` **导出器**（现在只有导入器）；导出为 `VoxelData` + `VoxelGenerator` 可用的资产；批量烘焙；脚本化 API | 稳定后 |
@@ -419,9 +422,9 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
 **顺手清理（并入对应期）**：
 
 - `QVoxelierApp.gd`（656 行）**减重**：装配与刷新逻辑下沉到各面板 / 会话，视口脚本只做翻译；
-- `QVoxOrbitCamera` → **`QVoxViewCamera`**（它已不只做环绕，还承担跟随 / 机位 / 面板切换）；
+- `QVoxelOrbitCamera` → **`QVoxelViewCamera`**（它已不只做环绕，还承担跟随 / 机位 / 面板切换）；
 - 密度档位（触摸 / 鼠标双形态）改用**可折叠分组**表达，而不是"把控件缩到更小"；
-- `QVoxWorld._rgba_of()` 必须是**唯一的取色权威**，任何新面板都不得自造调色板查找。
+- `QVoxelWorld._rgba_of()` 必须是**唯一的取色权威**，任何新面板都不得自造调色板查找。
 
 ---
 
@@ -434,4 +437,5 @@ QVoxTransformModifier   核 = PcgTransform   域 = VOXEL（变换 / 摆放）   
 | 3 | 调色板是"材质ID → 颜色"还是"材质ID → 材质资源" | 颜色（MagicaVoxel 语义）。渲染材质由视口统一配置 |
 | 4 | 跨节点的布尔（"把 A 从 B 里挖掉"）该怎么表达 | **已定案：不做节点字段。** 摆放入链后，节点上的 `combine` 一并取消 —— 它是父侧问题（要同时看见父与本子节点的内容），链只能看见自己，没有等价物；组这一层因此恒为并集，"挖空"由节点自己的链表达。真要跨节点布尔时再引入显式的布尔节点（而非字段） |
 | 5 | 是否真的需要 MESH 段 | 需要（倒角 / 减面是"体素看起来更精致"的关键），但它不可逆，要显著提示 |
-| 6 | 稀疏存储何时引入 | **已引入**：`QVoxModel.blocks` 分块稀疏，空块不占内存 / 不落盘 |
+| 6 | 稀疏存储何时引入 | **已引入**：`QVoxelModel.blocks` 分块稀疏，空块不占内存 / 不落盘 |
+| 7 | 帧动画落地时，含 `FRAM` 的文件要不要升版本号 | 倾向**不升**：用 `HEAD.require:["FRAM"]` 门控（无法处理的读者拒绝整份文件，而非静默少几个模型）。这会让 `require` 第一次被实际使用；若要更保守，则升 `qvx 4` |

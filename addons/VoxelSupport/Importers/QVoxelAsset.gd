@@ -1,22 +1,22 @@
-class_name QVoxAsset
+class_name QVoxelAsset
 extends RefCounted
 
-## QVox 资产的**块级**视图：把 QVoxDocument 直接交给运行时数据层与网格生成器。
+## QVX 资产的**块级**视图：把 QVoxelDocument 直接交给运行时数据层与网格生成器。
 ##
 ## 【为什么不复用 VoxAsset】VoxAsset 的形状是 MagicaVoxel 专属的：`nTRN/nGRP/nSHP` 场景图、
 ## `frames` 动画帧、`LAYR` 可见性、Z-up、以及 `VoxelModel.size` 的"按尺寸居中 + Z 翻转"约定。
-## QVox 的对应概念完全不同——**一个 `model_id` 就是一个 `VOX0`，摆放由 `NODE` 的 transform 决定**。
-## 把 QVox 塞进 VoxAsset 会有三处失真（此前实测）：
+## QVX 的对应概念完全不同——**一个 `model_id` 就是一个 `VOX0`，摆放由 `NODE` 的 transform 决定**。
+## 把 QVX 塞进 VoxAsset 会有三处失真（此前实测）：
 ##   1. `check_nodes()` 伪造成"每模型一个 frame"，而 `VoxelFrame` 合并分支在 index==0 时短路
 ##      → **多模型只导入第一个，其余静默丢失**；
 ##   2. `NODE` 场景图完全不参与 → **各模型的位置/旋转丢失**；
 ##   3. 体素被摊平成 `Dictionary[Vector3i,int]` 再逐体素重映射回去 → 大模型多趟全量字典操作。
 ##
-## 【为什么本类以"块"为核心】QVox 的 `block_size` 恒等于 `VoxelChunk.CHUNK_SIZE`，
+## 【为什么本类以"块"为核心】QVX 的 `block_size` 恒等于 `VoxelChunk.CHUNK_SIZE`，
 ## 块坐标就是 chunk 坐标：因此"导入"在常见情形下只是一次块缓冲搬运（零逐体素重映射）。
 ## 只有需要融合变换（非恒等摆放 / 非 Y 朝上）时才逐体素展开——见 `is_block_importable()`。
 ##
-## 与 `VoxAsset` 的分工：`.vox` 走 `VoxAsset`，`.qvox` 走本类。两者都由导入器按扩展名分派。
+## 与 `VoxAsset` 的分工：`.vox` 走 `VoxAsset`，`.qvx` 走本类。两者都由导入器按扩展名分派。
 
 const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
 const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
@@ -32,14 +32,14 @@ var models: Dictionary = {}
 ## 为该模型补一条恒等摆放。
 ##
 ## 【为什么没有"帧"这一维】`animations[].frames` 的键是**节点下标**，而 v3 的节点树是嵌套的、
-## 没有下标这层身份（见 QVoxFile 的 NODE 清洗）。于是动画在 v3 里只是"原样透传的遗留键"，
+## 没有下标这层身份（见 QVoxelFile 的 NODE 清洗）。于是动画在 v3 里只是"原样透传的遗留键"，
 ## 不参与摆放 —— 同一个文件无论看哪一帧，摆放都相同。
 var placements: Array = []
 
 ## HEAD 原始元数据（up_axis / bounds / 自定义键原样保留，供调用方按需读取）
 var metadata: Dictionary = {}
 
-var up_axis: String = QVoxSpec.DEFAULT_UP_AXIS
+var up_axis: String = QVoxelSpec.DEFAULT_UP_AXIS
 
 # 惰性缓存
 var _block_buffers: Dictionary = {}
@@ -53,43 +53,43 @@ var _block_count: int = -1
 # 构造
 # ----------------------------------------------------------------------------
 
-## 该路径是否由本适配器处理。导入器按扩展名分派：`.qvox` → QVoxAsset，`.vox` → VoxAsset。
+## 该路径是否由本适配器处理。导入器按扩展名分派：`.qvx` → QVoxelAsset，`.vox` → VoxAsset。
 static func handles(path: String) -> bool:
-	return path.get_extension().to_lower() == QVoxSpec.FILE_EXT
+	return path.get_extension().to_lower() == QVoxelSpec.FILE_EXT
 
 
 ## 读文件并解析（CRC 校验开启）。失败返回 null 并报错。
-static func from_file(path: String) -> QVoxAsset:
+static func from_file(path: String) -> QVoxelAsset:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
-		push_error("[QVoxAsset] 无法读取 %s" % path)
+		push_error("[QVoxelAsset] 无法读取 %s" % path)
 		return null
 	var bytes := f.get_buffer(f.get_length())
 	f.close()
-	var rep := QVoxFile.QVoxReport.new()
-	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	if doc == null:
-		push_error("[QVoxAsset] %s 解析失败：%s" % [path, rep.summary()])
+		push_error("[QVoxelAsset] %s 解析失败：%s" % [path, rep.summary()])
 		return null
 	for w in rep.warnings:
-		push_warning("[QVoxAsset] %s: %s" % [path.get_file(), w])
+		push_warning("[QVoxelAsset] %s: %s" % [path.get_file(), w])
 	return from_document(doc)
 
 
 ## 由已解析文档构造（不做任何逐体素展开）。
-static func from_document(doc: QVoxFile.QVoxDocument) -> QVoxAsset:
-	var out := QVoxAsset.new()
+static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
+	var out := QVoxelAsset.new()
 	out.metadata = doc.head.duplicate(true)
-	out.up_axis = str(doc.head.get("up_axis", QVoxSpec.DEFAULT_UP_AXIS))
+	out.up_axis = str(doc.head.get("up_axis", QVoxelSpec.DEFAULT_UP_AXIS))
 	if out.up_axis == "x":
-		push_warning("[QVoxAsset] up_axis='x' 暂不支持轴向修正，按 'y' 处理")
+		push_warning("[QVoxelAsset] up_axis='x' 暂不支持轴向修正，按 'y' 处理")
 	# 材质：索引 == 材质ID；条目 0（空气）留 null 占位
 	out.materials.resize(maxi(doc.materials.size(), 1))
 	for i in doc.materials.size():
 		if i == 0:
 			continue
 		out.materials[i] = VoxelMaterial.from_mate(doc.materials[i], i)
-	# 模型块（键统一为 int，与 QVoxDocument 一致）
+	# 模型块（键统一为 int，与 QVoxelDocument 一致）
 	for mid in doc.models:
 		var blocks: Variant = doc.models[mid]
 		if blocks is Dictionary and not (blocks as Dictionary).is_empty():
@@ -103,13 +103,13 @@ static func from_document(doc: QVoxFile.QVoxDocument) -> QVoxAsset:
 ##
 ## 【嵌套树直接递归下行】v3 的 nodes[] 每个节点自带 children[]（组）或 model_id（模型），
 ## "谁是根、谁是子"是结构本身 —— 不再需要"扫一遍 children 反查父表 + 挑出无父者"那一套
-## （那套复杂度全部来自"身份即位置"的扁平表示，见 QVoxFile 的 NODE 清洗）。
-static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionary) -> Array:
+## （那套复杂度全部来自"身份即位置"的扁平表示，见 QVoxelFile 的 NODE 清洗）。
+static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, models: Dictionary) -> Array:
 	var pending := {}
 	for mid in models:
 		pending[mid] = true
 	var out: Array = []
-	var scene: QVoxFile.QVoxSceneGraph = doc.scene
+	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
 	if scene != null:
 		_walk_nodes(scene.nodes, Transform3D.IDENTITY, models, pending, out)
 	for mid in pending:
@@ -122,7 +122,7 @@ static func _placements_from_scene(doc: QVoxFile.QVoxDocument, models: Dictionar
 static func _walk_nodes(nodes: Array, parent_xf: Transform3D, models: Dictionary,
 		pending: Dictionary, out: Array) -> void:
 	for item in nodes:
-		# 防御：scene 已清洗过，这里只是不让一个坏项把整棵树带崩（与 QVoxFile 的取向一致）
+		# 防御：scene 已清洗过，这里只是不让一个坏项把整棵树带崩（与 QVoxelFile 的取向一致）
 		if not (item is Dictionary):
 			continue
 		var node: Dictionary = item
@@ -148,7 +148,7 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, models: Dictionary
 ##   `s` 缩放 `[x, y, z]`
 ##
 ## 【为什么旋转不是 0–23 朝向索引】那是 MagicaVoxel 为 `.vox` 的 `nTRN` 发明的省字节
-## 编码：只有 24 种轴对齐朝向，还隐含 Z-up 约定。`.qvox` 是通用容器，没有义务继承它——
+## 编码：只有 24 种轴对齐朝向，还隐含 Z-up 约定。`.qvx` 是通用容器，没有义务继承它——
 ## 四元数只多一个浮点数就能表达任意旋转，且与 `Quaternion` / `Basis` / `Transform3D`
 ## 直接对接，读写两端不需要任何查表或位运算（那套解码留在 `VoxAccess` 里，只服务 `.vox`）。
 ##
@@ -194,7 +194,7 @@ func is_empty() -> bool:
 	return models.is_empty()
 
 
-## up_axis 轴向修正（QVox 体素坐标 → 引擎 Y-up）。
+## up_axis 轴向修正（QVX 体素坐标 → 引擎 Y-up）。
 ## 与 `.vox` 侧同一约定：(x,y,z) → (x, z, -y)。
 func axis_fix() -> Basis:
 	if up_axis == "z":
@@ -203,7 +203,7 @@ func axis_fix() -> Basis:
 
 
 ## 能否**零逐体素展开**地导入：无轴向修正、每个模型恰好被摆放一次、且摆放为恒等。
-## 成立时导入 = 块缓冲搬运（QVox 块坐标 == chunk 坐标）。
+## 成立时导入 = 块缓冲搬运（QVX 块坐标 == chunk 坐标）。
 func is_block_importable() -> bool:
 	if axis_fix() != Basis():
 		return false

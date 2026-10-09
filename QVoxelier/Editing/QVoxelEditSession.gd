@@ -1,10 +1,10 @@
 @tool
-class_name QVoxEditSession
+class_name QVoxelEditSession
 extends RefCounted
 ## 编辑会话 —— 一次「手势 → 数据 → 撤销 → 刷新」的完整链路，**不依赖任何节点**。
 ##
-## 【为什么把这条链收在一个类里】它横跨四个模块：工具的纯几何（QVoxBrushTool）、命令与撤销
-## （QVoxVoxelEditCommand / QVoxUndoStack）、插件的数据层（VoxelData / QVoxModelGenerator）、
+## 【为什么把这条链收在一个类里】它横跨四个模块：工具的纯几何（QVoxelBrushTool）、命令与撤销
+## （QVoxelEditCommand / QVoxelUndoStack）、插件的数据层（VoxelData / QVoxelModelGenerator）、
 ## 以及渲染器。每个环节的接口都很窄，但**接线本身**有语义，散在视口脚本里的话：
 ##   ① 视口要同时懂"手势协议""命令封口""chunk 键换算""渲染器刷新"四件事 —— 一个只该翻译
 ##      输入的角色被撑成全能类；
@@ -13,53 +13,53 @@ extends RefCounted
 ## 收进来之后视口只剩 `session.drag(pick)` 一句，而本类可以在 TestCase 里跑完整条链。
 ##
 ## 【依赖方向】QVoxelier → {VoxelSupport, DEVFramework}。本类只用插件的数据层与框架的命令基类，
-## 反过来插件完全不认识它（见 QVoxCommand 的分层说明）。
+## 反过来插件完全不认识它（见 QVoxelCommand 的分层说明）。
 ##
 ## 【刷新用回调，而不是持一个 VoxelRenderer】渲染器是节点（要进场景树、要跑帧），而本类要在
 ## 无头测试里跑。传一个 Callable（视口传 `renderer.request_update`）就够了：
 ## "让数据源作废"是**真逻辑**，"通知渲染器"只是**唤醒**。
 
 ## 被编辑的对象（手绘体素 + 修改器链，全项目唯一的常驻真值）。
-var object: QVoxModel
+var object: QVoxelModel
 
 ## 显示几何：视口渲染的那份数据层。对象改动后由本类负责让它按需重新取数。
 var data: VoxelData
 
-## 供数源。手绘体素是链的输入，故它必须能被作废（QVoxModelGenerator.invalidate）。
-var generator: QVoxModelGenerator
+## 供数源。手绘体素是链的输入，故它必须能被作废（QVoxelModelGenerator.invalidate）。
+var generator: QVoxelModelGenerator
 
 ## 撤销栈（会话内）。刻意叫 history 而不是 undo：本类另有 undo() 方法，同名成员与方法冲突。
-var history := QVoxUndoStack.new()
+var history := QVoxelUndoStack.new()
 
 ## 当前工具（模式 / 笔刷尺寸由界面直接设）。
-var tool := QVoxBrushTool.new()
+var tool := QVoxelBrushTool.new()
 
 ## 数据层被改动后唤醒渲染器的回调（一般传 `renderer.request_update`）。
 ## 为空 = 只作废数据源、不通知渲染（无头测试与"离线批量改数据"都走这条路）。
 var request_render_update := Callable()
 
-var _cmd: QVoxVoxelEditCommand = null
+var _cmd: QVoxelEditCommand = null
 
 
 # ----------------------------------------------------------------------------
 # 装配
 # ----------------------------------------------------------------------------
 
-## 按对象装配显示层（VoxelData + QVoxModelGenerator + 调色板）并绑成一个会话。
+## 按对象装配显示层（VoxelData + QVoxelModelGenerator + 调色板）并绑成一个会话。
 ##
 ## 【为什么要有这个工厂】"对象 → 可渲染数据层"的接线步骤固定但零散（分辨率、块尺寸、材质表、
 ## 生成器指向），漏一步的表现是"画了没反应"或"颜色全错"，而不是报错。收在这里之后，
 ## 视口与测试走的是同一条装配路径 —— 测试里绿的接线，运行时也一定是同一条。
 ##
 ## world 只用来取调色板（材质表就是它的 materials），可为 null（不渲染颜色的场合）。
-static func create_for(obj: QVoxModel, world: QVoxWorld = null) -> QVoxEditSession:
-	var s := QVoxEditSession.new()
+static func create_for(obj: QVoxelModel, world: QVoxelWorld = null) -> QVoxelEditSession:
+	var s := QVoxelEditSession.new()
 	s.object = obj
-	var gen := QVoxModelGenerator.new()
+	var gen := QVoxelModelGenerator.new()
 	gen.object = obj
 	var d := VoxelData.new()
 	# 显示尺寸取**求值输出盒**而不是 object.grid_size：链里若有重排型修改器（镜像 / 旋转 / 平铺），
-	# 渲染出来的尺寸与手绘种子的尺寸不同（见 QVoxModelGenerator.output_grid_size）。
+	# 渲染出来的尺寸与手绘种子的尺寸不同（见 QVoxelModelGenerator.output_grid_size）。
 	d.grid_size = gen.output_grid_size()
 	if world != null:
 		_copy_palette(world, d)
@@ -77,15 +77,15 @@ static func create_for(obj: QVoxModel, world: QVoxWorld = null) -> QVoxEditSessi
 ## 【几何判据取自显示层，而不是对象】对象里只有**手绘种子**；修改器链的产出（风化 / 染色 /
 ## 程序化生成）只存在于显示层。拿对象判"实心"会让面笔与填充看不见链生成出来的那部分几何
 ## —— 表现为"点得中却刷不动"。这也是 Pick 把判据做成闭包的原因（工具层不必认识 VoxelData）。
-func pick_from_hit(info: Dictionary, erase := false, material_id := 1) -> QVoxBrushTool.Pick:
+func pick_from_hit(info: Dictionary, erase := false, material_id := 1) -> QVoxelBrushTool.Pick:
 	var hit: Vector3i = info.get(VoxelRay.KEY_HIT, Vector3i.MIN)
 	var normal: Vector3i = info.get(VoxelRay.KEY_NORMAL, Vector3i.ZERO)
-	var pick := QVoxBrushTool.Pick.new()
+	var pick := QVoxelBrushTool.Pick.new()
 	pick.hit = hit
 	pick.normal = normal
 	pick.erase = erase
 	# 画 = 往法线那侧长一格；擦 = 就擦命中格本身（擦掉面前的空格毫无意义）。
-	# 这是 Pick 的既定约定（见 QVoxBrushTool.Pick.place 的注释），也是唯一区分两者的地方。
+	# 这是 Pick 的既定约定（见 QVoxelBrushTool.Pick.place 的注释），也是唯一区分两者的地方。
 	pick.place = hit if erase else VoxelRay.placement_of(hit, normal)
 	pick.material_id = material_id
 	pick.grid = object.grid_size if object != null else Vector3i.ZERO
@@ -100,7 +100,7 @@ func pick_from_hit(info: Dictionary, erase := false, material_id := 1) -> QVoxBr
 # ----------------------------------------------------------------------------
 
 ## 按下。返回 false = 这次无处落笔（视口据此不改数据、不入撤销栈）。
-func begin(pick: QVoxBrushTool.Pick) -> bool:
+func begin(pick: QVoxelBrushTool.Pick) -> bool:
 	if object == null:
 		return false
 	if _cmd != null:
@@ -109,12 +109,12 @@ func begin(pick: QVoxBrushTool.Pick) -> bool:
 		cancel()
 	if not tool.begin(pick):
 		return false
-	_cmd = QVoxVoxelEditCommand.begin(object)
+	_cmd = QVoxelEditCommand.begin(object)
 	return true
 
 
 ## 拖动。返回本次写入的格数（live 工具 > 0，span 工具恒 0 —— 它们松手才产出）。
-func drag(pick: QVoxBrushTool.Pick) -> int:
+func drag(pick: QVoxelBrushTool.Pick) -> int:
 	if _cmd == null:
 		return 0
 	# 材质必须在 tool.drag() 之前取：release() 内部会 cancel()，那之后 _pick 就没了。
@@ -162,7 +162,7 @@ func cancel() -> void:
 
 ## 悬停预览：返回"若现在按下会画出哪些格"。与落笔共用工具内的同一条形状分派 ——
 ## 所见即所画由构造保证，不靠预览与落笔两处对齐。
-func hover(pick: QVoxBrushTool.Pick) -> Array[Vector3i]:
+func hover(pick: QVoxelBrushTool.Pick) -> Array[Vector3i]:
 	return tool.hover(pick)
 
 
@@ -183,7 +183,7 @@ func can_redo() -> bool:
 
 
 ## 【为什么撤销之后也要刷新】命令只把**对象**恢复到 before 态，显示层仍是旧内容。
-## 刷新粒度由命令自己给出（见 QVoxCommand.dirty_bounds）：体素编辑只重算受影响的那几块。
+## 刷新粒度由命令自己给出（见 QVoxelCommand.dirty_bounds）：体素编辑只重算受影响的那几块。
 func undo() -> bool:
 	var cmd := history.undo()
 	if cmd == null:
@@ -235,19 +235,19 @@ func _refresh(bounds: Array[Vector3i]) -> void:
 
 ## 链作用后的盒尺寸（= 显示层的 grid_size）。只有重排型修改器会改变它。
 ##
-## 【为什么问生成器而不是照抄 object.grid_size】见 QVoxModelGenerator.output_grid_size：
+## 【为什么问生成器而不是照抄 object.grid_size】见 QVoxelModelGenerator.output_grid_size：
 ## 渲染的是**求值输出**，不是手绘种子；链里一旦有镜像 / 旋转 / 平铺，两者尺寸就不同。
 func output_size() -> Vector3i:
 	if object == null:
 		return Vector3i.ZERO
 	if generator != null:
 		return generator.output_grid_size()
-	return QVoxEvalEngine.output_grid_size(object.modifiers, object.grid_size)
+	return QVoxelEvalEngine.output_grid_size(object.modifiers, object.grid_size)
 
 
 ## 结构性改动之后的整体重算：分辨率与体素都可能全变（整对象变换），没有"局部"可言。
 ##
-## 【为什么另给一个公开入口，而不是让调用方写 _refresh([])】空数组"影响整对象"是 QVoxCommand
+## 【为什么另给一个公开入口，而不是让调用方写 _refresh([])】空数组"影响整对象"是 QVoxelCommand
 ## 的默认语义，直接对外暴露一个空参调用只会让人猜"为什么是空数组"；给它一个名字，意图自明。
 func rebuild() -> void:
 	_refresh([])
@@ -269,7 +269,7 @@ func rebuild() -> void:
 ## 并丢弃缓冲 → 下次取数重新按"流 > 生成器"读入，于是拿回的是**权威**内容。
 ## 换句话说：镜像只活在"这一笔还没结束"的窗口里。（该窗口内唯一能写盘的时机是显式
 ## `data.flush()`，编辑器只在存盘时调它，而存盘不会发生在拖动中。）
-func _apply(cmd: QVoxVoxelEditCommand, cells: Array[Vector3i], mat: int) -> int:
+func _apply(cmd: QVoxelEditCommand, cells: Array[Vector3i], mat: int) -> int:
 	if cmd == null or cells.is_empty():
 		return 0
 	var written := 0
@@ -293,6 +293,6 @@ func _wake_renderer() -> void:
 ## 世界的材质表 → 显示层的调色板。索引 0 恒为空气占位（材质 ID 0 = 空），故从 1 开始；
 ## "索引 == 材质 ID"的对齐由 add_material 保证，MATE 条目 → 材质的解释复用内核唯一的
 ## VoxelMaterial.from_mate（不在这里再写一遍位域拆解）。
-static func _copy_palette(world: QVoxWorld, data: VoxelData) -> void:
+static func _copy_palette(world: QVoxelWorld, data: VoxelData) -> void:
 	for i in range(1, world.materials.size()):
 		data.add_material(VoxelMaterial.from_mate(world.materials[i], i))

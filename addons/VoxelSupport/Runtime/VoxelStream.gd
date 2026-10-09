@@ -17,7 +17,7 @@ extends Resource
 ## "属于可生成范围"，调用方只能靠 `is 类型` 逐处分支猜语义；拆开后各自只有一个含义。
 ##
 ## 内置实现：
-##   QVoxStream        —— .qvox 单文件块流（磁盘，一个文件承载整个世界）
+##   QVoxelStream        —— .qvx 单文件块流（磁盘，一个文件承载整个世界）
 ##   VoxelMemoryStream —— 纯内存（无持久化；程序化世界的编辑覆盖层用它落脚）
 ##
 ## 数据格式约定（与 VoxelData 统一材质契约一致）：
@@ -51,13 +51,13 @@ func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]
 ## 流中已存的 chunk/block 数量。
 ## 【为什么单独开一个方法】HUD 等读取者每帧只想知道"有多少"，而 get_all_chunk_keys 必须
 ## 构造一整个 key 数组——每帧白付一次 O(n) 分配。有 O(1) 计数的实现应覆写本方法
-## （QVoxStream / VoxelMemoryStream 已覆写）；默认实现退化为数数组长度，保证正确。
+## （QVoxelStream / VoxelMemoryStream 已覆写）；默认实现退化为数数组长度，保证正确。
 func get_chunk_count(lod: int = 0) -> int:
 	return get_all_chunk_keys(lod).size()
 
 ## 本流是否承载粗层 LOD 数据（lod >= 1 的 block）。
 ##
-## 【为什么需要这个查询】调用方（渲染器 / VoxelData）此前靠 `is QVoxStream` 判断，
+## 【为什么需要这个查询】调用方（渲染器 / VoxelData）此前靠 `is QVoxelStream` 判断，
 ## 于是"抽象存储层"被迫泄露具体实现类型：新增任何一种带粗层的流都要回头改渲染器。
 ## 换成虚方法后，判定依据是**能力**而非**类型**，与 has_chunk / load_chunk 的抽象一致。
 ##

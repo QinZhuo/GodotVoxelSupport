@@ -586,7 +586,7 @@ inline int grid_floor_div(int v, int d) {
 // 块缓冲字典 → 网格 arrays：逐 chunk 构建 34³ halo → 原生 dense 面生成 → 合并 + 索引偏移。
 //
 // 【为什么搬进 C++】原 GDScript 版每个 chunk 要跨语言往返 3 次（build_halo_from_buffers /
-// generate_chunk_dense / 逐元素索引偏移），QVox 大资产（整资产或 MeshLibrary 分项）导入时是主要
+// generate_chunk_dense / 逐元素索引偏移），QVX 大资产（整资产或 MeshLibrary 分项）导入时是主要
 // 等待时间。此处循环与拼接全在 C++，索引偏移复用 append_arrays_native，不再产生中间数组。
 //
 // 【与 GDScript 版的关系】VoxelMeshGenerator.generate_arrays_from_chunks 保留为**测试 oracle**
@@ -1970,12 +1970,12 @@ Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Ar
 }
 
 // ----------------------------------------------------------------------------
-// QVox 文件写入：CRC32（标准 IEEE 802.3，反射多项式 0xEDB88320）
+// QVX 文件写入：CRC32（标准 IEEE 802.3，反射多项式 0xEDB88320）
 // ----------------------------------------------------------------------------
 //
 // 与 zlib 口径一致：初值 0xFFFFFFFF，终值异或 0xFFFFFFFF。
 // GDScript 逐字节查表算 1.4MB 要 ~84ms；同一算法在 C++ 下 ~0.5ms（约 170x），
-// 故 GDScript 侧不再保留兜底实现，QVox 读写校验与子块索引统一调这里。
+// 故 GDScript 侧不再保留兜底实现，QVX 读写校验与子块索引统一调这里。
 // 表用函数内 static const 惰性构造一次，线程安全（C++11 magic static）。
 
 static const uint32_t *qvox_crc32_table() {
@@ -2054,24 +2054,24 @@ int64_t VoxelNative::crc32_segments(const PackedByteArray &p_data, const PackedI
 }
 
 // ----------------------------------------------------------------------------
-// QVox 块级编解码（原生）
+// QVX 块级编解码（原生）
 // ----------------------------------------------------------------------------
 // 块内线性顺序 idx = x + y·B + z·B²（X 最快）；数值一律小端。
 //
-// 【常量单源】规范文本是 docs/QVOX_FORMAT.md，运行时权威是
-// addons/VoxelSupport/Runtime/QVoxSpec.gd —— 本文件只是它的**原生镜像**，不另立一套真值。
+// 【常量单源】规范文本是 docs/QVX_FORMAT.md，运行时权威是
+// addons/VoxelSupport/Runtime/QVoxelSpec.gd —— 本文件只是它的**原生镜像**，不另立一套真值。
 // 跨语言共享不了编译期常量，故用"镜像 + 机器校验"代替"注释保证"：
-// test_qvox_format.gd 的 test_native_codec_id_mirror 把 QVoxSpec.CODEC_* / CHANNEL_BYTES
+// test_qvox_format.gd 的 test_native_codec_id_mirror 把 QVoxelSpec.CODEC_* / CHANNEL_BYTES
 // 送进下面的原生接口，用**实现行为**反证一致性（保留值 0 必返空、SOLID 必为 bytes 字节、
 // DENSE 必为 N×bytes 字节、RUN/INDEXED 必压缩）。任一边改了而另一边没跟 → 该用例变红。
 
 namespace {
 
-// 位宽是唯一真值，字节数由它派生（与 QVoxSpec.CHANNEL_BYTES := CHANNEL_BPP / 8 同构）
+// 位宽是唯一真值，字节数由它派生（与 QVoxelSpec.CHANNEL_BYTES := CHANNEL_BPP / 8 同构）
 constexpr int QVOX_CHANNEL_BPP = 16;
 constexpr int QVOX_CHANNEL_BYTES = QVOX_CHANNEL_BPP / 8;
 
-// 编解码枚举：一份清单，取值必须与 QVoxSpec.CODEC_* 一致
+// 编解码枚举：一份清单，取值必须与 QVoxelSpec.CODEC_* 一致
 enum QvoxCodec : int {
 	QVOX_CODEC_EMPTY = 0,   // 保留值，永不写入文件（空块 = 块坐标缺失）
 	QVOX_CODEC_SOLID = 1,   // 所有通道各一个值

@@ -1,16 +1,16 @@
 extends Node3D
 
-## QVox 模型预览场 —— 专注"看 QVox 模型长什么样"。
+## QVX 模型预览场 —— 专注"看 QVX 模型长什么样"。
 ##
 ## 与其它 demo 的区别：本场景**不做程序化生成**，数据全部来自 .vox 模型文件，
-## 且强制走完整 QVox 容器读写链路，用来肉眼确认 QVox 格式的存储/加载/渲染是否正确：
+## 且强制走完整 QVX 容器读写链路，用来肉眼确认 QVX 格式的存储/加载/渲染是否正确：
 ##
 ##   .vox (MagicaVoxel)  →  VoxAccess 解析  →  VoxelData
-##        →  QVoxStream.save_chunk()  写进 .qvox 容器（HEAD/MATE/NODE/VOX0）
-##        →  QVoxStream.load_chunk()  从 .qvox 读回
+##        →  QVoxelStream.save_chunk()  写进 .qvx 容器（HEAD/MATE/NODE/VOX0）
+##        →  QVoxelStream.load_chunk()  从 .qvx 读回
 ##        →  VoxelRenderer 渲染成体素模型
 ##
-## 场景首次运行会把每个模型烘成 `user://qvox_viewer/<name>.qvox`，
+## 场景首次运行会把每个模型烘成 `user://qvx_viewer/<name>.qvx`，
 ## 之后直接复用（删除该目录即可强制重新烘）。
 ##
 ## 打开方式：在编辑器里 F5 运行本场景（res://demo/qvox_model_viewer.tscn），
@@ -23,11 +23,11 @@ extends Node3D
 ##   0              : 回到总览（自动重新取景）
 ##   R              : 开关自动旋转
 ##   W              : 线框 / 实心 切换（看内部体素排布）
-##   F              : 强制重新烘焙 .qvox（验证写盘链路）
+##   F              : 强制重新烘焙 .qvx（验证写盘链路）
 ##   Esc            : 退出
 ##
 ## 右上角实时显示每个模型的：chunk 数 / 回读 chunk 数 / 文件大小 / 解析·烘焙·回读耗时，
-## 这组数字就是"QVox 容器确实被写入并读回"的证据。
+## 这组数字就是"QVX 容器确实被写入并读回"的证据。
 
 ## 要预览的模型（.vox 源文件 → 显示名）。顺序即排列顺序。
 @export var models: Array[String] = [
@@ -44,9 +44,9 @@ extends Node3D
 @export var target_extent: float = 2.4
 
 ## 烘焙输出目录
-@export var bake_dir: String = "user://qvox_viewer"
+@export var bake_dir: String = "user://qvx_viewer"
 
-## 强制重新烘焙（忽略已存在的 .qvox）
+## 强制重新烘焙（忽略已存在的 .qvx）
 @export var force_rebake: bool = false
 
 var _camera: Camera3D
@@ -65,7 +65,7 @@ var _wireframe := false
 ## 聚焦索引：-1 = 总览（注视原点），>=0 = 注视该模型
 var _focus_index := -1
 
-## 单个模型的烘焙/加载统计（用于 HUD 展示，证明 QVox 真的被读写过）
+## 单个模型的烘焙/加载统计（用于 HUD 展示，证明 QVX 真的被读写过）
 var _stats: Array = []
 
 
@@ -73,7 +73,7 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_hud()
 	_build_all(force_rebake)
-	print("[QVoxViewer] 初始化完成，模型数=%d" % _renderers.size())
+	print("[QVoxelViewer] 初始化完成，模型数=%d" % _renderers.size())
 
 
 func _setup_camera() -> void:
@@ -137,7 +137,7 @@ func _build_all(rebake: bool) -> void:
 	for i in n:
 		var src: String = models[i]
 		if not ResourceLoader.exists(src):
-			push_warning("[QVoxViewer] 找不到模型: %s" % src)
+			push_warning("[QVoxelViewer] 找不到模型: %s" % src)
 			continue
 		var entry := _build_one(src, i, n)
 		if entry.is_empty():
@@ -151,7 +151,7 @@ func _build_all(rebake: bool) -> void:
 	_update_hud()
 
 
-## 单个模型：.vox → VoxelData → .qvox → 回读 → 渲染
+## 单个模型：.vox → VoxelData → .qvx → 回读 → 渲染
 func _build_one(src: String, index: int, total: int) -> Dictionary:
 	var name := src.get_file().get_basename()
 	var t_all := Time.get_ticks_usec()
@@ -159,20 +159,20 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 	# --- 1. 解析 .vox 为 VoxelData ---
 	var vox := VoxAccess.Open(src)
 	if vox == null:
-		push_error("[QVoxViewer] VoxAccess 打开失败: %s" % src)
+		push_error("[QVoxelViewer] VoxAccess 打开失败: %s" % src)
 		return {}
 	var data := VoxelData.from_voxel_data(vox.voxel)
 	if data == null:
-		push_error("[QVoxViewer] from_voxel_data 失败: %s" % src)
+		push_error("[QVoxelViewer] from_voxel_data 失败: %s" % src)
 		return {}
 	var t_parse := Time.get_ticks_usec()
 
-	# --- 2. 写入 .qvox 容器（走 QVoxStream 增量写盘）---
+	# --- 2. 写入 .qvx 容器（走 QVoxelStream 增量写盘）---
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(bake_dir))
-	var qpath := bake_dir.path_join(name + ".qvox")
+	var qpath := bake_dir.path_join(name + ".qvx")
 	var existed := FileAccess.file_exists(qpath)
 
-	var stream := QVoxStream.new()
+	var stream := QVoxelStream.new()
 	stream.file_path = qpath
 	# 材质表：必须**保持「数组下标 == 材质ID」**的契约。
 	# 【坑】data.materials 已经是 256 槽、下标即 ID 的数组（from_voxel_data 里
@@ -203,8 +203,8 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 		fsize = f.get_length()
 		f.close()
 
-	# --- 3. 从 .qvox 回读（新实例，验证磁盘数据可恢复）---
-	var reader := QVoxStream.new()
+	# --- 3. 从 .qvx 回读（新实例，验证磁盘数据可恢复）---
+	var reader := QVoxelStream.new()
 	reader.file_path = qpath
 	reader.clear_cache()
 	var t_read_start := Time.get_ticks_usec()
@@ -215,7 +215,7 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 			chunks_ok += 1
 	var t_read := Time.get_ticks_usec()
 
-	# --- 4. 用回读到的数据渲染（数据源 = QVox 文件）---
+	# --- 4. 用回读到的数据渲染（数据源 = QVX 文件）---
 	var rdata := VoxelData.new()
 	rdata.stream = reader
 	for m in mats:
@@ -246,14 +246,14 @@ func _build_one(src: String, index: int, total: int) -> Dictionary:
 		"t_read": (t_read - t_read_start) / 1000.0,
 		"t_total": (t_end - t_all) / 1000.0,
 	}
-	print("[QVoxViewer] %s: %d chunk, 写%d 读%d, %d KB, 解析%.1fms 烘焙%.1fms 回读%.1fms"
+	print("[QVoxelViewer] %s: %d chunk, 写%d 读%d, %d KB, 解析%.1fms 烘焙%.1fms 回读%.1fms"
 			% [name, st["chunks"], st["chunks"] as int, chunks_ok, fsize / 1024,
 			   st["t_parse"], st["t_bake"], st["t_read"]])
 	return st
 
 
 ## 从 VoxelData 提取每个 chunk 的 32³ 密集缓冲（键 = chunk 坐标）。
-## QVoxStream.save_chunk 需要的正是这个形态。VoxelData 内部就存成 _chunk_buffers，
+## QVoxelStream.save_chunk 需要的正是这个形态。VoxelData 内部就存成 _chunk_buffers，
 ## 直接取用可避免经由逐体素 API 重建（那份代价是 32³ 级别的）。
 func _extract_chunks(data: VoxelData) -> Dictionary:
 	var out: Dictionary = {}
@@ -352,7 +352,7 @@ func _layout() -> void:
 			slot_x - (aabb_min_world.x + half.x),
 			0.0,
 			-(aabb_min_world.z + half.z))
-		print("[QVoxViewer] 布局 %s: 体素AABB=%s extent=%.1f voxel_scale=%.5f 世界半尺寸=%s pos=%s"
+		print("[QVoxelViewer] 布局 %s: 体素AABB=%s extent=%.1f voxel_scale=%.5f 世界半尺寸=%s pos=%s"
 				% [r.name, str(aabb), extent, r.voxel_scale, str(half), str(r.position)])
 
 
@@ -473,7 +473,7 @@ func _auto_frame() -> void:
 	_yaw = 0.0
 	_pitch = 0.12
 	_focus_index = -1
-	print("[QVoxViewer] 自动取景: 排宽=%.2f 最高=%.2f 中心=(%.2f,%.2f,%.2f) aspect=%.2f dist=%.2f (d_w=%.2f d_h=%.2f)"
+	print("[QVoxelViewer] 自动取景: 排宽=%.2f 最高=%.2f 中心=(%.2f,%.2f,%.2f) aspect=%.2f dist=%.2f (d_w=%.2f d_h=%.2f)"
 			% [row_width, row_height, (mn.x + mx.x) * 0.5, (mn.y + mx.y) * 0.5, (mn.z + mx.z) * 0.5,
 			   aspect, _dist, d_w, d_h])
 
@@ -500,7 +500,7 @@ func _update_hud() -> void:
 	var fps := Engine.get_frames_per_second()
 	var draw := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 	var tri := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME)
-	_hud.text = "QVox 模型预览    FPS: %d    DrawCalls: %d\n" % [fps, draw] + \
+	_hud.text = "QVX 模型预览    FPS: %d    DrawCalls: %d\n" % [fps, draw] + \
 			"模型数: %d    自动旋转: %s    线框: %s    聚焦: %s\n" % [
 				_renderers.size(), "ON" if _auto_rotate else "OFF",
 				"ON" if _wireframe else "OFF",
@@ -508,7 +508,7 @@ func _update_hud() -> void:
 			"左键拖拽旋转  滚轮缩放\n" + \
 			"R:自动旋转  W:线框  F:重烘焙  1-9:聚焦  0:复位  Esc:退出"
 
-	var lines: Array = ["QVox 容器（.vox → .qvox → 渲染）", ""]
+	var lines: Array = ["QVX 容器（.vox → .qvx → 渲染）", ""]
 	for st in _stats:
 		lines.append("%s" % st["name"])
 		lines.append("  %d chunk | 回读 %d | %d KB" % [st["chunks"], st["chunks_ok"], st["bytes"] / 1024])

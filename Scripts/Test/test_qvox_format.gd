@@ -1,13 +1,13 @@
 extends TestCase
 
-## QVox 格式一致性测试（编辑器进程即可，无需游戏进程）。
+## QVX 格式一致性测试（编辑器进程即可，无需游戏进程）。
 ##
 ## 覆盖的是"实现是否兑现规范"这件事本身，而不是体素业务：
 ##   · 常量单一事实源（通道宽度）与编解码往返；
 ##   · 整文件 serialize ↔ parse 往返；
 ##   · HEAD 能力门：require 含未支持块 → 拒绝；channels ≠ 1 → 拒绝（§3.1 / §10）；
 ##   · CACH 作为一等块的结构往返与损坏处置（§6 / §9），未知块的不透明保真搬运；
-##   · 仓库样例 .qvox 能被当前读取器以 CRC 校验开启的方式读入。
+##   · 仓库样例 .qvx 能被当前读取器以 CRC 校验开启的方式读入。
 ##
 ## 之所以把样例纳入测试：样例是"格式的活体示例"，一旦写入端与读取端口径漂移
 ## （历史上 CRC 覆盖范围就漂移过一次），它们会最先变成读不进来的废文件。
@@ -21,14 +21,14 @@ const SAMPLES_DIR := "res://demo/samples"
 # ----------------------------------------------------------------------------
 
 func test_spec_channel_constants() -> void:
-	assert_eq(QVoxSpec.CHANNEL_BPP, 16, "支配通道 bpp")
-	assert_eq(QVoxSpec.CHANNEL_BYTES, 2, "支配通道每体素字节数")
-	assert_eq(QVoxSpec.SUPPORTED_CHANNEL_COUNT, 1, "当前版本通道数")
+	assert_eq(QVoxelSpec.CHANNEL_BPP, 16, "支配通道 bpp")
+	assert_eq(QVoxelSpec.CHANNEL_BYTES, 2, "支配通道每体素字节数")
+	assert_eq(QVoxelSpec.SUPPORTED_CHANNEL_COUNT, 1, "当前版本通道数")
 
 
 ## 【跨语言常量镜像】CODEC_* 与 CHANNEL_BYTES 在原生侧另有一份
 ## （gdextension/src/voxel_native.cpp 的 QvoxCodec 枚举 / QVOX_CHANNEL_BPP，见那里的【常量单源】）。
-## 跨语言共享不了编译期常量，只能**用行为反证**：把 QVoxSpec 的取值送进原生接口，
+## 跨语言共享不了编译期常量，只能**用行为反证**：把 QVoxelSpec 的取值送进原生接口，
 ## 看它是否恰好按规范里那个编解码动作。任一边改号或改位宽而另一边没跟 → 这里必红，
 ## 不必依赖人工比对两处数字。
 func test_native_codec_id_mirror() -> void:
@@ -55,27 +55,27 @@ func test_native_codec_id_mirror() -> void:
 	for i in n:
 		entropy[i] = (i * 2654435761) % 500
 
-	var cbytes := QVoxSpec.CHANNEL_BYTES
+	var cbytes := QVoxelSpec.CHANNEL_BYTES
 
 	# 0 是保留值：原生必须不认（否则"空块"会被写成一份合法负载）
-	assert_true(QVoxBlockCodec.pack(QVoxSpec.CODEC_EMPTY, uniform, n).is_empty(),
+	assert_true(QVoxelBlockCodec.pack(QVoxelSpec.CODEC_EMPTY, uniform, n).is_empty(),
 			"原生 codec 0 应是保留值（pack 返回空）")
 
 	# SOLID / DENSE 的负载长度由规范唯一确定 → 一次钉住编号与位宽
-	assert_eq(QVoxBlockCodec.pack(QVoxSpec.CODEC_SOLID, uniform, n).size(), cbytes,
+	assert_eq(QVoxelBlockCodec.pack(QVoxelSpec.CODEC_SOLID, uniform, n).size(), cbytes,
 			"原生 SOLID 应恰为 CHANNEL_BYTES 字节（编号或位宽漂移？）")
-	assert_eq(QVoxBlockCodec.pack(QVoxSpec.CODEC_DENSE, entropy, n).size(), n * cbytes,
+	assert_eq(QVoxelBlockCodec.pack(QVoxelSpec.CODEC_DENSE, entropy, n).size(), n * cbytes,
 			"原生 DENSE 应恰为 N×CHANNEL_BYTES 字节（编号或位宽漂移？）")
 
 	# RUN / INDEXED 的长度随数据而定，但一定远小于 DENSE → 用"必须压缩 + 往返无损"钉住编号
-	for pair in [["RUN", QVoxSpec.CODEC_RUN, layered], ["INDEXED", QVoxSpec.CODEC_INDEXED, few]]:
+	for pair in [["RUN", QVoxelSpec.CODEC_RUN, layered], ["INDEXED", QVoxelSpec.CODEC_INDEXED, few]]:
 		var name: String = pair[0]
 		var codec: int = pair[1]
 		var buf: PackedInt32Array = pair[2]
-		var payload := QVoxBlockCodec.pack(codec, buf, n)
+		var payload := QVoxelBlockCodec.pack(codec, buf, n)
 		assert_true(payload.size() > 0 and payload.size() < n * cbytes,
 				"原生 %s 应压缩编码（编号漂移？得到 %d 字节）" % [name, payload.size()])
-		assert_eq(QVoxBlockCodec.unpack(codec, payload, n), buf, "原生 %s 往返不一致" % name)
+		assert_eq(QVoxelBlockCodec.unpack(codec, payload, n), buf, "原生 %s 往返不一致" % name)
 
 
 ## 四个编解码各自 pack → unpack 必须无损。用高/低熵两种块各扫一遍，
@@ -107,22 +107,22 @@ func test_codec_roundtrip() -> void:
 	for pair in [["solid", solid], ["dense", dense], ["runs", runs], ["few", few]]:
 		var name: String = pair[0]
 		var buf: PackedInt32Array = pair[1]
-		var pick := QVoxBlockCodec.pick_codec(buf, n)
+		var pick := QVoxelBlockCodec.pick_codec(buf, n)
 		var codec: int = int(pick[0])
-		assert_ne(codec, QVoxSpec.CODEC_EMPTY, "%s 不应被判为空块" % name)
-		var payload := QVoxBlockCodec.pack(codec, buf, n)
-		var back := QVoxBlockCodec.unpack(codec, payload, n)
+		assert_ne(codec, QVoxelSpec.CODEC_EMPTY, "%s 不应被判为空块" % name)
+		var payload := QVoxelBlockCodec.pack(codec, buf, n)
+		var back := QVoxelBlockCodec.unpack(codec, payload, n)
 		assert_eq(back.size(), n, "%s 解包长度" % name)
 		assert_eq(back, buf, "%s 往返不一致（codec=%d）" % [name, codec])
 
 
 ## 损坏负载必须被判定为解包失败（返回空），而不是静默产出垃圾。
 func test_codec_rejects_corrupt() -> void:
-	assert_true(QVoxBlockCodec.unpack(QVoxSpec.CODEC_EMPTY, PackedByteArray(), 8).is_empty(),
+	assert_true(QVoxelBlockCodec.unpack(QVoxelSpec.CODEC_EMPTY, PackedByteArray(), 8).is_empty(),
 			"codec=0 应解包失败")
-	assert_true(QVoxBlockCodec.unpack(QVoxSpec.CODEC_DENSE, PackedByteArray([1, 2]), 8).is_empty(),
+	assert_true(QVoxelBlockCodec.unpack(QVoxelSpec.CODEC_DENSE, PackedByteArray([1, 2]), 8).is_empty(),
 			"DENSE 负载不足应解包失败")
-	assert_true(QVoxBlockCodec.unpack(QVoxSpec.CODEC_RUN, PackedByteArray([255, 255, 255, 255]), 8).is_empty(),
+	assert_true(QVoxelBlockCodec.unpack(QVoxelSpec.CODEC_RUN, PackedByteArray([255, 255, 255, 255]), 8).is_empty(),
 			"RUN count 荒谬应解包失败")
 
 
@@ -132,9 +132,9 @@ func test_codec_rejects_corrupt() -> void:
 
 func test_file_roundtrip() -> void:
 	var orig := _make_doc()
-	var bytes := QVoxFile.serialize(orig)
-	var rep := QVoxFile.QVoxReport.new()
-	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(orig)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(doc != null, "往返解析应成功（%s）" % rep.summary())
 	if doc == null:
 		return
@@ -154,9 +154,9 @@ func test_file_roundtrip() -> void:
 func test_require_unknown_type_rejected() -> void:
 	var doc := _make_doc()
 	doc.head["require"] = ["SKEL"]
-	var bytes := QVoxFile.serialize(doc)
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(doc)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(parsed == null, "require 含未知块类型应拒绝整个文件")
 	assert_true(_errors_contain(rep, "require"), "应在 errors 里说明是 require（%s）" % rep.summary())
 
@@ -165,9 +165,9 @@ func test_require_unknown_type_rejected() -> void:
 func test_require_known_type_accepted() -> void:
 	var doc := _make_doc()
 	doc.head["require"] = ["MATE", "VOX0", "NODE", "CACH"]
-	var bytes := QVoxFile.serialize(doc)
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(doc)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(parsed != null, "require 全为已知类型应可读入（%s）" % rep.summary())
 
 
@@ -178,9 +178,9 @@ func test_multichannel_rejected() -> void:
 		{"name": "material", "bpp": 16},
 		{"name": "sdf", "bpp": 8},
 	]
-	var bytes := QVoxFile.serialize(doc)
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(doc)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(parsed == null, "多通道应拒绝整个文件")
 	assert_true(_errors_contain(rep, "channels"), "应在 errors 里说明是 channels（%s）" % rep.summary())
 
@@ -189,9 +189,9 @@ func test_multichannel_rejected() -> void:
 func test_bad_up_axis_warns_only() -> void:
 	var doc := _make_doc()
 	doc.head["up_axis"] = "w"
-	var bytes := QVoxFile.serialize(doc)
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(doc)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(parsed != null, "非法 up_axis 不应拒绝文件")
 	assert_true(_warnings_contain(rep, "up_axis"), "应就 up_axis 告警（%s）" % rep.summary())
 
@@ -213,9 +213,9 @@ func test_cach_and_unknown_passthrough() -> void:
 	}]
 	doc.unknown_blocks["ZZZZ"] = ["opaque".to_utf8_buffer()]
 
-	var bytes := QVoxFile.serialize(doc)
-	var rep := QVoxFile.QVoxReport.new()
-	var doc1: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(doc)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var doc1: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(doc1 != null, "含 CACH/未知块的文件应可读入（%s）" % rep.summary())
 	if doc1 == null:
 		return
@@ -230,9 +230,9 @@ func test_cach_and_unknown_passthrough() -> void:
 		assert_eq(_strip_trailing_zeros(c["payload"]), data, "CACH 内容逐字节保留")
 
 	# 再写一遍：两者都必须还在
-	var bytes2 := QVoxFile.serialize(doc1)
-	var rep2 := QVoxFile.QVoxReport.new()
-	var doc2: QVoxFile.QVoxDocument = QVoxFile.parse(bytes2, true, rep2, true)
+	var bytes2 := QVoxelFile.serialize(doc1)
+	var rep2 := QVoxelFile.QVoxelReport.new()
+	var doc2: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes2, true, rep2, true)
 	assert_true(doc2 != null, "二次往返应可读入（%s）" % rep2.summary())
 	if doc2 == null:
 		return
@@ -246,13 +246,13 @@ func test_cach_and_unknown_passthrough() -> void:
 func test_malformed_cach_is_dropped_not_fatal() -> void:
 	var doc := _make_doc()
 	doc.cach = [{"kind": "mesh", "algo_version": 1, "source_crc": [], "payload": "x".to_utf8_buffer()}]
-	var bytes := QVoxFile.serialize(doc)
+	var bytes := QVoxelFile.serialize(doc)
 
 	# 定位 CACH 块并把 source_count 改成远超 length 的值（结构损坏）
 	var patched := false
-	for bi in QVoxFile.scan_block_index(bytes):
-		if bi["type"] == QVoxSpec.BLOCK_CACH:
-			bytes.encode_u16(int(bi["offset"]) + QVoxSpec.BLOCK_HEADER_SIZE + 6, 0xFFFF)
+	for bi in QVoxelFile.scan_block_index(bytes):
+		if bi["type"] == QVoxelSpec.BLOCK_CACH:
+			bytes.encode_u16(int(bi["offset"]) + QVoxelSpec.BLOCK_HEADER_SIZE + 6, 0xFFFF)
 			patched = true
 			break
 	assert_true(patched, "样例里应有 CACH 块")
@@ -260,8 +260,8 @@ func test_malformed_cach_is_dropped_not_fatal() -> void:
 		return
 
 	# CRC 已因改动而失效，故关闭校验，单独考察结构层处置
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, false, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, false, rep, true)
 	assert_true(parsed != null, "损坏的 CACH 不应拒绝整个文件")
 	if parsed == null:
 		return
@@ -275,8 +275,8 @@ func test_malformed_cach_is_dropped_not_fatal() -> void:
 # ----------------------------------------------------------------------------
 
 func test_samples_load_with_crc() -> void:
-	var files := _list_qvox(SAMPLES_DIR)
-	assert_true(not files.is_empty(), "%s 下应至少有一个 .qvox 样例" % SAMPLES_DIR)
+	var files := _list_qvx(SAMPLES_DIR)
+	assert_true(not files.is_empty(), "%s 下应至少有一个 .qvx 样例" % SAMPLES_DIR)
 	for path in files:
 		var f := FileAccess.open(str(path), FileAccess.READ)
 		assert_true(f != null, "无法打开样例 %s" % path)
@@ -284,22 +284,22 @@ func test_samples_load_with_crc() -> void:
 			continue
 		var bytes := f.get_buffer(f.get_length())
 		f.close()
-		var rep := QVoxFile.QVoxReport.new()
-		var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+		var rep := QVoxelFile.QVoxelReport.new()
+		var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 		assert_true(doc != null, "%s 应能被读入（CRC 开启）：%s" % [path.get_file(), rep.summary()])
 		if doc == null:
 			continue
 		assert_true(rep.ok(), "%s 不应报 FATAL：%s" % [path.get_file(), rep.summary()])
 		assert_true(not doc.models.is_empty(), "%s 应含至少一个模型" % path.get_file())
-		# HEAD 的 qvox 必须是**第一个键**（§3.1）：样例常因手改/旧工具而违反。
+		# HEAD 的 qvx 必须是**第一个键**（§3.1）：样例常因手改/旧工具而违反。
 		assert_true(_head_qvox_first(bytes), "%s 的 HEAD JSON 首键必须是 qvox" % path.get_file())
 
 
 # ----------------------------------------------------------------------------
-# QVoxStream 端到端（写盘 → 新实例回读 → 擦除 → 增量写盘 → 再回读）
+# QVoxelStream 端到端（写盘 → 新实例回读 → 擦除 → 增量写盘 → 再回读）
 # ----------------------------------------------------------------------------
 
-const TEST_DIR := "user://qvox_test"
+const TEST_DIR := "user://qvx_test"
 
 
 ## 每个用例后无条件收尾（runner 保证调用）：清掉测试目录，避免残留污染下次运行。
@@ -309,7 +309,7 @@ func cleanup() -> void:
 
 func test_stream_end_to_end() -> void:
 	_remove_dir(TEST_DIR)
-	var path := TEST_DIR + "/world.qvox"
+	var path := TEST_DIR + "/world.qvx"
 	var n := 32 * 32 * 32
 	var ck_a := Vector3i(0, 0, 0)
 	var ck_b := Vector3i(1, 0, 0)
@@ -327,17 +327,17 @@ func test_stream_end_to_end() -> void:
 	for i in n:
 		buf_l1[i] = 2
 
-	var s := QVoxStream.new()
+	var s := QVoxelStream.new()
 	s.file_path = path
 	s.set_materials([null, null, null, null])   # 4 个条目：体素值 1..3 均落在范围内
 	s.save_chunk(ck_a, buf_a, 0)
 	s.save_chunk(ck_b, buf_b, 0)
 	s.save_chunk(Vector3i.ZERO, buf_l1, 1)      # lod=1 → CACH 派生缓存（不是 model 1）
 	s.flush()
-	assert_true(FileAccess.file_exists(path), "应写出 .qvox 文件")
+	assert_true(FileAccess.file_exists(path), "应写出 .qvx 文件")
 
 	# 新实例回读：磁盘是权威，内存为空。
-	var r := QVoxStream.new()
+	var r := QVoxelStream.new()
 	r.file_path = path
 	assert_eq(r.load_chunk(ck_a, 0), buf_a, "lod0 chunk A 回读")
 	assert_eq(r.load_chunk(ck_b, 0), buf_b, "lod0 chunk B 回读")
@@ -348,7 +348,7 @@ func test_stream_end_to_end() -> void:
 	r.erase_chunk(ck_b, 0)
 	r.flush()
 
-	var r2 := QVoxStream.new()
+	var r2 := QVoxelStream.new()
 	r2.file_path = path
 	assert_eq(r2.load_chunk(ck_a, 0), buf_a, "擦除后 A 仍应存在")
 	assert_true(r2.load_chunk(ck_b, 0).is_empty(), "擦除后 B 应消失")
@@ -376,14 +376,14 @@ func test_stream_end_to_end() -> void:
 	assert_eq(dq.poll_all_ready(8).size(), 0, "不存在的 chunk 不应产出结果")
 	assert_true(not dq.is_chunk_pending(Vector3i(9, 9, 9), 0), "空块请求也应被消费")
 
-	# 文件本身仍应是合法 .qvox（用独立读取路径复核一次）
+	# 文件本身仍应是合法 .qvx（用独立读取路径复核一次）
 	var f := FileAccess.open(path, FileAccess.READ)
 	assert_true(f != null, "应能打开写出的文件")
 	if f != null:
 		var bytes := f.get_buffer(f.get_length())
 		f.close()
-		var rep := QVoxFile.QVoxReport.new()
-		var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+		var rep := QVoxelFile.QVoxelReport.new()
+		var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 		assert_true(doc != null and rep.ok(), "写出的文件应能通过解析与校验：%s" % rep.summary())
 		if doc != null:
 			# 回归：加载后直接 flush（本例走擦除→增量写）不得改写材质。
@@ -394,15 +394,15 @@ func test_stream_end_to_end() -> void:
 
 
 # ----------------------------------------------------------------------------
-# .qvox 作为一等资产：解析 → QVoxAsset → VoxelData / Mesh
+# .qvx 作为一等资产：解析 → QVoxelAsset → VoxelData / Mesh
 # （导入链路本身的用例在 test_qvox_import.gd；这里只钉"源格式 ↔ 适配器"的分派契约）
 # ----------------------------------------------------------------------------
 
-## 四种导入器都必须把 .qvox 当作可识别扩展名，且**不能丢掉 .vox**（否则破坏既有导入）。
+## 四种导入器都必须把 .qvx 当作可识别扩展名，且**不能丢掉 .vox**（否则破坏既有导入）。
 ##
 ## 【为什么用 load 而不是类名】全局注册类的可见性依赖编辑器完成一次文件系统扫描；
 ## 用路径加载则与注册时机无关，测试在任何时刻都稳定可跑（也顺带验证脚本可加载）。
-func test_importers_recognize_qvox() -> void:
+func test_importers_recognize_qvx() -> void:
 	var paths := [
 		"res://addons/VoxelSupport/Importers/VoxelNoopImporter.gd",
 		"res://addons/VoxelSupport/Importers/VoxelMeshImporter.gd",
@@ -416,40 +416,40 @@ func test_importers_recognize_qvox() -> void:
 			continue
 		var imp = script.new()
 		var exts: Array = imp._get_recognized_extensions()
-		assert_true("qvox" in exts, "%s 应识别 qvox" % p.get_file())
+		assert_true("qvx" in exts, "%s 应识别 qvx" % p.get_file())
 		assert_true("vox" in exts, "%s 应仍识别 vox" % p.get_file())
 
 
-## 扩展名分派契约：`.qvox` 归 QVoxAsset，`.vox` 归 VoxAsset，绝不互相冒充。
+## 扩展名分派契约：`.qvx` 归 QVoxelAsset，`.vox` 归 VoxAsset，绝不互相冒充。
 ##
 ## 这条是"源格式与适配器必须形状匹配"的守门用例：VoxAsset 是 MagicaVoxel 场景图形状的
-## 适配器，用它承载 .qvox 会丢掉 NODE 场景图与除第一个之外的所有模型（详见 QVoxAsset 注释），
-## 因此 from_asset() 遇到 .qvox 必须明确拒绝而不是返回一个丢信息的对象。
+## 适配器，用它承载 .qvx 会丢掉 NODE 场景图与除第一个之外的所有模型（详见 QVoxelAsset 注释），
+## 因此 from_asset() 遇到 .qvx 必须明确拒绝而不是返回一个丢信息的对象。
 func test_source_format_dispatch() -> void:
-	assert_true(QVoxAsset.handles("res://a/b.qvox"), "QVoxAsset 应认领 .qvox")
-	assert_true(QVoxAsset.handles("res://a/b.QVOX"), "扩展名判定应大小写无关")
-	assert_false(QVoxAsset.handles("res://a/b.vox"), "QVoxAsset 不应认领 .vox")
-	assert_true("qvox" in VoxAsset.SUPPORTED_EXTENSIONS and "vox" in VoxAsset.SUPPORTED_EXTENSIONS,
-			"扩展名列表应同时含 qvox 与 vox（四个导入器共用）")
+	assert_true(QVoxelAsset.handles("res://a/b.qvx"), "QVoxelAsset 应认领 .qvx")
+	assert_true(QVoxelAsset.handles("res://a/b.QVX"), "扩展名判定应大小写无关")
+	assert_false(QVoxelAsset.handles("res://a/b.vox"), "QVoxelAsset 不应认领 .vox")
+	assert_true("qvx" in VoxAsset.SUPPORTED_EXTENSIONS and "vox" in VoxAsset.SUPPORTED_EXTENSIONS,
+			"扩展名列表应同时含 qvx 与 vox（四个导入器共用）")
 
-	var sample := SAMPLES_DIR + "/deer.qvox"
+	var sample := SAMPLES_DIR + "/deer.qvx"
 	if FileAccess.file_exists(sample):
-		assert_true(VoxAsset.from_asset(sample) == null, "VoxAsset.from_asset 必须拒绝 .qvox")
-		assert_true(QVoxAsset.from_file(sample) != null, "QVoxAsset 应能解析同一文件")
+		assert_true(VoxAsset.from_asset(sample) == null, "VoxAsset.from_asset 必须拒绝 .qvx")
+		assert_true(QVoxelAsset.from_file(sample) != null, "QVoxelAsset 应能解析同一文件")
 
 
 # ----------------------------------------------------------------------------
-# 相机与节点树（NODE 下的工程数据，§5.1 / qvox 3）
+# 相机与节点树（NODE 下的工程数据，§5.1 / qvx 3）
 # ----------------------------------------------------------------------------
 # 这一组钉死三件事：
 #   ① 相机的字段**逐字段存活**，缺省只在缺失时补（文件里明写的 false 不能被改回来）；
 #   ② 坏数据只丢它自己 —— 非对象项、不在白名单的投影、未知 kind 都不该拖垮整块；
-#   ③ 编辑模型（QVoxWorld）与文件之间的往返一致，且节点树是**嵌套**的（不再有下标与图层）。
+#   ③ 编辑模型（QVoxelWorld）与文件之间的往返一致，且节点树是**嵌套**的（不再有下标与图层）。
 
 func test_cameras_and_nested_nodes_roundtrip() -> void:
-	var bytes := QVoxFile.serialize(_make_doc_with_engineering_data())
-	var rep := QVoxFile.QVoxReport.new()
-	var doc: QVoxFile.QVoxDocument = QVoxFile.parse(bytes, true, rep, true)
+	var bytes := QVoxelFile.serialize(_make_doc_with_engineering_data())
+	var rep := QVoxelFile.QVoxelReport.new()
+	var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
 	assert_true(doc != null, "应解析成功（%s）" % rep.summary())
 	if doc == null:
 		return
@@ -462,7 +462,7 @@ func test_cameras_and_nested_nodes_roundtrip() -> void:
 	assert_eq(sg.cameras[1]["projection"], "persp", "缺失的 projection 补缺省")
 	assert_false(sg.cameras[1].has("size"), "没写的可选字段不凭空补出来（未设 ≠ 设成 0）")
 
-	# 嵌套树：组是容器、模型是叶子，子节点在 children 里。**没有下标**正是 qvox 3 的要点 ——
+	# 嵌套树：组是容器、模型是叶子，子节点在 children 里。**没有下标**正是 qvx 3 的要点 ——
 	# 下标会随增删整体平移，一漏改就把节点挂到别的父下面（那类错既不报错、位置也看不出异常）。
 	var root := _find_node(sg.nodes, "root")
 	assert_eq(root.get("kind"), "group", "顶层是组")
@@ -481,11 +481,11 @@ func test_cameras_and_nested_nodes_roundtrip() -> void:
 func test_cameras_lenient_and_validated() -> void:
 	var doc := _make_doc()
 	doc.node = {
-		QVoxSpec.NODE_CAMERAS_KEY: [{"projection": "weird"}, {"projection": "ortho"}],
+		QVoxelSpec.NODE_CAMERAS_KEY: [{"projection": "weird"}, {"projection": "ortho"}],
 		"nodes": [{"name": "a", "kind": "model", "model_id": 0}],
 	}
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	var sg := parsed.scene
 
 	assert_eq(sg.cameras[0]["projection"], "persp", "不在白名单的投影按缺省处理")
@@ -504,8 +504,8 @@ func test_unknown_kind_drops_the_whole_subtree() -> void:
 					"children": [{"name": "inner", "kind": "model", "model_id": 0}]},
 		],
 	}
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	var sg := parsed.scene
 	assert_eq(sg.nodes.size(), 1, "未知 kind 的节点被丢弃")
 	assert_eq(sg.dropped_nodes, 2, "它和它的子树一起算丢弃（否则 inner 会飘到顶层）")
@@ -517,8 +517,8 @@ func test_model_with_children_keeps_the_model() -> void:
 	var doc := _make_doc()
 	doc.node = {"nodes": [{"name": "m", "kind": "model", "model_id": 0,
 			"children": [{"name": "x", "kind": "model", "model_id": 0}]}]}
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	var n := _find_node(parsed.scene.nodes, "m")
 	assert_false(n.is_empty(), "模型本身仍然可用")
 	assert_false(n.has("children"), "冗余的 children 被清掉")
@@ -527,9 +527,9 @@ func test_model_with_children_keeps_the_model() -> void:
 ## "只有相机、还没有对象"是新建工程的常态，不该在 nodes 的提前返回里被丢掉。
 func test_cameras_survive_without_nodes() -> void:
 	var doc := _make_doc()
-	doc.node = {QVoxSpec.NODE_CAMERAS_KEY: [{"name": "front"}]}
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(QVoxFile.serialize(doc), true, rep, true)
+	doc.node = {QVoxelSpec.NODE_CAMERAS_KEY: [{"name": "front"}]}
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	assert_eq(parsed.scene.cameras.size(), 1, "没有 nodes 键不该连相机一起丢")
 	assert_eq(parsed.scene.cameras[0]["name"], "front")
 	assert_true(parsed.scene.nodes.is_empty(), "节点树为空")
@@ -538,14 +538,14 @@ func test_cameras_survive_without_nodes() -> void:
 
 ## 相机字段改一下要能撤销。
 func test_world_camera_edit_is_undoable() -> void:
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	assert_eq(w.cameras().size(), 0, "新建世界没有相机")
 	assert_eq(w.add_camera("front"), 0, "第一台相机")
 	assert_eq(w.camera_field(0, "name"), "front")
 
-	# 面板把它包成 QVoxPropertyCommand(world, &"node")。这一条同时钉死了"写入必须整体替换"——
+	# 面板把它包成 QVoxelPropertyCommand(world, &"node")。这一条同时钉死了"写入必须整体替换"——
 	# 就地改的话 before 会跟着变，撤销就撤了个寂寞。
-	var cmd := QVoxPropertyCommand.begin(w, &"node")
+	var cmd := QVoxelPropertyCommand.begin(w, &"node")
 	assert_true(w.set_camera_field(0, "projection", "ortho"), "值变了 → 应产生撤销单位")
 	assert_false(w.set_camera_field(0, "projection", "ortho"), "值没变 → 不该占一次撤销")
 	assert_true(cmd.commit(), "整体替换 node 下的数组，浅快照才抓得住改前值")
@@ -560,23 +560,23 @@ func test_world_camera_edit_is_undoable() -> void:
 
 
 func test_world_engineering_data_roundtrip() -> void:
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	var mat := w.add_material(Color.RED)
 	var g := w.create_group("root")
 	var o := w.create_model("body", Vector3i(8, 8, 8), g)
 	o.fill_box(Vector3i.ZERO, Vector3i(3, 3, 3), mat)
 	var solid := o.count_solid()   # 闭区间盒 → 4³，不写死数字，测的是"存活"而非某个计数
 	# 组内坐标是一条链上条目（不再是节点字段）—— 它必须和别的条目一样往返
-	o.add_modifier(QVoxTransformModifier.of(PcgTransform.translate(Vector3i(1, 2, 3))))
+	o.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(1, 2, 3))))
 	w.add_camera("front")
 	assert_true(w.set_camera_field(0, "projection", "ortho"), "相机改成正交")
 	assert_true(w.set_camera_field(0, "size", 128), "正交视高")
 
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(
-			QVoxFile.serialize(w.to_document()), true, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(
+			QVoxelFile.serialize(w.to_document()), true, rep, true)
 	assert_true(rep.warnings.is_empty(), "回环不该有任何告警（%s）" % str(rep.warnings))
-	var w2 := QVoxWorld.from_document(parsed)
+	var w2 := QVoxelWorld.from_document(parsed)
 
 	assert_eq(w2.cameras().size(), 1, "相机条数")
 	assert_eq(w2.camera_field(0, "name"), "front")
@@ -584,60 +584,60 @@ func test_world_engineering_data_roundtrip() -> void:
 	assert_eq(int(w2.camera_field(0, "size")), 128, "正交视高存活（JSON 数字读回是 float）")
 
 	assert_eq(w2.nodes.size(), 1, "顶层只有那个组（模型是它的子节点，不是平级）")
-	var g2 := w2.nodes[0] as QVoxGroup
+	var g2 := w2.nodes[0] as QVoxelGroup
 	assert_eq(g2.node_name, "root", "组名存活")
 	assert_eq(g2.child_nodes.size(), 1, "组里的模型存活")
-	var o2 := g2.child_nodes[0] as QVoxModel
+	var o2 := g2.child_nodes[0] as QVoxelModel
 	assert_eq(o2.node_name, "body")
 	assert_eq(o2.modifiers.size(), 1, "组内坐标是一条链上条目")
-	var place := (o2.modifiers[0] as QVoxTransformModifier).transform
+	var place := (o2.modifiers[0] as QVoxelTransformModifier).transform
 	assert_eq(place.mode, PcgTransform.Mode.TRANSLATE, "它是平移条目")
 	assert_eq(place.offset, Vector3i(1, 2, 3), "组内坐标存活")
 	assert_eq(o2.count_solid(), solid, "体素存活")
 
 
-## 链上的条目要跟着节点树一起往返 —— 这是 qvox 3 新增的 steps 字段。
+## 链上的条目要跟着节点树一起往返 —— 这是 qvx 3 新增的 steps 字段。
 ##
 ## 【为什么连"输出盒尺寸"也一起断言】链的意义全在"它会改变求值结果"；只比条数等于没测，
 ## 参数读丢 / 旁通位读丢都能让条数一样而对不上。
 func test_node_modifiers_roundtrip() -> void:
-	var w := QVoxWorld.create_empty()
+	var w := QVoxelWorld.create_empty()
 	w.add_material(Color.RED)
 	var o := w.create_model("body", Vector3i(8, 8, 8))
 	# 三条覆盖三种"该存活的东西"：合成方式（差集）/ 核的参数（平铺份数）/ 旁通位。
-	# 差集挂在 SDF 条目上：体素域的变换型条目合成方式只能是「替换」（见 QVoxDomain.chain_errors）。
+	# 差集挂在 SDF 条目上：体素域的变换型条目合成方式只能是「替换」（见 QVoxelDomain.chain_errors）。
 	var hole := SdfSphere.new()
 	hole.center = Vector3(4.0, 4.0, 4.0)
 	hole.radius = 2.0
-	o.add_modifier(QVoxSdfModifier.of(hole, QVoxDomain.Combine.SUBTRACT))
-	o.add_modifier(QVoxTransformModifier.of(PcgTransform.repeat(0, 3)))
-	o.add_modifier(QVoxTransformModifier.of(PcgTransform.mirror(1)))
+	o.add_modifier(QVoxelSdfModifier.of(hole, QVoxelDomain.Combine.SUBTRACT))
+	o.add_modifier(QVoxelTransformModifier.of(PcgTransform.repeat(0, 3)))
+	o.add_modifier(QVoxelTransformModifier.of(PcgTransform.mirror(1)))
 	o.modifiers[2].enabled = false
 
-	var rep := QVoxFile.QVoxReport.new()
-	var parsed: QVoxFile.QVoxDocument = QVoxFile.parse(
-			QVoxFile.serialize(w.to_document()), true, rep, true)
+	var rep := QVoxelFile.QVoxelReport.new()
+	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(
+			QVoxelFile.serialize(w.to_document()), true, rep, true)
 	assert_true(rep.warnings.is_empty(), "回环不该有任何告警（%s）" % str(rep.warnings))
-	var o2 := QVoxWorld.from_document(parsed).all_models()[0]
+	var o2 := QVoxelWorld.from_document(parsed).all_models()[0]
 
 	assert_eq(o2.modifiers.size(), 3, "链上三条都要回来")
-	assert_eq(o2.modifiers[0].kind(), QVoxModifier.KIND_SDF, "种类存活")
-	assert_eq(o2.modifiers[0].combine, QVoxDomain.Combine.SUBTRACT, "合成方式存活")
-	assert_eq(o2.modifiers[1].kind(), QVoxModifier.KIND_TRANSFORM, "种类存活")
-	var t := (o2.modifiers[1] as QVoxTransformModifier).transform
+	assert_eq(o2.modifiers[0].kind(), QVoxelModifier.KIND_SDF, "种类存活")
+	assert_eq(o2.modifiers[0].combine, QVoxelDomain.Combine.SUBTRACT, "合成方式存活")
+	assert_eq(o2.modifiers[1].kind(), QVoxelModifier.KIND_TRANSFORM, "种类存活")
+	var t := (o2.modifiers[1] as QVoxelTransformModifier).transform
 	assert_eq(t.mode, PcgTransform.Mode.REPEAT, "核的种类存活")
 	assert_eq(t.times, 3, "核的参数存活")
 	assert_false(o2.modifiers[2].enabled, "旁通位存活（它不改变条数，只有尺寸/结果能证明它回来了）")
-	assert_eq(QVoxEvalEngine.output_grid_size(o2.modifiers, o2.grid_size), Vector3i(24, 8, 8),
+	assert_eq(QVoxelEvalEngine.output_grid_size(o2.modifiers, o2.grid_size), Vector3i(24, 8, 8),
 			"链的尺寸语义存活（平铺 ×3，镜像不改盒尺寸）")
 
 
 # --- 本节的局部辅助 ---------------------------------------------------------
 
-func _make_doc_with_engineering_data() -> QVoxFile.QVoxDocument:
+func _make_doc_with_engineering_data() -> QVoxelFile.QVoxelDocument:
 	var doc := _make_doc()
 	doc.node = {
-		QVoxSpec.NODE_CAMERAS_KEY: [
+		QVoxelSpec.NODE_CAMERAS_KEY: [
 			{"name": "front", "projection": "ortho", "size": 128},
 			{"name": "persp_cam"},
 		],
@@ -665,11 +665,11 @@ func _find_node(nodes: Array, node_name: String) -> Dictionary:
 # 辅助
 # ----------------------------------------------------------------------------
 
-func _make_doc() -> QVoxFile.QVoxDocument:
-	var doc := QVoxFile.QVoxDocument.new()
+func _make_doc() -> QVoxelFile.QVoxelDocument:
+	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
-		"qvox": QVoxSpec.VERSION,
-		"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": QVoxSpec.CHANNEL_BPP}],
+		"qvox": QVoxelSpec.VERSION,
+		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
 		"block_size": 32,
 		"up_axis": "y",
 	}
@@ -688,21 +688,21 @@ func _make_doc() -> QVoxFile.QVoxDocument:
 	return doc
 
 
-func _errors_contain(rep: QVoxFile.QVoxReport, needle: String) -> bool:
+func _errors_contain(rep: QVoxelFile.QVoxelReport, needle: String) -> bool:
 	for e in rep.errors:
 		if str(e).contains(needle):
 			return true
 	return false
 
 
-func _warnings_contain(rep: QVoxFile.QVoxReport, needle: String) -> bool:
+func _warnings_contain(rep: QVoxelFile.QVoxelReport, needle: String) -> bool:
 	for w in rep.warnings:
 		if str(w).contains(needle):
 			return true
 	return false
 
 
-func _list_qvox(dir_path: String) -> Array:
+func _list_qvx(dir_path: String) -> Array:
 	var out: Array = []
 	var dir := DirAccess.open(dir_path)
 	if dir == null:
@@ -710,7 +710,7 @@ func _list_qvox(dir_path: String) -> Array:
 	dir.list_dir_begin()
 	var name := dir.get_next()
 	while name != "":
-		if not dir.current_is_dir() and name.ends_with(".qvox"):
+		if not dir.current_is_dir() and name.ends_with(".qvx"):
 			out.append(dir_path.path_join(name))
 		name = dir.get_next()
 	dir.list_dir_end()
@@ -742,18 +742,18 @@ func _strip_trailing_zeros(payload: PackedByteArray) -> PackedByteArray:
 
 
 ## 只读文件头，判断 HEAD 块的 JSON 是否以 "qvox" 为第一个键（§3.1）。
-## 独立于 QVoxFile 实现，避免"用被测对象验证被测对象"。
+## 独立于 QVoxelFile 实现，避免"用被测对象验证被测对象"。
 func _head_qvox_first(bytes: PackedByteArray) -> bool:
-	if bytes.size() < QVoxSpec.SIGNATURE_SIZE + QVoxSpec.BLOCK_HEADER_SIZE:
+	if bytes.size() < QVoxelSpec.SIGNATURE_SIZE + QVoxelSpec.BLOCK_HEADER_SIZE:
 		return false
-	var at := QVoxSpec.SIGNATURE_SIZE
+	var at := QVoxelSpec.SIGNATURE_SIZE
 	var length := bytes.decode_u32(at)
 	var type := PackedByteArray()
 	for i in 4:
 		type.append(bytes[at + 4 + i])
-	if type.get_string_from_ascii() != QVoxSpec.BLOCK_HEAD:
+	if type.get_string_from_ascii() != QVoxelSpec.BLOCK_HEAD:
 		return false
-	var payload := bytes.slice(at + QVoxSpec.BLOCK_HEADER_SIZE, at + QVoxSpec.BLOCK_HEADER_SIZE + length)
+	var payload := bytes.slice(at + QVoxelSpec.BLOCK_HEADER_SIZE, at + QVoxelSpec.BLOCK_HEADER_SIZE + length)
 	while payload.size() > 0 and payload[payload.size() - 1] == 0:
 		payload.remove_at(payload.size() - 1)
 	var parsed: Variant = JSON.parse_string(payload.get_string_from_utf8())

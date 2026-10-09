@@ -1,10 +1,10 @@
-class_name QVoxStream
+class_name QVoxelStream
 extends VoxelStream
 
-## 磁盘文件流（QVox 单文件块流）—— .qvox 格式，一个文件承载整个世界。
+## 磁盘文件流（QVX 单文件块流）—— .qvx 格式，一个文件承载整个世界。
 ##
-## 取代旧的 .voxr region 存储。设计见 docs/QVOX_FORMAT.md。三点核心差异：
-##   1. 单文件：整个世界（所有 chunk、所有 LOD 层、材质、元数据）落在一个 .qvox，
+## 取代旧的 .voxr region 存储。设计见 docs/QVX_FORMAT.md。三点核心差异：
+##   1. 单文件：整个世界（所有 chunk、所有 LOD 层、材质、元数据）落在一个 .qvx，
 ##      而不是"每 region 一个文件"。文件数恒为 1。
 ##   2. 块流 + 内存索引：启动时扫描一次块头，建立 chunk_key → model/block 索引；
 ##      之后 save/load/has 全部 O(1) 命中内存。重写时按块重组，未知块原样保留。
@@ -21,22 +21,22 @@ extends VoxelStream
 ## "删掉语义为零"（§6）。于是取值路径只有一条：**权威数据永远从 VOX0 读，
 ## 派生的粗层数据永远从 CACH 读**，两条路互不干扰。
 ##
-## 块坐标 == chunk 坐标：QVox 的 block_size 与 VoxelChunk.CHUNK_SIZE 同为 32，
-## 因此 chunk_key 可直接作为 QVox 的块索引 (bx,by,bz)，无需换算。
+## 块坐标 == chunk 坐标：QVX 的 block_size 与 VoxelChunk.CHUNK_SIZE 同为 32，
+## 因此 chunk_key 可直接作为 QVX 的块索引 (bx,by,bz)，无需换算。
 ##
 ## 【持久化策略】内存只保留"未落盘的改动"（覆盖层 + 删除墓碑）+ 脏标记 + flush() 原子落盘。
 ##   - save_chunk 只改覆盖层并置脏，不立即写盘（避免每块一次整文件重写）
 ##   - flush() / 达到 auto_flush_dirty 阈值时才序列化（临时文件 + rename）；
-##     未变的块直接搬运磁盘原始字节（增量写，见 QVoxFile.serialize_incremental）
+##     未变的块直接搬运磁盘原始字节（增量写，见 QVoxelFile.serialize_incremental）
 ##   - 原子写保证读者只会看到旧的完整文件或新的完整文件，绝不半写
 
-## QVoxSpec / QVoxFile / QVoxBlockCodec 均为全局注册类（class_name），直接按名引用，
+## QVoxelSpec / QVoxelFile / QVoxelBlockCodec 均为全局注册类（class_name），直接按名引用，
 ## 不要用 `const X := preload(...)`（会遮蔽同名全局类并触发 "hides a global class"）。
 
 const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
 const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
 
-const FILE_EXT := "." + QVoxSpec.FILE_EXT
+const FILE_EXT := "." + QVoxelSpec.FILE_EXT
 
 ## 按目录组织存档的调用方使用的固定文件名（一个目录承载整个世界）。
 const WORLD_FILE_NAME := "world" + FILE_EXT
@@ -58,7 +58,7 @@ const LOD0_MODEL_ID := 0
 ## 头部元数据（写入 HEAD 的附加键，读取时原样带回，便于携带世界级参数）。
 @export var metadata: Dictionary = {}
 
-## 材质条目（按材质 ID 索引的 Array[Dictionary]，QVox MATE 结构）。
+## 材质条目（按材质 ID 索引的 Array[Dictionary]，QVX MATE 结构）。
 ## 由 VoxelData 在 flush 前通过 set_materials() 注入；索引 0 = 空气。
 var _materials: Array = []
 
@@ -128,7 +128,7 @@ var _loaded := false
 ## 【增量写】脏 model 集合（model_id → true）。仅这些 VOX0 块在 flush 时重建，
 ## 其余块直接搬运磁盘上的原始字节。替代"改一个块就重编码全世界"的全量路径；
 ## 而"重建"本身又只重编码变了的子块（内容看 _dirty_buffers、删除看 _deleted），
-## 未变子块仍按块索引搬运旧字节（见 QVoxFile.encode_vox0_blocks）。
+## 未变子块仍按块索引搬运旧字节（见 QVoxelFile.encode_vox0_blocks）。
 var _dirty_models: Dictionary = {}
 
 ## 【增量写】非 model 全局块（HEAD/MATE/NODE）是否需要重编码。materials/metadata 变动时置 true。
@@ -193,24 +193,24 @@ func _ensure_loaded() -> void:
 		return
 	var f := FileAccess.open(file_path, FileAccess.READ)
 	if f == null:
-		push_error("[QVoxStream] 无法读取 %s: %s" % [file_path, error_string(FileAccess.get_open_error())])
+		push_error("[QVoxelStream] 无法读取 %s: %s" % [file_path, error_string(FileAccess.get_open_error())])
 		return
 	var bytes := f.get_buffer(f.get_length())
 	f.close()
-	var doc: QVoxFile.QVoxDocument = QVoxFile.parse_with_index(bytes)
+	var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse_with_index(bytes)
 	if doc == null:
-		push_error("[QVoxStream] %s 解析失败，按空世界处理" % file_path)
+		push_error("[QVoxelStream] %s 解析失败，按空世界处理" % file_path)
 		return
 	# 【不变量校验】本流的全部坐标换算都建立在"块坐标 == chunk 坐标"之上，
-	# 即要求 HEAD.block_size == CHUNK_SIZE。block_size=16 的合法 .qvox 若照单全收，
+	# 即要求 HEAD.block_size == CHUNK_SIZE。block_size=16 的合法 .qvx 若照单全收，
 	# 每个 chunk 都会被按 16³ 解码 → 静默读出错误体素（接受却误读）。故 fail-fast 拒绝。
 	if doc.get_block_size() != CHUNK_SIZE:
-		push_error("[QVoxStream] %s 的 block_size=%d 与本流不兼容（本流要求 %d）"
+		push_error("[QVoxelStream] %s 的 block_size=%d 与本流不兼容（本流要求 %d）"
 				% [file_path, doc.get_block_size(), CHUNK_SIZE])
 		return
 	# 【不加载模型内容】只有块索引进内存：体素数据留在磁盘上，按块读（见 _read_clean_chunk）。
 	# doc.models 只是本次解析的中间产物，随 doc 一起在这里被丢弃。
-	# 材质：QVox MATE Dictionary → 供上层 set_materials 还原
+	# 材质：QVX MATE Dictionary → 供上层 set_materials 还原
 	_materials = doc.materials
 	# NODE 中的附加元数据原样带回
 	if doc.node.has("metadata") and doc.node["metadata"] is Dictionary:
@@ -234,7 +234,7 @@ func _ensure_loaded() -> void:
 
 ## 把未落盘的改动写盘（原子：写临时文件 → rename）。
 ##
-## 【增量写】磁盘上已有本文件时走 QVoxFile.serialize_incremental：只有变了的子块被重编码，
+## 【增量写】磁盘上已有本文件时走 QVoxelFile.serialize_incremental：只有变了的子块被重编码，
 ## 其余块（含 HEAD/MATE/NODE/未知块/CACH）直接搬运磁盘原始字节。这消除了"改一个 chunk
 ## 就重编码全世界所有 VOX0 块"的浪费（规范 §4 明示"块是编辑的局部性单位"）。
 ## 磁盘上还没有本文件（首写）时才整文件序列化 —— 此时覆盖层即完整世界，故也正确。
@@ -245,9 +245,9 @@ func _write_file() -> void:
 	# 这里重新加载，用磁盘上的真实索引做增量基准，避免退化成"只写覆盖层"而丢掉磁盘数据。
 	_ensure_loaded()
 	_ensure_dir()
-	var doc := QVoxFile.QVoxDocument.new()
+	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = _build_head()
-	doc.materials = _materials_to_qvox()
+	doc.materials = _materials_to_qvx()
 	doc.models = _overlay_doc_models()
 	var node := {}
 	if not metadata.is_empty():
@@ -256,7 +256,7 @@ func _write_file() -> void:
 	doc.unknown_blocks = _unknown_blocks
 
 	# 增量路径只需要 block_index 与旧 head/materials/node（用于变化对比）
-	var old_doc := QVoxFile.QVoxDocument.new()
+	var old_doc := QVoxelFile.QVoxelDocument.new()
 	old_doc.block_index = _block_index
 	old_doc.head = _loaded_head
 	old_doc.materials = _loaded_materials
@@ -268,10 +268,10 @@ func _write_file() -> void:
 	var bytes: PackedByteArray
 	if incremental:
 		# 增量基准 = 磁盘上当前的完整文件字节（按需读一次，不常驻）
-		bytes = QVoxFile.serialize_incremental(_read_base_bytes(), old_doc, doc,
+		bytes = QVoxelFile.serialize_incremental(_read_base_bytes(), old_doc, doc,
 				_dirty_models, _dirty_global, true, _deleted, _vox0_index, cach_replace)
 	else:
-		bytes = QVoxFile.serialize(doc)
+		bytes = QVoxelFile.serialize(doc)
 
 	# 【顺序要紧·一】据"待写字节"刷新块索引与 _vox0_index：派生缓存的 source_crc 是
 	# "它所依赖的 LOD0 子块 CRC"，必须取自**本次真正写出的字节**。若用内存里的旧索引，
@@ -284,7 +284,7 @@ func _write_file() -> void:
 	var derived := _encode_dirty_cach_entries()
 	if not derived.is_empty():
 		bytes.append_array(derived)
-		_block_index = QVoxFile.scan_block_index(bytes)
+		_block_index = QVoxelFile.scan_block_index(bytes)
 	# CACH 块偏移随前面块的大小变化而整体平移 → 按最终字节重建条目索引（轻量：只读头部，不解码）。
 	_build_cach_index(bytes)
 
@@ -343,7 +343,7 @@ func _on_write_done(serial: int, result: Array) -> void:
 	_write_in_flight = false
 	_write_task_id = -1
 	if int(result[0]) != OK:
-		push_error("[QVoxStream] 原子替换失败: %s" % error_string(int(result[0])))
+		push_error("[QVoxelStream] 原子替换失败: %s" % error_string(int(result[0])))
 		_restore_inflight()
 		return
 	_inflight = {}   # 本次已落盘，快照可以丢了
@@ -404,7 +404,7 @@ func _read_base_bytes() -> PackedByteArray:
 		return PackedByteArray()
 	var f := FileAccess.open(file_path, FileAccess.READ)
 	if f == null:
-		push_error("[QVoxStream] 无法读取增量基准 %s: %s"
+		push_error("[QVoxelStream] 无法读取增量基准 %s: %s"
 				% [file_path, error_string(FileAccess.get_open_error())])
 		return PackedByteArray()
 	var b := f.get_buffer(f.get_length())
@@ -417,7 +417,7 @@ func _read_base_bytes() -> PackedByteArray:
 ## 走完整 parse_with_index 会把每个 VOX0 的 32768 个体素全部解码并跑语义校验，
 ## 是扫描的数百倍代价（实测 1834ms vs <1ms），且增量写的正确性并不依赖它。
 func _refresh_index_from(bytes: PackedByteArray) -> void:
-	_block_index = QVoxFile.scan_block_index(bytes)
+	_block_index = QVoxelFile.scan_block_index(bytes)
 	if _block_index.is_empty():
 		# 扫描异常（不该发生）：清空索引 → 下次退回全量，安全兜底
 		_vox0_index.clear()
@@ -425,7 +425,7 @@ func _refresh_index_from(bytes: PackedByteArray) -> void:
 	# head/materials/node 快照仍从新写出的 doc 语义侧取（写入端已知其内容，
 	# 无需再从字节反解——那正是我们要避免的全量解析）。
 	_loaded_head = _build_head()
-	_loaded_materials = _materials_to_qvox()
+	_loaded_materials = _materials_to_qvx()
 	_loaded_node = {}
 	if not metadata.is_empty():
 		_loaded_node["metadata"] = metadata
@@ -455,15 +455,15 @@ func _build_vox0_index(block_size: int, bytes: PackedByteArray) -> void:
 	var src := bytes
 	var next_idx: Dictionary = {}
 	for bi in _block_index:
-		if bi["type"] != QVoxSpec.BLOCK_VOX0:
+		if bi["type"] != QVoxelSpec.BLOCK_VOX0:
 			continue
 		var mid := int(bi.get("model_id", -1))
 		if mid < 0:
 			continue
 		var off: int = bi["offset"]
 		var total: int = bi["total"]
-		var payload_off := off + QVoxSpec.BLOCK_HEADER_SIZE
-		var payload_len := total - QVoxSpec.BLOCK_HEADER_SIZE
+		var payload_off := off + QVoxelSpec.BLOCK_HEADER_SIZE
+		var payload_len := total - QVoxelSpec.BLOCK_HEADER_SIZE
 		# 未变 model 且已有索引：沿用（省下一次 1.4MB 负载的 CRC 扫描），仅刷新文件基址
 		if not _dirty_models.has(mid) and _vox0_index.has(mid):
 			var kept: Dictionary = _vox0_index[mid]
@@ -472,23 +472,23 @@ func _build_vox0_index(block_size: int, bytes: PackedByteArray) -> void:
 			continue
 		# 下界用模型头的实际长度（10 字节），而不是旧的魔法数 6——6~9 字节的负载
 		# 能通过旧判据却让 index_vox0_blocks 立刻返回空索引（静默丢块）。
-		if payload_len < QVoxSpec.VOX_MODEL_HEADER_SIZE or payload_off + payload_len > src.size():
+		if payload_len < QVoxelSpec.VOX_MODEL_HEADER_SIZE or payload_off + payload_len > src.size():
 			continue
-		var sub := QVoxFile.index_vox0_blocks(src.slice(payload_off, payload_off + payload_len), block_size)
+		var sub := QVoxelFile.index_vox0_blocks(src.slice(payload_off, payload_off + payload_len), block_size)
 		(sub["_meta"] as Dictionary)["base"] = payload_off
 		next_idx[mid] = sub
 	_vox0_index = next_idx
 
 
-## 构造 HEAD JSON 字典（qvox / channels / block_size / up_axis + 附加元数据）。
+## 构造 HEAD JSON 字典（qvx / channels / block_size / up_axis + 附加元数据）。
 ## block_size 恒为 CHUNK_SIZE —— 这不是"硬编码"，而是本流的不变量：
 ## 块坐标 == chunk 坐标（见类注释），block_size 不为 CHUNK_SIZE 的文件在加载时即被拒绝。
 func _build_head() -> Dictionary:
 	var head := {
-		"qvox": QVoxSpec.VERSION,
-		"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": QVoxSpec.CHANNEL_BPP}],
+		"qvox": QVoxelSpec.VERSION,
+		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
 		"block_size": CHUNK_SIZE,
-		"up_axis": QVoxSpec.DEFAULT_UP_AXIS,
+		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 	}
 	# 附加键（metadata 里的自定义键并入 HEAD，便于携带世界级参数）
 	for k in metadata:
@@ -498,20 +498,20 @@ func _build_head() -> Dictionary:
 	return head
 
 
-## 上层材质数组 → QVox MATE Dictionary 列表。
+## 上层材质数组 → QVX MATE Dictionary 列表。
 ##
 ## 转换本身在 VoxelMaterial.to_mate()（写盘与导入共用的唯一实现，见那里的量纲与缺口说明）：
 ## 这里只负责两件存储层的事——(1) 条目 0 恒为空气（§4 格式不变量，体素值 0 就是空气）；
 ## (2) 逐条归一化，使"加载 → 改块 → flush"多次写盘稳定（幂等）。
-func _materials_to_qvox() -> Array:
+func _materials_to_qvx() -> Array:
 	var out: Array = []
 	for i in _materials.size():
 		out.append(VoxelMaterial.air_mate() if i == 0 else VoxelMaterial.to_mate(_materials[i]))
 	return out
 
 
-## 未落盘的写入（_dirty_buffers）→ QVox doc.models（**只含脏块**，不是全世界）。
-## 统一输出 int 键；QVoxDocument 的 model_ids()/model_blocks() 会兼容两种键，
+## 未落盘的写入（_dirty_buffers）→ QVX doc.models（**只含脏块**，不是全世界）。
+## 统一输出 int 键；QVoxelDocument 的 model_ids()/model_blocks() 会兼容两种键，
 ## 故读取方无需关心键类型（历史上 int/str 混用曾让增量写无声退化成全量）。
 ## 这里不做"空块剪除"——save_chunk 早已把全空块转成 erase_chunk（见那里的注释）。
 func _overlay_doc_models() -> Dictionary:
@@ -535,7 +535,7 @@ func _overlay_doc_models() -> Dictionary:
 # 定长前置 2 + 17 = 19 字节。带 plen 是为了让"缓存内容在哪结束"成为块内事实（P4）：
 # CACH 负载按 §6 含 0–3 字节尾部填充，没有 plen 就只能退化为"剩余 < 4 即合法"的灰区判定。
 
-const LOD_ENTRY_HEADER := 2 + QVoxSpec.VOX_BLOCK_HEADER_SIZE
+const LOD_ENTRY_HEADER := 2 + QVoxelSpec.VOX_BLOCK_HEADER_SIZE
 
 
 ## 从文件字节建 CACH 条目索引（只读头部，**不解码**内容）。
@@ -549,15 +549,15 @@ const LOD_ENTRY_HEADER := 2 + QVoxSpec.VOX_BLOCK_HEADER_SIZE
 func _build_cach_index(bytes: PackedByteArray) -> void:
 	var idx: Dictionary = {}
 	for bi in _block_index:
-		if bi["type"] != QVoxSpec.BLOCK_CACH:
+		if bi["type"] != QVoxelSpec.BLOCK_CACH:
 			continue
 		var block_off: int = bi["offset"]
-		var payload_off := block_off + QVoxSpec.BLOCK_HEADER_SIZE
-		var payload_len: int = int(bi["total"]) - QVoxSpec.BLOCK_HEADER_SIZE
+		var payload_off := block_off + QVoxelSpec.BLOCK_HEADER_SIZE
+		var payload_len: int = int(bi["total"]) - QVoxelSpec.BLOCK_HEADER_SIZE
 		if payload_len < LOD_ENTRY_HEADER or payload_off + payload_len > bytes.size():
 			continue
 		var payload := bytes.slice(payload_off, payload_off + payload_len)
-		var hdr := QVoxFile.parse_cach_header(payload)
+		var hdr := QVoxelFile.parse_cach_header(payload)
 		if hdr.is_empty():
 			continue
 		# §6 规则 2/3：kind 或算法版本不认识 → 不索引（当作别的写入方的数据，原样保留）。
@@ -569,10 +569,10 @@ func _build_cach_index(bytes: PackedByteArray) -> void:
 		var lod := payload.decode_u16(content_off)
 		if lod < 1:
 			continue
-		# 内层子块头同样复用 QVoxFile.read_vox_block（唯一布局实现）。
+		# 内层子块头同样复用 QVoxelFile.read_vox_block（唯一布局实现）。
 		# limit 传整个负载长度：plen 界定内容，其后至多是 CACH 块尾填充，不构成损坏。
-		var blk := QVoxFile.read_vox_block(payload, content_off + 2, payload.size())
-		if blk.is_empty() or int(blk["codec"]) == QVoxSpec.CODEC_EMPTY:
+		var blk := QVoxelFile.read_vox_block(payload, content_off + 2, payload.size())
+		if blk.is_empty() or int(blk["codec"]) == QVoxelSpec.CODEC_EMPTY:
 			continue
 		if not idx.has(lod):
 			idx[lod] = {}
@@ -616,7 +616,7 @@ func _encode_dirty_cach_entries() -> PackedByteArray:
 				"payload": payload,
 			})
 	var out := PackedByteArray()
-	QVoxFile.append_cach_blocks(out, entries)
+	QVoxelFile.append_cach_blocks(out, entries)
 	return out
 
 
@@ -644,21 +644,21 @@ func _collect_cach_offsets(lod: int, keys: Array, out: Dictionary) -> void:
 
 
 ## 一个粗层块 → CACH 负载（2 字节 lod + 17 字节子块头 + 打包数据）。全空块不缓存（返回空）。
-## 子块部分复用 QVoxFile.write_vox_block：这段 17 字节布局**只在那边维护一处**，
+## 子块部分复用 QVoxelFile.write_vox_block：这段 17 字节布局**只在那边维护一处**，
 ## 免得 LOD 缓存与 VOX0 各自手抄偏移、日后漂移成"两套只有一半读者能读"的格式。
 func _pack_lod_block(lod: int, key: Vector3i, buf: PackedInt32Array) -> PackedByteArray:
 	if buf.size() != CHUNK_VOLUME:
 		return PackedByteArray()
 	# 一次完成"选 codec + 出字节"（原生）。此前 pick + pack 是两趟 GDScript 逐元素扫描，
 	# 实测约 15ms/块（CACH 重写一次可能带几百个粗层块）。
-	var picked := QVoxBlockCodec.choose_and_pack(buf, CHUNK_VOLUME)
-	var codec: int = picked.get("codec", QVoxSpec.CODEC_EMPTY)
-	if codec == QVoxSpec.CODEC_EMPTY:
+	var picked := QVoxelBlockCodec.choose_and_pack(buf, CHUNK_VOLUME)
+	var codec: int = picked.get("codec", QVoxelSpec.CODEC_EMPTY)
+	if codec == QVoxelSpec.CODEC_EMPTY:
 		return PackedByteArray()
 	var out := PackedByteArray()
 	out.resize(2)
 	out.encode_u16(0, lod & 0xFFFF)
-	QVoxFile.write_vox_block(out, key, codec, picked.get("payload", PackedByteArray()))
+	QVoxelFile.write_vox_block(out, key, codec, picked.get("payload", PackedByteArray()))
 	return out
 
 
@@ -690,7 +690,7 @@ func _read_cach_block(e: Dictionary) -> PackedInt32Array:
 	f.seek(int(e["payload_off"]))
 	var payload := f.get_buffer(int(e["payload_len"]))
 	f.close()
-	return QVoxBlockCodec.unpack(int(e["codec"]), payload, CHUNK_VOLUME)
+	return QVoxelBlockCodec.unpack(int(e["codec"]), payload, CHUNK_VOLUME)
 
 
 ## 取一个粗层块：未落盘的覆盖层优先 → 墓碑视为不存在 → 磁盘索引（来源须成立）。
@@ -920,7 +920,7 @@ func _read_clean_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 	f.seek(base + int(info["payload_off"]))
 	var payload := f.get_buffer(int(info["payload_len"]))
 	f.close()
-	return QVoxBlockCodec.unpack(int(info["codec"]), payload, CHUNK_VOLUME)
+	return QVoxelBlockCodec.unpack(int(info["codec"]), payload, CHUNK_VOLUME)
 
 
 ## lod=0 在磁盘上的子块索引（含 "_meta"）；没有 VOX0 块时返回空字典。
@@ -968,7 +968,7 @@ func get_stream_path() -> String:
 	return file_path
 
 
-## .qvox 单文件世界：粗层 LOD block 独立持久化在 CACH（kind="LODS"）中，
+## .qvx 单文件世界：粗层 LOD block 独立持久化在 CACH（kind="LODS"）中，
 ## 故本流承载粗层（供渲染器判断"可否直接同步降采样"与"是否回写持久化"）。
 func supports_lod_layer() -> bool:
 	return true
@@ -989,7 +989,7 @@ func set_materials(mats: Array) -> void:
 	_dirty_global = true   # 【增量写】MATE 属全局块，需重编码
 
 
-## 读取文件中的材质（QVox MATE Dictionary 列表），无则空数组。
+## 读取文件中的材质（QVX MATE Dictionary 列表），无则空数组。
 func get_materials() -> Array:
 	_ensure_loaded()
 	return _materials

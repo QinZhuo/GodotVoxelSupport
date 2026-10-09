@@ -1,9 +1,9 @@
 @tool
-class_name QVoxBrushTool
+class_name QVoxelBrushTool
 extends RefCounted
 ## 画笔工具：一次手势（按下 → 拖动 → 松手）的状态机，产出**要写的体素坐标**。
 ##
-## 【为什么工具不写数据】写入必须过 QVoxVoxelEditCommand（撤销要改动前后的块快照），
+## 【为什么工具不写数据】写入必须过 QVoxelEditCommand（撤销要改动前后的块快照），
 ## 而"哪些格要写"是纯几何。分开之后：工具可无头测试（不需要节点 / 输入 / 渲染），
 ## 预览与落笔调的是同一个函数，命令类也不必知道有几种工具。
 ##
@@ -219,12 +219,12 @@ func _stroke(a: Vector3i, b: Vector3i, pick: Pick) -> Array[Vector3i]:
 		Mode.FILL:
 			return _stroke_fill(pick)
 		Mode.BOX:
-			return QVoxBrushGeometry.box(_clip(a, pick), _clip(b, pick))
+			return QVoxelBrushGeometry.box(_clip(a, pick), _clip(b, pick))
 		Mode.LINE:
-			return QVoxBrushGeometry.line(_clip(a, pick), _clip(b, pick))
+			return QVoxelBrushGeometry.line(_clip(a, pick), _clip(b, pick))
 		_:
 			# 体素笔：相邻采样点之间补一条线。鼠标事件是离散的，不补线则快速拖动会断成虚点。
-			return QVoxBrushGeometry.line(_clip(a, pick), _clip(b, pick))
+			return QVoxelBrushGeometry.line(_clip(a, pick), _clip(b, pick))
 
 
 ## 面笔：铺满与拾取点连通的一片"暴露面"。
@@ -234,12 +234,12 @@ func _stroke_face(pick: Pick) -> Array[Vector3i]:
 	if not pick.solid.is_valid():
 		return []
 	var normal := pick.normal
-	var offsets := QVoxBrushGeometry.plane_offsets4(normal)
+	var offsets := QVoxelBrushGeometry.plane_offsets4(normal)
 	var accept := func(p: Vector3i) -> bool:
 		return bool(pick.solid.call(p)) and not bool(pick.solid.call(p + normal))
 	var step := func(_p: Vector3i) -> Array[Vector3i]:
 		return offsets
-	var exposed := QVoxBrushGeometry.region([pick.hit], accept, step)
+	var exposed := QVoxelBrushGeometry.region([pick.hit], accept, step)
 	if pick.erase:
 		return exposed
 	# 画：写在暴露面的外侧（沿法线一格）；擦：就擦掉暴露面本身
@@ -258,8 +258,8 @@ func _stroke_fill(pick: Pick) -> Array[Vector3i]:
 	var accept := func(p: Vector3i) -> bool:
 		return bool(pick.solid.call(p)) and int(pick.material_at.call(p)) == want
 	var step := func(_p: Vector3i) -> Array[Vector3i]:
-		return QVoxBrushGeometry.neighbors6()
-	return QVoxBrushGeometry.region([pick.hit], accept, step)
+		return QVoxelBrushGeometry.neighbors6()
+	return QVoxelBrushGeometry.region([pick.hit], accept, step)
 
 
 ## live 工具取"已交出末端 → 当前端点"这一段。
@@ -297,7 +297,7 @@ static func _clip(p: Vector3i, pick: Pick) -> Vector3i:
 func _finish(cells: Array[Vector3i], pick: Pick) -> Array[Vector3i]:
 	var radius := brush_size - 1
 	if supports_brush_size() and radius > 0:
-		cells = QVoxBrushGeometry.dilate(cells, radius)
+		cells = QVoxelBrushGeometry.dilate(cells, radius)
 	if pick == null or pick.grid == Vector3i.ZERO:
 		return cells
 	if symmetry != Vector3i.ZERO:

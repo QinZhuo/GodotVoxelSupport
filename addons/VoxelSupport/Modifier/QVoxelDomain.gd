@@ -1,5 +1,5 @@
 @tool
-class_name QVoxDomain
+class_name QVoxelDomain
 extends RefCounted
 
 ## 求值域 —— 一条链上只允许存在三种数据形态，且只能单向降级。
@@ -20,8 +20,8 @@ extends RefCounted
 ## 【与 Blender / Houdini 的差异（刻意的）】Blender 用单域换简单，Houdini 用全 DAG 换
 ## 表达力。本设计取第三条路：线性链 + 每个修改器可挂子图（见 DESIGN.md「线性链承载 DAG」）。
 ##
-## 【域由修改器类型表达，不靠方法探测】链上唯一的条目类型是 QVoxModifier，它的子类直接
-## 就是域（QVoxSdfModifier → FIELD，QVoxModelModifier / QVoxVolumeModifier → VOXEL）。于是
+## 【域由修改器类型表达，不靠方法探测】链上唯一的条目类型是 QVoxelModifier，它的子类直接
+## 就是域（QVoxelSdfModifier → FIELD，QVoxelModelModifier / QVoxelVolumeModifier → VOXEL）。于是
 ## "这个条目属于哪个域""它是不是源"都是类型问题；本类只保留"这样排合不合法"的规则。
 
 
@@ -46,7 +46,7 @@ enum Combine {
 	UNION,        ## 并（A ∪ B）
 	SUBTRACT,     ## 差（A \ B）
 	INTERSECT,    ## 交（A ∩ B）
-	SMOOTH_UNION, ## 平滑并（圆角过渡，宽度由 QVoxModifier.blend 给出）
+	SMOOTH_UNION, ## 平滑并（圆角过渡，宽度由 QVoxelModifier.blend 给出）
 }
 
 const COMBINE_NAMES: PackedStringArray = ["替换", "并集", "差集", "交集", "平滑并集"]
@@ -62,7 +62,7 @@ const COMBINE_FIELD_ONLY: Array[Combine] = [Combine.SMOOTH_UNION]
 ## 【为什么是方法存在性而不是共用基类】算子文件零改动就能接入新能力（不给 Sdf / PcgDetail /
 ## PcgModel 加新基类）—— 共用基类会把两个本可独立演化的模块永久绑在一起。
 ##
-## 【为什么"源"不用这里判】源与算子的区别（`QVoxModifier.is_source`）是**类型级**的：
+## 【为什么"源"不用这里判】源与算子的区别（`QVoxelModifier.is_source`）是**类型级**的：
 ## 体素域分"自足产出"（PcgModel）与"就地改写 / 重排"（PcgDetail / PcgTransform），
 ## 而后者拿不到输入就做不了布尔 —— 这条区别必须在链校验里是硬约束，故由子类类型表达。
 const CAP_SAMPLE := &"sample"          ## FIELD：逐点采样
@@ -85,7 +85,7 @@ static func chain_errors(modifiers: Array) -> Array:
 	var errs: Array = []
 	var prev := -1
 	for i in modifiers.size():
-		var m: QVoxModifier = modifiers[i]
+		var m: QVoxelModifier = modifiers[i]
 		if m == null or m.op() == null:
 			continue
 		var d := m.domain()
@@ -125,7 +125,7 @@ static func validate_chain(modifiers: Array) -> PackedStringArray:
 static func final_domain(modifiers: Array) -> Kind:
 	var last := Kind.VOXEL
 	for item in modifiers:
-		var m: QVoxModifier = item
+		var m: QVoxelModifier = item
 		if m == null or not m.is_active():
 			continue
 		last = m.domain()

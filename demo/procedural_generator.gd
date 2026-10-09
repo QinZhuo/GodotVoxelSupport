@@ -6,7 +6,7 @@ extends VoxelGenerator
 ## 用 FastNoiseLite 连续噪声（世界坐标）生成高度场地形，同 chunk_key 确定性地形。
 ##
 ## 注意它**不是** VoxelStream：生成器只管"造"，不碰存储。用户破坏的数据由与之并列的
-## stream（QVoxStream 落盘 / VoxelMemoryStream 只存内存）负责，两者在 VoxelData 上各占一个
+## stream（QVoxelStream 落盘 / VoxelMemoryStream 只存内存）负责，两者在 VoxelData 上各占一个
 ## 属性，取数时流优先（存过的必须权威，不能被重新生成覆盖）。
 ## 高度用**绝对体素 y** 判断：任意 y 层 chunk 按世界高度填，地形跨层连续。
 ##

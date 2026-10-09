@@ -2,13 +2,13 @@
 
 importer="voxel_mesh"
 type="Mesh"
-uid="uid://bg8sbc5p3m7pc"
-path="res://.godot/imported/teapot1.qvox-13f0e7a95aaf0eb138d6ad2eea9c4303.mesh"
+uid="uid://c5hlbewbsyoyt"
+path="res://.godot/imported/cars.qvx-55964800781eb57e326d1bf210754ade.mesh"
 
 [deps]
 
-source_file="res://demo/samples/teapot1.qvox"
-dest_files=["res://.godot/imported/teapot1.qvox-13f0e7a95aaf0eb138d6ad2eea9c4303.mesh"]
+source_file="res://demo/samples/cars.qvx"
+dest_files=["res://.godot/imported/cars.qvx-55964800781eb57e326d1bf210754ade.mesh"]
 
 [params]
 

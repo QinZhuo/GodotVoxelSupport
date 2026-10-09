@@ -1,6 +1,6 @@
 @tool
-class_name QVoxVoxelEditCommand
-extends QVoxCommand
+class_name QVoxelEditCommand
+extends QVoxelCommand
 ## 一次体素手势（画笔 / 盒 / 线 / 填充 / 橡皮都收敛到这一条）。
 ##
 ## 【为什么所有手绘工具共用一个命令类】它们的差别只在"哪些格被改成什么"，而撤销需要的
@@ -23,14 +23,14 @@ extends QVoxCommand
 ## 快照式撤销永远精确，代价是内存，而懒采集把内存压到了"实际改动量"。
 ##
 ## 【快照必须是独立副本：`get_block()` 给的是活视图】本类存下的 before/after 是"点时刻的值"，
-## 而 `QVoxModel.get_block()` 返回的数组与内部 `blocks[bk]` **共享同一缓冲**（见其注释），
+## 而 `QVoxelModel.get_block()` 返回的数组与内部 `blocks[bk]` **共享同一缓冲**（见其注释），
 ## `_write_box` 的逐元素写会就地改到它。曾经没拷贝的后果很隐蔽：擦除一笔时 before 被同一次
 ## 写入抹成"和 after 一样"，于是 commit() 判定"什么都没变"→ 返回值 false、命令不入栈、
 ## `undo()` 无内容可回滚，而屏幕上明明看到格子没了。所以本类**每一处留存块内容的地方**
 ## 都必须 `duplicate()`（共三处：抓 before、封口收 after、回放时交出），一处漏掉就会重新长出这个 bug。
 
 ## 被编辑的对象。为 null（对象已删）时撤销会明确报错，而不是静默改错对象。
-var object: QVoxModel
+var object: QVoxelModel
 
 ## 块坐标 → 该块**首次被改动前**的整块内容。空数组 = 该块当时不存在（撤销时要删掉它）。
 var before: Dictionary = {}
@@ -46,14 +46,14 @@ var dirty_hi := Vector3i.ZERO
 var _dirty := false
 
 
-func _init(obj: QVoxModel) -> void:
+func _init(obj: QVoxelModel) -> void:
 	super(&"voxel_edit", -1, [])
 	object = obj
 
 
 ## 开始一次手势。**必须在任何写入之前调用**（before 只能从"还没改过"的状态里抓）。
-static func begin(obj: QVoxModel) -> QVoxVoxelEditCommand:
-	return QVoxVoxelEditCommand.new(obj)
+static func begin(obj: QVoxelModel) -> QVoxelEditCommand:
+	return QVoxelEditCommand.new(obj)
 
 
 # ----------------------------------------------------------------------------
@@ -74,7 +74,7 @@ func fill_box(a: Vector3i, b: Vector3i, material_id: int) -> int:
 	return object.fill_box(a, b, material_id)
 
 
-## 密集体积写入（整对象变换 / 导入用）。data 布局 = QVoxModel.apply_box（PcgModel.index_of）。
+## 密集体积写入（整对象变换 / 导入用）。data 布局 = QVoxelModel.apply_box（PcgModel.index_of）。
 ##
 ## 【为什么必须有这个入口】整对象变换要一次重写整片网格：逐格走 set_voxel 会为每一格
 ## 各付一次"算块号 + 查字典 + 记脏"，256³ 就是 1600 万次；而 object.apply_box 本就按块推进。
@@ -163,7 +163,7 @@ func undo() -> void:
 ## 把一组块内容写回对象。src 里出现空数组 = 该块应当不存在（set_block 的空数组语义）。
 func _restore(src: Dictionary) -> void:
 	if object == null:
-		push_error("[QVox] 体素编辑命令的目标对象已不存在（model_id=%d）" % int(params[0]))
+		push_error("[QVX] 体素编辑命令的目标对象已不存在（model_id=%d）" % int(params[0]))
 		return
 	for bk: Vector3i in src:
 		# duplicate：set_block 会接管这份缓冲，而 src 还要留给下一次 undo/redo（见类头注释）
@@ -175,7 +175,7 @@ func _snapshot_voxel(x: int, y: int, z: int) -> void:
 		return
 	if x >= object.grid_size.x or y >= object.grid_size.y or z >= object.grid_size.z:
 		return
-	_snapshot_block(QVoxSpec.block_of(Vector3i(x, y, z), object.block_size))
+	_snapshot_block(QVoxelSpec.block_of(Vector3i(x, y, z), object.block_size))
 
 
 func _snapshot_box(a: Vector3i, b: Vector3i) -> void:
@@ -186,8 +186,8 @@ func _snapshot_box(a: Vector3i, b: Vector3i) -> void:
 			Vector3i.ZERO, object.grid_size - Vector3i.ONE)
 	if hi.x < lo.x or hi.y < lo.y or hi.z < lo.z:
 		return
-	var b0 := QVoxSpec.block_of(lo, bs)
-	var b1 := QVoxSpec.block_of(hi, bs)
+	var b0 := QVoxelSpec.block_of(lo, bs)
+	var b1 := QVoxelSpec.block_of(hi, bs)
 	for bz in range(b0.z, b1.z + 1):
 		for by in range(b0.y, b1.y + 1):
 			for bx in range(b0.x, b1.x + 1):
@@ -200,7 +200,7 @@ func _snapshot_block(bk: Vector3i) -> void:
 		before[bk] = object.get_block(bk).duplicate()
 		# 脏范围按**块**扩张：逐格记 min/max 要付出每格 6 次比较，而块粒度已经足够精确
 		# （视口本来也按块刷新）。
-		var o := QVoxSpec.block_origin(bk, object.block_size)
+		var o := QVoxelSpec.block_origin(bk, object.block_size)
 		var e := o + Vector3i.ONE * (object.block_size - 1)
 		dirty_lo = o if not _dirty else Vector3i(mini(dirty_lo.x, o.x), mini(dirty_lo.y, o.y),
 				mini(dirty_lo.z, o.z))

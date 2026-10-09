@@ -1,6 +1,6 @@
 extends TestCase
 
-## 网格拾取（QVoxGridPick）的契约测试。
+## 网格拾取（QVoxelGridPick）的契约测试。
 ##
 ## 它补的是内核不回答的那半句：新建的模型是空的，而 `VoxelRay` 只在实心格上给命中 ——
 ## 空图上射线永远打不到东西，第一笔就画不下去。这里钉死四条承诺：
@@ -20,19 +20,19 @@ const GRID := Vector3i(8, 8, 8)
 # ----------------------------------------------------------------------------
 
 ## 会话（含显示层）+ 可选的一批实心格：拾取要读的就是显示层。
-func _session(solid := {}) -> QVoxEditSession:
-	var w := QVoxWorld.create_empty()
+func _session(solid := {}) -> QVoxelEditSession:
+	var w := QVoxelWorld.create_empty()
 	w.add_material(Color(1, 0, 0)) # ID 1
 	var obj := w.create_model("m", GRID)
-	var s := QVoxEditSession.create_for(obj, w)
+	var s := QVoxelEditSession.create_for(obj, w)
 	for p: Vector3i in solid:
 		s.data.set_voxel(p, solid[p], false)
 	return s
 
 
 ## 打一条竖直向下的射线（相机在地板上方），返回拾取结果。
-func _look_down(s: QVoxEditSession, xz := Vector2(2.5, 3.5)) -> Dictionary:
-	return QVoxGridPick.hit(s.data, Vector3(xz.x, 5.0, xz.y), Vector3.DOWN, s.output_size())
+func _look_down(s: QVoxelEditSession, xz := Vector2(2.5, 3.5)) -> Dictionary:
+	return QVoxelGridPick.hit(s.data, Vector3(xz.x, 5.0, xz.y), Vector3.DOWN, s.output_size())
 
 
 # ----------------------------------------------------------------------------
@@ -45,13 +45,13 @@ func test_voxel_hit_wins_over_the_floor() -> void:
 	assert_eq(info[VoxelRay.KEY_HIT], Vector3i(2, 1, 3), "打得到实心格时给的是体素命中")
 	assert_eq(info[VoxelRay.KEY_NORMAL], Vector3i.DOWN, "法线是入射面（从上方来）")
 	assert_eq(info[VoxelRay.KEY_MATERIAL], MAT, "材质来自数据层（面笔/填充要用）")
-	assert_ne(info[VoxelRay.KEY_HIT].y, QVoxGridPick.FLOOR_LAYER, "地板不得抢答")
+	assert_ne(info[VoxelRay.KEY_HIT].y, QVoxelGridPick.FLOOR_LAYER, "地板不得抢答")
 
 
 func test_ray_starting_inside_a_solid_voxel_keeps_the_kernel_answer() -> void:
 	# 起点就在实心格内：内核明确给 normal = ZERO（"没有入射面"），不得被地板回退掩盖。
 	var s := _session({Vector3i(2, 5, 3): MAT})
-	var info := QVoxGridPick.hit(s.data, Vector3(2.5, 5.5, 3.5), Vector3.DOWN, s.object.grid_size)
+	var info := QVoxelGridPick.hit(s.data, Vector3(2.5, 5.5, 3.5), Vector3.DOWN, s.object.grid_size)
 	assert_eq(info[VoxelRay.KEY_HIT], Vector3i(2, 5, 3), "起点所在格即命中格")
 	assert_eq(info[VoxelRay.KEY_NORMAL], Vector3i.ZERO, "没有入射面就不编一个出来")
 	assert_false(s.pick_from_hit(info).valid(), "无入射面 ⇒ 无处落笔（视口据此不建命令）")
@@ -64,7 +64,7 @@ func test_ray_starting_inside_a_solid_voxel_keeps_the_kernel_answer() -> void:
 func test_empty_grid_lands_on_the_bottom_layer() -> void:
 	var s := _session()
 	var info := _look_down(s)
-	assert_eq(info[VoxelRay.KEY_HIT], Vector3i(2, QVoxGridPick.FLOOR_LAYER, 3), "命中地板层，坐标 = 射线与 y=0 的交点所在列")
+	assert_eq(info[VoxelRay.KEY_HIT], Vector3i(2, QVoxelGridPick.FLOOR_LAYER, 3), "命中地板层，坐标 = 射线与 y=0 的交点所在列")
 	assert_eq(info[VoxelRay.KEY_NORMAL], Vector3i.UP, "法线朝上（落笔格往 +Y 长）")
 	assert_eq(info[VoxelRay.KEY_MATERIAL], 0, "地板不是体素，材质为空")
 
@@ -95,26 +95,26 @@ func test_floor_outside_the_grid_is_not_a_hit() -> void:
 func test_parallel_or_upward_rays_never_hit_the_floor() -> void:
 	var s := _session()
 	var g := s.object.grid_size
-	assert_true(QVoxGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.RIGHT, g).is_empty(),
+	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.RIGHT, g).is_empty(),
 		"与地板平行的射线：永不相交")
-	assert_true(QVoxGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.UP, g).is_empty(),
+	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.UP, g).is_empty(),
 		"朝上的射线交点在反向延长线上（t < 0）")
-	assert_true(QVoxGridPick.hit(s.data, Vector3(2.5, -5, 3.5), Vector3.DOWN, g).is_empty(),
+	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, -5, 3.5), Vector3.DOWN, g).is_empty(),
 		"从地板下方朝下打：t < 0")
 
 
 func test_floor_respects_max_distance() -> void:
 	var s := _session()
 	var g := s.object.grid_size
-	assert_true(QVoxGridPick.hit(s.data, Vector3(2.5, 50, 3.5), Vector3.DOWN, g, 100.0).has(VoxelRay.KEY_HIT),
+	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 50, 3.5), Vector3.DOWN, g, 100.0).has(VoxelRay.KEY_HIT),
 		"50 格内看得见地板")
-	assert_true(QVoxGridPick.hit(s.data, Vector3(2.5, 500, 3.5), Vector3.DOWN, g, 100.0).is_empty(),
+	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 500, 3.5), Vector3.DOWN, g, 100.0).is_empty(),
 		"超出 max_distance 就不算命中（和内核同一条距离约定）")
 
 
 func test_zero_grid_has_no_floor() -> void:
 	var s := _session()
-	assert_true(QVoxGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.DOWN, Vector3i.ZERO).is_empty(),
+	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.DOWN, Vector3i.ZERO).is_empty(),
 		"没有网格尺寸就无从判断地板覆盖到哪，不猜")
 
 

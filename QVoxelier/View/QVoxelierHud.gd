@@ -5,7 +5,7 @@ extends QVoxelierPanel
 ##
 ## 【为什么值得单独一类】视口的手感有一半来自反馈：用户必须能当场看到"我在哪个格上"
 ## "这一笔写下去是几号材质""刚才那笔撤得掉吗"。把这些塞进视口脚本，会让一个本该只翻译
-## 输入的角色长出界面细节；而它们又必须与工具表（[QVoxBrushTool.MODES]）保持一致 ——
+## 输入的角色长出界面细节；而它们又必须与工具表（[QVoxelBrushTool.MODES]）保持一致 ——
 ## 提示文案与按钮同源，才不会出现"工具栏写着线笔、提示却还在讲盒笔"。
 ##
 ## 【形态无关】只依赖会话（Editing 层），不认识相机与渲染器：换成 Dock 内嵌视口时一行都不用改。
@@ -19,7 +19,7 @@ extends QVoxelierPanel
 ## 用户不必猜"平板上的右键在哪"。
 
 ## 会话（由视口装配后设进来；为空时只显示静态文案）。
-var session: QVoxEditSession = null
+var session: QVoxelEditSession = null
 
 var _tool: Label
 var _hint: Label
@@ -55,7 +55,7 @@ func refresh() -> void:
 	_hint.text = t.hint()
 	_brush.text = "笔刷 %d" % t.brush_size if t.supports_brush_size() else "笔刷 —"
 	_brush.add_theme_color_override("font_color",
-			QVoxUi.TEXT if t.supports_brush_size() else QVoxUi.TEXT_FAINT)
+			QVoxelUi.TEXT if t.supports_brush_size() else QVoxelUi.TEXT_FAINT)
 	var undo := session.history.undo_label()
 	var redo := session.history.redo_label()
 	# 可重做条数 = 命令流里游标之后的那一段（游标把一条命令流切成"已生效 / 可重做"两半）。
@@ -109,43 +109,43 @@ func _build() -> void:
 func _build_status() -> void:
 	var bar := PanelContainer.new()
 	bar.add_theme_stylebox_override("panel",
-			QVoxUi.box(QVoxUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxUi.space_m(), 0))
+			QVoxelUi.box(QVoxelUi.BAR, Color(0, 0, 0, 0), 0, 0, QVoxelUi.space_m(), 0))
 	bar.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	bar.offset_top = -QVoxUi.status_height()
+	bar.offset_top = -QVoxelUi.status_height()
 	add_child(bar)
 
-	var row := QVoxUi.hbox(QVoxUi.space_m())
+	var row := QVoxelUi.hbox(QVoxelUi.space_m())
 	bar.add_child(row)
 
-	_tool = _readout(QVoxUi.FONT_L, QVoxUi.ACCENT)
+	_tool = _readout(QVoxelUi.FONT_L, QVoxelUi.ACCENT)
 	row.add_child(_tool)
-	_hint = _readout(QVoxUi.FONT_M, QVoxUi.TEXT_DIM)
+	_hint = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	_hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_hint.clip_text = true
 	_hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	row.add_child(_hint)
 	# 隔一条线：左边是"你现在能做什么"（提示），右边是"你现在是什么状态"（读数）。
-	row.add_child(QVoxUi.vdivider(QVoxUi.status_height() / 2))
-	_cursor = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
+	row.add_child(QVoxelUi.vdivider(QVoxelUi.status_height() / 2))
+	_cursor = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_cursor)
-	_brush = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
+	_brush = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_brush)
-	_material = _readout(QVoxUi.FONT_M, QVoxUi.TEXT)
+	_material = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_material)
 	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。
-	row.add_child(QVoxUi.vdivider(QVoxUi.status_height() / 2))
-	_history = _readout(QVoxUi.FONT_M, QVoxUi.TEXT_DIM)
+	row.add_child(QVoxelUi.vdivider(QVoxelUi.status_height() / 2))
+	_history = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	row.add_child(_history)
 
 
 ## 提示条压在调色板上方（调色板占着底边），避免被盖住。
 func _build_toast() -> void:
-	_toast = QVoxUi.label("", QVoxUi.FONT_TITLE, QVoxUi.ACCENT, true)
+	_toast = QVoxelUi.label("", QVoxelUi.FONT_TITLE, QVoxelUi.ACCENT, true)
 	_toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
 	_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	var bottom := QVoxUi.status_height() + QVoxUi.hit_size() + 2 * QVoxUi.space_s() + QVoxUi.space_m()
-	_toast.offset_top = -float(bottom) - QVoxUi.FONT_TITLE - QVoxUi.space_s()
+	var bottom := QVoxelUi.status_height() + QVoxelUi.hit_size() + 2 * QVoxelUi.space_s() + QVoxelUi.space_m()
+	_toast.offset_top = -float(bottom) - QVoxelUi.FONT_TITLE - QVoxelUi.space_s()
 	_toast.offset_bottom = -float(bottom)
 	add_child(_toast)
 
@@ -153,37 +153,37 @@ func _build_toast() -> void:
 ## 操作说明浮层：鼠标与触摸两套并列。默认隐藏（视口第一印象要干净），
 ## 由应用栏的「?」开关 —— 说明是查得到的东西，不该常驻占地方。
 func _build_legend() -> void:
-	_legend = QVoxUi.panel(QVoxUi.space_m(), QVoxUi.SURFACE_SOLID)
+	_legend = QVoxelUi.panel(QVoxelUi.space_m(), QVoxelUi.SURFACE_SOLID)
 	_legend.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 	# 锚在右上角、向左下方生长：浮层宽度由文案决定（不写死宽度，改文案不必调这里）。
 	_legend.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	_legend.offset_left = -QVoxUi.space_m()
-	_legend.offset_right = -QVoxUi.space_m()
-	_legend.offset_top = QVoxUi.bar_height() + QVoxUi.space_m()
-	_legend.offset_bottom = QVoxUi.bar_height() + QVoxUi.space_m()
+	_legend.offset_left = -QVoxelUi.space_m()
+	_legend.offset_right = -QVoxelUi.space_m()
+	_legend.offset_top = QVoxelUi.bar_height() + QVoxelUi.space_m()
+	_legend.offset_bottom = QVoxelUi.bar_height() + QVoxelUi.space_m()
 	_legend.visible = false
 	add_child(_legend)
 
-	var col := QVoxUi.vbox(QVoxUi.SPACE_XS)
+	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	_legend.add_child(col)
-	col.add_child(QVoxUi.heading("操作说明"))
+	col.add_child(QVoxelUi.heading("操作说明"))
 	for block in _LEGEND:
-		var section := QVoxUi.label(block[0], QVoxUi.FONT_M, QVoxUi.ACCENT)
-		section.custom_minimum_size.y = QVoxUi.space_l()
+		var section := QVoxelUi.label(block[0], QVoxelUi.FONT_M, QVoxelUi.ACCENT)
+		section.custom_minimum_size.y = QVoxelUi.space_l()
 		col.add_child(section)
 		for line in block[1]:
-			col.add_child(QVoxUi.label(line, QVoxUi.FONT_S, QVoxUi.TEXT_DIM))
+			col.add_child(QVoxelUi.label(line, QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
 
 
 ## 说明文案：**两套操作形态并列**，因为同一套界面上平板与鼠标的动作名字不同。
-## 改输入约定时改这里一处（工具级的提示在 QVoxBrushTool.MODES 里，两处各管一层）。
+## 改输入约定时改这里一处（工具级的提示在 QVoxelBrushTool.MODES 里，两处各管一层）。
 const _LEGEND := [
 	["鼠标 + 键盘", [
 		"左键拖动 画 · 右键 擦（或开左侧「擦除」）",
 		"中键拖动 转视角 · Shift+中键 平移 · 滚轮 缩放 · Home 取景",
 		"V/F/B/L/C 切工具 · E 擦除 · [ ] 改笔刷 · 1..8 选材质",
 		"Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消这一笔",
-		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开（.qvox 可直接拖进窗口）",
+		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开（.qvx 可直接拖进窗口）",
 	]],
 	["触摸屏", [
 		"单指拖动 画 · 用左侧「擦除」开关代替右键",
@@ -194,8 +194,8 @@ const _LEGEND := [
 
 
 func _readout(font_size: int, color: Color) -> Label:
-	# 压在 3D 画面上，故一律带暗描边（见 QVoxUi.label 的 outlined）。
-	var l := QVoxUi.label("", font_size, color, true)
+	# 压在 3D 画面上，故一律带暗描边（见 QVoxelUi.label 的 outlined）。
+	var l := QVoxelUi.label("", font_size, color, true)
 	# 状态栏比一行字高，Label 默认顶对齐会让整排读数贴在上边；显式居中。
 	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	return l

@@ -17,9 +17,9 @@ extends QVoxelierPanel
 ## 同理，镜头与预设都**自己管互斥**（不挂 ButtonGroup）：回显只在 set_* 里一次性写完，
 ## 免得"程序设状态"与"组内自动互斥"两套逻辑互相拆台。
 
-## 镜头类型（值同 QVoxViewCamera.Lens）。
+## 镜头类型（值同 QVoxelViewCamera.Lens）。
 signal lens_selected(mode: int)
-## 标准视图（值同 QVoxViewCamera.View）。
+## 标准视图（值同 QVoxelViewCamera.View）。
 signal view_selected(view: int)
 ## 网格线显隐。
 signal grid_lines_toggled(enabled: bool)
@@ -35,42 +35,42 @@ func _build() -> void:
 	# 左锚点、下锚点：面板贴着视口左下角，窗口变高变矮时它跟着底边走（见父类文档"常驻抬头层"）。
 	# 底边留出状态栏的高度 —— 那条栏是全局的，任何面板都不该压在它上面。
 	set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
-	offset_left = QVoxUi.space_m()
-	offset_bottom = -(QVoxUi.status_height() + QVoxUi.space_s())
+	offset_left = QVoxelUi.space_m()
+	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
 
-	var panel := QVoxUi.panel(QVoxUi.space_s())
+	var panel := QVoxelUi.panel(QVoxelUi.space_s())
 	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	add_child(panel)
 	panel.resized.connect(func(): size = panel.size)
 
-	var col := QVoxUi.vbox(QVoxUi.SPACE_XS)
+	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	panel.add_child(col)
 
-	col.add_child(QVoxUi.heading("视图"))
+	col.add_child(QVoxelUi.heading("视图"))
 	col.add_child(_build_lens_row())
 
-	col.add_child(QVoxUi.divider())
+	col.add_child(QVoxelUi.divider())
 	col.add_child(_build_view_grid())
 
-	col.add_child(QVoxUi.divider())
-	_grid = QVoxUi.toggle_button("显示底面格线；关掉只剩外框，便于看清形状")
+	col.add_child(QVoxelUi.divider())
+	_grid = QVoxelUi.toggle_button("显示底面格线；关掉只剩外框，便于看清形状")
 	_grid.text = "网格线"
 	_grid.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_grid.set_pressed_no_signal(true)
 	_grid.toggled.connect(func(on: bool): grid_lines_toggled.emit(on))
 	col.add_child(_grid)
 
-	set_lens(QVoxViewCamera.Lens.PERSPECTIVE)
-	set_view(QVoxViewCamera.View.FREE)
+	set_lens(QVoxelViewCamera.Lens.PERSPECTIVE)
+	set_view(QVoxelViewCamera.View.FREE)
 
 
 ## 镜头：透视 / 正交，二选一。不是复选组，而是单选 —— "没有镜头"不是一个能走到的状态。
 func _build_lens_row() -> HBoxContainer:
-	var row := QVoxUi.hbox(QVoxUi.SPACE_XS)
-	for m in [QVoxViewCamera.Lens.PERSPECTIVE, QVoxViewCamera.Lens.ORTHO]:
-		var b := QVoxUi.toggle_button(_lens_hint(m))
-		b.text = QVoxViewCamera.LENS_NAMES[m]
-		b.custom_minimum_size = Vector2(QVoxUi.hit_size() * 1.6, QVoxUi.hit_size())
+	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	for m in [QVoxelViewCamera.Lens.PERSPECTIVE, QVoxelViewCamera.Lens.ORTHO]:
+		var b := QVoxelUi.toggle_button(_lens_hint(m))
+		b.text = QVoxelViewCamera.LENS_NAMES[m]
+		b.custom_minimum_size = Vector2(QVoxelUi.hit_size() * 1.6, QVoxelUi.hit_size())
 		b.pressed.connect(func(): lens_selected.emit(m))
 		_lens[m] = b
 		row.add_child(b)
@@ -81,12 +81,12 @@ func _build_lens_row() -> HBoxContainer:
 func _build_view_grid() -> GridContainer:
 	var grid := GridContainer.new()
 	grid.columns = COLUMNS
-	grid.add_theme_constant_override("h_separation", QVoxUi.SPACE_XS)
-	grid.add_theme_constant_override("v_separation", QVoxUi.SPACE_XS)
-	for v in QVoxViewCamera.VIEW_ANGLES_DEG:
-		var b := QVoxUi.toggle_button("把视角转到%s视图" % QVoxViewCamera.VIEW_NAMES[v])
-		b.text = QVoxViewCamera.VIEW_NAMES[v]
-		b.custom_minimum_size = Vector2(QVoxUi.hit_size(), QVoxUi.hit_size())
+	grid.add_theme_constant_override("h_separation", QVoxelUi.SPACE_XS)
+	grid.add_theme_constant_override("v_separation", QVoxelUi.SPACE_XS)
+	for v in QVoxelViewCamera.VIEW_ANGLES_DEG:
+		var b := QVoxelUi.toggle_button("把视角转到%s视图" % QVoxelViewCamera.VIEW_NAMES[v])
+		b.text = QVoxelViewCamera.VIEW_NAMES[v]
+		b.custom_minimum_size = Vector2(QVoxelUi.hit_size(), QVoxelUi.hit_size())
 		# pressed 而不是 toggled：见类文档（连按两次要各生效一次）。
 		b.pressed.connect(func(): view_selected.emit(v))
 		_views[v] = b
@@ -95,7 +95,7 @@ func _build_view_grid() -> GridContainer:
 
 
 static func _lens_hint(mode: int) -> String:
-	if mode == QVoxViewCamera.Lens.ORTHO:
+	if mode == QVoxelViewCamera.Lens.ORTHO:
 		return "正交投影：没有近大远小，量比例、对齐体素用（等轴视角配它才正）"
 	return "透视投影：有纵深感，看立体形状更直观"
 

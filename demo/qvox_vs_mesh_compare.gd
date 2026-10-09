@@ -1,6 +1,6 @@
 extends Node3D
 
-## QVox ⇄ Mesh 对比验证场 —— 以「.vox 直接导入成 mesh」为正确基准。
+## QVX ⇄ Mesh 对比验证场 —— 以「.vox 直接导入成 mesh」为正确基准。
 ##
 ## 每个模型渲染**两份**，左右紧邻：
 ##   左：MESH 路径（正确基准）
@@ -8,30 +8,30 @@ extends Node3D
 ##        → ArrayMesh + VoxelMeshGenerator.generate_textured_materials_runtime(materials)
 ##        这条路径就是 demo.tscn 里 deer.vox 作为 ArrayMesh 使用的路径，
 ##        用户确认「导入 mesh 显示的 mesh 是正确的」。
-##   右：QVOX 路径（待验证）
-##        .vox → VoxelData → .qvox (QVoxStream.save_chunk) → 回读 → VoxelRenderer
+##   右：QVX 路径（待验证）
+##        .vox → VoxelData → .qvx (QVoxelStream.save_chunk) → 回读 → VoxelRenderer
 ##
 ## 两侧都用同一套 256×1 材质纹理（VoxelMaterial.albedo_color 采样），
 ## 因此**颜色差异只能来自 UV 或网格几何**。
 ##
 ## 关键已知差异（本场景要暴露的）：
 ##   MESH 路径 UV: (u, 0.5)          —— GDScript _generate_size_dir_face
-##   QVOX 路径 UV: (u, 0.0)          —— 原生 generate_dense_impl (voxel_native.cpp:301/316)
+##   QVX 路径 UV: (u, 0.0)          —— 原生 generate_dense_impl (voxel_native.cpp:301/316)
 ##   两者 u 相同、v 不同。若纹理被按 clamp/mipmap/双线性处理，v=0.0 可能采到边界，
 ##   在 1 像素高的纹理上产生条纹/串色。
 ##
-## 除肉眼对比，本场景还做**逐体素数值比对**（QVox 往返 vs 原始 chunk 缓冲），
+## 除肉眼对比，本场景还做**逐体素数值比对**（QVX 往返 vs 原始 chunk 缓冲），
 ## 并在 HUD 打出 PASS / FAIL。
 ##
 ## 操作：
-##   1..9  : 只显示第 N 组（左 mesh / 右 qvox）
+##   1..9  : 只显示第 N 组（左 mesh / 右 qvx）
 ##   0     : 显示全部
 ##   M     : 单独切换 mesh 侧显示
-##   Q     : 单独切换 qvox 侧显示
-##   V     : 把 QVOX 侧的 UV 从 v=0.0 改成 v=0.5 复测（验证 v 的影响）
+##   Q     : 单独切换 qvx 侧显示
+##   V     : 把 QVX 侧的 UV 从 v=0.0 改成 v=0.5 复测（验证 v 的影响）
 ##   W     : 线框
 ##   R     : 自动旋转
-##   F     : 强制重新烘焙 .qvox 后再比对
+##   F     : 强制重新烘焙 .qvx 后再比对
 ##   左键拖拽 / 滚轮 : 旋转 / 缩放
 ##   Esc   : 退出
 
@@ -45,19 +45,19 @@ extends Node3D
 @export var group_gap: float = 6.2
 @export var target_extent: float = 2.2
 ## 烘焙缓存目录。**本场景独占，不与其它 demo 共用**：
-## 【踩过的坑】它原先是 `user://qvox_viewer`（与 qvox_model_viewer 同一个目录、同一批文件名），
+## 【踩过的坑】它原先是 `user://qvx_viewer`（与 qvox_model_viewer 同一个目录、同一批文件名），
 ## 而 viewer 按 world_origin（负坐标）烘、本场景按 bottom_center（重映射到 0 起）烘——
 ## 谁后跑谁把对方的缓存覆盖掉，表现是**逐体素比对莫名 FAIL**（差异成千上万格，但两侧位置仍对齐）。
 ## 缓存键必须包含"写入时的语义"，否则缓存会跨语义串味。
 @export var bake_dir: String = "user://qvox_vs_mesh"
 @export var force_rebake: bool = false
-## 覆盖 QVOX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
+## 覆盖 QVX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
 ## 两侧**显式同取**的原点模式（见 `_build_group` / `_build_reference_mesh`）。
 ## 抽成常量是为了让"烘焙文件名 + 数据构造 + mesh 选项"三处不可能各写一个值——
 ## 这三处一旦不一致，表现就是逐体素比对 FAIL 而位置看着还对（最难查的那类 bug）。
 const ORIGIN_MODE := VoxelData.OriginMode.BOTTOM_CENTER
 
-## 覆盖 QVOX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
+## 覆盖 QVX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
 @export var qvox_uv_v_override: float = -1.0
 
 var _camera: Camera3D
@@ -206,7 +206,7 @@ func _build_all(rebake: bool) -> void:
 	_update_hud()
 
 
-## 构建一组：左 = mesh 路径（正确基准），右 = .qvox 往返
+## 构建一组：左 = mesh 路径（正确基准），右 = .qvx 往返
 func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictionary:
 	var name := src.get_file().get_basename()
 
@@ -223,7 +223,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	mesh_inst.mesh = mesh
 	_root.add_child(mesh_inst)
 
-	# ---------- B. QVox 路径 ----------
+	# ---------- B. QVX 路径 ----------
 	# 两侧**显式取同一个原点模式**：导入器默认值现在是 world_origin（原样保留文件里的坐标），
 	# 而本场景的排布与取景是按"模型贴地"设计的（world_origin 下 teapot1 会悬空 5.8 单位、出画）。
 	# 默认值本身的一致性由 test_qvox_import.gd 的 test_mesh_and_data_origin_agree 守着，
@@ -236,11 +236,11 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 
 	# 文件名带回原点模式：缓存键必须包含"写入时的语义"，否则改了模式就会读到上一次的坐标
 	# （目录已独占，这层是第二道保险，也让缓存文件自解释）。
-	var qpath := bake_dir.path_join("%s_%d.qvox" % [name, ORIGIN_MODE])
+	var qpath := bake_dir.path_join("%s_%d.qvx" % [name, ORIGIN_MODE])
 	if rebake or not FileAccess.file_exists(qpath):
 		_bake_qvox(qpath, data, chunks_vox)
 
-	var reader := QVoxStream.new()
+	var reader := QVoxelStream.new()
 	reader.file_path = qpath
 	reader.clear_cache()
 	var chunks_qvox := {}
@@ -305,7 +305,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 			if not (nrms[a] == nrms[b] and nrms[b] == nrms[c]):
 				geo_bad_normal += 1
 
-	# ---------- D. QVox 渲染器 ----------
+	# ---------- D. QVX 渲染器 ----------
 	var rdata := VoxelData.new()
 	rdata.stream = reader
 	# 【关键】渲染顶点 = (体素坐标 + data.center_offset) * voxel_scale，故这个新 VoxelData 必须
@@ -323,7 +323,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 
 	var ok := diff_count == 0 and missing == 0 and extra == 0 \
 			and geo_bad_uv == 0 and geo_bad_normal == 0
-	print("[QvxMeshCmp] %s: mesh=%d face / qvox %d chunk | 比对单元 %d 差异 %d | 缺块 %d 多块 %d | 几何 %d tri 坏UV %d 坏法线 %d → %s"
+	print("[QvxMeshCmp] %s: mesh=%d face / qvx %d chunk | 比对单元 %d 差异 %d | 缺块 %d 多块 %d | 几何 %d tri 坏UV %d 坏法线 %d → %s"
 			% [name, mesh.get_faces().size() / 3, chunks_qvox.size(), total_cells, diff_count,
 			   missing, extra, geo_tris, geo_bad_uv, geo_bad_normal, "PASS" if ok else "FAIL"])
 
@@ -372,7 +372,7 @@ func _mesh_aabb(mesh: ArrayMesh) -> AABB:
 
 
 func _bake_qvox(qpath: String, data: VoxelData, chunks: Dictionary) -> void:
-	var stream := QVoxStream.new()
+	var stream := QVoxelStream.new()
 	stream.file_path = qpath
 	var mats: Array = []
 	mats.resize(data.materials.size())
@@ -429,7 +429,7 @@ static func _local_from_index(i: int) -> Vector3i:
 	return Vector3i(lx, ly, lz)
 
 
-## 排布：左侧 mesh（正确基准），右侧 qvox，各自直接摆到槽位，**不做任何位置补偿**。
+## 排布：左侧 mesh（正确基准），右侧 qvx，各自直接摆到槽位，**不做任何位置补偿**。
 ##
 ## 【为什么不再需要补偿】两条路径现在共用同一套原点语义（`VoxelData.OriginMode`，
 ## 默认 bottom_center = 内容 X/Z 居中 + Y 贴底）。历史上这里两边的原点不同——mesh 走 .vox 的
@@ -447,7 +447,7 @@ func _layout() -> void:
 		var mesh_inst: MeshInstance3D = g["mesh_inst"]
 		var qvox_r: VoxelRenderer = g["qvox_r"]
 
-		# qvox 侧体素 AABB
+		# qvx 侧体素 AABB
 		# 注意：qvox_r.data 是由 reader 支撑的 VoxelData（只含 stream，无 _chunk_buffers），
 		# 因此必须用最初 from_voxel_data 得到的 data 来算体素范围。
 		var va: AABB = _chunk_extent(g["chunks_raw"])
@@ -457,7 +457,7 @@ func _layout() -> void:
 			continue
 
 		# 两条路径都要缩放到 target_extent：mesh 顶点已含 scale=0.1，
-		# qvox 通过 voxel_scale 控制。
+		# qvx 通过 voxel_scale 控制。
 		var mesh_extent := maxf(maxf(ma.size.x, ma.size.y), ma.size.z)
 		var vox_extent := maxf(maxf(va.size.x, va.size.y), va.size.z)
 		var mesh_scale := target_extent / mesh_extent
@@ -483,7 +483,7 @@ func _layout() -> void:
 		var origin_delta := (m_min - q_min).length()
 		g["origin_delta"] = origin_delta
 		if origin_delta >= 0.01:
-			push_warning("[QvxMeshCmp] %s 两侧原点不一致：mesh 底面 y=%.3f vs qvox 底面 y=%.3f（Δ=%.3f）"
+			push_warning("[QvxMeshCmp] %s 两侧原点不一致：mesh 底面 y=%.3f vs qvx 底面 y=%.3f（Δ=%.3f）"
 					% [g["name"], m_min.y, q_min.y, origin_delta])
 
 		g["_w"] = target_extent
@@ -593,7 +593,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					_auto_rotate = false
 
 
-## 诊断开关：把 qvox 侧已生成 chunk mesh 的 UV.v 从 0.0 改成 0.5，复测颜色是否恢复。
+## 诊断开关：把 qvx 侧已生成 chunk mesh 的 UV.v 从 0.0 改成 0.5，复测颜色是否恢复。
 ## 这是「mesh 路径用 v=0.5 / 原生 chunk 路径用 v=0.0」这一差异的直接验证。
 func _patch_qvox_uv_v() -> void:
 	var v := 0.5 if qvox_uv_v_override < 0.0 else qvox_uv_v_override
@@ -622,13 +622,13 @@ func _patch_qvox_uv_v() -> void:
 
 func _update_hud() -> void:
 	var fps := Engine.get_frames_per_second()
-	_hud.text = "QVox ⇄ Mesh 对比验证    FPS: %d\n" % fps + \
-			"左=MESH 导入(正确基准)   右=.qvox 往返 (QVOX UV.v 覆写: %s)\n" % [
+	_hud.text = "QVX ⇄ Mesh 对比验证    FPS: %d\n" % fps + \
+			"左=MESH 导入(正确基准)   右=.qvx 往返 (QVX UV.v 覆写: %s)\n" % [
 				("原生0.0" if qvox_uv_v_override < 0.0 else "%.1f" % qvox_uv_v_override)] + \
 			"M:%s Q:%s W线框 R旋转\n" % ["显示mesh" if _show_mesh else "隐藏mesh", "显示qvox" if _show_qvox else "隐藏qvox"] + \
 			"1-9:聚焦 0:全部 V:切换QVox UV.v F:重烘焙 Esc:退出"
 
-	var lines: Array = ["QVox ⇄ MESH 逐体素比对", ""]
+	var lines: Array = ["QVX ⇄ MESH 逐体素比对", ""]
 	for g in _groups:
 		var tag := "PASS" if g["ok"] else "FAIL"
 		var org: Variant = g.get("origin_delta")

@@ -24,7 +24,7 @@
 ```
 VoxelData                    — 体素数据存储与修改（材质、chunk 缓冲）
   ├─ VoxelStream (@abstract)     — 存储：chunk 级持久化 API（全部方法 @abstract）
-  │    ├─ QVoxStream             — .qvox 单文件块流世界存档（磁盘）
+  │    ├─ QVoxelStream             — .qvx 单文件块流世界存档（磁盘）
   │    └─ VoxelMemoryStream      — 纯内存（不落盘；程序化世界的编辑落脚处）
   └─ VoxelGenerator (@abstract)  — 生成：给定 key 算出数据（不碰 I/O、无状态）
        └─ 子类覆写 @abstract `_generate_chunk()` / `_generate_chunk_lod()`
@@ -47,8 +47,8 @@ VoxelDestructible          — 继承 VoxelRenderer：破坏、崩塌、掉落�
 var data := VoxelData.new()
 # ... 添加材质、填充体素（set_voxels / load_voxels_dict）
 
-var stream := QVoxStream.new()
-stream.file_path = "user://my_world/world.qvox"
+var stream := QVoxelStream.new()
+stream.file_path = "user://my_world/world.qvx"
 data.stream = stream
 
 var renderer := VoxelDestructible.new()
@@ -75,8 +75,8 @@ func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
 
 # 使用：生成器"造"，存储"存"（可自由替换，互不影响）
 var data := VoxelData.new()
-data.stream = QVoxStream.new()          # 玩家修改落盘，重启保留
-data.stream.file_path = "user://world_edits/world.qvox"
+data.stream = QVoxelStream.new()          # 玩家修改落盘，重启保留
+data.stream.file_path = "user://world_edits/world.qvx"
 data.generator = MyWorld.new()          # 未编辑的部分按 key 确定性生成
 # 赋值给 VoxelRenderer.data（建议 visibility_mode = STREAMING）
 ```
@@ -131,15 +131,15 @@ target.damage_ray(origin, direction, max_distance)
   `VoxelNative`）。库缺失或版本不匹配时插件只报一次明确错误、不做 GDScript 兜底。
 - **资产原点由导入选项 `mesh/origin` 统一控制（Mesh 与 Data 两个导入器同名同义）** —— 默认
   `world_origin` = 原样保留文件里的坐标：`.vox` 就停在作者把它放在 MagicaVoxel 世界里的位置
-  （模型自己的 `SIZE` 盒中心 + 每层 `nTRN`/`NODE` 变换）；`.qvox` 没有"世界"这一层，此时就是
+  （模型自己的 `SIZE` 盒中心 + 每层 `nTRN`/`NODE` 变换）；`.qvx` 没有"世界"这一层，此时就是
   "文件里的坐标原样"。这也正是本插件网格导入一直以来的行为，因此升级不会挪动已有资产，多模型装配
   的相对位置也保得住。需要游戏资产惯用的原点（按内容 X/Z 居中、底面落在 `Y=0`）就显式选
   `bottom_center`，要三轴内容居中（与 Blender 导入器的 "Center Origins" 同思路）就选
   `content_center`。
-- **`.vox` 与 `.qvox` 各有自己的资产适配器** —— `.vox`（MagicaVoxel 场景图）走
-  `VoxAsset.from_asset()`；`.qvox`（一个 `VOX0` 一个模型 + `NODE` 摆放）走
-  `QVoxAsset.from_file()`。对 `.qvox` 调 `VoxAsset.from_asset()` 会**报错并返回 null**：
-  把 MagicaVoxel 的形状硬套到 QVox 上会静默丢掉 `NODE` 场景图与除第一个之外的全部模型。
+- **`.vox` 与 `.qvx` 各有自己的资产适配器** —— `.vox`（MagicaVoxel 场景图）走
+  `VoxAsset.from_asset()`；`.qvx`（一个 `VOX0` 一个模型 + `NODE` 摆放）走
+  `QVoxelAsset.from_file()`。对 `.qvx` 调 `VoxAsset.from_asset()` 会**报错并返回 null**：
+  把 MagicaVoxel 的形状硬套到 QVX 上会静默丢掉 `NODE` 场景图与除第一个之外的全部模型。
   编辑器的导入插件已按扩展名自动分派，无需手动区分。
 
 ### 流式 demo

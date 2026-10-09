@@ -1,19 +1,19 @@
 @tool
-class_name QVoxModifierSerializer
+class_name QVoxelModifierSerializer
 extends RefCounted
 
 ## 修改器与算子 ↔ JSON 的唯一实现 —— 链的落盘 / 读盘都从这里过。
 ##
 ## 【为什么叫 Serializer 而不是 Codec】`Codec`（coder + decoder）在业界指"内存表示 ↔ 压缩
-## 字节流"的编解码器（本项目里那个是 QVoxBlockCodec：五种块编码的 pick / pack / unpack）。
+## 字节流"的编解码器（本项目里那个是 QVoxelBlockCodec：五种块编码的 pick / pack / unpack）。
 ## 本类不做编码、不压缩、不定义字节格式，只做"对象 ↔ 普通字典/数组"的结构转换 —— 那正是
 ## 序列化器一词的含义。名字与能力对不上时，读代码的人会先去找并不存在的编码格式。
 ##
-## 【为什么与 QVoxDomain 分开】QVoxDomain 管"域与链的语义规则"（这样排合不合法）；本类管
+## 【为什么与 QVoxelDomain 分开】QVoxelDomain 管"域与链的语义规则"（这样排合不合法）；本类管
 ## "怎么写进文件、怎么读回来"。两者唯一的交点是都要提算子的类名，没有别的关系。
 ##
 ## 【为什么存"类名 + 参数"，而不是 Resource 序列化（var_to_bytes / .tres 内嵌）】
-##   ① 可读可 diff 可手改：工程文件是给用户看的（`.qvox` 里 HEAD / NODE 本来就是 JSON）；
+##   ① 可读可 diff 可手改：工程文件是给用户看的（`.qvx` 里 HEAD / NODE 本来就是 JSON）；
 ##   ② 跨版本稳定：var_to_bytes 里嵌着脚本路径与属性布局，插件目录一动、类一改名，整棵
 ##      算子树就失联；类名是稳定身份，解析入口只有 instantiate_op() 一处；
 ##   ③ 域既然由修改器子类类型表达，序列化也按类名解析，两处同思路。
@@ -27,42 +27,42 @@ extends RefCounted
 # ----------------------------------------------------------------------------
 
 ## 按判别键造一个空修改器（对象的「加修改器」用它）。未知键返回 null。
-static func new_modifier(kind: String) -> QVoxModifier:
+static func new_modifier(kind: String) -> QVoxelModifier:
 	match kind:
-		QVoxModifier.KIND_SDF:
-			return QVoxSdfModifier.new()
-		QVoxModifier.KIND_MODEL:
-			return QVoxModelModifier.new()
-		QVoxModifier.KIND_VOLUME:
-			return QVoxVolumeModifier.new()
-		QVoxModifier.KIND_TRANSFORM:
-			return QVoxTransformModifier.new()
+		QVoxelModifier.KIND_SDF:
+			return QVoxelSdfModifier.new()
+		QVoxelModifier.KIND_MODEL:
+			return QVoxelModelModifier.new()
+		QVoxelModifier.KIND_VOLUME:
+			return QVoxelVolumeModifier.new()
+		QVoxelModifier.KIND_TRANSFORM:
+			return QVoxelTransformModifier.new()
 	return null
 
 
 ## 修改器 → JSON。
-static func modifier_to_dict(m: QVoxModifier) -> Dictionary:
+static func modifier_to_dict(m: QVoxelModifier) -> Dictionary:
 	return {} if m == null else m.to_dict()
 
 
 ## 反向。`kind` 不认识 / 算子类型失联 / 核类型不符，三者返回 null。
 ##
-## 【缺 type 不是失败，是空修改器】QVoxModifier 允许 op() == null 的占位条目（用户先加一条
+## 【缺 type 不是失败，是空修改器】QVoxelModifier 允许 op() == null 的占位条目（用户先加一条
 ## 再填算子）。to_dict 对空条目本就不写 type，读盘据此还原成空条目 —— 否则"加空修改器 → 保存
 ## → 打开"会静默少一条。这与"算子失联就丢弃整条、不造空壳"并不矛盾：前者是条目本来就空，
 ## 后者是条目有内容却认不出来。
-static func modifier_from_dict(d: Variant) -> QVoxModifier:
+static func modifier_from_dict(d: Variant) -> QVoxelModifier:
 	if not (d is Dictionary):
 		return null
 	var dd: Dictionary = d
 	var kind := str(dd.get("kind", ""))
 	var m := new_modifier(kind)
 	if m == null:
-		push_warning("[QVox] 无法识别的修改器 kind「%s」（应为 %s）"
-				% [kind, ", ".join(QVoxModifier.KINDS)])
+		push_warning("[QVX] 无法识别的修改器 kind「%s」（应为 %s）"
+				% [kind, ", ".join(QVoxelModifier.KINDS)])
 		return null
 	m.enabled = bool(dd.get("enabled", true))
-	m.combine = int(dd.get("combine", QVoxDomain.Combine.UNION))
+	m.combine = int(dd.get("combine", QVoxelDomain.Combine.UNION))
 	m.blend = float(dd.get("blend", 2.0))
 	m.seed = int(dd.get("seed", 0))
 	m.label = str(dd.get("label", ""))
@@ -94,7 +94,7 @@ static func instantiate_op(type_name: String) -> Resource:
 	if ClassDB.class_exists(type_name) and ClassDB.can_instantiate(type_name):
 		var obj: Variant = ClassDB.instantiate(type_name)
 		return obj if obj is Resource else null
-	push_warning("[QVox] 找不到算子类型 %s（可能在改名/挪位后失联）" % type_name)
+	push_warning("[QVX] 找不到算子类型 %s（可能在改名/挪位后失联）" % type_name)
 	return null
 
 
@@ -219,7 +219,7 @@ static func value_to_json(v: Variant) -> Variant:
 	if v is bool or v is int or v is float or v is String:
 		return v
 	# 未支持的类型：明确报出来，而不是让它烂在 JSON.stringify 里（那会连累整棵子树）
-	push_warning("[QVox] 算子参数类型 %s 尚无 JSON 表达，已跳过" % type_string(typeof(v)))
+	push_warning("[QVX] 算子参数类型 %s 尚无 JSON 表达，已跳过" % type_string(typeof(v)))
 	return null
 
 

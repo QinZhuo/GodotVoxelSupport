@@ -63,7 +63,7 @@ public:
 	static Dictionary generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
 			float scale, const Vector3 &offset);
 
-	// 块缓冲字典 → 网格 arrays（QVox 块级导入路径：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全 C++）。
+	// 块缓冲字典 → 网格 arrays（QVX 块级导入路径：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全 C++）。
 	// 与 GDScript 侧 VoxelMeshGenerator.generate_arrays_from_chunks 逐位等价（后者保留为测试 oracle）。
 	static Dictionary generate_arrays_from_chunks_native(const Dictionary &chunks, const PackedByteArray &trans_flags,
 			float scale, const Vector3 &offset);
@@ -156,9 +156,9 @@ public:
 	// 写 buffers 触发写时拷贝 → 省去逐 chunk duplicate 的 64KB 深拷贝（大场景快照提速）。
 	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
 
-	// ---- QVox 块级编解码（原生）----
+	// ---- QVX 块级编解码（原生）----
 	// GDScript 版 pick+pack 是逐元素扫描（混合值块约 15ms/块），原生化后约 0.2ms。
-	// 选择规则与字节布局以 QVoxSpec / docs/QVOX_FORMAT.md 为准。
+	// 选择规则与字节布局以 QVoxelSpec / docs/QVX_FORMAT.md 为准。
 	// 返回 {codec:int, payload:PackedByteArray}；EMPTY 时 codec=0、payload 空。
 	static Dictionary choose_and_pack(const PackedInt32Array &buf, int n);
 
@@ -206,11 +206,11 @@ public:
 	// 与 collect_all_flat 成对（收 / 装），供存档载荷重建。
 	static Dictionary install_flat_voxels(const PackedInt32Array &flat);
 
-	// ---- QVox 格式：CRC32（读写两端唯一实现） ----
+	// ---- QVX 格式：CRC32（读写两端唯一实现） ----
 	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib 口径一致。
 	// 覆盖 data[start, start+length)，含初值 0xFFFFFFFF 与终值异或。
 	//
-	// 【为什么放在这里】GDScript 逐字节查表算 1.4MB 要 ~84ms，是 QVox 写盘的最大单项开销
+	// 【为什么放在这里】GDScript 逐字节查表算 1.4MB 要 ~84ms，是 QVX 写盘的最大单项开销
 	// （曾尝试 crc32_combine 拼接与 slicing-by-8，在解释器下都不成立）；C++ 下 ~0.5ms。
 	// 因此 GDScript 侧不再保留兜底实现，读写校验与子块索引都调这两个方法。
 	//

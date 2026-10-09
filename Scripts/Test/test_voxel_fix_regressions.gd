@@ -305,26 +305,26 @@ func test_flood_fill_restrict_branch_matches_predicate_oracle() -> void:
 
 func test_bpp_other_than_16_is_rejected() -> void:
 	for bpp in [8, 32]:
-		var doc := QVoxFile.QVoxDocument.new()
+		var doc := QVoxelFile.QVoxelDocument.new()
 		doc.head = {
-			"qvox": QVoxSpec.VERSION,
-			"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": bpp}],
+			"qvox": QVoxelSpec.VERSION,
+			"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": bpp}],
 			"block_size": CHUNK,
-			"up_axis": QVoxSpec.DEFAULT_UP_AXIS,
+			"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 		}
-		var rep := QVoxFile.validate(doc)
-		assert_false(rep.ok(), "bpp=%d 应被拒绝（本版仅支持 %d 位）" % [bpp, QVoxSpec.CHANNEL_BPP])
+		var rep := QVoxelFile.validate(doc)
+		assert_false(rep.ok(), "bpp=%d 应被拒绝（本版仅支持 %d 位）" % [bpp, QVoxelSpec.CHANNEL_BPP])
 
 
 func test_bpp_16_is_accepted() -> void:
-	var doc := QVoxFile.QVoxDocument.new()
+	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
-		"qvox": QVoxSpec.VERSION,
-		"channels": [{"name": QVoxSpec.DOMINANT_CHANNEL, "bpp": QVoxSpec.CHANNEL_BPP}],
+		"qvox": QVoxelSpec.VERSION,
+		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
 		"block_size": CHUNK,
-		"up_axis": QVoxSpec.DEFAULT_UP_AXIS,
+		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 	}
-	var rep := QVoxFile.validate(doc)
+	var rep := QVoxelFile.validate(doc)
 	assert_true(rep.ok(), "bpp=16 必须被接受")
 
 

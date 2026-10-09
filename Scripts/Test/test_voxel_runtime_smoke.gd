@@ -20,7 +20,7 @@ extends TestCase
 var _smoke_root: Node3D = null
 
 ## ④ 用的临时世界文件（cleanup 里删掉，避免污染下次运行）
-const SMOKE_STREAM_PATH := "user://voxel_smoke_stream.qvox"
+const SMOKE_STREAM_PATH := "user://voxel_smoke_stream.qvx"
 
 
 func needs_game_process() -> bool:
@@ -128,7 +128,7 @@ func test_destroy_all_removes_every_voxel() -> void:
 ## 未落盘覆盖层与删除墓碑必须回到空 —— 否则内存就随世界规模无界增长。
 ## auto_flush_dirty 取小值，使写盘在循环中途真的发生（覆盖"落盘在途 + 新改动"的时序）。
 func test_stream_memory_is_bounded_after_flush() -> void:
-	var s := QVoxStream.new()
+	var s := QVoxelStream.new()
 	s.file_path = SMOKE_STREAM_PATH
 	s.set_materials([_air_mate(), _air_mate()])
 	s.auto_flush_dirty = 16

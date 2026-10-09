@@ -41,15 +41,15 @@ func is_transparent() -> bool:
 
 
 # ----------------------------------------------------------------------------
-# QVox MATE 条目互转（唯一实现：QVoxStream 写盘、QVoxAsset 导入共用）
+# QVX MATE 条目互转（唯一实现：QVoxelStream 写盘、QVoxelAsset 导入共用）
 # ----------------------------------------------------------------------------
 # MATE 条目 = 12 字节定长语义结构：rgba / metal / rough / hardness / mass / e_r / e_g / e_b (+reserved)。
 #
-# 【为什么必须收敛到一处】此前"材质 → MATE"散落在 QVoxStream（写盘）与 VoxAsset（导入）两处，
+# 【为什么必须收敛到一处】此前"材质 → MATE"散落在 QVoxelStream（写盘）与 VoxAsset（导入）两处，
 # 两侧字段与量纲各自手抄 —— 漏一个字段就会静默丢数据（connection_strength 正是如此）。
 #
 # 【量纲约定】metal / rough：0–1 浮点 ↔ 0–255；hardness / mass：直接存整数（材质侧本就是
-# 0–255 量级的整数语义）；emission：QVox 存 RGB 三通道，材质只有单通道强度 → 取三通道最大值。
+# 0–255 量级的整数语义）；emission：QVX 存 RGB 三通道，材质只有单通道强度 → 取三通道最大值。
 #
 # 【已知格式缺口】MATE 只有一个物理量 hardness，而 VoxelMaterial 有 hardness + connection_strength
 # 两个独立旋钮：往返时 connection_strength 只能取默认值。要保住它需扩展 MATE（12 字节里的
@@ -84,7 +84,7 @@ static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
 
 
 ## 材质 → MATE 条目。输入可为 VoxelMaterial、已是 MATE 形状的 Dictionary（幂等归一化）、或 null（空气）。
-## 幂等性很关键：QVoxStream 的材质表既可能是上层注入的 VoxelMaterial，也可能是从磁盘加载的
+## 幂等性很关键：QVoxelStream 的材质表既可能是上层注入的 VoxelMaterial，也可能是从磁盘加载的
 ## MATE Dictionary —— 后者若按前者解释会写出全白材质（曾经的 bug）。
 static func to_mate(m: Variant) -> Dictionary:
 	if m == null:

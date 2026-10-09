@@ -3,11 +3,11 @@ extends RefCounted
 
 ## MagicaVoxel（`.vox`）资产的宿主：模型 / 材质 / 场景图（nTRN·nGRP·nSHP·LAYR）/ 动画帧。
 ##
-## 【只服务 `.vox`】`.qvox` 的对应概念形状不同（一个 `model_id` 一个 `VOX0` + `NODE` 定位，
-## 没有 `nSHP`/frame/`Z` 翻转那套约定），由 `QVoxAsset` 承载。把 `.qvox` 塞进本类会丢
-## NODE 与多模型信息（详见 QVoxAsset 类注释），故 `from_asset()` 遇到 `.qvox` 会直接报错。
+## 【只服务 `.vox`】`.qvx` 的对应概念形状不同（一个 `model_id` 一个 `VOX0` + `NODE` 定位，
+## 没有 `nSHP`/frame/`Z` 翻转那套约定），由 `QVoxelAsset` 承载。把 `.qvx` 塞进本类会丢
+## NODE 与多模型信息（详见 QVoxelAsset 类注释），故 `from_asset()` 遇到 `.qvx` 会直接报错。
 
-const SUPPORTED_EXTENSIONS := ["vox", "qvox"]
+const SUPPORTED_EXTENSIONS := ["vox", "qvx"]
 
 ## `.vox` 的扩展名（本类实际处理的格式）。`SUPPORTED_EXTENSIONS` 是两个格式的合集，
 ## 供四个导入器统一声明"识别哪些扩展名"。
@@ -16,8 +16,8 @@ const VOX_EXTENSION := "vox"
 
 ## 按扩展名把资产文件解析为 VoxAsset；不支持的格式或解析失败返回 null。
 static func from_asset(path: String) -> VoxAsset:
-	if QVoxAsset.handles(path):
-		push_error("[VoxAsset] %s 是 .qvox：请改用 QVoxAsset.from_file()。"
+	if QVoxelAsset.handles(path):
+		push_error("[VoxAsset] %s 是 .qvx：请改用 QVoxelAsset.from_file()。"
 				% path + "（VoxAsset 是 MagicaVoxel 专用适配器，硬塞会丢 NODE 与多模型信息）")
 		return null
 	var access := VoxAccess.Open(path)

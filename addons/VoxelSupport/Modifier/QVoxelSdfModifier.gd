@@ -1,6 +1,6 @@
 @tool
-class_name QVoxSdfModifier
-extends QVoxModifier
+class_name QVoxelSdfModifier
+extends QVoxelModifier
 
 ## 连续域（FIELD）修改器 —— 算法核是一棵 SDF 表达式树。
 ##
@@ -14,9 +14,9 @@ extends QVoxModifier
 @export var field: Sdf
 
 
-## 便捷构造（见 QVoxVolumeModifier.of）。combine 默认 REPLACE：链首一条 SDF 通常就是"定义模型"。
-static func of(field_: Sdf, combine_: QVoxDomain.Combine = QVoxDomain.Combine.REPLACE) -> QVoxSdfModifier:
-	var m := QVoxSdfModifier.new()
+## 便捷构造（见 QVoxelVolumeModifier.of）。combine 默认 REPLACE：链首一条 SDF 通常就是"定义模型"。
+static func of(field_: Sdf, combine_: QVoxelDomain.Combine = QVoxelDomain.Combine.REPLACE) -> QVoxelSdfModifier:
+	var m := QVoxelSdfModifier.new()
 	m.field = field_
 	m.combine = combine_
 	return m

@@ -2,8 +2,8 @@
 
 [ext_resource type="Script" path="res://QVoxelier/View/QVoxelierApp.gd" id="1_app"]
 [ext_resource type="Script" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="2_renderer"]
-[ext_resource type="Script" path="res://QVoxelier/View/QVoxGridFloor.gd" id="3_floor"]
-[ext_resource type="Script" path="res://QVoxelier/View/QVoxViewCamera.gd" id="4_camera"]
+[ext_resource type="Script" path="res://QVoxelier/View/QVoxelGridFloor.gd" id="3_floor"]
+[ext_resource type="Script" path="res://QVoxelier/View/QVoxelViewCamera.gd" id="4_camera"]
 [ext_resource type="Script" path="res://QVoxelier/View/QVoxelierHud.gd" id="5_hud"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]

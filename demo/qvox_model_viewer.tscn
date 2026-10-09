@@ -20,7 +20,7 @@ reflected_light_source = 3
 tonemap_mode = 2
 ssao_enabled = true
 
-[node name="QVoxModelViewer" type="Node3D" unique_id=686871673]
+[node name="QVoxelModelViewer" type="Node3D" unique_id=686871673]
 script = ExtResource("1_viewer")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1704921634]

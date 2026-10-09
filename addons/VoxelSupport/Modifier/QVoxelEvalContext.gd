@@ -1,4 +1,4 @@
-class_name QVoxEvalContext
+class_name QVoxelEvalContext
 extends RefCounted
 ## 求值上下文 —— 算子能看到的全部环境信息都在这里。
 ##
@@ -10,7 +10,7 @@ extends RefCounted
 ## 本次求值的体积尺寸（体素）。
 var grid_size := Vector3i(32, 32, 32)
 
-## 全链共用的主种子（世界级）。逐条修改器的种子由 QVoxModifier.seed 叠加，见 QVoxEvalEngine。
+## 全链共用的主种子（世界级）。逐条修改器的种子由 QVoxelModifier.seed 叠加，见 QVoxelEvalEngine。
 var seed := 0
 
 ## 进度回调：Callable(ratio: float)。可为空。
@@ -24,8 +24,8 @@ var is_cancelled_callable := Callable()
 var epoch := 0
 
 
-static func make(grid_size_: Vector3i, seed_ := 0) -> QVoxEvalContext:
-	var ctx := QVoxEvalContext.new()
+static func make(grid_size_: Vector3i, seed_ := 0) -> QVoxelEvalContext:
+	var ctx := QVoxelEvalContext.new()
 	ctx.grid_size = grid_size_
 	ctx.seed = seed_
 	return ctx
@@ -39,10 +39,10 @@ static func make(grid_size_: Vector3i, seed_ := 0) -> QVoxEvalContext:
 ## 【为什么复制逻辑住在本类而不是引擎里】它是"本类全部字段的一次列举"；放在字段旁边，
 ## 将来加字段时改这里就在改字段的同一条视线内。放在引擎里则加一个字段就会静默漏拷，
 ## 症状是"新字段在树形求值路径下永远是默认值"——极难定位。
-func at_grid_size(gs: Vector3i) -> QVoxEvalContext:
+func at_grid_size(gs: Vector3i) -> QVoxelEvalContext:
 	if grid_size == gs:
 		return self
-	var c := QVoxEvalContext.new()
+	var c := QVoxelEvalContext.new()
 	c.grid_size = gs
 	c.seed = seed
 	c.progress = progress

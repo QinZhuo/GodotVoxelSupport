@@ -1,5 +1,5 @@
 @tool
-class_name QVoxUi
+class_name QVoxelUi
 extends RefCounted
 ## QVoxelier 界面的设计规范（design token）与控件工厂 —— **所有面板长相的唯一来源**。
 ##

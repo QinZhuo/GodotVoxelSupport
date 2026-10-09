@@ -1,6 +1,6 @@
 @tool
-class_name QVoxMacroCommand
-extends QVoxCommand
+class_name QVoxelMacroCommand
+extends QVoxelCommand
 ## 宏 —— 把多步 UI 操作折叠成**一条**撤销单位（"改参数 + 重命名"、"批量赋材质"…）。
 ##
 ## 【为什么要有它，而不是让调用方连推三条】用户心里的一次操作就该是一次 Ctrl+Z。
@@ -14,11 +14,11 @@ extends QVoxCommand
 ## 【代价 = 子命令之和】预算淘汰因此能把"一大团宏"当作一个大单位衡量，
 ## 而不是被"一条命令看起来很小"骗过去。
 ##
-## 【子命令不进撤销栈】宏只把**自己**交给 QVoxUndoStack；子命令是它的内部结构。
+## 【子命令不进撤销栈】宏只把**自己**交给 QVoxelUndoStack；子命令是它的内部结构。
 ## 于是"一次撤销"的粒度天然正确，游标与菜单项文字也只需要看宏这一层。
 
-## 子命令（按执行顺序）。空宏由 QVoxUndoStack 拦截，不入栈。
-var children: Array[QVoxCommand] = []
+## 子命令（按执行顺序）。空宏由 QVoxelUndoStack 拦截，不入栈。
+var children: Array[QVoxelCommand] = []
 
 ## 展示名（如 "改参数"）；留空则退化为"多步操作"。
 var macro_label := ""
@@ -32,7 +32,7 @@ func _init(p_label := "") -> void:
 	params = [get_label()]
 
 
-func add(cmd: QVoxCommand) -> void:
+func add(cmd: QVoxelCommand) -> void:
 	if cmd != null:
 		children.append(cmd)
 

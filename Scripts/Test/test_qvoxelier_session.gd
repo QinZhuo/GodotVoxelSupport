@@ -1,6 +1,6 @@
 extends TestCase
 
-## 一期编辑会话（QVoxEditSession）的契约测试。
+## 一期编辑会话（QVoxelEditSession）的契约测试。
 ##
 ## 会话刻意不依赖任何节点，于是"手势 → 命令 → 撤销 → 数据源失效 → 唤醒渲染器"这整条链
 ## 可以在无头环境里跑完并逐项断言。这里钉死六条承诺：
@@ -21,14 +21,14 @@ const OTHER := 2
 # 夹具
 # ----------------------------------------------------------------------------
 
-func _session(grid := Vector3i(128, 128, 128)) -> QVoxEditSession:
-	var w := QVoxWorld.create_empty()
+func _session(grid := Vector3i(128, 128, 128)) -> QVoxelEditSession:
+	var w := QVoxelWorld.create_empty()
 	# 颜色刻意选 0/1 端点：MATE 是 8 位量化，中间值（如 0.5 → 128/255）取整后回不来，
 	# 断言浮点相等会变成在测"取整误差"而不是在测接线。
 	w.add_material(Color(1, 0, 0)) # ID 1
 	w.add_material(Color(0, 0, 1)) # ID 2
 	var obj := w.create_model("m", grid)
-	return QVoxEditSession.create_for(obj, w)
+	return QVoxelEditSession.create_for(obj, w)
 
 
 ## 射线命中信息（VoxelRay.cast 的形状；这里只填会话读的两个键）。
@@ -36,7 +36,7 @@ func _hit(hit: Vector3i, normal: Vector3i) -> Dictionary:
 	return {VoxelRay.KEY_HIT: hit, VoxelRay.KEY_NORMAL: normal}
 
 
-func _dirty_set(s: QVoxEditSession) -> Dictionary:
+func _dirty_set(s: QVoxelEditSession) -> Dictionary:
 	var d := {}
 	for ck in s.data.get_dirty_chunks():
 		d[ck] = true
@@ -195,7 +195,7 @@ func test_release_hands_the_chunk_back_to_the_authoritative_source() -> void:
 
 func test_span_tool_writes_only_at_release() -> void:
 	var s := _session()
-	s.tool.set_mode(QVoxBrushTool.Mode.BOX)
+	s.tool.set_mode(QVoxelBrushTool.Mode.BOX)
 	var a := s.pick_from_hit(_hit(Vector3i(2, 0, 3), Vector3i(0, 1, 0)))
 	assert_true(s.begin(a), "盒笔从第一个角点按下")
 	var b := s.pick_from_hit(_hit(Vector3i(4, 0, 6), Vector3i(0, 1, 0)))
