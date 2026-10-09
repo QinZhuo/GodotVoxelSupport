@@ -50,6 +50,23 @@ const MODES := [
 		"live": false, "brush": false, "hint": "按住拖动，把选区里的体素搬到新位置"},
 ]
 
+## 笔刷加粗的**截面形态**。与 Mode 正交：Mode 决定"画哪些格"，Shape 决定"加粗成什么形状"。
+##
+## 【为什么不把它做成第八种笔】"画什么"与"加粗成什么"是两件事：体素笔要粗笔头、线笔要粗线、
+## 盒笔要厚板 —— 三者都吃尺寸，也都能在球 / 平面之间选。做成模式会让按钮数翻倍，且以后每加
+## 一种笔都要把两种形态再抄一遍。正交的一维只该占一维。
+enum Shape {
+	BALL,  ## 球：以落笔点为中心各向同性鼓起（圆笔头，原行为）
+	PLANE, ## 平面：只在拾取面内摊开，沿法线的厚度不变（在表面上刷宽笔触用）
+}
+
+## 形态表：界面（按钮文案 / 提示）的唯一来源，与 MODES 同一套路数。
+const SHAPES := [
+	{"shape": Shape.BALL, "text": "球", "tip": "以落笔点为中心各向同性鼓起（传统圆笔头）"},
+	{"shape": Shape.PLANE, "text": "平面",
+		"tip": "只在拾取面的两个轴向摊开、厚度不变 —— 表面上刷宽笔触不会把一半体积埋进实心里"},
+]
+
 
 ## 拾取上下文：一次落笔需要知道的全部外部信息（视口拾取后填好）。
 ##
@@ -77,6 +94,8 @@ class Pick extends RefCounted:
 
 var mode: Mode = Mode.VOXEL
 var brush_size := 1
+## 加粗形态（见 [enum Shape]）。只在 [method supports_brush_size] 且尺寸 > 1 时起作用。
+var brush_shape: Shape = Shape.BALL
 ## 对称轴掩码：分量为 1 表示该轴镜像（X / Y / Z 各自独立勾选），ZERO = 关。
 ##
 ## 【为什么镜像放在 _finish 这一个出口】预览（hover）与落笔（release/drag）都汇到 _finish，
@@ -141,6 +160,12 @@ func set_mode(m: Mode) -> void:
 		return
 	cancel()
 	mode = m
+
+
+## 切加粗形态。与 [method set_mode] 同构，但**不需要 cancel** —— 形态不进手势状态，
+## 改它不会让进行中的一笔变成另一笔（尺寸同理，故也没有 setter）。
+func set_shape(s: Shape) -> void:
+	brush_shape = s
 
 
 # ----------------------------------------------------------------------------
@@ -328,14 +353,20 @@ static func _clip(p: Vector3i, pick: Pick) -> Vector3i:
 	return Vector3i(clampi(p.x, -1, g.x), clampi(p.y, -1, g.y), clampi(p.z, -1, g.z))
 
 
-## 收尾：按笔刷尺寸加粗 + 裁掉网格外的格子。
+## 收尾：按笔刷尺寸与**形态**加粗 + 裁掉网格外的格子。
 ##
 ## 【为什么要在这里裁】对象侧的越界处理是"丢弃"，让越界坐标走一趟只会白白记账
 ## （撤销里出现一堆从未生效的格）。裁剪放在唯一的出口，预览与落笔因此看到同一批格。
 func _finish(cells: Array[Vector3i], pick: Pick) -> Array[Vector3i]:
 	var radius := brush_size - 1
 	if supports_brush_size() and radius > 0:
-		cells = QVoxelBrushGeometry.dilate(cells, radius)
+		if brush_shape == Shape.PLANE:
+			# 平面形态要一个"面"来定摊开方向：取拾取面的法线。没命中（pick 为空）时退化成 XY 平面 ——
+			# 那种情况 pick.valid() 本就为假、这一笔不会真的落下，退化值没有副作用。
+			cells = QVoxelBrushGeometry.dilate_plane(cells, radius,
+					pick.normal if pick != null else Vector3i.ZERO)
+		else:
+			cells = QVoxelBrushGeometry.dilate(cells, radius)
 	if pick == null or pick.grid == Vector3i.ZERO:
 		return cells
 	if symmetry != Vector3i.ZERO:

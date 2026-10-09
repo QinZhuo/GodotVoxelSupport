@@ -106,8 +106,8 @@ var _pan_mode := false
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
 var _eyedropper := false
-## 正在进行的改色手势对应的属性命令（松手时封口入栈；见 QVoxelierColorSection 的"手势即命令"）。
-var _color_cmd: QVoxelPropertyCommand
+## 正在进行的"改材质"手势（颜色或 PBR）对应的属性命令（松手时封口入栈；见 QVoxelierColorSection 的"手势即命令"）。
+var _material_cmd: QVoxelPropertyCommand
 ## 正在进行的"改修改器参数"手势对应的属性命令（同上，只是目标换成链上的某条条目）。
 var _prop_cmd: QVoxelPropertyCommand
 ## 正在进行的"改帧时长"手势对应的属性命令（同上，目标是那一帧 QVoxelFrame 的 duration_ms）。
@@ -172,7 +172,10 @@ func _build_ui() -> void:
 	_toolbar.frame_requested.connect(func(): frame_view(); hud.flash("已取景"))
 	_toolbar.zoom_requested.connect(func(steps: float): camera.zoom_by_steps(steps))
 	_toolbar.view_mode_changed.connect(_set_view_mode)
-	_toolbar.help_toggled.connect(hud.set_legend_visible)
+	# 两块浮层都锚在右上角，开一块就关另一块 —— 互斥与按钮回弹都收在 _set_*_visible 里，
+	# 免得"界面开着日志、按钮却显示说明"这类不一致散落在两个 connect 里。
+	_toolbar.help_toggled.connect(_set_legend_visible)
+	_toolbar.log_toggled.connect(_set_log_visible)
 
 	_tools = QVoxelierTools.new()
 	_tools.name = "Tools"
@@ -180,6 +183,7 @@ func _build_ui() -> void:
 	_tools.tool_selected.connect(_set_tool)
 	_tools.brush_step.connect(_step_brush)
 	_tools.brush_scale_requested.connect(_scale_brush)
+	_tools.brush_shape_selected.connect(_set_brush_shape)
 	_tools.erase_toggled.connect(func(on: bool): hud.flash("擦除模式：%s" % ("开" if on else "关")))
 	_tools.symmetry_toggled.connect(_set_symmetry_axis)
 	# 选区面板的五个按钮共用一条信号（带动作 id）—— 面板不必为每个动作各开一条连接。
@@ -210,9 +214,10 @@ func _build_ui() -> void:
 	add_child(_dock)
 
 	_color_section = QVoxelierColorSection.new()
-	_color_section.edit_began.connect(_begin_color_edit)
+	_color_section.edit_began.connect(_begin_material_edit)
 	_color_section.color_changed.connect(_live_color)
-	_color_section.edit_ended.connect(_end_color_edit)
+	_color_section.pbr_changed.connect(_live_pbr)
+	_color_section.edit_ended.connect(_end_material_edit)
 	_color_section.eyedropper_toggled.connect(_set_eyedropper)
 	_color_section.add_material_requested.connect(_add_material)
 	_color_section.import_requested.connect(func(): _palette_import_dialog.popup_centered_ratio(0.7))
@@ -280,7 +285,7 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 	_stroke = false
 	_erase = false
 	_eyedropper = false
-	_color_cmd = null
+	_material_cmd = null
 
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	# 调色板取**世界的材质表**（而不是 default_palette）：打开别人做的 256 色工程时也照显，
@@ -612,10 +617,10 @@ func _cancel() -> void:
 	if session != null and session.deselect():
 		hud.flash("已取消选区")
 		_refresh_hud()
-	elif hud.legend_visible():
-		# 说明浮层挡着视口，Esc 应先关它 —— 与"Esc 先关最上面那层"的普遍习惯一致。
-		hud.set_legend_visible(false)
-		_toolbar.set_help(false)
+	elif hud.legend_visible() or hud.log_visible():
+		# 浮层挡着视口，Esc 应先关它 —— 与"Esc 先关最上面那层"的普遍习惯一致。
+		_set_legend_visible(false)
+		_set_log_visible(false)
 	else:
 		hud.flash("没有进行中的手势")
 
@@ -648,6 +653,25 @@ func _redo() -> void:
 		hud.flash("没有可重做的")
 
 
+## 说明浮层（应用栏「?」）。两块浮层同锚右上角，同时开会叠在一起 —— 开一块就顺手关另一块，
+## 并把两个按钮的按下态一起校准：按钮是浮层的投影，不能各自为政。
+func _set_legend_visible(on: bool) -> void:
+	hud.set_legend_visible(on)
+	_toolbar.set_help(on)
+	if on:
+		hud.set_log_visible(false)
+		_toolbar.set_log(false)
+
+
+## 日志浮层（应用栏「日志」）。与 _set_legend_visible 对称。
+func _set_log_visible(on: bool) -> void:
+	hud.set_log_visible(on)
+	_toolbar.set_log(on)
+	if on:
+		hud.set_legend_visible(false)
+		_toolbar.set_help(false)
+
+
 ## 切笔：工具坞的按钮与热键共用这一处 —— 于是"按钮高亮"永远是实况的投影，而不是第二份状态。
 func _set_tool(mode: int) -> void:
 	session.tool.set_mode(mode)
@@ -666,6 +690,14 @@ func _step_brush(delta: int) -> void:
 func _scale_brush(up: bool) -> void:
 	var s: int = session.tool.brush_size
 	_set_brush(s * 2 if up else maxi(1, s >> 1))
+
+
+## 切笔刷形态。与 _set_tool 同构：只改一处状态 + 刷新，按钮高亮由 _refresh_hud 投影出来
+## （面板自己 set_pressed_no_signal，故不存在"界面又通知 App"的回环）。
+func _set_brush_shape(shape: int) -> void:
+	session.tool.set_shape(shape)
+	hud.flash("笔刷形态：%s" % QVoxelBrushTool.SHAPES[shape].text)
+	_refresh_hud()
 
 
 func _set_brush(size: int) -> void:
@@ -1203,6 +1235,7 @@ func _refresh_hud() -> void:
 	_toolbar.set_history(session.history.can_undo(), session.history.can_redo())
 	_tools.set_tool(session.tool.mode)
 	_tools.set_brush(session.tool.brush_size, session.tool.supports_brush_size())
+	_tools.set_brush_shape(session.tool.brush_shape, session.tool.supports_brush_size())
 	# 对称是 App 级设置 → 每次刷新都把它压回当前对象的笔刷，并回写三个按钮的按下态。
 	_apply_symmetry()
 	_tools.set_symmetry(_symmetry)
@@ -1221,7 +1254,10 @@ func _refresh_panels() -> void:
 	if _color_section == null or world == null or session == null:
 		return
 	var has := _material_id > 0 and _material_id < world.materials.size()
-	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0))
+	var pbr := {}
+	for key in QVoxelierColorSection.pbr_keys():
+		pbr[key] = world.material_scalar(_material_id, StringName(key))
+	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0), pbr)
 	_tree_section.set_world(world, session.object.model_id)
 	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
 	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimelineSection.bind），播放期间不重建控件。
@@ -1392,15 +1428,16 @@ func _owns_modifier(node: QVoxelNode, m: QVoxelModifier) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# 颜色（右侧抽屉·颜色组）
+# 材质（右侧抽屉·颜色组）
 # ----------------------------------------------------------------------------
 
-## 改色的手势三段：开始（抓改前值）→ 连续写（不入栈）→ 结束（封口入栈）。
+## 改材质的手势三段：开始（抓改前值）→ 连续写（不入栈）→ 结束（封口入栈）。
+## 颜色与 PBR 共用同一条时间线与同一条命令（目标都是 `world.materials`）。
 ## 与体素笔同一时间线（见 QVoxelierColorSection 的"手势即命令"注释）。
-func _begin_color_edit() -> void:
+func _begin_material_edit() -> void:
 	if world == null or _material_id <= 0 or _material_id >= world.materials.size():
 		return
-	_color_cmd = QVoxelPropertyCommand.begin(world, &"materials", null, "修改材质颜色")
+	_material_cmd = QVoxelPropertyCommand.begin(world, &"materials", null, "修改材质")
 
 
 func _live_color(c: Color) -> void:
@@ -1410,10 +1447,17 @@ func _live_color(c: Color) -> void:
 	_sync_material(_material_id)
 
 
-func _end_color_edit() -> void:
-	if _color_cmd != null and _color_cmd.commit():
-		session.history.push(_color_cmd)
-	_color_cmd = null
+func _live_pbr(field: StringName, value: float) -> void:
+	if world == null or _material_id <= 0:
+		return
+	world.set_material_scalar(_material_id, field, value)
+	_sync_material(_material_id)
+
+
+func _end_material_edit() -> void:
+	if _material_cmd != null and _material_cmd.commit():
+		session.history.push(_material_cmd)
+	_material_cmd = null
 	_palette.set_palette(_material_colors(world))
 	_refresh_hud()
 

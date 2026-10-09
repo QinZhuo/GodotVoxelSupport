@@ -23,6 +23,8 @@ signal brush_step(delta: int)
 ## 与 brush_step 分开是因为语义不同：一个是"细调一格"，一个是"粗调一档"，
 ## 面板只报方向，钳制与上限一样归 App —— 界面不认识"上限"这个数。
 signal brush_scale_requested(up: bool)
+## 笔刷截面形态（值同 [enum QVoxelBrushTool.Shape]）。
+signal brush_shape_selected(shape: int)
 signal erase_toggled(enabled: bool)
 ## 对称轴开关：axis 0 / 1 / 2 = X / Y / Z。
 signal symmetry_toggled(axis: int, on: bool)
@@ -52,6 +54,7 @@ var _brush_plus: Button
 var _brush_half: Button
 var _brush_dbl: Button
 var _brush_title: Label
+var _shape_buttons: Array[Button] = []
 var _erase: Button
 var _sym: Array[Button] = []
 var _select_buttons := {}   # id → Button
@@ -96,6 +99,7 @@ func _build() -> void:
 	col.add_child(_brush_title)
 	col.add_child(_build_brush_row())
 	col.add_child(_build_brush_scale_row())
+	col.add_child(_build_shape_row())
 
 	col.add_child(QVoxelUi.divider())
 	_erase = QVoxelUi.toggle_button("擦除模式：画的时候挖掉体素（触摸屏上代替右键）")
@@ -187,6 +191,30 @@ func _build_brush_scale_row() -> HBoxContainer:
 	return row
 
 
+## 笔刷截面形态（球 / 平面）。读 [constant QVoxelBrushTool.SHAPES]（表即配置，与 MODES 同一套路数），
+## 与尺寸行一样**位置固定、不支持时置灰**而不是把行藏起来 —— 界面不跳。
+func _build_shape_row() -> HBoxContainer:
+	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	var group := ButtonGroup.new()
+	group.allow_unpress = false
+	for entry in QVoxelBrushTool.SHAPES:
+		var b := QVoxelUi.toggle_button(entry.tip)
+		b.text = entry.text
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.button_group = group
+		# bind 而不是闭包捕获：与对称轴 / 选区动作同一条理由 —— 每个按钮各钉各的值，
+		# 不会一起变成最后一个（捕获写法在不同 GDScript 版本下取值时机有歧义）。
+		b.toggled.connect(_on_shape_toggled.bind(int(entry.shape)))
+		_shape_buttons.append(b)
+		row.add_child(b)
+	return row
+
+
+func _on_shape_toggled(on: bool, shape: int) -> void:
+	if on:
+		brush_shape_selected.emit(shape)
+
+
 # ----------------------------------------------------------------------------
 # 对外：状态同步（只由 App 调用）
 # ----------------------------------------------------------------------------
@@ -210,6 +238,18 @@ func set_brush(size: int, supported: bool) -> void:
 	_brush_half.disabled = not supported or size <= 1
 	_brush_dbl.disabled = not supported
 	_brush_title.text = "笔刷" if supported else "笔刷（此工具不用）"
+
+
+## 回写形态的按下态（App 在切对象 / 撤销后调用；no_signal 避免"App 设界面、界面又通知 App"的回环）。
+## 与 set_brush 一样**置灰而非隐藏**：形态只对吃尺寸的笔有意义，但位置恒定。
+func set_brush_shape(shape: int, supported: bool) -> void:
+	for i in QVoxelBrushTool.SHAPES.size():
+		if i >= _shape_buttons.size():
+			break
+		var b := _shape_buttons[i]
+		if int(QVoxelBrushTool.SHAPES[i].shape) == shape:
+			b.set_pressed_no_signal(true)
+		b.disabled = not supported
 
 
 func set_erase(on: bool) -> void:

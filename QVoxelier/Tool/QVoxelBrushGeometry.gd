@@ -147,6 +147,82 @@ static func dilate(cells: Array[Vector3i], radius: int) -> Array[Vector3i]:
 	return out
 
 
+## 用「平面」把一组格子膨胀 —— 只在拾取面的两个轴向摊开，**沿法线的厚度不变**。
+##
+## 【与 dilate（欧氏球）的分工】球是各向同性地鼓起来，平面是"只在表面上摊开"。
+## 在表面上刷一条宽笔触时，球会把大约一半体积埋进实心内部 —— 看不见，却实实在在撑大了体积、
+## 也多写了一倍的格（还会把本该留空的邻格填掉）；平面只铺出一层薄片。这就是"形状"要区分的用途。
+##
+## 【可分离】平面方形 = 两个线段的闵可夫斯基和，故等价于沿平面内两轴各做一次一维膨胀 ——
+## 于是不必真的枚举 (2r+1)² 个偏移（半径 15 就是 961 个/格，对盒笔照样会爆炸）。
+static func dilate_plane(cells: Array[Vector3i], radius: int, normal: Vector3i) -> Array[Vector3i]:
+	if radius <= 0 or cells.is_empty():
+		return cells
+	var ax := face_axes(normal)
+	return _dilate_axis(_dilate_axis(cells, _axis_index(ax[0]), radius), _axis_index(ax[1]), radius)
+
+
+## 轴向向量的轴序号（0/1/2）。只用于 [method face_axes] 的产物（单轴单位向量）。
+static func _axis_index(v: Vector3i) -> int:
+	if v.x != 0:
+		return 0
+	return 1 if v.y != 0 else 2
+
+
+## 沿单个轴向做一维膨胀：每个格扩成 ±radius 的线段。
+##
+## 【为什么按线归组再并区间】"每格盖一条线"是 `格数 × (2r+1)` 次写入；把同一条线上的源格先归组、
+## 再把区间求并，代价就只由**结果长度**决定（与 dilate 的取向一致：不随笔刷尺寸乘性爆炸）。
+static func _dilate_axis(cells: Array[Vector3i], axis: int, radius: int) -> Array[Vector3i]:
+	var lines := {}    # 其余两轴的坐标 → 沿 axis 的坐标表
+	for c in cells:
+		var key := _rest2(c, axis)
+		if not lines.has(key):
+			lines[key] = []
+		# 必须存 Array 而不是 PackedInt32Array：后者在 GDScript 里是**值类型**，
+		# `lines[key].append(...)` 改的是取出来的副本，分组表会一直空着。
+		(lines[key] as Array).append(_axis_of(c, axis))
+	var out: Array[Vector3i] = []
+	for key in lines:
+		var ts: Array = lines[key]
+		ts.sort()
+		var lo: int = ts[0] - radius
+		var hi: int = ts[0] + radius
+		for i in range(1, ts.size()):
+			var t: int = ts[i]
+			if t - radius > hi + 1:
+				_emit_span(out, key, axis, lo, hi)
+				lo = t - radius
+			hi = maxi(hi, t + radius)
+		_emit_span(out, key, axis, lo, hi)
+	return out
+
+
+## 取走 axis 之后剩下的两个坐标（只当分组键用，顺序固定）。
+static func _rest2(p: Vector3i, axis: int) -> Vector2i:
+	match axis:
+		0: return Vector2i(p.y, p.z)
+		1: return Vector2i(p.x, p.z)
+		_: return Vector2i(p.x, p.y)
+
+
+## 沿 axis 的那一个坐标。
+static func _axis_of(p: Vector3i, axis: int) -> int:
+	match axis:
+		0: return p.x
+		1: return p.y
+		_: return p.z
+
+
+## 把"分组键 + 沿 axis 的区间"还原成坐标并追加。
+static func _emit_span(out: Array[Vector3i], key: Vector2i, axis: int, lo: int, hi: int) -> void:
+	for t in range(lo, hi + 1):
+		match axis:
+			0: out.append(Vector3i(t, key.x, key.y))
+			1: out.append(Vector3i(key.x, t, key.y))
+			_: out.append(Vector3i(key.x, key.y, t))
+
+
 ## 距离场里的"足够远"。只要大于任何可达的平方距离即可（区域对角线的平方远小于它）。
 const _FAR := 1 << 28
 

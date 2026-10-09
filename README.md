@@ -29,7 +29,7 @@ QVoxelSource                    — voxel storage & editing (materials, chunk bu
   │    ├─ QVoxelStream             — single-file .qvx block-stream world storage (disk)
   │    └─ VoxelMemoryStream      — memory only (no persistence; a home for edits)
   └─ node: QVoxelNode            — GENERATION: the data layer's single source of truth
-       └─ QVoxelModel            — bounded grid + modifier chain (run by QVoxelEvalEngine)
+	   └─ QVoxelModel            — bounded grid + modifier chain (run by QVoxelEvalEngine)
 VoxelRenderer              — async mesh generation, LOD, streaming, collision
 VoxelDestructible          — extends VoxelRenderer: destruction, collapse, falling debris
 ```
@@ -64,7 +64,7 @@ renderer.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 renderer.view_distance = 60.0
 renderer.unload_distance = 100.0
 renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级 ×2 粗化），
-                         # 各层距离由 view_distance 自动等比（×2）推导
+						 # 各层距离由 view_distance 自动等比（×2）推导
 ```
 
 ### Procedural infinite world

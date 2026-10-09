@@ -1,26 +1,30 @@
 @tool
 class_name QVoxelierColorSection
 extends QVoxelierSection
-## 右侧抽屉·颜色分组 —— 编辑**当前材质**的颜色，并提供调色板级操作。
+## 右侧抽屉·颜色分组 —— 编辑**当前材质**的颜色与 PBR（金属度 / 粗糙度 / 自发光），
+## 并提供调色板级操作。
 ##
 ## 【为什么不在这里再摆一份调色板网格】底部 `QVoxelierPalette` 已经是调色板的常驻视图，
 ## 再摆一份就要维护两处"哪个格子亮着"的选中状态，迟早不同步。于是这里只回答一个问题：
-## **"当前这个材质是什么色、怎么改"** —— 网格负责"选哪个"，本分组负责"改成什么"。
+## **"当前这个材质长什么样、怎么改"** —— 网格负责"选哪个"，本分组负责"改成什么"。
 ##
 ## 【手势即命令 —— 与体素笔同一时间线】滑条拖拽期间反复写数据、松手时才封口入栈
-## （见 QVoxelPropertyCommand 的"手势即命令"）。所以本分组只报告三段信号：
-##   edit_began → color_changed(多次) → edit_ended
-## App 把整段夹进一条 QVoxelPropertyCommand，撤销栈里就只留"一次改色"。
+## （见 QVoxelPropertyCommand 的"手势即命令"）。颜色与 PBR 的滑条**共用同一条手势**：
+##   edit_began → (color_changed | pbr_changed)(多次) → edit_ended
+## App 把整段夹进一条 QVoxelPropertyCommand，撤销栈里就只留"一次改材质"。
 ##
-## 【为什么滑条与预览的刷新要 _syncing 闸】App 回写颜色（撤销 / 切材质）时会 set 滑条值，
-## 那又会触发 value_changed —— 反过来再报一次 color_changed，形成自激。闸门一挡即可。
+## 【为什么滑条与预览的刷新要 _syncing 闸】App 回写材质（撤销 / 切材质）时会 set 滑条值，
+## 那又会触发 value_changed —— 反过来再报一次改动，形成自激。闸门一挡即可。
 
-## 一次改色手势开始（此时数据尚未变，供 undo 抓"改前值"）。
+## 一次改材质手势开始（此时数据尚未变，供 undo 抓"改前值"）。
 signal edit_began
 ## 手势进行中：当前颜色（App 实时落到世界，不入栈）。
 signal color_changed(color: Color)
 ## 手势结束：App 据此封口入栈。
 signal edit_ended
+
+## PBR 标量通道改动（金属度 / 粗糙度 / 自发光）：与 color_changed 同属一段手势，改的是标量。
+signal pbr_changed(field: StringName, value: float)
 
 ## 取色器开关（开启后下一次点视口即吸取该处材质色）。
 signal eyedropper_toggled(on: bool)
@@ -31,6 +35,17 @@ signal import_requested
 signal export_requested
 
 const _CHANNELS := ["R", "G", "B", "A"]
+
+## PBR 标量行：key = `QVoxelWorld.material_scalar` 的键，label = 中文名。
+## **表即配置**：滑条与 App 的取值都从这一张表派生，不再各抄一份键名。
+const _PBR := [
+	{"key": &"metal", "label": "金属度"},
+	{"key": &"rough", "label": "粗糙度"},
+	{"key": &"emission", "label": "自发光"},
+]
+
+## 行首标签的固定宽：让颜色通道（单字母）与 PBR（三字）两组滑条左缘对齐。
+const _LABEL_W := 42
 
 var _preview: ColorRect
 var _hex: Label
@@ -65,9 +80,15 @@ func _build_body(body: VBoxContainer) -> void:
 	_id_label = QVoxelUi.label("材质 —", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
 	info.add_child(_id_label)
 
-	# --- 四条通道滑条 ---
+	# --- 四条颜色通道滑条 ---
 	for ch in _CHANNELS:
-		body.add_child(_channel_row(ch))
+		body.add_child(_slider_row(ch, ch, func(_v: float): _on_channel_changed()))
+
+	# --- 三条 PBR 标量滑条（金属度 / 粗糙度 / 自发光）---
+	for p in _PBR:
+		var key := String(p["key"])
+		body.add_child(_slider_row(key, String(p["label"]),
+				func(_v: float): _on_pbr_changed(key)))
 
 	# --- 操作 ---
 	var ops := QVoxelUi.hbox()
@@ -95,27 +116,25 @@ func _build_body(body: VBoxContainer) -> void:
 	io.add_child(export_btn)
 
 
-func _channel_row(ch: String) -> HBoxContainer:
+## 一行标量滑条（颜色通道与 PBR 共用）：行首标签 + 滑条 + 右侧数值。
+## key 同时是 `_sliders` / `_value_labels` 的键，也是 `_format_value` 的判据。
+func _slider_row(key: String, label: String, on_changed: Callable) -> HBoxContainer:
 	var row := QVoxelUi.hbox()
-	row.add_child(QVoxelUi.label(ch, QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
+	var caption := QVoxelUi.label(label, QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	caption.custom_minimum_size = Vector2(_LABEL_W, 0)
+	row.add_child(caption)
 
-	var s := HSlider.new()
-	s.min_value = 0.0
-	s.max_value = 1.0
-	s.step = 0.001
-	s.focus_mode = Control.FOCUS_NONE
-	s.custom_minimum_size = Vector2(0, QVoxelUi.hit_size())
-	s.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	s.value_changed.connect(func(_v: float): _on_channel_changed())
-	s.drag_started.connect(_on_drag_started)
-	s.drag_ended.connect(func(_changed: bool): _on_drag_ended())
-	_sliders[ch] = s
+	var s := QVoxelUi.value_slider(0.0, 1.0, 0.001, 0.0)
+	s.value_changed.connect(on_changed)
+	s.drag_started.connect(func(): _on_drag_started())
+	s.drag_ended.connect(func(_changed: bool): _on_drag_ended(key))
+	_sliders[key] = s
 	row.add_child(s)
 
 	var v := QVoxelUi.label("0", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
 	v.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	v.custom_minimum_size = Vector2(34, 0)
-	_value_labels[ch] = v
+	_value_labels[key] = v
 	row.add_child(v)
 	return row
 
@@ -124,8 +143,18 @@ func _channel_row(ch: String) -> HBoxContainer:
 # 对外
 # ----------------------------------------------------------------------------
 
-## 绑定当前材质与颜色（App 在切材质 / 切对象 / 撤销后调用）。
-func bind(material_id: int, color: Color) -> void:
+## PBR 标量键（String："metal" / "rough" / "emission"）——App 据此向世界取 / 写值，
+## 也用作传给 `bind` 的字典键。键表仍是 `_PBR` 这一份，App 不另抄一遍。
+static func pbr_keys() -> Array:
+	var out: Array = []
+	for p in _PBR:
+		out.append(String(p["key"]))
+	return out
+
+
+## 绑定当前材质与颜色 / PBR（App 在切材质 / 切对象 / 撤销后调用）。
+## pbr 的键与 `_PBR` 的 key 一致（metal / rough / emission）。
+func bind(material_id: int, color: Color, pbr: Dictionary) -> void:
 	_active_id = material_id
 	var editable := material_id > 0
 	if editable:
@@ -139,7 +168,13 @@ func bind(material_id: int, color: Color) -> void:
 		var s: HSlider = _sliders[ch]
 		s.value = _channel_value(color, ch)
 		s.editable = editable
-		_value_labels[ch].text = str(int(round(_channel_value(color, ch) * 255.0)))
+		_value_labels[ch].text = _format_value(ch, s.value)
+	for p in _PBR:
+		var key := String(p["key"])
+		var ps: HSlider = _sliders[key]
+		ps.value = float(pbr.get(key, 0.0))
+		ps.editable = editable
+		_value_labels[key].text = _format_value(key, ps.value)
 	_syncing = false
 
 
@@ -167,13 +202,25 @@ func _on_channel_changed() -> void:
 	if _syncing:
 		return
 	_refresh_preview()
+	_gesture_report(func(): color_changed.emit(current_color()))
+
+
+func _on_pbr_changed(key: String) -> void:
+	if _syncing:
+		return
+	_refresh_preview()
+	var v := float(_sliders[key].value)
+	_gesture_report(func(): pbr_changed.emit(StringName(key), v))
+
+
+## 手势中 → 直接上报；无 drag 手势（点进滑条槽 / 键盘微调）→ 自成一次完整手势。
+func _gesture_report(report: Callable) -> void:
 	if _editing:
-		color_changed.emit(current_color())
-	else:
-		# 点进滑条槽 / 键盘微调：没有 drag 手势，自成一次完整手势。
-		edit_began.emit()
-		color_changed.emit(current_color())
-		edit_ended.emit()
+		report.call()
+		return
+	edit_began.emit()
+	report.call()
+	edit_ended.emit()
 
 
 func _on_drag_started() -> void:
@@ -183,10 +230,14 @@ func _on_drag_started() -> void:
 	edit_began.emit()
 
 
-func _on_drag_ended() -> void:
+func _on_drag_ended(key: String) -> void:
 	if not _editing:
 		return
-	color_changed.emit(current_color())
+	# 收尾补一次最终值上报（与手势中的逐次上报同源）。
+	if key in _CHANNELS:
+		color_changed.emit(current_color())
+	else:
+		pbr_changed.emit(StringName(key), float(_sliders[key].value))
 	_editing = false
 	edit_ended.emit()
 
@@ -195,8 +246,15 @@ func _refresh_preview() -> void:
 	var c := current_color()
 	_preview.color = c
 	_hex.text = "#" + c.to_html(false)
-	for ch in _CHANNELS:
-		_value_labels[ch].text = str(int(round(float(_sliders[ch].value) * 255.0)))
+	for key in _sliders:
+		_value_labels[key].text = _format_value(String(key), float(_sliders[key].value))
+
+
+## 数值显示：颜色通道按 0–255 字节（与 MATE 存储量纲一致），PBR 标量按百分比（贴近"强度"语义）。
+static func _format_value(key: String, v: float) -> String:
+	if key in _CHANNELS:
+		return str(int(round(v * 255.0)))
+	return "%d%%" % int(round(v * 100.0))
 
 
 ## 通道取值：Color 不支持下标运算，故显式分发（唯一一处，避免四处写 .r/.g/.b/.a）。

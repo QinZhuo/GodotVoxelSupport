@@ -62,10 +62,7 @@ func _build() -> void:
 	row.add_child(_current)
 
 	_group.allow_unpress = false
-	_scroll = ScrollContainer.new()
-	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_scroll.custom_minimum_size.y = QVoxelUi.hit_size()
+	_scroll = QVoxelUi.scroll(false, QVoxelUi.hit_size())
 	row.add_child(_scroll)
 
 	_row = QVoxelUi.hbox(QVoxelUi.SPACE_XS)

@@ -39,8 +39,11 @@ func cleanup() -> void:
 func _world() -> QVoxelWorld:
 	var w := QVoxelWorld.create_empty()
 	w.set_world_name("测试世界")
-	w.add_material(Color(1.0, 0.0, 0.0))
+	var m1 := w.add_material(Color(1.0, 0.0, 0.0))
 	w.add_material(Color(0.0, 1.0, 0.0))
+	# PBR 标量也要过一遍存档：MATE 把自发光存成 e_r/e_g/e_b，属"看着能存、读回变味"的高危字段。
+	w.set_material_scalar(m1, &"metal", 0.5)
+	w.set_material_scalar(m1, &"rough", 0.25)
 	w.add_camera("主视角")
 	var g := w.create_group("组一")
 	var obj := w.create_model("方块", Vector3i(16, 16, 16), g)
@@ -70,6 +73,8 @@ func test_round_trip_keeps_the_world() -> void:
 
 	assert_eq(back.world_name(), "测试世界", "世界名")
 	assert_eq(back.materials.size(), w.materials.size(), "材质数")
+	assert_eq(back.material_scalar(1, &"metal"), w.material_scalar(1, &"metal"), "金属度存活")
+	assert_eq(back.material_scalar(1, &"rough"), w.material_scalar(1, &"rough"), "粗糙度存活")
 	assert_eq(back.cameras().size(), w.cameras().size(), "相机数")
 	assert_eq(back.nodes.size(), 1, "顶层只有那个组（模型是它的子节点，不是平级）")
 	assert_eq(back.all_models().size(), 1, "模型数")
@@ -84,6 +89,27 @@ func test_round_trip_keeps_the_world() -> void:
 	assert_eq(obj.count_solid(), 2, "实心格数")
 	assert_eq(obj.get_voxel(1, 2, 3), 1, "第一笔的体素与材质")
 	assert_eq(obj.get_voxel(4, 0, 0), 2, "第二笔的体素与材质")
+
+
+## 材质 PBR 标量（金属度 / 粗糙度 / 自发光）：写进去的强度必须原样读回来。
+##
+## 【为什么自发光要单独盯】MATE 把自发光存成 `e_r/e_g/e_b` 三个字节（发光颜色），单通道强度只能
+## 从它还原。若照"基色 × 强度"写，读回会再乘一遍基色亮度（本例基色最大分量只有 0.8），滑条一松手
+## 就跳值。这条断言钉住"读回 == 写入"，也钉住渲染侧（`VoxelMaterial.from_mate`）看到同一强度。
+func test_material_pbr_scalars_round_trip() -> void:
+	var w := QVoxelWorld.create_empty()
+	var id := w.add_material(Color(0.8, 0.4, 0.2))
+	var before := w.material_color(id)
+	w.set_material_scalar(id, &"metal", 0.5)
+	w.set_material_scalar(id, &"rough", 0.25)
+	w.set_material_scalar(id, &"emission", 0.6)
+	assert_eq(w.material_scalar(id, &"metal"), 128.0 / 255.0, "金属度：写 0.5 读回 128/255")
+	assert_eq(w.material_scalar(id, &"rough"), 64.0 / 255.0, "粗糙度：写 0.25 读回 64/255")
+	assert_eq(w.material_scalar(id, &"emission"), 153.0 / 255.0,
+		"自发光：基色最大分量只有 0.8，仍要读回 0.6（= 153/255）")
+	assert_eq(w.material_color(id), before, "写 PBR 不该动到基色")
+	assert_eq(VoxelMaterial.from_mate(w.materials[id], id).emission, 153.0 / 255.0,
+		"渲染侧（from_mate）看到同一强度 —— UI 滑条与画面不会各说各话")
 
 
 func test_save_then_load_lands_on_disk() -> void:

@@ -310,6 +310,51 @@ func used_materials() -> Dictionary:
 	return used
 
 
+## 材质 PBR 标量通道（`metal` / `rough` / `emission`，值域 0–1）。ID 越界返回 0。
+##
+## 【为什么 emission 的读回恒等于写入值】MATE 用 `e_r/e_g/e_b` 存**发光颜色**（三个字节），
+## 单通道强度只能从它还原。若照 `VoxelMaterial.to_mate` 那样写 `基色 × 强度`，读回 `max()` 会
+## 再乘一遍基色亮度，滑条一松手就跳值。故写入时按基色的最大分量归一，使 `max(e) == 强度` ——
+## 渲染侧（`VoxelMaterial.emission_color`）看到的仍是"基色 × 强度"，语义不变。
+func material_scalar(material_id: int, key: StringName) -> float:
+	if material_id <= 0 or material_id >= materials.size():
+		return 0.0
+	var e: Dictionary = materials[material_id]
+	match key:
+		&"metal":
+			return float(int(e.get("metal", 0))) / 255.0
+		&"rough":
+			return float(int(e.get("rough", 0))) / 255.0
+		&"emission":
+			var hi := maxi(maxi(int(e.get("e_r", 0)), int(e.get("e_g", 0))), int(e.get("e_b", 0)))
+			return float(hi) / 255.0
+	return 0.0
+
+
+## 写材质 PBR 标量通道（与 `material_scalar` 成对，round-trip 稳定）。**整体替换条目**（同
+## `set_material_color`，理由见类头铁律：浅快照与活数据共享嵌套容器）。
+func set_material_scalar(material_id: int, key: StringName, value: float) -> void:
+	while materials.size() <= material_id:
+		materials.append(_air_entry())
+	var e: Dictionary = (materials[material_id] as Dictionary).duplicate()
+	match key:
+		&"metal":
+			e["metal"] = _byte(value)
+		&"rough":
+			e["rough"] = _byte(value)
+		&"emission":
+			var color := _color_of(e)
+			var hi := maxf(maxf(color.r, color.g), color.b)
+			var scale := 0.0 if hi <= 0.0 else value * 255.0 / hi
+			e["e_r"] = clampi(int(round(color.r * scale)), 0, 255)
+			e["e_g"] = clampi(int(round(color.g * scale)), 0, 255)
+			e["e_b"] = clampi(int(round(color.b * scale)), 0, 255)
+		_:
+			return
+	materials[material_id] = e
+	_touch()
+
+
 # ----------------------------------------------------------------------------
 # 相机（NODE 下的工程数据，§5.1）
 # ----------------------------------------------------------------------------
@@ -741,6 +786,11 @@ static func _color_of(entry: Variant) -> Color:
 	var e: Dictionary = entry
 	return Color8(int(e.get("r", 255)), int(e.get("g", 0)), int(e.get("b", 255)),
 			int(e.get("a", 255)))
+
+
+## 0–1 浮点 → 0–255 字节（PBR 标量的 MATE 存储量纲）。
+static func _byte(value: float) -> int:
+	return clampi(int(round(value * 255.0)), 0, 255)
 
 
 static func _rgba_of(c: Color) -> int:

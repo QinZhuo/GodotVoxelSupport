@@ -32,6 +32,8 @@ signal view_mode_changed(mode: int)
 signal zoom_requested(steps: float)
 ## 帮助（快捷键与手势一览）开关。
 signal help_toggled(enabled: bool)
+## 日志（刚才发生了什么）开关。
+signal log_toggled(enabled: bool)
 
 ## 视图模式取值。定义在界面这一层：它是"界面提供给用户的一种操作姿态"，不是算法概念 ——
 ## 换成 Dock 内嵌视口时它依然成立（两种形态下鼠标中键都可用，触摸屏则都只能靠这个开关）。
@@ -45,6 +47,7 @@ var _redo: Button
 var _nav: Button
 var _pan: Button
 var _help: Button
+var _log: Button
 var _project_name := ""
 var _project_dirty := false
 var _view := VIEW_PAINT
@@ -120,6 +123,13 @@ func _view_group() -> HBoxContainer:
 	_help.toggle_mode = true
 	_help.toggled.connect(func(on: bool): help_toggled.emit(on))
 	g.add_child(_help)
+
+	# 日志与说明并列在栏尾：两者都是"查一下"（都不改数据），也都开在右上角的浮层里。
+	_log = _action("日志", "刚才发生了什么 —— 导入 / 导出 / 求值失败的原因都在这里",
+			func(): pass, QVoxelUi.VARIATION_TOOL)
+	_log.toggle_mode = true
+	_log.toggled.connect(func(on: bool): log_toggled.emit(on))
+	g.add_child(_log)
 	return g
 
 
@@ -176,6 +186,10 @@ func view_mode() -> int:
 
 func set_help(on: bool) -> void:
 	_help.set_pressed_no_signal(on)
+
+
+func set_log(on: bool) -> void:
+	_log.set_pressed_no_signal(on)
 
 
 # ----------------------------------------------------------------------------

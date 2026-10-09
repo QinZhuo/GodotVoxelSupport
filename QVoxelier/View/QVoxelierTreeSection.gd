@@ -131,16 +131,19 @@ func _add_rows(node: QVoxelNode, depth: int) -> void:
 			if c != null:
 				_add_rows(c, depth + 1)
 	# 链是节点的**一部分**（见 QVoxelNode），故紧跟在它的子树之后、再缩进一级显示。
+	# 链错误按**实例**归属一次算好，行控件只负责显示（见 _chain_errors_by_modifier）。
+	var errors := _chain_errors_by_modifier(node)
 	for i in node.modifiers.size():
-		_rows.add_child(_make_modifier_row(node, i, depth + 1))
+		var m: QVoxelModifier = node.modifiers[i]
+		_rows.add_child(_make_modifier_row(node, i, depth + 1, errors.get(m, [])))
 
 
-## 一条修改器行：旁通开关 / 显示名 / 移除。点整行 = 选中它去改参数。
+## 一条修改器行：旁通开关 / 显示名 / 域徽标 / 错误红标 / 移除。点整行 = 选中它去改参数。
 ##
 ## 【为什么修改器要成为树上的行，而不是另开一个面板】链是节点的属性，"哪条链属于谁"必须
 ## 一眼可见；另开面板就要维护"当前看的是谁的链"这份额外的选中状态。成为行之后，选中状态
 ## 就是行本身，增删改都落在同一棵树里（"万物皆修改器"在 UI 上的对应物）。
-func _make_modifier_row(node: QVoxelNode, index: int, depth: int) -> Control:
+func _make_modifier_row(node: QVoxelNode, index: int, depth: int, errors: Array = []) -> Control:
 	var m: QVoxelModifier = node.modifiers[index]
 	var row := TreeRow.new()
 	row.node = node
@@ -149,7 +152,7 @@ func _make_modifier_row(node: QVoxelNode, index: int, depth: int) -> Control:
 	row.depth = depth
 	row.custom_minimum_size.y = QVoxelUi.hit_size()
 	row.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	row.tooltip_text = _modifier_tooltip(node, index, m)
+	row.tooltip_text = _modifier_tooltip(node, index, m, errors)
 	row.add_theme_color_override("font_color", QVoxelUi.TEXT_DIM)
 	row.pressed.connect(func(): modifier_selected.emit(node, index))
 
@@ -176,20 +179,44 @@ func _make_modifier_row(node: QVoxelNode, index: int, depth: int) -> Control:
 	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	box.add_child(name_label)
 
+	# 域徽标（§3.1）：这条修改器吃 / 吐哪种数据形态。域决定"改这个参数会不会重排输出盒"，
+	# 是用户预判代价的唯一线索 —— 只写在 tooltip 里等于没有。
+	box.add_child(QVoxelUi.label(QVoxelDomain.KIND_NAMES[m.domain()],
+			QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT))
+
+	# 错误红标（§3.1）：**打在有错的那一条上**，而不是等到求值崩 —— 域序号回升这类
+	# "设计错误"一定有明确的人为原因（链被拖错了位置），在求值前就该被看见。
+	# 旁通项不在生效链里、不产出错误，故不打标（见 _chain_errors_by_modifier）。
+	if not errors.is_empty():
+		var msgs := PackedStringArray()
+		for e in errors:
+			msgs.append(String(e["message"]))
+		var warn := QVoxelUi.label("⚠", QVoxelUi.FONT_S, QVoxelUi.WARN)
+		warn.tooltip_text = "\n".join(msgs)
+		box.add_child(warn)
+
 	var rm := QVoxelUi.icon_button("×", "从链上移除这条修改器")
 	rm.pressed.connect(func(): modifier_remove_requested.emit(node, index))
 	box.add_child(rm)
 	return row
 
 
-func _modifier_tooltip(node: QVoxelNode, index: int, m: QVoxelModifier) -> String:
+func _modifier_tooltip(node: QVoxelNode, index: int, m: QVoxelModifier, errors: Array = []) -> String:
 	var lines := PackedStringArray()
 	lines.append("%s · 第 %d 条" % [m.display_name(), index + 1])
 	lines.append("种类 %s · 合成 %d" % [m.kind(), int(m.combine)])
 	if not m.enabled:
 		lines.append("已旁通（不参与求值）")
-	for e in QVoxelDomain.chain_errors([m]):
+	# 生效链里的错误（含"域序号回升"这类只有放回链里才看得出的问题）。
+	var seen := {}
+	for e in errors:
+		seen[String(e["message"])] = true
 		lines.append("· %s" % e["message"])
+	# 条目自身的问题：旁通时它不在生效链里，上面那段看不到，这里补上（按消息去重）。
+	for e in QVoxelDomain.chain_errors([m]):
+		var msg := String(e["message"])
+		if not seen.has(msg):
+			lines.append("· %s" % msg)
 	return "\n".join(lines)
 
 
@@ -294,14 +321,39 @@ func _row_tooltip(node: QVoxelNode) -> String:
 	return "\n".join(lines)
 
 
-## 本节点（含子树）里的链错误数。组行汇总子树 —— 折叠着也能看见"这组里有问题"。
+## 本节点（含子树）里有问题的**修改器条数**。组行汇总子树 —— 折叠着也能看见"这组里有问题"。
+##
+## 【为什么数条数而不是数错误条】节点行的 ⚠N 与修改器行的红标是同一件事的两种粒度：
+## 用户看到 N 个红标，父行就该是 ⚠N。数"错误条数"会让一条修改器犯两个错时对不上号。
 func _errors_of(node: QVoxelNode) -> int:
-	var n := QVoxelDomain.chain_errors(node.active_modifiers()).size()
+	var n := _chain_errors_by_modifier(node).size()
 	if node.is_group():
 		for c in (node as QVoxelGroup).child_nodes:
 			if c != null:
 				n += _errors_of(c)
 	return n
+
+
+## 把链校验结果按**修改器实例**归属，返回 {QVoxelModifier: Array[错误]}。
+##
+## 【为什么必须按实例而不是按下标】`chain_errors()` 的 index 指向**传入数组**里的位置，
+## 而树遍历的是全量 `node.modifiers` —— 旁通项会被 `active_modifiers()` 滤掉，于是
+## "第 i 条"在两条路径上根本不是同一条（拿下标去标红，标错行）。实例是唯一稳定的归属键。
+##
+## 【为什么只用生效链】旁通项不参与求值，也就不产生错误；拿它标红是假警报。
+## 它自身的问题（如重排算子配了「平滑并」）仍会在 tooltip 里说明 —— 见 _modifier_tooltip。
+func _chain_errors_by_modifier(node: QVoxelNode) -> Dictionary:
+	var chain := node.active_modifiers()
+	var out := {}
+	for e in QVoxelDomain.chain_errors(chain):
+		var i := int(e["index"])
+		if i < 0 or i >= chain.size():
+			continue
+		var m: QVoxelModifier = chain[i]
+		if not out.has(m):
+			out[m] = []
+		(out[m] as Array).append(e)
+	return out
 
 
 func _is_active(node: QVoxelNode) -> bool:

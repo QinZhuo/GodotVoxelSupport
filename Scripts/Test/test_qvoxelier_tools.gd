@@ -128,6 +128,51 @@ func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 		assert_eq(only_want.size(), 0, "半径 %d 漏算了（距离变换偏大）: %s" % [r, str(only_want.slice(0, 8))])
 
 
+func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
+	# dilate_plane 走的是"平面内两轴各一轮一维膨胀"（代价随输出走），而它的定义是
+	# "每格盖一个平面方块"。与上面那条球的一样：这条把"快"钉在"对"上 —— 两条路径同一集合。
+	var seeds: Array[Vector3i] = []
+	for x in range(3):
+		for z in range(2):
+			seeds.append(Vector3i(x * 2 - 1, x - z, z * 3))
+	for normal in [Vector3i(0, 1, 0), Vector3i(1, 0, 0), Vector3i(0, 0, -1)]:
+		var ax := QVoxelBrushGeometry.face_axes(normal)
+		for r in [1, 2, 4]:
+			var got := _cells_of(QVoxelBrushGeometry.dilate_plane(seeds, r, normal))
+			var want := {}
+			for c in seeds:
+				for i in range(-r, r + 1):
+					for j in range(-r, r + 1):
+						want[c + ax[0] * i + ax[1] * j] = true
+			var only_got: Array[Vector3i] = []
+			var only_want: Array[Vector3i] = []
+			for k: Vector3i in got:
+				if not want.has(k):
+					only_got.append(k)
+			for k: Vector3i in want:
+				if not got.has(k):
+					only_want.append(k)
+			assert_eq(only_got.size(), 0,
+				"法线 %s 半径 %d 多算了: %s" % [str(normal), r, str(only_got.slice(0, 8))])
+			assert_eq(only_want.size(), 0,
+				"法线 %s 半径 %d 漏算了: %s" % [str(normal), r, str(only_want.slice(0, 8))])
+
+
+func test_dilate_plane_is_flat_where_the_ball_is_round() -> void:
+	# 「球 / 平面」的差别就落在这一步：球会朝法线两侧也鼓出去，平面只在面内摊开。
+	var one: Array[Vector3i] = [Vector3i(5, 5, 5)]
+	var flat := QVoxelBrushGeometry.dilate_plane(one, 2, Vector3i(0, 1, 0))
+	assert_eq(flat.size(), 25, "法线 +Y、半径 2 的平面 = 5×5 的一片（(2r+1)²）")
+	for c in flat:
+		assert_eq(c.y, 5, "厚度恒为 1：平面不朝法线方向鼓")
+	assert_true(QVoxelBrushGeometry.dilate(one, 2).size() > flat.size(),
+		"同半径下球比平面厚（球会朝法线两侧也长出去）")
+	assert_eq(QVoxelBrushGeometry.dilate_plane(one, 0, Vector3i(0, 1, 0)), one, "半径 0 原样返回")
+	assert_eq(QVoxelBrushGeometry.dilate_plane(one, 3, Vector3i(0, 1, 0)),
+		QVoxelBrushGeometry.dilate_plane(one, 3, Vector3i(0, -1, 0)),
+		"平面的两个朝向等价（face_axes 只看轴向，不看正负）")
+
+
 func test_ball_offsets_are_one_shared_cached_table() -> void:
 	# 球偏移只由半径决定，因此全类共用一张表：按格盖章的用法会反复算同一个球，
 	# 若每次都新建一张表，就是一串无谓的三重循环（半径 15 时每次 31³）。
@@ -311,6 +356,22 @@ func test_brush_size_dilates_the_stroke() -> void:
 	var cells := tool.release()
 	assert_eq(cells.size(), 7, "笔刷尺寸 2 → 半径 1 的球（中心 + 6 面邻）")
 	assert_true(cells.has(Vector3i(0, 1, 0)), "中心仍是落笔格")
+
+
+func test_plane_shape_keeps_a_wide_stroke_on_the_surface() -> void:
+	# 体素笔 + 平面形态：在地板上刷一笔，产物是贴在落笔层的一片，而不是半个球埋进地板。
+	# 这正是"形状"与"尺寸"分开的意义 —— 同一个尺寸，两种笔头、两种代价。
+	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
+	tool.brush_size = 3
+	tool.set_shape(QVoxelBrushTool.Shape.PLANE)
+	var solid := {}
+	tool.begin(_pick(solid, Vector3i(4, 0, 4), Vector3i(0, 1, 0)))
+	var cells := tool.release()
+	assert_eq(cells.size(), 25, "尺寸 3 → 半径 2 的平面片（(2·2+1)² = 25）")
+	for c in cells:
+		assert_eq(c.y, 1, "整片都在落笔层（法线 +Y），没有一格陷进地板或飘在空中")
+	assert_eq(_tool(QVoxelBrushTool.Mode.VOXEL).brush_shape, QVoxelBrushTool.Shape.BALL,
+		"默认形态仍是球：既有行为一字未改")
 
 
 func test_out_of_grid_cells_are_dropped() -> void:

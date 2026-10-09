@@ -420,6 +420,22 @@ static func hbox(sep := -1) -> HBoxContainer:
 	return h
 
 
+## 滚动容器：内容超出即滚动，**另一轴不参与布局**。
+##
+## 【为什么另一轴用 DISABLED 而不是 SHOW_NEVER】SHOW_NEVER 仍会把子节点的总宽 / 总高算进
+## minimum size，于是"把滚动条藏起来"的容器会把父容器撑爆（DefTableView 踩过同一个坑）。
+## height > 0 时定高；要"跟着父容器伸缩"就传 0 并自行设 SIZE_EXPAND_FILL。
+static func scroll(vertical: bool, height := 0.0) -> ScrollContainer:
+	var s := ScrollContainer.new()
+	s.horizontal_scroll_mode = (ScrollContainer.SCROLL_MODE_DISABLED if vertical
+			else ScrollContainer.SCROLL_MODE_AUTO)
+	s.vertical_scroll_mode = (ScrollContainer.SCROLL_MODE_AUTO if vertical
+			else ScrollContainer.SCROLL_MODE_DISABLED)
+	if height > 0.0:
+		s.custom_minimum_size.y = height
+	return s
+
+
 static func divider() -> HSeparator:
 	return HSeparator.new()
 

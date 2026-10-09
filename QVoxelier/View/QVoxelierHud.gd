@@ -31,9 +31,17 @@ var _selection: Label
 var _history: Label
 var _toast: Label
 var _legend: PanelContainer
+var _log: PanelContainer
+var _log_scroll: ScrollContainer
+var _log_list: VBoxContainer
 var _toast_left := 0.0
 
 const TOAST_SECONDS := 2.5
+## 日志浮层：宽固定（长消息换行，而不是把面板撑到半个屏幕），高固定（内容超出就滚动）。
+const LOG_WIDTH := 360.0
+const LOG_HEIGHT := 220.0
+## 只留最近 N 行 —— 日志是"回看刚才发生了什么"，不是审计档案；无界增长会一直吃内存。
+const LOG_MAX := 200
 
 
 func _process(delta: float) -> void:
@@ -115,18 +123,54 @@ func _selection_readout() -> String:
 
 
 ## 一行短提示（2.5 秒后自动消失）：越界、无可撤销、模式已切换这类"刚发生的事"。
+##
+## 【为什么顺带记进日志】提示一闪即过，而"我刚做了什么才变成这样"的上下文只在日志里留得住 ——
+## 导入 / 导出 / 求值失败的原因全都走这条路。让 flash 一处同时做两件事：几十个调用点一行不改，
+## 也不会有人新增提示时忘了记。
 func flash(text: String) -> void:
 	_toast.text = text
 	_toast_left = TOAST_SECONDS
+	_append_log(text)
 
 
-## 操作说明浮层（由应用栏的「?」开关）。
+## 操作说明浮层（由应用栏的「?」开关）。两块浮层都锚在右上角，同时开会叠在一起 ——
+## 开一块就关另一块（应用栏那个按钮由 App 负责弹起，见 QVoxelierApp._set_legend_visible）。
 func set_legend_visible(on: bool) -> void:
 	_legend.visible = on
+	if on:
+		_log.visible = false
 
 
 func legend_visible() -> bool:
 	return _legend.visible
+
+
+## 日志浮层（由应用栏的「日志」开关）：刚才发生了什么，按时间从上往下排。
+func set_log_visible(on: bool) -> void:
+	_log.visible = on
+	if on:
+		_legend.visible = false
+		# 打开即滚到底：点它多半是想看"最近这一下"，而不是从头读起。
+		_scroll_to_bottom.call_deferred()
+
+
+func log_visible() -> bool:
+	return _log.visible
+
+
+## 清空日志（浮层标题栏的按钮）。
+func clear_log() -> void:
+	for c in _log_list.get_children():
+		_log_list.remove_child(c)
+		c.queue_free()
+
+
+## 日志内容（只读，按时间从旧到新）。给"复制日志"这类导出用，也让测试不必伸手掏私有字段。
+func log_lines() -> PackedStringArray:
+	var out := PackedStringArray()
+	for c in _log_list.get_children():
+		out.append((c as Label).text)
+	return out
 
 
 # ----------------------------------------------------------------------------
@@ -138,6 +182,7 @@ func _build() -> void:
 	_build_status()
 	_build_toast()
 	_build_legend()
+	_build_log()
 
 
 ## 底部状态栏：左起工具名（强调色，一眼定位），中间是当前工具的用法提示（可伸缩，
@@ -214,6 +259,68 @@ func _build_legend() -> void:
 		col.add_child(section)
 		for line in block[1]:
 			col.add_child(QVoxelUi.label(line, QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
+
+
+## 日志浮层：与说明浮层并列（同样锚右上、同样默认隐藏），区别是**内容会增长**，故带滚动与清空。
+##
+## 【为什么不塞进右侧抽屉当第六组】抽屉里的组是"对工程做什么"（颜色 / 层级 / 修改器 / 时间轴），
+## 而日志是"刚才发生了什么"—— 它与瞬时提示、操作说明同属"视口的回话"，放在视口这一层才连贯；
+## 而且它多半在出错之后才被打开，那时用户的眼睛本来就在视口上。
+func _build_log() -> void:
+	_log = QVoxelUi.panel(QVoxelUi.space_m(), QVoxelUi.SURFACE_SOLID)
+	_log.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	_log.offset_right = -QVoxelUi.space_m()
+	_log.offset_left = -LOG_WIDTH - QVoxelUi.space_m()
+	_log.offset_top = QVoxelUi.bar_height() + QVoxelUi.space_m()
+	_log.offset_bottom = _log.offset_top + LOG_HEIGHT
+	_log.visible = false
+	add_child(_log)
+
+	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
+	_log.add_child(col)
+
+	var head := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	col.add_child(head)
+	var title := QVoxelUi.heading("日志")
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	head.add_child(title)
+	var clear := QVoxelUi.icon_button("清", "清空日志")
+	clear.pressed.connect(clear_log)
+	head.add_child(clear)
+
+	# 高度由浮层的固定矩形决定（EXPAND_FILL 吃掉标题行之外的余量），故不必在这里算高度。
+	_log_scroll = QVoxelUi.scroll(true)
+	_log_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(_log_scroll)
+	_log_list = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
+	_log_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_log_scroll.add_child(_log_list)
+
+
+## 追加一行：新行在底部（时间从上往下读），并**有界**（只留最近 LOG_MAX 行）。
+##
+## 【为什么在 Label 上开自动换行】浮层宽固定（长消息不该把面板撑到半个屏幕），
+## 若改成截断，则"失败原因"最关键的尾巴会被吃掉 —— 日志的价值恰恰在那后半句。
+func _append_log(text: String) -> void:
+	if _log_list == null:
+		return
+	var l := QVoxelUi.label(text, QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_log_list.add_child(l)
+	while _log_list.get_child_count() > LOG_MAX:
+		var old := _log_list.get_child(0)
+		_log_list.remove_child(old)
+		old.queue_free()
+	_scroll_to_bottom.call_deferred()
+
+
+## 滚到底。**延到帧末**：刚 add_child 的行还没参与布局，当场写 scroll_vertical 会被随后的
+## 布局改回去（表现为"新行在下面看不见"）。
+func _scroll_to_bottom() -> void:
+	if _log_scroll == null:
+		return
+	_log_scroll.scroll_vertical = int(_log_scroll.get_v_scroll_bar().max_value)
 
 
 ## 说明文案：**两套操作形态并列**，因为同一套界面上平板与鼠标的动作名字不同。
