@@ -30,7 +30,11 @@ var _legend: PanelContainer
 var _log: PanelContainer
 var _log_scroll: ScrollContainer
 var _log_list: VBoxContainer
+var _log_empty: Label
 var _toast_left := 0.0
+## 两块浮层右侧要让开的宽度。装配时由 App 报进来（抽屉的实际宽度随内容变，见
+## QVoxelierDock._fit），默认退回设计宽度 —— HUD 单独跑时也摆得对。
+var _right_inset := QVoxelUi.dock_width() + QVoxelUi.space_l() + QVoxelUi.space_m()
 
 const TOAST_SECONDS := 2.5
 ## 日志浮层：宽固定（长消息换行，而不是把面板撑到半个屏幕），高固定（内容超出就滚动）。
@@ -93,11 +97,14 @@ func set_material_id(material_id: int) -> void:
 ## 报种子数会变成"屏幕上有 8000 个体素，读数说 0"。
 ## 【为什么尺寸报 output_size 而体素数报 data】尺寸是**声明**（盒多大），体素数是**事实**
 ## （现在有多少个非空格）。前者由链的结构决定，后者只有数据层知道 —— 两处各取权威来源。
+## 【为什么是 evaluated_voxel_count 而不是 get_voxel_count】后者数的是 chunk 缓冲，而落笔封口时
+## 受影响的块**刚被作废丢弃**（等渲染器重新取数）→ 读出来恰好缺了刚画的那几块，表现为
+## "画完却还是 0 体素"。前者数的是求值输出本身，与屏幕上那份几何同源，且不依赖谁先跑。
 func _model_readout() -> String:
 	if session == null or session.object == null:
 		return "模型 —"
 	var g := session.output_size()
-	var n := session.data.get_voxel_count() if session.data != null else 0
+	var n := session.data.evaluated_voxel_count() if session.data != null else 0
 	return "模型 %d×%d×%d · %d 体素" % [g.x, g.y, g.z, n]
 
 
@@ -153,6 +160,7 @@ func clear_log() -> void:
 	for c in _log_list.get_children():
 		_log_list.remove_child(c)
 		c.queue_free()
+	_refresh_log_empty()
 
 
 ## 日志内容（只读，按时间从旧到新）。给"复制日志"这类导出用，也让测试不必伸手掏私有字段。
@@ -231,8 +239,8 @@ func _build_legend() -> void:
 	_legend.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 	# 锚在右上角、向左下方生长：浮层宽度由文案决定（不写死宽度，改文案不必调这里）。
 	_legend.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	_legend.offset_left = -QVoxelUi.space_m()
-	_legend.offset_right = -QVoxelUi.space_m()
+	_legend.offset_left = -_float_inset()
+	_legend.offset_right = -_float_inset()
 	_legend.offset_top = QVoxelUi.bar_height() + QVoxelUi.space_m()
 	_legend.offset_bottom = QVoxelUi.bar_height() + QVoxelUi.space_m()
 	_legend.visible = false
@@ -256,8 +264,8 @@ func _build_legend() -> void:
 func _build_log() -> void:
 	_log = QVoxelUi.panel(QVoxelUi.space_m(), QVoxelUi.SURFACE_SOLID)
 	_log.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	_log.offset_right = -QVoxelUi.space_m()
-	_log.offset_left = -LOG_WIDTH - QVoxelUi.space_m()
+	_log.offset_right = -_float_inset()
+	_log.offset_left = -LOG_WIDTH - _float_inset()
 	_log.offset_top = QVoxelUi.bar_height() + QVoxelUi.space_m()
 	_log.offset_bottom = _log.offset_top + LOG_HEIGHT
 	_log.visible = false
@@ -284,6 +292,15 @@ func _build_log() -> void:
 	_log_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_log_scroll.add_child(_log_list)
 
+	# 空态：日志是"回看刚才发生了什么"，一条都没有时得给句话 —— 否则用户对着空面板分不清
+	# 是自己还没操作，还是面板没打开/坏了。与滚动区互斥可见，所以占同一个位置。
+	_log_empty = QVoxelUi.label("还没有操作记录 —— 画一笔、切个工具，都会记在这里",
+			QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
+	_log_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_log_empty.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(_log_empty)
+	_refresh_log_empty()
+
 
 ## 追加一行：新行在底部（时间从上往下读），并**有界**（只留最近 LOG_MAX 行）。
 ## 【为什么在 Label 上开自动换行】浮层宽固定（长消息不该把面板撑到半个屏幕），
@@ -298,7 +315,40 @@ func _append_log(text: String) -> void:
 		var old := _log_list.get_child(0)
 		_log_list.remove_child(old)
 		old.queue_free()
+	_refresh_log_empty()
 	_scroll_to_bottom.call_deferred()
+
+
+## 空态与列表互斥可见：一条记录都没有时给提示，否则给滚动区。
+func _refresh_log_empty() -> void:
+	if _log_empty == null or _log_scroll == null:
+		return
+	var empty := _log_list.get_child_count() == 0
+	_log_empty.visible = empty
+	_log_scroll.visible = not empty
+
+
+## 两块浮层右侧要让开的宽度：右列抽屉（dock_width + space_l）再加一条缝。
+## 【为什么不能让浮层贴屏幕右缘】说明与日志和右列抽屉锚在同一个角上（PRESET_TOP_RIGHT），
+## 贴右缘就会被抽屉整条压住 —— 实测「操作说明」右半边被「颜色」面板盖掉，
+## "Ctrl+O 打开""无需键盘即可完成全部操作"这几行直接读不到。
+func _float_inset() -> float:
+	return _right_inset
+
+
+## 报告右列占掉的宽度（App 装配时喂入抽屉的实际宽度 + 一条缝），变了就把浮层挪过去。
+## 【为什么要喂而不是自己算】抽屉宽度是**内容驱动**的（同工具坞），HUD 既看不见抽屉的内容、
+## 也不该去认识兄弟节点；"谁给谁让位"统一在装配处说清（见 QVoxelierApp._build_ui）。
+func set_right_inset(w: float) -> void:
+	if is_equal_approx(w, _right_inset):
+		return
+	_right_inset = w
+	if _legend != null:
+		_legend.offset_left = -w
+		_legend.offset_right = -w
+	if _log != null:
+		_log.offset_right = -w
+		_log.offset_left = -LOG_WIDTH - w
 
 
 ## 滚到底。**延到帧末**：刚 add_child 的行还没参与布局，当场写 scroll_vertical 会被随后的

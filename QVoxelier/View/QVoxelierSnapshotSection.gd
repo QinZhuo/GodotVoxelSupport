@@ -26,9 +26,10 @@ signal save_requested
 ## 模型越大等得越久；但不能没有上限 —— 卡住时"永远停在渲染中"比"渲得慢"更糟。
 const MESH_WAIT_FRAMES := 600
 
-## 快照背景色（不透明时）。取一档深蓝灰：快照多半是拿去当素材，深底比浅底耐看，
-## 也不会与常见的浅色模型糊在一起。
-const BACKGROUND := Color(0.0706, 0.0863, 0.1137, 1.0)
+## 快照背景色（不透明时）。取一档中性深灰：快照多半是拿去当素材，深底比浅底耐看，
+## 也不会与常见的浅色模型糊在一起；**不带色相**是为了不给素材偷加一层底色偏色
+## （这条刻意独立于界面主题：素材底色是产出的一部分，不该跟着 UI 换肤一起变）。
+const BACKGROUND := Color(0.1059, 0.1059, 0.1059, 1.0)
 
 var _world: QVoxelWorld = null
 var _view: int = QVoxelViewCamera.View.ISO
@@ -155,7 +156,9 @@ func _build_body(body: VBoxContainer) -> void:
 	body.add_child(QVoxelUi.heading("镜头"))
 	body.add_child(_build_options(QVoxelSnapshot.lenses(), 2, _lens, _on_lens_toggled))
 
-	var transparent_button := QVoxelUi.toggle_button("背景透明：PNG 带 alpha 通道，方便叠到别的底上")
+	# 落单的开关**不能**用透明的工具按钮样式：那一列按钮靠上下文才认得出是按钮，
+	# 单独一个透明底的 toggle 看起来就是一行小标题，用户不知道能点（故 variation 传空）。
+	var transparent_button := QVoxelUi.toggle_button("背景透明：PNG 带 alpha 通道，方便叠到别的底上", &"")
 	transparent_button.text = "透明背景"
 	transparent_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	transparent_button.toggled.connect(_on_transparent_toggled)
@@ -256,7 +259,7 @@ func _build_stage() -> void:
 	fill.transform = Transform3D(Vector3(-0.70711, -0.31879, 0.63117), Vector3(0.0, 0.89262, 0.45084),
 			Vector3(-0.70711, 0.31879, -0.63117), Vector3(0.0, 6.0, 0.0))
 	fill.light_energy = 0.9
-	fill.light_color = Color(0.76, 0.82, 0.98)
+	fill.light_color = Color(0.92, 0.92, 0.92)
 	_stage.add_child(fill)
 
 	_camera = QVoxelViewCamera.new()
@@ -320,7 +323,7 @@ func _sync_stage(res: QVoxelEvalResult) -> void:
 		else Environment.BG_COLOR
 	env.background_color = BACKGROUND
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.3608, 0.4078, 0.4941)
+	env.ambient_light_color = Color(0.44, 0.44, 0.44)
 	env.ambient_light_energy = 1.0
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_BG
 	# 与视口同款色调映射：不然快照的明暗关系会和视口里看到的不一样。

@@ -26,39 +26,50 @@ extends RefCounted
 ## **不得在运行时改它**（要改请改本文件的常量），否则会串味到其它面板。
 
 # 设计令牌（design token）
-# 基调：深空冷调专业工具。长时间注视的底（低饱和深灰蓝）+ 单一冷色强调（窄色相）。
-# 强调色只有一个 —— 界面上任何"当前选中/可交互"的暗示都用它，颜色本身即是信息。
+# 基调：冷灰黑专业工具。底是**极低彩度**的灰黑阶 —— 色相偏冷约 5%，只在深底上刚够读出
+# "不是一块死灰"，层次仍靠"底有多深"拉开，不靠色相区分。强调色只有一个（蓝）：
+# 界面上任何"当前选中 / 可交互"的暗示都用它，颜色本身即是信息。
+# 【色偏为什么必须这么淡】偏色一旦浓到"这是个蓝色界面"，材质色板里的青、蓝就和界面色
+# 混作一团，用户分不清"这是 UI 强调还是我选的材质"。冷偏只该贡献"干净"，不该贡献色相。
+# 【为什么强调色是冷色】冷底配冷强调是暗色工具的主流观感（Blender / Godot 编辑器一路）；
+# 暖色压在同一块冷灰上，要么显脏、要么和材质色板里的橙黄撞色（两者都实测过）。
+# 【为什么色值写成 hex】这层色差全在 3~6% 之间，浮点三元组读不出也改不动 ——
+# 十六进制一眼能对上设计稿，末两位是 alpha（ff / f0 / eb ...）。
 
 ## 面板底（半透明：浮在 3D 视口上仍能看出下面有东西，但不会晃眼）。
-const SURFACE := Color(0.0706, 0.0863, 0.1137, 0.94)
+const SURFACE := Color("#1a1d22f0")
 ## 不透明面板底（对话框、需要盖住内容的场合）。
-const SURFACE_SOLID := Color(0.0706, 0.0863, 0.1137, 1.0)
+const SURFACE_SOLID := Color("#1a1d22ff")
 ## 底层（应用栏 / 状态栏，比面板再深一档，形成层次而不是靠描边区分）。
-const BAR := Color(0.0431, 0.0549, 0.0745, 0.92)
+const BAR := Color("#0e1013eb")
 ## 控件默认底。
-const SURFACE_HI := Color(0.1098, 0.1333, 0.1765, 1.0)
+const SURFACE_HI := Color("#262b32ff")
 ## 悬停底（鼠标专属，故只是锦上添花）。
-const SURFACE_HOVER := Color(0.1451, 0.1765, 0.2235, 1.0)
+const SURFACE_HOVER := Color("#30363eff")
 ## 按下 / 选中底。
-const SURFACE_ACTIVE := Color(0.1765, 0.2157, 0.2706, 1.0)
+const SURFACE_ACTIVE := Color("#3a414bff")
 
 const BORDER := Color(1.0, 1.0, 1.0, 0.08)
 const BORDER_STRONG := Color(1.0, 1.0, 1.0, 0.18)
 
-const TEXT := Color(0.9098, 0.9255, 0.9529, 1.0)
-const TEXT_DIM := Color(0.5961, 0.6353, 0.7020, 1.0)
-const TEXT_FAINT := Color(0.4196, 0.4549, 0.5098, 1.0)
+## 正文。纯白压在冷底上发刺，故正文也带一点同一方向的冷偏。
+const TEXT := Color("#edeff3ff")
+const TEXT_DIM := Color("#9aa1acff")
+## 提示 / 占位 / 禁用文字。压到 3.5:1 会在实际窗口里读不动，这里保到约 4.3:1
+## （压在面板底上）—— 它仍然是全屏最暗的文字，但不必眯眼。
+const TEXT_FAINT := Color("#7c838eff")
 
-## 唯一强调色。
-const ACCENT := Color(0.4353, 0.8275, 1.0, 1.0)
+## 唯一强调色（蓝）。
+const ACCENT := Color("#5c9fdbff")
 ## 强调色的低透明度底（选中态背景 / 主操作按钮的常态底）。
-const ACCENT_DIM := Color(0.4353, 0.8275, 1.0, 0.16)
+const ACCENT_DIM := Color("#5c9fdb29")
 ## 主操作按钮的悬停底（比常态略实一档）。
-const ACCENT_HOVER := Color(0.4353, 0.8275, 1.0, 0.28)
+const ACCENT_HOVER := Color("#5c9fdb4d")
 ## 铺在强调色上的文字色（深色，保证对比度）。用于主操作按钮"按下"那一瞬的实心反馈。
-const ON_ACCENT := Color(0.0431, 0.0784, 0.1098, 1.0)
-const WARN := Color(1.0, 0.5412, 0.4471, 1.0)
-const OK := Color(0.4196, 0.8902, 0.6275, 1.0)
+const ON_ACCENT := Color("#0e1013ff")
+## 危险 / 警告。**刻意离强调色远一档色相**（红）—— 强调色选中与"这会丢东西"
+## 必须一眼分得开，否则用户会把确认框里的危险项当成主操作去点。
+const WARN := Color("#e8584eff")
 
 const RADIUS_S := 6
 const RADIUS_M := 10
@@ -241,7 +252,7 @@ static func _theme_line_edit(t: Theme) -> void:
 
 ## 提示气泡：鼠标的专属福利（触摸看不到），但也给个统一长相。
 static func _theme_tooltip(t: Theme) -> void:
-	t.set_stylebox("panel", "TooltipPanel", box(Color(0.0353, 0.0431, 0.0588, 0.98), BORDER_STRONG, 1, RADIUS_S, space_s(), SPACE_XS))
+	t.set_stylebox("panel", "TooltipPanel", box(Color("#0b0d10fa"), BORDER_STRONG, 1, RADIUS_S, space_s(), SPACE_XS))
 	t.set_color("font_color", "TooltipLabel", TEXT)
 	t.set_font_size("font_size", "TooltipLabel", FONT_S)
 
@@ -301,9 +312,13 @@ static func label(text := "", size := FONT_M, color := TEXT, outlined := false) 
 	return l
 
 
-## 分组小标题：小字号 + 弱色 + 全大写字母间距感，用于"工具 / 笔刷 / 调色板"这类分区。
+## 分组小标题：小字号 + 次级色，用于"工具 / 笔刷 / 调色板"这类分区。
+## 【为什么是 TEXT_DIM 而不是更暗的 TEXT_FAINT】小标题是**导航用的路标**（"下面这堆是笔刷"），
+## 不是可忽略的注脚。实测 12px 的 TEXT_FAINT 压在 SURFACE 上对比度仅约 3.5:1，在 1152×648
+## 的实际窗口里要眯着认；再暗一档就与"禁用态文字"撞色，读者会误判成不可用。次级色既拉开
+## 与正文的层次，又保住了"这是路标"的可读性。
 static func heading(text: String) -> Label:
-	var l := label(text, FONT_S, TEXT_FAINT)
+	var l := label(text, FONT_S, TEXT_DIM)
 	l.autowrap_mode = TextServer.AUTOWRAP_OFF
 	return l
 
@@ -375,12 +390,23 @@ static func swatch(color: Color, tooltip := "", size := -1) -> Button:
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if not tooltip.is_empty():
 		b.tooltip_text = tooltip
+	paint_swatch(b, color)
+	return b
+
+
+## 把色块画成某个颜色。**与 [method swatch] 分开是为了能就地换色**：改材质颜色时若重造整条
+## 色板，拖动滑块会变成每帧扔掉再建一遍控件（并把 hover 状态清掉），故只重画那一块。
+## 【选中环为什么不用强调色】色块的颜色是**数据**，而材质里本来就有青、蓝、近白，
+## 强调蓝描在蓝块上等于没有环。故环色按块色亮度取反（暗块配白环、亮块配近黑环），
+## 并向外扩 1.5px —— 于是"选中"在任何材质色上都读得出来，键盘焦点仍走主题的强调色。
+static func paint_swatch(b: Button, color: Color) -> void:
 	var radius := RADIUS_S
 	b.add_theme_stylebox_override("normal", box(color, Color(1, 1, 1, 0.18), 1, radius, 0, 0))
-	b.add_theme_stylebox_override("hover", box(color.lightened(0.15), Color.WHITE, 2, radius, 0, 0))
-	b.add_theme_stylebox_override("pressed", box(color, ACCENT, 3, radius, 0, 0))
+	b.add_theme_stylebox_override("hover", box(color, Color.WHITE, 2, radius, 0, 0))
+	var sel := box(color, Color(1, 1, 1) if color.get_luminance() < 0.55 else Color("#0f1115ff"), 3, radius, 0, 0)
+	sel.set_expand_margin_all(1.5)
+	b.add_theme_stylebox_override("pressed", sel)
 	b.add_theme_stylebox_override("focus", box(Color(0, 0, 0, 0), ACCENT, 3, radius, 0, 0))
-	return b
 
 
 static func panel(margin := -1, bg := SURFACE) -> PanelContainer:

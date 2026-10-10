@@ -31,21 +31,36 @@ const AXIS_VIEWS := [
 ## 指示器要看着的相机（由 App 注入）。
 var camera: Camera3D
 
+## 右侧要让开的宽度（右列抽屉的实际宽度 + 一条缝），由 App 装配时报进来；
+## 默认退回设计宽度 —— 单独跑时也摆得对。HUD 的两块浮层吃的是同一个数。
+## 【为什么不能按常量摆】右列宽度是**内容驱动**的（同工具坞，见 QVoxelierDock._fit），
+## 展开「层级」后实测 228px；而指示器是 160px 见方钉在右下角 —— 按常量摆会被整块压住，
+## 只透过面板的半透明底露出几根轴的鬼影。
+var right_inset := float(QVoxelUi.dock_width() + QVoxelUi.space_l() + QVoxelUi.space_m()):
+	set(v):
+		right_inset = v
+		_sync_rect()
+
 var _last_basis := Basis()
 var _tip_radius := 0.0
 var _tips: Array = []        # [{pos: Vector2, view: int}]
 
 
 func _ready() -> void:
-	# 右下角、让开状态栏。四边锚点都钉在右下，于是窗口缩放时它跟着那个角走。
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	var s := 5 * QVoxelUi.hit_size()
-	custom_minimum_size = Vector2(s, s)
+	# 四边锚点都钉在右下，于是窗口缩放时它跟着那个角走。
 	anchor_left = 1.0
 	anchor_right = 1.0
 	anchor_top = 1.0
 	anchor_bottom = 1.0
-	offset_right = -QVoxelUi.space_m()
+	_sync_rect()
+
+
+## 贴右下角：让开状态栏与右列抽屉（宽度由 right_inset 报进来）。
+func _sync_rect() -> void:
+	var s := 5 * QVoxelUi.hit_size()
+	custom_minimum_size = Vector2(s, s)
+	offset_right = -right_inset
 	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
 	offset_left = offset_right - s
 	offset_top = offset_bottom - s
@@ -64,8 +79,9 @@ func _process(_delta: float) -> void:
 
 func _draw() -> void:
 	var center := size * 0.5
-	# 底盘：透过 3D 视口看它，没有底衬的话轴会与模型糊在一起。
-	draw_circle(center, size.x * 0.5, Color(0.04, 0.06, 0.09, 0.55))
+	# 底盘：透过 3D 视口看它，没有底衬的话轴会与模型糊在一起。取界面同一族的冷灰黑、
+	# 但压得更暗 —— 六个轴尖已经占满红/绿/蓝，底衬若带上台面色就会像"第七根轴"。
+	draw_circle(center, size.x * 0.5, Color(0.035, 0.043, 0.058, 0.55))
 
 	if camera == null:
 		return
@@ -100,7 +116,7 @@ func _draw() -> void:
 			draw_circle(e.pos, QVoxelUi.FONT_S * 0.9, color)
 			draw_string(font, e.pos - Vector2(font_size * 0.32, -font_size * 0.34),
 					AXIS_NAMES[e.axis], HORIZONTAL_ALIGNMENT_LEFT, -1, font_size,
-					Color(0.04, 0.06, 0.09, facing))
+					Color(0.06, 0.07, 0.09, facing))
 		else:
 			draw_arc(e.pos, QVoxelUi.FONT_S * 0.9, 0, TAU, 16, color, 1.5, true)
 		_tips.append({"pos": e.pos, "view": AXIS_VIEWS[e.axis][0 if e.sign > 0.0 else 1],

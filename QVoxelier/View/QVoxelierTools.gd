@@ -40,8 +40,11 @@ const SELECT_ACTIONS := [
 ]
 
 ## 工具坞**面板**的目标宽度取自 [method QVoxelUi.dock_width]（随密度档变）。
-## 它不是硬约束：见下面 resized 的处理 —— 它只是"最窄别窄过这个"。
+## 它不是硬约束：见 [method _fit] —— 它只是"最窄别窄过这个"。
 
+var _panel: PanelContainer
+var _scroll: ScrollContainer
+var _col: VBoxContainer
 var _buttons := {}          # Mode → Button
 var _group := ButtonGroup.new()
 var _brush_value: Label
@@ -56,6 +59,10 @@ var _sym: Array[Button] = []
 var _select_buttons := {}   # id → Button
 var _size := 1
 
+## 排在工具坞**下方**的定高面板所占的高度（左列里就是视图栏）。装配时由 App 报进来 ——
+## "下面还有谁、占多高"是应用级的布局知识，工具坞自己看不见。
+var bottom_reserved := 0.0
+
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
@@ -64,18 +71,30 @@ func _build() -> void:
 	# 直接写宽度会得到"宽度 − 左边距"（差一个左边距）。
 	size.x = QVoxelUi.dock_width()
 
-	var panel := QVoxelUi.panel(QVoxelUi.space_s())
-	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	add_child(panel)
-	# 非容器父节点下的子控件是"自由摆放"的：这个 Control 自身的矩形会停在 0 高 —— 画得出来，
-	# 但任何按矩形度量的东西（调试器、自动化工具、以后的对齐逻辑）都会读到 0。
-	# 取"设计宽度 vs 内容实际需要"的较大者：换文案 / 换语言时按钮不会被挤出面板，
-	# 同时矩形始终如实反映画出来的东西。此式有唯一不动点，不会来回抖。
-	panel.resized.connect(func():
-		size = Vector2(maxf(QVoxelUi.dock_width(), panel.size.x), panel.size.y))
+	_panel = QVoxelUi.panel(QVoxelUi.space_s())
+	_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	add_child(_panel)
 
-	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
-	panel.add_child(col)
+	# 【为什么要滚动，而不是让它一直往下长】内容比可用高度高时，底部那几组（对称 / 选区）
+	# 会伸出窗口：实测工具坞压住底部状态栏（"全选/复制/剪切"与提示文字糊在一起），
+	# 再往下还看不到。定高 + 滚动后，矮窗口里滚一下就能拿到全部按钮。
+	# 【为什么宽度仍然自适应】面板靠"内容比 dock_width 宽就跟着变宽"保住中文按钮不被压成
+	# "复…"（见 _build_selection_rows）。滚动容器不把内容宽度外传，故 _fit 直接读 col 的
+	# 固有宽度来算 —— 读面板宽度会形成"父定子、子又定父"的回环。
+	_scroll = QVoxelUi.scroll(true)
+	_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_panel.add_child(_scroll)
+
+	_col = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
+	_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_scroll.add_child(_col)
+	# 非容器父节点下的子控件是"自由摆放"的：这个 Control 自身的矩形会停在 0 高 —— 画得出来，
+	# 但任何按矩形度量的东西（调试器、自动化工具、以后的对齐逻辑）都会读到 0。故由 _fit 回写。
+	_col.resized.connect(_fit)
+	get_viewport().size_changed.connect(_fit)
+
+	var col := _col
 
 	col.add_child(QVoxelUi.heading("工具"))
 	_group.allow_unpress = false
@@ -122,6 +141,40 @@ func _build() -> void:
 	col.add_child(QVoxelUi.divider())
 	col.add_child(QVoxelUi.heading("选区"))
 	col.add_child(_build_selection_rows())
+	_fit()
+
+
+## 面板矩形 = max(设计宽度, 内容固有宽度) × min(内容固有高度, 可用高度)。
+## 【为什么用固有尺寸】panel / scroll 的 size 都受父容器约束，拿它回写本控件会形成
+## "父定子、子又定父"的回环（旧实现靠一个唯一不动点侥幸收敛）。固有尺寸只描述
+## "内容想要多大"，与父容器无关，回写因此是单向的，不会抖。
+func _fit() -> void:
+	if _col == null:
+		return
+	var inner := _col.get_combined_minimum_size()
+	# 面板内边距（QVoxelUi.panel 的 pad = space_s）+ 左右各 1px 边框。
+	var pad := float(QVoxelUi.space_s() * 2 + 2)
+	_scroll.custom_minimum_size.y = maxf(0.0, minf(inner.y, _available_height() - pad))
+	size = Vector2(maxf(float(QVoxelUi.dock_width()), inner.x + pad),
+			_scroll.custom_minimum_size.y + pad)
+
+
+## 本面板能占的最高高度：视口高减去它自己的顶边位置、底部状态栏、左列里排在它下方的面板
+## （视图栏）以及一点边距。
+## 【为什么必须让位给视图栏】视图栏贴在左列底部（实测 189px 高，从 y=423 起），而工具坞按
+## "视口高 − 状态栏"算得出 564 —— 于是它的下半截（笔刷形态 / 擦除 / 对称 / 选区）整块被视图栏
+## 压住。滚动挪的是内容，挪不动盖在上面的面板，实测"选区"那组无论怎么滚都够不着。
+func _available_height() -> float:
+	return (get_viewport_rect().size.y - position.y - QVoxelUi.status_height()
+			- QVoxelUi.space_s() - bottom_reserved)
+
+
+## 报告"下方要留出多少高度"（App 装配时喂入视图栏的高度）。变了就立刻重排。
+func set_bottom_reserved(h: float) -> void:
+	if is_equal_approx(h, bottom_reserved):
+		return
+	bottom_reserved = h
+	_fit()
 
 
 func _on_sym_toggled(on: bool, axis: int) -> void:

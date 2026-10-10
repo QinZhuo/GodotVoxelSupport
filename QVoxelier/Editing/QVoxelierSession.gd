@@ -31,6 +31,8 @@ var session: QVoxelEditSession
 ## 每个对象一条展示会话：model_id → QVoxelEditSession。**活动那条就是 session**。
 ## 非活动会话不接鼠标，只负责把它那份 QVoxelSource 喂给对应渲染器。
 var _sessions: Dictionary = {}
+## 帧末的 changed 是否已经排上队（一帧内多次改动只通知一次）。
+var _changed_queued := false
 
 ## 当前工程文件路径（空 = 还没存过盘的新工程，"保存"会转成"另存为"）。
 var project_path := ""
@@ -125,8 +127,23 @@ func _make_session(o: QVoxelModel, w: QVoxelWorld) -> QVoxelEditSession:
 
 
 ## 撤销栈一动就说明内容变了 —— 标脏 + 请 View 刷新，不会各说各话。
+## 【为什么请 View 刷新要延到帧末】`history.changed` 是在命令写进**对象**之后、而
+## `QVoxelEditSession._refresh`（作废显示层缓存）之前发出来的。View 的刷新会真的去取数：
+## 状态栏的体素数是当场重建求值体积得到的（见 QVoxelSource.evaluated_voxel_count），
+## 若此时缓存尚未作废，这次重建立刻会被随后的 _refresh 再作废一次 —— 一次落笔白算两遍整条链；
+## 而撤销那条路径更糟：体积缓存还是改动前那份，读数会停在旧数字上。
+## 推到帧末，_refresh 已经跑完，取到的是本次改动之后的那一份。
+## （标脏仍走当场：那是"文件有没有改过"的账，与显示层无关。）
 func _on_history_changed() -> void:
 	_set_dirty(true)
+	if _changed_queued:
+		return
+	_changed_queued = true
+	_emit_changed.call_deferred()
+
+
+func _emit_changed() -> void:
+	_changed_queued = false
 	changed.emit()
 
 

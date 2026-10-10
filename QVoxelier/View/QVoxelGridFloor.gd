@@ -35,24 +35,25 @@ const SHADER := preload("res://QVoxelier/View/QVoxelGridFloor.gdshader")
 		rebuild()
 
 @export_group("配色")
-## 底面格线（细）。
-@export var line_color := Color(0.78, 0.85, 1.0, 0.06):
+## 底面格线（细）。中性白 —— 格线是**参照物**，不该带色相去和体素抢色彩注意力。
+@export var line_color := Color(1.0, 1.0, 1.0, 0.06):
 	set(v):
 		line_color = v
 		rebuild()
 ## 每 major_step 格一条的粗线。
-@export var major_color := Color(0.82, 0.88, 1.0, 0.14):
+@export var major_color := Color(1.0, 1.0, 1.0, 0.14):
 	set(v):
 		major_color = v
 		rebuild()
-## 底面的足印框（合法范围的正面告知）。取界面强调色 —— 与"可交互"同色，颜色本身即是信息。
-@export var border_color := Color(0.4353, 0.8275, 1.0, 0.30):
+## 底面的足印框（合法范围的正面告知）。取界面强调色 —— 与"可交互/已选中"同色，颜色本身即是信息
+## （选区线框 QVoxelSelectionBox 用的是同一个强调色，两者一眼归一）。
+@export var border_color := Color(QVoxelUi.ACCENT, 0.30):
 	set(v):
 		border_color = v
 		rebuild()
 ## 四角的立棱短柱（体积暗示）。刻意压得比足印更弱：它只回答"底面往上还有空间"，
 ## 而强对比的笼子会盖过体素本身（此前 0.45 亮蓝、整根到顶，实测像调试线框）。
-@export var cage_color := Color(0.4353, 0.8275, 1.0, 0.13):
+@export var cage_color := Color(QVoxelUi.ACCENT, 0.13):
 	set(v):
 		cage_color = v
 		rebuild()

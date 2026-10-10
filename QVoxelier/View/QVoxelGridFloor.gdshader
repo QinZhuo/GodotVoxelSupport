@@ -11,8 +11,8 @@ render_mode unshaded, cull_disabled, depth_draw_never;
 // 【坐标约定】只在 UV（0~1，铺满整块地板）上算，于是与 voxel_scale 完全解耦：
 // 缩放节点不会让线变粗变细，格距永远等于 cell_count 等分。
 
-uniform vec4 line_color : source_color = vec4(0.78, 0.85, 1.0, 0.06);
-uniform vec4 major_color : source_color = vec4(0.82, 0.88, 1.0, 0.14);
+uniform vec4 line_color : source_color = vec4(1.0, 1.0, 1.0, 0.06);
+uniform vec4 major_color : source_color = vec4(1.0, 1.0, 1.0, 0.14);
 // 地板横竖各有多少格（= 体素网格的 x / z 尺寸）。
 uniform vec2 cell_count = vec2(32.0, 32.0);
 // 每几格一条粗线。

@@ -50,7 +50,8 @@ var _nav: Button
 var _pan: Button
 var _help: Button
 var _log: Button
-var _project_name := ""
+## 尚无文件名时的占位。**是"未命名"的唯一来源**：Label 初值留空，由 _sync_project 统一填。
+var _project_name := "未命名"
 var _project_dirty := false
 var _view := VIEW_PAINT
 
@@ -84,7 +85,7 @@ func _build() -> void:
 	row.add_child(_action("批量", "一次导出多个 .vox：按范围切开（整个世界 / 每个节点 / 每个模型 / 每个帧）",
 			func(): export_batch_requested.emit()))
 
-	_project = QVoxelUi.label("未命名", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
+	_project = QVoxelUi.label("", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_project.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_project.size_flags_horizontal = Control.SIZE_EXPAND_FILL

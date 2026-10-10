@@ -99,6 +99,10 @@ var _volume := PackedInt32Array()
 var _volume_origin := Vector3i.ZERO
 var _volume_grid_size := Vector3i.ZERO
 var _volume_built := false
+## 上一行的非空格数，惰性数一次（-1 = 还没数，见 evaluated_voxel_count）。
+## **不变式：任何给 `_volume` 赋值的地方都必须同时把它置回 -1**（_invalidate_volume /
+## _ensure_volume / _install_volume 三处）—— 漏一处，读数就会拿着上一份体积的数字当真。
+var _volume_count := -1
 
 ## 构建互斥：首帧多个 worker 会同时走到 _ensure_volume，无锁则各自求值一遍。
 var _volume_mutex := Mutex.new()
@@ -110,6 +114,7 @@ func _invalidate_volume() -> void:
 	_volume = PackedInt32Array()
 	_volume_built = false
 	_last = null
+	_volume_count = -1
 
 
 ## **求值缓存作废**：手绘体素或链参数被改动后由编辑侧调用（会话封口一笔手势时）。
@@ -181,6 +186,7 @@ func _ensure_volume() -> bool:
 			_volume = res.volume
 			_volume_origin = res.origin
 			_volume_grid_size = res.grid_size
+			_volume_count = -1
 			_last = res
 			_volume_built = true
 	_volume_mutex.unlock()
@@ -1153,6 +1159,7 @@ func _install_volume(volume: PackedInt32Array, origin: Vector3i, size: Vector3i)
 	_volume = volume
 	_volume_origin = origin
 	_volume_grid_size = size
+	_volume_count = -1
 	_volume_built = true
 	_last = null
 	var table := {}
@@ -1614,6 +1621,21 @@ func get_voxel_count() -> int:
 	for n in _chunk_voxel_counts.values():
 		total += n
 	return total
+
+
+## 求值输出里的体素总数（**链作用后**：含程序化产出与重排 / 镜像 / 平铺的结果）。
+## 【为什么 get_voxel_count 给不出这个数】那个数求和于 chunk 缓冲的计数账本，而缓冲是**渲染现场**：
+## 编辑后受影响的块会被 invalidate_chunk_source_range **丢掉**（等渲染器重新取数），于是落笔的那一刻
+## 账本里恰好少了刚编辑的那几块 —— "画完却报 0 体素"的根因就在这里。
+## 【为什么敢在此强制构建体积】那份体积**本来就要在本次编辑后被算一次**（渲染器取被作废的 chunk
+## 时会走 _ensure_volume），这里只是把同一次求值提前到读数这一刻，之后渲染器反而命中缓存 ——
+## 总工作量不变，而读数不再依赖"谁先跑"。数字与屏幕上的几何同源（都是求值输出）。
+func evaluated_voxel_count() -> int:
+	if not _ensure_volume():
+		return 0
+	if _volume_count < 0:
+		_volume_count = _count_voxels(_volume)
+	return _volume_count
 
 
 ## 是否完全没有体素

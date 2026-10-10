@@ -242,14 +242,17 @@ func _build_ui() -> void:
 	_tree_section.modifier_remove_requested.connect(_remove_modifier)
 	_tree_section.modifier_enabled_changed.connect(_set_modifier_enabled)
 	_tree_section.modifier_selected.connect(_on_modifier_selected)
-	_dock.add_section(_tree_section)
+	# 装配时只摊开「颜色」一组，其余四组收成抬头（点一下才展开）：右列全展开实测约 1400px，
+	# 在 648 高的默认窗口里等于"一进来就满屏 + 下面还够不着"。收起来之后五组抬头一眼看全，
+	# 需要哪组展哪组 —— Dock 本身可滚动，展开多少都不丢东西。
+	_dock.add_section(_tree_section, true)
 
 	# 参数分组：链上选中哪条修改器，就反射生成它的参数控件（含"变换"的参数，故不再需要独立变换面板）。
 	_inspector_section = QVoxelierInspectorSection.new()
 	_inspector_section.edit_began.connect(_begin_prop_edit)
 	_inspector_section.value_changed.connect(_live_prop)
 	_inspector_section.edit_ended.connect(_end_prop_edit)
-	_dock.add_section(_inspector_section)
+	_dock.add_section(_inspector_section, true)
 
 	# 时间轴分组（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。与其余分组同一约定 ——
 	# 面板只说"用户想干什么"，改哪个属性、记成哪条命令全在本类一处完成（见文件末的"时间轴"段）。
@@ -264,20 +267,43 @@ func _build_ui() -> void:
 	_timeline_section.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
 	_timeline_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
-	_dock.add_section(_timeline_section)
+	_dock.add_section(_timeline_section, true)
 
 	# 快照分组（F5）：它自己摆离屏舞台、自己按快门（见 QVoxelierSnapshotSection 的"为什么按下渲染
 	# 不经过应用层"）。本类只做它做不了的两件事：把当前世界推给它（见 _refresh_panels）、
 	# 以及弹落盘对话框 —— 文件对话框的公共装配在应用层一处（见 _build_dialogs）。
 	_snapshot_section = QVoxelierSnapshotSection.new()
 	_snapshot_section.save_requested.connect(_request_snapshot_save)
-	_dock.add_section(_snapshot_section)
+	_dock.add_section(_snapshot_section, true)
 
 	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
 	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
 	_selection_box = QVoxelSelectionBox.new()
 	_selection_box.name = "Selection"
 	model.add_child(_selection_box)
+
+	# 状态栏与两块浮层都归 Hud 所有，而 Hud 是场景里预摆的（排在子节点最前 = 画在最底下），
+	# 后建的右列抽屉会整条压住浮层 —— 实测「操作说明」右半边被「颜色」面板盖掉。
+	# 把它挪到最后一个子节点位置，浮层与提示才浮得住（左右两条侧栏的高度都已避开状态栏，
+	# 不会反过来被它遮住）。
+	move_child(hud, -1)
+
+	# 两处"邻居的边界会动，故要互相让位"的布线。都放在装配处说清：面板之间不互相认识
+	# （工具坞不认识视图栏、HUD 不认识抽屉），只有本类同时看得见它们。
+	# 1) 左列：视图栏贴在工具坞正下方（实测 189px 高），工具坞的高度上限要让出它。
+	# 2) 右列：抽屉宽度随内容变，视口里的浮层（HUD 的说明 / 日志、朝向指示器）都要让出它。
+	# 两边的目标值都是**布局算出来的**（不是常量），故挂信号 + 装配末尾补一次初值：
+	# 邻面板的矩形一般要到下一帧最小尺寸结算完才定下来。
+	var sync_left := func() -> void:
+		_tools.set_bottom_reserved(_view_bar.size.y + QVoxelUi.space_s())
+	var sync_right := func() -> void:
+		var w := _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
+		hud.set_right_inset(w)
+		_gizmo.right_inset = w
+	_view_bar.resized.connect(sync_left)
+	_dock.resized.connect(sync_right)
+	sync_left.call_deferred()
+	sync_right.call_deferred()
 
 
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
@@ -299,9 +325,8 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 	_material_cmd = null
 
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
-	# 调色板取**世界的材质表**（而不是 default_palette）：打开别人做的 256 色工程时也照显，
-	# 否则界面上会是一排与工程无关的颜色。
-	_palette.set_palette(_material_colors(w))
+	# 调色板不必在这里喂：它挂在唯一刷新路径上，install 发出的 changed 会把世界带过去
+	# （色板取的是**世界的材质表**而不是 default_palette，打开别人的 256 色工程也照显）。
 
 	_sess.install(w, obj)
 	frame_view()
@@ -1151,6 +1176,13 @@ func _build_dialogs() -> void:
 	# 对话框是独立的 Window，不会从 Node3D 父链上继承主题，得手挂一份 —— 否则它会顶着一套
 	# 与全应用无关的默认皮，风格统一在这里破功。
 	_confirm.theme = QVoxelUi.theme()
+	# AcceptDialog 弹出时会把键盘焦点给"确认"那颗 —— 也就是这里最危险的一颗（"放弃改动并继续"）。
+	# 主题里 focus 框是强调色描边，于是它一弹出来就被画成主操作（实测 has_focus = true），
+	# 回车 / 空格还会当场把它按下去。把焦点交给安全项（"返回"）：强调色回到"当前该按的那个"，
+	# 回车落到安全项上，Esc 照旧关闭（Esc 走 Window 的取消路径，与焦点无关）。
+	_confirm.visibility_changed.connect(func():
+		if _confirm.visible:
+			_confirm.get_cancel_button().grab_focus())
 	add_child(_confirm)
 
 
@@ -1293,6 +1325,11 @@ func _refresh_hud() -> void:
 	_selection_box.set_box(session.selection.lo(), session.selection.size())
 	# 状态栏里的选区 / 剪贴板读数由 HUD 自己按会话算（见 QVoxelierHud._selection_readout），
 	# 不在这里再喂一份字符串 —— 同一事实两处拼装迟早会各说各话。
+	# 色板取世界的材质表（增删材质 / 导入 / 改色都可能换掉它）。挂在这条唯一刷新路径上，
+	# set_palette 自己按指纹判重 —— 状态变更就不再需要各自记得去喂色板了（此前只有"打开工程"
+	# 那条路喂过，于是新建之后整条色板是空的，只剩一个"材质 1"的标签）。
+	if world != null:
+		_palette.set_palette(_material_colors(world))
 	_palette.set_current(_material_id)
 	hud.set_material_id(_material_id)
 	_refresh_panels()
@@ -1487,6 +1524,8 @@ func _live_color(c: Color) -> void:
 	if world == null or _material_id <= 0:
 		return
 	world.set_material_color(_material_id, c)
+	# 底部色块就地跟着变色：它就是"这个材质长什么样"，拖滑块时不变等于读数滞后一格。
+	_palette.set_color(_material_id, c)
 	_sync_material(_material_id)
 
 
@@ -1501,7 +1540,6 @@ func _end_material_edit() -> void:
 	if _material_cmd != null and _material_cmd.commit():
 		session.history.push(_material_cmd)
 	_material_cmd = null
-	_palette.set_palette(_material_colors(world))
 	_refresh_hud()
 
 
@@ -1533,7 +1571,7 @@ func _add_material() -> void:
 	if cmd.commit():
 		session.history.push(cmd)
 	_sync_material(id)
-	_palette.set_palette(_material_colors(world))
+	# 色板由 _set_material 里的 _refresh_hud 一并跟上（世界多了个材质，指纹自然不同）。
 	_set_material(id)
 	hud.flash("已新增材质 %d" % id)
 
@@ -1582,7 +1620,6 @@ func _import_palette(path: String) -> void:
 	if cmd.commit():
 		session.history.push(cmd)
 	_push_palette_into_all()
-	_palette.set_palette(_material_colors(world))
 	_refresh_hud()
 	hud.flash("已导入调色板（%d 色）" % (mini(width, 256) - 1))
 

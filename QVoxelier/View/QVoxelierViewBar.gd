@@ -38,7 +38,13 @@ func _build() -> void:
 	var panel := QVoxelUi.panel(QVoxelUi.space_s())
 	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	add_child(panel)
-	panel.resized.connect(func(): size = panel.size)
+	# 【为什么写 offset 而不是 size】本控件锚在左下（anchor_top == anchor_bottom == 1），
+	# 这种锚点下 size 的 setter 会**钉住 offset_top、把高度往屏幕下方长** —— 实测整条视图栏
+	# 落在 y=648..837（窗口高 648），七个视图预设与网格线开关一个都点不到。
+	# 显式写 offset 才是"贴住底边、向上生长"；宽度同理从左往右长。
+	panel.resized.connect(func():
+		offset_right = offset_left + panel.size.x
+		offset_top = offset_bottom - panel.size.y)
 
 	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	panel.add_child(col)

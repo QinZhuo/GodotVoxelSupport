@@ -153,8 +153,11 @@ func _build_body(body: VBoxContainer) -> void:
 	var tag_row := QVoxelUi.hbox()
 	body.add_child(tag_row)
 	tag_row.add_child(QVoxelUi.label("标签", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
-	_tags = QVoxelUi.text_field("", "名字:起-止[:方向]，逗号分隔",
-			"命名区间（Aseprite 的 tag）。例：idle:0-3, walk:4-7:pingpong（方向缺省 forward）")
+	# 占位文字用**示例**而不是语法说明：这一格只有约 150px 宽，写"名字:起-止[:方向]，逗号分隔"
+	# 会被截成半句（看着像坏了）。语法与方向取值放 tooltip，占位只负责给个能照抄的样子。
+	_tags = QVoxelUi.text_field("", "如 idle:0-3, walk:4-7",
+			"命名区间（Aseprite 的 tag）：名字:起-止[:方向]，逗号分隔。"
+			+ "例：idle:0-3, walk:4-7:pingpong（方向缺省 forward）")
 	_tags.text_changed.connect(func(_t: String): _on_tags_changed())
 	tag_row.add_child(_tags)
 

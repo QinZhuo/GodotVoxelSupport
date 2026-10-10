@@ -23,6 +23,7 @@ var _current: Label
 var _group := ButtonGroup.new()
 var _swatches := {}         # material_id → Button
 var _need := 0.0            # 色块行完整展开所需的宽度
+var _sig := PackedStringArray()   # 上一次建好的颜色序列（判重，见 set_palette）
 
 
 func _build() -> void:
@@ -74,7 +75,17 @@ func _notification(what: int) -> void:
 # 对外：状态同步（只由 App 调用）
 
 ## 重建色板。colors 的**下标即材质 ID**（0 位是空气占位，直接跳过）。
+## 颜色序列没变就直接返回：本方法是"挂在一处刷新"的（见 QVoxelierApp._refresh_hud），
+## 而刷新在每画一笔后都会走一遍 —— 不判重的话每次落笔都要拆掉重建八个按钮。
+## 判重也顺手治了"新建 / 打开工程后色板是空的"（此前只有打开工程那条路会喂色板）。
 func set_palette(colors: Array[Color]) -> void:
+	var sig := PackedStringArray()
+	for c in colors:
+		sig.append(c.to_html(true))
+	if sig == _sig:
+		return
+	_sig = sig
+
 	for c in _row.get_children():
 		_row.remove_child(c)
 		c.queue_free()
@@ -90,6 +101,18 @@ func set_palette(colors: Array[Color]) -> void:
 
 	_need = maxf(float(colors.size() - 1) * (QVoxelUi.hit_size() + QVoxelUi.SPACE_XS) - QVoxelUi.SPACE_XS, QVoxelUi.hit_size())
 	_clamp_width()
+
+
+## 单个色块就地换色（实时改色时用）。整条重建会每帧扔掉八个按钮并清掉 hover，
+## 故拖动颜色滑块走这条窄路，松手后的 set_palette 再按指纹收尾。
+func set_color(material_id: int, color: Color) -> void:
+	var b: Button = _swatches.get(material_id)
+	if b == null:
+		return
+	QVoxelUi.paint_swatch(b, color)
+	b.tooltip_text = "材质 %d · %s" % [material_id, color.to_html(false)]
+	if material_id < _sig.size():
+		_sig[material_id] = color.to_html(true)
 
 
 ## 高亮当前材质（点击与数字键共用同一条回写路径）。

@@ -17,8 +17,8 @@ extends MeshInstance3D
 		voxel_scale = maxf(v, 0.0001)
 		_apply_scale()
 
-## 线色。默认取界面强调色系的暖色 —— 与网格地板的冷蓝区分开，"框"和"界"是两件事。
-@export var line_color := Color(1.0, 0.78, 0.25, 0.95):
+## 线色。默认取界面强调色 —— 与网格足印框同族，"我框住的范围"和"能画的范围"是同一种信息。
+@export var line_color := Color(QVoxelUi.ACCENT, 0.95):
 	set(v):
 		line_color = v
 		rebuild()
