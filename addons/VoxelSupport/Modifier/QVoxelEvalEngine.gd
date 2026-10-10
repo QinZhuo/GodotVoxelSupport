@@ -512,7 +512,7 @@ static func _snapshot(field: Sdf, acc: PackedInt32Array,
 
 ## 一个组 → 它局部盒里的体积 + 在父画布里的 origin。
 ## 【组的链作用于"已经摆好的子树合并结果"】顺序即语义：先按各子结果的 origin 合成子树
-## （这是组的"内容"），再依次应用组自己的滤镜（这是"在层级上挂滤镜"）。
+## （这是组的"内容"），再依次应用组自己的修改器（这是"在层级上挂修改器"）。
 static func _evaluate_group(g: QVoxelGroup, ctx: QVoxelEvalContext,
 		previous: QVoxelEvalResult, cache: QVoxelEvalCache) -> QVoxelEvalResult:
 	var comp := _composite(g.child_nodes, ctx, cache)

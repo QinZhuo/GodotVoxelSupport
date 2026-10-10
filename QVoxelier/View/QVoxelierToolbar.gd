@@ -27,34 +27,27 @@ signal export_batch_requested
 signal undo_requested
 signal redo_requested
 signal frame_requested
-## 视图模式变了（取值见 VIEW_* 常量）。
-## 触摸屏没有中键、也没有 Shift+中键，导航 / 平移两个开关就是它们的替代品。
-## 发一个"模式"而不是两个布尔，因为它们本就互斥 —— 发两个布尔，调用方还得自己保证不同时为真。
-signal view_mode_changed(mode: int)
 ## 缩放（steps > 0 拉近）—— 触摸下的"滚轮"替代品。
 signal zoom_requested(steps: float)
+## 镜头切换（true = 正交）。原在视口左下的「视图栏」，随该栏一并移入顶栏。
+signal lens_toggled(ortho: bool)
+## 网格线显隐。
+signal grid_lines_toggled(enabled: bool)
 ## 帮助（快捷键与手势一览）开关。
 signal help_toggled(enabled: bool)
 ## 日志（刚才发生了什么）开关。
 signal log_toggled(enabled: bool)
 
-## 视图模式取值。定义在界面这一层：它是"界面提供给用户的一种操作姿态"，不是算法概念 ——
-## 换成 Dock 内嵌视口时它依然成立（两种形态下鼠标中键都可用，触摸屏则都只能靠这个开关）。
-const VIEW_PAINT := 0
-const VIEW_ORBIT := 1
-const VIEW_PAN := 2
-
 var _project: Label
 var _undo: Button
 var _redo: Button
-var _nav: Button
-var _pan: Button
+var _lens: Button
+var _grid: Button
 var _help: Button
 var _log: Button
 ## 尚无文件名时的占位。**是"未命名"的唯一来源**：Label 初值留空，由 _sync_project 统一填。
 var _project_name := "未命名"
 var _project_dirty := false
-var _view := VIEW_PAINT
 
 
 func _build() -> void:
@@ -115,22 +108,29 @@ func _build() -> void:
 	_sync_project()
 
 
-## 视图组：导航 / 取景 / 缩放。触摸屏上这三件分别顶替中键、Home 键与滚轮。
+## 视图组：取景 / 缩放 / 镜头 / 网格线。旋转与平移改由手势驱动（空白处拖动 / 中键 / 双指），
+## 故不再有"导航 / 平移"模式开关 —— 顶栏这一组因此清爽许多。
 func _view_group() -> HBoxContainer:
 	var g := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
-
-	# 导航 / 平移同组互斥，且允许"再按一次取消" —— 于是"不用视角工具"也是一个能走到的状态，
-	# 不必为它再加第三个按钮。
-	var group := ButtonGroup.new()
-	group.allow_unpress = true
-	_nav = _mode_toggle("导航\n左键拖动 = 转视角（代替中键）", group, VIEW_ORBIT, "navigate")
-	_pan = _mode_toggle("平移\n左键拖动 = 平移画面（代替 Shift+中键）", group, VIEW_PAN, "pan")
-	g.add_child(_nav)
-	g.add_child(_pan)
 
 	g.add_child(_action(frame_requested.emit, "取景（Home）\n把模型正好框进画面", "fit"))
 	g.add_child(_action(func(): zoom_requested.emit(-1.0), "缩小\n配合＋调整视距", "zoom_out"))
 	g.add_child(_action(func(): zoom_requested.emit(1.0), "放大\n配合－调整视距", "zoom_in"))
+
+	# 镜头与网格线：原先在视口左下的「视图栏」里，现并到顶栏的视图组 ——
+	# 标准视角交给右下角坐标系（点轴切换），这里只留这两件坐标系给不了的开关。
+	_lens = _action(func(): pass, "正交 / 透视（小键盘 5）\n正交没有近大远小，量比例、对齐体素用", "lens_persp",
+			QVoxelUi.VARIATION_TOOL)
+	_lens.toggle_mode = true
+	_lens.toggled.connect(func(on: bool): lens_toggled.emit(on))
+	g.add_child(_lens)
+
+	_grid = _action(func(): pass, "网格线\n显示底面格线；关掉只剩外框，便于看清形状", "grid",
+			QVoxelUi.VARIATION_TOOL)
+	_grid.toggle_mode = true
+	_grid.set_pressed_no_signal(true)
+	_grid.toggled.connect(func(on: bool): grid_lines_toggled.emit(on))
+	g.add_child(_grid)
 
 	_help = _action(func(): pass, "操作说明\n鼠标与触摸的全部操作一览", "help",
 			QVoxelUi.VARIATION_TOOL)
@@ -145,25 +145,6 @@ func _view_group() -> HBoxContainer:
 	_log.toggled.connect(func(on: bool): log_toggled.emit(on))
 	g.add_child(_log)
 	return g
-
-
-## 视图模式开关：同组的按钮彼此互斥（含"全都不按 = 绘制"）。
-func _mode_toggle(tooltip: String, group: ButtonGroup, mode: int, icon_name: String) -> Button:
-	var b := _action(func(): pass, tooltip, icon_name, QVoxelUi.VARIATION_TOOL)
-	b.toggle_mode = true
-	b.button_group = group
-	b.toggled.connect(func(_on: bool): _emit_view_mode.call_deferred())
-	return b
-
-
-## 延到帧末再读状态：同组按钮切换时是"旧的先弹起、新的再按下"两次信号，
-## 当场读会读到中间的空白态并多发一次 VIEW_PAINT（表现为提示闪一下"回绘制"）。
-## 攒到帧末只读一次终态，恰好也是 App 需要的语义。
-func _emit_view_mode() -> void:
-	var m := view_mode()
-	if m != _view:
-		_view = m
-		view_mode_changed.emit(m)
 
 
 # 对外：状态同步（只由 App 调用）
@@ -181,27 +162,27 @@ func set_history(can_undo: bool, can_redo: bool) -> void:
 	_redo.disabled = not can_redo
 
 
-## 视图模式的**显示**（Esc 关掉说明、或程序化复位时同步用）。不回发信号，避免自激。
-func set_view_mode(mode: int) -> void:
-	_view = mode
-	_nav.set_pressed_no_signal(mode == VIEW_ORBIT)
-	_pan.set_pressed_no_signal(mode == VIEW_PAN)
-
-
-func view_mode() -> int:
-	if _nav.button_pressed:
-		return VIEW_ORBIT
-	if _pan.button_pressed:
-		return VIEW_PAN
-	return VIEW_PAINT
-
-
 func set_help(on: bool) -> void:
 	_help.set_pressed_no_signal(on)
 
 
 func set_log(on: bool) -> void:
 	_log.set_pressed_no_signal(on)
+
+
+## 回显镜头（按下态 + 图标随透视/正交切换）。正交描边下用方形镜头图标更直观。
+func set_lens(ortho: bool) -> void:
+	if _lens == null:
+		return
+	_lens.set_pressed_no_signal(ortho)
+	var g := QVoxelUi.icon("lens_ortho" if ortho else "lens_persp")
+	if g != null:
+		_lens.icon = g
+
+
+func set_grid_lines(on: bool) -> void:
+	if _grid != null:
+		_grid.set_pressed_no_signal(on)
 
 
 # 内部

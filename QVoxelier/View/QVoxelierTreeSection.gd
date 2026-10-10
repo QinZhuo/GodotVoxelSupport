@@ -35,6 +35,10 @@ signal modifier_remove_requested(node: QVoxelNode, index: int)
 signal modifier_enabled_changed(node: QVoxelNode, index: int, value: bool)
 ## 选中某节点链上的第 index 条修改器（供参数分组显示）。
 signal modifier_selected(node: QVoxelNode, index: int)
+## 动画轴展开 / 收起（App 据此显示 / 隐藏时间轴附板）。
+signal anim_expanded_changed(expanded: bool)
+## 在动画轴里点了某模型的某一帧（App 切到该模型并设活动帧）。
+signal frame_selected(node: QVoxelNode, frame: int)
 
 const INDENT := 14
 
@@ -44,6 +48,12 @@ var _rows: VBoxContainer
 var _hint: Label
 var _del: Button
 var _selected: QVoxelNode
+## 动画轴是否展开。展开时每个模型行在名字后横向铺开帧格子（Aseprite 的图层×帧网格思路）。
+var _anim_expanded := false
+## 搜索过滤词（小写）。空 = 不过滤。
+var _filter := ""
+## 全局帧数 = 各模型帧数的最大值（各行的帧格子据此对齐）。
+var _frames := 1
 
 
 func section_title() -> String:
@@ -53,27 +63,83 @@ func section_title() -> String:
 func _build_body(body: VBoxContainer) -> void:
 	var tools := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	body.add_child(tools)
-	var add_group := QVoxelUi.button("＋组", "新建一个组（像文件夹一样把模型装在一起）")
-	add_group.pressed.connect(func(): group_add_requested.emit(_target_parent()))
-	tools.add_child(add_group)
-	var add_model := QVoxelUi.button("＋模型", "在当前组里新建一个模型")
-	add_model.pressed.connect(func(): model_add_requested.emit(_target_parent()))
-	tools.add_child(add_model)
-	_del = QVoxelUi.button("删除", "删除选中的节点（连同它下面的全部内容）")
+	# 新建 / 删除 / 动画轴：合并成三个纯图标按钮（＋菜单 / 垃圾桶 / 胶片）。
+	var add := QVoxelUi.button("＋", "新建：组 / 模型，或给选中节点挂修改器", &"", "add")
+	add.pressed.connect(_popup_add.bind(add))
+	tools.add_child(add)
+	_del = QVoxelUi.button("×", "删除选中的节点（连同它下面的全部内容）", &"", "del")
 	_del.disabled = true
 	_del.pressed.connect(func():
 		if _selected != null:
 			node_remove_requested.emit(_selected))
 	tools.add_child(_del)
-	var add_mod := QVoxelUi.button("＋滤镜", "给选中的节点挂一条修改器（挂上后再点它改参数）")
-	add_mod.pressed.connect(_popup_modifier_kinds.bind(add_mod))
-	tools.add_child(add_mod)
+	var anim := QVoxelUi.toggle_button(
+			"动画轴\n展开：每个节点一行，横向铺开帧，直接点格子切帧（普通建模时可关掉）",
+			QVoxelUi.VARIATION_TOOL, "", "anim")
+	anim.set_pressed_no_signal(_anim_expanded)
+	anim.toggled.connect(func(on: bool) -> void:
+		_anim_expanded = on
+		anim_expanded_changed.emit(on)
+		reset_measure()
+		_rebuild())
+	tools.add_child(anim)
+
+	# 搜索框：按名字过滤层级（组按子树匹配 —— 能顺着组名找到里面的模型）。
+	var search := QVoxelUi.text_field("", "搜索节点…", "按名字过滤层级")
+	search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	search.text_changed.connect(func(t: String) -> void:
+		_filter = t.strip_edges().to_lower()
+		_rebuild())
+	tools.add_child(search)
 
 	_hint = QVoxelUi.label("", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
 	body.add_child(_hint)
 
 	_rows = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	body.add_child(_rows)
+
+
+## "＋" 菜单：把 新建组 / 新建模型 / 挂修改器 合并到一个入口（减少顶栏一排文字按钮）。
+func _popup_add(anchor: Control) -> void:
+	var menu := PopupMenu.new()
+	add_child(menu)
+	menu.add_item("新建组", 0)
+	menu.add_item("新建模型", 1)
+	menu.add_item("给选中节点挂修改器", 2)
+	menu.id_pressed.connect(_on_add_menu.bind(anchor))
+	menu.popup_closed.connect(func() -> void: menu.queue_free())
+	menu.popup(Rect2i(Vector2i(anchor.global_position), Vector2i(anchor.size)))
+
+
+func _on_add_menu(id: int, anchor: Control) -> void:
+	match id:
+		0:
+			group_add_requested.emit(_target_parent())
+		1:
+			model_add_requested.emit(_target_parent())
+		2:
+			_popup_modifier_kinds.call_deferred(anchor)
+
+
+## 行右键菜单：挂修改器 / 删除（改名已在行内输入框，无需再列）。
+func _row_context(node: QVoxelNode) -> void:
+	_selected = node
+	_del.disabled = false
+	var menu := PopupMenu.new()
+	add_child(menu)
+	menu.add_item("挂修改器…", 1)
+	menu.add_item("删除节点", 2)
+	menu.id_pressed.connect(_on_context_menu.bind(node))
+	menu.popup_closed.connect(func() -> void: menu.queue_free())
+	menu.popup(Rect2i(DisplayServer.mouse_get_position(), Vector2i.ZERO))
+
+
+func _on_context_menu(id: int, node: QVoxelNode) -> void:
+	match id:
+		1:
+			_popup_modifier_kinds.call_deferred(self)
+		2:
+			node_remove_requested.emit(node)
 
 
 ## 挂上世界。**每次换世界都要调**（新建 / 打开工程）。
@@ -107,12 +173,32 @@ func _rebuild() -> void:
 		return
 	var total := _world.nodes.size()
 	if total == 0:
-		_hint.text = "空世界：点「＋模型」开始"
+		_hint.text = "空世界：点「＋」新建模型开始"
 	else:
 		_hint.text = "%d 个顶层节点 · 共 %d 个模型" % [total, _world.all_models().size()]
+	# 全局帧数（各行帧格子据此对齐）。
+	_frames = 1
+	for m in _world.all_models():
+		if m != null:
+			_frames = maxi(_frames, m.frame_count())
 	for n in _world.nodes:
-		if n != null:
+		if n != null and _visible_in_filter(n):
 			_add_rows(n, 0)
+	# 行内容变了（尤其动画轴展开后带帧格子）→ 重报内容宽度，右列才会跟着变宽。
+	_measure()
+
+
+## 搜索过滤：名字命中即显示；组还看子树（能顺着组名找到里面的模型）。
+func _visible_in_filter(node: QVoxelNode) -> bool:
+	if _filter.is_empty():
+		return true
+	if node.display_name().to_lower().contains(_filter):
+		return true
+	if node.is_group():
+		for c in (node as QVoxelGroup).child_nodes:
+			if c != null and _visible_in_filter(c):
+				return true
+	return false
 
 
 func _add_rows(node: QVoxelNode, depth: int) -> void:
@@ -213,10 +299,10 @@ func _modifier_tooltip(node: QVoxelNode, index: int, m: QVoxelModifier, errors: 
 	return "\n".join(lines)
 
 
-## 弹"挂哪种滤镜"菜单。条目直接来自 QVoxelModifier.KINDS —— 将来加一种域就自动多一项。
+## 弹"挂哪种修改器"菜单。条目直接来自 QVoxelModifier.KINDS —— 将来加一种域就自动多一项。
 func _popup_modifier_kinds(anchor: Control) -> void:
 	if _selected == null:
-		_hint.text = "先在树上点一个节点，再挂滤镜"
+		_hint.text = "先在树上点一个节点，再挂修改器"
 		return
 	var menu := PopupMenu.new()
 	add_child(menu)
@@ -270,11 +356,20 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	name_edit.text = node.display_name()
 	name_edit.flat = true
 	name_edit.custom_minimum_size.x = 96
-	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# 动画轴展开时名字定宽（各行的帧格子才能横向对齐）；否则撑满。
+	name_edit.size_flags_horizontal = (Control.SIZE_SHRINK_BEGIN if _anim_expanded
+			else Control.SIZE_EXPAND_FILL)
+	if _anim_expanded:
+		name_edit.custom_minimum_size.x = 88
 	name_edit.text_submitted.connect(func(t):
 		if t != node.display_name():
 			node_rename_requested.emit(node, t))
 	box.add_child(name_edit)
+
+	# 动画轴：每个模型一行，名字后横向铺开帧格子（Aseprite 的图层×帧网格）。
+	if _anim_expanded and node.is_model():
+		box.add_child(_frame_strip(node as QVoxelModel))
+		return row
 
 	# 类型 / 内容徽标。
 	var badge := _badge_of(node)
@@ -291,6 +386,45 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	return row
 
 
+## 动画轴：某模型行的帧格子条（横向滚动，宽度封顶以免把右列撑宽）。
+func _frame_strip(m: QVoxelModel) -> Control:
+	var sc := QVoxelUi.scroll(false, QVoxelUi.hit_size())
+	sc.custom_minimum_size = Vector2(132, QVoxelUi.hit_size())
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	var h := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sc.add_child(h)
+	for f in _frames:
+		h.add_child(_frame_cell(m, f))
+	return sc
+
+
+## 一个帧格子：实心点 = 该帧有内容、空心 = 空帧；按下态 = 当前正在编辑的帧。点它即切帧。
+func _frame_cell(m: QVoxelModel, f: int) -> Button:
+	var exists := f < maxi(m.frame_count(), 1)
+	var b := QVoxelUi.toggle_button("", QVoxelUi.VARIATION_TOOL, "")
+	b.custom_minimum_size = Vector2(18, QVoxelUi.hit_size() - 12)
+	b.disabled = not exists
+	if not exists:
+		return b
+	var filled := _frame_has(m, f)
+	b.text = "●" if filled else "○"
+	b.button_pressed = f == m.active_frame
+	b.tooltip_text = "第 %d 帧%s" % [f + 1, "" if filled else "（空）"]
+	b.toggled.connect(func(on: bool) -> void:
+		if on:
+			frame_selected.emit(m, f))
+	return b
+
+
+## 该帧是否有内容（静态模型看手绘块，动画模型看那一帧的块表）。
+func _frame_has(m: QVoxelModel, f: int) -> bool:
+	if not m.is_animated():
+		return m.count_solid() > 0
+	var fr := m.frame_at(f)
+	return fr != null and not fr.is_empty()
+
+
 func _badge_of(node: QVoxelNode) -> String:
 	if node.is_model():
 		return "%d 体素" % (node as QVoxelModel).count_solid()
@@ -305,10 +439,10 @@ func _row_tooltip(node: QVoxelNode) -> String:
 		lines.append("模型 %d · %d×%d×%d" % [(node as QVoxelModel).model_id, g.x, g.y, g.z])
 	else:
 		lines.append("组 · %d 个模型" % (node as QVoxelGroup).count_models())
-	# 摆放不在这里回显：它已是链上的一条（平移），下面"滤镜 N 条"里就看得见。
+	# 摆放不在这里回显：它已是链上的一条（平移），下面"修改器 N 条"里就看得见。
 	var chain := node.active_modifiers()
 	if not chain.is_empty():
-		lines.append("滤镜 %d 条" % chain.size())
+		lines.append("修改器 %d 条" % chain.size())
 		for e in QVoxelDomain.chain_errors(chain):
 			lines.append("· %s" % e["message"])
 	return "\n".join(lines)
@@ -397,6 +531,13 @@ class TreeRow extends Button:
 		preview.text = "  %s  " % node.display_name()
 		set_drag_preview(preview)
 		return {"qvoxel_node": node}
+
+	func _gui_input(event: InputEvent) -> void:
+		# 右键 = 行上下文菜单（挂修改器 / 删除）。修改器行不弹（它只有"移除"，行尾已有 ×）。
+		if event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_RIGHT and modifier_index < 0 and node != null:
+			section._row_context(node)
+			accept_event()
 
 	func _can_drop_data(at: Vector2, data: Variant) -> bool:
 		if modifier_index >= 0:

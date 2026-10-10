@@ -99,6 +99,12 @@ func _measure() -> void:
 	custom_minimum_size.x = _want_w
 
 
+## 清掉"只增不减"的记忆，让下次 _measure 重新按当前内容量宽（动画轴展开 / 收起这类
+## "宽度本来就该明显变化"的场合用）。
+func reset_measure() -> void:
+	_want_w = 0.0
+
+
 func _refresh() -> void:
 	if _header == null:
 		return

@@ -20,7 +20,6 @@ var session: QVoxelEditSession = null
 var _tool: Label
 var _hint: Label
 var _cursor: RichTextLabel
-var _brush: Label
 var _model: Label
 var _selection: Label
 var _history: Label
@@ -60,9 +59,6 @@ func refresh() -> void:
 	var t := session.tool
 	_tool.text = t.label()
 	_hint.text = t.hint()
-	_brush.text = "笔刷 %d" % t.brush_size if t.supports_brush_size() else "笔刷 —"
-	_brush.add_theme_color_override("font_color",
-			QVoxelUi.TEXT if t.supports_brush_size() else QVoxelUi.TEXT_FAINT)
 	_model.text = _model_readout()
 	_selection.text = _selection_readout()
 	# 有选区时点亮：选区是"下次复制 / 移动会作用在哪"的答案，用户必须一眼能看出它在不在。
@@ -220,8 +216,6 @@ func _build_status() -> void:
 	_cursor.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	_cursor.add_theme_constant_override("outline_size", 4)
 	row.add_child(_cursor)
-	_brush = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
-	row.add_child(_brush)
 	_model = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	row.add_child(_model)
 	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。
@@ -373,19 +367,18 @@ func _scroll_to_bottom() -> void:
 ## 改输入约定时改这里一处（工具级的提示在 QVoxelBrushTool.MODES 里，两处各管一层）。
 const _LEGEND := [
 	["鼠标 + 键盘", [
-		"左键拖动 画 · 右键 擦（或开左侧「擦除」）",
-		"Alt+左键拖 转视角 · Shift+左键拖 平移 · 中键拖 同（Shift/Alt+中键 平移）",
-		"滚轮 俯仰 · Ctrl+滚轮 缩放 · 拖右下坐标轴 转视角 · Home 取景",
+		"左键拖动 画 · 右键 擦 · Shift+左键 反向擦除（当前工具的逆操作）",
+		"空白处拖动 转视角 · 中键拖动 同（任意位置）· Shift+中键 平移",
+		"滚轮 俯仰 · Ctrl+滚轮 缩放 · 右下坐标轴：点轴切视图、拖动转视角、点盘心等轴",
 		"V/F/B/L/C 切工具 · T 选择 · M 移动 · E 擦除 · [ ] 改笔刷 · 1..8 选材质",
 		"Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消这一笔 / 退掉选区",
 		"Ctrl+A 全选 · Ctrl+C/X/V 复制 / 剪切 / 粘贴 · Del 清空选区",
-		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开（.qvx 可直接拖进窗口）",
-		"Ctrl+E 导出 .vox（MagicaVoxel 等外部工具可打开）",
+		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开 · Ctrl+E 导出 .vox",
 	]],
 	["触摸屏 / 触摸板", [
-		"单指拖动 画 · 用左侧「擦除」开关代替右键",
-		"双指拖动 转视角 · 双指捏合 缩放（触摸板：Ctrl+滚轮 缩放）",
-		"「导航」模式下单指拖动 = 转视角 · −/+ 缩放 ·「取景」把模型框回画面",
+		"单指拖动 画 · 用左列的「擦除」开关代替右键",
+		"双指拖动 平移画面 · 双指捏合 缩放（任意位置）",
+		"单指拖动**空白处** = 转视角 · 右下坐标轴：点轴切视图 / 拖动转视角 / 点盘心等轴",
 		"色块与按钮都按手指尺寸留足命中区，无需键盘即可完成全部操作",
 	]],
 ]

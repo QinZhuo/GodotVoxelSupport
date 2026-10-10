@@ -79,12 +79,13 @@ var ortho_height := 6.0
 @export var yaw_gain := 1.0
 ## 滚轮每一格的缩放倍率（> 1：向上滚 = 拉近）。
 @export var zoom_step := 1.15
-## 最近 / 最远距离。近端留得下单个体素，远端看得全 256³ 的模型。
-@export var min_distance := 0.05
-@export var max_distance := 4000.0
-## 正交可见高度的上下限。
-@export var min_ortho_height := 0.05
-@export var max_ortho_height := 4000.0
+## 最近 / 最远距离。夹住两端：太近会钻到模型里面（看不见整体），太远模型缩成一个点。
+## 上限按最大的 256³ 模型（约 26 世界单位）留足，下限约几格体素远。
+@export var min_distance := 0.6
+@export var max_distance := 200.0
+## 正交可见高度的上下限（同距离，两端都夹住）。
+@export var min_ortho_height := 0.6
+@export var max_ortho_height := 200.0
 ## pitch 的两端极限（留 1°：完全垂直时 look_at 的 up 向量退化）。
 @export var pitch_limit := deg_to_rad(89.0)
 ## 取景时的留白倍率（1.0 = 包围球正好贴边）。

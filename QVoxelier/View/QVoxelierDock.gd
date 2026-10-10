@@ -1,21 +1,18 @@
 @tool
 class_name QVoxelierDock
 extends QVoxelierPanel
-## 右侧抽屉 —— 顶部一排**页签**（颜色 / 层级 / 参数 / 时间轴 / 快照），一次只显示一组。
-## 【为什么是页签而不是竖着堆的折叠组】五组竖堆时，收起留下的一排抬头 + 组间空隙全是白地，
-## 展开又要占满整列 —— 纵向空间怎么分都不划算。页签把"选哪组"和"看哪组"合成一行宽度，
-## 于是任何时刻只画一组，右列高度随当前组自适应（Blender 的 Properties 页签、PS 的面板组同思路）。
-## 【为什么贴右上】左上与底部都已占（工具坞 / 视图栏 / 调色板 / 朝向指示器）。
-## 右上还顺带贴着"应用栏"的下沿，于是纵向只有一条连续的面板带，视线不必来回横跳。
-## 【宽度随密度档】触摸档要更宽（滑块更好点、文字更大），桌面档收窄把视口让出来。
+## 右侧抽屉 —— **上：属性（单页，随选中自动切换） / 下：层级（Outliner，常驻）**。
+## 【为什么只有一页属性】选中什么就显示什么（材质→颜色、节点→对象、修改器→参数），
+## 不需要用户自己在页签里找。一个区域、一份内容，切换由 App 按当前选择驱动。
+## 【为什么层级在下】层级是"这个世界里有什么"的常驻总览，放底部与动画轴（展开时）连成一条；
+## 属性在上、随选择变化。与 Blender 默认（Outliner 上 / Properties 下）上下对调。
 
 var _root: VBoxContainer
-var _tabs: HBoxContainer
-var _scroll: ScrollContainer
-var _col: VBoxContainer
-var _group := ButtonGroup.new()
-var _sections: Array[QVoxelierSection] = []
-var _buttons: Array[Button] = []
+var _prop_scroll: ScrollContainer
+var _prop_host: VBoxContainer
+var _out_scroll: ScrollContainer
+var _out_host: VBoxContainer
+var _prop_sections: Array[QVoxelierSection] = []
 var _active := -1
 
 
@@ -26,82 +23,78 @@ func _build() -> void:
 	var w := float(QVoxelUi.dock_width()) + QVoxelUi.space_l()
 	offset_left = offset_right - w
 
-	# 根竖排：页签条固定在顶，下面一条可滚动的组内容。本控件不是容器，故显式让它填满我
-	# （矩形由 _fit 写回：调试器/自动化工具要读到真实尺寸）。
-	_root = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
+	_root = QVoxelUi.vbox(QVoxelUi.space_s())
 	_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(_root)
 
-	_group.allow_unpress = false   # 页签永远有一个是"当前"，不允许点成"全都没选"
-	_tabs = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
-	_root.add_child(_tabs)
+	# 上：属性（单页，可滚动，占约 5.5 成高）。
+	_prop_scroll = QVoxelUi.scroll(true)
+	_prop_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_prop_scroll.size_flags_stretch_ratio = 0.55
+	_root.add_child(_prop_scroll)
+	_prop_host = QVoxelUi.vbox(QVoxelUi.space_s())
+	_prop_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_prop_scroll.add_child(_prop_host)
 
-	_scroll = QVoxelUi.scroll(true)
-	_scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_root.add_child(_scroll)
+	# 下：层级（Outliner，可滚动，占约 4.5 成高）。
+	_out_scroll = QVoxelUi.scroll(true)
+	_out_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_out_scroll.size_flags_stretch_ratio = 0.45
+	_root.add_child(_out_scroll)
+	_out_host = QVoxelUi.vbox(QVoxelUi.space_s())
+	_out_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_out_scroll.add_child(_out_host)
 
-	_col = QVoxelUi.vbox(QVoxelUi.space_s())
-	_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll.add_child(_col)
-	# 高度 = min(内容, 可用高度)：内容短时贴着内容，内容长时定高并在其中滚动。
-	# 本控件（它的矩形会被调试器/自动化工具读到）因此始终如实反映画出来的东西。
-	_col.resized.connect(_fit)
-	_tabs.resized.connect(_on_tabs_resized)
+	_prop_host.resized.connect(_fit)
+	_out_host.resized.connect(_fit)
 	get_viewport().size_changed.connect(_fit)
 
 
-## 右列的矩形：高度 = min(页签高 + 当前组内容高, 可用高度)；宽度 = 所有组 / 页签里最宽的那个。
-## 【高度】可用高度 = 视口高 − 顶边位置 − 底部状态栏 − 一点边距（状态栏是全局栏，不该被盖住）。
-## 【宽度为什么取"所有组"的最宽】切页签时若宽度跟着当前组变，右列与视口会一起横向弹跳；
-## 取最大宽度让右列在整个会话里稳定。页签条本身也要算进去，否则页签会被裁掉右半。
+## 右列矩形：纵向吃满可用高度（上下两栏各自滚动），横向取所有组里最宽的。
 func _fit() -> void:
-	if _col == null:
+	if _root == null:
 		return
-	var inner := _col.get_combined_minimum_size()
-	var want_w := maxf(inner.x, _tabs.get_combined_minimum_size().x)
-	for s in _sections:
-		want_w = maxf(want_w, s.custom_minimum_size.x)
-	var tabs_h := _tabs.get_combined_minimum_size().y + QVoxelUi.SPACE_XS
 	var avail := get_viewport_rect().size.y - offset_top - QVoxelUi.status_height() - QVoxelUi.space_s()
-	offset_bottom = offset_top + maxf(0.0, minf(tabs_h + inner.y, avail))
+	offset_bottom = offset_top + maxf(avail, 120.0)
+	var want_w := 0.0
+	for s in _prop_sections:
+		want_w = maxf(want_w, s.custom_minimum_size.x)
+	for c in _out_host.get_children():
+		if c is QVoxelierSection:
+			want_w = maxf(want_w, (c as QVoxelierSection).custom_minimum_size.x)
 	offset_left = offset_right - maxf(float(QVoxelUi.dock_width()) + QVoxelUi.space_l(), want_w)
 
 
-func _on_tabs_resized() -> void:
-	_fit()
-
-
-## 追加一组页签（**只在 App 装配时调用**，顺序即页签顺序）。
-## 第二参数保留以兼容调用方，页签模式下不再有"一进来先收起"这回事。
-func add_section(s: QVoxelierSection, _collapsed := false) -> void:
-	_col.add_child(s)
-	# 抬头收进页签：组自己的 ▾ 标题与页签重复，隐藏它。
-	s.set_header_visible(false)
-	var idx := _sections.size()
-	_sections.append(s)
-
-	var b := QVoxelUi.toggle_button(s.section_title(),
-			QVoxelUi.VARIATION_TOOL, s.section_title())
-	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	b.button_group = _group
-	b.toggled.connect(func(on: bool): if on: _select(idx))
-	_tabs.add_child(b)
-	_buttons.append(b)
-
+## 追加一个**属性页**组（只在装配时调用）。App 用 show_property 按当前选择切。
+func add_property(s: QVoxelierSection) -> void:
+	_prop_host.add_child(s)
+	_prop_sections.append(s)
 	if _active < 0:
-		_select(idx)
+		show_property(s)
 	else:
 		s.visible = false
 	_fit()
 
 
-func _select(idx: int) -> void:
-	if idx < 0 or idx >= _sections.size():
+## 追加一个**常驻**的层级组（Outliner）或它下面的附板（动画轴 / 快照）。
+func add_outliner(s: QVoxelierSection) -> void:
+	_out_host.add_child(s)
+	_fit()
+
+
+func show_property(s: QVoxelierSection) -> void:
+	var idx := _prop_sections.find(s)
+	if idx < 0:
 		return
 	_active = idx
-	for i in _sections.size():
-		_sections[i].visible = i == idx
-	if idx < _buttons.size():
-		_buttons[idx].set_pressed_no_signal(true)
+	for i in _prop_sections.size():
+		_prop_sections[i].visible = i == idx
 	_fit()
+
+
+## 按标题切属性页（App 在"选择了材质 / 节点 / 修改器"时调用，实现自动切换）。
+func show_property_by_title(title: String) -> void:
+	for s in _prop_sections:
+		if s.section_title() == title:
+			show_property(s)
+			return

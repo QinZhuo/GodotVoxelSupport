@@ -20,6 +20,8 @@ const PALETTE_MAX_W := 520.0
 var _scroll: ScrollContainer
 var _row: HBoxContainer
 var _current: Label
+var _collapse: Button
+var _expanded := true
 var _group := ButtonGroup.new()
 var _swatches := {}         # material_id → Button
 var _need := 0.0            # 色块行完整展开所需的宽度
@@ -49,6 +51,11 @@ func _build() -> void:
 
 	var row := QVoxelUi.hbox(QVoxelUi.space_s())
 	panel.add_child(row)
+
+	# 折叠开关：底边是最不想被拦住的一条，色板不用时可以收成"▸ 材质 N"一小块。
+	_collapse = QVoxelUi.icon_button("▾", "折叠 / 展开调色板（收起后只留当前材质）")
+	_collapse.pressed.connect(func(): set_expanded(not _expanded))
+	row.add_child(_collapse)
 
 	# 当前材质：数字键与点击色块共用的状态回显。放在最左与色板相邻 —— 此前它孤零零挂在
 	# 整排色块的最右端，与"选中了哪个"隔着一整排，读起来像另一件事的读数。
@@ -121,7 +128,18 @@ func set_current(material_id: int) -> void:
 	for id in _swatches:
 		var b: Button = _swatches[id]
 		b.set_pressed_no_signal(id == material_id)
-	_scroll_into_view(material_id)
+	if _expanded:
+		_scroll_into_view(material_id)
+
+
+## 折叠 / 展开色板。收起时只留"▸ 材质 N"，把底边让回给 3D 视口。
+func set_expanded(on: bool) -> void:
+	if on == _expanded:
+		return
+	_expanded = on
+	_collapse.text = "▾" if on else "▸"
+	_scroll.visible = on
+	_clamp_width()
 
 
 # 内部

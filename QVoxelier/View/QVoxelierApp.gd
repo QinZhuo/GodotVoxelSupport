@@ -43,12 +43,13 @@ extends Node3D
 ## 状态栏（Hud）留在场景里，因为它是静态骨架、且视口脚本要按路径引用它。
 var _toolbar: QVoxelierToolbar
 var _tools: QVoxelierTools
+var _context: QVoxelierContextBar
 var _palette: QVoxelierPalette
-var _view_bar: QVoxelierViewBar
 var _gizmo: QVoxelierGizmo
 var _dock: QVoxelierDock
 var _color_section: QVoxelierColorSection
 var _tree_section: QVoxelierTreeSection
+var _object_section: QVoxelierObjectSection
 var _inspector_section: QVoxelierInspectorSection
 var _timeline_section: QVoxelierTimelineSection
 ## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
@@ -60,6 +61,8 @@ var _confirm: ConfirmationDialog
 var _modifier: QVoxelModifier
 ## 该修改器的宿主节点（改参数的命令要挂在它的 content_changed 上标脏）。
 var _modifier_owner: QVoxelNode
+## 层级里当前选中的节点（对象属性页据此显示"它是什么"）。
+var _selected_node: QVoxelNode
 
 ## 非活动对象的渲染节点容器：多对象世界里只有"当前对象"用 model，其余挂在这里。
 ## （见 _rebuild_view —— 切换活动对象只换 model.data，其余渲染器复用。）
@@ -100,13 +103,8 @@ var _erase := false
 var _symmetry := Vector3i.ZERO
 var _orbit := false
 var _pan := false
-## 导航 / 平移模式：拖动改的是视角而不是体素。桌面上的中键与 Shift+中键，在触摸屏上
-## 没有对应物，故提升为常驻开关 —— 它与 `_orbit` / `_pan` 这类"某一帧正在发生的拖动"不同，
-## 是**跨手势的粘性模式**，所以排在状态区而不是手势区。
-var _nav := false
-var _pan_mode := false
-## 修饰键 / 粘性模式的导航拖拽由谁启动（&"" / &"left" / &"middle"）—— 释放时只关自己启动的
-## 那一路，免得左键松开把还按着的中键视角拖拽一并关掉。
+## 导航拖拽由谁启动（&"" / &"left" / &"middle"）—— 释放时只关自己启动的那一路，
+## 免得左键松开把还按着的中键视角拖拽一并关掉。
 var _nav_key := &""
 ## 触摸 / 触摸板手势解析（双指拖 = 旋转、捏合 = 缩放）。解析与相机动作分离，见 QVoxelierGestureNav。
 var _gesture := QVoxelierGestureNav.new()
@@ -118,8 +116,7 @@ var _pending_center := false
 ## 已经补过的侧栏像素量。补偿按**差值**做：inset 结算晚于首帧时（布局未稳），
 ## 后续 sync 只补差额 —— 重复调用不会叠加，也不会吃掉用户自己的平移。
 var _center_done_px := 0.0
-## 左右侧栏的背景条（把漂浮面板连成整条侧栏）。
-var _left_rail: Panel
+## 右侧栏的背景条（把右列的浮板连成整条侧栏）。左列工具是独立图标按钮、不带统一底色，故无左条。
 var _right_rail: Panel
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
@@ -143,6 +140,9 @@ var _batch_dialog: FileDialog
 ## 批量导出的范围（取值见 QVoxelBake.Scope）。选在对话框里，烘的时候才读。
 var _batch_scope := QVoxelBake.Scope.WORLD
 var _batch_prefix: LineEdit
+
+## 滚轮 / 双指滑一格对应的平移像素量。
+const WHEEL_PAN_STEP := 48.0
 
 const ACTION_UNDO := &"qvoxelier_undo"
 const ACTION_REDO := &"qvoxelier_redo"
@@ -186,10 +186,8 @@ func _build_ui() -> void:
 	_toolbar.name = "Toolbar"
 	add_child(_toolbar)
 
-	# 左右整栏背景：把工具坞 / 视图栏 / 抽屉这些浮板连成两条完整的侧栏（Blender 式），
-	# 3D 不再从面板缝隙里漏出来。先入树压在所有面板之下，只作背景不吃事件。
-	_left_rail = _make_rail(false)
-	add_child(_left_rail)
+	# 右侧整栏背景：把抽屉里的浮板连成一条完整侧栏，3D 不从面板缝隙里漏出来。
+	# 先入树压在所有面板之下，只作背景不吃事件。（左列是独立图标按钮，不需要这条。）
 	_right_rail = _make_rail(true)
 	add_child(_right_rail)
 	_toolbar.new_requested.connect(request_new)
@@ -202,7 +200,10 @@ func _build_ui() -> void:
 	_toolbar.redo_requested.connect(_redo)
 	_toolbar.frame_requested.connect(func(): frame_view(); hud.flash("已取景"))
 	_toolbar.zoom_requested.connect(func(steps: float): camera.zoom_by_steps(steps))
-	_toolbar.view_mode_changed.connect(_set_view_mode)
+	# 镜头 / 网格线原在视口左下的「视图栏」，随该栏一并移除后并进顶栏；标准视角交给右下坐标系。
+	_toolbar.lens_toggled.connect(func(ortho: bool):
+		_set_lens(QVoxelViewCamera.Lens.ORTHO if ortho else QVoxelViewCamera.Lens.PERSPECTIVE))
+	_toolbar.grid_lines_toggled.connect(_set_grid_lines)
 	# 两块浮层都锚在右上角，开一块就关另一块 —— 互斥与按钮回弹都收在 _set_*_visible 里，
 	# 免得"界面开着日志、按钮却显示说明"这类不一致散落在两个 connect 里。
 	_toolbar.help_toggled.connect(_set_legend_visible)
@@ -212,25 +213,24 @@ func _build_ui() -> void:
 	_tools.name = "Tools"
 	add_child(_tools)
 	_tools.tool_selected.connect(_set_tool)
-	_tools.brush_step.connect(_step_brush)
-	_tools.brush_scale_requested.connect(_scale_brush)
-	_tools.brush_shape_selected.connect(_set_brush_shape)
 	_tools.erase_toggled.connect(func(on: bool): hud.flash("擦除模式：%s" % ("开" if on else "关")))
-	_tools.symmetry_toggled.connect(_set_symmetry_axis)
+
+	# 上下文选项条：只显示当前工具用得到的选项（笔刷 / 形态 / 对称 / 选区动作）。
+	# 与左列工具条分工 —— 左列选工具与擦除开关，本条随工具给出参数。
+	_context = QVoxelierContextBar.new()
+	_context.name = "ContextBar"
+	add_child(_context)
+	_context.brush_step.connect(_step_brush)
+	_context.brush_scale_requested.connect(_scale_brush)
+	_context.brush_shape_selected.connect(_set_brush_shape)
+	_context.symmetry_toggled.connect(_set_symmetry_axis)
 	# 选区面板的五个按钮共用一条信号（带动作 id）—— 面板不必为每个动作各开一条连接。
-	_tools.selection_action.connect(_on_selection_action)
+	_context.selection_action.connect(_on_selection_action)
 
 	_palette = QVoxelierPalette.new()
 	_palette.name = "Palette"
 	add_child(_palette)
 	_palette.material_selected.connect(_set_material)
-
-	_view_bar = QVoxelierViewBar.new()
-	_view_bar.name = "ViewBar"
-	add_child(_view_bar)
-	_view_bar.lens_selected.connect(_set_lens)
-	_view_bar.view_selected.connect(_apply_view)
-	_view_bar.grid_lines_toggled.connect(_set_grid_lines)
 
 	# 朝向指示器要读相机基，故注入相机实例（它不持有相机，只是借来看一眼 —— see 类文档）。
 	_gizmo = QVoxelierGizmo.new()
@@ -240,27 +240,14 @@ func _build_ui() -> void:
 	_gizmo.view_requested.connect(_apply_view)
 	# 盘上拖拽 = 自由旋转（点击轴尖仍是切视图，见 QVoxelierGizmo._gui_input 的判型时机）。
 	_gizmo.orbit_requested.connect(func(rel: Vector2) -> void:
-		camera.orbit_by_pixels(rel)
-		_view_bar.set_view(camera.view))
+		camera.orbit_by_pixels(rel))
 
-	# 右侧抽屉：颜色 / 对象 / 参数 / 时间轴 / 快照五组。分组各自只发"用户想干什么"，写世界与记撤销都在本类一处完成。
+	# 右侧抽屉 = 上「层级」（常驻 Outliner）+ 下「属性」（随选中自动切换）。
 	_dock = QVoxelierDock.new()
 	_dock.name = "Dock"
 	add_child(_dock)
 
-	_color_section = QVoxelierColorSection.new()
-	_color_section.edit_began.connect(_begin_material_edit)
-	_color_section.color_changed.connect(_live_color)
-	_color_section.pbr_changed.connect(_live_pbr)
-	_color_section.edit_ended.connect(_end_material_edit)
-	_color_section.eyedropper_toggled.connect(_set_eyedropper)
-	_color_section.add_material_requested.connect(_add_material)
-	_color_section.import_requested.connect(func(): _palette_import_dialog.popup_centered_ratio(0.7))
-	_color_section.export_requested.connect(func(): _palette_export_dialog.popup_centered_ratio(0.7))
-	# 颜色分组**默认收起**：多数时候只是拿笔刷画，材质编辑是"想改才点开"的事 ——
-	# 让它默认摊开等于给每个会画画的人看一屏他没在改的参数。
-	_dock.add_section(_color_section, true)
-
+	# 层级树：唯一的层级入口，固定在右列上方。
 	_tree_section = QVoxelierTreeSection.new()
 	_tree_section.node_selected.connect(_on_tree_selected)
 	_tree_section.model_add_requested.connect(_sess.add_model)
@@ -274,20 +261,40 @@ func _build_ui() -> void:
 	_tree_section.modifier_remove_requested.connect(_remove_modifier)
 	_tree_section.modifier_enabled_changed.connect(_set_modifier_enabled)
 	_tree_section.modifier_selected.connect(_on_modifier_selected)
-	# 装配时只摊开「颜色」一组，其余四组收成抬头（点一下才展开）：右列全展开实测约 1400px，
-	# 在 648 高的默认窗口里等于"一进来就满屏 + 下面还够不着"。收起来之后五组抬头一眼看全，
-	# 需要哪组展哪组 —— Dock 本身可滚动，展开多少都不丢东西。
-	_dock.add_section(_tree_section, true)
+	# 动画轴展开 → 显示时间轴附板；点帧格子 → 切到该模型并设活动帧。
+	_tree_section.anim_expanded_changed.connect(func(on: bool) -> void:
+		if _timeline_section != null:
+			_timeline_section.visible = on)
+	_tree_section.frame_selected.connect(_on_frame_cell)
+	_dock.add_outliner(_tree_section)
 
-	# 参数分组：链上选中哪条修改器，就反射生成它的参数控件（含"变换"的参数，故不再需要独立变换面板）。
+	# ── 属性页签 ── 顺序即页签顺序；App 按当前选择自动切到对应那一页。
+	_color_section = QVoxelierColorSection.new()
+	_color_section.edit_began.connect(_begin_material_edit)
+	_color_section.color_changed.connect(_live_color)
+	_color_section.pbr_changed.connect(_live_pbr)
+	_color_section.edit_ended.connect(_end_material_edit)
+	_color_section.eyedropper_toggled.connect(_set_eyedropper)
+	_color_section.add_material_requested.connect(_add_material)
+	_color_section.import_requested.connect(func(): _palette_import_dialog.popup_centered_ratio(0.7))
+	_color_section.export_requested.connect(func(): _palette_export_dialog.popup_centered_ratio(0.7))
+	_dock.add_property(_color_section)
+
+	# 对象：显示当前在层级里选中的节点的数据；改名 / 可见 / 锁定走与树同一条会话入口。
+	_object_section = QVoxelierObjectSection.new()
+	_object_section.rename_requested.connect(_sess.rename_node)
+	_object_section.visible_changed.connect(_sess.set_node_visible)
+	_object_section.locked_changed.connect(_sess.set_node_locked)
+	_dock.add_property(_object_section)
+
+	# 参数：链上选中哪条修改器，就反射生成它的参数控件。
 	_inspector_section = QVoxelierInspectorSection.new()
 	_inspector_section.edit_began.connect(_begin_prop_edit)
 	_inspector_section.value_changed.connect(_live_prop)
 	_inspector_section.edit_ended.connect(_end_prop_edit)
-	_dock.add_section(_inspector_section, true)
+	_dock.add_property(_inspector_section)
 
-	# 时间轴分组（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。与其余分组同一约定 ——
-	# 面板只说"用户想干什么"，改哪个属性、记成哪条命令全在本类一处完成（见文件末的"时间轴"段）。
+	# 时间轴（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。
 	_timeline_section = QVoxelierTimelineSection.new()
 	_timeline_section.frame_selected.connect(_select_frame)
 	_timeline_section.insert_requested.connect(_insert_frame)
@@ -299,14 +306,15 @@ func _build_ui() -> void:
 	_timeline_section.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
 	_timeline_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
-	_dock.add_section(_timeline_section, true)
+	# 时间轴附在层级下方（动画轴展开时才显示），与树连成一条。
+	_dock.add_outliner(_timeline_section)
+	# 必须在 add_child 之后置隐 —— 面板 _ready 的 open() 会把 visible 置回真。
+	_timeline_section.visible = false
 
-	# 快照分组（F5）：它自己摆离屏舞台、自己按快门（见 QVoxelierSnapshotSection 的"为什么按下渲染
-	# 不经过应用层"）。本类只做它做不了的两件事：把当前世界推给它（见 _refresh_panels）、
-	# 以及弹落盘对话框 —— 文件对话框的公共装配在应用层一处（见 _build_dialogs）。
+	# 快照（F5）：它自己摆离屏舞台、自己按快门；本类只把世界推给它、再管一次落盘对话框。
 	_snapshot_section = QVoxelierSnapshotSection.new()
 	_snapshot_section.save_requested.connect(_request_snapshot_save)
-	_dock.add_section(_snapshot_section, true)
+	_dock.add_outliner(_snapshot_section)
 
 	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
 	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
@@ -324,24 +332,16 @@ func _build_ui() -> void:
 	# 不会反过来被它遮住）。
 	move_child(hud, -1)
 
-	# 两处"邻居的边界会动，故要互相让位"的布线。都放在装配处说清：面板之间不互相认识
-	# （工具坞不认识视图栏、HUD 不认识抽屉），只有本类同时看得见它们。
-	# 1) 左列：视图栏贴在工具坞正下方（实测 189px 高），工具坞的高度上限要让出它。
-	# 2) 右列：抽屉宽度随内容变，视口里的浮层（HUD 的说明 / 日志、朝向指示器）都要让出它。
-	# 两边的目标值都是**布局算出来的**（不是常量），故挂信号 + 装配末尾补一次初值：
+	# 右列：抽屉宽度随内容变，视口里的浮层（HUD 的说明 / 日志、朝向指示器）都要让出它。
+	# 目标值都是**布局算出来的**（不是常量），故挂信号 + 装配末尾补一次初值：
 	# 邻面板的矩形一般要到下一帧最小尺寸结算完才定下来。
-	var sync_left := func() -> void:
-		_tools.set_bottom_reserved(_view_bar.size.y + QVoxelUi.space_s())
-		_sync_rails()
 	var sync_right := func() -> void:
 		_sync_rails()
 		# 三者共用一个宽度而不是各算各的 —— 状态栏"避开右列"与坐标轴"避开状态栏"从此是一个数。
 		hud.set_right_inset(_right_inset)
 		_gizmo.right_inset = _right_inset
-	_view_bar.resized.connect(sync_left)
 	_tools.resized.connect(_sync_rails)   # 工具坞按内容变宽时，左栏背景也要跟
 	_dock.resized.connect(sync_right)
-	sync_left.call_deferred()
 	sync_right.call_deferred()
 
 
@@ -373,6 +373,9 @@ func _reset_edit_state() -> void:
 	_eyedropper = false
 	_material_cmd = null
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
+	# 擦除是左列工具条上的粘性开关，换世界时一并复位（否则新工程一进来还停在"擦除开"）。
+	if _tools != null:
+		_tools.set_erase(false)
 	# 调色板不必在这里喂：它挂在唯一刷新路径上，install 发出的 changed 会把世界带过去
 	# （色板取的是**世界的材质表**而不是 default_palette，打开别人的 256 色工程也照显）。
 
@@ -424,6 +427,8 @@ func _attach_active() -> void:
 		grid_floor.voxel_scale = model.voxel_scale
 	_selection_box.voxel_scale = model.voxel_scale
 	_ghost.voxel_scale = model.voxel_scale
+	# 预览与显示层同一份偏移（导入资产的 center_offset）：否则预览与体素错开。
+	_ghost.origin = session.data.center_offset if session.data != null else Vector3.ZERO
 	hud.session = session
 
 
@@ -556,11 +561,12 @@ func _make_rail(right: bool) -> Panel:
 ## 两条侧栏的宽度与"可见区裁切量"随邻居实际宽度更新 —— rail 背景、状态栏让位、
 ## 坐标轴让位、取景补偿从此共用同一组数。
 func _sync_rails() -> void:
-	# 左栏以"工具坞 / 视图栏中更宽的那个"为准 —— 视图栏比工具坞宽时会凸出背景条。
-	_left_inset = maxf(_tools.size.x, _view_bar.size.x) + QVoxelUi.space_m() * 2.0
+	_left_inset = _tools.size.x + QVoxelUi.space_m() * 2.0
 	_right_inset = _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
-	_left_rail.offset_right = _left_inset
 	_right_rail.offset_left = -_right_inset
+	# 上下文选项条横跨可见区（两侧让开左右栏），故也吃同一组 inset。
+	if _context != null:
+		_context.set_insets(_left_inset, _right_inset)
 	# 宽度变了 = 可见区中心也变了。补差额（只在取过景之后有欠账，别的场景 delta 为 0）。
 	_apply_view_center()
 
@@ -592,63 +598,58 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			if _eyedropper and e.pressed:
 				_pick_material_at(e.position)
 				return
-			# 触摸屏没有中键，故「导航 / 平移」模式把左键借给视角：单手即可转 / 移模型。
-			# 平板上的单指拖动经过 emulate_mouse_from_touch 就是这里的 LEFT，不需要另写一套触摸分支。
+			# 触摸屏没有中键：单指拖动画/擦，单指拖动**空白处**即转视角，双指拖动即平移。
+			# 平板上的单指拖动经过 emulate_mouse_from_touch 就是这里的 LEFT，不需要另写触摸分支。
 			if e.pressed:
-				if _nav or _pan_mode:
-					_nav_key = &"mode"
-					_orbit = _nav
-					_pan = _pan_mode
-				elif e.alt_pressed or e.shift_pressed:
-					# Alt+拖 = 旋转、Shift+拖 = 平移（Maya / Blender 系惯例）——
-					# 鼠标用户不必摸中键，与触摸板"双指拖 = 旋转"同一套肌肉记忆。
+				if e.alt_pressed:
+					# Alt+拖 = 旋转：老肌肉记忆的一条加速器，与空白处拖动同一条路径。
 					_nav_key = &"left"
-					_orbit = e.alt_pressed
-					_pan = e.shift_pressed and not e.alt_pressed
+					_orbit = true
 				else:
-					_begin_stroke(e.position, _erasing())
-			elif _nav_key == &"left" or _nav_key == &"mode":
+					# 命中可落笔处 → 画 / 擦（Shift = 反向，即当前工具的逆操作：画笔变擦除）；
+					# 落在空白处（射线哪儿都没打到）→ 拖动即旋转视角，**不需要任何组合键**。
+					if _pick_at(e.position).valid():
+						_begin_stroke(e.position, _erasing() or e.shift_pressed)
+					else:
+						_nav_key = &"left"
+						_orbit = true
+			elif _nav_key == &"left":
 				_nav_key = &""
 				_orbit = false
 				_pan = false
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_RIGHT:
-			# 导航 / 平移模式下右键不参与擦除 —— 否则"想转个视角却擦掉一片"。
-			if _nav or _pan_mode:
-				return
 			if e.pressed:
 				_begin_stroke(e.position, true)
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_MIDDLE:
-			# 中键转视角、Shift / Alt+中键平移：与左右键（画 / 擦）互不干扰，
-			# 于是"边画边转着看"不需要先切模式 —— 建模里这一步每天都在用。
+			# 中键拖动 = 任意位置旋转；Shift+中键 = 平移。与左右键（画 / 擦 / 空白处旋转）
+			# 互不干扰，于是"边画边转着看"不需要先切模式 —— 建模里这一步每天都在用。
 			if e.pressed:
 				_nav_key = &"middle"
-				_orbit = not (e.shift_pressed or e.alt_pressed)
-				_pan = e.shift_pressed or e.alt_pressed
+				_pan = e.shift_pressed
+				_orbit = not e.shift_pressed
 			elif _nav_key == &"middle":
 				_nav_key = &""
 				_orbit = false
 				_pan = false
 		MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
-			# 裸滚轮不再缩放（整屏一滚就放大缩小，误操作太容易）：
-			#   裸滚轮 = 俯仰；触摸板双指上下滑就是滚轮事件，"双指拖 = 旋转"由此闭环；
-			#   Ctrl+滚轮 = 缩放（Windows 精确触摸板的捏合也走这条 Ctrl+滚轮）；
-			#   Alt+滚轮 = 偏航，与 Alt+拖旋转同一修饰语义。
+			# 裸滚轮 = 平移（触摸板双指上下滑就是滚轮事件，故"双指拖 = 平移"由此闭环）；
+			# Ctrl+滚轮 = 缩放（Windows 精确触摸板的捏合也走这条 Ctrl+滚轮）；
+			# Alt+滚轮 = 俯仰（给"鼠标 + 键盘"留一条不用中键的抬头/低头）。
 			var up := e.button_index == MOUSE_BUTTON_WHEEL_UP
 			if e.ctrl_pressed:
 				camera.zoom_by_steps(1.0 if up else -1.0)
 			elif e.alt_pressed:
-				camera.yaw_by_degrees(4.0 if up else -4.0)
-			else:
 				camera.pitch_by_degrees(-4.0 if up else 4.0)
-			_view_bar.set_view(camera.view)
+			else:
+				camera.pan_by_pixels(Vector2(0.0, -WHEEL_PAN_STEP if up else WHEEL_PAN_STEP))
 		MOUSE_BUTTON_WHEEL_LEFT, MOUSE_BUTTON_WHEEL_RIGHT:
-			# 水平滚轮 = 触摸板双指左右滑 → 偏航，补齐"双指拖 = 旋转"的水平分量。
-			camera.yaw_by_degrees(-4.0 if e.button_index == MOUSE_BUTTON_WHEEL_LEFT else 4.0)
-			_view_bar.set_view(camera.view)
+			# 水平滚轮 = 触摸板双指左右滑 → 平移（补齐"双指拖 = 平移"的水平分量）。
+			var left := e.button_index == MOUSE_BUTTON_WHEEL_LEFT
+			camera.pan_by_pixels(Vector2(-WHEEL_PAN_STEP if left else WHEEL_PAN_STEP, 0.0))
 
 
 ## 把手势层累积的导航量接到相机上（每喂完一个手势事件调用一次）。
@@ -657,9 +658,8 @@ func _flush_gesture() -> void:
 	# 只在笔画中途取消；非笔画时不动 _cancel，它还有"退出选区"的语义。
 	if _gesture.active and _stroke:
 		_cancel()
-	if _gesture.orbit_pending != Vector2.ZERO:
-		camera.orbit_by_pixels(_gesture.orbit_pending)
-		_view_bar.set_view(camera.view)
+	if _gesture.pan_pending != Vector2.ZERO:
+		camera.pan_by_pixels(_gesture.pan_pending)
 	if not is_equal_approx(_gesture.zoom_pending, 1.0):
 		camera.zoom_by_ratio(_gesture.zoom_pending)
 	_gesture.take()
@@ -671,9 +671,6 @@ func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 		_refresh_cursor(e.position)
 	elif _orbit:
 		camera.orbit_by_pixels(e.relative)
-		# 转完就不再对齐任何预设了：视图栏要如实回显这一点，否则"前视图"还亮着 ——
-		# 用户会以为视角没动。
-		_view_bar.set_view(camera.view)
 	elif _pan:
 		camera.pan_by_pixels(e.relative)
 	else:
@@ -903,10 +900,13 @@ func _set_material(id: int) -> void:
 		return
 	_material_id = id
 	hud.flash("材质 %d" % id)
+	# 选中材质 → 属性区自动切到「颜色」（"选了什么就看什么"）。
+	if _dock != null:
+		_dock.show_property_by_title("颜色")
 	_refresh_hud()
 
 
-## 擦除开关（工具坞的「擦除」按钮与 E 键共用）：平板上没有右键，这是唯一的擦除入口。
+## 擦除开关（左列「擦除」按钮与 E 键共用）：平板上没有右键，这是唯一的粘性擦除入口。
 func _toggle_erase() -> void:
 	var on := not _tools.erase_mode()
 	_tools.set_erase(on)
@@ -1009,6 +1009,9 @@ func _on_modifier_selected(node: QVoxelNode, index: int) -> void:
 	if node == null or index < 0 or index >= node.modifiers.size():
 		return
 	_select_modifier(node, node.modifiers[index])
+	# 选中链上一条修改器 → 属性区自动切到「参数」。
+	if _dock != null:
+		_dock.show_property_by_title("参数")
 
 
 ## 把参数组绑到 m（null = 清空）。宿主节点一并记下 —— 改参数的命令要挂在它的 content_changed 上。
@@ -1100,47 +1103,27 @@ func _node_output_size(node: QVoxelNode) -> Vector3i:
 	return QVoxelEvalEngine.evaluate_node(node, ctx, null, null).grid_size
 
 
-## 视图模式：绘制 / 转视角 / 平移。触摸屏上没有中键，故左键会被借去当视角键，
-## 切模式时若正按着笔，必须先收笔 —— 否则那一笔会以"松手"的形式留下半截改动。
-func _set_view_mode(mode: int) -> void:
-	_nav = mode == QVoxelierToolbar.VIEW_ORBIT
-	_pan_mode = mode == QVoxelierToolbar.VIEW_PAN
-	_orbit = false
-	_pan = false
-	if mode != QVoxelierToolbar.VIEW_PAINT and _stroke:
-		session.cancel()
-		_stroke = false
-	match mode:
-		QVoxelierToolbar.VIEW_ORBIT:
-			hud.flash("导航模式：单指 / 左键拖动 = 转视角")
-		QVoxelierToolbar.VIEW_PAN:
-			hud.flash("平移模式：单指 / 左键拖动 = 平移画面")
-		_:
-			hud.flash("回到绘制：拖动 = 画")
-
-
 # 视图（镜头 / 标准视角 / 网格线）
 
 ## 切镜头（视图栏「透视 / 正交」与小键盘 5 共用）。正交不是"另一种画风"：
 ## 没有近大远小才量得准比例、才对得齐体素 —— 体素建模里它是刚需而不是可选项。
 func _set_lens(mode: int) -> void:
 	camera.set_lens(mode)
-	_view_bar.set_lens(mode)
+	_toolbar.set_lens(mode == QVoxelViewCamera.Lens.ORTHO)
 	hud.flash("镜头：%s" % QVoxelViewCamera.LENS_NAMES[mode])
 
 
-## 切标准视角。**三个入口共用这一条路径**：视图栏七个预设、朝向指示器点轴、小键盘 ——
-## 于是三处的回显与提示永远一致（不存在"点了指示器但视图栏还亮着别的"）。
+## 切标准视角。**三个入口共用这一条路径**：朝向指示器点轴、小键盘、视图模式 ——
+## 回显由坐标系自身按相机基呈现，故这里不必再维护一处"当前预设"。
 func _apply_view(view: int) -> void:
 	camera.apply_view(view)
-	_view_bar.set_view(view)
 	hud.flash("%s视图" % QVoxelViewCamera.VIEW_NAMES[view])
 
 
-## 网格线显隐（视图栏开关）。只摘格线、保留外框 —— 外框是"合法范围"的告知，见 QVoxelGridFloor。
+## 网格线显隐（顶栏开关）。只摘格线、保留外框 —— 外框是"合法范围"的告知，见 QVoxelGridFloor。
 func _set_grid_lines(on: bool) -> void:
 	grid_floor.set_grid_lines_visible(on)
-	_view_bar.set_grid_lines(on)
+	_toolbar.set_grid_lines(on)
 	hud.flash("网格线：%s" % ("开" if on else "关"))
 
 
@@ -1476,13 +1459,16 @@ func _refresh_hud() -> void:
 		return
 	_toolbar.set_history(session.history.can_undo(), session.history.can_redo())
 	_tools.set_tool(session.tool.mode)
-	_tools.set_brush(session.tool.brush_size, session.tool.supports_brush_size())
-	_tools.set_brush_shape(session.tool.brush_shape, session.tool.supports_brush_size())
+	# 上下文选项条：先按当前工具决定显示哪一组（笔刷参数 / 选区动作），再回填值。
+	var brush := session.tool.supports_brush_size()
+	_context.set_tool(session.tool.mode, brush, session.tool.selection_mode())
+	_context.set_brush(session.tool.brush_size, brush)
+	_context.set_brush_shape(session.tool.brush_shape, brush)
 	# 对称是 App 级设置 → 每次刷新都把它压回当前对象的笔刷，并回写三个按钮的按下态。
 	_apply_symmetry()
-	_tools.set_symmetry(_symmetry)
+	_context.set_symmetry(_symmetry)
 	# 选区 / 剪贴板：线框、按钮可用性、状态栏读数三处都跟着同一份数据走（一处刷新，三处跟上）。
-	_tools.set_selection_state(not session.selection.is_empty(), not session.clipboard.is_empty())
+	_context.set_selection_state(not session.selection.is_empty(), not session.clipboard.is_empty())
 	_selection_box.set_box(session.selection.lo(), session.selection.size())
 	# 状态栏里的选区 / 剪贴板读数由 HUD 自己按会话算（见 QVoxelierHud._selection_readout），
 	# 不在这里再喂一份字符串 —— 同一事实两处拼装迟早会各说各话。
@@ -1505,6 +1491,9 @@ func _refresh_panels() -> void:
 		pbr[key] = world.material_scalar(_material_id, StringName(key))
 	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0), pbr)
 	_tree_section.set_world(world, session.object.model_id)
+	# 对象属性页跟着当前选中的节点（撤销 / 重做后重看一眼数据）。
+	if _object_section != null:
+		_object_section.bind(_selected_node)
 	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
 	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimelineSection.bind），播放期间不重建控件。
 	_timeline_section.bind(session.object)
@@ -1673,11 +1662,25 @@ func _report_edit(n: int, ok_text: String, empty_text: String) -> void:
 ## 点树上的行：模型就切过去编辑；组只是容器，不改变当前编辑对象。
 ## 【为什么要顺手清掉参数组】选中的是"节点"，而参数组显示的是"链上某一条修改器"。
 ## 换了节点还留着上一条的参数，滑一下就把改动写进了另一个对象的链里（且看不出来）。
+## 动画轴里点了某模型的某一帧：切到该模型，并把活动帧设过去（重渲染由 _select_frame 带出）。
+func _on_frame_cell(node: QVoxelNode, frame: int) -> void:
+	if node == null or not node.is_model():
+		return
+	_activate((node as QVoxelModel).model_id, false)
+	_select_frame(frame)
+
+
 func _on_tree_selected(node: QVoxelNode) -> void:
 	if _modifier != null and (_modifier_owner != node or not _owns_modifier(node, _modifier)):
 		_select_modifier(null, null)
 	if node != null and node.is_model():
 		_activate((node as QVoxelModel).model_id)
+	# 选中一个节点 → 对象属性页跟着显示它的数据，并自动切到「对象」页签。
+	_selected_node = node
+	if _object_section != null:
+		_object_section.bind(node)
+	if _dock != null:
+		_dock.show_property_by_title("对象")
 
 
 ## m 是否还在 node 的链上（撤销 / 重做会换掉整个数组，条目可能已经不在了）。

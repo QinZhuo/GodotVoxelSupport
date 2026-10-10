@@ -59,20 +59,22 @@ const TEXT_DIM := Color("#9aa1acff")
 ## （压在面板底上）—— 它仍然是全屏最暗的文字，但不必眯眼。
 const TEXT_FAINT := Color("#7c838eff")
 
-## 唯一强调色（蓝）。
-const ACCENT := Color("#5c9fdbff")
+## 唯一强调色（蓝）。比早先的亮天蓝更深、更收敛一档 —— 压在同一块冷灰上更像 Blender 的
+## 选区蓝，不容易与材质色板里的青蓝撞车（"这是 UI 强调还是我选的材质"要一眼分得开）。
+const ACCENT := Color("#4f86c2ff")
 ## 强调色的低透明度底（选中态背景 / 主操作按钮的常态底）。
-const ACCENT_DIM := Color("#5c9fdb29")
+const ACCENT_DIM := Color("#4f86c229")
 ## 主操作按钮的悬停底（比常态略实一档）。
-const ACCENT_HOVER := Color("#5c9fdb4d")
+const ACCENT_HOVER := Color("#4f86c24d")
 ## 铺在强调色上的文字色（深色，保证对比度）。用于主操作按钮"按下"那一瞬的实心反馈。
 const ON_ACCENT := Color("#0e1013ff")
 ## 危险 / 警告。**刻意离强调色远一档色相**（红）—— 强调色选中与"这会丢东西"
 ## 必须一眼分得开，否则用户会把确认框里的危险项当成主操作去点。
 const WARN := Color("#e8584eff")
 
-const RADIUS_S := 6
-const RADIUS_M := 10
+# 圆角：Blender 那类专业工具偏"方"（很浅的圆角），过圆会显得像消费级 App。
+const RADIUS_S := 5
+const RADIUS_M := 8
 
 ## 间距最小一档。**两档共用** —— 它已经是"元素挨在一起"的下限，再收就要粘成一块。
 const SPACE_XS := 4

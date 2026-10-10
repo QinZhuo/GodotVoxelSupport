@@ -3,22 +3,22 @@ class_name QVoxelierGestureNav
 extends RefCounted
 ## 触摸 / 触摸板手势 → 相机导航增量。
 ## 【输入输出】feed() 收 ScreenTouch/ScreenDrag（多指跟踪）与 Magnify/PanGesture（引擎派发的
-## 系统手势），把结果累积成 orbit（像素位移）与 zoom（比例）两份量；App 每次 feed 后取走应用。
+## 系统手势），把结果累积成 pan（像素位移）与 zoom（比例）两份量；App 每次 feed 后取走应用。
 ## 状态解析与相机动作分离 —— 这里不认识相机，也不认识界面。
 ## 【平台差异】Windows 不派发 Magnify/PanGesture（Godot 仅 Android/macOS/Linux 派发），
-## 于是触摸板走"滚轮事件"那条路（App 的滚轮分支：垂直=俯仰、水平=偏航、Ctrl=缩放），
+## 于是触摸板走"滚轮事件"那条路（App 的滚轮分支：垂直=俯仰、水平=偏航），
 ## 触摸屏走多指跟踪这条；macOS/Android 的系统手势直接进 feed。
-## 双指语义与主流一致：双指拖动 = 旋转视角，捏合 = 缩放（Blender 触控板同款）。
+## 双指语义：双指拖动 = **平移画面**（与 PS / 多数工具一致的手感），捏合 = 缩放。
 
-## 双指中心位移 → 旋转的像素增益（1.0 = 中心挪多少像素转多少像素，与鼠标拖拽同手感）。
+## 双指中心位移 → 平移的像素增益（1.0 = 中心挪多少像素就平移多少像素）。
 const DRAG_GAIN := 1.0
 ## 捏合起步阈值：指距变化在 ±5% 内不算捏合，防止双指刚落下时的抖动触发缩放。
 const PINCH_EPS := 1.05
 
 ## 当前是否处于多指手势（>= 2 指）。App 据此打断进行中的笔画。
 var active := false
-## 累积的旋转位移（App 消费后应调 take() 清零）。
-var orbit_pending := Vector2.ZERO
+## 累积的平移位移（App 消费后应调 take() 清零）。
+var pan_pending := Vector2.ZERO
 ## 累积的缩放比例（同上）。
 var zoom_pending := 1.0
 
@@ -34,8 +34,8 @@ func feed(e: InputEvent) -> bool:
 		zoom_pending *= e.factor
 		return true
 	if e is InputEventPanGesture:
-		# 系统手势的 delta 即"手指滑了多少"，与双指拖同语义 → 旋转。
-		orbit_pending += e.delta * DRAG_GAIN
+		# 系统手势的 delta 即"手指滑了多少" → 平移。
+		pan_pending += e.delta * DRAG_GAIN
 		return true
 	if e is InputEventScreenTouch:
 		if e.pressed:
@@ -51,9 +51,9 @@ func feed(e: InputEvent) -> bool:
 			_touches[e.index] = e.position
 		if not active:
 			return false
-		# 双指拖：跟手转视角（中心位移）；捏合：指距比例缩放。两者同时发生也各算各的。
+		# 双指拖：跟手平移（中心位移）；捏合：指距比例缩放。两者同时发生也各算各的。
 		var c := _center_of()
-		orbit_pending += (c - _center) * DRAG_GAIN
+		pan_pending += (c - _center) * DRAG_GAIN
 		var s := _span_of()
 		if _span > 0.0 and s > 0.0:
 			var ratio := s / _span
@@ -67,7 +67,7 @@ func feed(e: InputEvent) -> bool:
 
 ## 取走累积量并清零（App 每次 feed 后调用）。
 func take() -> void:
-	orbit_pending = Vector2.ZERO
+	pan_pending = Vector2.ZERO
 	zoom_pending = 1.0
 
 

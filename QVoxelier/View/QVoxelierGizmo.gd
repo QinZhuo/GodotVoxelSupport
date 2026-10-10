@@ -50,6 +50,8 @@ var _tip_radius := 0.0
 var _tips: Array = []        # [{pos: Vector2, view: int}]
 var _press := false          # 左键正按在盘上（拖拽中）
 var _dragged := false        # 本次按下已越过点击/拖拽的分界阈值
+## 鼠标是否悬在本控件上。它是"补充工具"，平时压暗、不抢视线；悬停时才提亮。
+var _hover := false
 
 
 func _ready() -> void:
@@ -60,17 +62,20 @@ func _ready() -> void:
 	anchor_top = 1.0
 	anchor_bottom = 1.0
 	_sync_rect()
+	mouse_entered.connect(func(): _hover = true; queue_redraw())
+	mouse_exited.connect(func(): _hover = false; queue_redraw())
 
 
 ## 贴右下角：让开状态栏与右列抽屉（宽度由 right_inset 报进来）。
+## 尺寸只占 3 个命中区见方 —— 它只是"朝向补充"，不该抢模型的地方。
 func _sync_rect() -> void:
-	var s := 5 * QVoxelUi.hit_size()
+	var s := 3 * QVoxelUi.hit_size()
 	custom_minimum_size = Vector2(s, s)
 	offset_right = -right_inset
 	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
 	offset_left = offset_right - s
 	offset_top = offset_bottom - s
-	_tip_radius = s * 0.5 - QVoxelUi.hit_size() * 0.25
+	_tip_radius = s * 0.5 - QVoxelUi.hit_size() * 0.34
 
 
 func _process(_delta: float) -> void:
@@ -85,9 +90,11 @@ func _process(_delta: float) -> void:
 
 func _draw() -> void:
 	var center := size * 0.5
-	# 底盘：透过 3D 视口看它，没有底衬的话轴会与模型糊在一起。取界面同一族的冷灰黑、
-	# 但压得更暗 —— 六个轴尖已经占满红/绿/蓝，底衬若带上台面色就会像"第七根轴"。
-	draw_circle(center, size.x * 0.5, Color(0.035, 0.043, 0.058, 0.55))
+	# 平时压暗（dim < 1）、悬停时提亮：它是补充工具，不该与模型争视线。
+	var dim := 1.0 if _hover else 0.55
+	# 底盘：透过 3D 视口看它，没有底衬的话轴会与模型糊在一起。取界面同一族的冷灰黑，
+	# 但压得更暗、更透 —— 六个轴尖已经占满红/绿/蓝，底衬若带上台面色就会像"第七根轴"。
+	draw_circle(center, size.x * 0.5, Color(0.035, 0.043, 0.058, (0.5 if _hover else 0.24)))
 
 	if camera == null:
 		return
@@ -113,18 +120,18 @@ func _draw() -> void:
 	var font_size := QVoxelUi.FONT_S
 	for e in entries:
 		# 背向观察者的轴压暗：它们贴在底盘后面，画太亮会显得朝向反了。
-		var facing := clampf(0.5 - e.depth * 0.5, 0.25, 1.0)
+		var facing := clampf(0.5 - e.depth * 0.5, 0.25, 1.0) * dim
 		var color: Color = AXIS_COLORS[e.axis]
 		color.a = facing
 		draw_line(center, e.pos, color, 2.0, true)
 		# 轴尖：正方向实心 + 字母，负方向空心 —— 一个字母就分得出两端。
 		if e.sign > 0.0:
-			draw_circle(e.pos, QVoxelUi.FONT_S * 0.9, color)
+			draw_circle(e.pos, QVoxelUi.FONT_S * 0.85, color)
 			draw_string(font, e.pos - Vector2(font_size * 0.32, -font_size * 0.34),
 					AXIS_NAMES[e.axis], HORIZONTAL_ALIGNMENT_LEFT, -1, font_size,
 					Color(0.06, 0.07, 0.09, facing))
 		else:
-			draw_arc(e.pos, QVoxelUi.FONT_S * 0.9, 0, TAU, 16, color, 1.5, true)
+			draw_arc(e.pos, QVoxelUi.FONT_S * 0.85, 0, TAU, 16, color, 1.5, true)
 		_tips.append({"pos": e.pos, "view": AXIS_VIEWS[e.axis][0 if e.sign > 0.0 else 1],
 				"depth": e.depth, "color": color})
 
@@ -141,8 +148,8 @@ func _gui_input(event: InputEvent) -> void:
 			_press = false
 			if not _dragged:
 				var hit := _nearest_tip(event.position)
-				if hit >= 0:
-					view_requested.emit(_tips[hit].view)
+				# 点轴尖 = 切到那一侧；点中心的盘面 = 等轴视图（补齐坐标系唯一给不了的预设）。
+				view_requested.emit(_tips[hit].view if hit >= 0 else QVoxelViewCamera.View.ISO)
 			accept_event()
 	elif event is InputEventMouseMotion and _press:
 		if _dragged or event.relative.length() >= DRAG_START_PX:
