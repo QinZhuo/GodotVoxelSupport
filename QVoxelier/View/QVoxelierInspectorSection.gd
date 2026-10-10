@@ -18,7 +18,7 @@ var _inspector: QVoxelierInspector
 
 
 func section_title() -> String:
-	return "修改器参数"
+	return "参数"
 
 
 func _build_body(body: VBoxContainer) -> void:

@@ -21,7 +21,6 @@ var _tool: Label
 var _hint: Label
 var _cursor: RichTextLabel
 var _brush: Label
-var _material: Label
 var _model: Label
 var _selection: Label
 var _history: Label
@@ -91,13 +90,6 @@ func set_cursor(cell: Vector3i) -> void:
 
 static func _axis_hex(i: int) -> String:
 	return (QVoxelierGizmo.AXIS_COLORS[i] as Color).to_html(false)
-
-
-## 当前材质号（与调色板的选中块同源，由 App 一处回写）。
-## 名字带 `_id` 后缀是必须的：`set_material` 会**覆盖 CanvasItem 的原生方法**（画布材质），
-## 签名不匹配直接编译不过。
-func set_material_id(material_id: int) -> void:
-	_material.text = "材质 %d" % material_id
 
 
 ## 模型读数：**链作用后**的盒尺寸 + 屏幕上真实存在的体素数。
@@ -230,8 +222,6 @@ func _build_status() -> void:
 	row.add_child(_cursor)
 	_brush = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_brush)
-	_material = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
-	row.add_child(_material)
 	_model = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	row.add_child(_model)
 	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。

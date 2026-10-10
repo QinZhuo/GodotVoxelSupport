@@ -767,6 +767,16 @@ func _update_mesh_async() -> void:
 	# 大崩塌移除不再主线程逐体素写 dict
 	rebuild_chunks = data.get_dirty_chunks()
 	var had_dirty := not rebuild_chunks.is_empty()
+	# 【防闪】剔除"源已作废、等待重新取数"的 chunk：作废后其缓冲为空，拿空快照重建会把
+	# 还看得见的网格抹掉、再异步重建 —— 这就是"改一下模型闪一下"的根因。它们的重建权交给
+	# 流式泵（QVoxelSource.pending regeneration）：重新取数回填时 _accept_chunk_buffer 会再次
+	# 标脏，届时缓冲已就绪、重建即正确。清理分支因此也不会释放这类 chunk 的网格。
+	if not rebuild_chunks.is_empty():
+		var keep: Array[Vector3i] = []
+		for ck in rebuild_chunks:
+			if not data._is_chunk_source_invalidated(ck):
+				keep.append(ck)
+		rebuild_chunks = keep
 	# 【流式防抖】剔除已在延迟补建队列的脏 chunk：其重建权归无限层的延迟队列
 	# （晋升时 process_deferred_chunks 重新 mark_chunk_dirty，且未来构建的快照必含
 	# 已到达的邻居数据，无需边界缝合标记）。否则流式波次中每个新到 chunk 都把视锥外

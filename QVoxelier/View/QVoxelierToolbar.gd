@@ -6,8 +6,9 @@ extends QVoxelierPanel
 ## 平板上：那里没有键盘、没有中键、没有滚轮。于是快捷键在本项目里的定位降级为
 ## **加速器**而不是入口 —— 按钮才是唯一入口，快捷键只让熟练用户少点两下。
 ## 三处针对触摸的补位：中键转视角 → [导航] 模式开关；滚轮缩放 → [−]/[+]；Home 取景 → [取景]。
-## 【为什么工程名在正中】它是"我在编辑什么 + 改没改"的唯一常驻回答（未落盘时染强调色并带 *）。
-## 放中间读起来最省眼，也正好把两侧的按钮组隔开，省掉一条竖分隔线。
+## 【为什么工程名在文件组之后】它是"我在编辑什么 + 改没改"的唯一常驻回答（未落盘时染强调色并带 *）。
+## 贴着文件组左对齐，读起来像标题；居中会在两侧各留一大片空白，反而像浮在半空。它右侧用一段
+## 弹性空白把历史 / 视图两组推到右端 —— 中间的空白因此是"有意的分组间隔"。
 ## 【为什么用 HUD 层】它常驻、不参与 back()：按 Esc 该取消的是这一笔，不是把工具栏关掉。
 
 signal new_requested
@@ -87,13 +88,19 @@ func _build() -> void:
 			"batch"))
 
 	_project = QVoxelUi.label("", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
-	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# 左对齐贴着文件组，而不是居中悬在空档里 —— 居中会让两侧各留一大片空白，读起来像"浮"着。
+	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_project.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_project.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	# 窄屏（竖起来的平板）先压缩的应该是名字，不是按钮 —— 按钮被裁掉就没法点，名字被裁掉只是难看。
 	_project.clip_text = true
 	_project.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	# clip_text 的 Label 最小宽为 0，不给下限会被右侧弹性空白压成 1px（名字整段看不见）。
+	_project.custom_minimum_size.x = 140
 	row.add_child(_project)
+
+	# 名字之后放一段弹性空白，把历史 / 视图两组推到右端；中间的空白因此是"有意的分组间隔"，
+	# 而不是居中的名字把空间劈成两半。
+	row.add_child(QVoxelUi.spacer())
 
 	# ── 历史组 ──
 	_undo = _action(undo_requested.emit, "撤销（Ctrl+Z）\n撤回上一步改动", "undo")

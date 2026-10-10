@@ -98,15 +98,22 @@ func _build() -> void:
 
 	col.add_child(QVoxelUi.heading("工具"))
 	_group.allow_unpress = false
+	# 工具按钮排成 2 列图标网格（PS / Blender 工具架那种密度）：7 种笔一行一列要占 7 行，
+	# 两列压到 4 行，矮窗口里"对称 / 选区"不必再滚动才够得着。图标为主，名字与热键交 tooltip。
+	var tool_grid := GridContainer.new()
+	tool_grid.columns = 2
+	tool_grid.add_theme_constant_override("h_separation", QVoxelUi.SPACE_XS)
+	tool_grid.add_theme_constant_override("v_separation", QVoxelUi.SPACE_XS)
+	col.add_child(tool_grid)
 	for row in QVoxelBrushTool.MODES:
-		# 图标为主，名字与热键交 tooltip 首行；缺图时退回"热键字母 + 名字"的旧样式。
 		var tip := "%s（%s）\n%s" % [row.label, String.chr(row.hotkey), row.hint]
 		var b := QVoxelUi.toggle_button(tip, QVoxelUi.VARIATION_TOOL,
 				"%s   %s" % [String.chr(row.hotkey), row.label], row.icon)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.button_group = _group
 		b.toggled.connect(func(on: bool): if on: tool_selected.emit(row.mode))
 		_buttons[row.mode] = b
-		col.add_child(b)
+		tool_grid.add_child(b)
 
 	col.add_child(QVoxelUi.divider())
 	_brush_title = QVoxelUi.heading("笔刷")

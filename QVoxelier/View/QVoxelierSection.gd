@@ -44,6 +44,14 @@ func content() -> VBoxContainer:
 	return _body
 
 
+## 隐藏自带抬头（抽屉改用页签时，抬头与页签重复，由页签负责切组）。
+func set_header_visible(on: bool) -> void:
+	if _header != null:
+		_header.visible = on
+	if _body != null:
+		_body.visible = true
+
+
 func _build() -> void:
 	_panel = QVoxelUi.panel(QVoxelUi.space_s())
 	_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)

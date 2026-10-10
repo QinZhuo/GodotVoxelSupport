@@ -312,6 +312,8 @@ func invalidate_chunk_source(ck: Vector3i) -> void:
 	_async.cancel(ck, 0)
 	_chunk_buffers.erase(ck)
 	_chunk_voxel_counts.erase(ck)
+	# 标记"暂时取不到"：渲染层据此保留旧网格（而非当成"没数据"抹掉）直到重新取数回填
+	_source_invalidated[ck] = true
 	# 伤害账随内容一起作废：重新生成后的形态与旧账无关，留着会变成幽灵伤害
 	_damage.erase_chunk(ck)
 	invalidate_lod_for_chunk(ck)
@@ -319,6 +321,11 @@ func invalidate_chunk_source(ck: Vector3i) -> void:
 	_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
 	_dirty.mark(0, ck, VoxelDirtyLedger.MESH)
 	_mark_neighbors_dirty(ck)
+
+
+## chunk 是否"源被作废、等待重新取数"（渲染层用它区分"暂时没有"与"真的没有"）。
+func _is_chunk_source_invalidated(chunk_key: Vector3i) -> bool:
+	return _source_invalidated.has(chunk_key)
 
 
 ## 让一个**体素范围**覆盖的所有 chunk 的来源数据作废（闭区间，含端点）。返回覆盖的 chunk 数。
@@ -513,6 +520,12 @@ var _live_snapshots: Dictionary = {}
 ## 它替代了"归零后扫 4096 格"的判定，消除破坏 / 崩塌热路径的 32³ 循环。
 var _chunk_voxel_counts: Dictionary = {}
 
+## 源被"作废"（缓冲已丢、等待按流 > 生成器重新取数）的 chunk。与"无数据"区分开：
+## 前者只是暂时取不到，渲染层要**保留旧网格**直到新结果到达；后者才该清网格。
+## 少了这个区分，编辑收笔时作废源缓冲会让 has_chunk 瞬时为假 → 渲染器把还看得见的网格
+## 抹掉、再异步重建 → "改一下模型就闪一下"（见 invalidate_chunk_source / VoxelRenderer）。
+var _source_invalidated: Dictionary = {}
+
 ## 内存中被修改过的 chunk 记在 _dirty 的 level 0 账里（VoxelDirtyLedger.PERSIST）。两个用途：
 ## ① 存储回写（卸载时写盘 / 变空时清盘）；② 资源持久化（只把改过的块写进载荷）。
 ## 故不能只在有 stream 时维护 —— 加载 / 导入路径也必须逐块登记。
@@ -635,6 +648,8 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	if _snapshot_readers > 0:
 		buf = (buf as PackedInt32Array).duplicate()
 		_chunk_buffers[ck] = buf
+	# 写入即内容确定 → 清除"源作废"标记
+	_source_invalidated.erase(ck)
 	# 标待写盘：内存已变更（若最终变空由 _maybe_erase_empty_chunk 清盘）。
 	_dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
 	# 该位置被改写或移除 → 清零其累计伤害，否则残留伤害会"继承"给新体素（一放就被秒杀）
@@ -682,6 +697,7 @@ func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
 		return
 	_chunk_buffers[chunk_key] = buf
 	_count_set(chunk_key, _count_voxels(buf))
+	_source_invalidated.erase(chunk_key)
 
 
 ## 用一份块表**替换**体素内容：`{Vector3i chunk_key: PackedInt32Array}`，缓冲长度须为 CHUNK_VOLUME。
@@ -748,6 +764,8 @@ func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
 		return
 	_chunk_buffers.erase(ck)
 	_chunk_voxel_counts.erase(ck)
+	# 真·空块（确定无内容）不属"源作废"：渲染层应清掉它的旧网格，而不是保留
+	_source_invalidated.erase(ck)
 	# 只清"待写盘"：MESH 标记必须留着，否则渲染器不会重建来清掉该 chunk 的旧 mesh
 	_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
 	_damage.erase_chunk(ck)
@@ -834,6 +852,7 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 			return false
 		_chunk_buffers[chunk_key] = buf
 		_count_set(chunk_key, _count_voxels(buf))
+		_source_invalidated.erase(chunk_key)
 		# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合）
 		_mark_neighbors_dirty(chunk_key)
 		return true
@@ -853,6 +872,8 @@ func _accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int =
 			return
 		_chunk_buffers[chunk_key] = buf
 		_count_set(chunk_key, _count_voxels(buf))
+		# 内容已回填 → 清除"源作废"标记（渲染层可安全按新内容重建）
+		_source_invalidated.erase(chunk_key)
 		# 数据就绪 → 标网格重建。未修改的粗层块用独立数据层，不依赖 LOD0 回填，故无需失效 ——
 		# 否则每回填一个 chunk 就递增渲染器全局 gen_id，作废全部在途粗层任务。
 		_dirty.mark(0, chunk_key, VoxelDirtyLedger.MESH)
@@ -889,6 +910,7 @@ func unload_chunk(chunk_key: Vector3i) -> bool:
 		_dirty.clear_flag(0, chunk_key, VoxelDirtyLedger.PERSIST)
 	_chunk_voxel_counts.erase(chunk_key)
 	_chunk_buffers.erase(chunk_key)
+	_source_invalidated.erase(chunk_key)
 	# 伤害账随 chunk 一起释放，否则卸载后残留账目会随世界遍历无限增长
 	_damage.erase_chunk(chunk_key)
 	return true
@@ -1198,6 +1220,7 @@ func shift_origin(offset: Vector3i) -> void:
 		return
 	_chunk_buffers = VoxelChunk.shift_key_dict(_chunk_buffers, offset)
 	_chunk_voxel_counts = VoxelChunk.shift_key_dict(_chunk_voxel_counts, offset)
+	_source_invalidated = VoxelChunk.shift_key_dict(_source_invalidated, offset)
 	# 脏账本各层一起平移：漏平移会让它与数据基准脱节（残留旧坐标条目）。
 	_dirty.shift(offset)
 	# 伤害账同样以 chunk 为键，漏平移会让它与数据基准脱节（残留旧坐标条目）
@@ -1666,6 +1689,7 @@ func clear(notify: bool = true) -> void:
 	_force_release_snapshots()
 	_damage.clear_all()
 	_chunk_voxel_counts.clear()
+	_source_invalidated.clear()
 	# 脏账本一并归零：漏清会让旧坐标的脏 chunk / 失效块 / 脏区域在换世界后继续驱动渲染器
 	# 重建（而它们的体素早已不存在）。
 	_dirty.clear_all()
@@ -1854,6 +1878,7 @@ func set_voxels(positions: Array, material_id: int, notify: bool = true) -> void
 	for ck in chunk_set:
 		_chunk_buffers[ck] = modified_buffers[ck]
 		_count_delta(ck, int(chunk_set[ck]))
+		_source_invalidated.erase(ck)
 		# 流式：批量写入标记写盘（否则 chunk 被流式卸载时未 dirty → 存储里旧数据残留）
 		_dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
 	# 标记脏 chunk + 跨界面邻居（用 C++ 返回的边界掩码按 chunk 标，避免逐体素的 dict 写入瓶颈）。
@@ -1901,6 +1926,7 @@ func _remove_voxels(positions: Array, notify: bool = true) -> Array:
 	for ck in chunk_removed:
 		_chunk_buffers[ck] = modified_buffers[ck]  # 覆盖为修改后的 buffer
 		_count_delta(ck, -int(chunk_removed[ck]))
+		_source_invalidated.erase(ck)
 		# 流式：批量删除同样标写盘（否则卸载时未 dirty → 直接丢弃，重载后体素"复活"）。
 		_dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
 		touched[ck] = true
