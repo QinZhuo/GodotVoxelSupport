@@ -58,6 +58,7 @@ var _playhead: Label
 var _play_btn: Button
 var _loop_btn: Button
 var _strip: HFlowContainer
+var _extra: VBoxContainer
 var _frames: Array[Button] = []
 var _remove_btn: Button
 var _move_left: Button
@@ -127,9 +128,11 @@ func _build_body(body: VBoxContainer) -> void:
 	_move_right.pressed.connect(func(): move_requested.emit(_active_index(), _active_index() + 1))
 	ops.add_child(_move_right)
 
-	# --- 逐帧时长 / 帧率 / 标签 ---
+	# --- 逐帧时长 / 帧率 / 标签（嵌到底部动画面板时收起：那里的空间留给帧网格）---
+	_extra = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
+	body.add_child(_extra)
 	var dur_row := QVoxelUi.hbox()
-	body.add_child(dur_row)
+	_extra.add_child(dur_row)
 	dur_row.add_child(QVoxelUi.label("时长", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
 	_duration = QVoxelUi.value_slider(0, _MAX_MS, 10, 0)
 	_duration.tooltip_text = "本帧时长（毫秒）；0 = 跟随帧率"
@@ -141,7 +144,7 @@ func _build_body(body: VBoxContainer) -> void:
 	dur_row.add_child(_duration_label)
 
 	var fps_row := QVoxelUi.hbox()
-	body.add_child(fps_row)
+	_extra.add_child(fps_row)
 	fps_row.add_child(QVoxelUi.label("帧率", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
 	_fps = QVoxelUi.value_slider(1, 60, 1, 12)
 	_fps.tooltip_text = "缺省帧率：某帧时长为 0 时用它（落盘为 anim.fps）"
@@ -151,7 +154,7 @@ func _build_body(body: VBoxContainer) -> void:
 	fps_row.add_child(_fps_label)
 
 	var tag_row := QVoxelUi.hbox()
-	body.add_child(tag_row)
+	_extra.add_child(tag_row)
 	tag_row.add_child(QVoxelUi.label("标签", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
 	# 占位文字用**示例**而不是语法说明：这一格只有约 150px 宽，写"名字:起-止[:方向]，逗号分隔"
 	# 会被截成半句（看着像坏了）。语法与方向取值放 tooltip，占位只负责给个能照抄的样子。
@@ -184,6 +187,26 @@ func bind(model: QVoxelModel) -> void:
 func set_playing(on: bool) -> void:
 	if _play_btn != null and _play_btn.button_pressed != on:
 		_play_btn.set_pressed_no_signal(on)
+
+
+## 外部请求开始 / 停止播放（层级里的播放键走这条）。只动预览游标，不写数据。
+func play(on: bool) -> void:
+	_on_play_toggled(on)
+	set_playing(on)
+
+
+## 是否正在播放预览。
+func is_playing() -> bool:
+	return _clock.is_playing()
+
+
+## 紧凑模式（嵌到底部动画面板时用）：收起帧条（帧格子由层级行直接给）与 时长/帧率/标签 三行，
+## 把空间让给帧网格。
+func set_compact(on: bool) -> void:
+	if _strip != null:
+		_strip.visible = not on
+	if _extra != null:
+		_extra.visible = not on
 
 
 ## 外部请求停播放（落笔 / 换对象）。**必须同时收计时器与按钮态**：只收计时器的话

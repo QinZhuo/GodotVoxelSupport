@@ -50,7 +50,10 @@ func _build() -> void:
 	offset_top = QVoxelUi.bar_height()
 	offset_bottom = offset_top + _bar_height()
 
-	var panel := QVoxelUi.panel(QVoxelUi.space_s())
+	# 与左侧工具栏同一种风格：**没有统一背景底**，一排独立按钮直接浮在视口上。
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel",
+			QVoxelUi.box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 0, 0, QVoxelUi.space_s(), QVoxelUi.space_s()))
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(panel)
 

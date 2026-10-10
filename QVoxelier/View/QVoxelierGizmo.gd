@@ -45,6 +45,12 @@ var right_inset := float(QVoxelUi.dock_width() + QVoxelUi.space_l() + QVoxelUi.s
 		right_inset = v
 		_sync_rect()
 
+## 底部让位（动画面板展开时抬高它）。
+var bottom_inset := 0.0:
+	set(v):
+		bottom_inset = v
+		_sync_rect()
+
 var _last_basis := Basis()
 var _tip_radius := 0.0
 var _tips: Array = []        # [{pos: Vector2, view: int}]
@@ -72,7 +78,7 @@ func _sync_rect() -> void:
 	var s := 3 * QVoxelUi.hit_size()
 	custom_minimum_size = Vector2(s, s)
 	offset_right = -right_inset
-	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
+	offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s() + bottom_inset)
 	offset_left = offset_right - s
 	offset_top = offset_bottom - s
 	_tip_radius = s * 0.5 - QVoxelUi.hit_size() * 0.34

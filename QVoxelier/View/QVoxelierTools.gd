@@ -18,6 +18,8 @@ var _col: VBoxContainer
 var _buttons := {}          # Mode → Button
 var _group := ButtonGroup.new()
 var _erase: Button
+## 底部让位高度（动画面板展开时）。
+var bottom_reserved := 0.0
 
 
 func _build() -> void:
@@ -77,10 +79,18 @@ func _fit() -> void:
 	size = Vector2(_width(), _scroll.custom_minimum_size.y)
 
 
-## 本面板能占的最高高度：视口高 − 顶边位置 − 底部状态栏 − 一点边距。
+## 本面板能占的最高高度：视口高 − 顶边位置 − 底部状态栏 − 底部让位 − 一点边距。
 func _available_height() -> float:
 	return (get_viewport_rect().size.y - position.y - QVoxelUi.status_height()
-			- QVoxelUi.space_s())
+			- QVoxelUi.space_s() - bottom_reserved)
+
+
+## 底部让位（动画面板高度）。
+func set_bottom_reserved(h: float) -> void:
+	if is_equal_approx(h, bottom_reserved):
+		return
+	bottom_reserved = h
+	_fit()
 
 
 # 对外：状态同步（只由 App 调用）

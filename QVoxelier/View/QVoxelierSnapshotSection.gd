@@ -61,7 +61,7 @@ var _env: WorldEnvironment
 
 
 func section_title() -> String:
-	return "快照"
+	return "渲染"
 
 
 # ---------------------------------------------------------------- 对外接口

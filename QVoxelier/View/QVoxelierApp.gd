@@ -52,9 +52,17 @@ var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
 var _inspector_section: QVoxelierInspectorSection
 var _timeline_section: QVoxelierTimelineSection
+## 底部动画宿主（展开动画轴时层级横铺进来）。
+var _anim_host: Control
+## 底部让位高度（0 = 动画面板收起）。
+var _bottom_inset := 0.0
+
+## 展开动画轴时底部占掉的高度。
+const ANIM_HEIGHT := 320.0
 ## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
 ## （参数与预览是分组自己的状态，见 QVoxelierSnapshotSection）。
 var _snapshot_section: QVoxelierSnapshotSection
+var _snapshot_popup: PopupPanel
 var _confirm: ConfirmationDialog
 
 ## 参数面板当前绑定的修改器（选中树上某条修改器时置入，用于撤销 / 重做后重绑）。
@@ -196,6 +204,7 @@ func _build_ui() -> void:
 	_toolbar.save_as_requested.connect(save_project_as)
 	_toolbar.export_requested.connect(export_vox)
 	_toolbar.export_batch_requested.connect(export_vox_batch)
+	_toolbar.render_requested.connect(_toggle_render_popup)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
 	_toolbar.frame_requested.connect(func(): frame_view(); hud.flash("已取景"))
@@ -261,11 +270,17 @@ func _build_ui() -> void:
 	_tree_section.modifier_remove_requested.connect(_remove_modifier)
 	_tree_section.modifier_enabled_changed.connect(_set_modifier_enabled)
 	_tree_section.modifier_selected.connect(_on_modifier_selected)
-	# 动画轴展开 → 显示时间轴附板；点帧格子 → 切到该模型并设活动帧。
-	_tree_section.anim_expanded_changed.connect(func(on: bool) -> void:
-		if _timeline_section != null:
-			_timeline_section.visible = on)
+	# 动画轴展开 → 层级横铺到底部动画面板；收起 → 搬回右列。
+	_tree_section.anim_expanded_changed.connect(_on_anim_expanded)
 	_tree_section.frame_selected.connect(_on_frame_cell)
+	# 层级顶部的帧控制条（展开动画轴时显示）——播放由隐藏的时间轴分组驱动。
+	_tree_section.play_toggled.connect(func(on: bool): _timeline_section.play(on))
+	_tree_section.frame_step_requested.connect(_step_frame)
+	_tree_section.insert_frame_requested.connect(_insert_frame)
+	_tree_section.remove_frame_requested.connect(func():
+		if session != null and session.object != null and session.object.is_animated():
+			_remove_frame(session.object.active_frame))
+	_tree_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	_dock.add_outliner(_tree_section)
 
 	# ── 属性页签 ── 顺序即页签顺序；App 按当前选择自动切到对应那一页。
@@ -306,15 +321,28 @@ func _build_ui() -> void:
 	_timeline_section.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
 	_timeline_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
-	# 时间轴附在层级下方（动画轴展开时才显示），与树连成一条。
-	_dock.add_outliner(_timeline_section)
-	# 必须在 add_child 之后置隐 —— 面板 _ready 的 open() 会把 visible 置回真。
+	# 时间轴分组不再显示，只作为**播放内核**（帧时钟）的宿主 —— 但必须入树，否则 _ready 不跑、
+	# 控件不建、bind()/播放会空引用。入树后立即隐藏。
+	add_child(_timeline_section)
 	_timeline_section.visible = false
+	# 底部动画宿主：展开时层级分组被搬到这里横铺（透明容器，背景由层级分组自己给）。
+	_anim_host = Control.new()
+	_anim_host.name = "AnimHost"
+	_anim_host.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	_anim_host.offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
+	_anim_host.offset_top = _anim_host.offset_bottom - ANIM_HEIGHT
+	_anim_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_anim_host.visible = false
+	add_child(_anim_host)
 
-	# 快照（F5）：它自己摆离屏舞台、自己按快门；本类只把世界推给它、再管一次落盘对话框。
+	# 渲染（原「快照」）：离屏出图，做成顶栏一个按钮弹出的浮层（不再是右列的一页）。
 	_snapshot_section = QVoxelierSnapshotSection.new()
 	_snapshot_section.save_requested.connect(_request_snapshot_save)
-	_dock.add_outliner(_snapshot_section)
+	_snapshot_popup = PopupPanel.new()
+	_snapshot_popup.name = "RenderPopup"
+	_snapshot_popup.theme = QVoxelUi.theme()
+	add_child(_snapshot_popup)
+	_snapshot_popup.add_child(_snapshot_section)
 
 	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
 	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
@@ -503,28 +531,14 @@ func frame_view() -> void:
 		return
 	var g := Vector3(session.output_size()) * model.voxel_scale
 	var extent := g if not session.object.is_empty() else Vector3(g.x, 0.0, g.z)
+	# 始终以**窗口中心**取景。曾按"可见区中心"（左右侧栏宽度不等时补偿）对齐，但右栏通常更宽，
+	# 结果模型被推到窗口偏左，看着像"没居中"——用户要的就是窗口正中，故不再补偿。
 	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, extent), true)
-	# 取景对齐的是窗口中心，但可见区被左右侧栏裁掉的宽度不等（右栏通常更宽）——
-	# 模型因此视觉偏右。这里只打标记：inset 是布局的产物（要等 sync 算出来），补偿放 _apply_view_center。
-	_center_done_px = 0.0
-	_pending_center = true
+	_pending_center = false
 
 
-## 把取景中心拉回可见区正中（左右侧栏不对称的补偿）。
-## 【为什么按差值补】首帧 sync 拿到的还是布局结算前的宽度，此后 `_dock.resized` 才把 inset
-## 更新到终值；一次性消费会在旧值上补完就作废（表现为"启动时模型仍偏右、按 Home 才正"）。
-## 差值式让每次 sync 都只补"还欠多少"：何时算准何时到位，重复调用也不会叠加。
+## 居中补偿：已停用（见 frame_view 的说明）。保留空实现以兼容调用点。
 func _apply_view_center() -> void:
-	if session == null or _left_inset <= 0.0 or _right_inset <= 0.0:
-		return
-	# 相机没进树 / 视口还没尺寸时先不补：pan 按像素换世界距离，无尺寸可换算。
-	if not camera.is_inside_tree() or camera.get_viewport().get_visible_rect().size.y <= 0.0:
-		return
-	var want := (_left_inset - _right_inset) * 0.5
-	var delta := want - _center_done_px
-	if not is_zero_approx(delta):
-		camera.pan_by_pixels(Vector2(delta, 0.0))
-		_center_done_px = want
 	_pending_center = false
 
 
@@ -636,20 +650,16 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 				_orbit = false
 				_pan = false
 		MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
-			# 裸滚轮 = 平移（触摸板双指上下滑就是滚轮事件，故"双指拖 = 平移"由此闭环）；
-			# Ctrl+滚轮 = 缩放（Windows 精确触摸板的捏合也走这条 Ctrl+滚轮）；
-			# Alt+滚轮 = 俯仰（给"鼠标 + 键盘"留一条不用中键的抬头/低头）。
+			# 裸滚轮**什么都不做** —— 触摸板双指滑动就是滚轮事件，之前映射成平移/俯仰都太容易
+			# 误触（随手一滑视角就动）。缩放一律走 Ctrl+滚轮；俯仰留给 Alt+滚轮与中键/空白拖拽。
 			var up := e.button_index == MOUSE_BUTTON_WHEEL_UP
 			if e.ctrl_pressed:
 				camera.zoom_by_steps(1.0 if up else -1.0)
 			elif e.alt_pressed:
 				camera.pitch_by_degrees(-4.0 if up else 4.0)
-			else:
-				camera.pan_by_pixels(Vector2(0.0, -WHEEL_PAN_STEP if up else WHEEL_PAN_STEP))
 		MOUSE_BUTTON_WHEEL_LEFT, MOUSE_BUTTON_WHEEL_RIGHT:
-			# 水平滚轮 = 触摸板双指左右滑 → 平移（补齐"双指拖 = 平移"的水平分量）。
-			var left := e.button_index == MOUSE_BUTTON_WHEEL_LEFT
-			camera.pan_by_pixels(Vector2(-WHEEL_PAN_STEP if left else WHEEL_PAN_STEP, 0.0))
+			# 水平滚轮同样忽略（触摸板双指左右滑）。
+			pass
 
 
 ## 把手势层累积的导航量接到相机上（每喂完一个手势事件调用一次）。
@@ -1491,6 +1501,10 @@ func _refresh_panels() -> void:
 		pbr[key] = world.material_scalar(_material_id, StringName(key))
 	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0), pbr)
 	_tree_section.set_world(world, session.object.model_id)
+	_tree_section.set_playback_state(
+			_timeline_section.is_playing(),
+			session.object.anim_loop,
+			session.object.is_animated() and session.object.frame_count() > 1)
 	# 对象属性页跟着当前选中的节点（撤销 / 重做后重看一眼数据）。
 	if _object_section != null:
 		_object_section.bind(_selected_node)
@@ -1662,6 +1676,42 @@ func _report_edit(n: int, ok_text: String, empty_text: String) -> void:
 ## 点树上的行：模型就切过去编辑；组只是容器，不改变当前编辑对象。
 ## 【为什么要顺手清掉参数组】选中的是"节点"，而参数组显示的是"链上某一条修改器"。
 ## 换了节点还留着上一条的参数，滑一下就把改动写进了另一个对象的链里（且看不出来）。
+## 展开 / 收起动画轴：把层级分组在"右列"与"底部横铺面板"之间搬移，并让左列 / 右列 / 坐标系让位。
+func _on_anim_expanded(on: bool) -> void:
+	if _anim_host == null or _tree_section == null:
+		return
+	_anim_host.visible = on
+	if _palette != null:
+		_palette.visible = not on
+	if on:
+		_tree_section.reparent(_anim_host)
+		_tree_section.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	else:
+		_tree_section.reparent(_dock.outliner_host())
+	_tree_section.visible = true
+	_tree_section.reset_measure()
+	_tree_section.refresh()
+	_set_bottom_inset(ANIM_HEIGHT if on else 0.0)
+
+
+func _set_bottom_inset(h: float) -> void:
+	_bottom_inset = h
+	if _dock != null:
+		_dock.set_bottom_reserved(h)
+	if _tools != null:
+		_tools.set_bottom_reserved(h)
+	if _gizmo != null:
+		_gizmo.bottom_inset = h
+
+
+## 逐帧步进（层级顶部的 ◀ / ▶）。
+func _step_frame(delta: int) -> void:
+	if session == null or session.object == null or not session.object.is_animated():
+		return
+	var n := session.object.frame_count()
+	_select_frame(clampi(session.object.active_frame + delta, 0, n - 1))
+
+
 ## 动画轴里点了某模型的某一帧：切到该模型，并把活动帧设过去（重渲染由 _select_frame 带出）。
 func _on_frame_cell(node: QVoxelNode, frame: int) -> void:
 	if node == null or not node.is_model():
@@ -1840,6 +1890,16 @@ func _push_palette_into_all() -> void:
 # 分组自己摆离屏舞台、自己按快门（见 QVoxelierSnapshotSection 的"为什么按下渲染不经过应用层"）。
 # 本段只做两件分组做不了的事：弹落盘对话框（对话框的公共装配在 _build_dialogs 一处），
 # 以及把落盘结果说给用户听。世界的推送见 _refresh_panels。
+
+## 顶栏「渲染」按钮：弹出 / 收起离屏渲染浮层（原「快照」分组）。
+func _toggle_render_popup() -> void:
+	if _snapshot_popup == null:
+		return
+	if _snapshot_popup.visible:
+		_snapshot_popup.hide()
+	else:
+		_snapshot_popup.popup_centered()
+
 
 ## 分组点了「保存…」：用它的默认名（带视图名）弹对话框 —— 覆盖是可预期的，
 ## 而不是"七张角度悄悄互相覆盖、用户以为存了七张"。

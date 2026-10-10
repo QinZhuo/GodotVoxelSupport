@@ -24,6 +24,8 @@ signal export_requested
 ## 批量是"挑个目录 + 挑范围 + 起前缀"（参数更多、产出多个），混在一起会让单次那件最常用的事
 ## 每次都要先回答"我要不要批量"。
 signal export_batch_requested
+## 渲染（离屏出图，原「快照」）：与保存 / 导出同一层级的一个按钮。
+signal render_requested
 signal undo_requested
 signal redo_requested
 signal frame_requested
@@ -79,6 +81,9 @@ func _build() -> void:
 			"export"))
 	row.add_child(_action(export_batch_requested.emit, "批量导出\n按范围一次产出多个 .vox：整个世界 / 每个节点 / 每个模型 / 每个帧",
 			"batch"))
+	# 渲染：离屏出一张干净 PNG（不带网格 / 选区 / 浮层），与保存 / 导出同一层级。
+	row.add_child(_action(render_requested.emit, "渲染\n把当前世界离屏渲成一张 PNG（可选视图 / 尺寸 / 透明背景）",
+			"render"))
 
 	_project = QVoxelUi.label("", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	# 左对齐贴着文件组，而不是居中悬在空档里 —— 居中会让两侧各留一大片空白，读起来像"浮"着。

@@ -39,12 +39,22 @@ signal modifier_selected(node: QVoxelNode, index: int)
 signal anim_expanded_changed(expanded: bool)
 ## 在动画轴里点了某模型的某一帧（App 切到该模型并设活动帧）。
 signal frame_selected(node: QVoxelNode, frame: int)
+## 帧控制条：播放 / 逐帧 / 增删帧 / 循环（展开动画轴时显示在层级顶部）。
+signal play_toggled(on: bool)
+signal frame_step_requested(delta: int)
+signal insert_frame_requested(duplicate: bool)
+signal remove_frame_requested()
+signal loop_toggled(on: bool)
 
 const INDENT := 14
 
 var _world: QVoxelWorld
 var _active_id := -1
 var _rows: VBoxContainer
+var _controls_host: HBoxContainer
+var _play_btn: Button
+var _rm_btn: Button
+var _loop: Button
 var _hint: Label
 var _del: Button
 var _selected: QVoxelNode
@@ -92,6 +102,12 @@ func _build_body(body: VBoxContainer) -> void:
 		_rebuild())
 	tools.add_child(search)
 
+	# 帧控制条（播放 / 逐帧 / 帧增删 / 循环）—— 仅展开动画轴时显示在层级顶部。
+	_controls_host = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	_controls_host.visible = false
+	body.add_child(_controls_host)
+	_build_frame_controls()
+
 	_hint = QVoxelUi.label("", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
 	body.add_child(_hint)
 
@@ -99,13 +115,55 @@ func _build_body(body: VBoxContainer) -> void:
 	body.add_child(_rows)
 
 
+## 帧控制条：播放 / 上一帧 / 下一帧 / 插入空帧 / 复制帧 / 删除帧 / 循环。
+## 【为什么直接建在层级里】层级与时间轴**是同一个视图**：展开时它的顶部就是时间轴的工具栏，
+## 不另开一个面板。播放等动作只发信号，由 App 落到数据与撤销上。
+func _build_frame_controls() -> void:
+	_play_btn = QVoxelUi.toggle_button("按每帧时长循环预览（只动预览游标，不写数据）",
+			QVoxelUi.VARIATION_TOOL, "▶ 播放")
+	_play_btn.toggled.connect(func(on: bool) -> void:
+		_play_btn.text = "⏸ 暂停" if on else "▶ 播放"
+		play_toggled.emit(on))
+	_controls_host.add_child(_play_btn)
+
+	var prev := QVoxelUi.icon_button("◀", "上一帧")
+	prev.pressed.connect(func(): frame_step_requested.emit(-1))
+	_controls_host.add_child(prev)
+	var next := QVoxelUi.icon_button("▶", "下一帧")
+	next.pressed.connect(func(): frame_step_requested.emit(1))
+	_controls_host.add_child(next)
+	var add := QVoxelUi.icon_button("＋", "在当前帧后插入一个空帧")
+	add.pressed.connect(func(): insert_frame_requested.emit(false))
+	_controls_host.add_child(add)
+	var dup := QVoxelUi.icon_button("⧉", "复制当前帧到其后")
+	dup.pressed.connect(func(): insert_frame_requested.emit(true))
+	_controls_host.add_child(dup)
+	_rm_btn = QVoxelUi.icon_button("－", "删除当前帧")
+	_rm_btn.pressed.connect(func(): remove_frame_requested.emit())
+	_controls_host.add_child(_rm_btn)
+	_loop = QVoxelUi.toggle_button("循环播放（落盘为 anim.loop）", QVoxelUi.VARIATION_TOOL, "循环")
+	_loop.toggled.connect(func(on: bool): loop_toggled.emit(on))
+	_controls_host.add_child(_loop)
+
+
+## 回写播放 / 循环的按下态与"删除帧"的可用性（App 在刷新时调用）。
+func set_playback_state(playing: bool, loop: bool, can_remove: bool) -> void:
+	if _play_btn != null:
+		_play_btn.set_pressed_no_signal(playing)
+		_play_btn.text = "⏸ 暂停" if playing else "▶ 播放"
+	if _loop != null:
+		_loop.set_pressed_no_signal(loop)
+	if _rm_btn != null:
+		_rm_btn.disabled = not can_remove
+
+
 ## "＋" 菜单：把 新建组 / 新建模型 / 挂修改器 合并到一个入口（减少顶栏一排文字按钮）。
 func _popup_add(anchor: Control) -> void:
 	var menu := PopupMenu.new()
 	add_child(menu)
-	menu.add_item("新建组", 0)
-	menu.add_item("新建模型", 1)
-	menu.add_item("给选中节点挂修改器", 2)
+	menu.add_icon_item(QVoxelUi.icon("group"), "新建组", 0)
+	menu.add_icon_item(QVoxelUi.icon("model"), "新建模型", 1)
+	menu.add_icon_item(QVoxelUi.icon("modifier"), "给选中节点挂修改器", 2)
 	menu.id_pressed.connect(_on_add_menu.bind(anchor))
 	menu.popup_closed.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(anchor.global_position), Vector2i(anchor.size)))
@@ -127,8 +185,8 @@ func _row_context(node: QVoxelNode) -> void:
 	_del.disabled = false
 	var menu := PopupMenu.new()
 	add_child(menu)
-	menu.add_item("挂修改器…", 1)
-	menu.add_item("删除节点", 2)
+	menu.add_icon_item(QVoxelUi.icon("modifier"), "挂修改器…", 1)
+	menu.add_icon_item(QVoxelUi.icon("del"), "删除节点", 2)
 	menu.id_pressed.connect(_on_context_menu.bind(node))
 	menu.popup_closed.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(DisplayServer.mouse_get_position(), Vector2i.ZERO))
@@ -171,20 +229,29 @@ func _rebuild() -> void:
 	if _world == null:
 		_hint.text = "没有打开的世界"
 		return
+	# 全局帧数（各行的帧格子据此对齐）。静态模型也算 1 帧（它的手绘内容就是第 0 帧）。
+	_frames = 1
+	for m in _world.all_models():
+		if m != null:
+			_frames = maxi(_frames, maxi(m.frame_count(), 1))
+	if _controls_host != null:
+		_controls_host.visible = _anim_expanded
+
+	if _anim_expanded:
+		# 展开：整个层级横铺成时间轴（左列层级信息 + 右侧帧格子 + 顶部 tag）。
+		_hint.text = "动画轴 · %d 帧（再点「胶片」收起）" % _frames
+		_build_timeline()
+		_measure()
+		return
+
 	var total := _world.nodes.size()
 	if total == 0:
 		_hint.text = "空世界：点「＋」新建模型开始"
 	else:
 		_hint.text = "%d 个顶层节点 · 共 %d 个模型" % [total, _world.all_models().size()]
-	# 全局帧数（各行帧格子据此对齐）。
-	_frames = 1
-	for m in _world.all_models():
-		if m != null:
-			_frames = maxi(_frames, m.frame_count())
 	for n in _world.nodes:
 		if n != null and _visible_in_filter(n):
 			_add_rows(n, 0)
-	# 行内容变了（尤其动画轴展开后带帧格子）→ 重报内容宽度，右列才会跟着变宽。
 	_measure()
 
 
@@ -307,7 +374,7 @@ func _popup_modifier_kinds(anchor: Control) -> void:
 	var menu := PopupMenu.new()
 	add_child(menu)
 	for i in QVoxelModifier.KINDS.size():
-		menu.add_item(QVoxelModifier.KIND_NAMES[i], i)
+		menu.add_icon_item(QVoxelUi.icon("modifier"), QVoxelModifier.KIND_NAMES[i], i)
 	menu.id_pressed.connect(func(id: int) -> void:
 		modifier_add_requested.emit(_selected, QVoxelModifier.KINDS[id]))
 	menu.popup_closed.connect(func() -> void: menu.queue_free())
@@ -357,19 +424,11 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	name_edit.flat = true
 	name_edit.custom_minimum_size.x = 96
 	# 动画轴展开时名字定宽（各行的帧格子才能横向对齐）；否则撑满。
-	name_edit.size_flags_horizontal = (Control.SIZE_SHRINK_BEGIN if _anim_expanded
-			else Control.SIZE_EXPAND_FILL)
-	if _anim_expanded:
-		name_edit.custom_minimum_size.x = 88
+	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_edit.text_submitted.connect(func(t):
 		if t != node.display_name():
 			node_rename_requested.emit(node, t))
 	box.add_child(name_edit)
-
-	# 动画轴：每个模型一行，名字后横向铺开帧格子（Aseprite 的图层×帧网格）。
-	if _anim_expanded and node.is_model():
-		box.add_child(_frame_strip(node as QVoxelModel))
-		return row
 
 	# 类型 / 内容徽标。
 	var badge := _badge_of(node)
@@ -386,24 +445,156 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	return row
 
 
-## 动画轴：某模型行的帧格子条（横向滚动，宽度封顶以免把右列撑宽）。
-func _frame_strip(m: QVoxelModel) -> Control:
-	var sc := QVoxelUi.scroll(false, QVoxelUi.hit_size())
-	sc.custom_minimum_size = Vector2(132, QVoxelUi.hit_size())
-	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	var h := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
-	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	sc.add_child(h)
+## 时间轴布局常量。
+const TL_LEFT_W := 188.0   # 左列（层级信息）宽度
+const TL_CELL_W := 22.0    # 每个帧格宽度
+
+## 展开态：把整个层级横铺成时间轴（Aseprite 的图层 × 帧）。
+## 结构：顶部 tag 条（命名区间）→ 帧号表头 → 每个节点一行（左列层级信息 + 右侧帧格子）。
+func _build_timeline() -> void:
+	_rows.add_child(_tag_bar())
+	_rows.add_child(_frame_header())
+	for n in _world.nodes:
+		if n != null and _visible_in_filter(n):
+			_timeline_rows(n, 0)
+
+
+## 顶部 tag 条：把当前活动模型的命名区间画成一排标签，按帧位置对齐（Aseprite 的 tag）。
+func _tag_bar() -> Control:
+	var row := QVoxelUi.hbox(0)
+	row.custom_minimum_size.y = QVoxelUi.FONT_L + QVoxelUi.SPACE_XS * 2
+	row.add_child(_tl_spacer(TL_LEFT_W))
+	var m := _active_model()
+	var tags: Array = [] if m == null else m.anim_tags
+	var sorted := tags.duplicate()
+	sorted.sort_custom(func(a, b): return int(a.get("from", 0)) < int(b.get("from", 0)))
+	var cursor := 0
+	for t in sorted:
+		if not (t is Dictionary):
+			continue
+		var from_i := clampi(int(t.get("from", 0)), 0, _frames - 1)
+		var to_i := clampi(int(t.get("to", from_i)), from_i, _frames - 1)
+		if from_i > cursor:
+			row.add_child(_tl_spacer((from_i - cursor) * TL_CELL_W))
+			cursor = from_i
+		var pc := PanelContainer.new()
+		pc.add_theme_stylebox_override("panel",
+				QVoxelUi.box(QVoxelUi.ACCENT_DIM, QVoxelUi.ACCENT, 1, QVoxelUi.RADIUS_S, 2, 0))
+		pc.custom_minimum_size.x = (to_i - from_i + 1) * TL_CELL_W
+		var lbl := QVoxelUi.label(String(t.get("name", "")), QVoxelUi.FONT_S, QVoxelUi.TEXT)
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.clip_text = true
+		pc.add_child(lbl)
+		row.add_child(pc)
+		cursor = to_i + 1
+	return row
+
+
+## 帧号表头。
+func _frame_header() -> Control:
+	var row := QVoxelUi.hbox(0)
+	row.custom_minimum_size.y = QVoxelUi.hit_size()
+	var lead := QVoxelUi.label("层级", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	lead.custom_minimum_size.x = TL_LEFT_W
+	row.add_child(lead)
 	for f in _frames:
-		h.add_child(_frame_cell(m, f))
-	return sc
+		var l := QVoxelUi.label(str(f + 1), QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l.custom_minimum_size.x = TL_CELL_W
+		row.add_child(l)
+	return row
+
+
+func _timeline_rows(node: QVoxelNode, depth: int) -> void:
+	_rows.add_child(_timeline_row(node, depth))
+	if node.is_group() and not node.expanded_in_tree:
+		return
+	if node.is_group():
+		for c in (node as QVoxelGroup).child_nodes:
+			if c != null and _visible_in_filter(c):
+				_timeline_rows(c, depth + 1)
+	for i in node.modifiers.size():
+		_rows.add_child(_modifier_timeline_row(node, i, depth + 1))
+
+
+## 一个节点行：左列层级信息（缩进 + 眼睛 + 锁 + 名字）+ 右侧帧格子（模型才有）。
+func _timeline_row(node: QVoxelNode, depth: int) -> Control:
+	var row := QVoxelUi.hbox(0)
+	row.custom_minimum_size.y = QVoxelUi.hit_size()
+
+	var left := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	left.custom_minimum_size.x = TL_LEFT_W
+	left.add_child(_tl_spacer(depth * 12.0))
+	var vis := QVoxelUi.toggle_button("显示 / 隐藏")
+	vis.button_pressed = node.visible
+	vis.text = "👁"
+	vis.toggled.connect(func(v): node_visible_changed.emit(node, v))
+	left.add_child(vis)
+	var lock := QVoxelUi.toggle_button("锁定（锁上后整棵子树不可编辑）")
+	lock.button_pressed = node.locked
+	lock.text = "🔒"
+	lock.toggled.connect(func(v): node_locked_changed.emit(node, v))
+	left.add_child(lock)
+	var nb := Button.new()
+	nb.text = node.display_name()
+	nb.flat = true
+	nb.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	nb.focus_mode = Control.FOCUS_NONE
+	nb.clip_text = true
+	nb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nb.add_theme_color_override("font_color",
+			QVoxelUi.ACCENT if _is_active(node) else QVoxelUi.TEXT)
+	nb.pressed.connect(func():
+		_selected = node
+		_del.disabled = false
+		node_selected.emit(node)
+		_rebuild())
+	left.add_child(nb)
+	row.add_child(left)
+
+	if node.is_model():
+		var m := node as QVoxelModel
+		for f in _frames:
+			row.add_child(_frame_cell(m, f))
+	else:
+		row.add_child(_tl_spacer(_frames * TL_CELL_W))
+	return row
+
+
+func _modifier_timeline_row(node: QVoxelNode, index: int, depth: int) -> Control:
+	var m: QVoxelModifier = node.modifiers[index]
+	var row := QVoxelUi.hbox(0)
+	row.custom_minimum_size.y = QVoxelUi.hit_size()
+	var left := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	left.custom_minimum_size.x = TL_LEFT_W
+	left.add_child(_tl_spacer(depth * 12.0))
+	var on := QVoxelUi.toggle_button("旁通 / 启用这条修改器")
+	on.button_pressed = m.enabled
+	on.text = "◉" if m.enabled else "○"
+	on.toggled.connect(func(v: bool):
+		on.text = "◉" if v else "○"
+		modifier_enabled_changed.emit(node, index, v))
+	left.add_child(on)
+	var nb := Button.new()
+	nb.text = "· %s" % m.display_name()
+	nb.flat = true
+	nb.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	nb.focus_mode = Control.FOCUS_NONE
+	nb.clip_text = true
+	nb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nb.add_theme_color_override("font_color", QVoxelUi.TEXT_DIM)
+	nb.pressed.connect(func(): modifier_selected.emit(node, index))
+	left.add_child(nb)
+	row.add_child(left)
+	row.add_child(_tl_spacer(_frames * TL_CELL_W))
+	return row
 
 
 ## 一个帧格子：实心点 = 该帧有内容、空心 = 空帧；按下态 = 当前正在编辑的帧。点它即切帧。
 func _frame_cell(m: QVoxelModel, f: int) -> Button:
 	var exists := f < maxi(m.frame_count(), 1)
 	var b := QVoxelUi.toggle_button("", QVoxelUi.VARIATION_TOOL, "")
-	b.custom_minimum_size = Vector2(18, QVoxelUi.hit_size() - 12)
+	b.custom_minimum_size = Vector2(TL_CELL_W, QVoxelUi.hit_size() - 10)
 	b.disabled = not exists
 	if not exists:
 		return b
@@ -415,6 +606,19 @@ func _frame_cell(m: QVoxelModel, f: int) -> Button:
 		if on:
 			frame_selected.emit(m, f))
 	return b
+
+
+func _tl_spacer(w: float) -> Control:
+	var c := Control.new()
+	c.custom_minimum_size.x = w
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return c
+
+
+func _active_model() -> QVoxelModel:
+	if _world == null:
+		return null
+	return _world.find_model(_active_id)
 
 
 ## 该帧是否有内容（静态模型看手绘块，动画模型看那一帧的块表）。

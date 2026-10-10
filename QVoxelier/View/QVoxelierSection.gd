@@ -1,29 +1,14 @@
 @tool
 class_name QVoxelierSection
 extends QVoxelierPanel
-## 右侧抽屉里的一段**可折叠分组**：抬头一行（▾ 标题），点一下收起 / 展开。
-## 【为什么必须能折叠】右列要放下颜色 / 对象 / 图层 / 变换四组，全展开会占掉半个视口。
-## 折叠才是"屏幕不够时让位"的正解 —— 把命中区压到手指点不中（见 QVoxelUi 密度档的说明）
-## 换来的是"按钮都在但按不准"，那是更糟的交换。
-## 【为什么整条抬头都是按钮】触摸没有 hover、也没有 12px 的小箭头可瞄。把抬头整体做成按钮，
-## 命中区就是整行（≥ 一个 hit_size），手指不会点空；▾ / ▸ 只是状态的文字提示。
+## 右侧抽屉里的一段**分组**：抬头一行（小标题）+ 内容。
+## 【为什么不再可折叠】页签 / 固定分区已经把"选哪组"表达清楚，再给每组一个"点一下收起"只是
+## 多一层隐藏状态：用户会误收起、又找不到内容。分组一律**常展开**，抬头只当小标题用。
 ## 【为什么用 _build_body 而不是让子类自己 _build】`_ready` 的次序固定（主题 → 层级 →
 ## 构建 → open，见基类文档）。子类若重写 _build 就要自己保证抬头先建好、body 后建好，
 ## 迟早有人把顺序写反 —— 于是把"建抬头 → 建 body → 交给子类填"钉在这里，子类只填内容。
 
-## 折叠状态变化。
-signal expanded_changed(expanded: bool)
-
-## 折叠状态。**不持久化**：分组实例与应用同生命周期，改动不会丢；
-## 真要跨启动记住，那属于"用户偏好存档"，不该让每个分组各记一份。
-var expanded := true:
-	set(v):
-		if v == expanded:
-			return
-		expanded = v
-		_refresh()
-
-var _header: Button
+var _header: Label
 var _body: VBoxContainer
 var _panel: PanelContainer
 var _want_w := 0.0   # 本组内容想要的宽度（只增不减，见 _measure）
@@ -44,7 +29,7 @@ func content() -> VBoxContainer:
 	return _body
 
 
-## 隐藏自带抬头（抽屉改用页签时，抬头与页签重复，由页签负责切组）。
+## 隐藏自带抬头（抽屉用别的标题承载时，抬头重复，就把它藏掉）。
 func set_header_visible(on: bool) -> void:
 	if _header != null:
 		_header.visible = on
@@ -65,9 +50,8 @@ func _build() -> void:
 	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	_panel.add_child(col)
 
-	_header = QVoxelUi.button("", "展开 / 收起这一组")
-	_header.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_header.pressed.connect(func(): expanded = not expanded)
+	# 抬头是纯小标题（不可点、不折叠）。
+	_header = QVoxelUi.heading(section_title())
 	col.add_child(_header)
 
 	_body = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
@@ -79,10 +63,6 @@ func _build() -> void:
 
 
 ## 记下内容想要的宽度并报给父容器（抽屉按它定右列的宽度）。
-## 【为什么问 body 而不问 panel】PanelContainer / BoxContainer 算最小尺寸时会**跳过隐藏的孩子**，
-## 而折叠正是 `_body.visible = false` —— 问 panel 在折叠后只剩"内边距"，抽屉就会随展开 / 折叠
-## 忽宽忽窄（实测 134 ↔ 228，视口跟着一起弹）。body 自己的最小尺寸看的是**它的孩子**的 visible，
-## 那些行并没有被隐藏，故折叠着也量得准。
 ## 【为什么只增不减】宽度是布局输入，随内容抖动就会连锁改视口大小；一旦让某一组量出过宽度，
 ## 就一直给它留着（用户看到的是"右列一直这么宽"，而不是忽宽忽窄）。
 func _measure() -> void:
@@ -108,8 +88,6 @@ func reset_measure() -> void:
 func _refresh() -> void:
 	if _header == null:
 		return
-	_header.text = "%s  %s" % ["▾" if expanded else "▸", section_title()]
+	_header.text = section_title()
 	if _body != null:
-		# 折叠时**只隐藏 body**，抬头始终在 —— 否则收起的组会彻底消失，无从再展开。
-		_body.visible = expanded
-	expanded_changed.emit(expanded)
+		_body.visible = true

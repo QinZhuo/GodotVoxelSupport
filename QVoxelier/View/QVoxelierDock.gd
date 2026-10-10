@@ -14,6 +14,8 @@ var _out_scroll: ScrollContainer
 var _out_host: VBoxContainer
 var _prop_sections: Array[QVoxelierSection] = []
 var _active := -1
+## 底部让位高度（动画面板展开时它占住窗口下方，右列要缩短）。
+var bottom_reserved := 0.0
 
 
 func _build() -> void:
@@ -54,7 +56,7 @@ func _build() -> void:
 func _fit() -> void:
 	if _root == null:
 		return
-	var avail := get_viewport_rect().size.y - offset_top - QVoxelUi.status_height() - QVoxelUi.space_s()
+	var avail := get_viewport_rect().size.y - offset_top - QVoxelUi.status_height() - QVoxelUi.space_s() - bottom_reserved
 	offset_bottom = offset_top + maxf(avail, 120.0)
 	var want_w := 0.0
 	for s in _prop_sections:
@@ -98,3 +100,16 @@ func show_property_by_title(title: String) -> void:
 		if s.section_title() == title:
 			show_property(s)
 			return
+
+
+## 层级分组（QVoxelierTreeSection）的宿主容器 —— App 在动画面板展开 / 收起时搬进 / 搬出。
+func outliner_host() -> VBoxContainer:
+	return _out_host
+
+
+## 底部让位（动画面板高度）。变了就重排。
+func set_bottom_reserved(h: float) -> void:
+	if is_equal_approx(h, bottom_reserved):
+		return
+	bottom_reserved = h
+	_fit()
