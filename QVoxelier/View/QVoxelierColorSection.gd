@@ -103,17 +103,6 @@ func _build_body(body: VBoxContainer) -> void:
 	add.pressed.connect(func(): add_material_requested.emit())
 	ops.add_child(add)
 
-	var io := QVoxelUi.hbox()
-	body.add_child(io)
-	var import_btn := QVoxelUi.button("导入", "从 256×1 的 PNG 读入调色板")
-	import_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	import_btn.pressed.connect(func(): import_requested.emit())
-	io.add_child(import_btn)
-	var export_btn := QVoxelUi.button("导出", "把当前调色板写成 256×1 的 PNG")
-	export_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	export_btn.pressed.connect(func(): export_requested.emit())
-	io.add_child(export_btn)
-
 
 ## 一行标量滑条（颜色通道与 PBR 共用）：行首标签 + 滑条 + 右侧数值。
 ## key 同时是 `_sliders` / `_value_labels` 的键，也是 `_format_value` 的判据。

@@ -12,6 +12,7 @@ var _header: Label
 var _body: VBoxContainer
 var _panel: PanelContainer
 var _want_w := 0.0   # 本组内容想要的宽度（只增不减，见 _measure）
+var _fill := false   # 面板是否铺满自身矩形（层级展开成底部时间轴时用）
 
 
 ## 子类重写：分组标题（抬头文字）。
@@ -37,6 +38,15 @@ func set_header_visible(on: bool) -> void:
 		_body.visible = true
 
 
+## 让面板铺满自身矩形（层级展开成底部时间轴时用）：面板改为 FULL_RECT，不再按内容定高。
+func set_panel_fill(on: bool) -> void:
+	_fill = on
+	if _panel == null:
+		return
+	_panel.set_anchors_and_offsets_preset(
+			Control.PRESET_FULL_RECT if on else Control.PRESET_TOP_WIDE)
+
+
 func _build() -> void:
 	_panel = QVoxelUi.panel(QVoxelUi.space_s())
 	_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -45,7 +55,8 @@ func _build() -> void:
 	# custom_minimum_size 报告（直接写 size 会被父容器在下一帧抹掉）。
 	_panel.resized.connect(func():
 		_measure()
-		custom_minimum_size.y = _panel.size.y)
+		if not _fill:
+			custom_minimum_size.y = _panel.size.y)
 
 	var col := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	_panel.add_child(col)

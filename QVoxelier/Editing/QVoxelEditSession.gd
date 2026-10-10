@@ -124,6 +124,24 @@ func set_active_frame(index: int) -> void:
 	object.active_frame = maxi(0, index)
 
 
+## 切帧并**同步**把该帧内容换进显示层（播放 / 点帧条走这条）。
+## 【为什么不能走 _refresh 的"作废 + 异步重取"】那条路会让受影响 chunk 先作废、再等流式泵
+## 按帧率去重新取数 —— 播放（每秒十几帧）根本来不及，表现为"播着播着体素不变了"。
+## 无修改器时显示内容就是该帧的块表（块边长恒等于 chunk 边长），直接 `apply_block_table`
+## 换缓冲即可：同步、只重建变化过的块。有修改器时链要重算，才退回完整重取。
+func apply_frame(index: int) -> void:
+	if object == null:
+		return
+	object.active_frame = maxi(0, index)
+	if data == null:
+		return
+	if object.modifiers.is_empty():
+		data.apply_block_table(object.blocks_for(object.active_frame), false)
+		_wake_renderer()
+	else:
+		_refresh([])
+
+
 ## 本会话落笔的目标帧：静态模型 = -1（静态源）；动画模型 = 当前帧（夹到有效范围）。
 ## 【为什么不另存一个 session.frame 字段】编辑的帧与渲染的帧**必须是同一个**（用户改的正是他看到的），
 ## 存两份迟早会分叉 —— 而分叉的表现是"画在第 2 帧、屏幕上第 5 帧多了几个体素"，极难自查。

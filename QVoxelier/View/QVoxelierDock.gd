@@ -29,23 +29,23 @@ func _build() -> void:
 	_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(_root)
 
-	# 上：属性（单页，可滚动，占约 5.5 成高）。
-	_prop_scroll = QVoxelUi.scroll(true)
-	_prop_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_prop_scroll.size_flags_stretch_ratio = 0.55
-	_root.add_child(_prop_scroll)
-	_prop_host = QVoxelUi.vbox(QVoxelUi.space_s())
-	_prop_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_prop_scroll.add_child(_prop_host)
-
-	# 下：层级（Outliner，可滚动，占约 4.5 成高）。
+	# 上：层级（Outliner，常驻，占约 4.2 成高）。
 	_out_scroll = QVoxelUi.scroll(true)
 	_out_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_out_scroll.size_flags_stretch_ratio = 0.45
+	_out_scroll.size_flags_stretch_ratio = 0.42
 	_root.add_child(_out_scroll)
 	_out_host = QVoxelUi.vbox(QVoxelUi.space_s())
 	_out_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_out_scroll.add_child(_out_host)
+
+	# 下：属性（单页，随选中自动切换，占约 5.8 成高）。
+	_prop_scroll = QVoxelUi.scroll(true)
+	_prop_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_prop_scroll.size_flags_stretch_ratio = 0.58
+	_root.add_child(_prop_scroll)
+	_prop_host = QVoxelUi.vbox(QVoxelUi.space_s())
+	_prop_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_prop_scroll.add_child(_prop_host)
 
 	_prop_host.resized.connect(_fit)
 	_out_host.resized.connect(_fit)

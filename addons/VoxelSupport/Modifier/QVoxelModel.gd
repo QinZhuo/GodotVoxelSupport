@@ -86,7 +86,8 @@ var active_frame := 0
 
 ## 时间轴元数据（写进 NODE 节点条目的 `anim` 键，§12.3）。只在 `is_animated()` 时有意义。
 var anim_loop := true
-var anim_fps := 12
+## 缺省帧率（每秒帧数）。逐帧作画的手感偏慢，默认 4 fps（一秒 4 帧）。
+var anim_fps := 4
 
 ## 命名区间（Aseprite 的 tag）：每项 `{name, from, to, direction}`，
 ## `direction ∈ {forward, reverse, pingpong}`。缺省空（不写 anim.tags）。

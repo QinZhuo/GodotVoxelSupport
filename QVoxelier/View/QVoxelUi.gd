@@ -124,6 +124,16 @@ static func status_height() -> int:
 	return 30 if compact() else 36
 
 
+## 底部动画帧条高度：**与状态栏同高**，两条并排才是一条整齐的底栏。
+static func strip_height() -> int:
+	return status_height()
+
+
+## 左侧调色板列的宽度（竖排色块，像工具栏一样）。
+static func palette_width() -> int:
+	return hit_size() + space_s() * 2
+
+
 ## 左侧工具坞的目标宽度（下限：内容更宽时以内容为准）。
 static func dock_width() -> int:
 	return 116 if compact() else 132

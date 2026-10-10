@@ -52,13 +52,8 @@ var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
 var _inspector_section: QVoxelierInspectorSection
 var _timeline_section: QVoxelierTimelineSection
-## 底部动画宿主（展开动画轴时层级横铺进来）。
-var _anim_host: Control
-## 底部让位高度（0 = 动画面板收起）。
-var _bottom_inset := 0.0
-
-## 展开动画轴时底部占掉的高度。
-const ANIM_HEIGHT := 320.0
+## 底部动画帧条（常驻一行，只显示当前模型的帧）。
+var _timeline: QVoxelierTimeline
 ## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
 ## （参数与预览是分组自己的状态，见 QVoxelierSnapshotSection）。
 var _snapshot_section: QVoxelierSnapshotSection
@@ -184,6 +179,8 @@ func _ready() -> void:
 	if Engine.is_editor_hint():
 		return
 	get_window().files_dropped.connect(_on_files_dropped)
+	# 帧条贴在状态栏上方占底部一条：等布局稳一帧再让左列 / 右列 / 坐标系让位。
+	_reserve_strip.call_deferred()
 
 
 ## 装配三个界面面板并接线。面板只发"用户想干什么"的信号，**不收会话**：
@@ -221,6 +218,8 @@ func _build_ui() -> void:
 	_tools = QVoxelierTools.new()
 	_tools.name = "Tools"
 	add_child(_tools)
+	# 工具列排在调色板列的右边（最左一列是调色板）。
+	_tools.position.x = QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
 	_tools.tool_selected.connect(_set_tool)
 	_tools.erase_toggled.connect(func(on: bool): hud.flash("擦除模式：%s" % ("开" if on else "关")))
 
@@ -240,6 +239,7 @@ func _build_ui() -> void:
 	_palette.name = "Palette"
 	add_child(_palette)
 	_palette.material_selected.connect(_set_material)
+	_palette.add_material_requested.connect(_add_material)
 
 	# 朝向指示器要读相机基，故注入相机实例（它不持有相机，只是借来看一眼 —— see 类文档）。
 	_gizmo = QVoxelierGizmo.new()
@@ -251,12 +251,12 @@ func _build_ui() -> void:
 	_gizmo.orbit_requested.connect(func(rel: Vector2) -> void:
 		camera.orbit_by_pixels(rel))
 
-	# 右侧抽屉 = 上「层级」（常驻 Outliner）+ 下「属性」（随选中自动切换）。
+	# 右侧抽屉：上「层级」+ 下「属性」。
 	_dock = QVoxelierDock.new()
 	_dock.name = "Dock"
 	add_child(_dock)
 
-	# 层级树：唯一的层级入口，固定在右列上方。
+	# 层级树：唯一的层级入口，固定在右列**上方**。
 	_tree_section = QVoxelierTreeSection.new()
 	_tree_section.node_selected.connect(_on_tree_selected)
 	_tree_section.model_add_requested.connect(_sess.add_model)
@@ -270,17 +270,6 @@ func _build_ui() -> void:
 	_tree_section.modifier_remove_requested.connect(_remove_modifier)
 	_tree_section.modifier_enabled_changed.connect(_set_modifier_enabled)
 	_tree_section.modifier_selected.connect(_on_modifier_selected)
-	# 动画轴展开 → 层级横铺到底部动画面板；收起 → 搬回右列。
-	_tree_section.anim_expanded_changed.connect(_on_anim_expanded)
-	_tree_section.frame_selected.connect(_on_frame_cell)
-	# 层级顶部的帧控制条（展开动画轴时显示）——播放由隐藏的时间轴分组驱动。
-	_tree_section.play_toggled.connect(func(on: bool): _timeline_section.play(on))
-	_tree_section.frame_step_requested.connect(_step_frame)
-	_tree_section.insert_frame_requested.connect(_insert_frame)
-	_tree_section.remove_frame_requested.connect(func():
-		if session != null and session.object != null and session.object.is_animated():
-			_remove_frame(session.object.active_frame))
-	_tree_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	_dock.add_outliner(_tree_section)
 
 	# ── 属性页签 ── 顺序即页签顺序；App 按当前选择自动切到对应那一页。
@@ -325,16 +314,20 @@ func _build_ui() -> void:
 	# 控件不建、bind()/播放会空引用。入树后立即隐藏。
 	add_child(_timeline_section)
 	_timeline_section.visible = false
-	# 底部动画宿主：展开时层级分组被搬到这里横铺（透明容器，背景由层级分组自己给）。
-	_anim_host = Control.new()
-	_anim_host.name = "AnimHost"
-	_anim_host.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	_anim_host.offset_bottom = -(QVoxelUi.status_height() + QVoxelUi.space_s())
-	_anim_host.offset_top = _anim_host.offset_bottom - ANIM_HEIGHT
-	_anim_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_anim_host.visible = false
-	add_child(_anim_host)
 
+	# 底部动画帧条：常驻一行，只显示当前模型的帧（播放仍由隐藏的时间轴分组驱动）。
+	_timeline = QVoxelierTimeline.new()
+	_timeline.name = "Timeline"
+	add_child(_timeline)
+	_timeline.frame_selected.connect(_select_frame)
+	_timeline.append_frame_requested.connect(_append_frame)
+	_timeline.insert_frame_requested.connect(_insert_frame)
+	_timeline.remove_frame_requested.connect(func():
+		if session != null and session.object != null and session.object.is_animated():
+			_remove_frame(session.object.active_frame))
+	_timeline.move_frame_requested.connect(_move_frame)
+	_timeline.play_toggled.connect(func(on: bool): _timeline_section.play(on))
+	_timeline.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	# 渲染（原「快照」）：离屏出图，做成顶栏一个按钮弹出的浮层（不再是右列的一页）。
 	_snapshot_section = QVoxelierSnapshotSection.new()
 	_snapshot_section.save_requested.connect(_request_snapshot_save)
@@ -575,7 +568,9 @@ func _make_rail(right: bool) -> Panel:
 ## 两条侧栏的宽度与"可见区裁切量"随邻居实际宽度更新 —— rail 背景、状态栏让位、
 ## 坐标轴让位、取景补偿从此共用同一组数。
 func _sync_rails() -> void:
-	_left_inset = _tools.size.x + QVoxelUi.space_m() * 2.0
+	# 左列 = 最左的调色板列 + 工具列。inset 要含两者，可见区才让得对。
+	_left_inset = (QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
+			+ _tools.size.x + QVoxelUi.space_m())
 	_right_inset = _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
 	_right_rail.offset_left = -_right_inset
 	# 上下文选项条横跨可见区（两侧让开左右栏），故也吃同一组 inset。
@@ -1501,10 +1496,10 @@ func _refresh_panels() -> void:
 		pbr[key] = world.material_scalar(_material_id, StringName(key))
 	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0), pbr)
 	_tree_section.set_world(world, session.object.model_id)
-	_tree_section.set_playback_state(
-			_timeline_section.is_playing(),
-			session.object.anim_loop,
-			session.object.is_animated() and session.object.frame_count() > 1)
+	# 底部动画帧条绑到当前对象；播放按下态由隐藏的时间轴分组给出。
+	if _timeline != null:
+		_timeline.bind(session.object)
+		_timeline.set_playing(_timeline_section.is_playing())
 	# 对象属性页跟着当前选中的节点（撤销 / 重做后重看一眼数据）。
 	if _object_section != null:
 		_object_section.bind(_selected_node)
@@ -1676,26 +1671,9 @@ func _report_edit(n: int, ok_text: String, empty_text: String) -> void:
 ## 点树上的行：模型就切过去编辑；组只是容器，不改变当前编辑对象。
 ## 【为什么要顺手清掉参数组】选中的是"节点"，而参数组显示的是"链上某一条修改器"。
 ## 换了节点还留着上一条的参数，滑一下就把改动写进了另一个对象的链里（且看不出来）。
-## 展开 / 收起动画轴：把层级分组在"右列"与"底部横铺面板"之间搬移，并让左列 / 右列 / 坐标系让位。
-func _on_anim_expanded(on: bool) -> void:
-	if _anim_host == null or _tree_section == null:
-		return
-	_anim_host.visible = on
-	if _palette != null:
-		_palette.visible = not on
-	if on:
-		_tree_section.reparent(_anim_host)
-		_tree_section.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	else:
-		_tree_section.reparent(_dock.outliner_host())
-	_tree_section.visible = true
-	_tree_section.reset_measure()
-	_tree_section.refresh()
-	_set_bottom_inset(ANIM_HEIGHT if on else 0.0)
-
-
-func _set_bottom_inset(h: float) -> void:
-	_bottom_inset = h
+## 让底部三块（左列 / 右列 / 坐标系）给常驻的动画帧条让出一条高度（它贴在状态栏上方）。
+func _reserve_strip() -> void:
+	var h := float(QVoxelUi.strip_height())
 	if _dock != null:
 		_dock.set_bottom_reserved(h)
 	if _tools != null:
@@ -1704,20 +1682,12 @@ func _set_bottom_inset(h: float) -> void:
 		_gizmo.bottom_inset = h
 
 
-## 逐帧步进（层级顶部的 ◀ / ▶）。
+## 逐帧步进（帧条的 ◀ / ▶）。
 func _step_frame(delta: int) -> void:
 	if session == null or session.object == null or not session.object.is_animated():
 		return
 	var n := session.object.frame_count()
 	_select_frame(clampi(session.object.active_frame + delta, 0, n - 1))
-
-
-## 动画轴里点了某模型的某一帧：切到该模型，并把活动帧设过去（重渲染由 _select_frame 带出）。
-func _on_frame_cell(node: QVoxelNode, frame: int) -> void:
-	if node == null or not node.is_model():
-		return
-	_activate((node as QVoxelModel).model_id, false)
-	_select_frame(frame)
 
 
 func _on_tree_selected(node: QVoxelNode) -> void:
@@ -1929,8 +1899,9 @@ func _ensure_png_ext(path: String) -> String:
 func _select_frame(index: int) -> void:
 	if session == null or not session.object.is_animated():
 		return
-	session.set_active_frame(index)
-	_after_frame_change()
+	# 同步换帧（见 QVoxelEditSession.apply_frame）——播放才跟得上，不会"体素不变"。
+	session.apply_frame(index)
+	_refresh_hud()
 
 
 ## 帧结构 / 元数据改动后的统一收尾：重算 + 刷界面（标脏由撤销栈的 changed 信号带出来，
@@ -1959,6 +1930,20 @@ func _run_frame_edit(label: String, mutate: Callable) -> void:
 	if cmd.commit():
 		session.history.push(cmd)
 	_after_frame_change()
+
+
+## 末尾新建一帧（复制最后一帧）；静态模型先转成动画。帧条末尾的 ＋ 走这条。
+## 【为什么复制最后一帧而不是空帧】逐帧作画大多是在上一帧基础上改；从空帧开始几乎没人用。
+func _append_frame() -> void:
+	if session == null or world == null:
+		return
+	_run_frame_edit("新建帧", func(m: QVoxelModel) -> void:
+		if not m.is_animated():
+			m.make_animated()
+		var last := m.frame_count() - 1
+		var f: QVoxelFrame = m.frame_at(last).clone() if last >= 0 else QVoxelFrame.new()
+		m.add_frame(f, m.frame_count())
+		m.active_frame = m.frame_count() - 1)
 
 
 ## 在当前帧之后插入一帧（`duplicate` = 复制当前帧，否则空帧）。

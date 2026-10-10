@@ -146,7 +146,7 @@ func _build_body(body: VBoxContainer) -> void:
 	var fps_row := QVoxelUi.hbox()
 	_extra.add_child(fps_row)
 	fps_row.add_child(QVoxelUi.label("帧率", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
-	_fps = QVoxelUi.value_slider(1, 60, 1, 12)
+	_fps = QVoxelUi.value_slider(1, 60, 1, 4)
 	_fps.tooltip_text = "缺省帧率：某帧时长为 0 时用它（落盘为 anim.fps）"
 	_fps.value_changed.connect(func(_v: float): _on_fps_changed())
 	fps_row.add_child(_fps)
@@ -325,7 +325,7 @@ func _sync() -> void:
 	_duration.value = 0 if not animated else _model.frame_at(active).duration_ms
 	_duration.editable = animated
 	_duration_label.text = _duration_text()
-	_fps.value = 12 if _model == null else _model.anim_fps
+	_fps.value = 4 if _model == null else _model.anim_fps
 	_fps.editable = animated
 	_fps_label.text = "%d fps" % int(_fps.value)
 	_loop_btn.set_pressed_no_signal(true if _model == null else _model.anim_loop)
@@ -348,7 +348,7 @@ func _configure_clock() -> void:
 	durations.resize(n)
 	for i in n:
 		durations[i] = _model.frame_at(i).duration_ms
-	var fps := 12 if _model == null else _model.anim_fps
+	var fps := 4 if _model == null else _model.anim_fps
 	var loop := true if _model == null else _model.anim_loop
 	var tags: Array = [] if _model == null else _model.anim_tags
 	var sig := "%s|%d|%s|%s" % [str(durations), fps, str(loop), tags_to_text(tags)]
