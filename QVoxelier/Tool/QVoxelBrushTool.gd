@@ -30,19 +30,19 @@ enum Mode {
 
 ## 工具表：界面（热键 / 工具栏 / 提示）与行为（live / 笔刷尺寸）的唯一来源。
 const MODES := [
-	{"mode": Mode.VOXEL, "id": &"voxel", "label": "体素笔", "hotkey": KEY_V,
+	{"mode": Mode.VOXEL, "id": &"voxel", "label": "体素笔", "hotkey": KEY_V, "icon": "tool_voxel",
 		"live": true, "brush": true, "hint": "左键画 · 右键擦 · 拖动连续涂抹"},
-	{"mode": Mode.FACE, "id": &"face", "label": "面笔", "hotkey": KEY_F,
+	{"mode": Mode.FACE, "id": &"face", "label": "面笔", "hotkey": KEY_F, "icon": "tool_face",
 		"live": false, "brush": false, "hint": "点一下铺满整片同朝向的暴露面"},
-	{"mode": Mode.BOX, "id": &"box", "label": "盒笔", "hotkey": KEY_B,
+	{"mode": Mode.BOX, "id": &"box", "label": "盒笔", "hotkey": KEY_B, "icon": "tool_box",
 		"live": false, "brush": true, "hint": "按住拖出长方体，松手落笔"},
-	{"mode": Mode.LINE, "id": &"line", "label": "线笔", "hotkey": KEY_L,
+	{"mode": Mode.LINE, "id": &"line", "label": "线笔", "hotkey": KEY_L, "icon": "tool_line",
 		"live": false, "brush": true, "hint": "按住拖出直线，松手落笔"},
-	{"mode": Mode.FILL, "id": &"fill", "label": "填充", "hotkey": KEY_C,
+	{"mode": Mode.FILL, "id": &"fill", "label": "填充", "hotkey": KEY_C, "icon": "tool_fill",
 		"live": false, "brush": false, "hint": "替换与拾取点连通的同材质整块"},
-	{"mode": Mode.SELECT, "id": &"select", "label": "选择", "hotkey": KEY_T,
+	{"mode": Mode.SELECT, "id": &"select", "label": "选择", "hotkey": KEY_T, "icon": "tool_select",
 		"live": false, "brush": false, "hint": "拖出选区盒 · 再按 复制 / 剪切 / 粘贴 / 清空"},
-	{"mode": Mode.MOVE, "id": &"move", "label": "移动", "hotkey": KEY_M,
+	{"mode": Mode.MOVE, "id": &"move", "label": "移动", "hotkey": KEY_M, "icon": "tool_move",
 		"live": false, "brush": false, "hint": "按住拖动，把选区里的体素搬到新位置"},
 ]
 
@@ -57,8 +57,8 @@ enum Shape {
 
 ## 形态表：界面（按钮文案 / 提示）的唯一来源，与 MODES 同一套路数。
 const SHAPES := [
-	{"shape": Shape.BALL, "text": "球", "tip": "以落笔点为中心各向同性鼓起（传统圆笔头）"},
-	{"shape": Shape.PLANE, "text": "平面",
+	{"shape": Shape.BALL, "text": "球", "icon": "shape_ball", "tip": "以落笔点为中心各向同性鼓起（传统圆笔头）"},
+	{"shape": Shape.PLANE, "text": "平面", "icon": "shape_plane",
 		"tip": "只在拾取面的两个轴向摊开、厚度不变 —— 表面上刷宽笔触不会把一半体积埋进实心里"},
 ]
 
@@ -214,10 +214,25 @@ func release() -> Array[Vector3i]:
 	return cells
 
 
-## 悬停预览：不改手势状态，只算"如果现在按下会画出什么"。
+## 悬停预览：不改手势状态，只算"如果现在按下（或拖到这里）会画出什么"。
 ## 与落笔共用 _stroke 与 _finish —— 所见即所画由构造保证，不靠两处对齐。
 func hover(pick: Pick) -> Array[Vector3i]:
-	if pick == null or not pick.valid() or selection_mode():
+	if selection_mode():
+		return []
+	# 手势中：盒 / 线笔画出整个拖拽范围；live 笔只画"接下来要写的增量段"（与 _take 同一段，
+	# 只是不提交 _written），于是已写入的格子不会被重复框住。
+	# 拖到模型外时射线会落空 —— 手势已记住起点的 pick，用它兜底，盒子不闪没。
+	if _active:
+		var p := pick if pick != null and pick.valid() else _pick
+		if p == null:
+			return []
+		if live():
+			if _written == _current:
+				return []
+			var from := _anchor if _written == Vector3i.MIN else _written
+			return _finish(_stroke(from, _current, p), p)
+		return _finish(_stroke(_anchor, _current, p), p)
+	if pick == null or not pick.valid():
 		return []
 	var a := _anchor_of(pick)
 	return _finish(_stroke(a, a, pick), pick)

@@ -278,7 +278,7 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"remove_voxels_in_sphere", "remove_voxels_in_box",
 	"ensure_sphere_loaded", "ensure_box_loaded",
 	# 查询统计
-	"get_voxel_count", "is_empty", "get_positions", "get_voxels_aabb",
+	"get_voxel_count", "evaluated_voxel_count", "is_empty", "get_positions", "get_voxels_aabb",
 	"get_chunk_voxels", "has_chunk", "get_voxels_dict_snapshot",
 	"voxel_bounds", "origin_offset",
 	# 材质

@@ -32,11 +32,11 @@ signal selection_action(action: StringName)
 ## 【为什么"全选"也在这里】它就是"框选整个网格"的快捷键化 —— 用户不必从一角拖到另一角。
 ## 五条动作共用一条信号（带 id），面板因此不必为每个动作各开一个信号与一条连接。
 const SELECT_ACTIONS := [
-	{"id": &"all", "text": "全选", "tip": "选中整个网格（Ctrl+A）"},
-	{"id": &"copy", "text": "复制", "tip": "复制选区里的体素（Ctrl+C）"},
-	{"id": &"cut", "text": "剪切", "tip": "剪下选区里的体素（Ctrl+X）"},
-	{"id": &"paste", "text": "粘贴", "tip": "把剪贴板贴到光标处（Ctrl+V）"},
-	{"id": &"clear", "text": "清空", "tip": "挖掉选区里的体素（Delete）"},
+	{"id": &"all", "text": "全选", "icon": "select_all", "key": "Ctrl+A", "tip": "选中整个网格"},
+	{"id": &"copy", "text": "复制", "icon": "copy", "key": "Ctrl+C", "tip": "复制选区里的体素"},
+	{"id": &"cut", "text": "剪切", "icon": "cut", "key": "Ctrl+X", "tip": "剪下选区里的体素"},
+	{"id": &"paste", "text": "粘贴", "icon": "paste", "key": "Ctrl+V", "tip": "把剪贴板贴到光标处"},
+	{"id": &"clear", "text": "清空", "icon": "clear", "key": "Delete", "tip": "挖掉选区里的体素"},
 ]
 
 ## 工具坞**面板**的目标宽度取自 [method QVoxelUi.dock_width]（随密度档变）。
@@ -99,11 +99,10 @@ func _build() -> void:
 	col.add_child(QVoxelUi.heading("工具"))
 	_group.allow_unpress = false
 	for row in QVoxelBrushTool.MODES:
-		var b := QVoxelUi.toggle_button("%s（%s）" % [row.label, row.hint])
-		# 热键字母直接写进按钮文字当"键帽"：既省一层子控件，也让按钮的 text 是可读的
-		# （界面上每个按钮都该有能被人和自动化工具读到的名字，空 text 的按钮等于匿名）。
-		b.text = "%s   %s" % [String.chr(row.hotkey), row.label]
-		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		# 图标为主，名字与热键交 tooltip 首行；缺图时退回"热键字母 + 名字"的旧样式。
+		var tip := "%s（%s）\n%s" % [row.label, String.chr(row.hotkey), row.hint]
+		var b := QVoxelUi.toggle_button(tip, QVoxelUi.VARIATION_TOOL,
+				"%s   %s" % [String.chr(row.hotkey), row.label], row.icon)
 		b.button_group = _group
 		b.toggled.connect(func(on: bool): if on: tool_selected.emit(row.mode))
 		_buttons[row.mode] = b
@@ -117,9 +116,8 @@ func _build() -> void:
 	col.add_child(_build_shape_row())
 
 	col.add_child(QVoxelUi.divider())
-	_erase = QVoxelUi.toggle_button("擦除模式：画的时候挖掉体素（触摸屏上代替右键）")
-	_erase.text = "E   擦除"
-	_erase.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_erase = QVoxelUi.toggle_button("擦除（E）\n画的时候挖掉体素（触摸屏上代替右键）",
+			QVoxelUi.VARIATION_TOOL, "E   擦除", "erase")
 	_erase.toggled.connect(func(on: bool): erase_toggled.emit(on))
 	col.add_child(_erase)
 
@@ -190,7 +188,9 @@ func _build_selection_rows() -> VBoxContainer:
 		box.add_child(r)
 	for i in SELECT_ACTIONS.size():
 		var row: Dictionary = SELECT_ACTIONS[i]
-		var b := QVoxelUi.button(row.text, row.tip)
+		# 名字（含快捷键）在 tooltip 首行，按钮本体只留图标；缺图退回文字。
+		var b := QVoxelUi.button(row.text, "%s（%s）\n%s" % [row.text, row.key, row.tip],
+				&"", row.icon)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		# bind 而不是闭包捕获 i：三个按钮各连各的 id，不会一起变成最后一个（同对称轴的处理）。
 		b.pressed.connect(_on_select_action.bind(row.id))
@@ -247,8 +247,8 @@ func _build_shape_row() -> HBoxContainer:
 	var group := ButtonGroup.new()
 	group.allow_unpress = false
 	for entry in QVoxelBrushTool.SHAPES:
-		var b := QVoxelUi.toggle_button(entry.tip)
-		b.text = entry.text
+		var b := QVoxelUi.toggle_button("%s\n%s" % [entry.text, entry.tip],
+				QVoxelUi.VARIATION_TOOL, entry.text, entry.icon)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.button_group = group
 		# bind 而不是闭包捕获：与对称轴 / 选区动作同一条理由 —— 每个按钮各钉各的值，

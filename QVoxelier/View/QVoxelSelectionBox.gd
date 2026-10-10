@@ -20,24 +20,54 @@ extends MeshInstance3D
 ## 线色。默认取界面强调色 —— 与网格足印框同族，"我框住的范围"和"能画的范围"是同一种信息。
 @export var line_color := Color(QVoxelUi.ACCENT, 0.95):
 	set(v):
+		if line_color == v:
+			return
 		line_color = v
 		rebuild()
 
+## 逐格线框的格数上限。超过就退化成包围盒 —— 填充整块时几千个线框会叠成一片糊，
+## 而"有这么大一片"正是那一刻唯一说得清的信息。
+const CELLS_MAX := 1024
+
 var _lo := Vector3i.ZERO
 var _size := Vector3i.ZERO
+var _cells: Array[Vector3i] = []
+var _cells_mode := false
 var _line_mat: StandardMaterial3D
 
 
 ## 设置选区盒（体素单位）。任一边 size <= 0 = 没有选区 → 整块隐藏。
 func set_box(lo: Vector3i, size: Vector3i) -> void:
-	if lo == _lo and size == _size:
+	if not _cells_mode and lo == _lo and size == _size:
 		return
+	_cells_mode = false
+	_cells.clear()
 	_lo = lo
 	_size = size
 	rebuild()
 
 
+## 设置逐格线框（hover 预览）。空数组 = 没有预览 → 整块隐藏。
+func set_cells(cells: Array[Vector3i]) -> void:
+	if _cells_mode and cells.size() == _cells.size():
+		var same := true
+		for i in cells.size():
+			if cells[i] != _cells[i]:
+				same = false
+				break
+		if same:
+			return
+	_cells_mode = true
+	_cells = cells
+	_lo = Vector3i.ZERO
+	_size = Vector3i.ZERO
+	rebuild()
+
+
 func rebuild() -> void:
+	if _cells_mode:
+		_rebuild_cells()
+		return
 	if _size.x <= 0 or _size.y <= 0 or _size.z <= 0:
 		mesh = null
 		visible = false
@@ -45,7 +75,34 @@ func rebuild() -> void:
 	visible = true
 	var verts := PackedVector3Array()
 	var colors := PackedColorArray()
-	_edges(verts, colors)
+	_box_edges(verts, colors, _lo, _size)
+	_commit(verts, colors)
+
+
+## 逐格线框：每格一个立方框。空 = 隐藏；超上限退化为包围盒（见 CELLS_MAX）。
+func _rebuild_cells() -> void:
+	if _cells.is_empty():
+		mesh = null
+		visible = false
+		return
+	visible = true
+	var verts := PackedVector3Array()
+	var colors := PackedColorArray()
+	if _cells.size() > CELLS_MAX:
+		var lo := _cells[0]
+		var hi := _cells[0]
+		for c in _cells:
+			lo = Vector3i(mini(lo.x, c.x), mini(lo.y, c.y), mini(lo.z, c.z))
+			hi = Vector3i(maxi(hi.x, c.x), maxi(hi.y, c.y), maxi(hi.z, c.z))
+		_box_edges(verts, colors, lo, hi - lo + Vector3i.ONE)
+	else:
+		for c in _cells:
+			_box_edges(verts, colors, c, Vector3i.ONE)
+	_commit(verts, colors)
+
+
+## 顶点 → 网格 → 材质 → 缩放，两种模式共用的提交动作。
+func _commit(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
@@ -62,10 +119,11 @@ func _apply_scale() -> void:
 
 
 ## 12 条棱（底 4 + 顶 4 + 竖 4）。用顶点色而非 uniform，于是换色只重建顶点，不碰材质。
-func _edges(verts: PackedVector3Array, colors: PackedColorArray) -> void:
+func _box_edges(verts: PackedVector3Array, colors: PackedColorArray,
+		lo: Vector3i, size: Vector3i) -> void:
 	const PAD := 0.04
-	var a := Vector3(_lo) - Vector3.ONE * PAD
-	var b := Vector3(_lo + _size) + Vector3.ONE * PAD
+	var a := Vector3(lo) - Vector3.ONE * PAD
+	var b := Vector3(lo + size) + Vector3.ONE * PAD
 	var c := [
 		Vector3(a.x, a.y, a.z), Vector3(b.x, a.y, a.z), Vector3(b.x, a.y, b.z), Vector3(a.x, a.y, b.z),
 		Vector3(a.x, b.y, a.z), Vector3(b.x, b.y, a.z), Vector3(b.x, b.y, b.z), Vector3(a.x, b.y, b.z),

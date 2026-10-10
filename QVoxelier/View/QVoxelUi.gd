@@ -323,13 +323,33 @@ static func heading(text: String) -> Label:
 	return l
 
 
+## 图标目录。SVG 由 Godot 导入成 Texture2D，按文件名取用（故图标名 = 文件名）。
+const ICON_DIR := "res://QVoxelier/View/icons/"
+static var _icon_cache := {}
+
+## 取图标。缓存包含"没这张图"（null）—— 否则缺图时每次建控件都要扫一遍磁盘。
+static func icon(name: String) -> Texture2D:
+	if _icon_cache.has(name):
+		return _icon_cache[name]
+	var path := ICON_DIR + name + ".svg"
+	var t: Texture2D = load(path) if ResourceLoader.exists(path) else null
+	_icon_cache[name] = t
+	return t
+
+
 ## 普通按钮。variation 传 VARIATION_ACCENT 即主操作样式。
-static func button(text: String, tooltip := "", variation := &"") -> Button:
+## icon_name 有图时**顶掉文字**（名字与快捷键交给 tooltip 首行），没图时照旧显示文字 ——
+## 图标缺失绝不表现为一块空白按钮。
+static func button(text: String, tooltip := "", variation := &"", icon_name := "") -> Button:
 	var b := Button.new()
-	b.text = text
+	var glyph := icon(icon_name) if not icon_name.is_empty() else null
+	b.text = "" if glyph != null else text
 	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	# 键盘焦点一律不要：本应用的键盘归视口（热键），按钮只吃指针。
 	b.focus_mode = Control.FOCUS_NONE
+	if glyph != null:
+		b.icon = glyph
+		b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	if not tooltip.is_empty():
 		b.tooltip_text = tooltip
 	if not variation.is_empty():
@@ -346,8 +366,9 @@ static func icon_button(text: String, tooltip := "", size := -1) -> Button:
 
 
 ## 互斥选中按钮（工具、材质）：pressed 态即"当前"，触摸下没有 hover 也一眼看得出。
-static func toggle_button(tooltip := "", variation := VARIATION_TOOL) -> Button:
-	var b := button("", tooltip, variation)
+## icon_name 有图时顶掉文字（fallback text 只在缺图时出现，同 button 的约定）。
+static func toggle_button(tooltip := "", variation := VARIATION_TOOL, text := "", icon_name := "") -> Button:
+	var b := button(text, tooltip, variation, icon_name)
 	b.toggle_mode = true
 	b.custom_minimum_size = Vector2(0, hit_size())
 	return b

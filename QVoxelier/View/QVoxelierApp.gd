@@ -68,6 +68,9 @@ var _extra_root: Node3D
 ## 选区线框（挂在 model 下，与体素网格同一套坐标换算）。看不见的选区等于没有选区 ——
 ## 用户按了"复制"却不知道复制了什么，故它随 _refresh_hud 一起重画。
 var _selection_box: QVoxelSelectionBox
+## 笔刷悬停预览（虚线框标出"按下 / 拖到这里会改哪些格"）。与选区框同挂 model 下 ——
+## 同一套坐标换算，两者天然对齐；线色 = 待写材质色（擦除 = 警示红），一眼看出会改成什么。
+var _ghost: QVoxelSelectionBox
 ## 光标处最近一次的落笔点。粘贴要落在"用户正指着的地方"，而光标只在移动事件里出现 ——
 ## 于是把它记下来，按钮 / 快捷键按下时才有得用（没有它，粘贴只能贴回原地）。
 var _hover_pick: QVoxelBrushTool.Pick
@@ -227,7 +230,9 @@ func _build_ui() -> void:
 	_color_section.add_material_requested.connect(_add_material)
 	_color_section.import_requested.connect(func(): _palette_import_dialog.popup_centered_ratio(0.7))
 	_color_section.export_requested.connect(func(): _palette_export_dialog.popup_centered_ratio(0.7))
-	_dock.add_section(_color_section)
+	# 颜色分组**默认收起**：多数时候只是拿笔刷画，材质编辑是"想改才点开"的事 ——
+	# 让它默认摊开等于给每个会画画的人看一屏他没在改的参数。
+	_dock.add_section(_color_section, true)
 
 	_tree_section = QVoxelierTreeSection.new()
 	_tree_section.node_selected.connect(_on_tree_selected)
@@ -281,6 +286,10 @@ func _build_ui() -> void:
 	_selection_box = QVoxelSelectionBox.new()
 	_selection_box.name = "Selection"
 	model.add_child(_selection_box)
+
+	_ghost = QVoxelSelectionBox.new()
+	_ghost.name = "HoverGhost"
+	model.add_child(_ghost)
 
 	# 状态栏与两块浮层都归 Hud 所有，而 Hud 是场景里预摆的（排在子节点最前 = 画在最底下），
 	# 后建的右列抽屉会整条压住浮层 —— 实测「操作说明」右半边被「颜色」面板盖掉。
@@ -378,6 +387,7 @@ func _attach_active() -> void:
 	if not is_equal_approx(grid_floor.voxel_scale, model.voxel_scale):
 		grid_floor.voxel_scale = model.voxel_scale
 	_selection_box.voxel_scale = model.voxel_scale
+	_ghost.voxel_scale = model.voxel_scale
 	hud.session = session
 
 
@@ -1369,8 +1379,18 @@ func _refresh_cursor(screen: Vector2) -> void:
 	_hover_pick = pick if pick.valid() else null
 	if not pick.valid():
 		hud.set_cursor(Vector3i.MIN)
+	_refresh_ghost(pick)
+
+
+## 悬停预览：格子来自会话的 hover()（与真正落笔同一条形状分派，所见即所画）。
+## 颜色告诉用户"会改成什么"：擦除 = 警示红，画 = 当前材质色。
+func _refresh_ghost(pick: QVoxelBrushTool.Pick) -> void:
+	# 手势中射线落到模型外仍要预览 —— hover() 内部用起点 pick 兜底，盒子不闪没。
+	if not pick.valid() and not _stroke:
+		_ghost.set_cells([])
 		return
-	hud.set_cursor(pick.hit if pick.erase else pick.place)
+	_ghost.line_color = QVoxelUi.WARN if _erasing() else Color(world.material_color(_material_id), 0.9)
+	_ghost.set_cells(session.hover(pick))
 
 
 func _bind_actions() -> void:

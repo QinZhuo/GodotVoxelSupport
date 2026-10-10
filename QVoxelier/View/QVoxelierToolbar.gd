@@ -72,18 +72,19 @@ func _build() -> void:
 	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	bar.add_child(row)
 
-	# ── 文件组 ──
-	row.add_child(_action("新建", "清空并新建一个模型", func(): new_requested.emit()))
-	row.add_child(_action("打开", "打开一个 .qvx 工程（也可直接把文件拖进窗口）",
-			func(): open_requested.emit()))
+	# ── 文件组 ──（顶栏是屏幕顶上一条 40px 的带，一屏里要放下十余件操作 ——
+	# 文字版实测把工程名挤到看不见，故只留图标，名字与快捷键交给悬浮提示）
+	row.add_child(_action(new_requested.emit, "", "new"))
+	row.add_child(_action(open_requested.emit, "打开（Ctrl+O）\n打开 .qvx 工程，也可以直接把文件拖进窗口",
+			"open"))
 	# 保存是主操作：整条栏里唯一带强调描边与强调字的按钮（样式见 QVoxelUi.VARIATION_ACCENT）。
-	row.add_child(_action("保存", "保存工程（Ctrl+S）", func(): save_requested.emit(),
-			QVoxelUi.VARIATION_ACCENT))
-	row.add_child(_action("另存", "另存为新文件（Ctrl+Shift+S）", func(): save_as_requested.emit()))
-	row.add_child(_action("导出", "导出为 MagicaVoxel 的 .vox（其它体素工具都能打开）",
-			func(): export_requested.emit()))
-	row.add_child(_action("批量", "一次导出多个 .vox：按范围切开（整个世界 / 每个节点 / 每个模型 / 每个帧）",
-			func(): export_batch_requested.emit()))
+	row.add_child(_action(save_requested.emit, "保存（Ctrl+S）\n存成 .qvx 工程（保留修改器链与相机）",
+			"save", QVoxelUi.VARIATION_ACCENT))
+	row.add_child(_action(save_as_requested.emit, "另存（Ctrl+Shift+S）\n另存为新文件", "save_as"))
+	row.add_child(_action(export_requested.emit, "导出（Ctrl+E）\n导出为 MagicaVoxel 的 .vox，其它体素工具都能打开",
+			"export"))
+	row.add_child(_action(export_batch_requested.emit, "批量导出\n按范围一次产出多个 .vox：整个世界 / 每个节点 / 每个模型 / 每个帧",
+			"batch"))
 
 	_project = QVoxelUi.label("", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -95,8 +96,8 @@ func _build() -> void:
 	row.add_child(_project)
 
 	# ── 历史组 ──
-	_undo = _action("撤销", "撤销上一步（Ctrl+Z）", func(): undo_requested.emit())
-	_redo = _action("重做", "重做（Ctrl+Shift+Z）", func(): redo_requested.emit())
+	_undo = _action(undo_requested.emit, "撤销（Ctrl+Z）\n撤回上一步改动", "undo")
+	_redo = _action(redo_requested.emit, "重做（Ctrl+Shift+Z）\n恢复刚撤销的一步", "redo")
 	row.add_child(_undo)
 	row.add_child(_redo)
 
@@ -115,23 +116,24 @@ func _view_group() -> HBoxContainer:
 	# 不必为它再加第三个按钮。
 	var group := ButtonGroup.new()
 	group.allow_unpress = true
-	_nav = _mode_toggle("导航", "单指 / 左键拖动 = 转视角（触摸屏上代替中键）", group, VIEW_ORBIT)
-	_pan = _mode_toggle("平移", "单指 / 左键拖动 = 平移画面（触摸屏上代替 Shift+中键）", group, VIEW_PAN)
+	_nav = _mode_toggle("导航\n左键拖动 = 转视角（代替中键）", group, VIEW_ORBIT, "navigate")
+	_pan = _mode_toggle("平移\n左键拖动 = 平移画面（代替 Shift+中键）", group, VIEW_PAN, "pan")
 	g.add_child(_nav)
 	g.add_child(_pan)
 
-	g.add_child(_action("取景", "把模型正好框进画面（Home）", func(): frame_requested.emit()))
-	g.add_child(_action("−", "缩小", func(): zoom_requested.emit(-1.0)))
-	g.add_child(_action("+", "放大", func(): zoom_requested.emit(1.0)))
+	g.add_child(_action(frame_requested.emit, "取景（Home）\n把模型正好框进画面", "fit"))
+	g.add_child(_action(func(): zoom_requested.emit(-1.0), "缩小\n配合＋调整视距", "zoom_out"))
+	g.add_child(_action(func(): zoom_requested.emit(1.0), "放大\n配合－调整视距", "zoom_in"))
 
-	_help = _action("?", "查看鼠标与触摸的操作说明", func(): pass, QVoxelUi.VARIATION_TOOL)
+	_help = _action(func(): pass, "操作说明\n鼠标与触摸的全部操作一览", "help",
+			QVoxelUi.VARIATION_TOOL)
 	_help.toggle_mode = true
 	_help.toggled.connect(func(on: bool): help_toggled.emit(on))
 	g.add_child(_help)
 
 	# 日志与说明并列在栏尾：两者都是"查一下"（都不改数据），也都开在右上角的浮层里。
-	_log = _action("日志", "刚才发生了什么 —— 导入 / 导出 / 求值失败的原因都在这里",
-			func(): pass, QVoxelUi.VARIATION_TOOL)
+	_log = _action(func(): pass, "操作日志\n刚才发生了什么 —— 导入 / 导出 / 求值失败的原因都在这里",
+			"log", QVoxelUi.VARIATION_TOOL)
 	_log.toggle_mode = true
 	_log.toggled.connect(func(on: bool): log_toggled.emit(on))
 	g.add_child(_log)
@@ -139,8 +141,8 @@ func _view_group() -> HBoxContainer:
 
 
 ## 视图模式开关：同组的按钮彼此互斥（含"全都不按 = 绘制"）。
-func _mode_toggle(text: String, tooltip: String, group: ButtonGroup, mode: int) -> Button:
-	var b := _action(text, tooltip, func(): pass, QVoxelUi.VARIATION_TOOL)
+func _mode_toggle(tooltip: String, group: ButtonGroup, mode: int, icon_name: String) -> Button:
+	var b := _action(func(): pass, tooltip, icon_name, QVoxelUi.VARIATION_TOOL)
 	b.toggle_mode = true
 	b.button_group = group
 	b.toggled.connect(func(_on: bool): _emit_view_mode.call_deferred())
@@ -197,11 +199,13 @@ func set_log(on: bool) -> void:
 
 # 内部
 
-## 应用栏按钮的统一形态：文字 + 提示 + 回调，命中高度顶满整条栏。
-## 宽度也钉在 MIN_TOUCH 以上 —— "−/+/?" 这类单字按钮若按文字宽度算只有 22~32 像素，
-## 鼠标够用、手指却点不准；钉住下限后所有栏内按钮都是 ≥44×44 的可点面。
-func _action(text: String, tooltip: String, cb: Callable, variation := &"") -> Button:
-	var b := QVoxelUi.button(text, tooltip, variation)
+## 应用栏按钮的统一形态：图标 + 提示 + 回调，命中高度顶满整条栏。
+## 命中区**双向钉死**在 hit_size × 栏高：图标只画 24px，按内容算的按钮对手指太小；
+## 钉住下限后所有栏内按钮都是 ≥44×44 的可点面，也不会因图标 / 文字切换而宽窄跳动。
+## 文字取提示首行并截掉"（快捷键）"——只在图标加载失败时才露出来（QVoxelUi.button 的约定）。
+func _action(cb: Callable, tooltip: String, icon_name: String, variation := &"") -> Button:
+	var fallback := tooltip.get_slice("\n", 0).get_slice("（", 0)
+	var b := QVoxelUi.button(fallback, tooltip, variation, icon_name)
 	b.custom_minimum_size = Vector2(QVoxelUi.hit_size(), QVoxelUi.bar_height() - QVoxelUi.space_s())
 	b.pressed.connect(cb)
 	return b

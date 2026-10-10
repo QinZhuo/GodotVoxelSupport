@@ -23,6 +23,21 @@ signal grid_lines_toggled(enabled: bool)
 
 const COLUMNS := 4
 
+## 视图 → 图标（View 只是枚举值，界面细节留在界面层）。
+const VIEW_ICONS := {
+	QVoxelViewCamera.View.FRONT: "view_front",
+	QVoxelViewCamera.View.BACK: "view_back",
+	QVoxelViewCamera.View.LEFT: "view_left",
+	QVoxelViewCamera.View.RIGHT: "view_right",
+	QVoxelViewCamera.View.TOP: "view_top",
+	QVoxelViewCamera.View.BOTTOM: "view_bottom",
+	QVoxelViewCamera.View.ISO: "view_iso",
+}
+const LENS_ICONS := {
+	QVoxelViewCamera.Lens.PERSPECTIVE: "lens_persp",
+	QVoxelViewCamera.Lens.ORTHO: "lens_ortho",
+}
+
 var _lens := {}              # Lens → Button
 var _views := {}             # View → Button
 var _grid: Button
@@ -56,9 +71,8 @@ func _build() -> void:
 	col.add_child(_build_view_grid())
 
 	col.add_child(QVoxelUi.divider())
-	_grid = QVoxelUi.toggle_button("显示底面格线；关掉只剩外框，便于看清形状")
-	_grid.text = "网格线"
-	_grid.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_grid = QVoxelUi.toggle_button("网格线\n显示底面格线；关掉只剩外框，便于看清形状",
+			QVoxelUi.VARIATION_TOOL, "网格线", "grid")
 	_grid.set_pressed_no_signal(true)
 	_grid.toggled.connect(func(on: bool): grid_lines_toggled.emit(on))
 	col.add_child(_grid)
@@ -71,9 +85,10 @@ func _build() -> void:
 func _build_lens_row() -> HBoxContainer:
 	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	for m in [QVoxelViewCamera.Lens.PERSPECTIVE, QVoxelViewCamera.Lens.ORTHO]:
-		var b := QVoxelUi.toggle_button(_lens_hint(m))
-		b.text = QVoxelViewCamera.LENS_NAMES[m]
-		b.custom_minimum_size = Vector2(QVoxelUi.hit_size() * 1.6, QVoxelUi.hit_size())
+		var name: String = QVoxelViewCamera.LENS_NAMES[m]
+		var b := QVoxelUi.toggle_button("%s\n%s" % [name, _lens_hint(m)],
+				QVoxelUi.VARIATION_TOOL, name, LENS_ICONS[m])
+		b.custom_minimum_size = Vector2(QVoxelUi.hit_size(), QVoxelUi.hit_size())
 		b.pressed.connect(func(): lens_selected.emit(m))
 		_lens[m] = b
 		row.add_child(b)
@@ -87,8 +102,9 @@ func _build_view_grid() -> GridContainer:
 	grid.add_theme_constant_override("h_separation", QVoxelUi.SPACE_XS)
 	grid.add_theme_constant_override("v_separation", QVoxelUi.SPACE_XS)
 	for v in QVoxelViewCamera.VIEW_ANGLES_DEG:
-		var b := QVoxelUi.toggle_button("把视角转到%s视图" % QVoxelViewCamera.VIEW_NAMES[v])
-		b.text = QVoxelViewCamera.VIEW_NAMES[v]
+		var name: String = QVoxelViewCamera.VIEW_NAMES[v]
+		var b := QVoxelUi.toggle_button("%s视图\n把视角转到%s视图" % [name, name],
+				QVoxelUi.VARIATION_TOOL, name + "视图", VIEW_ICONS[v])
 		b.custom_minimum_size = Vector2(QVoxelUi.hit_size(), QVoxelUi.hit_size())
 		# pressed 而不是 toggled：见类文档（连按两次要各生效一次）。
 		b.pressed.connect(func(): view_selected.emit(v))

@@ -31,8 +31,6 @@ signal add_material_requested
 signal import_requested
 signal export_requested
 
-const _CHANNELS := ["R", "G", "B", "A"]
-
 ## PBR 标量行：key = `QVoxelWorld.material_scalar` 的键，label = 中文名。
 ## **表即配置**：滑条与 App 的取值都从这一张表派生，不再各抄一份键名。
 const _PBR := [
@@ -41,10 +39,10 @@ const _PBR := [
 	{"key": &"emission", "label": "自发光"},
 ]
 
-## 行首标签的固定宽：让颜色通道（单字母）与 PBR（三字）两组滑条左缘对齐。
+## 行首标签的固定宽：让三字的 PBR 标签左缘对齐。
 const _LABEL_W := 42
 
-var _preview: ColorRect
+var _picker: ColorPickerButton
 var _hex: Label
 var _id_label: Label
 var _sliders: Dictionary = {}
@@ -60,14 +58,22 @@ func section_title() -> String:
 
 
 func _build_body(body: VBoxContainer) -> void:
-	# --- 预览行：色块 + 十六进制 + 材质号 ---
+	# --- 预览行：取色按钮 + 十六进制 + 材质号 ---
 	var head := QVoxelUi.hbox()
 	body.add_child(head)
 
-	_preview = ColorRect.new()
-	_preview.custom_minimum_size = Vector2(QVoxelUi.hit_size() + QVoxelUi.space_l(), QVoxelUi.hit_size())
-	_preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	head.add_child(_preview)
+	# 【为什么是取色按钮而不是四根 R/G/B/A 滑条】滑条四根占满一屏、只能逐通道微调，
+	# 而 Godot 内置的 ColorPicker 已经把色环、RGB/HSV、滑条模式与吸管都做好了 ——
+	# 一个按钮点开全有，还顺带解决了"色块看得见但点不动"的问题。
+	# 【手势仍是一次】面板弹出期间的多次 color_changed 归为同一条"改材质"，
+	# 关面板（popup_closed）时才 edit_ended，撤销栈里只留一步。
+	_picker = ColorPickerButton.new()
+	_picker.custom_minimum_size = Vector2(QVoxelUi.hit_size() + QVoxelUi.space_l(), QVoxelUi.hit_size())
+	_picker.edit_alpha = true
+	_picker.tooltip_text = "改颜色：点开取色器（色环 / RGB / HSV / 吸管，关掉即生效）"
+	_picker.color_changed.connect(_on_picker_changed)
+	_picker.popup_closed.connect(_on_picker_closed)
+	head.add_child(_picker)
 
 	var info := QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -76,10 +82,6 @@ func _build_body(body: VBoxContainer) -> void:
 	info.add_child(_hex)
 	_id_label = QVoxelUi.label("材质 —", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
 	info.add_child(_id_label)
-
-	# --- 四条颜色通道滑条 ---
-	for ch in _CHANNELS:
-		body.add_child(_slider_row(ch, ch, func(_v: float): _on_channel_changed()))
 
 	# --- 三条 PBR 标量滑条（金属度 / 粗糙度 / 自发光）---
 	for p in _PBR:
@@ -157,13 +159,9 @@ func bind(material_id: int, color: Color, pbr: Dictionary) -> void:
 	else:
 		_id_label.text = "未选中材质"
 	_syncing = true
-	_preview.color = color
+	_picker.color = color
+	_picker.disabled = not editable
 	_hex.text = "#" + color.to_html(false)
-	for ch in _CHANNELS:
-		var s: HSlider = _sliders[ch]
-		s.value = _channel_value(color, ch)
-		s.editable = editable
-		_value_labels[ch].text = _format_value(ch, s.value)
 	for p in _PBR:
 		var key := String(p["key"])
 		var ps: HSlider = _sliders[key]
@@ -184,18 +182,29 @@ func active_id() -> int:
 
 
 func current_color() -> Color:
-	return Color(
-		float(_sliders["R"].value), float(_sliders["G"].value),
-		float(_sliders["B"].value), float(_sliders["A"].value))
+	return _picker.color
 
 
 # 内部
 
-func _on_channel_changed() -> void:
+## 取色器改色中：**第一次**改动才开手势（此前弹开面板不算改动），此后一路并进同一条"改材质"。
+func _on_picker_changed(c: Color) -> void:
 	if _syncing:
 		return
+	if not _editing:
+		_editing = true
+		edit_began.emit()
 	_refresh_preview()
-	_gesture_report(func(): color_changed.emit(current_color()))
+	color_changed.emit(c)
+
+
+## 关面板即手势结束：补报最终值再封口，于是拖到满意为止也只占撤销栈一步。
+func _on_picker_closed() -> void:
+	if not _editing:
+		return
+	_editing = false
+	color_changed.emit(_picker.color)
+	edit_ended.emit()
 
 
 func _on_pbr_changed(key: String) -> void:
@@ -226,38 +235,21 @@ func _on_drag_started() -> void:
 func _on_drag_ended(key: String) -> void:
 	if not _editing:
 		return
-	# 收尾补一次最终值上报（与手势中的逐次上报同源）。
-	if key in _CHANNELS:
-		color_changed.emit(current_color())
-	else:
-		pbr_changed.emit(StringName(key), float(_sliders[key].value))
+	# 收尾补一次最终值上报（与手势中的逐次上报同源）。到这里只剩 PBR 走拖动手势。
+	pbr_changed.emit(StringName(key), float(_sliders[key].value))
 	_editing = false
 	edit_ended.emit()
 
 
+## 只刷新"看"的那几个（十六进制与数值读数）。**不回写 _picker.color** ——
+## 颜色由取色器自己维护，回写等于把用户刚拖到的值再喂一遍给它。
 func _refresh_preview() -> void:
 	var c := current_color()
-	_preview.color = c
 	_hex.text = "#" + c.to_html(false)
 	for key in _sliders:
 		_value_labels[key].text = _format_value(String(key), float(_sliders[key].value))
 
 
-## 数值显示：颜色通道按 0–255 字节（与 MATE 存储量纲一致），PBR 标量按百分比（贴近"强度"语义）。
-static func _format_value(key: String, v: float) -> String:
-	if key in _CHANNELS:
-		return str(int(round(v * 255.0)))
+## PBR 数值显示：按百分比（贴近"强度"语义）。颜色本身由取色按钮自己呈现，不再单列渲染。
+static func _format_value(_key: String, v: float) -> String:
 	return "%d%%" % int(round(v * 100.0))
-
-
-## 通道取值：Color 不支持下标运算，故显式分发（唯一一处，避免四处写 .r/.g/.b/.a）。
-static func _channel_value(color: Color, ch: String) -> float:
-	match ch:
-		"R":
-			return color.r
-		"G":
-			return color.g
-		"B":
-			return color.b
-		_:
-			return color.a
