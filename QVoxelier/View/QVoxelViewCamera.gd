@@ -150,6 +150,31 @@ func zoom_by_steps(steps: float) -> void:
 	_apply()
 
 
+## 俯仰微调（滚轮用）。deg > 0 = 抬头。滚轮一维只能给俯仰，偏航留给水平滚轮（触摸板双指左右滑）。
+func pitch_by_degrees(deg: float) -> void:
+	pitch = clampf(pitch + deg_to_rad(deg), -pitch_limit, pitch_limit)
+	view = View.FREE
+	_apply()
+
+
+## 偏航微调（水平滚轮 = 触摸板双指左右滑）。
+func yaw_by_degrees(deg: float) -> void:
+	yaw -= deg_to_rad(deg)
+	view = View.FREE
+	_apply()
+
+
+## 按比例连续缩放（捏合手势用）。ratio > 1 = 拉近。与步进式共用同一条钳制与生效路径。
+func zoom_by_ratio(ratio: float) -> void:
+	if ratio <= 0.0:
+		return
+	if lens == Lens.ORTHO:
+		ortho_height = clampf(ortho_height / ratio, min_ortho_height, max_ortho_height)
+	else:
+		distance = clampf(distance / ratio, min_distance, max_distance)
+	_apply()
+
+
 ## 当前屏幕竖直方向覆盖的世界高度。平移与取景都按它换算 —— 透视/正交只有这一处分岔。
 func view_height() -> float:
 	if lens == Lens.ORTHO:

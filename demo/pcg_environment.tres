@@ -1,4 +1,4 @@
-[gd_resource type="Environment" load_steps=3 format=3]
+[gd_resource type="Environment" format=3 uid="uid://byeuwwju6u7lq"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_pcg"]
 sky_top_color = Color(0.09, 0.13, 0.24, 1)
@@ -17,11 +17,10 @@ ambient_light_color = Color(0.45, 0.5, 0.58, 1)
 ambient_light_sky_contribution = 0.7
 ambient_light_energy = 2.0
 tonemap_mode = 3
-tonemap_exposure = 1.0
-fog_enabled = true
-fog_density = 0.0006
-fog_sky_affect = 0.3
 ssao_enabled = true
 ssao_radius = 1.2
 ssao_intensity = 1.4
 ssao_power = 1.0
+fog_enabled = true
+fog_density = 0.0006
+fog_sky_affect = 0.3

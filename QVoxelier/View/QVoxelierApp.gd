@@ -105,6 +105,22 @@ var _pan := false
 ## 是**跨手势的粘性模式**，所以排在状态区而不是手势区。
 var _nav := false
 var _pan_mode := false
+## 修饰键 / 粘性模式的导航拖拽由谁启动（&"" / &"left" / &"middle"）—— 释放时只关自己启动的
+## 那一路，免得左键松开把还按着的中键视角拖拽一并关掉。
+var _nav_key := &""
+## 触摸 / 触摸板手势解析（双指拖 = 旋转、捏合 = 缩放）。解析与相机动作分离，见 QVoxelierGestureNav。
+var _gesture := QVoxelierGestureNav.new()
+## 左右两条侧栏占掉的宽度（可见区 = 窗口减这两块）。取景按它把模型对齐可见中心，见 frame_view。
+var _left_inset := 0.0
+var _right_inset := 0.0
+## 待执行的"取景对齐可见中心" —— 放 _process 做：那时 inset 已由 sync 算出、相机也完成布局。
+var _pending_center := false
+## 已经补过的侧栏像素量。补偿按**差值**做：inset 结算晚于首帧时（布局未稳），
+## 后续 sync 只补差额 —— 重复调用不会叠加，也不会吃掉用户自己的平移。
+var _center_done_px := 0.0
+## 左右侧栏的背景条（把漂浮面板连成整条侧栏）。
+var _left_rail: Panel
+var _right_rail: Panel
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
 var _eyedropper := false
@@ -169,6 +185,13 @@ func _build_ui() -> void:
 	_toolbar = QVoxelierToolbar.new()
 	_toolbar.name = "Toolbar"
 	add_child(_toolbar)
+
+	# 左右整栏背景：把工具坞 / 视图栏 / 抽屉这些浮板连成两条完整的侧栏（Blender 式），
+	# 3D 不再从面板缝隙里漏出来。先入树压在所有面板之下，只作背景不吃事件。
+	_left_rail = _make_rail(false)
+	add_child(_left_rail)
+	_right_rail = _make_rail(true)
+	add_child(_right_rail)
 	_toolbar.new_requested.connect(request_new)
 	_toolbar.open_requested.connect(request_open)
 	_toolbar.save_requested.connect(save_project)
@@ -215,6 +238,10 @@ func _build_ui() -> void:
 	add_child(_gizmo)
 	_gizmo.camera = camera
 	_gizmo.view_requested.connect(_apply_view)
+	# 盘上拖拽 = 自由旋转（点击轴尖仍是切视图，见 QVoxelierGizmo._gui_input 的判型时机）。
+	_gizmo.orbit_requested.connect(func(rel: Vector2) -> void:
+		camera.orbit_by_pixels(rel)
+		_view_bar.set_view(camera.view))
 
 	# 右侧抽屉：颜色 / 对象 / 参数 / 时间轴 / 快照五组。分组各自只发"用户想干什么"，写世界与记撤销都在本类一处完成。
 	_dock = QVoxelierDock.new()
@@ -305,11 +332,14 @@ func _build_ui() -> void:
 	# 邻面板的矩形一般要到下一帧最小尺寸结算完才定下来。
 	var sync_left := func() -> void:
 		_tools.set_bottom_reserved(_view_bar.size.y + QVoxelUi.space_s())
+		_sync_rails()
 	var sync_right := func() -> void:
-		var w := _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
-		hud.set_right_inset(w)
-		_gizmo.right_inset = w
+		_sync_rails()
+		# 三者共用一个宽度而不是各算各的 —— 状态栏"避开右列"与坐标轴"避开状态栏"从此是一个数。
+		hud.set_right_inset(_right_inset)
+		_gizmo.right_inset = _right_inset
 	_view_bar.resized.connect(sync_left)
+	_tools.resized.connect(_sync_rails)   # 工具坞按内容变宽时，左栏背景也要跟
 	_dock.resized.connect(sync_right)
 	sync_left.call_deferred()
 	sync_right.call_deferred()
@@ -318,7 +348,9 @@ func _build_ui() -> void:
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
 ## 尺寸与色板是视口的 @export（场景里可调），故由这里喂给会话 —— 会话只认"多大、哪些色"。
 func new_model(grid := Vector3i.ZERO) -> void:
+	_reset_edit_state()
 	_sess.new_model(grid, grid_size, default_palette)
+	frame_view()
 
 
 ## 装配：世界 + 待编辑对象 → 会话 / 渲染器 / 地板 / 状态栏。
@@ -326,19 +358,23 @@ func new_model(grid := Vector3i.ZERO) -> void:
 ## 【分工】世界与"每对象一条会话"由 `_sess` 装配（应用层）；这里只做显示层那一半。
 ## 刷新时机也不在这里：会话装完会发 `changed`，_on_session_changed 会把显示层重挂一遍。
 func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
-	# 这几个是"手势 / 工具"级的界面状态，换世界即作废。
+	_reset_edit_state()
+	_sess.install(w, obj)
+	frame_view()
+
+
+## 换世界后作废的"手势 / 工具"级界面状态。新建与打开两个入口共用这一份 ——
+## 【为什么必须共用】新建若漏掉它，新工程一进来材质还指着旧编号；启动首屏也是这条路径，
+## 于是"打开工程取过景、新建 / 首屏却停在默认机位"这种分叉就会一直存在。
+func _reset_edit_state() -> void:
 	_material_id = 1
 	_stroke = false
 	_erase = false
 	_eyedropper = false
 	_material_cmd = null
-
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	# 调色板不必在这里喂：它挂在唯一刷新路径上，install 发出的 changed 会把世界带过去
 	# （色板取的是**世界的材质表**而不是 default_palette，打开别人的 256 色工程也照显）。
-
-	_sess.install(w, obj)
-	frame_view()
 
 
 ## 切换"当前编辑对象"。三条入口共用这一条路径：对象列表点击、新建对象、打开工程挑初始对象。
@@ -463,12 +499,82 @@ func frame_view() -> void:
 	var g := Vector3(session.output_size()) * model.voxel_scale
 	var extent := g if not session.object.is_empty() else Vector3(g.x, 0.0, g.z)
 	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, extent), true)
+	# 取景对齐的是窗口中心，但可见区被左右侧栏裁掉的宽度不等（右栏通常更宽）——
+	# 模型因此视觉偏右。这里只打标记：inset 是布局的产物（要等 sync 算出来），补偿放 _apply_view_center。
+	_center_done_px = 0.0
+	_pending_center = true
+
+
+## 把取景中心拉回可见区正中（左右侧栏不对称的补偿）。
+## 【为什么按差值补】首帧 sync 拿到的还是布局结算前的宽度，此后 `_dock.resized` 才把 inset
+## 更新到终值；一次性消费会在旧值上补完就作废（表现为"启动时模型仍偏右、按 Home 才正"）。
+## 差值式让每次 sync 都只补"还欠多少"：何时算准何时到位，重复调用也不会叠加。
+func _apply_view_center() -> void:
+	if session == null or _left_inset <= 0.0 or _right_inset <= 0.0:
+		return
+	# 相机没进树 / 视口还没尺寸时先不补：pan 按像素换世界距离，无尺寸可换算。
+	if not camera.is_inside_tree() or camera.get_viewport().get_visible_rect().size.y <= 0.0:
+		return
+	var want := (_left_inset - _right_inset) * 0.5
+	var delta := want - _center_done_px
+	if not is_zero_approx(delta):
+		camera.pan_by_pixels(Vector2(delta, 0.0))
+		_center_done_px = want
+	_pending_center = false
+
+
+func _process(_delta: float) -> void:
+	# 条件不满足就不清标记 —— 下一帧重试，直到 inset 与视口都就绪。
+	if _pending_center:
+		_apply_view_center()
+
+
+## 侧栏背景条：宽 = 内容 + 两侧缝，高 = 顶栏下缘到状态栏上缘。只作背景，不吃鼠标事件。
+func _make_rail(right: bool) -> Panel:
+	var p := Panel.new()
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# 纵向贴满（顶栏下缘 → 状态栏上缘），横向各自锚定到所属侧；宽度由 _sync_rails 按内容更新。
+	p.anchor_top = 0.0
+	p.anchor_bottom = 1.0
+	p.offset_top = QVoxelUi.bar_height()
+	p.offset_bottom = -QVoxelUi.status_height()
+	if right:
+		p.anchor_left = 1.0
+		p.anchor_right = 1.0
+		p.offset_right = 0.0
+		p.offset_left = -QVoxelUi.dock_width() - QVoxelUi.space_m() * 2.0
+	else:
+		p.anchor_left = 0.0
+		p.anchor_right = 0.0
+		p.offset_left = 0.0
+		p.offset_right = QVoxelUi.dock_width() + QVoxelUi.space_m() * 2.0
+	p.add_theme_stylebox_override("panel",
+			QVoxelUi.box(QVoxelUi.SURFACE_SOLID, QVoxelUi.BORDER, 1, 0, 0, 0))
+	return p
+
+
+## 两条侧栏的宽度与"可见区裁切量"随邻居实际宽度更新 —— rail 背景、状态栏让位、
+## 坐标轴让位、取景补偿从此共用同一组数。
+func _sync_rails() -> void:
+	# 左栏以"工具坞 / 视图栏中更宽的那个"为准 —— 视图栏比工具坞宽时会凸出背景条。
+	_left_inset = maxf(_tools.size.x, _view_bar.size.x) + QVoxelUi.space_m() * 2.0
+	_right_inset = _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
+	_left_rail.offset_right = _left_inset
+	_right_rail.offset_left = -_right_inset
+	# 宽度变了 = 可见区中心也变了。补差额（只在取过景之后有欠账，别的场景 delta 为 0）。
+	_apply_view_center()
 
 
 # 输入翻译
 
 func _unhandled_input(event: InputEvent) -> void:
 	if Engine.is_editor_hint() or session == null:
+		return
+	# 触摸 / 触摸板手势（双指旋转、捏合缩放）在最前面分流：手势期间指针归导航，不进笔画。
+	if event is InputEventScreenTouch or event is InputEventScreenDrag \
+			or event is InputEventMagnifyGesture or event is InputEventPanGesture:
+		if _gesture.feed(event):
+			_flush_gesture()
 		return
 	if event is InputEventMouseButton:
 		_on_mouse_button(event)
@@ -488,11 +594,23 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 				return
 			# 触摸屏没有中键，故「导航 / 平移」模式把左键借给视角：单手即可转 / 移模型。
 			# 平板上的单指拖动经过 emulate_mouse_from_touch 就是这里的 LEFT，不需要另写一套触摸分支。
-			if _nav or _pan_mode:
-				_orbit = e.pressed and _nav
-				_pan = e.pressed and _pan_mode
-			elif e.pressed:
-				_begin_stroke(e.position, _erasing())
+			if e.pressed:
+				if _nav or _pan_mode:
+					_nav_key = &"mode"
+					_orbit = _nav
+					_pan = _pan_mode
+				elif e.alt_pressed or e.shift_pressed:
+					# Alt+拖 = 旋转、Shift+拖 = 平移（Maya / Blender 系惯例）——
+					# 鼠标用户不必摸中键，与触摸板"双指拖 = 旋转"同一套肌肉记忆。
+					_nav_key = &"left"
+					_orbit = e.alt_pressed
+					_pan = e.shift_pressed and not e.alt_pressed
+				else:
+					_begin_stroke(e.position, _erasing())
+			elif _nav_key == &"left" or _nav_key == &"mode":
+				_nav_key = &""
+				_orbit = false
+				_pan = false
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_RIGHT:
@@ -504,14 +622,47 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_MIDDLE:
-			# 中键转视角、Shift+中键平移：与左右键（画 / 擦）互不干扰，
+			# 中键转视角、Shift / Alt+中键平移：与左右键（画 / 擦）互不干扰，
 			# 于是"边画边转着看"不需要先切模式 —— 建模里这一步每天都在用。
-			_orbit = e.pressed and not e.shift_pressed
-			_pan = e.pressed and e.shift_pressed
-		MOUSE_BUTTON_WHEEL_UP:
-			camera.zoom_by_steps(1.0)
-		MOUSE_BUTTON_WHEEL_DOWN:
-			camera.zoom_by_steps(-1.0)
+			if e.pressed:
+				_nav_key = &"middle"
+				_orbit = not (e.shift_pressed or e.alt_pressed)
+				_pan = e.shift_pressed or e.alt_pressed
+			elif _nav_key == &"middle":
+				_nav_key = &""
+				_orbit = false
+				_pan = false
+		MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
+			# 裸滚轮不再缩放（整屏一滚就放大缩小，误操作太容易）：
+			#   裸滚轮 = 俯仰；触摸板双指上下滑就是滚轮事件，"双指拖 = 旋转"由此闭环；
+			#   Ctrl+滚轮 = 缩放（Windows 精确触摸板的捏合也走这条 Ctrl+滚轮）；
+			#   Alt+滚轮 = 偏航，与 Alt+拖旋转同一修饰语义。
+			var up := e.button_index == MOUSE_BUTTON_WHEEL_UP
+			if e.ctrl_pressed:
+				camera.zoom_by_steps(1.0 if up else -1.0)
+			elif e.alt_pressed:
+				camera.yaw_by_degrees(4.0 if up else -4.0)
+			else:
+				camera.pitch_by_degrees(-4.0 if up else 4.0)
+			_view_bar.set_view(camera.view)
+		MOUSE_BUTTON_WHEEL_LEFT, MOUSE_BUTTON_WHEEL_RIGHT:
+			# 水平滚轮 = 触摸板双指左右滑 → 偏航，补齐"双指拖 = 旋转"的水平分量。
+			camera.yaw_by_degrees(-4.0 if e.button_index == MOUSE_BUTTON_WHEEL_LEFT else 4.0)
+			_view_bar.set_view(camera.view)
+
+
+## 把手势层累积的导航量接到相机上（每喂完一个手势事件调用一次）。
+func _flush_gesture() -> void:
+	# 第二指落下即打断进行中的笔画 —— 双指是导航，不该顺带画一笔。
+	# 只在笔画中途取消；非笔画时不动 _cancel，它还有"退出选区"的语义。
+	if _gesture.active and _stroke:
+		_cancel()
+	if _gesture.orbit_pending != Vector2.ZERO:
+		camera.orbit_by_pixels(_gesture.orbit_pending)
+		_view_bar.set_view(camera.view)
+	if not is_equal_approx(_gesture.zoom_pending, 1.0):
+		camera.zoom_by_ratio(_gesture.zoom_pending)
+	_gesture.take()
 
 
 func _on_mouse_motion(e: InputEventMouseMotion) -> void:
@@ -1379,6 +1530,9 @@ func _refresh_cursor(screen: Vector2) -> void:
 	_hover_pick = pick if pick.valid() else null
 	if not pick.valid():
 		hud.set_cursor(Vector3i.MIN)
+	else:
+		# 擦除显示将被挖掉的那格，否则显示将落笔的那格 —— 与 ghost 预览同一个 pick，不会各说各话。
+		hud.set_cursor(pick.hit if pick.erase else pick.place)
 	_refresh_ghost(pick)
 
 

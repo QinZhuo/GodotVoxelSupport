@@ -14,6 +14,8 @@ extends Control
 
 ## 点了某个轴尖，请求切到那一侧的视图（值同 QVoxelViewCamera.View）。
 signal view_requested(view: int)
+## 在盘上按住拖动，请求自由旋转视角（位移小于阈值的"点击"仍走 view_requested）。
+signal orbit_requested(relative: Vector2)
 
 const AXIS_COLORS := [
 	Color(1.0, 0.42, 0.42),   # X
@@ -27,6 +29,8 @@ const AXIS_VIEWS := [
 	[QVoxelViewCamera.View.TOP, QVoxelViewCamera.View.BOTTOM],
 	[QVoxelViewCamera.View.FRONT, QVoxelViewCamera.View.BACK],
 ]
+## 拖过这个像素数才算"转视角"，否则仍是"切视图的点击" —— 点击前手指总会抖几像素。
+const DRAG_START_PX := 4.0
 
 ## 指示器要看着的相机（由 App 注入）。
 var camera: Camera3D
@@ -44,6 +48,8 @@ var right_inset := float(QVoxelUi.dock_width() + QVoxelUi.space_l() + QVoxelUi.s
 var _last_basis := Basis()
 var _tip_radius := 0.0
 var _tips: Array = []        # [{pos: Vector2, view: int}]
+var _press := false          # 左键正按在盘上（拖拽中）
+var _dragged := false        # 本次按下已越过点击/拖拽的分界阈值
 
 
 func _ready() -> void:
@@ -124,11 +130,24 @@ func _draw() -> void:
 
 
 func _gui_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.pressed \
-			and event.button_index == MOUSE_BUTTON_LEFT:
-		var hit := _nearest_tip(event.position)
-		if hit >= 0:
-			view_requested.emit(_tips[hit].view)
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_press = true
+			_dragged = false
+			accept_event()
+		elif _press:
+			# 松手时才判型：位移不足阈值 = 点击轴尖切视图，越过 = 拖拽转视角（按下后视口
+			# 会把 motion 持续派发给本控件，拖出盘外也不中断）。
+			_press = false
+			if not _dragged:
+				var hit := _nearest_tip(event.position)
+				if hit >= 0:
+					view_requested.emit(_tips[hit].view)
+			accept_event()
+	elif event is InputEventMouseMotion and _press:
+		if _dragged or event.relative.length() >= DRAG_START_PX:
+			_dragged = true
+			orbit_requested.emit(event.relative)
 			accept_event()
 
 

@@ -19,7 +19,7 @@ var session: QVoxelEditSession = null
 
 var _tool: Label
 var _hint: Label
-var _cursor: Label
+var _cursor: RichTextLabel
 var _brush: Label
 var _material: Label
 var _model: Label
@@ -79,9 +79,18 @@ func refresh() -> void:
 	]
 
 
-## 光标所在格（Vector3i.MIN = 没指到网格上）。
+## 光标所在格（Vector3i.MIN = 没指到网格上）。轴名用与坐标轴 gizmo 同一套红绿蓝。
 func set_cursor(cell: Vector3i) -> void:
-	_cursor.text = "格 —" if cell == Vector3i.MIN else "格 %d,%d,%d" % [cell.x, cell.y, cell.z]
+	if cell == Vector3i.MIN:
+		_cursor.text = "[color=#%s]X[/color] —   [color=#%s]Y[/color] —   [color=#%s]Z[/color] —" % [
+				_axis_hex(0), _axis_hex(1), _axis_hex(2)]
+	else:
+		_cursor.text = "[color=#%s]X[/color] %d   [color=#%s]Y[/color] %d   [color=#%s]Z[/color] %d" % [
+				_axis_hex(0), cell.x, _axis_hex(1), cell.y, _axis_hex(2), cell.z]
+
+
+static func _axis_hex(i: int) -> String:
+	return (QVoxelierGizmo.AXIS_COLORS[i] as Color).to_html(false)
 
 
 ## 当前材质号（与调色板的选中块同源，由 App 一处回写）。
@@ -206,7 +215,18 @@ func _build_status() -> void:
 	# 选区排在读数区最前：它是"接下来那一下会作用在哪"，比"光标在哪一格"更需要一眼看到。
 	_selection = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_FAINT)
 	row.add_child(_selection)
-	_cursor = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
+	# 光标坐标单用富文本：X/Y/Z 三段按轴着色（与右下角坐标轴同色），一眼分得开三行坐标。
+	_cursor = RichTextLabel.new()
+	_cursor.fit_content = true
+	# 关掉自动换行是必须的：fit_content 的"最小宽度 = 内容宽度"与换行互相喂招 ——
+	# 宽度先被压成 1px、文本折成好几行、高度反被撑到 144px（整条状态栏跟着变形）。
+	_cursor.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_cursor.bbcode_enabled = true
+	_cursor.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_cursor.add_theme_color_override("default_color", QVoxelUi.TEXT)
+	_cursor.add_theme_font_size_override("normal_font_size", QVoxelUi.FONT_M)
+	_cursor.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	_cursor.add_theme_constant_override("outline_size", 4)
 	row.add_child(_cursor)
 	_brush = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	row.add_child(_brush)
@@ -364,15 +384,17 @@ func _scroll_to_bottom() -> void:
 const _LEGEND := [
 	["鼠标 + 键盘", [
 		"左键拖动 画 · 右键 擦（或开左侧「擦除」）",
-		"中键拖动 转视角 · Shift+中键 平移 · 滚轮 缩放 · Home 取景",
+		"Alt+左键拖 转视角 · Shift+左键拖 平移 · 中键拖 同（Shift/Alt+中键 平移）",
+		"滚轮 俯仰 · Ctrl+滚轮 缩放 · 拖右下坐标轴 转视角 · Home 取景",
 		"V/F/B/L/C 切工具 · T 选择 · M 移动 · E 擦除 · [ ] 改笔刷 · 1..8 选材质",
 		"Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消这一笔 / 退掉选区",
 		"Ctrl+A 全选 · Ctrl+C/X/V 复制 / 剪切 / 粘贴 · Del 清空选区",
 		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开（.qvx 可直接拖进窗口）",
 		"Ctrl+E 导出 .vox（MagicaVoxel 等外部工具可打开）",
 	]],
-	["触摸屏", [
+	["触摸屏 / 触摸板", [
 		"单指拖动 画 · 用左侧「擦除」开关代替右键",
+		"双指拖动 转视角 · 双指捏合 缩放（触摸板：Ctrl+滚轮 缩放）",
 		"「导航」模式下单指拖动 = 转视角 · −/+ 缩放 ·「取景」把模型框回画面",
 		"色块与按钮都按手指尺寸留足命中区，无需键盘即可完成全部操作",
 	]],
