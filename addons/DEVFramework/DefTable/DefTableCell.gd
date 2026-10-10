@@ -23,8 +23,9 @@ const CELL_MARGIN_L := 4.0
 const CELL_MARGIN_R := 2.0
 const CELL_MARGIN_T := 2.0
 const CELL_MARGIN_B := 2.0
-## 资源单元格缩略图边长: 撑满行高可用高度(减去上下边距), 避免图标明显小于同行文字
-const RESOURCE_PREVIEW_SIZE := ROW_HEIGHT - CELL_MARGIN_T - CELL_MARGIN_B
+## 资源单元格缩略图(模型/贴图预览)边长: 固定较大尺寸, 所在行由 View 撑高以容纳,
+## 保证模型/贴图缩略图看得清; 未加载到预览时不占用空间(见 set_resource_preview)
+const RESOURCE_PREVIEW_SIZE := 64.0
 
 ## 当前显示类型
 var kind: int = Kind.TEXT
@@ -219,11 +220,11 @@ func _build_resource_cell() -> void:
 	var tex := TextureRect.new()
 	tex.name = &"Preview"
 	tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	tex.custom_minimum_size = Vector2(RESOURCE_PREVIEW_SIZE, RESOURCE_PREVIEW_SIZE)
+	# 初始不占位; 加载到预览后由 set_resource_preview 撑到 RESOURCE_PREVIEW_SIZE
+	tex.custom_minimum_size = Vector2.ZERO
 	tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	# 行变高(多行内容)时缩略图跟着长高, 保持"与同行文字同级"的可见度
-	tex.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tex.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	tex.visible = false
 	box.add_child(tex)
 
@@ -286,6 +287,10 @@ func set_resource_preview(texture: Texture2D) -> void:
 		return
 	var tex := box.get_node_or_null(NodePath("Preview")) as TextureRect
 	if tex:
-		tex.visible = texture != null
 		if texture != null:
+			tex.custom_minimum_size = Vector2(RESOURCE_PREVIEW_SIZE, RESOURCE_PREVIEW_SIZE)
 			tex.texture = texture
+			tex.visible = true
+		else:
+			tex.custom_minimum_size = Vector2.ZERO
+			tex.visible = false

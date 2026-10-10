@@ -247,12 +247,7 @@ func _clear_grid_cells() -> void:
 
 
 func _is_def(res: Resource) -> bool:
-	var script: Script = res.get_script()
-	if script == null:
-		return false
-	if res is Def:
-		return true
-	return script.resource_path.begins_with("res://") and script.get_global_name().ends_with("Def")
+	return res is Def
 
 
 func _build_columns() -> void:
@@ -600,6 +595,9 @@ func _compute_layout() -> void:
 				var lh := _measure_bbcode_height(text, column_widths[col] - CELL_PADDING)
 				if lh > row_h:
 					row_h = lh
+		# 含资源预览(模型/贴图)的行按其缩略图尺寸撑高, 保证预览可见且不与相邻行重叠
+		if _row_has_resource_preview(rows[r]):
+			row_h = maxf(row_h, DefTableCellClass.RESOURCE_PREVIEW_SIZE + ROW_V_PADDING)
 		heights.append(row_h)
 	grid.set_row_heights(heights)
 	frozen_grid.set_row_heights(heights)
@@ -1189,6 +1187,18 @@ func _display_kind(col: int) -> int:
 		TYPE_DICTIONARY:
 			return DefTableCellClass.Kind.DICT
 	return DefTableCellClass.Kind.TEXT
+
+
+## 该行是否含可预览的资源引用(OBJECT 列): 用于把行撑高以容纳缩略图。
+## 判定与 _request_resource_preview 一致(Texture2D 或带路径的 Resource 才会真正出图)
+func _row_has_resource_preview(res: Resource) -> bool:
+	for col in range(1, columns.size()):
+		if column_types[col] != TYPE_OBJECT:
+			continue
+		var v = _get_value(res, col)
+		if v is Texture2D or (v is Resource and v.resource_path != ""):
+			return true
+	return false
 
 
 func _fill_cell(cell: DefTableCellClass, pos: Vector2i, tint: Color = Color(1, 1, 1, 0)) -> void:
