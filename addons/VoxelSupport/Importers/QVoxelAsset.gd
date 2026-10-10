@@ -2,7 +2,6 @@ class_name QVoxelAsset
 extends RefCounted
 
 ## QVX 资产的**块级**视图：把 QVoxelDocument 直接交给运行时数据层与网格生成器。
-##
 ## 【为什么不复用 VoxAsset】VoxAsset 的形状是 MagicaVoxel 专属的：`nTRN/nGRP/nSHP` 场景图、
 ## `frames` 动画帧、`LAYR` 可见性、Z-up、以及 `VoxelModel.size` 的"按尺寸居中 + Z 翻转"约定。
 ## QVX 的对应概念完全不同——**一个 `model_id` 就是一个 `VXEL`，摆放由 `NODE` 的 transform 决定**。
@@ -11,11 +10,9 @@ extends RefCounted
 ##      → **多模型只导入第一个，其余静默丢失**；
 ##   2. `NODE` 场景图完全不参与 → **各模型的位置/旋转丢失**；
 ##   3. 体素被摊平成 `Dictionary[Vector3i,int]` 再逐体素重映射回去 → 大模型多趟全量字典操作。
-##
 ## 【为什么本类以"块"为核心】QVX 的 `block_size` 恒等于 `VoxelChunk.CHUNK_SIZE`，
 ## 块坐标就是 chunk 坐标：因此"导入"在常见情形下只是一次块缓冲搬运（零逐体素重映射）。
 ## 只有需要融合变换（非恒等摆放 / 非 Y 朝上）时才逐体素展开——见 `is_block_importable()`。
-##
 ## 与 `VoxAsset` 的分工：`.vox` 走 `VoxAsset`，`.qvx` 走本类。两者都由导入器按扩展名分派。
 
 const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
@@ -31,7 +28,6 @@ var models: Dictionary = {}
 ## 帧动画（§12，`FRAM`）：model_id(int) → { "loop": bool, "fps": int, "tags": Array,
 ##                                        "frames": Array[{"duration_ms": int, "blocks": Dictionary}] }
 ## 帧的块表在解析期已由格式层**还原为完整块表**（块级增量只存在于文件里），所以这里直接可用。
-##
 ## 【为什么与 models 分成两个表，而不是给 models 的每项加一个 frames 数组】两者互斥
 ## （一个 model_id 只有一个体素源，§12.2），合成一张表就要在每个消费点判"这次该看 frames
 ## 还是看块"，而漏判一处就是静默渲染错帧。分表让"有没有动画"在类型层面就看得见。
@@ -40,7 +36,6 @@ var animations: Dictionary = {}
 ## 摆放表：每项 { "model_id": int, "transform": Transform3D, "name": String }。
 ## 来自 NODE 场景图（组的 transform 逐层累积到模型节点）；NODE 缺失或未引用某个模型时，
 ## 为该模型补一条恒等摆放。
-##
 ## 【为什么没有"帧"这一维】摆放属于**模型**（NODE 节点），动画属于**模型的体素**（FRAM 块）。
 ## 一份 FRAM 的每一帧共用同一个摆放 —— 所以"摆放 × 帧"是个伪维度：给它加一维，只会得到
 ## N 份完全相同的 transform。切帧要切的是 `frame_blocks()`，不是 `placements`。
@@ -61,9 +56,7 @@ var _block_bounds_cache: Dictionary = {}
 var _block_count_cache: Dictionary = {}
 
 
-# ----------------------------------------------------------------------------
 # 构造
-# ----------------------------------------------------------------------------
 
 ## 该路径是否由本适配器处理。导入器按扩展名分派：`.qvx` → QVoxelAsset，`.vox` → VoxAsset。
 static func handles(path: String) -> bool:
@@ -127,11 +120,9 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 
 ## NODE 场景图 → 摆放表（含每个节点累积后的世界变换）。
 ## 未出现在场景图中的模型补恒等摆放，保证"文件里有几个体素源就导入几个"。
-##
 ## 【为什么入参是 model_id 列表而不是"块表字典"】体素源有两个（静态 `VXEL` 与动画 `FRAM`），
 ## 而摆放枚举只关心"有哪些模型" —— 传 `models` 字典会让动画模型**一个都进不来**
 ## （它们不在 models 里），表现为"带 FRAM 的文件导入后少了几个模型"。
-##
 ## 【嵌套树直接递归下行】v3 的 nodes[] 每个节点自带 children[]（组）或 model_id（模型），
 ## "谁是根、谁是子"是结构本身 —— 不再需要"扫一遍 children 反查父表 + 挑出无父者"那一套
 ## （那套复杂度全部来自"身份即位置"的扁平表示，见 QVoxelFile 的 NODE 清洗）。
@@ -152,7 +143,6 @@ static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, model_ids: Ar
 
 ## 递归一层：按作者书写顺序先序下行（摆放顺序稳定且符合直觉 —— MeshLibrary 的项名/顺序
 ## 直接来自这里）。`parent_xf` 是父组累积下来的世界变换。
-##
 ## `known` = 文件里确实有体素的模型集合（判"这个节点指向的模型存不存在"）；
 ## `pending` = 还没被任何节点引用的模型（走完树后给它们补恒等摆放）。
 ## 两者分开：同一个模型被两个节点引用时，`known` 仍为真（两次引用都记进摆放，
@@ -181,7 +171,6 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
 
 
 ## NODE 场景图里各模型节点的 `anim` 元数据：model_id → {loop, fps, tags}（§12.3）。
-##
 ## 【为什么从场景图取，而不是从 doc.frames 取】`anim` 是**节点**的属性（时间轴元数据与
 ## "模型是谁"绑在一起），而 frames 只装体素。两者在文件里就是分开的两处，读的时候也照原样各取各的。
 static func _anim_meta_from_scene(doc: QVoxelFile.QVoxelDocument) -> Dictionary:
@@ -212,12 +201,10 @@ static func _collect_anim_meta(nodes: Array, out: Dictionary) -> void:
 ##   `t` 平移 `[x, y, z]`（体素单位）
 ##   `r` 旋转 **单位四元数** `[x, y, z, w]`（与 glTF 同构）
 ##   `s` 缩放 `[x, y, z]`
-##
 ## 【为什么旋转不是 0–23 朝向索引】那是 MagicaVoxel 为 `.vox` 的 `nTRN` 发明的省字节
 ## 编码：只有 24 种轴对齐朝向，还隐含 Z-up 约定。`.qvx` 是通用容器，没有义务继承它——
 ## 四元数只多一个浮点数就能表达任意旋转，且与 `Quaternion` / `Basis` / `Transform3D`
 ## 直接对接，读写两端不需要任何查表或位运算（那套解码留在 `VoxAccess` 里，只服务 `.vox`）。
-##
 ## 三者按 T·R·S 组合（与 glTF / 常规场景图层级一致：缩放先于旋转作用于节点自身坐标系）。
 ## 非单位缩放会破坏"体素坐标是整数"这一前提，因此带缩放的摆放自动落到逐体素融合路径
 ## （`is_block_importable()` 为假），由 `fused_voxels()` 取整投影。
@@ -252,9 +239,7 @@ static func _quaternion(v: Variant) -> Quaternion:
 	return Quaternion.IDENTITY
 
 
-# ----------------------------------------------------------------------------
 # 查询
-# ----------------------------------------------------------------------------
 
 func is_empty() -> bool:
 	return models.is_empty() and animations.is_empty()
@@ -317,7 +302,6 @@ func frame_count(model_id: int) -> int:
 
 
 ## 整份资产可切的帧数 = 所有动画模型的最大帧数；全静态资产返回 1（"只有一帧"）。
-##
 ## 【为什么取 max 而不是"各模型各自的帧数"】"整个资产在第 k 帧长什么样"要求所有模型都在
 ## 同一个 k 上有定义；取 max 后，帧数少的模型在 k 越界时 `frame_blocks()` 返回空（它不参与这一帧），
 ## 这正是 split_by_frame 逐帧导出想要的语义。
@@ -329,7 +313,6 @@ func total_frame_count() -> int:
 
 
 ## 第 k 帧的块表。**动画模型切帧渲染/导出的唯一入口**（静态模型则恒等于其静态块表）。
-##
 ## 【为什么越界返回空字典，而不是 clamp 到最后一帧】越界 = 调用方算错帧号或数据被改小。
 ## 悄悄返回最后一帧会让"播到头了"和"帧号算错了"长得一模一样；返回空块表则表现为"这帧是空的"，
 ## 同样一眼可见。取模/回绕属于**播放器**（它才知道 loop 与 direction），不该藏进这个纯查询里。
@@ -353,7 +336,6 @@ func is_animated(model_id: int) -> bool:
 
 
 ## 全部模型的块表合并（块坐标即 chunk 坐标；仅在 is_block_importable() 时有意义）。
-##
 ## `frame` 只对**动画模型**有影响（静态模型的块与帧无关），于是"静态资产传什么 frame 都一样"，
 ## 调用方不必先判有没有动画。合并顺序取 all_model_ids()（升序）—— 块键撞车时"谁赢"必须确定，
 ## 否则同一份文件两次导入可能得到不同网格（Dictionary 迭代序不保证稳定）。
@@ -434,7 +416,6 @@ func grid_size(frame: int = 0) -> Vector3i:
 
 ## 原点偏移（体素单位，叠加到渲染顶点）：按 `origin_mode`（见 QVoxelSource.OriginMode）。
 ## 与 `.vox` 路径共用 `QVoxelSource.origin_offset` 这一处实现——"两条路径位置一致"的保证就在这里。
-##
 ## 【为什么原点要按帧算】原点由**包围盒**导出，而包围盒随帧变（第 3 帧才长出的部分会把
 ## bottom_center 的原点往下推）。逐帧导出网格时若沿用第 0 帧的原点，后面几帧会整体偏移。
 func origin_offset(origin_mode: int = QVoxelSource.OriginMode.WORLD_ORIGIN,
@@ -442,9 +423,7 @@ func origin_offset(origin_mode: int = QVoxelSource.OriginMode.WORLD_ORIGIN,
 	return QVoxelSource.origin_offset(voxel_bounds(frame), origin_mode)
 
 
-# ----------------------------------------------------------------------------
 # 内部：包围盒
-# ----------------------------------------------------------------------------
 
 ## 任意块集合的精确体素包围盒（逐体素判空，只取非空体素）。
 ## 分项导出（每模型/每节点一份网格）也要各自居中，故做成静态可复用。

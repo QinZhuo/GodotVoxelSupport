@@ -2,26 +2,20 @@ class_name VoxelDirtyLedger
 extends RefCounted
 
 ## 体素数据层"脏账本"：把原先散落的 5 本账收拢成**一份带位标记的账本**。
-##
 ## 收拢前各自独立维护（新增一处脏标记很容易忘记清另一处 → 幽灵状态）：
 ##   写盘账 / 网格重建账 / 粗层失效账 / 粗层回退账 / 粗层脏区域账
-##
 ## 现结构：
 ##   _flags[level][key] -> 位标记（"为何脏"）
 ##     level 0   = LOD0 chunk 空间，key = chunk key        （标记 PERSIST / MESH）
 ##     level >=1 = 粗层 block 空间，key = block key        （标记 LOD_MESH / COARSE_MODIFIED）
 ##   _region[level][block_key] -> [gmin, gmax]（块内大格坐标，含端点；level >=1）
-##
 ## 统一的好处：标记 / 取走 / 擦除 / 平移 / 清空都只经过这里，"漏清一处"不再可能散落在
 ## QVoxelSource 的十几个函数里。区域账不是布尔（带 [min,max] 数据）故单独一张表。
-##
 ## 注意 level 0 的 key 空间是 chunk key 与粗层 block key **共用**的：_accept_chunk_buffer
 ## 对 lod>=1 的块回填也会往 level 0 打 MESH 标记，渲染器 is_chunk_mesh_dirty 读的就是它。
 ## 该约定是历史行为，收拢时原样保留。
 
-# ---------------------------------------------------------------------------
 # 位标记
-# ---------------------------------------------------------------------------
 ## 需写盘 / 随资源持久化（level 0）
 const PERSIST := 1 << 0
 ## 需重建网格（level 0）
@@ -65,9 +59,7 @@ static func _unset(layer: Dictionary, key: Vector3i, flag: int) -> void:
 		layer[key] = v
 
 
-# ---------------------------------------------------------------------------
 # 写
-# ---------------------------------------------------------------------------
 ## 给 (level, key) 叠加标记位（唯一写入口）
 func mark(level: int, key: Vector3i, flags: int) -> void:
 	var layer := _layer(_flags, level)
@@ -90,9 +82,7 @@ func mark_region(level: int, key: Vector3i, gmin: Vector3i, gmax: Vector3i) -> v
 	layer[key] = r
 
 
-# ---------------------------------------------------------------------------
 # 读
-# ---------------------------------------------------------------------------
 ## (level, key) 是否带某标记
 func has(level: int, key: Vector3i, flag: int) -> bool:
 	return level < _flags.size() and (int(_flags[level].get(key, 0)) & flag) != 0
@@ -163,9 +153,7 @@ func clear_regions() -> void:
 		d.clear()
 
 
-# ---------------------------------------------------------------------------
 # 清
-# ---------------------------------------------------------------------------
 ## 取走该层带某标记的全部 key，并清掉该标记（其余标记保留；条目归零即移除）
 func take(level: int, flag: int) -> Array[Vector3i]:
 	var out: Array[Vector3i] = []

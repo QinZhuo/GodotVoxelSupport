@@ -2,7 +2,6 @@ class_name VoxAsset
 extends RefCounted
 
 ## MagicaVoxel（`.vox`）资产的宿主：模型 / 材质 / 场景图（nTRN·nGRP·nSHP·LAYR）/ 动画帧。
-##
 ## 【只服务 `.vox`】`.qvx` 的对应概念形状不同（一个 `model_id` 一个 `VXEL` + `NODE` 定位，
 ## 没有 `nSHP`/frame/`Z` 翻转那套约定），由 `QVoxelAsset` 承载。把 `.qvx` 塞进本类会丢
 ## NODE 与多模型信息（详见 QVoxelAsset 类注释），故 `from_asset()` 遇到 `.qvx` 会直接报错。
@@ -25,7 +24,6 @@ static func from_asset(path: String) -> VoxAsset:
 
 
 ## 世界 → `.vox` 资产（"走出去"的出口，与 from_asset 恰成一对进出）。
-##
 ## 【为什么整世界合成**一个**模型，而不是"每模型一个 nSHP + 场景图摆放"】
 ## QVoxelier 的树是**编辑期**的层级，MagicaVoxel 的多模型场景图是另一套东西：它要求每个模型
 ## 自带摆放，而摆放必须抵消 VoxelModel.offset 那套"按尺寸居中"的约定（见 QVoxelAsset 类注释
@@ -33,7 +31,6 @@ static func from_asset(path: String) -> VoxAsset:
 ## 跨工具时才暴露的问题。而用户要的其实是一块**能拿去用的体素** —— 那就直接用框架里已有的
 ## 世界级求值（evaluate_world 已把各顶层节点按 origin 合成进一个紧致盒），导出的语义与画面上
 ## 看到的一致，且"世界怎么合成"这件事全项目仍然只有一份实现。
-##
 ## 【多模型的结构去哪了】并入这一块体积，不保留。`.vox` 里想表达"多个对象"要靠场景图，
 ## 而那是另一条语义路径（需 QVoxelier 侧先有"每个模型独立摆放"的概念，当前没有）。
 static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> VoxAsset:
@@ -43,7 +40,6 @@ static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> Vox
 
 ## 树上任一节点（组 / 模型）→ `.vox` 资产：**只取该节点自己局部盒里的体积**，不含它在父画布里的
 ## 摆放（摆放是"在哪个世界"的信息，而一份独立文件里没有那个世界）。
-##
 ## 批量导出的"每个节点 / 每个模型"走这条路。与 `from_world` 共用 `from_result` —— 于是
 ## "一块体积怎么变成资产"（含 Z 翻转那套约定）全项目只有一份实现，多一条出口就多一处能写错的地方。
 static func from_node(world: QVoxelWorld, node: QVoxelNode, ctx: QVoxelEvalContext = null) -> VoxAsset:

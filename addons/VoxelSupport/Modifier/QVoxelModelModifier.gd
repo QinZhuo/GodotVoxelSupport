@@ -3,7 +3,6 @@ class_name QVoxelModelModifier
 extends QVoxelModifier
 
 ## 体素域（VOXEL）修改器（自足产出型）—— 算法核是一个 PcgModel，自己重建整块体素。
-##
 ## 【为什么"自足产出"要单独一种子类】这类核（L-系统 / 元胞自动机 / WFC）不读既有体素，
 ## 它吐出的是一整块新体积，于是可以和前面的结果做并 / 差 / 交；而就地改写型
 ## （见 QVoxelVolumeModifier）被调用时已经吃到了整块体积，引擎无法在事后替它做布尔。

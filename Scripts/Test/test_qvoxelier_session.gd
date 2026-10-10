@@ -1,7 +1,6 @@
 extends TestCase
 
 ## 一期编辑会话（QVoxelEditSession）的契约测试。
-##
 ## 会话刻意不依赖任何节点，于是"手势 → 命令 → 撤销 → 数据源失效 → 唤醒渲染器"这整条链
 ## 可以在无头环境里跑完并逐项断言。这里钉死六条承诺：
 ##   ① 装配：对象 → 显示层（数据层 + 节点 + 调色板）由 create_for 一条路径铺好；
@@ -10,16 +9,13 @@ extends TestCase
 ##   ④ 作废（cancel）必须回滚 —— 否则 live 工具拖动中改的东西永远撤不掉；
 ##   ⑤ 刷新只命中受影响的 chunk（范围外保留缓冲），而不是整对象重算；
 ##   ⑥ 镜像写入让拖动**当场可见**，且每一次可见改动只唤醒渲染器一次。
-##
 ## 索引对齐：MAT / OTHER 是材质 ID，值 0 = 空。
 
 const MAT := 1
 const OTHER := 2
 
 
-# ----------------------------------------------------------------------------
 # 夹具
-# ----------------------------------------------------------------------------
 
 func _session(grid := Vector3i(128, 128, 128)) -> QVoxelEditSession:
 	var w := QVoxelWorld.create_empty()
@@ -43,9 +39,7 @@ func _dirty_set(s: QVoxelEditSession) -> Dictionary:
 	return d
 
 
-# ----------------------------------------------------------------------------
 # 装配
-# ----------------------------------------------------------------------------
 
 func test_create_for_wires_object_data_and_palette() -> void:
 	var s := _session()
@@ -68,9 +62,7 @@ func test_palette_is_copied_from_the_world() -> void:
 	assert_eq(s.data.materials[2].color, Color(0, 0, 1), "同上")
 
 
-# ----------------------------------------------------------------------------
 # 拾取
-# ----------------------------------------------------------------------------
 
 func test_pick_reads_geometry_from_the_display_layer() -> void:
 	var s := _session()
@@ -94,9 +86,7 @@ func test_pick_without_incident_face_cannot_start() -> void:
 	assert_false(s.active(), "手势没开始")
 
 
-# ----------------------------------------------------------------------------
 # 手势 → 命令 → 撤销栈
-# ----------------------------------------------------------------------------
 
 func test_one_gesture_is_one_undo_unit_and_writes_both_ledgers() -> void:
 	var s := _session()
@@ -165,9 +155,7 @@ func test_cancel_before_any_write_touches_nothing() -> void:
 		"没写过任何格 → 连一次「作废」都不该发生（空手势不该引起重建）")
 
 
-# ----------------------------------------------------------------------------
 # live / span
-# ----------------------------------------------------------------------------
 
 func test_live_tool_mirrors_the_stroke_immediately() -> void:
 	var s := _session()
@@ -205,9 +193,7 @@ func test_span_tool_writes_only_at_release() -> void:
 	assert_eq(s.object.get_voxel(4, 1, 6), MAT, "另一个角点也在（含端点）")
 
 
-# ----------------------------------------------------------------------------
 # 刷新
-# ----------------------------------------------------------------------------
 
 func test_refresh_only_targets_the_chunks_that_changed() -> void:
 	var s := _session()

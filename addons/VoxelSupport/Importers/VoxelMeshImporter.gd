@@ -24,7 +24,6 @@ enum Shape {
 }
 
 ## 导入选项描述表 —— 选项定义的**单一出处**，且是静态的。
-##
 ## 【为什么必须静态】`EditorImportPlugin` 只能在编辑器进程实例化：headless/CI 里
 ## `VoxelMeshImporter.new()` 直接失败（"Class 'EditorImportPlugin' can only be instantiated
 ## by editor."）。此前测试只能靠"缺键 → 消费方各自读默认值"侥幸通过，一旦某个选项是硬取键
@@ -94,7 +93,6 @@ func _get_import_options(_path, _preset) -> Array[Dictionary]:
 
 ## 选项名 → 默认值：给拿不到插件实例的调用方用（headless 测试、工具脚本）。
 ## 实例方法 `_get_import_options()` 只在编辑器里可用，这条路径才与进程无关。
-##
 ## ⚠️ GDScript 的静态调用按**定义所在脚本**解析，不走虚函数派发：继承来的 `default_options()`
 ## 里调 `option_specs()` 只会拿到基类那张表。所以子类必须重写本方法转发自己的表。
 static func default_options() -> Dictionary:
@@ -127,7 +125,6 @@ func _get_priority() -> float:
 
 ## sphere_* 选项仅在形状选择 sphere 时显示
 ## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
-##
 ## frame_index = 取哪一帧生成**单个**网格：`.vox` 是 MagicaVoxel 的体素动画帧；
 ## `.qvx` 是 `FRAM` 帧动画（§12）—— 静态 `.qvx` 只有第 0 帧，该选项恒等于 0、无副作用。
 ## 选项始终可见（不按文件内容隐藏）：可见性回调拿不到已解析的资产，为它多load一次文件不值当。

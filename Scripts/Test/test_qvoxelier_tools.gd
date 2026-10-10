@@ -1,7 +1,6 @@
 extends TestCase
 
 ## 一期画笔工具族的契约测试：几何（QVoxelBrushGeometry）+ 手势状态机（QVoxelBrushTool）。
-##
 ## 这里不碰场景树、不碰输入、不碰渲染 —— 工具被刻意设计成"产出坐标的纯逻辑"，
 ## 于是它的正确性可以在无头环境里逐格断言。钉死五条承诺：
 ##   ① 五种笔共用同一次手势骨架：按下取锚点 → 拖动更新端点 → 松手交产物；
@@ -14,9 +13,7 @@ const MAT := 7
 const OTHER := 3
 
 
-# ----------------------------------------------------------------------------
 # 工具
-# ----------------------------------------------------------------------------
 
 ## 造一个拾取上下文。solid 字典的键 = 实心格，值 = 材质 id ——
 ## 用它替代真实的 QVoxelSource，测试就能在纯内存里描述任意形状。
@@ -55,9 +52,7 @@ func _cells_of(v: Array[Vector3i]) -> Dictionary:
 	return d
 
 
-# ----------------------------------------------------------------------------
 # 几何
-# ----------------------------------------------------------------------------
 
 func test_line_is_connected_and_lands_on_both_ends() -> void:
 	var a := Vector3i(0, 0, 0)
@@ -196,9 +191,7 @@ func test_region_stops_at_gaps() -> void:
 	assert_false(cells.has(Vector3i(0, 0, 7)), "断开的部分不得被收进来")
 
 
-# ----------------------------------------------------------------------------
 # 手势骨架
-# ----------------------------------------------------------------------------
 
 func test_voxel_brush_click_paints_one_cell_outside_the_face() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
@@ -257,7 +250,6 @@ func test_begin_rejects_hits_without_an_incidence_face() -> void:
 
 
 ## 回归：拖动时把鼠标移出模型（射线落空 → 拾取里是 Vector3i.MIN 哨兵）不得污染端点。
-##
 ## 【这条曾经是"画几下整机卡死"的现场】MIN 是"没有落笔点"的哨兵，不是坐标。它一旦写进端点，
 ## 盒 / 线笔就会拿 -2^31 当角点去生成格子：`box()` 的 range 变成 21 亿次 append，
 ## 内存打穿后引擎**逐次**报 OOM（连调用栈一起打），实测刷出 1.27GB 日志、游戏与编辑器双双卡死。
@@ -306,9 +298,7 @@ func test_hover_previews_without_starting_a_gesture() -> void:
 	assert_true(tool.release().is_empty(), "没按下过 → 松手无产物")
 
 
-# ----------------------------------------------------------------------------
 # 作用域判据（面笔 / 填充）
-# ----------------------------------------------------------------------------
 
 func test_face_brush_paints_the_exposed_layer_only() -> void:
 	var solid := _plate(MAT)
@@ -344,9 +334,7 @@ func test_fill_brush_stops_at_material_boundary() -> void:
 	assert_false(cells.has(Vector3i(2, 0, 0)), "异材质的那一块不得被吞掉")
 
 
-# ----------------------------------------------------------------------------
 # 尺寸与裁剪
-# ----------------------------------------------------------------------------
 
 func test_brush_size_dilates_the_stroke() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
@@ -386,9 +374,7 @@ func test_out_of_grid_cells_are_dropped() -> void:
 		assert_true(c.x < grid.x and c.y < grid.y and c.z < grid.z, "产物必须全在网格内")
 
 
-# ----------------------------------------------------------------------------
 # 工具表
-# ----------------------------------------------------------------------------
 
 func test_mode_table_is_complete_and_hotkeys_are_unique() -> void:
 	var seen := {}

@@ -2,7 +2,6 @@ class_name QVoxelStream
 extends VoxelStream
 
 ## 磁盘文件流（QVX 单文件块流）—— .qvx 格式，一个文件承载整个世界。
-##
 ## 取代旧的 .voxr region 存储。设计见 docs/QVX_FORMAT.md。三点核心差异：
 ##   1. 单文件：整个世界（所有 chunk、所有 LOD 层、材质、元数据）落在一个 .qvx，
 ##      而不是"每 region 一个文件"。文件数恒为 1。
@@ -10,20 +9,16 @@ extends VoxelStream
 ##      之后 save/load/has 全部 O(1) 命中内存。重写时按块重组，未知块原样保留。
 ##   3. 缓存可删：LOD 降采样、杂项派生数据可选写入 CACH（读取时忽略），
 ##      删掉 CACH 块不损失语义（P5）。
-##
 ## 与上层契约（VoxelStream 抽象）完全一致，QVoxelSource / VoxelRenderer 无感知：
 ##   buffer = PackedInt32Array(CHUNK_VOLUME)，值 = 材质ID（0 = 空）。
 ##   lod=0 走 VXEL model 0（唯一的权威体素数据）；lod>=1 走 CACH（派生缓存）。
-##
 ## 【为什么 LOD 不写进 VXEL】粗层块由 LOD0 降采样得到，不含任何 LOD0 没有的信息，
 ## 因此它是**派生数据**——存成 model 会污染 VXEL 的语义（模型数、NODE 引用、
 ## 导入器的 split_by_model 都会把它当成一个真实模型），而 CACH 的定义恰好是
 ## "删掉语义为零"（§6）。于是取值路径只有一条：**权威数据永远从 VXEL 读，
 ## 派生的粗层数据永远从 CACH 读**，两条路互不干扰。
-##
 ## 块坐标 == chunk 坐标：QVX 的 block_size 与 VoxelChunk.CHUNK_SIZE 同为 32，
 ## 因此 chunk_key 可直接作为 QVX 的块索引 (bx,by,bz)，无需换算。
-##
 ## 【持久化策略】内存只保留"未落盘的改动"（覆盖层 + 删除墓碑）+ 脏标记 + flush() 原子落盘。
 ##   - save_chunk 只改覆盖层并置脏，不立即写盘（避免每块一次整文件重写）
 ##   - flush() / 达到 auto_flush_dirty 阈值时才序列化（临时文件 + rename）；
@@ -80,9 +75,7 @@ var _write_result: Array = []
 ## 因此成功收尾只需丢弃快照——不必回头分辨"哪些条目是本次写的、哪些是飞行中新加的"。
 var _inflight: Dictionary = {}
 
-# ----------------------------------------------------------------------------
 # 内存状态：只留"未落盘的改动"，不留全世界的解码镜像
-# ----------------------------------------------------------------------------
 # 【为什么不再常驻全世界】旧实现用 _models 把文件里每个 chunk 都解码后长期留在内存，
 # 内存随探索范围**无界增长**。但"已落盘的干净数据"本就由磁盘 + 数据层 QVoxelSource 的流式
 # 缓存（受流式半径界定）共同持有，存储层再存一份纯属重复。于是这里只留尚未落盘的部分：
@@ -115,7 +108,6 @@ var _deleted_lod: Dictionary = {}
 ##       "codec": int,
 ##       "source_crc": Array, 落盘时它依赖的 LOD0 子块 CRC 集合（读时与当前比较判失效）
 ##   } }
-##
 ## 【为什么是索引而不是解码缓存】粗层块同样随探索范围无界增长；只记"条目在哪、来源是什么"，
 ## 缓冲区按需 seek 读盘 + 解码（与 _read_clean_chunk 同构）。来源校验因此也移到**读时**：
 ## 任何一次 LOD0 编辑都会即时让相关缓存失效，而不必在加载时把整批缓存解码一遍。
@@ -136,7 +128,6 @@ var _dirty_global := false
 
 ## 【增量写】上次解析出的块字节索引（doc.block_index 的副本）。
 ## 用于搬运未变块的原始字节；落盘失败或索引异常时置空 → 下次退化为全量写（安全）。
-##
 ## 【为什么不再常驻"原始文件字节"】此前与它配对还留了一份 `_raw_bytes` = 整份文件的
 ## 字节副本，等于在解码后的世界之外又常驻一份编码后的世界（内存翻倍）。
 ## 现在增量写的基准字节**按需从磁盘读一次**（见 _read_base_bytes）：读盘是 memcpy 级 I/O，
@@ -146,7 +137,6 @@ var _block_index: Array = []
 ## 【增量写 + 单块读·二级索引】每个 VXEL 的子块索引：{ model_id(int): index_vxel_blocks() 的结果 }。
 ## 除 index_vxel_blocks 给出的子块区间/CRC 外，本类还在其 `_meta` 里补一个 `base` 键
 ## = 该 VXEL 负载在**文件中的绝对起始偏移**（子块区间是相对的，读单块时必须叠上它）。
-##
 ## 【为什么必须缓存】index_vxel_blocks 要为整个 VXEL 负载（1.4MB）算一遍逐子块 CRC，
 ## 约 90ms。若每次写盘都重建，子块级增量省下的时间会被它原样吃回去 —— 实测正是如此
 ## （改 1 个 chunk 仍要 447ms）。这里把它当**持久索引**：加载时建一次，之后每次写盘
@@ -169,9 +159,7 @@ var _loaded_node: Dictionary = {}
 var _unknown_blocks: Dictionary = {}
 
 
-# ----------------------------------------------------------------------------
 # 路径 / 目录
-# ----------------------------------------------------------------------------
 
 func _ensure_dir() -> void:
 	var dir := file_path.get_base_dir()
@@ -180,9 +168,7 @@ func _ensure_dir() -> void:
 		DirAccess.make_dir_recursive_absolute(abs)
 
 
-# ----------------------------------------------------------------------------
 # 加载 / 保存（整文件）
-# ----------------------------------------------------------------------------
 
 ## 确保内存权威数据已从磁盘载入（幂等）。文件不存在则视为空世界。
 func _ensure_loaded() -> void:
@@ -233,7 +219,6 @@ func _ensure_loaded() -> void:
 
 
 ## 把未落盘的改动写盘（原子：写临时文件 → rename）。
-##
 ## 【增量写】磁盘上已有本文件时走 QVoxelFile.serialize_incremental：只有变了的子块被重编码，
 ## 其余块（含 HEAD/MATE/NODE/未知块/CACH）直接搬运磁盘原始字节。这消除了"改一个 chunk
 ## 就重编码全世界所有 VXEL 块"的浪费（规范 §4 明示"块是编辑的局部性单位"）。
@@ -396,7 +381,6 @@ func _can_write_incremental() -> bool:
 
 
 ## 读取磁盘上的基准字节（增量写搬运未变块用）。
-##
 ## 【为什么不常驻】它等于"整份文件的字节副本"。改为每次写盘按需读一次：
 ## 代价是一次文件读（memcpy 级），而收益是彻底去掉一份随世界增长的内存。
 func _read_base_bytes() -> PackedByteArray:
@@ -443,12 +427,10 @@ func _refresh_vxel_index(bytes: PackedByteArray) -> void:
 
 
 ## 建/更新 VXEL 子块索引 { model_id: index_vxel_blocks + _meta.base }。基于 _block_index + bytes。
-##
 ## 维护策略（"跟着写入走"）：_dirty_models 里的 model 重算子块索引（其字节变了），
 ## 其余沿用旧索引（字节原样搬运，子块偏移与 CRC 依旧准确）。
 ## 于是单次写盘的重索引代价 = O(脏 model 的子块数)，与全世界大小无关。
 ## bytes 必传：基准字节不再常驻（见 _block_index 注释），由调用方提供当前字节。
-##
 ## `_meta.base`（本 VXEL 负载在文件中的绝对偏移）**每个 model 都要刷**：前面的块大小一变，
 ## 后面所有块的绝对偏移就跟着变 —— 字节没变、索引内容仍有效，但读单块时要用它定位。
 func _build_vxel_index(block_size: int, bytes: PackedByteArray) -> void:
@@ -499,7 +481,6 @@ func _build_head() -> Dictionary:
 
 
 ## 上层材质数组 → QVX MATE Dictionary 列表。
-##
 ## 转换本身在 VoxelMaterial.to_mate()（写盘与导入共用的唯一实现，见那里的量纲与缺口说明）：
 ## 这里只负责两件存储层的事——(1) 条目 0 恒为空气（§4 格式不变量，体素值 0 就是空气）；
 ## (2) 逐条归一化，使"加载 → 改块 → flush"多次写盘稳定（幂等）。
@@ -523,13 +504,10 @@ func _overlay_doc_models() -> Dictionary:
 	return out
 
 
-# ----------------------------------------------------------------------------
 # LOD 派生缓存（CACH，§6）
-# ----------------------------------------------------------------------------
 # 粗层块由 LOD0 降采样得到，是**派生数据**：缓存内容与"它依赖哪些 LOD0 块"一起落盘，
 # 读取时对后者做一次精确的**集合比较**——不一致就丢弃重算（§6 失效规则 1）。
 # 于是"LOD0 被编辑过、但缓存尚未重算"这种状态在磁盘上无法伪装成有效缓存。
-#
 # 负载布局（kind="LODS"，格式层不解释，完全由本类定义）：
 #   uint16 lod ‖ [ int32 bx,by,bz ‖ uint8 codec ‖ uint32 plen ‖ plen 字节 ]
 # 定长前置 2 + 17 = 19 字节。带 plen 是为了让"缓存内容在哪结束"成为块内事实（P4）：
@@ -539,11 +517,9 @@ const LOD_ENTRY_HEADER := 2 + QVoxelSpec.VOX_BLOCK_HEADER_SIZE
 
 
 ## 从文件字节建 CACH 条目索引（只读头部，**不解码**内容）。
-##
 ## 非本流 kind / 算法版本、结构非法、或无法定界的条目一律不入选 —— 它们既不参与"按需读"，
 ## 也不会被写盘替换（serialize_incremental 只跳过 _cach_replace_offsets 给出的偏移），
 ## 于是保持不透明、原样保留。这正是 §6"忽略缓存的读者与用满缓存的读者结果相同"的前提。
-##
 ## payload_off 记的是**内层 vox 负载在文件中的绝对偏移**，据此按需 seek 读盘
 ## （与 VXEL 的 _read_clean_chunk 同构）；block_off 记顶层 CACH 块偏移，供增量写定位旧块。
 func _build_cach_index(bytes: PackedByteArray) -> void:
@@ -590,7 +566,6 @@ func _build_cach_index(bytes: PackedByteArray) -> void:
 
 
 ## 把**变化了的**粗层块编码为 CACH 块字节（含 12 字节块头）。没有变化时返回空。
-##
 ## 只编码 _dirty_lod：删除的条目无需新字节（serialize_incremental 跳过其旧块即完成删除），
 ## 未变的条目留在磁盘上原样搬运。source_crc 必须取**本次写出的** LOD0 子块 CRC，
 ## 故调用点必须在 _refresh_index_from 之后（见 _write_file 的"顺序要紧"注释）。
@@ -725,7 +700,6 @@ func _valid_lod_keys(lod: int) -> Dictionary:
 
 
 ## 一个粗层块**当前应有**的来源 CRC 集合（升序去重，§6 的表示要求）。
-##
 ## 来源 = 它覆盖的 2^lod³ 个 LOD0 chunk（VoxelChunk.lod_covered_chunks，与降采样同一套
 ## 坐标），CRC 直接取 _vxel_index[0] 里已算好的**子块 CRC**：降采样只读这些 chunk，
 ## 故这一组值足以判定"缓存是否过期"，且不产生任何额外扫描（索引本就为增量写而建）。
@@ -765,9 +739,7 @@ func _compare_block_keys(a: Vector3i, b: Vector3i) -> bool:
 	return a.z < b.z
 
 
-# ----------------------------------------------------------------------------
 # VoxelStream 接口实现
-# ----------------------------------------------------------------------------
 
 ## lod=0 → 写入覆盖层（落盘时才进 VXEL model 0）；lod>=1 → CACH 派生缓存（见类注释）。
 func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> void:
@@ -899,7 +871,6 @@ func get_chunk_count(lod: int = 0) -> int:
 
 
 ## 从文件按块索引 seek 出那一块并解码（不解析整个 model）。磁盘上没有 → 空。
-##
 ## 【为什么按需读盘】干净块不再常驻内存（见 _dirty_buffers 的注释），取值路径只有两条：
 ## 内存覆盖层（未落盘）/ 磁盘随机读（已落盘）。块索引已给出该子块精确的 payload 区间，
 ## 因此读的是一小块（十几 KB）而非整个 VXEL，代价与块大小同阶。
@@ -978,9 +949,7 @@ func supports_lod_layer() -> bool:
 # 编排（去重、限流、后台派发、结果回填）由 VoxelAsyncLoader 一处负责。
 
 
-# ----------------------------------------------------------------------------
 # 上层注入 / 查询
-# ----------------------------------------------------------------------------
 
 ## 注入材质数组（QVoxelSource.materials）。flush 时写入 MATE 块。
 func set_materials(mats: Array) -> void:

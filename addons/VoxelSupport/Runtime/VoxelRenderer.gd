@@ -14,41 +14,33 @@ extends MeshInstance3D
 #   与 **1 个 deferred 委托壳**（`_flush_lod_mesh_apply_queue`：deferred 目标须是节点，
 #   避免 RefCounted 被释放后野调用）。
 #   约定：标记行紧贴成员的 `##` 文档块上方；一个成员的区间 = 标记行起，至下一个顶格非空行止。
-#
 # ── 内核对外契约────────────────────────────────────────────────────────
 # 【目标形态】内核公开 API 只有两种形状：**按 chunk 索引** 与 **脏区域事件**。
 #   "整块重算"式接口（重算全部 chunk / 返回整个世界）一律不提供 —— 那是无限层挂不上来的根因。
 #   注意 `request_update()` **不是**"整块重算"：它只置一个"下一帧重建"的唤醒位，真正的重建
 #   粒度始终是 chunk，由数据层脏账本（`VoxelDirtyLedger` → `data.get_dirty_chunks()`）给出。
-#
 # 【A. 脏区域事件（内核 → 外层，唯一载体）】
 #   内核在 `_update_mesh_async` 把脏 chunk 列表交给外层做可见性决策：
 #     `infinite_layer.filter_visible_chunks(rebuild_chunks)`（首次全量时传的是全部 chunk 列表）。
 #   脏区域真值只有一份：`QVoxelSource` 的 mesh 脏位（`get_dirty_chunks()` / `mark_chunk_dirty()`）。
 #   粒度可断言（见 Scripts/Test/test_voxel_kernel_contract.gd）：内部点编辑 → 恰好 1 个 chunk；
 #   chunk 角点编辑 → 恰好 4 个（自身 + 3 个负向邻块）；**永不**退化为"全部 chunk"。
-#
 # 【B. 按 chunk 索引 · 写】
 #   request_update()               唤醒下一帧重建（粒度由脏账本决定）
 #   remove_chunk_mesh(ck)          释放该 chunk 的网格（+碰撞+队列条目）
 #   shift_render(shift, cs_world)  原点漂移：整体平移渲染账本（一次性，不在每帧路径）
 #   mount_lod_mesh / mark_lod_block_empty / clear_lod_mesh    粗层块网格挂 / 标空 / 卸
 #   set_lod_level_count / clear_lod_level                     粗层层数
-#
 # 【C. 按 chunk 索引 · 查】
 #   has_chunk_mesh(ck) / has_lod_mesh(level, bk) / lod_mesh(level, bk) / lod_mesh_keys(level)
 #   is_mesh_build_queued(ck) / lod_materials(level) / lod_level_count() / surface_materials()
-#
 # 【D. 只读环境】
 #   data / voxel_scale / global_position（节点自带） / current_camera() / get_data()
-#
 # 【E. 生命周期覆盖点】
 #   on_origin_shift(shift)   子类（VoxelDestructible）平移自己的在途队列
-#
 # 【F. 兼容别名 / 插件公开 API（P4 收口；勿新增依赖）】
 #   mark_dirty（= request_update） / force_update / regenerate_materials
 #   set_voxel / remove_voxel / get_voxel
-#
 # 【不在契约内】相机、LOD 分带、流式加载卸载、视锥剔除、原点漂移判定、异步块供需
 #   —— 全在 VoxelInfiniteLayer。内核只回答"按 chunk 建 / 删网格"。
 # 【依赖方向】无限层 → 内核：读上述面 + 按键写网格账本（另按既有约定读 5 个 `@export`
@@ -58,7 +50,6 @@ extends MeshInstance3D
 #   `clear_lod_state` / `on_mesh_removed` / `set_visibility_mode` / `configure_lod`），
 #   **不触碰它的私有字段**。
 # 【锁定】本清单与 test_voxel_kernel_contract 的期望表一一对应：增删任何公开方法必须同时改两处。
-# ──────────────────────────────────────────────────────────────────────────────
 
 signal mesh_updated
 
@@ -651,12 +642,10 @@ func on_origin_shift(_shift: Vector3i) -> void:
 	pass
 
 
-# ----------------------------------------------------------------------------
 # 多层级 LOD 渲染（lod_count 控制层级数，view_distance 自动等比 ×2 分带）
 #   LOD0 全精度 chunk（level 0 block == chunk）；LOD i 大块每格 2^i 体素。
 #   分带：LOD_i 显示区 = [outer[i-1], outer[i]]（outer[i] = view_distance / 2^(lod_count-1-i)）。
 #   各层 block 生成/移除/可见性带滞回 margin，交界处内层未就绪时用外层兜底防空洞。
-# ----------------------------------------------------------------------------
 
 
 
@@ -819,7 +808,6 @@ func _update_mesh_async() -> void:
 
 	# 后台线程生成纯数据（线程安全，不触碰 ArrayMesh）
 	# 将 voxel_scale 等渲染参数作为任务参数传入，避免子线程访问节点属性
-	#
 	# 每个脏 chunk 独立一个线程任务，WorkerThreadPool 内部管理并发数
 	# per-chunk 异步生成（唯一网格路径）
 	# 可见性决策：全量走所有 chunk；增量先清除"已变空"chunk 的残留 mesh 再决策。

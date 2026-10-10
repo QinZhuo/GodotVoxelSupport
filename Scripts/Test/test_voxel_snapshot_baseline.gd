@@ -1,22 +1,18 @@
 extends TestCase
 
 ## P0-6 无头回归测试：固定种子生成 → 网格 → 快照哈希（逐字节）。
-##
 ## 【为什么需要它】P1/P2 要把 VoxelRenderer / QVoxelSource 拆开（声明为"纯搬迁、行为等价"），
 ## 但"搬迁没改变行为"不能靠肉眼 —— 需要一份**逐字节基线**：同 seed 生成同一块体积、
 ## 切成同样的 chunk、过同一个几何内核，产物字节序列必须与基线完全一致。任一环节漂移
 ## （生成算法、chunk 存储布局、halo/面生成、实心-透明分桶、索引偏移、材质判定）都会改变哈希。
-##
 ## 【为什么是黄金常量，而不是"跑两次相等"】只比对两次运行的结果只能测"确定性"，
 ## 测不出"重构把结果改了"——两边一起变照样相等。故把基线钉死成常量：重构后必须逐字节不变；
 ## 若确实要合法地改结果（内核调优等），必须同期更新常量并说明原因
 ## （与 test_voxel_mesh_kernel 的黄金三角形数同一约定）。
-##
 ## 【覆盖路径】QVoxelSource(node = PcgTerrain) → _accept_chunk_buffer
 ##   → get_all_chunk_keys / _chunk_buffers_view → VoxelMeshGenerator.generate_arrays_from_chunks
 ##   （内部 = build_halo_from_buffers + NativeLoader.generate_chunk_dense，
 ##    与 VoxelRenderer 逐 chunk 构建用的是同一条内核）。
-##
 ## 【为什么是编辑器侧】纯数据 + 几何内核，不需要场景树；渲染器的异步/GPU 上传路径
 ## 由 test_voxel_runtime_smoke（游戏进程）覆盖。
 
@@ -41,9 +37,7 @@ const MESH_KEYS := [
 ]
 
 
-# ----------------------------------------------------------------------------
 # 基线
-# ----------------------------------------------------------------------------
 
 ## 固定 seed 生成 → 存储 → 网格：体积哈希、网格哈希、体素数、chunk 数、三角数全部钉死。
 func test_snapshot_baseline_is_stable() -> void:
@@ -57,9 +51,7 @@ func test_snapshot_baseline_is_stable() -> void:
 	assert_eq(_mesh_hash(arrays), GOLD_MESH_HASH, "逐字节网格哈希应与基线一致")
 
 
-# ----------------------------------------------------------------------------
 # 确定性 / 种子敏感（防"基线恒为常量"的假绿）
-# ----------------------------------------------------------------------------
 
 ## 同 seed 两次生成必须逐字节一致；换 seed 必须改变体积哈希。
 ## 前者保证基线是确定性的（否则上面的常量会随机飘），后者保证基线不是"恒为某常数"
@@ -73,9 +65,7 @@ func test_generation_is_deterministic_and_seed_sensitive() -> void:
 	assert_ne(c, a, "不同 seed 应得到不同体积（否则哈希测不出任何东西）")
 
 
-# ----------------------------------------------------------------------------
 # 辅助
-# ----------------------------------------------------------------------------
 
 ## 固定 seed 的程序化地形 → QVoxelSource（逐 chunk 回填，绕过异步加载，纯主线程确定性）。
 func _build_data(seed_v: int) -> QVoxelSource:

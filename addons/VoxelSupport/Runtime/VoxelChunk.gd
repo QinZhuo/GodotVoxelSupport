@@ -1,7 +1,6 @@
 class_name VoxelChunk
 extends RefCounted
 ## Chunk 几何常量的唯一权威源 + 共享坐标换算。
-##
 ## QVoxelSource 与 VoxelChunkGenerator 通过别名引用这里的常量，
 ## 防止两边重复定义导致漂移（如 HALO_SIZE 写错 → 光环下标 Y/Z 步长错位）。
 ## 两种线性下标约定：
@@ -64,9 +63,7 @@ static func halo_index_world(wx: int, wy: int, wz: int, origin: Vector3i) -> int
 	return halo_index(wx - origin.x + HALO, wy - origin.y + HALO, wz - origin.z + HALO)
 
 
-# ----------------------------------------------------------------------------
 # 坐标键字典平移（origin shift）
-# ----------------------------------------------------------------------------
 
 ## 把"以 chunk / block 坐标为键"的字典整体平移（origin shift）。
 ## 各层曾各写一份相同实现，漏改一处就会出现"平移后某张表仍指旧坐标"，故收在此处唯一实现。
@@ -89,9 +86,7 @@ static func shift_positions(positions: Array, offset: Vector3i) -> Array:
 	return out
 
 
-# ----------------------------------------------------------------------------
 # LOD 大块几何
-# ----------------------------------------------------------------------------
 # 约定（见 QVoxelSource.LOD_GRID / VoxelChunkGenerator.LOD_BLOCK_SIZE）：
 #   LOD 大块 = CHUNK_SIZE³ 个大格，每格代表 2^lod 体素。
 #   故边长 = CHUNK_SIZE × 2^lod 体素 → 每轴覆盖 2^lod 个 LOD0 chunk。

@@ -1,7 +1,6 @@
 extends TestCase
 
 ## 命令层契约测试：QVoxelPropertyCommand（O(1) 属性撤销）+ QVoxelMacroCommand / 撤销栈的宏。
-##
 ## 钉死四条硬承诺 —— 每一条都对应一个"以后重构很容易悄悄弄坏"的点：
 ##   ① 撤销是**精确还原**而不是反向重算：撤到的是原值，且"没真改"不占一次撤销；
 ##   ② 链的增删重排也是属性（`modifiers` 数组的前后两份）→ 不需要第二个命令类，
@@ -23,9 +22,7 @@ func _count_hits(obj: QVoxelModel) -> Array:
 	return hits
 
 
-# ----------------------------------------------------------------------------
 # ① 精确还原 + 无变化不入栈
-# ----------------------------------------------------------------------------
 
 func test_property_command_restores_exact_value() -> void:
 	var obj := _obj()
@@ -57,9 +54,7 @@ func test_no_real_change_is_not_a_command() -> void:
 	assert_false(drag.commit(), "滑条拖回原位的空手势不入栈")
 
 
-# ----------------------------------------------------------------------------
 # ② 链编辑就是属性
-# ----------------------------------------------------------------------------
 
 func test_chain_edit_is_a_property_command() -> void:
 	var obj := _obj()
@@ -85,9 +80,7 @@ func test_chain_edit_is_a_property_command() -> void:
 	assert_eq(obj.modifiers[1].combine, QVoxelDomain.Combine.SUBTRACT, "重做恢复的是同一个条目")
 
 
-# ----------------------------------------------------------------------------
 # ③ 改参数要标脏宿主对象
-# ----------------------------------------------------------------------------
 
 func test_modifier_param_marks_owner_dirty() -> void:
 	var obj := _obj()
@@ -117,9 +110,7 @@ func test_object_property_marks_itself_dirty() -> void:
 	assert_eq(hits[0], 1, "对象自身属性同样要标脏")
 
 
-# ----------------------------------------------------------------------------
 # ④ 宏
-# ----------------------------------------------------------------------------
 
 func test_macro_folds_multiple_steps() -> void:
 	var stack := QVoxelUndoStack.new()
@@ -217,9 +208,7 @@ func test_clear_drops_open_macro() -> void:
 	assert_eq(stack.size(), 0)
 
 
-# ----------------------------------------------------------------------------
 # 撤销栈的通用语义（属性命令作为最轻的命令载体来验证）
-# ----------------------------------------------------------------------------
 
 func test_push_truncates_redo_branch() -> void:
 	var stack := QVoxelUndoStack.new()

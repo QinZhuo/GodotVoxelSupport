@@ -2,7 +2,6 @@ extends TestCase
 
 ## P3「统一生成流水线」的契约测试：求值引擎（QVoxelEvalEngine）+ 数据层的逐 chunk 供数
 ## （QVoxelSource）。
-##
 ## 钉死四条硬承诺 —— 每一条都对应一个"以后重构很容易悄悄弄坏"的点：
 ##   ① 手绘体素是链的**输入/种子**，不是链的一环 → 链首那条的 combine 决定它怎么与手绘相合；
 ##   ② 域只能单向降级，FIELD→VOXEL 的降级点由引擎自动插入，调用方看不见；
@@ -12,9 +11,7 @@ extends TestCase
 const GS := Vector3i(64, 32, 32)
 
 
-# ----------------------------------------------------------------------------
 # 工具
-# ----------------------------------------------------------------------------
 
 ## 网格中心的球。半径远小于网格 → 不相交边界，暴露度断言才干净。
 func _sphere(radius: float, mat: int) -> SdfSphere:
@@ -55,7 +52,6 @@ func _obj_with_blocks() -> QVoxelModel:
 
 
 ## 测试用的"自足产出型"源：在网格中心画一个球，并数出自己被跑了多少次。
-##
 ## 【为什么要一个自定义源】逐步骤判脏的契约是"改链尾不得重跑链首"，而这件事只能靠**计数**证明：
 ## 现成算子的产出与参数强耦合（改参数就改产出），没法把"重跑与否"与"产出变了"分开看。
 class _CountingModel:
@@ -79,9 +75,7 @@ class _CountingModel:
 		return v
 
 
-# ----------------------------------------------------------------------------
 # ① 手绘体素是链的输入
-# ----------------------------------------------------------------------------
 
 func test_empty_chain_returns_hand_drawn_voxels() -> void:
 	var obj := _obj_with_blocks()
@@ -125,7 +119,6 @@ func test_leading_combine_decides_how_chain_meets_hand_drawn() -> void:
 
 
 ## 链首直接是**体素域源**（PcgModel）时，combine 同样决定它与手绘体素怎么合。
-##
 ## 【为什么这条必须单独钉】场域链首靠"降级那一步"显式把 obj.to_volume() 当左操作数，
 ## 而体素域链首没有降级步骤，一旦把"空 acc"直接当左操作数，UNION 就退化成 REPLACE
 ## （手绘石料凭空消失）、SUBTRACT 退化成"挖不动"—— 恰恰是"手绘 + 程序化混着用"的两种用法。
@@ -178,9 +171,7 @@ func test_voxel_operator_on_empty_hand_drawn_grid() -> void:
 	assert_eq(res.solid_count(), 0, "空底上染色仍然是空")
 
 
-# ----------------------------------------------------------------------------
 # ② 域单向降级 + 链校验
-# ----------------------------------------------------------------------------
 
 func test_field_chain_is_downgraded_to_volume_automatically() -> void:
 	var obj := QVoxelModel.new()
@@ -254,9 +245,7 @@ func test_off_chain_nodes_are_marked() -> void:
 	assert_false(scatter is PcgDetail, "散布器不是体素处理算子 → 不进链")
 
 
-# ----------------------------------------------------------------------------
 # ③ 无状态纯函数 + 输入签名增量复用
-# ----------------------------------------------------------------------------
 
 func test_incremental_reuse_and_signature_busting() -> void:
 	var obj := QVoxelModel.new()
@@ -288,7 +277,6 @@ func test_incremental_reuse_and_signature_busting() -> void:
 
 
 ## 逐步骤判脏（§5.2）：改链尾一条 → 只从该条起重算，链首那条（最贵的程序化生成）不得重跑。
-##
 ## 【为什么靠计数而不是"看产出对不对"】产出对不对在两种实现下完全一样（全量重算也得到同一个
 ## 体积）；能区分它们的唯一证据是"链首算子有没有被再调一次"，故这里数 build() 的调用次数。
 func test_step_dirty_only_recomputes_the_tail() -> void:
@@ -369,9 +357,7 @@ func test_engine_is_stateless_across_objects() -> void:
 	assert_eq(rb.volume[_at(2, 2, 2)], 0, "第一个对象的手绘不得泄漏进来")
 
 
-# ----------------------------------------------------------------------------
 # ④ 链的产出逐 chunk 供数（QVoxelSource）
-# ----------------------------------------------------------------------------
 
 func test_source_slices_match_engine_volume_exactly() -> void:
 	var obj := _obj_with_blocks()

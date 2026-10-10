@@ -2,14 +2,12 @@
 class_name QVoxelUndoStack
 extends CommandHistory
 ## 撤销栈 —— 命令流上的一个游标。
-##
 ## 【为什么继承 CommandHistory 而不是另写一个栈】
 ## 撤销栈与命令日志本来就是同一串数据，只差一个游标：
 ##   commands[0 .. cursor)  已生效
 ##   commands[cursor .. ]   已撤销、可重做（"redo 分支"）
 ## 于是"撤销栈"= 命令流 + 游标，"回放日志"= 同一份命令流，不必各存一份、各写一遍
 ## 序列化。save_data()（继承而来）因此天然给出"本次会话完整命令流"。
-##
 ## 【预算淘汰】命令流随会话增长，体素命令每条可能几十 KB。超预算时从**队首**丢最老的
 ## （游标随之前移）—— 这与 Godot EditorUndoRedoManager 的 history_size 限制同一思路：
 ## 宁可丢掉远古历史，也不能让编辑器在长会话里涨到几个 GB。
@@ -28,11 +26,9 @@ var _macro_open: Array[QVoxelMacroCommand] = []
 
 
 ## 入栈一条**已经生效**的命令。
-##
 ## 【为什么入栈时调 redo()】工具是"先改数据、再登记命令"，数据已经是 after 状态，
 ## 所以这次 redo() 必须是无副作用的幂等重放（见 QVoxelCommand.redo 的说明）。这样做的好处是
 ## 全项目只有一条时间线：任何让状态前进的路径都必须经过 redo()，不必区分"首次执行"与"重放"。
-##
 ## 【宏内入栈只攒着】这里转发给当前宏而不真正入栈 —— 于是"宏 = 一条命令"对游标、
 ## changed 通知与预算淘汰三处同时成立，这三处都不必知道宏的存在。
 func push(cmd: QVoxelCommand) -> void:
@@ -45,7 +41,6 @@ func push(cmd: QVoxelCommand) -> void:
 
 
 ## 开始一段宏：其间的 push() 都攒进同一条，end_macro() 一次性入栈。
-##
 ## 【为什么值得有】"改参数 + 重命名"在用户眼里是一次操作。攒起来还有个附带好处：
 ## 中间过程不触碰游标、不发信号 —— UI 不会在拖拽中闪出一串中间态的历史项。
 func begin_macro(label := "") -> QVoxelMacroCommand:

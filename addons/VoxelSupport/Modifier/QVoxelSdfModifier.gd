@@ -3,7 +3,6 @@ class_name QVoxelSdfModifier
 extends QVoxelModifier
 
 ## 连续域（FIELD）修改器 —— 算法核是一棵 SDF 表达式树。
-##
 ## 【布尔放在树里，还是放在链上】两者都表达得出来，但**链上的布尔一律走 combine**：
 ## 并 / 差 / 交 / 平滑并回答的是"这一条怎么并进已有结果"，属于条目自身的属性；把
 ## SdfUnion / SdfSubtract 也当成链条目，只会让同一件事有两种画法。组合算子留给

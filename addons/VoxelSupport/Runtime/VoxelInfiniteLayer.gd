@@ -3,12 +3,10 @@ extends RefCounted
 
 ## 无限层（视点调度）：视锥剔除 / 延迟补建队列 / 流式加载与卸载 / 卸载半径 / 原点漂移 /
 ## LOD 分带调度（各粗层的枚举、生成、移除、可见性兜底与异步供需）。
-##
 ## 【为什么单独成层】这些逻辑全部以"相机在哪"为前提，与"体素怎么存、网格怎么组装"正交。
 ## 内核（VoxelRenderer）不该知道相机、视锥、流式距离、LOD 分带的存在 ——
 ## 它只该回答"按 chunk / 按 block 建 / 删网格"。
 ## 本层把视点决策集中到一处，内核只留存储、网格组装、材质、碰撞与脏区域账本。
-##
 ## 【依赖方向】本层 → 内核（单向）：
 ##   · 读内核的存储与变换：`data` / `voxel_scale` / `global_position` / `current_camera()`
 ##   · 读/写内核的网格账本（见下）：`has_lod_mesh` / `lod_mesh` / `lod_mesh_keys` /
@@ -19,7 +17,6 @@ extends RefCounted
 ##     以及经 data 的标脏
 ## 反向只有一处：内核的网格管线在派发前问"哪些 chunk 可见"（`filter_visible_chunks`）。
 ## 那是**查询**而非依赖。
-##
 ## 【为什么网格账本 `_lod_meshes` 留在内核、而调度账本在本层】二者看似同类，实则依赖方向相反：
 ##   · `_lod_meshes` 是**渲染节点账本**，与 `_chunk_collisions` 同一族 —— 内核的
 ##     `remove_chunk_mesh`（数据变空时清残留网格）、`_update_chunk_collision`（取 mesh 提面）、
@@ -28,15 +25,12 @@ extends RefCounted
 ##   · 调度账本（待办 / 重建 / 重试 / 代次 / 分带 / 预算）只有本层读，故整体迁入。
 ## 于是内核只多开 8 个针对网格账本的按键窄访问器（比"暴露整个表"更窄，也与既有的
 ## `has_chunk_mesh` 同一风格），本层不碰内核任何私有成员。
-##
 ## 【为什么 `_lod_outer` 与 LOD 调度一起在本层】分带表（各层外半径）是纯视点几何，
 ## 期 1 已把公式收进 `VoxelLodGrid.bands`；本层的 `filter_visible_chunks` / `process_streaming`
 ## 也一直在读它（此前经 `kernel.lod_outer()`），迁入后直接读自己的字段。
-##
 ## 【原点漂移为何"决策在本层、平移在内核"】何时平移（阈值判定）与相机反向补偿是纯视点逻辑，
 ## 归本层；而"平移哪些账本"全是内核的渲染层私有状态（网格节点 / 碰撞体 / 各类队列），
 ## 内核只暴露一个 `shift_render(shift, chunk_size_world)` 整体平移，本层不逐个去摸内核私有成员。
-##
 ## 【为什么配置仍挂在节点上】`visibility_mode` / `view_distance` / `unload_distance` /
 ## `lod_count` / `visibility_check_interval` / 各 LOD 预算与预生成提前量仍是 `VoxelRenderer`
 ## 的 `@export`，本层每帧经 `kernel` 读取。
@@ -44,7 +38,6 @@ extends RefCounted
 ## 也不该被序列化）。把这些旋钮搬到本层 = 用户从此在 Inspector 里看不到、也存不进场景 ——
 ## 对一个插件来说是把"可调"变成"要改代码"，得不偿失。所以**只搬状态与逻辑，配置留在节点**，
 ## 与本层既有的 `unload_d()` 读 `kernel.unload_distance` 是同一处理。
-##
 ## 【无相机时的行为】未入树 / 无相机 / FULL 模式一律"不裁剪"（保守放行），与旧实现一致。
 
 ## 超范围粗层数据的清理降频（每 N 个扫描 tick 一次）。卸载扫描较重，不宜每 tick 全量跑。

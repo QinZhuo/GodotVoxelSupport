@@ -2,7 +2,6 @@ class_name VoxelEditKernel
 extends RefCounted
 
 ## 体素编辑内核：**无场景节点、无 `_process`、可无头调用**。
-##
 ## 【定位】把"编辑数学"从表现层节点里抽出来，只依赖 `QVoxelSource` + `NativeLoader`：
 ##   · 无 Node / 无场景树 / 无物理 / 无粒子 / 无信号 —— 服务端、建模"画笔"、批处理工具
 ##     都可以 `VoxelEditKernel.new()` 后直接调用，**不需要一个 `VoxelDestructible` 节点**：
@@ -16,12 +15,10 @@ extends RefCounted
 ##     都是 Inspector 旋钮 → 一律由调用方按参数传入（见 `VoxelDestructible` 的同名 `@export`）。
 ##   · **表现层职责不在内核里**：粒子碎片、掉落刚体、级联分帧调度、信号发射、帧尾合并、
 ##     诊断输出都留在 `VoxelDestructible`。内核只产出"发生了什么"的数据，不决定怎么演。
-##
 ## 【无状态】逐体素累计伤害账归 `QVoxelSource`（体素相邻状态，必须与 chunk 缓冲同生共死——
 ##   卸载 / 清空 / origin shift / 载荷重建都要同步清理），内核通过
 ##   `data._damage_buffers_view()` / `data._set_damage_buffers()` 读写，自己不持有任何状态。
 ##   因此同一个内核实例可以长期复用、可以跨多个 `QVoxelSource` 使用。
-##
 ## 【与原生库的关系】原生库（`NativeLoader`）是强制依赖，本内核不做 GDScript 回退：
 ##   全部数学都是一趟原生调用（伤害结算 / 应力传播），GDScript 侧只做入参组装与结果搬运。
 
@@ -32,11 +29,9 @@ const SHAPE_BOX: int = 1
 
 
 ## 伤害结算（一趟原生）：范围 → 材质 → 硬度比较 → 累伤 / 判移除。
-##
 ## 语义与原逐体素 GDScript 版完全一致（`use_voxel_health` / 硬度 / 累伤 / 硬化反馈），只是下沉 C++：
 ##   · 伤害账本从 Dictionary[Vector3i, float] 改为按 chunk 的扁平 Float32 缓冲（原生直接读写）；
 ##   · 材质硬度按材质ID 查表一次传下去（原实现是逐体素 `materials[id]` 读取）。
-##
 ## 返回 `{removed: Array[Vector3i], hardened: Dictionary, hardened_dirty: bool}`：
 ##   `removed`        本趟应被移除的体素（**调用方**负责实际 `data.remove_voxels`，内核不删）
 ##   `hardened`       受伤但未摧毁的 `{pos: 剩余硬度}`（数据产出，帧尾合并信号是表现层的事）

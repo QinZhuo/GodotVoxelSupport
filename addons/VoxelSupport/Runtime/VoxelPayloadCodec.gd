@@ -3,21 +3,17 @@ extends RefCounted
 
 ## QVoxelSource 资源载荷的**帧格式唯一实现**：
 ##   Dictionary ⇄ base64( "GZIP" + gzip( var_to_bytes(dict) ) )
-##
 ## 载荷随资源保存/加载（隐藏 storage 属性 `voxel_data_payload`），内容字典为
 ## `{v, grid_size, blocks}` —— 具体组装与回填在 QVoxelSource（`_encode_payload` /
 ## `_set`），本类只负责"过帧"与"拆帧 + 校验"。
-##
 ## 【为什么 encode 不写版本号、decode 却校验版本】不对称是有意的：
 ## encode 处理的是**可信数据**（自己的内存状态），只保证内容原样过帧；
 ## decode 面对的是**不可信输入**（磁盘/场景文件可能被改坏、跨版本），必须校验。
 ## 版本号由内容字典的 "v" 承载，写入方用 VERSION 常量；encode 不干预内容，
 ## 于是测试也能用同一个 encode 造出"版本不符"的载荷，不必再复制一份帧格式。
-##
 ## 【为什么不复用 DEVFramework.SaveTool.gzip_encode】帧格式确实同款（"GZIP" 魔数），
 ## 但 VoxelSupport 是**可独立拖入任意项目的插件**，对框架零依赖；为 8 行帧格式
 ## 反向依赖框架会破坏这条边界。此处保留同款约定，仅重复实现帧封装。
-##
 ## 【版本策略】只此一版，不提供任何旧版读取路径 —— 载荷是私有存储属性
 ## （PROPERTY_USAGE_STORAGE），没有对外契约，格式变更时重新导入/保存即可；
 ## 读端保留兼容分支只会变成永久的负担。版本号仍在，是为了让"版本不符"当场变成

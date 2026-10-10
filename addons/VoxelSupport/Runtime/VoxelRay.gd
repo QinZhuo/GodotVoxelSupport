@@ -2,13 +2,11 @@
 class_name VoxelRay
 extends RefCounted
 ## 体素射线（Amanatides & Woo 的 DDA 走格）。
-##
 ## 【为什么单独一个类，而不是长进 QVoxelSource】射线查询是"按 chunk 查"之上的**派生查询**：
 ## 它只需要 has_voxel / get_voxel 两个公开面，不该扩内核契约（QVoxelSource 的公开 API 由
 ## test_voxel_kernel_contract 逐条钉死）。放在这里，编辑器的拾取与运行时的破坏
 ## （VoxelDestructible）共用同一份实现 —— 这段 DDA 过去只存在于 VoxelDestructible 里，
 ## 编辑器要拾取就得抄第二份，正是 P4「统一接口」要消掉的东西。
-##
 ## 【为什么必须返回入射面法线】画笔的"落笔格" = 命中格 + 法线（往空的那一侧长）；
 ## 面笔/盒笔/填充也要靠它判断朝向。法线由"进入命中格之前的那一格"得出：DDA 每步只推进
 ## 一个轴，故 hit - prev 恰好是单轴 ±1 —— 不必另算浮点交点，也不会在斜射时抖成斜向量。
@@ -27,7 +25,6 @@ const KEY_MATERIAL := &"material"
 
 
 ## 投射一条射线，返回首个实心格的完整命中信息（未命中 → 空字典）。
-##
 ## 【起点落在实心格内】直接命中该格，normal = ZERO（"没有入射面"比"编一个法线"诚实：
 ## 调用方要么拒绝对这种命中落笔，要么按自己的规则处理）。
 static func cast(data: QVoxelSource, origin: Vector3, direction: Vector3,

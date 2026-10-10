@@ -5,7 +5,6 @@ extends EditorImportPlugin
 ## 导入 .vox / .qvx 为 QVoxelSource (.res)
 ## 保存可序列化的体素数据，供 VoxelRenderer / VoxelDestructible 等运行时节点使用
 ## 不生成 mesh，仅保存原始体素数据，便于运行时动态修改和破坏
-##
 ## 【按扩展名分派】两种源格式形状不同，各走各的适配器（详见 QVoxelAsset 的类注释）：
 ##   .qvx → QVoxelAsset（块级 + NODE 摆放）→ QVoxelSource.from_qvx
 ##   .vox  → VoxAsset（MagicaVoxel 场景图）→ QVoxelSource.from_voxel_data
@@ -65,7 +64,6 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 ## frame_index = 取哪一帧烤进这份 QVoxelSource：`.vox` 是 MagicaVoxel 的体素动画帧；
 ## `.qvx` 是 `FRAM` 帧动画（§12）。两者都产出**单帧静态快照**——静态 `.qvx` 只有第 0 帧，
 ## 该选项恒等于 0、无副作用。
-##
 ## 【为什么对 .qvx 也生效了】早先 `.qvx` 的 `animations[].frames` 是按**节点下标**寻址的
 ## 变换补丁（v3 的嵌套树没有下标，故无作用）；现在 `.qvx` 的帧是真正的体素帧（FRAM），
 ## 与 `.vox` 同义，该选项自然通用。运行时连续播放仍不在本层（见 QVoxelSource.from_qvx 的注释）。

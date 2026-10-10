@@ -1,14 +1,12 @@
 extends TestCase
 
 ## QVX 格式一致性测试（编辑器进程即可，无需游戏进程）。
-##
 ## 覆盖的是"实现是否兑现规范"这件事本身，而不是体素业务：
 ##   · 常量单一事实源（通道宽度）与编解码往返；
 ##   · 整文件 serialize ↔ parse 往返；
 ##   · HEAD 能力门：require 含未支持块 → 拒绝；channels ≠ 1 → 拒绝（§3.1 / §10）；
 ##   · CACH 作为一等块的结构往返与损坏处置（§6 / §9），未知块的不透明保真搬运；
 ##   · 仓库样例 .qvx 能被当前读取器以 CRC 校验开启的方式读入。
-##
 ## 之所以把样例纳入测试：样例是"格式的活体示例"，一旦写入端与读取端口径漂移
 ## （历史上 CRC 覆盖范围就漂移过一次），它们会最先变成读不进来的废文件。
 ## 用独立于写入端的读取路径去读它们，等于一次低成本的跨实现交叉校验。
@@ -16,9 +14,7 @@ extends TestCase
 const SAMPLES_DIR := "res://demo/samples"
 
 
-# ----------------------------------------------------------------------------
 # 常量 / 编解码
-# ----------------------------------------------------------------------------
 
 func test_spec_channel_constants() -> void:
 	assert_eq(QVoxelSpec.CHANNEL_BPP, 16, "支配通道 bpp")
@@ -126,9 +122,7 @@ func test_codec_rejects_corrupt() -> void:
 			"RUN count 荒谬应解包失败")
 
 
-# ----------------------------------------------------------------------------
 # 整文件往返
-# ----------------------------------------------------------------------------
 
 func test_file_roundtrip() -> void:
 	var orig := _make_doc()
@@ -146,9 +140,7 @@ func test_file_roundtrip() -> void:
 	assert_eq(blocks[Vector3i(0, 0, 0)], orig.models[0][Vector3i(0, 0, 0)], "块内容往返")
 
 
-# ----------------------------------------------------------------------------
 # HEAD 能力门（§3.1 / §10）
-# ----------------------------------------------------------------------------
 
 ## require 声明了本读者处理不了的块类型 → 拒绝整个文件（不许静默跳过）。
 func test_require_unknown_type_rejected() -> void:
@@ -196,9 +188,7 @@ func test_bad_up_axis_warns_only() -> void:
 	assert_true(_warnings_contain(rep, "up_axis"), "应就 up_axis 告警（%s）" % rep.summary())
 
 
-# ----------------------------------------------------------------------------
 # CACH / 未知块：不透明保真搬运
-# ----------------------------------------------------------------------------
 
 ## CACH 是一等块（§6：结构可解析），未知块是不透明搬运；两者往返都必须保真。
 func test_cach_and_unknown_passthrough() -> void:
@@ -270,9 +260,7 @@ func test_malformed_cach_is_dropped_not_fatal() -> void:
 	assert_true(not parsed.models.is_empty(), "其余块不受影响")
 
 
-# ----------------------------------------------------------------------------
 # 仓库样例（跨实现交叉校验）
-# ----------------------------------------------------------------------------
 
 func test_samples_load_with_crc() -> void:
 	var files := _list_qvx(SAMPLES_DIR)
@@ -295,9 +283,7 @@ func test_samples_load_with_crc() -> void:
 		assert_true(_head_qvox_first(bytes), "%s 的 HEAD JSON 首键必须是 qvox" % path.get_file())
 
 
-# ----------------------------------------------------------------------------
 # QVoxelStream 端到端（写盘 → 新实例回读 → 擦除 → 增量写盘 → 再回读）
-# ----------------------------------------------------------------------------
 
 const TEST_DIR := "user://qvx_test"
 
@@ -393,16 +379,12 @@ func test_stream_end_to_end() -> void:
 						"load→flush 不应改写材质（白色覆写回归）")
 
 
-# ----------------------------------------------------------------------------
 # .qvx 作为一等资产：解析 → QVoxelAsset → QVoxelSource / Mesh
 # （导入链路本身的用例在 test_qvox_import.gd；这里只钉"源格式 ↔ 适配器"的分派契约）
-# ----------------------------------------------------------------------------
 
 ## 四种导入器都必须把 .qvx 当作可识别扩展名，且**不能丢掉 .vox**（否则破坏既有导入）。
-##
 ## 【为什么用 load 而不是类名】全局注册类的可见性依赖编辑器完成一次文件系统扫描；
 ## 用路径加载则与注册时机无关，测试在任何时刻都稳定可跑（也顺带验证脚本可加载）。
-##
 ## 【为什么逐项检查要挂在 is_editor_hint 上】四个导入器都是 `EditorImportPlugin` 子类，只能在
 ## 编辑器进程实例化：headless/CI 里 `script.new()` 返回 null，紧接着对 null 调
 ## `_get_recognized_extensions()` 会**中断整个用例**，后面的断言一条都不跑 —— 表现为"静默通过"。
@@ -428,7 +410,6 @@ func test_importers_recognize_qvx() -> void:
 
 
 ## 扩展名分派契约：`.qvx` 归 QVoxelAsset，`.vox` 归 VoxAsset，绝不互相冒充。
-##
 ## 这条是"源格式与适配器必须形状匹配"的守门用例：VoxAsset 是 MagicaVoxel 场景图形状的
 ## 适配器，用它承载 .qvx 会丢掉 NODE 场景图与除第一个之外的所有模型（详见 QVoxelAsset 注释），
 ## 因此 from_asset() 遇到 .qvx 必须明确拒绝而不是返回一个丢信息的对象。
@@ -445,9 +426,7 @@ func test_source_format_dispatch() -> void:
 		assert_true(QVoxelAsset.from_file(sample) != null, "QVoxelAsset 应能解析同一文件")
 
 
-# ----------------------------------------------------------------------------
 # 相机与节点树（NODE 下的工程数据，§5.1 / qvx 3）
-# ----------------------------------------------------------------------------
 # 这一组钉死三件事：
 #   ① 相机的字段**逐字段存活**，缺省只在缺失时补（文件里明写的 false 不能被改回来）；
 #   ② 坏数据只丢它自己 —— 非对象项、不在白名单的投影、未知 kind 都不该拖垮整块；
@@ -604,7 +583,6 @@ func test_world_engineering_data_roundtrip() -> void:
 
 
 ## 链上的条目要跟着节点树一起往返 —— 这是 qvx 3 新增的 steps 字段。
-##
 ## 【为什么连"输出盒尺寸"也一起断言】链的意义全在"它会改变求值结果"；只比条数等于没测，
 ## 参数读丢 / 旁通位读丢都能让条数一样而对不上。
 func test_node_modifiers_roundtrip() -> void:
@@ -639,12 +617,9 @@ func test_node_modifiers_roundtrip() -> void:
 			"链的尺寸语义存活（平铺 ×3，镜像不改盒尺寸）")
 
 
-# ----------------------------------------------------------------------------
 # 帧动画 FRAM（§12）
-# ----------------------------------------------------------------------------
 
 ## FRAM 往返：帧时长与**完整块表**必须一字不差地回来。
-##
 ## 【为什么断言"完整块表"而不只是"帧数"】存储层是块级增量（帧 k 只写相对帧 k-1 的变化），
 ## 解析层必须把它**展开**成完整块表——否则调用方拿到的第 k 帧会缺掉所有没变的块。
 ## 只比帧数的话，"增量没展开、继承的块全丢了"也照样通过。
@@ -678,7 +653,6 @@ func test_fram_roundtrip_expands_deltas() -> void:
 
 
 ## 帧增量的收益：一帧的成本 = 它相对上一帧改了多少块，与模型总大小无关。
-##
 ## 【为什么盯 FRAM 块自己的 length 而不是文件总大小】总大小里混着 HEAD/MATE/填充，
 ## 想钉住"相同的块不重写"这件事，只能只看 FRAM 块负载。
 func test_fram_delta_skips_unchanged_blocks() -> void:
@@ -700,7 +674,6 @@ func test_fram_delta_skips_unchanged_blocks() -> void:
 
 
 ## FRAM 里 codec=0 = "把该块清空"，与 VXEL 里 codec=0 = 损坏的语义**不同**（§12 / QVoxelSpec）。
-##
 ## 【为什么单独测】"块消失"在增量里必须与"块没变"区分开：前者写 codec=0，后者不写。
 ## 若把 codec=0 当损坏丢弃，这一帧就会静默继承上一帧的块——画面里凭空多出一块。
 func test_fram_frame_can_clear_a_block() -> void:
@@ -790,9 +763,7 @@ func _find_node(nodes: Array, node_name: String) -> Dictionary:
 	return {}
 
 
-# ----------------------------------------------------------------------------
 # 辅助
-# ----------------------------------------------------------------------------
 
 func _make_doc() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()

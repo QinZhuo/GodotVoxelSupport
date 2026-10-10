@@ -3,28 +3,22 @@ class_name QVoxelModifierSerializer
 extends RefCounted
 
 ## 修改器与算子 ↔ JSON 的唯一实现 —— 链的落盘 / 读盘都从这里过。
-##
 ## 【为什么叫 Serializer 而不是 Codec】`Codec`（coder + decoder）在业界指"内存表示 ↔ 压缩
 ## 字节流"的编解码器（本项目里那个是 QVoxelBlockCodec：五种块编码的 pick / pack / unpack）。
 ## 本类不做编码、不压缩、不定义字节格式，只做"对象 ↔ 普通字典/数组"的结构转换 —— 那正是
 ## 序列化器一词的含义。名字与能力对不上时，读代码的人会先去找并不存在的编码格式。
-##
 ## 【为什么与 QVoxelDomain 分开】QVoxelDomain 管"域与链的语义规则"（这样排合不合法）；本类管
 ## "怎么写进文件、怎么读回来"。两者唯一的交点是都要提算子的类名，没有别的关系。
-##
 ## 【为什么存"类名 + 参数"，而不是 Resource 序列化（var_to_bytes / .tres 内嵌）】
 ##   ① 可读可 diff 可手改：工程文件是给用户看的（`.qvx` 里 HEAD / NODE 本来就是 JSON）；
 ##   ② 跨版本稳定：var_to_bytes 里嵌着脚本路径与属性布局，插件目录一动、类一改名，整棵
 ##      算子树就失联；类名是稳定身份，解析入口只有 instantiate_op() 一处；
 ##   ③ 域既然由修改器子类类型表达，序列化也按类名解析，两处同思路。
-##
 ## 【读盘失败一律返回 null，不回退成"空修改器"】类型失联（算子类被删 / 改名）或 kind
 ## 不认识时，凭空造一个空条目会让用户看到"链上多了一条不认识的东西"，比缺一条更难查。
 
 
-# ----------------------------------------------------------------------------
 # 修改器
-# ----------------------------------------------------------------------------
 
 ## 按判别键造一个空修改器（对象的「加修改器」用它）。未知键返回 null。
 static func new_modifier(kind: String) -> QVoxelModifier:
@@ -46,7 +40,6 @@ static func modifier_to_dict(m: QVoxelModifier) -> Dictionary:
 
 
 ## 反向。`kind` 不认识 / 算子类型失联 / 核类型不符，三者返回 null。
-##
 ## 【缺 type 不是失败，是空修改器】QVoxelModifier 允许 op() == null 的占位条目（用户先加一条
 ## 再填算子）。to_dict 对空条目本就不写 type，读盘据此还原成空条目 —— 否则"加空修改器 → 保存
 ## → 打开"会静默少一条。这与"算子失联就丢弃整条、不造空壳"并不矛盾：前者是条目本来就空，
@@ -74,9 +67,7 @@ static func modifier_from_dict(d: Variant) -> QVoxelModifier:
 	return m
 
 
-# ----------------------------------------------------------------------------
 # 算子 ↔ JSON
-# ----------------------------------------------------------------------------
 
 ## 类名 → 实例。仅接受全局类名（class_name），与 op_type_name() 对称。
 ## 不接受脚本路径：路径会随目录调整而失效，而类名是稳定身份。
@@ -156,12 +147,10 @@ static func exported_names(op: Object) -> PackedStringArray:
 
 
 ## @export 属性：名字 → 属性描述（type / hint / hint_string / class_name…）。
-##
 ## 【为什么过滤出 script 变量而不是直接用 get_property_list() 的全部条目】基类与内建的
 ## script / resource_path / resource_local_to_scene 等键会被写进工程文件，看起来像损坏；
 ## 而 STORAGE|EDITOR 正是"@export 属性"的标记（与 DEVFramework 的 ECS 序列化同一判据）。
 ## Dictionary 保持插入顺序，故遍历结果即声明顺序。
-##
 ## 【为什么读盘也要它】set() 只认一部分类型转换（见 value_from_json），还原时必须知道
 ## 目标属性类型。属性描述是唯一能同时给出"名字 + 类型 + 元素类型"的来源。
 static func _storage_properties(op: Object) -> Dictionary:
@@ -178,7 +167,6 @@ static func _storage_properties(op: Object) -> Dictionary:
 
 
 ## 值 → JSON 可表达的形式。算子树递归成 op_to_dict。
-##
 ## 【为什么不直接把 Variant 丢给 JSON.stringify】Godot 的 Vector3/Color/Transform3D 在 JSON
 ## 里会被写成字符串（"(1, 2, 3)"），读回来要靠解析字符串 —— 那是"能跑但脆"的方案。
 ## 这里显式转成数字数组，读回来按属性类型还原（属性类型是已知的，见 value_from_json 的说明）。
@@ -224,7 +212,6 @@ static func value_to_json(v: Variant) -> Variant:
 
 
 ## JSON → 值。**必须传属性描述** —— 还原目标类型不能指望 set() 替我们做。
-##
 ## 【实测依据（Godot 4.7）】Object.set() 的类型转换能力是不齐全的：
 ##   ✅ Array → PackedInt32Array / PackedStringArray（标量元素的包数组可以）
 ##   ❌ Array → Vector3 / Vector3i（**静默无效**，属性保留默认值；除非属性自带 setter）
@@ -278,7 +265,6 @@ static func _plain_from_json(v: Variant) -> Variant:
 
 ## `Array[T]` → Array[T]。必须造出**带元素类型**的数组：把无类型 Array 赋给 `Array[T]`
 ## 属性会被 Godot 静默丢弃（实测变空），而不是报错。
-##
 ## 【为什么用属性现有值当模板，而不是解析 hint_string】`Array[T]` 的元素类型对**脚本类**
 ## （如 `Array[PcgWfcTile]`）必须连 Script 对象一起带上 —— 只给类名时 Godot 会按原生类校验，
 ## 报"Resource does not inherit from PcgWfcTile"（实测）。属性现有的空 `Array[T]` 恰好是
@@ -296,7 +282,6 @@ static func _typed_array_from_json(v: Variant, template: Variant) -> Variant:
 
 
 ## 参与判脏用的算子签名：类型 + 实例 + 参数摘要。
-##
 ## 【为什么含实例 id】同类型同参数的算子树可能有两棵，只按"类型+参数"判签名会把它们
 ## 误判为"没变"，于是改了一棵却复用了另一棵的结果。实例 id 保证语义不同的两棵树签名不同。
 static func op_signature(op: Object) -> String:

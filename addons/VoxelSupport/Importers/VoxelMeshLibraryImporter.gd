@@ -55,7 +55,6 @@ func _get_priority() -> float:
 
 
 ## `.vox` 与 `.qvx` 的选项集一致（都继承自 VoxelMeshImporter），无额外可见性规则。
-##
 ## 【为什么这里不再写"split_by_frame 对 .qvx 无作用"】FRAM 落地后 `.qvx` 真的有体素动画帧：
 ## split_by_frame → 整个资产逐帧一项（frame_<k>）；split_by_model / split_by_node 则取
 ## `frame_index` 那一帧（静态资产恒为第 0 帧）。见 VoxelMeshGenerator 的分项实现。

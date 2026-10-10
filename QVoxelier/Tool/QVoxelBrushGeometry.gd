@@ -2,20 +2,16 @@
 class_name QVoxelBrushGeometry
 extends RefCounted
 ## 画笔几何：把"手势的两个端点 + 拾取上下文"翻译成一串**要写的体素坐标**。
-##
 ## 【为什么是独立的纯函数类】预览（ghost）与落笔必须画的是同一批格子，否则"看到的不等于
 ## 画出来的"。让两边调**同一个函数**，一致性就成了构造保证，而不是靠两处逻辑各自对齐。
 ## 因此这里不碰 QVoxelModel、不碰节点、不碰输入：全 static，可无头测试。
-##
 ## 【坐标约定】一律**对象局部体素坐标**（与 QVoxelModel.get_voxel / QVoxelSource.has_voxel 同一套）。
 ## 越界与否由调用方（QVoxelBrushTool）统一裁剪，几何函数只管形状本身。
-##
 ## 【为什么用 Array[Vector3i] 而不是 PackedVector3Array】写入侧（QVoxelEditCommand.set_voxel）
 ## 是整数坐标；用 Vector3i 一路到底可以避免在边界上来回取整。
 
 
 ## 3D 直线（Bresenham 误差累积版，26-连通）。
-##
 ## 【为什么要"最长轴 + 误差进位"而不是各轴独立插值】独立插值会在端点漂移（浮点累积），
 ## 而画笔的终点必须**恰好落在用户指到的那一格**；误差累积版 n 步走完后各轴恰好走了 |d| 次，
 ## 端点由构造保证。26-连通（可对角跨格）对手绘线来说视觉最自然，也让"粗笔"不出现锯齿空洞。
@@ -60,11 +56,9 @@ static func box(a: Vector3i, b: Vector3i) -> Array[Vector3i]:
 
 
 ## 球偏移缓存（key = 半径）。
-##
 ## 【为什么要缓存】`ball()` 是"中心 + 偏移"的形态，按格盖章的用法会把同一个半径的球反复算：
 ## 半径 15 的球有一万四千多个偏移，每算一次都要走三重循环 31³。缓存后同一半径只算一次，
 ## 其余全是查表 —— 球偏移只由半径决定，这笔缓存没有失效条件。
-##
 ## 约定：返回的是**共享只读池**，调用方只许遍历（ball 不改它）。
 static var _ball_offsets := {}
 
@@ -94,11 +88,9 @@ static func ball(center: Vector3i, radius: int) -> Array[Vector3i]:
 
 
 ## 用球把一组格子膨胀（笔刷尺寸 > 1 时让线 / 盒变粗）。radius = 0 原样返回。
-##
 ## 【为什么不能"每格盖一个球"】那是 `源格数 × 球偏移数` 次写入。半径 15 的球有一万四千个偏移，
 ## 盒笔铺满 32³ 就是 4.6 亿次 append —— 实测一次落笔要卡一百秒以上（与"画几下整机卡死"同源：
 ## 代价随笔刷尺寸乘性爆炸，只是这里卡在**正常用法**上，不是哨兵坐标那种错误路径）。
-##
 ## 【分离式平方距离变换】欧氏距离的平方是可分离的：
 ##   d²(p) = min over s of ((px-sx)² + (py-sy)² + (pz-sz)²)
 ## 于是沿三个轴各做一轮一维下包络扫描（Felzenszwalb & Huttenlocher，每轮 O(n)）就得到精确的
@@ -148,11 +140,9 @@ static func dilate(cells: Array[Vector3i], radius: int) -> Array[Vector3i]:
 
 
 ## 用「平面」把一组格子膨胀 —— 只在拾取面的两个轴向摊开，**沿法线的厚度不变**。
-##
 ## 【与 dilate（欧氏球）的分工】球是各向同性地鼓起来，平面是"只在表面上摊开"。
 ## 在表面上刷一条宽笔触时，球会把大约一半体积埋进实心内部 —— 看不见，却实实在在撑大了体积、
 ## 也多写了一倍的格（还会把本该留空的邻格填掉）；平面只铺出一层薄片。这就是"形状"要区分的用途。
-##
 ## 【可分离】平面方形 = 两个线段的闵可夫斯基和，故等价于沿平面内两轴各做一次一维膨胀 ——
 ## 于是不必真的枚举 (2r+1)² 个偏移（半径 15 就是 961 个/格，对盒笔照样会爆炸）。
 static func dilate_plane(cells: Array[Vector3i], radius: int, normal: Vector3i) -> Array[Vector3i]:
@@ -170,7 +160,6 @@ static func _axis_index(v: Vector3i) -> int:
 
 
 ## 沿单个轴向做一维膨胀：每个格扩成 ±radius 的线段。
-##
 ## 【为什么按线归组再并区间】"每格盖一条线"是 `格数 × (2r+1)` 次写入；把同一条线上的源格先归组、
 ## 再把区间求并，代价就只由**结果长度**决定（与 dilate 的取向一致：不随笔刷尺寸乘性爆炸）。
 static func _dilate_axis(cells: Array[Vector3i], axis: int, radius: int) -> Array[Vector3i]:
@@ -247,7 +236,6 @@ static func _edt_axis(d: PackedFloat64Array, sx: int, sy: int, sz: int, axis: in
 
 
 ## 一维平方距离变换（下包络法，O(n)）：令 d[start + i*stride] ← min over j of ((i-j)² + 原值)。
-##
 ## 【为什么需要 f_buf】第 ② 步是**就地**改写 d 的，而 `(i-j)² + f[j]` 里的 f[j] 必须是改写**之前**
 ## 的原值 —— 否则读到的是已经变小的 D[j]，结果会系统性偏小（笔刷球被算成"漏气的蜂窝"）。
 ## f_buf 就是这一行的原值副本（复用缓冲，长度 >= n）。env_pos / env_val 同样复用，
@@ -311,7 +299,6 @@ static func neighbors6() -> Array[Vector3i]:
 
 
 ## 连通域搜索（广度优先）。
-##
 ## accept(p) → 该格是否属于目标区域；step(p) → 从 p 出发还要试哪些邻格。
 ## 面笔（"铺满一片暴露面"）与填充（"同材质的整块"）共用它，差别只在两个闭包 ——
 ## 这正是这两个工具在界面上像两件事、在实现上是同一件事的原因。

@@ -2,20 +2,16 @@
 class_name QVoxelierInspector
 extends VBoxContainer
 ## 通用属性编辑器：按对象的 @export 属性自动生成控件。
-##
 ## 【为什么按反射生成，而不是给每个算子手写一份面板】算子参数的种类是**开放**的（SDF 与体素算子
 ## 共 30+ 个类，还在长），手写面板等于"每加一个算子就要改一次 UI"，且一定会漏。反射生成让新算子
 ## 零 UI 成本接入 —— 这与插件侧"算子零改动接入"（QVoxelDomain 的能力探测）是同一条原则。
-##
 ## 【为什么不用 Godot 自带的 EditorInspector】它属于编辑器插件上下文（EditorPlugin / 编辑器专属），
 ## 而 QVoxelier 要能作为独立程序运行。运行时没有现成的属性编辑器，故自建。
-##
 ## 【手势协议 —— 与 QVoxelPropertyCommand 同构】连续型控件（滑条）在拖动期间会反复改值，若每次都
 ## 记一条命令，撤销栈会被一次拖拽淹掉。故本类**只发意图、从不写数据**：
 ##     edit_began(target, prop) → value_changed(target, prop, v) × N → edit_ended(target, prop)
 ## 调用方把这一段夹成一条命令（begin 抓 before、value_changed 直接写、end 封口采集 after）。
 ## 离散型控件（勾选、下拉、输入框）把三个信号**连续发一次**，调用方无需区分这两种手势。
-##
 ## 【为什么信号要带 target】算子可以嵌算子（`SdfUnion.a` 本身又是一个 Sdf），参数因此分布在一棵
 ## 树上。带上传者就不需要"路径"这第二套寻址方式：谁被改了就报谁，任意深度都成立。
 
@@ -119,9 +115,7 @@ func _build_property(o: Object, p: Dictionary, depth: int) -> void:
 		_row_readonly(prop, value)
 
 
-# ----------------------------------------------------------------------------
 # 行的骨架
-# ----------------------------------------------------------------------------
 
 ## 参数名标签：定宽 + 省略号 + tooltip。定宽是为了让同一栏里所有控件左边界对齐 ——
 ## 参数名长短不一，不对齐就会读成一堆参差的控件。
@@ -361,12 +355,9 @@ func _row_readonly(prop: StringName, value: Variant) -> void:
 	row.add_child(l)
 
 
-# ----------------------------------------------------------------------------
 # 候选类与数值工具
-# ----------------------------------------------------------------------------
 
 ## 候选算子类：以 hint_string（如 "Sdf"）为基类，从全局类表里捞出它的全部后代。
-##
 ## 【为什么不用 ClassDB.get_inheriters_from_class】它只认引擎原生类；Sdf / PcgModel 都是
 ## GDScript 类，全局类表（ProjectSettings.get_global_class_list）才是它们的权威来源。
 static func candidate_classes(base_name: String) -> PackedStringArray:

@@ -1,7 +1,6 @@
 extends TestCase
 
 ## 架构加固的回归测试（编辑器进程即可，无需游戏进程）。
-##
 ## 这里锁定的都是**新建立的不变量**，每条都对应一个已修复的失效模式：
 ##   · S1 异步批次计数：批次无论派发/取消/空批次，finished **至多且恰好一次**，
 ##     且结算时只读快照一定被释放 —— 旧实现里结果处理的两条早退路径各减一次计数，
@@ -11,7 +10,6 @@ extends TestCase
 ##   · S6 只读快照句柄：句柄释放后计数归零；泄漏句柄时 clear() 能强制回收
 ##     （否则 _snapshot_readers 永久 >0 → 之后每次单点写都复制整块 32³）。
 ##   · S8 bpp：非 16 位的 HEAD 必须被拒绝（旧实现接受 8/32 却按 16 解码 = 接受却读错）。
-##
 ## 注意断言用的是**公开可观测状态**（信号次数、计数器、缓冲内容），而不是内部实现细节，
 ## 这样即使将来内部结构调整，这些不变量仍然成立。
 
@@ -19,9 +17,7 @@ const CHUNK := VoxelChunk.CHUNK_SIZE
 const VOL := VoxelChunk.CHUNK_VOLUME
 
 
-# ----------------------------------------------------------------------------
 # S6：只读快照句柄
-# ----------------------------------------------------------------------------
 
 func test_snapshot_handle_releases_counter() -> void:
 	var data := QVoxelSource.new()
@@ -64,9 +60,7 @@ func test_missing_end_release_leaves_counter_stuck_unless_forced() -> void:
 	assert_eq(data._snapshot_readers, 0, "_force_release_snapshots 可兜底回收")
 
 
-# ----------------------------------------------------------------------------
 # S1：批次结算唯一（结算点只有 VoxelMeshBatch 内部一处）
-# ----------------------------------------------------------------------------
 
 func test_batch_settles_once_for_empty_batch() -> void:
 	var b := VoxelMeshBatch.new()
@@ -93,7 +87,6 @@ func test_batch_releases_snapshot_on_settle() -> void:
 
 
 ## 锁定 Godot 4 的 `Callable.bind()` 实参顺序：绑定实参在 **call 实参之后**。
-##
 ## 这正是曾经的真实回归：`_generate_chunk_worker.bind(a, b, ...).call(out)` 的实际调用是
 ## `_generate_chunk_worker(out, a, b, ...)`，out 落到第 1 个形参上、其余参数整体错位，
 ## 运行时报 "Cannot convert argument 2 from Dictionary to Array"。
@@ -131,9 +124,7 @@ func test_batch_spawn_then_cancel_releases_snapshot_once() -> void:
 	b.wait_tasks()          # 再次 join 必须安全（幂等）
 
 
-# ----------------------------------------------------------------------------
 # S5：伤害账随 chunk 生命周期同步
-# ----------------------------------------------------------------------------
 
 func test_removing_voxel_zeroes_its_damage() -> void:
 	var data := QVoxelSource.new()
@@ -219,9 +210,7 @@ func test_destructible_queues_follow_origin_shift() -> void:
 	r.free()
 
 
-# ----------------------------------------------------------------------------
 # 全量悬空检测下沉原生：结果必须与 GDScript flood_fill 判据逐体素一致
-# ----------------------------------------------------------------------------
 
 func test_find_unsupported_matches_flood_fill_oracle() -> void:
 	var d := QVoxelSource.new()
@@ -249,9 +238,7 @@ func test_find_unsupported_matches_flood_fill_oracle() -> void:
 	assert_eq(d.find_unsupported({}).size(), want.size(), "空世界集合参数应走全量路径且结果一致")
 
 
-# ----------------------------------------------------------------------------
 # 集合受限泛洪下沉原生：restrict 分支（原生）必须与判据分支（GDScript oracle）一致
-# ----------------------------------------------------------------------------
 
 func test_flood_fill_restrict_branch_matches_predicate_oracle() -> void:
 	var d := QVoxelSource.new()
@@ -299,9 +286,7 @@ func test_flood_fill_restrict_branch_matches_predicate_oracle() -> void:
 	assert_eq(d.find_unsupported(restrict).size(), 4, "子集路径应把悬空 4 体素判为悬空")
 
 
-# ----------------------------------------------------------------------------
 # S8：bpp 非 16 必须被拒绝（接受却读错 → 改为 fail-fast）
-# ----------------------------------------------------------------------------
 
 func test_bpp_other_than_16_is_rejected() -> void:
 	for bpp in [8, 32]:
@@ -328,9 +313,7 @@ func test_bpp_16_is_accepted() -> void:
 	assert_true(rep.ok(), "bpp=16 必须被接受")
 
 
-# ----------------------------------------------------------------------------
 # PCG：同一模型被并发请求多个 chunk 时，只能构建一次
-# ----------------------------------------------------------------------------
 # 模型覆盖多个 chunk 时，首帧会有多个 worker 线程同时请求不同 chunk，每个都走到
 # QVoxelSource._ensure_volume()。无锁则各自 build 一遍：L-系统 / 元胞 / WFC 只是
 # N× 白算，而 PcgWfcOverlap 的 _learn() 会写实例成员 _patterns/_weights/_allow
@@ -401,9 +384,7 @@ func test_pcg_model_builds_once_under_concurrent_chunks() -> void:
 			"体素 (3,3,3) 应落在第 1 个 chunk 的局部同位置")
 
 
-# ----------------------------------------------------------------------------
 # 辅助
-# ----------------------------------------------------------------------------
 
 ## 在指定位置种入累计伤害（直接写数据层的伤害账内部协议，避免依赖原生破坏内核）。
 func _seed_damage(data: QVoxelSource, pos: Vector3i, amount: float) -> void:

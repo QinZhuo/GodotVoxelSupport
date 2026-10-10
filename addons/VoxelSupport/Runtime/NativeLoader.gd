@@ -2,11 +2,9 @@ class_name NativeLoader
 extends RefCounted
 
 ## GDExtension 原生核心桥（VoxelNative）——**硬依赖**。
-##
 ## 插件全部热路径（网格生成 / 崩塌检测 / 批量体素写 / 快照 / CRC）都实现在原生库里，
 ## 因此不保留任何 GDScript 兜底：库缺失或方法不全时，这里统一报一次错并返回空值。
 ## 单一实现 = 单一行为，不会出现"有库/无库两条路径表现不一致"。
-##
 ## 【为什么动态绑定】编辑器启动早期（扩展注册完成前）GDScript 静态引用 VoxelNative
 ## 会直接 SIGKILL；经 ClassDB + Object.call 动态绑定对任何启动时序都安全。
 
@@ -88,10 +86,8 @@ static func refresh() -> void:
 	_inst = null
 
 
-# ----------------------------------------------------------------------------
 # 桥接方法：一律"取实例 → 为空则返回空值 → 否则动态调用"。
 # 返回值形状与原生签名一致（见 voxel_native.h）。
-# ----------------------------------------------------------------------------
 
 ## 单个 chunk 网格（halo: 34³ 密集光环，值 = 材质ID，0 = 空）。
 static func generate_chunk_dense(halo: PackedInt32Array, trans_flags: PackedByteArray,
@@ -289,9 +285,7 @@ static func crc32_segments(data: PackedByteArray, offsets: PackedInt64Array,
 	return int(inst.call(&"crc32_segments", data, offsets, lengths))
 
 
-# ----------------------------------------------------------------------------
 # QVX 块级编解码（原生）
-# ----------------------------------------------------------------------------
 # 字节布局权威在 QVoxelSpec / docs/QVX_FORMAT.md；GDScript 侧的 QVoxelBlockCodec.unpack 仍是
 # 参考实现，编解码往返由 test_qvox_format 做 oracle。
 
@@ -328,9 +322,7 @@ static func voxel_value_range(buf: PackedInt32Array) -> Vector2i:
 	return inst.call(&"voxel_value_range", buf)
 
 
-# ----------------------------------------------------------------------------
 # 体素枚举（原生批量）
-# ----------------------------------------------------------------------------
 # 这四个都只读 buffers（chunk key -> PackedInt32Array(32³)），不修改内容。
 
 ## 全部非空体素位置（Array[Vector3i]）。

@@ -4,14 +4,11 @@ extends PcgModel
 
 ## WFC（波函数坍缩）：把"一整块体素"看作由若干小图块拼成的格网，
 ## 从"每格都能是任意图块"出发，反复做"选一格定下来 + 传播约束"，直到处处定下。
-##
 ## 【为什么和 SDF 互补】WFC 的规则是**局部**的（只看邻居接口是否对得上），
 ## 全局形态是**涌现**的：作者只写"墙接墙、门接墙、地板接地板"，算法自动拼出连通的房间与走廊。
 ## 这正适合"我说不清具体长什么样、但知道每块该怎么接"的建筑/遗迹。
-##
 ## 【确定性】固定 seed；一旦某格候选被清空（矛盾）就换 seed 重来，
 ## 因此同参数同 grid_size 恒得同一结果。全部重试都失败则输出空模型并告警。
-##
 ## 【边界】本实现不约束世界边界（边上的图块朝外的面自由），成品边缘可能有开口。
 ## 需要封闭时加一块"朝外面全为实心"的图块，并调高其 weight。
 
@@ -61,9 +58,7 @@ func build(grid_size: Vector3i) -> PackedInt32Array:
 	return volume
 
 
-# ----------------------------------------------------------------------------
 # ① 求解：观察 → 坍缩 → 传播
-# ----------------------------------------------------------------------------
 
 ## 解一次。返回每格选中的图块下标（长度 = 格数）；矛盾则返回空数组。
 func _solve(cells: Vector3i, rng: RandomNumberGenerator) -> PackedInt32Array:
@@ -159,9 +154,7 @@ func _compatible(src: PackedInt32Array, dst: PackedInt32Array, d: int) -> Packed
 	return out
 
 
-# ----------------------------------------------------------------------------
 # ② 落格：把每格选中的图块画进体积
-# ----------------------------------------------------------------------------
 
 func _stamp(volume: PackedInt32Array, grid_size: Vector3i, ts: Vector3i,
 		cells: Vector3i, solved: PackedInt32Array) -> void:
@@ -181,9 +174,7 @@ func _stamp(volume: PackedInt32Array, grid_size: Vector3i, ts: Vector3i,
 										origin.z + lz, grid_size, m)
 
 
-# ----------------------------------------------------------------------------
 # 格网坐标换算（布局与 PcgModel.index_of 一致：x 连续，再 y，再 z）
-# ----------------------------------------------------------------------------
 
 func _grid_count(extent: int, cell: int) -> int:
 	return maxi(int(ceil(float(extent) / float(cell))), 0)

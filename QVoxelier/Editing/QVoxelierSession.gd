@@ -1,18 +1,15 @@
 class_name QVoxelierSession
 extends RefCounted
-## 应用会话：**世界 + 每个对象一条编辑会话 + 工程状态 + 应用能力**（DESIGN §2.1 的 App/Command 层）。
-##
+## 应用会话：**世界 + 每个对象一条编辑会话 + 工程状态 + 应用能力**。
 ## 【为什么它必须独立于视口脚本】§2.1 把"应用能力"（改世界、记撤销）划给 App/Command 层，
 ## 把"只管 UI，不含算法"划给 View 层。此前这些能力住在 `QVoxelierApp` 里，于是那个类同时是
 ## 界面装配、输入翻译、命令编排与刷新中枢（1789 行）。本类承接其中的**数据与应用能力**，
 ## 视口脚本因此只剩装配 / 翻译 / 刷新三件事。
-##
 ## 【它不认识任何 UI 类型】不引用 hud、不引用面板、不引用渲染器 —— 要说话就发信号：
 ##   · `hint`          —— 一句面向用户的提示（View 转给状态栏）
 ##   · `changed`       —— 数据变了（View 据此重挂显示层 + 刷面板）
 ##   · `dirty_changed` —— 未落盘改动变化（View 据此刷标题星号）
 ## 这条边界是可测性的全部依据：本类可无头驱动（见 Scripts/Test/test_qvoxelier_session.gd）。
-##
 ## 【显示层怎么被叫醒】会话刻意不认识渲染器，故"哪一份数据该喂给哪个渲染器"由 View 注入：
 ## `render_update` 是 View 给的唤醒回调，本类新建 / 重挂 QVoxelEditSession 时压给它们。
 ## 与 `QVoxelEditSession.request_render_update` 同一套约定，只是从"一条会话一个"提到"一个应用一个"。
@@ -41,9 +38,7 @@ var project_path := ""
 var dirty := false
 
 
-# ----------------------------------------------------------------------------
 # 装配：世界 → 会话
-# ----------------------------------------------------------------------------
 
 ## 新建一个空模型（grid 为 ZERO 时用 size）：建世界 → 建对象 → 装配。
 ## 【为什么尺寸与色板由调用方传入】它们是视口的 @export（在场景里可调），属 View 的配置；
@@ -74,11 +69,9 @@ func install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 
 
 ## 切换"当前编辑对象"。三条入口共用这一条路径：对象列表点击、新建对象、打开工程挑初始对象。
-##
 ## 【为什么不重建会话】非活动对象也早就有一条展示会话（见 install），切换只是把活动引用换掉。
 ## 于是撤销栈按对象各自保留 —— 切走再切回来，那一个对象的撤销历史还在，
 ## 不会因为"看了一眼别的对象"就清空。
-##
 ## 返回是否真的换了对象（调用方据此决定要不要提示 / 重挂显示层）。
 func activate(model_id: int) -> bool:
 	if world == null:
@@ -96,7 +89,7 @@ func activate(model_id: int) -> bool:
 
 
 ## 一期只编辑一个模型：优先挑"有内容"的那个（打开样例时第一眼就有东西看），都没有就取第一个。
-## 多模型 / 组是二期的事（DESIGN §4.5）。
+## 多模型 / 组是二期的事。
 static func pick_editable(w: QVoxelWorld) -> QVoxelModel:
 	var first: QVoxelModel = null
 	for o in w.all_models():
@@ -109,9 +102,7 @@ static func pick_editable(w: QVoxelWorld) -> QVoxelModel:
 	return first
 
 
-# ----------------------------------------------------------------------------
 # 会话查询（View 的渲染器装配要按"世界的全部对象"挨个喂数据，故需要能遍历）
-# ----------------------------------------------------------------------------
 
 func session_for(model_id: int) -> QVoxelEditSession:
 	return _sessions.get(model_id)
@@ -139,9 +130,7 @@ func _on_history_changed() -> void:
 	changed.emit()
 
 
-# ----------------------------------------------------------------------------
 # 层级结构（树上的增 / 删 / 移 / 改字段）
-# ----------------------------------------------------------------------------
 
 ## 新建模型：尺寸随当前模型（"再做一个同样大小的"是最常见的心智模型）。
 ## 新模型会挂一条展示会话并**直接切过去** —— 建了却停在旧的上面，用户会以为没建成。
@@ -167,10 +156,8 @@ func add_group(parent: QVoxelGroup) -> void:
 
 
 ## 删除节点（连同子树）。
-##
 ## 【为什么删组不先拆散】"删掉这个组"在用户心里就是"这一坨不要了"；想留内容就先把它拖出来。
 ## 拆散是另一个动作，混进来会让"删除"变得不可预期。
-##
 ## 【为什么不入撤销栈】结构增删与体素编辑是两类东西：后者才是高频、真正需要逐笔回退的手势。
 func remove_node(node: QVoxelNode) -> void:
 	if world == null or node == null:
@@ -247,7 +234,6 @@ func rename_node(node: QVoxelNode, new_name: String) -> void:
 
 
 ## 拖拽落位：把节点挂到新父下的 index 位置。
-##
 ## 【为什么"移动"和"插入"是同一个操作】树上没有"移动"这回事 —— 移动就是"从原父摘下来、
 ## 挂到新父"。QVoxelWorld.attach_node 直接拒绝"把组挂进自己的子树"（那会造出环）。
 func move_node(node: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
@@ -261,7 +247,6 @@ func move_node(node: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
 
 
 ## 改节点的一个字段并记成一条可撤销命令。
-##
 ## 【为什么改完要重建显示】可见性不只是个数据字段 —— 它决定该节点渲染与否；
 ## 而这条命令的 undo() 只写属性、不会替我们叫醒视口，故两条路径都得手动重建（由 changed 带出）。
 func write_node_field(node: QVoxelNode, prop: StringName, value: Variant, label: String) -> void:
@@ -273,9 +258,7 @@ func write_node_field(node: QVoxelNode, prop: StringName, value: Variant, label:
 	changed.emit()
 
 
-# ----------------------------------------------------------------------------
 # 工程状态
-# ----------------------------------------------------------------------------
 
 ## 标记"有未落盘改动"。对象增删这类不入撤销栈的操作也走这里，保证标题星号不漏。
 func mark_dirty() -> void:

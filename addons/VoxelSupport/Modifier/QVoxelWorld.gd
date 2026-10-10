@@ -2,22 +2,18 @@
 class_name QVoxelWorld
 extends Resource
 ## 世界 —— QVoxelier 的顶层编辑模型，也就是一份 `.qvx` 工程的**唯一常驻真值**。
-##
 ## 【与 QVoxelFile.QVoxelDocument 的分工：一份真值 + 一个瞬时 DTO】
 ##   QVoxelWorld    活的编辑状态（对象 + 手绘体素 + 修改器链），常驻内存、可被就地改写。
 ##   QVoxelDocument QVoxelFile 解析/序列化用的传输结构，**只在读写的那一瞬间存在**。
 ## 两者用 from_document() / to_document() 一对显式转换连接，**不允许同时常驻** ——
 ## 否则同一份体素会有两个账本，改动落哪边取决于调用顺序（这类静默数据丢失最难查）。
-##
 ## 【为什么加载/保存要经一次转换，而不是直接编辑 Document】
 ## QVoxelDocument 是"格式的忠实投影"：块表按 model_id 分桶、对象元数据散在 NODE 的 JSON 里、
 ## 没有"选择/焦点/撤销目标"这类编辑期概念。拿它当编辑模型，UI 每次都要自己拼装语义，
 ## 于是"格式细节"会渗透到每个面板里。转换一次（而不是每处各转一次）才能把格式关在 QVoxelFile 内。
-##
 ## 【head / materials / node / cach 原样保留】HEAD 与 NODE 都是 JSON，格式层不解释未知键
 ## （QVoxelSpec §3/§7）。本类只解释自己拥有的键（world 设置、nodes 树、cameras），
 ## 其余**原样写回** —— 于是"读进来再存出去"不会丢掉任何我们还没实现的东西。
-##
 ## 【铁律：写入 = "替换"，绝不就地改嵌套结构】本类的改动由 QVoxelPropertyCommand 撤销，
 ## 而它的快照是**浅**副本（见该类 _snapshot）。浅副本与活数据**共享**嵌套容器，所以
 ## `head["world"]["name"] = x` 这种就地写会让命令手里的"改前值"跟着一起变 ——
@@ -35,7 +31,6 @@ extends Resource
 @export var node: Dictionary = {}
 
 ## 场景树顶层（有序）。**唯一真值** —— 组/模型的父子关系全在这里。
-##
 ## 【为什么不再有"图层"这张平行表】层与对象本是同一件事的两半：层管分组/可见/顺序，
 ## 对象管内容。两张表就得同步（"删层要把层内对象的 layer 一起搬"就是这么来的），
 ## 而同步总有漏掉一处的时候。合成一棵树后，层就是一个 QVoxelGroup 节点、归属就是父子关系。
@@ -50,9 +45,7 @@ var revision := 0
 signal content_changed
 
 
-# ----------------------------------------------------------------------------
 # 构造
-# ----------------------------------------------------------------------------
 
 ## 新建空世界。HEAD 由格式常量组装（qvx 版本、必填 channels 等一律取自 QVoxelSpec，
 ## 免得把"版本号"抄第二遍 —— 那正是升级格式时漏改一处的地方）。
@@ -90,7 +83,6 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 
 
 ## 节点条目 → 节点对象（递归）。
-##
 ## 【认不出来就丢弃，不造空壳】未知 kind 意味着这份文件来自更新的版本或别的工具。
 ## 凭猜补一个空节点出来，用户会以为数据还在（然后在保存时把真正的数据覆盖掉）。
 static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int) -> QVoxelNode:
@@ -129,7 +121,6 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 
 
 ## 节点条目里"两种节点共有"的那部分。
-##
 ## 【为什么没有 position / combine】摆放已是链上的一条平移条目，而"怎么并进父画布"是父侧
 ## 恒定的并集（见 QVoxelEvalEngine._composite），两者都不再是节点自己的属性。
 static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
@@ -139,9 +130,7 @@ static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 	n.modifiers = _modifiers_of_entry(entry)
 
 
-# ----------------------------------------------------------------------------
 # 导出为传输结构（保存路径）
-# ----------------------------------------------------------------------------
 
 ## 构出可交给 QVoxelFile.serialize() 的文档。**每次调用都重新构**（Document 不常驻）。
 func to_document() -> QVoxelFile.QVoxelDocument:
@@ -212,7 +201,6 @@ static func _frames_of_array(arr: Array) -> Array[QVoxelFrame]:
 
 
 ## 节点条目的 `anim` 键 → 时间轴元数据（§12.3）。
-##
 ## 【为什么只认 anim，不认旧的 animations】旧键按"节点下标"寻址，而 v3 的嵌套树没有下标
 ## 这层身份（§12.4），与旧 layers 键同一处置：读盘忽略、写盘抹掉。
 static func _read_anim(m: QVoxelModel, entry: Dictionary) -> void:
@@ -241,9 +229,7 @@ static func _anim_of_model(m: QVoxelModel) -> Dictionary:
 	return a
 
 
-# ----------------------------------------------------------------------------
 # 世界级设置
-# ----------------------------------------------------------------------------
 
 func block_size() -> int:
 	return int(head.get("block_size", QVoxelSpec.DEFAULT_BLOCK_SIZE))
@@ -267,9 +253,7 @@ func set_voxel_size(value: float) -> void:
 	_write_settings(_patched_settings("voxel_size", value))
 
 
-# ----------------------------------------------------------------------------
 # 材质（MATE 就是调色板本身）
-# ----------------------------------------------------------------------------
 
 ## 材质颜色。ID 越界或条目缺失返回洋红（可见的错误色，而不是悄悄变黑）。
 func material_color(material_id: int) -> Color:
@@ -311,7 +295,6 @@ func used_materials() -> Dictionary:
 
 
 ## 材质 PBR 标量通道（`metal` / `rough` / `emission`，值域 0–1）。ID 越界返回 0。
-##
 ## 【为什么 emission 的读回恒等于写入值】MATE 用 `e_r/e_g/e_b` 存**发光颜色**（三个字节），
 ## 单通道强度只能从它还原。若照 `VoxelMaterial.to_mate` 那样写 `基色 × 强度`，读回 `max()` 会
 ## 再乘一遍基色亮度，滑条一松手就跳值。故写入时按基色的最大分量归一，使 `max(e) == 强度` ——
@@ -355,14 +338,11 @@ func set_material_scalar(material_id: int, key: StringName, value: float) -> voi
 	_touch()
 
 
-# ----------------------------------------------------------------------------
 # 相机（NODE 下的工程数据，§5.1）
-# ----------------------------------------------------------------------------
 # 【为什么相机没有自己的 Resource 类】相机的唯一归宿是 `node` 这个 JSON 字典：
 # 存盘要 JSON、读盘要 JSON。中间再过一层 Resource，只会凭空多出两处"字段改名"的机会 ——
 # 而改名错位不报错，只静默丢字段。故本类直接读写 node 下的键，
 # 与 HEAD 的 world 设置（_settings / _write_settings）同一手法。
-#
 # 【改相机怎么撤销】面板把一次改动包成 QVoxelPropertyCommand(world, &"node") 即可 ——
 # 本节 setter 一律**整体替换** node 下的数组，于是浅快照里的旧数组原封不动（见类头铁律）。
 
@@ -391,18 +371,14 @@ func remove_camera(index: int) -> bool:
 	return _remove_entry_at(QVoxelSpec.NODE_CAMERAS_KEY, index)
 
 
-# ----------------------------------------------------------------------------
 # 场景树
-# ----------------------------------------------------------------------------
 # 【为什么"层"没有了】层与对象本是同一件事的两半。合成一棵树后，分组 = 父子关系，
 # 可见 / 锁定 / 摆放 / 滤镜全是节点属性 —— **只有一处真值**，也不再需要"删层要连带搬 layer"
 # 这种跨表同步（那条规则的存在本身就是"有两张表"的证据）。
-#
 # 【为什么没有 parent 指针】父 → 子只朝一个方向，引用图是 DAG、没有环。Resource 是
 # RefCounted：存反向指针就造出环，环永远不被释放（静默泄漏）。需要"我在谁下面"时从根往下找。
 
 ## 新建模型并接进世界。parent 为 null 则挂到顶层。
-##
 ## model_id 取"现有最大值 + 1"（而不是 size()）：删掉中间某个模型后，ID 不会被新模型复用
 ## —— 复用会让仍在引用旧 ID 的撤销命令改错模型。
 func create_model(node_name := "", grid := Vector3i.ZERO, parent: QVoxelGroup = null) -> QVoxelModel:
@@ -496,7 +472,6 @@ func detach_node(target: QVoxelNode) -> bool:
 
 
 ## 把已有节点挂到 parent 下的 index 位置（index < 0 = 末尾）。会先把它从原位置摘下来。
-##
 ## 【为什么"移动"和"插入"是同一个操作】树上没有"移动"这回事 —— 移动就是"从原父摘下来、
 ## 挂到新父"。分成两套只会让"跨组拖拽"和"组内重排"各有一套边界条件。
 ## 【为什么必须挡祖先】把组挂进自己的子树会造出环 —— 环上的节点既不在任何根的可达集合里、
@@ -570,9 +545,7 @@ func _collect_models(list: Array[QVoxelNode], out: Array[QVoxelModel]) -> void:
 			_collect_models((n as QVoxelGroup).child_nodes, out)
 
 
-# ----------------------------------------------------------------------------
 # 内部
-# ----------------------------------------------------------------------------
 
 func _touch() -> void:
 	revision += 1
@@ -682,13 +655,10 @@ func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 
 
 ## NODE JSON：把场景树写进 nodes，其余键**原样保留**。
-##
 ## 【为什么是"打补丁"而不是"重新生成"】NODE 里还有相机、动画、我们的未知键。
 ## 重新生成会静默丢掉它们；打补丁则只碰自己拥有的键（§7：格式不解释未知键）。
-##
 ## 【为什么显式 erase("layers")】图层已被树取代（qvx 3）。node 里若还留着旧的 layers 键，
 ## 写回去就等于"存盘时复活了一个已经删掉的概念"，下次读盘还会被当成有效数据。
-##
 ## 【为什么也要 erase("animations")】旧动画键按"节点下标"寻址，与 v3 的嵌套树对不上号
 ## （§12.4：动画已并入各模型节点的 `anim` 键）。留着它 → 下次读盘拿到一份指向错误节点的
 ## 动画元数据，且与 `anim` 并存时谁生效取决于读取顺序（这类"两处真值"正是要消掉的）。
@@ -707,7 +677,6 @@ func _node_json() -> Dictionary:
 
 ## 节点 → JSON 条目（递归）。缺省值一律**不写**（P2：缺省才是常态）：
 ## visible=true / locked=false 都是冗语，写了只会让文件更长、且"改回缺省"时需要记得删键。
-##
 ## 【摆放为什么不在这里】它已是 steps 里的一条平移条目 —— 节点的摆放与链上的旋转 / 镜像
 ## 走同一条序列化路径，于是"文件里有两份摆放"这种可能根本不存在。
 func _entry_of_node(n: QVoxelNode) -> Dictionary:
@@ -754,7 +723,6 @@ static func _modifiers_of_entry(entry: Dictionary) -> Array[QVoxelModifier]:
 
 
 ## 节点里显式写了 size 就用它；否则从块范围推断（外来文件可能没写 size）。
-##
 ## 【为什么推断要并上**所有**帧】动画模型的分辨率是整份 FRAM 共用的（§12.2），
 ## 只看第 0 帧会让"第 5 帧才长出外圈"的模型分辨率偏小 → 那些体素一进来就被判越界丢掉。
 static func _size_of_entry(entry: Dictionary, m: QVoxelModel, bs: int) -> Vector3i:

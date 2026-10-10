@@ -2,22 +2,18 @@ class_name VoxelMeshBatch
 extends RefCounted
 
 ## 一次"渲染扇出"的**所有权对象**：同时持有本批次的**任务计数**与**只读快照句柄**。
-##
 ## 【要解决什么】旧实现把这三样东西散在渲染器里各写一遍：
 ##     `_pending_task_count`（任务计数）、`_batch_snapshot_active`（快照是否已登记）、
 ##     `_generation_id`（过期判定）。
 ## 于是"递减"这个动作出现在多个地方：结果处理函数里既有正常路径的递减，
 ## 又有两条早退路径各自的递减 —— 一个被丢弃的结果会被减 2 次，计数提前归零，
 ## 批次被判"完成"→ 快照在 worker 仍在读共享缓冲时被释放 → COW 写保护被击穿。
-##
 ## 【本类的做法：结算点唯一】计数只在 [method _on_done] 一处递减，而 [method _wrap]
 ## 保证"无论 worker 怎么提前 return，_on_done 必然被调用一次"。
 ## 于是消费方（渲染器）无论怎么早退，都不可能让计数失衡 —— 失效模式被结构消除，
 ## 而不是靠"每处都记得减一次"的纪律维持。
-##
 ## 【为什么用对象身份而不是 gen_id】批次一经取消即不再发射结果，迟到的回填自然被丢弃；
 ## 渲染器只需 `batch != _batch` 即可判过期。对象身份不需要维护、也不会忘记自增。
-##
 ## 【为什么与 VoxelAsyncLoader 分开】后者是**取数账本**：按 (chunk_key, lod) 键、
 ## 跨多个渲染批次存活、由 configure()/clear() 失效。本类是**渲染扇出账本**：
 ## 同时至多一个、随 origin shift / 退出 / 世界重建失效，且必须携带 QVoxelSource 的快照句柄。
@@ -79,13 +75,11 @@ func has_dispatched() -> bool:
 ## 派发一个 worker。**worker 必须恰好只有一个自由形参**，签名视为
 ## `func(out: Dictionary) -> void`：需要产出结果时向 out 写入（`out.merge(...)` /
 ## `out["k"] = v`）；不写 = 本任务无结果。
-##
 ## 【为什么强调"恰好一个自由形参"】_wrap 用 `worker.call(out)` 调用它，而 Godot 4 的
 ## `Callable.bind()` 会把绑定实参放在 call 实参**之后** —— 所以
 ## `f.bind(a, b).call(out)` 实际是 `f(out, a, b)`，out 落在第一个形参上、其余整体错位。
 ## 需要传额外参数时，请在调用方用 lambda 把 out 显式写在末位（见 VoxelRenderer 的派发处），
 ## 不要依赖 bind 的位置。
-##
 ## 记账、线程包装、结算全部由本类负责，调用方不需要（也不应该）再维护计数。
 func spawn(worker: Callable) -> void:
 	if _settled:
@@ -119,9 +113,7 @@ func wait_tasks() -> void:
 	_task_ids.clear()
 
 
-# ----------------------------------------------------------------------------
 # 内部
-# ----------------------------------------------------------------------------
 
 ## 子线程包装：唯一职责是"保证 _on_done 必然被调用一次"。
 ## worker 抛错/提前 return 也走不到"不结算"的分支，因为 call_deferred 在其之后无条件执行。

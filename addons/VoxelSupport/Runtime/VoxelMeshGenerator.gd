@@ -26,7 +26,6 @@ const MATERIAL_REFRACTION_SCALE := 0.01
 
 
 ## 统一配置实心材质（编辑器/运行时共用）
-##
 ## 【不开 vertex_color_use_as_albedo】本渲染器不提供几何级顶点色 AO（曾实现过，
 ## 实测观感更差，原因记录在 VoxelChunkGenerator 的"已移除：顶点色 AO"那段）。
 ## 凹处的层次改为用**材质分档**表达（同色系更暗的一档体素），那才是体素画法。
@@ -178,19 +177,15 @@ func _get_channel_images() -> Dictionary:
 	return _channel_images
 
 
-# ----------------------------------------------------------------------------
 # QVX 路径 —— 块级生成
-# ----------------------------------------------------------------------------
 # QVX 的 block_size 恒等于 CHUNK_SIZE，块坐标就是 chunk 坐标，因此网格可以直接按块生成：
 # build_halo_from_buffers（跨块面可见性）→ generate_chunk_dense。无需把数据摊平成
 # Dictionary[Vector3i,int] 再交给 generate_arrays_native 重新分块（那是 .vox 路径的做法）。
-#
 # 坐标约定：use_local_space=false → 顶点 = (体素坐标 + offset) × scale，即**绝对世界坐标**，
 # 于是各块结果可直接拼接；块边界面"负方向本块负责、正方向看邻居"的约定保证每个跨界只生成
 # 一次 → 拼接后无重叠面、无 z-fighting。
 
 ## 由块缓冲生成网格 arrays（输出形状与 generate_arrays_native 一致）。
-##
 ## 【测试 oracle，非生产路径】生产路径已全量下沉原生
 ## （NativeLoader.generate_arrays_from_chunks_native，见 P2-5）：本函数保留的唯一用途是
 ## test_voxel_snapshot_baseline 的逐位对照。原生实现与本 oracle 的产物字节序列必须一致，
@@ -262,7 +257,6 @@ static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: 
 ##   模型分项：每个体素源一项（项名 model_<id>；动画模型取 `frame_index` 那一帧）；
 ##   节点分项：NODE 里每个 kind="model" 节点一项（项名取节点名）；
 ##   帧分项：整个资产在每一帧的样子（项名 frame_<k>），与 .vox 的 split_by_frame 同构。
-##
 ## 【为什么 split_by_frame 对 .qvx 不再降级】FRAM 落地后 .qvx 真的有体素动画帧了（§12.7）。
 ## 继续按 split_by_model 处理会让"逐帧导出"的用户拿到 N 个模型而不是 N 帧 —— 静默的错产物。
 static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary,
@@ -313,7 +307,6 @@ static func _items_by_node(qvx: QVoxelAsset, frame: int = 0) -> Array:
 
 ## 逐帧一项：整个资产在第 k 帧长什么样（与 .vox 的 split_by_frame 同构）。
 ## 帧数取所有动画模型的最大帧数；全静态资产 = 1 帧（即"整资产一项"）。
-##
 ## 【为什么要按帧各算一次包围盒】原点由包围盒导出，而包围盒随帧变（§12.7 的 origin_offset）。
 ## 沿用第 0 帧的原点会让"第 3 帧才长出来的部分"整体偏移 —— 逐帧项各自摆正才是对的。
 static func _items_by_frame(qvx: QVoxelAsset) -> Array:

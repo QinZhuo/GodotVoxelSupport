@@ -1,14 +1,11 @@
 extends TestCase
 
 ## 游戏进程级冒烟测试：把体素系统在**真实游戏进程**里完整跑一遍。
-##
 ## 为什么必须有这一层：编辑器侧的纯逻辑用例碰不到场景树与真实主循环，拦不住
 ## "只有场景真跑起来才暴露"的 bug —— 例如 VoxelMeshBatch 的 Callable.bind 实参
 ## 错位曾让 worker 结果字典的键全部读错，编辑器里所有单测照样全绿，一开 demo 却是空白。
-##
 ## 归属声明 needs_game_process() = true：由 MCP run_game_tests（或 headless --game）
 ## 在游戏进程内执行；编辑器侧 run_tests 会把它列为 skipped（不静默通过）。
-##
 ## 覆盖：
 ##   ① 渲染管线端到端：数据 → 异步 worker → 帧尾 GPU 上传 → LOD0 网格落到 _lod_meshes[0]
 ##   ② 崩塌路径的材质收集（_collect_group_materials，原生批量）真跑不报错且世界被清空
@@ -36,9 +33,7 @@ func cleanup() -> void:
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(SMOKE_STREAM_PATH))
 
 
-# ----------------------------------------------------------------------------
 # ① 渲染管线端到端
-# ----------------------------------------------------------------------------
 
 func test_render_pipeline_produces_lod0_mesh() -> void:
 	var tree := _main_tree()
@@ -65,9 +60,7 @@ func test_render_pipeline_produces_lod0_mesh() -> void:
 	assert_true(_lod0_vertex_total(r) > 0, "实心块应产生非零顶点 (got=%d)" % _lod0_vertex_total(r))
 
 
-# ----------------------------------------------------------------------------
 # ② 崩塌路径的材质收集
-# ----------------------------------------------------------------------------
 
 func test_validate_stability_collapses_floating_block() -> void:
 	var tree := _main_tree()
@@ -99,9 +92,7 @@ func test_validate_stability_collapses_floating_block() -> void:
 	assert_eq(r.last_collapse_count, before, "崩塌计数应等于悬空体素数")
 
 
-# ----------------------------------------------------------------------------
 # ③ 全量破坏
-# ----------------------------------------------------------------------------
 
 func test_destroy_all_removes_every_voxel() -> void:
 	var tree := _main_tree()
@@ -120,9 +111,7 @@ func test_destroy_all_removes_every_voxel() -> void:
 	assert_eq(d.get_voxel_count(), 0, "destroy_all 应移除全部体素 (before=%d)" % before)
 
 
-# ----------------------------------------------------------------------------
 # ④ 存储层内存有界
-# ----------------------------------------------------------------------------
 
 ## 写远超 auto_flush_dirty 的块并 flush：存储层内存里只应剩"块索引"，
 ## 未落盘覆盖层与删除墓碑必须回到空 —— 否则内存就随世界规模无界增长。
@@ -144,9 +133,7 @@ func test_stream_memory_is_bounded_after_flush() -> void:
 	assert_eq(s.load_chunk(Vector3i(19, 9, 0), 0), _one_voxel_block(n - 1), "块应按磁盘读回")
 
 
-# ----------------------------------------------------------------------------
 # 辅助
-# ----------------------------------------------------------------------------
 
 ## 只有 1 个体素的块（位置随 seed 变化 → 内容各不相同，且保证非空）。
 func _one_voxel_block(seed_v: int) -> PackedInt32Array:

@@ -2,12 +2,10 @@ class_name VoxelDestructionPresenter
 extends Node3D
 
 ## 破坏表现层：把"怎么演"从编辑逻辑里彻底分开。
-##
 ## 【边界】编辑侧（`VoxelEditKernel` 的编辑数学 + `VoxelDestructible` 的编辑管道）只产出
 ##   **数据**——"哪些体素没了 / 哪些体素失稳 / 材质快照"；本组件负责**演出**——粒子碎片、
 ##   掉落刚体、mesh 组装、冻结与生命周期清理。宿主 `_process` 里因此不再出现
 ##   "级联调度 + mesh 组装"混在一条链上的情况。
-##
 ## 【依赖方向】本组件是宿主的**子节点**（identity 变换，故 `global_position` 即宿主世界位置）：
 ##   · 宿主 → 本组件：只调本组件的公开方法——`ensure_debris_root` / `spawn_debris_with_materials`
 ##     / `spawn_falling_chunks_from_groups` / `process_pending_falling_groups`
@@ -18,7 +16,6 @@ extends Node3D
 ##   · 本组件 → 宿主：**只读**宿主的公开面（`host.data` / `host.voxel_scale` / `host.infinite_layer` /
 ##     `host.diag_enabled` / `host.surface_materials()`），与 P2-2 冻结的内核契约一致；
 ##     **不碰宿主私有成员**。构造时传入 `host`，之后不再变更。
-##
 ## 【配置旋钮】本组件不是被 Inspector 编辑的节点（由宿主在 `_ready` 里创建），
 ##   故破坏手感 / 掉落旋钮仍留在宿主的 `@export` 上，由 `configure()` 每帧传入——
 ##   避免同一旋钮出现第二套 Inspector 真值。
@@ -126,9 +123,7 @@ func configure(max_debris_per_hit: int, debris_speed_range: Vector2,
 	_falling_cleanup_time = falling_cleanup_time
 
 
-# ----------------------------------------------------------------------------
 # 碎片系统：粒子系统（无物理碰撞体）
-# ----------------------------------------------------------------------------
 
 func ensure_debris_root() -> void:
 	if not _debris_root:
@@ -585,7 +580,6 @@ func _ensure_falling_chunk_root() -> void:
 ## 将一组连通体素创建为一个"轻量静态 MeshInstance3D" + RigidBody3D 掉落
 ## 体素位置偏移到居中，使 RigidBody3D 位于块的中心
 ## mat_map: 体素位置 -> 材质ID 的映射（在调用前已从 host.data 中收集，因为体素可能在调用前已移除）
-##
 ## 轻量化说明：掉落块只需静态渲染 + 刚体物理，不需要任何后期破坏/修改能力。
 ## 因此用"一次性生成的 ArrayMesh + MeshInstance3D"替代完整的 VoxelDestructible
 ## （后者携带异步网格生成管线、材质缓存、级联崩塌逻辑等重资产），大幅降低每个

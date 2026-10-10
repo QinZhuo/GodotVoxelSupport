@@ -1,6 +1,5 @@
 class_name VoxelChunkGenerator
 ## 高性能体素网格生成器（Chunk 分区）
-##
 ## 将体素世界划分为固定大小的 chunk，每个 chunk 独立生成网格。
 ## 生成时始终输出所有非空 chunk 的完整 mesh，避免增量重建导致数据丢失。
 ## 支持在后台线程生成网格数据（generate_arrays_runtime），避免阻塞主线程。

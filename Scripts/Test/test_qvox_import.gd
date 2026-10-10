@@ -1,7 +1,6 @@
 extends TestCase
 
 ## QVX 导入链路测试：`.qvx` → QVoxelAsset → QVoxelSource / 网格 / 材质。
-##
 ## 钉死的是"QVX 的语义不能被中间表示压缩"这件事。此前 `.qvx` 走 VoxAsset
 ## （MagicaVoxel 场景图形状的适配器）导致三处**静默**失真，本文件逐条覆盖：
 ##   ① 多模型只导入第一个（VoxelFrame 的合并分支在 index==0 时短路）；
@@ -17,9 +16,7 @@ func cleanup() -> void:
 	_remove_dir(TEST_DIR)
 
 
-# ----------------------------------------------------------------------------
 # ① 多模型 + NODE 摆放：一个都不能丢，位置按 NODE 变换融合
-# ----------------------------------------------------------------------------
 
 func test_multi_model_with_node_placement() -> void:
 	var path := TEST_DIR + "/two.qvx"
@@ -45,9 +42,7 @@ func test_multi_model_with_node_placement() -> void:
 	assert_true(data.has_voxel(Vector3i(161, 97, 1)), "模型 1：组变换与自身位移都应叠加")
 
 
-# ----------------------------------------------------------------------------
 # ② 无 NODE（恒等摆放）= 块级直连：与逐体素融合结果必须一致
-# ----------------------------------------------------------------------------
 
 func test_block_import_matches_fused() -> void:
 	var path := TEST_DIR + "/plain.qvx"
@@ -64,9 +59,7 @@ func test_block_import_matches_fused() -> void:
 	assert_eq(via_blocks.get_voxel_count(), 2, "体素数应正确（块级安装用原生 count 统计）")
 
 
-# ----------------------------------------------------------------------------
 # ③ 网格：所有模型都要出现在同一个 mesh 里
-# ----------------------------------------------------------------------------
 
 func test_mesh_covers_all_models() -> void:
 	var path := TEST_DIR + "/mesh_two.qvx"
@@ -84,9 +77,7 @@ func test_mesh_covers_all_models() -> void:
 	assert_true(verts >= 48, "两个模型的体素都应出现在网格里（实得 %d 顶点）" % verts)
 
 
-# ----------------------------------------------------------------------------
 # ④ 资源载荷：块表往返（单一格式，无旧版兼容路径）
-# ----------------------------------------------------------------------------
 
 func test_resource_payload_roundtrip() -> void:
 	var d := _make_data()
@@ -107,9 +98,7 @@ func test_resource_payload_roundtrip() -> void:
 	assert_eq(bad.get_voxel_count(), 0, "版本不符的载荷应被拒绝")
 
 
-# ----------------------------------------------------------------------------
 # ⑤ 材质：MATE ↔ VoxelMaterial 的唯一转换必须幂等且保住物理量
-# ----------------------------------------------------------------------------
 
 func test_material_mate_roundtrip() -> void:
 	var entry := {
@@ -136,9 +125,7 @@ func test_material_mate_roundtrip() -> void:
 	assert_eq(VoxelMaterial.to_mate(null), VoxelMaterial.air_mate(), "null → 空气条目")
 
 
-# ----------------------------------------------------------------------------
 # ⑥ 仓库样例：所有样例都应能导入出非空体素
-# ----------------------------------------------------------------------------
 
 func test_samples_import_without_loss() -> void:
 	var files := _list_qvx(SAMPLES_DIR)
@@ -153,9 +140,7 @@ func test_samples_import_without_loss() -> void:
 		assert_true(data.get_voxel_count() > 0, "%s 应导入出体素" % path.get_file())
 
 
-# ----------------------------------------------------------------------------
 # ⑦ NODE 变换：通用四元数（而不是 .vox 的 0–23 朝向索引）
-# ----------------------------------------------------------------------------
 
 ## 90° 绕 Y 在浮点里恰好落在整数上：体素 (1,1,1) → (1,1,-1)。
 ## 这条用例钉住旋转的**表示与解码**：若哪天有人把 `.vox` 的 0–23 索引搬回 QVX，
@@ -187,9 +172,7 @@ func test_node_scale_and_translation_applied() -> void:
 	assert_true(data.has_voxel(Vector3i(12, 2, 2)), "先缩放 2× 再平移 (10,0,0)：(1,1,1) → (12,2,2)")
 
 
-# ----------------------------------------------------------------------------
 # ⑧ NODE.animations：格式层原样透传，**不解释**（v3 没有可寻址的节点下标）
-# ----------------------------------------------------------------------------
 
 ## `animations[].frames` 的键是**节点下标**，而 v3 的节点树是嵌套的、没有下标这层身份。
 ## 于是动画退化为"扁平时代的遗留键"：格式层原样保留（重写不丢数据），但不参与摆放。
@@ -216,16 +199,13 @@ func test_animation_frames_are_passed_through_not_interpreted() -> void:
 		assert_eq(doc.scene.animations.size(), 1, "动画应原样透传（不丢数据）")
 
 
-# ----------------------------------------------------------------------------
 # ⑨ 原点统一：`.vox → mesh` 与 `.vox → data` 必须摆在同一个位置（同 scale）
-# ----------------------------------------------------------------------------
 
 ## 守两件事：
 ##   ① 同一个模型经两条导入路径进场景，必须落在同一位置——mesh 的世界 AABB 与 data 的
 ##      `(体素AABB + center_offset) × scale` 在**三种原点模式下**都必须重合；
 ##   ② 导入器默认值必须是 `WORLD_ORIGIN`（不动几何）。它等于本插件网格导入一直以来的行为，
 ##      改成别的会让已有资产升级后集体挪位。
-##
 ## 形状固定用 cube：sphere 是另一种几何（每体素一颗球，AABB 本就更大），与原点无关。
 func test_mesh_and_data_origin_agree() -> void:
 	var src := "res://demo/deer.vox"
@@ -264,9 +244,7 @@ func test_mesh_and_data_origin_agree() -> void:
 					"显式选 bottom_center 时底面应落在 y=0（实得 %.3f）" % maabb.position.y)
 
 
-# ----------------------------------------------------------------------------
 # 辅助
-# ----------------------------------------------------------------------------
 
 ## 最小可用 QVX 文档骨架：HEAD（单通道 material）+ 材质表（条目 0 空气 + 1 号实体）。
 ## 各用例只在其上挂自己的 models / node。
@@ -311,7 +289,6 @@ func _write_single_voxel_qvx(path: String, transform: Dictionary, frames: Array 
 ## 模型 0：块 (0,0,0) 内 (1,1,1)；模型 1：块 (5,0,0) 内 (1,1,1)。
 ## with_node 时给出 NODE：组 root 位移 (0,32,0)、模型 1 再位移 (0,64,0)，
 ## 于是既验证"场景图不再被丢弃"，也验证**组变换累积到子节点**。
-##
 ## 节点树是**嵌套**的：组自己带 children[]（v3 起不再是"子节点下标"那套扁平表示）。
 func _write_two_model_qvx(path: String, with_node: bool) -> void:
 	var doc := _new_doc()

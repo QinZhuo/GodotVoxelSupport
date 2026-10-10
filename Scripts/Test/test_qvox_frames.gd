@@ -1,7 +1,6 @@
 extends TestCase
 
 ## QVX 帧动画（§12）链路测试：FRAM 从资产读取 → 导入器切帧 → 编辑器帧结构编辑与撤销。
-##
 ## 钉死四件事 —— 每一条都对应"FRAM 落地后很容易悄悄弄坏"的点：
 ##   ① 帧是**入参 / 静态快照**，不是隐藏状态：同一份资产按 frame 取出不同世界，
 ##      且包围盒 / 原点**逐帧各算**（第 k 帧才长出的部分不会整体偏移）；
@@ -9,7 +8,6 @@ extends TestCase
 ##      撤销到一半绝不能出现"两个源都非空"（那是序列化期的 FATAL 文件）；
 ##   ③ 撤销记住"改的是第几帧"，**与当前预览游标无关**（切帧后撤销不得改错帧）；
 ##   ④ 逐帧导出（frame_index / split_by_frame）真的按帧产出，而不是静默退化成按模型。
-##
 ## 索引对齐：MAT 是材质 ID，值 0 = 空。
 
 const TEST_DIR := "user://qvx_frames_test"
@@ -21,9 +19,7 @@ func cleanup() -> void:
 	_remove_dir(TEST_DIR)
 
 
-# ----------------------------------------------------------------------------
 # ① 资产读取：帧数 / 元数据 / 逐帧查询
-# ----------------------------------------------------------------------------
 
 func test_asset_exposes_frames_and_metadata() -> void:
 	var path := TEST_DIR + "/anim_meta.qvx"
@@ -80,9 +76,7 @@ func test_frame_blocks_out_of_range_is_empty_not_clamped() -> void:
 	assert_eq(qvx.voxel_count(2), 0, "越界帧没有体素")
 
 
-# ----------------------------------------------------------------------------
 # ② 包围盒 / 原点 / 融合：都随帧变
-# ----------------------------------------------------------------------------
 
 func test_bounds_grid_and_origin_vary_per_frame() -> void:
 	var path := TEST_DIR + "/bounds.qvx"
@@ -119,9 +113,7 @@ func test_fused_path_applies_placement_per_frame() -> void:
 	assert_eq(qvx.voxel_count(1), 2, "帧 1 融合后 2 个体素")
 
 
-# ----------------------------------------------------------------------------
 # ③ 导入器：QVoxelSource 快照 / 逐帧 MeshLibrary
-# ----------------------------------------------------------------------------
 
 func test_voxel_data_snapshot_per_frame() -> void:
 	var path := TEST_DIR + "/data.qvx"
@@ -190,9 +182,7 @@ func test_mesh_library_model_split_follows_frame_index() -> void:
 			% [a1.size.y, a0.size.y])
 
 
-# ----------------------------------------------------------------------------
 # ④ 撤销：帧号随命令走，不随游标
-# ----------------------------------------------------------------------------
 
 func test_edit_command_remembers_its_frame() -> void:
 	var obj := _animated_model()
@@ -216,9 +206,7 @@ func test_edit_command_remembers_its_frame() -> void:
 			"重做后 active_frame=0，读的是第 0 帧 → 看不到第 1 帧的笔迹（读写游标一致）")
 
 
-# ----------------------------------------------------------------------------
 # ⑤ 属性命令 extras：静态 ⇄ 动画的两个源同生共死
-# ----------------------------------------------------------------------------
 
 func test_property_command_extras_keep_sources_in_sync() -> void:
 	var obj := QVoxelModel.new()
@@ -250,9 +238,7 @@ func test_property_command_extras_keep_sources_in_sync() -> void:
 	assert_true(obj.blocks.is_empty(), "重做同样清空静态源")
 
 
-# ----------------------------------------------------------------------------
 # ⑥ 模型帧结构编辑入口
-# ----------------------------------------------------------------------------
 
 func test_model_frame_edit_entries() -> void:
 	var obj := QVoxelModel.new()
@@ -302,9 +288,7 @@ func test_static_model_ignores_frame_in_model() -> void:
 	assert_eq(obj.source_blocks(), obj.blocks, "静态模型 source_blocks 恒返回静态源")
 
 
-# ----------------------------------------------------------------------------
 # ⑦ 世界往返：frames / anim 元数据 / require 声明
-# ----------------------------------------------------------------------------
 
 func test_world_roundtrip_preserves_frames_and_anim() -> void:
 	var w := QVoxelWorld.create_empty()
@@ -358,9 +342,7 @@ func test_world_static_roundtrip_does_not_declare_fram() -> void:
 			"全静态文件不声明 FRAM（免得老读者白白拒掉本可读的文件）")
 
 
-# ----------------------------------------------------------------------------
 # ⑧ 播放内核：纯逻辑，直接喂 delta
-# ----------------------------------------------------------------------------
 
 ## 内核现在是编辑器预览与运行时播放器**共用**的唯一循环实现，所以它错了两个消费者会一起错；
 ## 而"预览看着像在播"几乎暴露不出问题。它是纯逻辑，喂 delta 即可驱动，不必起场景树。
@@ -492,9 +474,7 @@ func test_clock_single_frame_is_not_playable() -> void:
 	assert_eq(c.delay_ms(), 0, "不播放时调度间隔为 0")
 
 
-# ----------------------------------------------------------------------------
 # ⑨ 块表替换：切帧的落点
-# ----------------------------------------------------------------------------
 
 ## `apply_block_table` 是"整份内容替换"的唯一入口。返回"真改了几块"——
 ## 未变的块必须整块跳过（FRAM 的块级增量就是靠这个才省下来）。
@@ -529,9 +509,7 @@ func test_apply_block_table_drops_empty_buffers() -> void:
 	assert_true(d.is_empty(), "装完仍是空（不变式没被破坏）")
 
 
-# ----------------------------------------------------------------------------
 # ⑩ 运行时播放器：装配 → 切帧 → 时间推进
-# ----------------------------------------------------------------------------
 
 ## 播放器端到端：装配后帧 0 立刻就位、seek 换帧、按逐帧时长推进、循环回绕。
 ## 时间入口就是 `_process`，喂 delta 即可，不必等真实时钟。
@@ -587,9 +565,7 @@ func test_animator_rejects_static_asset() -> void:
 	animator.free()
 
 
-# ----------------------------------------------------------------------------
 # 夹具 / 辅助
-# ----------------------------------------------------------------------------
 
 ## 播放内核要的是 PackedInt32Array（与 FRAM 逐帧时长同型），字面量数组转一下。
 func _durations(ms: Array) -> PackedInt32Array:

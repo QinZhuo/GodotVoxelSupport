@@ -1,14 +1,12 @@
 extends TestCase
 
 ## 变换测试：纯重排数学（QVoxelTransform）+ 链上的变换 / 摆放条目（PcgTransform / QVoxelTransformModifier）。
-##
 ## 【为什么这几层要一起测】变换最容易坏的不是数学，而是"尺寸怎么传下去"：核算出新盒尺寸 →
 ## 引擎把它记进结果 → 会话把 data.grid_size 对齐。任一处落后一步都不报错，只表现为
 ## "新长出来的区域永远不渲染"或"旧 chunk 留成鬼影"。这里钉死三条曾真出过问题的承诺：
 ##   ① 非恒等置换下 remap 不能越界（下标必须按**源轴**步长算，按目的轴顺序算会读到数组外）；
 ##   ② 挂 / 摘链上条目撤销再重做必须把**体素**带回来（少 commit 一次 → 尺寸对了、格子少一半）；
 ##   ③ 超限时 output_size() 与 reshape() 必须给出**同一个**答案（否则数组长度与盒尺寸对不上）。
-##
 ## 体积布局 = PcgModel.index_of：x 步长 1、y 步长 w、z 步长 w*h（w=宽, h=高）。
 ## 材质 ID 值 0 = 空。
 
@@ -37,9 +35,7 @@ func _nonzero_sorted(v: PackedInt32Array) -> Array:
 	return out
 
 
-# ----------------------------------------------------------------------------
 # 纯重排数学
-# ----------------------------------------------------------------------------
 
 func test_identity_is_a_no_op() -> void:
 	var t := QVoxelTransform.identity()
@@ -111,9 +107,7 @@ func test_repeat_tiles_the_volume() -> void:
 	assert_eq(out[_index(Vector3i(8, 0, 0), ns)], src[_index(Vector3i(2, 0, 0), old)], "第三份的末格")
 
 
-# ----------------------------------------------------------------------------
 # 变换核：PcgTransform（链上的"体素变换"域）
-# ----------------------------------------------------------------------------
 
 ## 一份 4×2×2 的模型，放三个可辨认的格子（原点 / 中点 / 对角）。
 func _model() -> QVoxelModel:
@@ -131,7 +125,6 @@ func _eval(m: QVoxelModel) -> QVoxelEvalResult:
 
 
 ## 超限时两个入口必须给出**同一个答案**。
-##
 ## 【为什么这条要单独钉】output_size() 说"撑到 262144 宽"，而 reshape() 原地不动的话，
 ## data.grid_size 就会与实际体积长度不符 —— 那是最坏的一类静默错位（渲染器读到数组外）。
 ## 反过来若 reshape() 撑大而 output_size() 不认，就是每次求值都白分配一块巨型数组。
@@ -169,9 +162,7 @@ func test_repeat_grows_the_box_and_the_volume() -> void:
 			"第二份与第一份内容相同")
 
 
-# ----------------------------------------------------------------------------
 # 链上的变换条目：尺寸传播 + 求值 + 撤销
-# ----------------------------------------------------------------------------
 
 func test_repeat_modifier_grows_the_output_box() -> void:
 	var m := _model()
@@ -195,12 +186,9 @@ func test_mirror_modifier_keeps_box_and_moves_voxels() -> void:
 	assert_eq(r.volume[_index(Vector3i(1, 0, 0), r.grid_size)], MAT, "x=2 的格子翻到 x=1")
 
 
-# ----------------------------------------------------------------------------
 # 链上的摆放条目：平移（位置不再是节点字段）
-# ----------------------------------------------------------------------------
 
 ## 平移 = 链上的一条摆放条目：**不改盒尺寸、不改体积**，只把结果整体挪走（origin）。
-##
 ## 【为什么钉住"体积逐格不变"】平移若顺手重排了体积，"往右补零"就成了唯一的表达方式 ——
 ## 负偏移无从表达、挪回去也回不到原位（每挪一次丢一点），而那是最难查的一类不可逆。
 func test_translate_modifier_keeps_box_and_moves_origin() -> void:
@@ -232,7 +220,6 @@ func test_translate_steps_accumulate_and_skip_bypassed() -> void:
 
 
 ## 组按**各子结果自己的 origin**（链的产出）并成紧致盒 —— 子节点挪了，组的盒与摆放都要跟上。
-##
 ## 【为什么这条最关键】"摆放从节点字段搬到链上"改的正是这里：组若仍读节点字段，
 ## 子节点的平移会被整段忽略，表现为"挪了没反应"，且不报任何错。
 func test_group_places_children_by_their_chain_origin() -> void:
@@ -269,7 +256,6 @@ func test_negative_translate_moves_the_composite_box_origin() -> void:
 
 
 ## 挂 / 摘条目必须是一条撤销单位，且**显示层分辨率要跟着链走**。
-##
 ## 【为什么钉住显示层那一半】链改了输出盒，而 data.grid_size 落后一步的话，新长出来的区域
 ## 永远不渲染、缩小时旧 chunk 又留成鬼影 —— 两者都不报错，只表现为"画面不对"。
 func test_chain_edit_is_undoable_and_box_follows() -> void:

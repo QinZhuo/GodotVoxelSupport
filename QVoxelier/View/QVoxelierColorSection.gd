@@ -3,16 +3,13 @@ class_name QVoxelierColorSection
 extends QVoxelierSection
 ## 右侧抽屉·颜色分组 —— 编辑**当前材质**的颜色与 PBR（金属度 / 粗糙度 / 自发光），
 ## 并提供调色板级操作。
-##
 ## 【为什么不在这里再摆一份调色板网格】底部 `QVoxelierPalette` 已经是调色板的常驻视图，
 ## 再摆一份就要维护两处"哪个格子亮着"的选中状态，迟早不同步。于是这里只回答一个问题：
 ## **"当前这个材质长什么样、怎么改"** —— 网格负责"选哪个"，本分组负责"改成什么"。
-##
 ## 【手势即命令 —— 与体素笔同一时间线】滑条拖拽期间反复写数据、松手时才封口入栈
 ## （见 QVoxelPropertyCommand 的"手势即命令"）。颜色与 PBR 的滑条**共用同一条手势**：
 ##   edit_began → (color_changed | pbr_changed)(多次) → edit_ended
 ## App 把整段夹进一条 QVoxelPropertyCommand，撤销栈里就只留"一次改材质"。
-##
 ## 【为什么滑条与预览的刷新要 _syncing 闸】App 回写材质（撤销 / 切材质）时会 set 滑条值，
 ## 那又会触发 value_changed —— 反过来再报一次改动，形成自激。闸门一挡即可。
 
@@ -139,9 +136,7 @@ func _slider_row(key: String, label: String, on_changed: Callable) -> HBoxContai
 	return row
 
 
-# ----------------------------------------------------------------------------
 # 对外
-# ----------------------------------------------------------------------------
 
 ## PBR 标量键（String："metal" / "rough" / "emission"）——App 据此向世界取 / 写值，
 ## 也用作传给 `bind` 的字典键。键表仍是 `_PBR` 这一份，App 不另抄一遍。
@@ -194,9 +189,7 @@ func current_color() -> Color:
 		float(_sliders["B"].value), float(_sliders["A"].value))
 
 
-# ----------------------------------------------------------------------------
 # 内部
-# ----------------------------------------------------------------------------
 
 func _on_channel_changed() -> void:
 	if _syncing:

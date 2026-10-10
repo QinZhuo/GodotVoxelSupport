@@ -2,15 +2,12 @@ class_name VoxelDamageStore
 extends RefCounted
 
 ## 逐体素累计伤害账：chunk_key -> PackedFloat32Array(CHUNK_VOLUME)。
-##
 ## 【为什么归数据层而不是破坏节点】这是**体素相邻状态**：必须与 chunk 缓冲同生共死
 ## （卸载 / 清空 / origin shift / 载荷重建都要同步处理）。放在破坏节点上时无人负责清理，
 ## 于是残留伤害会"继承"给后来放上去的新体素（一放上去就被秒杀），且随卸载无限增长。
 ## 破坏节点只负责"发起伤害"，经 QVoxelSource 的转发读写这里。
-##
 ## 【缓冲契约】与 chunk 密集缓冲同款：整块 PackedFloat32Array 供原生批量接口直接读写
 ## （原生在本地副本上改，调用方 write_back 写回），不做逐体素字典查询。
-##
 ## 【线程约定】只在主线程访问，不交给 worker，故不参与只读快照的写时分叉。
 
 ## chunk_key -> PackedFloat32Array(CHUNK_VOLUME)

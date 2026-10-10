@@ -1,16 +1,13 @@
 ## 材质缓存：把原先散落在 VoxelRenderer / VoxelDestructible 里的四份材质派生数据收成一份。
-##
 ## 权威始终是 QVoxelSource.materials（材质表），本类只做派生与惰性重建：
 ##   派生 1  snapshot     —— 权威表的深拷贝，供子线程只读（避免跨线程访问 Resource）
 ##   派生 2  surfaces     —— 运行时 Material 对象数组（渲染用，索引 0/1 对应两个表面）
 ##   派生 3  aligned[层]  —— 各 LOD 层"按材质 ID 对齐"的数组（生成器要求 索引 == 材质ID）
-##
 ## 【为什么需要它】旧实现这几份各自散在 VoxelRenderer 里、由 5 处清空点手工维护，
 ## 漏清一份就表现为"材质改了但颜色/透明度不更新"——见 VoxelRenderer 里
 ## _clear_lod_block_state 的事故注释（"旧材质对齐结果会残留，会让粗层用错材质"）。
 ## VoxelDestructible 还另有一份同语义的运行时材质缓存。现在失效只有 invalidate()
 ## 一个入口，不存在"记得清这一份、忘了那一份"。
-##
 ## 【失效的两条通道】二者互补，缺一不可：
 ##   1) 源引用比对（自动）：调用方换了 data.materials（新数组/新材质对象）时自动重建；
 ##   2) invalidate()（显式）：材质对象**属性**变了（regenerate_materials 的语义）时，

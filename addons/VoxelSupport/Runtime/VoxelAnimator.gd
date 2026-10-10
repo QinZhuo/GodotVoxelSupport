@@ -1,16 +1,13 @@
 class_name VoxelAnimator
 extends Node
 ## 逐帧动画的运行时播放器：按逐帧时长把 `QVoxelAsset` 的一帧帧体素灌进一个 `QVoxelSource`。
-##
 ## 【它与 VoxelRenderer 的分工】它只改**数据**，一行渲染代码都不写：网格重建是渲染器监听
 ## `QVoxelSource.changed` 后的既有职责（而且是块级增量重建）。于是播放代价与"这一帧改了多少块"成正比，
 ## 不会因为要播动画就每帧重建整个模型。
-##
 ## 【为什么帧数据留在 QVoxelAsset 上，不拷进 QVoxelSource】一份 .qvx 常被实例化多次（一排士兵、
 ## 满地金币）。帧数据应当只有一份——`QVoxelAsset` 是 RefCounted，天然可共享；
 ## 每个实例的 QVoxelSource 只持有**当前帧**的块缓冲。若把全部帧拷进每个 QVoxelSource，
 ## 内存就是"实例数 × 帧数"地涨。
-##
 ## 【用法】
 ## [codeblock]
 ## var animator := VoxelAnimator.new()
@@ -47,12 +44,9 @@ func _process(delta: float) -> void:
 		_apply(_clock.index())
 
 
-# ----------------------------------------------------------------------------
 # 装配
-# ----------------------------------------------------------------------------
 
 ## 装配并（可选）立刻开始播放。返回 false = 该资产在这个 model_id 上没有帧动画，什么都没做。
-##
 ## `mid < 0` 时自动取资产里**第一个**动画模型。`d` 为空时依次尝试：自身节点上的 `data`、
 ## 父节点若是 `VoxelRenderer` 则取它的 `data`——让"把播放器挂在渲染器下"这种常见摆法不必手写接线。
 func setup(a: QVoxelAsset, d: QVoxelSource = null, mid: int = -1, autoplay: bool = true) -> bool:
@@ -100,9 +94,7 @@ func _find_data() -> QVoxelSource:
 	return null
 
 
-# ----------------------------------------------------------------------------
 # 播放控制（全部转发给 QVoxelFrameClock；这份壳只负责"把结果应用出去"）
-# ----------------------------------------------------------------------------
 
 ## 开始播放。`tag_name` 非空且该标签存在时在它的区间里播（含 reverse / pingpong），否则播整段。
 func play(tag_name: String = "") -> void:
@@ -143,7 +135,6 @@ func tag_name() -> String:
 
 
 ## 当前帧在给定原点模式下的位移（`WORLD_ORIGIN` 下恒为零向量）。
-##
 ## 【为什么播放器只报位移、不替调用方搬内容】逐帧重新居中（BOTTOM_CENTER / CONTENT_CENTER）意味着
 ## 每切一帧都要把每个块**重新切片**——位移一般不是块长的整数倍，跨块的内容得拆到相邻块去，
 ## 那正是 FRAM 的块级增量想避免的开销。而同一件事做成**节点级平移**既不花一分钱又完全精确。
@@ -155,9 +146,7 @@ func frame_origin_offset(mode: int = QVoxelSource.OriginMode.WORLD_ORIGIN) -> Ve
 	return asset.origin_offset(mode, _clock.index())
 
 
-# ----------------------------------------------------------------------------
 # 内部
-# ----------------------------------------------------------------------------
 
 ## 把第 `k` 帧的块表替换进数据，返回实际改动的块数（0 = 这一帧与上一帧逐块相同）。
 ## 不播放时也会被 `setup()` / `seek()` 调用，所以这里不碰任何播放态。
