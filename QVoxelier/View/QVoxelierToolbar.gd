@@ -21,6 +21,11 @@ signal save_as_requested
 ## （.qvx，含修改器链 / 材质 PBR / 相机），导出是"拿去用"（.vox，只剩烘出来的体素与调色板）。
 ## 两件事的产物与失败原因都不同，合成一个按钮会让用户在"我到底存的是哪个"上犹豫。
 signal export_requested
+## 批量导出：按"范围"（整个世界 / 每个节点 / 每个模型 / 每个帧）一次产出多个 `.vox`。
+## 与"导出"分开而不是并进同一个按钮：单次导出是"挑个文件存下来"（一次交互、一个文件），
+## 批量是"挑个目录 + 挑范围 + 起前缀"（参数更多、产出多个），混在一起会让单次那件最常用的事
+## 每次都要先回答"我要不要批量"。
+signal export_batch_requested
 signal undo_requested
 signal redo_requested
 signal frame_requested
@@ -79,6 +84,8 @@ func _build() -> void:
 	row.add_child(_action("另存", "另存为新文件（Ctrl+Shift+S）", func(): save_as_requested.emit()))
 	row.add_child(_action("导出", "导出为 MagicaVoxel 的 .vox（其它体素工具都能打开）",
 			func(): export_requested.emit()))
+	row.add_child(_action("批量", "一次导出多个 .vox：按范围切开（整个世界 / 每个节点 / 每个模型 / 每个帧）",
+			func(): export_batch_requested.emit()))
 
 	_project = QVoxelUi.label("未命名", QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
 	_project.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

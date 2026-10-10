@@ -37,6 +37,22 @@ static func from_asset(path: String) -> VoxAsset:
 ## 【多模型的结构去哪了】并入这一块体积，不保留。`.vox` 里想表达"多个对象"要靠场景图，
 ## 而那是另一条语义路径（需 QVoxelier 侧先有"每个模型独立摆放"的概念，当前没有）。
 static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> VoxAsset:
+	return from_result(world, QVoxelEvalEngine.evaluate_world(world,
+			ctx if ctx != null else QVoxelEvalContext.new()))
+
+
+## 树上任一节点（组 / 模型）→ `.vox` 资产：**只取该节点自己局部盒里的体积**，不含它在父画布里的
+## 摆放（摆放是"在哪个世界"的信息，而一份独立文件里没有那个世界）。
+##
+## 批量导出的"每个节点 / 每个模型"走这条路。与 `from_world` 共用 `from_result` —— 于是
+## "一块体积怎么变成资产"（含 Z 翻转那套约定）全项目只有一份实现，多一条出口就多一处能写错的地方。
+static func from_node(world: QVoxelWorld, node: QVoxelNode, ctx: QVoxelEvalContext = null) -> VoxAsset:
+	return from_result(world, QVoxelEvalEngine.evaluate_node(node,
+			ctx if ctx != null else QVoxelEvalContext.new()))
+
+
+## 求值结果 → `.vox` 资产：**世界 / 组 / 模型三条出口共用的最后一段**（材质表 + 体素搬运）。
+static func from_result(world: QVoxelWorld, res: QVoxelEvalResult) -> VoxAsset:
 	var out := VoxAsset.new()
 	# 索引 0 恒为 null 空气占位；1..255 预建并设好 id —— 与 VoxAccess._init 同一套约定，
 	# 这样写出的 RGBA 块与读入的资产在"下标 == 材质ID"上完全对齐。
@@ -50,8 +66,6 @@ static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> Vox
 	for i in range(1, mini(256, world.materials.size())):
 		out.materials[i].color = world.material_color(i)
 
-	var res := QVoxelEvalEngine.evaluate_world(world,
-			ctx if ctx != null else QVoxelEvalContext.new())
 	var size := res.grid_size
 	if res.volume.is_empty() or size.x <= 0 or size.y <= 0 or size.z <= 0:
 		return out  # 世界为空（或全被差集挖空）：给一份"只有调色板"的资产，不造 0 尺寸模型
@@ -71,6 +85,32 @@ static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> Vox
 		model.voxels[Vector3i(p.x, p.y, p.z - z_shift)] = material
 	out.models.append(model)
 	return out
+
+
+## 资产里所有模型盒的**逐轴最大值** —— 导出前的尺寸自检用。
+func box() -> Vector3i:
+	var b := Vector3i.ZERO
+	for m in models:
+		b.x = maxi(b.x, int(m.size.x))
+		b.y = maxi(b.y, int(m.size.y))
+		b.z = maxi(b.z, int(m.size.z))
+	return b
+
+
+## 能不能被 MagicaVoxel 完整打开。上限**按单轴**判（`VoxAccess.MODEL_LIMIT`）：超了它不报错、
+## 直接截断，而 XYZI 的坐标是单字节，写口会把 256 以外的体素丢掉 —— 那对用户就是"导出成功了，
+## 可我的模型少了一层壳"。单次导出与批量导出都问这一句，判断只此一处。
+func fits_magica() -> bool:
+	var b := box()
+	return maxi(maxi(b.x, b.y), b.z) <= VoxAccess.MODEL_LIMIT
+
+
+## 资产里体素总数（导出提示里报个数，让用户知道刚才那一下干了多少活）。
+func voxel_count() -> int:
+	var n := 0
+	for m in models:
+		n += m.voxels.size()
+	return n
 
 
 var models: Array[VoxelModel]

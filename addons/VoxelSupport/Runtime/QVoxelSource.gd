@@ -42,7 +42,7 @@ extends Resource
 #   脏账事件   mark_chunk_dirty / is_chunk_mesh_dirty / get_dirty_mesh_chunk_count /
 #              get_dirty_chunks / notify_changed
 #   存档生命周期 save_data / load_data / flush / bake_to / load_voxels_dict /
-#              from_voxel_data(静态) / from_qvx(静态)
+#              from_voxel_data(静态) / from_qvx(静态) / from_eval_result(静态)
 #   连通塌落   flood_fill / find_connected / connectivity / neighbors /
 #              partition_connected(静态) / find_unsupported / find_unsupported_around
 #   数据源     set_stream / is_streaming / shift_origin / invalidate_chunk_source /
@@ -1336,6 +1336,71 @@ func bake_to(target: VoxelStream) -> int:
 func load_voxels_dict(dict: Dictionary) -> void:
 	for pos_key in dict:
 		_write_buffer_impl(pos_key, dict[pos_key], false)
+
+
+## 由一份**整块求值结果**装配一个数据源：装体积 + 装调色板 + 标脏，一次做完。
+##
+## 【用途】消费方已经拿到"整世界 / 整节点求值完"的结果，想把它当成一份**静态资产**去渲染 ——
+## 快照（离屏预览图）、离线出图、任何"把求值结果拿去显示而不挂进编辑链"的场合。
+##
+## 【为什么必须收成一条入口】三件事拆成三个 API 让调用方自己拼，迟早漏掉第三件：
+## 漏了标脏 → 渲染器的重建粒度是"数据层给的脏账"（见 VoxelRenderer._update_mesh_async），
+## 脏账空 = 一块网格都不建，表现为**画面全空且不报任何错**。这类"静默的空白"最难查，
+## 故把三件事钉在一次调用里。
+##
+## 【为什么不用 load_voxels_dict】那个入口逐格写：256³ 最多 1600 万次字典写入 + 逐格分派，
+## 而这里的数据本来就是**按块连续**的；且它收的是"稀疏点集"，与"整块密集体积"是两种形态。
+## 与 `from_voxel_data` / `from_qvx` 同族：都是"外部数据形态 → 本数据源"的静态装配入口。
+static func from_eval_result(world: QVoxelWorld, res: QVoxelEvalResult) -> QVoxelSource:
+	var src := QVoxelSource.new()
+	if res == null or res.volume.is_empty():
+		return src
+	# 调色板：索引 0 恒为空气占位（材质 ID 0 = 空），故从 1 开始；"索引 == 材质 ID" 的对齐由
+	# add_material 保证，MATE 条目 → 材质的解释复用唯一的 VoxelMaterial.from_mate
+	# （不在这里再写一遍位域拆解）。
+	if world != null:
+		for i in range(1, world.materials.size()):
+			src.add_material(VoxelMaterial.from_mate(world.materials[i], i))
+	# 顺序不能反：grid_size 的 setter 会作废求值体积缓存（尺寸变了，旧体积的下标布局就错了），
+	# 故必须先声明盒、再装体积。
+	src.grid_size = res.grid_size
+	src._install_volume(res.volume, res.origin, res.grid_size)
+	return src
+
+
+## 把一整块已求值的体积切进 chunk 缓冲（`from_eval_result` 的第二段）。
+##
+## 【为什么切块走 _generate_chunk】"体积下标 → chunk 缓冲"的换算（含越界补零、负坐标取块）
+## 在数据层只有那一处实现。快照 / 导出 / 视口渲染必须看到**同一份切法** —— 在这里重写一遍
+## 迟早与它分叉，而分叉的表现是"快照少了一角"，同样不报错。
+##
+## 【为什么装入走 apply_block_table】脏标记 / 边界邻居标记 / 高层 LOD 失效 / 变更信号都在
+## 那个唯一入口里；本函数只负责"把体积翻成块表"，替换语义一字不改。
+func _install_volume(volume: PackedInt32Array, origin: Vector3i, size: Vector3i) -> void:
+	if size.x <= 0 or size.y <= 0 or size.z <= 0:
+		return
+	if volume.size() < size.x * size.y * size.z:
+		push_error("[QVoxelSource] 体积长度 %d 与尺寸 %s 不符，已跳过" % [volume.size(), size])
+		return
+	# 让 LOD0 的唯一切块实现直接读到这块体积（_ensure_volume 见到 _volume_built 即原样返回，
+	# 于是这里的循环不会触发第二次整块求值）。
+	_volume = volume
+	_volume_origin = origin
+	_volume_grid_size = size
+	_volume_built = true
+	_last = null
+	var table := {}
+	var first := VoxelChunk.chunk_of(origin)
+	var last := VoxelChunk.chunk_of(origin + size - Vector3i.ONE)
+	for cz in range(first.z, last.z + 1):
+		for cy in range(first.y, last.y + 1):
+			for cx in range(first.x, last.x + 1):
+				var ck := Vector3i(cx, cy, cz)
+				var buf := _generate_chunk(ck)
+				if _count_voxels(buf) == 0:
+					continue
+				table[ck] = buf
+	apply_block_table(table)
 
 
 ## 获取所有有数据的 chunk key（内存 + 流中已存的）

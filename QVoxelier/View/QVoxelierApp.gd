@@ -55,6 +55,9 @@ var _color_section: QVoxelierColorSection
 var _tree_section: QVoxelierTreeSection
 var _inspector_section: QVoxelierInspectorSection
 var _timeline_section: QVoxelierTimelineSection
+## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
+## （参数与预览是分组自己的状态，见 QVoxelierSnapshotSection）。
+var _snapshot_section: QVoxelierSnapshotSection
 var _confirm: ConfirmationDialog
 
 ## 参数面板当前绑定的修改器（选中树上某条修改器时置入，用于撤销 / 重做后重绑）。
@@ -118,6 +121,13 @@ var _save_dialog: FileDialog
 var _export_dialog: FileDialog
 var _palette_import_dialog: FileDialog
 var _palette_export_dialog: FileDialog
+## 快照落盘对话框（*.png）。与调色板导出同走自绘那套 —— 默认文件名由分组按视图名给出。
+var _snapshot_dialog: FileDialog
+## 批量导出的目标目录对话框：范围开关与命名前缀就挂在它自己的 vbox 里（见 _build_batch_options）。
+var _batch_dialog: FileDialog
+## 批量导出的范围（取值见 QVoxelBake.Scope）。选在对话框里，烘的时候才读。
+var _batch_scope := QVoxelBake.Scope.WORLD
+var _batch_prefix: LineEdit
 
 const ACTION_UNDO := &"qvoxelier_undo"
 const ACTION_REDO := &"qvoxelier_redo"
@@ -167,6 +177,7 @@ func _build_ui() -> void:
 	_toolbar.save_requested.connect(save_project)
 	_toolbar.save_as_requested.connect(save_project_as)
 	_toolbar.export_requested.connect(export_vox)
+	_toolbar.export_batch_requested.connect(export_vox_batch)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
 	_toolbar.frame_requested.connect(func(): frame_view(); hud.flash("已取景"))
@@ -208,7 +219,7 @@ func _build_ui() -> void:
 	_gizmo.camera = camera
 	_gizmo.view_requested.connect(_apply_view)
 
-	# 右侧抽屉：颜色 / 对象 / 图层三组。分组各自只发"用户想干什么"，写世界与记撤销都在本类一处完成。
+	# 右侧抽屉：颜色 / 对象 / 参数 / 时间轴 / 快照五组。分组各自只发"用户想干什么"，写世界与记撤销都在本类一处完成。
 	_dock = QVoxelierDock.new()
 	_dock.name = "Dock"
 	add_child(_dock)
@@ -260,6 +271,13 @@ func _build_ui() -> void:
 	_timeline_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
 	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
 	_dock.add_section(_timeline_section)
+
+	# 快照分组（F5）：它自己摆离屏舞台、自己按快门（见 QVoxelierSnapshotSection 的"为什么按下渲染
+	# 不经过应用层"）。本类只做它做不了的两件事：把当前世界推给它（见 _refresh_panels）、
+	# 以及弹落盘对话框 —— 文件对话框的公共装配在应用层一处（见 _build_dialogs）。
+	_snapshot_section = QVoxelierSnapshotSection.new()
+	_snapshot_section.save_requested.connect(_request_snapshot_save)
+	_dock.add_section(_snapshot_section)
 
 	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
 	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
@@ -1093,17 +1111,21 @@ func export_vox() -> void:
 	_export_dialog.popup_centered_ratio(0.7)
 
 
+## 批量导出：**先挑目标目录**，范围与命名前缀就在同一个对话框里选（见 `_build_batch_options`）。
+## 之所以是"目录对话框"而不是"先弹一个参数框、再弹目录框"：这两件事本来是同一次决定，
+## 拆成两个弹窗只是让用户多点一次、还要在两个窗口之间来回看。
+func export_vox_batch() -> void:
+	_batch_dialog.popup_centered_ratio(0.7)
+
+
 func _on_export_path_selected(path: String) -> void:
 	var asset := VoxAsset.from_world(world)
 	# 【为什么先查尺寸、再落盘】MagicaVoxel 的模型上限是 256³（`VoxAccess.MODEL_LIMIT`），超了
 	# 它**不报错、直接截断**；而 XYZI 的坐标是单字节，写口会把 256 以外的体素丢掉。那对用户就是
 	# "导出成功了，可我的模型少了一层壳"。宁可在这里明确拒绝，也不产出悄悄少一块的文件。
-	var box := Vector3i.ZERO
-	for model in asset.models:
-		box.x = maxi(box.x, int(model.size.x))
-		box.y = maxi(box.y, int(model.size.y))
-		box.z = maxi(box.z, int(model.size.z))
-	if maxi(maxi(box.x, box.y), box.z) > VoxAccess.MODEL_LIMIT:
+	# 判据只有一处（`VoxAsset.fits_magica`）—— 批量导出问的是同一句。
+	if not asset.fits_magica():
+		var box := asset.box()
 		hud.flash("未导出：世界盒 %d×%d×%d 超过 MagicaVoxel 的 %d 上限（超出部分会被它截掉）"
 				% [box.x, box.y, box.z, VoxAccess.MODEL_LIMIT])
 		return
@@ -1111,10 +1133,14 @@ func _on_export_path_selected(path: String) -> void:
 	if err != OK:
 		hud.flash("导出失败（错误码 %d）：%s" % [err, path.get_file()])
 		return
-	var voxels := 0
-	for model in asset.models:
-		voxels += model.voxels.size()
-	hud.flash("已导出 %s（%d 体素）" % [path.get_file(), voxels])
+	hud.flash("已导出 %s（%d 体素）" % [path.get_file(), asset.voxel_count()])
+
+
+## 目录已定：范围与前缀**当场读**（用户可能刚在同一个对话框里改过），
+## 烘完把"写了几个、跳了哪几个"一句话报回去。切分与落盘都在 QVoxelBake 里。
+func _on_batch_dir_selected(dir: String) -> void:
+	var batches := QVoxelBake.plan(world, _batch_scope, _batch_prefix.text.strip_edges())
+	hud.flash(QVoxelBake.summary(QVoxelBake.write(dir, batches), dir))
 
 
 ## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
@@ -1135,6 +1161,19 @@ func _build_dialogs() -> void:
 			"调色板 PNG（256×1）", "导出调色板")
 	_palette_export_dialog.file_selected.connect(_export_palette)
 
+	# 快照落盘：与调色板导出同是 "*.png" 另存，但默认文件名由分组按当前视图给出（见
+	# _request_snapshot_save）—— 于是"同一个世界出七个角度"不会七张互相覆盖。
+	_snapshot_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.png",
+			"PNG 图片", "保存快照")
+	_snapshot_dialog.file_selected.connect(_on_snapshot_path_selected)
+
+	# 批量导出挑的是**目录**（一个文件一个名字，不由用户逐个起名），故走 OPEN_DIR + dir_selected。
+	# 不能挂 native：范围与前缀要画进它自己的 vbox 里（见 _build_batch_options）。
+	_batch_dialog = _make_fs_dialog(FileDialog.FILE_MODE_OPEN_DIR, "批量导出 .vox（选目标目录）", false)
+	_batch_dialog.ok_button_text = "导出到此目录"
+	_batch_dialog.dir_selected.connect(_on_batch_dir_selected)
+	_build_batch_options()
+
 	_confirm = ConfirmationDialog.new()
 	_confirm.title = "未保存的改动"
 	_confirm.cancel_button_text = "返回"
@@ -1144,7 +1183,15 @@ func _build_dialogs() -> void:
 	add_child(_confirm)
 
 
-func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
+## 系统文件对话框的公共装配：**"选什么、叫什么、筛什么"是唯一随用途变的东西**，其余
+##（系统文件系统、主题、首路径、按钮文案的中文化）四种用途一字不差 —— 复制成四份，
+## 迟早有一份忘了改。
+##
+## 【为什么 native 是参数，而不是一律关掉】`.qvx` 的打开 / 另存走系统原生对话框 —— 桌面端体验
+## 更好（记住上次目录、能直接跳系统盘符）。而调色板与批量导出要往对话框里挂自定义内容
+##（格式过滤 / 范围开关 / 前缀输入），原生对话框不渲染自绘 UI，那两处只能
+## `use_native_dialog = false` 走引擎自绘的那套。
+func _make_fs_dialog(mode: FileDialog.FileMode, title: String, native := true) -> FileDialog:
 	var d := FileDialog.new()
 	d.file_mode = mode
 	d.access = FileDialog.ACCESS_FILESYSTEM
@@ -1153,36 +1200,72 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	#（本应用是内嵌子窗口样式，所以这层皮是看得见的）。 Theme 是**叠加**而不是替换：
 	# 本主题没定义的条目（Tree / LineEdit / OptionButton）继续走引擎默认值，不会把对话框弄坏。
 	d.theme = QVoxelUi.theme()
-	d.add_filter("*.%s" % QVoxelProject.EXTENSION, "QVoxelier 工程")
-	d.title = "打开工程" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存工程"
+	d.title = title
 	# 引擎自建文案在游戏进程里没有内置翻译，会显示成 "Save" / "Cancel"。
 	# 其余（Path: / 列头 / 新建文件夹）同样来自引擎，改不动；但这两个是每次操作都要读、
 	# 要按的，必须跟界面同一种语言。
 	d.ok_button_text = "打开" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存"
 	d.cancel_button_text = "取消"
+	d.use_native_dialog = native
 	add_child(d)
 	return d
 
 
-## 调色板 / 导出用的文件对话框：**"筛什么、叫什么"是唯一随用途变的东西**，其余（系统文件
-## 系统、主题、首路径、按钮文案的中文化）三种用途一字不差 —— 复制成三份，迟早有一份忘了改。
+func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
+	var d := _make_fs_dialog(mode,
+			"打开工程" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存工程")
+	d.add_filter("*.%s" % QVoxelProject.EXTENSION, "QVoxelier 工程")
+	return d
+
+
+## 调色板 / 导出用的文件对话框（带格式过滤，且必须自绘 —— 理由见 `_make_fs_dialog` 的 native）。
 ##
 ## 为什么调色板走 PNG 而不是自定义格式：MagicaVoxel 的调色板就是 256×1 的 PNG，沿用它就能与
 ## 其它体素工具互相倒色板，也不用再定义一套只有本程序认得的格式。
 func _make_format_dialog(mode: FileDialog.FileMode, filter: String, filter_name: String,
 		title: String) -> FileDialog:
-	var d := FileDialog.new()
-	d.file_mode = mode
-	d.access = FileDialog.ACCESS_FILESYSTEM
-	d.current_dir = _default_dir()
-	d.theme = QVoxelUi.theme()
+	var d := _make_fs_dialog(mode, title, false)
 	d.add_filter(filter, filter_name)
-	d.title = title
-	d.ok_button_text = "打开" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存"
-	d.cancel_button_text = "取消"
-	d.use_native_dialog = false
-	add_child(d)
 	return d
+
+
+## 批量导出的范围与前缀：挂在目录对话框**自己的 vbox** 里（`FileDialog.get_vbox()` 是引擎留给
+## 自绘控件的口子），于是"选目录 + 选范围 + 填前缀"是**一次**交互，不用弹第二个对话框。
+##
+## 【为什么范围是一排开关而不是下拉】与工具面板的 球/平面、导航/平移 同一套（QVoxelUi 的
+## 开关组）：触摸屏上没有下拉，而且四个选项一眼全在，不必点开才知道有些什么。
+func _build_batch_options() -> void:
+	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	row.add_child(QVoxelUi.label("范围", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
+
+	var group := ButtonGroup.new()
+	# 同组按钮永远有一个是"当前"，不允许点第二下变成"什么都没选"（与笔刷形态同一套）。
+	group.allow_unpress = false
+	for i in QVoxelBake.SCOPES.size():
+		var spec: Dictionary = QVoxelBake.SCOPES[i]
+		var b := QVoxelUi.toggle_button(spec.tip)
+		b.text = spec.text
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.button_group = group
+		# bind 而不是闭包捕获：与笔刷形态同一条理由 —— 每个按钮各钉各的值，不会一起变成最后一个。
+		b.toggled.connect(_on_batch_scope_toggled.bind(i))
+		if i == _batch_scope:
+			b.set_pressed_no_signal(true)
+		row.add_child(b)
+
+	row.add_child(QVoxelUi.label("前缀", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
+	_batch_prefix = QVoxelUi.text_field("", "如 rock_（可留空）", "接在每份文件名之前，用来区分批次")
+	_batch_prefix.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(_batch_prefix)
+
+	_batch_dialog.get_vbox().add_child(row)
+
+
+func _on_batch_scope_toggled(on: bool, scope: int) -> void:
+	# 同组切换是"旧的先弹起、新的再按下"两次信号：只听按下那一次，否则会被弹起那一下
+	# 覆盖回旧值（与 QVoxelierTools._on_shape_toggled 同一条）。
+	if on:
+		_batch_scope = scope
 
 
 ## 文件对话框的首选落地目录。**两个平台的"用户自己的目录"不是同一个地方**：
@@ -1262,6 +1345,9 @@ func _refresh_panels() -> void:
 	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
 	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimelineSection.bind），播放期间不重建控件。
 	_timeline_section.bind(session.object)
+	# 快照只读世界，且 set_world 幂等（同一个世界直接返回），故挂在这条唯一刷新路径上 ——
+	# 新建 / 打开换世界时它自然会收到新世界并把旧预览作废（见 QVoxelierSnapshotSection.set_world）。
+	_snapshot_section.set_world(world)
 
 
 ## 世界的材质表 → 调色板用的颜色数组：**下标即材质 ID**，0 位留空气占位。
@@ -1551,8 +1637,7 @@ func _import_palette(path: String) -> void:
 func _export_palette(path: String) -> void:
 	if world == null:
 		return
-	if not path.to_lower().ends_with(".png"):
-		path += ".png"
+	path = _ensure_png_ext(path)
 	var img := Image.create(256, 1, false, Image.FORMAT_RGBA8)
 	for i in 256:
 		var c := Color(0, 0, 0, 0)
@@ -1575,6 +1660,30 @@ func _push_palette_into_all() -> void:
 		for id in range(1, world.materials.size()):
 			data.add_material(VoxelMaterial.from_mate(world.materials[id], id))
 	_rerender_materials()
+
+
+# ----------------------------------------------------------------------------
+# 快照（右侧抽屉·快照组，F5）
+# ----------------------------------------------------------------------------
+# 分组自己摆离屏舞台、自己按快门（见 QVoxelierSnapshotSection 的"为什么按下渲染不经过应用层"）。
+# 本段只做两件分组做不了的事：弹落盘对话框（对话框的公共装配在 _build_dialogs 一处），
+# 以及把落盘结果说给用户听。世界的推送见 _refresh_panels。
+
+## 分组点了「保存…」：用它的默认名（带视图名）弹对话框 —— 覆盖是可预期的，
+## 而不是"七张角度悄悄互相覆盖、用户以为存了七张"。
+func _request_snapshot_save() -> void:
+	_snapshot_dialog.current_file = _snapshot_section.suggested_file_name()
+	_snapshot_dialog.popup_centered_ratio(0.7)
+
+
+func _on_snapshot_path_selected(path: String) -> void:
+	hud.flash(_snapshot_section.save_png(_ensure_png_ext(path)))
+
+
+## 补上 .png 扩展名（两个 PNG 出口共用：调色板导出与快照落盘）。
+## 用 to_lower 判：Windows 上 "X.PNG" 同样是 PNG，不认它就会存出一个 "X.PNG.png"。
+func _ensure_png_ext(path: String) -> String:
+	return path if path.to_lower().ends_with(".png") else path + ".png"
 
 
 # ----------------------------------------------------------------------------
