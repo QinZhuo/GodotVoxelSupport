@@ -30,6 +30,9 @@ signal duration_edit_ended(index: int)
 signal fps_changed(fps: int)
 signal loop_toggled(on: bool)
 signal tags_changed(tags: Array)
+## 逐帧摆放轨道（NODE 的 `transform_tracks`）：把当前帧的节点摆放记下来 / 清除该帧。
+signal track_record_requested
+signal track_clear_requested
 
 ## 时长滑条上限：逐帧 1 秒已经够长（超过就该调帧率了）。
 const _MAX_MS := 1000
@@ -68,6 +71,9 @@ var _duration_label: Label
 var _fps: HSlider
 var _fps_label: Label
 var _tags: LineEdit
+var _track_label: Label
+var _track_record: Button
+var _track_clear: Button
 var _timer: Timer
 
 
@@ -163,6 +169,19 @@ func _build_body(body: VBoxContainer) -> void:
 			+ "例：idle:0-3, walk:4-7:pingpong（方向缺省 forward）")
 	_tags.text_changed.connect(func(_t: String): _on_tags_changed())
 	tag_row.add_child(_tags)
+
+	# 逐帧摆放：把当前帧的节点摆放记进 transform_tracks（NODE 的摆放动画）。与体素帧共用帧号。
+	var track_row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	_extra.add_child(track_row)
+	_track_label = QVoxelUi.label("摆放：跟随静态", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	_track_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	track_row.add_child(_track_label)
+	_track_record = QVoxelUi.icon_button("⦿", "把当前节点摆放记到本帧（与体素帧共用帧号）")
+	_track_record.pressed.connect(func(): track_record_requested.emit())
+	track_row.add_child(_track_record)
+	_track_clear = QVoxelUi.icon_button("⦸", "清除本帧的独立摆放（退回跟随静态摆放）")
+	_track_clear.pressed.connect(func(): track_clear_requested.emit())
+	track_row.add_child(_track_clear)
 
 	_timer = Timer.new()
 	_timer.one_shot = true
@@ -337,6 +356,12 @@ func _sync() -> void:
 	_move_left.disabled = active <= 0
 	_move_right.disabled = not animated or active >= n - 1
 	_play_btn.disabled = not animated
+	# 逐帧摆放状态：本帧是否有一条"独立于静态摆放"的轨道。
+	var has_track := animated and _model != null and active < _model.transform_tracks.size() \
+			and not _model.transform_tracks[active].is_equal_approx(_model.local_transform)
+	_track_label.text = "摆放：本帧独立" if has_track else "摆放：跟随静态"
+	_track_record.disabled = not animated
+	_track_clear.disabled = not animated or not has_track
 	_syncing = false
 
 

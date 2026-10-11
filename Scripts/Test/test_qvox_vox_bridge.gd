@@ -241,6 +241,77 @@ func test_resize_command_undo_restores_voxels() -> void:
 	assert_eq(m.count_solid(), 1, "重做后仍是盒内那一个")
 
 
+## ⑨ 逐帧摆放轨道：world_transform（渲染器摆放的唯一来源）按当前帧取轨道
+
+func test_transform_track_preview() -> void:
+	var w := QVoxelWorld.create_empty()
+	var mat := w.add_material(Color.RED)
+	var m := w.create_model("m", Vector3i(1, 1, 1))
+	m.set_voxel(0, 0, 0, mat)
+	m.local_transform = Transform3D(Basis.IDENTITY, Vector3.ZERO)
+	m.transform_tracks = [Transform3D(Basis.IDENTITY, Vector3.ZERO),
+			Transform3D(Basis.IDENTITY, Vector3(0, 7, 0))]
+	w.preview_frame = 1
+	assert_eq(w.world_transform(m).origin, Vector3(0, 7, 0), "world_transform 按共享帧取摆放轨道")
+	w.preview_frame = 0
+	assert_eq(w.world_transform(m).origin, Vector3.ZERO, "第 0 帧回到静态摆放")
+
+
+## ⑩ `.vox` 多帧 nTRN → transform_tracks（摆放动画导入）
+
+func test_vox_transform_animation_import() -> void:
+	var vox := VoxAsset.new()
+	vox.materials.resize(256)
+	vox.models.append(_one_voxel_model())
+	# node0 root → node1 nGRP → node2 nTRN(两帧位移) → node3 nSHP(model0)
+	vox.nodes[0] = _trn(0, 1, -1, Vector3.ZERO)
+	vox.nodes[1] = _grp(1, [2])
+	var anim := VoxAsset.VoxelNode.new()
+	anim.id = 2
+	anim.child_nodes.append(3)
+	var fa := VoxAsset.VoxelFrame.new()
+	fa.position = Vector3(0, 0, 0)
+	var fb := VoxAsset.VoxelFrame.new()
+	fb.position = Vector3(0, 7, 0)
+	anim.frames[0] = fa
+	anim.frames[1] = fb
+	vox.nodes[2] = anim
+	vox.nodes[3] = _shp(3, 0)
+
+	var w := vox.to_world()
+	var found: QVoxelGroup = null
+	for n in w.all_nodes():
+		if n is QVoxelGroup and n.transform_tracks.size() == 2:
+			found = n
+	assert_true(found != null, "应导入一个带逐帧摆放轨道的组")
+	if found != null:
+		w.preview_frame = 1
+		assert_eq(w.world_transform(found).origin, Vector3(0, 7, 0), "第 1 帧位移")
+		w.preview_frame = 0
+		assert_eq(w.world_transform(found).origin, Vector3.ZERO, "第 0 帧位移")
+
+
+## ⑪ 模型内部旋转：绕选区中心，90° 整数旋转，四圈归位
+
+func test_rotate_selection_in_model() -> void:
+	var w := QVoxelWorld.create_empty()
+	var mat := w.add_material(Color.RED)
+	var m := w.create_model("m", Vector3i(8, 8, 8))
+	m.set_voxel(0, 1, 0, mat)
+	var s := QVoxelierSession.new()
+	s.install(w, m)
+	var sess := s.session_for(m.model_id)
+	assert_true(sess != null, "有编辑会话")
+	if sess == null:
+		return
+	# 3×3 的对称盒：绕中心转 90° 后盒形不变，故连转四圈必回原位。
+	sess.selection = QVoxelSelection.from_corners(Vector3i(0, 0, 0), Vector3i(2, 2, 0))
+	assert_true(sess.rotate_selection(1, 1) > 0, "绕 Y 转 90° 应改动体素")
+	assert_eq(m.count_solid(), 1, "旋转不改变体素数")
+	assert_true(sess.rotate_selection(1, 3) > 0, "再转 270°")
+	assert_true(m.get_voxel(0, 1, 0) > 0, "转满 360° 回到原位")
+
+
 func _count_models(group: QVoxelGroup) -> int:
 	var n := 0
 	for c in group.child_nodes:

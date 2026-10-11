@@ -13,6 +13,8 @@ signal visible_changed(node: QVoxelNode, value: bool)
 signal locked_changed(node: QVoxelNode, value: bool)
 signal offset_changed(node: QVoxelNode, value: Vector3i)
 signal resize_requested(node: QVoxelNode, value: Vector3i)
+## 世界级旋转：三个轴的欧拉角（度）。轴对齐时为 90 的倍数。
+signal rotation_changed(node: QVoxelNode, degrees: Vector3)
 
 var _node: QVoxelNode
 var _name: LineEdit
@@ -20,6 +22,7 @@ var _vis: Button
 var _lock: Button
 var _offset_spins: Array[SpinBox] = []
 var _size_spins: Array[SpinBox] = []
+var _rot_spins: Array[SpinBox] = []
 var _info: VBoxContainer
 
 
@@ -72,6 +75,24 @@ func _build_body(body: VBoxContainer) -> void:
 		posrow.add_child(sp)
 		_offset_spins.append(sp)
 
+	# 旋转：**世界级**的节点欧拉角（度）。轴对齐吸附到 90° 倍数；显示具体数值而非只有按钮。
+	var rotrow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	body.add_child(rotrow)
+	var rlabel := QVoxelUi.label("旋转", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	rlabel.custom_minimum_size.x = 32
+	rlabel.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	rotrow.add_child(rlabel)
+	for _axis in 3:
+		var sp := SpinBox.new()
+		sp.min_value = -360
+		sp.max_value = 360
+		sp.step = 90
+		sp.suffix = "°"
+		sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sp.value_changed.connect(_on_rotation_spin)
+		rotrow.add_child(sp)
+		_rot_spins.append(sp)
+
 	# 尺寸：每个模型**独立**的分辨率（体素数上限）。改它是结构级操作（会丢盒外的体素），
 	# 由 App 包成一条可撤销命令（QVoxelResizeCommand），这里只上报新值。
 	var sizerow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
@@ -103,6 +124,14 @@ func _on_size_spin(_v: float) -> void:
 			int(_size_spins[0].value), int(_size_spins[1].value), int(_size_spins[2].value)))
 
 
+## 旋转三个轴任一变化 → 合成欧拉角（度）上报（App 记成可撤销命令）。
+func _on_rotation_spin(_v: float) -> void:
+	if _node == null or _rot_spins.size() < 3:
+		return
+	rotation_changed.emit(_node, Vector3(
+			_rot_spins[0].value, _rot_spins[1].value, _rot_spins[2].value))
+
+
 ## 三个轴任一变化 → 合成 Vector3i 上报（App 记成可撤销命令）。
 func _on_offset_spin(_v: float) -> void:
 	if _node == null or _offset_spins.size() < 3:
@@ -131,10 +160,16 @@ func _rebuild() -> void:
 		sp.editable = has
 	for sp in _size_spins:
 		sp.editable = has and _node != null and _node.is_model()
+	for sp in _rot_spins:
+		sp.editable = has
 	if has:
 		_offset_spins[0].set_value_no_signal(_node.offset.x)
 		_offset_spins[1].set_value_no_signal(_node.offset.y)
 		_offset_spins[2].set_value_no_signal(_node.offset.z)
+		var e := _node.local_transform.basis.get_euler()
+		_rot_spins[0].set_value_no_signal(roundf(rad_to_deg(e.x)))
+		_rot_spins[1].set_value_no_signal(roundf(rad_to_deg(e.y)))
+		_rot_spins[2].set_value_no_signal(roundf(rad_to_deg(e.z)))
 	if has and _node.is_model():
 		var g := (_node as QVoxelModel).grid_size
 		_size_spins[0].set_value_no_signal(g.x)

@@ -42,6 +42,10 @@ var cach: Array = []
 ## 每次"影响文件内容"的改动自增。UI 据此判断"是否需要提示保存"。
 var revision := 0
 
+## 编辑器预览用的**共享帧号**（瞬态，不落盘）：所有节点的 `transform_tracks` 都按它采样。
+## 由 App 在切帧时设为当前活动模型的 active_frame —— 摆放动画与体素动画因此共用同一时间轴。
+var preview_frame := 0
+
 signal content_changed
 
 
@@ -459,7 +463,8 @@ func world_transform(target: QVoxelNode) -> Transform3D:
 		return Transform3D.IDENTITY
 	var xf := Transform3D.IDENTITY
 	for n in path:
-		xf = xf * n.local_transform
+		# 用 transform_at(preview_frame)：带逐帧摆放轨道的节点在编辑器里就能预览到动画位移。
+		xf = xf * n.transform_at(preview_frame)
 	return xf
 
 

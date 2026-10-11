@@ -331,6 +331,70 @@ func move_selection(delta: Vector3i) -> int:
 	return n
 
 
+## 把选区里的体素绕**选区中心**旋转 axis 轴、quarters×90°（轴对齐整数旋转）。
+## 【为什么绕选区中心而不是模型原点】体素编辑的心智是"转我框住的那一块"，绕中心转它才原地自转；
+## 绕原点会把整块甩到别处（且模型原点通常在盒角上）。
+func rotate_selection(axis: int, quarters: int) -> int:
+	if object == null or quarters == 0:
+		return 0
+	if selection.is_empty():
+		_set_selection(QVoxelSelection.all(object.grid_size))
+	var clip := QVoxelClipboard.capture(selection, _material_at)
+	if clip.is_empty():
+		return 0
+	var origin := selection.lo()
+	var pivot := Vector3(origin) + (Vector3(selection.size()) - Vector3.ONE) * 0.5
+	var basis := Basis([Vector3.RIGHT, Vector3.UP, Vector3.BACK][axis], float(quarters) * PI / 2.0)
+	var cells := clip.cells()
+	var mats := clip.materials()
+	var old_abs: Array[Vector3i] = []
+	var new_abs: Array[Vector3i] = []
+	for i in cells.size():
+		var abs := origin + cells[i]
+		old_abs.append(abs)
+		var rp := basis * (Vector3(abs) - pivot) + pivot
+		new_abs.append(Vector3i(roundi(rp.x), roundi(rp.y), roundi(rp.z)))
+	# 先挖空**全部**旧格，再落新格：新格与某个旧格重合时不会被旧格覆盖（与移动同一处置）。
+	var n := _commit_once(func(cmd: QVoxelEditCommand) -> void:
+		for i in old_abs.size():
+			cmd.set_voxel(old_abs[i].x, old_abs[i].y, old_abs[i].z, 0)
+		for i in new_abs.size():
+			cmd.set_voxel(new_abs[i].x, new_abs[i].y, new_abs[i].z, mats[i]), "旋转")
+	if n <= 0:
+		return 0
+	# 选区落到**旋转后的原选区盒**（而不是逐格集合的 AABB）：转的是"我框住的那块"，
+	# 对称盒转四圈能原地归位（逐格 AABB 会缩成 1×1×1，后续就绕单格自转了）。
+	var box_lo := Vector3i(2147483647, 2147483647, 2147483647)
+	var box_hi := Vector3i(-2147483648, -2147483648, -2147483648)
+	var hi_inc := origin + selection.size() - Vector3i.ONE
+	for cx in [origin.x, hi_inc.x]:
+		for cy in [origin.y, hi_inc.y]:
+			for cz in [origin.z, hi_inc.z]:
+				var rp := basis * (Vector3(cx, cy, cz) - pivot) + pivot
+				var q := Vector3i(roundi(rp.x), roundi(rp.y), roundi(rp.z))
+				box_lo = Vector3i(mini(box_lo.x, q.x), mini(box_lo.y, q.y), mini(box_lo.z, q.z))
+				box_hi = Vector3i(maxi(box_hi.x, q.x), maxi(box_hi.y, q.y), maxi(box_hi.z, q.z))
+	_set_selection(QVoxelSelection.from_corners(box_lo, box_hi))
+	return n
+
+
+## 预览：选区绕中心旋转 axis/quarters 后的**绝对格**（不写数据）。供旋转拖拽的 ghost 预览。
+func preview_rotation(axis: int, quarters: int) -> Array[Vector3i]:
+	var out: Array[Vector3i] = []
+	if object == null or selection.is_empty() or quarters == 0:
+		return out
+	var clip := QVoxelClipboard.capture(selection, _material_at)
+	if clip.is_empty():
+		return out
+	var origin := selection.lo()
+	var pivot := Vector3(origin) + (Vector3(selection.size()) - Vector3.ONE) * 0.5
+	var basis := Basis([Vector3.RIGHT, Vector3.UP, Vector3.BACK][axis], float(quarters) * PI / 2.0)
+	for c in clip.cells():
+		var rp := basis * (Vector3(origin + c) - pivot) + pivot
+		out.append(Vector3i(roundi(rp.x), roundi(rp.y), roundi(rp.z)))
+	return out
+
+
 # 撤销 / 重做
 
 func can_undo() -> bool:

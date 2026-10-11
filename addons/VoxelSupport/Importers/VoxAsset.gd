@@ -258,7 +258,7 @@ func _top_vox_ids() -> Array:
 	return [id]
 
 
-## 结构壳 = 无名字、不属任何图层、无模型帧、但有子节点（场景图里纯结构的 nTRN / nGRP）。
+## 结构壳 = 无名字、不属任何图层、无模型帧、**无多帧摆放动画**、但有子节点（纯结构的 nTRN / nGRP）。
 ## 导入时**不单独成组**：它的变换并入孩子、它的孩子提到上一层 —— 于是不会多出"匿名组"。
 ## （`.vox` 里"带变换 / 图层的组"必然写成 nTRN 包 nGRP 两层，这个约定不该在编辑器里多出一层。）
 func _is_structural(id: int) -> bool:
@@ -266,7 +266,7 @@ func _is_structural(id: int) -> bool:
 		return false
 	var n: VoxelNode = nodes[id]
 	return n.name.is_empty() and not layers.has(n.layerId) and not _has_model_frame(n) \
-			and _child_ids(id).size() > 0
+			and not _has_transform_anim(n) and _child_ids(id).size() > 0
 
 
 func _child_ids(id: int) -> Array:
@@ -290,6 +290,38 @@ static func _node_xf(n: VoxelNode) -> Transform3D:
 	if f == null or (f.rotation == null and f.position == null):
 		return Transform3D.IDENTITY
 	return f.transform
+
+
+## 该节点是否有**多帧**变换（`.vox` 的 nTRN 多帧摆放动画）。
+static func _has_transform_anim(n: VoxelNode) -> bool:
+	var count := 0
+	for k in n.frames:
+		var f: VoxelFrame = n.frames[k]
+		if f != null and (f.position != null or f.rotation != null):
+			count += 1
+			if count > 1:
+				return true
+	return false
+
+
+## 第 k 帧的节点变换（缺失回落到第 0 帧 / 恒等）。
+static func _frame_xf(n: VoxelNode, k: int) -> Transform3D:
+	if n.frames.has(k):
+		var f: VoxelFrame = n.frames[k]
+		if f != null and (f.position != null or f.rotation != null):
+			return f.transform
+	return _node_xf(n)
+
+
+## 逐帧摆放轨道（按最大帧号稠密铺开）。仅 `_has_transform_anim` 为真时调用。
+static func _transform_tracks(n: VoxelNode) -> Array[Transform3D]:
+	var out: Array[Transform3D] = []
+	var mx := -1
+	for k in n.frames:
+		mx = maxi(mx, int(k))
+	for k in mx + 1:
+		out.append(_frame_xf(n, k))
+	return out
 
 
 ## 递归镜像一个 `.vox` 节点到世界（挂在 parent 下）。`carry` = 被折叠掉的结构壳累积下来的变换。
@@ -319,6 +351,12 @@ func _build_world_node(w: QVoxelWorld, id: int, parent: QVoxelGroup, carry: Tran
 	var g := w.create_group(_group_name(n), parent)
 	g.visible = _group_visible(n)
 	g.local_transform = xf
+	# 多帧摆放动画 → 逐帧轨道（`.vox` 的 nTRN 多帧）。被折叠结构壳的静态变换(carry)并入每帧。
+	if _has_transform_anim(n):
+		var tracks := _transform_tracks(n)
+		for i in tracks.size():
+			tracks[i] = carry * tracks[i]
+		g.transform_tracks = tracks
 	if has_model:
 		# 既有模型又有子节点：组包住"模型 + 子树"（与 get_models 的"先子后己"同构）。
 		_make_world_model(w, models[n.frames[0].model_id], Transform3D.IDENTITY, g)
