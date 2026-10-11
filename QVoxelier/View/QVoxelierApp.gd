@@ -37,6 +37,8 @@ extends Node3D
 @onready var camera: QVoxelViewCamera = $Camera
 @onready var grid_floor: QVoxelGridFloor = $Model/Floor
 @onready var hud: QVoxelierHud = $Hud
+@onready var _key_light: DirectionalLight3D = $KeyLight
+@onready var _env_node: WorldEnvironment = $WorldEnvironment
 
 ## 应用栏 / 工具坞 / 调色板：**在代码里建**而不是摆进 .tscn —— 它们的内容完全由运行时数据决定
 ## （工具表、世界的材质表），在场景里预摆只会得到一份立刻被推翻的空壳；
@@ -215,6 +217,9 @@ func _ready() -> void:
 	_build_dialogs()
 	_build_ui()
 	_disable_focus(self)
+	# 天空里的"太阳盘"调小：材质 metallic=1 会把天空的太阳反射成一个大光球（用户不想要）。
+	_setup_sky()
+	_apply_render_mode()
 	# 按钮/控件的悬停提示统一送到状态栏显示（本应用不用悬浮气泡）。
 	QVoxelUi.hint_sink = hud.show_hover_hint
 	new_model()
@@ -564,6 +569,10 @@ func _rebuild_view() -> void:
 		add_child(_extra_root)
 
 	var active_id: int = session.object.model_id
+	# 活动对象由 model 渲染，其唤醒回调必须指回 model.request_update。
+	# 【曾经的 bug】对象先当非活动（回调指向它的临时渲染器）、再切回活动时，回调仍指向那个
+	# 已释放的临时渲染器 → 撤销后 _wake_renderer 打到野对象 → 网格不重建（画面看着没撤销）。
+	session.request_render_update = model.request_update
 
 	# 回收：不再属于世界、或已变成活动对象（该由 model 渲染）的旧渲染器。
 	for id in _display.keys():
@@ -1958,6 +1967,73 @@ func _set_preview_box(sel: QVoxelSelection) -> void:
 	_selection_box.set_box(lo, hi - lo + Vector3i.ONE)
 
 
+## 天空里的"太阳盘"**完全隐藏**：材质 metallic=1 会把天空的太阳反射成一个大光球（用户不想看到）。
+func _setup_sky() -> void:
+	if _env_node == null or _env_node.environment == null:
+		return
+	var sky := _env_node.environment.sky
+	if sky != null and sky.sky_material is ProceduralSkyMaterial:
+		var mat := sky.sky_material as ProceduralSkyMaterial
+		mat.sun_angle_max = 0.0
+		mat.sun_curve = 1.0
+
+
+## 按编辑层级套渲染设置：
+##   模型编辑 → 关阴影 / SSAO / SSIL / SSR / 辉光（这些会干扰"看体素判断形状"）；
+##   布局（世界）→ 全开并精调（高质阴影 + SSAO + SSIL + SSR + 适度辉光 + ACES），逼近渲染图。
+func _apply_render_mode() -> void:
+	var best := _edit_mode == 1
+	if _key_light != null:
+		_key_light.shadow_enabled = best
+		# 阴影质量拉高：4 段 PSSM + 混合分割 + 软阴影 + 更细的偏置。
+		_key_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+		_key_light.directional_shadow_blend_splits = true
+		_key_light.directional_shadow_max_distance = 120.0
+		_key_light.directional_shadow_fade_start = 0.8
+		_key_light.shadow_blur = 1.5
+		_key_light.shadow_bias = 0.03
+		_key_light.shadow_normal_bias = 1.5
+		_key_light.shadow_opacity = 0.9
+		_key_light.light_angular_distance = 0.6
+	var env := _env_node.environment if _env_node != null else null
+	if env == null:
+		return
+	env.ssao_enabled = best
+	env.ssil_enabled = best
+	env.ssr_enabled = best
+	env.glow_enabled = best
+	if best:
+		# 环境光遮蔽：稍强、稍大半径 → 凹处层次更明显。
+		env.ssao_intensity = 2.0
+		env.ssao_radius = 0.8
+		# 屏幕空间间接光：让缝隙 / 背光面得到更自然的补光。
+		env.ssil_intensity = 1.0
+		env.ssil_radius = 5.0
+		env.ssil_sharpness = 0.98
+		env.ssil_normal_rejection = 1.0
+		# 屏幕空间反射：金属/光滑面能映出周围体素与地面。
+		env.ssr_max_steps = 64
+		env.ssr_fade_in = 0.15
+		env.ssr_fade_out = 2.0
+		env.ssr_depth_tolerance = 0.2
+		# 辉光调低（此前偏强）：阈值抬高，只有真发光才溢出。
+		env.glow_intensity = 0.5
+		env.glow_bloom = 0.02
+		env.glow_hdr_threshold = 1.2
+		# 环境光：更亮的间接照明 + 更多天空贡献。
+		env.ambient_light_energy = 1.3
+		env.ambient_light_sky_contribution = 0.6
+		# 色调映射：ACES（更接近渲染图）。
+		env.tonemap_mode = Environment.TONE_MAPPER_ACES
+		env.tonemap_white = 6.0
+		env.tonemap_exposure = 1.0
+	else:
+		env.ambient_light_energy = 1.0
+		env.ambient_light_sky_contribution = 0.3
+		env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+		env.tonemap_exposure = 1.0
+
+
 ## 切换编辑层级（Tab）：模型内部 ⇄ 布局（类似 Blender 的模式切换）。
 ## 布局下：只留「移动」工具可用、隐藏上下文条（绘制参数无关）、gizmo 改**模型整体变换**。
 func _set_edit_mode(m: int) -> void:
@@ -1966,6 +2042,7 @@ func _set_edit_mode(m: int) -> void:
 		return
 	_edit_mode = m
 	_gizmo_active = false
+	_apply_render_mode()
 	if m == 1:
 		_layout_sel.clear()
 	if _move_gizmo != null:
