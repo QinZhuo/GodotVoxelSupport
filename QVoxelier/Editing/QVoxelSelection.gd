@@ -124,6 +124,28 @@ func offset_by(delta: Vector3i) -> QVoxelSelection:
 	return from_corners(_lo + delta, _hi + delta)
 
 
+## 并集（Shift 加选）：返回一个逐格集合并入 other 的**新**选区。
+func union_with(other: QVoxelSelection) -> QVoxelSelection:
+	var set := {}
+	for c in cells():
+		set[c] = true
+	for c in other.cells():
+		set[c] = true
+	return from_cells(set.keys())
+
+
+## 差集（Ctrl 减选）：从自身逐格集合里去掉 other 的格。
+func subtract(other: QVoxelSelection) -> QVoxelSelection:
+	var drop := {}
+	for c in other.cells():
+		drop[c] = true
+	var keep: Array[Vector3i] = []
+	for c in cells():
+		if not drop.has(c):
+			keep.append(c)
+	return from_cells(keep)
+
+
 func equals(other: QVoxelSelection) -> bool:
 	if other == null:
 		return false

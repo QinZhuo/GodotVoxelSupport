@@ -104,6 +104,8 @@ var _stroke := false
 var _op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
 ## 进行中手势的模式：落笔那一刻定死，拖动与预览都按它走（与 _op 可不同，右键 / Shift 会临时覆盖）。
 var _stroke_op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
+## 悬停预览用的模式：按 Shift 时临时切到移除，于是**松手前**的预览就能反映"这一下是移除"。
+var _hover_op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
 ## 对称轴掩码。是**App 级设置**而非笔刷级：每个对象各有自己的笔刷实例，
 ## 若把它存在笔刷里，切一次对象就会被新笔刷的默认值抹掉（见 _apply_symmetry）。
 var _symmetry := Vector3i.ZERO
@@ -261,6 +263,8 @@ func _build_ui() -> void:
 	_gizmo.name = "Gizmo"
 	add_child(_gizmo)
 	_gizmo.camera = camera
+	# 网格背景面要知道相机朝哪，才能把"当前作为背景的那几个面"画成格线。
+	grid_floor.camera = camera
 	_gizmo.view_requested.connect(_apply_view)
 	# 盘上拖拽 = 自由旋转（点击轴尖仍是切视图，见 QVoxelierGizmo._gui_input 的判型时机）。
 	_gizmo.orbit_requested.connect(func(rel: Vector2) -> void:
@@ -405,6 +409,7 @@ func _reset_edit_state() -> void:
 	_gizmo_active = false
 	_op = QVoxelBrushTool.Op.ADD
 	_stroke_op = QVoxelBrushTool.Op.ADD
+	_hover_op = QVoxelBrushTool.Op.ADD
 	_tool_kind = ToolKind.BRUSH
 	_eyedropper = false
 	_material_cmd = null
@@ -535,10 +540,8 @@ func frame_view() -> void:
 	if session == null:
 		return
 	var g := Vector3(session.output_size()) * model.voxel_scale
-	var extent := g if not session.object.is_empty() else Vector3(g.x, 0.0, g.z)
-	# 始终以**窗口中心**取景。曾按"可见区中心"（左右侧栏宽度不等时补偿）对齐，但右栏通常更宽，
-	# 结果模型被推到窗口偏左，看着像"没居中"——用户要的就是窗口正中，故不再补偿。
-	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, extent), true)
+	# 取景对准**整块网格盒的中心**（而不是地板中心）—— 背景面有地板也有侧墙，盒子中心才是视觉中心。
+	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, g), true)
 	_pending_center = false
 
 
@@ -640,6 +643,9 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					elif _tool_kind != ToolKind.BRUSH:
 						_stamp_at(e.position)
 					else:
+						# 选区手势：Shift 加选 / Ctrl 减选（在按下那一刻定死）。
+						if session.tool.selection_mode():
+							session.selection_combine = 2 if e.ctrl_pressed else (1 if e.shift_pressed else 0)
 						_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op)
 			elif _gizmo_active:
 				_gizmo_end()
@@ -706,6 +712,7 @@ func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 	elif _pan:
 		camera.pan_by_pixels(e.relative)
 	else:
+		_hover_op = QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op
 		_refresh_cursor(e.position)
 
 
@@ -774,7 +781,9 @@ func _pick_at(screen: Vector2, op: int) -> QVoxelBrushTool.Pick:
 	var scale := model.voxel_scale
 	var origin: Vector3 = model.to_local(camera.project_ray_origin(screen)) / scale
 	var dir: Vector3 = model.global_transform.basis.inverse() * camera.project_ray_normal(screen)
-	var info := QVoxelGridPick.hit(session.data, origin, dir, session.output_size())
+	# 只允许落在"当前可见的背景面"上（与边框显示一致：有边框的面才作画笔地面）。
+	var info := QVoxelGridPick.hit(session.data, origin, dir, session.output_size(), 100.0,
+			grid_floor.visible_faces())
 	return session.pick_from_hit(info, op, _material_id)
 
 
@@ -946,6 +955,7 @@ func _set_op(op: int) -> void:
 	if _op == op:
 		return
 	_op = op
+	_hover_op = op
 	hud.flash("操作：%s" % QVoxelBrushTool.OPS[op].text)
 	_refresh_hud()
 
@@ -1447,7 +1457,7 @@ func _material_colors(w: QVoxelWorld) -> Array[Color]:
 ## 光标格：按 Pick 已经算好的 place 显示（添加 = 外侧那格，移除 / 上色 = 命中格本身）。
 ## 屏幕坐标由调用方传入（鼠标事件里有，不必再问视口要一次 —— 内嵌视口时那个答案还是错的）。
 func _refresh_cursor(screen: Vector2) -> void:
-	var pick := _pick_at(screen, _stroke_op if _stroke else _op)
+	var pick := _pick_at(screen, _stroke_op if _stroke else _hover_op)
 	_hover_pick = pick if pick.valid() else null
 	if not pick.valid():
 		hud.set_cursor(Vector3i.MIN)

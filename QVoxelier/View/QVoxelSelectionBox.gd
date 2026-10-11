@@ -79,26 +79,83 @@ func rebuild() -> void:
 	_commit(verts, colors)
 
 
-## 逐格线框：每格一个立方框。空 = 隐藏；超上限退化为包围盒（见 CELLS_MAX）。
+## 逐格集合的**轮廓**：只画"组成形状的边界"（外侧棱），而不是每格一个方框。
+## 内部相邻面与共享棱会被去重掉，于是不管选了多少格，看到的都是一个干净的轮廓线。
 func _rebuild_cells() -> void:
 	if _cells.is_empty():
 		mesh = null
 		visible = false
 		return
 	visible = true
-	var verts := PackedVector3Array()
+	var verts := boundary_edges(_cells)
 	var colors := PackedColorArray()
-	if _cells.size() > CELLS_MAX:
-		var lo := _cells[0]
-		var hi := _cells[0]
-		for c in _cells:
-			lo = Vector3i(mini(lo.x, c.x), mini(lo.y, c.y), mini(lo.z, c.z))
-			hi = Vector3i(maxi(hi.x, c.x), maxi(hi.y, c.y), maxi(hi.z, c.z))
-		_box_edges(verts, colors, lo, hi - lo + Vector3i.ONE)
-	else:
-		for c in _cells:
-			_box_edges(verts, colors, c, Vector3i.ONE)
+	for _i in verts.size():
+		colors.push_back(line_color)
 	_commit(verts, colors)
+
+
+# 立方体的 6 个面方向与对应四角顺序（与预览体素同一套）。
+const _FACES := [
+	Vector3i(0, -1, 0), Vector3i(0, 1, 0),
+	Vector3i(0, 0, -1), Vector3i(0, 0, 1),
+	Vector3i(-1, 0, 0), Vector3i(1, 0, 0),
+]
+const _QUADS := [
+	[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [3, 2, 6, 7], [0, 3, 7, 4], [1, 2, 6, 5],
+]
+
+
+## 一组格的**外轮廓棱**（整体 mesh 的轮廓，而不是每格的方框）：
+## 只看"暴露面"（邻格为空的那些面），且同一平面内相邻暴露面之间的**接缝棱不画** ——
+## 于是不管是一格还是几千格，看到的都是这个形状的边界线（平面上的内部网格线被省掉）。
+## offset 把顶点整体平移（预览体素要叠 center_offset）。
+static func boundary_edges(cells: Array[Vector3i], offset := Vector3.ZERO) -> PackedVector3Array:
+	var set := {}
+	for c in cells:
+		set[c] = true
+	var verts := PackedVector3Array()
+	var seen := {}
+	for c in cells:
+		var a := Vector3(c)
+		var b := Vector3(c + Vector3i.ONE)
+		var corners := [
+			Vector3(a.x, a.y, a.z), Vector3(b.x, a.y, a.z), Vector3(b.x, a.y, b.z), Vector3(a.x, a.y, b.z),
+			Vector3(a.x, b.y, a.z), Vector3(b.x, b.y, a.z), Vector3(b.x, b.y, b.z), Vector3(a.x, b.y, b.z),
+		]
+		for i in 6:
+			var n: Vector3i = _FACES[i]
+			if set.has(c + n):
+				continue  # 内部面不画
+			var q: Array = _QUADS[i]
+			var quad := [corners[q[0]], corners[q[1]], corners[q[2]], corners[q[3]]]
+			var fc: Vector3 = (quad[0] + quad[1] + quad[2] + quad[3]) / 4.0
+			for k in 4:
+				var p0: Vector3 = quad[k]
+				var p1: Vector3 = quad[(k + 1) % 4]
+				# 这条棱的平面外邻格方向（由棱中点相对面心得到，±1 单轴）。
+				var em: Vector3 = (p0 + p1) / 2.0
+				var d := em - fc
+				var dcell := Vector3i(roundi(d.x * 2.0), roundi(d.y * 2.0), roundi(d.z * 2.0))
+				var nb := c + dcell
+				# 共面接缝（相邻格在同一平面上也暴露）→ 不画，得到的是整体轮廓。
+				if set.has(nb) and not set.has(nb + n):
+					continue
+				var e0: Vector3 = p0 + offset
+				var e1: Vector3 = p1 + offset
+				var key := _edge_key(e0, e1)
+				if seen.has(key):
+					continue
+				seen[key] = true
+				verts.push_back(e0)
+				verts.push_back(e1)
+	return verts
+
+
+## 棱的无向去重键（两个端点排序后拼串）。
+static func _edge_key(p0: Vector3, p1: Vector3) -> String:
+	var s0 := "%d,%d,%d" % [int(p0.x), int(p0.y), int(p0.z)]
+	var s1 := "%d,%d,%d" % [int(p1.x), int(p1.y), int(p1.z)]
+	return (s0 + "|" + s1) if s0 < s1 else (s1 + "|" + s0)
 
 
 ## 顶点 → 网格 → 材质 → 缩放，两种模式共用的提交动作。

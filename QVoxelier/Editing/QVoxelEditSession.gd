@@ -37,6 +37,9 @@ var selection := QVoxelSelection.new()
 ## 快速选区的连通判据：true = 同材质（颜色相连，默认）；false = 任意实心（几何相连）。
 var select_by_color := true
 
+## 本次选区动作如何并入现有选区：0 = 替换；1 = 加选（Shift）；2 = 减选（Ctrl）。由 App 在按下时设定。
+var selection_combine := 0
+
 ## 剪贴板（复制 / 剪切 / 粘贴的载体）。跨对象、跨会话共用一份 —— 这就是"复制到另一个模型"。
 var clipboard := QVoxelClipboard.new()
 
@@ -431,6 +434,20 @@ func _set_selection(sel: QVoxelSelection) -> void:
 	selection_changed.emit()
 
 
+## 把一次框选 / 快速选区的产物按当前组合方式（替换 / 加选 / 减选）并入选区。
+func _apply_selection(new_sel: QVoxelSelection) -> bool:
+	var result := new_sel
+	if not selection.is_empty():
+		if selection_combine == 1:
+			result = selection.union_with(new_sel)
+		elif selection_combine == 2:
+			result = selection.subtract(new_sel)
+	if result.equals(selection):
+		return false
+	_set_selection(result)
+	return true
+
+
 ## 把一次框选落到选区上。**夹进网格** —— 框到网格外的部分不是"选中了虚空"，是没框到。
 func _set_box_selection(a: Vector3i, b: Vector3i) -> bool:
 	if object == null:
@@ -440,11 +457,7 @@ func _set_box_selection(a: Vector3i, b: Vector3i) -> bool:
 	var hi := Vector3i(maxi(a.x, b.x), maxi(a.y, b.y), maxi(a.z, b.z)).clamp(Vector3i.ZERO, top)
 	if hi.x < lo.x or hi.y < lo.y or hi.z < lo.z:
 		return false
-	var sel := QVoxelSelection.from_corners(lo, hi)
-	if sel.equals(selection):
-		return false
-	_set_selection(sel)
-	return true
+	return _apply_selection(QVoxelSelection.from_corners(lo, hi))
 
 
 ## 快速选区：从 seed 出发，把**连通**的体素整块选中（逐格集合，不是包围盒）。
@@ -474,11 +487,7 @@ func _select_connected(seed: Vector3i) -> bool:
 		cells.append(p)
 		for d in QVoxelBrushGeometry.neighbors6():
 			stack.append(p + d)
-	var sel := QVoxelSelection.from_cells(cells)
-	if sel.equals(selection):
-		return false
-	_set_selection(sel)
-	return true
+	return _apply_selection(QVoxelSelection.from_cells(cells))
 
 
 ## 一次性写入的公共流程：建命令 → 由 `build` 填格 → 封口 → 入栈 → 刷新。返回真正改动的格数。

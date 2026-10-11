@@ -90,8 +90,9 @@ func test_parallel_or_upward_rays_never_hit_the_floor() -> void:
 	assert_eq(wall.get(VoxelRay.KEY_HIT), Vector3i(g.x, 5, 3), "水平射线命中远端 +X 墙")
 	assert_eq(wall.get(VoxelRay.KEY_NORMAL), Vector3i(-1, 0, 0), "法线朝内（往盒里画，近侧不糊壳）")
 	assert_eq(s.pick_from_hit(wall).place, Vector3i(g.x - 1, 5, 3), "落笔格在墙的里侧一格")
-	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.UP, g).is_empty(),
-		"朝上的射线：远端是顶面，不画天花板")
+	var up := QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.UP, g)
+	assert_eq(up.get(VoxelRay.KEY_HIT), Vector3i(2, g.y, 3), "朝上的射线命中远端顶面（从下方看时可画顶面）")
+	assert_eq(s.pick_from_hit(up).place, Vector3i(2, g.y - 1, 3), "落笔格在顶面里侧一格")
 	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, -5, 3.5), Vector3.DOWN, g).is_empty(),
 		"从地板下方朝下打：盒在背后，不命中")
 

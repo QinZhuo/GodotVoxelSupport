@@ -81,15 +81,13 @@ func _exposed(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 				_cube_face(verts, colors, c, i)
 
 
-## 线框预览（移除 / 上色）：逐格描边（超上限退化为包围盒线框）。
+## 线框预览（移除 / 上色）：只画**轮廓**（组成形状的边界棱），而不是每格一个方框 —— 密麻的小框太乱。
 func _wire_frame(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	var c := Color(_color, 1.0)
-	if _cells.size() > CELLS_MAX:
-		var b := _bounds()
-		_box_edges(verts, colors, b.lo, b.hi, c)
-	else:
-		for cell in _cells:
-			_box_edges(verts, colors, cell, cell, c)
+	var edges := QVoxelSelectionBox.boundary_edges(_cells, origin)
+	verts.append_array(edges)
+	for _i in edges.size():
+		colors.push_back(c)
 
 
 ## 向缓冲追加一个格（或盒）的第 face 面（两个三角形）。

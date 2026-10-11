@@ -30,20 +30,20 @@ enum Mode {
 
 ## 工具表：界面（热键 / 工具栏 / 提示）与行为（live / 笔刷尺寸）的唯一来源。
 const MODES := [
-	{"mode": Mode.VOXEL, "id": &"voxel", "label": "体素笔", "hotkey": KEY_V, "icon": "tool_voxel",
-		"live": true, "brush": true, "hint": "左键画 · 右键擦 · 拖动连续涂抹"},
-	{"mode": Mode.FACE, "id": &"face", "label": "面笔", "hotkey": KEY_F, "icon": "tool_face",
-		"live": false, "brush": false, "hint": "点一下铺满整片同朝向的暴露面"},
-	{"mode": Mode.BOX, "id": &"box", "label": "盒笔", "hotkey": KEY_B, "icon": "tool_box",
-		"live": false, "brush": true, "hint": "按住拖出长方体，松手落笔"},
-	{"mode": Mode.LINE, "id": &"line", "label": "线笔", "hotkey": KEY_L, "icon": "tool_line",
-		"live": false, "brush": true, "hint": "按住拖出直线，松手落笔"},
-	{"mode": Mode.FILL, "id": &"fill", "label": "填充", "hotkey": KEY_C, "icon": "tool_fill",
-		"live": false, "brush": false, "hint": "替换与拾取点连通的同材质整块"},
+	{"mode": Mode.VOXEL, "id": &"voxel", "label": "点", "hotkey": KEY_V, "icon": "tool_voxel",
+		"live": true, "brush": true, "hint": "点：左键画 · 右键擦 · 拖动连续"},
+	{"mode": Mode.LINE, "id": &"line", "label": "线", "hotkey": KEY_L, "icon": "tool_line",
+		"live": false, "brush": true, "hint": "线：拖出直线，松手落笔"},
+	{"mode": Mode.FACE, "id": &"face", "label": "面", "hotkey": KEY_F, "icon": "tool_face",
+		"live": false, "brush": false, "hint": "面：铺满一片暴露面（也能铺背景面）"},
+	{"mode": Mode.BOX, "id": &"box", "label": "块", "hotkey": KEY_B, "icon": "tool_box",
+		"live": false, "brush": true, "hint": "块：拖出一个长方体，松手落笔"},
+	{"mode": Mode.FILL, "id": &"fill", "label": "填", "hotkey": KEY_C, "icon": "tool_fill",
+		"live": false, "brush": false, "hint": "填：替换连通的同材质整块"},
 	{"mode": Mode.SELECT, "id": &"select", "label": "选择", "hotkey": KEY_T, "icon": "tool_select",
-		"live": false, "brush": false, "hint": "拖出选区盒 · 再按 复制 / 剪切 / 粘贴 / 清空"},
+		"live": false, "brush": false, "hint": "选择：拖框 / 单击连通一块"},
 	{"mode": Mode.MOVE, "id": &"move", "label": "移动", "hotkey": KEY_M, "icon": "tool_move",
-		"live": false, "brush": false, "hint": "按住拖动，把选区里的体素搬到新位置"},
+		"live": false, "brush": false, "hint": "移动：拖坐标轴"},
 ]
 
 ## 操作意图：这一笔对命中格做**什么**。与 Mode 正交（Mode 决定"哪些格"，Op 决定"写什么"）。
@@ -294,6 +294,9 @@ func material() -> int:
 func _anchor_of(pick: Pick) -> Vector3i:
 	if mode == Mode.FACE or mode == Mode.FILL or is_selection_mode(mode):
 		return pick.hit
+	if mode == Mode.BOX or mode == Mode.LINE:
+		# 区域工具：锚点始终取"落笔面外侧那一格"（与操作无关），于是空白区（地板 / 侧墙等背景面）也能起笔。
+		return VoxelRay.placement_of(pick.hit, pick.normal)
 	return pick.place
 
 
@@ -319,6 +322,9 @@ func _stroke_face(pick: Pick) -> Array[Vector3i]:
 	if not pick.solid.is_valid():
 		return []
 	var normal := pick.normal
+	# 背景面（地板 / 侧墙）：命中格落在网格外 → 铺满整个网格截面的那一层（面笔也要能画背景面）。
+	if _is_background_face(pick):
+		return _grid_face_plane(pick, normal)
 	var offsets := QVoxelBrushGeometry.plane_offsets4(normal)
 	var accept := func(p: Vector3i) -> bool:
 		return bool(pick.solid.call(p)) and not bool(pick.solid.call(p + normal))
@@ -331,6 +337,35 @@ func _stroke_face(pick: Pick) -> Array[Vector3i]:
 	var out: Array[Vector3i] = []
 	for c in exposed:
 		out.append(c + normal)
+	return out
+
+
+## 命中格是否落在网格外（= 打在了背景面：地板 / 侧墙）。无网格上下文时恒 false。
+func _is_background_face(pick: Pick) -> bool:
+	var g := pick.grid
+	if g == Vector3i.ZERO:
+		return false
+	var h := pick.hit
+	return h.x < 0 or h.y < 0 or h.z < 0 or h.x >= g.x or h.y >= g.y or h.z >= g.z
+
+
+## 背景面铺满：把与背景面垂直的一整层网格截面作为产物（落笔层 = 命中外侧一格）。
+func _grid_face_plane(pick: Pick, normal: Vector3i) -> Array[Vector3i]:
+	var g := pick.grid
+	var place := VoxelRay.placement_of(pick.hit, normal)
+	var out: Array[Vector3i] = []
+	if absi(normal.x) == 1:
+		for z in g.z:
+			for y in g.y:
+				out.append(Vector3i(place.x, y, z))
+	elif absi(normal.y) == 1:
+		for z in g.z:
+			for x in g.x:
+				out.append(Vector3i(x, place.y, z))
+	else:
+		for y in g.y:
+			for x in g.x:
+				out.append(Vector3i(x, y, place.z))
 	return out
 
 

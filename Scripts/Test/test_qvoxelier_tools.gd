@@ -385,7 +385,7 @@ func test_mode_table_is_complete_and_hotkeys_are_unique() -> void:
 		seen[row.hotkey] = true
 		assert_eq(QVoxelBrushTool.mode_by_hotkey(row.hotkey), m, "热键要能反查回模式")
 	assert_eq(QVoxelBrushTool.mode_by_hotkey(KEY_F), QVoxelBrushTool.Mode.FACE, "F = 面笔")
-	assert_eq(QVoxelBrushTool.info(QVoxelBrushTool.Mode.BOX).label, "盒笔", "工具栏读的就是这张表")
+	assert_eq(QVoxelBrushTool.info(QVoxelBrushTool.Mode.BOX).label, "块", "工具栏读的就是这张表")
 
 
 func test_preview_matches_the_actual_stroke_for_every_mode() -> void:

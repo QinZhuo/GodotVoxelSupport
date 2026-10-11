@@ -55,8 +55,8 @@ func _build() -> void:
 	# 自定义笔刷：与笔类并列（互斥选中）—— 拿一个做好的模型当图章盖，同样是"点哪画哪"。
 	_col.add_child(QVoxelUi.divider())
 	var cb := QVoxelUi.toggle_button(
-			"自定义笔刷\n把复制出的体素当笔刷：先框选并复制，再点击盖章（支持添加 / 移除 / 上色）",
-			QVoxelUi.VARIATION_TOOL, "笔刷", "brush")
+			"图章\n把复制出的体素当时印章：先框选并复制，再点击盖章（支持添加 / 移除 / 上色）",
+			QVoxelUi.VARIATION_TOOL, "图章", "stamp")
 	cb.custom_minimum_size = Vector2(0, QVoxelUi.hit_size())
 	cb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	cb.button_group = _group

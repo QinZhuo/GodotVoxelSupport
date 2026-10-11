@@ -170,9 +170,9 @@ func _build_criterion_group() -> void:
 	_row.add_child(_criterion_group)
 	var group := ButtonGroup.new()
 	group.allow_unpress = false
-	for spec in [[true, "同色", "同色相连：快速选区只收同材质的一块"],
-			[false, "相连", "几何相连：只要相邻实心就收（可跨颜色）"]]:
-		var b := QVoxelUi.toggle_button(spec[2], QVoxelUi.VARIATION_TOOL, spec[1], "paint")
+	for spec in [[true, "同色", "同色相连：快速选区只收同材质的一块", "same_color"],
+			[false, "相连", "几何相连：只要相邻实心就收（可跨颜色）", "connect"]]:
+		var b := QVoxelUi.toggle_button(spec[2], QVoxelUi.VARIATION_TOOL, spec[1], spec[3])
 		b.custom_minimum_size.x = QVoxelUi.hit_size()
 		b.button_group = group
 		b.toggled.connect(func(on: bool): if on: select_criterion_changed.emit(spec[0]))
