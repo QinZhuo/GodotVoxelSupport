@@ -307,7 +307,7 @@ func _row_resource(o: Object, prop: StringName, hint_string: String, value: Vari
 	opt.add_item("（无）", 0)
 	var cur := -1
 	if value is Resource:
-		var cur_name := QVoxelModifierSerializer.op_type_name(value)
+		var cur_name := op_type_name(value)
 		cur = cands.find(cur_name)
 		if cur < 0:
 			# 当前类型不在候选里（脚本改了名、或候选表不全）：补进去，否则下拉框会显示错的类型。
@@ -320,7 +320,7 @@ func _row_resource(o: Object, prop: StringName, hint_string: String, value: Vari
 		if idx == 0:
 			_emit_discrete(o, prop, null)
 		else:
-			var inst: Resource = QVoxelModifierSerializer.instantiate_op(cands[idx - 1])
+			var inst: Resource = instantiate_op(cands[idx - 1])
 			if inst != null:
 				_emit_discrete(o, prop, inst))
 	row.add_child(opt)
@@ -382,6 +382,35 @@ static func candidate_classes(base_name: String) -> PackedStringArray:
 				break
 	out.sort()
 	return out
+
+
+## 全局类名 → 实例（仅接受 class_name；内建 Resource 子类兜底）。
+static func instantiate_op(type_name: String) -> Resource:
+	if type_name.is_empty():
+		return null
+	for e in ProjectSettings.get_global_class_list():
+		if str(e.get("class", "")) != type_name:
+			continue
+		var script: Script = load(str(e.get("path", "")))
+		if script != null and script.can_instantiate():
+			return script.new()
+		return null
+	if ClassDB.class_exists(type_name) and ClassDB.can_instantiate(type_name):
+		var obj: Variant = ClassDB.instantiate(type_name)
+		return obj if obj is Resource else null
+	return null
+
+
+## 资源对象的类型名：优先全局类名（class_name），其次原生类名。
+static func op_type_name(op: Object) -> String:
+	if op == null:
+		return ""
+	var script: Script = op.get_script()
+	if script != null:
+		var g := script.get_global_name()
+		if not g.is_empty():
+			return g
+	return op.get_class()
 
 
 static func _with_axis(cur: Variant, axis: int, v: float, is_int: bool) -> Variant:

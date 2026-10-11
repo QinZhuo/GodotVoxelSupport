@@ -74,16 +74,16 @@ static func create_for(obj: QVoxelModel, world: QVoxelWorld = null) -> QVoxelEdi
 ## 【几何判据取自显示层，而不是对象】对象里只有**手绘种子**；修改器链的产出（风化 / 染色 /
 ## 程序化生成）只存在于显示层。拿对象判"实心"会让面笔与填充看不见链生成出来的那部分几何
 ## —— 表现为"点得中却刷不动"。这也是 Pick 把判据做成闭包的原因（工具层不必认识 QVoxelSource）。
-func pick_from_hit(info: Dictionary, erase := false, material_id := 1) -> QVoxelBrushTool.Pick:
+func pick_from_hit(info: Dictionary, op := QVoxelBrushTool.Op.ADD, material_id := 1) -> QVoxelBrushTool.Pick:
 	var hit: Vector3i = info.get(VoxelRay.KEY_HIT, Vector3i.MIN)
 	var normal: Vector3i = info.get(VoxelRay.KEY_NORMAL, Vector3i.ZERO)
 	var pick := QVoxelBrushTool.Pick.new()
 	pick.hit = hit
 	pick.normal = normal
-	pick.erase = erase
-	# 画 = 往法线那侧长一格；擦 = 就擦命中格本身（擦掉面前的空格毫无意义）。
-	# 这是 Pick 的既定约定（见 QVoxelBrushTool.Pick.place 的注释），也是唯一区分两者的地方。
-	pick.place = hit if erase else VoxelRay.placement_of(hit, normal)
+	pick.op = op
+	# 添加 = 往法线那侧长一格；移除 / 上色 = 就作用在命中格本身。
+	# 这是 Pick 的既定约定（见 QVoxelBrushTool.Pick.place 的注释），也是唯一区分三态的地方。
+	pick.place = VoxelRay.placement_of(hit, normal) if op == QVoxelBrushTool.Op.ADD else hit
 	pick.material_id = material_id
 	pick.grid = object.grid_size if object != null else Vector3i.ZERO
 	if data != null:
@@ -127,19 +127,16 @@ func set_active_frame(index: int) -> void:
 ## 切帧并**同步**把该帧内容换进显示层（播放 / 点帧条走这条）。
 ## 【为什么不能走 _refresh 的"作废 + 异步重取"】那条路会让受影响 chunk 先作废、再等流式泵
 ## 按帧率去重新取数 —— 播放（每秒十几帧）根本来不及，表现为"播着播着体素不变了"。
-## 无修改器时显示内容就是该帧的块表（块边长恒等于 chunk 边长），直接 `apply_block_table`
-## 换缓冲即可：同步、只重建变化过的块。有修改器时链要重算，才退回完整重取。
+## 去链后显示内容恒等于该帧的块表（块边长恒等于 chunk 边长），直接 `apply_block_table`
+## 换缓冲即可：同步、只重建变化过的块。
 func apply_frame(index: int) -> void:
 	if object == null:
 		return
 	object.active_frame = maxi(0, index)
 	if data == null:
 		return
-	if object.modifiers.is_empty():
-		data.apply_block_table(object.blocks_for(object.active_frame), false)
-		_wake_renderer()
-	else:
-		_refresh([])
+	data.apply_block_table(object.blocks_for(object.active_frame), false)
+	_wake_renderer()
 
 
 ## 本会话落笔的目标帧：静态模型 = -1（静态源）；动画模型 = 当前帧（夹到有效范围）。
@@ -366,13 +363,11 @@ func _refresh(bounds: Array[Vector3i]) -> void:
 	_wake_renderer()
 
 
-## 链作用后的盒尺寸（= 显示层的 grid_size）。只有重排型修改器会改变它。
-## 【为什么问链而不是照抄 object.grid_size】见 QVoxelSource.output_grid_size：
-## 渲染的是**求值输出**，不是手绘种子；链里一旦有镜像 / 旋转 / 平铺，两者尺寸就不同。
+## 输出盒尺寸。去链后恒等于模型的 grid_size。
 func output_size() -> Vector3i:
 	if object == null:
 		return Vector3i.ZERO
-	return QVoxelEvalEngine.output_grid_size(object.modifiers, object.grid_size)
+	return object.grid_size
 
 
 ## 结构性改动之后的整体重算：分辨率与体素都可能全变（整对象变换），没有"局部"可言。

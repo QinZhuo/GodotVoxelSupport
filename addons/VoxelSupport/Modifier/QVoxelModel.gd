@@ -3,17 +3,11 @@ class_name QVoxelModel
 extends QVoxelNode
 ## 模型 —— 树上的叶子，也是**唯一持有手绘体素**的节点（对标 MagicaVoxel 的「模型」、
 ## 作图软件里的「图层」）。
-## 【结构 = 手绘基础体素 + 非破坏链】
-##   blocks    用户手绘出来的体素（画笔/盒/填充/克隆都写这里）。是"所见即所得"的那部分，
-##             也是撤销栈唯一改写的体素数据。
-##   modifiers 非破坏链：作用在 blocks **之上**，改参数不改数据。
+## 【结构 = 手绘体素（+ 可选帧动画）】
+##   blocks    用户做出来的体素（画笔/盒/填充/自定义笔刷/导入都写这里）。是"所见即所得"的
+##             那部分，也是撤销栈改写的体素数据。
 ##   frames    帧动画（§12）：**空 = 静态模型**（零成本）。非空时体素源换成"当前帧的块表"，
 ##             blocks 退居不用 —— 一个 model_id 恰好一个体素源（VXEL XOR FRAM，§12.2）。
-## 【为什么手绘不能塞进链里当一个算子】画笔编辑是高频率、增量、要撤销的；链是低频率、
-## 全量、参数化的。把画笔做成算子会让每次落笔触发整链重算，且撤销要回滚链参数。
-## 所以：blocks 是链的**输入**，不是链的一环（同 Blender 的"编辑模式改网格" vs
-## "物体模式挂修改器"）。于是两条编辑路径职责清晰且**可以组合**：手绘一块石头，
-## 再挂一个 SDF 修改器 combine = SUBTRACT 挖洞。
 ## 【为什么是分块稀疏，而不是一整块 dense 数组】
 ##   ① 内存：512³ dense 是 5.4 亿格 ≈ 537 MB（int32），而实体往往只占其中少数几块；
 ##      分块稀疏只在"画到哪一块"时分配一块 32³（128 KB），空块根本不占内存。
@@ -36,25 +30,6 @@ func display_name() -> String:
 		return node_name
 	return "Model %d" % model_id
 
-
-## 造一个"以算子为链"的模型 —— **程序化产出的标准装配**：有界盒 + 一条链，模型自身不含手绘体素。
-## 【为什么收成一个入口】"造一个程序化模型"在 demos / 测试里出现几十次。原先每处都要先 new 一个
-## 适配器再接线，而接线漏一步的表现是"画了没反应"而不是报错；收成一句之后那种空间就不存在了。
-## op_ 可以是 PcgModel（整体产出）/ Sdf（逐点采样）/ PcgTransform（重排）/ PcgDetail（体素域改写），
-## 域由 QVoxelModifier.of_op 按类型判定；details 是接在源之后的条目（如风化 / 染色），
-## detail_seed 是它们共用的种子 —— 同一 seed 下"换算子顺序"不会各自掷出不同的骰子，
-## 便于逐算子比对（沿用原 detail_seed 的既定语义）。
-## 某一条要单独的随机时，直接设它的 QVoxelModifier.seed 覆盖。
-static func of_source(op_: Resource, grid_size: Vector3i, details: Array = [],
-		detail_seed := 0) -> QVoxelModel:
-	var m := QVoxelModel.new()
-	m.grid_size = grid_size
-	m.add_op(op_)
-	for item in details:
-		var mod := m.add_op(item)
-		if mod != null:
-			mod.seed = detail_seed
-	return m
 
 ## 分辨率（体素），同时是体积的上限。采纳 MagicaVoxel 的语义：一块对象 = 一块有界体素。
 ## 【为什么是有界】体素域算子（侵蚀/风化/连通性清理）需要完整邻域，与"惰性按 chunk 生成、
@@ -135,7 +110,7 @@ func source_blocks() -> Dictionary:
 
 
 # 帧的编辑入口（UI 把这些包进 QVoxelPropertyCommand 后再调用，以保证撤销正确）
-# 【为什么这些方法不自己入栈】与链编辑入口（QVoxelNode.add_modifier 等）同一约定：
+# 【为什么这些方法不自己入栈】与别的编辑入口同一约定：
 # 命令要能在**改动之前**抓到旧值，所以 begin 必须在调用方手里、在本函数之前。
 
 ## 静态 → 动画：把现有静态内容原样搬进第 0 帧（§12.2 一个 model_id 只能有一个体素源）。
@@ -237,7 +212,7 @@ func fill_box(a: Vector3i, b: Vector3i, material_id: int) -> int:
 
 
 ## 把一块盒内密集体积写进本对象（撤销重放/导入用）。
-## data 布局 = PcgModel.index_of(局部坐标, dims)，dims = 盒尺寸（即 hi - lo + 1）。
+## data 布局 = VoxelVolume.index_of(局部坐标, dims)，dims = 盒尺寸（即 hi - lo + 1）。
 func apply_box(lo: Vector3i, dims: Vector3i, data: PackedInt32Array) -> int:
 	return apply_frame_box(-1, lo, dims, data)
 
@@ -305,7 +280,7 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 	return out
 
 
-## 摊平成一整块密集体积（布局 = PcgModel.index_of）—— 求值引擎与导出器的入口。
+## 摊平成一整块密集体积（布局 = VoxelVolume.index_of）—— 求值引擎与导出器的入口。
 ## read_box 在整块范围上的特例，故与它共用一份实现。
 ## 【空对象返回 size 0，而不是一整块零】求值引擎用"空数组"表示"还没有既有体积"，
 ## 于是"手绘为空"这个情形不必特判，也省掉一次无谓的全量分配 + 扫描（512³ = 537 MB）。
@@ -416,7 +391,7 @@ func resize_grid(new_size: Vector3i) -> void:
 
 # 内部：盒写入（唯一的体素写入路径，fill/set/apply/undo 全走它）
 
-## 盒内写入。data 为空 = 用 material_id 填满；否则 data 是按 PcgModel.index_of 布局的
+## 盒内写入。data 为空 = 用 material_id 填满；否则 data 是按 VoxelVolume.index_of 布局的
 ## 盒内密集体积。逐**块**推进（而不是逐体素查字典），块创建/空块回收都在这里收口。
 ## 【为什么 target 是显式形参，而不是"写 self.blocks"】同一套写入逻辑要服务两种体素源
 ## （静态 `blocks` 与某一帧的块表）—— 让 target 进来，块创建 / 空块回收 / 标脏只有一份实现，

@@ -43,9 +43,8 @@ func _world() -> QVoxelWorld:
 	w.add_camera("主视角")
 	var g := w.create_group("组一")
 	var obj := w.create_model("方块", Vector3i(16, 16, 16), g)
-	# 组内坐标不再挂在节点上：它是一条平移条目（见 PcgTransform 类头）
-	obj.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(2, 0, 0))))
-	obj.add_modifier(QVoxelTransformModifier.of(PcgTransform.repeat(0, 2)))
+	# 组内坐标就是节点的 offset（去链后摆放回到节点本身）。
+	obj.offset = Vector3i(2, 0, 0)
 	obj.set_voxel(1, 2, 3, 1)
 	obj.set_voxel(4, 0, 0, 2)
 	return w
@@ -76,10 +75,7 @@ func test_round_trip_keeps_the_world() -> void:
 	var obj := back.all_models()[0]
 	assert_eq(obj.node_name, "方块", "对象名")
 	assert_eq(obj.grid_size, Vector3i(16, 16, 16), "网格尺寸")
-	assert_eq(obj.modifiers.size(), 2, "链上的条目")
-	var place := (obj.modifiers[0] as QVoxelTransformModifier).transform
-	assert_eq(place.mode, PcgTransform.Mode.TRANSLATE, "组内坐标是链上的平移条目")
-	assert_eq(place.offset, Vector3i(2, 0, 0), "组内坐标存活")
+	assert_eq(obj.offset, Vector3i(2, 0, 0), "组内坐标（节点 offset）存活")
 	assert_eq(obj.count_solid(), 2, "实心格数")
 	assert_eq(obj.get_voxel(1, 2, 3), 1, "第一笔的体素与材质")
 	assert_eq(obj.get_voxel(4, 0, 0), 2, "第二笔的体素与材质")

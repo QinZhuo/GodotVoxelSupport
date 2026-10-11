@@ -33,12 +33,7 @@ extends Resource
 ## 缩放比例 (仅作为导入时的默认值，实际渲染缩放由 VoxelRenderer 控制)
 @export var default_scale: float = 0.1
 
-## 全链共用的**主种子**（→ QVoxelEvalContext.seed）。逐条修改器的种子在它之上叠加
-## （见 QVoxelEvalEngine：`ctx.seed + m.seed`），于是"同一 seed 下换算子顺序"不会各自掷出
-## 不同的骰子，便于逐算子比对。
-## 【为什么种子在数据层而不是在每条修改器上】同一次求值里所有算子必须看到同一个世界种子；
-## 把它放在链上任何一条上都会让"谁才是主种子"变成隐式约定。逐条要不同随机时用
-## QVoxelModifier.seed 叠加即可。
+## 求值主种子（→ QVoxelEvalContext.seed）。生成工具烘焙时也用它作默认随机源。
 @export var seed: int = 0:
 	set(v):
 		if seed == v:
@@ -125,13 +120,12 @@ func invalidate() -> void:
 	_invalidate_volume()
 
 
-## 节点求值输出盒 —— 链末端的实际尺寸，未必等于 node.grid_size（重排型修改器会改变尺寸）。
-## 纯盒运算、不做光栅化，故可在装配期 / 每帧调用。组与世界返回 ZERO（无声明盒，由内容算紧致盒）。
+## 节点求值输出盒 —— 去链后模型恒等于 node.grid_size；组 / 世界返回 ZERO（由内容算紧致盒）。
 func output_grid_size() -> Vector3i:
 	var m := node as QVoxelModel
 	if m == null:
 		return Vector3i.ZERO
-	return QVoxelEvalEngine.output_grid_size(m.modifiers, m.grid_size)
+	return m.grid_size
 
 
 ## 求值 / 边界判定用的基础盒：数据层显式声明的 grid_size 优先，未声明时问节点自己。
@@ -1587,6 +1581,9 @@ func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
 
 ## 获取指定位置的体素材质ID，不存在返回 -1
 ## 流式模式下若该 chunk 在磁盘上有数据则自动载入内存（保证读语义一致）
+## 【chunk 缓冲缺失时回落到求值体积】编辑收笔会作废相关 chunk 的缓冲（等流式泵重新取数），
+## 而渲染器填回缓冲要等到下一帧。若拾取恰好落在这段窗口里，就会"刚画的格打不到"——
+## 表现为"画一格后没法在它上面再画"。求值体积是同步、权威的那一份，故缺失时回落到它。
 func get_voxel(pos: Vector3i) -> int:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
@@ -1595,7 +1592,7 @@ func get_voxel(pos: Vector3i) -> int:
 			preload_chunk(ck)
 			buf = _chunk_buffers.get(ck)
 		if buf == null:
-			return -1
+			return _volume_voxel(pos)
 	var v: int = buf[_buf_index(pos - ck * CHUNK_SIZE)]
 	return v if v > 0 else -1
 
@@ -1609,8 +1606,20 @@ func has_voxel(pos: Vector3i) -> bool:
 			preload_chunk(ck)
 			buf = _chunk_buffers.get(ck)
 		if buf == null:
-			return false
+			return _volume_voxel(pos) > 0
 	return buf[_buf_index(pos - ck * CHUNK_SIZE)] > 0
+
+
+## 从求值体积里读一格（缺失缓冲时的权威回落）。越界 / 无体积返回 -1。
+func _volume_voxel(pos: Vector3i) -> int:
+	if node == null or not _ensure_volume() or _volume.is_empty():
+		return -1
+	var p := pos - _volume_origin
+	var gs := _volume_grid_size
+	if p.x < 0 or p.y < 0 or p.z < 0 or p.x >= gs.x or p.y >= gs.y or p.z >= gs.z:
+		return -1
+	var m := _volume[p.x + p.y * gs.x + p.z * gs.x * gs.y]
+	return m if m > 0 else -1
 
 
 ## 获取所有体素位置（内存 + 磁盘流中已持久化的，磁盘部分临时加载不缓存）

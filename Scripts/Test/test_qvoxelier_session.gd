@@ -103,7 +103,7 @@ func test_one_gesture_is_one_undo_unit_and_writes_both_ledgers() -> void:
 func test_gesture_that_changes_nothing_is_not_pushed() -> void:
 	var s := _session()
 	s.object.set_voxel(8, 9, 8, MAT)  # 目标格已经是这个材质了
-	var p := s.pick_from_hit(_hit(Vector3i(8, 8, 8), Vector3i(0, 1, 0)), false, MAT)
+	var p := s.pick_from_hit(_hit(Vector3i(8, 8, 8), Vector3i(0, 1, 0)), QVoxelBrushTool.Op.ADD, MAT)
 	assert_true(s.begin(p), "落笔格合法 → 手势可以开始")
 	assert_false(s.release(), "刷了同一种颜色 = 什么都没变 → 不该占一次撤销")
 	assert_false(s.can_undo(), "撤销栈保持干净")
@@ -122,13 +122,28 @@ func test_erase_gesture_removes_the_hit_voxel_and_is_undoable() -> void:
 	s.object.set_voxel(3, 3, 3, MAT)
 	s.data.set_voxel(Vector3i(3, 3, 3), MAT, false)
 	# 擦除的落笔格 = 命中格本身（不是 hit + normal）—— 擦掉面前的空格毫无意义。
-	var p := s.pick_from_hit(_hit(Vector3i(3, 3, 3), Vector3i(0, 1, 0)), true)
+	var p := s.pick_from_hit(_hit(Vector3i(3, 3, 3), Vector3i(0, 1, 0)), QVoxelBrushTool.Op.REMOVE)
 	assert_eq(p.place, Vector3i(3, 3, 3), "擦除的落笔格就是命中格")
 	assert_true(s.begin(p), "已经有实心格可擦")
 	assert_true(s.release(), "擦除也是一次编辑")
 	assert_eq(s.object.get_voxel(3, 3, 3), 0, "右键擦除把目标格清空")
 	assert_true(s.undo(), "擦除可以被撤销")
 	assert_eq(s.object.get_voxel(3, 3, 3), MAT, "撤销把材质还回来")
+
+
+func test_paint_gesture_recolors_the_hit_voxel_and_is_undoable() -> void:
+	var s := _session()
+	s.object.set_voxel(3, 3, 3, MAT)
+	s.data.set_voxel(Vector3i(3, 3, 3), MAT, false)
+	# 上色：作用在命中格本身（与移除同址），但写入的是当前材质而不是 0。
+	var p := s.pick_from_hit(_hit(Vector3i(3, 3, 3), Vector3i(0, 1, 0)), QVoxelBrushTool.Op.PAINT, OTHER)
+	assert_eq(p.place, Vector3i(3, 3, 3), "上色的落笔格就是命中格")
+	assert_eq(p.material(), OTHER, "上色写入当前材质（不是 0）")
+	assert_true(s.begin(p))
+	assert_true(s.release(), "改色也是一次编辑")
+	assert_eq(s.object.get_voxel(3, 3, 3), OTHER, "上色把命中格换成当前材质")
+	assert_true(s.undo())
+	assert_eq(s.object.get_voxel(3, 3, 3), MAT, "撤销把原材质还回来")
 
 
 func test_cancel_rolls_back_live_writes_and_leaves_no_history() -> void:
@@ -174,8 +189,10 @@ func test_release_hands_the_chunk_back_to_the_authoritative_source() -> void:
 	s.drag(p)
 	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), MAT, "拖动中镜像立即可见")
 	s.release()
-	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), -1,
-		"收尾把该 chunk 交回权威来源重新取数（镜像只是「这一笔还没结束」时的临时账）")
+	# 收尾丢掉镜像（chunk 缓冲作废），但读取回落到求值体积 —— 权威内容仍是刚写下的那一格。
+	# 这正是"画一格后能在它上面继续画"的前提：拾取读的必须是权威数据，而不是还没回填的缓冲。
+	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), MAT,
+		"收尾后读取走权威求值体积（缓冲作废不影响读取正确性）")
 	assert_true(s.data.is_chunk_mesh_dirty(Vector3i(0, 0, 0)), "并且标脏等待重建")
 
 

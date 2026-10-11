@@ -2,10 +2,10 @@
 class_name QVoxelPreviewMesh
 extends MeshInstance3D
 ## 落笔预览的**实体**渲染：把"这一次会写出 / 擦掉哪些格"画出来。
-## 【画 = 半透明实体】只画外露面的立方体，于是用户看到的是"改完之后这块长什么样"，
+## 【添加 = 半透明实体】只画外露面的立方体，于是用户看到的是"改完之后这块长什么样"，
 ## 而不是几根框线。内部相邻两格之间的面被剔掉，一整片实心盒只留外壳（省三角形、不发白）。
-## 【擦 = 红色空心框】"将会被挖掉"没法用体积表达（体积是"会有"），故切成红色线框：
-## 一眼读出"这几格要没了"，而不是又叠一层实心块把模型糊住。
+## 【移除 / 上色 = 空心框】"会被挖掉 / 改色"没法用体积表达（体积是"会有"），故切成线框：
+## 一眼读出"这几格要动"，而不是又叠一层实心块把模型糊住。
 ## 【为什么不参与光照、也不做深度测试】预览是"还没发生的改动"的示意，不是场景实体；
 ## 不受光、直接取材质色，压在模型上也始终看得见（否则会被挡在背后读不出来）。
 ## 【坐标约定】顶点用体素单位，靠节点 scale 乘 voxel_scale —— 与 VoxelRenderer 同一套换算。
@@ -32,22 +32,23 @@ const PAD := 0.02
 
 var _cells: Array[Vector3i] = []
 var _color := Color.WHITE
-var _erase := false
+var _wire := false
 var _mat: StandardMaterial3D
 
 
-## 设置预览格集。color = 基色（不透明即可）；erase 决定"实心 / 空心"与颜色语义。
-func set_cells(cells: Array[Vector3i], color: Color, erase := false) -> void:
-	if color == _color and erase == _erase and _same(cells):
+## 设置预览格集。color = 基色（不透明即可）；wire 决定"实心 / 线框"。
+## 实心用于"添加"（看改完的体积），线框用于"移除 / 上色"（看被作用的已有体素）。
+func set_cells(cells: Array[Vector3i], color: Color, wire := false) -> void:
+	if color == _color and wire == _wire and _same(cells):
 		return
 	_cells = cells
 	_color = color
-	_erase = erase
+	_wire = wire
 	rebuild()
 
 
 func clear() -> void:
-	set_cells([] as Array[Vector3i], _color, _erase)
+	set_cells([] as Array[Vector3i], _color, _wire)
 
 
 func rebuild() -> void:
@@ -58,8 +59,8 @@ func rebuild() -> void:
 	visible = true
 	var verts := PackedVector3Array()
 	var colors := PackedColorArray()
-	if _erase:
-		_erase_wire(verts, colors)
+	if _wire:
+		_wire_frame(verts, colors)
 		_commit(verts, colors, Mesh.PRIMITIVE_LINES)
 	else:
 		if _cells.size() > CELLS_MAX:
@@ -80,8 +81,8 @@ func _exposed(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 				_cube_face(verts, colors, c, i)
 
 
-## 擦除预览：红色线框（超上限退化为包围盒线框）。
-func _erase_wire(verts: PackedVector3Array, colors: PackedColorArray) -> void:
+## 线框预览（移除 / 上色）：逐格描边（超上限退化为包围盒线框）。
+func _wire_frame(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	var c := Color(_color, 1.0)
 	if _cells.size() > CELLS_MAX:
 		var b := _bounds()

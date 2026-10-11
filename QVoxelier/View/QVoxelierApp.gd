@@ -10,7 +10,7 @@ extends Node3D
 ## 【快捷键是加速器，不是入口】本应用要同时跑在平板（无键盘 / 无中键 / 无滚轮 / 无右键）与桌面，
 ## 于是每个动作都先在界面上有一个按钮，键盘只让熟练用户少点两下 —— 按钮与快捷键改的是**同一份状态**
 ## （工具 / 笔刷 / 材质 / 导航模式），不存在"只有键盘才够得着"的功能。
-## 触摸屏上必须由界面补位的三处：中键转视角 →「导航 / 平移」开关，滚轮缩放 →「− / +」，右键擦除 →「擦除」开关。
+## 触摸屏上必须由界面补位的两处：滚轮缩放 →「− / +」，右键擦除 → 顶部选项条的「添加 / 移除 / 上色」三态（E 键同义）。
 ## 本类因此也是这些状态的**唯一持有者**（`_install` / `_set_*` 都往界面上回写），界面自己不留副本。
 ## 【为什么"翻译"值得单独一层】会话刻意不认识鼠标：它要的是"这一次落笔打在哪"（Pick）。
 ## 视口是唯一知道屏幕坐标、相机与渲染节点的地方 —— 于是换算只在这里发生一次，
@@ -50,7 +50,8 @@ var _dock: QVoxelierDock
 var _color_section: QVoxelierColorSection
 var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
-var _inspector_section: QVoxelierInspectorSection
+## 自定义笔刷面板：挑一个模型抓成笔刷图案。
+var _brush_section: QVoxelierBrushSection
 var _timeline_section: QVoxelierTimelineSection
 ## 底部动画帧条（常驻一行，只显示当前模型的帧）。
 var _timeline: QVoxelierTimeline
@@ -60,10 +61,11 @@ var _snapshot_section: QVoxelierSnapshotSection
 var _snapshot_popup: PopupPanel
 var _confirm: ConfirmationDialog
 
-## 参数面板当前绑定的修改器（选中树上某条修改器时置入，用于撤销 / 重做后重绑）。
-var _modifier: QVoxelModifier
-## 该修改器的宿主节点（改参数的命令要挂在它的 content_changed 上标脏）。
-var _modifier_owner: QVoxelNode
+## 工具类别：笔刷 / 自定义笔刷（拿一个模型当图章盖）。与 QVoxelierContextBar.KIND_* 对应。
+enum ToolKind { BRUSH, CUSTOM }
+var _tool_kind := ToolKind.BRUSH
+## 当前自定义笔刷图案（{} = 没抓）。结构见 QVoxelStamp.capture。
+var _brush_pattern: Dictionary = {}
 ## 层级里当前选中的节点（对象属性页据此显示"它是什么"）。
 var _selected_node: QVoxelNode
 
@@ -75,7 +77,7 @@ var _extra_root: Node3D
 ## 用户按了"复制"却不知道复制了什么，故它随 _refresh_hud 一起重画。
 var _selection_box: QVoxelSelectionBox
 ## 笔刷悬停预览（半透明实体标出"按下 / 拖到这里会改成什么"）。与选区框同挂 model 下 ——
-## 同一套坐标换算，两者天然对齐；色 = 待写材质色（擦除 = 警示红），一眼看出改完的样子。
+## 同一套坐标换算，两者天然对齐；色与线框形态按操作三态（添加 = 实体材质色，移除 = 红线框，上色 = 材质色线框）。
 var _ghost: QVoxelPreviewMesh
 ## 光标处最近一次的落笔点。粘贴要落在"用户正指着的地方"，而光标只在移动事件里出现 ——
 ## 于是把它记下来，按钮 / 快捷键按下时才有得用（没有它，粘贴只能贴回原地）。
@@ -100,7 +102,10 @@ var session: QVoxelEditSession:
 
 var _material_id := 1
 var _stroke := false
-var _erase := false
+## 当前操作模式（添加 / 移除 / 上色）。顶部选项条与 E 键改的是这一份。
+var _op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
+## 进行中手势的模式：落笔那一刻定死，拖动与预览都按它走（与 _op 可不同，右键 / Shift 会临时覆盖）。
+var _stroke_op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
 ## 对称轴掩码。是**App 级设置**而非笔刷级：每个对象各有自己的笔刷实例，
 ## 若把它存在笔刷里，切一次对象就会被新笔刷的默认值抹掉（见 _apply_symmetry）。
 var _symmetry := Vector3i.ZERO
@@ -126,8 +131,6 @@ var _right_rail: Panel
 var _eyedropper := false
 ## 正在进行的"改材质"手势（颜色或 PBR）对应的属性命令（松手时封口入栈；见 QVoxelierColorSection 的"手势即命令"）。
 var _material_cmd: QVoxelPropertyCommand
-## 正在进行的"改修改器参数"手势对应的属性命令（同上，只是目标换成链上的某条条目）。
-var _prop_cmd: QVoxelPropertyCommand
 ## 正在进行的"改帧时长"手势对应的属性命令（同上，目标是那一帧 QVoxelFrame 的 duration_ms）。
 var _frame_dur_cmd: QVoxelPropertyCommand
 
@@ -223,13 +226,13 @@ func _build_ui() -> void:
 	# 工具列排在调色板列的右边（最左一列是调色板）。
 	_tools.position.x = QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
 	_tools.tool_selected.connect(_set_tool)
-	_tools.erase_toggled.connect(func(on: bool): hud.flash("擦除模式：%s" % ("开" if on else "关")))
 
 	# 上下文选项条：只显示当前工具用得到的选项（笔刷 / 形态 / 对称 / 选区动作）。
-	# 与左列工具条分工 —— 左列选工具与擦除开关，本条随工具给出参数。
+	# 与左列工具条分工 —— 左列选工具，本条随工具给出操作三态与参数。
 	_context = QVoxelierContextBar.new()
 	_context.name = "ContextBar"
 	add_child(_context)
+	_context.op_selected.connect(_set_op)
 	_context.brush_step.connect(_step_brush)
 	_context.brush_scale_requested.connect(_scale_brush)
 	_context.brush_shape_selected.connect(_set_brush_shape)
@@ -268,10 +271,6 @@ func _build_ui() -> void:
 	_tree_section.node_locked_changed.connect(_sess.set_node_locked)
 	_tree_section.node_rename_requested.connect(_sess.rename_node)
 	_tree_section.node_move_requested.connect(_sess.move_node)
-	_tree_section.modifier_add_requested.connect(_add_modifier)
-	_tree_section.modifier_remove_requested.connect(_remove_modifier)
-	_tree_section.modifier_enabled_changed.connect(_set_modifier_enabled)
-	_tree_section.modifier_selected.connect(_on_modifier_selected)
 	_dock.add_outliner(_tree_section)
 
 	# ── 属性页签 ── 顺序即页签顺序；App 按当前选择自动切到对应那一页。
@@ -291,14 +290,13 @@ func _build_ui() -> void:
 	_object_section.rename_requested.connect(_sess.rename_node)
 	_object_section.visible_changed.connect(_sess.set_node_visible)
 	_object_section.locked_changed.connect(_sess.set_node_locked)
+	_object_section.offset_changed.connect(_set_node_offset)
 	_dock.add_property(_object_section)
 
-	# 参数：链上选中哪条修改器，就反射生成它的参数控件。
-	_inspector_section = QVoxelierInspectorSection.new()
-	_inspector_section.edit_began.connect(_begin_prop_edit)
-	_inspector_section.value_changed.connect(_live_prop)
-	_inspector_section.edit_ended.connect(_end_prop_edit)
-	_dock.add_property(_inspector_section)
+	# 生成：选程序化算子 + 参数 + 合并方式，一次性烘焙进当前模型。
+	_brush_section = QVoxelierBrushSection.new()
+	_brush_section.capture_requested.connect(_capture_brush)
+	_dock.add_property(_brush_section)
 
 	# 时间轴（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。
 	_timeline_section = QVoxelierTimelineSection.new()
@@ -392,13 +390,15 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 func _reset_edit_state() -> void:
 	_material_id = 1
 	_stroke = false
-	_erase = false
+	_op = QVoxelBrushTool.Op.ADD
+	_stroke_op = QVoxelBrushTool.Op.ADD
+	_tool_kind = ToolKind.BRUSH
 	_eyedropper = false
 	_material_cmd = null
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
-	# 擦除是左列工具条上的粘性开关，换世界时一并复位（否则新工程一进来还停在"擦除开"）。
-	if _tools != null:
-		_tools.set_erase(false)
+	# 笔刷面板回填（换世界后仍是同一份图案，这里只是把界面重新对齐）。
+	if _brush_section != null:
+		_bind_brush()
 	# 调色板不必在这里喂：它挂在唯一刷新路径上，install 发出的 changed 会把世界带过去
 	# （色板取的是**世界的材质表**而不是 default_palette，打开别人的 256 色工程也照显）。
 
@@ -463,8 +463,6 @@ func _on_session_changed() -> void:
 	_attach_active()
 	_rebuild_view()
 	_refresh_hud()
-	# 参数组要重看一眼数据：撤销 / 重做会把数据退回到"面板控件被建出来时"之外的状态。
-	_rebind_inspector()
 
 
 func _on_dirty_changed(_on: bool) -> void:
@@ -617,13 +615,15 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					_nav_key = &"left"
 					_orbit = true
 				else:
-					# 命中可落笔处 → 画 / 擦（Shift = 反向，即当前工具的逆操作：画笔变擦除）；
-					# 落在空白处（射线哪儿都没打到）→ 拖动即旋转视角，**不需要任何组合键**。
-					if _pick_at(e.position).valid():
-						_begin_stroke(e.position, _erasing() or e.shift_pressed)
-					else:
+					# 命中可落笔处 → 落笔；落在空白处 → 拖动即旋转视角，**不需要任何组合键**。
+					# 生成 / 风化是"点一下"的工具（不拖拽），走 _stamp_at 而不是笔画手势。
+					if not _pick_at(e.position, _op).valid():
 						_nav_key = &"left"
 						_orbit = true
+					elif _tool_kind != ToolKind.BRUSH:
+						_stamp_at(e.position)
+					else:
+						_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op)
 			elif _nav_key == &"left":
 				_nav_key = &""
 				_orbit = false
@@ -631,8 +631,11 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_RIGHT:
+			# 右键 = 临时移除，只对笔刷有意义（生成 / 风化是单击工具）。
+			if _tool_kind != ToolKind.BRUSH:
+				return
 			if e.pressed:
-				_begin_stroke(e.position, true)
+				_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE)
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_MIDDLE:
@@ -674,7 +677,7 @@ func _flush_gesture() -> void:
 
 func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 	if _stroke:
-		session.drag(_pick_at(e.position))
+		session.drag(_pick_at(e.position, _stroke_op))
 		_refresh_cursor(e.position)
 	elif _orbit:
 		camera.orbit_by_pixels(e.relative)
@@ -719,8 +722,8 @@ func _on_key(e: InputEventKey) -> void:
 		frame_view()
 		hud.flash("已取景")
 	elif e.keycode == KEY_E:
-		# 擦除开关的热键：平板用户点左侧「擦除」，桌面用户按 E —— 改的是同一份状态。
-		_toggle_erase()
+		# E = 在「添加 / 移除」之间切换操作模式（平板点顶部选项条，桌面按 E，同一份状态）。
+		_set_op(QVoxelBrushTool.Op.ADD if _op == QVoxelBrushTool.Op.REMOVE else QVoxelBrushTool.Op.REMOVE)
 	elif e.keycode >= KEY_1 and e.keycode <= KEY_8:
 		_set_material(e.keycode - KEY_0)
 	elif _numpad_view(e.keycode):
@@ -745,32 +748,25 @@ func _switch_by_hotkey(key: Key) -> void:
 
 
 ## 把屏幕坐标解成"这一次落笔打在哪"：相机射线 → 体素空间 → 网格拾取（含空图落在地板上）。
-func _pick_at(screen: Vector2) -> QVoxelBrushTool.Pick:
+func _pick_at(screen: Vector2, op: int) -> QVoxelBrushTool.Pick:
 	var scale := model.voxel_scale
 	var origin: Vector3 = model.to_local(camera.project_ray_origin(screen)) / scale
 	var dir: Vector3 = model.global_transform.basis.inverse() * camera.project_ray_normal(screen)
 	var info := QVoxelGridPick.hit(session.data, origin, dir, session.output_size())
-	return session.pick_from_hit(info, _erasing(), _material_id)
-
-
-## 这一笔是擦还是画。两个来源取或：右键按下时的**一次性** `_erase`，与左侧「擦除」开关的
-## **粘性**模式（平板上没有右键，全靠它）。取或而不是二选一，是为了让"开着擦除模式时按右键"
-## 仍然擦 —— 用户不会因为多按了一个键反而改回画。
-func _erasing() -> bool:
-	return _erase or (_tools != null and _tools.erase_mode())
+	return session.pick_from_hit(info, op, _material_id)
 
 
 # 手势
 
-func _begin_stroke(screen: Vector2, erase: bool) -> void:
+func _begin_stroke(screen: Vector2, op: int) -> void:
 	if _sess.node_locked(session.object):
 		hud.flash("这一层已锁定：先在右侧「图层」里解锁")
 		return
 	# 预览中落笔 = 这一笔会画在"播放头正好停住的那一帧"上，而播放头还在动 —— 用户根本
 	# 说不清自己画到了第几帧。先停下播放再落笔（停在哪一帧就是哪一帧，看得见）。
 	_timeline_section.stop_playback()
-	_erase = erase
-	if not session.begin(_pick_at(screen)):
+	_stroke_op = op
+	if not session.begin(_pick_at(screen, op)):
 		hud.flash("这儿落不了笔：把光标放到网格上，或已经画出来的体素上")
 		return
 	_stroke = true
@@ -784,7 +780,6 @@ func _end_stroke() -> void:
 	var picking := session.tool.selection_mode()
 	if not session.release():
 		hud.flash(_no_change_hint(picking))
-	_erase = false
 	_refresh_hud()
 
 
@@ -800,7 +795,6 @@ func _cancel() -> void:
 	if _stroke:
 		session.cancel()
 		_stroke = false
-		_erase = false
 		hud.flash("已取消这一笔")
 		return
 	# 不在手势中时，Esc 退掉选区：选区是"模式之外的临时状态"，用户需要一个不碰数据的退出键。
@@ -821,7 +815,6 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT and _stroke and session != null:
 		session.cancel()
 		_stroke = false
-		_erase = false
 
 
 func _undo() -> void:
@@ -863,11 +856,26 @@ func _set_log_visible(on: bool) -> void:
 		_toolbar.set_help(false)
 
 
-## 切笔：工具坞的按钮与热键共用这一处 —— 于是"按钮高亮"永远是实况的投影，而不是第二份状态。
+## 切工具：工具坞的按钮与热键共用这一处 —— 于是"按钮高亮"永远是实况的投影，而不是第二份状态。
+## 自定义笔刷是"工具"而非笔刷模式，故只切 _tool_kind（笔刷模式才写回 session.tool）。
 func _set_tool(mode: int) -> void:
+	if mode == QVoxelierTools.TOOL_CUSTOM:
+		_tool_kind = ToolKind.CUSTOM
+		if _dock != null:
+			_dock.show_property_by_title("笔刷")
+		_bind_brush()
+		hud.flash("工具：自定义笔刷（在视口里点击盖章）")
+		_refresh_hud()
+		return
+	_tool_kind = ToolKind.BRUSH
 	session.tool.set_mode(mode)
 	hud.flash("工具：" + session.tool.label())
 	_refresh_hud()
+
+
+## 当前工具的 id（供工具坞高亮）：笔刷模式或其枚举值，自定义笔刷用 TOOL_CUSTOM。
+func _current_tool_id() -> int:
+	return QVoxelierTools.TOOL_CUSTOM if _tool_kind == ToolKind.CUSTOM else session.tool.mode
 
 
 ## 笔刷加减（工具坞的 [−]/[+] 与 [ ] 键共用）。面板只报"想加还是想减"（相对量），
@@ -913,11 +921,13 @@ func _set_material(id: int) -> void:
 	_refresh_hud()
 
 
-## 擦除开关（左列「擦除」按钮与 E 键共用）：平板上没有右键，这是唯一的粘性擦除入口。
-func _toggle_erase() -> void:
-	var on := not _tools.erase_mode()
-	_tools.set_erase(on)
-	hud.flash("擦除模式：%s" % ("开（画的时候挖掉体素）" if on else "关"))
+## 切换操作三态（顶部选项条与 E 键共用）。按钮高亮由 _refresh_hud 投影，界面不留副本。
+func _set_op(op: int) -> void:
+	if _op == op:
+		return
+	_op = op
+	hud.flash("操作：%s" % QVoxelBrushTool.OPS[op].text)
+	_refresh_hud()
 
 
 ## 对称轴开关（左侧「对称」三个按钮共用）。状态留在 App 这一层，再压进当前笔刷。
@@ -940,174 +950,61 @@ func _apply_symmetry() -> void:
 		session.tool.symmetry = _symmetry
 
 
-# 修改器链（右侧抽屉·层级组挂链 + 参数组改参数）
-# 旋转 / 镜像 / 平铺不再是"一次性重写整片网格"的动作，而是链上一条 QVoxelTransformModifier。
-# 于是本段只剩三件事：把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"，
-# 并在动手前用 PcgTransform.within_budget 拦一次（那条命令本身在 QVoxelPropertyCommand）。
+# 自定义笔刷（右侧抽屉·「笔刷」面板）
+# 拿一个做好的模型当图章：抓成图案 → 在视口里**点哪盖哪**，一次点击 = 一条可撤销命令。
+# 合并方式由操作三态（添加 / 移除 / 上色）决定。
 
-
-## 往 node 的链上追加一条修改器（一条可撤销的属性命令）。
-## 【为什么先造条目再追加，而不是把"算子 + 合成方式"传进来】条目自带开关与合成方式，
-## 而这些属于修改器而不属于算子（同一棵 Sdf 树既能被并进去、也能被减掉），
-## 故由 QVoxelModifierSerializer.new_modifier 造空条目、本处填好默认核，见 QVoxelNode.add_modifier。
-## 【为什么默认核是"镜像 X"而不是空】空条目求值为恒等 —— 挂上去画面纹丝不动，
-## 用户会以为按钮坏了。镜像既是重排（看得出效果），又不改盒尺寸（不会突然撑大网格）。
-func _add_modifier(node: QVoxelNode, kind: String) -> void:
-	if world == null or session == null or node == null:
+## 把某个模型抓成笔刷图案。
+func _capture_brush(model_id: int) -> void:
+	if world == null:
 		return
-	var m := QVoxelModifierSerializer.new_modifier(kind)
+	var m := world.find_model(model_id)
 	if m == null:
 		return
-	if kind == QVoxelModifier.KIND_TRANSFORM:
-		(m as QVoxelTransformModifier).transform = PcgTransform.mirror(0)
-	var too_big := _over_budget(node, m)
-	if too_big != Vector3i.ZERO:
-		hud.flash("挂上「%s」会把网格撑到 %d×%d×%d，超过 %d 格的上限，未执行"
-				% [m.display_name(), too_big.x, too_big.y, too_big.z,
-						PcgTransform.MAX_OUTPUT_VOXELS])
+	var pat := QVoxelStamp.capture(m)
+	if pat.is_empty():
+		hud.flash("这个模型是空的，抓不了笔刷")
 		return
-	var cmd := QVoxelPropertyCommand.begin(node, &"modifiers", node, "挂修改器 %s" % m.display_name())
-	node.add_modifier(m)
-	if not cmd.commit():
+	_brush_pattern = pat
+	_bind_brush()
+	var size: Vector3i = pat["size"]
+	hud.flash("已抓取笔刷：%d×%d×%d · %d 体素" % [size.x, size.y, size.z, (pat["cells"] as Array).size()])
+
+
+func _bind_brush() -> void:
+	if _brush_section != null:
+		_brush_section.set_pattern(_brush_pattern)
+
+
+## 在点击处盖一次自定义笔刷（图章）。center = 命中格（无入射面时退回落笔格）。
+func _stamp_at(screen: Vector2) -> void:
+	if world == null or session == null:
+		return
+	if _sess.node_locked(session.object):
+		hud.flash("这一层已锁定：先在右侧「层级」里解锁")
+		return
+	if _brush_pattern.is_empty():
+		hud.flash("先在右侧「笔刷」面板里抓取一个模型作为笔刷")
+		return
+	var pick := _pick_at(screen, _op)
+	if not pick.valid():
+		hud.flash("这儿落不了：把光标放到网格或已有体素上")
+		return
+	_timeline_section.stop_playback()
+	var center := pick.hit if pick.hit != Vector3i.MIN else pick.place
+	var obj := session.object
+	var cmd := QVoxelEditCommand.begin(obj, session.edit_frame())
+	cmd.label_override = "盖笔刷"
+	var n := QVoxelStamp.stamp(cmd, obj, _brush_pattern, center, _op, _material_id)
+	if not cmd.commit() or n <= 0:
+		hud.flash("这一下没有改动（空白 / 越界 / 同色）")
 		return
 	session.history.push(cmd)
-	_select_modifier(node, m)
-	_chain_changed()
-	hud.flash("已挂 %s" % m.display_name())
-
-
-## 从链上移除第 index 条（同样只记一条属性命令 —— modifiers 就是一个 @export 数组）。
-func _remove_modifier(node: QVoxelNode, index: int) -> void:
-	if world == null or session == null or node == null:
-		return
-	if index < 0 or index >= node.modifiers.size():
-		return
-	var m: QVoxelModifier = node.modifiers[index]
-	var cmd := QVoxelPropertyCommand.begin(node, &"modifiers", node, "移除修改器 %s" % m.display_name())
-	node.remove_modifier(index)
-	if not cmd.commit():
-		return
-	session.history.push(cmd)
-	if _modifier == m:
-		_select_modifier(node, null)
-	_chain_changed()
-	hud.flash("已移除 %s" % m.display_name())
-
-
-## 旁通 / 启用链上第 index 条。**不删条目** —— 与 Blender 的修改器眼睛同义：
-## 试比较两种参数配置时不必反复删了重加。
-func _set_modifier_enabled(node: QVoxelNode, index: int, on: bool) -> void:
-	if world == null or session == null or node == null:
-		return
-	if index < 0 or index >= node.modifiers.size():
-		return
-	var m: QVoxelModifier = node.modifiers[index]
-	if m.enabled == on:
-		return
-	var cmd := QVoxelPropertyCommand.apply(m, &"enabled", on, node,
-			"%s修改器 %s" % ["启用" if on else "旁通", m.display_name()])
-	if cmd != null:
-		session.history.push(cmd)
-	_chain_changed()
-
-
-## 选中链上某条修改器 → 参数组显示它的参数。
-func _on_modifier_selected(node: QVoxelNode, index: int) -> void:
-	if node == null or index < 0 or index >= node.modifiers.size():
-		return
-	_select_modifier(node, node.modifiers[index])
-	# 选中链上一条修改器 → 属性区自动切到「参数」。
-	if _dock != null:
-		_dock.show_property_by_title("参数")
-
-
-## 把参数组绑到 m（null = 清空）。宿主节点一并记下 —— 改参数的命令要挂在它的 content_changed 上。
-func _select_modifier(node: QVoxelNode, m: QVoxelModifier) -> void:
-	_modifier = m
-	_modifier_owner = node if m != null else null
-	_inspector_section.bind(m)
-
-
-## 改参数的手势三段：开始（抓改前值）→ 连续写（不入栈，实时预览）→ 结束（封口入栈）。
-## 与改色 / 体素笔同一时间线（见 QVoxelPropertyCommand 的"手势即命令"）。
-func _begin_prop_edit(target: Object, prop: StringName) -> void:
-	if session == null or _modifier_owner == null or target == null:
-		return
-	_prop_cmd = QVoxelPropertyCommand.begin(target, prop, _modifier_owner, "修改器参数")
-
-
-func _live_prop(target: Object, prop: StringName, value: Variant) -> void:
-	if _prop_cmd == null or target == null:
-		return
-	target.set(prop, value)
-	# 实时预览：只重建渲染，**不重建树** —— 重建会把正在拖的那根滑条销毁，手势当场断掉。
-	# 与改色同理（见 QVoxelierColorSection），差异只在"链改了要连输出盒一起同步"。
-	if session != null:
-		session.rebuild()
-
-
-func _end_prop_edit(_target: Object, _prop: StringName) -> void:
-	if _prop_cmd == null:
-		return
-	if _prop_cmd.commit() and session != null:
-		session.history.push(_prop_cmd)
-	_prop_cmd = null
-	_chain_changed()
-
-
-## 链变了之后的四件事：标脏、重建显示、刷新层级（行上的显示名与超限提示跟着变）、重绑参数组。
-## 【为什么统一走这里，而不是各入口各刷一遍】"链变了"的入口有四个（挂 / 删 / 旁通 / 改参数），
-## 它们要刷的东西一模一样；分散写迟早漏一处 —— 表现为"撤销回去树上是旧名字"。
-func _chain_changed() -> void:
+	session.rebuild()
 	_sess.mark_dirty()
 	_rebuild_view()
 	_refresh_hud()
-	_tree_section.refresh()
-	_rebind_inspector()
-
-
-## 让参数组重看一眼数据。**两个出口共用**：链变了（_chain_changed）与撤销 / 重做（_on_session_changed）
-## —— 两者都会把数据改到"面板控件被建出来时"之外的状态：
-##   · 选中算子会顺带校正合成方式（见 QVoxelVolumeModifier.detail），而下拉框还停在旧值；
-##   · 撤销一次改参数会把值退回去，滑条却还停在拖完的位置；
-##   · 撤销掉"挂修改器"会让绑着的那条**不在链上**了 —— 再改它就是写进孤儿，还白占一次撤销。
-## 故这里一并做"清理 + 重绑"：绑着的那条已不在链上就清空，否则重绑。
-## 【为什么按 is_editing() 让开】重绑会重建控件、把正在拖的滑条销毁。手势中的实时预览本就不重建
-## （见 _live_prop），而撤销栈的信号是在手势收尾（commit）之后才发的，故走到这里手势已经结束。
-func _rebind_inspector() -> void:
-	if _inspector_section == null or _inspector_section.is_editing():
-		return
-	if _modifier != null and not _owns_modifier(_modifier_owner, _modifier):
-		_select_modifier(null, null)
-	else:
-		_inspector_section.bind(_modifier)
-
-
-## 挂上 candidate 之后，node 的输出盒会变成多大。**超限则返回那个超限的尺寸**（供报错文案用），
-## 没超限返回 ZERO。
-## 【为什么问核的 raw_output_size 而不是引擎的 output_grid_size】后者会经过核的上限判定，
-## 超限时"静静地原样返回"——于是 UI 看到的尺寸与没挂时一样，压根发现不了超限。
-## 而界面上先拦一次只是为了给一句人话；真正生效的那道闸在 PcgTransform（撤销 / 读盘也过它），
-## 判据共用 within_budget，故"提示"与"实际生效"不会说两套话。
-func _over_budget(node: QVoxelNode, candidate: QVoxelModifier) -> Vector3i:
-	var t := candidate.op() as PcgTransform
-	if t == null:
-		return Vector3i.ZERO
-	var size := t.raw_output_size(_node_output_size(node))
-	return Vector3i.ZERO if PcgTransform.within_budget(size) else size
-
-
-## node 当前的输出盒尺寸。模型问会话（与显示层同源，且那份结果本来就算过）；
-## 组要问引擎 —— 组的输入盒是"子树并集包围盒"，那是求值的产物，没有更便宜的来源。
-func _node_output_size(node: QVoxelNode) -> Vector3i:
-	if node == null:
-		return Vector3i.ZERO
-	if node.is_model():
-		var s := _sess.session_for((node as QVoxelModel).model_id)
-		return s.output_size() if s != null else (node as QVoxelModel).grid_size
-	# ctx 的 grid_size 随便给 —— 组求值第一件事就是把它换成"子树并集包围盒"（见 QVoxelEvalEngine）。
-	var ctx := QVoxelEvalContext.make(Vector3i.ONE, 0)
-	return QVoxelEvalEngine.evaluate_node(node, ctx, null, null).grid_size
+	hud.flash("已盖 %d 个体素" % n)
 
 
 # 视图（镜头 / 标准视角 / 网格线）
@@ -1465,10 +1362,11 @@ func _refresh_hud() -> void:
 	if session == null:
 		return
 	_toolbar.set_history(session.history.can_undo(), session.history.can_redo())
-	_tools.set_tool(session.tool.mode)
-	# 上下文选项条：先按当前工具决定显示哪一组（笔刷参数 / 选区动作），再回填值。
+	_tools.set_tool(_current_tool_id())
+	# 上下文选项条：先按工具类别决定显示哪一组（操作三态 / 笔刷参数 / 选区动作），再回填值。
 	var brush := session.tool.supports_brush_size()
-	_context.set_tool(session.tool.mode, brush, session.tool.selection_mode())
+	_context.set_tool(_tool_kind, brush, session.tool.selection_mode())
+	_context.set_op(_op)
 	_context.set_brush(session.tool.brush_size, brush)
 	_context.set_brush_shape(session.tool.brush_shape, brush)
 	# 对称是 App 级设置 → 每次刷新都把它压回当前对象的笔刷，并回写三个按钮的按下态。
@@ -1511,6 +1409,9 @@ func _refresh_panels() -> void:
 	# 快照只读世界，且 set_world 幂等（同一个世界直接返回），故挂在这条唯一刷新路径上 ——
 	# 新建 / 打开换世界时它自然会收到新世界并把旧预览作废（见 QVoxelierSnapshotSection.set_world）。
 	_snapshot_section.set_world(world)
+	# 笔刷面板的模型下拉跟着世界走（增删对象 / 换世界后重新列）。
+	if _brush_section != null:
+		_brush_section.set_world(world, session.object.model_id)
 
 
 ## 世界的材质表 → 调色板用的颜色数组：**下标即材质 ID**，0 位留空气占位。
@@ -1522,29 +1423,29 @@ func _material_colors(w: QVoxelWorld) -> Array[Color]:
 	return colors
 
 
-## 光标格：画的时候看"要写哪一格"，擦的时候看"要擦哪一格"（Pick 已按擦除算好 place）。
+## 光标格：按 Pick 已经算好的 place 显示（添加 = 外侧那格，移除 / 上色 = 命中格本身）。
 ## 屏幕坐标由调用方传入（鼠标事件里有，不必再问视口要一次 —— 内嵌视口时那个答案还是错的）。
 func _refresh_cursor(screen: Vector2) -> void:
-	var pick := _pick_at(screen)
+	var pick := _pick_at(screen, _stroke_op if _stroke else _op)
 	_hover_pick = pick if pick.valid() else null
 	if not pick.valid():
 		hud.set_cursor(Vector3i.MIN)
 	else:
-		# 擦除显示将被挖掉的那格，否则显示将落笔的那格 —— 与 ghost 预览同一个 pick，不会各说各话。
-		hud.set_cursor(pick.hit if pick.erase else pick.place)
+		hud.set_cursor(pick.place)
 	_refresh_ghost(pick)
 
 
 ## 悬停预览：格子来自会话的 hover()（与真正落笔同一条形状分派，所见即所画）。
-## 颜色告诉用户"会改成什么"：擦除 = 警示红，画 = 当前材质色。预览是**实体半透明**的
-## （见 QVoxelPreviewMesh），于是用户看到的是改完的体积，而不是几根描边。
+## 三态各有一种读法：添加 = 材质色半透明实体；移除 = 警示红线框；上色 = 材质色线框
+## （线框表示"改的是已有体素"，色调表示"改成什么色"）。
 func _refresh_ghost(pick: QVoxelBrushTool.Pick) -> void:
 	# 手势中射线落到模型外仍要预览 —— hover() 内部用起点 pick 兜底，预览不闪没。
 	if not pick.valid() and not _stroke:
 		_ghost.clear()
 		return
-	var erase := _erasing()
-	_ghost.set_cells(session.hover(pick), QVoxelUi.WARN if erase else _material_color(), erase)
+	var remove := pick.op == QVoxelBrushTool.Op.REMOVE
+	_ghost.set_cells(session.hover(pick),
+			QVoxelUi.WARN if remove else _material_color(), pick.op != QVoxelBrushTool.Op.ADD)
 
 
 ## 当前材质的基色（越界 / 世界未就绪时退回白色，预览不因为一次边界态而画不出来）。
@@ -1692,9 +1593,27 @@ func _step_frame(delta: int) -> void:
 	_select_frame(clampi(session.object.active_frame + delta, 0, n - 1))
 
 
+## 改节点位置（对象属性面板的三个轴）。走一条可撤销命令，并让显示层重新取数（摆放是求值的一部分）。
+func _set_node_offset(node: QVoxelNode, value: Vector3i) -> void:
+	if session == null or node == null or node.offset == value:
+		return
+	var cmd := QVoxelPropertyCommand.begin(node, &"offset", node, "移动节点")
+	node.offset = value
+	if cmd.commit():
+		session.history.push(cmd)
+	# 活动对象同步重算；其余对象的显示层作废后唤醒，各自重新取数。
+	session.rebuild()
+	for s in _sess.all_sessions():
+		if s != session and s.data != null:
+			s.data.invalidate()
+			if s.request_render_update.is_valid():
+				s.request_render_update.call()
+	_sess.mark_dirty()
+	_rebuild_view()
+	_refresh_hud()
+
+
 func _on_tree_selected(node: QVoxelNode) -> void:
-	if _modifier != null and (_modifier_owner != node or not _owns_modifier(node, _modifier)):
-		_select_modifier(null, null)
 	if node != null and node.is_model():
 		_activate((node as QVoxelModel).model_id)
 	# 选中一个节点 → 对象属性页跟着显示它的数据，并自动切到「对象」页签。
@@ -1703,11 +1622,6 @@ func _on_tree_selected(node: QVoxelNode) -> void:
 		_object_section.bind(node)
 	if _dock != null:
 		_dock.show_property_by_title("对象")
-
-
-## m 是否还在 node 的链上（撤销 / 重做会换掉整个数组，条目可能已经不在了）。
-func _owns_modifier(node: QVoxelNode, m: QVoxelModifier) -> bool:
-	return node != null and m != null and node.modifiers.has(m)
 
 
 # 层级的增 / 删 / 移 / 改字段全在 QVoxelierSession（应用能力），本层只做两件事：
@@ -1794,7 +1708,7 @@ func _set_eyedropper(on: bool) -> void:
 func _pick_material_at(screen: Vector2) -> void:
 	if session == null:
 		return
-	var pick := _pick_at(screen)
+	var pick := _pick_at(screen, _op)
 	if not pick.valid():
 		hud.flash("这儿没有体素可吸取")
 		return

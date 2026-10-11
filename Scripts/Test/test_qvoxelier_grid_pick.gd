@@ -37,7 +37,7 @@ func test_voxel_hit_wins_over_the_floor() -> void:
 	var s := _session({Vector3i(2, 1, 3): MAT})
 	var info := _look_down(s)
 	assert_eq(info[VoxelRay.KEY_HIT], Vector3i(2, 1, 3), "打得到实心格时给的是体素命中")
-	assert_eq(info[VoxelRay.KEY_NORMAL], Vector3i.DOWN, "法线是入射面（从上方来）")
+	assert_eq(info[VoxelRay.KEY_NORMAL], Vector3i.UP, "法线朝外（从上方来 ⇒ 顶面朝上）")
 	assert_eq(info[VoxelRay.KEY_MATERIAL], MAT, "材质来自数据层（面笔/填充要用）")
 	assert_ne(info[VoxelRay.KEY_HIT].y, QVoxelGridPick.FLOOR_LAYER, "地板不得抢答")
 
@@ -63,7 +63,7 @@ func test_empty_grid_lands_on_the_bottom_layer() -> void:
 
 func test_floor_pick_puts_the_first_stroke_on_y_zero() -> void:
 	var s := _session()
-	var pick := s.pick_from_hit(_look_down(s), false, MAT)
+	var pick := s.pick_from_hit(_look_down(s), QVoxelBrushTool.Op.ADD, MAT)
 	assert_true(pick.valid(), "空图上也要能落笔 —— 这是这个类存在的理由")
 	assert_eq(pick.place, Vector3i(2, 0, 3), "落笔格 = 底层格子")
 	assert_true(s.begin(pick), "手势起笔")
@@ -114,7 +114,7 @@ func test_erasing_on_the_floor_writes_nothing() -> void:
 	# 擦除的落笔格 = 命中格本身 = 地板层（网格外）→ 工具的越界裁剪吃掉它。
 	# 于是"空图上右键"既不报错也不占撤销单位 —— 不需要为地板写任何擦除特判。
 	var s := _session()
-	var pick := s.pick_from_hit(_look_down(s), true, MAT)
+	var pick := s.pick_from_hit(_look_down(s), QVoxelBrushTool.Op.REMOVE, MAT)
 	assert_true(pick.valid(), "手势能起笔（右键不会像失灵）")
 	assert_true(s.begin(pick), "起笔成功")
 	assert_false(s.release(), "没东西可擦：不算改动")
@@ -124,7 +124,7 @@ func test_erasing_on_the_floor_writes_nothing() -> void:
 func test_brush_paints_on_the_floor_with_the_current_material() -> void:
 	var s := _session()
 	s.tool.brush_size = 2
-	var pick := s.pick_from_hit(_look_down(s), false, MAT)
+	var pick := s.pick_from_hit(_look_down(s), QVoxelBrushTool.Op.ADD, MAT)
 	s.begin(pick)
 	s.release()
 	# 笔刷尺寸 2 ⇒ 以落笔格为中心、半径 1 的球（欧氏）；网格内应出现一片底层格子。

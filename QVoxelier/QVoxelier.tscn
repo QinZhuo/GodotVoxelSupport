@@ -5,7 +5,6 @@
 [ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Runtime/VoxelMaterial.gd" id="3_dgjb5"]
 [ext_resource type="Script" uid="uid://cno2veyfhcs7q" path="res://QVoxelier/View/QVoxelGridFloor.gd" id="3_floor"]
 [ext_resource type="Script" uid="uid://burtnbyvql7d5" path="res://QVoxelier/View/QVoxelViewCamera.gd" id="4_camera"]
-[ext_resource type="Script" uid="uid://bfy4b0e1d1nm1" path="res://addons/VoxelSupport/Modifier/QVoxelModifier.gd" id="4_vme6d"]
 [ext_resource type="Script" uid="uid://elaahhighr38" path="res://QVoxelier/View/QVoxelierHud.gd" id="5_hud"]
 [ext_resource type="Script" uid="uid://dku3ijpa354n" path="res://addons/VoxelSupport/Modifier/QVoxelModel.gd" id="5_vhrsv"]
 [ext_resource type="Script" uid="uid://clnfkmvkg10qe" path="res://addons/VoxelSupport/Runtime/QVoxelSource.gd" id="6_nsjr8"]

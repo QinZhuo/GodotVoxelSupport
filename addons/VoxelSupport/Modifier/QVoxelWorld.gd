@@ -3,7 +3,7 @@ class_name QVoxelWorld
 extends Resource
 ## 世界 —— QVoxelier 的顶层编辑模型，也就是一份 `.qvx` 工程的**唯一常驻真值**。
 ## 【与 QVoxelFile.QVoxelDocument 的分工：一份真值 + 一个瞬时 DTO】
-##   QVoxelWorld    活的编辑状态（对象 + 手绘体素 + 修改器链），常驻内存、可被就地改写。
+##   QVoxelWorld    活的编辑状态（节点树 + 手绘体素 + 材质 + 帧），常驻内存、可被就地改写。
 ##   QVoxelDocument QVoxelFile 解析/序列化用的传输结构，**只在读写的那一瞬间存在**。
 ## 两者用 from_document() / to_document() 一对显式转换连接，**不允许同时常驻** ——
 ## 否则同一份体素会有两个账本，改动落哪边取决于调用顺序（这类静默数据丢失最难查）。
@@ -120,14 +120,40 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 	return null
 
 
-## 节点条目里"两种节点共有"的那部分。
-## 【为什么没有 position / combine】摆放已是链上的一条平移条目，而"怎么并进父画布"是父侧
-## 恒定的并集（见 QVoxelEvalEngine._composite），两者都不再是节点自己的属性。
+## 节点条目里"两种节点共有"的那部分。position 缺省 (0,0,0) 不写（P2：缺省才是常态）。
+## 【旧工程迁移】去链之前，摆放是链上的一条平移条目（NODE 的 `steps`）。旧文件没有 `pos`，
+## 这里把 steps 里的平移量求和迁成 `pos`，并给一句告警 —— 否则老工程打开后摆放会静默丢失。
 static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 	n.node_name = str(entry.get("name", ""))
 	n.visible = bool(entry.get("visible", true))
 	n.locked = bool(entry.get("locked", false))
-	n.modifiers = _modifiers_of_entry(entry)
+	var p: Variant = entry.get("pos")
+	if p is Array and (p as Array).size() == 3:
+		n.offset = Vector3i(int(p[0]), int(p[1]), int(p[2]))
+		return
+	var mig := _migrate_offset_from_steps(entry)
+	if mig != Vector3i.ZERO:
+		n.offset = mig
+		push_warning("[QVX] 旧工程：已把节点「%s」的平移链迁移为位置 %s（修改器链其余改动不再生效）"
+				% [n.display_name(), mig])
+
+
+## 旧格式迁移：把残留 steps 里的平移量（params.offset）求和成节点位置。
+static func _migrate_offset_from_steps(entry: Dictionary) -> Vector3i:
+	var steps: Variant = entry.get("steps")
+	if not (steps is Array):
+		return Vector3i.ZERO
+	var acc := Vector3i.ZERO
+	for st in (steps as Array):
+		if not (st is Dictionary):
+			continue
+		var params: Variant = (st as Dictionary).get("params")
+		if not (params is Dictionary):
+			continue
+		var off: Variant = (params as Dictionary).get("offset")
+		if off is Array and (off as Array).size() == 3:
+			acc += Vector3i(int(off[0]), int(off[1]), int(off[2]))
+	return acc
 
 
 # 导出为传输结构（保存路径）
@@ -676,9 +702,7 @@ func _node_json() -> Dictionary:
 
 
 ## 节点 → JSON 条目（递归）。缺省值一律**不写**（P2：缺省才是常态）：
-## visible=true / locked=false 都是冗语，写了只会让文件更长、且"改回缺省"时需要记得删键。
-## 【摆放为什么不在这里】它已是 steps 里的一条平移条目 —— 节点的摆放与链上的旋转 / 镜像
-## 走同一条序列化路径，于是"文件里有两份摆放"这种可能根本不存在。
+## visible=true / locked=false / pos=(0,0,0) 都是冗语，写了只会让文件更长、且"改回缺省"时要删键。
 func _entry_of_node(n: QVoxelNode) -> Dictionary:
 	var e := {}
 	e["kind"] = n.kind()
@@ -687,11 +711,8 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 		e["visible"] = false
 	if n.locked:
 		e["locked"] = true
-	var steps: Array = []
-	for m in n.modifiers:
-		if m != null:
-			steps.append(QVoxelModifierSerializer.modifier_to_dict(m))
-	e["steps"] = steps
+	if n.offset != Vector3i.ZERO:
+		e["pos"] = [n.offset.x, n.offset.y, n.offset.z]
 	if n.is_model():
 		var mo := n as QVoxelModel
 		e["model_id"] = mo.model_id
@@ -706,20 +727,6 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 				kids.append(_entry_of_node(c))
 		e["children"] = kids
 	return e
-
-
-## 节点里的 steps → 修改器链。认不出来的条目**跳过**（而不是让整份工程加载失败）：
-## 一个失联的算子不该把用户另外九十九个对象一起拖下水。
-static func _modifiers_of_entry(entry: Dictionary) -> Array[QVoxelModifier]:
-	var out: Array[QVoxelModifier] = []
-	var steps: Variant = entry.get("steps")
-	if not (steps is Array):
-		return out
-	for d in (steps as Array):
-		var m := QVoxelModifierSerializer.modifier_from_dict(d)
-		if m != null:
-			out.append(m)
-	return out
 
 
 ## 节点里显式写了 size 就用它；否则从块范围推断（外来文件可能没写 size）。

@@ -7,9 +7,12 @@ extends RefCounted
 ## test_voxel_kernel_contract 逐条钉死）。放在这里，编辑器的拾取与运行时的破坏
 ## （VoxelDestructible）共用同一份实现 —— 这段 DDA 过去只存在于 VoxelDestructible 里，
 ## 编辑器要拾取就得抄第二份，正是 P4「统一接口」要消掉的东西。
-## 【为什么必须返回入射面法线】画笔的"落笔格" = 命中格 + 法线（往空的那一侧长）；
-## 面笔/盒笔/填充也要靠它判断朝向。法线由"进入命中格之前的那一格"得出：DDA 每步只推进
-## 一个轴，故 hit - prev 恰好是单轴 ±1 —— 不必另算浮点交点，也不会在斜射时抖成斜向量。
+## 【为什么必须返回入射面法线】**朝外**（指向射线来的一侧）：画笔的"落笔格" = 命中格 + 法线
+## （往空的那一侧长）；面笔/盒笔/填充也要靠它判断朝向。法线由"进入命中格之前的那一格"得出：
+## DDA 每步只推进一个轴，故 prev - hit 恰好是单轴 ±1（**朝外**，即朝向射线来源）—— 不必另算
+## 浮点交点，也不会在斜射时抖成斜向量。
+## 【为什么是 prev - hit 而不是 hit - prev】后者是"行走方向"（朝命中格内部），拿它做落笔会落到
+## 命中格的**里侧/背面**：从上方点一个体素的顶面却把新格画在它下面，永远叠不上去。
 
 ## 命中结果字典的键（未命中返回空字典）：
 ##   hit      Vector3i  命中的体素（**体素坐标**，与 QVoxelSource.has_voxel 同一套）
@@ -88,7 +91,7 @@ static func placement_of(hit: Vector3i, normal: Vector3i) -> Vector3i:
 static func _result(data: QVoxelSource, hit: Vector3i, prev: Vector3i, distance: float) -> Dictionary:
 	var normal := Vector3i.ZERO
 	if prev != hit:
-		normal = hit - prev
+		normal = prev - hit
 	return {
 		KEY_HIT: hit,
 		KEY_PREV: prev,

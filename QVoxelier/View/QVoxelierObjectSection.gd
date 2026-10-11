@@ -11,11 +11,13 @@ extends QVoxelierSection
 signal rename_requested(node: QVoxelNode, new_name: String)
 signal visible_changed(node: QVoxelNode, value: bool)
 signal locked_changed(node: QVoxelNode, value: bool)
+signal offset_changed(node: QVoxelNode, value: Vector3i)
 
 var _node: QVoxelNode
 var _name: LineEdit
 var _vis: Button
 var _lock: Button
+var _offset_spins: Array[SpinBox] = []
 var _info: VBoxContainer
 
 
@@ -51,9 +53,34 @@ func _build_body(body: VBoxContainer) -> void:
 		if _node != null: locked_changed.emit(_node, on))
 	toggles.add_child(_lock)
 
+	# 位置：节点在父画布里的偏移（去链后摆放回到节点本身）。三个轴各自可调。
+	var posrow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	body.add_child(posrow)
+	var plabel := QVoxelUi.label("位置", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	plabel.custom_minimum_size.x = 32
+	plabel.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	posrow.add_child(plabel)
+	for _axis in 3:
+		var sp := SpinBox.new()
+		sp.min_value = -4096
+		sp.max_value = 4096
+		sp.step = 1
+		sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sp.value_changed.connect(_on_offset_spin)
+		posrow.add_child(sp)
+		_offset_spins.append(sp)
+
 	_info = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	body.add_child(_info)
 	_rebuild()
+
+
+## 三个轴任一变化 → 合成 Vector3i 上报（App 记成可撤销命令）。
+func _on_offset_spin(_v: float) -> void:
+	if _node == null or _offset_spins.size() < 3:
+		return
+	offset_changed.emit(_node, Vector3i(
+			int(_offset_spins[0].value), int(_offset_spins[1].value), int(_offset_spins[2].value)))
 
 
 ## 绑定选中的节点（App 在树上点选 / 撤销后调用）。
@@ -72,6 +99,12 @@ func _rebuild() -> void:
 	_name.editable = has
 	_vis.disabled = not has
 	_lock.disabled = not has
+	for sp in _offset_spins:
+		sp.editable = has
+	if has:
+		_offset_spins[0].set_value_no_signal(_node.offset.x)
+		_offset_spins[1].set_value_no_signal(_node.offset.y)
+		_offset_spins[2].set_value_no_signal(_node.offset.z)
 	if not has:
 		_name.text = ""
 		_info.add_child(QVoxelUi.label("（未选中对象）", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT))
@@ -87,12 +120,12 @@ func _rebuild() -> void:
 		_kv("类型", "模型 #%d" % m.model_id)
 		_kv("尺度", "%d × %d × %d" % [g.x, g.y, g.z])
 		_kv("体素", "%d" % m.count_solid())
-		_kv("修改器", "%d 条" % m.modifiers.size())
+		_kv("位置", "%d, %d, %d" % [m.offset.x, m.offset.y, m.offset.z])
 	else:
 		var grp := _node as QVoxelGroup
 		_kv("类型", "组")
 		_kv("子模型", "%d" % grp.count_models())
-		_kv("修改器", "%d 条" % grp.modifiers.size())
+		_kv("位置", "%d, %d, %d" % [grp.offset.x, grp.offset.y, grp.offset.z])
 
 
 func _kv(k: String, v: String) -> void:

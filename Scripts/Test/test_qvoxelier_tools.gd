@@ -21,8 +21,8 @@ func _pick(solid: Dictionary, hit: Vector3i, normal: Vector3i, opts := {}) -> QV
 	var p := QVoxelBrushTool.Pick.new()
 	p.hit = hit
 	p.normal = normal
-	p.place = VoxelRay.placement_of(hit, normal)
-	p.erase = opts.get("erase", false)
+	p.op = opts.get("op", QVoxelBrushTool.Op.ADD)
+	p.place = VoxelRay.placement_of(hit, normal) if p.op == QVoxelBrushTool.Op.ADD else hit
 	p.material_id = opts.get("material", MAT)
 	p.grid = opts.get("grid", Vector3i.ZERO)
 	p.solid = func(q: Vector3i) -> bool: return solid.has(q)
@@ -315,7 +315,7 @@ func test_face_brush_paints_the_exposed_layer_only() -> void:
 func test_face_brush_erase_removes_the_exposed_layer() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.FACE)
 	var solid := _plate(MAT)
-	var cells := tool.hover(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"erase": true}))
+	var cells := tool.hover(_pick(solid, Vector3i(1, 0, 1), Vector3i(0, 1, 0), {"op": QVoxelBrushTool.Op.REMOVE}))
 	assert_eq(cells.size(), 9, "擦除铺满整片暴露面")
 	for c in cells:
 		assert_eq(c.y, 0, "擦的是暴露面本身，不是它外侧的空格")

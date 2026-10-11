@@ -46,6 +46,23 @@ const MODES := [
 		"live": false, "brush": false, "hint": "按住拖动，把选区里的体素搬到新位置"},
 ]
 
+## 操作意图：这一笔对命中格做**什么**。与 Mode 正交（Mode 决定"哪些格"，Op 决定"写什么"）。
+## 【为什么是三个而不是一个"擦除"开关】体素编辑的全部意图就这三件：加、删、涂。
+## 做成互斥三态后，右键/Shift 只是"临时切到移除"，不再是一条与工具并列的独立开关。
+enum Op {
+	ADD,    ## 添加：在命中面的外侧长出一格（传统"画"）
+	REMOVE, ## 移除：挖掉命中格本身（传统"擦"）
+	PAINT,  ## 上色：把命中格改成当前材质，不增不减
+}
+
+## 操作表：界面（按钮文案 / 图标 / 提示）的唯一来源，与 MODES 同一套路数。
+const OPS := [
+	{"op": Op.ADD, "text": "添加", "icon": "add", "tip": "添加：在点中的面外侧长出体素"},
+	{"op": Op.REMOVE, "text": "移除", "icon": "erase", "tip": "移除：挖掉点中的体素（右键 / Shift+左键同义）"},
+	{"op": Op.PAINT, "text": "上色", "icon": "tool_fill", "tip": "上色：把点中的体素改成当前材质，不增不减"},
+]
+
+
 ## 笔刷加粗的**截面形态**。与 Mode 正交：Mode 决定"画哪些格"，Shape 决定"加粗成什么形状"。
 ## 【为什么不把它做成第八种笔】"画什么"与"加粗成什么"是两件事：体素笔要粗笔头、线笔要粗线、
 ## 盒笔要厚板 —— 三者都吃尺寸，也都能在球 / 平面之间选。做成模式会让按钮数翻倍，且以后每加
@@ -70,8 +87,8 @@ const SHAPES := [
 class Pick extends RefCounted:
 	var hit := Vector3i.MIN       ## 命中的体素；MIN = 没命中
 	var normal := Vector3i.ZERO   ## 入射面法线（朝外，单轴 ±1）
-	var place := Vector3i.MIN     ## 落笔格 = hit + normal；擦除时 = hit
-	var erase := false            ## 右键 = 擦除
+	var place := Vector3i.MIN     ## 落笔格 = hit + normal；移除 / 上色时 = hit
+	var op: Op = Op.ADD           ## 这一笔的意图：添加 / 移除 / 上色
 	var material_id := 1          ## 当前材质
 	var grid := Vector3i.ZERO     ## 对象网格尺寸（ZERO = 不裁剪，测试用）
 	var solid := Callable()       ## p → 该格是否实心
@@ -81,9 +98,13 @@ class Pick extends RefCounted:
 	func valid() -> bool:
 		return hit != Vector3i.MIN and place != Vector3i.MIN
 
-	## 这一笔写入的材质：擦除写 0（内核语义：0 = 空气）。
+	## 是否"挖掉命中格"（移除）。供只关心"是不是挖"的调用点使用。
+	func erasing() -> bool:
+		return op == Op.REMOVE
+
+	## 这一笔写入的材质：移除写 0（内核语义：0 = 空气），添加 / 上色写当前材质。
 	func material() -> int:
-		return 0 if erase else material_id
+		return 0 if op == Op.REMOVE else material_id
 
 
 var mode: Mode = Mode.VOXEL
@@ -259,7 +280,7 @@ func active() -> bool:
 	return _active
 
 
-## 当前这一笔要写入的材质（擦除 → 0）。没有手势时返回 0。
+## 当前这一笔要写入的材质（移除 → 0）。没有手势时返回 0。
 func material() -> int:
 	return _pick.material() if _pick != null else 0
 
@@ -302,9 +323,9 @@ func _stroke_face(pick: Pick) -> Array[Vector3i]:
 	var step := func(_p: Vector3i) -> Array[Vector3i]:
 		return offsets
 	var exposed := QVoxelBrushGeometry.region([pick.hit], accept, step)
-	if pick.erase:
+	if pick.op != Op.ADD:
 		return exposed
-	# 画：写在暴露面的外侧（沿法线一格）；擦：就擦掉暴露面本身
+	# 添加：写在暴露面的外侧（沿法线一格）；移除 / 上色：作用在暴露面本身
 	var out: Array[Vector3i] = []
 	for c in exposed:
 		out.append(c + normal)

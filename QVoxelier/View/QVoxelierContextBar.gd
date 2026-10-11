@@ -2,12 +2,14 @@
 class_name QVoxelierContextBar
 extends QVoxelierPanel
 ## 顶栏正下方的**上下文选项条**（PS 的选项条 / Blender 的 header）：只显示**当前工具**用得到的选项。
-## 【为什么单独一条】把笔刷尺寸 / 形态 / 擦除 / 对称 / 选区动作常驻在左侧，等于让每个用户一直
+## 【为什么单独一条】把操作三态 / 笔刷尺寸 / 形态 / 对称 / 选区动作常驻在左侧，等于让每个用户一直
 ## 看着他此刻用不上的东西；移到"随工具变化的一条"里，左侧就只剩"选哪个工具"一件事。
 ## 【仍然全部是可见按钮】与全应用一致：快捷键只是加速器，按钮才是入口（触摸屏没有键盘）。
 ## 【表即配置】工具与形态两组选项直接读 [QVoxelBrushTool] 的 MODES / SHAPES，
 ## 与左列工具条、状态栏提示同源 —— 加一种笔只改表，本条的显隐与文案一起跟着变。
 
+## 操作三态（值同 [enum QVoxelBrushTool.Op]）。
+signal op_selected(op: int)
 ## 笔刷尺寸加减（delta = ±1）。
 signal brush_step(delta: int)
 ## 笔刷尺寸乘除（up = true 表示 ×2）。
@@ -29,6 +31,8 @@ const SELECT_ACTIONS := [
 ]
 
 var _row: HBoxContainer
+var _op_group: HBoxContainer
+var _op_buttons := {}   # Op → Button
 var _brush_group: HBoxContainer
 var _shape_group: HBoxContainer
 var _sym_group: HBoxContainer
@@ -61,6 +65,8 @@ func _build() -> void:
 	_row.alignment = BoxContainer.ALIGNMENT_BEGIN
 	panel.add_child(_row)
 
+	_build_op_group()
+	_row.add_child(QVoxelUi.vdivider())
 	_build_brush_group()
 	_row.add_child(QVoxelUi.vdivider())
 	_build_shape_group()
@@ -73,6 +79,24 @@ func _build() -> void:
 
 func _bar_height() -> float:
 	return QVoxelUi.hit_size() + QVoxelUi.space_s() * 2.0
+
+
+## 操作三态：添加 / 移除 / 上色（互斥）。读 [constant QVoxelBrushTool.OPS]。
+## 它是**这一笔对体素做什么**，与"哪一种笔"（左列）正交，故排在本条最前。
+func _build_op_group() -> void:
+	_op_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	_row.add_child(_op_group)
+	var group := ButtonGroup.new()
+	group.allow_unpress = false
+	for entry in QVoxelBrushTool.OPS:
+		var b := QVoxelUi.toggle_button("%s\n%s" % [entry.text, entry.tip],
+				QVoxelUi.VARIATION_TOOL, entry.text, entry.icon)
+		b.custom_minimum_size.x = QVoxelUi.hit_size()
+		b.button_group = group
+		b.toggled.connect(_on_op_toggled.bind(int(entry.op)))
+		_op_buttons[entry.op] = b
+		_op_group.add_child(b)
+	_op_buttons[QVoxelBrushTool.Op.ADD].set_pressed_no_signal(true)
 
 
 ## 笔刷尺寸：− 值 + （细调）+ ×2 / ÷2（粗调）。与左列旧版同一套，只是横排。
@@ -147,6 +171,11 @@ func _build_selection_group() -> void:
 		_select_group.add_child(b)
 
 
+func _on_op_toggled(on: bool, op: int) -> void:
+	if on:
+		op_selected.emit(op)
+
+
 func _on_shape_toggled(on: bool, shape: int) -> void:
 	if on:
 		brush_shape_selected.emit(shape)
@@ -178,12 +207,28 @@ func _sync_rect() -> void:
 
 # 对外：状态同步（只由 App 调用）
 
-## 切工具 → 换一套选项。selection_mode（选择 / 移动）显示选区动作；其笔画工具显示笔刷参数。
-func set_tool(mode: int, supports_brush: bool, selection_mode: bool) -> void:
-	_brush_group.visible = supports_brush
-	_shape_group.visible = supports_brush
-	_sym_group.visible = not selection_mode
-	_select_group.visible = selection_mode
+## 工具类别（与 App 的 _tool_kind 对应）：笔刷 / 自定义笔刷。
+const KIND_BRUSH := 0
+const KIND_CUSTOM := 1
+
+
+## 切工具 → 换一套选项。
+##   笔刷：操作三态 + 笔刷尺寸 / 形态 / 对称（选择 / 移动时换成选区动作）；
+##   自定义笔刷：只有操作三态（图案与抓取在右侧「笔刷」面板）。
+func set_tool(kind: int, supports_brush: bool, selection_mode: bool) -> void:
+	var brush := kind == KIND_BRUSH
+	_op_group.visible = (kind == KIND_BRUSH or kind == KIND_CUSTOM) and not selection_mode
+	_brush_group.visible = brush and supports_brush
+	_shape_group.visible = brush and supports_brush
+	_sym_group.visible = brush and not selection_mode
+	_select_group.visible = brush and selection_mode
+
+
+## 回写操作三态（App 在切工具 / 按键后调用；no_signal 避免回环）。
+func set_op(op: int) -> void:
+	var b: Button = _op_buttons.get(op)
+	if b != null:
+		b.set_pressed_no_signal(true)
 
 
 ## 刷新笔刷显示；supported = false 时整组置灰（面笔 / 填充不吃笔刷）。

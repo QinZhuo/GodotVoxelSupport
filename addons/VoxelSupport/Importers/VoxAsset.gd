@@ -77,7 +77,7 @@ static func from_result(world: QVoxelWorld, res: QVoxelEvalResult) -> VoxAsset:
 		var material: int = res.volume[i]
 		if material == 0:
 			continue
-		var p := PcgModel.pos_of(i, size)
+		var p := VoxelVolume.pos_of(i, size)
 		model.voxels[Vector3i(p.x, p.y, p.z - z_shift)] = material
 	out.models.append(model)
 	return out

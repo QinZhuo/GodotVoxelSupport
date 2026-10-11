@@ -456,11 +456,8 @@ func test_cameras_and_nested_nodes_roundtrip() -> void:
 	var body := _find_node(root.get("children", []), "body")
 	assert_eq(body.get("kind"), "model", "子节点在父的 children 里")
 	assert_eq(body.get("model_id"), 0, "模型下标存活")
-	var steps: Array = body.get("steps", [])
-	assert_eq(steps.size(), 1, "组内坐标是链上的一条")
-	assert_eq(steps[0].get("type"), "PcgTransform", "条目认得出是哪种算子")
-	assert_eq((steps[0].get("params") as Dictionary).get("offset"), [1.0, 2.0, 3.0],
-			"组内坐标存活（JSON 数字读回是 float）")
+	assert_eq(body.get("pos"), [1.0, 2.0, 3.0], "组内坐标（节点 pos）存活，JSON 数字读回是 float")
+	assert_false(body.has("steps"), "去链后不再写 steps")
 	assert_false(body.has("children"), "模型是叶子 —— children 是冗余键，不该出现在模型上")
 
 
@@ -552,8 +549,8 @@ func test_world_engineering_data_roundtrip() -> void:
 	var o := w.create_model("body", Vector3i(8, 8, 8), g)
 	o.fill_box(Vector3i.ZERO, Vector3i(3, 3, 3), mat)
 	var solid := o.count_solid()   # 闭区间盒 → 4³，不写死数字，测的是"存活"而非某个计数
-	# 组内坐标是一条链上条目（不再是节点字段）—— 它必须和别的条目一样往返
-	o.add_modifier(QVoxelTransformModifier.of(PcgTransform.translate(Vector3i(1, 2, 3))))
+	# 组内坐标就是节点 offset —— 必须随节点树一起往返
+	o.offset = Vector3i(1, 2, 3)
 	w.add_camera("front")
 	assert_true(w.set_camera_field(0, "projection", "ortho"), "相机改成正交")
 	assert_true(w.set_camera_field(0, "size", 128), "正交视高")
@@ -575,46 +572,8 @@ func test_world_engineering_data_roundtrip() -> void:
 	assert_eq(g2.child_nodes.size(), 1, "组里的模型存活")
 	var o2 := g2.child_nodes[0] as QVoxelModel
 	assert_eq(o2.node_name, "body")
-	assert_eq(o2.modifiers.size(), 1, "组内坐标是一条链上条目")
-	var place := (o2.modifiers[0] as QVoxelTransformModifier).transform
-	assert_eq(place.mode, PcgTransform.Mode.TRANSLATE, "它是平移条目")
-	assert_eq(place.offset, Vector3i(1, 2, 3), "组内坐标存活")
+	assert_eq(o2.offset, Vector3i(1, 2, 3), "组内坐标（节点 offset）存活")
 	assert_eq(o2.count_solid(), solid, "体素存活")
-
-
-## 链上的条目要跟着节点树一起往返 —— 这是 qvx 3 新增的 steps 字段。
-## 【为什么连"输出盒尺寸"也一起断言】链的意义全在"它会改变求值结果"；只比条数等于没测，
-## 参数读丢 / 旁通位读丢都能让条数一样而对不上。
-func test_node_modifiers_roundtrip() -> void:
-	var w := QVoxelWorld.create_empty()
-	w.add_material(Color.RED)
-	var o := w.create_model("body", Vector3i(8, 8, 8))
-	# 三条覆盖三种"该存活的东西"：合成方式（差集）/ 核的参数（平铺份数）/ 旁通位。
-	# 差集挂在 SDF 条目上：体素域的变换型条目合成方式只能是「替换」（见 QVoxelDomain.chain_errors）。
-	var hole := SdfSphere.new()
-	hole.center = Vector3(4.0, 4.0, 4.0)
-	hole.radius = 2.0
-	o.add_modifier(QVoxelSdfModifier.of(hole, QVoxelDomain.Combine.SUBTRACT))
-	o.add_modifier(QVoxelTransformModifier.of(PcgTransform.repeat(0, 3)))
-	o.add_modifier(QVoxelTransformModifier.of(PcgTransform.mirror(1)))
-	o.modifiers[2].enabled = false
-
-	var rep := QVoxelFile.QVoxelReport.new()
-	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(
-			QVoxelFile.serialize(w.to_document()), true, rep, true)
-	assert_true(rep.warnings.is_empty(), "回环不该有任何告警（%s）" % str(rep.warnings))
-	var o2 := QVoxelWorld.from_document(parsed).all_models()[0]
-
-	assert_eq(o2.modifiers.size(), 3, "链上三条都要回来")
-	assert_eq(o2.modifiers[0].kind(), QVoxelModifier.KIND_SDF, "种类存活")
-	assert_eq(o2.modifiers[0].combine, QVoxelDomain.Combine.SUBTRACT, "合成方式存活")
-	assert_eq(o2.modifiers[1].kind(), QVoxelModifier.KIND_TRANSFORM, "种类存活")
-	var t := (o2.modifiers[1] as QVoxelTransformModifier).transform
-	assert_eq(t.mode, PcgTransform.Mode.REPEAT, "核的种类存活")
-	assert_eq(t.times, 3, "核的参数存活")
-	assert_false(o2.modifiers[2].enabled, "旁通位存活（它不改变条数，只有尺寸/结果能证明它回来了）")
-	assert_eq(QVoxelEvalEngine.output_grid_size(o2.modifiers, o2.grid_size), Vector3i(24, 8, 8),
-			"链的尺寸语义存活（平铺 ×3，镜像不改盒尺寸）")
 
 
 # 帧动画 FRAM（§12）
@@ -745,11 +704,8 @@ func _make_doc_with_engineering_data() -> QVoxelFile.QVoxelDocument:
 		],
 		"nodes": [
 			{"name": "root", "kind": "group", "children": [
-				# 组内坐标是 steps 里的一条平移条目（combine=0 即「替换」，体素域变换型只允许它）
-				{"name": "body", "kind": "model", "model_id": 0, "steps": [
-					{"kind": "transform", "combine": 0,
-						"type": "PcgTransform", "params": {"mode": 3, "offset": [1, 2, 3]}},
-				]},
+				# 组内坐标就是节点的 pos（去链后摆放回到节点本身）。
+				{"name": "body", "kind": "model", "model_id": 0, "pos": [1, 2, 3]},
 			]},
 		],
 	}

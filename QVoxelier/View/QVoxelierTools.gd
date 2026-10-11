@@ -8,16 +8,16 @@ extends QVoxelierPanel
 ## 强调底表达（触摸没有 hover，选中必须常驻可见）。
 ## 【工具列表从哪来】直接读 [QVoxelBrushTool.MODES]（表即配置）：加一种笔只需在表里加一行。
 
-## 选中了某个画笔模式（值同 QVoxelBrushTool.Mode）。
+## 选中了某个工具：笔刷模式（值同 QVoxelBrushTool.Mode）或生成/风化（见 TOOL_* 常量）。
 signal tool_selected(mode: int)
-## 擦除开关（粘性）：与右键、Shift+左键的反向同源。
-signal erase_toggled(enabled: bool)
+
+## 自定义笔刷 = 把自己做好的模型当图章盖。它是"工具"而非笔刷模式，故用独立 id。
+const TOOL_CUSTOM := 100
 
 var _scroll: ScrollContainer
 var _col: VBoxContainer
 var _buttons := {}          # Mode → Button
 var _group := ButtonGroup.new()
-var _erase: Button
 ## 底部让位高度（动画面板展开时）。
 var bottom_reserved := 0.0
 
@@ -52,10 +52,18 @@ func _build() -> void:
 		_buttons[row.mode] = b
 		_col.add_child(b)
 
+	# 自定义笔刷：与笔类并列（互斥选中）—— 拿一个做好的模型当图章盖，同样是"点哪画哪"。
 	_col.add_child(QVoxelUi.divider())
-	_erase = _icon_toggle("擦除（E）\n画的时候挖掉体素（右键 / Shift+左键的反向）", "erase")
-	_erase.toggled.connect(func(on: bool): erase_toggled.emit(on))
-	_col.add_child(_erase)
+	var cb := QVoxelUi.toggle_button(
+			"自定义笔刷\n把右侧选中的模型当作笔刷，点击处盖章（右侧「笔刷」面板先抓取图案）",
+			QVoxelUi.VARIATION_TOOL, "笔刷", "modifier")
+	cb.custom_minimum_size = Vector2(0, QVoxelUi.hit_size())
+	cb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cb.button_group = _group
+	cb.toggled.connect(func(on: bool): if on: tool_selected.emit(TOOL_CUSTOM))
+	_buttons[TOOL_CUSTOM] = cb
+	_col.add_child(cb)
+
 	_fit()
 
 
@@ -100,12 +108,3 @@ func set_tool(mode: int) -> void:
 	var b: Button = _buttons.get(mode)
 	if b != null:
 		b.set_pressed_no_signal(true)
-
-
-func set_erase(on: bool) -> void:
-	if _erase != null:
-		_erase.set_pressed_no_signal(on)
-
-
-func erase_mode() -> bool:
-	return _erase != null and _erase.button_pressed
