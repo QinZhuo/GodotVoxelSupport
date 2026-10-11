@@ -59,7 +59,7 @@ enum Op {
 const OPS := [
 	{"op": Op.ADD, "text": "添加", "icon": "add", "tip": "添加：在点中的面外侧长出体素"},
 	{"op": Op.REMOVE, "text": "移除", "icon": "erase", "tip": "移除：挖掉点中的体素（右键 / Shift+左键同义）"},
-	{"op": Op.PAINT, "text": "上色", "icon": "tool_fill", "tip": "上色：把点中的体素改成当前材质，不增不减"},
+	{"op": Op.PAINT, "text": "上色", "icon": "paint", "tip": "上色：把点中的体素改成当前材质，不增不减"},
 ]
 
 
@@ -287,10 +287,12 @@ func material() -> int:
 
 # 形状分派
 
-## 锚点：绝大多数笔落在"落笔格"（命中格往外一格）；
-## 面笔与填充的锚点是**命中格本身** —— 它们的作用域由被点中的那块实体定义，与"往哪长"无关。
+## 锚点：落笔类笔落在"落笔格"（命中格往外一格）；
+## 面笔 / 填充 / 选择 / 移动的锚点是**命中格本身** ——
+##   · 面笔 / 填充：作用域由被点中的那块实体定义，与"往哪长"无关；
+##   · 选择 / 移动：框选的参照就是被点中的体素（若用"外侧一格"，框会整体偏一格，选不中想选的东西）。
 func _anchor_of(pick: Pick) -> Vector3i:
-	if mode == Mode.FACE or mode == Mode.FILL:
+	if mode == Mode.FACE or mode == Mode.FILL or is_selection_mode(mode):
 		return pick.hit
 	return pick.place
 

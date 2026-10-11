@@ -20,6 +20,8 @@ signal brush_shape_selected(shape: int)
 signal symmetry_toggled(axis: int, on: bool)
 ## 选区 / 剪贴板动作请求（值 = [constant SELECT_ACTIONS] 里的 id）。
 signal selection_action(action: StringName)
+## 快速选区判据：true = 同色相连；false = 几何相连。
+signal select_criterion_changed(by_color: bool)
 
 ## 选区动作表（表即配置，与左侧工具表同一套路数）。选中「选择 / 移动」时本行取代笔刷参数。
 const SELECT_ACTIONS := [
@@ -37,6 +39,7 @@ var _brush_group: HBoxContainer
 var _shape_group: HBoxContainer
 var _sym_group: HBoxContainer
 var _select_group: HBoxContainer
+var _criterion_group: HBoxContainer
 var _brush_value: Label
 var _brush_minus: Button
 var _brush_plus: Button
@@ -72,6 +75,8 @@ func _build() -> void:
 	_build_shape_group()
 	_row.add_child(QVoxelUi.vdivider())
 	_build_symmetry_group()
+	_row.add_child(QVoxelUi.vdivider())
+	_build_criterion_group()
 	_row.add_child(QVoxelUi.vdivider())
 	_build_selection_group()
 	_sync_rect()
@@ -159,6 +164,23 @@ func _build_symmetry_group() -> void:
 		_sym_group.add_child(b)
 
 
+## 快速选区判据：同色相连 / 几何相连（只在「选择」工具下显示）。
+func _build_criterion_group() -> void:
+	_criterion_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	_row.add_child(_criterion_group)
+	var group := ButtonGroup.new()
+	group.allow_unpress = false
+	for spec in [[true, "同色", "同色相连：快速选区只收同材质的一块"],
+			[false, "相连", "几何相连：只要相邻实心就收（可跨颜色）"]]:
+		var b := QVoxelUi.toggle_button(spec[2], QVoxelUi.VARIATION_TOOL, spec[1], "paint")
+		b.custom_minimum_size.x = QVoxelUi.hit_size()
+		b.button_group = group
+		b.toggled.connect(func(on: bool): if on: select_criterion_changed.emit(spec[0]))
+		_criterion_group.add_child(b)
+		if spec[0]:
+			b.set_pressed_no_signal(true)
+
+
 func _build_selection_group() -> void:
 	_select_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	_row.add_child(_select_group)
@@ -221,6 +243,7 @@ func set_tool(kind: int, supports_brush: bool, selection_mode: bool) -> void:
 	_brush_group.visible = brush and supports_brush
 	_shape_group.visible = brush and supports_brush
 	_sym_group.visible = brush and not selection_mode
+	_criterion_group.visible = brush and selection_mode
 	_select_group.visible = brush and selection_mode
 
 

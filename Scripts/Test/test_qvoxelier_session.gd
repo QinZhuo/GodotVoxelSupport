@@ -146,18 +146,38 @@ func test_paint_gesture_recolors_the_hit_voxel_and_is_undoable() -> void:
 	assert_eq(s.object.get_voxel(3, 3, 3), MAT, "撤销把原材质还回来")
 
 
-func test_cancel_rolls_back_live_writes_and_leaves_no_history() -> void:
+## 选区手势必须跟踪拖动端点（曾经 session.drag 在无命令时早退，框永远停在 1×1×1、移动永远零位移）。
+func test_selection_drag_tracks_endpoint_and_move_shifts_voxels() -> void:
+	var s := _session()
+	s.object.set_voxel(2, 0, 2, MAT)
+	s.object.set_voxel(3, 0, 2, MAT)
+	s.tool.set_mode(QVoxelBrushTool.Mode.SELECT)
+	var a := s.pick_from_hit(_hit(Vector3i(2, 0, 2), Vector3i.UP))
+	var b := s.pick_from_hit(_hit(Vector3i(3, 0, 2), Vector3i.UP))
+	assert_true(s.begin(a), "起笔")
+	s.drag(b)
+	assert_true(s.release(), "框选成功")
+	assert_eq(s.selection.size(), Vector3i(2, 1, 1), "拖动端点被跟踪（否则框是 1×1×1）")
+
+	# 移动选区 +2 y
+	s.tool.set_mode(QVoxelBrushTool.Mode.MOVE)
+	s.begin(s.pick_from_hit(_hit(Vector3i(2, 0, 2), Vector3i.UP)))
+	s.drag(s.pick_from_hit(_hit(Vector3i(2, 2, 2), Vector3i.UP)))
+	assert_true(s.release(), "移动成功")
+	assert_eq(s.object.get_voxel(2, 2, 2), MAT, "体素被搬到目标处")
+	assert_eq(s.object.get_voxel(2, 0, 2), 0, "原位被清空")
+
+
+func test_cancel_discards_the_pending_stroke() -> void:
 	var s := _session()
 	var p := s.pick_from_hit(_hit(Vector3i(6, 6, 6), Vector3i(0, 1, 0)))
 	s.begin(p)
-	assert_true(s.drag(p) > 0, "live 工具拖动就该有产物")
-	assert_eq(s.object.get_voxel(6, 7, 6), MAT, "拖动已经改过对象")
+	assert_true(s.drag(p) > 0, "拖动累积待写的格")
+	assert_eq(s.object.get_voxel(6, 7, 6), 0, "拖动中不碰对象（整笔松手才落盘）")
 	s.cancel()
-	assert_eq(s.object.get_voxel(6, 7, 6), 0,
-		"作废必须回滚：只丢命令的话，这批改动永远撤不掉")
+	assert_eq(s.object.get_voxel(6, 7, 6), 0, "作废只需丢弃待写格（本就未落盘）")
 	assert_false(s.can_undo(), "作废的笔不该留下历史项")
-	assert_eq(s.data.get_voxel(Vector3i(6, 7, 6)), -1,
-		"显示层也被按权威重新取数（缓冲作废 → 下次取数重新生成）")
+	assert_eq(s.data.get_voxel(Vector3i(6, 7, 6)), -1, "显示层自始至终未被触碰")
 
 
 func test_cancel_before_any_write_touches_nothing() -> void:
@@ -172,14 +192,17 @@ func test_cancel_before_any_write_touches_nothing() -> void:
 
 # live / span
 
-func test_live_tool_mirrors_the_stroke_immediately() -> void:
+func test_stroke_is_committed_only_on_release() -> void:
 	var s := _session()
 	var p := s.pick_from_hit(_hit(Vector3i(4, 4, 4), Vector3i(0, 1, 0)))
 	s.begin(p)
-	assert_true(s.drag(p) > 0, "体素笔边拖边写")
-	assert_eq(s.data.get_voxel(Vector3i(4, 5, 4)), MAT,
-		"显示层当场可见（即时反馈靠镜像，而不是每帧全量重求值）")
+	assert_true(s.drag(p) > 0, "拖动累积待写的格")
+	# 拖动中既不改对象也不改显示层 —— 否则整笔会"踩着自己往上画"，且撤销语义变复杂。
+	assert_eq(s.object.get_voxel(4, 5, 4), 0, "拖动中对象未变")
+	assert_eq(s.data.get_voxel(Vector3i(4, 5, 4)), -1, "拖动中显示层未变")
 	assert_false(s.can_undo(), "松手之前不入栈（一次拖动只留一条历史）")
+	assert_true(s.release(), "松手一次性落盘")
+	assert_eq(s.object.get_voxel(4, 5, 4), MAT, "松手后体素才出现")
 
 
 func test_release_hands_the_chunk_back_to_the_authoritative_source() -> void:
@@ -187,9 +210,9 @@ func test_release_hands_the_chunk_back_to_the_authoritative_source() -> void:
 	var p := s.pick_from_hit(_hit(Vector3i(10, 10, 10), Vector3i(0, 1, 0)))
 	s.begin(p)
 	s.drag(p)
-	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), MAT, "拖动中镜像立即可见")
+	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), -1, "拖动中不写显示层（整笔松手才落盘）")
 	s.release()
-	# 收尾丢掉镜像（chunk 缓冲作废），但读取回落到求值体积 —— 权威内容仍是刚写下的那一格。
+	# 收尾后读取走权威求值体积 —— 权威内容就是刚写下的那一格。
 	# 这正是"画一格后能在它上面继续画"的前提：拾取读的必须是权威数据，而不是还没回填的缓冲。
 	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), MAT,
 		"收尾后读取走权威求值体积（缓冲作废不影响读取正确性）")
@@ -240,7 +263,7 @@ func test_undo_and_redo_restore_object_and_refresh() -> void:
 	assert_eq(s.object.get_voxel(3, 4, 3), MAT, "重做后写回来")
 
 
-func test_wake_happens_once_per_visible_change() -> void:
+func test_wake_happens_once_per_stroke() -> void:
 	var s := _session()
 	var calls := [0]
 	s.request_render_update = func() -> void: calls[0] += 1
@@ -248,9 +271,9 @@ func test_wake_happens_once_per_visible_change() -> void:
 	s.begin(p)
 	assert_eq(calls[0], 0, "只按下、还没写 → 不唤醒")
 	s.drag(p)
-	assert_eq(calls[0], 1, "本次拖动真写了格 → 唤醒一次（渲染器走增量重建）")
+	assert_eq(calls[0], 0, "拖动中不写对象 → 也不唤醒（整笔松手才落盘）")
 	s.release()
-	assert_eq(calls[0], 2, "收尾的源失效再唤醒一次（一笔一共两次，不多不少）")
+	assert_eq(calls[0], 1, "松手落盘 → 唤醒一次（整笔只唤醒一次）")
 
 
 func test_session_without_a_renderer_still_works() -> void:

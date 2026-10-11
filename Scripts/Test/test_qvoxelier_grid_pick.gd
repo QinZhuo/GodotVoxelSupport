@@ -85,12 +85,15 @@ func test_floor_outside_the_grid_is_not_a_hit() -> void:
 func test_parallel_or_upward_rays_never_hit_the_floor() -> void:
 	var s := _session()
 	var g := s.object.grid_size
-	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.RIGHT, g).is_empty(),
-		"与地板平行的射线：永不相交")
+	# 水平射线打不到地板，但命中**远端侧墙**（空网格上从侧面起笔：画在远侧，近侧敞开）。
+	var wall := QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.RIGHT, g)
+	assert_eq(wall.get(VoxelRay.KEY_HIT), Vector3i(g.x, 5, 3), "水平射线命中远端 +X 墙")
+	assert_eq(wall.get(VoxelRay.KEY_NORMAL), Vector3i(-1, 0, 0), "法线朝内（往盒里画，近侧不糊壳）")
+	assert_eq(s.pick_from_hit(wall).place, Vector3i(g.x - 1, 5, 3), "落笔格在墙的里侧一格")
 	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, 5, 3.5), Vector3.UP, g).is_empty(),
-		"朝上的射线交点在反向延长线上（t < 0）")
+		"朝上的射线：远端是顶面，不画天花板")
 	assert_true(QVoxelGridPick.hit(s.data, Vector3(2.5, -5, 3.5), Vector3.DOWN, g).is_empty(),
-		"从地板下方朝下打：t < 0")
+		"从地板下方朝下打：盒在背后，不命中")
 
 
 func test_floor_respects_max_distance() -> void:

@@ -28,13 +28,17 @@ static func capture(sel: QVoxelSelection, material_at: Callable) -> QVoxelClipbo
 		return c
 	var lo := sel.lo()
 	var hi := sel.hi()
+	# 逐格判 sel.contains：盒形态收全部，集合形态只收被选中的那些格（不把包围盒里的空档也带走）。
 	for z in range(lo.z, hi.z + 1):
 		for y in range(lo.y, hi.y + 1):
 			for x in range(lo.x, hi.x + 1):
-				var m := int(material_at.call(Vector3i(x, y, z)))
+				var p := Vector3i(x, y, z)
+				if not sel.contains(p):
+					continue
+				var m := int(material_at.call(p))
 				if m <= 0:
 					continue
-				c._cells.append(Vector3i(x, y, z) - lo)
+				c._cells.append(p - lo)
 				c._materials.append(m)
 	c._size = sel.size()
 	c._empty = c._cells.is_empty()

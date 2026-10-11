@@ -50,8 +50,6 @@ var _dock: QVoxelierDock
 var _color_section: QVoxelierColorSection
 var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
-## 自定义笔刷面板：挑一个模型抓成笔刷图案。
-var _brush_section: QVoxelierBrushSection
 var _timeline_section: QVoxelierTimelineSection
 ## 底部动画帧条（常驻一行，只显示当前模型的帧）。
 var _timeline: QVoxelierTimeline
@@ -64,8 +62,6 @@ var _confirm: ConfirmationDialog
 ## 工具类别：笔刷 / 自定义笔刷（拿一个模型当图章盖）。与 QVoxelierContextBar.KIND_* 对应。
 enum ToolKind { BRUSH, CUSTOM }
 var _tool_kind := ToolKind.BRUSH
-## 当前自定义笔刷图案（{} = 没抓）。结构见 QVoxelStamp.capture。
-var _brush_pattern: Dictionary = {}
 ## 层级里当前选中的节点（对象属性页据此显示"它是什么"）。
 var _selected_node: QVoxelNode
 
@@ -76,6 +72,8 @@ var _extra_root: Node3D
 ## 选区线框（挂在 model 下，与体素网格同一套坐标换算）。看不见的选区等于没有选区 ——
 ## 用户按了"复制"却不知道复制了什么，故它随 _refresh_hud 一起重画。
 var _selection_box: QVoxelSelectionBox
+## 移动坐标轴 gizmo（选区中心，点轴端挪一格）。
+var _move_gizmo: QVoxelierMoveGizmo
 ## 笔刷悬停预览（半透明实体标出"按下 / 拖到这里会改成什么"）。与选区框同挂 model 下 ——
 ## 同一套坐标换算，两者天然对齐；色与线框形态按操作三态（添加 = 实体材质色，移除 = 红线框，上色 = 材质色线框）。
 var _ghost: QVoxelPreviewMesh
@@ -109,8 +107,19 @@ var _stroke_op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
 ## 对称轴掩码。是**App 级设置**而非笔刷级：每个对象各有自己的笔刷实例，
 ## 若把它存在笔刷里，切一次对象就会被新笔刷的默认值抹掉（见 _apply_symmetry）。
 var _symmetry := Vector3i.ZERO
+## 快速选区判据（App 级设置，切对象时压回当前会话）：true = 同色相连。
+var _select_by_color := true
 var _orbit := false
 var _pan := false
+## 坐标轴拖拽移动的进行态。
+var _gizmo_active := false
+var _gizmo_axis := -1
+var _gizmo_t0 := 0.0
+var _gizmo_per_voxel := 1.0
+var _gizmo_delta := 0
+## 拖动移动时的实时预览素材：拖动开始时抓取的选区体素 + 选区下角。
+var _gizmo_clip: QVoxelClipboard = null
+var _gizmo_base_lo := Vector3i.ZERO
 ## 导航拖拽由谁启动（&"" / &"left" / &"middle"）—— 释放时只关自己启动的那一路，
 ## 免得左键松开把还按着的中键视角拖拽一并关掉。
 var _nav_key := &""
@@ -239,6 +248,7 @@ func _build_ui() -> void:
 	_context.symmetry_toggled.connect(_set_symmetry_axis)
 	# 选区面板的五个按钮共用一条信号（带动作 id）—— 面板不必为每个动作各开一条连接。
 	_context.selection_action.connect(_on_selection_action)
+	_context.select_criterion_changed.connect(_set_select_criterion)
 
 	_palette = QVoxelierPalette.new()
 	_palette.name = "Palette"
@@ -294,9 +304,7 @@ func _build_ui() -> void:
 	_dock.add_property(_object_section)
 
 	# 生成：选程序化算子 + 参数 + 合并方式，一次性烘焙进当前模型。
-	_brush_section = QVoxelierBrushSection.new()
-	_brush_section.capture_requested.connect(_capture_brush)
-	_dock.add_property(_brush_section)
+
 
 	# 时间轴（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。
 	_timeline_section = QVoxelierTimelineSection.new()
@@ -342,6 +350,10 @@ func _build_ui() -> void:
 	_selection_box = QVoxelSelectionBox.new()
 	_selection_box.name = "Selection"
 	model.add_child(_selection_box)
+
+	_move_gizmo = QVoxelierMoveGizmo.new()
+	_move_gizmo.name = "MoveGizmo"
+	model.add_child(_move_gizmo)
 
 	_ghost = QVoxelPreviewMesh.new()
 	_ghost.name = "HoverPreview"
@@ -390,15 +402,13 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 func _reset_edit_state() -> void:
 	_material_id = 1
 	_stroke = false
+	_gizmo_active = false
 	_op = QVoxelBrushTool.Op.ADD
 	_stroke_op = QVoxelBrushTool.Op.ADD
 	_tool_kind = ToolKind.BRUSH
 	_eyedropper = false
 	_material_cmd = null
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
-	# 笔刷面板回填（换世界后仍是同一份图案，这里只是把界面重新对齐）。
-	if _brush_section != null:
-		_bind_brush()
 	# 调色板不必在这里喂：它挂在唯一刷新路径上，install 发出的 changed 会把世界带过去
 	# （色板取的是**世界的材质表**而不是 default_palette，打开别人的 256 色工程也照显）。
 
@@ -450,6 +460,8 @@ func _attach_active() -> void:
 		grid_floor.voxel_scale = model.voxel_scale
 	_selection_box.voxel_scale = model.voxel_scale
 	_ghost.voxel_scale = model.voxel_scale
+	_move_gizmo.voxel_scale = model.voxel_scale
+	_move_gizmo.origin = session.data.center_offset if session.data != null else Vector3.ZERO
 	# 预览与显示层同一份偏移（导入资产的 center_offset）：否则预览与体素错开。
 	_ghost.origin = session.data.center_offset if session.data != null else Vector3.ZERO
 	hud.session = session
@@ -615,15 +627,22 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					_nav_key = &"left"
 					_orbit = true
 				else:
-					# 命中可落笔处 → 落笔；落在空白处 → 拖动即旋转视角，**不需要任何组合键**。
-					# 生成 / 风化是"点一下"的工具（不拖拽），走 _stamp_at 而不是笔画手势。
-					if not _pick_at(e.position, _op).valid():
+					# 移动**只经坐标轴**：先试着按住轴拖拽；没点中轴就转视角（不会误移）。
+					# 其余工具：命中可落笔处 → 落笔；落在空白处 → 拖动即旋转视角。
+					# 自定义笔刷是"点一下"的工具（不拖拽），走 _stamp_at 而不是笔画手势。
+					if _tool_kind == ToolKind.BRUSH and session.tool.mode == QVoxelBrushTool.Mode.MOVE:
+						if not _gizmo_begin(e.position):
+							_nav_key = &"left"
+							_orbit = true
+					elif not _pick_at(e.position, _op).valid():
 						_nav_key = &"left"
 						_orbit = true
 					elif _tool_kind != ToolKind.BRUSH:
 						_stamp_at(e.position)
 					else:
 						_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op)
+			elif _gizmo_active:
+				_gizmo_end()
 			elif _nav_key == &"left":
 				_nav_key = &""
 				_orbit = false
@@ -676,6 +695,9 @@ func _flush_gesture() -> void:
 
 
 func _on_mouse_motion(e: InputEventMouseMotion) -> void:
+	if _gizmo_active:
+		_gizmo_update(e.position)
+		return
 	if _stroke:
 		session.drag(_pick_at(e.position, _stroke_op))
 		_refresh_cursor(e.position)
@@ -792,6 +814,7 @@ func _no_change_hint(picking: bool) -> String:
 
 
 func _cancel() -> void:
+	_gizmo_active = false
 	if _stroke:
 		session.cancel()
 		_stroke = false
@@ -861,10 +884,7 @@ func _set_log_visible(on: bool) -> void:
 func _set_tool(mode: int) -> void:
 	if mode == QVoxelierTools.TOOL_CUSTOM:
 		_tool_kind = ToolKind.CUSTOM
-		if _dock != null:
-			_dock.show_property_by_title("笔刷")
-		_bind_brush()
-		hud.flash("工具：自定义笔刷（在视口里点击盖章）")
+		hud.flash("工具：自定义笔刷（把复制出的体素当笔刷，点击盖章）")
 		_refresh_hud()
 		return
 	_tool_kind = ToolKind.BRUSH
@@ -930,6 +950,14 @@ func _set_op(op: int) -> void:
 	_refresh_hud()
 
 
+## 切快速选区判据（顶部选项条：同色 / 相连）。
+func _set_select_criterion(by_color: bool) -> void:
+	_select_by_color = by_color
+	if session != null:
+		session.select_by_color = by_color
+	hud.flash("快速选区：%s" % ("同色相连" if by_color else "几何相连"))
+
+
 ## 对称轴开关（左侧「对称」三个按钮共用）。状态留在 App 这一层，再压进当前笔刷。
 func _set_symmetry_axis(axis: int, on: bool) -> void:
 	var axes := [_symmetry.x, _symmetry.y, _symmetry.z]
@@ -954,37 +982,17 @@ func _apply_symmetry() -> void:
 # 拿一个做好的模型当图章：抓成图案 → 在视口里**点哪盖哪**，一次点击 = 一条可撤销命令。
 # 合并方式由操作三态（添加 / 移除 / 上色）决定。
 
-## 把某个模型抓成笔刷图案。
-func _capture_brush(model_id: int) -> void:
-	if world == null:
-		return
-	var m := world.find_model(model_id)
-	if m == null:
-		return
-	var pat := QVoxelStamp.capture(m)
-	if pat.is_empty():
-		hud.flash("这个模型是空的，抓不了笔刷")
-		return
-	_brush_pattern = pat
-	_bind_brush()
-	var size: Vector3i = pat["size"]
-	hud.flash("已抓取笔刷：%d×%d×%d · %d 体素" % [size.x, size.y, size.z, (pat["cells"] as Array).size()])
-
-
-func _bind_brush() -> void:
-	if _brush_section != null:
-		_brush_section.set_pattern(_brush_pattern)
-
-
-## 在点击处盖一次自定义笔刷（图章）。center = 命中格（无入射面时退回落笔格）。
+## 在点击处盖一次自定义笔刷（图章），图案取自剪贴板。center = 命中格（无入射面时退回落笔格）。
 func _stamp_at(screen: Vector2) -> void:
 	if world == null or session == null:
 		return
 	if _sess.node_locked(session.object):
 		hud.flash("这一层已锁定：先在右侧「层级」里解锁")
 		return
-	if _brush_pattern.is_empty():
-		hud.flash("先在右侧「笔刷」面板里抓取一个模型作为笔刷")
+	# 自定义笔刷 = 剪贴板里的体素（复制 = 把它做成笔刷）。不需要额外的"抓取"操作。
+	var clip := session.clipboard
+	if clip.is_empty():
+		hud.flash("先框选并复制一块体素（复制出来的那块就是笔刷）")
 		return
 	var pick := _pick_at(screen, _op)
 	if not pick.valid():
@@ -995,7 +1003,8 @@ func _stamp_at(screen: Vector2) -> void:
 	var obj := session.object
 	var cmd := QVoxelEditCommand.begin(obj, session.edit_frame())
 	cmd.label_override = "盖笔刷"
-	var n := QVoxelStamp.stamp(cmd, obj, _brush_pattern, center, _op, _material_id)
+	var pat := {"cells": clip.cells(), "mats": clip.materials(), "size": clip.size()}
+	var n := QVoxelStamp.stamp(cmd, obj, pat, center, _op, _material_id)
 	if not cmd.commit() or n <= 0:
 		hud.flash("这一下没有改动（空白 / 越界 / 同色）")
 		return
@@ -1372,9 +1381,24 @@ func _refresh_hud() -> void:
 	# 对称是 App 级设置 → 每次刷新都把它压回当前对象的笔刷，并回写三个按钮的按下态。
 	_apply_symmetry()
 	_context.set_symmetry(_symmetry)
+	# 快速选区判据同样是 App 级设置（切对象后新会话要重新压一次）。
+	session.select_by_color = _select_by_color
 	# 选区 / 剪贴板：线框、按钮可用性、状态栏读数三处都跟着同一份数据走（一处刷新，三处跟上）。
 	_context.set_selection_state(not session.selection.is_empty(), not session.clipboard.is_empty())
-	_selection_box.set_box(session.selection.lo(), session.selection.size())
+	# 选区线框：集合形态逐格高亮（不规则形状），盒形态画一个框。
+	if session.selection.is_precise():
+		_selection_box.set_cells(session.selection.cells())
+	else:
+		_selection_box.set_box(session.selection.lo(), session.selection.size())
+	# 移动坐标轴：只在「移动」工具下显示；没有选区时按"整体"摆在网格中心（移动默认全选）。
+	if _move_gizmo != null:
+		if _tool_kind == ToolKind.BRUSH and session.tool.mode == QVoxelBrushTool.Mode.MOVE:
+			if session.selection.is_empty():
+				_move_gizmo.set_selection(Vector3i.ZERO, session.object.grid_size)
+			else:
+				_move_gizmo.set_selection(session.selection.lo(), session.selection.size())
+		else:
+			_move_gizmo.visible = false
 	# 状态栏里的选区 / 剪贴板读数由 HUD 自己按会话算（见 QVoxelierHud._selection_readout），
 	# 不在这里再喂一份字符串 —— 同一事实两处拼装迟早会各说各话。
 	# 色板取世界的材质表（增删材质 / 导入 / 改色都可能换掉它）。挂在这条唯一刷新路径上，
@@ -1409,9 +1433,6 @@ func _refresh_panels() -> void:
 	# 快照只读世界，且 set_world 幂等（同一个世界直接返回），故挂在这条唯一刷新路径上 ——
 	# 新建 / 打开换世界时它自然会收到新世界并把旧预览作废（见 QVoxelierSnapshotSection.set_world）。
 	_snapshot_section.set_world(world)
-	# 笔刷面板的模型下拉跟着世界走（增删对象 / 换世界后重新列）。
-	if _brush_section != null:
-		_brush_section.set_world(world, session.object.model_id)
 
 
 ## 世界的材质表 → 调色板用的颜色数组：**下标即材质 ID**，0 位留空气占位。
@@ -1433,19 +1454,162 @@ func _refresh_cursor(screen: Vector2) -> void:
 	else:
 		hud.set_cursor(pick.place)
 	_refresh_ghost(pick)
+	_refresh_selection_preview()
 
 
 ## 悬停预览：格子来自会话的 hover()（与真正落笔同一条形状分派，所见即所画）。
 ## 三态各有一种读法：添加 = 材质色半透明实体；移除 = 警示红线框；上色 = 材质色线框
 ## （线框表示"改的是已有体素"，色调表示"改成什么色"）。
 func _refresh_ghost(pick: QVoxelBrushTool.Pick) -> void:
+	# 自定义笔刷：预览"贴上去的整块图案"（与真正盖章同一套定位，所见即所盖）。
+	if _tool_kind == ToolKind.CUSTOM:
+		_refresh_brush_ghost(pick)
+		return
 	# 手势中射线落到模型外仍要预览 —— hover() 内部用起点 pick 兜底，预览不闪没。
 	if not pick.valid() and not _stroke:
 		_ghost.clear()
 		return
 	var remove := pick.op == QVoxelBrushTool.Op.REMOVE
-	_ghost.set_cells(session.hover(pick),
+	_ghost.set_cells(session.preview_cells(pick),
 			QVoxelUi.WARN if remove else _material_color(), pick.op != QVoxelBrushTool.Op.ADD)
+
+
+## 自定义笔刷的悬停预览：把剪贴板图案按盖章位置铺出来。
+## 与真正盖章**共用同一定位公式**、同样夹进网格 —— 否则预览会多出越界的那半块，看着"盖歪了"。
+func _refresh_brush_ghost(pick: QVoxelBrushTool.Pick) -> void:
+	var clip := session.clipboard if session != null else null
+	if clip == null or clip.is_empty() or not pick.valid():
+		_ghost.clear()
+		return
+	if session.object == null:
+		_ghost.clear()
+		return
+	var center := pick.hit if pick.hit != Vector3i.MIN else pick.place
+	var size: Vector3i = clip.size()
+	var anchor := center - Vector3i(size.x >> 1, size.y >> 1, size.z >> 1)
+	var top := session.object.grid_size - Vector3i.ONE
+	var cells: Array[Vector3i] = []
+	for c in clip.cells():
+		var p: Vector3i = anchor + c
+		if p.x < 0 or p.y < 0 or p.z < 0 or p.x > top.x or p.y > top.y or p.z > top.z:
+			continue
+		cells.append(p)
+	var remove := pick.op == QVoxelBrushTool.Op.REMOVE
+	_ghost.set_cells(cells, QVoxelUi.WARN if remove else _material_color(), pick.op != QVoxelBrushTool.Op.ADD)
+
+
+## 选择 / 移动手势中的**实时线框预览**（松手前就看得见框多大 / 会挪到哪）。
+## 【为什么必须预览】选区是纯数据，拖动中不给反馈就是"盲拖"；而松手才显示太晚，用户不知道
+## 自己框到了什么 / 搬去了哪。生成最终选区的是会话（release），这里只画"如果现在松手会怎样"。
+func _refresh_selection_preview() -> void:
+	if session == null or not session.tool.selection_mode() or not session.tool.active():
+		return
+	var corners := session.tool.gesture_corners()
+	if corners.size() < 2:
+		return
+	if session.tool.mode == QVoxelBrushTool.Mode.MOVE:
+		if session.selection.is_empty():
+			return
+		_set_preview_box(session.selection.offset_by(corners[1] - corners[0]))
+	else:
+		_set_preview_box(QVoxelSelection.from_corners(corners[0], corners[1]))
+
+
+## 把预览框夹进网格后画出来（与 QVoxelEditSession._set_box_selection 的夹取一致）。
+func _set_preview_box(sel: QVoxelSelection) -> void:
+	if sel.is_empty() or session == null or session.object == null:
+		return
+	var top := session.object.grid_size - Vector3i.ONE
+	var lo := sel.lo().clamp(Vector3i.ZERO, top)
+	var hi := sel.hi().clamp(Vector3i.ZERO, top)
+	if hi.x < lo.x or hi.y < lo.y or hi.z < lo.z:
+		return
+	_selection_box.set_box(lo, hi - lo + Vector3i.ONE)
+
+
+## 按下：若点中坐标轴，开始沿该轴拖拽移动（返回是否命中）。移动只能通过坐标轴发生。
+func _gizmo_begin(screen: Vector2) -> bool:
+	if _move_gizmo == null or not _move_gizmo.visible:
+		return false
+	var a := _move_gizmo.axis_hit(screen, camera)
+	if a < 0:
+		return false
+	# 没有选区就默认整体（与移动默认全选一致），并抓一份用于实时预览。
+	if session.selection.is_empty():
+		session.select_all()
+	_refresh_hud()
+	_gizmo_clip = session.capture_selection()
+	_gizmo_base_lo = session.selection.lo()
+	_gizmo_active = true
+	_gizmo_axis = a
+	_gizmo_delta = 0
+	_gizmo_per_voxel = maxf(_move_gizmo.axis_world(a).length(), 1e-6)
+	_gizmo_t0 = _gizmo_param(screen)
+	return true
+
+
+## 拖动：沿轴算出整数位移，实时预览（不改数据，松手才提交）。
+func _gizmo_update(screen: Vector2) -> void:
+	if not _gizmo_active:
+		return
+	var d := int(roundf((_gizmo_param(screen) - _gizmo_t0) / _gizmo_per_voxel))
+	if d == _gizmo_delta:
+		return
+	_gizmo_delta = d
+	var dir := _gizmo_dir()
+	# 实时预览：选区框落到目标处 + 体素以半透明 ghost 画在目标处（松手前就能看到搬去哪）。
+	if not session.selection.is_empty():
+		_set_preview_box(session.selection.offset_by(dir))
+	if _gizmo_clip != null and not _gizmo_clip.is_empty():
+		var target := _gizmo_base_lo + dir
+		var cells: Array[Vector3i] = []
+		for c in _gizmo_clip.cells():
+			cells.append(target + c)
+		_ghost.set_cells(cells, QVoxelUi.ACCENT, false)
+
+
+## 松手：把这一拖动提交成一条可撤销的移动命令。
+func _gizmo_end() -> void:
+	if not _gizmo_active:
+		return
+	var dir := _gizmo_dir()
+	_gizmo_active = false
+	_gizmo_axis = -1
+	_gizmo_delta = 0
+	_gizmo_clip = null
+	_ghost.clear()
+	if dir != Vector3i.ZERO:
+		var n := session.move_selection(dir)
+		hud.flash("移动 %d 体素" % n if n > 0 else "移不动（越界 / 没有体素）")
+	_refresh_hud()
+
+
+func _gizmo_dir() -> Vector3i:
+	var d := Vector3i.ZERO
+	match _gizmo_axis:
+		0:
+			d.x = _gizmo_delta
+		1:
+			d.y = _gizmo_delta
+		2:
+			d.z = _gizmo_delta
+	return d
+
+
+## 光标射线与所选轴直线的最近点参数（世界单位）。
+func _gizmo_param(screen: Vector2) -> float:
+	var c := _move_gizmo.center_global()
+	var u := _move_gizmo.axis_world(_gizmo_axis).normalized()
+	var ro := camera.project_ray_origin(screen)
+	var rd := camera.project_ray_normal(screen)
+	var w0 := c - ro
+	var b := u.dot(rd)
+	var d := u.dot(w0)
+	var e := rd.dot(w0)
+	var den := 1.0 - b * b
+	if absf(den) < 1e-6:
+		return 0.0
+	return (b * e - d) / den
 
 
 ## 当前材质的基色（越界 / 世界未就绪时退回白色，预览不因为一次边界态而画不出来）。

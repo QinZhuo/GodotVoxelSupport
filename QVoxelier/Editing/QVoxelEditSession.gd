@@ -34,6 +34,9 @@ var tool := QVoxelBrushTool.new()
 ## 而无头测试也就没法构造"先框一块再复制"这类场景。
 var selection := QVoxelSelection.new()
 
+## 快速选区的连通判据：true = 同材质（颜色相连，默认）；false = 任意实心（几何相连）。
+var select_by_color := true
+
 ## 剪贴板（复制 / 剪切 / 粘贴的载体）。跨对象、跨会话共用一份 —— 这就是"复制到另一个模型"。
 var clipboard := QVoxelClipboard.new()
 
@@ -45,6 +48,8 @@ signal selection_changed
 var request_render_update := Callable()
 
 var _cmd: QVoxelEditCommand = null
+## 当前手势累积的待写格（松手时一次性提交）。拖动期间不改对象，避免"踩着自己往上画"。
+var _stroke_cells: Array[Vector3i] = []
 
 
 # 装配
@@ -111,6 +116,7 @@ func begin(pick: QVoxelBrushTool.Pick) -> bool:
 	# 落笔的帧在**按下时**定死并写进命令：手势期间即使用户切帧（面板不会，但接口允许），
 	# 这一笔的撤销也仍然只回滚它真正改过的那一帧（见 QVoxelEditCommand.frame）。
 	_cmd = QVoxelEditCommand.begin(object, edit_frame())
+	_stroke_cells.clear()
 	return true
 
 
@@ -149,21 +155,26 @@ func edit_frame() -> int:
 	return clampi(object.active_frame, 0, object.frames.size() - 1)
 
 
-## 拖动。返回本次写入的格数（live 工具 > 0，span 工具恒 0 —— 它们松手才产出）。
+## 拖动：**只累积待写的格，不碰对象 / 显示层**。
+## 【为什么不在拖动中写】若边拖边写，刚画下的体素会立刻成为下一段拾取的"碰撞体"——同一笔里
+## 画笔会踩着自己往上叠，越画越乱。整笔在松手时一次性提交，则整笔都作用在**落笔前的那张面**上。
+## 拖动中的即时反馈由悬停预览（ghost）承担，用户照样看得见笔迹。
 func drag(pick: QVoxelBrushTool.Pick) -> int:
+	if tool.selection_mode():
+		# 选区手势没有命令，但**端点必须跟着拖动更新** —— 否则 release 拿到的一直是按下那一刻的
+		# 锚点，框永远是 1×1×1、移动永远是零位移。tool.drag 只更新端点、不产格。
+		tool.drag(pick)
+		return 0
 	if _cmd == null:
 		return 0
-	# 材质必须在 tool.drag() 之前取：release() 内部会 cancel()，那之后 _pick 就没了。
-	var mat := tool.material()
-	var n := _apply(_cmd, tool.drag(pick), mat)
-	if n > 0:
-		# 拖动中的即时反馈：显示层已就地把这批格改掉，唤醒渲染器走增量重建。
-		# 唤醒放在这里而不是 _apply 里 —— 收尾那次由 _refresh 负责，免得一笔唤醒两回。
-		_wake_renderer()
-	return n
+	var cells := tool.drag(pick)
+	if cells.is_empty():
+		return 0
+	_stroke_cells.append_array(cells)
+	return cells.size()
 
 
-## 松手：封口成一条命令并入栈。返回"是否真的改了东西" —— false 时这一笔不占撤销单位。
+## 松手：把整笔（拖动累积 + 松手增量）一次性写进对象并封口入栈。返回是否真的改了东西。
 func release() -> bool:
 	if tool.selection_mode():
 		# 角点必须在 tool.release() **之前**取：那一下会把手势状态清掉（选区手势的产物为空，
@@ -174,43 +185,52 @@ func release() -> bool:
 		if corners.size() < 2:
 			return false
 		if mode == QVoxelBrushTool.Mode.SELECT:
+			# 没拖动 = 单击 → 快速选区（把与命中格连通的那一块自动框出来）；
+			# 拖动 = 画一个矩形框选区。两种都在同一个「选择」工具里。
+			if corners[0] == corners[1]:
+				return _select_connected(corners[0])
 			return _set_box_selection(corners[0], corners[1])
+		# 移动：没有选区时 move_selection 会默认整体（"直接拖一下就搬走全部"）。
 		return move_selection(corners[1] - corners[0]) > 0
 	if _cmd == null:
 		return false
 	var cmd := _cmd
+	# 材质必须在 tool.release() 之前取（它会 cancel 掉手势状态）。
 	var mat := tool.material()
-	# 命令是显式传进去的，不是从 _cmd 读的：此刻 _cmd 必须尽早清空（重入保护），
-	# 而"写哪条命令"和"手势是否还活跃"是两件事 —— 让它们共用 _cmd 就会出现"先清空后写入 = 什么都没写"。
-	_apply(cmd, tool.release(), mat)
+	_stroke_cells.append_array(tool.release())
 	_cmd = null
+	_write_cells(cmd, _stroke_cells, mat)
+	_stroke_cells.clear()
 	if not cmd.commit():
-		# 空手势（点了一下但没改到任何格）：对象本来就没变，不该占一次撤销。
-		# 显示层的镜像也只在真有写入时才做，故此处两边都干净。
 		return false
 	history.push(cmd)
 	_refresh(cmd.dirty_bounds())
 	return true
 
 
-## 作废当前手势（Esc / 失焦）。
+## 作废当前手势（Esc / 失焦）。拖动期间没写对象，故只需丢掉待提交的格，无需回滚。
 func cancel() -> void:
-	var cmd := _cmd
 	_cmd = null
+	_stroke_cells.clear()
 	tool.cancel()
-	if cmd == null or cmd.dirty_bounds().is_empty():
-		return  # 还没写过任何格：对象没被碰过，不必回滚也不必刷新
-	# 【必须回滚，而不是只丢命令】live 工具在拖动期间已经改了对象；只丢命令的话，那批改动
-	# 就留在数据里而撤销栈里没有对应记录 —— 从此永远撤不掉，且下次"新建"会把它当成既有内容。
-	cmd.undo()
-	# 回滚也是"对象又变了" → 显示层同样按权威重新取数（镜像写过的块正好都在这个范围内）。
-	_refresh(cmd.dirty_bounds())
 
 
 ## 悬停预览：返回"若现在按下会画出哪些格"。与落笔共用工具内的同一条形状分派 ——
 ## 所见即所画由构造保证，不靠预览与落笔两处对齐。
 func hover(pick: QVoxelBrushTool.Pick) -> Array[Vector3i]:
 	return tool.hover(pick)
+
+
+## 手势中的完整预览：已累积的待写格 + 当前这一段的增量。
+## 【为什么需要它】拖动期间不写对象（避免踩着自己画），于是显示层看不到笔迹；把"累积 + 增量"
+## 一起交给预览，用户拖动时能看到**完整笔迹**，松手前就与落盘结果一致。
+func preview_cells(pick: QVoxelBrushTool.Pick) -> Array[Vector3i]:
+	var seg := tool.hover(pick)
+	if _cmd == null or _stroke_cells.is_empty():
+		return seg
+	var out := _stroke_cells.duplicate()
+	out.append_array(seg)
+	return out
 
 
 ## 是否有进行中的手势。选区手势没有命令，故不能只看 _cmd —— 否则"正在框选"会被报成空闲。
@@ -289,8 +309,11 @@ func paste(at: Vector3i) -> int:
 ## 【源与目标必须写进同一条命令】否则"挖空"与"落位"会变成两次独立撤销 —— 用户按一次 Ctrl+Z
 ## 只回滚一半，剩下的半截留在画面上，看着像撤销坏了。
 func move_selection(delta: Vector3i) -> int:
-	if object == null or selection.is_empty() or delta == Vector3i.ZERO:
+	if object == null or delta == Vector3i.ZERO:
 		return 0
+	# 没有选区时默认整体（"直接拖一下 / 点一下轴，就搬走全部体素"）。
+	if selection.is_empty():
+		_set_selection(QVoxelSelection.all(object.grid_size))
 	var clip := QVoxelClipboard.capture(selection, _material_at)
 	if clip.is_empty():
 		return 0
@@ -379,30 +402,20 @@ func rebuild() -> void:
 
 # 内部
 
-## 把一批格写进**两个**账本：对象（权威，撤销要快照）与显示层（镜像，为了即时反馈）。
-## 返回真正改变的格数（两个调用方据此决定要不要唤醒渲染器）。
-## 【为什么要镜像，而不是每帧重跑一次求值】拖动中若每帧都作废生成器的体积，就是每帧一次
-## 全量求值（手绘层是 obj.to_volume() 的整块密集拷贝，还叠上整条修改器链）—— 大模型上必卡。
-## 镜像只改被碰过的 chunk 缓冲并标记重建，代价与笔画长度成正比，与模型大小无关。
-## 【镜像的账目为什么不会污染真值】镜像走的 `set_voxels` 会标记"待写盘"（PERSIST），
-## 但松手时的 `_refresh` 会对同一批 chunk 调 `invalidate_chunk_source`，它把 PERSIST 清掉
-## 并丢弃缓冲 → 下次取数重新按"流 > 生成器"读入，于是拿回的是**权威**内容。
-## 换句话说：镜像只活在"这一笔还没结束"的窗口里。（该窗口内唯一能写盘的时机是显式
-## `data.flush()`，编辑器只在存盘时调它，而存盘不会发生在拖动中。）
-func _apply(cmd: QVoxelEditCommand, cells: Array[Vector3i], mat: int) -> int:
+## 把整笔的格写进对象（权威）。显示层不在这里镜像 —— 松手后由 _refresh 按权威重新取数。
+func _write_cells(cmd: QVoxelEditCommand, cells: Array[Vector3i], mat: int) -> int:
 	if cmd == null or cells.is_empty():
 		return 0
 	var written := 0
 	for c in cells:
 		if cmd.set_voxel(c.x, c.y, c.z, mat):
 			written += 1
-	if written <= 0:
-		# 一格都没真变（刷了同一种颜色）：显示层不必跟着重建。
-		return 0
-	if data != null:
-		# notify=false：唤醒交给本类的回调，刷新时机只有一处（渲染器另有每帧限流）。
-		data.set_voxels(cells, mat, false)
 	return written
+
+
+## 供移动预览用：把当前选区里的体素抓成剪贴板（相对选区下角 + 材质）。
+func capture_selection() -> QVoxelClipboard:
+	return QVoxelClipboard.capture(selection, _material_at)
 
 
 ## 显示层的材质读取（0 = 空）。选区与剪贴板的取数**一律走显示层**：用户框的是他看得见的东西，
@@ -428,6 +441,40 @@ func _set_box_selection(a: Vector3i, b: Vector3i) -> bool:
 	if hi.x < lo.x or hi.y < lo.y or hi.z < lo.z:
 		return false
 	var sel := QVoxelSelection.from_corners(lo, hi)
+	if sel.equals(selection):
+		return false
+	_set_selection(sel)
+	return true
+
+
+## 快速选区：从 seed 出发，把**连通**的体素整块选中（逐格集合，不是包围盒）。
+## 判据由 select_by_color 决定：
+##    true（默认）= 颜色相连（只收同材质的格，紧贴但异色的一块不会被吞进来）；
+##    false       = 几何相连（见实心就收，跨颜色也连）。
+func _select_connected(seed: Vector3i) -> bool:
+	if object == null:
+		return false
+	var want := _material_at(seed)
+	if want <= 0:
+		return false
+	var g := object.grid_size
+	var visited := {}
+	var stack: Array[Vector3i] = [seed]
+	var cells: Array[Vector3i] = []
+	while not stack.is_empty():
+		var p: Vector3i = stack.pop_back()
+		if visited.has(p):
+			continue
+		if p.x < 0 or p.y < 0 or p.z < 0 or p.x >= g.x or p.y >= g.y or p.z >= g.z:
+			continue
+		var m := _material_at(p)
+		if m <= 0 or (select_by_color and m != want):
+			continue
+		visited[p] = true
+		cells.append(p)
+		for d in QVoxelBrushGeometry.neighbors6():
+			stack.append(p + d)
+	var sel := QVoxelSelection.from_cells(cells)
 	if sel.equals(selection):
 		return false
 	_set_selection(sel)
