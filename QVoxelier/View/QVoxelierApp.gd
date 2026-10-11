@@ -1540,9 +1540,8 @@ func open_project(path: String) -> bool:
 		hud.flash("这个工程里没有可编辑的对象：%s" % path.get_file())
 		return false
 	_install(loaded, obj)
-	# .vox 只是"导入来编辑"：不把工程路径设成它，否则 Ctrl+S 会拿 .qvx 字节覆盖源文件
-	# （保存 → 另存为 .qvx 才是正确归宿）。.qvx 则记住路径，Ctrl+S 直接覆盖。
-	_sess.project_path = "" if QVoxelProject.is_vox_path(path) else path
+	# 记住路径：Ctrl+S 直接**存回原文件**（.vox 就存回 .vox，.qvx 就存回 .qvx）。
+	_sess.project_path = path
 	_sess.clear_dirty()
 	_update_title()
 	var total := loaded.all_models().size()
@@ -1551,7 +1550,8 @@ func open_project(path: String) -> bool:
 	return true
 
 
-## 保存到当前工程文件；还没存过盘就转"另存为"。
+## 保存到当前文件；还没存过盘就转"另存为"。按扩展名分派：`.vox` 存回 MagicaVoxel 格式，
+## `.qvx` 存工程。于是"打开 .vox → 改 → Ctrl+S"直接覆盖那个 .vox。
 func save_project() -> void:
 	if _stroke:
 		session.cancel()
@@ -1559,7 +1559,10 @@ func save_project() -> void:
 	if _sess.project_path.is_empty():
 		save_project_as()
 		return
-	_write_project(_sess.project_path)
+	if QVoxelProject.is_vox_path(_sess.project_path):
+		_write_vox(_sess.project_path)
+	else:
+		_write_project(_sess.project_path)
 
 
 ## 另存为：弹文件对话框，默认文件名取世界名。
@@ -1577,6 +1580,24 @@ func _write_project(path: String) -> bool:
 	_sess.clear_dirty()
 	_update_title()
 	hud.flash("已保存 %s" % path.get_file())
+	return true
+
+
+## 存回 `.vox`：世界 → 结构保留的 VoxAsset → MagicaVoxel 文件。
+func _write_vox(path: String) -> bool:
+	var asset := VoxAsset.from_world(world)
+	if not asset.fits_magica():
+		var box := asset.box()
+		hud.flash("未保存：世界盒 %d×%d×%d 超过 MagicaVoxel 的 %d 上限（超出部分会被截掉）"
+				% [box.x, box.y, box.z, VoxAccess.MODEL_LIMIT])
+		return false
+	var err := VoxAccess.Save(path, asset)
+	if err != OK:
+		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
+		return false
+	_sess.clear_dirty()
+	_update_title()
+	hud.flash("已保存 %s（%d 体素）" % [path.get_file(), asset.voxel_count()])
 	return true
 
 

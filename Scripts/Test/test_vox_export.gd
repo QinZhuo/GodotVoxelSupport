@@ -182,6 +182,37 @@ func test_header_and_out_of_range_guard() -> void:
 	f.close()
 
 
+# ⑤ 规范兼容：LAYR 结尾必须有 reserved=-1（否则 MagicaVoxel 块流错位、读不出模型）
+
+func test_layr_has_reserved_field() -> void:
+	var world := QVoxelWorld.create_empty()
+	world.add_material(Color.RED)
+	var g := world.create_group("L")
+	var m := world.create_model("m", Vector3i(4, 4, 4), g)
+	m.set_voxel(0, 0, 0, 1)
+	var path := TEST_DIR + "/fmt.vox"
+	assert_eq(_save(path, VoxAsset.from_world(world)), OK, "应能写出")
+	var f := FileAccess.open(path, FileAccess.READ)
+	assert_true(f != null, "文件应存在")
+	if f == null:
+		return
+	var bytes := f.get_buffer(f.get_length())
+	f.close()
+	# 直接扫 "LAYR" 的 4 个 ASCII 字节（块头 id），再按它自己的 length 定位内容结尾。
+	var idx := -1
+	for i in range(bytes.size() - 4):
+		if bytes[i] == 76 and bytes[i + 1] == 65 and bytes[i + 2] == 89 and bytes[i + 3] == 82:
+			idx = i
+			break
+	assert_true(idx >= 0, "应写出 LAYR 块")
+	if idx < 0:
+		return
+	var size := bytes.decode_u32(idx + 4)
+	var content_end := idx + 12 + size
+	assert_eq(bytes.decode_u32(content_end - 4), 0xFFFFFFFF,
+			"LAYR 结尾必须是 reserved=-1（否则 MagicaVoxel 解析错位）")
+
+
 # 夹具
 
 func _build_asset() -> VoxAsset:

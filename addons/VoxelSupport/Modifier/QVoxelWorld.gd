@@ -83,6 +83,33 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 			var n := _node_from_entry(e, doc, bs)
 			if n != null:
 				w.nodes.append(n)
+	# 【纯体素文件 / NODE 未引用】没有 NODE 块（或 NODE 里没引用某些 VXEL/FRAM）时，为每个
+	# "没被摆放的"体素源补一个顶层模型 —— 否则像 `demo/samples/*.qvx` 这种只有 VXEL 的文件
+	# 会导入成空世界（编辑器打不开）。与 `VoxAsset.check_nodes` 对 `.vox` 的处置同一思路。
+	var used := {}
+	for m in w.all_models():
+		used[m.model_id] = true
+	var missing: Array = []
+	for mid in doc.model_ids():
+		if not used.has(int(mid)):
+			missing.append(int(mid))
+	for mid in doc.frame_model_ids():
+		if not used.has(int(mid)):
+			missing.append(int(mid))
+	missing.sort()
+	for mid in missing:
+		var m := QVoxelModel.new()
+		m.model_id = mid
+		m.block_size = bs
+		m.node_name = "Model %d" % mid
+		var frames: Variant = doc.model_frames(mid)
+		if frames is Array and not (frames as Array).is_empty():
+			m.frames = _frames_of_array(frames)
+		else:
+			var blocks: Variant = doc.model_blocks(mid)
+			m.blocks = blocks if blocks is Dictionary else {}
+		m.grid_size = _size_of_entry({}, m, bs)
+		w.nodes.append(m)
 	return w
 
 

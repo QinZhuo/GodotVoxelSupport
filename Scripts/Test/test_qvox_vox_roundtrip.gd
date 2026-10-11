@@ -124,6 +124,54 @@ func test_material_color_roundtrip() -> void:
 
 # ⑤ FRAM 帧动画经 .qvx 往返
 
+## 体素动画：世界（FRAM，多帧）→ .vox（nSHP 多帧）→ 世界（FRAM），帧数/每帧体素一致。
+func test_world_animation_to_vox_roundtrip() -> void:
+	_ensure_dir(TMP_DIR)
+	var vox := VoxAsset.from_asset("res://demo/deer.vox")
+	if vox == null:
+		return
+	var w := vox.to_world()
+	var out := TMP_DIR + "/anim.vox"
+	assert_eq(VoxAccess.Save(out, VoxAsset.from_world(w)), OK, "应能写出 .vox")
+	var back := VoxAsset.from_asset(out)
+	assert_true(back != null, "应能读回")
+	if back == null:
+		return
+	var w2 := back.to_world()
+	var anim: QVoxelModel = null
+	for m in w2.all_models():
+		if m.is_animated():
+			anim = m
+	assert_true(anim != null, "体素动画应经 .vox 保留")
+	if anim == null:
+		return
+	assert_eq(anim.frame_count(), 4, "4 帧")
+	for k in anim.frame_count():
+		anim.active_frame = k
+		var got := QVoxelEvalEngine.evaluate_world(w2, QVoxelEvalContext.new()).solid_count()
+		var want := vox.get_voxels(k).size()
+		assert_eq(got, want, "第 %d 帧体素数应与原始 .vox 一致" % k)
+
+func test_vox_voxel_animation_import() -> void:
+	var vox := VoxAsset.from_asset("res://demo/deer.vox")
+	assert_true(vox != null, "应能读入 deer.vox")
+	if vox == null:
+		return
+	var w := vox.to_world()
+	var anim: QVoxelModel = null
+	for m in w.all_models():
+		if m.is_animated():
+			anim = m
+	assert_true(anim != null, "deer 的 nSHP 多帧应导入成动画模型（FRAM）")
+	if anim == null:
+		return
+	assert_eq(anim.frame_count(), 4, "deer 应有 4 帧")
+	for k in anim.frame_count():
+		anim.active_frame = k
+		var got := QVoxelEvalEngine.evaluate_world(w, QVoxelEvalContext.new()).solid_count()
+		var want := vox.get_voxels(k).size()
+		assert_eq(got, want, "deer 第 %d 帧体素数应与 .vox 取景一致" % k)
+
 func test_fram_qvx_roundtrip() -> void:
 	var w := QVoxelWorld.create_empty()
 	var red := w.add_material(Color.RED)
@@ -144,6 +192,30 @@ func test_fram_qvx_roundtrip() -> void:
 	assert_eq(m2.get_frame_block(1, Vector3i.ZERO)[QVoxelSpec.index_in_block(Vector3i(3, 3, 3), m2.block_size)], red, "第 1 帧体素")
 	assert_eq(m2.anim_fps, 8, "帧率")
 	assert_false(m2.anim_loop, "循环标志")
+
+
+# ⑥ 无 NODE 的纯 VXEL `.qvx`（如 demo/samples）也能导入出模型
+
+func test_qvx_without_node_imports_models() -> void:
+	var doc := QVoxelFile.QVoxelDocument.new()
+	doc.head = {
+		"qvox": QVoxelSpec.VERSION,
+		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		"block_size": 32, "up_axis": "y",
+	}
+	doc.materials = [
+		{"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0, "e_r": 0, "e_g": 0, "e_b": 0},
+		{"rgba": 0xFF0000FF, "metal": 0, "rough": 0, "hardness": 0, "mass": 0, "e_r": 0, "e_g": 0, "e_b": 0},
+	]
+	var buf := PackedInt32Array()
+	buf.resize(32 * 32 * 32)
+	buf[0] = 1
+	doc.models = {0: {Vector3i.ZERO: buf}}
+	var w := QVoxelWorld.from_document(doc)
+	assert_eq(w.all_models().size(), 1, "无 NODE 的纯 VXEL 文件应导入出模型")
+	if w.all_models().size() == 1:
+		assert_eq(w.all_models()[0].model_id, 0)
+		assert_eq(w.all_models()[0].count_solid(), 1)
 
 
 # 夹具

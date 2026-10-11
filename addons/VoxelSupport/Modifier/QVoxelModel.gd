@@ -248,6 +248,20 @@ func apply_frame_box(frame: int, lo: Vector3i, dims: Vector3i, data: PackedInt32
 ## 已分配块，成本与块数成正比 —— 与 _write_box 同一条思路，公式也刻意保持同形。
 ## to_volume() 是本函数在整块范围上的特例，于是"稀疏 → 密集"全项目只有一份实现。
 func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
+	return _read_box_table(source_blocks(), lo, dims)
+
+
+## 指定帧的整块密集体积（导出逐帧 / 快照用）。静态模型恒等于 `to_volume()`。
+func frame_volume(frame: int) -> PackedInt32Array:
+	if frames.is_empty():
+		return to_volume()
+	var f := frame_at(frame)
+	if f == null:
+		return PackedInt32Array()
+	return _read_box_table(f.blocks, Vector3i.ZERO, grid_size)
+
+
+func _read_box_table(src_blocks: Dictionary, lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 	var out := PackedInt32Array()
 	if dims.x <= 0 or dims.y <= 0 or dims.z <= 0:
 		return out
@@ -255,7 +269,6 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 	var bs := block_size
 	var dx := dims.x
 	var dxy := dx * dims.y
-	var src_blocks := source_blocks()
 	var b0 := QVoxelSpec.block_of(lo, bs)
 	var b1 := QVoxelSpec.block_of(lo + dims - Vector3i.ONE, bs)
 	for bz in range(b0.z, b1.z + 1):

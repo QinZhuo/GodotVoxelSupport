@@ -29,9 +29,10 @@ static func from_asset(path: String) -> VoxAsset:
 ## 【为什么不再拍平成一块】旧实现把整世界合成一个模型（画面一致但结构尽失）。现在编辑器
 ## 自身已支持"每个模型独立尺寸 + 自由摆放 + 组嵌套"，导出自然应把这些结构写回 `.vox`
 ## —— 图层（LAYR）与组一一对应、摆放进 nTRN，正是 `.vox` 的分层/场景图语义。
-static func from_world(world: QVoxelWorld, _ctx: QVoxelEvalContext = null) -> VoxAsset:
+static func from_world(world: QVoxelWorld, _ctx: QVoxelEvalContext = null,
+		flatten_animation := false) -> VoxAsset:
 	var out := VoxAsset.new()
-	out._build_structured(world)
+	out._build_structured(world, flatten_animation)
 	return out
 
 
@@ -39,7 +40,7 @@ static func from_world(world: QVoxelWorld, _ctx: QVoxelEvalContext = null) -> Vo
 ## 【节点图】root nTRN(0) → nGRP(1) → 每个顶层节点一个 nTRN 包装（携带变换与图层）→ 其子树。
 ## 模型是 nSHP（只带 model_id），摆放挂在包它的 nTRN 上 —— nSHP 的帧首字段是 model_id，装不下
 ## 位置/旋转（见 VoxAccess._shape_frames 与 _write_transform 的分工）。
-func _build_structured(world: QVoxelWorld) -> void:
+func _build_structured(world: QVoxelWorld, flatten_animation := false) -> void:
 	# 材质：索引 0 恒为空；1..255 从世界 MATE 逐条解释（与 from_result 同一套摆放契约）。
 	materials.resize(256)
 	for i in range(1, 256):
@@ -51,11 +52,6 @@ func _build_structured(world: QVoxelWorld) -> void:
 	for i in range(1, mini(256, world.materials.size())):
 		if world.materials[i] is Dictionary:
 			materials[i] = VoxelMaterial.from_mate(world.materials[i], i)
-	# 模型：每个 QVoxelModel 一块（本地内容 + Z 映射；摆放交给 nTRN）。
-	var index := {}
-	for m in world.all_models():
-		index[m] = models.size()
-		models.append(_model_from_volume(m.grid_size, m.to_volume()))
 	# 图层：每个顶层组一条 LAYR（组名 = 图层名，可见性 = `_hidden` 的反）。
 	var layer_of := {}
 	var layer_id := 0
@@ -68,7 +64,7 @@ func _build_structured(world: QVoxelWorld) -> void:
 			layers[layer_id] = l
 			layer_of[top] = layer_id
 			layer_id += 1
-	# 场景图。
+	# 场景图（模型在 _emit_node 里顺带产出，动画模型会产出多块）。
 	var next := [2]
 	var root := VoxelNode.new()
 	root.id = 0
@@ -77,36 +73,51 @@ func _build_structured(world: QVoxelWorld) -> void:
 	topgrp.id = 1
 	for top in world.nodes:
 		if top != null:
-			topgrp.child_nodes.append(_emit_node(top, int(layer_of.get(top, -1)), next, index))
+			topgrp.child_nodes.append(_emit_node(top, int(layer_of.get(top, -1)), next, flatten_animation))
 	nodes[0] = root
 	nodes[1] = topgrp
 
 
 ## 递归把一个 QVoxelNode 写进节点图，返回其外层 nTRN 的 id（包装变换与图层）。
-func _emit_node(node: QVoxelNode, layer: int, next: Array, index: Dictionary) -> int:
+## 模型顺带产出 VoxelModel（动画模型每帧一块），因此不需要预建 model 索引。
+## `flatten` = 动画模型只导出**当前帧**（逐帧烘焙用），否则导出多帧 nSHP。
+func _emit_node(node: QVoxelNode, layer: int, next: Array, flatten := false) -> int:
 	if node.is_model():
-		var grid := (node as QVoxelModel).grid_size
+		var qm := node as QVoxelModel
+		var grid := qm.grid_size
 		var shp := VoxelNode.new()
 		shp.id = next[0]
 		next[0] += 1
-		var f := VoxelFrame.new()
-		f.model_id = int(index[node])
-		shp.frames[0] = f
+		if qm.is_animated() and not flatten:
+			# 体素动画：每帧一个 VoxelModel，nSHP 逐帧引用（= `.vox` 的 nSHP 多帧）。
+			for k in qm.frame_count():
+				var fk := VoxelFrame.new()
+				fk.model_id = models.size()
+				shp.frames[k] = fk
+				models.append(_model_from_volume(grid, qm.frame_volume(k)))
+		else:
+			var f0 := VoxelFrame.new()
+			f0.model_id = models.size()
+			shp.frames[0] = f0
+			models.append(_model_from_volume(grid, qm.to_volume()))
 		nodes[shp.id] = shp
 		# 抵消 `.vox` 的"按尺寸居中 + Z 平移"约定，使导出的 `.vox` 渲染（get_voxels）与世界求值
 		# 逐格一致：get_voxels 摆的是 `node_xf * (key + offset)`，key = 局部坐标 + e（e = 0,0,-(gz-1)），
 		# 故令 node_xf = W ∘ T(-(e + centering))，导入时 base(=e+minp) 会抵消掉，结果 = W * 局部坐标。
 		var e := Vector3(0, 0, -float(grid.z - 1))
-		var xf := node.local_transform * Transform3D(Basis.IDENTITY, -(e + _centering(grid)))
-		return _emit_wrapper(shp.id, xf, layer, next)
+		var off := Transform3D(Basis.IDENTITY, -(e + _centering(grid)))
+		var tracks: Array[Transform3D] = []
+		for t in node.transform_tracks:
+			tracks.append(t * off)
+		return _emit_wrapper(shp.id, node.local_transform * off, layer, next, tracks, qm.node_name)
 	var grp := VoxelNode.new()
 	grp.id = next[0]
 	next[0] += 1
 	for c in (node as QVoxelGroup).child_nodes:
 		if c != null:
-			grp.child_nodes.append(_emit_node(c, -1, next, index))
+			grp.child_nodes.append(_emit_node(c, -1, next, flatten))
 	nodes[grp.id] = grp
-	return _emit_wrapper(grp.id, node.local_transform, layer, next)
+	return _emit_wrapper(grp.id, node.local_transform, layer, next, node.transform_tracks, node.node_name)
 
 
 ## `.vox` 对模型的居中偏移（VoxAsset.VoxelModel.size setter 的同一算法）。
@@ -114,14 +125,21 @@ static func _centering(grid: Vector3i) -> Vector3:
 	return Vector3(-floori(grid.x / 2.0), -floori(grid.y / 2.0), floori(grid.z / 2.0))
 
 
-## 造一个"包装节点"：单子 nTRN，携带变换与 layerId（VoxAccess 据此写 nTRN）。
-func _emit_wrapper(child_id: int, xf: Transform3D, layer: int, next: Array) -> int:
+## 造一个"包装节点"：单子 nTRN，携带变换、layerId 与名字（VoxAccess 据此写 nTRN）。
+## `tracks` 非空时写成 nTRN 的**多帧变换**（摆放动画）；否则只写第 0 帧。
+func _emit_wrapper(child_id: int, xf: Transform3D, layer: int, next: Array,
+		tracks: Array[Transform3D] = [], node_name := "") -> int:
 	var trn := VoxelNode.new()
 	trn.id = next[0]
 	next[0] += 1
 	trn.child_nodes.append(child_id)
 	trn.layerId = layer
-	trn.frames[0] = _frame_of_transform(xf)
+	trn.name = node_name
+	if tracks.is_empty():
+		trn.frames[0] = _frame_of_transform(xf)
+	else:
+		for k in tracks.size():
+			trn.frames[k] = _frame_of_transform(tracks[k])
 	nodes[trn.id] = trn
 	return trn.id
 
@@ -343,8 +361,23 @@ func _build_world_node(w: QVoxelWorld, id: int, parent: QVoxelGroup, carry: Tran
 			_build_world_node(w, int(c), parent, xf)
 		return
 	var has_model := _has_model_frame(n)
+	# 命名包装（nTRN 带 name、单子且子是形状）：名字并进模型，不单独成组 —— 于是"模型名"能往返。
+	if not has_model and not n.name.is_empty() and kids.size() == 1:
+		var cid := int(kids[0])
+		var c0: VoxelNode = nodes.get(cid)
+		if c0 != null and _has_model_frame(c0) and _child_ids(cid).is_empty():
+			var cxf := xf * _node_xf(c0)
+			if _model_frame_count(c0) > 1:
+				_make_world_animated_model(w, c0, cxf, parent, n.name)
+			else:
+				_make_world_model(w, models[c0.frames[0].model_id], cxf, parent, n.name)
+			return
 	if has_model and kids.is_empty():
-		_make_world_model(w, models[n.frames[0].model_id], xf, parent)
+		# 多帧 nSHP（同一形状逐帧换模型 = .vox 的**体素动画**）→ QVoxelModel 的 FRAM 帧。
+		if _model_frame_count(n) > 1:
+			_make_world_animated_model(w, n, xf, parent)
+		else:
+			_make_world_model(w, models[n.frames[0].model_id], xf, parent)
 		return
 	if not has_model and kids.is_empty():
 		return  # 空壳节点：没有内容
@@ -365,17 +398,68 @@ func _build_world_node(w: QVoxelWorld, id: int, parent: QVoxelGroup, carry: Tran
 
 
 ## 一个形状引用 → QVoxelModel（本地内容 + 紧致盒重定位；摆放 = 形状节点变换 × 居中/重定位平移）。
-func _make_world_model(w: QVoxelWorld, m: VoxelModel, xf: Transform3D, parent: QVoxelGroup) -> void:
+func _make_world_model(w: QVoxelWorld, m: VoxelModel, xf: Transform3D, parent: QVoxelGroup,
+		node_name := "") -> void:
 	var bounds := _voxel_bounds(m.voxels)
 	var grid: Vector3i = bounds["size"]
 	var base: Vector3i = bounds["min"]
-	var qm := w.create_model("", grid, parent)
+	var qm := w.create_model(node_name, grid, parent)
 	for pos: Vector3i in m.voxels:
 		var c: Vector3i = pos - base
 		qm.set_voxel(c.x, c.y, c.z, m.voxels[pos])
 	# world = xf * (voxel + offset)，局部坐标 c = voxel - base ⇒
 	# world = (xf ∘ T(base+offset)) * c。整数平移 ⇒ 旋转仍保整数。
 	qm.local_transform = xf * _offset_shift(m, base)
+
+
+## 该形状节点有几帧带模型（>1 = .vox 体素动画）。
+func _model_frame_count(n: VoxelNode) -> int:
+	var c := 0
+	for k in n.frames:
+		var f: VoxelFrame = n.frames[k]
+		if f != null and f.model_id >= 0 and f.model_id < models.size():
+			c += 1
+	return c
+
+
+## 多帧 nSHP（逐帧换模型）→ QVoxelModel 的 **FRAM 帧**：所有帧共用一个分辨率（各帧模型包围盒并集），
+## 摆放沿用形状节点变换 ×（第 0 帧模型的居中/重定位平移）。于是 `.vox` 的体素动画在编辑器里可播可编辑。
+func _make_world_animated_model(w: QVoxelWorld, n: VoxelNode, xf: Transform3D, parent: QVoxelGroup,
+		node_name := "") -> void:
+	var maxk := 0
+	for k in n.frames:
+		maxk = maxi(maxk, int(k))
+	var mids: Array[int] = []
+	for k in maxk + 1:
+		var f: VoxelFrame = n.frames.get(k)
+		mids.append(f.model_id if (f != null and f.model_id >= 0 and f.model_id < models.size()) else -1)
+	# 各帧模型内容的并集包围盒 → 共用分辨率。
+	var mn := Vector3i(2147483647, 2147483647, 2147483647)
+	var mx := Vector3i(-2147483648, -2147483648, -2147483648)
+	for mid in mids:
+		if mid < 0:
+			continue
+		var bb := _voxel_bounds(models[mid].voxels)
+		var bmin: Vector3i = bb["min"]
+		var bmax: Vector3i = bmin + (bb["size"] as Vector3i) - Vector3i.ONE
+		mn = Vector3i(mini(mn.x, bmin.x), mini(mn.y, bmin.y), mini(mn.z, bmin.z))
+		mx = Vector3i(maxi(mx.x, bmax.x), maxi(mx.y, bmax.y), maxi(mx.z, bmax.z))
+	var base := mn
+	var grid: Vector3i = mx - mn + Vector3i.ONE
+	var qm := w.create_model(node_name, grid, parent)
+	qm.make_animated()
+	for i in range(1, mids.size()):
+		qm.add_frame(QVoxelFrame.new(), i)
+	for idx in mids.size():
+		var mid := mids[idx]
+		if mid < 0:
+			continue
+		var m: VoxelModel = models[mid]
+		for pos: Vector3i in m.voxels:
+			var c: Vector3i = pos - base
+			qm.set_frame_voxel(idx, c.x, c.y, c.z, m.voxels[pos])
+	var first_mid := mids[0] if mids[0] >= 0 else 0
+	qm.local_transform = xf * _offset_shift(models[first_mid], base)
 
 
 ## 组名：节点自带名优先，其次图层名（无名图层给 "Layer N"），都没有则留空（用默认名）。

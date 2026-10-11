@@ -142,7 +142,9 @@ static func _plan_frames(world: QVoxelWorld, prefix: String, out: Array[Batch],
 	for f in count:
 		for m in restore:
 			m.active_frame = f
-		_add(out, taken, prefix, world.world_name() + FRAME_SUFFIX % f, VoxAsset.from_world(world))
+		# 逐帧烘焙 = 该帧的**静态**一块：动画模型只导出当前帧（flatten），不写多帧 nSHP。
+		_add(out, taken, prefix, world.world_name() + FRAME_SUFFIX % f,
+				VoxAsset.from_world(world, null, true))
 	# 游标是"正在看第几帧"的瞬态状态（见 QVoxelModel.active_frame）：烘完必须放回去，
 	# 否则用户会发现"导出之后画面停在最后一帧"。
 	for m in restore:
