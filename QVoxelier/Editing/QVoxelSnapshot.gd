@@ -117,6 +117,6 @@ static func describe(size: int, view: int, lens: int) -> String:
 	]
 
 
-## 落盘后的一句话（应用层出用户文案，与 QVoxelBake.summary 同一分工）。
+## 落盘后的一句话（应用层出用户文案）。
 static func summary(path: String, size: int) -> String:
 	return "已渲染 %d×%d → %s" % [size, size, path]

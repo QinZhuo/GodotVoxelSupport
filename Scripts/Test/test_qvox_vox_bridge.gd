@@ -10,11 +10,6 @@ extends TestCase
 ## 这是"两种格式显示一致"的可测代理。
 
 const SAMPLES_DIR := "res://demo"
-const TMP_DIR := "user://bridge_test"
-
-
-func cleanup() -> void:
-	_remove_dir(TMP_DIR)
 
 
 # ① 图层 ↔ 组
@@ -144,58 +139,6 @@ func test_demo_samples_parity() -> void:
 		assert_eq(got2, expected, "%s：.qvx 往返后体素数一致" % name)
 
 
-# ⑥ 世界 → .vox（结构保留）→ 读回 → 世界：逐格一致
-
-func test_world_vox_roundtrip_structured() -> void:
-	_ensure_dir(TMP_DIR)
-	var w := QVoxelWorld.create_empty()
-	var mat := w.add_material(Color.RED)
-	var g := w.create_group("layerA")
-	var a := w.create_model("A", Vector3i(8, 8, 8), g)
-	a.set_voxel(1, 1, 1, mat)
-	a.set_voxel(6, 0, 3, mat)
-	var b := w.create_model("B", Vector3i(4, 4, 4), g)
-	b.set_voxel(0, 0, 0, mat)
-	b.set_voxel(3, 3, 3, mat)
-	b.offset = Vector3i(20, 5, -3)
-	var c := w.create_model("C", Vector3i(2, 2, 2))
-	c.set_voxel(1, 1, 1, mat)
-
-	var asset := VoxAsset.from_world(w)
-	assert_eq(asset.models.size(), 3, "每个模型一块（结构保留）")
-	assert_eq(asset.layers.size(), 1, "一个顶层组 → 一条 LAYR")
-	assert_eq(asset.layers[0].name, "layerA", "图层名 = 组名")
-
-	var path := TMP_DIR + "/roundtrip.vox"
-	assert_eq(VoxAccess.Save(path, asset), OK, "应能写出")
-	var back := VoxAsset.from_asset(path)
-	assert_true(back != null, "应能读回")
-	if back == null:
-		return
-	var w2 := back.to_world()
-	assert_eq(w2.all_models().size(), 3, "读回后三个模型")
-	var grp: QVoxelGroup = null
-	for n in w2.nodes:
-		if n is QVoxelGroup and n.node_name == "layerA":
-			grp = n
-	assert_true(grp != null, "读回后有名为 layerA 的组")
-	if grp != null:
-		assert_eq(_count_models(grp), 2, "layerA 子树里两个模型")
-	# `.vox` 的 "nTRN 包 nGRP" 结构壳应在导入时被折叠 —— 不应出现匿名组。
-	for n in w2.all_nodes():
-		if n is QVoxelGroup:
-			assert_true(not n.node_name.is_empty(), "不应有匿名组（%s）" % n.display_name())
-
-	var s1 := _world_set(w)
-	var s2 := _world_set(w2)
-	assert_eq(s2.size(), s1.size(), "往返后体素总数一致")
-	var missing := 0
-	for k in s1:
-		if not s2.has(k):
-			missing += 1
-	assert_eq(missing, 0, "往返后每个世界坐标都能对上（差 %d）" % missing)
-
-
 ## ⑦ 编辑器：体素数据本地化（不含摆放），摆放由 world_transform 提供（渲染器承载）
 
 func test_editor_data_is_local() -> void:
@@ -312,31 +255,6 @@ func test_rotate_selection_in_model() -> void:
 	assert_true(m.get_voxel(0, 1, 0) > 0, "转满 360° 回到原位")
 
 
-func _count_models(group: QVoxelGroup) -> int:
-	var n := 0
-	for c in group.child_nodes:
-		if c is QVoxelModel:
-			n += 1
-		elif c is QVoxelGroup:
-			n += _count_models(c)
-	return n
-
-
-func _world_set(world: QVoxelWorld) -> Dictionary:
-	var res := QVoxelEvalEngine.evaluate_world(world, QVoxelEvalContext.new())
-	var out := {}
-	var gs := res.grid_size
-	var o := res.origin
-	var i := 0
-	for z in gs.z:
-		for y in gs.y:
-			for x in gs.x:
-				if res.volume[i] > 0:
-					out[Vector3i(o.x + x, o.y + y, o.z + z)] = true
-				i += 1
-	return out
-
-
 # 夹具
 
 ## 两个图层 + 两个单格模型 + 带位移的场景图。模型 size=1³ ⇒ 居中偏移为 0，摆放即帧位移。
@@ -424,22 +342,3 @@ func _list_vox(dir_path: String) -> Array:
 	out.sort()
 	return out
 
-
-func _ensure_dir(dir_path: String) -> void:
-	var abs := ProjectSettings.globalize_path(dir_path)
-	if not DirAccess.dir_exists_absolute(abs):
-		DirAccess.make_dir_recursive_absolute(abs)
-
-
-func _remove_dir(dir_path: String) -> void:
-	var dir := DirAccess.open(dir_path)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var name := dir.get_next()
-	while name != "":
-		if not dir.current_is_dir():
-			DirAccess.remove_absolute(ProjectSettings.globalize_path(dir_path.path_join(name)))
-		name = dir.get_next()
-	dir.list_dir_end()
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(dir_path))

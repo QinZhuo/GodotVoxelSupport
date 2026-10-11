@@ -15,16 +15,7 @@ signal new_requested
 signal open_requested
 signal save_requested
 signal save_as_requested
-## 导出成别的工具能读的格式（当前只有 `.vox`）。**与"保存"分开**：保存是"下次还能接着编辑"
-## （.qvx，含修改器链 / 材质 PBR / 相机），导出是"拿去用"（.vox，只剩烘出来的体素与调色板）。
-## 两件事的产物与失败原因都不同，合成一个按钮会让用户在"我到底存的是哪个"上犹豫。
-signal export_requested
-## 批量导出：按"范围"（整个世界 / 每个节点 / 每个模型 / 每个帧）一次产出多个 `.vox`。
-## 与"导出"分开而不是并进同一个按钮：单次导出是"挑个文件存下来"（一次交互、一个文件），
-## 批量是"挑个目录 + 挑范围 + 起前缀"（参数更多、产出多个），混在一起会让单次那件最常用的事
-## 每次都要先回答"我要不要批量"。
-signal export_batch_requested
-## 渲染（离屏出图，原「快照」）：与保存 / 导出同一层级的一个按钮。
+## 渲染（离屏出图，原「快照」）：与保存同一层级的一个按钮。
 signal render_requested
 signal undo_requested
 signal redo_requested
@@ -77,11 +68,7 @@ func _build() -> void:
 	row.add_child(_action(save_requested.emit, "保存（Ctrl+S）\n存成 .qvx 工程（保留修改器链与相机）",
 			"save", QVoxelUi.VARIATION_ACCENT))
 	row.add_child(_action(save_as_requested.emit, "另存（Ctrl+Shift+S）\n另存为新文件", "save_as"))
-	row.add_child(_action(export_requested.emit, "导出（Ctrl+E）\n导出为 MagicaVoxel 的 .vox，其它体素工具都能打开",
-			"export"))
-	row.add_child(_action(export_batch_requested.emit, "批量导出\n按范围一次产出多个 .vox：整个世界 / 每个节点 / 每个模型 / 每个帧",
-			"batch"))
-	# 渲染：离屏出一张干净 PNG（不带网格 / 选区 / 浮层），与保存 / 导出同一层级。
+	# 渲染：离屏出一张干净 PNG（不带网格 / 选区 / 浮层），与保存同一层级。
 	row.add_child(_action(render_requested.emit, "渲染\n把当前世界离屏渲成一张 PNG（可选视图 / 尺寸 / 透明背景）",
 			"render"))
 

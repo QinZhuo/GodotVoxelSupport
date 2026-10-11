@@ -175,16 +175,10 @@ var _frame_dur_cmd: QVoxelPropertyCommand
 
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
-var _export_dialog: FileDialog
 var _palette_import_dialog: FileDialog
 var _palette_export_dialog: FileDialog
 ## 快照落盘对话框（*.png）。与调色板导出同走自绘那套 —— 默认文件名由分组按视图名给出。
 var _snapshot_dialog: FileDialog
-## 批量导出的目标目录对话框：范围开关与命名前缀就挂在它自己的 vbox 里（见 _build_batch_options）。
-var _batch_dialog: FileDialog
-## 批量导出的范围（取值见 QVoxelBake.Scope）。选在对话框里，烘的时候才读。
-var _batch_scope := QVoxelBake.Scope.WORLD
-var _batch_prefix: LineEdit
 
 ## 滚轮 / 双指滑一格对应的平移像素量。
 const WHEEL_PAN_STEP := 48.0
@@ -196,7 +190,6 @@ const ACTION_BRUSH_DOWN := &"qvoxelier_brush_down"
 const ACTION_SAVE := &"qvoxelier_save"
 const ACTION_SAVE_AS := &"qvoxelier_save_as"
 const ACTION_OPEN := &"qvoxelier_open"
-const ACTION_EXPORT := &"qvoxelier_export"
 const ACTION_SELECT_ALL := &"qvoxelier_select_all"
 const ACTION_COPY := &"qvoxelier_copy"
 const ACTION_CUT := &"qvoxelier_cut"
@@ -260,8 +253,6 @@ func _build_ui() -> void:
 	_toolbar.open_requested.connect(request_open)
 	_toolbar.save_requested.connect(save_project)
 	_toolbar.save_as_requested.connect(save_project_as)
-	_toolbar.export_requested.connect(export_vox)
-	_toolbar.export_batch_requested.connect(export_vox_batch)
 	_toolbar.render_requested.connect(_toggle_render_popup)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
@@ -1149,8 +1140,6 @@ func _on_key(e: InputEventKey) -> void:
 		save_project()
 	elif _pressed(e, ACTION_OPEN):
 		request_open()
-	elif _pressed(e, ACTION_EXPORT):
-		export_vox()
 	elif _pressed(e, ACTION_SELECT_ALL):
 		_select_all()
 	elif _pressed(e, ACTION_COPY):
@@ -1550,19 +1539,16 @@ func open_project(path: String) -> bool:
 	return true
 
 
-## 保存到当前文件；还没存过盘就转"另存为"。按扩展名分派：`.vox` 存回 MagicaVoxel 格式，
-## `.qvx` 存工程。于是"打开 .vox → 改 → Ctrl+S"直接覆盖那个 .vox。
+## 保存到当前工程（`.qvx`）；还没存过盘、或当前是导入的 `.vox`（`.vox` 只支持导入、不写回）
+## 就转"另存为"。
 func save_project() -> void:
 	if _stroke:
 		session.cancel()
 		_stroke = false
-	if _sess.project_path.is_empty():
+	if _sess.project_path.is_empty() or QVoxelProject.is_vox_path(_sess.project_path):
 		save_project_as()
 		return
-	if QVoxelProject.is_vox_path(_sess.project_path):
-		_write_vox(_sess.project_path)
-	else:
-		_write_project(_sess.project_path)
+	_write_project(_sess.project_path)
 
 
 ## 另存为：弹文件对话框，默认文件名取世界名。
@@ -1583,69 +1569,8 @@ func _write_project(path: String) -> bool:
 	return true
 
 
-## 存回 `.vox`：世界 → 结构保留的 VoxAsset → MagicaVoxel 文件。
-func _write_vox(path: String) -> bool:
-	var asset := VoxAsset.from_world(world)
-	if not asset.fits_magica():
-		var box := asset.box()
-		hud.flash("未保存：世界盒 %d×%d×%d 超过 MagicaVoxel 的 %d 上限（超出部分会被截掉）"
-				% [box.x, box.y, box.z, VoxAccess.MODEL_LIMIT])
-		return false
-	var err := VoxAccess.Save(path, asset)
-	if err != OK:
-		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
-		return false
-	_sess.clear_dirty()
-	_update_title()
-	hud.flash("已保存 %s（%d 体素）" % [path.get_file(), asset.voxel_count()])
-	return true
-
-
 func _on_save_path_selected(path: String) -> void:
 	_write_project(QVoxelProject.ensure_extension(path))
-
-
-## 导出成 `.vox`：**与"保存"是两件事**，别合并。保存（.qvx）留的是"下次还能接着编辑"的全套
-## （修改器链 / 材质 PBR / 相机 / 帧）；导出只留**烘出来的体素与调色板**，给别的工具用。
-## 两者的产物与失败原因都不同，所以按钮、对话框、提示都分开。
-## 【为什么不要求"先存盘"】导出读的是内存里的世界（`VoxAsset.from_world` 现算），与工程文件
-## 在哪、存没存过都无关 —— 一个刚新建、从没存过的世界照样能导出。少一条前置条件就少一处
-## "为什么按钮是灰的"的疑问。
-func export_vox() -> void:
-	_export_dialog.current_file = "%s.vox" % world.world_name()
-	_export_dialog.popup_centered_ratio(0.7)
-
-
-## 批量导出：**先挑目标目录**，范围与命名前缀就在同一个对话框里选（见 `_build_batch_options`）。
-## 之所以是"目录对话框"而不是"先弹一个参数框、再弹目录框"：这两件事本来是同一次决定，
-## 拆成两个弹窗只是让用户多点一次、还要在两个窗口之间来回看。
-func export_vox_batch() -> void:
-	_batch_dialog.popup_centered_ratio(0.7)
-
-
-func _on_export_path_selected(path: String) -> void:
-	var asset := VoxAsset.from_world(world)
-	# 【为什么先查尺寸、再落盘】MagicaVoxel 的模型上限是 256³（`VoxAccess.MODEL_LIMIT`），超了
-	# 它**不报错、直接截断**；而 XYZI 的坐标是单字节，写口会把 256 以外的体素丢掉。那对用户就是
-	# "导出成功了，可我的模型少了一层壳"。宁可在这里明确拒绝，也不产出悄悄少一块的文件。
-	# 判据只有一处（`VoxAsset.fits_magica`）—— 批量导出问的是同一句。
-	if not asset.fits_magica():
-		var box := asset.box()
-		hud.flash("未导出：世界盒 %d×%d×%d 超过 MagicaVoxel 的 %d 上限（超出部分会被它截掉）"
-				% [box.x, box.y, box.z, VoxAccess.MODEL_LIMIT])
-		return
-	var err := VoxAccess.Save(path, asset)
-	if err != OK:
-		hud.flash("导出失败（错误码 %d）：%s" % [err, path.get_file()])
-		return
-	hud.flash("已导出 %s（%d 体素）" % [path.get_file(), asset.voxel_count()])
-
-
-## 目录已定：范围与前缀**当场读**（用户可能刚在同一个对话框里改过），
-## 烘完把"写了几个、跳了哪几个"一句话报回去。切分与落盘都在 QVoxelBake 里。
-func _on_batch_dir_selected(dir: String) -> void:
-	var batches := QVoxelBake.plan(world, _batch_scope, _batch_prefix.text.strip_edges())
-	hud.flash(QVoxelBake.summary(QVoxelBake.write(dir, batches), dir))
 
 
 ## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
@@ -1655,9 +1580,6 @@ func _build_dialogs() -> void:
 	_open_dialog.file_selected.connect(open_project)
 	_save_dialog = _make_dialog(FileDialog.FILE_MODE_SAVE_FILE)
 	_save_dialog.file_selected.connect(_on_save_path_selected)
-	_export_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.vox",
-			"MagicaVoxel 体素", "导出 .vox")
-	_export_dialog.file_selected.connect(_on_export_path_selected)
 
 	_palette_import_dialog = _make_format_dialog(FileDialog.FILE_MODE_OPEN_FILE, "*.png",
 			"调色板 PNG（256×1）", "导入调色板")
@@ -1671,13 +1593,6 @@ func _build_dialogs() -> void:
 	_snapshot_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.png",
 			"PNG 图片", "保存快照")
 	_snapshot_dialog.file_selected.connect(_on_snapshot_path_selected)
-
-	# 批量导出挑的是**目录**（一个文件一个名字，不由用户逐个起名），故走 OPEN_DIR + dir_selected。
-	# 不能挂 native：范围与前缀要画进它自己的 vbox 里（见 _build_batch_options）。
-	_batch_dialog = _make_fs_dialog(FileDialog.FILE_MODE_OPEN_DIR, "批量导出 .vox（选目标目录）", false)
-	_batch_dialog.ok_button_text = "导出到此目录"
-	_batch_dialog.dir_selected.connect(_on_batch_dir_selected)
-	_build_batch_options()
 
 	_confirm = ConfirmationDialog.new()
 	_confirm.title = "未保存的改动"
@@ -1699,9 +1614,8 @@ func _build_dialogs() -> void:
 ##（系统文件系统、主题、首路径、按钮文案的中文化）四种用途一字不差 —— 复制成四份，
 ## 迟早有一份忘了改。
 ## 【为什么 native 是参数，而不是一律关掉】`.qvx` 的打开 / 另存走系统原生对话框 —— 桌面端体验
-## 更好（记住上次目录、能直接跳系统盘符）。而调色板与批量导出要往对话框里挂自定义内容
-##（格式过滤 / 范围开关 / 前缀输入），原生对话框不渲染自绘 UI，那两处只能
-## `use_native_dialog = false` 走引擎自绘的那套。
+## 更好（记住上次目录、能直接跳系统盘符）。而调色板与快照要往对话框里挂格式过滤，
+## 原生对话框不渲染自绘 UI，那两处只能 `use_native_dialog = false` 走引擎自绘的那套。
 func _make_fs_dialog(mode: FileDialog.FileMode, title: String, native := true) -> FileDialog:
 	var d := FileDialog.new()
 	d.file_mode = mode
@@ -1739,44 +1653,6 @@ func _make_format_dialog(mode: FileDialog.FileMode, filter: String, filter_name:
 	var d := _make_fs_dialog(mode, title, false)
 	d.add_filter(filter, filter_name)
 	return d
-
-
-## 批量导出的范围与前缀：挂在目录对话框**自己的 vbox** 里（`FileDialog.get_vbox()` 是引擎留给
-## 自绘控件的口子），于是"选目录 + 选范围 + 填前缀"是**一次**交互，不用弹第二个对话框。
-## 【为什么范围是一排开关而不是下拉】与工具面板的 球/平面、导航/平移 同一套（QVoxelUi 的
-## 开关组）：触摸屏上没有下拉，而且四个选项一眼全在，不必点开才知道有些什么。
-func _build_batch_options() -> void:
-	var row := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
-	row.add_child(QVoxelUi.label("范围", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
-
-	var group := ButtonGroup.new()
-	# 同组按钮永远有一个是"当前"，不允许点第二下变成"什么都没选"（与笔刷形态同一套）。
-	group.allow_unpress = false
-	for i in QVoxelBake.SCOPES.size():
-		var spec: Dictionary = QVoxelBake.SCOPES[i]
-		var b := QVoxelUi.toggle_button(spec.tip)
-		b.text = spec.text
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		b.button_group = group
-		# bind 而不是闭包捕获：与笔刷形态同一条理由 —— 每个按钮各钉各的值，不会一起变成最后一个。
-		b.toggled.connect(_on_batch_scope_toggled.bind(i))
-		if i == _batch_scope:
-			b.set_pressed_no_signal(true)
-		row.add_child(b)
-
-	row.add_child(QVoxelUi.label("前缀", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
-	_batch_prefix = QVoxelUi.text_field("", "如 rock_（可留空）", "接在每份文件名之前，用来区分批次")
-	_batch_prefix.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(_batch_prefix)
-
-	_batch_dialog.get_vbox().add_child(row)
-
-
-func _on_batch_scope_toggled(on: bool, scope: int) -> void:
-	# 同组切换是"旧的先弹起、新的再按下"两次信号：只听按下那一次，否则会被弹起那一下
-	# 覆盖回旧值（与 QVoxelierTools._on_shape_toggled 同一条）。
-	if on:
-		_batch_scope = scope
 
 
 ## 文件对话框的首选落地目录。**两个平台的"用户自己的目录"不是同一个地方**：
@@ -2366,7 +2242,6 @@ func _bind_actions() -> void:
 	InputTool.register_action(ACTION_SAVE, [InputTool.key_event(KEY_S, true)])
 	InputTool.register_action(ACTION_SAVE_AS, [InputTool.key_event(KEY_S, true, true)])
 	InputTool.register_action(ACTION_OPEN, [InputTool.key_event(KEY_O, true)])
-	InputTool.register_action(ACTION_EXPORT, [InputTool.key_event(KEY_E, true)])
 	# 选区 / 剪贴板：与"存 / 开"同属"带修饰键的操作"，故一律走 InputTool 注册的动作，
 	# 而不是在 _on_key 里手写 ctrl 判断 —— 键位因此能在项目设置里改。
 	InputTool.register_action(ACTION_SELECT_ALL, [InputTool.key_event(KEY_A, true)])
