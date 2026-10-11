@@ -33,6 +33,8 @@ var _hint: Label
 var _del: Button
 var _selected: QVoxelNode
 var _filter := ""
+## 正在进行的改名提交闭包（点任意别处 / 重建时先把它结掉，避免"改了却没生效"）。
+var _rename_commit := Callable()
 
 
 func section_title() -> String:
@@ -76,7 +78,7 @@ func _popup_add(anchor: Control) -> void:
 	menu.add_icon_item(QVoxelUi.icon("model"), "新建模型", 1)
 	menu.add_icon_item(QVoxelUi.icon("modifier"), "给选中节点挂修改器", 2)
 	menu.id_pressed.connect(_on_add_menu.bind(anchor))
-	menu.popup_closed.connect(func() -> void: menu.queue_free())
+	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(anchor.global_position), Vector2i(anchor.size)))
 
 
@@ -99,7 +101,7 @@ func _row_context(node: QVoxelNode) -> void:
 	menu.add_icon_item(QVoxelUi.icon("modifier"), "挂修改器…", 1)
 	menu.add_icon_item(QVoxelUi.icon("del"), "删除节点", 2)
 	menu.id_pressed.connect(_on_context_menu.bind(node))
-	menu.popup_closed.connect(func() -> void: menu.queue_free())
+	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(DisplayServer.mouse_get_position(), Vector2i.ZERO))
 
 
@@ -109,6 +111,41 @@ func _on_context_menu(id: int, node: QVoxelNode) -> void:
 			_popup_modifier_kinds.call_deferred(self)
 		2:
 			node_remove_requested.emit(node)
+
+
+## 双击行内名字 → 就地换成输入框改名（回车 / 失焦提交，Esc 不改）。
+func _begin_rename(node: QVoxelNode, row: TreeRow) -> void:
+	var lbl := row.name_label
+	if lbl == null or not is_instance_valid(lbl):
+		return
+	var parent := lbl.get_parent()
+	var idx := lbl.get_index()
+	var le := LineEdit.new()
+	le.text = node.display_name()
+	le.flat = true
+	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(le)
+	parent.move_child(le, idx)
+	lbl.visible = false
+	le.grab_focus()
+	le.select_all()
+	# 回车与失焦都可能触发提交，用一次性闸门防重复。
+	var done := [false]
+	var commit := func() -> void:
+		if done[0]:
+			return
+		done[0] = true
+		_rename_commit = Callable()
+		var t := le.text.strip_edges()
+		if is_instance_valid(lbl):
+			lbl.visible = true
+		if is_instance_valid(le):
+			le.queue_free()
+		if not t.is_empty() and t != node.display_name():
+			node_rename_requested.emit(node, t)
+	_rename_commit = commit
+	le.text_submitted.connect(func(_t: String) -> void: commit.call())
+	le.focus_exited.connect(func() -> void: commit.call())
 
 
 ## 挂上世界。**每次换世界都要调**（新建 / 打开工程）。
@@ -133,6 +170,11 @@ func refresh() -> void:
 func _rebuild() -> void:
 	if _rows == null:
 		return
+	# 重建前先把进行中的改名结掉（点别的行会触发重建，不结就会把改动丢掉）。
+	if _rename_commit.is_valid():
+		var c := _rename_commit
+		_rename_commit = Callable()
+		c.call()
 	for c in _rows.get_children():
 		c.queue_free()
 	if _world == null:
@@ -257,7 +299,7 @@ func _popup_modifier_kinds(anchor: Control) -> void:
 		menu.add_icon_item(QVoxelUi.icon("modifier"), QVoxelModifier.KIND_NAMES[i], i)
 	menu.id_pressed.connect(func(id: int) -> void:
 		modifier_add_requested.emit(_selected, QVoxelModifier.KINDS[id]))
-	menu.popup_closed.connect(func() -> void: menu.queue_free())
+	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(anchor.global_position), Vector2i(anchor.size)))
 
 
@@ -296,15 +338,13 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	lock.toggled.connect(func(v): node_locked_changed.emit(node, v))
 	box.add_child(lock)
 
-	var name_edit := LineEdit.new()
-	name_edit.text = node.display_name()
-	name_edit.flat = true
-	name_edit.custom_minimum_size.x = 96
-	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_edit.text_submitted.connect(func(t):
-		if t != node.display_name():
-			node_rename_requested.emit(node, t))
-	box.add_child(name_edit)
+	# 名字用 Label（点一下 = 选中整行；双击才改名，见 TreeRow._gui_input / _begin_rename）。
+	var name_label := QVoxelUi.label(node.display_name(), QVoxelUi.FONT_M, QVoxelUi.TEXT)
+	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_label.clip_text = true
+	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	box.add_child(name_label)
+	row.name_label = name_label
 
 	var badge := _badge_of(node)
 	if not badge.is_empty():
@@ -400,6 +440,8 @@ class TreeRow extends Button:
 	var section: QVoxelierTreeSection
 	var depth := 0
 	var modifier_index := -1
+	## 名字 Label（双击改名时就地把它换成 LineEdit）。
+	var name_label: Label
 
 	func _get_drag_data(_at: Vector2) -> Variant:
 		if node == null or modifier_index >= 0:
@@ -410,9 +452,13 @@ class TreeRow extends Button:
 		return {"qvoxel_node": node}
 
 	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseButton and event.pressed \
-				and event.button_index == MOUSE_BUTTON_RIGHT and modifier_index < 0 and node != null:
+		if not (event is InputEventMouseButton) or not event.pressed or modifier_index >= 0 or node == null:
+			return
+		if event.button_index == MOUSE_BUTTON_RIGHT:
 			section._row_context(node)
+			accept_event()
+		elif event.button_index == MOUSE_BUTTON_LEFT and event.double_click:
+			section._begin_rename(node, self)
 			accept_event()
 
 	func _can_drop_data(at: Vector2, data: Variant) -> bool:

@@ -94,6 +94,21 @@ const VARIATION_TOOL := &"ToolButton"
 
 static var _theme: Theme = null
 
+## 悬停提示的接收端（App 接到底部状态栏）。本应用**不用悬浮气泡**：提示统一在底栏显示。
+## 工厂出的控件在 mouse_entered 时把 tooltip 首行送进来，离开时送空串（恢复默认提示）。
+static var hint_sink := Callable()
+
+
+static func _wire_hint(c: Control) -> void:
+	if c.tooltip_text.is_empty():
+		return
+	c.mouse_entered.connect(func() -> void:
+		if hint_sink.is_valid():
+			hint_sink.call(c.tooltip_text.get_slice("\n", 0)))
+	c.mouse_exited.connect(func() -> void:
+		if hint_sink.is_valid():
+			hint_sink.call(""))
+
 
 # 密度档（界面骨架尺寸的唯一来源）
 
@@ -366,6 +381,7 @@ static func button(text: String, tooltip := "", variation := &"", icon_name := "
 		b.tooltip_text = tooltip
 	if not variation.is_empty():
 		b.theme_type_variation = variation
+	_wire_hint(b)
 	return b
 
 
@@ -396,6 +412,7 @@ static func text_field(text := "", placeholder := "", tooltip := "") -> LineEdit
 	e.custom_minimum_size = Vector2(0, hit_size())
 	if not tooltip.is_empty():
 		e.tooltip_text = tooltip
+	_wire_hint(e)
 	return e
 
 
@@ -424,6 +441,7 @@ static func swatch(color: Color, tooltip := "", size := -1) -> Button:
 	if not tooltip.is_empty():
 		b.tooltip_text = tooltip
 	paint_swatch(b, color)
+	_wire_hint(b)
 	return b
 
 

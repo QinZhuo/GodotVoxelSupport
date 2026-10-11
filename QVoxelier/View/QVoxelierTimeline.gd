@@ -123,7 +123,7 @@ func _frame_context(index: int, at: Vector2) -> void:
 	menu.add_item("复制此帧到其后", 1)
 	menu.add_item("删除此帧", 2)
 	menu.id_pressed.connect(_on_frame_menu)
-	menu.popup_closed.connect(func() -> void: menu.queue_free())
+	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(at), Vector2i.ZERO))
 
 

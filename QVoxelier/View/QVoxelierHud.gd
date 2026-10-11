@@ -20,10 +20,10 @@ var session: QVoxelEditSession = null
 var _tool: Label
 var _hint: Label
 var _cursor: RichTextLabel
-var _model: Label
 var _selection: Label
-var _history: Label
 var _toast: Label
+## 悬停提示（按钮/控件的 tooltip 首行）。非空时状态栏显示它，否则显示当前工具提示。
+var _hover_hint := ""
 var _legend: PanelContainer
 var _log: PanelContainer
 var _log_scroll: ScrollContainer
@@ -52,26 +52,26 @@ func _process(delta: float) -> void:
 
 # 对外：刷新 / 提示
 
-## 按会话现状刷新状态栏（工具 / 笔刷 / 撤销栈）。
+## 按会话现状刷新状态栏（工具 + 提示）。读数只留光标与选区；模型尺寸/体素与撤销栈已在别处可见，删掉。
 func refresh() -> void:
 	if session == null:
 		return
 	var t := session.tool
 	_tool.text = t.label()
-	_hint.text = t.hint()
-	_model.text = _model_readout()
+	# 有悬停提示时优先显示它（本应用把按钮提示统一放到这里，不用悬浮气泡）。
+	_hint.text = _hover_hint if not _hover_hint.is_empty() else t.hint()
 	_selection.text = _selection_readout()
 	# 有选区时点亮：选区是"下次复制 / 移动会作用在哪"的答案，用户必须一眼能看出它在不在。
 	_selection.add_theme_color_override("font_color",
 			QVoxelUi.ACCENT if not session.selection.is_empty() else QVoxelUi.TEXT_FAINT)
-	var undo := session.history.undo_label()
-	var redo := session.history.redo_label()
-	# 可重做条数 = 命令流里游标之后的那一段（游标把一条命令流切成"已生效 / 可重做"两半）。
-	var redo_count := session.history.commands.size() - session.history.cursor
-	_history.text = "撤销 %d%s · 重做 %d%s" % [
-		session.history.cursor, "（%s）" % undo if undo != "" else "",
-		redo_count, "（%s）" % redo if redo != "" else "",
-	]
+
+
+## 悬停某个按钮 / 控件时把它的提示送到状态栏（空串 = 恢复默认的工具提示）。
+func show_hover_hint(text: String) -> void:
+	_hover_hint = text
+	if session == null:
+		return
+	_hint.text = text if not text.is_empty() else session.tool.hint()
 
 
 ## 光标所在格（Vector3i.MIN = 没指到网格上）。轴名用与坐标轴 gizmo 同一套红绿蓝。
@@ -216,12 +216,7 @@ func _build_status() -> void:
 	_cursor.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	_cursor.add_theme_constant_override("outline_size", 4)
 	row.add_child(_cursor)
-	_model = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
-	row.add_child(_model)
-	# 撤销栈是"改了什么"的历史，与光标读数不是一类，再隔一条。
-	row.add_child(QVoxelUi.vdivider(QVoxelUi.status_height() / 2))
-	_history = _readout(QVoxelUi.FONT_M, QVoxelUi.TEXT_DIM)
-	row.add_child(_history)
+	# 模型尺寸/体素数、撤销/重做计数已删：前者在层级里可见，后者顶栏的撤销/重做按钮已表达。
 
 
 ## 提示条压在调色板上方（调色板占着底边），避免被盖住。
@@ -230,7 +225,7 @@ func _build_toast() -> void:
 	_toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
 	_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	var bottom := QVoxelUi.status_height() + QVoxelUi.hit_size() + 2 * QVoxelUi.space_s() + QVoxelUi.space_m()
+	var bottom := QVoxelUi.status_height() + QVoxelUi.strip_height() + QVoxelUi.hit_size() + 2 * QVoxelUi.space_s() + QVoxelUi.space_m()
 	_toast.offset_top = -float(bottom) - QVoxelUi.FONT_TITLE - QVoxelUi.space_s()
 	_toast.offset_bottom = -float(bottom)
 	add_child(_toast)

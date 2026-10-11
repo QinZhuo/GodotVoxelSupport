@@ -15,6 +15,7 @@ signal add_material_requested
 
 var _scroll: ScrollContainer
 var _col: VBoxContainer
+var _add: Button
 var _group := ButtonGroup.new()
 var _swatches := {}         # material_id → Button
 var _sig := PackedStringArray()
@@ -39,11 +40,11 @@ func _build() -> void:
 	_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_scroll.add_child(_col)
 
-	# 列底：新建材质（放底部不挡色块，色多时下方滚动、它固定在底）。
-	var add := QVoxelUi.icon_button("＋", "新建材质", QVoxelUi.hit_size())
-	add.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	add.pressed.connect(func(): add_material_requested.emit())
-	vb.add_child(add)
+	# 新建材质按钮：排在**最后一个色块下面**（跟着色块一起滚动），而不是钉在列底。
+	_add = QVoxelUi.icon_button("＋", "新建材质", QVoxelUi.hit_size())
+	_add.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_add.pressed.connect(func(): add_material_requested.emit())
+	_col.add_child(_add)
 
 	get_viewport().size_changed.connect(_resize)
 	_resize()
@@ -68,6 +69,8 @@ func set_palette(colors: Array[Color]) -> void:
 	_sig = sig
 
 	for c in _col.get_children():
+		if c == _add:
+			continue
 		_col.remove_child(c)
 		c.queue_free()
 	_swatches.clear()
@@ -81,6 +84,11 @@ func set_palette(colors: Array[Color]) -> void:
 		b.toggled.connect(func(on: bool): if on: material_selected.emit(captured))
 		_swatches[id] = b
 		_col.add_child(b)
+	# 新建按钮永远排在最后一个色块之后（已在树上 → 用 move_child，不能再 add_child）。
+	if _add.get_parent() == _col:
+		_col.move_child(_add, _col.get_child_count() - 1)
+	else:
+		_col.add_child(_add)
 
 
 ## 单个色块就地换色（实时改色时用）。

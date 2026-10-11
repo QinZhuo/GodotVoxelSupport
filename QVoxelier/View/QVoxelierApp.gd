@@ -174,6 +174,8 @@ func _ready() -> void:
 	_bind_actions()
 	_build_dialogs()
 	_build_ui()
+	# 按钮/控件的悬停提示统一送到状态栏显示（本应用不用悬浮气泡）。
+	QVoxelUi.hint_sink = hud.show_hover_hint
 	new_model()
 	# 编辑器里只装配外观（网格地板与取景），输入留给编辑器自己 —— @tool 脚本不该抢编辑器的键。
 	if Engine.is_editor_hint():
