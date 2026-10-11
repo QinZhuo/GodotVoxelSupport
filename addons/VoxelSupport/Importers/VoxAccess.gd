@@ -191,7 +191,7 @@ func read_chunk():
 					var position := frame_attributes['_t'].split_floats(' ')
 					frame.position = Vector3(position[0], position[2], -position[1])
 				if frame_attributes.has('_r'):
-					frame.rotation = _decode_rotation(_rotation_byte(frame_attributes['_r']))
+					frame.rotation = _decode_rotation(int(frame_attributes['_r']))
 		"nGRP":
 			var node := _get_node()
 			for i in _get_32():
@@ -326,14 +326,9 @@ static func _frame_attributes(index: int, frame: VoxAsset.VoxelFrame) -> Diction
 		var p := _to_file(frame.position)
 		a["_t"] = "%s %s %s" % [p.x, p.y, p.z]
 	if frame.rotation != null:
-		# `_r` 是**1 字节二进制**（规范 (c)），不是十进制串 —— 写成 str(int) 会被 MagicaVoxel 误读。
-		a["_r"] = String.chr(_encode_rotation(frame.rotation))
+		# `_r` 在 DICT 里是**十进制字符串**（MagicaVoxel 实际写法，如 "52"），不是二进制字节。
+		a["_r"] = str(_encode_rotation(frame.rotation))
 	return a
-
-
-## `_r` 的 1 字节取值（规范 (c) 的打包字节）。
-static func _rotation_byte(s: String) -> int:
-	return s.unicode_at(0) if not s.is_empty() else 0
 
 
 ## Y-up 的 Basis → `_r` 的 7 位编码。**不去反推位域公式**：合法值只有 24 个（见 _decode_rotation

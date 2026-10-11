@@ -115,7 +115,8 @@ func _emit_node(node: QVoxelNode, layer: int, next: Array, flatten := false) -> 
 	next[0] += 1
 	for c in (node as QVoxelGroup).child_nodes:
 		if c != null:
-			grp.child_nodes.append(_emit_node(c, -1, next, flatten))
+			# 图层沿子树**下传**：MagicaVoxel 的图层挂在 nTRN 上且不继承，故该层内每个节点都写。
+			grp.child_nodes.append(_emit_node(c, layer, next, flatten))
 	nodes[grp.id] = grp
 	return _emit_wrapper(grp.id, node.local_transform, layer, next, node.transform_tracks, node.node_name)
 
