@@ -146,6 +146,14 @@ func bind(node: QVoxelNode) -> void:
 	_rebuild()
 
 
+## 双击树行触发：聚焦名字输入框并全选 —— 直接开改名。
+func begin_rename(node: QVoxelNode) -> void:
+	bind(node)
+	if _name != null and _name.editable:
+		_name.grab_focus()
+		_name.select_all()
+
+
 func _rebuild() -> void:
 	if _info == null:
 		return

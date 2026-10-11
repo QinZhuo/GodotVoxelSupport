@@ -110,8 +110,10 @@ func set_tool(mode: int) -> void:
 		b.set_pressed_no_signal(true)
 
 
-## 布局模式：只留"移动"可用（绘制 / 选择 / 图章在布局下不适用，置灰）—— 类似 Blender 的模式切换。
+## 布局模式：只留「移动」与「选择」可用（其余绘制 / 图章在布局下不适用，置灰）。
+## 移动 = 拖 gizmo 改整体变换；选择 = 点选 / 框选模型。
 func set_layout_mode(on: bool) -> void:
 	for mode in _buttons:
 		var b: Button = _buttons[mode]
-		b.disabled = on and mode != QVoxelBrushTool.Mode.MOVE
+		var usable: bool = mode == QVoxelBrushTool.Mode.MOVE or mode == QVoxelBrushTool.Mode.SELECT
+		b.disabled = on and not usable

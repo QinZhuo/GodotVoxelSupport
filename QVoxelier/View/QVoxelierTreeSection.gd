@@ -18,6 +18,8 @@ signal node_remove_requested(node: QVoxelNode)
 signal node_visible_changed(node: QVoxelNode, value: bool)
 signal node_locked_changed(node: QVoxelNode, value: bool)
 signal node_rename_requested(node: QVoxelNode, new_name: String)
+## 双击行 → 请求在属性面板里开始改名（聚焦名字输入框）。
+signal rename_begin_requested(node: QVoxelNode)
 signal node_move_requested(node: QVoxelNode, parent: QVoxelGroup, index: int)
 
 const INDENT := 14
@@ -96,9 +98,11 @@ func _row_context(node: QVoxelNode) -> void:
 
 
 func set_world(world: QVoxelWorld, active_id := -1) -> void:
+	# 只在**换了世界**时清选中；同一世界的刷新（改名 / 移动 / 撤销）要保住选中高亮。
+	if world != _world:
+		_selected = null
 	_world = world
 	_active_id = active_id
-	_selected = null
 	_rebuild()
 
 
@@ -156,6 +160,8 @@ func _add_rows(node: QVoxelNode, depth: int) -> void:
 
 
 func _make_row(node: QVoxelNode, depth: int) -> Control:
+	var is_active := _is_active(node)
+	var is_sel := node == _selected
 	var row := TreeRow.new()
 	row.node = node
 	row.section = self
@@ -163,7 +169,13 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	row.custom_minimum_size.y = QVoxelUi.hit_size()
 	row.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	row.tooltip_text = _row_tooltip(node)
-	row.add_theme_color_override("font_color", QVoxelUi.ACCENT if _is_active(node) else QVoxelUi.TEXT)
+	row.add_theme_color_override("font_color", QVoxelUi.ACCENT if (is_active or is_sel) else QVoxelUi.TEXT)
+	# 选中 / 活动行给一层强调底（默认 Button 样式看不出选中，名字又只是子 Label）。
+	if is_active or is_sel:
+		var sb := _row_style()
+		row.add_theme_stylebox_override("normal", sb)
+		row.add_theme_stylebox_override("hover", sb)
+		row.add_theme_stylebox_override("pressed", sb)
 	row.pressed.connect(func():
 		_selected = node
 		_del.disabled = false
@@ -172,7 +184,9 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 
 	var box := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	box.position = Vector2(8 + depth * INDENT, 0)
+	# 铺满整行（左缩进随层级），名字才有整行宽度可显示，不会被挤没。
+	box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	box.offset_left = 8 + depth * INDENT
 	row.add_child(box)
 
 	if node.is_group():
@@ -198,8 +212,9 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 		node_locked_changed.emit(node, v))
 	box.add_child(lock)
 
-	# 名字用 Label（点整行 = 选中；改名在右侧「对象」属性页里做）。
-	var name_label := QVoxelUi.label(node.display_name(), QVoxelUi.FONT_M, QVoxelUi.TEXT)
+	# 名字用 Label（点整行 = 选中；改名在右侧「对象」属性页里做）。活动 / 选中行名字用强调色。
+	var name_label := QVoxelUi.label(node.display_name(), QVoxelUi.FONT_M,
+			QVoxelUi.ACCENT if (is_active or is_sel) else QVoxelUi.TEXT)
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_label.clip_text = true
 	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -250,6 +265,14 @@ func _is_active(node: QVoxelNode) -> bool:
 	return node.is_model() and (node as QVoxelModel).model_id == _active_id
 
 
+## 选中 / 活动行的强调底。
+func _row_style() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(QVoxelUi.ACCENT.r, QVoxelUi.ACCENT.g, QVoxelUi.ACCENT.b, 0.22)
+	sb.set_corner_radius_all(4)
+	return sb
+
+
 func _target_parent() -> QVoxelGroup:
 	if _selected != null and _selected.is_group():
 		return _selected as QVoxelGroup
@@ -295,6 +318,10 @@ class TreeRow extends Button:
 			return
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			section._row_context(node)
+			accept_event()
+		elif event.button_index == MOUSE_BUTTON_LEFT and event.double_click:
+			# 双击 = 开始改名（在属性面板里聚焦名字输入框）。
+			section.rename_begin_requested.emit(node)
 			accept_event()
 
 	func _can_drop_data(at: Vector2, data: Variant) -> bool:

@@ -384,7 +384,8 @@ func test_mode_table_is_complete_and_hotkeys_are_unique() -> void:
 		assert_false(seen.has(row.hotkey), "热键不得重复（单键切工具的前提）")
 		seen[row.hotkey] = true
 		assert_eq(QVoxelBrushTool.mode_by_hotkey(row.hotkey), m, "热键要能反查回模式")
-	assert_eq(QVoxelBrushTool.mode_by_hotkey(KEY_F), QVoxelBrushTool.Mode.FACE, "F = 面笔")
+	assert_eq(QVoxelBrushTool.mode_by_hotkey(KEY_3), QVoxelBrushTool.Mode.FACE, "3 = 面笔")
+	assert_eq(QVoxelBrushTool.mode_by_hotkey(KEY_1), QVoxelBrushTool.Mode.VOXEL, "1 = 点笔")
 	assert_eq(QVoxelBrushTool.info(QVoxelBrushTool.Mode.BOX).label, "块", "工具栏读的就是这张表")
 
 

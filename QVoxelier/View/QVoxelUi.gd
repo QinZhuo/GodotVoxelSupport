@@ -407,7 +407,8 @@ static func text_field(text := "", placeholder := "", tooltip := "") -> LineEdit
 	var e := LineEdit.new()
 	e.text = text
 	e.placeholder_text = placeholder
-	e.focus_mode = Control.FOCUS_NONE
+	# 必须可聚焦，否则点进去也打不了字（Tab 导航由 App 在 _input 里统一消费，不靠关焦点实现）。
+	e.focus_mode = Control.FOCUS_ALL
 	e.caret_blink = true
 	e.custom_minimum_size = Vector2(0, hit_size())
 	if not tooltip.is_empty():

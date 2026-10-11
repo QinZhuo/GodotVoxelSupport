@@ -30,19 +30,19 @@ enum Mode {
 
 ## 工具表：界面（热键 / 工具栏 / 提示）与行为（live / 笔刷尺寸）的唯一来源。
 const MODES := [
-	{"mode": Mode.VOXEL, "id": &"voxel", "label": "点", "hotkey": KEY_V, "icon": "tool_voxel",
+	{"mode": Mode.VOXEL, "id": &"voxel", "label": "点", "hotkey": KEY_1, "icon": "tool_voxel",
 		"live": true, "brush": true, "hint": "点：左键画 · 右键擦 · 拖动连续"},
-	{"mode": Mode.LINE, "id": &"line", "label": "线", "hotkey": KEY_L, "icon": "tool_line",
+	{"mode": Mode.LINE, "id": &"line", "label": "线", "hotkey": KEY_2, "icon": "tool_line",
 		"live": false, "brush": true, "hint": "线：拖出直线，松手落笔"},
-	{"mode": Mode.FACE, "id": &"face", "label": "面", "hotkey": KEY_F, "icon": "tool_face",
+	{"mode": Mode.FACE, "id": &"face", "label": "面", "hotkey": KEY_3, "icon": "tool_face",
 		"live": false, "brush": false, "hint": "面：铺满一片暴露面（也能铺背景面）"},
-	{"mode": Mode.BOX, "id": &"box", "label": "块", "hotkey": KEY_B, "icon": "tool_box",
+	{"mode": Mode.BOX, "id": &"box", "label": "块", "hotkey": KEY_4, "icon": "tool_box",
 		"live": false, "brush": true, "hint": "块：拖出一个长方体，松手落笔"},
-	{"mode": Mode.FILL, "id": &"fill", "label": "填", "hotkey": KEY_C, "icon": "tool_fill",
+	{"mode": Mode.FILL, "id": &"fill", "label": "填", "hotkey": KEY_5, "icon": "tool_fill",
 		"live": false, "brush": false, "hint": "填：替换连通的同材质整块"},
-	{"mode": Mode.SELECT, "id": &"select", "label": "选择", "hotkey": KEY_T, "icon": "tool_select",
+	{"mode": Mode.SELECT, "id": &"select", "label": "选择", "hotkey": KEY_6, "icon": "tool_select",
 		"live": false, "brush": false, "hint": "选择：拖框 / 单击连通一块"},
-	{"mode": Mode.MOVE, "id": &"move", "label": "移动", "hotkey": KEY_M, "icon": "tool_move",
+	{"mode": Mode.MOVE, "id": &"move", "label": "移动", "hotkey": KEY_7, "icon": "tool_move",
 		"live": false, "brush": false, "hint": "移动：拖坐标轴"},
 ]
 

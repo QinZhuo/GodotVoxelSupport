@@ -129,8 +129,20 @@ var _edit_mode := 0
 ## 布局拖拽的**固定参考**（拖拽期间模型会动，参考必须钉在按下那一刻，否则参数自漂移）。
 var _layout_center := Vector3.ZERO
 var _layout_axis_u := Vector3.ZERO
-var _layout_base_offset := Vector3i.ZERO
-var _layout_base_xf := Transform3D.IDENTITY
+## 布局多选：选中的 model_id 集合；拖拽时逐模型记下改前值，松手一次性提交。
+var _layout_sel: Dictionary = {}
+var _layout_base_offsets: Dictionary = {}
+var _layout_base_xfs: Dictionary = {}
+## 布局旋转的**共同中心**（世界体素坐标），按下时按改前变换算一次并钉住。
+var _layout_pivot := Vector3.ZERO
+## 布局旋转的**固定参考系**（gizmo 随模型转，必须钉住按下那一刻的基/中心，否则夹角乱跳）。
+var _layout_rot_basis := Basis.IDENTITY
+var _layout_rot_center := Vector3.ZERO
+## 布局框选（屏幕矩形）。
+var _box_select := false
+var _box_start := Vector2.ZERO
+var _box_end := Vector2.ZERO
+var _box_panel: Panel
 var _gizmo_per_voxel := 1.0
 var _gizmo_delta := 0
 ## 拖动移动时的实时预览素材：拖动开始时抓取的选区体素 + 选区下角。
@@ -202,6 +214,7 @@ func _ready() -> void:
 	_bind_actions()
 	_build_dialogs()
 	_build_ui()
+	_disable_focus(self)
 	# 按钮/控件的悬停提示统一送到状态栏显示（本应用不用悬浮气泡）。
 	QVoxelUi.hint_sink = hud.show_hover_hint
 	new_model()
@@ -211,6 +224,19 @@ func _ready() -> void:
 	get_window().files_dropped.connect(_on_files_dropped)
 	# 帧条贴在状态栏上方占底部一条：等布局稳一帧再让左列 / 右列 / 坐标系让位。
 	_reserve_strip.call_deferred()
+
+
+## 关闭界面控件的**焦点导航**：Tab / 方向键不再在控件之间跳焦点（Tab 留给"模型 / 布局"切换）。
+## 文本框（LineEdit / TextEdit / SpinBox）除外 —— 它们要能聚焦输入；对话框窗口整棵跳过（自带焦点）。
+func _disable_focus(node: Node) -> void:
+	if node is Window:
+		return
+	if node is Control:
+		var c := node as Control
+		if not (c is LineEdit or c is TextEdit or c is SpinBox):
+			c.focus_mode = Control.FOCUS_NONE
+	for ch in node.get_children():
+		_disable_focus(ch)
 
 
 ## 装配三个界面面板并接线。面板只发"用户想干什么"的信号，**不收会话**：
@@ -298,6 +324,7 @@ func _build_ui() -> void:
 	_tree_section.node_visible_changed.connect(_sess.set_node_visible)
 	_tree_section.node_locked_changed.connect(_sess.set_node_locked)
 	_tree_section.node_rename_requested.connect(_sess.rename_node)
+	_tree_section.rename_begin_requested.connect(_begin_rename)
 	_tree_section.node_move_requested.connect(_sess.move_node)
 	_dock.add_outliner(_tree_section)
 
@@ -646,12 +673,61 @@ func _rebuild_layout_overlay() -> void:
 		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
 			continue
 		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
-		_layout_overlay.add_child(_line_box(AABB(bb.position * vs, bb.size * vs), Color(0.85, 0.85, 0.92)))
+		# 未选中：透明灰；选中 / 活动：与编辑模式选区线框同色（强调色）。
+		var col := Color(0.65, 0.65, 0.70, 0.35)
+		if _layout_sel.has(m.model_id) or (session != null and m == session.object):
+			col = Color(QVoxelUi.ACCENT, 0.95)
+		_layout_overlay.add_child(_line_box(AABB(bb.position * vs, bb.size * vs), col))
 	# 世界中心十字（表示原点位置）。
 	_layout_overlay.add_child(_cross_lines(maxf(vs * 4.0, 0.4), Color(0.95, 0.8, 0.3)))
 
 
-## 一个轴对齐盒的 12 条棱（ImmediateMesh 线框，不透明）。
+## 布局模式：射线点选模型（对每个模型的包围盒做射线求交，取最近的）。无命中返回 null。
+func _pick_layout_model(screen: Vector2) -> QVoxelModel:
+	if world == null:
+		return null
+	var ro := camera.project_ray_origin(screen)
+	var rd := camera.project_ray_normal(screen)
+	var vs := world.voxel_size()
+	var best: QVoxelModel = null
+	var best_t := INF
+	for m in world.all_models():
+		var sz := QVoxelEvalEngine.output_grid_size(m)
+		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
+			continue
+		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
+		var t := _ray_aabb(ro, rd, AABB(bb.position * vs, bb.size * vs))
+		if t >= 0.0 and t < best_t:
+			best_t = t
+			best = m
+	return best
+
+
+## 射线 × 轴对齐盒（slab 法）：返回进入参数 t（>=0），无交返回 -1。
+func _ray_aabb(ro: Vector3, rd: Vector3, bb: AABB) -> float:
+	var tmin := 0.0
+	var tmax := INF
+	for a in 3:
+		var o := ro[a]
+		var d := rd[a]
+		if absf(d) < 1e-8:
+			if o < bb.position[a] or o > bb.end[a]:
+				return -1.0
+		else:
+			var t1 := (bb.position[a] - o) / d
+			var t2 := (bb.end[a] - o) / d
+			if t1 > t2:
+				var tmp := t1
+				t1 = t2
+				t2 = tmp
+			tmin = maxf(tmin, t1)
+			tmax = minf(tmax, t2)
+			if tmin > tmax:
+				return -1.0
+	return tmin
+
+
+## 一个轴对齐盒的 12 条棱（线段，与编辑模式的选区线框同一套观感）。
 func _line_box(bb: AABB, col: Color) -> MeshInstance3D:
 	var c := []
 	for i in 8:
@@ -673,7 +749,7 @@ func _line_box(bb: AABB, col: Color) -> MeshInstance3D:
 	return mi
 
 
-## 世界中心十字：三根过原点的短轴。
+## 世界中心十字：三根过原点的短轴（线段）。
 func _cross_lines(r: float, col: Color) -> MeshInstance3D:
 	var im := ImmediateMesh.new()
 	im.surface_begin(Mesh.PRIMITIVE_LINES)
@@ -687,19 +763,174 @@ func _cross_lines(r: float, col: Color) -> MeshInstance3D:
 	return mi
 
 
-## 线框用的不透明无光照材质。
+## 线材质：不受光、可透明、不裁剪、不做深度测试 —— 与编辑模式选区线框同一套。
 func _line_material(col: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.albedo_color = col
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.no_depth_test = true
 	return m
+
+
+# 布局多选 / 框选
+
+## 当前布局选中的模型（空选区时退化为"当前对象"，与移动默认整体一致）。
+func _layout_models() -> Array[QVoxelModel]:
+	var out: Array[QVoxelModel] = []
+	if world == null:
+		return out
+	if _layout_sel.is_empty():
+		if session != null and session.object != null:
+			out.append(session.object)
+		return out
+	for m in world.all_models():
+		if _layout_sel.has(m.model_id):
+			out.append(m)
+	return out
+
+
+func _layout_capture_offsets() -> Dictionary:
+	var d := {}
+	for m in _layout_models():
+		d[m.model_id] = m.offset
+	return d
+
+
+func _layout_capture_xfs() -> Dictionary:
+	var d := {}
+	for m in _layout_models():
+		d[m.model_id] = m.local_transform
+	return d
+
+
+## 模型父组的**世界变换**（顶层模型的父为世界 → 恒等）。
+func _parent_world(m: QVoxelModel) -> Transform3D:
+	if world == null:
+		return Transform3D.IDENTITY
+	var p := world.find_parent(m)
+	return world.world_transform(p) if p != null else Transform3D.IDENTITY
+
+
+## 布局选区的**共同中心**（世界体素坐标）—— 按给定的改前变换算，旋转绕它整体转。
+func _layout_pivot_from(xfs: Dictionary) -> Vector3:
+	var sum := Vector3.ZERO
+	var n := 0
+	for m in _layout_models():
+		var base: Transform3D = xfs.get(m.model_id, m.local_transform)
+		sum += (_parent_world(m) * base) * _node_center_voxel(m)
+		n += 1
+	return sum / float(maxi(n, 1))
+
+
+func _layout_pivot_world() -> Vector3:
+	return _layout_pivot_from(_layout_capture_xfs())
+
+
+## 共同中心在**活动模型本地**体素坐标（gizmo 是 model 的子节点，位置要用这个）。
+func _layout_gizmo_center() -> Vector3:
+	if world == null or session == null:
+		return Vector3.ZERO
+	var p := _layout_pivot_world() * model.voxel_scale
+	var local := model.global_transform.affine_inverse() * p
+	return local / maxf(model.voxel_scale, 1e-6)
+
+
+## 布局拖拽期间实时更新被选中模型的渲染器变换（活动对象用 model，其余用 _display）。
+func _update_layout_renderers() -> void:
+	for m in _layout_models():
+		var r: VoxelRenderer = null
+		if session != null and m == session.object:
+			r = model
+		else:
+			r = _display.get(m.model_id)
+		if r != null:
+			r.transform = _display_transform(m, model.voxel_scale)
+	_rebuild_layout_overlay()
+
+
+## 布局点选：replace / Shift 加选 / Ctrl 减选。
+func _layout_select(m: QVoxelModel, add: bool, remove: bool) -> void:
+	if remove:
+		_layout_sel.erase(m.model_id)
+	elif add:
+		_layout_sel[m.model_id] = true
+	else:
+		_layout_sel.clear()
+		_layout_sel[m.model_id] = true
+	_activate(m.model_id)
+	_on_tree_selected(m)
+	_rebuild_layout_overlay()
+	_refresh_hud()
+
+
+func _box_panel_node() -> Panel:
+	if _box_panel == null:
+		_box_panel = Panel.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(1.0, 0.55, 0.2, 0.12)
+		sb.border_color = Color(1.0, 0.55, 0.2, 0.9)
+		sb.set_border_width_all(1)
+		_box_panel.add_theme_stylebox_override("panel", sb)
+		_box_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_box_panel)
+	return _box_panel
+
+
+func _show_box_rect() -> void:
+	_box_panel_node().visible = true
+	_update_box_rect()
+
+
+func _update_box_rect() -> void:
+	var p := _box_panel_node()
+	var r := Rect2(_box_start, _box_end - _box_start).abs()
+	p.position = r.position
+	p.size = r.size
+
+
+func _hide_box_rect() -> void:
+	if _box_panel != null:
+		_box_panel.visible = false
+
+
+## 结束框选：把投影中心落在矩形内的模型纳入选区（`add` = Shift 加选，否则替换）。
+func _end_box_select(add := false) -> void:
+	_box_select = false
+	_hide_box_rect()
+	var r := Rect2(_box_start, _box_end - _box_start).abs()
+	if r.size.x < 4.0 or r.size.y < 4.0 or world == null:
+		return
+	var vs := world.voxel_size()
+	if not add:
+		_layout_sel.clear()
+	for m in world.all_models():
+		var sz := QVoxelEvalEngine.output_grid_size(m)
+		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
+			continue
+		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
+		var c := (bb.position + bb.end) * 0.5 * vs
+		if r.has_point(camera.unproject_position(c)):
+			_layout_sel[m.model_id] = true
+	_rebuild_layout_overlay()
+	_refresh_hud()
 
 
 func _process(_delta: float) -> void:
 	# 条件不满足就不清标记 —— 下一帧重试，直到 inset 与视口都就绪。
 	if _pending_center:
 		_apply_view_center()
+	_update_gizmo_size()
+
+
+## gizmo 手柄**屏幕大小恒定**：几何缩放系数按相机到 gizmo 中心的距离设定（世界尺寸 ∝ 距离）。
+func _update_gizmo_size() -> void:
+	if _move_gizmo == null or not _move_gizmo.visible or session == null:
+		return
+	var vs := maxf(model.voxel_scale, 1e-4)
+	var d := camera.global_position.distance_to(_move_gizmo.center_global())
+	_move_gizmo.set_size_factor(clampf(d * 0.06 / vs, 0.15, 40.0))
 
 
 ## 侧栏背景条：宽 = 内容 + 两侧缝，高 = 顶栏下缘到状态栏上缘。只作背景，不吃鼠标事件。
@@ -790,10 +1021,22 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					# 其余工具：命中可落笔处 → 落笔；落在空白处 → 拖动即旋转视角。
 					# 自定义笔刷是"点一下"的工具（不拖拽），走 _stamp_at 而不是笔画手势。
 					if _edit_mode == 1:
-						# 布局模式：只经 gizmo 改模型整体变换；点空白即转视角（不落笔）。
-						if not _gizmo_begin(e.position):
-							_nav_key = &"left"
-							_orbit = true
+						# 布局：先试 gizmo；否则**点中模型即选中**（任何工具下都行，Shift 加 / Ctrl 减）；
+						# 空处：只有「选择」工具才框选，其它工具（默认「移动」）拖动即转视角。
+						if _gizmo_begin(e.position):
+							pass
+						else:
+							var lm := _pick_layout_model(e.position)
+							if lm != null:
+								_layout_select(lm, e.shift_pressed, e.ctrl_pressed)
+							elif session.tool.mode == QVoxelBrushTool.Mode.SELECT:
+								_box_select = true
+								_box_start = e.position
+								_box_end = e.position
+								_show_box_rect()
+							else:
+								_nav_key = &"left"
+								_orbit = true
 					elif _tool_kind == ToolKind.BRUSH and session.tool.mode == QVoxelBrushTool.Mode.MOVE:
 						if not _gizmo_begin(e.position):
 							_nav_key = &"left"
@@ -808,6 +1051,8 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 						if session.tool.selection_mode():
 							session.selection_combine = 2 if e.ctrl_pressed else (1 if e.shift_pressed else 0)
 						_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op)
+			elif _box_select:
+				_end_box_select(e.shift_pressed)
 			elif _gizmo_active:
 				_gizmo_end()
 			elif _nav_key == &"left":
@@ -862,6 +1107,10 @@ func _flush_gesture() -> void:
 
 
 func _on_mouse_motion(e: InputEventMouseMotion) -> void:
+	if _box_select:
+		_box_end = e.position
+		_update_box_rect()
+		return
 	if _gizmo_active:
 		_gizmo_update(e.position)
 		return
@@ -915,11 +1164,10 @@ func _on_key(e: InputEventKey) -> void:
 	elif e.keycode == KEY_E:
 		# E = 在「添加 / 移除」之间切换操作模式（平板点顶部选项条，桌面按 E，同一份状态）。
 		_set_op(QVoxelBrushTool.Op.ADD if _op == QVoxelBrushTool.Op.REMOVE else QVoxelBrushTool.Op.REMOVE)
-	elif e.keycode >= KEY_1 and e.keycode <= KEY_8:
-		_set_material(e.keycode - KEY_0)
 	elif _numpad_view(e.keycode):
 		pass
 	else:
+		# 数字键 1..7 切工具（调色板不再占用数字键）。
 		_switch_by_hotkey(e.keycode)
 
 
@@ -1571,8 +1819,8 @@ func _refresh_hud() -> void:
 	#   模型内部 + 「移动」工具 → 摆在选区中心（没有选区时按"整体"摆在网格中心）。
 	if _move_gizmo != null:
 		if _edit_mode == 1:
-			# 布局：gizmo 摆在**模型盒中心**（旋转即绕盒心，与 .vox 的居中旋转一致）。
-			_move_gizmo.set_center(_node_center_voxel(session.object))
+			# 布局：gizmo 摆在**选区共同中心**（多选时绕它整体旋转）。
+			_move_gizmo.set_center(_layout_gizmo_center())
 		elif _tool_kind == ToolKind.BRUSH and session.tool.mode == QVoxelBrushTool.Mode.MOVE:
 			if session.selection.is_empty():
 				_move_gizmo.set_selection(Vector3i.ZERO, session.object.grid_size)
@@ -1589,6 +1837,8 @@ func _refresh_hud() -> void:
 		_palette.set_palette(_material_colors(world))
 	_palette.set_current(_material_id)
 	_refresh_panels()
+	# 面板会动态新建控件（色板 / 层级 / 帧条…），刷新收尾再关一遍焦点，杜绝 Tab/方向键乱跳。
+	_disable_focus(self)
 
 
 ## 右列三组的刷新。与 _refresh_hud 同一入口，于是"改状态 → 全界面跟上"仍只有一条路径。
@@ -1716,6 +1966,8 @@ func _set_edit_mode(m: int) -> void:
 		return
 	_edit_mode = m
 	_gizmo_active = false
+	if m == 1:
+		_layout_sel.clear()
 	if _move_gizmo != null:
 		_move_gizmo.set_hover(-1, -1)
 	if _tools != null:
@@ -1724,6 +1976,9 @@ func _set_edit_mode(m: int) -> void:
 		_context.visible = _edit_mode == 0
 	if _edit_mode == 1 and session != null:
 		_set_tool(QVoxelBrushTool.Mode.MOVE)
+	elif _edit_mode == 0 and session != null and not QVoxelBrushTool.MODES.is_empty():
+		# 切回模型编辑：默认第一个体素工具（画笔），而不是布局用的位移工具。
+		_set_tool(int(QVoxelBrushTool.MODES[0]["mode"]))
 	_attach_active()
 	_rebuild_view()
 	_rebuild_layout_overlay()
@@ -1752,7 +2007,7 @@ func _gizmo_begin(screen: Vector2) -> bool:
 			_gizmo_mode = 2
 			_layout_center = _move_gizmo.center_global()
 			_layout_axis_u = _move_gizmo.axis_world(a).normalized()
-			_layout_base_offset = session.object.offset
+			_layout_base_offsets = _layout_capture_offsets()
 			_gizmo_t0 = _layout_param(screen)
 			return true
 		# 模型内部：移动选区（没有选区就默认整体），并抓一份用于实时预览。
@@ -1770,12 +2025,17 @@ func _gizmo_begin(screen: Vector2) -> bool:
 		_gizmo_axis = r
 		_gizmo_rot_angle = 0.0
 		_gizmo_rot_quarters = 0
-		_gizmo_t0 = _move_gizmo.ring_angle(screen, camera, r)
 		if _edit_mode == 1:
 			_gizmo_mode = 3
-			_layout_base_xf = session.object.local_transform
+			_layout_base_xfs = _layout_capture_xfs()
+			_layout_pivot = _layout_pivot_from(_layout_base_xfs)
+			# 钉住参考系：拖动中 gizmo 随模型转，实时 global_transform 会让夹角乱跳。
+			_layout_rot_basis = _move_gizmo.global_transform.basis
+			_layout_rot_center = _move_gizmo.center_global()
+			_gizmo_t0 = _move_gizmo.ring_angle_ref(screen, camera, r, _layout_rot_basis, _layout_rot_center)
 		else:
 			_gizmo_mode = 1
+			_gizmo_t0 = _move_gizmo.ring_angle(screen, camera, r)
 		return true
 	return false
 
@@ -1790,30 +2050,38 @@ func _gizmo_update(screen: Vector2) -> void:
 		if d == _gizmo_delta:
 			return
 		_gizmo_delta = d
-		session.object.offset = _layout_base_offset + _axis_delta(_gizmo_axis, d)
-		model.transform = _display_transform(session.object, model.voxel_scale)
+		var delta := _axis_delta(_gizmo_axis, d)
+		for m in _layout_models():
+			m.offset = (_layout_base_offsets[m.model_id] as Vector3i) + delta
+		_update_layout_renderers()
 		return
 	if _gizmo_mode == 3:
-		_move_gizmo.set_hover(-1, _gizmo_axis)
-		_gizmo_rot_angle = _move_gizmo.ring_angle(screen, camera, _gizmo_axis) - _gizmo_t0
+		_gizmo_rot_angle = _move_gizmo.ring_angle_ref(screen, camera, _gizmo_axis,
+				_layout_rot_basis, _layout_rot_center) - _gizmo_t0
+		_move_gizmo.set_hover(-1, _gizmo_axis, _ring_seg_for(_gizmo_rot_angle))
 		var q := roundi(_gizmo_rot_angle / (PI / 2.0))
 		if q == _gizmo_rot_quarters:
 			return
 		_gizmo_rot_quarters = q
-		var axis_v: Vector3 = [Vector3.RIGHT, Vector3.UP, Vector3.BACK][_gizmo_axis]
-		var b := (_layout_base_xf.basis * Basis(axis_v, float(q) * PI / 2.0)).orthonormalized()
-		session.object.local_transform = _center_preserving(_layout_base_xf, b, _node_center_voxel(session.object))
-		model.transform = _display_transform(session.object, model.voxel_scale)
+		hud.flash("旋转 %d°" % (q * 90))
+		var rot := Basis([Vector3.RIGHT, Vector3.UP, Vector3.BACK][_gizmo_axis], float(q) * PI / 2.0)
+		var rot_p := Transform3D(rot, _layout_pivot - rot * _layout_pivot)
+		for m in _layout_models():
+			var base: Transform3D = _layout_base_xfs[m.model_id]
+			var pw := _parent_world(m)
+			m.local_transform = pw.affine_inverse() * rot_p * pw * base
+		_update_layout_renderers()
 		return
 	if _gizmo_mode == 1:
-		_move_gizmo.set_hover(-1, _gizmo_axis)
 		_gizmo_rot_angle = _move_gizmo.ring_angle(screen, camera, _gizmo_axis) - _gizmo_t0
+		_move_gizmo.set_hover(-1, _gizmo_axis, _ring_seg_for(_gizmo_rot_angle))
 		var q := roundi(_gizmo_rot_angle / (PI / 2.0))
 		if q == _gizmo_rot_quarters:
 			return
 		_gizmo_rot_quarters = q
 		# 实时预览：旋转后的格以半透明 ghost 画出来（与移动同一套预览语言）。
 		_ghost.set_cells(session.preview_rotation(_gizmo_axis, q), QVoxelUi.ACCENT, false)
+		hud.flash("旋转 %d°" % (q * 90))
 		return
 	var d := int(roundf((_gizmo_param(screen) - _gizmo_t0) / _gizmo_per_voxel))
 	if d == _gizmo_delta:
@@ -1840,15 +2108,21 @@ func _gizmo_end() -> void:
 	if _gizmo_mode == 2:
 		_gizmo_mode = 0
 		_gizmo_axis = -1
-		var node := session.object
-		var final := _layout_base_offset + _axis_delta(ax, _gizmo_delta)
+		var delta := _axis_delta(ax, _gizmo_delta)
 		_gizmo_delta = 0
-		if final != _layout_base_offset:
-			node.offset = _layout_base_offset   # 复位，让命令抓到正确的 before
-			var cmd := QVoxelPropertyCommand.begin(node, &"offset", node, "移动节点")
-			node.offset = final
+		var macro := QVoxelMacroCommand.new("移动模型")
+		for m in _layout_models():
+			var base: Vector3i = _layout_base_offsets[m.model_id]
+			var final := base + delta
+			if final == base:
+				continue
+			m.offset = base   # 复位，让命令抓到正确的 before
+			var cmd := QVoxelPropertyCommand.begin(m, &"offset", m, "移动节点")
+			m.offset = final
 			if cmd.commit():
-				session.history.push(cmd)
+				macro.add(cmd)
+		if not macro.is_empty():
+			session.history.push(macro)
 			_sess.mark_dirty()
 		_attach_active()
 		_rebuild_view()
@@ -1857,19 +2131,27 @@ func _gizmo_end() -> void:
 	if _gizmo_mode == 3:
 		_gizmo_mode = 0
 		_gizmo_axis = -1
-		var node := session.object
 		var q := roundi(_gizmo_rot_angle / (PI / 2.0))
 		_gizmo_rot_angle = 0.0
 		_gizmo_rot_quarters = 0
 		if q != 0:
-			node.local_transform = _layout_base_xf   # 复位
-			var cmd := QVoxelPropertyCommand.begin(node, &"local_transform", node, "旋转节点")
-			var axis_v: Vector3 = [Vector3.RIGHT, Vector3.UP, Vector3.BACK][ax]
-			var b := (_layout_base_xf.basis * Basis(axis_v, float(q) * PI / 2.0)).orthonormalized()
-			node.local_transform = _center_preserving(_layout_base_xf, b, _node_center_voxel(node))
-			if cmd.commit():
-				session.history.push(cmd)
-			_sess.mark_dirty()
+			var rot := Basis([Vector3.RIGHT, Vector3.UP, Vector3.BACK][ax], float(q) * PI / 2.0)
+			var rot_p := Transform3D(rot, _layout_pivot - rot * _layout_pivot)
+			var macro := QVoxelMacroCommand.new("旋转模型")
+			for m in _layout_models():
+				var base: Transform3D = _layout_base_xfs[m.model_id]
+				var pw := _parent_world(m)
+				var final := pw.affine_inverse() * rot_p * pw * base
+				if final.is_equal_approx(base):
+					continue
+				m.local_transform = base   # 复位
+				var cmd := QVoxelPropertyCommand.begin(m, &"local_transform", m, "旋转节点")
+				m.local_transform = final
+				if cmd.commit():
+					macro.add(cmd)
+			if not macro.is_empty():
+				session.history.push(macro)
+				_sess.mark_dirty()
 		_attach_active()
 		_rebuild_view()
 		_refresh_hud()
@@ -1903,9 +2185,18 @@ func _update_gizmo_hover(screen: Vector2) -> void:
 		return
 	var a := _move_gizmo.axis_hit(screen, camera)
 	var r := -1
+	var seg := -1
 	if a < 0:
 		r = _move_gizmo.ring_hit(screen, camera)
-	_move_gizmo.set_hover(a, r)
+		if r >= 0:
+			seg = _move_gizmo.last_ring_seg()
+	_move_gizmo.set_hover(a, r, seg)
+
+
+## 角度 → 环段下标（分段高亮用）。
+func _ring_seg_for(angle: float) -> int:
+	var seg := float(QVoxelierMoveGizmo.RING_SEG)
+	return posmod(int(round(angle / (TAU / seg))), int(seg))
 
 
 ## 单轴整数位移（axis 下标 + 步数 → Vector3i）。
@@ -2162,6 +2453,13 @@ func _node_center_voxel(node: QVoxelNode) -> Vector3:
 ## 把 base 的旋转换成 b，同时**保持盒中心 C 不动**（new*C == base*C）→ 原地自转，不甩到别处。
 func _center_preserving(base: Transform3D, b: Basis, c: Vector3) -> Transform3D:
 	return Transform3D(b, base.origin + base.basis * c - b * c)
+
+
+## 双击层级行：切到该节点（顺带显示「对象」页）并聚焦名字输入框开始改名。
+func _begin_rename(node: QVoxelNode) -> void:
+	_on_tree_selected(node)
+	if _object_section != null:
+		_object_section.begin_rename(node)
 
 
 func _on_tree_selected(node: QVoxelNode) -> void:
