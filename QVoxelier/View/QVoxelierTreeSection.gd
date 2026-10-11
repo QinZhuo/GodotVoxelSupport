@@ -33,8 +33,6 @@ var _hint: Label
 var _del: Button
 var _selected: QVoxelNode
 var _filter := ""
-## 正在进行的改名提交闭包（点任意别处 / 重建时先把它结掉，避免"改了却没生效"）。
-var _rename_commit := Callable()
 
 
 func section_title() -> String:
@@ -113,42 +111,6 @@ func _on_context_menu(id: int, node: QVoxelNode) -> void:
 			node_remove_requested.emit(node)
 
 
-## 双击行内名字 → 就地换成输入框改名（回车 / 失焦提交，Esc 不改）。
-func _begin_rename(node: QVoxelNode, row: TreeRow) -> void:
-	var lbl := row.name_label
-	if lbl == null or not is_instance_valid(lbl):
-		return
-	var parent := lbl.get_parent()
-	var idx := lbl.get_index()
-	var le := LineEdit.new()
-	le.text = node.display_name()
-	le.flat = true
-	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	parent.add_child(le)
-	parent.move_child(le, idx)
-	lbl.visible = false
-	le.grab_focus()
-	le.select_all()
-	# 回车与失焦都可能触发提交，用一次性闸门防重复。
-	var done := [false]
-	var commit := func() -> void:
-		if done[0]:
-			return
-		done[0] = true
-		_rename_commit = Callable()
-		var t := le.text.strip_edges()
-		if is_instance_valid(lbl):
-			lbl.visible = true
-		if is_instance_valid(le):
-			le.queue_free()
-		if not t.is_empty() and t != node.display_name():
-			node_rename_requested.emit(node, t)
-	_rename_commit = commit
-	le.text_submitted.connect(func(_t: String) -> void: commit.call())
-	le.focus_exited.connect(func() -> void: commit.call())
-
-
-## 挂上世界。**每次换世界都要调**（新建 / 打开工程）。
 func set_world(world: QVoxelWorld, active_id := -1) -> void:
 	_world = world
 	_active_id = active_id
@@ -170,11 +132,6 @@ func refresh() -> void:
 func _rebuild() -> void:
 	if _rows == null:
 		return
-	# 重建前先把进行中的改名结掉（点别的行会触发重建，不结就会把改动丢掉）。
-	if _rename_commit.is_valid():
-		var c := _rename_commit
-		_rename_commit = Callable()
-		c.call()
 	for c in _rows.get_children():
 		c.queue_free()
 	if _world == null:
@@ -239,9 +196,9 @@ func _make_modifier_row(node: QVoxelNode, index: int, depth: int, errors: Array 
 
 	var on := QVoxelUi.toggle_button("旁通 / 启用这条修改器")
 	on.button_pressed = m.enabled
-	on.text = "◉" if m.enabled else "○"
+	on.icon = QVoxelUi.icon("dot_on" if m.enabled else "dot_off")
 	on.toggled.connect(func(v: bool):
-		on.text = "◉" if v else "○"
+		on.icon = QVoxelUi.icon("dot_on" if v else "dot_off")
 		modifier_enabled_changed.emit(node, index, v))
 	box.add_child(on)
 
@@ -261,8 +218,12 @@ func _make_modifier_row(node: QVoxelNode, index: int, depth: int, errors: Array 
 		var msgs := PackedStringArray()
 		for e in errors:
 			msgs.append(String(e["message"]))
-		var warn := QVoxelUi.label("⚠", QVoxelUi.FONT_S, QVoxelUi.WARN)
+		var warn := TextureRect.new()
+		warn.texture = QVoxelUi.icon("warn")
+		warn.custom_minimum_size = Vector2(15, 15)
+		warn.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		warn.tooltip_text = "\n".join(msgs)
+		warn.mouse_filter = Control.MOUSE_FILTER_PASS
 		box.add_child(warn)
 
 	var rm := QVoxelUi.icon_button("×", "从链上移除这条修改器")
@@ -324,27 +285,34 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 	row.add_child(box)
 
 	if node.is_group():
-		var arrow := QVoxelUi.label("▾" if node.expanded_in_tree else "▸", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+		var arrow := QVoxelUi.icon_button("", "展开 / 收起这一组", QVoxelUi.hit_size() - 6)
+		arrow.icon = QVoxelUi.icon("caret_down" if node.expanded_in_tree else "caret_right")
+		arrow.pressed.connect(func():
+			node.expanded_in_tree = not node.expanded_in_tree
+			_rebuild())
 		box.add_child(arrow)
 
 	var vis := QVoxelUi.toggle_button("显示 / 隐藏")
 	vis.button_pressed = node.visible
-	vis.text = "👁"
-	vis.toggled.connect(func(v): node_visible_changed.emit(node, v))
+	vis.icon = QVoxelUi.icon("eye" if node.visible else "eye_off")
+	vis.toggled.connect(func(v):
+		vis.icon = QVoxelUi.icon("eye" if v else "eye_off")
+		node_visible_changed.emit(node, v))
 	box.add_child(vis)
 	var lock := QVoxelUi.toggle_button("锁定（锁上后整棵子树不可编辑）")
 	lock.button_pressed = node.locked
-	lock.text = "🔒"
-	lock.toggled.connect(func(v): node_locked_changed.emit(node, v))
+	lock.icon = QVoxelUi.icon("lock" if node.locked else "lock_open")
+	lock.toggled.connect(func(v):
+		lock.icon = QVoxelUi.icon("lock" if v else "lock_open")
+		node_locked_changed.emit(node, v))
 	box.add_child(lock)
 
-	# 名字用 Label（点一下 = 选中整行；双击才改名，见 TreeRow._gui_input / _begin_rename）。
+	# 名字用 Label（点整行 = 选中；改名在右侧「对象」属性页里做）。
 	var name_label := QVoxelUi.label(node.display_name(), QVoxelUi.FONT_M, QVoxelUi.TEXT)
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_label.clip_text = true
 	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	box.add_child(name_label)
-	row.name_label = name_label
 
 	var badge := _badge_of(node)
 	if not badge.is_empty():
@@ -352,9 +320,15 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 
 	var errs := _errors_of(node)
 	if errs > 0:
-		var warn := QVoxelUi.label("⚠%d" % errs, QVoxelUi.FONT_S, QVoxelUi.WARN)
+		var warn := TextureRect.new()
+		warn.texture = QVoxelUi.icon("warn")
+		warn.custom_minimum_size = Vector2(15, 15)
+		warn.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		warn.tooltip_text = _row_tooltip(node)
+		warn.mouse_filter = Control.MOUSE_FILTER_PASS
 		box.add_child(warn)
+		if errs > 1:
+			box.add_child(QVoxelUi.label(str(errs), QVoxelUi.FONT_S, QVoxelUi.WARN))
 
 	return row
 
@@ -440,8 +414,6 @@ class TreeRow extends Button:
 	var section: QVoxelierTreeSection
 	var depth := 0
 	var modifier_index := -1
-	## 名字 Label（双击改名时就地把它换成 LineEdit）。
-	var name_label: Label
 
 	func _get_drag_data(_at: Vector2) -> Variant:
 		if node == null or modifier_index >= 0:
@@ -456,9 +428,6 @@ class TreeRow extends Button:
 			return
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			section._row_context(node)
-			accept_event()
-		elif event.button_index == MOUSE_BUTTON_LEFT and event.double_click:
-			section._begin_rename(node, self)
 			accept_event()
 
 	func _can_drop_data(at: Vector2, data: Variant) -> bool:

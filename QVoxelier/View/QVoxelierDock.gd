@@ -25,23 +25,30 @@ func _build() -> void:
 	var w := float(QVoxelUi.dock_width()) + QVoxelUi.space_l()
 	offset_left = offset_right - w
 
-	_root = QVoxelUi.vbox(QVoxelUi.space_s())
-	_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(_root)
+	# 整列**一块背景**（各分组自己不再带背景），中间一条分割线把"层级 / 属性"两半分开。
+	var bg := QVoxelUi.panel(QVoxelUi.space_s())
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(bg)
 
-	# 上：层级（Outliner，常驻，占约 4.2 成高）。
+	_root = QVoxelUi.vbox(0)
+	bg.add_child(_root)
+
+	# 上：层级（占一半）。
 	_out_scroll = QVoxelUi.scroll(true)
 	_out_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_out_scroll.size_flags_stretch_ratio = 0.42
+	_out_scroll.size_flags_stretch_ratio = 0.5
 	_root.add_child(_out_scroll)
 	_out_host = QVoxelUi.vbox(QVoxelUi.space_s())
 	_out_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_out_scroll.add_child(_out_host)
 
-	# 下：属性（单页，随选中自动切换，占约 5.8 成高）。
+	# 中缝：一条分割线（两半之间的唯一分界）。
+	_root.add_child(QVoxelUi.divider())
+
+	# 下：属性（占一半，随选中自动切换）。
 	_prop_scroll = QVoxelUi.scroll(true)
 	_prop_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_prop_scroll.size_flags_stretch_ratio = 0.58
+	_prop_scroll.size_flags_stretch_ratio = 0.5
 	_root.add_child(_prop_scroll)
 	_prop_host = QVoxelUi.vbox(QVoxelUi.space_s())
 	_prop_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -70,6 +77,8 @@ func _fit() -> void:
 ## 追加一个**属性页**组（只在装配时调用）。App 用 show_property 按当前选择切。
 func add_property(s: QVoxelierSection) -> void:
 	_prop_host.add_child(s)
+	# 必须在 add_child 之后 —— 组自己的面板是在 _ready（add_child 触发）里建出来的。
+	s.set_flat(true)
 	_prop_sections.append(s)
 	if _active < 0:
 		show_property(s)
@@ -78,9 +87,10 @@ func add_property(s: QVoxelierSection) -> void:
 	_fit()
 
 
-## 追加一个**常驻**的层级组（Outliner）或它下面的附板（动画轴 / 快照）。
+## 追加一个**常驻**的层级组（Outliner）。
 func add_outliner(s: QVoxelierSection) -> void:
 	_out_host.add_child(s)
+	s.set_flat(true)
 	_fit()
 
 

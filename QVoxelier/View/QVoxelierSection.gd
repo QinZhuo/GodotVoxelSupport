@@ -47,6 +47,20 @@ func set_panel_fill(on: bool) -> void:
 			Control.PRESET_FULL_RECT if on else Control.PRESET_TOP_WIDE)
 
 
+## 去掉本组自己的背景 / 描边（整列统一一块背景时用，组只留内容）。
+func set_flat(on: bool) -> void:
+	if _panel == null:
+		return
+	if on:
+		_panel.add_theme_stylebox_override("panel",
+				QVoxelUi.box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 0, 0,
+						QVoxelUi.space_s(), QVoxelUi.space_s()))
+	else:
+		_panel.add_theme_stylebox_override("panel",
+				QVoxelUi.box(QVoxelUi.SURFACE, QVoxelUi.BORDER, 1, QVoxelUi.RADIUS_M,
+						QVoxelUi.space_s(), QVoxelUi.space_s()))
+
+
 func _build() -> void:
 	_panel = QVoxelUi.panel(QVoxelUi.space_s())
 	_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
