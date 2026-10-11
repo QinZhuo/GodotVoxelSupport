@@ -71,7 +71,7 @@ func _build() -> void:
 	# ── 文件组 ──（顶栏是屏幕顶上一条 40px 的带，一屏里要放下十余件操作 ——
 	# 文字版实测把工程名挤到看不见，故只留图标，名字与快捷键交给悬浮提示）
 	row.add_child(_action(new_requested.emit, "", "new"))
-	row.add_child(_action(open_requested.emit, "打开（Ctrl+O）\n打开 .qvx 工程，也可以直接把文件拖进窗口",
+	row.add_child(_action(open_requested.emit, "打开（Ctrl+O）\n打开 .qvx 工程或 .vox 体素文件，也可以直接把文件拖进窗口",
 			"open"))
 	# 保存是主操作：整条栏里唯一带强调描边与强调字的按钮（样式见 QVoxelUi.VARIATION_ACCENT）。
 	row.add_child(_action(save_requested.emit, "保存（Ctrl+S）\n存成 .qvx 工程（保留修改器链与相机）",

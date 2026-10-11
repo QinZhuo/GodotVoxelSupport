@@ -120,40 +120,15 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 	return null
 
 
-## 节点条目里"两种节点共有"的那部分。position 缺省 (0,0,0) 不写（P2：缺省才是常态）。
-## 【旧工程迁移】去链之前，摆放是链上的一条平移条目（NODE 的 `steps`）。旧文件没有 `pos`，
-## 这里把 steps 里的平移量求和迁成 `pos`，并给一句告警 —— 否则老工程打开后摆放会静默丢失。
+## 节点条目里"两种节点共有"的那部分。摆放缺省恒等则不写（P2：缺省才是常态）。
+## 【摆放的唯一表示是 `transform`】位置 + 旋转同住一处，读写都经 QVoxelNode 那对编解码。
+## 历史键 `pos` / `steps` 不再兼容（格式定稿前从未真正落盘过需要迁移的数据）。
 static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 	n.node_name = str(entry.get("name", ""))
 	n.visible = bool(entry.get("visible", true))
 	n.locked = bool(entry.get("locked", false))
-	var p: Variant = entry.get("pos")
-	if p is Array and (p as Array).size() == 3:
-		n.offset = Vector3i(int(p[0]), int(p[1]), int(p[2]))
-		return
-	var mig := _migrate_offset_from_steps(entry)
-	if mig != Vector3i.ZERO:
-		n.offset = mig
-		push_warning("[QVX] 旧工程：已把节点「%s」的平移链迁移为位置 %s（修改器链其余改动不再生效）"
-				% [n.display_name(), mig])
-
-
-## 旧格式迁移：把残留 steps 里的平移量（params.offset）求和成节点位置。
-static func _migrate_offset_from_steps(entry: Dictionary) -> Vector3i:
-	var steps: Variant = entry.get("steps")
-	if not (steps is Array):
-		return Vector3i.ZERO
-	var acc := Vector3i.ZERO
-	for st in (steps as Array):
-		if not (st is Dictionary):
-			continue
-		var params: Variant = (st as Dictionary).get("params")
-		if not (params is Dictionary):
-			continue
-		var off: Variant = (params as Dictionary).get("offset")
-		if off is Array and (off as Array).size() == 3:
-			acc += Vector3i(int(off[0]), int(off[1]), int(off[2]))
-	return acc
+	n.local_transform = QVoxelNode.transform_from_json(entry.get("transform"))
+	n.transform_tracks = QVoxelNode.transform_tracks_from_json(entry.get("transform_tracks"))
 
 
 # 导出为传输结构（保存路径）
@@ -476,6 +451,32 @@ func find_parent(target: QVoxelNode) -> QVoxelGroup:
 	return null
 
 
+## 节点在**世界里的组合摆放**：从根到它逐层累乘 local_transform。渲染器据此把模型摆到该处。
+## 编辑器按"体素坐标本地化 + 渲染器承载摆放"的口径渲染，本函数就是那条摆放的唯一来源。
+func world_transform(target: QVoxelNode) -> Transform3D:
+	var path: Array[QVoxelNode] = []
+	if not _path_to(nodes, target, path):
+		return Transform3D.IDENTITY
+	var xf := Transform3D.IDENTITY
+	for n in path:
+		xf = xf * n.local_transform
+	return xf
+
+
+## 深度优先找 target 的路径（根 → target），填入 path。找不到返回 false（path 复原）。
+func _path_to(list: Array[QVoxelNode], target: QVoxelNode, path: Array[QVoxelNode]) -> bool:
+	for n in list:
+		if n == null:
+			continue
+		path.append(n)
+		if n == target:
+			return true
+		if n.is_group() and _path_to((n as QVoxelGroup).child_nodes, target, path):
+			return true
+		path.pop_back()
+	return false
+
+
 ## target 的同级列表（顶层节点的同级 = 顶层数组）。
 func siblings_of(target: QVoxelNode) -> Array[QVoxelNode]:
 	var lst := _list_holding(target)
@@ -711,8 +712,12 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 		e["visible"] = false
 	if n.locked:
 		e["locked"] = true
-	if n.offset != Vector3i.ZERO:
-		e["pos"] = [n.offset.x, n.offset.y, n.offset.z]
+	var xf := QVoxelNode.transform_to_json(n.local_transform)
+	if not xf.is_empty():
+		e["transform"] = xf
+	var tracks := QVoxelNode.transform_tracks_to_json(n.transform_tracks)
+	if not tracks.is_empty():
+		e["transform_tracks"] = tracks
 	if n.is_model():
 		var mo := n as QVoxelModel
 		e["model_id"] = mo.model_id

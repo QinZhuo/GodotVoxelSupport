@@ -12,12 +12,14 @@ signal rename_requested(node: QVoxelNode, new_name: String)
 signal visible_changed(node: QVoxelNode, value: bool)
 signal locked_changed(node: QVoxelNode, value: bool)
 signal offset_changed(node: QVoxelNode, value: Vector3i)
+signal resize_requested(node: QVoxelNode, value: Vector3i)
 
 var _node: QVoxelNode
 var _name: LineEdit
 var _vis: Button
 var _lock: Button
 var _offset_spins: Array[SpinBox] = []
+var _size_spins: Array[SpinBox] = []
 var _info: VBoxContainer
 
 
@@ -70,9 +72,35 @@ func _build_body(body: VBoxContainer) -> void:
 		posrow.add_child(sp)
 		_offset_spins.append(sp)
 
+	# 尺寸：每个模型**独立**的分辨率（体素数上限）。改它是结构级操作（会丢盒外的体素），
+	# 由 App 包成一条可撤销命令（QVoxelResizeCommand），这里只上报新值。
+	var sizerow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
+	body.add_child(sizerow)
+	var slabel := QVoxelUi.label("尺寸", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
+	slabel.custom_minimum_size.x = 32
+	slabel.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	sizerow.add_child(slabel)
+	for _axis in 3:
+		var sp := SpinBox.new()
+		sp.min_value = 1
+		sp.max_value = 1024
+		sp.step = 1
+		sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sp.value_changed.connect(_on_size_spin)
+		sizerow.add_child(sp)
+		_size_spins.append(sp)
+
 	_info = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	body.add_child(_info)
 	_rebuild()
+
+
+## 三个轴任一变化 → 合成 Vector3i 上报（App 记成可撤销的改尺寸命令）。
+func _on_size_spin(_v: float) -> void:
+	if _node == null or not _node.is_model() or _size_spins.size() < 3:
+		return
+	resize_requested.emit(_node, Vector3i(
+			int(_size_spins[0].value), int(_size_spins[1].value), int(_size_spins[2].value)))
 
 
 ## 三个轴任一变化 → 合成 Vector3i 上报（App 记成可撤销命令）。
@@ -101,10 +129,17 @@ func _rebuild() -> void:
 	_lock.disabled = not has
 	for sp in _offset_spins:
 		sp.editable = has
+	for sp in _size_spins:
+		sp.editable = has and _node != null and _node.is_model()
 	if has:
 		_offset_spins[0].set_value_no_signal(_node.offset.x)
 		_offset_spins[1].set_value_no_signal(_node.offset.y)
 		_offset_spins[2].set_value_no_signal(_node.offset.z)
+	if has and _node.is_model():
+		var g := (_node as QVoxelModel).grid_size
+		_size_spins[0].set_value_no_signal(g.x)
+		_size_spins[1].set_value_no_signal(g.y)
+		_size_spins[2].set_value_no_signal(g.z)
 	if not has:
 		_name.text = ""
 		_info.add_child(QVoxelUi.label("（未选中对象）", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT))

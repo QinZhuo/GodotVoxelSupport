@@ -79,6 +79,11 @@ func is_animated() -> bool:
 	return not frames.is_empty()
 
 
+## 渲染 / 求值当前该看的帧号（= active_frame）。摆放轨道与体素帧共用它，见 QVoxelNode.transform_at。
+func current_frame() -> int:
+	return active_frame
+
+
 func frame_count() -> int:
 	return frames.size()
 

@@ -456,8 +456,9 @@ func test_cameras_and_nested_nodes_roundtrip() -> void:
 	var body := _find_node(root.get("children", []), "body")
 	assert_eq(body.get("kind"), "model", "子节点在父的 children 里")
 	assert_eq(body.get("model_id"), 0, "模型下标存活")
-	assert_eq(body.get("pos"), [1.0, 2.0, 3.0], "组内坐标（节点 pos）存活，JSON 数字读回是 float")
+	assert_eq(body.get("transform").get("t"), [1.0, 2.0, 3.0], "组内坐标（节点 transform.t）存活，JSON 数字读回是 float")
 	assert_false(body.has("steps"), "去链后不再写 steps")
+	assert_false(body.has("pos"), "摆放只写 transform，不再有 pos")
 	assert_false(body.has("children"), "模型是叶子 —— children 是冗余键，不该出现在模型上")
 
 
@@ -705,7 +706,7 @@ func _make_doc_with_engineering_data() -> QVoxelFile.QVoxelDocument:
 		"nodes": [
 			{"name": "root", "kind": "group", "children": [
 				# 组内坐标就是节点的 pos（去链后摆放回到节点本身）。
-				{"name": "body", "kind": "model", "model_id": 0, "pos": [1, 2, 3]},
+				{"name": "body", "kind": "model", "model_id": 0, "transform": {"t": [1, 2, 3]}},
 			]},
 		],
 	}

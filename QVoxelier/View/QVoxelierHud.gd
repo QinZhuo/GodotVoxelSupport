@@ -371,7 +371,7 @@ const _LEGEND := [
 		"V/F/B/L/C 切工具 · T 选择 · M 移动 · [ ] 改笔刷 · 1..8 选材质",
 		"Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Esc 取消这一笔 / 退掉选区",
 		"Ctrl+A 全选 · Ctrl+C/X/V 复制 / 剪切 / 粘贴 · Del 清空选区",
-		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开 · Ctrl+E 导出 .vox",
+		"Ctrl+S 保存 · Ctrl+Shift+S 另存 · Ctrl+O 打开（.qvx/.vox） · Ctrl+E 导出 .vox",
 	]],
 	["触摸屏 / 触摸板", [
 		"单指拖动 按当前操作落笔 · 用顶部选项条切「添加 / 移除 / 上色」",

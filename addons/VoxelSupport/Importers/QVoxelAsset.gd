@@ -197,46 +197,12 @@ static func _collect_anim_meta(nodes: Array, out: Dictionary) -> void:
 			_collect_anim_meta(kids, out)
 
 
-## 单个节点的局部变换。三个字段全部可选，缺省即恒等：
-##   `t` 平移 `[x, y, z]`（体素单位）
-##   `r` 旋转 **单位四元数** `[x, y, z, w]`（与 glTF 同构）
-##   `s` 缩放 `[x, y, z]`
-## 【为什么旋转不是 0–23 朝向索引】那是 MagicaVoxel 为 `.vox` 的 `nTRN` 发明的省字节
-## 编码：只有 24 种轴对齐朝向，还隐含 Z-up 约定。`.qvx` 是通用容器，没有义务继承它——
-## 四元数只多一个浮点数就能表达任意旋转，且与 `Quaternion` / `Basis` / `Transform3D`
-## 直接对接，读写两端不需要任何查表或位运算（那套解码留在 `VoxAccess` 里，只服务 `.vox`）。
-## 三者按 T·R·S 组合（与 glTF / 常规场景图层级一致：缩放先于旋转作用于节点自身坐标系）。
-## 非单位缩放会破坏"体素坐标是整数"这一前提，因此带缩放的摆放自动落到逐体素融合路径
-## （`is_block_importable()` 为假），由 `fused_voxels()` 取整投影。
+## 单个节点的局部变换。字段布局与编解码的唯一实现在 `QVoxelNode.transform_from_json`
+## （位置 `t` / 四元数 `r` / 缩放 `s`，三者皆可缺省）。这里只做"取 transform 键"这一层转发。
+## 【为什么旋转是四元数而不是 0–23 朝向索引】那是 MagicaVoxel 为 `.vox` 的 `nTRN` 发明的
+## 省字节编码，隐含 Z-up 约定；`.qvx` 是通用容器，四元数与 Transform3D 直接对接，无需查表。
 static func _node_transform(node: Dictionary) -> Transform3D:
-	var xf: Variant = node.get("transform")
-	var d: Dictionary = xf if xf is Dictionary else {}
-	if d.is_empty():
-		return Transform3D.IDENTITY
-	var basis := Basis(_quaternion(d.get("r")))
-	var sv: Variant = d.get("s")
-	if sv is Array and (sv as Array).size() >= 3:
-		var sa: Array = sv
-		basis = basis * Basis.from_scale(Vector3(float(sa[0]), float(sa[1]), float(sa[2])))
-	return Transform3D(basis, _vec3(d.get("t")))
-
-
-## `[x, y, z]` → Vector3。字段缺失或格式非法时取零。
-static func _vec3(v: Variant) -> Vector3:
-	if v is Array and (v as Array).size() >= 3:
-		var a: Array = v
-		return Vector3(float(a[0]), float(a[1]), float(a[2]))
-	return Vector3.ZERO
-
-
-## `[x, y, z, w]` → 单位四元数。字段缺失、格式非法或长度为零时取恒等。
-static func _quaternion(v: Variant) -> Quaternion:
-	if v is Array and (v as Array).size() >= 4:
-		var a: Array = v
-		var q := Quaternion(float(a[0]), float(a[1]), float(a[2]), float(a[3]))
-		if q.length_squared() > 0.0:
-			return q.normalized()
-	return Quaternion.IDENTITY
+	return QVoxelNode.transform_from_json(node.get("transform"))
 
 
 # 查询

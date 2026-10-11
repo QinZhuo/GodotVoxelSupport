@@ -23,19 +23,135 @@ static func from_asset(path: String) -> VoxAsset:
 	return access.voxel if access != null else null
 
 
-## 世界 → `.vox` 资产（"走出去"的出口，与 from_asset 恰成一对进出）。
-## 【为什么整世界合成**一个**模型，而不是"每模型一个 nSHP + 场景图摆放"】
-## QVoxelier 的树是**编辑期**的层级，MagicaVoxel 的多模型场景图是另一套东西：它要求每个模型
-## 自带摆放，而摆放必须抵消 VoxelModel.offset 那套"按尺寸居中"的约定（见 QVoxelAsset 类注释
-## 列出的三处失真）。硬凑出来的结果是"在 MagicaVoxel 里看着对、回到本项目就错位"这类只在
-## 跨工具时才暴露的问题。而用户要的其实是一块**能拿去用的体素** —— 那就直接用框架里已有的
-## 世界级求值（evaluate_world 已把各顶层节点按 origin 合成进一个紧致盒），导出的语义与画面上
-## 看到的一致，且"世界怎么合成"这件事全项目仍然只有一份实现。
-## 【多模型的结构去哪了】并入这一块体积，不保留。`.vox` 里想表达"多个对象"要靠场景图，
-## 而那是另一条语义路径（需 QVoxelier 侧先有"每个模型独立摆放"的概念，当前没有）。
-static func from_world(world: QVoxelWorld, ctx: QVoxelEvalContext = null) -> VoxAsset:
-	return from_result(world, QVoxelEvalEngine.evaluate_world(world,
-			ctx if ctx != null else QVoxelEvalContext.new()))
+## 世界 → `.vox` 资产（**结构保留**：每个模型一个 SIZE/XYZI，每个顶层组一条 LAYR，节点摆放 → nTRN）。
+## 与 `from_asset`（读）恰成一对进出；与 `from_node`（把一块体积拍平）不同，这里保持
+## "多模型 + 图层 + 摆放"，于是 `.qvx` ⇄ `.vox` 往返后结构与显示都一致。
+## 【为什么不再拍平成一块】旧实现把整世界合成一个模型（画面一致但结构尽失）。现在编辑器
+## 自身已支持"每个模型独立尺寸 + 自由摆放 + 组嵌套"，导出自然应把这些结构写回 `.vox`
+## —— 图层（LAYR）与组一一对应、摆放进 nTRN，正是 `.vox` 的分层/场景图语义。
+static func from_world(world: QVoxelWorld, _ctx: QVoxelEvalContext = null) -> VoxAsset:
+	var out := VoxAsset.new()
+	out._build_structured(world)
+	return out
+
+
+## 世界 → 结构化 `.vox` 资产（填入 self 的 materials / models / nodes / layers）。
+## 【节点图】root nTRN(0) → nGRP(1) → 每个顶层节点一个 nTRN 包装（携带变换与图层）→ 其子树。
+## 模型是 nSHP（只带 model_id），摆放挂在包它的 nTRN 上 —— nSHP 的帧首字段是 model_id，装不下
+## 位置/旋转（见 VoxAccess._shape_frames 与 _write_transform 的分工）。
+func _build_structured(world: QVoxelWorld) -> void:
+	# 材质：索引 0 恒为空；1..255 从世界 MATE 逐条解释（与 from_result 同一套摆放契约）。
+	materials.resize(256)
+	for i in range(1, 256):
+		var mat := VoxelMaterial.new()
+		mat.id = i
+		materials[i] = mat
+	if world == null:
+		return
+	for i in range(1, mini(256, world.materials.size())):
+		if world.materials[i] is Dictionary:
+			materials[i] = VoxelMaterial.from_mate(world.materials[i], i)
+	# 模型：每个 QVoxelModel 一块（本地内容 + Z 映射；摆放交给 nTRN）。
+	var index := {}
+	for m in world.all_models():
+		index[m] = models.size()
+		models.append(_model_from_volume(m.grid_size, m.to_volume()))
+	# 图层：每个顶层组一条 LAYR（组名 = 图层名，可见性 = `_hidden` 的反）。
+	var layer_of := {}
+	var layer_id := 0
+	for top in world.nodes:
+		if top is QVoxelGroup:
+			var l := VoxelLayer.new()
+			l.id = layer_id
+			l.name = (top as QVoxelGroup).node_name
+			l.isVisible = top.visible
+			layers[layer_id] = l
+			layer_of[top] = layer_id
+			layer_id += 1
+	# 场景图。
+	var next := [2]
+	var root := VoxelNode.new()
+	root.id = 0
+	root.child_nodes.append(1)
+	var topgrp := VoxelNode.new()
+	topgrp.id = 1
+	for top in world.nodes:
+		if top != null:
+			topgrp.child_nodes.append(_emit_node(top, int(layer_of.get(top, -1)), next, index))
+	nodes[0] = root
+	nodes[1] = topgrp
+
+
+## 递归把一个 QVoxelNode 写进节点图，返回其外层 nTRN 的 id（包装变换与图层）。
+func _emit_node(node: QVoxelNode, layer: int, next: Array, index: Dictionary) -> int:
+	if node.is_model():
+		var grid := (node as QVoxelModel).grid_size
+		var shp := VoxelNode.new()
+		shp.id = next[0]
+		next[0] += 1
+		var f := VoxelFrame.new()
+		f.model_id = int(index[node])
+		shp.frames[0] = f
+		nodes[shp.id] = shp
+		# 抵消 `.vox` 的"按尺寸居中 + Z 平移"约定，使导出的 `.vox` 渲染（get_voxels）与世界求值
+		# 逐格一致：get_voxels 摆的是 `node_xf * (key + offset)`，key = 局部坐标 + e（e = 0,0,-(gz-1)），
+		# 故令 node_xf = W ∘ T(-(e + centering))，导入时 base(=e+minp) 会抵消掉，结果 = W * 局部坐标。
+		var e := Vector3(0, 0, -float(grid.z - 1))
+		var xf := node.local_transform * Transform3D(Basis.IDENTITY, -(e + _centering(grid)))
+		return _emit_wrapper(shp.id, xf, layer, next)
+	var grp := VoxelNode.new()
+	grp.id = next[0]
+	next[0] += 1
+	for c in (node as QVoxelGroup).child_nodes:
+		if c != null:
+			grp.child_nodes.append(_emit_node(c, -1, next, index))
+	nodes[grp.id] = grp
+	return _emit_wrapper(grp.id, node.local_transform, layer, next)
+
+
+## `.vox` 对模型的居中偏移（VoxAsset.VoxelModel.size setter 的同一算法）。
+static func _centering(grid: Vector3i) -> Vector3:
+	return Vector3(-floori(grid.x / 2.0), -floori(grid.y / 2.0), floori(grid.z / 2.0))
+
+
+## 造一个"包装节点"：单子 nTRN，携带变换与 layerId（VoxAccess 据此写 nTRN）。
+func _emit_wrapper(child_id: int, xf: Transform3D, layer: int, next: Array) -> int:
+	var trn := VoxelNode.new()
+	trn.id = next[0]
+	next[0] += 1
+	trn.child_nodes.append(child_id)
+	trn.layerId = layer
+	trn.frames[0] = _frame_of_transform(xf)
+	nodes[trn.id] = trn
+	return trn.id
+
+
+## 模块局部变换 → nTRN 帧。缺省分量不写（位置为 0 / 无旋转时留空帧）。
+## `VoxelFrame.position` 存的是 Y-up 世界坐标（VoxAccess 读 `_t` 时已换算），故直接拷 origin。
+static func _frame_of_transform(xf: Transform3D) -> VoxelFrame:
+	var f := VoxelFrame.new()
+	if not xf.origin.is_zero_approx():
+		f.position = xf.origin
+	var q := xf.basis.get_rotation_quaternion()
+	if not q.is_equal_approx(Quaternion.IDENTITY):
+		f.rotation = xf.basis
+	return f
+
+
+## 一块本地密集体积 → VoxAsset.VoxelModel（Z 平移那套约定与 from_result 同源）。
+static func _model_from_volume(grid: Vector3i, volume: PackedInt32Array) -> VoxelModel:
+	var model := VoxelModel.new()
+	if grid.x <= 0 or grid.y <= 0 or grid.z <= 0:
+		return model
+	model.size = Vector3(grid)
+	var z_shift := grid.z - 1
+	for i in volume.size():
+		var material: int = volume[i]
+		if material == 0:
+			continue
+		var p := VoxelVolume.pos_of(i, grid)
+		model.voxels[Vector3i(p.x, p.y, p.z - z_shift)] = material
+	return model
 
 
 ## 树上任一节点（组 / 模型）→ `.vox` 资产：**只取该节点自己局部盒里的体积**，不含它在父画布里的
@@ -107,6 +223,176 @@ func voxel_count() -> int:
 	for m in models:
 		n += m.voxels.size()
 	return n
+
+
+# `.vox` → QVoxelier 的编辑模型（结构保留）
+
+## `.vox` 资产 → QVoxelWorld（世界）。**镜像 `.vox` 的场景图**：nTRN / nGRP 容器 → QVoxelGroup
+## （嵌套保留），nSHP → QVoxelModel；带图层的节点其组名取图层名、可见性取 `_hidden` 的反。
+## 【为什么放这里】它是"外部格式 → 本项目编辑模型"的适配，与 VoxAsset 同属一侧。于是 `.vox`
+## 与 `.qvx` 最终都落到**同一个 QVoxelWorld**，编辑 / 求值 / 渲染只有一套语义 —— 这正是"两种
+## 格式显示一致"的根本保证。
+## 【与 get_voxels 逐像素同构】递归规则对齐 VoxAsset.get_models：从 node 0 起、跳过隐藏图层的
+## 整棵子树、同一模型被多个形状引用就摆多份；摆放 = 祖先变换 ×（模型居中 + 紧致盒重定位）。
+## 于是世界求值出的体素集合与 `.vox` 渲染路径完全一致。
+func to_world() -> QVoxelWorld:
+	var w := QVoxelWorld.create_empty()
+	w.materials = _world_materials()
+	for id in _top_vox_ids():
+		_build_world_node(w, int(id), null, Transform3D.IDENTITY)
+	return w
+
+
+## 顶层节点：折叠根部的"结构壳"样板链（MagicaVoxel 的 nTRN(0) → nGRP(1) → …），
+## 若停在结构壳（如包住所有对象的 nGRP）则把它的孩子提到顶层 —— 世界顶层就是用户真正建的层 / 组。
+func _top_vox_ids() -> Array:
+	if not nodes.has(0) or nodes[0] == null:
+		return []
+	var id := 0
+	var guard := 0
+	while guard < 64 and _is_structural(id) and _child_ids(id).size() == 1:
+		id = int(_child_ids(id)[0])
+		guard += 1
+	if _is_structural(id):
+		return _child_ids(id)
+	return [id]
+
+
+## 结构壳 = 无名字、不属任何图层、无模型帧、但有子节点（场景图里纯结构的 nTRN / nGRP）。
+## 导入时**不单独成组**：它的变换并入孩子、它的孩子提到上一层 —— 于是不会多出"匿名组"。
+## （`.vox` 里"带变换 / 图层的组"必然写成 nTRN 包 nGRP 两层，这个约定不该在编辑器里多出一层。）
+func _is_structural(id: int) -> bool:
+	if not nodes.has(id) or nodes[id] == null:
+		return false
+	var n: VoxelNode = nodes[id]
+	return n.name.is_empty() and not layers.has(n.layerId) and not _has_model_frame(n) \
+			and _child_ids(id).size() > 0
+
+
+func _child_ids(id: int) -> Array:
+	if not nodes.has(id) or nodes[id] == null:
+		return []
+	return nodes[id].child_nodes
+
+
+func _has_model_frame(n: VoxelNode) -> bool:
+	if not n.frames.has(0):
+		return false
+	var f: VoxelFrame = n.frames[0]
+	return f != null and f.model_id >= 0 and f.model_id < models.size()
+
+
+## 节点自身局部变换（无 position/rotation 则恒等）。
+static func _node_xf(n: VoxelNode) -> Transform3D:
+	if not n.frames.has(0):
+		return Transform3D.IDENTITY
+	var f: VoxelFrame = n.frames[0]
+	if f == null or (f.rotation == null and f.position == null):
+		return Transform3D.IDENTITY
+	return f.transform
+
+
+## 递归镜像一个 `.vox` 节点到世界（挂在 parent 下）。`carry` = 被折叠掉的结构壳累积下来的变换。
+## 隐藏图层的子树不参与（与 get_models 一致），但保留一个不可见组（图层 ↔ 组仍一一对应）。
+func _build_world_node(w: QVoxelWorld, id: int, parent: QVoxelGroup, carry: Transform3D) -> void:
+	if not nodes.has(id) or nodes[id] == null:
+		return
+	var n: VoxelNode = nodes[id]
+	var kids := _child_ids(id)
+	if n.layerId in layers and not layers[n.layerId].isVisible:
+		if not _has_model_frame(n) and kids.size() > 0:
+			var gh := w.create_group(_group_name(n), parent)
+			gh.visible = false
+		return
+	var xf := carry * _node_xf(n)
+	if _is_structural(id):
+		# 结构壳：不单独成组 —— 变换并入孩子、孩子提到上一层。
+		for c in kids:
+			_build_world_node(w, int(c), parent, xf)
+		return
+	var has_model := _has_model_frame(n)
+	if has_model and kids.is_empty():
+		_make_world_model(w, models[n.frames[0].model_id], xf, parent)
+		return
+	if not has_model and kids.is_empty():
+		return  # 空壳节点：没有内容
+	var g := w.create_group(_group_name(n), parent)
+	g.visible = _group_visible(n)
+	g.local_transform = xf
+	if has_model:
+		# 既有模型又有子节点：组包住"模型 + 子树"（与 get_models 的"先子后己"同构）。
+		_make_world_model(w, models[n.frames[0].model_id], Transform3D.IDENTITY, g)
+	for c in kids:
+		_build_world_node(w, int(c), g, Transform3D.IDENTITY)
+
+
+## 一个形状引用 → QVoxelModel（本地内容 + 紧致盒重定位；摆放 = 形状节点变换 × 居中/重定位平移）。
+func _make_world_model(w: QVoxelWorld, m: VoxelModel, xf: Transform3D, parent: QVoxelGroup) -> void:
+	var bounds := _voxel_bounds(m.voxels)
+	var grid: Vector3i = bounds["size"]
+	var base: Vector3i = bounds["min"]
+	var qm := w.create_model("", grid, parent)
+	for pos: Vector3i in m.voxels:
+		var c: Vector3i = pos - base
+		qm.set_voxel(c.x, c.y, c.z, m.voxels[pos])
+	# world = xf * (voxel + offset)，局部坐标 c = voxel - base ⇒
+	# world = (xf ∘ T(base+offset)) * c。整数平移 ⇒ 旋转仍保整数。
+	qm.local_transform = xf * _offset_shift(m, base)
+
+
+## 组名：节点自带名优先，其次图层名（无名图层给 "Layer N"），都没有则留空（用默认名）。
+func _group_name(n: VoxelNode) -> String:
+	if not n.name.is_empty():
+		return n.name
+	if layers.has(n.layerId):
+		var layer: VoxelLayer = layers[n.layerId]
+		if layer != null and not layer.name.is_empty():
+			return layer.name
+		return "Layer %d" % int(n.layerId)
+	return ""
+
+
+func _group_visible(n: VoxelNode) -> bool:
+	if layers.has(n.layerId) and layers[n.layerId] != null:
+		return layers[n.layerId].isVisible
+	return true
+
+
+## 场景图变换与居中偏移的合成：Translate(base + model.offset)。
+static func _offset_shift(m: VoxelModel, base: Vector3i) -> Transform3D:
+	return Transform3D(Basis.IDENTITY, Vector3(base) + m.offset)
+
+
+## 体素坐标的紧致包围盒（供 QVoxelModel 的非负局部坐标与尺寸）。空模型返回原点 + 1³。
+static func _voxel_bounds(voxels: Dictionary[Vector3i, int]) -> Dictionary:
+	if voxels.is_empty():
+		return {"min": Vector3i.ZERO, "size": Vector3i.ONE}
+	var mn := Vector3i(2147483647, 2147483647, 2147483647)
+	var mx := Vector3i(-2147483648, -2147483648, -2147483648)
+	for pos: Vector3i in voxels:
+		mn = Vector3i(mini(mn.x, pos.x), mini(mn.y, pos.y), mini(mn.z, pos.z))
+		mx = Vector3i(maxi(mx.x, pos.x), maxi(mx.y, pos.y), maxi(mx.z, pos.z))
+	return {"min": mn, "size": mx - mn + Vector3i.ONE}
+
+
+## VoxAsset 材质表 → QVX MATE 条目数组（索引即材质 ID，条目 0 恒为空气）。
+func _world_materials() -> Array:
+	var out: Array = []
+	for i in 256:
+		var src: VoxelMaterial = materials[i] if i < materials.size() else null
+		out.append(_mate_entry(src))
+	return out
+
+
+## VoxelMaterial → MATE 条目（含 QVoxelWorld._color_of 需要的 r/g/b/a 视图）。
+static func _mate_entry(mat: VoxelMaterial) -> Dictionary:
+	var e := VoxelMaterial.to_mate(mat)
+	var rgba := int(e.get("rgba", 0))
+	e["r"] = (rgba >> 24) & 0xFF
+	e["g"] = (rgba >> 16) & 0xFF
+	e["b"] = (rgba >> 8) & 0xFF
+	e["a"] = rgba & 0xFF
+	return e
 
 
 var models: Array[VoxelModel]
@@ -281,3 +567,6 @@ class VoxelLayer:
 	var id: int;
 
 	var isVisible: bool;
+
+	## 图层名（LAYR 的 `_name`）。与 QVX 的组名一一对应。
+	var name: String = ""

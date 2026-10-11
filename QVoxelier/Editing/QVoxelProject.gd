@@ -30,9 +30,14 @@ static func save(world: QVoxelWorld, path: String) -> Error:
 ## 结构校验是在**格式层**才知道结果的。若在框架外自己判，框架就只看到"字节读成功"，
 ## 永远不会去翻备份 —— 文件写坏了只能报错，而"原子写 + 滚动备份"等于白做。
 ## 把判据交回去之后，"写坏了"与"读不出来"在框架眼里是同一种失败，都退回上一次的存档。
+## 【`.vox` 也能直接打开】按扩展名分派：`.vox` 走 VoxAsset.to_world() 得到同一个 QVoxelWorld。
+## 于是"打开 MagicaVoxel 文件来编辑"与"打开 .qvx 工程"是同一个动作、同一条会话路径。
 static func load_world(path: String) -> QVoxelWorld:
 	if path.is_empty() or not FileAccess.file_exists(path):
 		return null
+	if is_vox_path(path):
+		var vox := VoxAsset.from_asset(path)
+		return vox.to_world() if vox != null else null
 	return SaveTool.load_data(path, SaveTool.Mode.BYTES, decode) as QVoxelWorld
 
 
@@ -56,6 +61,15 @@ static func decode(bytes: PackedByteArray) -> QVoxelWorld:
 ## 扩展名判定（大小写不敏感）：给"另存为"补后缀、给拖放过滤。
 static func is_project_path(path: String) -> bool:
 	return path.get_extension().to_lower() == EXTENSION
+
+
+## 是否可由 `load_world` 打开（`.qvx` 工程 + `.vox` 外部文件）。
+static func is_openable(path: String) -> bool:
+	return is_project_path(path) or is_vox_path(path)
+
+
+static func is_vox_path(path: String) -> bool:
+	return path.get_extension().to_lower() == VoxAsset.VOX_EXTENSION
 
 
 ## 补上缺失的 `.qvx` 后缀（已有就不动）。

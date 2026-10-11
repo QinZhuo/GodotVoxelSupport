@@ -24,11 +24,12 @@ static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext,
 	if node == null or not node.visible:
 		return res
 	res.epoch = ctx.epoch if ctx != null else 0
+	var frame := ctx.frame if ctx != null else 0
 	if node.is_model():
 		var m := node as QVoxelModel
 		res.volume = m.to_volume()
 		res.grid_size = m.grid_size
-		res.origin = m.offset
+		_place(res, Vector3i.ZERO, m.transform_at(frame))
 		res.input_signature = "%d|%d|%d,%d,%d|%d" % [
 				m.get_instance_id(), m.base_revision,
 				m.grid_size.x, m.grid_size.y, m.grid_size.z, m.active_frame]
@@ -37,7 +38,33 @@ static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext,
 	var comp := _composite(g.child_nodes, ctx)
 	res.volume = comp["volume"]
 	res.grid_size = comp["size"]
-	res.origin = g.offset + comp["lo"]
+	_place(res, comp["lo"], g.transform_at(frame))
+	res.input_signature = comp["key"]
+	return res
+
+
+## 只取节点**自身局部**的体积（不含本节点及祖先的摆放）。
+## 编辑器按"一个模型一个渲染器 + 渲染器承载摆放"的口径渲染时用它；求值 / 导出继续用 evaluate_node。
+## 于是体素坐标恒为 [0, grid)，与编辑工具的 object-local 坐标一致（摆放交给渲染器 transform）。
+static func evaluate_local(node: QVoxelNode, ctx: QVoxelEvalContext) -> QVoxelEvalResult:
+	var res := QVoxelEvalResult.new()
+	if node == null or not node.visible:
+		return res
+	res.epoch = ctx.epoch if ctx != null else 0
+	if node.is_model():
+		var m := node as QVoxelModel
+		res.volume = m.to_volume()
+		res.grid_size = m.grid_size
+		res.origin = Vector3i.ZERO
+		res.input_signature = "%d|%d|%d,%d,%d|%d" % [
+				m.get_instance_id(), m.base_revision,
+				m.grid_size.x, m.grid_size.y, m.grid_size.z, m.active_frame]
+		return res
+	var g := node as QVoxelGroup
+	var comp := _composite(g.child_nodes, ctx)
+	res.volume = comp["volume"]
+	res.grid_size = comp["size"]
+	res.origin = comp["lo"]
 	res.input_signature = comp["key"]
 	return res
 
@@ -62,7 +89,7 @@ static func output_grid_size(node: QVoxelNode) -> Vector3i:
 	if node == null or not node.visible:
 		return Vector3i.ZERO
 	if node.is_model():
-		return (node as QVoxelModel).grid_size
+		return _rotated_size((node as QVoxelModel).grid_size, node.local_transform.basis)
 	var g := node as QVoxelGroup
 	var any := false
 	var lo := Vector3i.ZERO
@@ -82,7 +109,95 @@ static func output_grid_size(node: QVoxelNode) -> Vector3i:
 		else:
 			lo = Vector3i(mini(lo.x, clo.x), mini(lo.y, clo.y), mini(lo.z, clo.z))
 			hi = Vector3i(maxi(hi.x, chi.x), maxi(hi.y, chi.y), maxi(hi.z, chi.z))
-	return Vector3i.ZERO if not any else hi - lo
+	if not any:
+		return Vector3i.ZERO
+	return _rotated_size(hi - lo, g.local_transform.basis)
+
+
+# 节点摆放（位置 + 旋转）的唯一应用点
+
+## 把一块"位于自身局部盒 [lo, lo+size) 的体积"按节点变换摆进父画布：
+## 先绕局部原点做轴对齐旋转，再平移 xf.origin。旋转保整数 ⇒ 结果 origin 仍是整数。
+## 非轴对齐旋转 / 缩放（.qvx 世界不支持）按"不旋转"处理并告警 —— 宁可少给，不可给错。
+static func _place(res: QVoxelEvalResult, lo: Vector3i, xf: Transform3D) -> void:
+	var t := Vector3i(roundi(xf.origin.x), roundi(xf.origin.y), roundi(xf.origin.z))
+	var basis := xf.basis.orthonormalized()
+	if res.volume.is_empty() or basis.is_equal_approx(Basis.IDENTITY):
+		res.origin = t + lo
+		return
+	if not _is_axis_aligned(basis):
+		push_warning("[QVX] 节点摆放含非轴对齐旋转/缩放，求值按不旋转处理（.qvx 世界仅支持 90° 倍数）")
+		res.origin = t + lo
+		return
+	var r := _rotate_box(res.volume, res.grid_size, lo, basis)
+	res.volume = r["volume"]
+	res.grid_size = r["size"]
+	res.origin = t + r["lo"]
+
+
+## basis 是否为轴对齐 90° 倍数（每列恰是一个 ±单位轴）。
+static func _is_axis_aligned(basis: Basis) -> bool:
+	for axis: Vector3 in [basis.x, basis.y, basis.z]:
+		if absf(absf(axis.x) + absf(axis.y) + absf(axis.z) - 1.0) > 1e-3:
+			return false
+	return true
+
+
+## 绕局部原点旋转一块轴对齐体积（basis 为轴对齐 90° 倍数）。返回 {volume, size, lo}。
+## 旋转后包围盒重算，逐父坐标反查源坐标取值（basis 正交 ⇒ 逆 = 转置，整数保持）。
+## 【为什么角点用 lo+size-1 而不是 lo+size】体素盒是**离散**的 [lo, lo+size)，反射（如 x→−x）下
+## 末格落在 −(size−1) 而非 −size；用连续边算包围盒会整体错开一格、把边界那一层丢掉。
+static func _rotate_box(vol: PackedInt32Array, size: Vector3i, lo: Vector3i, basis: Basis) -> Dictionary:
+	var inv := basis.transposed()
+	var hi := lo + size - Vector3i.ONE
+	var mn := Vector3i(2147483647, 2147483647, 2147483647)
+	var mx := Vector3i(-2147483648, -2147483648, -2147483648)
+	for cx in [lo.x, hi.x]:
+		for cy in [lo.y, hi.y]:
+			for cz in [lo.z, hi.z]:
+				var ip := _round3(basis * Vector3(cx, cy, cz))
+				mn = Vector3i(mini(mn.x, ip.x), mini(mn.y, ip.y), mini(mn.z, ip.z))
+				mx = Vector3i(maxi(mx.x, ip.x), maxi(mx.y, ip.y), maxi(mx.z, ip.z))
+	var nsize := mx - mn + Vector3i.ONE
+	var out := PackedInt32Array()
+	out.resize(nsize.x * nsize.y * nsize.z)
+	var dx := nsize.x
+	var dxy := dx * nsize.y
+	for z in nsize.z:
+		for y in nsize.y:
+			var row := y * dx + z * dxy
+			for x in nsize.x:
+				var l := _round3(inv * Vector3(mn.x + x, mn.y + y, mn.z + z))
+				if l.x < lo.x or l.y < lo.y or l.z < lo.z \
+						or l.x > hi.x or l.y > hi.y or l.z > hi.z:
+					continue
+				var m := vol[(l.x - lo.x) + (l.y - lo.y) * size.x + (l.z - lo.z) * size.x * size.y]
+				if m != 0:
+					out[row + x] = m
+	return {"volume": out, "size": nsize, "lo": mn}
+
+
+## 一块尺寸经轴对齐旋转后的包围盒尺寸（非轴对齐或恒等返回原尺寸）。
+static func _rotated_size(size: Vector3i, basis: Basis) -> Vector3i:
+	if size.x <= 0 or size.y <= 0 or size.z <= 0:
+		return size
+	var b := basis.orthonormalized()
+	if b.is_equal_approx(Basis.IDENTITY) or not _is_axis_aligned(b):
+		return size
+	var hi := size - Vector3i.ONE
+	var mn := Vector3i(2147483647, 2147483647, 2147483647)
+	var mx := Vector3i(-2147483648, -2147483648, -2147483648)
+	for cx in [0, hi.x]:
+		for cy in [0, hi.y]:
+			for cz in [0, hi.z]:
+				var ip := _round3(b * Vector3(cx, cy, cz))
+				mn = Vector3i(mini(mn.x, ip.x), mini(mn.y, ip.y), mini(mn.z, ip.z))
+				mx = Vector3i(maxi(mx.x, ip.x), maxi(mx.y, ip.y), maxi(mx.z, ip.z))
+	return mx - mn + Vector3i.ONE
+
+
+static func _round3(v: Vector3) -> Vector3i:
+	return Vector3i(roundi(v.x), roundi(v.y), roundi(v.z))
 
 
 # 树形合成

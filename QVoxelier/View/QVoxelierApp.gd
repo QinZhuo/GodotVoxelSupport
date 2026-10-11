@@ -305,6 +305,7 @@ func _build_ui() -> void:
 	_object_section.visible_changed.connect(_sess.set_node_visible)
 	_object_section.locked_changed.connect(_sess.set_node_locked)
 	_object_section.offset_changed.connect(_set_node_offset)
+	_object_section.resize_requested.connect(_resize_model)
 	_dock.add_property(_object_section)
 
 	# 生成：选程序化算子 + 参数 + 合并方式，一次性烘焙进当前模型。
@@ -469,7 +470,21 @@ func _attach_active() -> void:
 	_move_gizmo.origin = session.data.center_offset if session.data != null else Vector3.ZERO
 	# 预览与显示层同一份偏移（导入资产的 center_offset）：否则预览与体素错开。
 	_ghost.origin = session.data.center_offset if session.data != null else Vector3.ZERO
+	# 摆放：体素在数据层是**本地**坐标，节点变换（含祖先）由渲染器承载。model 的子树（地板 /
+	# 选区 / gizmo / 预览）都跟着它走，故只在 model 上设一次变换即可整体归位。
+	var xf := _display_transform(session.object, model.voxel_scale)
+	if not model.transform.is_equal_approx(xf):
+		model.transform = xf
 	hud.session = session
+
+
+## 节点的世界摆放 → 渲染器变换：位置换算到世界单位（× voxel_scale），旋转直接沿用。
+## 体素几何本身已按 voxel_scale 生成，故这里只承载"平移到哪、转到什么朝向"。
+func _display_transform(node: QVoxelNode, scale: float) -> Transform3D:
+	if world == null or node == null:
+		return Transform3D.IDENTITY
+	var xf := world.world_transform(node)
+	return Transform3D(xf.basis, xf.origin * scale)
 
 
 ## 会话数据变了 → 重挂显示层 + 重建视口 + 一处刷新界面。
@@ -523,11 +538,13 @@ func _rebuild_view() -> void:
 			r = VoxelRenderer.new()
 			r.name = "Model_%d" % id
 			_extra_root.add_child(r)
-			r.voxel_scale = model.voxel_scale
 			r.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 			r.data = s.data
 			s.request_render_update = r.request_update
 			_display[id] = r
+		# 摆放由渲染器承载（数据层是本地坐标）：每次刷新都同步一次（改名 / 移动 / 换尺寸都会进来）。
+		r.voxel_scale = model.voxel_scale
+		r.transform = _display_transform(s.object, model.voxel_scale)
 		r.visible = _sess.node_visible(s.object)
 
 	model.visible = _sess.node_visible(session.object)
@@ -1121,7 +1138,9 @@ func open_project(path: String) -> bool:
 		hud.flash("这个工程里没有可编辑的对象：%s" % path.get_file())
 		return false
 	_install(loaded, obj)
-	_sess.project_path = path
+	# .vox 只是"导入来编辑"：不把工程路径设成它，否则 Ctrl+S 会拿 .qvx 字节覆盖源文件
+	# （保存 → 另存为 .qvx 才是正确归宿）。.qvx 则记住路径，Ctrl+S 直接覆盖。
+	_sess.project_path = "" if QVoxelProject.is_vox_path(path) else path
 	_sess.clear_dirty()
 	_update_title()
 	var total := loaded.all_models().size()
@@ -1284,6 +1303,8 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	var d := _make_fs_dialog(mode,
 			"打开工程" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存工程")
 	d.add_filter("*.%s" % QVoxelProject.EXTENSION, "QVoxelier 工程")
+	if mode == FileDialog.FILE_MODE_OPEN_FILE:
+		d.add_filter("*.%s" % VoxAsset.VOX_EXTENSION, "MagicaVoxel 体素")
 	return d
 
 
@@ -1348,14 +1369,14 @@ static func _default_dir() -> String:
 	return ProjectSettings.globalize_path("user://")
 
 
-## 把 `.qvx` 拖进窗口即打开（建模时最顺手的一步）；非工程文件一律忽略。
+## 把 `.qvx` / `.vox` 拖进窗口即打开（建模时最顺手的一步）；其它文件一律忽略。
 func _on_files_dropped(files: PackedStringArray) -> void:
 	for f in files:
-		if QVoxelProject.is_project_path(f):
+		if QVoxelProject.is_openable(f):
 			# 拖进来同样是"整体换掉当前世界"，走 request_open 才有那道未保存确认。
 			request_open(f)
 			return
-	hud.flash("只认得 .%s 工程文件" % QVoxelProject.EXTENSION)
+	hud.flash("只认得 .%s 工程 / .%s 体素文件" % [QVoxelProject.EXTENSION, VoxAsset.VOX_EXTENSION])
 
 
 func _update_title() -> void:
@@ -1767,7 +1788,9 @@ func _step_frame(delta: int) -> void:
 	_select_frame(clampi(session.object.active_frame + delta, 0, n - 1))
 
 
-## 改节点位置（对象属性面板的三个轴）。走一条可撤销命令，并让显示层重新取数（摆放是求值的一部分）。
+## 改节点位置（对象属性面板的三个轴）。走一条可撤销命令。
+## 【为什么不再重算数据】去摆放本地化之后，位置只影响渲染器的 transform（摆放由渲染器承载），
+## 体素数据一个字节都不用动 —— 只重挂变换即可（比旧实现少一次整对象重取数）。
 func _set_node_offset(node: QVoxelNode, value: Vector3i) -> void:
 	if session == null or node == null or node.offset == value:
 		return
@@ -1775,14 +1798,23 @@ func _set_node_offset(node: QVoxelNode, value: Vector3i) -> void:
 	node.offset = value
 	if cmd.commit():
 		session.history.push(cmd)
-	# 活动对象同步重算；其余对象的显示层作废后唤醒，各自重新取数。
-	session.rebuild()
-	for s in _sess.all_sessions():
-		if s != session and s.data != null:
-			s.data.invalidate()
-			if s.request_render_update.is_valid():
-				s.request_render_update.call()
 	_sess.mark_dirty()
+	_attach_active()
+	_rebuild_view()
+	_refresh_hud()
+
+
+## 改模型分辨率（对象属性面板的"尺寸"）。结构级操作 → 可撤销命令 + 整对象重算。
+func _resize_model(node: QVoxelNode, value: Vector3i) -> void:
+	if session == null or node == null or not node.is_model():
+		return
+	var cmd := QVoxelResizeCommand.apply(node as QVoxelModel, value)
+	if cmd == null:
+		return
+	session.history.push(cmd)
+	session.rebuild()
+	_sess.mark_dirty()
+	_attach_active()
 	_rebuild_view()
 	_refresh_hud()
 

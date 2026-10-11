@@ -59,3 +59,34 @@
 要么是 `FRAM` 动画，不能同时是。
 
 删除全部 `CACH` 块后，文件必须加载出**完全相同的结果**——只是首次加载更慢（P5）。
+
+---
+
+## 2. 节点摆放（NODE 的 `nodes[]` 条目）
+
+场景树是**嵌套**的：每个节点是一个 JSON 对象，`kind` 取 `group`（容器，带 `children`）或
+`model`（叶子，带 `model_id`）。节点的摆放只有一处真值 —— 一个 `transform` 键：
+
+```json
+{ "kind": "model", "model_id": 0, "name": "body",
+  "transform": { "t": [1, 2, 3], "r": [x, y, z, w], "s": [1, 1, 1] } }
+```
+
+- `t` 平移（体素单位，整数）、`r` 旋转（单位四元数，与 glTF 同构）、`s` 缩放（三者皆可缺省）。
+- 缺省 = 恒等，**不写字面量**（P2）：`transform` 键整体缺失即恒等。
+- 轴对齐 90° 旋转（`.vox` 的 24 朝向的等价物）是**整数保序**的，体素盒不被破坏；
+  非轴对齐旋转 / 缩放由运行时导入器逐体素融合处理，编辑器世界按"不旋转 + 告警"处理。
+- 读写唯一实现：`QVoxelNode.transform_from_json` / `transform_to_json`。**全项目不得另抄一份**。
+
+逐帧摆放（变换动画）用一个并列的 `transform_tracks` 键 —— `transform_tracks[k]` 是第 k 帧的
+`transform`，与 `FRAM` 的体素帧**共用同一帧号**（播放第 k 帧 = 体素取 FRAM 第 k 帧 + 摆放取
+本数组第 k 项）。空数组 = 静态（零成本）。
+
+## 3. `.vox` ⇄ `.qvx` 的图层 / 组映射
+
+`.vox` 的 `LAYR`（图层，含 `_name` / `_hidden`）与 `.qvx` 的组**一一对应**：
+一个图层 = 一个 `QVoxelGroup`，**组名 = 图层名**，**可见性 = `_hidden` 的反**。导入器
+（`VoxAsset.to_world()`）从 `node 0` 递归、跳过隐藏图层的整棵子树、同一模型被多个形状引用
+就摆多份 —— 于是"世界求值出的体素集合"与 `.vox` 的渲染路径 `VoxAsset.get_voxels()` **逐格一致**。
+`.qvx` 与 `.vox` 因此都落到同一个 `QVoxelWorld`，渲染只有一套语义。
+

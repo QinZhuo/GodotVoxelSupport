@@ -229,7 +229,9 @@ func read_chunk():
 		"LAYR":
 			var layer := VoxAsset.VoxelLayer.new()
 			layer.id = _get_32()
-			layer.isVisible = _get_dictionary().get('_hidden', '0') != '1'
+			var attrs := _get_dictionary()
+			layer.isVisible = attrs.get('_hidden', '0') != '1'
+			layer.name = attrs.get('_name', '')
 			voxel.layers[layer.id] = layer
 
 		_:
@@ -397,17 +399,22 @@ static func _byte_of(v: float) -> int:
 	return int(round(v * 255.0)) & 0xFF
 
 
-## LAYR（图层可见性）。**必须写**：读口的 `VoxelNode.get_models` 会跳过 `isVisible == false` 的
+## LAYR（图层名 + 可见性）。**必须写**：读口的 `VoxelNode.get_models` 会跳过 `isVisible == false` 的
 ## 图层 —— 不写的话，本来藏着的体素会在重新读入时全部冒出来（在 MagicaVoxel 里同样如此）。
-## 只写 `_hidden`，因为读口只认它（`_name` 在 VoxelLayer 上根本没有字段可放）。
+## `_name` 一并写：它是"图层 ↔ 组"一一对应的键（QVoxelWorld 的组名取自它）。
 static func _write_layers(out: StreamPeerBuffer, voxel: VoxAsset) -> void:
 	for id in voxel.layers:
 		var layer: VoxAsset.VoxelLayer = voxel.layers[id]
 		if layer == null:
 			continue
+		var attrs := {}
+		if not layer.name.is_empty():
+			attrs["_name"] = layer.name
+		if not layer.isVisible:
+			attrs["_hidden"] = "1"
 		var body := StreamPeerBuffer.new()
 		body.put_32(layer.id)
-		_write_attributes(body, {} if layer.isVisible else {"_hidden": "1"})
+		_write_attributes(body, attrs)
 		_chunk(out, "LAYR", body.data_array)
 
 
