@@ -83,33 +83,29 @@ const MCPTestTools := preload("res://addons/DEVFramework/MCP/MCPTestTools.gd")
 const MCPUITools := preload("res://addons/DEVFramework/MCP/MCPUITools.gd")
 const MCPValidateTools := preload("res://addons/DEVFramework/MCP/MCPValidateTools.gd")
 
-##   3. **改上面几个模块后, refresh_tools 不足以让改动生效** —— 但**解法不是 reload 本文件**
-##      (见第 4 条, 那会杀死服务器)。实测有效的链路只有一条, 分两种情况:
+## MCP 目录(域脚本都在这儿)。供 `_mod()` 按路径动态取用 + refresh 时批量换缓存。
+const MCP_DIR := "res://addons/DEVFramework/MCP"
+
+##   3. **域脚本(除本文件外)改动 → refresh_tools 即可, 无需重启**:
+##      注册走 _mod()(读源码文本 + GDScript 重编译), 于是 MCPToolMeta / MCPToolSchema /
+##      MCPResourceTools / MCPSceneTools 等**新增或修改工具、注解名单、入参构造、handler**都能
+##      免重启生效。
+##      【为什么不能只重跑注册树】const preload 在**本文件编译期**就把常量绑成了当时那个
+##      GDScript 对象; 之后连 `X.reload()` 也切不动已经编译进本文件的静态调用目标。而
+##      ResourceLoader.CACHE_MODE_REPLACE —— 连同随后的 fs.scan() —— 在**同一帧内**也不会换成
+##      磁盘版本(均实测)。旧实现只重跑注册树, 因此"往域文件加一个工具"会**静默注册不上**,
+##      而 refresh_tools 照样报成功。现改为从源码重编译, 绕开缓存/重扫的时序。
 ##
-##      **A. 改的是 MCPToolMeta / MCPToolSchema / MCPResult / MCPArgCheck / MCPScriptSync**
-##         (即除本文件外的 preload 依赖) —— 用 eval_code 原地重载, 再 refresh_tools:
-##           for n in ["MCPToolMeta", "MCPToolSchema"]:
-##               load("res://addons/DEVFramework/MCP/%s.gd" % n).reload(true)
-##         之所以有效: const 持有的是 GDScript **对象**, 而 reload() 是**原地重新编译**同一个
-##         对象, 故 const 引用自动指向新代码, 无需重载本文件。
-##
-##      **B. 改的是本文件自身**(工具描述/schema 字面量都在这里) —— 无法热生效, 只能重启:
-##         在编辑器「插件」里取消勾选 DEVFramework 再重新勾选(或重启编辑器)。
-##
+##   4. **本文件自身改动**(工具描述/schema 字面量、注册表逻辑) —— 无法热生效, 只能重启:
+##      在编辑器「插件」里取消勾选 DEVFramework 再重新勾选(或 restart_editor)。
 ##      为什么不能直接 reload 本文件: 本文件正承载着 HTTP 服务器(_http 字段), 原地重载会
 ##      终止该服务器, 之后 MCP 端口不再监听、所有调用返回"无法连接", 且**无法再靠 MCP 工具
 ##      自救**(restart_editor / refresh_tools 都调不到了), 只能去编辑器里重新启用插件。实测踩过。
-##      边界: 本文件内另外两处 reload()(两个 eval 入口)编译的都是 eval_code 用的**临时**脚本
-##      (GDScript.new(), 无资源路径, 不进 Resource 缓存), 与此无关; 第三条编译路径(脚本校验)
-##      搬去了 MCPValidateTools.gd, 同样不碰本文件。
-##      这条边界原先还带一个洞: MCPScriptSync._guard_editor 会对磁盘有改动的每个 .gd 做
-##      CACHE_MODE_REPLACE 重载, 而集合里**包含本文件** —— 改完本文件而服务器实例尚未重建时,
-##      eval_code 的守卫路径会顺手把本文件也重载掉, 于是 eval 执行到一半服务已死、端口失联。
-##      现已兜住: 本文件在编辑器进程的 _ready 里把自己登记进 MCPScriptSync._unreloadable,
-##      _guard_editor 会先分流 —— 显式阻止并指引重启, 而不是静默重载。
+##      已兜住: 本文件在编辑器进程的 _ready 里把自己登记进 MCPScriptSync._unreloadable,
+##      eval 守卫会先分流 —— 显式阻止并指引重启, 而不是静默重载。
 ##
-##      判据: 改完量一次 tools/list 字符数, 未变即未生效 —— 别把"refresh_tools 报告成功且
-##      契约自检 pass"当成生效证据, 它在未生效时同样返回成功。
+##      判据: refresh_tools 后跨次对比 schema_fingerprint —— 指纹不变即注册表没变(未生效)。
+##      别把"refresh_tools 报告成功且契约自检 pass"当成生效证据, 它在未生效时同样返回成功。
 
 ## ------- 配置项(ProjectSettings) -------
 const SETTING_ENABLED := "dev_framework/mcp/enabled"
@@ -461,6 +457,7 @@ func _schema_fingerprint() -> String:
 func _call_refresh_tools(_args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return _fail("仅在编辑器模式可用")
+	# 注册走 _mod()(从源码重编译磁盘版本), 因此域文件里**新增/改动工具**也免重启生效。
 	_register_editor_tools()
 	var count := _tool_defs.size()
 	var fp := _schema_fingerprint()
@@ -545,7 +542,38 @@ func is_running() -> bool:
 func _add_tool(name: String, desc: String, input_schema: Dictionary, handler: Callable) -> void:
 	_tool_handlers[name] = handler
 	_tool_schemas[name] = input_schema
-	_tool_defs.append(MCPToolMeta.build(name, desc, input_schema))
+	_tool_defs.append(_mod("MCPToolMeta").build(name, desc, input_schema))
+
+
+## MCP 目录下的域脚本按"当前磁盘版本"动态取用(而非 const preload 的编译期绑定)。
+##
+## 【根因】`const X := preload(path)` 在**本文件编译期**就把 X 绑成当时那个 GDScript 对象;
+## 之后磁盘新版本与它无关 —— 连 `X.reload()` 也切不动已经编译进本文件的静态调用目标(实测)。
+## 于是"往域文件加一个工具"后调 refresh_tools 会**静默不生效**(注册表没变, 而 refresh_tools
+## 照样报成功, 只有 schema_fingerprint 不变露出马脚)。
+##
+## 【为什么不是 CACHE_MODE_REPLACE】本机实测: 对 .gd 调 load(..., CACHE_MODE_REPLACE) —— 连同
+## 之后的 fs.scan() —— 在**同一帧内**都不会换成磁盘版本, 拿到的仍是旧对象(可能与脚本已进入
+## ScriptServer 有关)。唯一可靠的是"读源码文本 + GDScript.new() 重编译", 这是引擎直接给的能力,
+## 不依赖缓存/编辑器重扫的时序。每轮注册只编译一次(经 _mod_cache), 重编译失败则回退缓存版本
+## (宁可旧, 不可坏)。
+var _mod_cache := {}
+
+
+func _mod(name: String) -> Variant:
+	if _mod_cache.has(name):
+		return _mod_cache[name]
+	var path := "%s/%s.gd" % [MCP_DIR, name]
+	var src := FileAccess.get_file_as_string(path)
+	if src.is_empty():
+		return ResourceLoader.load(path)
+	var gd := GDScript.new()
+	gd.source_code = src
+	if gd.reload() != OK:
+		push_error("[MCP] 域脚本 %s 重编译失败, 回退缓存版本" % name)
+		gd = ResourceLoader.load(path)
+	_mod_cache[name] = gd
+	return gd
 
 
 ## ======= 工具参数 schema =======
@@ -579,6 +607,8 @@ func _reset_tools() -> void:
 	# 工具"的脏记录 —— 而那种残留恰好会在同名工具将来重新注册时静默生效, 比缺字段更难查。
 	_tool_schemas.clear()
 	_tool_audit_handlers.clear()
+	# 域脚本的源码编译缓存也必须每轮重建: 否则 refresh_tools 会复用上一轮编译的旧版本。
+	_mod_cache.clear()
 
 
 func _register_editor_tools() -> void:
@@ -594,14 +624,15 @@ func _register_editor_tools() -> void:
 
 	## 域文件注册。放在各 _register_* 之后: 域文件不认识本服务器, 只能靠传入 _add_tool 完成
 	## 注册, 所以它们的工具统一排在主文件工具之后。
-	MCPCodeIndex.register(_add_tool)
+	_mod("MCPCodeIndex").register(_add_tool)
 	# eval_code 的运行时上下文(mode / 游戏启动时刻 / 日志捕获器)全是实例状态, 域文件拿不到,
 	# 经 provider 注入。**游戏进程侧也必须注入**(见 _register_runtime_tools): 那边的 game_eval
 	# 等宿主工具根本不走 register(), 漏注入时守卫会静默全放行且运行期错误完全捕获不到,
 	# 两种都不报错, 只表现为"game_eval 的问题查不出来"。
-	MCPDevTools.set_eval_ctx_provider(func(): return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger})
-	MCPDevTools.register(_add_tool)
-	MCPResourceTools.register(_add_tool)
+	var dev_tools: Variant = _mod("MCPDevTools")
+	dev_tools.set_eval_ctx_provider(func(): return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger})
+	dev_tools.register(_add_tool)
+	_mod("MCPResourceTools").register(_add_tool)
 
 	_audit_tools()
 
@@ -627,7 +658,7 @@ func _audit_tools() -> void:
 	# 迹象。理由详见 MCPToolAudit 的扫描范围说明。
 	# registry_is_full: 只有编辑器进程注册全量工具。游戏进程只注册运行时那部分, 在那里做
 	# "名单里的工具名是否都已注册"的反向校验会把分模式注册误报成名单未同步(实测刷 33 条)。
-	_tool_audit_issues = MCPToolAudit.audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR)
+	_tool_audit_issues = _mod("MCPToolAudit").audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR)
 	# 自检通过是常态, 静默即可; 只在发现问题时报警, 否则每次启动都要宣告一遍"没问题"。
 	if not _tool_audit_issues.is_empty():
 		LogTool.log("MCP", "工具契约自检发现 %d 个问题:\n  - %s" % [_tool_audit_issues.size(), "\n  - ".join(_tool_audit_issues)])
@@ -638,7 +669,7 @@ func _audit_tools() -> void:
 ## -- 脚本/资源验证 --
 ## desc / schema / handler 已全部搬进 MCPValidateTools.register —— 契约单副本。
 func _register_validate_tools() -> void:
-	MCPValidateTools.register(_add_tool)
+	_mod("MCPValidateTools").register(_add_tool)
 
 
 ## -- 日志/错误 --
@@ -649,8 +680,9 @@ func _register_log_tools() -> void:
 	# 游戏进程侧的 get_game_logs / get_game_errors / clear_game_errors / clear_game_logs
 	# 也复用 MCPLogTools 的底层件, 所以**两个进程都要注入捕获器**。漏注入时那几个工具会
 	# 显式返回"日志捕获器未就绪"(不是静默失效), 见 MCPLogTools.bind_logger 的注释。
-	MCPLogTools.bind_logger(_logger)
-	MCPLogTools.register(_add_tool)
+	var log_tools: Variant = _mod("MCPLogTools")
+	log_tools.bind_logger(_logger)
+	log_tools.register(_add_tool)
 
 
 ## -- 场景树 / 节点 + 场景编辑 --
@@ -658,7 +690,7 @@ func _register_log_tools() -> void:
 ## MCPSceneTools.register: 9 个工具同属一个域, 拆成两次调用只会让"一个域一次注册"出现两种
 ## 粒度。desc / schema / handler 全在域文件内, 契约单副本。
 func _register_scene_tools() -> void:
-	MCPSceneTools.register(_add_tool)
+	_mod("MCPSceneTools").register(_add_tool)
 
 
 ## -- 项目信息 --
@@ -668,13 +700,14 @@ func _register_scene_tools() -> void:
 ## 第一次 refresh_tools 就永久过期, 表现为"游戏正跑着而 get_editor_activity 报 game_running=null",
 ## 反而会邀请 game_control 去抢占一个正在运行的会话。
 func _register_project_tools() -> void:
-	MCPProjectTools.set_session_facts_provider(func() -> Dictionary:
+	var project_tools: Variant = _mod("MCPProjectTools")
+	project_tools.set_session_facts_provider(func() -> Dictionary:
 		return {
 			"mcp_running": is_running(),
 			"game_running": _has_game_session(),
 			"bridge_ready": _has_game_session() and _game_ready,
 		})
-	MCPProjectTools.register(_add_tool)
+	project_tools.register(_add_tool)
 
 
 ## -- 运行游戏 --
@@ -714,12 +747,12 @@ func _register_run_tools() -> void:
 ## 7 个资源与项目设置类工具 -> MCPResourceTools。
 func _register_dev_tools() -> void:
 	_add_tool("refresh_tools",
-		"手动重建 MCP 工具注册表(免重启编辑器), 响应含工具数、schema_fingerprint 与契约自检结果。**判定'是否真的生效': 跨次对比 schema_fingerprint** —— 指纹不变即工具表没变。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 客户端缓存的旧 tools/list 不会自动刷新, 需在 IDE 侧重连 MCP 才更新; 在此之前, 以 tools/list 直查服务器为准, 勿把会话开始时的快照当权威。【重要: 适用范围】改动**被本服务器 preload 的其他脚本**时有效, 例如 MCPToolMeta.gd 的注解名单(READ_ONLY/DESTRUCTIVE/SIDE_EFFECT/IDEMPOTENT)、MCPToolSchema.gd 的入参构造、具体工具实现的辅助脚本 —— 只需调用本工具。但改动 **MCPDevServer.gd 自身**(新增/修改工具、描述、注册表逻辑)时**本工具无效**: 运行实例的方法体不会被热替换, 必须重建服务器实例(禁用再启用 DEVFramework 插件, 或 restart_editor)。该情况下本工具仍返回成功, 但注册表内容原样不变 —— 正是靠 schema_fingerprint 不变来识别这种'假成功'。",
+		"手动重建 MCP 工具注册表(免重启编辑器), 响应含工具数、schema_fingerprint 与契约自检结果。**判定'是否真的生效': 跨次对比 schema_fingerprint** —— 指纹不变即工具表没变。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 客户端缓存的旧 tools/list 不会自动刷新, 需在 IDE 侧重连 MCP 才更新; 在此之前, 以 tools/list 直查服务器为准, 勿把会话开始时的快照当权威。【重要: 适用范围】改动 **MCP 目录下任一域脚本**(MCPResourceTools / MCPSceneTools 等: 新增或修改工具、注解名单、入参构造、handler)时有效 —— 本工具会先把域脚本缓存换成磁盘版本, 再按路径动态注册, 免重启生效。**唯一例外是 MCPDevServer.gd 自身**: 运行实例的方法体不会被热替换, 必须重建服务器实例(禁用再启用 DEVFramework 插件, 或 restart_editor); 该情况下本工具仍返回成功但注册表原样不变 —— 正是靠 schema_fingerprint 不变来识别这种'假成功'。",
 		MCPToolSchema.no_arg(),
 		_call_refresh_tools)
 
 	# run_tests 已搬进 MCPTestTools —— 为何编辑器侧只跑进程无关用例, 见该文件。
-	MCPTestTools.register(_add_tool)
+	_mod("MCPTestTools").register(_add_tool)
 
 
 ## -- 文件操作 --
@@ -727,7 +760,7 @@ func _register_dev_tools() -> void:
 ## "写类工具统一带 dry_run"的使用约定说明也一并搬走 —— 留一份在这里只会与域文件
 ## 各说一份而漂移。
 func _register_file_tools() -> void:
-	MCPFileTools.register(_add_tool)
+	_mod("MCPFileTools").register(_add_tool)
 
 
 ## ======= MCP 协议处理 =======
