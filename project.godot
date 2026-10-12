@@ -23,6 +23,7 @@ config/icon="uid://dryeet8uchrw"
 [autoload]
 
 DevMCP="*res://addons/DEVFramework/MCP/MCPDevServer.gd"
+VoxelMCPRuntime="*res://addons/DEVFramework/MCP/MCPRuntimeServer.gd"
 
 [debug]
 
@@ -31,6 +32,9 @@ settings/stdout/print_fps=true
 [dev_framework]
 
 gdextension_build/build_types=PackedStringArray("release")
+mcp/runtime_enabled=true
+mcp/runtime_port=8932
+mcp/runtime_providers=PackedStringArray("res://addons/VoxelSupport/Dynamic/QVoxelMCPTools.gd")
 
 [display]
 
