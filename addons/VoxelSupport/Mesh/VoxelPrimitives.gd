@@ -1,14 +1,13 @@
 @tool
-class_name QVoxelBrushGeometry
+class_name VoxelPrimitives
 extends RefCounted
-## 画笔几何：把"手势的两个端点 + 拾取上下文"翻译成一串**要写的体素坐标**。
-## 【为什么是独立的纯函数类】预览（ghost）与落笔必须画的是同一批格子，否则"看到的不等于
-## 画出来的"。让两边调**同一个函数**，一致性就成了构造保证，而不是靠两处逻辑各自对齐。
-## 因此这里不碰 QVoxelModel、不碰节点、不碰输入：全 static，可无头测试。
+## 体素**几何图元**：纯 static、可无头测试的一组形状/布尔原语（线 / 盒 / 球 / 膨胀 / 连通域…）。
+## 【一份图元、多处复用】编辑器的画笔几何（预览 ghost 与落笔必须同一批格子）与脚本 / AI 的
+## `QVoxelBuilder`（程序化建模）**共用这里** —— 一致性成了构造保证，而不是两处逻辑各自对齐。
 ## 【坐标约定】一律**对象局部体素坐标**（与 QVoxelModel.get_voxel / QVoxelSource.has_voxel 同一套）。
-## 越界与否由调用方（QVoxelBrushTool）统一裁剪，几何函数只管形状本身。
-## 【为什么用 Array[Vector3i] 而不是 PackedVector3Array】写入侧（QVoxelEditCommand.set_voxel）
-## 是整数坐标；用 Vector3i 一路到底可以避免在边界上来回取整。
+## 越界与否由调用方（画笔工具 / 构建器）统一裁剪，几何函数只管形状本身。
+## 【为什么用 Array[Vector3i] 而不是 PackedVector3Array】写入侧是整数坐标；
+## 用 Vector3i 一路到底可以避免在边界上来回取整。
 
 
 ## 3D 直线（Bresenham 误差累积版，26-连通）。

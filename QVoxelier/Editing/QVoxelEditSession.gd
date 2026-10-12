@@ -549,7 +549,7 @@ func _select_connected(seed: Vector3i) -> bool:
 			continue
 		visited[p] = true
 		cells.append(p)
-		for d in QVoxelBrushGeometry.neighbors6():
+		for d in VoxelPrimitives.neighbors6():
 			stack.append(p + d)
 	return _apply_selection(QVoxelSelection.from_cells(cells))
 

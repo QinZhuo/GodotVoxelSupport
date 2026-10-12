@@ -122,6 +122,13 @@ static func register(add_tool: Callable) -> void:
 		}, "required": ["path"]},
 		_handle_get_resource_info)
 
+	add_tool.call("preview_resource",
+		"取编辑器为某资源生成的**预览缩略图**(FileSystem 里那种), 存成 PNG 并返回路径。用途: 让已导入成 mesh 的模型(.vox/.qvx/.glb 等)看一眼渲染效果, 不必放进场景。传**源文件路径**(如 res://demo/deer.vox, 需已导入); 走 EditorResourcePreview, 异步回调。",
+		{"type": "object", "properties": {
+			"path": MCPToolSchema.str_arg("已导入资源的源文件 res:// 路径(如 res://demo/deer.vox)")
+		}, "required": ["path"]},
+		_handle_preview_resource)
+
 
 ## ======= 实现 =======
 
@@ -486,3 +493,42 @@ static func _markdown_headings(text: String) -> Array[String]:
 			out.append("...(标题过多, 已截断)")
 			break
 	return out
+
+
+## preview_resource: 取编辑器生成的资源预览缩略图 → 存 PNG。
+## 【为什么用 EditorResourcePreview】那是 FileSystem 面板出缩略图的**同一套机制**: 对"已导入资源"
+## (含 .vox/.qvx 导入成的 .mesh)自动可用, 不必自己搭离屏渲染。代价是**异步回调** + 缩略图尺寸。
+## 回调经 PreviewReceiver(把异步结果转成可 await 信号的 RefCounted)接住。
+static func _handle_preview_resource(args: Dictionary) -> Dictionary:
+	if not Engine.is_editor_hint():
+		return MCPResult.fail("仅在编辑器模式可用")
+	var path := str(args.get("path", ""))
+	if path.is_empty():
+		return MCPResult.fail("path 不能为空")
+	var recv := PreviewReceiver.new()
+	EditorInterface.get_resource_previewer().queue_resource_preview(path, recv, &"_on_preview", null)
+	# 轮询 + 超时兜底：回调可能因资源没导入 / 类型无生成器而永不到来，不能无限挂起（会卡死工具调用）。
+	var deadline := Time.get_ticks_msec() + 5000
+	while recv.tex == null and Time.get_ticks_msec() < deadline:
+		await Engine.get_main_loop().process_frame
+	var tex: Texture2D = recv.tex
+	if tex == null:
+		return MCPResult.fail("拿不到预览（该资源可能没导入，或类型没有预览生成器）: %s" % path)
+	var img := tex.get_image()
+	if img == null:
+		return MCPResult.fail("预览纹理没有图像数据: %s" % path)
+	var dir := "user://mcp_previews"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
+	var out_path := "%s/%s.png" % [dir, path.get_file()]
+	var err := img.save_png(out_path)
+	if err != OK:
+		return MCPResult.fail("保存预览失败（错误码 %d）" % err)
+	return MCPResult.ok_json({"path": out_path, "width": img.get_width(), "height": img.get_height()})
+
+
+## EditorResourcePreview 的回调接收器：把异步结果存下来，供调用方轮询。
+class PreviewReceiver extends RefCounted:
+	var tex: Texture2D
+
+	func _on_preview(_path: String, preview: Texture2D, _thumbnail: Texture2D, _ud: Variant) -> void:
+		tex = preview

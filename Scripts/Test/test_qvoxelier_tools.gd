@@ -1,6 +1,6 @@
 extends TestCase
 
-## 一期画笔工具族的契约测试：几何（QVoxelBrushGeometry）+ 手势状态机（QVoxelBrushTool）。
+## 一期画笔工具族的契约测试：几何（VoxelPrimitives）+ 手势状态机（QVoxelBrushTool）。
 ## 这里不碰场景树、不碰输入、不碰渲染 —— 工具被刻意设计成"产出坐标的纯逻辑"，
 ## 于是它的正确性可以在无头环境里逐格断言。钉死五条承诺：
 ##   ① 五种笔共用同一次手势骨架：按下取锚点 → 拖动更新端点 → 松手交产物；
@@ -57,7 +57,7 @@ func _cells_of(v: Array[Vector3i]) -> Dictionary:
 func test_line_is_connected_and_lands_on_both_ends() -> void:
 	var a := Vector3i(0, 0, 0)
 	var b := Vector3i(5, 3, -2)
-	var cells := QVoxelBrushGeometry.line(a, b)
+	var cells := VoxelPrimitives.line(a, b)
 	assert_eq(cells[0], a, "直线从起点开始")
 	assert_eq(cells[cells.size() - 1], b, "直线恰好落在终点（误差累积版不漂移）")
 	assert_eq(cells.size(), 6, "26-连通直线长度 = 最长轴跨度 + 1")
@@ -70,31 +70,31 @@ func test_line_is_connected_and_lands_on_both_ends() -> void:
 
 
 func test_line_of_a_single_point_is_a_dot() -> void:
-	var cells := QVoxelBrushGeometry.line(Vector3i(2, 3, 4), Vector3i(2, 3, 4))
+	var cells := VoxelPrimitives.line(Vector3i(2, 3, 4), Vector3i(2, 3, 4))
 	assert_eq(cells.size(), 1, "零长度直线就是单格")
 
 
 func test_box_is_inclusive_on_both_corners() -> void:
-	var cells := QVoxelBrushGeometry.box(Vector3i(2, 0, 1), Vector3i(0, 1, 3))
+	var cells := VoxelPrimitives.box(Vector3i(2, 0, 1), Vector3i(0, 1, 3))
 	assert_eq(cells.size(), 18, "实心长方体：各轴跨度（含两端）之积")
 	assert_true(cells.has(Vector3i(0, 0, 1)) and cells.has(Vector3i(2, 1, 3)),
 		"两个角点都必须在内（含端点）")
 
 
 func test_ball_is_euclidean_not_chebyshev() -> void:
-	assert_eq(QVoxelBrushGeometry.ball(Vector3i(5, 5, 5), 0).size(), 1, "半径 0 = 单格")
-	var r1 := QVoxelBrushGeometry.ball(Vector3i(5, 5, 5), 1)
+	assert_eq(VoxelPrimitives.ball(Vector3i(5, 5, 5), 0).size(), 1, "半径 0 = 单格")
+	var r1 := VoxelPrimitives.ball(Vector3i(5, 5, 5), 1)
 	assert_eq(r1.size(), 7, "半径 1 = 中心 + 6 个面邻")
 	assert_false(r1.has(Vector3i(6, 6, 5)), "角格不属于欧氏球 r=1（切比雪夫球才会收它）")
 
 
 func test_dilate_dedupes_overlaps() -> void:
 	var seeds: Array[Vector3i] = [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
-	var cells := QVoxelBrushGeometry.dilate(seeds, 1)
+	var cells := VoxelPrimitives.dilate(seeds, 1)
 	assert_eq(cells.size(), 12, "两格相邻 → 各自膨胀后重叠 2 格，必须去重（同一格只写一次）")
 	assert_true(cells.has(Vector3i(0, 0, 0)) and cells.has(Vector3i(1, 0, 0)), "两个原始格都还在")
-	assert_eq(QVoxelBrushGeometry.dilate(seeds, 1), cells, "同样的输入必须给出同样的顺序（可复现）")
-	assert_eq(QVoxelBrushGeometry.dilate(cells, 0), cells, "半径 0 原样返回")
+	assert_eq(VoxelPrimitives.dilate(seeds, 1), cells, "同样的输入必须给出同样的顺序（可复现）")
+	assert_eq(VoxelPrimitives.dilate(cells, 0), cells, "半径 0 原样返回")
 
 
 func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
@@ -105,10 +105,10 @@ func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 		for y in range(2):
 			seeds.append(Vector3i(x * 3 - 2, y * 2 + 1, x - y))
 	for r in [1, 2, 3, 5]:
-		var got := _cells_of(QVoxelBrushGeometry.dilate(seeds, r))
+		var got := _cells_of(VoxelPrimitives.dilate(seeds, r))
 		var want := {}
 		for c in seeds:
-			for off in QVoxelBrushGeometry.ball_offsets(r):
+			for off in VoxelPrimitives.ball_offsets(r):
 				want[c + off] = true
 		# 只报差异格：出问题时能一眼看出"多算了什么 / 漏了什么"，而不是抛两个大字典
 		var only_got: Array[Vector3i] = []
@@ -131,9 +131,9 @@ func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 		for z in range(2):
 			seeds.append(Vector3i(x * 2 - 1, x - z, z * 3))
 	for normal in [Vector3i(0, 1, 0), Vector3i(1, 0, 0), Vector3i(0, 0, -1)]:
-		var ax := QVoxelBrushGeometry.face_axes(normal)
+		var ax := VoxelPrimitives.face_axes(normal)
 		for r in [1, 2, 4]:
-			var got := _cells_of(QVoxelBrushGeometry.dilate_plane(seeds, r, normal))
+			var got := _cells_of(VoxelPrimitives.dilate_plane(seeds, r, normal))
 			var want := {}
 			for c in seeds:
 				for i in range(-r, r + 1):
@@ -156,25 +156,25 @@ func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 func test_dilate_plane_is_flat_where_the_ball_is_round() -> void:
 	# 「球 / 平面」的差别就落在这一步：球会朝法线两侧也鼓出去，平面只在面内摊开。
 	var one: Array[Vector3i] = [Vector3i(5, 5, 5)]
-	var flat := QVoxelBrushGeometry.dilate_plane(one, 2, Vector3i(0, 1, 0))
+	var flat := VoxelPrimitives.dilate_plane(one, 2, Vector3i(0, 1, 0))
 	assert_eq(flat.size(), 25, "法线 +Y、半径 2 的平面 = 5×5 的一片（(2r+1)²）")
 	for c in flat:
 		assert_eq(c.y, 5, "厚度恒为 1：平面不朝法线方向鼓")
-	assert_true(QVoxelBrushGeometry.dilate(one, 2).size() > flat.size(),
+	assert_true(VoxelPrimitives.dilate(one, 2).size() > flat.size(),
 		"同半径下球比平面厚（球会朝法线两侧也长出去）")
-	assert_eq(QVoxelBrushGeometry.dilate_plane(one, 0, Vector3i(0, 1, 0)), one, "半径 0 原样返回")
-	assert_eq(QVoxelBrushGeometry.dilate_plane(one, 3, Vector3i(0, 1, 0)),
-		QVoxelBrushGeometry.dilate_plane(one, 3, Vector3i(0, -1, 0)),
+	assert_eq(VoxelPrimitives.dilate_plane(one, 0, Vector3i(0, 1, 0)), one, "半径 0 原样返回")
+	assert_eq(VoxelPrimitives.dilate_plane(one, 3, Vector3i(0, 1, 0)),
+		VoxelPrimitives.dilate_plane(one, 3, Vector3i(0, -1, 0)),
 		"平面的两个朝向等价（face_axes 只看轴向，不看正负）")
 
 
 func test_ball_offsets_are_one_shared_cached_table() -> void:
 	# 球偏移只由半径决定，因此全类共用一张表：按格盖章的用法会反复算同一个球，
 	# 若每次都新建一张表，就是一串无谓的三重循环（半径 15 时每次 31³）。
-	var r2 := QVoxelBrushGeometry.ball_offsets(2)
-	assert_eq(QVoxelBrushGeometry.ball(Vector3i.ZERO, 2), r2, "以原点为中心的球就是偏移表本身")
-	assert_eq(QVoxelBrushGeometry.ball_offsets(2), r2, "重复取用必须给出同一张表")
-	assert_eq(QVoxelBrushGeometry.ball_offsets(-3), QVoxelBrushGeometry.ball_offsets(0),
+	var r2 := VoxelPrimitives.ball_offsets(2)
+	assert_eq(VoxelPrimitives.ball(Vector3i.ZERO, 2), r2, "以原点为中心的球就是偏移表本身")
+	assert_eq(VoxelPrimitives.ball_offsets(2), r2, "重复取用必须给出同一张表")
+	assert_eq(VoxelPrimitives.ball_offsets(-3), VoxelPrimitives.ball_offsets(0),
 		"半径 <= 0 一律归到 0（只有中心偏移），与 ball() 的旧语义一致")
 	assert_eq(r2.count(Vector3i.ZERO), 1, "偏移表内不得有重复（去重由生成方式保证）")
 
@@ -185,8 +185,8 @@ func test_region_stops_at_gaps() -> void:
 		solid[Vector3i(0, 0, z)] = MAT
 	solid[Vector3i(0, 0, 7)] = MAT  # 中间空两格 → 断开的柱子
 	var accept := func(p: Vector3i) -> bool: return solid.has(p)
-	var step := func(_p: Vector3i) -> Array[Vector3i]: return QVoxelBrushGeometry.neighbors6()
-	var cells := QVoxelBrushGeometry.region([Vector3i(0, 0, 0)], accept, step)
+	var step := func(_p: Vector3i) -> Array[Vector3i]: return VoxelPrimitives.neighbors6()
+	var cells := VoxelPrimitives.region([Vector3i(0, 0, 0)], accept, step)
 	assert_eq(cells.size(), 5, "只能收到连通的 5 格")
 	assert_false(cells.has(Vector3i(0, 0, 7)), "断开的部分不得被收进来")
 

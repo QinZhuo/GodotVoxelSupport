@@ -307,12 +307,12 @@ func _stroke(a: Vector3i, b: Vector3i, pick: Pick) -> Array[Vector3i]:
 		Mode.FILL:
 			return _stroke_fill(pick)
 		Mode.BOX:
-			return QVoxelBrushGeometry.box(_clip(a, pick), _clip(b, pick))
+			return VoxelPrimitives.box(_clip(a, pick), _clip(b, pick))
 		Mode.LINE:
-			return QVoxelBrushGeometry.line(_clip(a, pick), _clip(b, pick))
+			return VoxelPrimitives.line(_clip(a, pick), _clip(b, pick))
 		_:
 			# 体素笔：相邻采样点之间补一条线。鼠标事件是离散的，不补线则快速拖动会断成虚点。
-			return QVoxelBrushGeometry.line(_clip(a, pick), _clip(b, pick))
+			return VoxelPrimitives.line(_clip(a, pick), _clip(b, pick))
 
 
 ## 面笔：铺满与拾取点连通的一片"暴露面"。
@@ -325,12 +325,12 @@ func _stroke_face(pick: Pick) -> Array[Vector3i]:
 	# 背景面（地板 / 侧墙）：命中格落在网格外 → 铺满整个网格截面的那一层（面笔也要能画背景面）。
 	if _is_background_face(pick):
 		return _grid_face_plane(pick, normal)
-	var offsets := QVoxelBrushGeometry.plane_offsets4(normal)
+	var offsets := VoxelPrimitives.plane_offsets4(normal)
 	var accept := func(p: Vector3i) -> bool:
 		return bool(pick.solid.call(p)) and not bool(pick.solid.call(p + normal))
 	var step := func(_p: Vector3i) -> Array[Vector3i]:
 		return offsets
-	var exposed := QVoxelBrushGeometry.region([pick.hit], accept, step)
+	var exposed := VoxelPrimitives.region([pick.hit], accept, step)
 	if pick.op != Op.ADD:
 		return exposed
 	# 添加：写在暴露面的外侧（沿法线一格）；移除 / 上色：作用在暴露面本身
@@ -378,8 +378,8 @@ func _stroke_fill(pick: Pick) -> Array[Vector3i]:
 	var accept := func(p: Vector3i) -> bool:
 		return bool(pick.solid.call(p)) and int(pick.material_at.call(p)) == want
 	var step := func(_p: Vector3i) -> Array[Vector3i]:
-		return QVoxelBrushGeometry.neighbors6()
-	return QVoxelBrushGeometry.region([pick.hit], accept, step)
+		return VoxelPrimitives.neighbors6()
+	return VoxelPrimitives.region([pick.hit], accept, step)
 
 
 ## live 工具取"已交出末端 → 当前端点"这一段。
@@ -417,10 +417,10 @@ func _finish(cells: Array[Vector3i], pick: Pick) -> Array[Vector3i]:
 		if brush_shape == Shape.PLANE:
 			# 平面形态要一个"面"来定摊开方向：取拾取面的法线。没命中（pick 为空）时退化成 XY 平面 ——
 			# 那种情况 pick.valid() 本就为假、这一笔不会真的落下，退化值没有副作用。
-			cells = QVoxelBrushGeometry.dilate_plane(cells, radius,
+			cells = VoxelPrimitives.dilate_plane(cells, radius,
 					pick.normal if pick != null else Vector3i.ZERO)
 		else:
-			cells = QVoxelBrushGeometry.dilate(cells, radius)
+			cells = VoxelPrimitives.dilate(cells, radius)
 	if pick == null or pick.grid == Vector3i.ZERO:
 		return cells
 	if symmetry != Vector3i.ZERO:
