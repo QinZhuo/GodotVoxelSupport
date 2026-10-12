@@ -1,152 +1,64 @@
 @tool
 class_name VoxelMeshImporter
-extends EditorImportPlugin
+extends VoxelImportPluginBase
+
+## `.vox` / `.qvx` → **单个静态网格**（ArrayMesh）。绝大多数用户的期望产物，故优先级最高。
+## 选项定义见 VoxelImportOptions；分派与落盘见基类。
+
+# 选项名 / 枚举的**兼容别名**（旧引用点仍可用）；权威定义在 VoxelImportOptions。
+const Shape = VoxelImportOptions.Shape
+const shape := VoxelImportOptions.SHAPE
+const sphere_subdivisions := VoxelImportOptions.SPHERE_SUBDIVISIONS
+const sphere_scale := VoxelImportOptions.SPHERE_SCALE
+const frame_index := VoxelImportOptions.FRAME_INDEX
+const scale := VoxelImportOptions.SCALE
+const origin := VoxelImportOptions.ORIGIN
+const unwrap_lightmap_uv2 := VoxelImportOptions.UNWRAP_UV2
+const uv2_texel_size := VoxelImportOptions.UV2_TEXEL_SIZE
+const import_materials_textures := VoxelImportOptions.IMPORT_MATERIALS_TEXTURES
+
 
 func _get_importer_name():
-	return 'voxel_mesh'
+	return "voxel_mesh"
+
 
 func _get_visible_name():
 	return "Voxel Mesh"
 
-func _get_recognized_extensions():
-	return VoxAsset.SUPPORTED_EXTENSIONS.duplicate()
 
 func _get_save_extension():
 	return "mesh"
 
+
 func _get_resource_type():
-	return 'Mesh'
-
-## 体素导入形状：cube = 经典面片网格；sphere = 每个体素一颗小球（风格化渲染）
-enum Shape {
-	cube,
-	sphere,
-}
-
-## 导入选项描述表 —— 选项定义的**单一出处**，且是静态的。
-## 【为什么必须静态】`EditorImportPlugin` 只能在编辑器进程实例化：headless/CI 里
-## `VoxelMeshImporter.new()` 直接失败（"Class 'EditorImportPlugin' can only be instantiated
-## by editor."）。此前测试只能靠"缺键 → 消费方各自读默认值"侥幸通过，一旦某个选项是硬取键
-## （如 `options[import_materials_textures]`）就会整条链路静默失败。把"选项定义"与"插件实例"
-## 解耦后，编辑器与 headless 测试读到的是同一份定义。
-static func option_specs() -> Array[Dictionary]:
-	return [
-		{
-			name = scale,
-			default_value = 0.1,
-		},
-		{
-			# 资产原点：默认 world_origin = 原样保留文件里的坐标（等于本插件网格导入一直以来的
-			# 行为，已有资产不会因升级挪位）。要"X/Z 居中 + Y 贴底"这种游戏资产惯例，
-			# 再显式选 bottom_center。与 VoxelDataImporter 的同一选项共享取值与语义，
-			# 详见 VoxelWorldUtil.OriginMode。
-			name = origin,
-			default_value = VoxelWorldUtil.OriginMode.WORLD_ORIGIN,
-			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
-			hint_string = "world_origin,bottom_center,content_center",
-		},
-		{
-			name = shape,
-			default_value = Shape.cube,
-			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
-			hint_string = "cube,sphere",
-			# 修改 shape 时强制刷新全部选项可见性，
-			# 否则编辑器不会重新调用 _get_option_visibility (godot#49641)
-			usage = PropertyUsageFlags.PROPERTY_USAGE_DEFAULT | PropertyUsageFlags.PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED,
-		},
-		{
-			name = sphere_subdivisions,
-			default_value = 0,
-			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
-			hint_string = "20,80,320",
-		},
-		{
-			name = sphere_scale,
-			default_value = 1.0,
-			property_hint = PropertyHint.PROPERTY_HINT_RANGE,
-			hint_string = "0.05,2.0,0.05",
-		},
-		{
-			name = frame_index,
-			default_value = 0,
-		},
-		{
-			name = unwrap_lightmap_uv2,
-			default_value = false,
-		},
-		{
-			name = uv2_texel_size,
-			default_value = 0.2,
-			property_hint = PropertyHint.PROPERTY_HINT_RANGE,
-			hint_string = "0.01,100,0.001"
-		},
-		{
-			name = import_materials_textures,
-			default_value = false,
-		},
-	]
+	return "Mesh"
 
 
-func _get_import_options(_path, _preset) -> Array[Dictionary]:
-	return option_specs()
-
-
-## 选项名 → 默认值：给拿不到插件实例的调用方用（headless 测试、工具脚本）。
-## 实例方法 `_get_import_options()` 只在编辑器里可用，这条路径才与进程无关。
-## ⚠️ GDScript 的静态调用按**定义所在脚本**解析，不走虚函数派发：继承来的 `default_options()`
-## 里调 `option_specs()` 只会拿到基类那张表。所以子类必须重写本方法转发自己的表。
-static func default_options() -> Dictionary:
-	return _defaults_of(option_specs())
-
-
-static func _defaults_of(specs: Array[Dictionary]) -> Dictionary:
-	var opts := {}
-	for o in specs:
-		opts[o["name"]] = o["default_value"]
-	return opts
-
-## 选项名统一取自 VoxAsset 单一出处（与 VoxelDataImporter 共用，避免同值重复定义）
-const frame_index := VoxAsset.OPT_FRAME_INDEX
-const scale := VoxAsset.OPT_SCALE
-const origin := VoxAsset.OPT_ORIGIN
-const shape := "mesh/shape"
-## icosphere 细分级别 (0..4)，下拉标签为对应三角形数
-const sphere_subdivisions := "mesh/sphere_subdivisions"
-const sphere_scale := "mesh/sphere_scale"
-const unwrap_lightmap_uv2 := "mesh/unwrap_lightmap_uv2"
-const uv2_texel_size := "mesh/uv2_texel_size"
-const import_materials_textures := "material/import_materials_textures"
-
+## 网格是绝大多数用户的期望产物，故作为新文件的默认导入器（Noop=0、MeshLibrary=1.5 次之）。
 func _get_priority() -> float:
-	# 网格是绝大多数用户的期望产物，故作为新文件的默认导入器
-	# （No Import 降到 0、Data/MeshLibrary 次之，避免"默认导入成空资源"）。
 	return 2.0
 
 
-## sphere_* 选项仅在形状选择 sphere 时显示
-## 依赖 shape 选项的 PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED 标志触发刷新 (godot#49641)
-## frame_index = 取哪一帧生成**单个**网格：`.vox` 是 MagicaVoxel 的体素动画帧；
-## `.qvx` 是 `FRAM` 帧动画（§12）—— 静态 `.qvx` 只有第 0 帧，该选项恒等于 0、无副作用。
-## 选项始终可见（不按文件内容隐藏）：可见性回调拿不到已解析的资产，为它多load一次文件不值当。
+func _get_import_options(_path, _preset) -> Array[Dictionary]:
+	return VoxelImportOptions.mesh_specs()
+
+
+## 选项名 → 默认值：给拿不到插件实例的调用方（headless 测试 / 工具脚本）。
+static func default_options() -> Dictionary:
+	return VoxelImportOptions.defaults(VoxelImportOptions.mesh_specs())
+
+
+## sphere_* 仅在形状为 sphere 时显示（依赖 shape 的 UPDATE_ALL_IF_MODIFIED 触发刷新，godot#49641）。
+## frame_index 恒可见：可见性回调拿不到已解析资产，为它多 load 一次文件不值当。
 func _get_option_visibility(_path: String, option_name: StringName, options: Dictionary) -> bool:
 	if String(option_name).begins_with("mesh/sphere_"):
-		return options.get(VoxelMeshImporter.shape, Shape.cube) == Shape.sphere
+		return options.get(VoxelImportOptions.SHAPE, VoxelImportOptions.Shape.cube) == VoxelImportOptions.Shape.sphere
 	return true
 
-func _import(source_file, save_path, options, _platforms, gen_files):
-	var mesh: ArrayMesh
-	if QVoxelAsset.handles(source_file):
-		var qvx := QVoxelAsset.from_file(source_file)
-		if qvx == null:
-			return FAILED
-		mesh = VoxelMeshGenerator.generate_mesh_from_qvx(qvx, options, source_file)
-	else:
-		# 与 QVX 分支同款守卫：解析失败返回 null，直接送进 generate_mesh 会在
-		# 内部解引用空的体素数据而崩溃。
-		var vox = VoxAsset.from_asset(source_file)
-		if vox == null:
-			return FAILED
-		mesh = VoxelMeshGenerator.generate_mesh(vox, options, source_file)
-	if not mesh:
-		return FAILED
-	return ResourceSaver.save(mesh, "%s.%s" % [save_path, _get_save_extension()])
+
+func _from_qvx(qvx, options, source_file) -> Resource:
+	return VoxelMeshGenerator.generate_mesh_from_qvx(qvx, options, source_file)
+
+
+func _from_vox(vox, options, source_file) -> Resource:
+	return VoxelMeshGenerator.generate_mesh(vox, options, source_file)

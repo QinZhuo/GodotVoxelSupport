@@ -12,11 +12,11 @@ extends EditorImportPlugin
 ##   .vox  → VoxAsset（MagicaVoxel 场景图）→ QVoxelSource.from_voxel_data
 
 ## 选项名统一取自 VoxAsset 单一出处（与 VoxelMeshImporter 共用，避免同值重复定义）
-const frame_index := VoxAsset.OPT_FRAME_INDEX
-const scale := VoxAsset.OPT_SCALE
+const frame_index := VoxelImportOptions.FRAME_INDEX
+const scale := VoxelImportOptions.SCALE
 ## 资产原点：与 VoxelMeshImporter 同名同义（原先是本类独有的 `mesh/center` 布尔，
 ## 只表达"居中/不居中"两态，无法表达"内容居中"与"保留作者摆放"——统一成三态枚举）。
-const origin := VoxAsset.OPT_ORIGIN
+const origin := VoxelImportOptions.ORIGIN
 
 
 ## 【importer id 保持 "voxel_data"】它是**序列化键**（每个 `.import` 里记着它），改名会让

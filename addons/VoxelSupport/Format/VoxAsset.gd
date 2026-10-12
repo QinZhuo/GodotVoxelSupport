@@ -63,16 +63,7 @@ static func get_offset_voxels(voxels: Dictionary[Vector3i, int], offset: Vector3
 	return result
 
 
-## 导入面板选项名的单一出处：mesh/frame_index、mesh/scale 同时被 Mesh 与 Data 两个
-## 导入器使用（VoxelMeshImporter / VoxelDataImporter），值必须与既有 .import 文件完全一致。
-const OPT_FRAME_INDEX := "mesh/frame_index"
-const OPT_SCALE := "mesh/scale"
-
-## 资产原点模式（取值见 VoxelWorldUtil.OriginMode）。
-## 【为什么两个导入器必须同名同义】同一个模型经 "导入成 mesh" 与 "导入成 data" 两条路进场景，
-## 原点若各按各的习惯摆，位置就会差一截（本仓库实测差 0.35~0.50）；共用一个选项名与一套
-## 语义，是"两条路结果一致"在选项层的表达。
-const OPT_ORIGIN := "mesh/origin"
+# 导入面板的选项名已集中到 `VoxelImportOptions`（单一出处，含 mesh/frame_index、mesh/scale、mesh/origin）。
 
 
 class VoxelModel:
