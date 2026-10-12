@@ -23,8 +23,8 @@ func test_vox_to_qvx_roundtrip_samples() -> void:
 		assert_true(vox != null, "应能读入 %s" % name)
 		if vox == null:
 			continue
-		var a := _world_sig(vox.to_world())
-		var w := vox.to_world()
+		var a := _world_sig(VoxAssetWorld.to_world(vox))
+		var w := VoxAssetWorld.to_world(vox)
 		var rep := QVoxelFile.QVoxelReport.new()
 		var doc := QVoxelFile.parse(QVoxelFile.serialize(w.to_document()), true, rep, true)
 		assert_true(doc != null, "%s：.qvx 应能解析回去（%s）" % [name, rep.summary()])
@@ -71,7 +71,7 @@ func test_vox_voxel_animation_import() -> void:
 	assert_true(vox != null, "应能读入 deer.vox")
 	if vox == null:
 		return
-	var w := vox.to_world()
+	var w := VoxAssetWorld.to_world(vox)
 	var anim: QVoxelModel = null
 	for m in w.all_models():
 		if m.is_animated():

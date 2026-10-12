@@ -16,7 +16,7 @@ const SAMPLES_DIR := "res://demo"
 
 func test_layers_map_to_groups() -> void:
 	var vox := _two_layer_asset()
-	var w := vox.to_world()
+	var w := VoxAssetWorld.to_world(vox)
 
 	assert_eq(w.nodes.size(), 2, "两个图层各成一个组")
 	var ground := w.nodes[0] as QVoxelGroup
@@ -37,7 +37,7 @@ func test_layers_map_to_groups() -> void:
 
 
 func test_world_eval_places_models() -> void:
-	var w := _two_layer_asset(true, true).to_world()
+	var w := VoxAssetWorld.to_world(_two_layer_asset(true, true))
 	var res := QVoxelEvalEngine.evaluate_world(w, QVoxelEvalContext.new())
 	assert_eq(res.solid_count(), 2, "两个模型各一个体素")
 	assert_eq(res.grid_size, Vector3i(2, 4, 4), "包围盒 = 两个位移点张成的盒")
@@ -125,7 +125,7 @@ func test_demo_samples_parity() -> void:
 		if vox == null:
 			continue
 		var expected := vox.get_voxels().size()
-		var w := vox.to_world()
+		var w := VoxAssetWorld.to_world(vox)
 		var got := QVoxelEvalEngine.evaluate_world(w, QVoxelEvalContext.new()).solid_count()
 		assert_eq(got, expected, "%s：.vox 体素数应与 .vox→世界求值一致" % name)
 		# 同一世界经 .qvx 字节往返后仍一致（对"显示一致"的序列化侧代理）。
@@ -221,7 +221,7 @@ func test_vox_transform_animation_import() -> void:
 	vox.nodes[2] = anim
 	vox.nodes[3] = _shp(3, 0)
 
-	var w := vox.to_world()
+	var w := VoxAssetWorld.to_world(vox)
 	var found: QVoxelGroup = null
 	for n in w.all_nodes():
 		if n is QVoxelGroup and n.transform_tracks.size() == 2:

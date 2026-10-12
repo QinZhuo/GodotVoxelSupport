@@ -176,12 +176,12 @@ static func _anim_meta_from_scene(doc: QVoxelFile.QVoxelDocument) -> Dictionary:
 	return doc.anim_meta
 
 
-## 单个节点的局部变换。字段布局与编解码的唯一实现在 `QVoxelNode.transform_from_json`
+## 单个节点的局部变换。字段布局与编解码的唯一实现在 `QVoxelTransform.transform_from_json`
 ## （位置 `t` / 四元数 `r` / 缩放 `s`，三者皆可缺省）。这里只做"取 transform 键"这一层转发。
 ## 【为什么旋转是四元数而不是 0–23 朝向索引】那是 MagicaVoxel 为 `.vox` 的 `nTRN` 发明的
 ## 省字节编码，隐含 Z-up 约定；`.qvx` 是通用容器，四元数与 Transform3D 直接对接，无需查表。
 static func _node_transform(node: Dictionary) -> Transform3D:
-	return QVoxelNode.transform_from_json(node.get("transform"))
+	return QVoxelTransform.transform_from_json(node.get("transform"))
 
 
 # 查询

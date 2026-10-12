@@ -162,8 +162,8 @@ static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 	n.node_name = str(entry.get("name", ""))
 	n.visible = bool(entry.get("visible", true))
 	n.locked = bool(entry.get("locked", false))
-	n.local_transform = QVoxelNode.transform_from_json(entry.get("transform"))
-	n.transform_tracks = QVoxelNode.transform_tracks_from_json(entry.get("transform_tracks"))
+	n.local_transform = QVoxelTransform.transform_from_json(entry.get("transform"))
+	n.transform_tracks = QVoxelTransform.transform_tracks_from_json(entry.get("transform_tracks"))
 
 
 # 导出为传输结构（保存路径）
@@ -753,10 +753,10 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 		e["visible"] = false
 	if n.locked:
 		e["locked"] = true
-	var xf := QVoxelNode.transform_to_json(n.local_transform)
+	var xf := QVoxelTransform.transform_to_json(n.local_transform)
 	if not xf.is_empty():
 		e["transform"] = xf
-	var tracks := QVoxelNode.transform_tracks_to_json(n.transform_tracks)
+	var tracks := QVoxelTransform.transform_tracks_to_json(n.transform_tracks)
 	if not tracks.is_empty():
 		e["transform_tracks"] = tracks
 	if n.is_model():

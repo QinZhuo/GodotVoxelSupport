@@ -9,6 +9,14 @@ extends EditorPlugin
 
 const SETTING_ENABLE_RUNTIME := "voxel_support/enable_runtime"
 
+## 受开关门控的目录（关 → 写 `.gdignore`，真·不编译）。
+## `Model/`（世界/场景/求值）+ `Dynamic/`（运行时数据层）—— 两者都只在"要编辑 / 要动态体素"时才需要；
+## 关掉后只剩 `Importer + Format + Mesh`，即"导入为静态网格"的最小集。
+const GATED_DIRS := [
+	"res://addons/VoxelSupport/Model",
+	"res://addons/VoxelSupport/Dynamic",
+]
+
 var importers: Array[EditorImportPlugin]
 
 
@@ -42,21 +50,25 @@ func _exit_tree():
 		remove_import_plugin(importer)
 
 
-## 按开关同步 `Dynamic/.gdignore`：**关 → 写入**（编辑器不扫描该目录 = 不编译、不导入、
+## 按开关同步被门控目录的 `.gdignore`：**关 → 写入**（编辑器不扫描该目录 = 不编译、不导入、
 ## class_name 不进全局类表）；**开 → 删除**。这是"一个项目设置 → 真·物理排除"的桥。
 ## 改设置后需重载本插件（或重启编辑器）生效。
-## 【代价】关闭时 `Dynamic/` 里的类全部消失 —— 引用 `QVoxelSource` 等的**测试/演示也会编译失败**。
-## 故：本仓库（用到动态层）在 project.godot 里把该开关置 true；纯静态网格的游戏置 false 才真瘦身。
+## 【代价】关闭时 `Model/` 与 `Dynamic/` 里的类全部消失 —— 引用它们的**编辑器（QVoxelier）/
+## 测试 / 演示也会编译失败**。故：本仓库在 project.godot 里把该开关置 true；纯静态网格的游戏置 false。
 func _apply_runtime_gate() -> void:
-	var marker := "res://addons/VoxelSupport/Dynamic/.gdignore"
 	var enabled := bool(ProjectSettings.get_setting(SETTING_ENABLE_RUNTIME, false))
-	var has := FileAccess.file_exists(marker)
-	if has == (not enabled):
-		return  # 已一致（enabled 时不该有 marker；否则该有）
-	if enabled:
-		DirAccess.remove_absolute(ProjectSettings.globalize_path(marker))
-	else:
-		var f := FileAccess.open(marker, FileAccess.WRITE)
-		if f != null:
-			f.close()
-	EditorInterface.get_resource_filesystem().scan()
+	var changed := false
+	for dir in GATED_DIRS:
+		var marker: String = dir + "/.gdignore"
+		var has := FileAccess.file_exists(marker)
+		if has == (not enabled):
+			continue  # 已一致（enabled 时不该有 marker；否则该有）
+		if enabled:
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(marker))
+		else:
+			var f := FileAccess.open(marker, FileAccess.WRITE)
+			if f != null:
+				f.close()
+		changed = true
+	if changed:
+		EditorInterface.get_resource_filesystem().scan()
