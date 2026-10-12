@@ -762,58 +762,11 @@ func _make_fram_doc(frames: Array) -> QVoxelFile.QVoxelDocument:
 	return doc
 
 
-## 文本块（TEXT_FLAG）：MATE/VXEL/ANIM 以文本写出，读回与二进制**同语义** —— 同一格式、一条解析路径。
-func test_text_blocks_are_same_format() -> void:
-	var doc := _make_fram_doc([{"duration_ms": 50, "blocks": {Vector3i.ZERO: _sparse_buf()}}])
-	doc.anim_meta = {0: {"fps": 8, "loop": false, "tags": [{"name": "a", "from": 0, "to": 0}]}}
-	var bin := QVoxelFile.serialize(doc)
-	var txt := QVoxelFile.serialize(doc, true,
-			PackedStringArray([QVoxelSpec.BLOCK_MATE, QVoxelSpec.BLOCK_ANIM]))
-	assert_true(_block_flagged_text(txt, QVoxelSpec.BLOCK_ANIM), "ANIM 应以文本标记写出")
-	assert_false(_block_flagged_text(bin, QVoxelSpec.BLOCK_ANIM), "默认写出的是二进制（无文本标记）")
-
-	var rep1 := QVoxelFile.QVoxelReport.new()
-	var rep2 := QVoxelFile.QVoxelReport.new()
-	var d1 := QVoxelFile.parse(bin, true, rep1, true)
-	var d2 := QVoxelFile.parse(txt, true, rep2, true)
-	assert_true(d1 != null and d2 != null, "两种形态都应能读入（%s / %s）" % [rep1.summary(), rep2.summary()])
-	if d1 == null or d2 == null:
-		return
-	var f1: Array = d1.model_frames(0)
-	var f2: Array = d2.model_frames(0)
-	assert_eq(f2.size(), f1.size(), "帧数一致")
-	for i in f1.size():
-		assert_eq((f2[i] as Dictionary)["blocks"], (f1[i] as Dictionary)["blocks"], "第 %d 帧块表一致" % i)
-	assert_eq(d2.model_anim_meta(0).get("fps"), 8, "文本 ANIM 的 fps 存活")
-	assert_eq(d2.materials, d1.materials, "文本 MATE 与二进制 MATE 一致")
-
-
-## 一个 32³ 的稀疏缓冲（只 2 个非空体素，使文本 JSON 小、编码快）。
-func _sparse_buf() -> PackedInt32Array:
-	var buf := PackedInt32Array()
-	buf.resize(32 * 32 * 32)
-	buf[QVoxelSpec.index_in_block(Vector3i(1, 2, 3), 32)] = 1
-	buf[QVoxelSpec.index_in_block(Vector3i(30, 31, 5), 32)] = 2
-	return buf
-
-
-## 扫描文件，判断某类型的块是否带 TEXT_FLAG。
-func _block_flagged_text(bytes: PackedByteArray, type: String) -> bool:
-	var pos := QVoxelSpec.SIGNATURE_SIZE
-	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
-		var raw := bytes.decode_u32(pos)
-		var length := raw & QVoxelSpec.LENGTH_MASK
-		if bytes.slice(pos + 4, pos + 8).get_string_from_ascii() == type:
-			return (raw & QVoxelSpec.TEXT_FLAG) != 0
-		pos += QVoxelSpec.BLOCK_HEADER_SIZE + length
-	return false
-
-
-## 定位序列化结果里 FRAM 块的块头偏移（没有则 -1）。块头自足，故顺序扫即可。
+## 定位序列化结果里 ANIM 块的块头偏移（没有则 -1）。块头自足，故顺序扫即可。
 func _fram_block_offset(bytes: PackedByteArray) -> int:
 	var pos := QVoxelSpec.SIGNATURE_SIZE
 	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
-		var length := bytes.decode_u32(pos) & QVoxelSpec.LENGTH_MASK
+		var length := bytes.decode_u32(pos)
 		if bytes.slice(pos + 4, pos + 8).get_string_from_ascii() == QVoxelSpec.BLOCK_ANIM:
 			return pos
 		pos += QVoxelSpec.BLOCK_HEADER_SIZE + length
@@ -879,7 +832,7 @@ func _head_qvox_first(bytes: PackedByteArray) -> bool:
 	if bytes.size() < QVoxelSpec.SIGNATURE_SIZE + QVoxelSpec.BLOCK_HEADER_SIZE:
 		return false
 	var at := QVoxelSpec.SIGNATURE_SIZE
-	var length := bytes.decode_u32(at) & QVoxelSpec.LENGTH_MASK
+	var length := bytes.decode_u32(at)
 	var type := PackedByteArray()
 	for i in 4:
 		type.append(bytes[at + 4 + i])

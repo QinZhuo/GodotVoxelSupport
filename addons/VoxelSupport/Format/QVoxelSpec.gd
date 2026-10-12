@@ -58,15 +58,6 @@ static func signature_bytes() -> PackedByteArray:
 const BLOCK_HEADER_SIZE := 12
 const BLOCK_ALIGN := 4
 
-## 块头 length 的最高位 = **"负载是文本（UTF-8 JSON）"标志**（v4）。
-## 【为什么借 length 的最高位】块长 < 2GB，最高位永远用不到；借它则块头仍是 12 字节、零额外开销。
-## 文本块的负载 = 该块类型的**文本形态**：机械账（CRC / 长度 / 对齐）由工具算，作者只写语义文本
-## —— 这正是"AI / 人也能直接写 `.qvx`"的入口，且**不需要第二套格式**：解析仍只有一条路径
-## （看这一位），只是把负载按 JSON 解释。工具保存时默认规范化回二进制（见 serialize 的 text_types）。
-## 只有 MATE / VXEL / ANIM 有"二进制 ↔ 文本"两形态；HEAD / NODE / CAMR 的负载本就是 JSON。
-const TEXT_FLAG := 0x80000000
-const LENGTH_MASK := 0x7FFFFFFF
-
 # 块类型（当前版本共七种）
 # HEAD  恰好 1 个，必须第一，必需。JSON 声明文件。
 # MATE  ≤ 1，材质调色板（12 字节定长条目）。
