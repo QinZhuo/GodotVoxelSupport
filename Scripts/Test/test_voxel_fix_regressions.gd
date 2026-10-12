@@ -293,7 +293,8 @@ func test_bpp_other_than_16_is_rejected() -> void:
 		var doc := QVoxelFile.QVoxelDocument.new()
 		doc.head = {
 			"qvox": QVoxelSpec.VERSION,
-			"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": bpp}],
+			QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+			QVoxelSpec.HEAD_BPP_KEY: bpp,
 			"block_size": CHUNK,
 			"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 		}
@@ -305,7 +306,8 @@ func test_bpp_16_is_accepted() -> void:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
 		"qvox": QVoxelSpec.VERSION,
-		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": CHUNK,
 		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 	}

@@ -15,15 +15,16 @@ extends RefCounted
 
 # 版本
 # HEAD 的 qvx 键必须等于此值。读者遇到更高版本应拒绝（宁可不解，不可误读）。
-# v3（当前）：场景图从 `layers` 下标体系改为 NODE 嵌套节点树 —— 层就是一个 QVoxelGroup
-#             节点，归属即父子关系；旧 `layers` 键读盘时忽略、写盘时显式抹掉。
-#             VXEL / MATE 等块布局与 v2 一致（本次只动工程数据键）。
-# v2：VXEL 模型头 6 → 10 字节，新增 uint32 payload_length，
-#     使"模型负载的精确边界"成为头内事实（P4 贯彻到 VXEL 内部）。
-# v1 与后续版本不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，
-# 从未有实际落盘的 v1 文件，无需背负历史包袱。
+# v4（当前）：三处赘余被收敛 ——
+#   ① HEAD 的 `channels` 数组（恒为长度 1、却暗示多通道）→ 扁平单键 `channel` + `bpp`；
+#   ② NODE 一肩挑三事 → 拆成 NODE（场景树）/ CAMR（相机）/ ANIM（动画）；
+#   ③ 动画的时序（fps/loop/tags）从 NODE 节点条目收进 ANIM 块，与体素帧内聚一处
+#      （节点摆放轨道 transform_tracks 仍属节点 —— 组也能做摆放动画，见 ANIM 注释）。
+# v3：场景图从 `layers` 下标体系改为 NODE 嵌套节点树。
+# v2：VXEL 模型头 6 → 10 字节，新增 uint32 payload_length。
+# v1 及更早与后续版本不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，无需背负历史包袱。
 
-const VERSION := 3
+const VERSION := 4
 
 ## 文件扩展名（不带点，与 `String.get_extension()` 的返回形态一致）。
 ## 唯一出处：导入器按扩展名分派、QVoxelStream 组文件名都引用它。
@@ -57,23 +58,34 @@ static func signature_bytes() -> PackedByteArray:
 const BLOCK_HEADER_SIZE := 12
 const BLOCK_ALIGN := 4
 
-# 块类型（当前版本共六种）
+## 块头 length 的最高位 = **"负载是文本（UTF-8 JSON）"标志**（v4）。
+## 【为什么借 length 的最高位】块长 < 2GB，最高位永远用不到；借它则块头仍是 12 字节、零额外开销。
+## 文本块的负载 = 该块类型的**文本形态**：机械账（CRC / 长度 / 对齐）由工具算，作者只写语义文本
+## —— 这正是"AI / 人也能直接写 `.qvx`"的入口，且**不需要第二套格式**：解析仍只有一条路径
+## （看这一位），只是把负载按 JSON 解释。工具保存时默认规范化回二进制（见 serialize 的 text_types）。
+## 只有 MATE / VXEL / ANIM 有"二进制 ↔ 文本"两形态；HEAD / NODE / CAMR 的负载本就是 JSON。
+const TEXT_FLAG := 0x80000000
+const LENGTH_MASK := 0x7FFFFFFF
+
+# 块类型（当前版本共七种）
 # HEAD  恰好 1 个，必须第一，必需。JSON 声明文件。
 # MATE  ≤ 1，材质调色板（12 字节定长条目）。
 # VXEL  ≥ 0，体素数据（每个 model_id 一个）。
-# FRAM  ≥ 0，体素帧动画（每个 model_id 一个；与 VXEL 互斥，见下）。
-# NODE  ≤ 1，场景图 / 变换 / 动画（JSON）。
+# ANIM  ≥ 0，体素帧动画 + 时序（每个 model_id 一个；与 VXEL 互斥，见下）。
+# NODE  ≤ 1，场景树（JSON；只放 nodes）。
+# CAMR  ≤ 1，相机书签（JSON）。
 # CACH  任意，任何可重算的数据（可删）。
 
 const BLOCK_HEAD := "HEAD"
 const BLOCK_MATE := "MATE"
 const BLOCK_VXEL := "VXEL"
-const BLOCK_FRAM := "FRAM"
+const BLOCK_ANIM := "ANIM"
 const BLOCK_NODE := "NODE"
+const BLOCK_CAMR := "CAMR"
 const BLOCK_CACH := "CACH"
 
 ## 当前版本全部块类型（用于校验 / 调试）。
-const KNOWN_BLOCK_TYPES := [BLOCK_HEAD, BLOCK_MATE, BLOCK_VXEL, BLOCK_FRAM, BLOCK_NODE, BLOCK_CACH]
+const KNOWN_BLOCK_TYPES := [BLOCK_HEAD, BLOCK_MATE, BLOCK_VXEL, BLOCK_ANIM, BLOCK_NODE, BLOCK_CAMR, BLOCK_CACH]
 
 # CACH 负载的定长前置（8 字节）
 # char[4] kind         任意的 4 字符标签，兼作命名空间，由写入方定义（格式不解释）
@@ -120,18 +132,14 @@ const ALLOWED_UP_AXES := ["x", "y", "z"]
 ## 因此用同一策略收敛：读方遇到非 16 直接拒绝（FATAL，fail-fast），而非静默误读。
 ## 将来确需其它位宽时，随格式版本引入逐通道位宽描述，而不是现在背这个成本。
 
-## 支配通道名（channels[0] 必须为此，决定空块判定与可见性）。
+## 通道名（决定空块判定与可见性）。v4 起 HEAD 用**扁平单键**声明，不再用数组。
 const DOMINANT_CHANNEL := "material"
 
-## 当前版本支持的通道数：**恰好 1 个**（dominant = material）。
-## 【为什么收敛为单通道】规范原设计允许 `channels` 列多个定长通道（如附加 sdf），
-## 但编解码层只按单通道 material 实现 —— 于是"多通道文件"会被**接受却读错**
-## （RUN 逐游程交错 (len, material, sdf)，只读 material 会从第二段起错位）。
-## 同域参照 MagicaVoxel .vox 也只有单一体素通道，附加数据一律走独立块类型
-## （P1：新功能 = 新块类型）。故本版把契约收敛为"恰好 1 个通道"：读方遇到 >1
-## 直接拒绝（FATAL，fail-fast），不再静默误读。将来确需多通道时，作为新的
-## qvx 版本引入"逐通道布局描述"（类似 KTX2 的 DFD），而不是现在就背这个成本。
-const SUPPORTED_CHANNEL_COUNT := 1
+## HEAD 的单通道键名（v4）。取代旧 `channels` 数组 —— 那个数组恒为长度 1、却暗示支持多通道，
+## 是"看起来能多通道、实际只支持 1"的假象（违背 P2）。单通道就是单通道：
+## `"channel":"material"` + `"bpp":16`；读方据此校验，多通道 / 别的位宽一律拒绝（fail-fast）。
+const HEAD_CHANNEL_KEY := "channel"
+const HEAD_BPP_KEY := "bpp"
 
 ## 支配通道每体素位宽与字节数（bpp=16 → 2 字节）。
 ## 编解码层里所有"每通道一个值"的宽度都引用此常量，消除散落的魔法数 2。
@@ -213,25 +221,29 @@ const VXEL_MODEL_HEADER_SIZE := 10
 
 const VOX_BLOCK_HEADER_SIZE := 17
 
-# FRAM 帧动画（设计见 docs/QVX_FORMAT.md §12）
-# 一个模型一套帧，按 model_id 绑定。**不变式**：一个 model_id 恰好对应一个体素源 ——
-# VXEL（静态）或 FRAM（动画），二者互斥（同时出现即损坏，FATAL）。
-# FRAM 模型头（8 字节）：uint16 model_id + uint16 frame_count + uint32 payload_length。
-#   payload_length = 其后全部帧数据的字节数（不含本头、不含顶层填充）—— 与 VXEL 同构，
+# ANIM 帧动画（设计见 docs/QVX_FORMAT.md §12）。**取代旧 FRAM**：把"体素帧 + 时序"内聚一处。
+# 一个模型一套动画，按 model_id 绑定。**不变式**：一个 model_id 恰好对应一个体素源 ——
+# VXEL（静态）或 ANIM（动画），二者互斥（同时出现即损坏，FATAL）。
+# ANIM 模型头（8 字节）：uint16 model_id + uint16 frame_count + uint32 payload_length。
+#   payload_length = 其后全部字节数（meta + 帧，不含本头、不含顶层填充）—— 与 VXEL 同构，
 #   让"解析到哪里才算正好用完"退化成一次等式比较（P4）。
+# 紧跟头之后是**时序 meta**：uint32 meta_len + meta_len 字节 JSON
+#   （{"fps":N,"loop":bool,"tags":[...]}；meta_len=0 表示全缺省）。时序与体素帧同处一块。
 # 每帧（6 字节定长前置）：uint16 duration_ms + uint32 payload_length + byte[] 块级增量。
-#   duration_ms = 0 表示"用 NODE 里 anim.fps 的缺省帧率"。
+#   duration_ms = 0 表示"用 meta.fps 的缺省帧率"。
 # 【帧增量的语义】第 0 帧基线为空（其 delta 即全量块表，与一个 VXEL 的负载逐字节同构）；
 # 第 k 帧 = 第 k-1 帧的块表**应用本帧 delta**：
 #   codec ∈ {SOLID,RUN,DENSE,INDEXED} → 设置该块；
 #   codec = 0（EMPTY）                → **清空**该块；
 #   未出现的块                        → 继承上一帧。
 # 于是"一帧的成本 = 它相对上一帧改了多少块"，与模型总大小无关（P2）。
-# 【为什么 codec=0 在 FRAM 里合法】§5.2 说"读到 codec=0 视为损坏"约束的是 VXEL 的块
+# 【为什么 codec=0 在 ANIM 里合法】§5.2 说"读到 codec=0 视为损坏"约束的是 VXEL 的块
 # （那里空块用"坐标缺失"表示，0 因此是冗余值）；而增量的本质是"与上一帧的**差异**"，
-# "变成空"也是一种差异、必须有编码。给 FRAM 一个自己的命名空间即可，不污染 VXEL 语义。
-const FRAM_MODEL_HEADER_SIZE := 8
-const FRAM_FRAME_HEADER_SIZE := 6
+# "变成空"也是一种差异、必须有编码。给 ANIM 一个自己的命名空间即可，不污染 VXEL 语义。
+# 【为什么摆放轨道不在这里】transform_tracks 是**节点**属性（组也能做摆放动画），而 ANIM
+# 按 model_id 绑定（模型专有）；粒度不同，故摆放轨道留在 NODE 的节点条目里（§2）。
+const ANIM_MODEL_HEADER_SIZE := 8
+const ANIM_FRAME_HEADER_SIZE := 6
 
 # NODE 块的图层与相机（§7）
 # 【为什么这几个键名要提到规范里，而修改器链的键名留在 QVoxelModifierSerializer】

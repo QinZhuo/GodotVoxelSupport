@@ -26,8 +26,12 @@ class QVoxelDocument extends RefCounted:
 	## 块表**（文件里的块级增量在解析时展开，写盘时压回增量）。
 	## **不变式**：一个 model_id 只能出现在 models 或 frames 之一（VXEL 与 FRAM 互斥）。
 	var frames: Dictionary = {}
-	## NODE JSON（Dictionary），可空。原样保留（重写不丢数据）。
+	## NODE JSON（Dictionary），可空。原样保留（重写不丢数据）。v4 起只放场景树 `nodes`。
 	var node: Dictionary = {}
+	## 相机书签（CAMR 块）。纯工程数据，不参与几何渲染。
+	var cameras: Array = []
+	## 动画时序 meta：model_id -> { "fps", "loop", "tags" }。与 frames 内聚于 ANIM 块。
+	var anim_meta: Dictionary = {}
 	## NODE 的已校验只读视图。任一引用无效的节点 / 帧已被丢弃。
 	## 解析失败或无 NODE 块时为 null。
 	var scene: QVoxelSceneGraph = null
@@ -46,10 +50,13 @@ class QVoxelDocument extends RefCounted:
 	## 用于"未变的块直接搬运原始字节"，避免全量重编码。
 	var block_index: Array = []
 
-	func get_channels() -> Array:
-		# 直接写 [] 会因 Variant 推断报"返回 float 而声明 Array"，故先取 Variant 再判型。
-		var c: Variant = head.get("channels")
-		return c if c is Array else []
+	## HEAD 声明的通道名（v4 扁平单键；缺省 = material）。
+	func get_channel() -> String:
+		return str(head.get(QVoxelSpec.HEAD_CHANNEL_KEY, QVoxelSpec.DOMINANT_CHANNEL))
+
+	## HEAD 声明的每体素位宽（v4 扁平单键；缺省 = 16）。
+	func get_bpp() -> int:
+		return int(head.get(QVoxelSpec.HEAD_BPP_KEY, QVoxelSpec.CHANNEL_BPP))
 
 	func get_block_size() -> int:
 		return int(head.get("block_size", QVoxelSpec.DEFAULT_BLOCK_SIZE))
@@ -94,6 +101,13 @@ class QVoxelDocument extends RefCounted:
 		if frames.has(model_id):
 			return frames[model_id]
 		return frames.get(str(model_id))
+
+	## 取指定 model_id 的动画时序 meta（兼容 int / str 键；不存在返回空 Dictionary）。
+	func model_anim_meta(model_id: int) -> Dictionary:
+		var m: Variant = anim_meta.get(model_id)
+		if m == null:
+			m = anim_meta.get(str(model_id))
+		return m if m is Dictionary else {}
 
 
 ## NODE 块的已校验只读视图。节点是**嵌套**的：类型未知 / 非对象的条目已在构造时（连同子树）
@@ -209,7 +223,7 @@ static func scan_block_index(bytes: PackedByteArray) -> Array:
 			return index
 	var pos := QVoxelSpec.SIGNATURE_SIZE
 	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
-		var length := bytes.decode_u32(pos)
+		var length := bytes.decode_u32(pos) & QVoxelSpec.LENGTH_MASK
 		if length % QVoxelSpec.BLOCK_ALIGN != 0:
 			return index
 		var payload_start := pos + QVoxelSpec.BLOCK_HEADER_SIZE
@@ -218,7 +232,7 @@ static func scan_block_index(bytes: PackedByteArray) -> Array:
 		var type := _read_type(bytes, pos + 4)
 		var model_id := -1
 		# 只为 VXEL / FRAM 读前 2 字节拿 model_id（块头之外的唯一身份信息）；其余块不碰负载。
-		if (type == QVoxelSpec.BLOCK_VXEL or type == QVoxelSpec.BLOCK_FRAM) and length >= 2:
+		if (type == QVoxelSpec.BLOCK_VXEL or type == QVoxelSpec.BLOCK_ANIM) and length >= 2:
 			model_id = bytes.decode_u16(payload_start)
 		index.append({
 			"type": type,
@@ -262,7 +276,9 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxelR
 		if pos + QVoxelSpec.BLOCK_HEADER_SIZE > bytes.size():
 			_flush_fatal(report, "块头越界 @%d" % pos, notes, "[QVX] 块头越界 @%d" % pos)
 			return null
-		var length := bytes.decode_u32(pos)
+		var raw_length := bytes.decode_u32(pos)
+		var is_text := (raw_length & QVoxelSpec.TEXT_FLAG) != 0
+		var length := raw_length & QVoxelSpec.LENGTH_MASK
 		var type := _read_type(bytes, pos + 4)
 		var crc := bytes.decode_u32(pos + 8)
 
@@ -325,30 +341,34 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxelR
 					return null
 				block_size = doc.get_block_size()
 			QVoxelSpec.BLOCK_MATE:
-				doc.materials = _parse_mate(payload, notes)
+				doc.materials = _parse_mate_text(payload, notes) if is_text else _parse_mate(payload, notes)
 			QVoxelSpec.BLOCK_VXEL:
 				# 一个 model_id 恰好对应一个 VXEL 块；重复即为损坏（拒绝整个文件）。
 				var vxel_err: Array = [""]
-				var model_id: Variant = _parse_vxel_into(doc, payload, block_size, notes, vxel_err)
+				var model_id: Variant = _parse_vxel_text_into(doc, payload, block_size, vxel_err) if is_text \
+						else _parse_vxel_into(doc, payload, block_size, notes, vxel_err)
 				if model_id == null:
 					_flush_fatal(report, vxel_err[0], notes)
 					return null
 				vxel_count += 1
 				if entry >= 0:
 					doc.block_index[entry]["model_id"] = int(model_id)
-			QVoxelSpec.BLOCK_FRAM:
-				# 一个 model_id 恰好对应一个体素源（VXEL 或 FRAM），二者互斥；撞 model_id 或
+			QVoxelSpec.BLOCK_ANIM:
+				# 一个 model_id 恰好对应一个体素源（VXEL 或 ANIM），二者互斥；撞 model_id 或
 				# 自身结构非法 → 拒绝整个文件（FATAL）。
-				var fram_err: Array = [""]
-				var fram_id: Variant = _parse_fram_into(doc, payload, block_size, notes, fram_err)
-				if fram_id == null:
-					_flush_fatal(report, fram_err[0], notes)
+				var anim_err: Array = [""]
+				var anim_id: Variant = _parse_anim_text_into(doc, payload, block_size, anim_err) if is_text \
+						else _parse_anim_into(doc, payload, block_size, notes, anim_err)
+				if anim_id == null:
+					_flush_fatal(report, anim_err[0], notes)
 					return null
 				fram_count += 1
 				if entry >= 0:
-					doc.block_index[entry]["model_id"] = int(fram_id)
+					doc.block_index[entry]["model_id"] = int(anim_id)
 			QVoxelSpec.BLOCK_NODE:
 				doc.node = _parse_json(payload)
+			QVoxelSpec.BLOCK_CAMR:
+				doc.cameras = _parse_camr(payload)
 			QVoxelSpec.BLOCK_CACH:
 				# 只做结构切分（kind / algo_version / source_crc / 余下字节）；前缀或来源表越界
 				# → 该块损坏，按 DROP_BLOCK 跳过，不影响其余块。
@@ -408,24 +428,14 @@ static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 		return
 	var n := B * B * B
 
-	# channels[0] 必须是 material，通道数必须 == 1（本版收敛为单通道）。
-	var channels: Array = doc.get_channels()
-	if channels.size() != QVoxelSpec.SUPPORTED_CHANNEL_COUNT:
-		rep.errors.append("HEAD.channels 含 %d 个通道，当前版本仅支持 %d 个（%s）" \
-				% [channels.size(), QVoxelSpec.SUPPORTED_CHANNEL_COUNT, QVoxelSpec.DOMINANT_CHANNEL])
+	# 通道：v4 扁平单键，必须是 material / 16 位（与能力门同一判据）。
+	if doc.get_channel() != QVoxelSpec.DOMINANT_CHANNEL:
+		rep.errors.append("HEAD.%s 必须是 '%s'" % [QVoxelSpec.HEAD_CHANNEL_KEY, QVoxelSpec.DOMINANT_CHANNEL])
 		return
-	var ch0: Variant = channels[0]
-	if not (ch0 is Dictionary) or String(ch0.get("name", "")) != QVoxelSpec.DOMINANT_CHANNEL:
-		rep.errors.append("HEAD.channels[0].name 必须是 '%s'" % QVoxelSpec.DOMINANT_CHANNEL)
+	if not QVoxelSpec.is_allowed_bpp(doc.get_bpp()):
+		rep.errors.append("HEAD.%s=%d 不受支持（本版仅 %d 位）" \
+				% [QVoxelSpec.HEAD_BPP_KEY, doc.get_bpp(), QVoxelSpec.CHANNEL_BPP])
 		return
-	for ci in channels.size():
-		var c: Variant = channels[ci]
-		if not (c is Dictionary):
-			rep.errors.append("HEAD.channels[%d] 不是对象" % ci)
-			return
-		if not QVoxelSpec.is_allowed_bpp(int(c.get("bpp", 0))):
-			rep.errors.append("HEAD.channels[%d].bpp=%s 不受支持（本版仅 %d 位）" % [ci, c.get("bpp"), QVoxelSpec.CHANNEL_BPP])
-			return
 
 	# up_axis 只允许 x/y/z；其他值按缺省 y 处理并告警，不拒绝文件。
 	var up := str(doc.head.get("up_axis", QVoxelSpec.DEFAULT_UP_AXIS))
@@ -563,13 +573,16 @@ static func _check_capabilities(head: Dictionary) -> String:
 			var ts := String(t)
 			if ts != "" and not QVoxelSpec.can_handle_block_type(ts):
 				return "HEAD.require 含本读者无法处理的块类型 '%s'（§10：拒绝整个文件）" % ts
-	# channels：本版恰好 1 个（material）。>1 会让单通道 codec 错读，故拒绝而非静默误读。
-	var channels: Variant = head.get("channels")
-	if not (channels is Array) or (channels as Array).is_empty():
-		return "HEAD.channels 必须是非空数组"
-	if (channels as Array).size() != QVoxelSpec.SUPPORTED_CHANNEL_COUNT:
-		return "HEAD.channels 含 %d 个通道，当前版本仅支持 %d 个（%s）" \
-				% [(channels as Array).size(), QVoxelSpec.SUPPORTED_CHANNEL_COUNT, QVoxelSpec.DOMINANT_CHANNEL]
+	# 通道：v4 是扁平单键。必须是 material / 16 位 —— 别的通道或位宽会让单通道 codec 错读，
+	# 故拒绝而非静默误读（fail-fast）。
+	var channel := str(head.get(QVoxelSpec.HEAD_CHANNEL_KEY, ""))
+	if channel != QVoxelSpec.DOMINANT_CHANNEL:
+		return "HEAD.%s='%s' 不受支持（本版仅 '%s'）" \
+				% [QVoxelSpec.HEAD_CHANNEL_KEY, channel, QVoxelSpec.DOMINANT_CHANNEL]
+	var bpp := int(head.get(QVoxelSpec.HEAD_BPP_KEY, 0))
+	if not QVoxelSpec.is_allowed_bpp(bpp):
+		return "HEAD.%s=%d 不受支持（本版仅 %d 位）" \
+				% [QVoxelSpec.HEAD_BPP_KEY, bpp, QVoxelSpec.CHANNEL_BPP]
 	return ""
 
 
@@ -588,8 +601,8 @@ static func _parse_head(payload: PackedByteArray, err: Array = []) -> Dictionary
 		reason = "payload 不是合法 JSON 对象"
 	elif not d.has("qvox"):
 		reason = "缺少必填键 qvox"
-	elif not d.has("channels"):
-		reason = "缺少必填键 channels"
+	elif not d.has(QVoxelSpec.HEAD_CHANNEL_KEY):
+		reason = "缺少必填键 %s" % QVoxelSpec.HEAD_CHANNEL_KEY
 	elif int(d["qvox"]) != QVoxelSpec.VERSION:
 		reason = "不支持的 qvox 版本 %d（本实现仅支持 %d）" % [int(d["qvox"]), QVoxelSpec.VERSION]
 	if reason != "":
@@ -818,36 +831,37 @@ static func _parse_vxel_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 	return model_id
 
 
-## 解析一个 FRAM payload 并写入 doc.frames。返回 model_id（失败返回 null）。
+## 解析一个 ANIM payload 并写入 doc.frames / doc.anim_meta。返回 model_id（失败返回 null）。
 ## 模型头 = uint16 model_id + uint16 frame_count + uint32 payload_length（共 8 字节）；
+## 紧跟 uint32 meta_len + meta_len 字节 JSON 时序（fps/loop/tags）；
 ## 每帧 = uint16 duration_ms + uint32 payload_length + 块级增量（布局同 VXEL 的块）。
 ## 帧增量语义：codec=0 = 清空该块，未出现的块继承上一帧。结果**还原为完整块表**。
 ##
 ## FATAL：头部越界、model_id 与既有体素源冲突、frame_count=0（原因写 err[0]）。
-## DROP_MODEL：payload_length 越界、帧数据与 frame_count / 长度不自洽、任一帧的块头或解包
+## DROP_MODEL：payload_length 越界、meta/帧数据与 frame_count / 长度不自洽、任一帧的块头或解包
 ##   失败 —— 增量是链式的，一处坏会波及后续所有帧，只能整段丢。
-static func _parse_fram_into(doc: QVoxelDocument, payload: PackedByteArray, block_size: int, notes: QVoxelNotes = null, err: Array = [""]) -> Variant:
-	if payload.size() < QVoxelSpec.FRAM_MODEL_HEADER_SIZE:
-		err[0] = "FRAM 头部越界（需要 %d 字节，实得 %d）" \
-				% [QVoxelSpec.FRAM_MODEL_HEADER_SIZE, payload.size()]
+static func _parse_anim_into(doc: QVoxelDocument, payload: PackedByteArray, block_size: int, notes: QVoxelNotes = null, err: Array = [""]) -> Variant:
+	if payload.size() < QVoxelSpec.ANIM_MODEL_HEADER_SIZE:
+		err[0] = "ANIM 头部越界（需要 %d 字节，实得 %d）" \
+				% [QVoxelSpec.ANIM_MODEL_HEADER_SIZE, payload.size()]
 		return null
 	var model_id := payload.decode_u16(0)
 	var frame_count := payload.decode_u16(2)
 	var payload_length := payload.decode_u32(4)
-	# 一个 model_id 恰好对应一个体素源（VXEL 或 FRAM），二者互斥 → 冲突即 FATAL。
+	# 一个 model_id 恰好对应一个体素源（VXEL 或 ANIM），二者互斥 → 冲突即 FATAL。
 	if doc.models.has(model_id) or doc.frames.has(model_id):
-		err[0] = "FRAM 的 model_id=%d 与既有体素源冲突（每个 model_id 只能有一个 VXEL/FRAM）" % model_id
+		err[0] = "ANIM 的 model_id=%d 与既有体素源冲突（每个 model_id 只能有一个 VXEL/ANIM）" % model_id
 		return null
 	# frame_count=0 无意义（"没有帧"的动画不是动画）→ 结构矛盾，FATAL。
 	if frame_count == 0:
-		err[0] = "FRAM model_id=%d 的 frame_count=0（至少 1 帧）" % model_id
+		err[0] = "ANIM model_id=%d 的 frame_count=0（至少 1 帧）" % model_id
 		return null
 
 	# 长度自洽（与 VXEL 同构）：payload_length 越界 = DROP_MODEL —— 顶层块流由块头自己的 length
 	# 定界，与该负载声明无关，故波及范围只到这一段动画。
-	var expected_end := QVoxelSpec.FRAM_MODEL_HEADER_SIZE + payload_length
+	var expected_end := QVoxelSpec.ANIM_MODEL_HEADER_SIZE + payload_length
 	if expected_end > payload.size():
-		var msg := "FRAM model_id=%d 的 payload_length=%d 越界（需要 %d，实得 %d），已丢弃该动画" \
+		var msg := "ANIM model_id=%d 的 payload_length=%d 越界（需要 %d，实得 %d），已丢弃该动画" \
 				% [model_id, payload_length, expected_end, payload.size()]
 		push_warning("[QVX] " + msg)
 		if notes != null:
@@ -855,18 +869,30 @@ static func _parse_fram_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 		doc.frames[model_id] = []
 		return model_id
 
+	# 时序 meta：uint32 meta_len + JSON。越界 → 整段动画不可信，DROP_MODEL。
+	var meta_pos := QVoxelSpec.ANIM_MODEL_HEADER_SIZE
+	if meta_pos + 4 > expected_end:
+		_drop_anim(doc, model_id, notes, "ANIM model_id=%d 缺少时序 meta 头，已丢弃该动画" % model_id)
+		return model_id
+	var meta_len := payload.decode_u32(meta_pos)
+	var meta_end := meta_pos + 4 + meta_len
+	if meta_end > expected_end:
+		_drop_anim(doc, model_id, notes, "ANIM model_id=%d 的 meta_len=%d 越界，已丢弃该动画" % [model_id, meta_len])
+		return model_id
+	var meta := _anim_meta_from_json(_parse_json(payload.slice(meta_pos + 4, meta_end)))
+
 	var n := block_size * block_size * block_size
 	var frames: Array = []
 	var prev: Dictionary = {}     # 上一帧的完整块表（帧 0 的基线为空）
-	var pos := QVoxelSpec.FRAM_MODEL_HEADER_SIZE
+	var pos := meta_end
 	var broken := false           # 帧链断裂：增量是链式的，一处坏即整段动画不可信
 	for _f in frame_count:
-		if pos + QVoxelSpec.FRAM_FRAME_HEADER_SIZE > expected_end:
+		if pos + QVoxelSpec.ANIM_FRAME_HEADER_SIZE > expected_end:
 			broken = true
 			break
 		var duration := payload.decode_u16(pos)
 		var frame_len := payload.decode_u32(pos + 2)
-		var frame_start := pos + QVoxelSpec.FRAM_FRAME_HEADER_SIZE
+		var frame_start := pos + QVoxelSpec.ANIM_FRAME_HEADER_SIZE
 		var frame_end := frame_start + frame_len
 		if frame_end > expected_end:
 			broken = true
@@ -886,7 +912,7 @@ static func _parse_fram_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 			var plen: int = blk["payload_len"]
 			fpos = payload_off + plen
 			if codec == QVoxelSpec.CODEC_EMPTY:
-				# FRAM 语义：codec=0 = 清空该块（与 VXEL 不同）。
+				# ANIM 语义：codec=0 = 清空该块（与 VXEL 不同）。
 				cur.erase(bkey)
 				continue
 			var buf := QVoxelBlockCodec.unpack(codec, payload.slice(payload_off, payload_off + plen), n)
@@ -903,16 +929,29 @@ static func _parse_fram_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 
 	# frame_count 与 payload_length 必须自洽 → 否则 DROP_MODEL（整段动画）。
 	if broken or pos != expected_end or frames.size() != frame_count:
-		var msg := "FRAM model_id=%d 的 frame_count=%d/payload_length=%d 与帧数据不自洽（解析到 %d，应为 %d，得 %d 帧），已丢弃该动画" \
-				% [model_id, frame_count, payload_length, pos, expected_end, frames.size()]
-		push_warning("[QVX] " + msg)
-		if notes != null:
-			notes.model_dropped(msg)
-		doc.frames[model_id] = []
+		_drop_anim(doc, model_id, notes,
+				"ANIM model_id=%d 的 frame_count=%d/payload_length=%d 与帧数据不自洽（解析到 %d，应为 %d，得 %d 帧），已丢弃该动画" \
+				% [model_id, frame_count, payload_length, pos, expected_end, frames.size()])
 		return model_id
 
 	doc.frames[model_id] = frames
+	doc.anim_meta[model_id] = meta
 	return model_id
+
+
+## 丢弃一段动画（记 DROP_MODEL 并置空帧表），供 ANIM 解析的多个失败分支共用。
+static func _drop_anim(doc: QVoxelDocument, model_id: int, notes: QVoxelNotes, msg: String) -> void:
+	push_warning("[QVX] " + msg)
+	if notes != null:
+		notes.model_dropped(msg)
+	doc.frames[model_id] = []
+
+
+## 解析 CAMR payload（JSON）→ 相机数组。结构非法返回空数组。
+static func _parse_camr(payload: PackedByteArray) -> Array:
+	var d := _parse_json(payload)
+	var c: Variant = d.get(QVoxelSpec.NODE_CAMERAS_KEY)
+	return c if c is Array else []
 
 
 static func _read_type(bytes: PackedByteArray, at: int) -> String:
@@ -936,7 +975,7 @@ static func _build_scene(doc: QVoxelDocument, rep: QVoxelReport) -> QVoxelSceneG
 	# 相机**先于 nodes**处理："有相机、还没摆模型"是新建工程的常态；若放在下面 nodes 的提前
 	# 返回之后，这种文件一存一读就会把 cameras 丢掉。
 	sg.cameras = _normalize_object_array(
-			doc.node.get(QVoxelSpec.NODE_CAMERAS_KEY), QVoxelSpec.CAMERA_FIELD_DEFAULTS,
+			doc.cameras, QVoxelSpec.CAMERA_FIELD_DEFAULTS,
 			QVoxelSpec.NODE_CAMERAS_KEY, rep,
 			{"projection": QVoxelSpec.ALLOWED_CAMERA_PROJECTIONS})
 	var raw_nodes: Variant = doc.node.get(QVoxelSpec.NODE_NODES_KEY)
@@ -1070,30 +1109,46 @@ static func as_index(v: Variant) -> int:
 # 写入
 
 ## 把 QVoxelDocument 序列化为完整 .qvx 字节（含签名）。
-static func serialize(doc: QVoxelDocument, include_crc: bool = true) -> PackedByteArray:
+## text_types：要**以文本形态写出**的块类型集合（空 = 全二进制，即工具默认）。
+## 文本形态只影响 MATE / VXEL / ANIM（HEAD / NODE / CAMR 的负载本就是 JSON，恒按文本标记）。
+## 用途：把"AI / 人写的文本块"原样落盘，或生成便于 hexdump 阅读的样例。
+static func serialize(doc: QVoxelDocument, include_crc: bool = true,
+		text_types := PackedStringArray()) -> PackedByteArray:
 	var out := PackedByteArray()
 	out.append_array(QVoxelSpec.signature_bytes())
 
-	# HEAD 必须第一
-	_write_block(out, QVoxelSpec.BLOCK_HEAD, _encode_head(doc), include_crc)
+	# HEAD 必须第一（JSON，恒文本标记）
+	_write_block(out, QVoxelSpec.BLOCK_HEAD, _encode_head(doc), include_crc, true)
 	# MATE：只要用到任何非空气材质就写（含条目 0）
 	if not doc.materials.is_empty():
-		_write_block(out, QVoxelSpec.BLOCK_MATE, _encode_mate(doc), include_crc)
+		var mate_text := text_types.has(QVoxelSpec.BLOCK_MATE)
+		_write_block(out, QVoxelSpec.BLOCK_MATE,
+				_encode_mate_text(doc) if mate_text else _encode_mate(doc), include_crc, mate_text)
 	# VXEL：每个 model 一个块
 	for mid in doc.model_ids():
 		var blocks: Variant = doc.model_blocks(mid)
 		if blocks is Dictionary:
+			var vxel_text := text_types.has(QVoxelSpec.BLOCK_VXEL)
 			_write_block(out, QVoxelSpec.BLOCK_VXEL,
-					_encode_vxel(mid, blocks as Dictionary, doc.get_block_size()), include_crc)
-	# FRAM：每个动画一个块，与 VXEL 按 model_id 互斥（由 doc 保证）。
+					_encode_vxel_text(mid, blocks as Dictionary, doc.get_block_size()) if vxel_text \
+							else _encode_vxel(mid, blocks as Dictionary, doc.get_block_size()),
+					include_crc, vxel_text)
+	# ANIM：每个动画一个块，与 VXEL 按 model_id 互斥（由 doc 保证）。
 	for fmid in doc.frame_model_ids():
 		var frames: Variant = doc.model_frames(fmid)
 		if frames is Array and not (frames as Array).is_empty():
-			_write_block(out, QVoxelSpec.BLOCK_FRAM,
-					_encode_fram(fmid, frames as Array, doc.get_block_size()), include_crc)
-	# NODE
+			var anim_text := text_types.has(QVoxelSpec.BLOCK_ANIM)
+			_write_block(out, QVoxelSpec.BLOCK_ANIM,
+					_encode_anim_text(fmid, frames as Array, doc.model_anim_meta(fmid), doc.get_block_size()) if anim_text \
+							else _encode_anim(fmid, frames as Array, doc.model_anim_meta(fmid), doc.get_block_size()),
+					include_crc, anim_text)
+	# NODE（JSON，恒文本标记）
 	if not doc.node.is_empty():
-		_write_block(out, QVoxelSpec.BLOCK_NODE, _encode_json(doc.node), include_crc)
+		_write_block(out, QVoxelSpec.BLOCK_NODE, _encode_json(doc.node), include_crc, true)
+	# CAMR：相机书签（纯工程数据，为空则不写；JSON，恒文本标记）
+	if not doc.cameras.is_empty():
+		_write_block(out, QVoxelSpec.BLOCK_CAMR,
+				_encode_json({QVoxelSpec.NODE_CAMERAS_KEY: doc.cameras}), include_crc, true)
 	# CACH：派生数据（可删）。写入方提供什么就写什么，格式层不解释 kind。
 	append_cach_blocks(out, doc.cach, include_crc)
 	# 未知块：原样保留（重写不丢数据）
@@ -1209,23 +1264,32 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxelDoc
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
-		if type == QVoxelSpec.BLOCK_FRAM:
-			# FRAM 的"脏"判据 = new_doc.frames 里**显式给出**了该 model 的帧（返回非 null）：
-			# 非空 → 重编码（帧是完整块表，非覆盖层）；空数组 → 显式清空，丢弃 FRAM 块；
+		if type == QVoxelSpec.BLOCK_ANIM:
+			# ANIM 的"脏"判据 = new_doc.frames 里**显式给出**了该 model 的帧（返回非 null）：
+			# 非空 → 重编码（帧是完整块表，非覆盖层）；空数组 → 显式清空，丢弃 ANIM 块；
 			# null → 原样搬运。
 			var fmid: int = int(bi.get("model_id", -1))
 			var fr: Variant = new_doc.model_frames(fmid) if fmid >= 0 else null
 			if fr == null:
 				_copy_block(old_bytes, out, bi)
 			elif fr is Array and not (fr as Array).is_empty():
-				_write_block(out, QVoxelSpec.BLOCK_FRAM,
-						_encode_fram(fmid, fr as Array, block_size), include_crc)
+				_write_block(out, QVoxelSpec.BLOCK_ANIM,
+						_encode_anim(fmid, fr as Array, new_doc.model_anim_meta(fmid), block_size), include_crc)
 			# fr 为空数组 → 不写（等同删除该动画）
 			continue
 		if type == QVoxelSpec.BLOCK_NODE:
 			if dirty_global or _node_changed(old_doc, new_doc):
 				if not new_doc.node.is_empty():
 					_write_block(out, QVoxelSpec.BLOCK_NODE, _encode_json(new_doc.node), include_crc)
+			else:
+				_copy_block(old_bytes, out, bi)
+			continue
+		if type == QVoxelSpec.BLOCK_CAMR:
+			# 与 NODE 同构：dirty 或相机变了 → 重编码；否则搬运。变空 → 不写（丢弃该块）。
+			if dirty_global or _cameras_changed(old_doc, new_doc):
+				if not new_doc.cameras.is_empty():
+					_write_block(out, QVoxelSpec.BLOCK_CAMR,
+							_encode_json({QVoxelSpec.NODE_CAMERAS_KEY: new_doc.cameras}), include_crc)
 			else:
 				_copy_block(old_bytes, out, bi)
 			continue
@@ -1255,17 +1319,25 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxelDoc
 
 	# 兜底：新 doc 有而旧文件没有的动画；帧是**完整块表**，直接整编码追加。
 	var old_frame_ids := {}
+	var had_camr := false
 	for idx in old_doc.block_index.size():
 		var fbi: Dictionary = old_doc.block_index[idx]
-		if fbi["type"] == QVoxelSpec.BLOCK_FRAM:
+		if fbi["type"] == QVoxelSpec.BLOCK_ANIM:
 			old_frame_ids[int(fbi.get("model_id", -1))] = true
+		elif fbi["type"] == QVoxelSpec.BLOCK_CAMR:
+			had_camr = true
 	for fmid in new_doc.frame_model_ids():
 		if old_frame_ids.has(fmid):
 			continue
 		var fr: Variant = new_doc.model_frames(fmid)
 		if fr is Array and not (fr as Array).is_empty():
-			_write_block(out, QVoxelSpec.BLOCK_FRAM,
-					_encode_fram(fmid, fr as Array, block_size), include_crc)
+			_write_block(out, QVoxelSpec.BLOCK_ANIM,
+					_encode_anim(fmid, fr as Array, new_doc.model_anim_meta(fmid), block_size), include_crc)
+
+	# 兜底：新 doc 有相机、而旧文件没有 CAMR 块 → 追加。
+	if not had_camr and not new_doc.cameras.is_empty():
+		_write_block(out, QVoxelSpec.BLOCK_CAMR,
+				_encode_json({QVoxelSpec.NODE_CAMERAS_KEY: new_doc.cameras}), include_crc)
 
 	# CACH：新条目统一追加在末尾（变了的旧块已在上面被跳过）。CACH 允许出现在文件任意位置，
 	# 故"跳过旧块 + 末尾追加"天然等价于一次按条目替换。
@@ -1442,6 +1514,10 @@ static func _node_changed(a: QVoxelDocument, b: QVoxelDocument) -> bool:
 	return JSON.stringify(a.node) != JSON.stringify(b.node)
 
 
+static func _cameras_changed(a: QVoxelDocument, b: QVoxelDocument) -> bool:
+	return a.cameras.size() != b.cameras.size() or JSON.stringify(a.cameras) != JSON.stringify(b.cameras)
+
+
 ## model 是否"空"（没有任何非空块）。判空用原生 `count(0)`：逐体素 GDScript 扫描在写盘时
 ## 是秒级开销，原生是毫秒级。
 static func _model_is_empty(blocks: Dictionary) -> bool:
@@ -1453,11 +1529,12 @@ static func _model_is_empty(blocks: Dictionary) -> bool:
 
 
 ## 写一个块：length（含填充）+ type + crc32 + payload + 零填充。
-static func _write_block(out: PackedByteArray, type: String, payload: PackedByteArray, include_crc: bool) -> void:
+static func _write_block(out: PackedByteArray, type: String, payload: PackedByteArray, include_crc: bool, is_text := false) -> void:
 	var length := QVoxelSpec.padded_length(payload.size())
 	var header_at := out.size()
 	out.resize(header_at + QVoxelSpec.BLOCK_HEADER_SIZE)
-	out.encode_u32(header_at, length)
+	# 最高位标记"文本负载"；CRC 覆盖这个字段的原始字节（含该位），读写两端一致。
+	out.encode_u32(header_at, length | (QVoxelSpec.TEXT_FLAG if is_text else 0))
 	var t := type.to_ascii_buffer()
 	if t.size() != 4:
 		push_error("[QVX] 块类型必须是 4 个 ASCII 字符: '%s'" % type)
@@ -1561,12 +1638,21 @@ static func _encode_vxel(model_id: int, blocks: Dictionary, block_size: int) -> 
 	return out
 
 
-## FRAM 编码：uint16 model_id + uint16 frame_count + uint32 payload_length + 帧数组。
+## ANIM 编码：uint16 model_id + uint16 frame_count + uint32 payload_length + 时序 meta + 帧数组。
+## 【时序 meta】紧跟模型头：uint32 meta_len + meta_len 字节 JSON（fps/loop/tags）。缺省写长度 0。
 ## 【增量压缩】帧 0 相对空基线写全量（与 VXEL 负载逐字节同构）；帧 k 只写相对帧 k-1 的**块级
 ## 增量** —— 相同的块不写，变成空的块写 codec=0。于是"一帧的成本 = 相对上一帧改了多少块"。
-static func _encode_fram(model_id: int, frames: Array, block_size: int) -> PackedByteArray:
+static func _encode_anim(model_id: int, frames: Array, meta: Dictionary, block_size: int) -> PackedByteArray:
 	var n := block_size * block_size * block_size
 	var body := PackedByteArray()
+	# 时序 meta（JSON）：缺省全不写（P2），meta_len=0 即"全缺省"。
+	var meta_dict := _anim_meta_json(meta)
+	var meta_json := PackedByteArray()
+	if not meta_dict.is_empty():
+		meta_json = _encode_json(meta_dict)
+	body.resize(4)
+	body.encode_u32(0, meta_json.size())
+	body.append_array(meta_json)
 	var prev: Dictionary = {}
 	var written := 0
 	for frame in frames:
@@ -1576,7 +1662,7 @@ static func _encode_fram(model_id: int, frames: Array, block_size: int) -> Packe
 		var duration := maxi(0, int(fd.get("duration_ms", 0))) & 0xFFFF
 		var cur := _as_blocks(fd.get("blocks", {}))
 		var delta := PackedByteArray()
-		# 清空：上一帧有、本帧没有的块 → 写 codec=0（FRAM 专有语义）
+		# 清空：上一帧有、本帧没有的块 → 写 codec=0（ANIM 专有语义）
 		var clears: Array = []
 		for k in prev:
 			if (k is Vector3i) and not cur.has(k):
@@ -1606,14 +1692,14 @@ static func _encode_fram(model_id: int, frames: Array, block_size: int) -> Packe
 			write_vox_block(delta, k, codec, picked.get("payload", PackedByteArray()))
 		# 帧头（6 字节定长）+ 增量负载
 		var foff := body.size()
-		body.resize(foff + QVoxelSpec.FRAM_FRAME_HEADER_SIZE)
+		body.resize(foff + QVoxelSpec.ANIM_FRAME_HEADER_SIZE)
 		body.encode_u16(foff, duration)
 		body.encode_u32(foff + 2, delta.size())
 		body.append_array(delta)
 		prev = cur
 		written += 1
 	var out := PackedByteArray()
-	out.resize(QVoxelSpec.FRAM_MODEL_HEADER_SIZE)
+	out.resize(QVoxelSpec.ANIM_MODEL_HEADER_SIZE)
 	out.encode_u16(0, model_id & 0xFFFF)
 	out.encode_u16(2, written & 0xFFFF)
 	out.encode_u32(4, body.size())
@@ -1621,10 +1707,198 @@ static func _encode_fram(model_id: int, frames: Array, block_size: int) -> Packe
 	return out
 
 
-## 块坐标的确定性排序（升序 x → y → z）。供 FRAM 增量编码用。
+## 时序 meta → JSON 字典（缺省不写，P2）。空字典 = 全缺省（fps=12 / loop=true / 无 tags）。
+static func _anim_meta_json(meta: Dictionary) -> Dictionary:
+	var d := {}
+	if meta.is_empty():
+		return d
+	if int(meta.get("fps", 12)) != 12:
+		d["fps"] = int(meta["fps"])
+	if not bool(meta.get("loop", true)):
+		d["loop"] = false
+	var tags: Variant = meta.get("tags", [])
+	if tags is Array and not (tags as Array).is_empty():
+		d["tags"] = tags
+	return d
+
+
+## 时序 meta JSON → 归一化 Dictionary（缺字段补默认，非法忽略）。供 ANIM 解析用。
+static func _anim_meta_from_json(json: Dictionary) -> Dictionary:
+	var d := {"fps": maxi(1, int(json.get("fps", 12))), "loop": bool(json.get("loop", true))}
+	var tags: Variant = json.get("tags", [])
+	d["tags"] = (tags as Array).duplicate() if tags is Array else []
+	return d
+
+
+## 块坐标的确定性排序（升序 x → y → z）。供增量编码用。
 static func _block_key_less(a: Vector3i, b: Vector3i) -> bool:
 	if a.x != b.x:
 		return a.x < b.x
 	if a.y != b.y:
 		return a.y < b.y
 	return a.z < b.z
+
+
+# 文本块（TEXT_FLAG 置位）的编解码
+# 【设计】文本块的负载 = UTF-8 JSON，与二进制负载**同语义**；工具读入即转成同一套内存结构，
+# 保存时默认写回二进制（规范化）。于是"AI / 人写的文本 .qvx"与"工具写的二进制 .qvx"是**同一个格式**，
+# 解析只有一条路径（看 TEXT_FLAG）。只有 MATE / VXEL / ANIM 需要两形态；HEAD / NODE / CAMR 本就是 JSON。
+
+## 剥掉尾部零填充并取 UTF-8 文本。
+static func _text_of(payload: PackedByteArray) -> String:
+	var end := payload.size()
+	while end > 0 and payload[end - 1] == 0:
+		end -= 1
+	return payload.slice(0, end).get_string_from_utf8()
+
+
+## 任意 Variant → 紧凑 JSON 字节（数组也能编码，故与 _encode_json 分开）。
+static func _encode_json_any(v: Variant) -> PackedByteArray:
+	return JSON.stringify(v, "", false).to_utf8_buffer()
+
+
+## 材质条目字典 → 规范化条目（rgba 与 r/g/b/a 互推）。
+static func _mate_entry_from_dict(d: Dictionary) -> Dictionary:
+	var rgba := int(d.get("rgba", 0)) & 0xFFFFFFFF
+	return {
+		"rgba": rgba,
+		"r": (rgba >> 24) & 0xFF, "g": (rgba >> 16) & 0xFF,
+		"b": (rgba >> 8) & 0xFF, "a": rgba & 0xFF,
+		"metal": int(d.get("metal", 0)) & 0xFF,
+		"rough": int(d.get("rough", 0)) & 0xFF,
+		"hardness": int(d.get("hardness", 0)) & 0xFF,
+		"mass": int(d.get("mass", 0)) & 0xFF,
+		"e_r": int(d.get("e_r", 0)) & 0xFF,
+		"e_g": int(d.get("e_g", 0)) & 0xFF,
+		"e_b": int(d.get("e_b", 0)) & 0xFF,
+	}
+
+
+## 文本 MATE：JSON 数组，每项一个材质条目（缺字段按 0 补）。
+static func _parse_mate_text(payload: PackedByteArray, notes: Variant = null) -> Array:
+	var j: Variant = JSON.parse_string(_text_of(payload))
+	if not (j is Array):
+		_push_note(notes, "文本 MATE 不是 JSON 数组，按无材质处理")
+		return []
+	var out: Array = []
+	for e in (j as Array):
+		if e is Dictionary:
+			out.append(_mate_entry_from_dict(e))
+	return out
+
+
+static func _encode_mate_text(doc: QVoxelDocument) -> PackedByteArray:
+	return _encode_json_any(doc.materials)
+
+
+## 体素数组 [[x,y,z,m],…] → 块表（按块坐标聚合；空 / 材质 0 的项跳过）。
+static func _blocks_from_voxels(voxels: Variant, block_size: int) -> Dictionary:
+	var n := block_size * block_size * block_size
+	var blocks: Dictionary = {}
+	if not (voxels is Array):
+		return blocks
+	for item in (voxels as Array):
+		if not (item is Array) or (item as Array).size() < 4:
+			continue
+		var v := item as Array
+		var pos := Vector3i(int(v[0]), int(v[1]), int(v[2]))
+		var mat := int(v[3])
+		if mat <= 0:
+			continue
+		var bkey := QVoxelSpec.block_of(pos, block_size)
+		var buf: PackedInt32Array
+		if blocks.has(bkey):
+			buf = blocks[bkey]
+		else:
+			buf = PackedInt32Array()
+			buf.resize(n)
+		buf[QVoxelSpec.index_in_block(pos, block_size)] = mat
+		blocks[bkey] = buf   # PackedInt32Array 是值类型，必须回写
+	return blocks
+
+
+## 块表 → 体素数组 [[x,y,z,m],…]（只列非空体素；块按坐标升序、块内 ZXY 顺序，确定性输出）。
+static func _voxels_of_blocks(blocks: Dictionary, block_size: int) -> Array:
+	var out: Array = []
+	var keys: Array = []
+	for k in blocks:
+		if k is Vector3i:
+			keys.append(k)
+	keys.sort_custom(_block_key_less)
+	for k in keys:
+		var buf: Variant = blocks[k]
+		if not (buf is PackedInt32Array):
+			continue
+		var arr := buf as PackedInt32Array
+		if arr.size() != block_size * block_size * block_size:
+			continue
+		var origin: Vector3i = (k as Vector3i) * block_size
+		for i in arr.size():
+			var m := arr[i]
+			if m <= 0:
+				continue
+			out.append([origin.x + i % block_size,
+					origin.y + (i / block_size) % block_size,
+					origin.z + i / (block_size * block_size), m])
+	return out
+
+
+## 文本 VXEL：JSON {"model_id":N, "voxels":[[x,y,z,m],…]}。把体素打包进块表（codec 由保存时挑）。
+static func _parse_vxel_text_into(doc: QVoxelDocument, payload: PackedByteArray, block_size: int, err: Array = [""]) -> Variant:
+	var j: Variant = JSON.parse_string(_text_of(payload))
+	if not (j is Dictionary):
+		err[0] = "文本 VXEL 不是 JSON 对象"
+		return null
+	var d: Dictionary = j
+	var model_id := int(d.get("model_id", 0))
+	if doc.models.has(model_id) or doc.frames.has(model_id):
+		err[0] = "文本 VXEL 的 model_id=%d 与既有体素源冲突" % model_id
+		return null
+	doc.models[model_id] = _blocks_from_voxels(d.get("voxels"), block_size)
+	return model_id
+
+
+static func _encode_vxel_text(model_id: int, blocks: Dictionary, block_size: int) -> PackedByteArray:
+	return _encode_json_any({"model_id": model_id, "voxels": _voxels_of_blocks(blocks, block_size)})
+
+
+## 文本 ANIM：JSON {"model_id":N,"fps","loop","tags","frames":[{"duration_ms","voxels":[[x,y,z,m],…]},…]}。
+static func _parse_anim_text_into(doc: QVoxelDocument, payload: PackedByteArray, block_size: int, err: Array = [""]) -> Variant:
+	var j: Variant = JSON.parse_string(_text_of(payload))
+	if not (j is Dictionary):
+		err[0] = "文本 ANIM 不是 JSON 对象"
+		return null
+	var d: Dictionary = j
+	var model_id := int(d.get("model_id", 0))
+	if doc.models.has(model_id) or doc.frames.has(model_id):
+		err[0] = "文本 ANIM 的 model_id=%d 与既有体素源冲突" % model_id
+		return null
+	var raw_frames: Variant = d.get("frames", [])
+	if not (raw_frames is Array) or (raw_frames as Array).is_empty():
+		err[0] = "文本 ANIM model_id=%d 至少 1 帧" % model_id
+		return null
+	var frames: Array = []
+	for f in (raw_frames as Array):
+		var fd: Dictionary = f if f is Dictionary else {}
+		frames.append({
+			"duration_ms": maxi(0, int(fd.get("duration_ms", 0))),
+			"blocks": _blocks_from_voxels(fd.get("voxels"), block_size),
+		})
+	doc.frames[model_id] = frames
+	doc.anim_meta[model_id] = _anim_meta_from_json(d)
+	return model_id
+
+
+static func _encode_anim_text(model_id: int, frames: Array, meta: Dictionary, block_size: int) -> PackedByteArray:
+	var out := {"model_id": model_id}
+	for k in meta:
+		out[k] = meta[k]
+	var arr: Array = []
+	for f in frames:
+		var fd: Dictionary = f if f is Dictionary else {}
+		arr.append({
+			"duration_ms": int(fd.get("duration_ms", 0)),
+			"voxels": _voxels_of_blocks(fd.get("blocks", {}), block_size),
+		})
+	out["frames"] = arr
+	return _encode_json_any(out)

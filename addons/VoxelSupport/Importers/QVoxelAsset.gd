@@ -170,31 +170,10 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
 			_walk_nodes(kids, world, known, pending, out)
 
 
-## NODE 场景图里各模型节点的 `anim` 元数据：model_id → {loop, fps, tags}（§12.3）。
-## 【为什么从场景图取，而不是从 doc.frames 取】`anim` 是**节点**的属性（时间轴元数据与
-## "模型是谁"绑在一起），而 frames 只装体素。两者在文件里就是分开的两处，读的时候也照原样各取各的。
+## 各模型的动画时序 meta：model_id → {loop, fps, tags}（§12.3）。
+## 【v4：时序在 ANIM 块里】不再是 NODE 节点条目的 `anim` 键，直接取 doc.anim_meta。
 static func _anim_meta_from_scene(doc: QVoxelFile.QVoxelDocument) -> Dictionary:
-	var out := {}
-	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
-	if scene == null:
-		return out
-	_collect_anim_meta(scene.nodes, out)
-	return out
-
-
-static func _collect_anim_meta(nodes: Array, out: Dictionary) -> void:
-	for item in nodes:
-		if not (item is Dictionary):
-			continue
-		var node: Dictionary = item
-		if String(node.get("kind", "")) == "model":
-			var a: Variant = node.get("anim")
-			if a is Dictionary:
-				out[int(node.get("model_id", -1))] = a
-			continue
-		var kids: Variant = node.get("children")
-		if kids is Array:
-			_collect_anim_meta(kids, out)
+	return doc.anim_meta
 
 
 ## 单个节点的局部变换。字段布局与编解码的唯一实现在 `QVoxelNode.transform_from_json`

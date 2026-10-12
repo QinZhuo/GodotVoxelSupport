@@ -468,13 +468,15 @@ func _build_vxel_index(block_size: int, bytes: PackedByteArray) -> void:
 func _build_head() -> Dictionary:
 	var head := {
 		"qvox": QVoxelSpec.VERSION,
-		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": CHUNK_SIZE,
 		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 	}
 	# 附加键（metadata 里的自定义键并入 HEAD，便于携带世界级参数）
 	for k in metadata:
-		if k == "qvox" or k == "channels" or k == "block_size" or k == "up_axis":
+		if k == "qvox" or k == QVoxelSpec.HEAD_CHANNEL_KEY or k == QVoxelSpec.HEAD_BPP_KEY \
+				or k == "block_size" or k == "up_axis":
 			continue
 		head[k] = metadata[k]
 	return head

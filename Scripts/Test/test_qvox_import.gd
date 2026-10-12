@@ -252,7 +252,8 @@ func _new_doc() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
 		"qvox": QVoxelSpec.VERSION,
-		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": VoxelChunk.CHUNK_SIZE,
 		"up_axis": "y",
 	}

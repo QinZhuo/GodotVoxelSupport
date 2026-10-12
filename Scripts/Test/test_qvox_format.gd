@@ -19,7 +19,7 @@ const SAMPLES_DIR := "res://demo/samples"
 func test_spec_channel_constants() -> void:
 	assert_eq(QVoxelSpec.CHANNEL_BPP, 16, "支配通道 bpp")
 	assert_eq(QVoxelSpec.CHANNEL_BYTES, 2, "支配通道每体素字节数")
-	assert_eq(QVoxelSpec.SUPPORTED_CHANNEL_COUNT, 1, "当前版本通道数")
+	assert_eq(QVoxelSpec.HEAD_CHANNEL_KEY, "channel", "HEAD 单通道键名（v4 扁平）")
 
 
 ## 【跨语言常量镜像】CODEC_* 与 CHANNEL_BYTES 在原生侧另有一份
@@ -163,18 +163,16 @@ func test_require_known_type_accepted() -> void:
 	assert_true(parsed != null, "require 全为已知类型应可读入（%s）" % rep.summary())
 
 
-## channels 数 ≠ 1 → 拒绝（而不是按单通道猜测解码，"接受却读错"）。
-func test_multichannel_rejected() -> void:
+## 非 material 通道 → 拒绝（而不是按单通道猜测解码，"接受却读错"）。
+func test_wrong_channel_rejected() -> void:
 	var doc := _make_doc()
-	doc.head["channels"] = [
-		{"name": "material", "bpp": 16},
-		{"name": "sdf", "bpp": 8},
-	]
+	doc.head[QVoxelSpec.HEAD_CHANNEL_KEY] = "sdf"
 	var bytes := QVoxelFile.serialize(doc)
 	var rep := QVoxelFile.QVoxelReport.new()
 	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(bytes, true, rep, true)
-	assert_true(parsed == null, "多通道应拒绝整个文件")
-	assert_true(_errors_contain(rep, "channels"), "应在 errors 里说明是 channels（%s）" % rep.summary())
+	assert_true(parsed == null, "非 material 通道应拒绝整个文件")
+	assert_true(_errors_contain(rep, QVoxelSpec.HEAD_CHANNEL_KEY),
+			"应在 errors 里说明通道键（%s）" % rep.summary())
 
 
 ## up_axis 非法 → 不拒绝文件，只告警（§3.1）。
@@ -278,7 +276,8 @@ func test_samples_load_with_crc() -> void:
 		if doc == null:
 			continue
 		assert_true(rep.ok(), "%s 不应报 FATAL：%s" % [path.get_file(), rep.summary()])
-		assert_true(not doc.models.is_empty(), "%s 应含至少一个模型" % path.get_file())
+		assert_true(not doc.models.is_empty() or not doc.frames.is_empty(),
+				"%s 应含至少一个体素源（VXEL 或 ANIM）" % path.get_file())
 		# HEAD 的 qvx 必须是**第一个键**（§3.1）：样例常因手改/旧工具而违反。
 		assert_true(_head_qvox_first(bytes), "%s 的 HEAD JSON 首键必须是 qvox" % path.get_file())
 
@@ -464,10 +463,8 @@ func test_cameras_and_nested_nodes_roundtrip() -> void:
 
 func test_cameras_lenient_and_validated() -> void:
 	var doc := _make_doc()
-	doc.node = {
-		QVoxelSpec.NODE_CAMERAS_KEY: [{"projection": "weird"}, {"projection": "ortho"}],
-		"nodes": [{"name": "a", "kind": "model", "model_id": 0}],
-	}
+	doc.cameras = [{"projection": "weird"}, {"projection": "ortho"}]
+	doc.node = {"nodes": [{"name": "a", "kind": "model", "model_id": 0}]}
 	var rep := QVoxelFile.QVoxelReport.new()
 	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	var sg := parsed.scene
@@ -511,7 +508,7 @@ func test_model_with_children_keeps_the_model() -> void:
 ## "只有相机、还没有对象"是新建工程的常态，不该在 nodes 的提前返回里被丢掉。
 func test_cameras_survive_without_nodes() -> void:
 	var doc := _make_doc()
-	doc.node = {QVoxelSpec.NODE_CAMERAS_KEY: [{"name": "front"}]}
+	doc.cameras = [{"name": "front"}]
 	var rep := QVoxelFile.QVoxelReport.new()
 	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	assert_eq(parsed.scene.cameras.size(), 1, "没有 nodes 键不该连相机一起丢")
@@ -620,7 +617,8 @@ func test_fram_delta_skips_unchanged_blocks() -> void:
 	var buf := _frame_buf(1)
 	var one := QVoxelFile.serialize(_make_fram_doc([{"duration_ms": 100, "blocks": {k0: buf}}]))
 	var one_off := _fram_block_offset(one)
-	var full := one.decode_u32(one_off) - QVoxelSpec.FRAM_MODEL_HEADER_SIZE - QVoxelSpec.FRAM_FRAME_HEADER_SIZE
+	var meta_section := 4 + one.decode_u32(one_off + QVoxelSpec.BLOCK_HEADER_SIZE + QVoxelSpec.ANIM_MODEL_HEADER_SIZE)
+	var full := one.decode_u32(one_off) - QVoxelSpec.ANIM_MODEL_HEADER_SIZE - meta_section - QVoxelSpec.ANIM_FRAME_HEADER_SIZE
 	assert_true(full > 0, "单帧的增量负载应非空")
 
 	var same3 := QVoxelFile.serialize(_make_fram_doc([
@@ -629,7 +627,7 @@ func test_fram_delta_skips_unchanged_blocks() -> void:
 		{"duration_ms": 100, "blocks": {k0: buf}},
 	]))
 	assert_eq(same3.decode_u32(_fram_block_offset(same3)),
-			QVoxelSpec.FRAM_MODEL_HEADER_SIZE + 3 * QVoxelSpec.FRAM_FRAME_HEADER_SIZE + full,
+			QVoxelSpec.ANIM_MODEL_HEADER_SIZE + meta_section + 3 * QVoxelSpec.ANIM_FRAME_HEADER_SIZE + full,
 			"内容相同的帧不该重复写块负载（增量收益消失？）")
 
 
@@ -669,7 +667,7 @@ func test_fram_vxel_conflict_is_fatal() -> void:
 ## （这也是 FRAM 作为"新块类型"对旧读取器的唯一告知手段。）
 func test_fram_require_gate_accepted() -> void:
 	var doc := _make_fram_doc([{"duration_ms": 100, "blocks": {Vector3i(0, 0, 0): _frame_buf(1)}}])
-	doc.head["require"] = ["MATE", "FRAM", "NODE"]
+	doc.head["require"] = ["MATE", "ANIM", "NODE"]
 	var rep := QVoxelFile.QVoxelReport.new()
 	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(QVoxelFile.serialize(doc), true, rep, true)
 	assert_true(parsed != null, "require 含 FRAM 应可读入（%s）" % rep.summary())
@@ -698,11 +696,12 @@ func test_fram_bad_payload_length_drops_animation() -> void:
 
 func _make_doc_with_engineering_data() -> QVoxelFile.QVoxelDocument:
 	var doc := _make_doc()
+	# v4：相机在独立 CAMR 块（doc.cameras），不留在 NODE。
+	doc.cameras = [
+		{"name": "front", "projection": "ortho", "size": 128},
+		{"name": "persp_cam"},
+	]
 	doc.node = {
-		QVoxelSpec.NODE_CAMERAS_KEY: [
-			{"name": "front", "projection": "ortho", "size": 128},
-			{"name": "persp_cam"},
-		],
 		"nodes": [
 			{"name": "root", "kind": "group", "children": [
 				# 组内坐标就是节点的 pos（去链后摆放回到节点本身）。
@@ -726,7 +725,8 @@ func _make_doc() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
 		"qvox": QVoxelSpec.VERSION,
-		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": 32,
 		"up_axis": "y",
 	}
@@ -762,12 +762,59 @@ func _make_fram_doc(frames: Array) -> QVoxelFile.QVoxelDocument:
 	return doc
 
 
+## 文本块（TEXT_FLAG）：MATE/VXEL/ANIM 以文本写出，读回与二进制**同语义** —— 同一格式、一条解析路径。
+func test_text_blocks_are_same_format() -> void:
+	var doc := _make_fram_doc([{"duration_ms": 50, "blocks": {Vector3i.ZERO: _sparse_buf()}}])
+	doc.anim_meta = {0: {"fps": 8, "loop": false, "tags": [{"name": "a", "from": 0, "to": 0}]}}
+	var bin := QVoxelFile.serialize(doc)
+	var txt := QVoxelFile.serialize(doc, true,
+			PackedStringArray([QVoxelSpec.BLOCK_MATE, QVoxelSpec.BLOCK_ANIM]))
+	assert_true(_block_flagged_text(txt, QVoxelSpec.BLOCK_ANIM), "ANIM 应以文本标记写出")
+	assert_false(_block_flagged_text(bin, QVoxelSpec.BLOCK_ANIM), "默认写出的是二进制（无文本标记）")
+
+	var rep1 := QVoxelFile.QVoxelReport.new()
+	var rep2 := QVoxelFile.QVoxelReport.new()
+	var d1 := QVoxelFile.parse(bin, true, rep1, true)
+	var d2 := QVoxelFile.parse(txt, true, rep2, true)
+	assert_true(d1 != null and d2 != null, "两种形态都应能读入（%s / %s）" % [rep1.summary(), rep2.summary()])
+	if d1 == null or d2 == null:
+		return
+	var f1: Array = d1.model_frames(0)
+	var f2: Array = d2.model_frames(0)
+	assert_eq(f2.size(), f1.size(), "帧数一致")
+	for i in f1.size():
+		assert_eq((f2[i] as Dictionary)["blocks"], (f1[i] as Dictionary)["blocks"], "第 %d 帧块表一致" % i)
+	assert_eq(d2.model_anim_meta(0).get("fps"), 8, "文本 ANIM 的 fps 存活")
+	assert_eq(d2.materials, d1.materials, "文本 MATE 与二进制 MATE 一致")
+
+
+## 一个 32³ 的稀疏缓冲（只 2 个非空体素，使文本 JSON 小、编码快）。
+func _sparse_buf() -> PackedInt32Array:
+	var buf := PackedInt32Array()
+	buf.resize(32 * 32 * 32)
+	buf[QVoxelSpec.index_in_block(Vector3i(1, 2, 3), 32)] = 1
+	buf[QVoxelSpec.index_in_block(Vector3i(30, 31, 5), 32)] = 2
+	return buf
+
+
+## 扫描文件，判断某类型的块是否带 TEXT_FLAG。
+func _block_flagged_text(bytes: PackedByteArray, type: String) -> bool:
+	var pos := QVoxelSpec.SIGNATURE_SIZE
+	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
+		var raw := bytes.decode_u32(pos)
+		var length := raw & QVoxelSpec.LENGTH_MASK
+		if bytes.slice(pos + 4, pos + 8).get_string_from_ascii() == type:
+			return (raw & QVoxelSpec.TEXT_FLAG) != 0
+		pos += QVoxelSpec.BLOCK_HEADER_SIZE + length
+	return false
+
+
 ## 定位序列化结果里 FRAM 块的块头偏移（没有则 -1）。块头自足，故顺序扫即可。
 func _fram_block_offset(bytes: PackedByteArray) -> int:
 	var pos := QVoxelSpec.SIGNATURE_SIZE
 	while pos + QVoxelSpec.BLOCK_HEADER_SIZE <= bytes.size():
-		var length := bytes.decode_u32(pos)
-		if bytes.slice(pos + 4, pos + 8).get_string_from_ascii() == QVoxelSpec.BLOCK_FRAM:
+		var length := bytes.decode_u32(pos) & QVoxelSpec.LENGTH_MASK
+		if bytes.slice(pos + 4, pos + 8).get_string_from_ascii() == QVoxelSpec.BLOCK_ANIM:
 			return pos
 		pos += QVoxelSpec.BLOCK_HEADER_SIZE + length
 	return -1
@@ -832,7 +879,7 @@ func _head_qvox_first(bytes: PackedByteArray) -> bool:
 	if bytes.size() < QVoxelSpec.SIGNATURE_SIZE + QVoxelSpec.BLOCK_HEADER_SIZE:
 		return false
 	var at := QVoxelSpec.SIGNATURE_SIZE
-	var length := bytes.decode_u32(at)
+	var length := bytes.decode_u32(at) & QVoxelSpec.LENGTH_MASK
 	var type := PackedByteArray()
 	for i in 4:
 		type.append(bytes[at + 4 + i])

@@ -306,8 +306,8 @@ func test_world_roundtrip_preserves_frames_and_anim() -> void:
 	var doc := w.to_document()
 	assert_true(doc.frames.has(m.model_id), "动画模型进 frames")
 	assert_false(doc.models.has(m.model_id), "同一 model_id 不得同时进 models（§12.2）")
-	assert_true((doc.head.get("require", []) as Array).has(QVoxelSpec.BLOCK_FRAM),
-			"含 FRAM 的文件必须声明 require（旧读者 fail-fast）")
+	assert_true((doc.head.get("require", []) as Array).has(QVoxelSpec.BLOCK_ANIM),
+			"含 ANIM 的文件必须声明 require（旧读者 fail-fast）")
 
 	var rep := QVoxelFile.QVoxelReport.new()
 	var parsed: QVoxelFile.QVoxelDocument = QVoxelFile.parse(
@@ -338,8 +338,8 @@ func test_world_static_roundtrip_does_not_declare_fram() -> void:
 	var doc := w.to_document()
 	assert_true(doc.models.has(m.model_id), "静态模型进 models")
 	assert_false(doc.frames.has(m.model_id), "静态模型不进 frames")
-	assert_false((doc.head.get("require", []) as Array).has(QVoxelSpec.BLOCK_FRAM),
-			"全静态文件不声明 FRAM（免得老读者白白拒掉本可读的文件）")
+	assert_false((doc.head.get("require", []) as Array).has(QVoxelSpec.BLOCK_ANIM),
+			"全静态文件不声明 ANIM（免得老读者白白拒掉本可读的文件）")
 
 
 # ⑧ 播放内核：纯逻辑，直接喂 delta
@@ -587,7 +587,8 @@ func _new_doc() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
 		"qvox": QVoxelSpec.VERSION,
-		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": VoxelChunk.CHUNK_SIZE,
 		"up_axis": "y",
 	}
@@ -620,10 +621,10 @@ func _write_animated_qvx(path: String, frame_specs: Array, transform := {},
 			"blocks": {BLOCK_KEY: _block(s.get("cells", []))},
 		})
 	doc.frames = {0: frames}
-	var node := {"name": "n", "kind": "model", "model_id": 0, "transform": transform}
+	# v4：时序 meta 进 ANIM 块（doc.anim_meta），不再挂在 NODE 节点条目上。
 	if not anim.is_empty():
-		node["anim"] = anim
-	doc.node = {"nodes": [node]}
+		doc.anim_meta = {0: anim}
+	doc.node = {"nodes": [{"name": "n", "kind": "model", "model_id": 0, "transform": transform}]}
 	_write_bytes(path, QVoxelFile.serialize(doc))
 
 

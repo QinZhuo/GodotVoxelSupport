@@ -57,7 +57,8 @@ static func create_empty() -> QVoxelWorld:
 	var w := QVoxelWorld.new()
 	w.head = {
 		"qvox": QVoxelSpec.VERSION,
-		"channels": [{"name": QVoxelSpec.DOMINANT_CHANNEL, "bpp": QVoxelSpec.CHANNEL_BPP}],
+		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
+		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": QVoxelSpec.DEFAULT_BLOCK_SIZE,
 		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
 		# 世界设置集中在 world 键下：HEAD 的其余键留给格式本身（§3）
@@ -74,6 +75,9 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 	w.head = doc.head
 	w.materials = doc.materials
 	w.node = doc.node
+	# 相机是独立块（CAMR）；在内存里并回 node（相机代码一直读 node["cameras"]）。
+	if not doc.cameras.is_empty():
+		w.node["cameras"] = doc.cameras
 	w.cach = doc.cach
 
 	var bs := doc.get_block_size()
@@ -145,7 +149,7 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 		else:
 			var blocks: Variant = doc.model_blocks(m.model_id)
 			m.blocks = blocks if blocks is Dictionary else {}
-		_read_anim(m, entry)
+		_read_anim(m, doc.model_anim_meta(m.model_id))
 		m.grid_size = _size_of_entry(entry, m, bs)
 		return m
 	return null
@@ -171,6 +175,9 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 	doc.head["block_size"] = block_size()  # 对象按它分块，必须与 HEAD 一致
 	doc.materials = materials
 	doc.node = _node_json()
+	# 相机（CAMR）：从 node 里取出来单放（v4 拆块）。
+	var cams: Variant = node.get("cameras")
+	doc.cameras = (cams as Array).duplicate() if cams is Array else []
 	doc.cach = cach
 	var animated := false
 	for m in all_models():
@@ -179,18 +186,22 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 		# 格式层会直接判 FATAL（这正是我们想要的兜底），但真到了那一步就说明本函数有 bug。
 		if m.is_animated():
 			doc.frames[m.model_id] = _frames_to_array(m.frames)
+			# 时序 meta 随帧进 ANIM 块（v4：不再写进 NODE 节点条目）。
+			var meta := _anim_of_model(m)
+			if not meta.is_empty():
+				doc.anim_meta[m.model_id] = meta
 			animated = true
 			continue
 		var blocks := _dense_blocks_of(m)
 		if not blocks.is_empty():
 			doc.models[m.model_id] = blocks
-	# §12.2：含 FRAM 的文件必须在 HEAD.require 里声明 "FRAM" —— 不认识它的读者**拒绝整个文件**
+	# §12.2：含 ANIM 的文件必须在 HEAD.require 里声明 "ANIM" —— 不认识它的读者**拒绝整个文件**
 	# （fail-fast），而不是静默少几个模型。反过来，全是静态模型时**不声明**：声明了等于
 	# 让老读者白白拒掉一份它们本来完全能读的文件。
 	if animated:
-		doc.head["require"] = _with_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_FRAM)
+		doc.head["require"] = _with_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_ANIM)
 	else:
-		doc.head["require"] = _without_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_FRAM)
+		doc.head["require"] = _without_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_ANIM)
 	return doc
 
 
@@ -233,16 +244,13 @@ static func _frames_of_array(arr: Array) -> Array[QVoxelFrame]:
 
 
 ## 节点条目的 `anim` 键 → 时间轴元数据（§12.3）。
-## 【为什么只认 anim，不认旧的 animations】旧键按"节点下标"寻址，而 v3 的嵌套树没有下标
-## 这层身份（§12.4），与旧 layers 键同一处置：读盘忽略、写盘抹掉。
-static func _read_anim(m: QVoxelModel, entry: Dictionary) -> void:
-	var a: Variant = entry.get("anim")
-	if not (a is Dictionary):
+## 动画时序 meta（v4：来自 ANIM 块的 meta，不再是节点条目的 `anim` 键）→ 模型字段。
+static func _read_anim(m: QVoxelModel, meta: Dictionary) -> void:
+	if meta.is_empty():
 		return
-	var d: Dictionary = a
-	m.anim_loop = bool(d.get("loop", true))
-	m.anim_fps = maxi(1, int(d.get("fps", 12)))
-	var tags: Variant = d.get("tags")
+	m.anim_loop = bool(meta.get("loop", true))
+	m.anim_fps = maxi(1, int(meta.get("fps", 12)))
+	var tags: Variant = meta.get("tags")
 	m.anim_tags = (tags as Array).duplicate() if tags is Array else []
 
 
@@ -725,6 +733,7 @@ func _node_json() -> Dictionary:
 	var out := node.duplicate(true)
 	out.erase("layers")
 	out.erase("animations")
+	out.erase("cameras")   # v4：相机单放 CAMR 块，不留在 NODE
 	var arr: Array = []
 	for n in nodes:
 		if n != null:
@@ -754,9 +763,6 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 		var mo := n as QVoxelModel
 		e["model_id"] = mo.model_id
 		e["size"] = [mo.grid_size.x, mo.grid_size.y, mo.grid_size.z]
-		var anim := _anim_of_model(mo)
-		if not anim.is_empty():
-			e["anim"] = anim
 	else:
 		var kids: Array = []
 		for c in (n as QVoxelGroup).child_nodes:
