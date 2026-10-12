@@ -1579,6 +1579,51 @@ func _on_save_path_selected(path: String) -> void:
 	_write_project(QVoxelProject.ensure_extension(path))
 
 
+# ======= 外部程序化生成接口(脚本 / 运行时 MCP) =======
+##
+## 供外部以**字符串方法名**调用(`scene.call("script_xxx", ...)`), 于是调用方(QVoxelMCPTools)
+## 在编译期**不需要认识 QVoxelierApp** —— 把 QVoxelier 排除出包时它也编得过。
+## 只放**程序化生成模型**所需: 材质 / 写格(见 QVoxelEditSession.apply_cells) / 存盘 / 统计。
+## 编辑类操作(撤销 / 选区 / 剪贴板 / 帧)是给人按界面的, 不是脚本生成所需, 故不放这里。
+## 每个入口都复用应用内部同一条时间线/落盘路径, 不新开第二条写入通道。
+
+## 新增材质(颜色 + PBR), 返回材质 ID。与色板"新增材质"按钮同一条命令(可撤销) + 同一次纹理刷新。
+func script_add_material(color: Color, metal := 0.0, rough := 0.8) -> int:
+	if world == null or session == null:
+		return -1
+	var cmd := QVoxelPropertyCommand.begin(world, &"materials", null, "新增材质")
+	var id := world.add_material(color)
+	if cmd.commit():
+		session.history.push(cmd)
+	world.set_material_scalar(id, &"metal", metal)
+	world.set_material_scalar(id, &"rough", rough)
+	_sync_material(id)
+	_set_material(id)
+	return id
+
+
+## 存到指定路径(.qvx)。复用 _write_project(脏标记/标题/flash 一致), 并在存盘前收尾进行中的笔画。
+func script_save(path: String) -> bool:
+	if world == null:
+		return false
+	if _stroke and session != null:
+		session.cancel()
+		_stroke = false
+	return _write_project(QVoxelProject.ensure_extension(path))
+
+
+## 当前模型统计。
+func script_stats() -> Dictionary:
+	if world == null or session == null:
+		return {}
+	var gs := session.output_size()
+	return {
+		"grid_size": [gs.x, gs.y, gs.z],
+		"material_count": world.materials.size() - 1,
+		"objects": _sess.all_sessions().size(),
+	}
+
+
 ## 导出网格：把当前世界烘成三角网格，写成 glTF 2.0（`.glb`/`.gltf` 由扩展名决定）。
 ## 与"保存（.qvx）"分开：保存留的是"下次还能接着编辑"的全套，导出只留**烘出来的几何与颜色**。
 func export_mesh() -> void:

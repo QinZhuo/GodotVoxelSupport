@@ -467,6 +467,15 @@ func rebuild() -> void:
 	_refresh([])
 
 
+## 程序化写入一批格子(供脚本 / MCP 调用): 与"粘贴/清空"等一次性操作等价 —— 建命令、写格、
+## 入撤销栈、刷新显示, 因此它和手绘的编辑走**同一条**撤销/渲染路径(可 Ctrl+Z)。返回改动的格数。
+## material=0 表示挖空。包一层 _commit_once 而不是另起一套写入, 正是为了不出现第二条时间线。
+func apply_cells(cells: Array[Vector3i], material: int, label := "脚本写入") -> int:
+	return _commit_once(func(cmd: QVoxelEditCommand) -> void:
+		for c in cells:
+			cmd.set_voxel(c.x, c.y, c.z, material), label)
+
+
 # 内部
 
 ## 把整笔的格写进对象（权威）。显示层不在这里镜像 —— 松手后由 _refresh 按权威重新取数。
