@@ -175,6 +175,8 @@ var _frame_dur_cmd: QVoxelPropertyCommand
 
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
+## 导出网格对话框（glTF 2.0：*.glb / *.gltf）。
+var _mesh_dialog: FileDialog
 var _palette_import_dialog: FileDialog
 var _palette_export_dialog: FileDialog
 ## 快照落盘对话框（*.png）。与调色板导出同走自绘那套 —— 默认文件名由分组按视图名给出。
@@ -190,6 +192,7 @@ const ACTION_BRUSH_DOWN := &"qvoxelier_brush_down"
 const ACTION_SAVE := &"qvoxelier_save"
 const ACTION_SAVE_AS := &"qvoxelier_save_as"
 const ACTION_OPEN := &"qvoxelier_open"
+const ACTION_EXPORT := &"qvoxelier_export"
 const ACTION_SELECT_ALL := &"qvoxelier_select_all"
 const ACTION_COPY := &"qvoxelier_copy"
 const ACTION_CUT := &"qvoxelier_cut"
@@ -253,6 +256,7 @@ func _build_ui() -> void:
 	_toolbar.open_requested.connect(request_open)
 	_toolbar.save_requested.connect(save_project)
 	_toolbar.save_as_requested.connect(save_project_as)
+	_toolbar.export_mesh_requested.connect(export_mesh)
 	_toolbar.render_requested.connect(_toggle_render_popup)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
@@ -1140,6 +1144,8 @@ func _on_key(e: InputEventKey) -> void:
 		save_project()
 	elif _pressed(e, ACTION_OPEN):
 		request_open()
+	elif _pressed(e, ACTION_EXPORT):
+		export_mesh()
 	elif _pressed(e, ACTION_SELECT_ALL):
 		_select_all()
 	elif _pressed(e, ACTION_COPY):
@@ -1573,6 +1579,22 @@ func _on_save_path_selected(path: String) -> void:
 	_write_project(QVoxelProject.ensure_extension(path))
 
 
+## 导出网格：把当前世界烘成三角网格，写成 glTF 2.0（`.glb`/`.gltf` 由扩展名决定）。
+## 与"保存（.qvx）"分开：保存留的是"下次还能接着编辑"的全套，导出只留**烘出来的几何与颜色**。
+func export_mesh() -> void:
+	_mesh_dialog.current_file = "%s.glb" % world.world_name()
+	_mesh_dialog.popup_centered_ratio(0.7)
+
+
+func _on_mesh_path_selected(path: String) -> void:
+	path = _ensure_mesh_ext(path)
+	var err := QVoxelMeshExport.export(world, path)
+	if err != OK:
+		hud.flash("导出失败（错误码 %d）：%s" % [err, path.get_file()])
+		return
+	hud.flash("已导出网格 %s" % path.get_file())
+
+
 ## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
 ## 工程文件本就该落在用户自己的目录里（导出打包后 `res://` 更是读不到的）。
 func _build_dialogs() -> void:
@@ -1580,6 +1602,13 @@ func _build_dialogs() -> void:
 	_open_dialog.file_selected.connect(open_project)
 	_save_dialog = _make_dialog(FileDialog.FILE_MODE_SAVE_FILE)
 	_save_dialog.file_selected.connect(_on_save_path_selected)
+
+	# 导出网格：glTF 2.0。两个扩展名各一个过滤器（*.glb 二进制 / *.gltf 文本），
+	# 写出格式随扩展名（见 QVoxelMeshExport）。
+	_mesh_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.glb",
+			"glTF 二进制（.glb）", "导出网格")
+	_mesh_dialog.add_filter("*.gltf", "glTF 文本（.gltf）")
+	_mesh_dialog.file_selected.connect(_on_mesh_path_selected)
 
 	_palette_import_dialog = _make_format_dialog(FileDialog.FILE_MODE_OPEN_FILE, "*.png",
 			"调色板 PNG（256×1）", "导入调色板")
@@ -1611,27 +1640,24 @@ func _build_dialogs() -> void:
 
 
 ## 系统文件对话框的公共装配：**"选什么、叫什么、筛什么"是唯一随用途变的东西**，其余
-##（系统文件系统、主题、首路径、按钮文案的中文化）四种用途一字不差 —— 复制成四份，
-## 迟早有一份忘了改。
-## 【为什么 native 是参数，而不是一律关掉】`.qvx` 的打开 / 另存走系统原生对话框 —— 桌面端体验
-## 更好（记住上次目录、能直接跳系统盘符）。而调色板与快照要往对话框里挂格式过滤，
-## 原生对话框不渲染自绘 UI，那两处只能 `use_native_dialog = false` 走引擎自绘的那套。
-func _make_fs_dialog(mode: FileDialog.FileMode, title: String, native := true) -> FileDialog:
+##（系统文件系统、主题、首路径、按钮文案）各处一字不差 —— 复制成几份，迟早有一份忘了改。
+## 【一律走系统原生对话框】`use_native_dialog = true`：每个平台都用**它自己的**文件对话框
+##（Windows 用系统对话框、macOS / Linux 同理；没有原生实现的平台 Godot 自动回退到自绘那套）。
+## 于是"打开 / 另存 / 导入 / 导出"四处行为一致 —— 不会一会儿弹系统框、一会儿弹引擎自绘框。
+## 【过滤与扩展名】原生对话框同样吃 `add_filter`（Windows 只认扩展名，macOS/Linux 还认 MIME），
+## 但它**不替你补扩展名**，所以每个保存出口都要自己补（见 _ensure_png_ext / _ensure_mesh_ext）。
+func _make_fs_dialog(mode: FileDialog.FileMode, title: String) -> FileDialog:
 	var d := FileDialog.new()
 	d.file_mode = mode
 	d.access = FileDialog.ACCESS_FILESYSTEM
 	d.current_dir = _default_dir()
-	# 与 _confirm 同因：对话框的父链是 Node3D，主题传不下来，不挂就是一套 Godot 默认皮
-	#（本应用是内嵌子窗口样式，所以这层皮是看得见的）。 Theme 是**叠加**而不是替换：
-	# 本主题没定义的条目（Tree / LineEdit / OptionButton）继续走引擎默认值，不会把对话框弄坏。
+	# 原生对话框忽略 theme / ok_button_text 等自绘属性（系统自己那套更地道）；这里仍设一遍，
+	# 是为了**没有原生实现的平台**回退到自绘那套时，外观与文案不至于跟界面脱节。
 	d.theme = QVoxelUi.theme()
 	d.title = title
-	# 引擎自建文案在游戏进程里没有内置翻译，会显示成 "Save" / "Cancel"。
-	# 其余（Path: / 列头 / 新建文件夹）同样来自引擎，改不动；但这两个是每次操作都要读、
-	# 要按的，必须跟界面同一种语言。
 	d.ok_button_text = "打开" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存"
 	d.cancel_button_text = "取消"
-	d.use_native_dialog = native
+	d.use_native_dialog = true
 	add_child(d)
 	return d
 
@@ -1645,12 +1671,12 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	return d
 
 
-## 调色板 / 导出用的文件对话框（带格式过滤，且必须自绘 —— 理由见 `_make_fs_dialog` 的 native）。
+## 带格式过滤的文件对话框（调色板 / 快照 / 导出网格共用）。
 ## 为什么调色板走 PNG 而不是自定义格式：MagicaVoxel 的调色板就是 256×1 的 PNG，沿用它就能与
 ## 其它体素工具互相倒色板，也不用再定义一套只有本程序认得的格式。
 func _make_format_dialog(mode: FileDialog.FileMode, filter: String, filter_name: String,
 		title: String) -> FileDialog:
-	var d := _make_fs_dialog(mode, title, false)
+	var d := _make_fs_dialog(mode, title)
 	d.add_filter(filter, filter_name)
 	return d
 
@@ -2242,6 +2268,7 @@ func _bind_actions() -> void:
 	InputTool.register_action(ACTION_SAVE, [InputTool.key_event(KEY_S, true)])
 	InputTool.register_action(ACTION_SAVE_AS, [InputTool.key_event(KEY_S, true, true)])
 	InputTool.register_action(ACTION_OPEN, [InputTool.key_event(KEY_O, true)])
+	InputTool.register_action(ACTION_EXPORT, [InputTool.key_event(KEY_E, true)])
 	# 选区 / 剪贴板：与"存 / 开"同属"带修饰键的操作"，故一律走 InputTool 注册的动作，
 	# 而不是在 _on_key 里手写 ctrl 判断 —— 键位因此能在项目设置里改。
 	InputTool.register_action(ACTION_SELECT_ALL, [InputTool.key_event(KEY_A, true)])
@@ -2624,6 +2651,12 @@ func _on_snapshot_path_selected(path: String) -> void:
 ## 用 to_lower 判：Windows 上 "X.PNG" 同样是 PNG，不认它就会存出一个 "X.PNG.png"。
 func _ensure_png_ext(path: String) -> String:
 	return path if path.to_lower().ends_with(".png") else path + ".png"
+
+
+## 补上网格扩展名（原生对话框不替我们补）：已带 .glb / .gltf 就原样，否则按默认 .glb 补。
+func _ensure_mesh_ext(path: String) -> String:
+	return path if path.get_extension().to_lower() in QVoxelMeshExport.EXTENSIONS \
+			else path + "." + QVoxelMeshExport.EXTENSIONS[0]
 
 
 # 时间轴（右侧抽屉·时间轴组，QVoxelSpec §12.6）

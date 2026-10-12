@@ -15,6 +15,9 @@ signal new_requested
 signal open_requested
 signal save_requested
 signal save_as_requested
+## 导出网格：世界 → glTF 2.0（`.glb`/`.gltf`）。Godot 内核唯一自带的网格交换格式，
+## 与"保存（.qvx，下次还能接着编辑）"是两件事。
+signal export_mesh_requested
 ## 渲染（离屏出图，原「快照」）：与保存同一层级的一个按钮。
 signal render_requested
 signal undo_requested
@@ -68,6 +71,8 @@ func _build() -> void:
 	row.add_child(_action(save_requested.emit, "保存（Ctrl+S）\n存成 .qvx 工程（保留修改器链与相机）",
 			"save", QVoxelUi.VARIATION_ACCENT))
 	row.add_child(_action(save_as_requested.emit, "另存（Ctrl+Shift+S）\n另存为新文件", "save_as"))
+	row.add_child(_action(export_mesh_requested.emit, "导出网格（Ctrl+E）\n导出为 glTF 2.0（.glb/.gltf），Blender 等三维软件都能打开",
+			"export"))
 	# 渲染：离屏出一张干净 PNG（不带网格 / 选区 / 浮层），与保存同一层级。
 	row.add_child(_action(render_requested.emit, "渲染\n把当前世界离屏渲成一张 PNG（可选视图 / 尺寸 / 透明背景）",
 			"render"))
