@@ -32,7 +32,7 @@ const SUPPORTED_PROTOCOL_VERSIONS := ["2025-11-25", "2025-06-18", "2025-03-26"]
 const SETTING_ENABLED := "dev_framework/mcp/runtime_enabled"
 const SETTING_PORT := "dev_framework/mcp/runtime_port"
 const SETTING_PROVIDERS := "dev_framework/mcp/runtime_providers"
-const DEFAULT_PORT := 8932
+const DEFAULT_PORT := 18931
 
 var _http: MCPTcpHttpServer
 var _tool_defs: Array = []

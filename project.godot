@@ -33,7 +33,7 @@ settings/stdout/print_fps=true
 
 gdextension_build/build_types=PackedStringArray("release")
 mcp/runtime_enabled=true
-mcp/runtime_port=8932
+mcp/runtime_port=18931
 mcp/runtime_providers=PackedStringArray("res://addons/VoxelSupport/Dynamic/QVoxelMCPTools.gd")
 
 [display]
