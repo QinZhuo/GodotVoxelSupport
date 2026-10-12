@@ -1,10 +1,12 @@
 @tool
-class_name VoxelDataImporter
+class_name QVoxelSourceImporter
 extends EditorImportPlugin
 
-## 导入 .vox / .qvx 为 QVoxelSource (.res)
-## 保存可序列化的体素数据，供 VoxelRenderer / VoxelDestructible 等运行时节点使用
-## 不生成 mesh，仅保存原始体素数据，便于运行时动态修改和破坏
+## 导入 .vox / .qvx 为 QVoxelSource (.res) —— **动态体素**路径（运行时逐格增删 / 破坏）。
+## 保存可序列化的体素数据，供 VoxelRenderer / VoxelDestructible 等运行时节点使用；
+## 不生成 mesh，仅保存原始体素数据，便于运行时动态修改和破坏。
+## 【与 VoxelMeshImporter 的关系】两者都读同一份源文件，但产物不同：本导入器出**数据**
+## （QVoxelSource），VoxelMeshImporter 出**静态网格**。只做静态展示的游戏用后者即可。
 ## 【按扩展名分派】两种源格式形状不同，各走各的适配器（详见 QVoxelAsset 的类注释）：
 ##   .qvx → QVoxelAsset（块级 + NODE 摆放）→ QVoxelSource.from_qvx
 ##   .vox  → VoxAsset（MagicaVoxel 场景图）→ QVoxelSource.from_voxel_data
@@ -17,12 +19,14 @@ const scale := VoxAsset.OPT_SCALE
 const origin := VoxAsset.OPT_ORIGIN
 
 
+## 【importer id 保持 "voxel_data"】它是**序列化键**（每个 `.import` 里记着它），改名会让
+## 既有资产全部找不到导入器而需重导；类名 / 文件名改了，这个稳定 id 不动。
 func _get_importer_name():
-	return 'voxel_data'
+	return "voxel_data"
 
 
 func _get_visible_name():
-	return "Voxel Data Resource"
+	return "QVoxel Source Resource"
 
 
 func _get_recognized_extensions():
@@ -62,11 +66,8 @@ func _get_import_options(path, preset) -> Array[Dictionary]:
 
 
 ## frame_index = 取哪一帧烤进这份 QVoxelSource：`.vox` 是 MagicaVoxel 的体素动画帧；
-## `.qvx` 是 `FRAM` 帧动画（§12）。两者都产出**单帧静态快照**——静态 `.qvx` 只有第 0 帧，
-## 该选项恒等于 0、无副作用。
-## 【为什么对 .qvx 也生效了】早先 `.qvx` 的 `animations[].frames` 是按**节点下标**寻址的
-## 变换补丁（v3 的嵌套树没有下标，故无作用）；现在 `.qvx` 的帧是真正的体素帧（FRAM），
-## 与 `.vox` 同义，该选项自然通用。运行时连续播放仍不在本层（见 QVoxelSource.from_qvx 的注释）。
+## `.qvx` 是 `ANIM` 帧动画（§12）。两者都产出**单帧静态快照**——静态 `.qvx` 只有第 0 帧，
+## 该选项恒等于 0、无副作用。运行时连续播放仍不在本层（见 QVoxelSource.from_qvx 的注释）。
 func _get_option_visibility(_path: String, _option_name: StringName, _options: Dictionary) -> bool:
 	return true
 

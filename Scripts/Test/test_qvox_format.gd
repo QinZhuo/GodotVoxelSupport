@@ -394,7 +394,7 @@ func test_importers_recognize_qvx() -> void:
 		"res://addons/VoxelSupport/Importers/VoxelNoopImporter.gd",
 		"res://addons/VoxelSupport/Importers/VoxelMeshImporter.gd",
 		"res://addons/VoxelSupport/Importers/VoxelMeshLibraryImporter.gd",
-		"res://addons/VoxelSupport/Importers/VoxelDataImporter.gd",
+		"res://addons/VoxelSupport/Importers/QVoxelSourceImporter.gd",
 	]
 	for p in paths:
 		var script: Script = load(p)
