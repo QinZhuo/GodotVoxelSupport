@@ -177,69 +177,6 @@ func _get_channel_images() -> Dictionary:
 	return _channel_images
 
 
-# QVX 路径 —— 块级生成
-# QVX 的 block_size 恒等于 CHUNK_SIZE，块坐标就是 chunk 坐标，因此网格可以直接按块生成：
-# build_halo_from_buffers（跨块面可见性）→ generate_chunk_dense。无需把数据摊平成
-# Dictionary[Vector3i,int] 再交给 generate_arrays_native 重新分块（那是 .vox 路径的做法）。
-# 坐标约定：use_local_space=false → 顶点 = (体素坐标 + offset) × scale，即**绝对世界坐标**，
-# 于是各块结果可直接拼接；块边界面"负方向本块负责、正方向看邻居"的约定保证每个跨界只生成
-# 一次 → 拼接后无重叠面、无 z-fighting。
-
-## 由块缓冲生成网格 arrays（输出形状与 generate_arrays_native 一致）。
-## 【测试 oracle，非生产路径】生产路径已全量下沉原生
-## （NativeLoader.generate_arrays_from_chunks_native，见 P2-5）：本函数保留的唯一用途是
-## test_voxel_snapshot_baseline 的逐位对照。原生实现与本 oracle 的产物字节序列必须一致，
-## 故两处需同步修改。
-static func generate_arrays_from_chunks(chunks: Dictionary, trans_flags: PackedByteArray,
-		scale: float, offset: Vector3) -> Dictionary:
-	var sv := PackedVector3Array()
-	var sn := PackedVector3Array()
-	var su := PackedVector2Array()
-	var si := PackedInt32Array()
-	var tv := PackedVector3Array()
-	var tn := PackedVector3Array()
-	var tu := PackedVector2Array()
-	var ti := PackedInt32Array()
-	for key in chunks:
-		var ck: Vector3i = key
-		var halo := VoxelChunkGenerator.build_halo_from_buffers(chunks, ck)
-		if halo.is_empty():
-			continue
-		var part := NativeLoader.generate_chunk_dense(halo, trans_flags, scale, ck, false, offset)
-		# 【为什么写在循环体内而不是抽函数】Packed*Array 是写时复制：把累积数组传进辅助
-		# 函数会多一个引用，每次 append 都触发整段复制（O(n²)）。故就地 append 局部变量。
-		var pv: PackedVector3Array = part.get("solid_verts", PackedVector3Array())
-		if not pv.is_empty():
-			var base := sv.size()
-			sv.append_array(pv)
-			sn.append_array(part["solid_normals"])
-			su.append_array(part["solid_uvs"])
-			si.append_array(_shift_index_array(part["solid_idxs"], base))
-		var pt: PackedVector3Array = part.get("trans_verts", PackedVector3Array())
-		if not pt.is_empty():
-			var base_t := tv.size()
-			tv.append_array(pt)
-			tn.append_array(part["trans_normals"])
-			tu.append_array(part["trans_uvs"])
-			ti.append_array(_shift_index_array(part["trans_idxs"], base_t))
-	var out := {
-		"solid_verts": sv, "solid_normals": sn, "solid_uvs": su, "solid_idxs": si,
-		"trans_verts": tv, "trans_normals": tn, "trans_uvs": tu, "trans_idxs": ti,
-	}
-	return out
-
-
-## 索引数组整体加偏移（多块网格合并时把各自的顶点基准抬到全局）。
-static func _shift_index_array(idxs: PackedInt32Array, base: int) -> PackedInt32Array:
-	if base == 0:
-		return idxs
-	var out := PackedInt32Array()
-	out.resize(idxs.size())
-	for i in idxs.size():
-		out[i] = idxs[i] + base
-	return out
-
-
 ## .qvx → ArrayMesh（单网格）。选项与 .vox 路径共用，故两者产物形状一致。
 static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: String = "") -> ArrayMesh:
 	var gen := VoxelMeshGenerator.new(null, options, path)

@@ -125,7 +125,6 @@ static func generate_arrays_native(voxels: Dictionary, trans_flags: PackedByteAr
 
 
 ## 块缓冲字典 → 网格 arrays（QVX 块级导入：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全在原生）。
-## 与 GDScript 侧 VoxelMeshGenerator.generate_arrays_from_chunks 逐位等价（后者保留为测试 oracle）。
 static func generate_arrays_from_chunks_native(chunks: Dictionary, trans_flags: PackedByteArray,
 		scale: float, offset: Vector3) -> Dictionary:
 	var inst := instance()
