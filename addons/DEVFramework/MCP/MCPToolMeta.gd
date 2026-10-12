@@ -45,6 +45,7 @@ const READ_ONLY := [
 ## 一张图弹一次确认框)。MCP 恰好能表达这个中间态: readOnlyHint=false + destructiveHint=false。
 const SIDE_EFFECT := [
 	"take_screenshot", # 落盘新增 PNG(文件名含时间戳, 不覆盖已有文件; 删除即可回退)
+	"render_model",    # 离屏渲染落盘新增 PNG(文件名含时戳, 不覆盖; 删除即可回退)
 ]
 
 ## ---------------------------------------------------------------- 破坏性工具

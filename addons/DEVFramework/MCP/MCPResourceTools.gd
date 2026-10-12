@@ -123,11 +123,24 @@ static func register(add_tool: Callable) -> void:
 		_handle_get_resource_info)
 
 	add_tool.call("preview_resource",
-		"取编辑器为某资源生成的**预览缩略图**(FileSystem 里那种), 存成 PNG 并返回路径。用途: 让已导入成 mesh 的模型(.vox/.qvx/.glb 等)看一眼渲染效果, 不必放进场景。传**源文件路径**(如 res://demo/deer.vox, 需已导入); 走 EditorResourcePreview, 异步回调。",
+		"取编辑器为某资源生成的**预览缩略图**(FileSystem 里那种), 存成 PNG 并返回路径。用途: 让已导入成 mesh 的模型(.vox/.qvx/.glb 等)看一眼渲染效果, 不必放进场景。传**源文件路径**(如 res://demo/deer.vox, 需已导入); 走 EditorResourcePreview, 异步回调。视角固定、尺寸由编辑器缩略图设置决定。",
 		{"type": "object", "properties": {
 			"path": MCPToolSchema.str_arg("已导入资源的源文件 res:// 路径(如 res://demo/deer.vox)")
 		}, "required": ["path"]},
 		_handle_preview_resource)
+
+	add_tool.call("render_model",
+		"把模型资源(.qvx/.vox 导入成的 Mesh、.mesh, 或含 Mesh 的 .tscn)离屏渲染成 PNG, **相机可调**: yaw/pitch 角度、dist 缩放、size 分辨率、透明背景。与 preview_resource 的固定缩略图互补 —— 那个视角固定且小, 这个能逐角度/放大核对造型。返回 PNG 路径。",
+		{"type": "object", "properties": {
+			"path": MCPToolSchema.str_arg("资源 res:// 路径(如 res://demo/samples/cottage.qvx, 需已导入)"),
+			"yaw": {"type": "number", "description": "水平角(度), 默认 35"},
+			"pitch": {"type": "number", "description": "俯仰角(度), 默认 20, 范围 -85..85"},
+			"dist": {"type": "number", "description": "相机距离 = dist × 模型包围球半径, 越小越放大, 默认 2.7"},
+			"size": {"type": "integer", "description": "输出边长(像素), 默认 512, 范围 64..2048"},
+			"bg": {"type": "string", "description": "背景色 #rrggbb, 默认 #2a2d33"},
+			"transparent": {"type": "boolean", "description": "透明背景, 默认 false"}
+		}, "required": ["path"]},
+		_handle_render_model)
 
 
 ## ======= 实现 =======
@@ -532,3 +545,143 @@ class PreviewReceiver extends RefCounted:
 
 	func _on_preview(_path: String, preview: Texture2D, _thumbnail: Texture2D, _ud: Variant) -> void:
 		tex = preview
+
+
+## ======= render_model: 可调相机的离屏渲染预览 =======
+##
+## 【为什么不复用 preview_resource】那是 FileSystem 缩略图机制(EditorResourcePreview): 视角固定、
+## 尺寸由编辑器设置决定, **没有任何角度/缩放入参**(见该工具说明)。想要"自由调角度、放大缩小"就得
+## 自建离屏渲染: 一个 SubViewport + Camera3D, 相机位置由 yaw/pitch/dist 决定。
+##
+## 【为什么挂在编辑器根控件下】SubViewport 只要在场景树里且 update_mode != DISABLED 就会渲染到自己的
+## 纹理(不需要 SubViewportContainer 显示)。挂在 base_control 下即随编辑器帧循环出图, 读完即释放,
+## 不干扰用户界面。
+##
+## 【为什么等几帧】刚 add_child 时子视口尚未产出画面; get_texture().get_image() 要等至少一帧渲染
+## 完成才有内容。取 4 帧留足余量(编辑器帧循环下代价可忽略)。
+static func _handle_render_model(args: Dictionary) -> Dictionary:
+	if not Engine.is_editor_hint():
+		return MCPResult.fail("仅在编辑器模式可用")
+	var path := VariantTool.get_string(args, "path").strip_edges()
+	if path.is_empty():
+		return MCPResult.fail("必须提供 path")
+	if not ResourceLoader.exists(path):
+		return MCPResult.fail("资源不存在: %s" % path)
+	var res := ResourceLoader.load(path)
+	var content := _renderable_from(res)
+	if content == null:
+		return MCPResult.fail("该资源无法渲染(需要 Mesh / PackedScene / Node3D): %s" % path)
+	var size := clampi(VariantTool.get_int(args, "size", 512), 64, 2048)
+	var yaw := VariantTool.get_float(args, "yaw", 35.0)
+	var pitch := clampf(VariantTool.get_float(args, "pitch", 20.0), -85.0, 85.0)
+	var dist := maxf(VariantTool.get_float(args, "dist", 2.7), 0.2)
+	var bg := VariantTool.get_string(args, "bg", "#2a2d33")
+	var transparent := VariantTool.get_bool(args, "transparent", false)
+
+	var parent := EditorInterface.get_base_control()
+	if parent == null:
+		return MCPResult.fail("拿不到编辑器根控件, 无法离屏渲染")
+
+	var vp := SubViewport.new()
+	vp.size = Vector2i(size, size)
+	vp.transparent_bg = transparent
+	vp.own_world_3d = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	vp.msaa_3d = Viewport.MSAA_4X
+	parent.add_child(vp)
+
+	vp.add_child(_make_render_env(bg))
+	vp.add_child(content)
+	var cam := Camera3D.new()
+	cam.fov = 45.0
+	vp.add_child(cam)
+	cam.current = true
+
+	# content 已入树, get_aabb() 给的是含变换的包围盒 → 按其中心/包围球半径摆相机
+	var box := _content_aabb(content)
+	var center := box.get_center()
+	var radius := box.size.length() * 0.5
+	if radius <= 0.0001:
+		radius = 0.5
+	var yr := deg_to_rad(yaw)
+	var pr := deg_to_rad(pitch)
+	var dir := Vector3(cos(pr) * sin(yr), sin(pr), cos(pr) * cos(yr)).normalized()
+	cam.position = center + dir * (radius * dist)
+	cam.look_at(center, Vector3.UP)
+
+	for _i in 4:
+		await Engine.get_main_loop().process_frame
+	var tex := vp.get_texture()
+	var img: Image = tex.get_image() if tex != null else null
+	vp.queue_free()
+	if img == null:
+		return MCPResult.fail("离屏渲染没有产出图像(窗口渲染可能被禁用)")
+	var out_dir := "user://mcp_previews"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(out_dir))
+	var out_path := "%s/render_%s_%d.png" % [out_dir, path.get_file().get_basename(), Time.get_ticks_usec()]
+	var err := img.save_png(out_path)
+	if err != OK:
+		return MCPResult.fail("保存渲染图失败(错误码 %d)" % err)
+	return MCPResult.ok_json({
+		"path": out_path, "width": img.get_width(), "height": img.get_height(),
+		"yaw": yaw, "pitch": pitch, "dist": dist,
+	})
+
+
+## 资源 → 可渲染节点(未入树)。Mesh 包一层 MeshInstance3D; PackedScene 实例化; 其余 Node3D 原样。
+static func _renderable_from(res: Resource) -> Node:
+	if res is Mesh:
+		var mi := MeshInstance3D.new()
+		mi.mesh = res
+		return mi
+	if res is PackedScene:
+		var inst := (res as PackedScene).instantiate()
+		if inst is Node3D:
+			return inst
+		if inst is Node:
+			var holder := Node3D.new()
+			holder.add_child(inst)
+			return holder
+	return null
+
+
+## 一个带环境(背景色 + 环境光)与主光的 WorldEnvironment。
+static func _make_render_env(bg: String) -> WorldEnvironment:
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color.html(bg) if Color.html_is_valid(bg) else Color(0.16, 0.18, 0.22)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.62, 0.66, 0.72)
+	env.ambient_light_energy = 1.0
+	var we := WorldEnvironment.new()
+	we.environment = env
+	var sun := DirectionalLight3D.new()
+	sun.light_energy = 1.2
+	sun.rotation = Vector3(deg_to_rad(-50.0), deg_to_rad(30.0), 0.0)
+	we.add_child(sun)
+	return we
+
+
+## 节点子树里全部有网格的 MeshInstance3D 的合并包围盒(global 空间)。
+static func _content_aabb(node: Node) -> AABB:
+	var box := AABB()
+	var found := false
+	for mi in _render_mesh_instances(node):
+		var a: AABB = mi.get_aabb()
+		if found:
+			box = box.merge(a)
+		else:
+			box = a
+			found = true
+	if not found:
+		box = AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)
+	return box
+
+
+static func _render_mesh_instances(node: Node) -> Array[MeshInstance3D]:
+	var out: Array[MeshInstance3D] = []
+	if node is MeshInstance3D and (node as MeshInstance3D).mesh != null:
+		out.append(node)
+	for c in node.get_children():
+		out.append_array(_render_mesh_instances(c))
+	return out
