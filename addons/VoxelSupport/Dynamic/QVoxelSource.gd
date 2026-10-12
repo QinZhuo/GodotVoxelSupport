@@ -540,28 +540,13 @@ const NEIGHBORS_6: Array[Vector3i] = VoxelConnectivity.NEIGHBORS_6
 ## 脚底中心）时再显式选 BOTTOM_CENTER。
 ## 【名字含义】"源文件世界的原点 (0,0,0) 就是 Godot 的原点"—— 模型停在作者摆放的位置，而不是
 ## 被搬到原点；是 origin 而非 center。`.qvx` 没有"世界"这一层，此档即"文件里的坐标原样"。
-enum OriginMode {
-	WORLD_ORIGIN,    ## 保留文件坐标 —— **默认**
-	BOTTOM_CENTER,   ## 内容包围盒：X/Z 居中 + Y 贴底（游戏资产惯例）
-	CONTENT_CENTER,  ## 内容包围盒三轴居中
-}
+## 原点模式 / 求界 / 偏移已**下沉到基础层 `VoxelWorldUtil`**（网格导入不该依赖动态数据层）。
+## 这里保留同名转发，使既有调用点（本层内部、外部测试、编辑器）无需改动。
+const OriginMode = VoxelWorldUtil.OriginMode
 
-## 体素单位的原点偏移：把内容摆成 `mode` 描述的样子，渲染顶点再叠加它。
-## **四条链路唯一的实现**：各写一份必然漂移，表现成"模型位置莫名错开"。
-## 包围盒用内容 AABB（不是 .vox 的 SIZE 盒）—— 这正是与 MagicaVoxel 的差异所在。
-## 【取整：先除再 floor，即 `-floor(extent/2)`】结果**恒为整数体素**：奇数边长恰好居中
-## （内容跨 [0, w-1]，中心 (w-1)/2 = floor(w/2) 是整数）；偶数边长差半个体素（真中心是半整数，
-## 无法避免），但至少仍落在体素格点上。"先 floor 再除"对奇数边长会平白多偏半格。
-## 运行时以整数体素为单位（chunk 边界 = 32 的倍数），原点必须落在格点上，否则与体素世界错相位。
-## WORLD_ORIGIN 返回零向量：文件里的摆放已体现在顶点坐标里。
+
 static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
-	if bounds.is_empty() or mode == OriginMode.WORLD_ORIGIN:
-		return Vector3.ZERO
-	var lo: Vector3i = bounds["min"]
-	var hi: Vector3i = bounds["max"]
-	var half := (Vector3(hi - lo + Vector3i.ONE) / 2.0).floor()
-	var y := -float(lo.y) if mode == OriginMode.BOTTOM_CENTER else -(float(lo.y) + half.y)
-	return Vector3(-(float(lo.x) + half.x), y, -(float(lo.z) + half.z))
+	return VoxelWorldUtil.origin_offset(bounds, mode)
 
 
 ## 从 VoxAsset 构造（编辑器导入时使用）。`origin_mode` 决定模型摆到哪，据此写 `center_offset`。
@@ -1736,23 +1721,9 @@ static func _bounds_to_aabb(bounds: Array) -> AABB:
 	return AABB(Vector3(min_pos), Vector3(extents))
 
 
-## 体素字典 `{Vector3i: 材质ID}` 的精确包围盒 `{"min", "max"}`（含端点）；空集合返回 `{}`。
-## **全项目唯一的"体素字典求界"实现**（`.vox`/`.qvx` 导入、原点偏移、网格生成都调它）：
-## 同类公式各写一份必然漂移 —— 本仓库已因"两条路径各有一套原点"出过一次 bug。
+## 体素字典求界已下沉到 `VoxelWorldUtil.voxel_bounds`；此处保留转发以兼容旧调用点。
 static func voxel_bounds(voxels: Dictionary) -> Dictionary:
-	if voxels.is_empty():
-		return {}
-	var min_pos := Vector3i.MAX
-	var max_pos := Vector3i.MIN
-	for pos_key in voxels:
-		var pos: Vector3i = pos_key
-		min_pos.x = mini(min_pos.x, pos.x)
-		min_pos.y = mini(min_pos.y, pos.y)
-		min_pos.z = mini(min_pos.z, pos.z)
-		max_pos.x = maxi(max_pos.x, pos.x)
-		max_pos.y = maxi(max_pos.y, pos.y)
-		max_pos.z = maxi(max_pos.z, pos.z)
-	return {"min": min_pos, "max": max_pos}
+	return VoxelWorldUtil.voxel_bounds(voxels)
 
 
 # 空间查询（基于 chunk 密集缓冲扫描，数组下标而非字典哈希）

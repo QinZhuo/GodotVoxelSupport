@@ -38,7 +38,7 @@ const KERNEL_PUBLIC_API: Array[String] = [
 
 
 func test_kernel_public_api_matches_contract() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelRenderer.gd")
+	var script: Script = load("res://addons/VoxelSupport/Dynamic/VoxelRenderer.gd")
 	assert_true(script != null, "内核脚本应能加载")
 	var actual: Array[String] = []
 	for m in script.get_script_method_list():
@@ -111,7 +111,7 @@ const EDIT_KERNEL_PUBLIC_API: Array[String] = [
 
 ## 编辑内核的"无节点"性质：不是 Node、不实现任何帧回调、公开面固定。
 func test_edit_kernel_is_headless_node_free() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelEditKernel.gd")
+	var script: Script = load("res://addons/VoxelSupport/Dynamic/VoxelEditKernel.gd")
 	assert_true(script != null, "编辑内核脚本应能加载")
 	var probe = script.new()
 	# ① 不是 Node：一旦是 Node 就意味着它能被挂进场景树、被引擎每帧驱动
@@ -339,7 +339,7 @@ const VOXEL_DATA_INTERNAL_PROTOCOLS: Array[String] = [
 
 
 func test_data_layer_api_tiers_match_contract() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Runtime/QVoxelSource.gd")
+	var script: Script = load("res://addons/VoxelSupport/Dynamic/QVoxelSource.gd")
 	assert_true(script != null, "数据层脚本应能加载")
 	var actual: Array[String] = []
 	for m in script.get_script_method_list():
@@ -366,7 +366,7 @@ func test_data_layer_api_tiers_match_contract() -> void:
 
 
 func test_data_internal_protocols_are_underscored() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Runtime/QVoxelSource.gd")
+	var script: Script = load("res://addons/VoxelSupport/Dynamic/QVoxelSource.gd")
 	var names: Array[String] = []
 	for m in script.get_script_method_list():
 		names.append(m["name"])

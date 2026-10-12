@@ -39,9 +39,9 @@ static func option_specs() -> Array[Dictionary]:
 			# 资产原点：默认 world_origin = 原样保留文件里的坐标（等于本插件网格导入一直以来的
 			# 行为，已有资产不会因升级挪位）。要"X/Z 居中 + Y 贴底"这种游戏资产惯例，
 			# 再显式选 bottom_center。与 VoxelDataImporter 的同一选项共享取值与语义，
-			# 详见 QVoxelSource.OriginMode。
+			# 详见 VoxelWorldUtil.OriginMode。
 			name = origin,
-			default_value = QVoxelSource.OriginMode.WORLD_ORIGIN,
+			default_value = VoxelWorldUtil.OriginMode.WORLD_ORIGIN,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
 			hint_string = "world_origin,bottom_center,content_center",
 		},

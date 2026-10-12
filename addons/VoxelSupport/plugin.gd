@@ -22,13 +22,17 @@ func _enter_tree():
 		"hint": PROPERTY_HINT_NONE,
 		"hint_string": "",
 	})
+	_apply_runtime_gate()
 
-	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelNoopImporter.gd").new())
-	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelMeshImporter.gd").new())
-	importers.append(preload("res://addons/VoxelSupport/Importers/VoxelMeshLibraryImporter.gd").new())
+	importers.append(preload("res://addons/VoxelSupport/Importer/VoxelNoopImporter.gd").new())
+	importers.append(preload("res://addons/VoxelSupport/Importer/VoxelMeshImporter.gd").new())
+	importers.append(preload("res://addons/VoxelSupport/Importer/VoxelMeshLibraryImporter.gd").new())
 	# 动态体素导入器：仅当开关打开时注册（否则连选项都不出现在导入面板）。
+	# 用 load 而非 preload：关闭时该脚本可能被 .gdignore 排除，preload 会在解析期直接报错。
 	if bool(ProjectSettings.get_setting(SETTING_ENABLE_RUNTIME, false)):
-		importers.append(preload("res://addons/VoxelSupport/Importers/QVoxelSourceImporter.gd").new())
+		var script := load("res://addons/VoxelSupport/Dynamic/QVoxelSourceImporter.gd")
+		if script != null:
+			importers.append(script.new())
 	for importer in importers:
 		add_import_plugin(importer)
 
@@ -36,3 +40,23 @@ func _enter_tree():
 func _exit_tree():
 	for importer in importers:
 		remove_import_plugin(importer)
+
+
+## 按开关同步 `Dynamic/.gdignore`：**关 → 写入**（编辑器不扫描该目录 = 不编译、不导入、
+## class_name 不进全局类表）；**开 → 删除**。这是"一个项目设置 → 真·物理排除"的桥。
+## 改设置后需重载本插件（或重启编辑器）生效。
+## 【代价】关闭时 `Dynamic/` 里的类全部消失 —— 引用 `QVoxelSource` 等的**测试/演示也会编译失败**。
+## 故：本仓库（用到动态层）在 project.godot 里把该开关置 true；纯静态网格的游戏置 false 才真瘦身。
+func _apply_runtime_gate() -> void:
+	var marker := "res://addons/VoxelSupport/Dynamic/.gdignore"
+	var enabled := bool(ProjectSettings.get_setting(SETTING_ENABLE_RUNTIME, false))
+	var has := FileAccess.file_exists(marker)
+	if has == (not enabled):
+		return  # 已一致（enabled 时不该有 marker；否则该有）
+	if enabled:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(marker))
+	else:
+		var f := FileAccess.open(marker, FileAccess.WRITE)
+		if f != null:
+			f.close()
+	EditorInterface.get_resource_filesystem().scan()
