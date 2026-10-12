@@ -27,6 +27,12 @@ const CELL_MARGIN_B := 2.0
 ## 保证模型/贴图缩略图看得清; 未加载到预览时不占用空间(见 set_resource_preview)
 const RESOURCE_PREVIEW_SIZE := 64.0
 
+## tooltip 气泡限宽: 原生 tooltip 是**不换行的单行 Label**, 长文本会撑出一条超宽气泡;
+## 自定义气泡按此宽度自动换行(见 _make_custom_tooltip)。
+const TOOLTIP_MAX_WIDTH := 1000.0
+## tooltip 字长上限: 超长文本换行后仍会拖慢气泡构建/渲染, 截断到该字符数(加省略号)。
+const TOOLTIP_MAX_CHARS := 2000
+
 ## 当前显示类型
 var kind: int = Kind.TEXT
 
@@ -150,6 +156,55 @@ func _init() -> void:
 
 func set_selected(selected: bool) -> void:
 	_sel.visible = selected
+
+
+## 悬停气泡: Godot 原生 tooltip 是单行 Label(不换行), 文本过长会撑成一条超宽气泡且卡顿
+## (见 viewport.cpp _gui_show_tooltip 未设 autowrap)。这里自带折行 + 限宽/限长的 Label 替代。
+## 【为何手动折行而非 autowrap】开启 autowrap 的 Label 在"最小尺寸"阶段只返回单行高
+## (label.cpp get_minimum_size), PopupPanel 会据此把气泡压成一行高; 只有显式插入 \n 的
+## 普通过 Label 才会把换行计入最小高度, 气泡才被正确撑高。
+func _make_custom_tooltip(for_text: String) -> Object:
+	if for_text.is_empty():
+		return null
+	var font := get_theme_default_font()
+	if font == null:
+		font = ThemeDB.fallback_font
+	var fsize := get_theme_default_font_size()
+	if fsize <= 0:
+		fsize = ThemeDB.fallback_font_size
+	var lb := Label.new()
+	lb.add_theme_font_override("font", font)
+	lb.add_theme_font_size_override("font_size", fsize)
+	lb.add_theme_color_override("font_color", get_theme_color("font_color", "Label"))
+	lb.text = _wrap_text(for_text, font, fsize, TOOLTIP_MAX_WIDTH)
+	return lb
+
+
+## 按像素宽手动折行; 文本先截断到 TOOLTIP_MAX_CHARS。
+## 【为何按"累积串"量宽而不是逐字符宽度相加】单字符宽度之和会低估整串宽
+## (实测 "A"=10px 但 12 个 A 的整串=137px), 逐字符累加会让行宽超限。故每步量 cand=cur+ch。
+func _wrap_text(text: String, font: Font, fsize: int, max_w: float) -> String:
+	var raw := text if text.length() <= TOOLTIP_MAX_CHARS else text.substr(0, TOOLTIP_MAX_CHARS) + "…"
+	var out := PackedStringArray()
+	for src in raw.split("\n"):
+		if _text_width(src, font, fsize) <= max_w:
+			out.append(src)
+			continue
+		var cur := ""
+		for i in src.length():
+			var cand := cur + src[i]
+			if not cur.is_empty() and _text_width(cand, font, fsize) > max_w:
+				out.append(cur)
+				cur = src[i]
+			else:
+				cur = cand
+		if not cur.is_empty():
+			out.append(cur)
+	return "\n".join(out)
+
+
+func _text_width(s: String, font: Font, fsize: int) -> float:
+	return font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize).x
 
 
 ## 由子类/工厂构建内容节点。基类默认: 无内容。

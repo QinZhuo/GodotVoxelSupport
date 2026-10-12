@@ -1149,7 +1149,8 @@ func _on_cell_mouse_entered(cell: DefTableCellClass) -> void:
 	_set_hover_row(pos.y)
 	# 延迟 tooltip：hover 时按需构建(替代 fill 阶段的全量预构建)
 	if pos.y < rows.size() and pos.x < columns.size():
-		var tip := String(_cell_text(rows[pos.y], pos.x))
+		# 纯文本气泡: 去掉 BBCode([img]资源路径 / [color] 等), 既避免又长又乱, 也免去图片加载
+		var tip := _strip_bbcode(String(_cell_text(rows[pos.y], pos.x))).strip_edges()
 		var file_name: String = rows[pos.y].resource_path.get_file()
 		cell.tooltip_text = "%s\n%s\n---\n%s" % [file_name, String(columns[pos.x]), tip]
 	else:
