@@ -39,6 +39,11 @@ func add_material(color: Color, metal := 0.0, rough := 0.8,
 	return id
 
 
+## 已声明的材质数量（不含空气槽 0）—— 供调用方判断可用材质 ID 上界。
+func material_count() -> int:
+	return _palette.size() - 1
+
+
 # 图元（与画笔共用 VoxelPrimitives）
 
 ## 单个体素。
@@ -46,19 +51,28 @@ func put(pos: Vector3i, material: int) -> void:
 	_voxels[pos] = material
 
 
+## 把任意格子集合盖成同一材质 —— 图元结果的统一落笔入口。
+## 【为什么必须有它】`VoxelPrimitives.dilate` / `dilate_plane` / `region` 产出的都是
+## `Array[Vector3i]`，没有公开落笔口的话这些结果就只能烂在手上；只留 line/box/ball 三个
+## 固定形状不够程序化 / AI 建模用。
+func paint(cells: Array[Vector3i], material: int) -> void:
+	for p in cells:
+		_voxels[p] = material
+
+
 ## 3D 直线（Bresenham，26-连通）。
 func line(a: Vector3i, b: Vector3i, material: int) -> void:
-	_paint(VoxelPrimitives.line(a, b), material)
+	paint(VoxelPrimitives.line(a, b), material)
 
 
 ## 实心长方体（两角点含端点）。
 func box(a: Vector3i, b: Vector3i, material: int) -> void:
-	_paint(VoxelPrimitives.box(a, b), material)
+	paint(VoxelPrimitives.box(a, b), material)
 
 
 ## 欧氏球。
 func ball(center: Vector3i, radius: int, material: int) -> void:
-	_paint(VoxelPrimitives.ball(center, radius), material)
+	paint(VoxelPrimitives.ball(center, radius), material)
 
 
 ## 已写格子 → 材质表（供只读查询 / 自定义图元）。
@@ -100,11 +114,6 @@ func save(path: String) -> bool:
 
 
 # 内部
-
-func _paint(cells: Array[Vector3i], material: int) -> void:
-	for p in cells:
-		_voxels[p] = material
-
 
 func _byte(v: float) -> int:
 	return int(round(clampf(v, 0.0, 1.0) * 255.0))
