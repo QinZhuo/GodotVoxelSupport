@@ -6,6 +6,10 @@
 /addons    !export-ignore
 /addons/** !export-ignore
 
+# DEVFramework 是作者本地开发期的编辑器工具，不属于体素插件的发布内容，打包时排除。
+/addons/DEVFramework     export-ignore
+/addons/DEVFramework/**  export-ignore
+
 # 体素二进制资产统一走 Git LFS（.qvx 与 .vox 同级，均为模型源文件）。
 *.vox  filter=lfs diff=lfs merge=lfs -text
 *.qvx filter=lfs diff=lfs merge=lfs -text
