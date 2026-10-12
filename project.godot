@@ -50,4 +50,4 @@ worker_pool/max_threads=16.0
 
 [voxel_support]
 
-enable_runtime=true
+enable_dynamic_voxel=true
