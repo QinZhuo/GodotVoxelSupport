@@ -68,11 +68,27 @@ QVoxelScript 每个方法内部自动分流: 运行时有 QVoxelier 应用→改
 - 打包运行时: QVoxelBuilder / QVoxelScript 随包可用, 源码文本不可读 —— 本说明即为此提供。"""
 
 
+const RESOURCE_URI := "voxel://api"
+
+
 static func register(add_tool: Callable) -> void:
 	add_tool.call("voxel_help",
-		"体素程序化生成的**用法说明**(API 参考): 用 QVoxelScript 脚本自动分流实时/无头地建模型, 或直接用 QVoxelBuilder; 含进程选择、坐标与材质约定。写体素生成脚本前先调它。",
+		"体素程序化生成的**用法说明**(API 参考): 用 QVoxelScript 脚本自动分流实时/无头地建模型, 或直接用 QVoxelBuilder; 含进程选择、坐标与材质约定。返回指向资源 %s 的链接。" % RESOURCE_URI,
 		MCPToolSchema.no_arg(), _help)
 
 
+## MCP 静态文档资源(内嵌内容, 编辑器与运行时都可用)。由 MCPResourceDocs 注册。
+static func resources() -> Array:
+	return [{
+		"uri": RESOURCE_URI,
+		"name": "体素程序化生成 API",
+		"description": "QVoxelScript / QVoxelBuilder 用法: 何时用脚本、如何自动分流实时/无头、坐标与材质约定。",
+		"mimeType": "text/markdown",
+		"content": HELP,
+	}]
+
+
 static func _help(_args: Dictionary) -> Dictionary:
-	return MCPResult.ok(HELP)
+	return MCPResult.resource_link(RESOURCE_URI, "体素程序化生成 API", "text/markdown",
+		"体素程序化生成 API 说明见资源 %s —— 用 resources/read(uri=\"%s\") 读取; 内容含 QVoxelScript / QVoxelBuilder 用法与约定。" % [RESOURCE_URI, RESOURCE_URI],
+		"QVoxelScript / QVoxelBuilder 用法说明")

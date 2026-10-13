@@ -735,7 +735,8 @@ func _session_facts_provider() -> Dictionary:
 	}
 
 
-## 注册项目侧 provider(见 SETTING_PROVIDERS): 加载脚本并调其 `static register(add_tool)`。
+## 注册项目侧 provider(见 SETTING_PROVIDERS): 加载脚本, 调其 `static register(add_tool)`
+## (工具) 与 `static resources() -> Array`(静态文档资源, 内嵌内容)。两者都可选。
 ##
 ## 【以宿主进程就地注册, 不转发】provider 工具运行在**承载服务器的进程**里: 编辑器进程 /
 ## F5 游戏进程 / 导出运行时。理由: provider 是项目侧"自足"工具(如 voxel_help 纯文档), 编辑器里
@@ -745,6 +746,9 @@ func _session_facts_provider() -> Dictionary:
 ## 用 _script_from_disk 而非 load: provider 与域文件一样要能在"改脚本 → refresh_tools"后生效,
 ## 无需重启编辑器(load 会命中 ResourceLoader 旧缓存)。
 func _register_providers() -> void:
+	# 资源注册表随每轮工具注册一起重建(与 _reset_tools 同节奏), 避免旧文档残留。
+	var docs: Variant = _mod("MCPResourceDocs")
+	docs.clear()
 	var paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
 	if not (paths is Array or paths is PackedStringArray):
 		return
@@ -753,10 +757,15 @@ func _register_providers() -> void:
 		if path.is_empty():
 			continue
 		var script: Variant = _script_from_disk(path)
-		if script == null or not (script is GDScript) or not script.has_method("register"):
-			push_warning("[MCP] provider 脚本无效(需提供 static register(add_tool)): %s" % path)
+		if script == null or not (script is GDScript):
+			push_warning("[MCP] provider 脚本无效: %s" % path)
 			continue
-		script.register(_add_tool)
+		if script.has_method("register"):
+			script.register(_add_tool)
+		if script.has_method("resources"):
+			docs.register(script.resources())
+		if not script.has_method("register") and not script.has_method("resources"):
+			push_warning("[MCP] provider 脚本既无 static register(add_tool) 也无 static resources(): %s" % path)
 
 
 ## ======= 契约自检 =======
@@ -1181,26 +1190,22 @@ func _handle_jsonrpc(req: Dictionary, proto: String = PROTOCOL_VERSION) -> Dicti
 			# 出协议边界: 剥掉仅供进程内使用的顶层 text / is_error。二者与 content[0].text
 			# 逐字节重复, 不剥等于每次调用把同一份正文传两遍(实测占大结果 45%)。详见 MCPResult.for_protocol。
 			return {"jsonrpc": "2.0", "id": req_id, "result": MCPResult.for_protocol(result)}
-		# resources: 静态文档入口。短连接架构发不出推送, 故 subscribe / listChanged 均为 false。
+		# resources: 静态文档入口(项目侧 provider 声明、**内嵌内容**)。短连接架构发不出推送,
+		# 故 subscribe / listChanged 均为 false。注册表是导出安全的 MCPResourceDocs,
+		# **编辑器与运行时两个进程都可用**(不再仅编辑器)。
 		# 注意 resources/read 的成功与失败**都**放在 result 里(失败时带 isError + content),
 		# 而不是走 JSON-RPC error: 规范两种都允许, 而这里选 result 是因为"uri 不对"属于
 		# 换掉 uri 就能自纠错的问题, 与 tools/call 的处理方式保持一致。
-		# **只在编辑器构建提供**: MCPResourceTools 含编辑器引用, 导出包不可 _mod 它。
 		"resources/list":
-			if not _is_editor_build():
-				return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result({"resources": []}, proto, true)}
 			return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result(
-				{"resources": _mod("MCPResourceTools").list_resources()}, proto, true)}
+				{"resources": _mod("MCPResourceDocs").list_all()}, proto, true)}
 		"resources/read":
-			if not _is_editor_build():
-				return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result(
-					MCPResult.for_protocol(_err_validation("运行时模式不提供静态资源", "仅在编辑器模式可用")), proto, true)}
 			var rparams: Variant = req.get("params", {})
 			var rdict: Dictionary = rparams if rparams is Dictionary else {}
 			# 成功与失败都在 result 里(失败时是 _err_validation, 自带 content+isError),
 			# 故两条路径都要过 for_protocol: 失败那条同样带 text/is_error。
 			return {"jsonrpc": "2.0", "id": req_id,
-				"result": _decorate_result(MCPResult.for_protocol(_mod("MCPResourceTools").read_resource(str(rdict.get("uri", "")))), proto, true)}
+				"result": _decorate_result(MCPResult.for_protocol(_mod("MCPResourceDocs").read(str(rdict.get("uri", "")))), proto, true)}
 		"ping":
 			return {"jsonrpc": "2.0", "id": req_id, "result": {}}
 		# 声明支持 4 个级别却什么都不做, 比不声明更糟: 模型会据此以为 debug/info 日志已被

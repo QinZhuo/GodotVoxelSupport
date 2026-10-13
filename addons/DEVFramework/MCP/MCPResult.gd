@@ -97,6 +97,18 @@ static func ok_with_meta(text: String, meta: Dictionary) -> Dictionary:
 	return make(text, false, {"structuredContent": safe_meta})
 
 
+## 工具返回"资源链接"(规范 content 类型 resource_link): 让大段文档走 resources 通道, 而不是
+## 把它整段塞进工具结果。text 是给**资源感知之外**客户端的一句说明(至少要能据此知道去哪取);
+## 资源感知客户端可据 uri 直接拉正文。content 里并列一个 text 项 + 一个 resource_link 项。
+static func resource_link(uri: String, name: String, mime_type: String, text: String, description: String = "") -> Dictionary:
+	var link := {"type": "resource_link", "uri": uri, "name": name, "mimeType": mime_type}
+	if not description.is_empty():
+		link["description"] = description
+	var out := make(text, false)
+	out["content"] = [{"type": "text", "text": text}, link]
+	return out
+
+
 ## 语义化错误封装: retryable 由类别固化, 调用方只负责给出恢复动作。
 ## 这几个是新增代码的推荐入口(它把"该不该重试"这个判断从 50+ 个调用点收敛到一处)。
 

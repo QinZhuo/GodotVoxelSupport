@@ -11,16 +11,14 @@ extends RefCounted
 ## (打开场景、写项目设置、创建/读取 .tres、触发重新导入)。两者唯一的交集是都要走 res:// 路径
 ## 规范化, 故没有共用辅助函数。
 ##
-## ## 本文件的两块职责(名字相近, 语义完全不同)
+## ## 本文件的职责
 ##
-##   1. **tools/\* 工具**(下方"域注册入口"一节): open_scene / project_setting /
-##      create_resource / get_resource_info 等 —— 改与查编辑器侧实体资源, 走 tools/call。
-##   2. **resources/\* 协议端点**(文件末尾): list_resources / read_resource —— 把项目自带的
-##      静态文档(LAYERS.md 与各模块 Readme.md)声明成 MCP 资源, 走 resources/list|read。
+## **tools/\* 工具**(下方"域注册入口"一节): open_scene / project_setting /
+## create_resource / get_resource_info 等 —— 改与查编辑器侧实体资源, 走 tools/call。
 ##
-## 第 2 块此前住在 MCPDevServer 里, 与本文件同名却毫无关系, 读代码时极易误以为"resources
-## 端点归 MCPResourceTools 管"而找不到它。现在两块在本文件内 —— "resources"这个词在项目里
-## 只有一个落点, 这比拆成两个文件更不容易走丢(它们的调用方都是主文件, 不在同一处)。
+## **resources/\* 协议端点不在此文件**: 静态文档资源改为项目侧 provider 声明(内嵌内容), 由
+## 导出安全的 MCPResourceDocs 承载(见其类文档)。原因: 运行时也要能用, 而本文件含编辑器工具,
+## 导出包解析不了 —— 这正是"资源"从本文件迁走、且不再硬编码框架文档的理由。
 ##
 ## ## 依赖方向: 严格单向
 ##
@@ -382,130 +380,6 @@ static func _resource_property_tree(res: Resource, depth: int, max_depth: int) -
 
 static func _value_type(v: Variant) -> String:
 	return type_string(typeof(v))
-
-
-## ======= resources 协议端点(静态文档索引) =======
-##
-## 为什么需要: LAYERS.md 与各模块 Readme.md 是这个项目的**约定载体**(比如"框架=机制、
-## 项目=内容, 新代码该放哪"的判定清单), 但它们此前没有任何 MCP 入口 —— AI 要读到只能靠
-## eval_code 现场 FileAccess 打开。那样做有两个坏处: 绕开了统一的截断统计, 且把一次
-## 声明式的读取变成了执行任意代码。
-##
-## 刻意**只给索引而非全文**: 最大一份 57KB(约 20K token), 一次性灌进上下文既挤掉后续工具
-## 调用的额度, 也会把真正相关的那几段埋掉。故 read_resource 返回「标题索引 + 开头预览」,
-## 全文按需用 read_file(offset/limit) 续读 —— read_file 加游标与这条路径是配套的, 否则模型
-## 拿到索引却读不到内容, 那只是把"读不到"换成了"不知道从哪读起"。
-##
-## 白名单而非任意路径: uri 由客户端提供, 放开等于凭空多一个文件读取面, 而那件事 read_file
-## 已经做完了(带路径守卫)。这里只做 read_file 做不到的那一件: 把静态知识**声明出来**,
-## 让模型知道它存在 —— 可见性本身就是价值。
-
-const _RESOURCE_DOCS := [
-	{"uri": "res://addons/DEVFramework/LAYERS.md", "name": "分层约定(框架 vs 项目)",
-		"desc": "新代码放哪的判定清单、框架红线与历史案例。写任何新代码前必读。"},
-	{"uri": "res://addons/DEVFramework/Readme.md", "name": "DEVFramework 使用说明",
-		"desc": "框架总览: 各模块入口与用法索引。体量最大, 建议先取标题索引再按需精读。"},
-	{"uri": "res://addons/DEVFramework/ECS/Readme.md", "name": "ECS 使用说明",
-		"desc": "ECS 实体组件系统: SoA 列存、命令缓冲、prefab 批量实例化、存档。"},
-	{"uri": "res://addons/DEVFramework/Camera/Readme.md", "name": "Camera 虚拟机位",
-		"desc": "Camera 模块: 机位(视角/跟随/blend)与面板类 UI 的机位切换。"},
-	{"uri": "res://addons/DEVFramework/AI/Readme.md", "name": "GOAP AI",
-		"desc": "GOAP 目标导向 AI: 目标声明、行动规划、世界状态变化触发重规划。"},
-	{"uri": "res://addons/DEVFramework/Task/Readme.md", "name": "Task 任务 + 新手教程",
-		"desc": "Task 任务系统与 Tutorial 新手引导: 配置式步骤、指针事件放行、CSV 翻译。"},
-	{"uri": "res://addons/DEVFramework/GameCommand/Readme.md", "name": "GameCommand 命令",
-		"desc": "GameCommand: 命令记录与回放。"},
-]
-
-## resources/read 的开头预览字符数上限。取 3000 是权衡: 足够看出写法约定与目录结构,
-## 又不至于挤占一次工具调用的额度; 真要读全文走 read_file 的 offset/limit。
-const _RESOURCE_PREVIEW_CHARS := 3000
-
-## 标题索引条数上限。同上理由: 索引本身不该变成噪声。
-const _RESOURCE_MAX_HEADINGS := 80
-
-
-## resources/list 的响应体。由 MCPDevServer._handle_jsonrpc 的 resources/list 分支调用。
-static func list_resources() -> Array:
-	var out: Array = []
-	for d in _RESOURCE_DOCS:
-		out.append({
-			"uri": d["uri"],
-			"name": d["name"],
-			"description": d["desc"],
-			"mimeType": "text/markdown",
-		})
-	return out
-
-
-## resources/read 的 result 体。成功返回 {contents:[...]}, 失败直接返回 MCPResult 的
-## validation 错误(自带 content + isError) —— 两种情况都是合法 result, 调用方不必分支处理
-## 两种错误形状。
-##
-## 索引/预览/续读提示全部拼进 contents[].text, 而**不**放成并列字段: 规范下客户端只保证
-## 把 text 交给模型, 写进并列字段的东西模型看不到, 那等于白写。
-static func read_resource(uri: String) -> Dictionary:
-	var entry: Dictionary = {}
-	for d in _RESOURCE_DOCS:
-		if d["uri"] == uri:
-			entry = d
-			break
-	if entry.is_empty():
-		return MCPResult.err_validation("未登记的资源 uri: %s" % uri,
-			"先调 resources/list 取可用 uri(共 %d 份文档); 若只是想读任意文件, 用 read_file(带路径守卫)" % _RESOURCE_DOCS.size())
-	if not FileAccess.file_exists(uri):
-		return MCPResult.err_validation("文档不存在: %s" % uri, "文件可能已被移动或改名, 请用 resources/list 复核可用 uri")
-	var text := FileAccess.get_file_as_string(uri)
-	var total := text.length()
-	var body := "[文档] %s\n[说明] %s\n[标题索引]\n%s\n\n[开头预览 前%d字符 / 全文%d字符]\n%s\n\n[续读] 读全文用 read_file(path=\"%s\", offset=<字符下标>, limit=<本次要读的字符数>), 按返回的 next_char_offset 接下一段; next_char_offset 为 -1 表示已读完。" % [
-		str(entry["name"]),
-		str(entry["desc"]),
-		"\n".join(PackedStringArray(_markdown_headings(text))),
-		_RESOURCE_PREVIEW_CHARS,
-		total,
-		text.substr(0, _RESOURCE_PREVIEW_CHARS),
-		uri,
-	]
-	return {
-		"contents": [{
-			"uri": uri,
-			"name": str(entry["name"]),
-			"description": str(entry["desc"]),
-			"mimeType": "text/markdown",
-			"text": body,
-		}],
-	}
-
-
-## 提取 markdown 标题作为目录索引。**必须跳过围栏代码块**: 文档里有大量以 # 开头的
-## GDScript 注释, 不过滤索引会被这些注释灌满, 而真正的小节标题埋在中间 —— 那样的索引
-## 比没有索引更糟, 因为它看起来是有用的。
-## 只收前三级(#/##/###): 更深的层级在这些文档里通常是补充说明而非章节, 全收会显著拉长索引。
-static func _markdown_headings(text: String) -> Array[String]:
-	var out: Array[String] = []
-	var in_fence := false
-	for line in text.split("\n"):
-		if line.begins_with("```"):
-			in_fence = not in_fence
-			continue
-		if in_fence:
-			continue
-		var s: String = line.strip_edges()
-		if s.length() < 2 or not s.begins_with("#"):
-			continue
-		var hashes := 0
-		while hashes < s.length() and s[hashes] == "#":
-			hashes += 1
-		if hashes > 3:
-			continue
-		# "#" 后必须紧跟空白才是标题(ATX 规范), 否则 "#hashtag" 这类普通文本会被误收。
-		if s.length() > hashes and s[hashes] != " " and s[hashes] != "\t":
-			continue
-		out.append(s)
-		if out.size() >= _RESOURCE_MAX_HEADINGS:
-			out.append("...(标题过多, 已截断)")
-			break
-	return out
 
 
 ## preview_resource: 取编辑器生成的资源预览缩略图 → 存 PNG。
