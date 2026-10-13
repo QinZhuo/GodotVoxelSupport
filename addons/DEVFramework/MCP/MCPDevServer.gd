@@ -735,9 +735,12 @@ func _session_facts_provider() -> Dictionary:
 	}
 
 
-## 注册项目侧 provider(见 SETTING_PROVIDERS)。工具一律按"游戏操作工具"处理: 编辑器模式下手
-## 经调试线转发到游戏进程, 运行时模式就地执行 —— 与 simulate_click 等同一套机制, 因为 provider
-## 面向的是运行中的游戏而非编辑器。故须在**编辑器、F5 游戏进程、导出/独立运行三个分支都调**。
+## 注册项目侧 provider(见 SETTING_PROVIDERS): 加载脚本并调其 `static register(add_tool)`。
+##
+## 【以宿主进程就地注册, 不转发】provider 工具运行在**承载服务器的进程**里: 编辑器进程 /
+## F5 游戏进程 / 导出运行时。理由: provider 是项目侧"自足"工具(如 voxel_help 纯文档), 编辑器里
+## 没有运行的游戏时也必须可用; 需要操作"正在运行的游戏"的项目工具应改用脚本 + game_eval,
+## 而不是靠 MCP 转发。故须在**编辑器、F5 游戏进程、导出/独立运行三个分支都调**。
 ##
 ## 用 _script_from_disk 而非 load: provider 与域文件一样要能在"改脚本 → refresh_tools"后生效,
 ## 无需重启编辑器(load 会命中 ResourceLoader 旧缓存)。
@@ -745,7 +748,6 @@ func _register_providers() -> void:
 	var paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
 	if not (paths is Array or paths is PackedStringArray):
 		return
-	var editor := _mode == MODE_EDITOR
 	for p in paths:
 		var path := str(p).strip_edges()
 		if path.is_empty():
@@ -754,14 +756,7 @@ func _register_providers() -> void:
 		if script == null or not (script is GDScript) or not script.has_method("register"):
 			push_warning("[MCP] provider 脚本无效(需提供 static register(add_tool)): %s" % path)
 			continue
-		if editor:
-			# 编辑器侧: 每个工具包成"转发到游戏进程"的宿主工具, handler 即游戏侧实现
-			script.register(func(name: String, desc: String, schema: Dictionary, handler: Callable) -> void:
-				_register_game_play_tool(name, desc, schema, handler,
-					func(args: Dictionary) -> Dictionary: return await _call_runtime_proxy(name, args)))
-		else:
-			# 运行时侧: 就地执行(与框架游戏操作工具同一分支)
-			script.register(_add_tool)
+		script.register(_add_tool)
 
 
 ## ======= 契约自检 =======
