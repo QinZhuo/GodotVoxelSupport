@@ -41,8 +41,14 @@ static func run_all(filter := "", root_dir := TESTS_DIR, mode := MODE_ALL) -> Di
 			continue
 		var script: Script = load(str(path))
 		if script == null:
-			failures.append("%s: 用例脚本加载失败" % path)
-			failed += 1
+			# 无法加载用例脚本。**编辑器/F5(编辑器二进制)里这是真问题**(用例写坏/依赖缺失),
+			# 记为失败; 而**导出包**里这是预期 —— 引用了编辑器类(如 EditorImportPlugin)的用例
+			# 本就无法在发布版加载。此时记为 skipped(可见, 但不误报成失败)。
+			if OS.has_feature("editor"):
+				failures.append("%s: 用例脚本加载失败" % path)
+				failed += 1
+			else:
+				skipped.append({case = str(path).get_file(), reason = "用例脚本加载失败(导出包不可用, 可能依赖编辑器类)"})
 			continue
 		# 无类型标注(鸭子式): 规避跨编译代次时类型化赋值静默失败的坑; new 失败返回 null 再判空
 		var inst = script.new()

@@ -16,6 +16,11 @@ const MCPToolMeta := preload("res://addons/DEVFramework/MCP/MCPToolMeta.gd")
 ## 本轮自检读到的源码缓存: 脚本路径 -> 源码文本。仅供入参一致性自检切片用, 每次自检重读一遍。
 static var _source_cache := {}
 
+## 本轮源码是否可读。false = 读不到(导出包脚本是二进制 token, get_file_as_string 返回空) ——
+## 此时基于源码的三类检查(func_body / 跨域调用 / 声明注册)全部**跳过**, 而不是把每个 handler
+## 误报成"切不出函数体"(实测导出运行时会刷出 20 条虚假告警)。那是"查不到", 不是"有问题"。
+static var _sources_ok := true
+
 
 ## ======= 扫描范围: 为什么是整个目录, 而不是调用方给的一份名单 =======
 ##
@@ -51,7 +56,10 @@ static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_scri
 	_load_sources(anchor_script_path, extra_scripts)
 	issues.append_array(MCPToolMeta.audit())
 	issues.append_array(audit_tool_name_duplicates(tool_defs))
-	issues.append_array(audit_cross_domain_calls())
+	# 源码相关检查只在**能读到源码**时执行(见 _sources_ok): 导出包读不到源码, 子句若照跑会把每个
+	# handler 误报成"切不出函数体"。与源码无关的检查(工具元数据/重名/schema)始终执行。
+	if _sources_ok:
+		issues.append_array(audit_cross_domain_calls())
 	var registered := {}
 	for def in tool_defs:
 		var tname := str(def.get("name", ""))
@@ -62,13 +70,14 @@ static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_scri
 		if not tool_handlers.has(tname):
 			issues.append("工具 '%s' 已进注册表但无对应 handler" % tname)
 		issues.append_array(audit_input_schema(tname, def.get("inputSchema", {})))
-		if tool_handlers.has(tname):
+		if tool_handlers.has(tname) and _sources_ok:
 			issues.append_array(audit_handler_params(tname, def.get("inputSchema", {}), audit_handlers.get(tname, tool_handlers[tname])))
 	# 反向核对, 两项各自独立: 一项拿元数据名单查(名单写了却没注册), 一项拿源码查
 	# (源码声明注册了却没进注册表)。都只在全量注册表下成立 —— 游戏进程只注册运行时那部分。
 	if registry_is_full:
 		issues.append_array(MCPToolMeta.audit_against(registered))
-		issues.append_array(audit_declared_registrations(registered))
+		if _sources_ok:
+			issues.append_array(audit_declared_registrations(registered))
 	return issues
 
 
@@ -81,6 +90,7 @@ static func _load_sources(anchor_script_path: String, extra_scripts: Array = [])
 		# 目录都打不开(锚点路径写错/目录被移走): 什么都不扫 = 静默全通过, 是最坏结果,
 		# 故把锚点本身塞进缓存(值为空串), 让 func_body 明确"查过、没找到"而非"没查"。
 		_source_cache[anchor_script_path] = ""
+		_sources_ok = false
 		return
 	dir.list_dir_begin()
 	var names: Array[String] = []
@@ -100,6 +110,9 @@ static func _load_sources(anchor_script_path: String, extra_scripts: Array = [])
 		var path := str(p)
 		if not path.is_empty() and not _source_cache.has(path):
 			_source_cache[path] = FileAccess.get_file_as_string(path)
+	# 判定源码可读性: 锚点(主文件)内容为空即视为读不到 —— 导出包脚本是二进制 token,
+	# get_file_as_string 返回空串。据此跳过全部基于源码的检查(见 audit_tools)。
+	_sources_ok = not str(_source_cache.get(anchor_script_path, "")).is_empty()
 
 
 ## ======= 检查 B: 工具重名 =======

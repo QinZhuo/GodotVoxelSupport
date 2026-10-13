@@ -11,11 +11,11 @@ static func generate_mesh(voxel: VoxAsset, options: Dictionary, path: String = "
 	gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
 	gen.start_generate_mesh(voxel.get_voxels(gen.frame_index))
-	gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
+	gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
 	if not gen.mesh:
 		return null
-	if options[VoxelMeshImporter.unwrap_lightmap_uv2]:
-		gen.mesh.lightmap_unwrap(Transform3D.IDENTITY, options[VoxelMeshImporter.uv2_texel_size])
+	if options[VoxelImportOptions.UNWRAP_UV2]:
+		gen.mesh.lightmap_unwrap(Transform3D.IDENTITY, options[VoxelImportOptions.UV2_TEXEL_SIZE])
 	print_verbose("generate_mesh mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms", gen.mesh.get_faces().size() / 6, "face")
 	return gen.mesh
 
@@ -96,8 +96,8 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 	var voxel_mesh_library: MeshLibrary = res if res is MeshLibrary else null
 	if not voxel_mesh_library:
 		voxel_mesh_library = MeshLibrary.new()
-	match options[VoxelMeshLibraryImporter.mesh_mode]:
-		VoxelMeshLibraryImporter.MeshMode.split_by_model:
+	match options[VoxelImportOptions.MESH_MODE]:
+		VoxelImportOptions.MeshMode.split_by_model:
 			for i in voxel.models.size():
 				var gen := VoxelMeshGenerator.new(voxel, options, path)
 				gen.materials = root_gen.materials
@@ -105,7 +105,7 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 				gen.start_generate_mesh(voxel.models[i].get_voxels())
 				gens.append(gen)
 
-		VoxelMeshLibraryImporter.MeshMode.split_by_node:
+		VoxelImportOptions.MeshMode.split_by_node:
 			var root_node := voxel.nodes[voxel.nodes[0].child_nodes[0]]
 			var gen_nodes: Array[String]
 			for node_id in root_node.child_nodes:
@@ -121,7 +121,7 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 				gen.start_generate_mesh(node.get_voxels(voxel, root_gen.frame_index, true), )
 				gens.append(gen)
 
-		VoxelMeshLibraryImporter.MeshMode.split_by_frame:
+		VoxelImportOptions.MeshMode.split_by_frame:
 			for i in root_gen.frame_index + 1:
 				var gen := VoxelMeshGenerator.new(voxel, options, path)
 				gen.materials = root_gen.materials
@@ -136,13 +136,13 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 			old_meshes.append(old_mesh)
 	voxel_mesh_library.clear()
 	for i in gens.size():
-		var child_mesh := gens[i].wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
+		var child_mesh := gens[i].wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
 		if not child_mesh:
 			continue
 		voxel_mesh_library.create_item(i)
 		voxel_mesh_library.set_item_mesh(i, child_mesh)
 		voxel_mesh_library.set_item_name(i, child_mesh.resource_name)
-		if options[VoxelMeshLibraryImporter.import_meshes] and path:
+		if options[VoxelImportOptions.IMPORT_MESHES] and path:
 			ResourceSaver.save(child_mesh)
 	for old_mesh in old_meshes:
 		var i := voxel_mesh_library.find_item_by_name(old_mesh.resource_name)
@@ -153,7 +153,7 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 	return voxel_mesh_library
 
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
-	if options[VoxelMeshLibraryImporter.import_meshes] and path:
+	if options[VoxelImportOptions.IMPORT_MESHES] and path:
 		DirAccess.make_dir_absolute(path.get_basename())
 		var child_path := path.get_basename() + "/" + name + ".res"
 		# 存在性检查必须针对**要加载的那个文件**（child_path）。此前检查的是源资产 path，
@@ -184,7 +184,7 @@ static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: 
 	gen.runtime_materials = qvx.materials
 	gen.generate_materials(options)
 	gen.start_generate_mesh_from_qvx()
-	gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
+	gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
 	if not gen.mesh or gen.mesh.get_surface_count() == 0:
 		return null
 	return gen.mesh
@@ -205,12 +205,12 @@ static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary
 			lib = res
 	if lib == null:
 		lib = MeshLibrary.new()
-	var frame := int(options.get(VoxelMeshImporter.frame_index, 0))
+	var frame := int(options.get(VoxelImportOptions.FRAME_INDEX, 0))
 	var items: Array
-	match int(options[VoxelMeshLibraryImporter.mesh_mode]):
-		VoxelMeshLibraryImporter.MeshMode.split_by_node:
+	match int(options[VoxelImportOptions.MESH_MODE]):
+		VoxelImportOptions.MeshMode.split_by_node:
 			items = _items_by_node(qvx, frame)
-		VoxelMeshLibraryImporter.MeshMode.split_by_frame:
+		VoxelImportOptions.MeshMode.split_by_frame:
 			items = _items_by_frame(qvx)
 		_:
 			items = _items_by_model(qvx, frame)
@@ -278,14 +278,14 @@ static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
 		gen.generate_materials(options)
 		gen.start_generate_mesh_from_chunks(
 				chunks, VoxelWorldUtil.origin_offset(QVoxelAsset.bounds_for_blocks(chunks), gen.origin_mode))
-		gen.wait_finished(options[VoxelMeshImporter.unwrap_lightmap_uv2], options[VoxelMeshImporter.uv2_texel_size])
+		gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
 		if child.get_surface_count() == 0:
 			continue
 		lib.create_item(idx)
 		lib.set_item_mesh(idx, child)
 		lib.set_item_name(idx, item_name)
 		idx += 1
-		if options[VoxelMeshLibraryImporter.import_meshes] and path:
+		if options[VoxelImportOptions.IMPORT_MESHES] and path:
 			ResourceSaver.save(child)
 	# 清掉本次未再生成的旧网格文件（与 .vox 路径同策略：按项名反查，找不到即删）
 	for old in old_meshes:
@@ -305,8 +305,8 @@ var root_path: String
 var runtime_materials: Array = []
 ## 材质通道图缓存（一次导入只构建一次；见 _get_channel_images）
 var _channel_images: Dictionary = {}
-## 导入形状 (VoxelMeshImporter.Shape): cube=面片网格, sphere=每体素一颗小球
-var shape: int = VoxelMeshImporter.Shape.cube
+## 导入形状 (VoxelImportOptions.Shape): cube=面片网格, sphere=每体素一颗小球
+var shape: int = VoxelImportOptions.Shape.cube
 ## 球体细分级别 (icosphere)，仅 sphere 形状生效；默认 0=20 面，优先保证性能
 var sphere_subdivisions: int = 0
 ## 小球半径相对体素边长的比例，仅 sphere 形状生效
@@ -325,19 +325,19 @@ var _native_arrays: Dictionary = {}
 func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
 	self.root_path = path
 	self.voxel = voxel
-	frame_index = options.get(VoxelMeshImporter.frame_index, 0)
-	scale = options.get(VoxelMeshImporter.scale, 0.1)
+	frame_index = options.get(VoxelImportOptions.FRAME_INDEX, 0)
+	scale = options.get(VoxelImportOptions.SCALE, 0.1)
 	if scale <= 0:
 		scale = 0.01
-	shape = options.get(VoxelMeshImporter.shape, VoxelMeshImporter.Shape.cube)
-	sphere_subdivisions = clampi(options.get(VoxelMeshImporter.sphere_subdivisions, 0), 0, 2)
-	sphere_scale = clampf(options.get(VoxelMeshImporter.sphere_scale, 1.0), 0.05, 2.0)
-	origin_mode = options.get(VoxelMeshImporter.origin, VoxelWorldUtil.OriginMode.WORLD_ORIGIN)
+	shape = options.get(VoxelImportOptions.SHAPE, VoxelImportOptions.Shape.cube)
+	sphere_subdivisions = clampi(options.get(VoxelImportOptions.SPHERE_SUBDIVISIONS, 0), 0, 2)
+	sphere_scale = clampf(options.get(VoxelImportOptions.SPHERE_SCALE, 1.0), 0.05, 2.0)
+	origin_mode = options.get(VoxelImportOptions.ORIGIN, VoxelWorldUtil.OriginMode.WORLD_ORIGIN)
 
 
 func generate_materials(options: Dictionary) -> Array[Material]:
 	materials.resize(2)
-	var path := root_path if options[VoxelMeshImporter.import_materials_textures] else ""
+	var path := root_path if options[VoxelImportOptions.IMPORT_MATERIALS_TEXTURES] else ""
 	materials[0] = generate_material(path)
 	materials[1] = generate_material_trans(materials[0], path)
 	return materials
@@ -427,7 +427,7 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	var offset := Vector3.ZERO
 	if origin_mode != VoxelWorldUtil.OriginMode.WORLD_ORIGIN:
 		offset = VoxelWorldUtil.origin_offset(VoxelWorldUtil.voxel_bounds(voxels), origin_mode)
-	if shape == VoxelMeshImporter.Shape.sphere:
+	if shape == VoxelImportOptions.Shape.sphere:
 		# offset 为体素单位，原生内部乘 scale（与 cube 路径同一约定）——不必再事后遍历平移顶点。
 		_native_arrays = NativeLoader.generate_spheres_native(
 			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET, offset)
@@ -477,7 +477,7 @@ func _reset_mesh() -> void:
 func wait_finished(gen_uv2: bool, uv2_texel_size: float) -> ArrayMesh:
 	_append_native_surfaces()
 	# 球体路径与旧行为一致：不在 wait_finished 内展开 UV2
-	if shape != VoxelMeshImporter.Shape.sphere and gen_uv2:
+	if shape != VoxelImportOptions.Shape.sphere and gen_uv2:
 		mesh.lightmap_unwrap(Transform3D.IDENTITY, uv2_texel_size)
 	return mesh
 
