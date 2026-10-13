@@ -1619,9 +1619,17 @@ func script_stats() -> Dictionary:
 	var gs := session.output_size()
 	return {
 		"grid_size": [gs.x, gs.y, gs.z],
+		"voxel_count": session.object.count_solid() if session.object != null else 0,
 		"material_count": world.materials.size() - 1,
 		"objects": _sess.all_sessions().size(),
 	}
+
+
+## 新建空模型(MCP / 脚本入口)：**整体替换**当前世界（网格 grid；ZERO 用场景默认）。
+## 与界面"新建"同一条 `new_model` 路径，只是省掉了未保存确认对话框（脚本调用）。
+func script_new(grid := Vector3i.ZERO) -> bool:
+	new_model(grid)
+	return session != null
 
 
 ## 改当前活动模型的分辨率(输出盒尺寸)。保留新旧尺寸交集内的体素, 超出部分丢弃 —— 与对象属性
