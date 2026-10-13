@@ -220,6 +220,12 @@ const LIST_TTL_MS := 600000
 const SERVER_NAME := "godot-dev-mcp"
 const SERVER_VERSION := "0.3.0"
 
+## 服务器级"使用说明"(initialize / server:discover 结果的 instructions 字段)。这是给模型的
+## **全局**提示(Host 常把它注入 system prompt; Claude Code 默认截断 2048 字符), 故只放跨工具的
+## 约定与边界, **不抄工具描述**(工具描述在 tools/list 里另发)。项目 provider 的
+## `static func instructions() -> String` 会追加在后面。
+const BASE_INSTRUCTIONS := "Godot 开发调试 MCP 服务器(编辑器/游戏双模式): 改场景节点前先 get_scene_tree/get_node_info; 不确定 Godot 原生 API 先 classdb_query; 带 game_ 前缀的工具与 game_eval/simulate_*/take_screenshot(game) 作用于游戏进程(编辑器里调用经调试线转发); 编辑器日志用 get_logs, 游戏日志用 get_game_logs/get_game_errors。"
+
 ## 模式
 const MODE_EDITOR := "editor"
 const MODE_RUNTIME := "runtime"
@@ -280,6 +286,10 @@ var _verify_sessions: Dictionary = {}
 var _tool_audit_handlers := {}
 
 var _tool_audit_issues: Array[String] = []
+
+## 项目 provider 追加的服务器说明(见 _register_providers 的 instructions 收集), 拼进
+## initialize/server:discover 的 instructions(在 BASE_INSTRUCTIONS 之后)。
+var _provider_instructions: Array[String] = []
 
 
 ## ------- 生命周期(autoload) -------
@@ -746,9 +756,10 @@ func _session_facts_provider() -> Dictionary:
 ## 用 _script_from_disk 而非 load: provider 与域文件一样要能在"改脚本 → refresh_tools"后生效,
 ## 无需重启编辑器(load 会命中 ResourceLoader 旧缓存)。
 func _register_providers() -> void:
-	# 资源注册表随每轮工具注册一起重建(与 _reset_tools 同节奏), 避免旧文档残留。
+	# 资源注册表与服务器说明都随每轮工具注册一起重建(与 _reset_tools 同节奏), 避免残留。
 	var docs: Variant = _mod("MCPResourceDocs")
 	docs.clear()
+	_provider_instructions = []
 	var paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
 	if not (paths is Array or paths is PackedStringArray):
 		return
@@ -764,8 +775,12 @@ func _register_providers() -> void:
 			script.register(_add_tool)
 		if script.has_method("resources"):
 			docs.register(script.resources())
-		if not script.has_method("register") and not script.has_method("resources"):
-			push_warning("[MCP] provider 脚本既无 static register(add_tool) 也无 static resources(): %s" % path)
+		if script.has_method("instructions"):
+			var line := str(script.instructions()).strip_edges()
+			if not line.is_empty():
+				_provider_instructions.append(line)
+		if not script.has_method("register") and not script.has_method("resources") and not script.has_method("instructions"):
+			push_warning("[MCP] provider 脚本既无 static register(add_tool) / resources() / instructions(): %s" % path)
 
 
 ## ======= 契约自检 =======
@@ -1128,6 +1143,7 @@ func _handle_jsonrpc(req: Dictionary, proto: String = PROTOCOL_VERSION) -> Dicti
 					"protocolVersion": agreed,
 					"capabilities": _server_capabilities(),
 					"serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+					"instructions": _server_instructions(),
 				},
 			}
 		"notifications/initialized":
@@ -1138,12 +1154,14 @@ func _handle_jsonrpc(req: Dictionary, proto: String = PROTOCOL_VERSION) -> Dicti
 		# 注: 规范的 DiscoverResult 完整字段未公开, 这里是按已公开的
 		# Result/ServerCapabilities/Implementation 三个接口推导的最小形状;
 		# 多报无害(客户端按 schema 取自己认识的), 少报才会被拒。
+		# instructions 自 2026-07-28 起从 initialize 迁到 server/discover, 故两处都发。
 		"server/discover":
 			return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result({
 				"protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
 				"protocolVersion": proto,
 				"capabilities": _server_capabilities(),
 				"serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+				"instructions": _server_instructions(),
 			}, proto)}
 		"tools/list":
 			# ttlMs/cacheScope 让客户端缓存这份 38K 的清单而不是每次重拉 —— 它在进程生命周期内
@@ -1277,6 +1295,15 @@ func _server_capabilities() -> Dictionary:
 		# _meta 的 logLevel 逐请求开启; 这里保留 setLevel 只为兼容旧客户端。
 		"logging": {"supportedLevels": ["debug", "info", "warning", "error"]},
 	}
+
+
+## 服务器级 instructions(BASE + 项目 provider 追加)。initialize / server:discover 都发它。
+func _server_instructions() -> String:
+	var parts: Array[String] = []
+	if not BASE_INSTRUCTIONS.is_empty():
+		parts.append(BASE_INSTRUCTIONS)
+	parts.append_array(_provider_instructions)
+	return "\n".join(parts)
 
 
 ## 按协商到的协议版本给 result 补新版必需字段。

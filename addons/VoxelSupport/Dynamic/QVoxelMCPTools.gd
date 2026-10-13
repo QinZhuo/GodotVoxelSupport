@@ -88,7 +88,13 @@ static func resources() -> Array:
 	}]
 
 
+## 追加到服务器级 instructions 的一句话(见 MCPDevServer.BASE_INSTRUCTIONS)。
+static func instructions() -> String:
+	return "体素程序化生成: 用脚本(QVoxelScript 自动分流实时/无头, 或直接用 QVoxelBuilder) 建模; API 见资源 %s 或工具 voxel_help。" % RESOURCE_URI
+
+
+## 返回文档: 正文内联为 text(**资源感知之外的客户端也能直接读到**), 另附一个 resource_link
+## 指向 %s 供资源感知客户端拉取/缓存。正文较长(约 2.8K), 但 voxel_help 是显式调用, 可接受。
 static func _help(_args: Dictionary) -> Dictionary:
-	return MCPResult.resource_link(RESOURCE_URI, "体素程序化生成 API", "text/markdown",
-		"体素程序化生成 API 说明见资源 %s —— 用 resources/read(uri=\"%s\") 读取; 内容含 QVoxelScript / QVoxelBuilder 用法与约定。" % [RESOURCE_URI, RESOURCE_URI],
+	return MCPResult.resource_link(RESOURCE_URI, "体素程序化生成 API", "text/markdown", HELP,
 		"QVoxelScript / QVoxelBuilder 用法说明")
