@@ -20,11 +20,11 @@ const MCPScreenshotTools := preload("res://addons/DEVFramework/MCP/MCPScreenshot
 ##
 ## **入口名不可改回 `_call_take_screenshot`**: 那会与主文件的分流器同名, 而审计取
 ## `[runtime_handler, editor_handler]` 里第一个非 lambda 去切函数体 —— 一旦取到分流器, 它只读
-## capture_type, schema 里 max_width / srgb / include_text / text_max_nodes 四处读取会**一处都不被
+## capture_type, schema 里 max_width / color_mode / srgb 三处读取会**一处都不被
 ## 检查且完全无声**。
 ##
 ## [param capture_type] 只可能是 "editor" 或 "scene"; 其他值显式报错, 不做"视作 editor"的兜底。
-## [param args] 原始入参, 读取 max_width / srgb。
+## [param args] 原始入参, 读取 max_width / color_mode / srgb。
 ## 返回: MCPResult 封装的结果字典(成功带 path/res_path/width/height/bytes/capture_type)。
 static func capture_editor_side(capture_type: String, args: Dictionary) -> Dictionary:
 	# 本函数只服务编辑器进程。被误从游戏进程转发进来时, EditorInterface 未必不可用, 但即使用得
@@ -44,7 +44,7 @@ static func capture_editor_side(capture_type: String, args: Dictionary) -> Dicti
 		_:
 			# 这里**故意不做**"视作 editor"的兜底: schema 的 enum + MCPArgCheck 只挡协议路径,
 			# 挡不住主服务器自己构造出来的 capture_type —— 兜底会静默返回一张编辑器视口。
-			return MCPResult.fail("capture_type=%s 不是本域支持的模式(本域只做 editor / scene; text / game 由主服务器转发去游戏进程)" % capture_type)
+			return MCPResult.fail("capture_type=%s 不是本域支持的模式(本域只做 editor / scene; game 由主服务器转发去游戏进程)" % capture_type)
 	# 统一走 ScreenshotTool: 颜色处理(auto 判定) -> 缩放 -> 保存。
 	var opts := {
 		"dir": ScreenshotTool.DEFAULT_DIR_RES,

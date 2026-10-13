@@ -355,9 +355,9 @@ func _call_runtime_tool_async(req_id: int, tool_name: String, args: Dictionary) 
 	var result: Dictionary
 	## 长任务(游戏用例)运行期间: 需要主循环的工具会被用例拖慢, 多数会干等到超时才报错。
 	## 这里立即返回 busy, 让调用方先读进度 —— 读缓冲类工具与用例自身仍放行。
-	if _game_tests_running and tool_name != "run_game_tests" and not _BREAK_SAFE_TOOLS.has(tool_name):
-		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请先反复调用 run_game_tests 读进度直到 running=false, 或用 game_control(action=stop) 终止用例。" % tool_name,
-			"busy", true, "run_game_tests读进度至running=false后再调用; 或game_control(action=stop)终止用例")
+	if _game_tests_running and tool_name != "run_tests" and not _BREAK_SAFE_TOOLS.has(tool_name):
+		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请先反复调用 run_tests(process=game) 读进度直到 running=false, 或用 game_control(action=stop) 终止用例。" % tool_name,
+			"busy", true, "run_tests(process=game)读进度至running=false后再调用; 或game_control(action=stop)终止用例")
 	elif _tool_handlers.has(tool_name):
 		result = await _tool_handlers[tool_name].call(args)
 	else:
@@ -710,12 +710,11 @@ func _register_editor_tools() -> void:
 ## 注册"编辑器与运行时都可用"的域。走 _mod: 编辑器侧热重载, 运行时侧经 FileAccess/
 ## ResourceLoader 取 pck 内版本 —— 两条路径同一份代码。
 func _register_shared_domains() -> void:
-	# MCPLogTools / MCPDevTools 不再在此注册工具: get_logs / clear_logs / eval_code 已收进
-	# _register_game_play_tools(带必填 process, 编辑器侧转发 / 运行时就地)。它们的底层实现
-	# (_call_get_logs / _call_clear_errors / _call_eval_code) 仍由本文件按需调用。
+	# MCPLogTools / MCPDevTools / MCPTestTools 不再在此注册工具: get_logs / clear_logs / eval_code /
+	# run_tests 已收进 _register_game_play_tools(带必填 process, 编辑器侧转发 / 运行时就地)。
+	# 它们的底层实现由本文件按需调用。
 	_mod("MCPValidateTools").register(_add_tool)
 	_mod("MCPFileTools").register(_add_tool)
-	_mod("MCPTestTools").register(_add_tool)
 	_mod("MCPCodeIndex").register(_add_tool)
 
 
@@ -1544,6 +1543,20 @@ func _require_process(args: Dictionary) -> String:
 	return VariantTool.get_string(args, "process", "").strip_edges()
 
 
+## run_tests 的 runtime 侧(服务器位于游戏进程内): process 只能是 game(游戏用例就地跑)。
+func _call_run_tests_local(args: Dictionary) -> Dictionary:
+	if _require_process(args) != "game":
+		return _fail("导出运行时没有独立的编辑器进程; run_tests 的 process 只能是 'game'")
+	return await _runtime_run_game_tests(args)
+
+
+## run_tests 的 editor 侧: process=editor 在编辑器进程同步跑; process=game 转发到游戏进程。
+func _call_run_tests_routed(args: Dictionary) -> Dictionary:
+	if _require_process(args) == "game":
+		return await _call_runtime_proxy("run_tests", args)
+	return await _mod("MCPTestTools")._handle_run_tests(args)
+
+
 ## 游戏运行控制: start(支持 uid:// 场景, 已在运行时自动停止旧实例后重启)/stop/continue
 ##
 ## continue 并入本工具而非独立成工具, 理由见 _call_debug_continue 上方那段注释 —— 简言之:
@@ -1584,9 +1597,9 @@ func _mark_script_baseline(reason: String) -> void:
 
 
 func _call_take_screenshot(args: Dictionary) -> Dictionary:
-	# text(文本化截图) 与 game(真实截图) 都分析游戏运行画面: 编辑器模式经调试线转发到游戏进程
-	var capture_type: String = VariantTool.get_string(args, "capture_type", "text")
-	if capture_type == "text" or capture_type == "game":
+	# game(真实截图) 分析游戏运行画面: 编辑器模式经调试线转发到游戏进程, 运行时就地。
+	var capture_type: String = VariantTool.get_string(args, "capture_type", "game")
+	if capture_type == "game":
 		if _mode == MODE_EDITOR:
 			return await _call_runtime_proxy("take_screenshot", args)
 		# 运行时模式: 直接处理
@@ -1898,7 +1911,7 @@ func _wait_game_ready(timeout_sec: float = 15.0) -> bool:
 
 ## 非编辑器(导出包/独立运行)进程的工具注册: 共享域 + 游戏操作宿主工具。
 ## 复用 _register_shared_domains 保证与编辑器**同一份共享域清单**; 游戏操作工具传
-## include_eval=false, 故不注册 auto_verify(依赖编辑器类; eval_code 在运行时=本进程)。仅勾选 runtime_enabled 时调用。
+## include_auto_verify=false, 故不注册 auto_verify(依赖编辑器类; eval_code 在运行时=本进程)。仅勾选 runtime_enabled 时调用。
 func _register_runtime_domains() -> void:
 	_reset_tools()
 	_register_shared_domains()
@@ -1908,12 +1921,12 @@ func _register_runtime_domains() -> void:
 
 
 ## 注册"游戏操作宿主工具"(截图 / UI 交互 / 日志 / 用例 / eval)。三个调用场景:
-##   · 编辑器进程: _register_editor_tools 追加在编辑工具之后(include_eval=true);
-##   · 开发期游戏进程(F5): _ready 里注册(include_eval=true, 供调试线 eval_code 用);
-##   · 导出/独立运行: _register_runtime_domains 里注册(include_eval=false)。
-## include_eval=false 时**只少注册 auto_verify**(它驱动完整游戏进程, 不适合发布包); eval_code/
-## get_logs/clear_logs 始终注册 —— 它们各有 process 参数, 复用同一份实现。
-func _register_game_play_tools(include_eval: bool = true) -> void:
+##   · 编辑器进程: _register_editor_tools 追加在编辑工具之后(include_auto_verify=true);
+##   · 开发期游戏进程(F5): _ready 里注册(include_auto_verify=true, 供调试线 eval_code 用);
+##   · 导出/独立运行: _register_runtime_domains 里注册(include_auto_verify=false)。
+## 该参数只控 **auto_verify** 是否注册(false=发布包不注册它, 因为它会驱动完整游戏进程);
+## eval_code / get_logs / clear_logs / run_tests 始终注册 —— 它们各有 process 参数, 复用同一份实现。
+func _register_game_play_tools(include_auto_verify: bool = true) -> void:
 	# 仅首次进入时清空(editor 进程已由 _register_editor_tools 清空并注册了编辑/项目工具,
 	# 这里只能追加 runtime 工具, 不能 reset 否则会清掉前面分组的注册)。
 	if _tool_handlers.is_empty():
@@ -1971,18 +1984,25 @@ func _register_game_play_tools(include_eval: bool = true) -> void:
 		"required": ["process"],
 	}
 	_register_game_play_tool("eval_code",
-		"执行一段 GDScript(方法体内容, 缩进由服务器处理)。process 必填: editor=在编辑器进程执行(可读写编辑态, 新鲜度闸门 + 热重载); game=在游戏进程执行(可读运行状态/改变量/触发逻辑, 需游戏运行; 导出运行时=本进程)。【副作用】执行任意代码, 不可自动重试; 纯查询优先用 take_screenshot(capture_type='text') 或 get_logs。可 return 返回值; 支持 await(timeout_ms 默认 8000/上限 15000)。get_node 相对路径基于 eval 实例, 访问游戏节点用 /root/... 或 get_tree().current_scene.get_node(...)。【新鲜度闸门(process=game)】引擎不热重载游戏进程: 改过 .gd 后执行只会得到旧代码, 工具会先自动热重载, 再对(①已有既存实例的脚本 ②全局类)拒绝并给出 error_category=stale_code; 此时需 game_control(action=start) 重启再验。",
+		"执行一段 GDScript(方法体内容, 缩进由服务器处理)。process 必填: editor=在编辑器进程执行(可读写编辑态, 新鲜度闸门 + 热重载); game=在游戏进程执行(可读运行状态/改变量/触发逻辑, 需游戏运行; 导出运行时=本进程)。【副作用】执行任意代码, 不可自动重试; 纯查询优先用专用只读工具(如 get_interactables / get_scene_tree / get_logs)。可 return 返回值; 支持 await(timeout_ms 默认 8000/上限 15000)。get_node 相对路径基于 eval 实例, 访问游戏节点用 /root/... 或 get_tree().current_scene.get_node(...)。【新鲜度闸门(process=game)】引擎不热重载游戏进程: 改过 .gd 后执行只会得到旧代码, 工具会先自动热重载, 再对(①已有既存实例的脚本 ②全局类)拒绝并给出 error_category=stale_code; 此时需 game_control(action=start) 重启再验。",
 		eval_schema,
 		_call_eval_code_local,
 		_call_eval_code_routed)
 
-	_register_game_play_tool("run_game_tests",
-		"在**游戏进程**里跑需要游戏进程的用例(Scripts/Test/ 下声明 needs_game_process() 返回 true 的用例; 依赖 MonitorGame/场景树/真实时间轴)。发射即返回+读进度: 首次调用启动, 之后反复调用读同一份报告直到 running=false(不要带 filter 中途重启)。与编辑器侧的 run_tests 互补: run_tests 会把这些用例列为 skipped, 两类合起来才是全量。需游戏已运行(game_control start)。",
-		{"type": "object", "properties": {
+	var tests_schema := {
+		"type": "object",
+		"properties": {
+			"process": {"type": "string", "enum": ["editor", "game"], "description": "在哪个进程跑: editor=编辑器进程(同步返回统计; 只跑进程无关用例); game=游戏进程(发射+轮询进度; 跑 needs_game_process() 用例; 需游戏运行; 导出运行时=本进程)。必填。"},
 			"filter": {"type": "string", "description": "可选: 用例文件路径子串过滤(仅启动时生效)"},
-			"wait_ms": {"type": "integer", "description": "本次最多等待毫秒(默认 8000, 上限 15000), 超时返回当前进度"}
-		}},
-		_runtime_run_game_tests)
+			"wait_ms": {"type": "integer", "description": "仅 process=game: 本次最多等待毫秒(默认 8000, 上限 15000), 超时返回当前进度"},
+		},
+		"required": ["process"],
+	}
+	_register_game_play_tool("run_tests",
+		"运行项目单元测试(Scripts/Test/ 目录, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。process 必填: editor=编辑器进程(同步返回通过/失败统计与明细, 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 发射即返回+读进度: 首次启动, 之后反复调用读同一份报告直到 running=false, 不要带 filter 中途重启; 需游戏运行)。两类合起来才是全量。",
+		tests_schema,
+		_call_run_tests_local,
+		_call_run_tests_routed)
 
 	# 日志读/清: 统一入口, process 必填(editor|game)。编辑器进程: editor=本进程缓冲, game=转发;
 	# 运行时: 服务器就在游戏进程内, 只能 game。⇒ 取代原先的 get_logs/get_game_logs/get_game_errors
@@ -2013,78 +2033,13 @@ func _register_game_play_tools(include_eval: bool = true) -> void:
 		_call_clear_logs_local,
 		_call_clear_logs_routed)
 
-	if include_eval:
+	if include_auto_verify:
 		_register_game_play_tool("auto_verify",
 			"自动验证闭环: 启动场景后按 operations 序列模拟玩家行为, 每步后增量查错。【副作用: 会接管用户正在玩的游戏】若已有游戏在运行, 本工具会**先将其停止**再启动本工具指定的场景, 结束后再停掉游戏 —— 用户手头的游戏进程会被中断且不会自动恢复。执行前先用 get_editor_activity 确认没有正在进行的调试。操作各字段格式见 operations 参数(不在此复述); 其中 poll 的探测期 eval 出错**不计入**失败判定。retries>0 时曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration 是单次总时长上限, 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
 			MCPToolSchema.auto_verify(),
 			_runtime_auto_verify,
 			func(args): return await _call_auto_verify(args))
 
-
-
-## 递归收集可见节点信息(运行时模式, 游戏进程内坐标天然正确)
-func _collect_visible_nodes(node: Node, viewport: Viewport, result: Array, max_nodes: int, depth: int, max_depth: int) -> void:
-	if result.size() >= max_nodes:
-		return
-	if depth > max_depth:
-		return
-	if node is CanvasItem and not (node as CanvasItem).visible:
-		return
-	if node.name != "" and not str(node.name).begins_with("@"):
-		var screen_pos := Vector2.ZERO
-		var screen_size := Vector2.ZERO
-		var z_index := 0
-		if node is CanvasItem:
-			var canvas_item := node as CanvasItem
-			if node is Control:
-				var control := node as Control
-				var global_rect := control.get_global_rect()
-				screen_pos = global_rect.position
-				screen_size = global_rect.size
-			elif node is Node2D:
-				var node2d := node as Node2D
-				screen_pos = canvas_item.get_global_transform_with_canvas() * Vector2.ZERO
-				if node is Sprite2D:
-					var sprite := node as Sprite2D
-					if sprite.texture:
-						screen_size = Vector2(sprite.texture.get_width(), sprite.texture.get_height())
-				elif node is Polygon2D:
-					var polygon := node as Polygon2D
-					if polygon.polygon.size() > 0:
-						var rect := Rect2(polygon.polygon[0], Vector2.ZERO)
-						for p in polygon.polygon:
-							rect = rect.expand(p)
-						screen_size = rect.size
-			z_index = canvas_item.z_index if canvas_item is Node2D else 0
-		var class_name_str := node.get_class()
-		var script_class_str: String = ""
-		var nscript: Script = node.get_script()
-		if nscript != null:
-			script_class_str = nscript.get_global_name()
-		var info := {
-			"name": str(node.name),
-			"class": class_name_str,
-			"script_class": script_class_str,
-			"screen_position": {"x": int(screen_pos.x), "y": int(screen_pos.y)},
-			"screen_size": {"x": int(screen_size.x), "y": int(screen_size.y)},
-			"z_index": z_index,
-			"visible": true
-		}
-		if node is Button:
-			info["text"] = (node as Button).text
-			info["disabled"] = (node as Button).disabled
-		elif node is Label:
-			info["text"] = (node as Label).text
-		elif node is Sprite2D:
-			var sprite := node as Sprite2D
-			if sprite.texture:
-				info["texture_size"] = {"x": sprite.texture.get_width(), "y": sprite.texture.get_height()}
-		elif node is Polygon2D:
-				var polygon := node as Polygon2D
-				info["polygon_count"] = polygon.polygon.size()
-		result.append(info)
-	for child in node.get_children():
-		_collect_visible_nodes(child, viewport, result, max_nodes, depth + 1, max_depth)
 
 
 ## 运行时: 模拟鼠标左键点击(游戏进程内 Input.parse_input_event 直接生效)
@@ -2270,7 +2225,7 @@ func _call_simulate_key(args: Dictionary) -> Dictionary:
 
 ## ======= 运行时: 游戏进程用例(依赖 MonitorGame / 场景树 / 真实时间轴) =======
 
-## 游戏用例会话状态: `run_game_tests` 首次调用启动, 后续调用读进度 ——
+## 游戏用例会话状态: run_tests(process=game) 首次调用启动, 后续调用读进度 ——
 ## 一个完整的游戏用例(真实战斗 + 真实回放)远超工具单次超时, 不能靠一次调用等完。
 var _game_tests_running := false
 var _game_tests_report: Dictionary = {}
@@ -2298,7 +2253,7 @@ func _runtime_run_game_tests(args: Dictionary) -> Dictionary:
 	if started:
 		out.started = true
 	if _game_tests_running:
-		out.hint = "用例仍在运行: 再次调用 run_game_tests 读进度即可(带 filter 会等本轮结束后重启)"
+		out.hint = "用例仍在运行: 再次调用 run_tests(process=game) 读进度即可(带 filter 会等本轮结束后重启)"
 	return _ok_json(out)
 
 
@@ -2308,20 +2263,8 @@ func _run_game_tests_async(filter: String) -> void:
 	_game_tests_running = false
 
 
-## 运行时: 捕获游戏视口截图(文件名自动生成)
+## 运行时: 捕获游戏视口真实截图(文件名自动生成)
 func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
-	var capture_type: String = VariantTool.get_string(args, "capture_type", "text")
-	# 纯文本化截图模式(text): 不保存图片, 直接返回可见节点布局快照。
-	# 适合点击游玩模拟与无法识别图像的 AI, 大幅节省 token。默认模式。
-	if capture_type == "text":
-		var text_max_nodes := VariantTool.get_int(args, "text_max_nodes", 50)
-		var text_data := _build_game_view_snapshot(text_max_nodes)
-		return _ok_json({
-			"capture_type": "text",
-			"is_text_view": true,
-			"text": text_data,
-			"hint": "文本化截图(text, 默认): 用于点击/拖拽游玩模拟与无图像输入的AI, 省token。大部分场景用此模式即可; 仅需查看具体画面表现时才用 capture_type='game' 真实截图。",
-		})
 	var filename := ScreenshotTool.make_filename("mcp")
 	var dir_path := "user://mcp_screenshots"
 	var viewport := get_viewport()
@@ -2350,33 +2293,7 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 		"capture_type": "game",
 		"color_mode": str(shot.get("color_mode", "")),
 	}
-	# 整合文本化截图快照(text): 截图同时返回画面可见节点布局,
-	# 供 AI 在无图像输入时也能理解画面。可用 include_text=false 关闭, text_max_nodes 控制节点数。
-	if VariantTool.get_bool(args, "include_text", true):
-		var text_max_nodes := VariantTool.get_int(args, "text_max_nodes", 50)
-		result["text"] = _build_game_view_snapshot(text_max_nodes)
 	return _ok_json(result)
-
-
-## 收集游戏画面文本化视图(可见节点布局快照, 即"文本化的截图")
-func _build_game_view_snapshot(max_nodes: int) -> Dictionary:
-	var tree := get_tree()
-	if tree == null:
-		return {}
-	var viewport := get_viewport()
-	if viewport == null:
-		return {}
-	var viewport_size := viewport.get_visible_rect().size
-	var nodes_info: Array = []
-	# 从场景树根的所有子节点遍历(current_scene + autoload + 其他根),
-	# autoload 下的 UI(如 HUD) 是 root 直属子节点, 仅遍历 current_scene 会漏掉它们
-	for child in tree.root.get_children():
-		_collect_visible_nodes(child, viewport, nodes_info, max_nodes, 0, 10)
-	return {
-		"viewport_size": {"x": int(viewport_size.x), "y": int(viewport_size.y)},
-		"node_count": nodes_info.size(),
-		"nodes": nodes_info,
-	}
 
 
 ## ======= 自动验证闭环(auto_verify) =======
@@ -2389,7 +2306,7 @@ func _build_game_view_snapshot(max_nodes: int) -> Dictionary:
 ##   key   {key, pressed?} 模拟按键
 ##   eval  {code}          执行 GDScript(可 return, 结果记入 step)
 ##   poll  {code, timeout_ms, interval_ms} 轮询直到 code 返回 true 或超时
-##   screenshot {capture_type?} 截图(结果记入 step)
+##   screenshot            真实截图(结果记入 step)
 func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 	var operations: Array = VariantTool.get_array(args, "operations")
 	if operations.is_empty():

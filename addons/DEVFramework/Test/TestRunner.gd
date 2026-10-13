@@ -5,13 +5,13 @@ class_name TestRunner extends RefCounted
 ##
 ## 用例按**进程归属**分两类(见 `TestCase.needs_game_process()`):
 ##   · 进程无关(默认) —— 纯逻辑/资源层面, 编辑器进程即可, 快且无副作用;
-##   · 需要游戏进程 —— 依赖 MonitorGame / 场景树 / 真实时间轴, 只能由 `run_game_tests`
+##   · 需要游戏进程 —— 依赖 MonitorGame / 场景树 / 真实时间轴, 只能由 `run_tests(process=game)`
 ##     (MCP, 游戏进程内) 或 headless `--game` 执行。
 ## 在错误的进程里跑某类用例时, 它会被列为 **skipped 并出现在结果文本里** ——
 ## 绝不静默通过, 也绝不因"缺环境"而假失败。
 ##
 ## 入口:
-##   - MCP 工具 run_tests(编辑器/进程无关) / run_game_tests(游戏进程)
+##   - MCP 工具 run_tests(process=editor|game)
 ##   - headless CLI: godot --headless --script res://addons/DEVFramework/Test/run_headless.gd [-- --game]
 ## 用例方法可含 await(协程), runner 自动等待完成后再判定。
 
@@ -170,5 +170,5 @@ static func _format(total: int, failed: int, failures: Array, skipped: Array, mo
 ## 被跳过的用例该去哪儿跑
 static func _next_tool(mode: String) -> String:
 	if mode == MODE_GAME:
-		return "run_tests(编辑器进程)"
-	return "run_game_tests(游戏进程)"
+		return "run_tests(process=editor)"
+	return "run_tests(process=game)"

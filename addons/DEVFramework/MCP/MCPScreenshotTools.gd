@@ -25,14 +25,12 @@ extends RefCounted
 static func spec() -> Dictionary:
 	return {
 		"name": "take_screenshot",
-		"desc": "画面感知工具, 只回答画面长什么样。默认'text'文本化截图(推荐): 返回游戏画面可见节点布局(名称/类型/坐标/尺寸/文本), 无需真图省token, 适合点击模拟与无识图AI。capture_type='game'真实截图(保存PNG返回路径, 附带text快照可include_text=false关)。'editor'编辑器视口截图,'scene'场景缩略图。真实截图默认自动判定颜色空间(color_mode=auto: 按渲染缓冲的实际格式决定要不要补 sRGB 编码), 出图与实际看到的画面一致, 一般无需干预; 仅在极少数偏色场合用 color_mode 覆盖。仅当你能看到图片(多模态识图)时才用非text模式, 纯文本AI禁用game/editor/scene。要找可点的东西并按下, 别截图, 改用 get_interactables(给 ref; 2D 免坐标换算, 3D 直接激活)。",
+		"desc": "画面感知工具, 只回答画面长什么样(像素)。capture_type='game'真实游戏截图(默认; 保存PNG返回路径; 需游戏运行), 'editor'编辑器视口截图, 'scene'场景缩略图。真实截图默认自动判定颜色空间(color_mode=auto: 按渲染缓冲的实际格式决定要不要补 sRGB 编码), 出图与实际看到的画面一致, 一般无需干预; 仅极少数偏色场合用 color_mode 覆盖。**只读文本布局/找可点的东西, 用 get_interactables**(返回可见元素与 ref, 比截图文本更结构化), 再配 simulate_*。仅当你能看到图片(多模态识图)时才需要本工具。",
 		"schema": {"type": "object", "properties": {
-			"capture_type": {"type": "string", "enum": ["text", "game", "editor", "scene"], "description": "模式: text=文本化截图(默认, 推荐, 需游戏运行), game=真实游戏截图(需游戏运行), editor=编辑器视口截图, scene=当前场景缩略图。传错值会直接报错而非静默回落到 editor"},
-			"max_width": {"type": "integer", "description": "仅真实截图生效: 最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
-			"color_mode": {"type": "string", "enum": ["auto", "srgb", "raw"], "description": "仅真实截图生效: 颜色处理模式, 默认 auto(按渲染缓冲的实际数据格式自动判定, 出图即所见)。srgb=强制补一次 linear→sRGB 编码(认定读回的是线性光值), raw=强制不转换(认定读回的已是显示值)。只有确认出图偏色时才需要手动指定"},
-			"srgb": {"type": "boolean", "description": "[已废弃, 请用 color_mode] 仅真实截图生效: 旧的强制开关, 等价 color_mode=srgb(true)/raw(false); 与 color_mode 同时传时以 color_mode 为准。不传则走 auto"},
-			"include_text": {"type": "boolean", "description": "仅真实截图生效: 是否附带文本化截图(text 字段), 默认 true"},
-			"text_max_nodes": {"type": "integer", "description": "文本化截图最多节点数, 默认 50"}
+			"capture_type": {"type": "string", "enum": ["game", "editor", "scene"], "description": "模式: game=真实游戏截图(默认, 需游戏运行; 导出运行时=本进程), editor=编辑器视口截图, scene=当前场景缩略图。传错值会直接报错而非静默回落"},
+			"max_width": {"type": "integer", "description": "最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
+			"color_mode": {"type": "string", "enum": ["auto", "srgb", "raw"], "description": "颜色处理模式, 默认 auto(按渲染缓冲的实际数据格式自动判定, 出图即所见)。srgb=强制补一次 linear→sRGB 编码(认定读回的是线性光值), raw=强制不转换(认定读回的已是显示值)。只有确认出图偏色时才需要手动指定"},
+			"srgb": {"type": "boolean", "description": "[已废弃, 请用 color_mode] 旧的强制开关, 等价 color_mode=srgb(true)/raw(false); 与 color_mode 同时传时以 color_mode 为准。不传则走 auto"}
 		}},
 	}
 

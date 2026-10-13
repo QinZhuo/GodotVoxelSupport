@@ -12,9 +12,9 @@ var _current_method := ""
 ##
 ## 默认 false: 纯逻辑用例, 编辑器进程即可 —— 快、无副作用, `run_tests` 直接跑。
 ## 覆写为 true 之后:
-##   · `run_tests`(编辑器进程) 不会跑它, 而是列为 **skipped 并写进结果文本**
+##   · `run_tests(process=editor)` 不会跑它, 而是列为 **skipped 并写进结果文本**
 ##     (绝不静默通过: 免得"看着全绿其实一条没跑");
-##   · 由 `run_game_tests`(MCP, 游戏进程内) 或 headless `--game` 实际执行。
+##   · 由 `run_tests(process=game)`(MCP, 游戏进程内) 或 headless `--game` 实际执行。
 ##
 ## 判定建议: 用到 `MonitorGame.singleton` / `get_tree()` / 真实计时 / 真实战斗流程的用例
 ## 一律 return true; 只算数据、只读资源、只测纯函数的用例保持 false。

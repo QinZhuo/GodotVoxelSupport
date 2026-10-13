@@ -33,8 +33,9 @@ const READ_ONLY := [
 	"search_symbols", "find_resource_users", "script_status", "get_resource_info",
 	# -- 文件观测 --
 	"read_file", "file_exists",
-	# -- 测试(不写工程状态) --
-	"run_tests",
+	# -- 测试 / 截图(不写工程状态) --
+	# run_tests 刻意**不列**: process=editor 时只读, 但 process=game 会驱动游戏进程执行用例(见下方
+	# "刻意留在名单外"), 一条工具两种进程语义, 按保守取"非只读"。
 ]
 
 ## ------------------------------------------------- 有副作用但不破坏的工具(SIDE_EFFECT)
@@ -101,8 +102,8 @@ const IDEMPOTENT := [
 ## open_scene / clear_logs 这类最高频的例行操作全部被弹确认框, 代价是每次调试都打断。代价则是
 ## "漏标会静默降级成安全", 所以 audit() 必须把 DESTRUCTIVE 的完备性兜住。
 ##
-## 刻意留在名单外的: auto_verify(停掉用户正在跑的游戏)、verify_fix / run_game_tests(驱动
-## 进程)、simulate_click/drag/key(注入输入)。它们会打断调试流程但都能恢复, 打断的代价由人当场
+## 刻意留在名单外的: auto_verify(停掉用户正在跑的游戏)、verify_fix / run_tests(其 process=game
+## 会驱动游戏进程执行用例)、simulate_click/drag/key(注入输入)。它们会打断调试流程但都能恢复, 打断的代价由人当场
 ## 决定, 不如标成破坏性让客户端弹框。
 
 
