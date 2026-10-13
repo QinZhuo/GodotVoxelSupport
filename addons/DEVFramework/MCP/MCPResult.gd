@@ -40,6 +40,13 @@ static func make(text: String, is_error: bool, extra: Dictionary = {}, content_t
 		"is_error": is_error,
 		"isError": is_error,
 		"content": [ {"type": "text", "text": content_text if not content_text.is_empty() else text}],
+		# 【协议契约】MCP 2025-06-18 起: 工具一旦在 tools/list 声明 outputSchema(MCPToolMeta 对
+		# 所有工具一律声明 {"type":"object"}), 则**每个**结果都必须带符合该 schema 的
+		# structuredContent —— 否则合规客户端会把它判成 -32600 InvalidRequest(实测: 报错时正常、
+		# 成功反而被拒, 极隐蔽)。此处给个空对象兜底; ok_json / ok_with_meta / fail / err 会在下面的
+		# extra 循环里用各自更有内容的 structuredContent 覆盖它。空对象对 {"type":"object"} 合法,
+		# 且不复制正文(与 for_protocol 去重的初衷一致)。
+		"structuredContent": {},
 	}
 	for key in extra:
 		out[key] = extra[key]

@@ -208,27 +208,18 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 		# 按错误的方向恢复, 所以分类在判定处产生, 这里只透传。
 		return _attach_warning(MCPResult.err(str(guard.get("message", "")), str(guard.get("category", MCPResult.CAT_STALE_CODE)),
 			bool(guard.get("retryable", false)), str(guard.get("recovery", ""))), warn)
-	# 预编译检查(语法错误 + 静态安全扫描都在 precheck_eval_code 内, 不重复调用)
-	# 实现住本域而非主文件: 主文件 _call_game_eval_proxy(编辑器侧 game_eval 转发)也调它,
-	# 共享件住域里、主文件转发, 依赖方向保持单向(同 MCPCodeIndex.collect_scene_deps 先例)。
-	# 反过来"两边各留一份"是两份实现各自漂移 —— 症状是 eval 能跑但 game_eval 被拦, 且不报错。
-	var precheck := precheck_eval_code(code)
-	if precheck != "":
-		return _attach_warning(MCPResult.err_validation(precheck,
+	# 预处理(长度/安全扫描/语法编译)**只做一次**, 并把编译好的脚本返回来直接执行 ——
+	# 不再"预检编译一次 + 执行前再编译一次"。编译失败时 _prepare_eval 会把引擎本轮打印的
+	# **具体解析错**(如 "Cannot call non-static function ... on the class ...")经 logger 游标取回并内联,
+	# 使 AI 一眼看到根因, 不必再去 get_logs 翻。
+	# 单一实现住本域(主文件 _call_game_eval_proxy 的转发前预检也走 precheck_eval_code → _prepare_eval)。
+	var prep := _prepare_eval(code, logger)
+	if not bool(prep.get("ok", false)):
+		return _attach_warning(MCPResult.err_validation(str(prep.get("error", "")),
 			"修正代码语法后重新调用 eval(语法错误无法通过重试解决)"), warn)
-	var script := GDScript.new()
-	var body := indent_method_body(code)
-	# 包装为挂到场景树的 Node 方法, 让用户代码可直接 get_tree()/get_node() 访问当前场景
-	script.source_code = "extends Node\nfunc _mcp_run():\n%s" % body
-	var err := script.reload()
-	if err != OK:
-		var text := error_string(err)
-		var hint := ""
-		if text.contains("hides a global script class"):
-			hint = " (class_name 与全局类冲突: 请勿在 eval_code 中声明类, 或先 restart_editor)"
-		return _attach_warning(MCPResult.err("代码解析失败: %s%s\n解析详情已输出到编辑器控制台, 可用 get_logs 查看。" % [text, hint],
-			MCPResult.CAT_VALIDATION, false, "修正代码后重新调用 eval"), warn)
-	# 执行前记录错误游标, 以便捕获本次 eval 运行期错误(用逻辑游标, 环形缓冲满后仍正确)
+	var script: GDScript = prep.get("script")
+	# 执行前记录错误游标, 以便捕获本次 eval 运行期错误(用逻辑游标, 环形缓冲满后仍正确)。
+	# 取在编译**之后**: 上一步的编译错已在上面内联返回, 不会混进运行期错误收集。
 	var err_before: int = logger.get_error_cursor() if logger else 0
 	var inst: Node = script.new()
 	if inst == null:
@@ -295,27 +286,64 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 ##
 ## 安全边界警告: 黑名单是"事故防护围栏", 不是信任模型。改名单前先读下面的注释。
 
-## 预检 eval 代码: 返回 "" 表示通过, 否则返回错误描述。
-## 1) 静态扫描被禁止的 API(防代码逃逸编辑器/游戏沙箱); 2) GDScript 语法预编译。
-static func precheck_eval_code(code: String) -> String:
+## 预检 eval 代码(供"编辑器侧转发前拦截"用): 返回 "" 表示通过, 否则错误描述。
+## 内含安全扫描 + 语法预编译(单一实现见 _prepare_eval)。
+## [param logger] 可选: 传入则编译失败时从它取**本轮新增的引擎解析错**内联进错误文案
+##   (否则调用方只得到笼统的 "Parse error", 还得再去 get_logs 翻具体行)。
+static func precheck_eval_code(code: String, logger: Object = null) -> String:
+	var prep := _prepare_eval(code, logger)
+	return "" if bool(prep.get("ok", false)) else str(prep.get("error", ""))
+
+
+## eval 代码的**唯一**预处理: 长度校验 + 安全扫描 + 语法预编译。
+## 返回 {ok:bool, script:GDScript(ok 时), error:String(不 ok 时)}。
+## 编译一次并把脚本返给调用方复用 —— 消除"预检编译一次、执行又编译一次"的重复编译。
+static func _prepare_eval(code: String, logger: Object = null) -> Dictionary:
 	if code.is_empty():
-		return "必须提供 code"
+		return {"ok": false, "error": "必须提供 code"}
 	if code.length() > MAX_EVAL_LENGTH:
-		return "代码过长: %d 字符, 超过上限 %d。请拆分逻辑后重试。" % [code.length(), MAX_EVAL_LENGTH]
+		return {"ok": false, "error": "代码过长: %d 字符, 超过上限 %d。请拆分逻辑后重试。" % [code.length(), MAX_EVAL_LENGTH]}
 	var forbidden := _eval_forbidden_scan(code)
 	if forbidden != "":
-		return forbidden
+		return {"ok": false, "error": forbidden}
+	# 编译前记错误游标: 编译失败时据此取回**引擎刚打印的**具体解析错(非破坏性读)。
+	var cursor: int = logger.get_error_cursor() if logger != null else -1
 	var script := GDScript.new()
-	var body := indent_method_body(code)
-	script.source_code = "extends Node\nfunc _mcp_run():\n%s" % body
+	script.source_code = _wrap_source(code)
 	var err := script.reload()
 	if err != OK:
 		var text := error_string(err)
 		var hint := ""
 		if text.contains("hides a global script class"):
 			hint = " (class_name 与全局类冲突: 请勿在 eval_code 中声明类, 或先 restart_editor)"
-		return "代码解析失败: %s%s" % [text, hint]
-	return ""
+		return {"ok": false, "error": "代码解析失败: %s%s\n%s" % [text, hint, _parse_error_details(logger, cursor)]}
+	return {"ok": true, "script": script}
+
+
+## 把代码包成挂在场景树上的 Node 方法(让用户代码可直接 get_tree()/get_node())。
+static func _wrap_source(code: String) -> String:
+	return "extends Node\nfunc _mcp_run():\n%s" % indent_method_body(code)
+
+
+## 从 logger 取**自 cursor 起新增**的错误条目, 拼成具体解析错文案(供编译失败时内联)。
+## take_errors_since 是**非破坏性**读(不推进游标), 故与后续"运行期错误收集"互不影响。
+static func _parse_error_details(logger: Object, cursor: int) -> String:
+	if logger == null or cursor < 0:
+		return "(详细解析错见 get_logs(kind=error))"
+	var taken: Dictionary = logger.take_errors_since(cursor)
+	var entries: Array = taken.get("entries", [])
+	var lines := PackedStringArray()
+	for e in entries:
+		if not (e is Dictionary):
+			continue
+		var msg := str((e as Dictionary).get("message", "")).strip_edges()
+		if msg.is_empty():
+			continue
+		var ln := str((e as Dictionary).get("line", ""))
+		lines.append("- %s%s" % [msg, ("" if ln.is_empty() else "  (行 %s)" % ln)])
+		if lines.size() >= 5:
+			break
+	return "(引擎未提供详细解析错)" if lines.is_empty() else "具体:\n" + "\n".join(lines)
 
 
 ## 静态扫描 eval 代码中被禁止的 API, 返回 "" 表示通过。

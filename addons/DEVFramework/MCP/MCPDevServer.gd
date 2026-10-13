@@ -2598,7 +2598,7 @@ func _call_eval_code_routed(args: Dictionary) -> Dictionary:
 ## 所以判定统一交给游戏侧的 guard_eval —— 它会先尝试热重载, 再按"有既存实例"
 ## 与"是全局类"两类原因分别上报(后者是引擎限制, 游戏进程刷不了全局类表)。
 func _call_game_eval_proxy(args: Dictionary) -> Dictionary:
-	var precheck: String = _mod("MCPDevTools").precheck_eval_code(VariantTool.get_string(args, "code"))
+	var precheck: String = _mod("MCPDevTools").precheck_eval_code(VariantTool.get_string(args, "code"), _logger)
 	if precheck != "":
 		return _err_validation("eval_code(process=game) 被编辑器侧预检拦截: %s" % precheck, "修正代码后重新调用 eval_code(语法错误无法通过重试解决, 需修改代码)")
 	## auto_resume: 调用方明确要求时先解除断点暂停再执行(默认不开, 避免掩盖真错误)
