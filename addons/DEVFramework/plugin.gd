@@ -221,6 +221,11 @@ class _PackMcpFilter extends EditorExportPlugin:
 		_autoload_key = autoload_key
 		_runtime_key = runtime_key
 
+	## EditorExportPlugin 要求重写 _get_name(): 未重写时导出会报
+	## "Required virtual method EditorExportPlugin::_get_name must be overridden"(非致命噪音)。
+	func _get_name() -> String:
+		return "DEVFramework MCP Autoload Filter"
+
 	func _export_begin(_features: PackedStringArray, _is_debug: bool, _path: String, _flags: int) -> void:
 		if bool(ProjectSettings.get_setting(_runtime_key, false)):
 			return
