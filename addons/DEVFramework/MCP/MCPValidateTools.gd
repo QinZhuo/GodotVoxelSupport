@@ -135,8 +135,9 @@ static func _compile_error_log() -> MCPLogger:
 ## 文件里就成了随机的")。所以命中是**确定的、可按文件名算出来**的, 不是随机的。
 ##
 ## **【不可当通则用, 方向必须按具体的两个文件算】** 该目录当前字典序为:
-##   MCPCodeIndex < MCPDevServer < MCPDevTools < MCPFileTools < MCPLogTools
-##     < MCPResourceTools < MCPSceneTools < MCPScreenshotTools < MCPScriptSync < MCPValidateTools
+##   MCPCodeIndex < MCPDevServer < MCPDevTools < MCPDevToolsEditor < MCPFileTools < MCPLogTools
+##     < MCPResourceTools < MCPSceneTools < MCPScreenshotEditor < MCPScreenshotTools
+##     < MCPScriptSync < MCPValidateTools
 ## 本域属于"主文件先命中"是因为 **MCPValidateTools.gd 排在整个列表最后**; 唯独 **MCPCodeIndex.gd
 ## 排在 MCPDevServer.gd 之前** —— 在 CodeIndex 域撞名时方向**相反**, 是域文件先命中。抄去判断别的域会算反。
 ##

@@ -16,7 +16,7 @@ extends RefCounted
 ## 依赖单向: 本文件不引用任何域文件, 只被各域 preload。
 ##
 ## static 化说明: 原为实例方法用 `get_tree()`, static 后改 `Engine.get_main_loop()`,
-## 与 MCPDevTools 的 `_delayed_restart` 同一手法。`Engine.get_main_loop() as SceneTree`
+## 与 MCPDevToolsEditor 的 `_delayed_restart` 同一手法。`Engine.get_main_loop() as SceneTree`
 ## 在无 main loop 时得到 null, 与原 `var tree := get_tree()` 的空判等价。
 
 ## 当前正在编辑的场景根节点(编辑器模式)或运行中场景(运行时模式)。
@@ -28,3 +28,13 @@ static func edited_root() -> Node:
 		return EditorInterface.get_edited_scene_root()
 	var tree := Engine.get_main_loop() as SceneTree
 	return tree.current_scene if tree else null
+
+
+## 以调试模式启动指定场景(等效 F5)。编辑器专属 API 收口在此, 主服务器文件因导出需零
+## 编辑器标识符, 只能经 _mod("MCPEditorEnv") 间接调用。
+static func play_custom_scene(path: String) -> void:
+	EditorInterface.play_custom_scene(path)
+
+
+static func stop_playing_scene() -> void:
+	EditorInterface.stop_playing_scene()

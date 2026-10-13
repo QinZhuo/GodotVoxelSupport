@@ -34,10 +34,7 @@ class_name MCPDevServer extends Node
 ##      故三个模块一律不声明 class_name。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
-const MCPToolMeta := preload("res://addons/DEVFramework/MCP/MCPToolMeta.gd")
 const MCPArgCheck := preload("res://addons/DEVFramework/MCP/MCPArgCheck.gd")
-const MCPScriptSync := preload("res://addons/DEVFramework/MCP/MCPScriptSync.gd")
-const MCPToolAudit := preload("res://addons/DEVFramework/MCP/MCPToolAudit.gd")
 ## 输出整形层(序列化转义兜底 + 统一输出上限截断)。与其它 preload 的区别: 它既不注册工具也不
 ## 提供协议端点, 而是**全部工具共用的一道关口**, 详见该文件顶部注释。
 const MCPFormat := preload("res://addons/DEVFramework/MCP/MCPFormat.gd")
@@ -58,27 +55,34 @@ const MCPFormat := preload("res://addons/DEVFramework/MCP/MCPFormat.gd")
 ##                      —— get_game_logs / get_game_errors 复用日志捕获器, 游戏进程侧漏注入时
 ##                         它们显式返回"日志捕获器未就绪"(这条是显式的, 不会静默)
 ##   MCPDevTools        register + set_eval_ctx_provider(provider)
-##                      —— game_eval / auto_verify 的新鲜度闸门要用 _mode 与游戏启动时刻。
-##                         漏注入**不报错**, 守卫静默全放行且运行期错误捕获不到, 症状是
-##                         "game_eval 的问题查不出来"
+##                      —— eval_code(运行时可用的唯一开发辅助工具)的新鲜度闸门要用 _mode 与
+##                         游戏启动时刻。漏注入**不报错**, 守卫静默全放行且运行期错误捕获不到。
+##                         **导出安全**: restart_editor / script_status 已拆到 MCPDevToolsEditor
+##   MCPDevToolsEditor  register(仅编辑器侧)
+##                      —— restart_editor(EditorInterface) / script_status(MCPScriptSync), 含
+##                         编辑器引用, 不进导出包解析图
 ##   MCPProjectTools    register + set_session_facts_provider(provider)
-##   MCPScreenshotTools **没有 register**: take_screenshot 的默认模式 text 必须经本文件的
-##                      _call_runtime_proxy 转发到游戏进程(内部挂 _pending / debugger_plugin),
-##                      静态化不了。它只暴露 spec()(desc/schema 单副本) + capture_editor_side(),
-##                      由本文件在 _register_runtime_tools 里那一处注册点调用。
+##   MCPScreenshotTools **没有 register**: 只暴露 spec()(desc/schema 单副本) + color_opts(),
+##                      **导出安全**; take_screenshot 的注册点在主文件 _register_game_play_tools,
+##                      text/game 模式经 _call_runtime_proxy 转发到游戏进程(挂 _pending/debugger_plugin)。
+##   MCPScreenshotEditor register 无关: 编辑器专属的 editor/scene 像素捕获(EditorInterface),
+##                      经 _mod 按需加载, 不进导出包解析图。
 ##   MCPEditorEnv       **不是工具域**: 跨域共享的编辑器环境辅助, 无 register 也不注册工具。
 ##                      它原本是本文件的实例方法 _edited_root(), 被三个域同时用, 不属于任何
 ##                      单一域, 所以提到共享层而不是让每域留一份私有副本(副本分叉的症状从
 ##                      调用栈看不出根因)。
+## **导出安全是硬约束**: 本文件是 autoload, 正式包里也会被解析。GDScript 的标识符是
+## **解析期**解析的 —— 只要本文件的解析图里出现任何编辑器类(EditorInterface /
+## EditorDebuggerPlugin / EditorUndoRedoManager ...), 哪怕是死分支, 整个 autoload
+## 在导出包启动时都会解析失败而崩溃。因此:
+##   · const preload 只允许**零编辑器引用**的模块(下面这些);
+##   · 任何含编辑器引用的模块(MCPEditorEnv / MCPDevTools / MCPProjectTools /
+##     MCPResourceTools / MCPSceneTools / MCPScreenshotTools / MCPScriptSync ...)
+##     一律改成在编辑器/开发分支内用 `_mod(name)` **按需动态编译**, 绝不进解析图。
+##   · 判据回归: 对本文件做 `Select-String "Editor[A-Z]"` 不应命中任何**代码行**(注释除外)。
 const MCPCodeIndex := preload("res://addons/DEVFramework/MCP/MCPCodeIndex.gd")
-const MCPEditorEnv := preload("res://addons/DEVFramework/MCP/MCPEditorEnv.gd")
-const MCPDevTools := preload("res://addons/DEVFramework/MCP/MCPDevTools.gd")
 const MCPFileTools := preload("res://addons/DEVFramework/MCP/MCPFileTools.gd")
 const MCPLogTools := preload("res://addons/DEVFramework/MCP/MCPLogTools.gd")
-const MCPProjectTools := preload("res://addons/DEVFramework/MCP/MCPProjectTools.gd")
-const MCPResourceTools := preload("res://addons/DEVFramework/MCP/MCPResourceTools.gd")
-const MCPSceneTools := preload("res://addons/DEVFramework/MCP/MCPSceneTools.gd")
-const MCPScreenshotTools := preload("res://addons/DEVFramework/MCP/MCPScreenshotTools.gd")
 const MCPTestTools := preload("res://addons/DEVFramework/MCP/MCPTestTools.gd")
 const MCPUITools := preload("res://addons/DEVFramework/MCP/MCPUITools.gd")
 const MCPValidateTools := preload("res://addons/DEVFramework/MCP/MCPValidateTools.gd")
@@ -113,6 +117,15 @@ const SETTING_PORT := "dev_framework/mcp/port"
 const SETTING_TOKEN := "dev_framework/mcp/token"
 const SETTING_MAX_OUTPUT_CHARS := "dev_framework/mcp/max_output_chars"
 const SETTING_LOG_TOOL_RESULTS := "dev_framework/mcp/log_tool_results"
+
+## ------- 运行时服务器(导出包/独立运行)配置 -------
+## 勾选 runtime_enabled 后, **导出包/独立运行的进程**(非编辑器构建)会复用
+## dev_framework/mcp/port 同一个端口开服务器。工具**自动注册**: 凡能在运行时编译运行的框架
+## 工具域(日志/文件/校验/测试/代码索引)与运行时宿主工具(截图/UI 交互/游戏日志/用例)全部注册,
+## **唯独不含 eval**(game_eval/auto_verify 依赖编辑器类, 且发布包开放 eval 等于分发 RCE)。
+## 为何复用端口: 编辑器进程与 F5 游戏进程是两个进程, 无法同时绑同一 127.0.0.1:port, 故运行时
+## 服务器**只在非编辑器构建里起**(F5 时由编辑器那台服务器负责, 游戏进程仅走调试线桥接)。
+const SETTING_RUNTIME_ENABLED := "dev_framework/mcp/runtime_enabled"
 
 ## 统一输出上限默认值(字符)。超限则**截断**返回并附续读提示, 而非整条拒绝。
 ##
@@ -228,8 +241,10 @@ var _tool_schemas := {} # 工具名 -> inputSchema。tools/list 要的是数组(
 	# 注册(先注册的后覆盖), 校验就会拿错 schema 且毫无征兆。故两份索引分开存, 各按各的形状用。
 var _mode := MODE_EDITOR # editor / runtime
 
-## 编辑器模式: 指向 MCPDebuggerPlugin(由 plugin.gd 注入)
-var debugger_plugin: MCPDebuggerPlugin = null
+## 编辑器模式: 指向 MCPDebuggerPlugin(由 plugin.gd 注入)。
+## **类型刻意是 Object 而非 MCPDebuggerPlugin**: 后者 extends EditorDebuggerPlugin, 若在此写
+## 具体类型注解, 解析期会去加载该编辑器类 → 导出包解析失败(见文件顶部导出安全约束)。
+var debugger_plugin: Object = null
 ## 编辑器模式: 游戏进程 MCP 桥接是否就绪(收到 dev_mcp:ready)
 var _game_ready := false
 ## 当前游戏调试会话的启动时刻(unix 秒); 0 = 没有游戏在运行。
@@ -271,27 +286,39 @@ func _ready() -> void:
 		# 这里仅登记 instance, 不自动启动, 避免与插件开关产生端口/生命周期冲突。
 		# 顺带把自己登记为"不可热重载"(见文件顶部 B 条): 原地重载本文件会终止 HTTP 服务器,
 		# 且之后所有工具都调不到。登记后 MCPScriptSync._guard_editor 会先分流、显式阻止并
-		# 指引重启, 而不是静默重载把整条 MCP 通道关掉。
-		MCPScriptSync.register_unreloadable(get_script().resource_path, "承载 MCP HTTP 服务器")
+		# 指引重启, 而不是静默重载把整条 MCP 通道关掉。MCPScriptSync 含编辑器引用, 故走 _mod。
+		_mod("MCPScriptSync").register_unreloadable(get_script().resource_path, "承载 MCP HTTP 服务器")
 		return
-	# 游戏进程: 仅注册调试线消息捕获器, 供编辑器经 EngineDebugger wire 调用运行时工具。
-	# 不开启任何端口; 正常手动运行/发布版无调试线, 捕获器注册后无消息到达, 无副作用。
+	# 非编辑器进程(开发期游戏进程 / 独立运行 / 导出包)。
 	if not _enabled:
 		return
-	_mode = MODE_RUNTIME
-	# 游戏侧新鲜度基准(见 MCPScriptSync.guard_eval)。必须在游戏进程内自己记一份 ——
-	# 编辑器侧的同名变量由会话回调赋值, 游戏进程没有那些回调, 漏设会让判据退化成
-	# "无基准=全部放行", 等于闸门失效。取 autoload 就绪时刻而非调试线就绪时刻:
-	# autoload 先于主场景加载, 取早了不会误报(加载时读到的就是磁盘最新版本)。
+	# 新鲜度基准(见 MCPScriptSync.guard_eval)。必须在游戏进程内自己记一份, 取 autoload 就绪
+	# 时刻而非调试线就绪时刻: autoload 先于主场景加载, 取早了不会误报。
 	_game_started_at = int(Time.get_unix_time_from_system())
 	_logger = MCPLogger.new()
 	OS.add_logger(_logger)
-	_register_runtime_tools()
-	# 防御: 若本单例被实例化多次/热重载等导致 capture 已注册, 跳过而非崩溃
-	if not EngineDebugger.has_capture(DEBUGGER_PREFIX):
-		EngineDebugger.register_message_capture(DEBUGGER_PREFIX, _on_debugger_message)
-	# 通知编辑器侧桥接已就绪(仅在调试线激活时有意义, 未连接时 send_message 无害)
-	EngineDebugger.send_message(DEBUGGER_PREFIX + ":ready", [])
+	_mode = MODE_RUNTIME
+	# (1) 开发期桥接: "由编辑器启动的游戏进程"注册调试线工具(不占端口)。含 game_eval/auto_verify
+	#     —— 该进程用的是编辑器二进制, MCPDevTools 可解析。
+	if _is_editor_build():
+		_register_game_play_tools(true)
+		# 防御: 若本单例被实例化多次/热重载等导致 capture 已注册, 跳过而非崩溃
+		if not EngineDebugger.has_capture(DEBUGGER_PREFIX):
+			EngineDebugger.register_message_capture(DEBUGGER_PREFIX, _on_debugger_message)
+		# 通知编辑器侧桥接已就绪(仅在调试线激活时有意义, 未连接时 send_message 无害)
+		EngineDebugger.send_message(DEBUGGER_PREFIX + ":ready", [])
+	# (2) 导出包/独立运行: 注册共享域 + 游戏操作工具(不含 eval), 勾选时复用同一端口开服。
+	#     未勾选则不开端口 —— 无入口、零暴露(runtime_enabled 默认 false)。
+	elif bool(ProjectSettings.get_setting(SETTING_RUNTIME_ENABLED, false)):
+		_register_runtime_domains()
+		_start_runtime_server()
+
+
+## 是否"编辑器构建"(即: 编辑器进程本身, 或由编辑器启动的游戏进程)。导出模板为 false。
+## 用特征标签而非 is_editor_hint: 后者在 F5 游戏进程里是 false, 但该进程用的仍是编辑器二进制
+## (实测 os_has_editor=true / class_ei=true), 编辑器类可解析、调试线可用。判据收敛在此一处。
+static func _is_editor_build() -> bool:
+	return OS.has_feature("editor")
 
 
 ## 游戏进程: 处理编辑器经调试线发来的工具调用消息。
@@ -508,17 +535,14 @@ func _exit_tree() -> void:
 func start() -> void:
 	if not _enabled or _http:
 		return
-	_http = MCPTcpHttpServer.new()
-	var err := _http.listen(_port)
+	var err := _start()
 	if err != OK:
 		printerr("MCPDevServer: 监听端口 %d 失败 (错误码 %d)。已自动跳过, AI 助手将无法连接。" % [_port, err])
-		_http = null
 		return
 	# 只在**监听成功**后才认领 owner: 绑定失败还标记成"该我监听", 会让自愈反复重试
 	# 一个根本轮不到自己的端口。
 	_owner = self
-	_http.request_received.connect(_on_request)
-	# 工具名清单不打: 49 个名字会占满日志, 而它是静态的, 客户端随时能用 tools/list 查。
+	# 工具名清单不打: 几十个名字会占满日志, 而它是静态的, 客户端随时能用 tools/list 查。
 	LogTool.log("MCP", "MCP 服务器已开启(%s): http://127.0.0.1:%d/mcp, 已注册 %d 个工具" % [_mode, _port, _tool_defs.size()])
 
 
@@ -533,6 +557,31 @@ func stop() -> void:
 
 func is_running() -> bool:
 	return _http != null and _http.is_listening()
+
+
+## ------- 运行时服务器(导出包/独立运行) -------
+## 非编辑器进程勾选 runtime_enabled 后开的一个端口: 与编辑器服务器共用同一套协议实现与
+## 同一套工具注册机制, 工具由 _register_runtime_domains 自动注册(共享域含 eval_code, 游戏操作
+## 工具不含 game_eval/auto_verify)。
+func _start_runtime_server() -> void:
+	# 复用编辑器同一端口设置: 非编辑器构建里该端口空闲(编辑器进程不在), 不另设端口。
+	_port = int(ProjectSettings.get_setting(SETTING_PORT, 8931))
+	var err := _start()
+	if err != OK:
+		push_error("[MCP] 运行时服务器监听 127.0.0.1:%d 失败(错误码 %d)" % [_port, err])
+		return
+	print("[MCP] 运行时服务器已启动: http://127.0.0.1:%d/ (%d 个工具)" % [_port, _tool_defs.size()])
+
+
+## 监听并接管请求(与编辑器 start() 的区别: 不认领 _owner/不做日志, 供运行时端口复用)。
+func _start() -> Error:
+	_http = MCPTcpHttpServer.new()
+	var err := _http.listen(_port, "127.0.0.1")
+	if err != OK:
+		_http = null
+		return err
+	_http.request_received.connect(_on_request)
+	return OK
 
 
 ## ------- 工具注册 -------
@@ -613,28 +662,62 @@ func _reset_tools() -> void:
 
 func _register_editor_tools() -> void:
 	_reset_tools()
-	_register_validate_tools()
-	_register_log_tools()
+	_register_shared_domains()
+	_register_editor_only_domains()
+	_register_game_play_tools(true)
+	_audit_tools()
+
+
+## ======= 域注册 =======
+##
+## 分三层, 单一事实来源:
+##   shared      编辑器与运行时**都可用**(全部导出安全) —— _register_shared_domains
+##   editor_only 仅编辑器(依赖 EditorInterface / 编辑器会话) —— _register_editor_only_domains
+##   game_play   游戏操作宿主工具(截图/UI 交互/游戏日志/用例) —— _register_game_play_tools
+## 新增一个"运行时也能用"的域只改 _register_shared_domains 一处。这正是把共享域从原先
+## "编辑器侧散在 _register_* + 运行时侧另抄一份清单"收敛成单一列表的原因: 两份清单必然漂移,
+## 而漂移的症状是"某工具在编辑器有、在发布版悄悄没有"。
+
+## 注册"编辑器与运行时都可用"的域。走 _mod: 编辑器侧热重载, 运行时侧经 FileAccess/
+## ResourceLoader 取 pck 内版本 —— 两条路径同一份代码。
+func _register_shared_domains() -> void:
+	var log_tools: Variant = _mod("MCPLogTools")
+	log_tools.bind_logger(_logger)
+	log_tools.register(_add_tool)
+	_mod("MCPValidateTools").register(_add_tool)
+	_mod("MCPFileTools").register(_add_tool)
+	_mod("MCPTestTools").register(_add_tool)
+	_mod("MCPCodeIndex").register(_add_tool)
+	# eval_code 的上下文(mode / 游戏启动时刻 / 日志捕获器)是实例状态, 域文件拿不到, 经 provider
+	# 注入。漏注入不报错, 守卫会静默全放行且运行期错误捕获不到 —— 症状是"eval 的问题查不出来"。
+	var dev_tools: Variant = _mod("MCPDevTools")
+	dev_tools.set_eval_ctx_provider(_eval_ctx_provider)
+	dev_tools.register(_add_tool)
+
+
+## 注册**编辑器专属**的域与工具(依赖 EditorInterface / 编辑器会话), 不进导出包解析图。
+func _register_editor_only_domains() -> void:
 	_register_scene_tools()
 	_register_project_tools()
-	_register_run_tools()
-	_register_dev_tools()
-	_register_file_tools()
-	_register_game_play_tools()
-
-	## 域文件注册。放在各 _register_* 之后: 域文件不认识本服务器, 只能靠传入 _add_tool 完成
-	## 注册, 所以它们的工具统一排在主文件工具之后。
-	_mod("MCPCodeIndex").register(_add_tool)
-	# eval_code 的运行时上下文(mode / 游戏启动时刻 / 日志捕获器)全是实例状态, 域文件拿不到,
-	# 经 provider 注入。**游戏进程侧也必须注入**(见 _register_runtime_tools): 那边的 game_eval
-	# 等宿主工具根本不走 register(), 漏注入时守卫会静默全放行且运行期错误完全捕获不到,
-	# 两种都不报错, 只表现为"game_eval 的问题查不出来"。
-	var dev_tools: Variant = _mod("MCPDevTools")
-	dev_tools.set_eval_ctx_provider(func(): return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger})
-	dev_tools.register(_add_tool)
+	# restart_editor / script_status(依赖编辑器类); eval_code 留在导出安全的 MCPDevTools 里。
+	_mod("MCPDevToolsEditor").register(_add_tool)
 	_mod("MCPResourceTools").register(_add_tool)
+	_register_run_tools()
+	_register_refresh_tool()
 
-	_audit_tools()
+
+## eval 运行上下文(见 _register_shared_domains)。方法引用即 Callable, 避免三处各写一份 lambda。
+func _eval_ctx_provider() -> Dictionary:
+	return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger}
+
+
+## 会话事实(get_project_info / get_editor_activity 用), 现取现用(理由见 _register_project_tools)。
+func _session_facts_provider() -> Dictionary:
+	return {
+		"mcp_running": is_running(),
+		"game_running": _has_game_session(),
+		"bridge_ready": _has_game_session() and _game_ready,
+	}
 
 
 ## ======= 契约自检 =======
@@ -666,25 +749,6 @@ func _audit_tools() -> void:
 
 ## ------- 工具实现 =======
 
-## -- 脚本/资源验证 --
-## desc / schema / handler 已全部搬进 MCPValidateTools.register —— 契约单副本。
-func _register_validate_tools() -> void:
-	_mod("MCPValidateTools").register(_add_tool)
-
-
-## -- 日志/错误 --
-## 日志类工具的进程归属**只由工具名决定**, 不由参数决定: 本函数注册的这一对只读编辑器进程
-## 自己的缓冲, 游戏进程的一律 get_game_*/clear_game_*。这条判据与"旧的 source=auto 三档"
-## 为何要收掉的历史理由已搬进 MCPLogTools 顶部, 留一份在这里只会与域文件各说各话而漂移。
-func _register_log_tools() -> void:
-	# 游戏进程侧的 get_game_logs / get_game_errors / clear_game_errors / clear_game_logs
-	# 也复用 MCPLogTools 的底层件, 所以**两个进程都要注入捕获器**。漏注入时那几个工具会
-	# 显式返回"日志捕获器未就绪"(不是静默失效), 见 MCPLogTools.bind_logger 的注释。
-	var log_tools: Variant = _mod("MCPLogTools")
-	log_tools.bind_logger(_logger)
-	log_tools.register(_add_tool)
-
-
 ## -- 场景树 / 节点 + 场景编辑 --
 ## 原先分两组注册(读: _register_scene_tools, 写: _register_scene_edit_tools), 现合并为一次
 ## MCPSceneTools.register: 9 个工具同属一个域, 拆成两次调用只会让"一个域一次注册"出现两种
@@ -701,12 +765,7 @@ func _register_scene_tools() -> void:
 ## 反而会邀请 game_control 去抢占一个正在运行的会话。
 func _register_project_tools() -> void:
 	var project_tools: Variant = _mod("MCPProjectTools")
-	project_tools.set_session_facts_provider(func() -> Dictionary:
-		return {
-			"mcp_running": is_running(),
-			"game_running": _has_game_session(),
-			"bridge_ready": _has_game_session() and _game_ready,
-		})
+	project_tools.set_session_facts_provider(_session_facts_provider)
 	project_tools.register(_add_tool)
 
 
@@ -736,31 +795,14 @@ func _register_run_tools() -> void:
 		_call_verify_fix)
 
 
-## -- 开发辅助(重载编辑器/求值/设置) --
-## 原先这个函数是个混装大组(restart_editor / refresh_tools / run_tests / script_status /
-## eval_code / open_scene / set_main_scene / project_setting / save_all / reimport /
-## create_resource / get_resource_info)。拆分后只剩两个留在这里:
-##   - refresh_tools 要重跑 _register_editor_tools 整棵注册树, 并读 _tool_defs /
-##     _tool_audit_issues / _schema_fingerprint(), 全是注册表自身状态, 域文件拿不到也不该拿;
-##   - run_tests 属测试域, 已拆进 MCPTestTools。
-## 其余: eval_code / script_status / restart_editor -> MCPDevTools(见 _register_editor_tools);
-## 7 个资源与项目设置类工具 -> MCPResourceTools。
-func _register_dev_tools() -> void:
+## -- 刷新工具注册表 --
+## refresh_tools 要重跑 _register_editor_tools 整棵注册树, 并读 _tool_defs / _tool_audit_issues /
+## _schema_fingerprint(), 全是注册表自身状态, 域文件拿不到也不该拿, 故留在主文件。
+func _register_refresh_tool() -> void:
 	_add_tool("refresh_tools",
 		"手动重建 MCP 工具注册表(免重启编辑器), 响应含工具数、schema_fingerprint 与契约自检结果。**判定'是否真的生效': 跨次对比 schema_fingerprint** —— 指纹不变即工具表没变。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 客户端缓存的旧 tools/list 不会自动刷新, 需在 IDE 侧重连 MCP 才更新; 在此之前, 以 tools/list 直查服务器为准, 勿把会话开始时的快照当权威。【重要: 适用范围】改动 **MCP 目录下任一域脚本**(MCPResourceTools / MCPSceneTools 等: 新增或修改工具、注解名单、入参构造、handler)时有效 —— 本工具会先把域脚本缓存换成磁盘版本, 再按路径动态注册, 免重启生效。**唯一例外是 MCPDevServer.gd 自身**: 运行实例的方法体不会被热替换, 必须重建服务器实例(禁用再启用 DEVFramework 插件, 或 restart_editor); 该情况下本工具仍返回成功但注册表原样不变 —— 正是靠 schema_fingerprint 不变来识别这种'假成功'。",
 		MCPToolSchema.no_arg(),
 		_call_refresh_tools)
-
-	# run_tests 已搬进 MCPTestTools —— 为何编辑器侧只跑进程无关用例, 见该文件。
-	_mod("MCPTestTools").register(_add_tool)
-
-
-## -- 文件操作 --
-## desc / schema / handler 与路径守卫(guard_write_path)全部搬进 MCPFileTools。
-## "写类工具统一带 dry_run"的使用约定说明也一并搬走 —— 留一份在这里只会与域文件
-## 各说一份而漂移。
-func _register_file_tools() -> void:
-	_mod("MCPFileTools").register(_add_tool)
 
 
 ## ======= MCP 协议处理 =======
@@ -1100,16 +1142,22 @@ func _handle_jsonrpc(req: Dictionary, proto: String = PROTOCOL_VERSION) -> Dicti
 		# 注意 resources/read 的成功与失败**都**放在 result 里(失败时带 isError + content),
 		# 而不是走 JSON-RPC error: 规范两种都允许, 而这里选 result 是因为"uri 不对"属于
 		# 换掉 uri 就能自纠错的问题, 与 tools/call 的处理方式保持一致。
+		# **只在编辑器构建提供**: MCPResourceTools 含编辑器引用, 导出包不可 _mod 它。
 		"resources/list":
+			if not _is_editor_build():
+				return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result({"resources": []}, proto, true)}
 			return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result(
-				{"resources": MCPResourceTools.list_resources()}, proto, true)}
+				{"resources": _mod("MCPResourceTools").list_resources()}, proto, true)}
 		"resources/read":
+			if not _is_editor_build():
+				return {"jsonrpc": "2.0", "id": req_id, "result": _decorate_result(
+					MCPResult.for_protocol(_err_validation("运行时模式不提供静态资源", "仅在编辑器模式可用")), proto, true)}
 			var rparams: Variant = req.get("params", {})
 			var rdict: Dictionary = rparams if rparams is Dictionary else {}
 			# 成功与失败都在 result 里(失败时是 _err_validation, 自带 content+isError),
 			# 故两条路径都要过 for_protocol: 失败那条同样带 text/is_error。
 			return {"jsonrpc": "2.0", "id": req_id,
-				"result": _decorate_result(MCPResult.for_protocol(MCPResourceTools.read_resource(str(rdict.get("uri", "")))), proto, true)}
+				"result": _decorate_result(MCPResult.for_protocol(_mod("MCPResourceTools").read_resource(str(rdict.get("uri", "")))), proto, true)}
 		"ping":
 			return {"jsonrpc": "2.0", "id": req_id, "result": {}}
 		# 声明支持 4 个级别却什么都不做, 比不声明更糟: 模型会据此以为 debug/info 日志已被
@@ -1209,8 +1257,11 @@ func _safe_call_handler(handler: Callable, arguments: Dictionary) -> Dictionary:
 	if _logger and _logger.get_error_count() > err_before:
 		var outcome := _collect_runtime_error(err_before)
 		# 全部命中忽略模式(如 UID 缓存重建期的噪音)时不附加诊断: 模式表与判定都在 MCPDevTools
-		if MCPDevTools.is_all_ignored(outcome, MCPDevTools.get_ignored_error_patterns()):
-			return result
+		# (含编辑器引用, 导出包不加载) —— 只在编辑器构建里做忽略判定, 否则直接附加诊断。
+		if _is_editor_build():
+			var dev_tools: Variant = _mod("MCPDevTools")
+			if dev_tools.is_all_ignored(outcome, dev_tools.get_ignored_error_patterns()):
+				return result
 		var base: Dictionary = result
 		var new_text := str(base.get("text", "")) + "\n[警告] 执行过程中捕获运行期错误:\n%s" % outcome
 		base["text"] = new_text
@@ -1443,13 +1494,15 @@ func _call_take_screenshot(args: Dictionary) -> Dictionary:
 		# 运行时模式: 直接处理
 		return await _runtime_take_screenshot(args)
 
-	# editor / scene 两模式只取编辑器进程自己的像素, 整段搬进了 MCPScreenshotTools
+	# editor / scene 两模式只取编辑器进程自己的像素, 整段搬进了 MCPScreenshotEditor
 	# (含 SubViewport 渲染、frame_post_draw 那三条禁令、颜色处理 auto 判定与 1280 降采样)。
 	# 本函数必须留在主文件的只有上面 text/game 那段: 它要 _call_runtime_proxy 与
 	# _runtime_take_screenshot, 两者都依赖 _pending / debugger_plugin, 静态化不了。
 	# 那边**刻意不叫 _call_take_screenshot**: 跨文件同名会让"按函数名取实现"(grep、审计切源码)
 	# 有机会取到错误那一份, 域文件那边把理由写全了。
-	return await MCPScreenshotTools.capture_editor_side(capture_type, args)
+	if not Engine.is_editor_hint():
+		return _fail("editor/scene 截图仅在编辑器进程可用")
+	return await _mod("MCPScreenshotEditor").capture_editor_side(capture_type, args)
 
 
 func _call_run_game(args: Dictionary) -> Dictionary:
@@ -1469,7 +1522,7 @@ func _call_run_game(args: Dictionary) -> Dictionary:
 				"传入 scene 参数后重试。")
 	# uid:// → res://。解析失败时模块会先重扫重建 UID 缓存再重试一次, 因为编辑器重启后
 	# 第一次启动必然撞上缓存未就绪 —— 那正是"改代码 → restart_editor → 验证"的第一个动作
-	var scene := await MCPScriptSync.resolve_scene_path(raw)
+	var scene: String = await _mod("MCPScriptSync").resolve_scene_path(raw)
 	if scene.is_empty():
 		return _err_validation("无法把%s解析为项目内资源路径: %s" % [source, raw],
 			"确认该资源已导入; 也可绕过 uid 解析 —— 直接传 res:// 路径形式。")
@@ -1481,7 +1534,7 @@ func _call_run_game(args: Dictionary) -> Dictionary:
 		return _fail("不是有效场景文件: %s(类型: %s)" % [scene, scene_res.get_class() if scene_res else "null"])
 	# 以调试模式启动(等效编辑器 F5): 编辑器自动建立 EngineDebugger 调试线,
 	# 游戏进程内的 autoload 注册消息捕获器并回发 ready, 之后运行时工具经调试线可用。
-	EditorInterface.play_custom_scene(scene)
+	_mod("MCPEditorEnv").play_custom_scene(scene)
 	var ready := await _wait_game_ready(15.0)
 	if not ready:
 		return _ok("已启动游戏(场景=%s), 但调试线 %d 秒内未就绪, 稍后重试运行时工具。" % [scene, int(15.0)])
@@ -1493,7 +1546,7 @@ func _call_stop_game(_args: Dictionary) -> Dictionary:
 		return _fail("仅在编辑器模式可停止游戏")
 	if debugger_plugin == null or not debugger_plugin.has_active_session():
 		return _fail("当前没有运行中的游戏")
-	EditorInterface.stop_playing_scene()
+	_mod("MCPEditorEnv").stop_playing_scene()
 	_game_ready = false
 	return _ok("已停止游戏")
 
@@ -1506,7 +1559,7 @@ func _call_auto_verify(args: Dictionary) -> Dictionary:
 	var scene := VariantTool.get_string(args, "scene")
 	# 自动接管: 已运行的游戏先停止再重跑(本工具自行管理启停, 对齐 Playwright 等托管生命周期工具惯例)。
 	if _has_game_session():
-		EditorInterface.stop_playing_scene()
+		_mod("MCPEditorEnv").stop_playing_scene()
 		_game_ready = false
 		var waited := 0.0
 		while _has_game_session() and waited < 5.0:
@@ -1745,18 +1798,33 @@ func _wait_game_ready(timeout_sec: float = 15.0) -> bool:
 
 ## ======= 运行时工具(游戏进程内原生执行) =======
 
-func _register_runtime_tools() -> void:
-	# 仅游戏进程首次进入时清空(editor 进程已由 _register_editor_tools 清空并注册了编辑/项目工具,
+## 非编辑器(导出包/独立运行)进程的工具注册: 共享域 + 游戏操作宿主工具。
+## 复用 _register_shared_domains(含 eval_code)保证与编辑器**同一份共享域清单**; 游戏操作工具传
+## include_eval=false, 故不含 game_eval/auto_verify(依赖编辑器类)。仅勾选 runtime_enabled 时调用。
+func _register_runtime_domains() -> void:
+	_reset_tools()
+	_register_shared_domains()
+	_register_game_play_tools(false)
+	_audit_tools()
+
+
+## 注册"游戏操作宿主工具"(截图 / UI 交互 / 游戏日志 / 游戏用例)。三个调用场景:
+##   · 编辑器进程: _register_editor_tools 追加在编辑工具之后(include_eval=true);
+##   · 开发期游戏进程(F5): _ready 里注册(include_eval=true, 供调试线 game_eval 用);
+##   · 导出/独立运行: _register_runtime_domains 里注册(include_eval=false)。
+## include_eval=false 时**不注册 game_eval / auto_verify** —— 它们依赖 MCPDevTools(含编辑器类),
+## 导出包不能加载, 且发布包开放 eval 等于分发 RCE。
+func _register_game_play_tools(include_eval: bool = true) -> void:
+	# 仅首次进入时清空(editor 进程已由 _register_editor_tools 清空并注册了编辑/项目工具,
 	# 这里只能追加 runtime 工具, 不能 reset 否则会清掉前面分组的注册)。
 	if _tool_handlers.is_empty():
 		_reset_tools()
-	# 游戏进程侧同样要注入日志捕获器: get_game_logs / get_game_errors / clear_game_errors /
-	# clear_game_logs 复用 MCPLogTools 的底层件, 漏注入时它们显式返回"日志捕获器未就绪"。
+	# 绑定日志捕获器: get_game_logs / get_game_errors / clear_game_* 复用 MCPLogTools 的底层件。
 	MCPLogTools.bind_logger(_logger)
-	# eval ctx provider: 游戏侧的 game_eval / auto_verify / 轮询探针都经 MCPDevTools.eval_code,
-	# 而新鲜度闸门要用 _mode 与游戏启动时刻、日志捕获器。漏注入不报错, 但守卫会静默全放行且
-	# 运行期错误完全捕获不到 —— 症状是"game_eval 的问题查不出来"。
-	MCPDevTools.set_eval_ctx_provider(func(): return {"mode": _mode, "game_started_at": _game_started_at, "logger": _logger})
+	if include_eval:
+		# eval ctx provider: game_eval / auto_verify / 轮询探针都经 MCPDevTools.eval_code, 新鲜度闸门
+		# 要用 _mode 与游戏启动时刻、日志捕获器。本分支只在编辑器构建里走到, 故 _mod 安全。
+		_mod("MCPDevTools").set_eval_ctx_provider(_eval_ctx_provider)
 	# 排在 simulate_click 之前注册: 使用顺序就是"先查后点", 工具表按此顺序排能让 AI
 	# 先看到定位手段再看到执行手段。
 	_register_game_play_tool("get_interactables",
@@ -1787,18 +1855,19 @@ func _register_runtime_tools() -> void:
 	# 一份 —— 两处各写必然漂移, 而 desc 漂移不会编译报错, 只在客户端表现为"参数说明对不上"。
 	# 两个 handler 都要留在主文件: _runtime_take_screenshot 要 Node 上下文(get_viewport/get_tree),
 	# _call_take_screenshot 的 text/game 分支要 _call_runtime_proxy(内部挂 _pending/debugger_plugin)。
-	var _shot_spec := MCPScreenshotTools.spec()
+	var _shot_spec: Variant = _mod("MCPScreenshotTools").spec()
 	_register_game_play_tool(_shot_spec["name"],
 		_shot_spec["desc"],
 		_shot_spec["schema"],
 		_runtime_take_screenshot,
 		_call_take_screenshot)
 
-	_register_game_play_tool("game_eval",
-		"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。【副作用】执行的是**任意 GDScript 代码**并会先热重载游戏脚本: 可改运行状态(血量/场景/存档)或停掉游戏, 故不可自动重试; 纯查询类需求优先用 take_screenshot(capture_type='text') 或 get_game_logs。可return返回值。支持await: 代码含await时等待协程完成后回传最终结果(超时协程继续后台执行, timeout_ms 上限见参数)。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。【新鲜度闸门】引擎不热重载游戏进程, 所以改过 .gd 后执行只会得到旧代码的无效结果。本工具会先自动热重载, 再按两类原因拒绝执行(error_category=stale_code): ①该脚本在游戏里已有既存实例(引擎不允许热替换实例类型)——消息会给出具体脚本与节点路径; ②该脚本是全局类(class_name)——实测全局类引用不随脚本缓存刷新, 且游戏进程无 EditorInterface 无法刷全局类表。因此改过 .gd 后仍需 game_control(action=start) 重启再验证。",
-		{"type": "object", "properties": {"code": MCPToolSchema.code_arg(), "timeout_ms": MCPToolSchema.code_timeout_arg(), "auto_resume": {"type": "boolean", "description": "可选: 游戏处于断点暂停时先自动 game_control(action=continue) 再执行(默认 false —— 默认不自动跳过, 以免掩盖真错误; 确认只是瞬态暂停时可传 true)"}}},
-		MCPDevTools._call_eval_code,
-		func(args): return await _call_game_eval_proxy(args))
+	if include_eval:
+		_register_game_play_tool("game_eval",
+			"在游戏进程执行GDScript代码, 可访问游戏场景树(get_tree()/get_node()/get_viewport()等), 读运行状态/改变量/触发逻辑。【副作用】执行的是**任意 GDScript 代码**并会先热重载游戏脚本: 可改运行状态(血量/场景/存档)或停掉游戏, 故不可自动重试; 纯查询类需求优先用 take_screenshot(capture_type='text') 或 get_game_logs。可return返回值。支持await: 代码含await时等待协程完成后回传最终结果(超时协程继续后台执行, timeout_ms 上限见参数)。get_node相对路径基于eval实例, 访问场景节点用绝对路径/root/场景名/子路径或get_tree().current_scene.get_node(...)。【新鲜度闸门】引擎不热重载游戏进程, 所以改过 .gd 后执行只会得到旧代码的无效结果。本工具会先自动热重载, 再按两类原因拒绝执行(error_category=stale_code): ①该脚本在游戏里已有既存实例(引擎不允许热替换实例类型)——消息会给出具体脚本与节点路径; ②该脚本是全局类(class_name)——实测全局类引用不随脚本缓存刷新, 且游戏进程无 EditorInterface 无法刷全局类表。因此改过 .gd 后仍需 game_control(action=start) 重启再验证。",
+			{"type": "object", "properties": {"code": MCPToolSchema.code_arg(), "timeout_ms": MCPToolSchema.code_timeout_arg(), "auto_resume": {"type": "boolean", "description": "可选: 游戏处于断点暂停时先自动 game_control(action=continue) 再执行(默认 false —— 默认不自动跳过, 以免掩盖真错误; 确认只是瞬态暂停时可传 true)"}}},
+			_mod("MCPDevTools")._call_eval_code,
+			func(args): return await _call_game_eval_proxy(args))
 
 	_register_game_play_tool("run_game_tests",
 		"在**游戏进程**里跑需要游戏进程的用例(Scripts/Test/ 下声明 needs_game_process() 返回 true 的用例; 依赖 MonitorGame/场景树/真实时间轴)。发射即返回+读进度: 首次调用启动, 之后反复调用读同一份报告直到 running=false(不要带 filter 中途重启)。与编辑器侧的 run_tests 互补: run_tests 会把这些用例列为 skipped, 两类合起来才是全量。需游戏已运行(game_control start)。",
@@ -1837,19 +1906,13 @@ func _register_runtime_tools() -> void:
 		MCPLogTools._call_clear_errors,
 		func(args): return await _call_runtime_proxy("clear_game_logs", args))
 
-	_register_game_play_tool("auto_verify",
-		"自动验证闭环: 启动场景后按 operations 序列模拟玩家行为, 每步后增量查错。【副作用: 会接管用户正在玩的游戏】若已有游戏在运行, 本工具会**先将其停止**再启动本工具指定的场景, 结束后再停掉游戏 —— 用户手头的游戏进程会被中断且不会自动恢复。执行前先用 get_editor_activity 确认没有正在进行的调试。操作各字段格式见 operations 参数(不在此复述); 其中 poll 的探测期 eval 出错**不计入**失败判定。retries>0 时曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration 是单次总时长上限, 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
-		MCPToolSchema.auto_verify(),
-		_runtime_auto_verify,
-		func(args): return await _call_auto_verify(args))
+	if include_eval:
+		_register_game_play_tool("auto_verify",
+			"自动验证闭环: 启动场景后按 operations 序列模拟玩家行为, 每步后增量查错。【副作用: 会接管用户正在玩的游戏】若已有游戏在运行, 本工具会**先将其停止**再启动本工具指定的场景, 结束后再停掉游戏 —— 用户手头的游戏进程会被中断且不会自动恢复。执行前先用 get_editor_activity 确认没有正在进行的调试。操作各字段格式见 operations 参数(不在此复述); 其中 poll 的探测期 eval 出错**不计入**失败判定。retries>0 时曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration 是单次总时长上限, 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
+			MCPToolSchema.auto_verify(),
+			_runtime_auto_verify,
+			func(args): return await _call_auto_verify(args))
 
-	# 游戏进程侧自检: 这里注册的是 runtime 工具子集, 与编辑器侧完整集合不同 —— 名单里若有
-	# 本模式不存在的名字, 只有各自自检才抓得到。
-	# 用 _mode 判定而非无条件执行: 编辑器侧经 _register_game_play_tools 也会走到这里, 若
-	# 同样跑一次就会与 _register_editor_tools 末尾的全量自检重复告警(内容完全相同的两次
-	# 打印), 而编辑器侧那次才是权威的全量结果。
-	if _mode == MODE_RUNTIME:
-		_audit_tools()
 
 
 ## 递归收集可见节点信息(运行时模式, 游戏进程内坐标天然正确)
@@ -2165,7 +2228,7 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 		"max_width": VariantTool.get_int(args, "max_width", ScreenshotTool.DEFAULT_MAX_WIDTH),
 		"capture_type": "game",
 	}
-	shot_opts.merge(MCPScreenshotTools.color_opts(args))
+	shot_opts.merge(_mod("MCPScreenshotTools").color_opts(args))
 	var shot: Dictionary = await ScreenshotTool.capture(viewport, shot_opts)
 	if not shot.get("ok", false):
 		return _fail(str(shot.get("error", "截图失败")))
@@ -2260,7 +2323,7 @@ func _runtime_auto_verify(args: Dictionary) -> Dictionary:
 					step["status"] = "action_error"
 					step["message"] = str(r3.get("text", ""))
 			"eval":
-				var r4: Dictionary = await MCPDevTools._call_eval_code({"code": str(op.get("code", ""))})
+				var r4: Dictionary = await _mod("MCPDevTools")._call_eval_code({"code": str(op.get("code", ""))})
 				step["result"] = str(r4.get("text", ""))
 				if r4.get("is_error", false):
 					step["status"] = "action_error"
@@ -2343,7 +2406,7 @@ func _poll_until(op: Dictionary, deadline: int) -> bool:
 	var start := Time.get_ticks_msec()
 	var poll_deadline := mini(deadline, start + timeout_ms)
 	while Time.get_ticks_msec() < poll_deadline:
-		var r: Dictionary = await MCPDevTools._call_eval_code({"code": code})
+		var r: Dictionary = await _mod("MCPDevTools")._call_eval_code({"code": code})
 		if not r.get("is_error", false):
 			if _eval_returned_true(str(r.get("text", ""))):
 				return true
@@ -2361,12 +2424,6 @@ func _eval_returned_true(text: String) -> bool:
 
 
 ## ======= 编辑器模式的运行时工具转发(经 EngineDebugger 调试线) =======
-
-func _register_game_play_tools() -> void:
-	# 运行时工具(游戏操作/截图): 由 _register_runtime_tools 统一注册,
-	# _register_game_play_tool 按 _mode 分流 handler(editor 代理转发 / runtime 就地执行)。
-	_register_runtime_tools()
-
 
 ## 编辑器进程: 解除游戏断点暂停(等效编辑器的 Continue 按钮)
 ##
@@ -2503,7 +2560,7 @@ func _normalize_wire_result(result: Dictionary, _tool_name: String) -> Dictionar
 ## 所以判定统一交给游戏侧的 guard_eval —— 它会先尝试热重载, 再按"有既存实例"
 ## 与"是全局类"两类原因分别上报(后者是引擎限制, 游戏进程刷不了全局类表)。
 func _call_game_eval_proxy(args: Dictionary) -> Dictionary:
-	var precheck := MCPDevTools.precheck_eval_code(VariantTool.get_string(args, "code"))
+	var precheck: String = _mod("MCPDevTools").precheck_eval_code(VariantTool.get_string(args, "code"))
 	if precheck != "":
 		return _err_validation("game_eval 被编辑器侧预检拦截: %s" % precheck, "修正代码后重新调用 game_eval(语法错误无法通过重试解决, 需修改代码)")
 	## auto_resume: 调用方明确要求时先解除断点暂停再执行(默认不开, 避免掩盖真错误)

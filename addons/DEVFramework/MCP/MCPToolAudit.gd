@@ -168,7 +168,7 @@ static func audit_declared_registrations(registered: Dictionary) -> Array[String
 ##     那个方法, GDScript 的静态检查不报这种"跨脚本方法缺失";
 ##   · 只在 tools/call 真正执行到那一行时才炸 "Function not found", 表现为某一个工具
 ##     单独失效, 同批次其它工具全部正常。
-## 真实一次: MCPDevServer 调 MCPScreenshotTools.capture_editor_side(), 而域文件里当时只有
+## 真实一次: MCPDevServer 调 MCPScreenshotEditor.capture_editor_side(), 而域文件里当时只有
 ## _call_take_screenshot —— 静态全绿, 运行时才炸。
 ##
 ## 因此本项检查的是**纯 grep 事实**(调用的名字在目标文件的顶层成员表里没有), 不含任何

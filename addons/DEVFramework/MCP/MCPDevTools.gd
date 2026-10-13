@@ -3,15 +3,17 @@ extends RefCounted
 
 ## ======= 开发辅助域 =======
 ##
-## 从 MCPDevServer 拆出的工具域, 收录"在编辑器/宿主进程里就地执行开发动作"这一类能力:
-## restart_editor(重启编辑器) / script_status(脚本新鲜度诊断) / eval_code(进程内求值)。
+## 从 MCPDevServer 拆出的工具域, 收录"在宿主进程里就地执行开发动作"的能力。**本文件必须导出安全**
+## (运行时服务器要在导出包里注册 eval_code), 故:
+##   · 只留 eval_code(唯一运行时可用的开发辅助工具);
+##   · restart_editor / script_status 依赖 EditorInterface / MCPScriptSync, 已拆到 MCPDevToolsEditor。
 ##
 ## 依赖方向与 MCPCodeIndex / MCPFileTools 一致, 严格单向: 本文件**不引用** MCPDevServer,
 ## 也不持有任何服务器状态, 只依赖:
 ##   - MCPResult      响应封装
 ##   - MCPToolSchema  请求 schema 工厂
-##   - MCPScriptSync  新鲜度判据 + 脚本状态比对
 ##   - VariantTool    全局 class_name, 入参读取
+## (新鲜度守卫所需的 MCPScriptSync **不 preload**: 它含编辑器引用, 只在编辑器构建里经 load 条件加载。)
 ## 注册靠"把 _add_tool 当 Callable 传进来"完成, 所以连服务器的类型都不需要认识。
 ##
 ## ## eval_code 为什么需要一份"注入的上下文", 而它不是状态
@@ -42,7 +44,8 @@ extends RefCounted
 ##
 ## ## eval_code 的热重载边界(危险面, 别改坏)
 ##
-## eval_code 执行前会过 MCPScriptSync.guard_eval, 编辑器侧那条路径对**磁盘有改动的每一个
+## eval_code 执行前会过 MCPScriptSync.guard_eval(**仅编辑器构建**: 导出包无热重载、且不能加载
+## MCPScriptSync, 故跳过守卫), 编辑器侧那条路径对**磁盘有改动的每一个
 ## .gd** 做 ResourceLoader.load(..., CACHE_MODE_REPLACE)。这个集合里包含 MCPDevServer.gd
 ## 自己 —— 而 MCPDevServer.gd 正承载 HTTP 服务器(_http), 原地重载它会终止服务器, 之后端口
 ## 不再监听、且无法靠 MCP 工具自救(见 MCPDevServer 顶部第 3 条注释)。这不是本文件引入的,
@@ -53,13 +56,11 @@ extends RefCounted
 ## **必须带 @tool 且不声明 class_name**, 两条都是踩过的坑, 详见 MCPDevServer 顶部注释。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
-const MCPScriptSync := preload("res://addons/DEVFramework/MCP/MCPScriptSync.gd")
 
-## 模式标识。直接取 MCPScriptSync 的常量而不另抄一份: 那里的注释已写明"与
-## MCPDevServer.MODE_* 对齐; 放在本模块以避免反向依赖", 本域沿用同一事实来源,
-## 免得第三份字面量各自漂移。
-const MODE_EDITOR := MCPScriptSync.MODE_EDITOR
-const MODE_RUNTIME := MCPScriptSync.MODE_RUNTIME
+## 模式标识。**本文件必须导出安全**(运行时服务器要注册 eval_code), 故不能 preload 含编辑器引用的
+## MCPScriptSync; 这两个字面量与 MCPScriptSync.MODE_* / MCPDevServer.MODE_* 取值一致。
+const MODE_EDITOR := "editor"
+const MODE_RUNTIME := "runtime"
 
 ## eval 上下文提供器: 无参 Callable, 返回 {mode, game_started_at, logger}。
 ##
@@ -83,34 +84,19 @@ static func set_eval_ctx_provider(provider: Callable) -> void:
 
 ## ======= 域注册入口 =======
 ##
-## 由 MCPDevServer._register_dev_tools() 调用一次。add_tool 是服务器 `_add_tool` 的
-## Callable, 签名 (name, desc, input_schema, handler)。
+## 由 MCPDevServer 调用: 编辑器侧经 _register_dev_tools() 调本 register + MCPDevToolsEditor.register;
+## 运行时(导出包)侧只调本 register(eval_code 是唯一运行时可用的开发辅助工具)。
+## add_tool 是服务器 `_add_tool` 的 Callable, 签名 (name, desc, input_schema, handler)。
 ##
-## [param eval_ctx] 可选: 见 set_eval_ctx_provider。漏传时只有编辑器侧仍能正确工作
-## (见文件头"为什么不能推导")。
+## **restart_editor / script_status 已拆到 MCPDevToolsEditor**(它们依赖 EditorInterface /
+## MCPScriptSync, 导出包解析不了)。本文件因此保持零编辑器标识符。
+##
+## eval 上下文经 set_eval_ctx_provider() 单独注入(不在本函数参数里), 服务器在注册前调它。
 ##
 ## handler 一律 static(不用 lambda): MCPToolAudit 靠 handler.get_method() 拿函数名再去源码里
 ## 切函数体做入参一致性自检, lambda 注册会让 get_method() 返回 "<anonymous lambda>", 那批工具
 ## 将**静默跳过**自检 —— 详见 MCPCodeIndex 开头与 MCPToolAudit 开头。
-static func register(add_tool: Callable, eval_ctx: Callable = Callable()) -> void:
-	if eval_ctx.is_valid():
-		set_eval_ctx_provider(eval_ctx)
-
-	add_tool.call("restart_editor",
-		"重启编辑器: 修改框架代码(addons/DEVFramework/**.gd)后调用, 以统一全局类脚本代次并让新逻辑生效(原重扫逻辑已由编辑器自动处理, 不再需要)。**总会先保存全部已打开的场景再重启**(EditorInterface.restart_editor(true), 故未保存的改动不会丢)。延迟默认1秒触发以保证本响应先送达; 重启期间MCP连接短暂断开(端口不变+插件自启自动恢复), 客户端等待数秒后重试调用即可继续。",
-		{"type": "object", "properties": {
-			"delay_sec": {"type": "number", "description": "延迟触发的秒数(留时间送达本响应), 默认 1.0, 上限 10"}
-		}},
-		_handle_restart_editor)
-
-	add_tool.call("script_status",
-		"检查脚本'磁盘内容'与'编辑器进程已加载版本'是否一致。eval_code 执行前会自动热重载(CACHE_MODE_REPLACE 换掉脚本缓存 + fs.scan() 刷新全局类表, 约1.8s, 远快于 restart_editor), 本工具用于诊断该热重载是否生效, 或主动核查指定脚本; 每个路径返回 state=in_sync/changed/not_loaded/missing 与两侧哈希。【范围】只反映本进程; 游戏进程同类问题由 game_eval 在游戏侧自行判定。",
-		{"type": "object", "properties": {
-			"paths": {"type": "array", "description": "要检查的 res:// 脚本路径数组(如 [\"res://Scripts/Const/GameConstants.gd\"]); 单个也可传 path", "items": {"type": "string"}},
-			"path": {"type": "string", "description": "可选: 单个脚本路径(与 paths 二选一)"}
-		}},
-		_handle_script_status)
-
+static func register(add_tool: Callable) -> void:
 	add_tool.call("eval_code",
 		"在编辑器进程执行GDScript(查值/调工具/验证逻辑)。【副作用】执行的是**任意 GDScript 代码**, 副作用不可预估: 可写文件/改项目设置/加载关闭场景/停掉正在运行的游戏。纯查询类需求优先用其它只读工具, 不要图省事用本工具当计算器。可return返回值, print进get_logs。支持await: 代码含await时等待协程完成后回传最终结果(超时协程继续后台执行, timeout_ms 上限见参数)。包装为Node方法, 可用get_tree()/get_node()。缩进自动归一化。字符串内换行用char(10)勿用'\\n'(JSON会拆行)。",
 		{"type": "object", "properties": {"code": MCPToolSchema.code_arg(), "timeout_ms": MCPToolSchema.code_timeout_arg()}, "required": ["code"]},
@@ -123,64 +109,6 @@ static func register(add_tool: Callable, eval_ctx: Callable = Callable()) -> voi
 ## (与 MCPScriptSync._rescan_fs 同一手法)。
 static func _tree() -> SceneTree:
 	return Engine.get_main_loop() as SceneTree
-
-
-## restart_editor: 重启编辑器(原重扫逻辑不再需要; 修改框架代码后重启以统一全局类脚本代次)
-static func _handle_restart_editor(args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return MCPResult.fail("仅在编辑器模式可用")
-	var delay_sec: float = clampf(VariantTool.get_float(args, "delay_sec", 1.0), 0.0, 10.0)
-	# 场景清单必须在触发前取: 重启后这段代码不会再跑, 而"到底存了哪些场景"正是重启之后
-	# 无法复得的证据。把清单写进响应, "自动保存"才是可核对的承诺而不是一句说法。
-	var open_scenes := PackedStringArray(EditorInterface.get_open_scenes())
-	var names := PackedStringArray()
-	for p in open_scenes:
-		names.append(String(p).get_file())
-	# 延迟触发: 让本工具的确认响应先送达客户端, 否则进程即刻退出客户端只能收到超时
-	_delayed_restart(delay_sec)
-	return MCPResult.ok_with_meta(
-		"编辑器将在 %.1f 秒后重启(已安排保存全部 %d 个打开的场景: %s)。重启期间 MCP 连接短暂断开(端口不变+插件自启自动恢复), 客户端等待数秒后重试调用即可继续。" % [delay_sec, open_scenes.size(), ", ".join(names)],
-		{"open_scene_count": open_scenes.size(), "open_scenes": Array(names)})
-
-
-## 延迟重启。保存**交给引擎**: restart_editor(true) 内部先走保存再重启。
-##
-## 原先刻意拆成 save_all_scenes() + restart_editor(false), 理由是"不让 Godot 再走一遍保存,
-## 免得保存失败弹框把重启卡在原地"。该理由不成立: 两条路径最终调的是同一个
-## EditorNode::_save_all_scenes(), 拆开写并不产生任何隔离 —— 弹框照样弹, 卡住照样卡。
-## 反而让"保存是否发生"这件事多出一个由本工具负责、却无失败回报的环节。
-static func _delayed_restart(delay_sec: float) -> void:
-	var loop := _tree()
-	if delay_sec > 0.0 and loop != null:
-		await loop.create_timer(delay_sec).timeout
-	EditorInterface.restart_editor(true)
-
-
-## 编辑器进程: 比对脚本"磁盘内容"与"编辑器已加载版本"。
-## 本工具只读比对, 不改任何状态 —— 它是诊断入口, 而非同步手段(同步由 eval 自动完成)。
-## 判据实现与 eval 的自动同步共用 MCPScriptSync, 避免"工具说一致"与"实际一致"分叉。
-## 只反映本进程; 游戏进程的同类问题由 game_eval 在游戏侧自行判定。
-static func _handle_script_status(args: Dictionary) -> Dictionary:
-	var paths: Array = VariantTool.get_array(args, "paths").duplicate()
-	var single := VariantTool.get_string(args, "path")
-	if not single.is_empty():
-		paths.append(single)
-	if paths.is_empty():
-		return MCPResult.fail("需提供 path 或 paths(要检查的 res:// 脚本路径)")
-	var items: Array = []
-	var changed_count := 0
-	for p in paths:
-		var path := str(p)
-		# 单个脚本的状态比对(只读)。转发给 MCPScriptSync —— 与 eval 的自动同步同一判据,
-		# 避免"本工具说一致"与"eval 实际按不一致处理"出现分叉。
-		var item := MCPScriptSync.script_status_of(path)
-		if item.get("state", "") == "changed":
-			changed_count += 1
-		items.append(item)
-	var out := {"items": items, "changed": changed_count, "total": items.size()}
-	if changed_count > 0:
-		out.hint = "有 %d 个脚本与编辑器已加载版本不一致(编辑器跑的是旧代码)。eval_code 会自动热重载; 若仍出现此提示说明自动热重载未生效, 请用 restart_editor 重启编辑器。" % changed_count
-	return MCPResult.ok_json(out)
 
 
 ## resolve_eval_ctx 必须拿到**真值**的三个键。列成常量而非散在各处写字符串,
@@ -275,7 +203,13 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 	# (原因与实测过程见 MCPScriptSync._guard_runtime)。
 	# 两个 eval 入口共用这一个判定点, 内部按模式走各自的判据:
 	# 编辑器侧比内容哈希, 游戏侧比 mtime 并区分"有既存实例"与"是全局类"两种阻塞原因。
-	var guard := await MCPScriptSync.guard_eval(mode, game_started_at, tree)
+	# **新鲜度守卫只在编辑器构建(编辑器/游戏进程)有意义**: 导出包无热重载, 且 MCPScriptSync
+	# 含编辑器引用不能 preload。故按特征标签分流 —— 非编辑器构建直接跳过守卫(ok=true)。
+	var guard := {"ok": true}
+	if Engine.is_editor_hint() or OS.has_feature("editor"):
+		var sync: Variant = load("res://addons/DEVFramework/MCP/MCPScriptSync.gd")
+		if sync != null:
+			guard = await sync.guard_eval(mode, game_started_at, tree)
 	if not bool(guard.get("ok", true)):
 		# category 由守卫按失败原因判定(编辑器侧=磁盘脚本语法错, 游戏侧=跑的是旧代码)。
 		# 这两者的正确恢复动作完全相反(改代码 vs 重启进程), 统一归为一类会让调用方

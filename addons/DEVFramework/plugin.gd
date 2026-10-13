@@ -39,10 +39,14 @@ func _enter_tree() -> void:
 	_register("dev_framework/mcp/token", TYPE_STRING, "")
 	_register("dev_framework/mcp/max_output_chars", TYPE_INT, MCPDevServer.DEFAULT_MAX_OUTPUT_CHARS)
 	_register("dev_framework/mcp/log_tool_results", TYPE_BOOL, false)
+	# 运行时服务器: 勾选后**导出包/独立运行**进程复用同一端口(mcp/port), 自动注册运行时
+	# 可编译的全部框架工具(不含 eval)。默认 false —— 导出包不应默认暴露任何本地端口。
+	_register("dev_framework/mcp/runtime_enabled", TYPE_BOOL, false)
 	# 先开启 MCP 调试服务器, 避免后续初始化(工具菜单/DefTable)出错时阻断调试链路
 	_set_mcp_enabled(true)
-	# 导出时剔除 DevMCP autoload（编辑器专用脚本不进正式包，避免解析崩溃）
-	_pack_mcp_filter = _PackMcpFilter.new(EXPORT_AUTOLOAD_KEY)
+	# 导出过滤: 未勾选 runtime_enabled 时, 正式包剔除 DevMCP autoload(零 MCP 入口);
+	# 勾选时保留, 让导出包能起 runtime 端口。
+	_pack_mcp_filter = _PackMcpFilter.new(EXPORT_AUTOLOAD_KEY, "dev_framework/mcp/runtime_enabled")
 	add_export_plugin(_pack_mcp_filter)
 	# 所有编辑器工具统一由 Tool 目录下 extends EditorScript 的脚本自动注册
 	EditorScriptMenuTool.register(self)
@@ -201,19 +205,23 @@ func _register(name: String, type: int, default) -> void:
 	ProjectSettings.set_initial_value(name, default)
 
 
-## 导出过滤器：正式打包时临时移除 DevMCP autoload，结束后恢复。
-## 背景：MCPDevServer.gd 引用仅编辑器存在的 EditorInterface/EditorUndoRedoManager，
-## 若被打进正式包会导致该 autoload 解析失败而崩溃。本过滤器在导出一时移除它，
-## 平时测试不受影响（autoload 仍在）。
+## 导出过滤器：未勾选运行时服务器时, 正式包临时移除 DevMCP autoload，结束后恢复。
+## 背景：DevMCP(MCPDevServer.gd) 现已是"导出安全"的单服务器(编辑器/运行时双模式), 其自身
+## 解析图不再含任何编辑器类; 但默认仍不希望导出包带 MCP 入口 —— 仅当用户勾选
+## dev_framework/mcp/runtime_enabled 时才保留 autoload, 让导出包能起 runtime 端口。
 class _PackMcpFilter extends EditorExportPlugin:
 	var _autoload_key: String
+	var _runtime_key: String
 	var _removed := false
 	var _prev: Variant
 
-	func _init(autoload_key: String) -> void:
+	func _init(autoload_key: String, runtime_key: String) -> void:
 		_autoload_key = autoload_key
+		_runtime_key = runtime_key
 
 	func _export_begin(_features: PackedStringArray, _is_debug: bool, _path: String, _flags: int) -> void:
+		if bool(ProjectSettings.get_setting(_runtime_key, false)):
+			return
 		if ProjectSettings.has_setting(_autoload_key) and ProjectSettings.get_setting(_autoload_key) != null:
 			_prev = ProjectSettings.get_setting(_autoload_key)
 			ProjectSettings.set_setting(_autoload_key, null)
