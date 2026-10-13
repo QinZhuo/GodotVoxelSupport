@@ -3,10 +3,11 @@ extends RefCounted
 
 ## ======= 体素**程序化生成** MCP 工具集(项目侧 provider) =======
 ##
-## 由 MCPRuntimeServer 按项目设置 `dev_framework/mcp/runtime_providers` 加载并调用 `register`。
+## 由 DEVFramework 的 MCPDevServer 按项目设置 `dev_framework/mcp/providers` 加载并调用 `register`,
+## 注册为**游戏操作工具**: 编辑器经调试线转发到游戏进程, 运行时(导出包/独立运行)就地执行。
 ##
 ## 【只做生成, 不做"模拟人手"】不提供撤销 / 选区 / 复制粘贴 / 移动旋转 / 帧编辑 —— 那些是给人
-## 按界面的, 程序化生成用不到。保留: 新建 / 材质 / 画图元 / 查询 / 存盘。
+## 按界面的, 程序化生成用不到。保留: 新建 / 改分辨率 / 材质 / 画图元 / 查询 / 存盘。
 ##
 ## 【统一接口, 而非 N 份并列实现】三条共性各自只收在一处:
 ##   · 形状入口: 所有图元都走 **voxel_draw(ops)** 一个批量入口;
@@ -27,6 +28,11 @@ static func register(add_tool: Callable) -> void:
 			"grid_size": {"type": "integer", "description": "参考网格边长, 默认 32"},
 			"block_size": {"type": "integer", "description": "块边长(2 的幂), 默认 32"}
 		}}, _reset)
+	add_tool.call("voxel_resize",
+		"改模型分辨率(输出盒尺寸, 体素坐标范围变为 [0,size))。保留新旧尺寸交集内的体素, 超出部分丢弃。实时模式走应用可撤销命令; 无头模式裁剪 builder(其 grid 仅作参考)。",
+		{"type": "object", "properties": {
+			"size": {"type": "array", "description": "新的输出盒尺寸 [x,y,z](每轴 >= 1)", "items": {"type": "integer"}}
+		}, "required": ["size"]}, _resize)
 	add_tool.call("voxel_material",
 		"追加一个材质, 返回 ID(从 1 起; 0 恒为空气)。color / emission 用 #rrggbb 十六进制。",
 		{"type": "object", "properties": {
@@ -57,6 +63,26 @@ static func _reset(args: Dictionary) -> Dictionary:
 	var bs := VariantTool.get_int(args, "block_size", 32)
 	_b = QVoxelBuilder.new(Vector3i(g, g, g), bs)
 	return MCPResult.ok_json({"block_size": bs, "live": false})
+
+
+static func _resize(args: Dictionary) -> Dictionary:
+	var v: Variant = args.get("size", [])
+	if not (v is Array) or (v as Array).size() < 3:
+		return MCPResult.fail("size 必须是 [x,y,z]")
+	var a: Array = v
+	var size := Vector3i(int(a[0]), int(a[1]), int(a[2]))
+	if size.x <= 0 or size.y <= 0 or size.z <= 0:
+		return MCPResult.fail("size 每轴必须 >= 1")
+	var sc = _live_scene()
+	if sc != null and sc.has_method("script_resize"):
+		if not bool(sc.call("script_resize", size)):
+			return MCPResult.fail("改尺寸失败(尺寸非法或未变化)")
+		return _result({"grid_size": [size.x, size.y, size.z]})
+	var b := _builder()
+	if size == b.grid_size:
+		return MCPResult.fail("改尺寸失败(尺寸未变化)")
+	b.resize(size)
+	return _result({"grid_size": [size.x, size.y, size.z]})
 
 
 static func _material(args: Dictionary) -> Dictionary:

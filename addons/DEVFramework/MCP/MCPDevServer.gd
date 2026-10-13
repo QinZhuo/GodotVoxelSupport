@@ -127,6 +127,12 @@ const SETTING_LOG_TOOL_RESULTS := "dev_framework/mcp/log_tool_results"
 ## 服务器**只在非编辑器构建里起**(F5 时由编辑器那台服务器负责, 游戏进程仅走调试线桥接)。
 const SETTING_RUNTIME_ENABLED := "dev_framework/mcp/runtime_enabled"
 
+## ------- 项目侧 provider(项目自定义 MCP 工具域) -------
+## 项目设置列出若干 .gd 路径, 每个脚本须提供 `static func register(add_tool: Callable) -> void`,
+## 语义与框架域文件一致(框架只认机制, 项目提供内容)。工具注册为**游戏操作工具**:
+## 编辑器进程经调试线转发到游戏进程执行, 运行时(导出包/独立运行/F5 游戏进程)就地执行。
+const SETTING_PROVIDERS := "dev_framework/mcp/providers"
+
 ## 统一输出上限默认值(字符)。超限则**截断**返回并附续读提示, 而非整条拒绝。
 ##
 ## 取值 24000 的推导(两级约束, 取更严的那个):
@@ -302,6 +308,7 @@ func _ready() -> void:
 	#     —— 该进程用的是编辑器二进制, MCPDevTools 可解析。
 	if _is_editor_build():
 		_register_game_play_tools(true)
+		_register_providers()
 		# 防御: 若本单例被实例化多次/热重载等导致 capture 已注册, 跳过而非崩溃
 		if not EngineDebugger.has_capture(DEBUGGER_PREFIX):
 			EngineDebugger.register_message_capture(DEBUGGER_PREFIX, _on_debugger_message)
@@ -612,16 +619,23 @@ var _mod_cache := {}
 func _mod(name: String) -> Variant:
 	if _mod_cache.has(name):
 		return _mod_cache[name]
-	var path := "%s/%s.gd" % [MCP_DIR, name]
+	var gd: Variant = _script_from_disk("%s/%s.gd" % [MCP_DIR, name])
+	_mod_cache[name] = gd
+	return gd
+
+
+## 按当前磁盘源码重编译一个脚本(绕过 ResourceLoader 缓存)。域文件与项目 provider 共用: 于是
+## "改脚本 → refresh_tools"对两者同样生效, 无需重启编辑器。读不到源码(导出包二进制脚本)则
+## 回退 ResourceLoader 缓存版本 —— 宁可旧, 不可坏。
+func _script_from_disk(path: String) -> Variant:
 	var src := FileAccess.get_file_as_string(path)
 	if src.is_empty():
 		return ResourceLoader.load(path)
 	var gd := GDScript.new()
 	gd.source_code = src
 	if gd.reload() != OK:
-		push_error("[MCP] 域脚本 %s 重编译失败, 回退缓存版本" % name)
+		push_error("[MCP] 脚本 %s 重编译失败, 回退缓存版本" % path)
 		gd = ResourceLoader.load(path)
-	_mod_cache[name] = gd
 	return gd
 
 
@@ -665,6 +679,7 @@ func _register_editor_tools() -> void:
 	_register_shared_domains()
 	_register_editor_only_domains()
 	_register_game_play_tools(true)
+	_register_providers()
 	_audit_tools()
 
 
@@ -720,6 +735,35 @@ func _session_facts_provider() -> Dictionary:
 	}
 
 
+## 注册项目侧 provider(见 SETTING_PROVIDERS)。工具一律按"游戏操作工具"处理: 编辑器模式下手
+## 经调试线转发到游戏进程, 运行时模式就地执行 —— 与 simulate_click 等同一套机制, 因为 provider
+## 面向的是运行中的游戏而非编辑器。故须在**编辑器、F5 游戏进程、导出/独立运行三个分支都调**。
+##
+## 用 _script_from_disk 而非 load: provider 与域文件一样要能在"改脚本 → refresh_tools"后生效,
+## 无需重启编辑器(load 会命中 ResourceLoader 旧缓存)。
+func _register_providers() -> void:
+	var paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
+	if not (paths is Array or paths is PackedStringArray):
+		return
+	var editor := _mode == MODE_EDITOR
+	for p in paths:
+		var path := str(p).strip_edges()
+		if path.is_empty():
+			continue
+		var script: Variant = _script_from_disk(path)
+		if script == null or not (script is GDScript) or not script.has_method("register"):
+			push_warning("[MCP] provider 脚本无效(需提供 static register(add_tool)): %s" % path)
+			continue
+		if editor:
+			# 编辑器侧: 每个工具包成"转发到游戏进程"的宿主工具, handler 即游戏侧实现
+			script.register(func(name: String, desc: String, schema: Dictionary, handler: Callable) -> void:
+				_register_game_play_tool(name, desc, schema, handler,
+					func(args: Dictionary) -> Dictionary: return await _call_runtime_proxy(name, args)))
+		else:
+			# 运行时侧: 就地执行(与框架游戏操作工具同一分支)
+			script.register(_add_tool)
+
+
 ## ======= 契约自检 =======
 ##
 ## 为什么必须有: 全部工具(主文件 + 各域文件)都是手写注册, 而协议层的失败模式**全部是静默的**
@@ -741,7 +785,11 @@ func _audit_tools() -> void:
 	# 迹象。理由详见 MCPToolAudit 的扫描范围说明。
 	# registry_is_full: 只有编辑器进程注册全量工具。游戏进程只注册运行时那部分, 在那里做
 	# "名单里的工具名是否都已注册"的反向校验会把分模式注册误报成名单未同步(实测刷 33 条)。
-	_tool_audit_issues = _mod("MCPToolAudit").audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR)
+	# extra_scripts: 项目侧 provider 脚本在 MCP 目录之外, 须并入源码扫描, 否则其 handler 的
+	# 函数体切不出来, 入参一致性自检会对那批工具报"检查缺失"。
+	var provider_paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
+	var extra: Array = Array(provider_paths) if (provider_paths is Array or provider_paths is PackedStringArray) else []
+	_tool_audit_issues = _mod("MCPToolAudit").audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR, extra)
 	# 自检通过是常态, 静默即可; 只在发现问题时报警, 否则每次启动都要宣告一遍"没问题"。
 	if not _tool_audit_issues.is_empty():
 		LogTool.log("MCP", "工具契约自检发现 %d 个问题:\n  - %s" % [_tool_audit_issues.size(), "\n  - ".join(_tool_audit_issues)])
@@ -1805,6 +1853,7 @@ func _register_runtime_domains() -> void:
 	_reset_tools()
 	_register_shared_domains()
 	_register_game_play_tools(false)
+	_register_providers()
 	_audit_tools()
 
 

@@ -1624,6 +1624,17 @@ func script_stats() -> Dictionary:
 	}
 
 
+## 改当前活动模型的分辨率(输出盒尺寸)。保留新旧尺寸交集内的体素, 超出部分丢弃 —— 与对象属性
+## 面板的"尺寸"走同一条可撤销命令(_resize_model → QVoxelResizeCommand)。尺寸非法 / 未变返回 false。
+func script_resize(size: Vector3i) -> bool:
+	if session == null or session.object == null:
+		return false
+	if size.x <= 0 or size.y <= 0 or size.z <= 0 or size == session.object.grid_size:
+		return false
+	_resize_model(session.object, size)
+	return true
+
+
 ## 导出网格：把当前世界烘成三角网格，写成 glTF 2.0（`.glb`/`.gltf` 由扩展名决定）。
 ## 与"保存（.qvx）"分开：保存留的是"下次还能接着编辑"的全套，导出只留**烘出来的几何与颜色**。
 func export_mesh() -> void:

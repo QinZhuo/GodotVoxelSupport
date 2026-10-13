@@ -42,11 +42,13 @@ static var _source_cache := {}
 ## [param registry_is_full] 本次 tool_defs 是否是**全量**工具表(默认 true)。游戏进程只注册运行时
 ##   那部分工具, 此时"名单里的编辑器工具没被注册"是分模式注册的正常结果, 不是名单未同步 ——
 ##   不跳过反向校验就会在每次游戏启动时刷出几十条误报, 而误报会让自检迅速被无视(见 MCPToolMeta.audit)。
-static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_script_path: String, audit_handlers: Dictionary = {}, registry_is_full: bool = true) -> Array[String]:
+## [param extra_scripts] 项目侧 provider 脚本路径(MCP 目录之外)。它们不在锚点目录里, 不并入则其
+##   handler 的函数体切不出来, 入参一致性自检会对那批工具报"检查缺失"。
+static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_script_path: String, audit_handlers: Dictionary = {}, registry_is_full: bool = true, extra_scripts: Array = []) -> Array[String]:
 	var issues: Array[String] = []
 	# 源码缓存必须每次自检重新读: 缓存的意义只是"一次自检内读一次"(几十个工具共用一份切片),
 	# 跨自检复用会让刚改完的代码仍按旧文本判定 —— 那时报出的问题可能已经不存在, 比不报更糟。
-	_load_sources(anchor_script_path)
+	_load_sources(anchor_script_path, extra_scripts)
 	issues.append_array(MCPToolMeta.audit())
 	issues.append_array(audit_tool_name_duplicates(tool_defs))
 	issues.append_array(audit_cross_domain_calls())
@@ -70,8 +72,8 @@ static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_scri
 	return issues
 
 
-## 展开待扫描的源码: 锚点所在目录下的全部 .gd。
-static func _load_sources(anchor_script_path: String) -> void:
+## 展开待扫描的源码: 锚点所在目录下的全部 .gd, 外加项目侧 provider 脚本(在目录之外)。
+static func _load_sources(anchor_script_path: String, extra_scripts: Array = []) -> void:
 	_source_cache = {}
 	var dir_path := anchor_script_path.get_base_dir()
 	var dir := DirAccess.open(dir_path)
@@ -93,6 +95,11 @@ static func _load_sources(anchor_script_path: String) -> void:
 	names.sort()
 	for name in names:
 		_source_cache[dir_path.path_join(name)] = FileAccess.get_file_as_string(dir_path.path_join(name))
+	# provider 脚本: MCP 目录之外, 单独并入(func_body 全局按函数名搜, 与目录文件同等待遇)。
+	for p in extra_scripts:
+		var path := str(p)
+		if not path.is_empty() and not _source_cache.has(path):
+			_source_cache[path] = FileAccess.get_file_as_string(path)
 
 
 ## ======= 检查 B: 工具重名 =======

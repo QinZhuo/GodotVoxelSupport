@@ -42,6 +42,8 @@ func _enter_tree() -> void:
 	# 运行时服务器: 勾选后**导出包/独立运行**进程复用同一端口(mcp/port), 自动注册运行时
 	# 可编译的全部框架工具(不含 eval)。默认 false —— 导出包不应默认暴露任何本地端口。
 	_register("dev_framework/mcp/runtime_enabled", TYPE_BOOL, false)
+	# 项目侧 provider: 列出项目自定义 MCP 工具域的 .gd 路径(每个提供 static register(add_tool))。
+	_register("dev_framework/mcp/providers", TYPE_PACKED_STRING_ARRAY, PackedStringArray())
 	# 先开启 MCP 调试服务器, 避免后续初始化(工具菜单/DefTable)出错时阻断调试链路
 	_set_mcp_enabled(true)
 	# 导出过滤: 未勾选 runtime_enabled 时, 正式包剔除 DevMCP autoload(零 MCP 入口);

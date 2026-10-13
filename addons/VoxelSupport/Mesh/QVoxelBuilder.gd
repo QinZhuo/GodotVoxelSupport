@@ -80,6 +80,22 @@ func voxels() -> Dictionary:
 	return _voxels
 
 
+## 改参考网格尺寸：保留 [0,new_size) 内的体素、其余丢弃（与 QVoxelModel.resize_grid 同语义）。
+## 【注意】无头 builder 的 grid_size 仅作参考，之后的 put/paint 不按它裁剪（坐标可从负起）——
+## 与实时模型"写入即受网格约束"不同；本函数只保证"改尺寸时按新盒裁掉旧内容"。
+func resize(new_size: Vector3i) -> void:
+	if new_size.x <= 0 or new_size.y <= 0 or new_size.z <= 0 or new_size == grid_size:
+		return
+	grid_size = new_size
+	var kept := {}
+	for pos in _voxels:
+		var p: Vector3i = pos
+		if p.x >= 0 and p.y >= 0 and p.z >= 0 \
+				and p.x < new_size.x and p.y < new_size.y and p.z < new_size.z:
+			kept[p] = _voxels[p]
+	_voxels = kept
+
+
 # 落盘
 
 ## 构建 QVX 文档（单模型 + NODE 摆放 + HEAD.bounds，bounds 按块对齐）。
