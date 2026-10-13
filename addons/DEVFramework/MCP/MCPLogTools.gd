@@ -3,21 +3,21 @@ extends RefCounted
 
 ## ======= 日志 / 错误域 =======
 ##
-## 收录"读 / 清**本进程**日志缓冲"这一类能力: get_logs / clear_logs, 外加一个供主服务器进程侧
-## 复用的底层件 _call_collect_logs。三个函数沿用主文件里的**原名**不另造名 —— 原名引用点散在主
-## 文件多处(尤其 clear_game_errors 与 clear_game_logs 复用同一个 _call_clear_errors)。
+## 提供"读 / 清**本进程**日志缓冲"的**实现件**(handler): _call_get_logs / _call_clear_errors,
+## 外加供主服务器复用的底层件 _call_collect_logs。MCP 工具 get_logs / clear_logs **已收进
+## MCPDevServer._register_game_play_tools**(带必填 process: editor|game, 编辑器侧转发 / 运行时
+## 就地), 由它按进程调用本文件的实现 —— 故本文件不再有 register()。
 ##
-## ## 进程归属: 只由工具名决定, 不由参数决定
+## ## 进程归属: process 参数显式指定, 不做静默切换
 ##
-## 本文件注册的这一对恒读编辑器进程自己的缓冲, 游戏进程的一律 get_game_*/clear_game_*。
-## 旧实现给 get_logs 加了 source=auto 会在游戏运行时静默改读游戏缓冲 —— 编辑器侧 eval_code
-## 捕获的错误用 get_logs(kind=error) 查出来就成了游戏的错误。现已全部收掉: 跨进程只剩
-## _register_game_play_tool 的 editor lambda 一条通路。
+## 工具恒读**调用它的那个进程**的缓冲; "读游戏缓冲"由 MCPDevServer 的 editor 路由(process=game
+## → 调试线转发)完成。旧实现给 get_logs 加过 source=auto: 会在游戏运行时静默改读游戏缓冲 ——
+## 编辑器侧 eval_code 捕获的错误用 get_logs 查出来就成了游戏的错误, 且无从察觉。现改为 process
+## **必填**、缺省即报错, 杜绝"默认读错进程"。
 ##
 ## ## 依赖方向: 严格单向
 ##
-## 本文件**不引用** MCPDevServer, 也不持有服务器实例状态。注册靠"把 _add_tool 当 Callable 传
-## 进来"完成, 连服务器的类型都不需要认识。
+## 本文件**不引用** MCPDevServer, 也不持有服务器实例状态 —— 只暴露静态实现, 由主文件调用。
 ##
 ## 捕获器用 static 注入的原因: handler 签名由协议定死(只收 args), 而捕获器是 MCPDevServer 的
 ## 实例字段, 本文件既不认识它也不该自己再造一个(再造一个等于把引擎输出抄到第二个缓冲, 于是
@@ -29,10 +29,10 @@ extends RefCounted
 ##
 ## ## 主文件侧调用形式
 ##
-##   register(_add_tool)                    编辑器侧 _register_log_tools() 内
-##   bind_logger(_logger)                   两个进程各一次, 漏绑只报"未就绪"
-##   _call_collect_logs(args, is_errors)    游戏侧 get_game_logs / get_game_errors 复用
-##   _call_clear_errors(args)               clear_game_errors / clear_game_logs 的 handler
+##   bind_logger(_logger)              两个进程各一次, 漏绑只报"未就绪"
+##   _call_get_logs(args)              get_logs 的实现(读本进程缓冲, 按 kind 过滤)
+##   _call_collect_logs(args, is_err)  底层件(get_logs / 主文件超时回查错误复用)
+##   _call_clear_errors(args)          clear_logs 的实现
 ##
 ## **主文件不得保留同名函数**: MCPToolAudit.func_body 按函数名在全目录找第一个命中, 而
 ## "MCPDevServer.gd" 字典序在 "MCPLogTools.gd" 之前 —— 主文件若还留着同名的一份, 切出来的
@@ -55,28 +55,6 @@ static var _logger: MCPLogger = null
 ## 第二个缓冲 —— clear_logs 只清得掉其中一份, 这是**用户可见的语义错误**。
 static func bind_logger(logger: MCPLogger) -> void:
 	_logger = logger
-
-
-## ======= 域注册入口 =======
-##
-## 由 MCPDevServer._register_log_tools() 调用一次。add_tool 是服务器 `_add_tool` 的 Callable,
-## 签名 (name, desc, input_schema, handler)。
-
-static func register(add_tool: Callable) -> void:
-	## -- 日志/错误 --
-	add_tool.call("get_logs",
-		"【编辑器进程】获取**编辑器侧**日志/错误/警告(获取而非打印)。kind=log 取print日志; kind=warning 取push_warning警告; kind=error 取脚本错误(script_error/shader_error/stderr, 含栈追踪)。游戏进程侧请用 get_game_logs / get_game_errors —— 本工具恒读编辑器缓冲, 不会在游戏运行时被静默换成游戏日志。返回next游标作since增量拉取, 连续重复自动合并(repeat计数)节省token。",
-		MCPToolSchema.logs("200(log)/100(warning|error)", "条目", {
-			"kind": {"type": "string", "enum": ["log", "warning", "error"], "description": "获取类别, 默认 log"},
-		}),
-		_call_get_logs)
-
-	add_tool.call("clear_logs",
-		"【编辑器进程】清空**编辑器侧**日志/错误缓冲(调试复位)。scope=all 全清; scope=logs 只清print日志; scope=errors 只清错误与警告。游戏进程侧请用 clear_game_logs / clear_game_errors。",
-		{"type": "object", "properties": {
-			"scope": {"type": "string", "enum": ["all", "logs", "errors"], "description": "清理范围, 默认 all"}
-		}},
-		_call_clear_errors)
 
 
 ## ======= 实现 =======
@@ -108,9 +86,8 @@ static func _call_get_logs(args: Dictionary) -> Dictionary:
 	return result
 
 
-## 清空**本进程**的日志/错误缓冲。clear_logs 与 clear_game_errors 共用本实现: 差别只在注册于
-## 哪一侧, 跨进程转发由 _register_game_play_tool 负责。故必须是 static 且签名与 handler 一致
-## (args -> Dictionary), 不能收窄成只吃 scope 字符串, 否则那两处注册会引用不到。
+## 清空**本进程**的日志/错误缓冲(clear_logs 的进程侧实现)。跨进程转发由 MCPDevServer 的路由
+## handler(process=game)负责。签名与 handler 一致(args -> Dictionary)。
 static func _call_clear_errors(args: Dictionary) -> Dictionary:
 	var scope := VariantTool.get_string(args, "scope", "all")
 	if _logger:

@@ -6,7 +6,7 @@ extends RefCounted
 ## 由 DEVFramework 的 MCPDevServer 按项目设置 `dev_framework/mcp/providers` 加载并调用 `register`。
 ##
 ## 【只剩一个"说明"工具】建模能力已收敛到脚本侧: **优先用 `QVoxelScript`(自动分流实时/无头)
-## 或 `QVoxelBuilder`(纯无头)** 写脚本, 在 eval_code / game_eval 里执行 —— 这比固定形状的
+## 或 `QVoxelBuilder`(纯无头)** 写脚本, 在 eval_code(process="editor"|"game") 里执行 —— 这比固定形状的
 ## MCP 工具更自由, 也是 AI 更擅长的用法。故这里只留 `voxel_help`(API 说明), 不再暴露
 ## reset/material/draw/resize/info/save 等包装工具(它们都是脚本能力的子集)。
 ##
@@ -19,7 +19,7 @@ const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
 const HELP := """# 体素程序化生成 —— 用法说明
 
 ## 首选: 脚本 + QVoxelScript(全局类, 自动分流实时/无头)
-在 eval_code / game_eval 里执行:
+在 eval_code(process="editor"|"game") 里执行:
 
     QVoxelScript.new_model(Vector3i(32,32,32), 32)                 # 新建(实时=替换当前模型)
     var id := QVoxelScript.material(Color(0.8,0.5,0.3), 0.0, 0.8)  # 追加材质, 返回 id(从 1 起; 0=空气)
@@ -33,10 +33,10 @@ QVoxelScript 每个方法内部自动分流: 运行时有 QVoxelier 应用→改
 否则→无头 QVoxelBuilder。也可用 QVoxelScript.app() / QVoxelScript.builder() 自取两端。
 
 ### 在哪跑(进程决定"是否可见")
-- 想改**正在运行的应用**(看得见): 用 **game_eval**(编辑器里 eval_code 跑在编辑器进程, 摸不到游戏)。
-- 编辑器里 eval_code: QVoxelScript **不把"编辑中的场景"当实时目标**(避免改你正开着的场景),
-  一律落无头 builder; 想看得见就用 game_eval。
-- **打包运行时**: eval_code 就在游戏进程内, 直接生效、可见。
+- 想改**正在运行的应用**(看得见): 用 **eval_code(process="game")**(编辑器里 process="editor" 跑在编辑器进程, 摸不到游戏)。
+- 编辑器里 process="editor": QVoxelScript **不把"编辑中的场景"当实时目标**(避免改你正开着的场景),
+  一律落无头 builder; 想看得见就用 eval_code(process="game")。
+- **打包运行时**: 服务器就在游戏进程内, process="game" 直接生效、可见。
 
 ## 完全控制: 直接用 QVoxelBuilder(纯无头)
     var b := QVoxelBuilder.new(Vector3i(64,64,64), 32)      # (网格, 块边长)

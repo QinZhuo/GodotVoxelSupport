@@ -16,10 +16,10 @@ extends RefCounted
 ## (可见、可撤销), 否则操作无头 `QVoxelBuilder`(可直接存 .qvx)。调用方无需判断。
 ##
 ## 【进程选择决定"是否可见"】
-##   · 想改**正在运行的应用**: 用 `game_eval`(编辑器进程里 eval_code 摸不到游戏)。
-##   · 编辑器里 eval_code: 本类**不把"编辑中的场景"当实时目标**(避免改用户正开着的场景),
-##     一律落无头 builder; 想看得见就用 game_eval。
-##   · 打包运行时: eval_code 就在游戏进程内, 直接生效、可见。
+##   · 想改**正在运行的应用**: 用 `eval_code(process="game")`(编辑器进程里 process="editor" 摸不到游戏)。
+##   · 编辑器里 process="editor": 本类**不把"编辑中的场景"当实时目标**(避免改用户正开着的场景),
+##     一律落无头 builder; 想看得见就用 eval_code(process="game")。
+##   · 打包运行时: 服务器就在游戏进程内, process="game" 直接生效、可见。
 ##
 ## 【想要完全控制】直接用 `QVoxelBuilder`(纯无头, 不参与分流): 见其类文档与 voxel_help。
 ## 【形状算法】一律 `VoxelPrimitives`(与编辑器画笔同一份实现)。

@@ -24,7 +24,7 @@ static func register(add_tool: Callable) -> void:
 		_handle_restart_editor)
 
 	add_tool.call("script_status",
-		"检查脚本'磁盘内容'与'编辑器进程已加载版本'是否一致。eval_code 执行前会自动热重载(CACHE_MODE_REPLACE 换掉脚本缓存 + fs.scan() 刷新全局类表, 约1.8s, 远快于 restart_editor), 本工具用于诊断该热重载是否生效, 或主动核查指定脚本; 每个路径返回 state=in_sync/changed/not_loaded/missing 与两侧哈希。【范围】只反映本进程; 游戏进程同类问题由 game_eval 在游戏侧自行判定。",
+		"检查脚本'磁盘内容'与'编辑器进程已加载版本'是否一致。eval_code(process=editor) 执行前会自动热重载(CACHE_MODE_REPLACE 换掉脚本缓存 + fs.scan() 刷新全局类表, 约1.8s, 远快于 restart_editor), 本工具用于诊断该热重载是否生效, 或主动核查指定脚本; 每个路径返回 state=in_sync/changed/not_loaded/missing 与两侧哈希。【范围】只反映本进程; 游戏进程同类问题由 eval_code(process=game) 在游戏侧自行判定。",
 		{"type": "object", "properties": {
 			"paths": {"type": "array", "description": "要检查的 res:// 脚本路径数组(如 [\"res://Scripts/Const/GameConstants.gd\"]); 单个也可传 path", "items": {"type": "string"}},
 			"path": {"type": "string", "description": "可选: 单个脚本路径(与 paths 二选一)"}

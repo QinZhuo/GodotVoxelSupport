@@ -24,7 +24,7 @@ const READ_ONLY := [
 	# -- 验证/查询 --
 	"validate", "list_dir", "classdb_query",
 	# -- 日志/错误 --
-	"get_logs", "get_game_logs", "get_game_errors",
+	"get_logs",
 	# -- 场景观测 --
 	"get_scene_tree", "get_node_info", "get_interactables",
 	# -- 项目观测 --
@@ -74,7 +74,6 @@ const DESTRUCTIVE := [
 	# 都失效。此前漏标, 从 build() 的默认值拿到 destructiveHint=false, 与两份 description
 	# 开头的【副作用】自相矛盾。
 	"eval_code",
-	"game_eval",
 ]
 
 ## ---------------------------------------------------------------- 幂等工具
@@ -87,7 +86,7 @@ const IDEMPOTENT := [
 	# -- 会改状态但可安全重放 --
 	"save_scene", "save_all", "set_node_property", "open_scene",
 	"connect_signal", "create_resource",
-	"clear_logs", "clear_game_logs", "clear_game_errors",
+	"clear_logs",
 	"refresh_tools",
 	# -- 刻意不列 --
 	# duplicate_node: 每次生成一个 *_copy, 重放会多出一份

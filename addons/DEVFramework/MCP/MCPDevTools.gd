@@ -82,25 +82,17 @@ static func set_eval_ctx_provider(provider: Callable) -> void:
 	_eval_ctx_provider = provider
 
 
-## ======= 域注册入口 =======
+## ======= eval 实现(注册不在此) =======
 ##
-## 由 MCPDevServer 调用: 编辑器侧经 _register_dev_tools() 调本 register + MCPDevToolsEditor.register;
-## 运行时(导出包)侧只调本 register(eval_code 是唯一运行时可用的开发辅助工具)。
-## add_tool 是服务器 `_add_tool` 的 Callable, 签名 (name, desc, input_schema, handler)。
+## eval_code 的 MCP 工具注册已收进 MCPDevServer._register_game_play_tools(带必填 process):
+## 编辑器侧 process=editor 就地执行、process=game 经预检 + 调试线转发; 运行时就地执行。故本文件
+## 不再有 register()。本文件保持零编辑器标识符(restart_editor / script_status 在 MCPDevToolsEditor)。
 ##
-## **restart_editor / script_status 已拆到 MCPDevToolsEditor**(它们依赖 EditorInterface /
-## MCPScriptSync, 导出包解析不了)。本文件因此保持零编辑器标识符。
-##
-## eval 上下文经 set_eval_ctx_provider() 单独注入(不在本函数参数里), 服务器在注册前调它。
+## eval 上下文经 set_eval_ctx_provider() 单独注入(服务器在注册 eval_code 前调它)。
 ##
 ## handler 一律 static(不用 lambda): MCPToolAudit 靠 handler.get_method() 拿函数名再去源码里
 ## 切函数体做入参一致性自检, lambda 注册会让 get_method() 返回 "<anonymous lambda>", 那批工具
 ## 将**静默跳过**自检 —— 详见 MCPCodeIndex 开头与 MCPToolAudit 开头。
-static func register(add_tool: Callable) -> void:
-	add_tool.call("eval_code",
-		"在编辑器进程执行GDScript(查值/调工具/验证逻辑)。【副作用】执行的是**任意 GDScript 代码**, 副作用不可预估: 可写文件/改项目设置/加载关闭场景/停掉正在运行的游戏。纯查询类需求优先用其它只读工具, 不要图省事用本工具当计算器。可return返回值, print进get_logs。支持await: 代码含await时等待协程完成后回传最终结果(超时协程继续后台执行, timeout_ms 上限见参数)。包装为Node方法, 可用get_tree()/get_node()。缩进自动归一化。字符串内换行用char(10)勿用'\\n'(JSON会拆行)。",
-		{"type": "object", "properties": {"code": MCPToolSchema.code_arg(), "timeout_ms": MCPToolSchema.code_timeout_arg()}, "required": ["code"]},
-		_call_eval_code)
 
 
 ## ======= 开发辅助工具实现 =======
@@ -287,10 +279,9 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 		# 白费一轮。"修正代码后重试"确实有效, 但那属于改参数之后的重试, 由 recovery 承载。
 		return _attach_warning(MCPResult.err_validation(
 					"eval 执行返回: %s\n执行中捕获 %d 条运行期错误(合并后 %d 类, 前 %d 类):\n%s\n\n提示: get_node() 相对路径基于 eval 脚本实例, 找不到节点常因路径写错, 建议用绝对路径(/root/场景名/...) 或 get_tree().current_scene.get_node(...)。完整错误列表可用 %s; 重复噪音可在项目设置 dev_framework/mcp/ignored_error_patterns 配置子串忽略。" %
-			# 上面这些错误取自**本进程**的 logger 游标, 故按模式指向对应的读日志工具 ——
-			# 恒推 get_game_errors 会在编辑器侧把 AI 引去读游戏的错误缓冲, 查不到东西。
+			# 上面这些错误取自**本进程**的 logger 游标, 故按模式指向对应进程的日志。
 			[shown, runtime_errors.size(), merged.size(), max_show, "\n".join(msgs),
-				"get_game_errors" if mode == MODE_RUNTIME else "get_logs(kind=error)"],
+				"get_logs(process=game,kind=error)" if mode == MODE_RUNTIME else "get_logs(process=editor,kind=error)"],
 			"修正 eval 代码中的错误后重试"), warn)
 	return _attach_warning(MCPResult.ok("执行成功, 返回: %s" % shown), warn)
 
