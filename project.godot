@@ -49,7 +49,3 @@ enabled=PackedStringArray("res://addons/DEVFramework/plugin.cfg", "res://addons/
 [threading]
 
 worker_pool/max_threads=16.0
-
-[voxel_support]
-
-enable_dynamic_voxel=true
