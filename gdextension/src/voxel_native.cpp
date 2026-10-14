@@ -2059,7 +2059,7 @@ int64_t VoxelNative::crc32_segments(const PackedByteArray &p_data, const PackedI
 // 块内线性顺序 idx = x + y·B + z·B²（X 最快）；数值一律小端。
 //
 // 【常量单源】规范文本是 docs/QVX_FORMAT.md，运行时权威是
-// addons/VoxelSupport/Runtime/QVoxelSpec.gd —— 本文件只是它的**原生镜像**，不另立一套真值。
+// addons/VoxelSupport/Format/QVoxelSpec.gd —— 本文件只是它的**原生镜像**，不另立一套真值。
 // 跨语言共享不了编译期常量，故用"镜像 + 机器校验"代替"注释保证"：
 // test_qvox_format.gd 的 test_native_codec_id_mirror 把 QVoxelSpec.CODEC_* / CHANNEL_BYTES
 // 送进下面的原生接口，用**实现行为**反证一致性（保留值 0 必返空、SOLID 必为 bytes 字节、

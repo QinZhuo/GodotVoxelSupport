@@ -1582,7 +1582,7 @@ func _on_save_path_selected(path: String) -> void:
 # ======= 外部程序化生成接口(脚本 / 运行时 MCP) =======
 ##
 ## 供外部以**字符串方法名**调用(`scene.call("script_xxx", ...)`), 于是调用方(QVoxelMCPTools)
-## 在编译期**不需要认识 QVoxelierApp** —— 把 QVoxelier 排除出包时它也编得过。
+## 在编译期**不需要认识 QVoxelierApp**。
 ## 只放**程序化生成模型**所需: 材质 / 写格(见 QVoxelEditSession.apply_cells) / 存盘 / 统计。
 ## 编辑类操作(撤销 / 选区 / 剪贴板 / 帧)是给人按界面的, 不是脚本生成所需, 故不放这里。
 ## 每个入口都复用应用内部同一条时间线/落盘路径, 不新开第二条写入通道。

@@ -1,7 +1,7 @@
 # gdextension — VoxelSupport 原生核心 (C++ / GDExtension)
 
 体素插件原生核心：体素数据访问 / 网格生成等高性能逻辑的 C++ 实现，
-与 `addons/VoxelSupport/Runtime/` 的 GDScript 逻辑配合。
+与 `addons/VoxelSupport/` 下的 GDScript 逻辑配合。
 
 ## 目录结构
 

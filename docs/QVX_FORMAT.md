@@ -12,7 +12,7 @@
 >   导入器按扩展名分派，不共用适配器
 > - **世界存档** `QVoxelStream`：可写、脏标记、增量落盘
 >
-> 编辑器导入器（`addons/VoxelSupport/Importers/`）**同时识别 `.vox` 与 `.qvx`**，
+> 编辑器导入器（`addons/VoxelSupport/Importer/`）**同时识别 `.vox` 与 `.qvx`**，
 > 在导入面板可选四种产物：
 > - `Voxel Data Resource` → `QVoxelSource` (.res)：运行时体素数据（可破坏 / 动态修改）
 > - `Voxel Mesh` → `ArrayMesh` (.mesh)：静态网格
