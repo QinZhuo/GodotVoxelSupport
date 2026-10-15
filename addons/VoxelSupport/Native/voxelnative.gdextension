@@ -11,3 +11,4 @@ windows.debug.x86_64 = "res://addons/VoxelSupport/Native/voxelnative.windows.rel
 windows.release.x86_64 = "res://addons/VoxelSupport/Native/voxelnative.windows.release.x86_64.dll"
 linux.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelnative.linux.debug.x86_64.so"
 linux.release.x86_64 = "res://addons/VoxelSupport/Native/libvoxelnative.linux.release.x86_64.so"
+macos.release.universal = "res://addons/VoxelSupport/Native/libvoxelnative.macos.release.universal.dylib"
