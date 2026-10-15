@@ -412,12 +412,15 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	if not mesh:
 		mesh = ArrayMesh.new()
 	else:
-		if mesh.has_meta("hash") and voxels_hash == mesh.get_meta("hash"):
+		# 缓存命中需 hash 一致，且"有体素就必须已有表面"——
+		# 否则会把"空网格 + 正确 hash"（原生库曾不可用导致）当成最新版本，永远不再重建。
+		if mesh.has_meta("hash") and voxels_hash == mesh.get_meta("hash") \
+				and (voxels.is_empty() or mesh.get_surface_count() > 0):
 			return
 		mesh.clear_surfaces()
-	mesh.set_meta("hash", voxels_hash)
 
 	if voxels.size() == 0:
+		mesh.set_meta("hash", voxels_hash)
 		return
 
 	var trans_flags := VoxelMaterial.build_trans_flags(
@@ -433,6 +436,14 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 			voxels, trans_flags, sphere_subdivisions, sphere_scale, scale, SPHERE_VERTEX_BUDGET, offset)
 	else:
 		_native_arrays = NativeLoader.generate_arrays_native(voxels, trans_flags, scale, offset)
+
+	# 原生库不可用/版本不匹配时返回 {}：此时**不登记 hash** 并报错，
+	# 否则空网格会被当作最新缓存，后续导入全部短路、再也修不回来。
+	if _native_arrays.is_empty():
+		push_error("[VoxelSupport] 体素网格生成返回空（原生库 VoxelNative 不可用或版本不匹配）: %s" % root_path)
+		mesh.remove_meta("hash")
+		return
+	mesh.set_meta("hash", voxels_hash)
 
 
 ## 由块缓冲生成网格（QVX 路径的实例入口：整资产 / MeshLibrary 分项共用）。
