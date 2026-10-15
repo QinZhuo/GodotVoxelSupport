@@ -2607,5 +2607,3 @@ func _call_game_eval_proxy(args: Dictionary) -> Dictionary:
 		if bool(resumed.get("is_error", false)):
 			return resumed
 	return await _call_runtime_proxy("eval_code", args)
-
-

@@ -79,6 +79,12 @@ func _focus_enter() -> void:
 func _focus_exit() -> void:
 	pass
 
+## 应用面板显隐（[UIPanelTool.open] / [UIPanelTool.close] 调用）。
+## 默认切换自身 [member visible]；面板若本身是房间里的实体模型（关闭后本体仍需保留），
+## 重写本方法只显隐 UI 部分、保留本体。
+func apply_visibility(shown: bool) -> void:
+	visible = shown
+
 ## 当前面板是否拥有焦点（快捷键应仅在聚焦时响应）。
 func is_focus() -> bool:
 	return UITool.is_focus(self)

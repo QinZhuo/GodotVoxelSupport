@@ -81,6 +81,10 @@ func await_closed() -> bool:
 func _back() -> void:
 	close()
 
+## 应用面板显隐（[UIPanelTool.open] / [UIPanelTool.close] 调用）。默认切换自身 [member visible]。
+func apply_visibility(shown: bool) -> void:
+	visible = shown
+
 ## 当前面板是否拥有焦点（快捷键应仅在聚焦时响应）。
 func is_focus() -> bool:
 	return UITool.is_focus(self)

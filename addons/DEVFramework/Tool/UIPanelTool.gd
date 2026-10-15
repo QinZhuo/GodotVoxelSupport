@@ -14,13 +14,22 @@ extends RefCounted
 ## 参数刻意不标注类型: Control 与 Node3D 的公共成员(visible / 自定义信号)无法用单一基类表达,
 ## 只能动态派发到具体面板。
 
+## 应用面板显隐。走面板的 [method UIPanel3D.apply_visibility] / [method UIPanel.apply_visibility]，
+## 便于"本体是房间实体模型"的面板重写为只显隐 UI（缺方法的自定义面板按切换 visible 兜底）。
+static func _apply_visibility(panel, shown: bool) -> void:
+	if panel.has_method(&"apply_visibility"):
+		panel.apply_visibility(shown)
+	else:
+		panel.visible = shown
+
+
 ## 打开面板: 注册到 [UITool] 栈(含层级互斥) → [code]on_open[/code] → 显示 → 进入动画 → [code]on_opened[/code]
 static func open(panel) -> void:
 	panel._open_version += 1
 	UITool.register(panel)
 	panel.is_open = true
 	panel.on_open.emit()
-	panel.visible = true
+	_apply_visibility(panel, true)
 	if panel.show_tween:
 		await panel.show_tween.play().finished
 	if not is_instance_valid(panel):
@@ -37,7 +46,7 @@ static func close(panel) -> void:
 		await panel.show_tween.playback().finished
 	if not is_instance_valid(panel):
 		return
-	panel.visible = false
+	_apply_visibility(panel, false)
 	panel.on_closed.emit()
 
 
@@ -51,7 +60,7 @@ static func on_exit_tree(panel) -> void:
 		return
 	panel.is_open = false
 	UITool.unregister(panel)
-	panel.visible = false
+	_apply_visibility(panel, false)
 	panel.on_closed.emit()
 
 
