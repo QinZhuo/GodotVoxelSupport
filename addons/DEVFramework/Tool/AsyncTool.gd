@@ -87,6 +87,21 @@ static func await_until(done: Callable, timeout_ms: int = -1, log_name: String =
 	return true
 
 
+## 等待一个 Signal 触发一次，**带超时保护**；返回 {ok: bool, args: Array}，ok=false 表示超时（未收到）。
+## 用途：等待异步回调（如 Steam API），避免回调不来时协程永久挂起。
+static func await_signal(sig: Signal, timeout_ms: int, log_name: String) -> Dictionary:
+	var box := {"done": false, "args": []}
+	var cb := func(...args):
+		box.args = args
+		box.done = true
+	sig.connect(cb, CONNECT_ONE_SHOT)
+	await await_until(func(): return box.done, timeout_ms, log_name)
+	if not box.done:
+		safe_disconnect(sig, cb)
+		return {ok = false, args = []}
+	return {ok = true, args = box.args}
+
+
 ## 等待所有 Signal 各触发一次；内置超时保护（基于 await_until 的超时检测）。
 ## 默认内置 8000ms 超时；日志名会自动拼接等待的信号名（如 "await_signals:on_trigger_end,on_trigger_end"）。
 ## 调用方只需传入信号即可。
@@ -222,7 +237,7 @@ static var _lock_token := 0
 ## [codeblock]
 ## var entries = await AsyncTool.with_lock(&"leaderboard", func():
 ##     Steam.downloadLeaderboardEntriesForUsers(ids, handle)
-##     return await _await_signal(_scores_downloaded, 10000, "按用户下载条目")
+##     return await await_signal(_scores_downloaded, 10000, "按用户下载条目")
 ## )
 ## [/codeblock]
 static func with_lock(lock_name: StringName, action: Callable) -> Variant:
