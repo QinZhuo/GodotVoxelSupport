@@ -39,6 +39,9 @@ func _enter_tree() -> void:
 	_register("dev_framework/mcp/token", TYPE_STRING, "")
 	_register("dev_framework/mcp/max_output_chars", TYPE_INT, MCPDevServer.DEFAULT_MAX_OUTPUT_CHARS)
 	_register("dev_framework/mcp/log_tool_results", TYPE_BOOL, false)
+	# 游戏调用单次等待上限: 编辑器等游戏经调试线回包, 以及 run_tests(process=game) 的单次阻塞
+	# 共用它。默认 600s(10 分钟, 与测试硬超时对齐); 过小会截到安全下限, 过大也会截到上限。
+	_register("dev_framework/mcp/game_call_timeout_ms", TYPE_INT, MCPDevServer.DEFAULT_GAME_CALL_TIMEOUT_MS)
 	# 运行时服务器: 勾选后**导出包/独立运行**进程复用同一端口(mcp/port), 自动注册运行时
 	# 可编译的全部框架工具(不含 eval)。默认 false —— 导出包不应默认暴露任何本地端口。
 	_register("dev_framework/mcp/runtime_enabled", TYPE_BOOL, false)

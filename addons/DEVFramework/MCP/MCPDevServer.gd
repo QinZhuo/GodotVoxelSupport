@@ -82,7 +82,6 @@ const MCPFormat := preload("res://addons/DEVFramework/MCP/MCPFormat.gd")
 const MCPCodeIndex := preload("res://addons/DEVFramework/MCP/MCPCodeIndex.gd")
 const MCPFileTools := preload("res://addons/DEVFramework/MCP/MCPFileTools.gd")
 const MCPLogTools := preload("res://addons/DEVFramework/MCP/MCPLogTools.gd")
-const MCPTestTools := preload("res://addons/DEVFramework/MCP/MCPTestTools.gd")
 const MCPUITools := preload("res://addons/DEVFramework/MCP/MCPUITools.gd")
 const MCPValidateTools := preload("res://addons/DEVFramework/MCP/MCPValidateTools.gd")
 
@@ -116,12 +115,20 @@ const SETTING_PORT := "dev_framework/mcp/port"
 const SETTING_TOKEN := "dev_framework/mcp/token"
 const SETTING_MAX_OUTPUT_CHARS := "dev_framework/mcp/max_output_chars"
 const SETTING_LOG_TOOL_RESULTS := "dev_framework/mcp/log_tool_results"
+## 游戏调用单次等待上限(毫秒): 编辑器等待游戏经调试线回包(_call_runtime_proxy), 以及
+## run_tests(process=game) 的单次阻塞共用它。默认 600s(10 分钟) —— 与 TestRunner.HARD_TIMEOUT_MS
+## 对齐: 测试整体不超过 10 分钟, 故一次调用即可等到结束。见 _game_call_timeout_ms 的边界裁剪。
+const SETTING_GAME_CALL_TIMEOUT_MS := "dev_framework/mcp/game_call_timeout_ms"
+const DEFAULT_GAME_CALL_TIMEOUT_MS := 600000
+## 代理 deadline 比"游戏侧等待"多留的余量: 游戏 handler 到点返回后, 结果要经调试线回到编辑器。
+## 不留余量会与游戏侧同时到点, 表现为"结果已出但代理已放弃"。
+const _PROXY_RESPONSE_MARGIN_MS := 10000
 
 ## ------- 运行时服务器(导出包/独立运行)配置 -------
 ## 勾选 runtime_enabled 后, **导出包/独立运行的进程**(非编辑器构建)会复用
 ## dev_framework/mcp/port 同一个端口开服务器。工具**自动注册**: 凡能在运行时编译运行的框架
 ## 工具域(文件/校验/测试/代码索引)与运行时宿主工具(截图/UI 交互/日志/用例/eval)全部注册;
-## eval_code 在运行时=本进程执行(其 process 只能是 game), auto_verify 依赖编辑器类故不注册。
+## eval_code 在运行时=本进程执行(其 process 只能是 game)。
 ## 为何复用端口: 编辑器进程与 F5 游戏进程是两个进程, 无法同时绑同一 127.0.0.1:port, 故运行时
 ## 服务器**只在非编辑器构建里起**(F5 时由编辑器那台服务器负责, 游戏进程仅走调试线桥接)。
 const SETTING_RUNTIME_ENABLED := "dev_framework/mcp/runtime_enabled"
@@ -273,9 +280,6 @@ const _BREAK_SAFE_TOOLS := ["get_logs", "clear_logs"]
 ## 逐条 JSON-RPC 请求日志的开关(现场可 set, 不必重启编辑器)。
 static var _log_rpc := false
 
-## verify_fix 会话(editor 侧): 按 session_id 存验证配置, 支持 start/continue/status/abort 多会话
-var _verify_sessions: Dictionary = {}
-
 ## 最近一次工具契约自检的问题列表(空 = 通过)。由 _audit_tools 写入,
 ## 供 refresh_tools 响应回给 AI —— 否则自检结果只能翻编辑器日志, 等于没有。
 ## 工具名 -> "入参自检该切哪个 handler"。与 _tool_handlers 的差别: _tool_handlers 存的是
@@ -313,10 +317,10 @@ func _ready() -> void:
 	_logger = MCPLogger.new()
 	OS.add_logger(_logger)
 	_mode = MODE_RUNTIME
-	# (1) 开发期桥接: "由编辑器启动的游戏进程"注册调试线工具(不占端口)。含 eval_code(process=game)/auto_verify
+	# (1) 开发期桥接: "由编辑器启动的游戏进程"注册调试线工具(不占端口)。含 eval_code(process=game)
 	#     —— 该进程用的是编辑器二进制, MCPDevTools 可解析。
 	if _is_editor_build():
-		_register_game_play_tools(true)
+		_register_game_play_tools()
 		_register_providers()
 		# 防御: 若本单例被实例化多次/热重载等导致 capture 已注册, 跳过而非崩溃
 		if not EngineDebugger.has_capture(DEBUGGER_PREFIX):
@@ -356,8 +360,8 @@ func _call_runtime_tool_async(req_id: int, tool_name: String, args: Dictionary) 
 	## 长任务(游戏用例)运行期间: 需要主循环的工具会被用例拖慢, 多数会干等到超时才报错。
 	## 这里立即返回 busy, 让调用方先读进度 —— 读缓冲类工具与用例自身仍放行。
 	if _game_tests_running and tool_name != "run_tests" and not _BREAK_SAFE_TOOLS.has(tool_name):
-		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请先反复调用 run_tests(process=game) 读进度直到 running=false, 或用 game_control(action=stop) 终止用例。" % tool_name,
-			"busy", true, "run_tests(process=game)读进度至running=false后再调用; 或game_control(action=stop)终止用例")
+		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请先反复调用 run_tests(process=game, script=...) 读进度直到 running=false, 或用 game_control(action=stop) 终止用例。" % tool_name,
+			"busy", true, "run_tests(process=game, script=...)读进度至running=false后再调用; 或game_control(action=stop)终止用例")
 	elif _tool_handlers.has(tool_name):
 		result = await _tool_handlers[tool_name].call(args)
 	else:
@@ -400,7 +404,7 @@ func _on_session_started(session_id: int) -> void:
 
 ## 游戏会话结束(正常停止/崩溃/被杀)。填充所有未决请求为失败结果,
 ## 等待中的 _call_runtime_proxy 能立即读到(而不是干等超时)。
-## 注意: 填充后不能 clear(), 否则代理读不到结果会退回 20s 超时。
+## 注意: 填充后不能 clear(), 否则代理读不到结果会退回配置的超时(_game_call_timeout_ms)。
 func _on_session_stopped(session_id: int) -> void:
 	LogTool.log("MCP", "游戏调试会话已结束(session=%d)" % session_id)
 	_game_ready = false
@@ -578,7 +582,7 @@ func is_running() -> bool:
 ## ------- 运行时服务器(导出包/独立运行) -------
 ## 非编辑器进程勾选 runtime_enabled 后开的一个端口: 与编辑器服务器共用同一套协议实现与
 ## 同一套工具注册机制, 工具由 _register_runtime_domains 自动注册(共享域 + 游戏操作工具; eval_code
-## 在运行时=本进程执行, auto_verify 依赖编辑器类故不注册)。
+## 在运行时=本进程执行)。
 func _start_runtime_server() -> void:
 	# 复用编辑器同一端口设置: 非编辑器构建里该端口空闲(编辑器进程不在), 不另设端口。
 	_port = int(ProjectSettings.get_setting(SETTING_PORT, 8931))
@@ -658,7 +662,7 @@ func _script_from_disk(path: String) -> Variant:
 ## 通用游戏操作工具注册: editor 侧 handler 经调试线转发, runtime 侧就地执行。
 ## editor_handler 缺省时**自动按名生成转发 lambda**(大多数游戏操作工具就是纯转发)—— 既省样板,
 ## 也消除"忘了写转发"这类静默 bug。只有需要自定义编辑器行为(take_screenshot 多模式 / eval_code
-## 分流 / auto_verify)时才显式传 editor_handler。
+## 分流)时才显式传 editor_handler。
 func _register_game_play_tool(name: String, desc: String, schema: Dictionary, runtime_handler: Callable, editor_handler := Callable()) -> void:
 	var ehandler: Callable = editor_handler
 	if not ehandler.is_valid():
@@ -692,7 +696,7 @@ func _register_editor_tools() -> void:
 	_reset_tools()
 	_register_shared_domains()
 	_register_editor_only_domains()
-	_register_game_play_tools(true)
+	_register_game_play_tools()
 	_register_providers()
 	_audit_tools()
 
@@ -710,8 +714,8 @@ func _register_editor_tools() -> void:
 ## 注册"编辑器与运行时都可用"的域。走 _mod: 编辑器侧热重载, 运行时侧经 FileAccess/
 ## ResourceLoader 取 pck 内版本 —— 两条路径同一份代码。
 func _register_shared_domains() -> void:
-	# MCPLogTools / MCPDevTools / MCPTestTools 不再在此注册工具: get_logs / clear_logs / eval_code /
-	# run_tests 已收进 _register_game_play_tools(带必填 process, 编辑器侧转发 / 运行时就地)。
+	# MCPLogTools / MCPDevTools 不再在此注册工具: get_logs / clear_logs / eval_code / run_tests
+	# 已收进 _register_game_play_tools(带必填 process, 编辑器侧转发 / 运行时就地)。
 	# 它们的底层实现由本文件按需调用。
 	_mod("MCPValidateTools").register(_add_tool)
 	_mod("MCPFileTools").register(_add_tool)
@@ -843,21 +847,6 @@ func _register_run_tools() -> void:
 			"scene": {"type": "string", "description": "action=start 时可选: 要运行的场景 res:// 或 uid:// 路径"}
 		}, "required": ["action"]},
 		_call_game_control)
-
-	_add_tool("verify_fix",
-		"有状态验证修复会话: 按 session_id 记住验证配置(操作序列/场景/参数), AI 改完代码后 continue 即自动重跑。continue 时检测场景依赖的脚本/资源/配置是否变化(deps_changed=false 表示没改过依赖, 重跑结果大概率相同)。action: start(默认, 存配置并跑第一轮) / continue(复用配置重跑) / status(查会话, all=true 查全部) / abort(清除会话, all=true 清全部)。返回 round/rounds_done/verdict/was_flaky/deps_changed + 每轮结果。适合'改代码→验→修→再验'循环。",
-		{"type": "object", "properties": {
-			"action": {"type": "string", "description": "start(默认)/continue/status/abort"},
-			"session_id": {"type": "string", "description": "会话标识(可并行多个验证任务), 默认 'default'"},
-			"scene": {"type": "string", "description": "要启动的场景 res:// 路径, start 时提供"},
-			"operations": {"type": "array", "description": "操作序列(同 auto_verify), start 时提供"},
-			"duration": {"type": "number", "description": "单轮运行时长上限(秒), 默认 4"},
-			"retries": {"type": "integer", "description": "单轮内失败重试次数, 默认 0"},
-			"retry_backoff_ms": {"type": "integer", "description": "单轮内重试间隔毫秒, 默认 500"},
-			"stop_on_error": {"type": "boolean", "description": "hard(true)/soft(false), 默认 true"},
-			"all": {"type": "boolean", "description": "status/abort 时 true=操作全部会话, 默认 false"}
-		}},
-		_call_verify_fix)
 
 
 ## -- 刷新工具注册表 --
@@ -1551,10 +1540,21 @@ func _call_run_tests_local(args: Dictionary) -> Dictionary:
 
 
 ## run_tests 的 editor 侧: process=editor 在编辑器进程同步跑; process=game 转发到游戏进程。
+## 传 _logger: 内联源码编译失败时由 TestRunner 取回具体解析错行。
+## process=game 且为内联源码时**先在编辑器内编译预检**: 语法错就地拦截, 不把坏代码转发到游戏
+## (游戏进程里解析错会触发调试器断点中断游戏 —— 同 _call_game_eval_proxy 的转发预检)。
 func _call_run_tests_routed(args: Dictionary) -> Dictionary:
+	var script := VariantTool.get_string(args, "script").strip_edges()
 	if _require_process(args) == "game":
+		if TestRunner.is_inline_source(script):
+			var pre := TestRunner.precheck_inline(script, _logger)
+			if pre != "":
+				return _err_validation("内联测试代码预检未通过(未转发到游戏进程):\n%s" % pre,
+					"修正内联测试源码后重试; 或改成文件放到 %s 下再用 script 路径跑" % TestRunner.TESTS_DIR)
 		return await _call_runtime_proxy("run_tests", args)
-	return await _mod("MCPTestTools")._handle_run_tests(args)
+	if script.is_empty():
+		return _fail("必须指定测试脚本(script: 脚本路径子串如 'test_display_tool', 或 'all' 全量, 或内联 GDScript 源码); 不支持默认全跑")
+	return _ok_json(await TestRunner.run_all(script, TestRunner.MODE_EDITOR, _logger))
 
 
 ## 游戏运行控制: start(支持 uid:// 场景, 已在运行时自动停止旧实例后重启)/stop/continue
@@ -1662,231 +1662,6 @@ func _call_stop_game(_args: Dictionary) -> Dictionary:
 	return _ok("已停止游戏")
 
 
-## 编辑器侧: 自动验证闭环。启动场景 → 清错误缓冲 → 代理到游戏进程执行操作序列 → 停止。
-## retries>0 时失败自动重跑(每轮独立重启场景, 排除 flaky/时序性失败), 返回含重试历史。
-func _call_auto_verify(args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var scene := VariantTool.get_string(args, "scene")
-	# 自动接管: 已运行的游戏先停止再重跑(本工具自行管理启停, 对齐 Playwright 等托管生命周期工具惯例)。
-	if _has_game_session():
-		_mod("MCPEditorEnv").stop_playing_scene()
-		_game_ready = false
-		var waited := 0.0
-		while _has_game_session() and waited < 5.0:
-			await get_tree().create_timer(0.1).timeout
-			waited += 0.1
-	var retries := VariantTool.get_int(args, "retries")
-	var backoff_ms := VariantTool.get_int(args, "retry_backoff_ms", 500)
-	# 可选: 调用方提供的上次依赖快照({path: mtime}), 用于检测本次执行前代码是否变化
-	var prev_snapshot: Dictionary = VariantTool.get_dict(args, "prev_snapshot")
-	var history: Array = []
-	var attempts := 0
-	while true:
-		attempts += 1
-		var result: Dictionary = await _run_auto_verify_once(scene, args)
-		# 单轮执行硬错误(启动失败/清错失败等)直接返回
-		if result.get("is_error", false):
-			return result
-		var sc: Variant = result.get("structuredContent", null)
-		var verdict := "pass"
-		if sc is Dictionary:
-			verdict = str(sc.get("verdict", "pass"))
-		# 记录本轮摘要(错误数/首个出错步, 供 retry 历史诊断)
-		var summary := {
-			"attempt": attempts,
-			"verdict": verdict,
-			"error_count": int(sc.get("error_count", 0)) if sc is Dictionary else 0,
-			"first_error_step": int(sc.get("first_error_step", -1)) if sc is Dictionary else -1,
-		}
-		history.append(summary)
-		# 通过或重试次数用完 → 收尾返回
-		if verdict == "pass" or attempts > retries:
-			if verdict == "pass":
-				# 曾失败但最终通过 = flaky: 附 was_flaky 标记 + 完整重试历史,
-				# 避免把"偶发失败"当干净通过(可能有被时序掩盖的潜在 bug)。
-				var had_failure := false
-				for h in history:
-					if str(h.get("verdict", "")) != "pass":
-						had_failure = true
-						break
-				if sc is Dictionary:
-					sc["attempts"] = attempts
-					sc["retry_history"] = history
-					sc["was_flaky"] = had_failure
-					_attach_code_change_info(sc, scene, prev_snapshot)
-					return _ok_json(sc)
-				return result
-			# 全部失败: 在结果里附加重试历史
-			if sc is Dictionary:
-				sc["attempts"] = attempts
-				sc["retry_history"] = history
-				sc["was_flaky"] = false
-				_attach_code_change_info(sc, scene, prev_snapshot)
-				return _ok_json(sc)
-			return result
-		# 等待重试间隔后重跑
-		if backoff_ms > 0:
-			await get_tree().create_timer(backoff_ms / 1000.0).timeout
-	# 不可达
-	return _fail("auto_verify 内部异常")
-
-
-## 在验证结果里附加依赖变化信息: 当前依赖快照 vs prev_snapshot。
-## deps_changed=true 表示自上次快照以来场景依赖的脚本/资源/配置有改动。
-func _attach_code_change_info(sc: Dictionary, scene: String, prev_snapshot: Dictionary) -> void:
-	var current := _snapshot_deps_mtime(scene)
-	sc["scene_deps"] = current
-	var changed := true
-	if not prev_snapshot.is_empty():
-		# 新增/删除/内容变化都算变化
-		changed = current.size() != prev_snapshot.size()
-		if not changed:
-			for path in prev_snapshot:
-				if not current.has(path) or current[path] != prev_snapshot[path]:
-					changed = true
-					break
-	sc["deps_changed"] = changed
-	# 兼容旧字段名(verify_fix 旧客户端/旧会话仍读 code_changed)
-	sc["code_changed"] = changed
-
-
-## 有状态验证修复会话: 按 session_id 记住验证配置, AI 改完代码后 continue 即重跑。
-## action: start(存配置并跑第一轮) / continue(复用配置重跑, 检测代码是否变化) /
-## status(查会话, 不跑) / abort(清除会话)。
-## 返回含 round/rounds_done/verdict/was_flaky/code_changed + 该轮完整结果。
-func _call_verify_fix(args: Dictionary) -> Dictionary:
-	if not Engine.is_editor_hint():
-		return _fail("仅在编辑器模式可用")
-	var action := VariantTool.get_string(args, "action", "start").to_lower()
-	var session_id := VariantTool.get_string(args, "session_id", "default")
-	# abort: 清除指定会话(或全部)
-	if action == "abort":
-		if VariantTool.get_bool(args, "all"):
-			_verify_sessions.clear()
-			return _ok_json({"action": "abort", "session_active": false, "message": "全部 verify_fix 会话已清除"})
-		_verify_sessions.erase(session_id)
-		return _ok_json({"action": "abort", "session_id": session_id, "session_active": false, "message": "verify_fix 会话已清除: %s" % session_id})
-	# status: 只查不跑
-	if action == "status":
-		if _verify_sessions.is_empty():
-			return _ok_json({"action": "status", "session_active": false, "session_count": 0, "message": "无活跃会话。用 action=start 创建。"})
-		if VariantTool.get_bool(args, "all"):
-			return _ok_json({"action": "status", "session_active": true, "session_count": _verify_sessions.size(), "sessions": _verify_sessions})
-		if not _verify_sessions.has(session_id):
-			return _ok_json({"action": "status", "session_id": session_id, "session_active": false, "message": "会话不存在: %s" % session_id})
-		return _ok_json({"action": "status", "session_id": session_id, "session_active": true, "session": _verify_sessions[session_id]})
-	# start / continue
-	if action == "start":
-		_verify_sessions[session_id] = {
-			"scene": VariantTool.get_string(args, "scene"),
-			"operations": VariantTool.get_array(args, "operations"),
-			"duration": VariantTool.get_float(args, "duration", 4.0),
-			"retries": VariantTool.get_int(args, "retries"),
-			"retry_backoff_ms": VariantTool.get_int(args, "retry_backoff_ms", 500),
-			"stop_on_error": VariantTool.get_bool(args, "stop_on_error", true),
-			"rounds": [],
-			"deps_snapshot": {},
-		}
-	elif action == "continue":
-		if not _verify_sessions.has(session_id):
-			return _fail("无活跃 verify_fix 会话: %s。先调用 action=start 创建(传 scene+operations)。" % session_id)
-	else:
-		return _fail("action 无效: %s (可选: start/continue/status/abort)" % action)
-	var session: Dictionary = _verify_sessions[session_id]
-	if session.get("operations", []).is_empty():
-		return _fail("会话缺少 operations 操作序列。start 时需提供。")
-	var verify_args := {
-		"scene": str(session.get("scene", "")),
-		"operations": session.get("operations", []),
-		"duration": float(session.get("duration", 4.0)),
-		"retries": int(session.get("retries", 0)),
-		"retry_backoff_ms": int(session.get("retry_backoff_ms", 500)),
-		"stop_on_error": bool(session.get("stop_on_error", true)),
-	}
-	# 依赖变化检测由 auto_verify 统一完成: 传上次快照, 从结果读 deps_changed + 更新 scene_deps
-	var prev_snapshot: Dictionary = session.get("deps_snapshot", {}) if session.get("deps_snapshot") is Dictionary else {}
-	if not prev_snapshot.is_empty():
-		verify_args["prev_snapshot"] = prev_snapshot
-	var result: Dictionary = await _call_auto_verify(verify_args)
-	# 错误响应不能当成功结果读: 错误结果的 sc 里没有 verdict / deps_changed 字段,
-	# 读它会让 verdict 被 `sc.get("verdict", "unknown")` 静默读成 "unknown"(而非明确的
-	# "error"), 并让 deps_changed 取默认 true —— 于是"本轮根本没跑起来"这一事实被
-	# "依赖有变化, 重跑有意义"这个乐观结论盖掉。故先分流, 错误时 sc 保持 null。
-	# (MCPResult.err 现在会填 structuredContent, 见该函数的说明)
-	var sc: Variant = null
-	if not bool(result.get("is_error", false)):
-		sc = result.get("structuredContent", null)
-	var deps_changed := true
-	if sc is Dictionary:
-		deps_changed = bool(sc.get("deps_changed", sc.get("code_changed", true)))
-		if sc.has("scene_deps") and sc.get("scene_deps") is Dictionary:
-			session["deps_snapshot"] = sc.get("scene_deps")
-	# 记录本轮摘要到会话
-	var rounds: Array = session.get("rounds", [])
-	rounds.append({
-		"verdict": str(sc.get("verdict", "unknown")) if sc is Dictionary else "error",
-		"was_flaky": bool(sc.get("was_flaky", false)) if sc is Dictionary else false,
-		"error_count": int(sc.get("error_count", 0)) if sc is Dictionary else 0,
-		"first_error_step": int(sc.get("first_error_step", -1)) if sc is Dictionary else -1,
-	})
-	session["rounds"] = rounds
-	# 构造返回: 会话摘要 + 本轮完整结果
-	var round_summary := {
-		"session_id": session_id,
-		"round": rounds.size(),
-		"rounds_done": rounds.size(),
-		"verdict": str(sc.get("verdict", "error")) if sc is Dictionary else "error",
-		"was_flaky": bool(sc.get("was_flaky", false)) if sc is Dictionary else false,
-		"deps_changed": deps_changed,
-		"code_changed": deps_changed,  # 兼容旧字段名
-		"rounds": rounds,
-		"session_active": true,
-		"hint": "deps_changed=false 表示自上次轮次以来场景依赖的脚本/资源/配置均未变化, continue 重跑结果大概率相同; 若确实改过请确认保存并检查场景依赖。",
-	}
-	if sc is Dictionary:
-		round_summary["steps"] = sc.get("steps", [])
-		round_summary["error_count"] = sc.get("error_count", 0)
-		round_summary["first_error_step"] = sc.get("first_error_step", -1)
-		if sc.has("retry_history"):
-			round_summary["retry_history"] = sc.get("retry_history")
-	return _ok_json(round_summary)
-
-
-## 快照依赖文件的修改时间(path -> mtime)。mtime 变化即认为代码/资源被改动。
-func _snapshot_deps_mtime(scene: String) -> Dictionary:
-	var snap := {}
-	var deps := MCPCodeIndex.collect_scene_deps(scene)
-	for path in deps:
-		if not FileAccess.file_exists(String(path)):
-			continue
-		snap[String(path)] = FileAccess.get_modified_time(String(path))
-	return snap
-
-
-## 单次验证执行: 启动场景 → 等就绪 → 清错误 → 代理执行 → 停止游戏
-func _run_auto_verify_once(scene: String, args: Dictionary) -> Dictionary:
-	# 1) 启动场景(缺省用主场景)
-	var run_res := await _call_run_game({"scene": scene})
-	if run_res.get("is_error", false):
-		return run_res
-	# 2) 等待调试线就绪, 清空游戏错误缓冲(保证验证期间的错误都是本次触发)
-	if not await _wait_game_ready(2.0):
-		await _call_stop_game({})
-		return _fail("游戏启动后调试线未就绪, auto_verify 中止。已停止游戏。")
-	var ok_clear := await _call_runtime_proxy("clear_logs", {"process": "game", "scope": "errors"})
-	if ok_clear.get("is_error", false):
-		await _call_stop_game({})
-		return _fail("清空游戏错误缓冲失败: %s" % str(ok_clear.get("text", "")))
-	# 3) 代理到游戏进程执行操作序列
-	var result := await _call_runtime_proxy("auto_verify", args)
-	# 4) 收尾: 停止游戏(无论结果如何都要停)
-	await _call_stop_game({})
-	if result.get("is_error", false):
-		return result
-	return result
-
-
 ## 等待游戏调试会话结束(供 start 前自动停止旧实例用), 超时返回 false
 func _wait_game_stopped(timeout_sec: float = 5.0) -> bool:
 	var deadline := Time.get_ticks_msec() + int(timeout_sec * 1000)
@@ -1910,23 +1685,22 @@ func _wait_game_ready(timeout_sec: float = 15.0) -> bool:
 ## ======= 运行时工具(游戏进程内原生执行) =======
 
 ## 非编辑器(导出包/独立运行)进程的工具注册: 共享域 + 游戏操作宿主工具。
-## 复用 _register_shared_domains 保证与编辑器**同一份共享域清单**; 游戏操作工具传
-## include_auto_verify=false, 故不注册 auto_verify(依赖编辑器类; eval_code 在运行时=本进程)。仅勾选 runtime_enabled 时调用。
+## 复用 _register_shared_domains 保证与编辑器**同一份共享域清单**; eval_code 在运行时=本进程。
+## 仅勾选 runtime_enabled 时调用。
 func _register_runtime_domains() -> void:
 	_reset_tools()
 	_register_shared_domains()
-	_register_game_play_tools(false)
+	_register_game_play_tools()
 	_register_providers()
 	_audit_tools()
 
 
 ## 注册"游戏操作宿主工具"(截图 / UI 交互 / 日志 / 用例 / eval)。三个调用场景:
-##   · 编辑器进程: _register_editor_tools 追加在编辑工具之后(include_auto_verify=true);
-##   · 开发期游戏进程(F5): _ready 里注册(include_auto_verify=true, 供调试线 eval_code 用);
-##   · 导出/独立运行: _register_runtime_domains 里注册(include_auto_verify=false)。
-## 该参数只控 **auto_verify** 是否注册(false=发布包不注册它, 因为它会驱动完整游戏进程);
-## eval_code / get_logs / clear_logs / run_tests 始终注册 —— 它们各有 process 参数, 复用同一份实现。
-func _register_game_play_tools(include_auto_verify: bool = true) -> void:
+##   · 编辑器进程: _register_editor_tools 追加在编辑工具之后;
+##   · 开发期游戏进程(F5): _ready 里注册(供调试线 eval_code 用);
+##   · 导出/独立运行: _register_runtime_domains 里注册。
+## eval_code / get_logs / clear_logs / run_tests 均在此注册 —— 它们各有 process 参数, 复用同一份实现。
+func _register_game_play_tools() -> void:
 	# 仅首次进入时清空(editor 进程已由 _register_editor_tools 清空并注册了编辑/项目工具,
 	# 这里只能追加 runtime 工具, 不能 reset 否则会清掉前面分组的注册)。
 	if _tool_handlers.is_empty():
@@ -1934,7 +1708,7 @@ func _register_game_play_tools(include_auto_verify: bool = true) -> void:
 	# 绑定日志捕获器: get_logs / clear_logs 复用 MCPLogTools 的底层件(server 侧用 preload 实例,
 	# 故必须绑这个对象而非 _mod 出的那份)。
 	MCPLogTools.bind_logger(_logger)
-	# eval ctx provider: eval_code(process=game) / auto_verify / 轮询探针都经 MCPDevTools.eval_code,
+	# eval ctx provider: eval_code(process=game) 经 MCPDevTools.eval_code,
 	# 新鲜度闸门要用 _mode 与游戏启动时刻、日志捕获器。**始终注入**(eval_code 始终注册, 导出运行时亦然)。
 	_mod("MCPDevTools").set_eval_ctx_provider(_eval_ctx_provider)
 	# 排在 simulate_click 之前注册: 使用顺序就是"先查后点", 工具表按此顺序排能让 AI
@@ -1992,14 +1766,13 @@ func _register_game_play_tools(include_auto_verify: bool = true) -> void:
 	var tests_schema := {
 		"type": "object",
 		"properties": {
-			"process": {"type": "string", "enum": ["editor", "game"], "description": "在哪个进程跑: editor=编辑器进程(同步返回统计; 只跑进程无关用例); game=游戏进程(发射+轮询进度; 跑 needs_game_process() 用例; 需游戏运行; 导出运行时=本进程)。必填。"},
-			"filter": {"type": "string", "description": "可选: 用例文件路径子串过滤(仅启动时生效)"},
-			"wait_ms": {"type": "integer", "description": "仅 process=game: 本次最多等待毫秒(默认 8000, 上限 15000), 超时返回当前进度"},
+			"process": {"type": "string", "enum": ["editor", "game"], "description": "在哪个进程跑: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **阻塞到本轮跑完才返回**; 需游戏运行; 导出运行时=本进程)。必填。"},
+			"script": {"type": "string", "description": "必填。二选一(靠内容自动判别): ①测试脚本路径子串(如 'test_game_replay'), 只运行匹配的用例文件; 'all'=全量(**不推荐**: 耗时可能过长)。②**内联 GDScript 源码**——含换行 或 以 'extends ' 开头即判为源码, 需 `extends TestCase` 并定义 test_ 开头的断言方法, 直接编译运行、**不落盘**, 适合临时验证(上限 8192 字符)。单个词(含打错的脚本名)一律按选择器处理。"},
 		},
-		"required": ["process"],
+		"required": ["process", "script"],
 	}
 	_register_game_play_tool("run_tests",
-		"运行项目单元测试(Scripts/Test/ 目录, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。process 必填: editor=编辑器进程(同步返回通过/失败统计与明细, 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 发射即返回+读进度: 首次启动, 之后反复调用读同一份报告直到 running=false, 不要带 filter 中途重启; 需游戏运行)。两类合起来才是全量。",
+		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **调用会阻塞到本轮跑完才返回**, 不提供中途进度查询; 需游戏运行)。**测试整体硬超时 10 分钟**: 到点判失败并停止等待。两类合起来才是全量。",
 		tests_schema,
 		_call_run_tests_local,
 		_call_run_tests_routed)
@@ -2032,14 +1805,6 @@ func _register_game_play_tools(include_auto_verify: bool = true) -> void:
 		clear_schema,
 		_call_clear_logs_local,
 		_call_clear_logs_routed)
-
-	if include_auto_verify:
-		_register_game_play_tool("auto_verify",
-			"自动验证闭环: 启动场景后按 operations 序列模拟玩家行为, 每步后增量查错。【副作用: 会接管用户正在玩的游戏】若已有游戏在运行, 本工具会**先将其停止**再启动本工具指定的场景, 结束后再停掉游戏 —— 用户手头的游戏进程会被中断且不会自动恢复。执行前先用 get_editor_activity 确认没有正在进行的调试。操作各字段格式见 operations 参数(不在此复述); 其中 poll 的探测期 eval 出错**不计入**失败判定。retries>0 时曾失败但最终通过会标 was_flaky=true(警惕被时序掩盖的潜在bug), 返回retry_history。返回verdict=pass/fail+逐步明细+first_error_step。注意: duration 是单次总时长上限, 操作总耗时(含wait/poll)不能超过它; duration建议<=15s(代理超时20s)。",
-			MCPToolSchema.auto_verify(),
-			_runtime_auto_verify,
-			func(args): return await _call_auto_verify(args))
-
 
 
 ## 运行时: 模拟鼠标左键点击(游戏进程内 Input.parse_input_event 直接生效)
@@ -2225,42 +1990,28 @@ func _call_simulate_key(args: Dictionary) -> Dictionary:
 
 ## ======= 运行时: 游戏进程用例(依赖 MonitorGame / 场景树 / 真实时间轴) =======
 
-## 游戏用例会话状态: run_tests(process=game) 首次调用启动, 后续调用读进度 ——
-## 一个完整的游戏用例(真实战斗 + 真实回放)远超工具单次超时, 不能靠一次调用等完。
+## 运行中的测试标志: run_tests(process=game) 阻塞执行期间为 true —— 供 _call_runtime_tool_async
+## 的 busy 守卫(运行期其它需主循环的工具会被拖慢/超时)与"并发第二个 run_tests 直接拒绝"使用。
 var _game_tests_running := false
-var _game_tests_report: Dictionary = {}
 
 
-## 运行时: 在**游戏进程**里跑需要游戏进程的用例(`TestRunner` MODE_GAME)。
-## 用法: 首次调用启动, 之后反复调用读进度 —— 流程与断言全在用例里, 调用方不需要任何编排。
+## 运行时: 在**游戏进程**里跑需要游戏进程的用例(`TestRunner` MODE_GAME)。**阻塞至跑完才返回**。
+## 硬超时由 TestRunner 强制(总不超过 10 分钟); 期间不返回中间进度。
 func _runtime_run_game_tests(args: Dictionary) -> Dictionary:
-	var filter := VariantTool.get_string(args, "filter")
-	var wait_ms: int = clampi(VariantTool.get_int(args, "wait_ms", 8000), 0, 15000)
-	var started := false
-	if not _game_tests_running:
-		_game_tests_running = true
-		_game_tests_report = {}
-		started = true
-		_run_game_tests_async(filter)  # 有意不 await(见上方状态说明)
-	if wait_ms > 0:
-		var tree := get_tree()
-		if tree:
-			var deadline := Time.get_ticks_msec() + wait_ms
-			while _game_tests_running and Time.get_ticks_msec() < deadline:
-				await tree.create_timer(0.2).timeout
-	var out: Dictionary = _game_tests_report.duplicate(true)
-	out.running = _game_tests_running
-	if started:
-		out.started = true
+	var script := VariantTool.get_string(args, "script").strip_edges()
+	if script.is_empty():
+		return _fail("必须指定测试脚本(script: 脚本路径子串如 'test_game_replay', 或 'all' 全量, 或内联 GDScript 源码; 不支持默认全跑)")
 	if _game_tests_running:
-		out.hint = "用例仍在运行: 再次调用 run_tests(process=game) 读进度即可(带 filter 会等本轮结束后重启)"
-	return _ok_json(out)
-
-
-func _run_game_tests_async(filter: String) -> void:
-	var summary: Dictionary = await TestRunner.run_all(filter, TestRunner.TESTS_DIR, TestRunner.MODE_GAME)
-	_game_tests_report = summary
+		return _err_validation("已有测试在运行, 请等待其结束或 game_control(action=stop) 终止后再调用",
+			"等待当前用例结束(running=false)后再试")
+	_game_tests_running = true
+	# 传 _logger: 内联源码在游戏进程编译失败时取回该进程的具体解析错行。
+	var summary: Dictionary = await TestRunner.run_all(script, TestRunner.MODE_GAME, _logger)
 	_game_tests_running = false
+	# run_all 已含 script 标签(内联为 "<inline>")/aborted/text 等; 补 done/running 供调用方判定。
+	summary["running"] = false
+	summary["done"] = true
+	return _ok_json(summary)
 
 
 ## 运行时: 捕获游戏视口真实截图(文件名自动生成)
@@ -2296,157 +2047,6 @@ func _runtime_take_screenshot(args: Dictionary) -> Dictionary:
 	return _ok_json(result)
 
 
-## ======= 自动验证闭环(auto_verify) =======
-
-## 运行时侧执行器: 在游戏进程内逐步执行操作序列, 每步后增量查错。
-## operations 元素: {action, ...}; action 取值:
-##   wait  {ms}            显式延迟(操作间间隔)
-##   click {x, y}          模拟点击
-##   drag  {from_x..to_y}  模拟拖拽
-##   key   {key, pressed?} 模拟按键
-##   eval  {code}          执行 GDScript(可 return, 结果记入 step)
-##   poll  {code, timeout_ms, interval_ms} 轮询直到 code 返回 true 或超时
-##   screenshot            真实截图(结果记入 step)
-func _runtime_auto_verify(args: Dictionary) -> Dictionary:
-	var operations: Array = VariantTool.get_array(args, "operations")
-	if operations.is_empty():
-		return _fail("必须提供 operations 操作序列")
-	var duration := VariantTool.get_float(args, "duration", 4.0)
-	var stop_on_error := VariantTool.get_bool(args, "stop_on_error", true)
-	var err_cursor: int = _logger.get_error_cursor() if _logger else 0
-	var steps: Array = []
-	var all_errors: Array = []
-	var first_error_step := -1
-	var total_waited_ms := 0
-	var deadline := Time.get_ticks_msec() + int(duration * 1000.0)
-	for i in range(operations.size()):
-		if Time.get_ticks_msec() >= deadline:
-			break
-		var op: Dictionary = operations[i]
-		var action := str(op.get("action", "wait"))
-		var step := {"index": i, "action": action, "status": "ok", "errors": []}
-		# 执行动作
-		match action:
-			"wait":
-				var ms := int(op.get("ms", 200))
-				total_waited_ms += ms
-				await get_tree().create_timer(ms / 1000.0).timeout
-			"click":
-				var r: Dictionary = await _call_simulate_click(op)
-				if r.get("is_error", false):
-					step["status"] = "action_error"
-					step["message"] = str(r.get("text", ""))
-			"drag":
-				var r2: Dictionary = await _call_simulate_drag(op)
-				if r2.get("is_error", false):
-					step["status"] = "action_error"
-					step["message"] = str(r2.get("text", ""))
-			"key":
-				var r3: Dictionary = _call_simulate_key(op)
-				if r3.get("is_error", false):
-					step["status"] = "action_error"
-					step["message"] = str(r3.get("text", ""))
-			"eval":
-				var r4: Dictionary = await _mod("MCPDevTools")._call_eval_code({"code": str(op.get("code", ""))})
-				step["result"] = str(r4.get("text", ""))
-				if r4.get("is_error", false):
-					step["status"] = "action_error"
-					step["message"] = str(r4.get("text", ""))
-			"poll":
-				# poll 期间 eval 探测的错误不算验证错误: 先快照, poll 后把游标推进到当前(丢弃探测期错误)
-				var poll_err_before: int = _logger.get_error_cursor() if _logger else err_cursor
-				var polled := await _poll_until(op, deadline)
-				if _logger:
-					err_cursor = _logger.get_error_cursor()
-				step["poll"] = polled
-				if not polled:
-					step["status"] = "timeout"
-					step["message"] = "轮询超时: 条件未在限定时间内满足"
-			"screenshot":
-				var r5: Dictionary = await _runtime_take_screenshot(op)
-				if r5.get("is_error", false):
-					step["status"] = "action_error"
-					step["message"] = str(r5.get("text", ""))
-				else:
-					var sc: Variant = r5.get("structuredContent", null)
-					if sc is Dictionary:
-						step["screenshot"] = {"path": str(sc.get("path", "")), "res_path": str(sc.get("res_path", ""))}
-			_:
-				step["status"] = "invalid_action"
-				step["message"] = "未知操作: %s(可选: wait/click/drag/key/eval/poll/screenshot)" % action
-		# 每步后增量查错(捕捉该操作触发的运行时错误)
-		if _logger:
-			var taken := _logger.take_errors_since(err_cursor)
-			err_cursor = int(taken.get("next", err_cursor))
-			var new_errors: Array = taken.get("entries", [])
-			if not new_errors.is_empty():
-				step["errors"] = new_errors
-				if step["status"] == "ok":
-					step["status"] = "error"
-				if first_error_step < 0:
-					first_error_step = i
-				all_errors.append_array(new_errors)
-		steps.append(step)
-		# hard 模式: 任一步出错立即停
-		if stop_on_error and step["status"] != "ok":
-			break
-	# 汇总判定: fail = 任一错误 或 任一步非 ok(poll 超时/动作失败/非法操作) 或 预算耗尽未跑完
-	var failed := not all_errors.is_empty()
-	for s in steps:
-		if str(s.get("status", "ok")) != "ok":
-			failed = true
-			break
-	# 预算耗尽/提前中断导致部分操作未执行完 → fail(除非是 hard 模式在出错步骤主动停)
-	if steps.size() < operations.size():
-		var hard_stopped := stop_on_error and not steps.is_empty() and str(steps[steps.size() - 1].get("status", "ok")) != "ok"
-		if not hard_stopped:
-			failed = true
-	var verdict := "fail" if failed else "pass"
-	var out := {
-		"verdict": verdict,
-		"steps": steps,
-		"step_count": steps.size(),
-		"operation_count": operations.size(),
-		"error_count": all_errors.size(),
-		"first_error_step": first_error_step,
-		"total_waited_ms": total_waited_ms,
-		"stop_on_error": stop_on_error,
-		"hint": "verdict=fail 时 first_error_step 指向出错操作下标, 对应 steps[i].status/errors。poll 超时/动作报错/运行期错误都会导致 fail。",
-	}
-	if not all_errors.is_empty():
-		out["errors"] = all_errors
-	return _ok_json(out)
-
-
-## 轮询直到 code 返回 true 或超时。code 为 GDScript 表达式(经 eval 执行, 可 return bool)。
-## 轮询期间 eval 产生的错误属于"正在探测的条件", 不计入验证错误(调用方在 poll 前已快照错误游标)。
-## 默认固定 interval_ms(无递增退避, 保持语义可预期)。
-func _poll_until(op: Dictionary, deadline: int) -> bool:
-	var code := str(op.get("code", ""))
-	if code.is_empty():
-		return false
-	var timeout_ms := int(op.get("timeout_ms", 5000))
-	var interval_ms := int(op.get("interval_ms", 200))
-	var start := Time.get_ticks_msec()
-	var poll_deadline := mini(deadline, start + timeout_ms)
-	while Time.get_ticks_msec() < poll_deadline:
-		var r: Dictionary = await _mod("MCPDevTools")._call_eval_code({"code": code})
-		if not r.get("is_error", false):
-			if _eval_returned_true(str(r.get("text", ""))):
-				return true
-		await get_tree().create_timer(interval_ms / 1000.0).timeout
-	return false
-
-
-## 解析 eval 返回文本, 判断是否返回 true
-func _eval_returned_true(text: String) -> bool:
-	var idx := text.find("返回: ")
-	if idx == -1:
-		return false
-	var val := text.substr(idx + 4).strip_edges().to_lower()
-	return val == "true" or val == "1" or val == "yes"
-
-
 ## ======= 编辑器模式的运行时工具转发(经 EngineDebugger 调试线) =======
 
 ## 编辑器进程: 解除游戏断点暂停(等效编辑器的 Continue 按钮)
@@ -2468,6 +2068,14 @@ func _call_debug_continue(_args: Dictionary) -> Dictionary:
 	return _err_internal("无法解除断点暂停", "尝试 game_control(action=stop) 后 game_control(action=start) 重启")
 
 
+## 读取游戏调用单次等待上限并做边界裁剪(实时读取, 改项目设置无需重启)。
+## 下限 2s: 太小的值连一次正常回包都等不到, 只会制造假超时;
+## 上限 600s(10 分钟): 与测试硬超时对齐, 防止误填超大值把一次调用挂成"假死";
+## 缺失/非法回落默认 600s。
+func _game_call_timeout_ms() -> int:
+	return clampi(int(ProjectSettings.get_setting(SETTING_GAME_CALL_TIMEOUT_MS, DEFAULT_GAME_CALL_TIMEOUT_MS)), 2000, 600000)
+
+
 ## 转发工具调用到游戏进程(经 EngineDebugger 调试线)。仅编辑器模式。
 func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 	if debugger_plugin == null or not debugger_plugin.has_active_session():
@@ -2487,8 +2095,10 @@ func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 	_pending[req_id] = null
 	debugger_plugin.send_call(req_id, tool_name, args)
 	# 轮询等待游戏响应。会话断开时 _on_session_stopped 会填充失败结果;
-	# 同时每帧检测会话是否仍活跃, 一旦消失立即返回(不再干等 20s)。
-	var deadline := Time.get_ticks_msec() + 20000
+	# 同时每帧检测会话是否仍活跃, 一旦消失立即返回(不再干等)。
+	# deadline 比"游戏侧等待"多留 _PROXY_RESPONSE_MARGIN_MS: 游戏 handler 到点返回后结果要回传。
+	var timeout_ms := _game_call_timeout_ms() + _PROXY_RESPONSE_MARGIN_MS
+	var deadline := Time.get_ticks_msec() + timeout_ms
 	while Time.get_ticks_msec() < deadline:
 		if _pending.has(req_id) and _pending[req_id] != null:
 			var result: Dictionary = _pending[req_id]
@@ -2503,13 +2113,14 @@ func _call_runtime_proxy(tool_name: String, args: Dictionary) -> Dictionary:
 		_pending.erase(req_id)
 	# 超时主因: eval触发运行期脚本错误导致_mcp_run中止未回发, 或是死循环/卡死。自动回查错误缓冲拼进响应。
 	var diagnose := await _fetch_recent_game_error(tool_name)
+	var secs := "%.1f" % (timeout_ms / 1000.0)
 	if diagnose != "":
 		# 同上面的 eval 分支: 原样重发同一工具必然再超时一次, 故 is_retryable=false。
 		# 有效路径是先按 recovery 改代码或重启游戏 —— 那属于"改参数后重试"。
-		return _err_validation("游戏进程响应超时(20s), 工具: %s。已发现运行期脚本错误:\n%s\n\n修正代码后重试; 若无疑错误仍超时再考虑死循环。" %
-			[tool_name, diagnose],
+		return _err_validation("游戏进程响应超时(%ss), 工具: %s。已发现运行期脚本错误:\n%s\n\n修正代码后重试; 若无疑错误仍超时再考虑死循环。" %
+			[secs, tool_name, diagnose],
 			"修正上方脚本错误后重试; 仍超时则 game_control(action=stop) 后 game_control(action=start) 重启")
-	return _err("游戏进程响应超时(20s), 工具: %s。错误缓冲无脚本错误, 可能是死循环/卡死或无响应。" % tool_name,
+	return _err("游戏进程响应超时(%ss), 工具: %s。错误缓冲无脚本错误, 可能是死循环/卡死或无响应。" % [secs, tool_name],
 		MCPResult.CAT_TRANSIENT, true, "查 eval_code(process=game) 是否死循环; 必要时 game_control(action=stop) 后 game_control(action=start) 重启")
 
 
@@ -2521,7 +2132,7 @@ func _fetch_recent_game_error(tool_name: String) -> String:
 	_pending[req_id] = null
 	if not debugger_plugin.send_call(req_id, "get_logs", {"process": "game", "kind": "error"}):
 		return ""
-	var deadline := Time.get_ticks_msec() + 5000
+	var deadline := Time.get_ticks_msec() + mini(5000, _game_call_timeout_ms())
 	while Time.get_ticks_msec() < deadline:
 		if _pending.has(req_id) and _pending[req_id] != null:
 			var result: Dictionary = _pending[req_id]
@@ -2577,17 +2188,20 @@ func _normalize_wire_result(result: Dictionary, _tool_name: String) -> Dictionar
 
 
 ## eval_code 的 runtime 侧(服务器位于游戏进程内): process 只能是 game。
+## **必须 await**: eval 代码含 await 时 _call_eval_code 会挂起, 漏 await 会把协程句柄当结果返回,
+## 客户端表现为 "-32600 未返回 structuredContent"(见 MCPResult 的 outputSchema 契约)。
 func _call_eval_code_local(args: Dictionary) -> Dictionary:
 	if _require_process(args) != "game":
 		return _fail("导出运行时没有独立的编辑器进程; eval_code 的 process 只能是 'game'")
-	return _mod("MCPDevTools")._call_eval_code(args)
+	return await _mod("MCPDevTools")._call_eval_code(args)
 
 
 ## eval_code 的 editor 侧: process=editor 在编辑器进程执行; process=game 经预检 + 调试线转发。
+## **必须 await**(同上): 否则 eval 含 await 时返回协程句柄, 客户端报 -32600。
 func _call_eval_code_routed(args: Dictionary) -> Dictionary:
 	if _require_process(args) == "game":
 		return await _call_game_eval_proxy(args)
-	return _mod("MCPDevTools")._call_eval_code(args)
+	return await _mod("MCPDevTools")._call_eval_code(args)
 
 
 ## 编辑器侧 eval_code(process=game) 的转发: 先本地预编译 + 静态检查, 通过后才发到游戏进程。

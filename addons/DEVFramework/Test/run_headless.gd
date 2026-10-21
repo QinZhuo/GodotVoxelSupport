@@ -29,14 +29,14 @@ func _wants_game_mode() -> bool:
 
 
 func _run() -> void:
-	var summary: Dictionary = await TestRunner.run_all("", TestRunner.TESTS_DIR, TestRunner.MODE_EDITOR)
+	var summary: Dictionary = await TestRunner.run_all("", TestRunner.MODE_EDITOR)
 	print(str(summary.get("text", "")))
 	quit(0 if int(summary.get("failed", 1)) == 0 else 1)
 
 
 ## 游戏进程模式: 先起主场景, 等它就绪, 再跑游戏用例。
 ## ⚠️ 依赖 autoload(如 RankManager)与主场景节点在 headless 下能正常初始化;
-## 若项目的主场景在 headless 下跑不起来, 应改用 MCP `run_game_tests`(跑在真实游戏进程里)。
+## 若项目的主场景在 headless 下跑不起来, 应改用 MCP `run_tests(process=game, script=...)`(跑在真实游戏进程里)。
 func _run_game() -> void:
 	var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
 	if main_scene.is_empty():
@@ -50,7 +50,7 @@ func _run_game() -> void:
 		quit(1)
 		return
 	await _await_scene_ready()
-	var summary: Dictionary = await TestRunner.run_all("", TestRunner.TESTS_DIR, TestRunner.MODE_GAME)
+	var summary: Dictionary = await TestRunner.run_all("", TestRunner.MODE_GAME)
 	print(str(summary.get("text", "")))
 	quit(0 if int(summary.get("failed", 1)) == 0 else 1)
 

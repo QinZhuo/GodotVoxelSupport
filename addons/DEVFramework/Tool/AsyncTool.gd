@@ -200,13 +200,35 @@ static func await_emit(s: Signal, ...args) -> void:
 			await Engine.get_main_loop().create_timer(await_emit_delay, true, true).timeout
 	timer.stop()
 
-## 安全等待一个协程句柄(GDScriptFunctionState), 返回其结果。
-## 引擎陷阱: await 一个【已完成/已失效】的句柄会永久挂起且无任何报错 ——
-## 本方法先经 is_valid() 判定, 仅活跃句柄才真正等待; 失效/非句柄输入返回 null。
-static func await_state_safe(fs: Variant) -> Variant:
-	if _is_active_function_state(fs):
-		return await fs
-	return null
+## 是否为**协程句柄** —— 含 `await` 的函数在让出控制权前返回的 `GDScriptFunctionState`。
+## 引擎**未把该类型暴露给脚本类型系统**(不能用 `is GDScriptFunctionState`), 只能按类名判定 ——
+## 这是社区通行写法(见 godot-proposals#5673)。非 Object / null 一律 false。
+static func is_coroutine(v: Variant) -> bool:
+	return v != null and v is Object and v.get_class() == "GDScriptFunctionState"
+
+
+## 等待协程句柄完成, 最多 timeout_ms 毫秒; 返回 true=已完成, false=超时。
+## 引擎陷阱: await 一个【已完成/已失效】的句柄会永久挂起且无任何报错 —— 本方法先经 is_valid()
+## 判定, 失效/非句柄输入视为"已完成"(立即返回 true)。
+## ⚠️ 超时**不会掐死**协程(引擎不支持) —— 它仍在后台继续; 调用方须据此停止等待并(通常)中止后续步骤。
+static func await_coroutine(fs: Variant, timeout_ms: int) -> bool:
+	if not _is_resumable(fs):
+		return true
+	var holder := {"done": false}
+	_await_into(fs, holder)
+	var tree := Engine.get_main_loop() as SceneTree
+	var start := Time.get_ticks_msec()
+	while not bool(holder["done"]) and Time.get_ticks_msec() - start < timeout_ms:
+		if tree == null:
+			break
+		await tree.create_timer(0.1).timeout
+	return bool(holder["done"])
+
+
+## fire-and-forget: 等 fs 完成后置 holder.done(不掐死续体)。
+static func _await_into(fs: Variant, holder: Dictionary) -> void:
+	await fs
+	holder["done"] = true
 
 
 # ============================================================
@@ -299,7 +321,7 @@ static func safe_disconnect_named(obj: Object, signal_name: StringName, callable
 	if obj.is_connected(signal_name, callable):
 		obj.disconnect(signal_name, callable)
 
-static func _is_active_function_state(v: Variant) -> bool:
-	if v == null or not (v is Object) or v.get_class() != "GDScriptFunctionState":
-		return false
-	return bool(v.call("is_valid"))
+## 该协程句柄是否**仍可恢复**(可安全 await): 是协程句柄且 `is_valid()` 为真。
+## await 一个已失效句柄会永久挂起且零报错(见框架 Readme 陷阱2), 故等待前必须先判。
+static func _is_resumable(v: Variant) -> bool:
+	return is_coroutine(v) and bool(v.call("is_valid"))

@@ -676,9 +676,7 @@ claude mcp list        # 查看已配置
 | `reimport` | 重新导入指定资源（重建导入缓存）|
 | `search_symbols` | 跨脚本/场景/资源搜索符号（函数/变量/类定义与引用，支持节点名与资源路径）|
 | `find_resource_users` | **双向依赖查询**：`users`=谁引用该资源（反向），`deps`=该资源依赖谁（正向，带类型标签）。目标为带全局类名的脚本时额外扫描类名在其它 .gd 中的词边界使用点（kind=class_ref，覆盖 @onready/类型注解/静态调用等无路径引用场景）。改/删资源前查完整影响面 |
-| `auto_verify` | **自动验证闭环**：启动场景后按操作序列模拟玩家行为（wait/click/drag/key/eval/poll/screenshot），每步后增量查错。支持 hard/soft 模式、flaky 重试、依赖变化检测。游戏已在运行时自动接管（停止旧实例后重跑） |
-| `verify_fix` | **有状态验证修复会话**：记住验证配置，AI 改完代码后 `continue` 即重跑（省去重传操作序列），支持多会话并行 |
-| `run_tests` | 运行项目单元测试（`Scripts/Test/`，extends TestCase，test_ 开头方法自动发现；支持协程用例）。返回统计与失败明细 |
+| `run_tests` | 运行**指定**的单元测试（`Scripts/Test/`，extends TestCase）：`script` 必填，两种用法——① 脚本路径子串（`all`=全量但不推荐）；② **直接传内联 GDScript 源码**（含换行或 `extends ` 开头即视为源码，`extends TestCase` + `test_` 方法，不落盘，临时验证用）。`process=editor` 同步跑完返回（进程无关用例）；`process=game` 跑 `needs_game_process()` 用例，**调用阻塞到本轮跑完才返回**（无中途进度查询）。**测试整体硬超时 10 分钟**：到点判失败并停止等待。结果含每个用例 `elapsed_ms` 与超声明上限的 `SLOW` 提示 |
 | `refresh_tools` | 手动重建 MCP 工具注册表：改框架脚本后调用，客户端重拉 tools/list 即生效（免重启） |
 
 > **提示**：修改插件代码（`MCPDevServer.gd` 等）后，新工具需**重启编辑器**才会注册（脚本热重载不会重建工具注册表）。可调用 `restart_editor` 工具一键重启（保存后重启），或改完后调 `refresh_tools` 重建注册表。
@@ -691,51 +689,8 @@ claude mcp list        # 查看已配置
 4. AI 用 `set_node_property` / `call_node_method` 快速验证逻辑，`get_logs`(kind=error) 定位报错。
 5. `take_screenshot` 查看编辑器画面实际表现。
 
-### 5.1 自动验证闭环（auto_verify / verify_fix）
-
-`auto_verify` 把"启动游戏 → 模拟操作 → 逐帧查错 → 停止游戏"串成**一次工具调用**，专门捕获**操作触发的运行时错误**（点击崩溃、走到某处报错、动画播完炸）。适合 AI 改完代码后的回归验证。
-
-**操作序列**（`operations` 数组，按序执行，操作间可任意延迟）：
-
-```json
-[
-  {"action": "wait", "ms": 800},
-  {"action": "click", "x": 100, "y": 200},
-  {"action": "wait", "ms": 500},
-  {"action": "poll", "code": "return get_node(\"/root/...\").visible", "timeout_ms": 3000},
-  {"action": "key", "key": "space"},
-  {"action": "screenshot", "capture_type": "text"}
-]
-```
-
-| 操作 | 参数 | 说明 |
-|---|---|---|
-| `wait` | `ms` | 显式延迟（操作间间隔）|
-| `click` | `x, y` | 模拟点击（复用 `simulate_click`）|
-| `drag` | `from_x, from_y, to_x, to_y` | 模拟拖拽 |
-| `key` | `key` | 模拟按键 |
-| `eval` | `code` | 执行 GDScript，结果记入 step |
-| `poll` | `code, timeout_ms, interval_ms` | **轮询直到条件满足**（等异步/动画结果，探测期 eval 错误不计入验证）|
-| `screenshot` | `capture_type` | 截图（结果含路径）|
-
-**判定与模式**：
-- `verdict=pass/fail`；`first_error_step` 指向出错操作下标，`steps[i].status/errors` 给出定位。
-- `stop_on_error=true`（hard）任一步出错立即停；`false`（soft）跑完全部步骤再汇总。
-- `retries>0` 失败自动重启场景重跑（排除 flaky）；**曾失败但最终通过会标 `was_flaky=true`**（警惕被时序掩盖的潜在 bug），返回 `retry_history`。
-- `prev_snapshot`（由上次返回的 `scene_deps` 提供）可检测**场景依赖（脚本/配置/图片/音频等）是否变化**，结果含 `deps_changed`。
-
-**verify_fix 修复循环**（有状态会话，省 token）：
-
-```
-verify_fix {action:"start", scene, operations}   # 存配置 + 跑第 1 轮
-# → AI 读错误 → 改代码 →
-verify_fix {action:"continue"}                    # 复用配置重跑（无需重传 operations）
-verify_fix {action:"status"}                       # 查轮次历史
-verify_fix {action:"abort"}                        # 结束会话
-```
-
-- `session_id` 可并行多个验证任务；`continue` 时 `deps_changed=false` 表示自上次以来依赖未变，重跑结果大概率相同。
-- 典型工作流：`start`（验出 fail）→ 改代码 → `continue`（重验）→ 直到 `pass` → `abort`。
+> **回归测试**：把关键流程写成 `Scripts/Test/` 下的 TestCase（断言 + 档案护栏 + `cleanup`），用 `run_tests(process=game, script=...)` 跑（**阻塞到跑完返回**，整体硬超时 10 分钟）。
+> **临时冒烟**：无需写用例，直接 `game_control(action=start)` + `simulate_click/key/drag` + `get_logs(kind=error)` 手工编排，最后 `game_control(action=stop)`。
 
 ### 6. AI 开发规范（AI 助手必读）
 
@@ -818,7 +773,7 @@ var data = await SaveTool.load_async("user://save.json", SaveTool.Mode.JSON)
 ### 陷阱2：await 已完成的协程句柄会永久挂起
 对已执行完毕的 `GDScriptFunctionState` 再 `await`，协程永不恢复且零报错。
 典型场景：先 emit 信号唤醒子协程、再 await 其句柄——唤醒瞬间链条已完成，随后的 await 即死锁。
-- 正确姿势：保持"先挂起、后触发、再等待"的顺序；或用 `AsyncTool.await_state_safe(fs)`（内部经 `is_valid()` 判定，失效句柄立即返回 null）
+- 正确姿势：保持"先挂起、后触发、再等待"的顺序；或用 `AsyncTool.await_coroutine(fs, ms)`（先经 `is_valid()` 判定，失效句柄立即返回；并对死等加超时）
 
 ### 陷阱3：跨编译代次的类型化赋值静默失败
 脚本被 reload 后产生新的类代次，此时 `var x: OldClass = new_obj` 若两侧代次不同，赋值结果为 **null 且不报错**。

@@ -192,6 +192,28 @@ func get_error_cursor() -> int:
 	return c
 
 
+## 把"自 cursor 起新增的引擎报错"格式化成可读详情(每条带行号, 最多 5 条)。
+## **单一实现**: eval 的语法预检与内联测试的编译失败都调它 —— 解析错来源只有引擎缓冲一处,
+## 各写一份必然漂移(message/line 的取法一变, 只有一边跟上)。
+func describe_errors_since(cursor: int) -> String:
+	if cursor < 0:
+		return "(未提供错误游标, 详细解析错见 get_logs kind=error)"
+	var taken := take_errors_since(cursor)
+	var entries: Array = taken.get("entries", [])
+	var lines := PackedStringArray()
+	for e in entries:
+		if not (e is Dictionary):
+			continue
+		var msg := str((e as Dictionary).get("message", "")).strip_edges()
+		if msg.is_empty():
+			continue
+		var ln := str((e as Dictionary).get("line", ""))
+		lines.append("- %s%s" % [msg, ("" if ln.is_empty() else "  (行 %s)" % ln)])
+		if lines.size() >= 5:
+			break
+	return "(引擎未提供详细解析错)" if lines.is_empty() else "具体:\n" + "\n".join(lines)
+
+
 ## 清空错误缓冲区(调试复位用)
 func clear_errors() -> void:
 	_mutex.lock()

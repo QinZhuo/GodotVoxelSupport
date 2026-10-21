@@ -45,7 +45,7 @@ extends RefCounted
 ##     最隐蔽, 所以它自带告警。
 ##
 ## **本域的答案是"零状态接缝"(第四种形态)**: 本域没有任何 bind_xxx, 因为它**没有实例状态** ——
-## 7 个 handler 对 _pending / _verify_sessions / _http / debugger_plugin / _mode / _logger /
+## 7 个 handler 对 _pending / _http / debugger_plugin / _mode / _logger /
 ## _game_started_at 等**零引用**, 不存在"必须由服务器递进来"的东西, 自然也就没有可漏调的绑定。
 ## 全域唯一的接缝是注册用的 add_tool, 而它的漏调后果是**显式**的: 7 个工具整体不进 _tool_defs,
 ## tools/list 里查不到, 调用直接回 Unknown tool; 而且因为 handler 全 static 且无状态, 不存在

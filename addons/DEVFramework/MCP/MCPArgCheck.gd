@@ -67,7 +67,7 @@ static func _walk(schema: Dictionary, args: Dictionary, prefix: String, out: Arr
 			out.append('"%s" 的值 %s 不在合法取值内。合法值: %s。' % [at, _describe(v), " / ".join(PackedStringArray(legal))])
 			continue
 		# 只递归显式声明了 properties 的嵌套对象。其余 object 参数(set_node_property 的
-		# value、auto_verify 的 prev_snapshot)是刻意开放的, 把它们当定形字典校验只会误伤。
+		# value)是刻意开放的, 把它们当定形字典校验只会误伤。
 		if tname == "object" and prop.get("properties", null) is Dictionary:
 			_walk(prop, v, at + ".", out)
 

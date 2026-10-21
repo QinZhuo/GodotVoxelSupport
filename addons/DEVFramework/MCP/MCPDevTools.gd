@@ -162,11 +162,9 @@ static func resolve_eval_ctx(override: Dictionary = {}) -> Dictionary:
 ##
 ## ## 命名: 沿用主服务器原名 _call_eval_code, 不套壳成 _handle_eval_code
 ##
-## 它既是注册进工具表的 eval_code handler, 又是主文件三处跨域调用点的公共入口:
-##   _register_runtime_tools 的 game_eval runtime 实现(约 3624)
-##   _runtime_auto_verify 的 "eval" 动作(约 4002)
-##   _poll_until 的轮询探测(约 4085)
-## 三处都只传一个 Dictionary(单参调用), 故签名是 ([param args], [param ctx] = {}),
+## 它既是注册进工具表的 eval_code handler, 又是主文件跨域调用点的公共入口
+## (_call_eval_code_local / _call_eval_code_routed 都调到它)。
+## 各处都只传一个 Dictionary(单参调用), 故签名是 ([param args], [param ctx] = {}),
 ## ctx 走默认空字典 → 回落到 provider。
 ##
 ## 不套壳的第二个理由: MCPToolAudit 靠 handler.get_method() 取函数名再切源码函数体做
@@ -230,7 +228,7 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 	var result: Variant = inst.call("_mcp_run")
 	# await 感知: 代码含 await 时 call 返回协程句柄, 等待其完成再回传真实结果(带超时)。
 	# 超时不杀续体: 实例转交延迟回收, 协程自然结束后自动释放(对齐 DevTools/Node REPL 的 top-level await 语义)。
-	if _is_function_state(result):
+	if AsyncTool.is_coroutine(result):
 		var timeout_sec := clampf(VariantTool.get_float(args, "timeout_ms", 8000) / 1000.0, 0.5, 15.0)
 		var holder := {"done": false, "value": null}
 		_await_state(result, holder)
@@ -253,7 +251,7 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 	if result is Dictionary or result is Array:
 		shown = JSON.stringify(result)
 	# 运行期错误(如 get_node 访问 null 字段)应作为错误即时返回, 而非"成功+警告",
-	# 否则编辑器侧只能等 20s 超时再回查错误缓冲, AI 无法及时定位。
+	# 否则编辑器侧只能等代理超时(_game_call_timeout_ms)再回查错误缓冲, AI 无法及时定位。
 	if not runtime_errors.is_empty():
 		var merged := condense_runtime_errors(runtime_errors)
 		if merged.is_empty():
@@ -327,23 +325,11 @@ static func _wrap_source(code: String) -> String:
 
 ## 从 logger 取**自 cursor 起新增**的错误条目, 拼成具体解析错文案(供编译失败时内联)。
 ## take_errors_since 是**非破坏性**读(不推进游标), 故与后续"运行期错误收集"互不影响。
+## 格式化本身在 MCPLogger.describe_errors_since(单副本, 与内联测试编译失败共用)。
 static func _parse_error_details(logger: Object, cursor: int) -> String:
-	if logger == null or cursor < 0:
+	if logger == null:
 		return "(详细解析错见 get_logs(kind=error))"
-	var taken: Dictionary = logger.take_errors_since(cursor)
-	var entries: Array = taken.get("entries", [])
-	var lines := PackedStringArray()
-	for e in entries:
-		if not (e is Dictionary):
-			continue
-		var msg := str((e as Dictionary).get("message", "")).strip_edges()
-		if msg.is_empty():
-			continue
-		var ln := str((e as Dictionary).get("line", ""))
-		lines.append("- %s%s" % [msg, ("" if ln.is_empty() else "  (行 %s)" % ln)])
-		if lines.size() >= 5:
-			break
-	return "(引擎未提供详细解析错)" if lines.is_empty() else "具体:\n" + "\n".join(lines)
+	return str(logger.describe_errors_since(cursor))
 
 
 ## 静态扫描 eval 代码中被禁止的 API, 返回 "" 表示通过。
@@ -544,11 +530,6 @@ static func _degraded_warning(mode: String, game_started_at: int, context: Dicti
 	if mode == MODE_RUNTIME and game_started_at <= 0:
 		reasons.append("[守卫未生效] game_started_at<=0, 新鲜度守卫对本次 eval **全部放行**: 跑的是旧代码也不会被拦。编辑器侧按内容哈希判新鲜度, 不依赖该基准, 故此条只在游戏侧出现。")
 	return "\n".join(reasons)
-
-
-## 判断值是否为协程句柄(GDScriptFunctionState 未暴露给脚本类型系统, 用类名判断)
-static func _is_function_state(v) -> bool:
-	return v != null and v is Object and v.get_class() == "GDScriptFunctionState"
 
 
 ## 等待协程完成并把最终返回值写入 holder(fire-and-forget 调用)

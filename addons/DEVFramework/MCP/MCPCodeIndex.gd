@@ -28,7 +28,7 @@ extends RefCounted
 ##    而若改用 lambda 注册, get_method() 返回空串, 那批工具会**静默跳过**入参自检 ——
 ##    正是这个自检文件开头警告的"比不自检更糟"的失效模式。
 ## 2. 本域实现体经实测对实例状态零依赖, 静态化不损失任何东西。真正依赖实例状态的那批
-##    (调试桥接的 debugger_plugin、运行期的 _pending / _verify_sessions)刻意留在主服务器里。
+##    (调试桥接的 debugger_plugin、运行期的 _pending)刻意留在主服务器里。
 ##
 ## **必须带 @tool 且不声明 class_name**, 两条都是踩过的坑, 详见 MCPDevServer 顶部注释。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
@@ -445,10 +445,8 @@ static func _resource_type_label(path: String) -> String:
 ## 收集场景依赖链的全部资源文件(递归: 场景依赖 → 资源依赖), 含脚本/配置/图片/音频/字体等。
 ## 排除 .godot 缓存与 .import 元数据, 只看用户资源。
 ##
-## 本函数原先住在 MCPDevServer 的运行校验域, 被本域的 find_resource_users 与那边的
-## _snapshot_deps_mtime 同时使用 —— 是整轮拆分里**唯一**的跨域共享件。放在本域的理由是它
-## 与其它扫描器同族(都是"沿 res:// 递归解析资源图"), 且这样依赖是单向的(运行校验域 → 本域);
-## 若留在主服务器, 则每个域都要反向引用服务器, 等于把耦合从横向搬到纵向, 什么都没解决。
+## 本函数原先住在 MCPDevServer 的运行校验域, 被本域的 find_resource_users 使用 —— 放在本域
+## 的理由是它与其它扫描器同族(都是"沿 res:// 递归解析资源图"), 依赖单向;
 static func collect_scene_deps(scene: String) -> Dictionary:
 	var deps := {}
 	var visited := {}

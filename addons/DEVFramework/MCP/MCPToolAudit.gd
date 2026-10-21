@@ -394,10 +394,9 @@ static func _next_func_line(body: String) -> int:
 ## 其前缀 `VariantTool.` 本身就足够特异, 加了反而会让它在 "." 处失配、导致整个自检
 ## 静默扫不到任何键 —— 那正是本函数当年失灵的形态(规则改了而正则没跟上, 检查变空转)。
 ##
-## 而后两条的 `args` 前必须加否定环视, 已证明不是可有可无: verify_fix 里写的是
-## `verify_args["prev_snapshot"]`(给它自己的局部字典赋值), 而朴素的 `args\["(\w+)"\]`
-## 恰好命中这串的后半段, 于是把一个**局部变量名**误报成"未声明的入参"。正则不做词边界
-## 就把这类噪声塞进自检, 而总在喊狼来了的检查等于没有检查。
+## 而后两条的 `args` 前必须加否定环视: 局部字典若恰好以 `args` 结尾(如 `verify_args["k"]`),
+## 朴素的 `args\["(\w+)"\]` 会命中这串的后半段, 把**局部变量名**误报成"未声明的入参"。正则不做
+## 词边界就把这类噪声塞进自检, 而总在喊狼来了的检查等于没有检查。
 static func scan_arg_keys(body: String) -> Array[String]:
 	var out: Array[String] = []
 	for pattern in [
