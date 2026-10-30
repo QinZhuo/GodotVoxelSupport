@@ -32,19 +32,38 @@ static func get_screen_rect(node: Node, target_def: TutorialTargetDef = null) ->
 	if node is Node3D:
 		rect = _rect_3d(node)
 	elif node is CanvasItem:
-		# 2D(Control/Node2D): 合并自身与可见子级的画布矩形 —— 多目标同框 = 直接把 node_path 指向其父节点
-		var rects: Array[Rect2] = []
-		_collect_canvas_rects(node, rects)
-		if rects.is_empty():
-			var origin := (node as CanvasItem).get_global_transform_with_canvas().origin
-			rect = Rect2(origin - Vector2.ONE * 0.5, Vector2.ONE)
-		else:
-			rect = rects[0]
-			for i in range(1, rects.size()):
-				rect = rect.merge(rects[i])
+		rect = _rect_2d(node as CanvasItem)
+		# UI 若贴在 3D 面上(子视口渲染到平板屏幕等), 还需换算回主视口坐标
+		rect = _sub_view_screen_rect(node.get_viewport(), rect)
 	if rect.size == Vector2.ZERO:
 		return Rect2()
 	return rect.grow(pad)
+
+
+## CanvasItem → 画布矩形: 合并自身与可见子级 —— 多目标同框 = 直接把 node_path 指向其父节点
+static func _rect_2d(item: CanvasItem) -> Rect2:
+	var rects: Array[Rect2] = []
+	_collect_canvas_rects(item, rects)
+	if rects.is_empty():
+		var origin := item.get_global_transform_with_canvas().origin
+		return Rect2(origin - Vector2.ONE * 0.5, Vector2.ONE)
+	var rect := rects[0]
+	for i in range(1, rects.size()):
+		rect = rect.merge(rects[i])
+	return rect
+
+
+## 子视口内的 2D 矩形 → 主视口矩形(约定: 承载该视口的 SubView3D 是视口的祖先)。
+## 主视口内的普通 UI 原样返回。
+static func _sub_view_screen_rect(viewport: Viewport, rect: Rect2) -> Rect2:
+	if not (viewport is SubViewport):
+		return rect
+	var node := viewport.get_parent()
+	while node:
+		if node is SubView3D and (node as SubView3D).viewport == viewport:
+			return (node as SubView3D).viewport_rect_to_screen(rect)
+		node = node.get_parent()
+	return rect
 
 
 ## Node3D → 屏幕矩形。统一用"可见 mesh 世界 AABB 合并投影"而非顶点投影:

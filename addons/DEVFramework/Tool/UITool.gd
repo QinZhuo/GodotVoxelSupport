@@ -164,29 +164,36 @@ static func toggle(panel: Node) -> void:
 	else:
 		panel.open()
 
-## 返回键处理。委托调用面板的 [code]close()[/code]，触发完整关闭 + 注销流程。
-## 优先关闭栈顶 DIALOG，其次关闭栈顶 PANEL。
+## 返回键处理：优先 DIALOG，其次 PANEL。
+## 返回是否被消费（= 面板确实处理了返回）。面板的 `_back()` 返回 false 表示它不接管返回键
+## （如常驻主菜单），此时继续尝试下一层，避免"吞掉返回键却不做任何事"。
 static func back() -> bool:
-	# 优先处理 DIALOG
 	var top_dialog := get_top_of_layer(Layer.DIALOG)
-	if top_dialog:
-		_call_back(top_dialog)
+	if top_dialog and _call_back(top_dialog):
 		return true
 
-	# 其次处理 PANEL（主界面）
 	var top_panel := get_top_of_layer(Layer.PANEL)
-	if top_panel:
-		_call_back(top_panel)
+	if top_panel and _call_back(top_panel):
 		return true
 
 	return false
 
-## 调用面板的 _back() 方法，若未实现则默认调用 close()。
-static func _call_back(panel: Node) -> void:
-	if panel.has_method("_back"):
-		panel._back()
-	else:
+## 点击空白处返回：仅当栈顶面板声明了 [code]dismiss_on_blank_click[/code] 时生效。
+## 与 ESC 走同一条返回链，因此同样支持面板自己的 `_back()` 覆盖。
+static func dismiss_on_blank_click() -> bool:
+	var top := get_top()
+	if not is_instance_valid(top) or not ("dismiss_on_blank_click" in top) or not top.dismiss_on_blank_click:
+		return false
+	return back()
+
+## 调用面板的 `_back()`，未实现则默认 close()。返回是否消费。
+## 兼容返回 void 的旧实现（视为已消费）。
+static func _call_back(panel: Node) -> bool:
+	if not panel.has_method("_back"):
 		panel.close()
+		return true
+	var result = panel._back()
+	return result if result is bool else true
 
 ## 关闭所有面板（委托调用每个面板的 [code]close()[/code]，触发完整关闭 + 注销流程）。
 static func close_all() -> void:

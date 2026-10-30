@@ -3,11 +3,12 @@
 importer="voxel_mesh"
 type="Mesh"
 uid="uid://bg8sbc5p3m7pc"
-valid=false
+path="res://.godot/imported/teapot1.qvx-6f5a650df3ec554a093a42f5c6c852e9.mesh"
 
 [deps]
 
 source_file="res://demo/samples/teapot1.qvx"
+dest_files=["res://.godot/imported/teapot1.qvx-6f5a650df3ec554a093a42f5c6c852e9.mesh"]
 
 [params]
 

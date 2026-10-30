@@ -30,24 +30,27 @@ static var _shake: Dictionary = {}
 static var _rr_index: int = 0
 static var _rr_active: VirtualCamera3D = null
 
+## 相机所在视口: 3D 画面被包进 SubViewport 时由业务注册, 缺省为主窗口
+static var viewport: Viewport
+
 
 # ── 查询 ──
 
 ## 当前场景的相机大脑(不在场景树中时返回 null)
 static func get_brain() -> CameraBrain3D:
 	var brain := CameraBrain3D.main
-	if brain == null or not is_instance_valid(brain) or not brain.is_inside_tree():
-		return null
-	return brain
+	return brain if is_instance_valid(brain) else null
 
 
-## 真实渲染相机: 优先 Brain, 否则退回视口当前相机(兼容没有 Brain 的场景)
+## 真实渲染相机: 优先 Brain, 否则相机所在视口的当前相机
 static func get_camera() -> Camera3D:
 	var brain := get_brain()
 	if brain != null:
 		return brain
-	var loop := Engine.get_main_loop() as SceneTree
-	return loop.root.get_camera_3d() if loop != null else null
+	var vp := viewport
+	if not is_instance_valid(vp):
+		vp = (Engine.get_main_loop() as SceneTree).root
+	return vp.get_camera_3d()
 
 
 ## 当前生效机位

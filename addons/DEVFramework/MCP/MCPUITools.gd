@@ -83,7 +83,7 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 	var areas_3d: Array = []
 	if _collect_interactables_3d(loop.root, areas_3d, max_depth, 0):
 		depth_capped = true
-	var cam := loop.root.get_camera_3d()
+	var cam := CameraTool.get_camera()
 
 	# 先按调用方的筛选条件过滤, 再排序截断 —— 顺序反了会让前 max_nodes 条被背景装饰占满。
 	var items: Array = []
@@ -381,7 +381,7 @@ static func _is_interactable_3d(n: CollisionObject3D) -> bool:
 	return n.has_method("activate") or n.has_method("_mouse_down")
 
 
-## 3D 元素的文本: 走项目自己的提示来源, 与 TipPanel.open_panel 读的是同一组属性。
+## 3D 元素的文本: 走项目自己的提示来源, 与 DetailPanel.open_panel 读的是同一组属性。
 ##
 ## 刻意不调 data.get_desc(context) —— 那要先构造并 game_ready 一个 GameContext, 是有副作用的
 ## 游戏逻辑, 一个"列清单"的只读工具不该碰它。取不到就交白: name/script/distance 足够 AI 认人。

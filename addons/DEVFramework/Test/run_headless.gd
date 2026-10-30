@@ -5,6 +5,7 @@ extends SceneTree
 ##     → 只跑**进程无关**用例(编辑器进程语义, 快、无副作用)
 ##   godot --headless --script res://addons/DEVFramework/Test/run_headless.gd -- --game
 ##     → 先加载项目主场景(游戏进程语义: autoload + 场景树 + 真实时间), 再跑**需要游戏进程**的用例
+##   追加 `--script <名字>` 只跑指定用例(长用例回归时免去全量开销)
 ## 退出码: 全部通过=0, 存在失败=1(CI 可直接判定)。
 ##
 ## 进程归属由用例自行声明(`TestCase.needs_game_process()`); 跑错进程的用例会被列为 skipped,
@@ -29,9 +30,20 @@ func _wants_game_mode() -> bool:
 
 
 func _run() -> void:
-	var summary: Dictionary = await TestRunner.run_all("", TestRunner.MODE_EDITOR)
+	_finish(await TestRunner.run_all(_script_arg(), TestRunner.MODE_EDITOR))
+
+
+## 打印结果并退出: 码 0=全通过 / 1=有失败, 供 CI 判定。两个模式共用
+func _finish(summary: Dictionary) -> void:
 	print(str(summary.get("text", "")))
 	quit(0 if int(summary.get("failed", 1)) == 0 else 1)
+
+
+## `-- --script <名字>`: 只跑指定用例; 缺省 = 全量(空串)
+func _script_arg() -> String:
+	var args := OS.get_cmdline_user_args()
+	var i := args.find("--script")
+	return str(args[i + 1]) if i >= 0 and i + 1 < args.size() else ""
 
 
 ## 游戏进程模式: 先起主场景, 等它就绪, 再跑游戏用例。
@@ -50,9 +62,7 @@ func _run_game() -> void:
 		quit(1)
 		return
 	await _await_scene_ready()
-	var summary: Dictionary = await TestRunner.run_all("", TestRunner.MODE_GAME)
-	print(str(summary.get("text", "")))
-	quit(0 if int(summary.get("failed", 1)) == 0 else 1)
+	_finish(await TestRunner.run_all(_script_arg(), TestRunner.MODE_GAME))
 
 
 func _await_scene_ready() -> void:

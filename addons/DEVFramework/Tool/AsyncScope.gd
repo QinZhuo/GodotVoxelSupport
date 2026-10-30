@@ -6,7 +6,7 @@
 ## 那份副作用就会作用在「别人正在用的对象」上——误停别人的特效、误回收在用的实例。
 ##
 ## 过去靠「世代计数器 + 醒来后比对」判定失效。那只是**事后检测**：等待者照样被挂住，
-## 且每个复用点都要手工自增计数器，漏写一处就静默出错（这是令牌模式的固有成本）。
+## 且每个复用点都要手工自增计数器，漏写一处就静默出错（等别人协程时只能这样，见 [Generation]）。
 ##
 ## 本类改为**资源所有权**：把这一轮挂起的任务登记在本作用域内，于生命周期边界
 ## [method cancel_all] 一次性撤销——等待中的 [method delay] **立即**恢复为 false，
@@ -42,6 +42,10 @@
 ## 与 [GameTimer] 的分工：GameTimer 由宿主的物理 tick 驱动、经 TickTool 定序，
 ## 用于**必须可复现的战斗逻辑**（回放的顺序依赖它）。AsyncScope 不参与定序，
 ## 用于**表现层**（特效节奏、UI 收尾、池化视图的异步清理）——回放不关心这些，定了序反而是负担。
+##
+## 与 [Generation] 的分工：本类让**自己登记的等待立即返回**；等别人的协程
+## （网络、`load_data`）时无法被唤醒，只能回来后查世代。本类的 [member generation]
+## 在 [method cancel_all] 时换代，可直接交给调用方当检查点用，两者共用一次「这一轮结束」。
 ##
 ## [b]不覆盖[/b]：可撤销的**信号连接**与 [method Object.call_deferred] 队列。
 ## 特别提醒 [code]await tween.finished[/code] 是个陷阱：[method Tween.kill]
@@ -94,12 +98,17 @@ class _Task extends RefCounted:
 var _tasks: Array[_Task] = []
 ## 宿主弱引用。**必须用弱引用**：强引用会让 Node 永远得不到释放
 var _host: WeakRef
+## 本作用域的世代。[method cancel_all] 换代后，外部持有的旧快照一律失效；
+## 等别人的协程时用它做检查点（见 [Generation]）
+var generation := Generation.new()
 
 
 ## [param host] 宿主，通常是本作用域所属的那个 Node。
 ## 传入后本作用域便与它**同生共死**：宿主离开场景树时立刻撤销全部任务，
 ## 调用方既不必写任何撤销分支，也不必再判断实例是否有效。
 func _init(host: Object = null) -> void:
+	## 先接自己的世代：即使没有宿主，外部换代也必须能撤销本作用域的等待
+	generation.advanced.connect(_on_generation_advanced)
 	if host == null:
 		return
 	## 弱引用。**不能用强引用**，否则 Node 永远等不到释放
@@ -133,9 +142,17 @@ func call_after(sec: float, callback: Callable) -> void:
 	_tasks.append(_Task.new(self, sec, callback))
 
 
-## 撤销本作用域内所有尚未结算的任务：等待中的 [method delay] 立即恢复为 false，
-## [method call_after] 的回调不再执行。幂等，可重复调用。
+## 换代并撤销本作用域内所有尚未结算的任务：等待中的 [method delay] 立即恢复为 false，
+## [method call_after] 的回调不再执行，外部持有的旧 [member generation] 快照随之失效。
+## 幂等，可重复调用。
 func cancel_all() -> void:
+	## 只换代，撤销经信号回流到 _on_generation_advanced —— 这样外部直接
+	## `generation.next()` 也能撤掉本作用域的等待，两条入口行为一致
+	generation.next()
+
+
+## 世代换代：撤销登记表里的全部任务
+func _on_generation_advanced(_gen: int) -> void:
 	## 先复制并清空集合，再逐个撤销：cancel() 会**同步**唤醒等待中的 delay()，
 	## 而那个协程恢复后会回头结算。直接边遍历边缩容会漏掉后面的项，撤销静默失效
 	var pending := _tasks.duplicate()

@@ -493,13 +493,31 @@ func find_parent(target: QVoxelNode) -> QVoxelGroup:
 ## 节点在**世界里的组合摆放**：从根到它逐层累乘 local_transform。渲染器据此把模型摆到该处。
 ## 编辑器按"体素坐标本地化 + 渲染器承载摆放"的口径渲染，本函数就是那条摆放的唯一来源。
 func world_transform(target: QVoxelNode) -> Transform3D:
+	# 用 transform_at(preview_frame)：带逐帧摆放轨道的节点在编辑器里就能预览到动画位移。
+	return world_transform_at(target, preview_frame)
+
+
+## 第 frame 帧的组合摆放（渲染 / 烘焙共用；帧号越界由 transform_at 回落到静态摆放）。
+func world_transform_at(target: QVoxelNode, frame: int) -> Transform3D:
 	var path: Array[QVoxelNode] = []
 	if not _path_to(nodes, target, path):
 		return Transform3D.IDENTITY
 	var xf := Transform3D.IDENTITY
 	for n in path:
-		# 用 transform_at(preview_frame)：带逐帧摆放轨道的节点在编辑器里就能预览到动画位移。
-		xf = xf * n.transform_at(preview_frame)
+		xf = xf * n.transform_at(frame)
+	return xf
+
+
+## 静止态组合摆放：忽略 transform_tracks，只用节点自己的 local_transform。
+## 【为什么需要它】烘焙要把"根节点的运动"从体素里拿掉（root motion 交给节点），
+## 这个参考系必须是不随预览帧漂移的静止态。
+func world_transform_rest(target: QVoxelNode) -> Transform3D:
+	var path: Array[QVoxelNode] = []
+	if not _path_to(nodes, target, path):
+		return Transform3D.IDENTITY
+	var xf := Transform3D.IDENTITY
+	for n in path:
+		xf = xf * n.local_transform
 	return xf
 
 

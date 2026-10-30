@@ -77,9 +77,11 @@ func popup() -> void:
 func await_closed() -> bool:
 	return await UIPanelTool.await_closed(self)
 
-## 返回键处理，由 UITool.back() 调用。子类可重写自定义返回行为，默认关闭面板。
-func _back() -> void:
+## 返回键处理，由 [method UITool.back] 调用。默认关闭面板并返回 true（已消费）。
+## 子类返回 false 表示不接管返回键（如常驻界面的面板），调用方会继续回退。
+func _back() -> bool:
 	close()
+	return true
 
 ## 应用面板显隐（[UIPanelTool.open] / [UIPanelTool.close] 调用）。默认切换自身 [member visible]。
 func apply_visibility(shown: bool) -> void:

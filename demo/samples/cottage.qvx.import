@@ -3,11 +3,12 @@
 importer="voxel_mesh"
 type="Mesh"
 uid="uid://cttwd1mgagvvc"
-valid=false
+path="res://.godot/imported/cottage.qvx-15ac2f8ce2f8f0c0f46fa42b2293fec8.mesh"
 
 [deps]
 
 source_file="res://demo/samples/cottage.qvx"
+dest_files=["res://.godot/imported/cottage.qvx-15ac2f8ce2f8f0c0f46fa42b2293fec8.mesh"]
 
 [params]
 

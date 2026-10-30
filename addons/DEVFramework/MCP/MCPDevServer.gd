@@ -1534,7 +1534,10 @@ func _require_process(args: Dictionary) -> String:
 
 ## run_tests 的 runtime 侧(服务器位于游戏进程内): process 只能是 game(游戏用例就地跑)。
 func _call_run_tests_local(args: Dictionary) -> Dictionary:
-	if _require_process(args) != "game":
+	var process := _require_process(args)
+	if process == "both":
+		return _fail("导出运行时没有独立的编辑器进程, process=both 无意义; 这里只能跑 process=game")
+	if process != "game":
 		return _fail("导出运行时没有独立的编辑器进程; run_tests 的 process 只能是 'game'")
 	return await _runtime_run_game_tests(args)
 
@@ -1545,16 +1548,118 @@ func _call_run_tests_local(args: Dictionary) -> Dictionary:
 ## (游戏进程里解析错会触发调试器断点中断游戏 —— 同 _call_game_eval_proxy 的转发预检)。
 func _call_run_tests_routed(args: Dictionary) -> Dictionary:
 	var script := VariantTool.get_string(args, "script").strip_edges()
-	if _require_process(args) == "game":
+	var process := _require_process(args)
+	if process != "editor" and process != "game" and process != "both":
+		return _fail("process 必须是 editor / game / both, 收到: '%s'" % process)
+	if process == "both":
+		return await _run_tests_both(script)
+	if process == "game":
 		if TestRunner.is_inline_source(script):
 			var pre := TestRunner.precheck_inline(script, _logger)
 			if pre != "":
 				return _err_validation("内联测试代码预检未通过(未转发到游戏进程):\n%s" % pre,
 					"修正内联测试源码后重试; 或改成文件放到 %s 下再用 script 路径跑" % TestRunner.TESTS_DIR)
-		return await _call_runtime_proxy("run_tests", args)
+		return await _run_tests_in_game(script)
 	if script.is_empty():
 		return _fail("必须指定测试脚本(script: 脚本路径子串如 'test_display_tool', 或 'all' 全量, 或内联 GDScript 源码); 不支持默认全跑")
 	return _ok_json(await TestRunner.run_all(script, TestRunner.MODE_EDITOR, _logger))
+
+
+## 转发游戏用例到游戏进程; **没有活跃会话时自动启动游戏**(而不是要求先 game_control(start)):
+##   · 没会话 = 用户没在玩, 自动启动不抢占任何东西(已有会话时一律不动, 那才可能打断用户);
+##   · run_tests 是唯一不过新鲜度守卫的执行入口, 复用几小时前的旧会话跑测试会拿到旧代码的
+##     "通过" —— 自动启动天然从最新磁盘脚本起进程;
+##   · "测试没跑起来"与"游戏没开"的报错几乎一样, 多要求一步就多一次误判。
+func _run_tests_in_game(script: String) -> Dictionary:
+	var auto_started := false
+	if not _has_game_session():
+		var started: Dictionary = await _call_run_game({})
+		if bool(started.get("is_error", false)):
+			return started
+		auto_started = true
+		# _call_run_game 在调试线 15s 内未就绪时返回的是**成功文案**, 这里必须区分开:
+		# 直接转发只会撞上 _call_runtime_proxy 的 transient, 白等一轮
+		if not _game_ready:
+			return _err_transient("已自动启动游戏, 但调试线 15 秒内未就绪, 本轮测试未执行",
+				"稍后重试; 或 game_control(action=start) 后确认游戏窗口已进入主场景再调 run_tests")
+		# ⚠️ 调试线就绪 ≠ 主场景初始化完: autoload 的 ready 早于场景根 _ready, 此刻注入测试会
+		# 插进 _ready 的 await 点之间, 撞上"商店概率表/随机池还没建好"的半初始化状态
+		# (实测: 自动启动后立刻转发, 首轮必然断在 SymbolComponent.game_ready —— actor 还是 null,
+		#  而手动启动后隔几秒再调则正常)。编辑器进程看不到游戏场景树的初始化进度, 事件式探测
+		# 成本高于收益, 固定短等待相对 10~15s 的启动开销可忽略。ignore_time_scale=true:
+		# 用例常把 time_scale 调高, 这里不能被它缩短。
+		await get_tree().create_timer(2.0, true, false, true).timeout
+	var raw: Dictionary = await _call_runtime_proxy("run_tests", {"process": "game", "script": script})
+	if bool(raw.get("is_error", false)):
+		return raw
+	var sum := _summary_of(raw)
+	if sum.is_empty():
+		return raw
+	if auto_started:
+		sum["auto_started_game"] = true
+		sum["text"] = "[已自动启动游戏进程(此前无运行实例)]\n%s" % str(sum.get("text", ""))
+	return _ok_json(sum)
+
+
+## process=both: 编辑器段 → 游戏段, 合并成一份汇总。
+## 拆成两次调用的问题不是麻烦, 而是**误判**: 调用方往往只跑记得的那一半就宣布全绿。
+func _run_tests_both(script: String) -> Dictionary:
+	if TestRunner.is_inline_source(script):
+		# 内联源码只跑一次: 它是临时逻辑验证, 两段跑同一段代码只是翻倍耗时
+		return _ok_json(await TestRunner.run_all(script, TestRunner.MODE_EDITOR, _logger))
+	var editor_sum: Dictionary = await TestRunner.run_all(script, TestRunner.MODE_EDITOR, _logger)
+	# 选择器一条都没匹配上(早退结果): 游戏段必然同样为空, 不再白起一轮 ——
+	# 更不该为此自动启动游戏
+	if int(editor_sum.get("total", 0)) == 0 and int(editor_sum.get("failed", 0)) > 0:
+		return _ok_json(editor_sum)
+	var game_res: Dictionary = await _run_tests_in_game(script)
+	if bool(game_res.get("is_error", false)):
+		return _both_with_game_failure(editor_sum, script, _error_text(game_res))
+	var game_sum := _summary_of(game_res)
+	if game_sum.is_empty():
+		return _both_with_game_failure(editor_sum, script, "游戏进程返回内容无法解析为测试汇总")
+	var merged: Dictionary = TestRunner.merge_summaries([editor_sum, game_sum], script)
+	if bool(game_sum.get("auto_started_game", false)):
+		merged["auto_started_game"] = true
+		merged["text"] = "[已自动启动游戏进程(此前无运行实例)]\n%s" % str(merged.get("text", ""))
+	return _ok_json(merged)
+
+
+## 游戏段没跑成 = 全量没跑成: 记成**一条失败项**而不是静默省略。
+## 省略的话 total 只含编辑器段, 调用方看到"失败 0"会当成全绿 —— 半个结果最危险的形态。
+func _both_with_game_failure(editor_sum: Dictionary, script: String, reason: String) -> Dictionary:
+	var merged: Dictionary = TestRunner.merge_summaries([editor_sum], script)
+	merged["total"] = int(merged["total"]) + 1
+	merged["failed"] = int(merged["failed"]) + 1
+	merged["passed"] = int(merged["total"]) - int(merged["failed"])
+	merged["failures"].append("<游戏段> 未执行: %s" % reason)
+	merged["cases"].append({"case": "<游戏段>", "ok": false, "elapsed_ms": 0})
+	merged["text"] = TestRunner.render_text(merged)
+	return _ok_json(merged)
+
+
+## 取回结果里的结构化摘要(ok_json 放 structuredContent; 少数路径只有 content[].text 的 JSON)
+func _summary_of(res: Dictionary) -> Dictionary:
+	var sc: Variant = res.get("structuredContent", null)
+	if sc is Dictionary:
+		return sc
+	var content: Variant = res.get("content", null)
+	if content is Array and not content.is_empty() and content[0] is Dictionary:
+		var parsed: Variant = JSON.parse_string(str(content[0].get("text", "")))
+		if parsed is Dictionary:
+			return parsed
+	return {}
+
+
+## 取错误结果里的可读正文(错误封装把 message 放进 structuredContent.message)
+func _error_text(res: Dictionary) -> String:
+	var sc: Variant = res.get("structuredContent", null)
+	if sc is Dictionary and str(sc.get("message", "")) != "":
+		return str(sc.get("message"))
+	var content: Variant = res.get("content", null)
+	if content is Array and not content.is_empty() and content[0] is Dictionary:
+		return str(content[0].get("text", ""))
+	return "未知错误"
 
 
 ## 游戏运行控制: start(支持 uid:// 场景, 已在运行时自动停止旧实例后重启)/stop/continue
@@ -1766,13 +1871,13 @@ func _register_game_play_tools() -> void:
 	var tests_schema := {
 		"type": "object",
 		"properties": {
-			"process": {"type": "string", "enum": ["editor", "game"], "description": "在哪个进程跑: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **阻塞到本轮跑完才返回**; 需游戏运行; 导出运行时=本进程)。必填。"},
+			"process": {"type": "string", "enum": ["editor", "game", "both"], "description": "在哪个进程跑: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **阻塞到本轮跑完才返回**; 无运行中的游戏时**自动启动**; 导出运行时=本进程); both=先 editor 段再 game 段并合并成一份汇总(跑全量用这个)。必填。"},
 			"script": {"type": "string", "description": "必填。二选一(靠内容自动判别): ①测试脚本路径子串(如 'test_game_replay'), 只运行匹配的用例文件; 'all'=全量(**不推荐**: 耗时可能过长)。②**内联 GDScript 源码**——含换行 或 以 'extends ' 开头即判为源码, 需 `extends TestCase` 并定义 test_ 开头的断言方法, 直接编译运行、**不落盘**, 适合临时验证(上限 8192 字符)。单个词(含打错的脚本名)一律按选择器处理。"},
 		},
 		"required": ["process", "script"],
 	}
 	_register_game_play_tool("run_tests",
-		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **调用会阻塞到本轮跑完才返回**, 不提供中途进度查询; 需游戏运行)。**测试整体硬超时 10 分钟**: 到点判失败并停止等待。两类合起来才是全量。",
+		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **阻塞到本轮跑完才返回**; 无运行中的游戏时自动启动一个; 已有会话不重启); both=先 editor 段再 game 段并合并成一份汇总(**跑全量用它**, 游戏段没跑成会记成一条失败而不是静默省略)。**逐条进度**(每个用例方法的开始/结束、长方法的 15s 心跳)只 print 到宿主控制台 —— 编辑器输出面板 / 游戏窗口 / headless stdout, 工具返回值只有最终汇总, 阻塞期间查不到中途进度。**测试整体硬超时 10 分钟**: 到点判失败并停止等待。",
 		tests_schema,
 		_call_run_tests_local,
 		_call_run_tests_routed)

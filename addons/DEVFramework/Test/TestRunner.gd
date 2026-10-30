@@ -28,6 +28,16 @@ const HARD_TIMEOUT_MS := 600000
 const MODE_EDITOR := "editor"
 ## 游戏进程: 只跑需要游戏进程的用例
 const MODE_GAME := "game"
+## 编辑器段 + 游戏段合并后的标签(仅 MCP process=both 合并时使用, 不作为 run_all 的入参)
+const MODE_BOTH := "both"
+
+## 长用例心跳间隔(毫秒): 单个方法可能跑几十秒到几分钟, 只打一行"开始"会让人分不清
+## 是还在跑还是卡死。心跳只在方法**让出主循环**(await)时才有机会打, 纯死循环打不出来。
+const HEARTBEAT_MS := 15000
+
+## 防重入: 同一进程内不允许两轮 run_all 并发 —— 用例会改共享单例/存档/时间倍率,
+## 交叉执行时互相污染, 且失败会指向错误的用例。空串 = 空闲, 否则为正在跑的 mode。
+static var _running_mode := ""
 
 
 ## [param script] 二选一(靠内容自动判别, 不新增参数):
@@ -39,6 +49,18 @@ const MODE_GAME := "game"
 ##   传 null(如 headless CLI)则退回通用提示。鸭子式调用(只用到 get_error_cursor/describe_errors_since),
 ##   故 Test 域不依赖 MCP 的具体类型。
 static func run_all(script := "", mode := MODE_EDITOR, logger: Object = null) -> Dictionary:
+	# 闸门放在唯一入口: 两个宿主(编辑器 MCP / 游戏进程 MCP / headless)共用同一道,
+	# 而不是各宿主自己记一个"正在跑"标志(那种写法必然漏掉新增的宿主)。
+	if _running_mode != "":
+		return _error_result("已有测试在运行(%s), 本轮拒绝执行: 并发的两轮测试会互相污染共享状态(单例/存档/时间倍率)。等它跑完再来。"
+			% _mode_label(_running_mode), script, mode)
+	_running_mode = mode
+	var result := await _run_all(script, mode, logger)
+	_running_mode = ""
+	return result
+
+
+static func _run_all(script: String, mode: String, logger: Object) -> Dictionary:
 	var deadline := Time.get_ticks_msec() + HARD_TIMEOUT_MS
 	if is_inline_source(script):
 		return await _run_inline(script, mode, logger, deadline)
@@ -50,10 +72,15 @@ static func run_all(script := "", mode := MODE_EDITOR, logger: Object = null) ->
 	case_paths.sort()
 
 	if selector != "":
+		## 逗号分隔可多选(如 "cross,test_replay_matches"): 复现跨用例污染时按需组合, 不必全量
+		var keys := selector.split(",", false)
 		var matched: Array = []
 		for p in case_paths:
-			if str(p).contains(selector):
-				matched.append(p)
+			var path := str(p)
+			for k in keys:
+				if path.contains(str(k).strip_edges()):
+					matched.append(p)
+					break
 		if matched.is_empty():
 			return _error_result("未找到匹配 '%s' 的测试脚本 (扫描 %s)" % [selector, TESTS_DIR], script, mode)
 		case_paths = matched
@@ -136,6 +163,7 @@ static func _run_one_case(res: Script, label: String, mode: String, acc: Diction
 	var skip := _skip_reason(mode, wants_game)
 	if skip != "":
 		acc["skipped"].append({case = label, reason = skip})
+		_progress("跳过 %s（%s）" % [label, skip])
 		return
 	var case_started_at := Time.get_ticks_msec()
 	for mname in _test_methods(res):
@@ -146,10 +174,11 @@ static func _run_one_case(res: Script, label: String, mode: String, acc: Diction
 			acc["aborted"] = true
 			return
 		acc["total"] = int(acc["total"]) + 1
+		_progress("→ %s › %s" % [label, mname])
 		inst._current_method = mname
 		var before: int = inst._failures.size()
 		var started_at := Time.get_ticks_msec()
-		var err: String = await _run_one(inst, mname, remaining)
+		var err: String = await _run_one(inst, mname, remaining, _make_heartbeat("%s › %s" % [label, mname], started_at))
 		var elapsed := Time.get_ticks_msec() - started_at
 		## 兜底收尾：不论成败都跑。手动收尾只覆盖"正常跑完"那条路，中途 return /
 		## 协程被超时中断都会跳过它 —— 对会写玩家档案的用例，那等于把测试数据留在存档里。
@@ -169,6 +198,7 @@ static func _run_one_case(res: Script, label: String, mode: String, acc: Diction
 			acc["failed"] = int(acc["failed"]) + 1
 			for f in new_failures:
 				acc["failures"].append("%s | %s" % [label, str(f)])
+		_progress("%s %s" % ["通过" if new_failures.is_empty() else "失败", _fmt_ms(elapsed)])
 		# 硬超时: 该方法的协程仍在后台跑(引擎无法掐死), 继续跑后续只会互相污染 ⇒ 立即中止。
 		if err != "":
 			acc["aborted"] = true
@@ -197,6 +227,59 @@ static func _summary(acc: Dictionary, script_label: String, mode: String, text: 
 		"script": script_label,
 		"text": text,
 	}
+
+
+## 合并多段摘要(编辑器段 + 游戏段)为一份, 供 MCP process=both 使用。
+##
+## 全量本该是一条命令: 拆成两次调用时, "只跑了记得的那一半就宣布全绿"是高频误判,
+## 而且两份汇总谁都没覆盖对方 —— 合并后 total/failed 才是真正的全量口径。
+##
+## 跳过项的处理是本函数的关键: 某脚本在 editor 段被跳过、在 game 段跑了, 属于**正常分工**,
+## 不是"缺环境"; 只有**每一段都跳过它**才保留(那才是真跑不了的用例)。
+static func merge_summaries(parts: Array, script_label: String) -> Dictionary:
+	var total := 0
+	var failed := 0
+	var aborted := false
+	var failures: Array = []
+	var cases: Array = []
+	var overruns: Array = []
+	var ran := {}
+	var skip_seen := {}
+	for p in parts:
+		var d: Dictionary = p
+		total += int(d.get("total", 0))
+		failed += int(d.get("failed", 0))
+		aborted = aborted or bool(d.get("aborted", false))
+		failures.append_array(d.get("failures", []))
+		overruns.append_array(d.get("overruns", []))
+		for c in d.get("cases", []):
+			cases.append(c)
+			ran[str(c.get("case", ""))] = true
+		for s in d.get("skipped", []):
+			var key := str(s.get("case", ""))
+			if not skip_seen.has(key):
+				skip_seen[key] = {entry = s, hits = 0}
+			skip_seen[key]["hits"] = int(skip_seen[key]["hits"]) + 1
+	var skipped: Array = []
+	for key in skip_seen:
+		if not ran.has(key) and int(skip_seen[key]["hits"]) >= parts.size():
+			skipped.append(skip_seen[key]["entry"])
+	var merged := {
+		"total": total, "passed": total - failed, "failed": failed,
+		"failures": failures, "cases": cases, "skipped": skipped,
+		"overruns": overruns, "aborted": aborted,
+		"mode": MODE_BOTH, "script": script_label,
+	}
+	merged["text"] = render_text(merged)
+	return merged
+
+
+## 按摘要字段重新排版正文。字段被外部改过(如 both 里把"游戏段未执行"记成一条失败)时,
+## text 必须跟着重排, 否则正文与结构化数据自相矛盾。
+static func render_text(summary: Dictionary) -> String:
+	return _format(int(summary.get("total", 0)), int(summary.get("failed", 0)),
+		summary.get("failures", []), summary.get("skipped", []), summary.get("overruns", []),
+		str(summary.get("mode", MODE_EDITOR)))
 
 
 ## 早退结果(选择器无匹配 / 内联编译失败): 直接给出失败摘要, 不走正常执行流程。
@@ -233,9 +316,21 @@ static func _test_methods(script: Script) -> Array:
 ## 跑一个用例方法, 最多 timeout_ms 毫秒。返回 "" = 正常结束, 否则为超时文案。
 ## 协程用例（方法体含 await）在 Godot 4 里会返回一个协程句柄; 复用 `AsyncTool.await_coroutine`:
 ## 它先判 is_valid 再等待, 且**带时限** —— 规避"await 已失效句柄永久挂起"这个引擎坑, 同时给硬超时兜底。
-static func _run_one(inst: TestCase, method_name: String, timeout_ms: int) -> String:
-	var done := await AsyncTool.await_coroutine(inst.call(method_name), timeout_ms)
+static func _run_one(inst: TestCase, method_name: String, timeout_ms: int, on_tick := Callable()) -> String:
+	var done := await AsyncTool.await_coroutine(inst.call(method_name), timeout_ms, on_tick)
 	return "" if done else "超过硬超时(该用例/方法未在剩余时限内结束)"
+
+
+## 心跳回调: 由等待内核每帧调用一次, 这里按 HEARTBEAT_MS 节流成"每 15s 一行"。
+## 用 box 而非裸 int 承载上次打印时刻(闭包对局部变量是值捕获, 直接写不会留到下次调用)。
+static func _make_heartbeat(label: String, started_at: int) -> Callable:
+	var box := {last = started_at}
+	return func() -> void:
+		var now := Time.get_ticks_msec()
+		if now - int(box.last) < HEARTBEAT_MS:
+			return
+		box.last = now
+		_progress("… %s 仍在运行 (%s)" % [label, _fmt_ms(now - started_at)])
 
 
 ## 跑用例的收尾钩子（`TestCase.cleanup`）, 同样带时限 —— 钩子漏写 await 或自身卡住会挂住整个 run_all。
@@ -259,12 +354,24 @@ static func _collect_cases(base: String, out: Array) -> void:
 	dir.list_dir_end()
 
 
+## 逐条进度输出: 全量动辄几分钟, 没有进度就分不清"还在跑"还是"卡死"。
+## 与最终汇总区分开(`[测试]` 前缀), 编辑器输出面板 / 游戏窗口 / CI 日志里都能看到当前位置。
+static func _progress(msg: String) -> void:
+	print("[测试] %s" % msg)
+
+
+static func _fmt_ms(ms: int) -> String:
+	return "%.1fs" % (float(ms) / 1000.0) if ms >= 1000 else "%dms" % ms
+
+
 static func _mode_label(mode: String) -> String:
 	match mode:
 		MODE_EDITOR:
 			return "编辑器/进程无关"
 		MODE_GAME:
 			return "游戏进程"
+		MODE_BOTH:
+			return "全量(编辑器+游戏)"
 		_:
 			return mode
 
@@ -297,4 +404,7 @@ static func _format(total: int, failed: int, failures: Array, skipped: Array, ov
 static func _next_tool(mode: String) -> String:
 	if mode == MODE_GAME:
 		return "run_tests(process=editor)"
+	if mode == MODE_BOTH:
+		# 两段都跳过了它 ⇒ 不是进程归属问题(两边都不认), 得看该脚本自己
+		return "检查该脚本 needs_game_process() 与依赖环境"
 	return "run_tests(process=game)"

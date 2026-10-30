@@ -3,6 +3,16 @@ class_name NodeTreeTool
 ## 通用节点树生命周期/存档编排工具(原 ActorTool, 更名以反映通用定位):
 ## 按约定在子节点上实现 game_init/game_ready/save_data/load_data, 由宿主统一调度。
 
+## 节点是否仍可用于展示/交互：未释放、在树内、父链可见。
+## 被回收或隐藏的节点不该再收悬停、提示与焦点。
+static func is_alive(v: Variant) -> bool:
+	if not is_instance_valid(v):
+		return false
+	if v is Node:
+		var node: Node = v
+		return node.is_inside_tree() and node.is_visible_in_tree()
+	return true
+
 ## 遍历指定节点的子节点，在所有子节点上调用同名函数
 static func call_on_children(node: Node, func_name: String):
 	for child in node.get_children():

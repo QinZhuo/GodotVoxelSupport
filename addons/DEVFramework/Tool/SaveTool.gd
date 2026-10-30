@@ -260,9 +260,20 @@ static func save_async(path: String, data, mode: Mode = Mode.JSON) -> Error:
 
 	return await _flush_pending(path, err)
 
+## 等待保存链的超时（毫秒）。正常一次保存 300ms 内完成，超出说明保存链异常收尾（写盘/编码失败没清状态）。
+## 必须有上限：这里原本是"无限等"，一旦某条链卡住，之后该路径的所有保存都会永远挂在这里
+## ⇒ 表现就是"整局卡死在某一步、没有任何报错"。
+const WAIT_SAVE_TIMEOUT_MS := 10000
+
 ## 等待指定路径的保存链完成（当前保存 → 缓存补存，直到 _save_states 中移除该路径）
 static func _wait_save_done(path: String) -> void:
+	var deadline := Time.get_ticks_msec() + WAIT_SAVE_TIMEOUT_MS
 	while _save_states.has(path):
+		if Time.get_ticks_msec() >= deadline:
+			## 超时即接管：清掉死掉的状态让后续保存能继续，宁可丢一次合并写，也不要把流程永久卡住
+			LogTool.error("SaveTool", "等待保存完成超时(>%dms)，接管并清理状态: %s" % [WAIT_SAVE_TIMEOUT_MS, path])
+			_save_states.erase(path)
+			return
 		await Engine.get_main_loop().process_frame
 
 ## 检查并处理同一路径的待处理保存，有则递归补存

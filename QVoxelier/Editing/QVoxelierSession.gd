@@ -162,6 +162,20 @@ func add_model(parent: QVoxelGroup) -> void:
 	activate(o.model_id)
 
 
+## 采纳一个已经挂进世界的模型（烘焙产物）：补一条展示会话、标脏，并可切过去。
+## 【为什么不走 add_model】烘焙的目标模型是 QVoxelRigBaker 先建好再挂进世界的，
+## add_model 会再新建一个空模型。这里只补会话，不改树。
+func register_model(o: QVoxelModel, activate_now := true) -> void:
+	if world == null or o == null or _sessions.has(o.model_id):
+		return
+	_sessions[o.model_id] = _make_session(o, world)
+	_set_dirty(true)
+	if activate_now:
+		activate(o.model_id)
+	else:
+		changed.emit()
+
+
 ## 新建组。组没有内容，故只标脏 + 请 View 刷新（不切换编辑对象）。
 func add_group(parent: QVoxelGroup) -> void:
 	if world == null:

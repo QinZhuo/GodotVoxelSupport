@@ -29,9 +29,9 @@ signal drag_ended()
 signal drag_cancelled()
 
 ## ---------------------------------------------------- 拖拽状态
-## 是否正在拖拽中（由 dragging_item 推导）
+## 是否正在拖拽中（由 PointerTool.dragging 推导）
 var is_dragging: bool:
-	get: return ButtonView3D.dragging_item == self
+	get: return PointerTool.dragging == self
 var drag_offset: Vector3 = Vector3.ZERO
 var drag_start_global_pos: Vector3 = Vector3.ZERO
 var drag_plane: Plane
@@ -66,7 +66,7 @@ func _unhandled_input(event: InputEvent):
 func _start_drag():
 	if not _can_drag():
 		return
-	ButtonView3D.dragging_item = self
+	PointerTool.begin_drag(self)
 	drag_start_global_pos = global_position
 
 	var camera: Camera3D = get_viewport().get_camera_3d()
@@ -178,7 +178,7 @@ func _restore_scale():
 
 ## 统一重置拖拽状态（子类出售场景可主动调用以跳过基类清理）
 func _cleanup_drag_state():
-	ButtonView3D.dragging_item = null
+	PointerTool.end_drag()
 	drag_offset = Vector3.ZERO
 	drag_start_global_pos = Vector3.ZERO
 	drag_container = null

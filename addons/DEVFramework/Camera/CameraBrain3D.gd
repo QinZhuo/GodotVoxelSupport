@@ -64,6 +64,10 @@ var _blend_elapsed: float = 0.0
 var _blend_trans: Tween.TransitionType = Tween.TRANS_CUBIC
 var _blend_ease: Tween.EaseType = Tween.EASE_IN_OUT
 var _dirty: bool = true
+## 上一帧的真实时刻(微秒): 硬暂停时 delta 被缩成 0，只能靠它还原真实步长
+var _last_usec: int = 0
+## 冻结后恢复时的单帧步长上限: 免得一次卡顿/长时间不更新把过渡一步跳完
+const MAX_REAL_STEP := 0.25
 
 
 func _enter_tree() -> void:
@@ -105,6 +109,22 @@ func _process(delta: float) -> void:
 
 # ── 对外 API ──
 
+## 本帧推进步长。
+##
+## [member ignore_time_scale] 时按**真实时间**推进: `_process` 的 delta 已被 `Engine.time_scale`
+## 缩放，慢动作下 `delta / time_scale` 即可还原; 但暂停(time_scale = 0)时 delta 恒为 0，
+## 除法还原不出真实时间 ⇒ 改用真实时钟差值，否则机位混合 / 跟随会整个冻住。
+func _step(delta: float) -> float:
+	var now := Time.get_ticks_usec()
+	var real := float(now - _last_usec) / 1_000_000.0 if _last_usec > 0 else delta
+	_last_usec = now
+	if not ignore_time_scale:
+		return delta
+	if Engine.time_scale > 0.0:
+		return delta / Engine.time_scale
+	return clampf(real, 0.0, MAX_REAL_STEP)
+
+
 ## 每帧驱动: 挑机位 → 混合/跟随 → 叠加偏移 + 冲击写入真实相机
 func update_camera(delta: float) -> void:
 	CameraTool._advance_round_robin()
@@ -115,7 +135,7 @@ func update_camera(delta: float) -> void:
 	# 没有任何机位时不接管相机, 交回场景自行控制
 	if vcam == null or not is_instance_valid(vcam):
 		return
-	var step := delta / maxf(Engine.time_scale, 0.001) if ignore_time_scale else delta
+	var step := _step(delta)
 	var target := vcam.get_pose()
 	var target_fov := vcam.lens_fov if vcam.lens_fov > 0.0 else _base_fov
 	if _blend_elapsed < _blend_time:

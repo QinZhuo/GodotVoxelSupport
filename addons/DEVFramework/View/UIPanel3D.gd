@@ -18,6 +18,12 @@ class_name UIPanel3D extends Node3D
 ## UI 层级（[UITool.Layer] 枚举值，数字越大越靠前）
 @export var layer: UITool.Layer = UITool.Layer.PANEL
 
+## 打开时的返回键提示文案 key（tip.csv），留空则不提示
+@export var back_tip: StringName
+
+## 点击面板外的空白是否退一层（查看类面板用；操作型面板保持关闭，避免误触）
+@export var dismiss_on_blank_click: bool = false
+
 # ============================================================
 # 状态
 # ============================================================
@@ -46,9 +52,12 @@ signal on_closed()
 ## 打开面板。完整流程见 [UIPanelTool.open]。
 func open() -> void:
 	await UIPanelTool.open(self)
+	if back_tip != &"" and is_open:
+		TipTool.show_tip([[[&"menu"], back_tip]], self, 0)
 
 ## 关闭面板。完整流程见 [UIPanelTool.close]。
 func close() -> void:
+	TipTool.hide_tip(self)
 	await UIPanelTool.close(self)
 
 ## 节点离开场景树时自动注销（兜底，见 [UIPanelTool.on_exit_tree]）。
@@ -67,9 +76,11 @@ func popup() -> void:
 func await_closed() -> bool:
 	return await UIPanelTool.await_closed(self)
 
-## 返回键处理，由 UITool.back() 调用。子类可重写自定义返回行为，默认关闭面板。
-func _back() -> void:
+## 返回键处理，由 [method UITool.back] 调用。默认关闭面板并返回 true（已消费）。
+## 子类返回 false 表示不接管返回键（如常驻界面的面板），调用方会继续回退。
+func _back() -> bool:
 	close()
+	return true
 
 ## 获取焦点时由 UITool 调用。子类可重写以注册 3D 导航。
 func _focus_enter() -> void:
