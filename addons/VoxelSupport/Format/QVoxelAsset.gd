@@ -25,10 +25,6 @@ var materials: Array[VoxelMaterial] = []
 ## **只装静态模型**（`VXEL`）；帧动画模型的块在 `animations` 里（§12.2 互斥）。
 var models: Dictionary = {}
 
-## 被 NODE 隐藏的模型（含隐藏组下的整棵子树）。运行时不导入它们：
-## 与 `.vox` 跳过隐藏 LAYR 同一语义，也避免"烘焙后隐藏源 rig"仍被导入造成重叠。
-var hidden_model_ids: Dictionary = {}
-
 ## 帧动画（§12，`FRAM`）：model_id(int) → { "loop": bool, "fps": int, "tags": Array,
 ##                                        "frames": Array[{"duration_ms": int, "blocks": Dictionary}] }
 ## 帧的块表在解析期已由格式层**还原为完整块表**（块级增量只存在于文件里），所以这里直接可用。
@@ -118,16 +114,6 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 			"tags": (tags as Array).duplicate() if tags is Array else [],
 			"frames": (frames as Array).duplicate(),
 		}
-	# 隐藏节点（含隐藏组下的整棵子树）不进入运行时资产。先收集，再枚举摆放，
-	# 这样 all_model_ids / block_buffers / fused_voxels / is_block_importable 全都自动跳过它们。
-	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
-	var hidden := {}
-	var visible := {}
-	_collect_model_visibility(scene.nodes if scene != null else [], false, hidden, visible)
-	for mid in hidden:
-		# 同一模型只要还有一处可见引用，就仍然导入（隐藏的只是那一次摆放）。
-		if not visible.has(mid):
-			out.hidden_model_ids[mid] = true
 	out.placements = _placements_from_scene(doc, out.all_model_ids())
 	return out
 
@@ -149,31 +135,10 @@ static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, model_ids: Ar
 	var out: Array = []
 	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
 	if scene != null:
-		_walk_nodes(scene.nodes, Transform3D.IDENTITY, known, pending, out, true)
+		_walk_nodes(scene.nodes, Transform3D.IDENTITY, known, pending, out)
 	for mid in pending:
 		out.append({"model_id": mid, "transform": Transform3D.IDENTITY, "name": ""})
 	return out
-
-
-## 收集模型在 NODE 树里的可见性（visible 沿树继承）。
-## 同一个模型可能被多个节点引用：只有"所有引用都隐藏"才真正不导入。
-static func _collect_model_visibility(nodes: Array, parent_hidden: bool,
-		hidden: Dictionary, visible: Dictionary) -> void:
-	for item in nodes:
-		if not (item is Dictionary):
-			continue
-		var node: Dictionary = item
-		var is_hidden := parent_hidden or not bool(node.get("visible", true))
-		if String(node.get("kind", "")) == "model":
-			var mid := int(node.get("model_id", -1))
-			if is_hidden:
-				hidden[mid] = true
-			else:
-				visible[mid] = true
-			continue
-		var kids: Variant = node.get("children")
-		if kids is Array:
-			_collect_model_visibility(kids, is_hidden, hidden, visible)
 
 
 ## 递归一层：按作者书写顺序先序下行（摆放顺序稳定且符合直觉 —— MeshLibrary 的项名/顺序
@@ -183,15 +148,12 @@ static func _collect_model_visibility(nodes: Array, parent_hidden: bool,
 ## 两者分开：同一个模型被两个节点引用时，`known` 仍为真（两次引用都记进摆放，
 ## 由 is_block_importable() 判"能否零展开"，而不是在这里悄悄吞掉第二次）。
 static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
-		pending: Dictionary, out: Array, parent_visible := true) -> void:
+		pending: Dictionary, out: Array) -> void:
 	for item in nodes:
 		# 防御：scene 已清洗过，这里只是不让一个坏项把整棵树带崩（与 QVoxelFile 的取向一致）
 		if not (item is Dictionary):
 			continue
 		var node: Dictionary = item
-		var visible := parent_visible and bool(node.get("visible", true))
-		if not visible:
-			continue   # 隐藏节点连同整棵子树都不导入（与 .vox 跳过隐藏 LAYR 同义）
 		var world := parent_xf * _node_transform(node)
 		if String(node.get("kind", "")) == "model":
 			var mid := int(node.get("model_id", -1))
@@ -205,7 +167,7 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
 			continue   # 模型是叶子，不必再看 children
 		var kids: Variant = node.get("children")
 		if kids is Array:
-			_walk_nodes(kids, world, known, pending, out, visible)
+			_walk_nodes(kids, world, known, pending, out)
 
 
 ## 各模型的动画时序 meta：model_id → {loop, fps, tags}（§12.3）。
@@ -225,7 +187,7 @@ static func _node_transform(node: Dictionary) -> Transform3D:
 # 查询
 
 func is_empty() -> bool:
-	return all_model_ids().is_empty()
+	return models.is_empty() and animations.is_empty()
 
 
 ## up_axis 轴向修正（QVX 体素坐标 → 引擎 Y-up）。
@@ -263,13 +225,9 @@ func model_blocks(model_id: int) -> Dictionary:
 func all_model_ids() -> Array[int]:
 	var ids: Array[int] = []
 	for mid in models:
-		var id := int(mid)
-		if not hidden_model_ids.has(id):
-			ids.append(id)
+		ids.append(int(mid))
 	for mid in animations:
-		var id := int(mid)
-		if not hidden_model_ids.has(id):
-			ids.append(id)
+		ids.append(int(mid))
 	ids.sort()
 	return ids
 
@@ -294,8 +252,8 @@ func frame_count(model_id: int) -> int:
 ## 这正是 split_by_frame 逐帧导出想要的语义。
 func total_frame_count() -> int:
 	var n := 1
-	for mid in all_model_ids():
-		n = maxi(n, frame_count(mid))
+	for mid in animations:
+		n = maxi(n, frame_count(int(mid)))
 	return n
 
 

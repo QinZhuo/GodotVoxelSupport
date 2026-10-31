@@ -59,8 +59,6 @@ var _timeline: QVoxelierTimeline
 ## （参数与预览是分组自己的状态，见 QVoxelierSnapshotSection）。
 var _snapshot_section: QVoxelierSnapshotSection
 var _snapshot_popup: PopupPanel
-## 烘焙体素帧的选项弹窗（骨骼/摆放动画 → ANIM）。不标注类型：新 class_name 未扫描时也不拖垮 App。
-var _bake_dialog
 var _confirm: ConfirmationDialog
 
 ## 工具类别：笔刷 / 自定义笔刷（拿一个模型当图章盖）。与 QVoxelierContextBar.KIND_* 对应。
@@ -104,9 +102,6 @@ var session: QVoxelEditSession:
 		return _sess.session if _sess != null else null
 
 var _material_id := 1
-## 世界级预览帧：节点摆放（transform_tracks）按它采样。与活动模型的体素帧解耦，
-## 于是"选中一个静态部件"也能摆姿势、记关键帧，再交给烘焙器采样。
-var _rig_frame := 0
 var _stroke := false
 ## 当前操作模式（添加 / 移除 / 上色）。顶部选项条与 E 键改的是这一份。
 var _op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
@@ -204,11 +199,6 @@ const ACTION_CUT := &"qvoxelier_cut"
 const ACTION_PASTE := &"qvoxelier_paste"
 const ACTION_CLEAR := &"qvoxelier_clear"
 
-## 烘焙器走 preload 而不是全局类名：QVoxelier 与插件分层，显式依赖更清楚，
-## 也避免新 class_name 尚未被编辑器扫描时 App 整体编译失败。
-const RIG_BAKER := preload("res://addons/VoxelSupport/Model/QVoxelRigBaker.gd")
-const BAKE_DIALOG := preload("res://QVoxelier/View/QVoxelierBakeDialog.gd")
-
 
 # 装配
 
@@ -267,7 +257,6 @@ func _build_ui() -> void:
 	_toolbar.save_requested.connect(save_project)
 	_toolbar.save_as_requested.connect(save_project_as)
 	_toolbar.export_mesh_requested.connect(export_mesh)
-	_toolbar.bake_requested.connect(_open_bake_dialog)
 	_toolbar.render_requested.connect(_toggle_render_popup)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
@@ -359,9 +348,6 @@ func _build_ui() -> void:
 	_object_section.offset_changed.connect(_set_node_offset)
 	_object_section.resize_requested.connect(_resize_model)
 	_object_section.rotation_changed.connect(_set_node_rotation)
-	_object_section.key_pose_requested.connect(_key_pose)
-	_object_section.clear_key_requested.connect(_clear_key)
-	_object_section.rig_frame_changed.connect(_set_rig_frame)
 	_dock.add_property(_object_section)
 
 	# 生成：选程序化算子 + 参数 + 合并方式，一次性烘焙进当前模型。
@@ -407,12 +393,6 @@ func _build_ui() -> void:
 	_snapshot_popup.theme = QVoxelUi.theme()
 	add_child(_snapshot_popup)
 	_snapshot_popup.add_child(_snapshot_section)
-
-	# 烘焙体素帧：一次性动作，参数只在打开这一刻有意义，故用弹窗。
-	_bake_dialog = BAKE_DIALOG.new()
-	_bake_dialog.name = "BakeDialog"
-	_bake_dialog.bake_requested.connect(_bake_rig)
-	add_child(_bake_dialog)
 
 	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
 	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
@@ -470,7 +450,6 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 ## 于是"打开工程取过景、新建 / 首屏却停在默认机位"这种分叉就会一直存在。
 func _reset_edit_state() -> void:
 	_material_id = 1
-	_rig_frame = 0
 	_stroke = false
 	_gizmo_active = false
 	_op = QVoxelBrushTool.Op.ADD
@@ -503,8 +482,6 @@ func _activate(model_id: int, flash := true) -> void:
 	if _stroke and session != null:
 		session.cancel()
 		_stroke = false
-	# 切到另一个模型时，预览帧先跟它自己的 active_frame 对齐；之后用户仍可用关键帧面板改。
-	_rig_frame = maxi(0, o.active_frame)
 	if not _sess.activate(model_id):
 		return
 	if flash:
@@ -521,7 +498,8 @@ func _attach_active() -> void:
 	if session == null or world == null:
 		return
 	# 摆放动画与体素动画共用同一时间轴：共享帧号取当前活动模型的帧，供 world_transform 采样轨道。
-	world.preview_frame = _rig_frame
+	if session.object != null:
+		world.preview_frame = session.object.active_frame
 	var vs := world.voxel_size()
 	if model.data != session.data:
 		model.data = session.data
@@ -1876,7 +1854,6 @@ func _refresh_panels() -> void:
 	# 对象属性页跟着当前选中的节点（撤销 / 重做后重看一眼数据）。
 	if _object_section != null:
 		_object_section.bind(_selected_node)
-		_object_section.set_frame(_rig_frame)
 	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
 	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimelineSection.bind），播放期间不重建控件。
 	_timeline_section.bind(session.object)
@@ -2757,7 +2734,6 @@ func _ensure_mesh_ext(path: String) -> String:
 func _select_frame(index: int) -> void:
 	if session == null or not session.object.is_animated():
 		return
-	_rig_frame = maxi(0, index)
 	# 同步换帧（见 QVoxelEditSession.apply_frame）——播放才跟得上，不会"体素不变"。
 	session.apply_frame(index)
 	# 逐帧摆放轨道也随帧走：重挂显示层（渲染器 transform = world_transform，后者按当前帧取轨道）。
@@ -2780,72 +2756,43 @@ func _after_frame_change() -> void:
 func _record_track() -> void:
 	if session == null:
 		return
-	_key_pose(_selected_node if _selected_node != null else session.object, _rig_frame)
+	var m := session.object
+	var f := clampi(m.active_frame, 0, maxi(m.frame_count() - 1, 0))
+	var cmd := QVoxelPropertyCommand.begin(m, &"transform_tracks", m, "记录摆放")
+	while m.transform_tracks.size() < f + 1:
+		m.transform_tracks.append(m.local_transform)
+	m.transform_tracks[f] = m.local_transform
+	if cmd.commit():
+		session.history.push(cmd)
+	_sess.mark_dirty()
+	_attach_active()
+	_rebuild_view()
+	_refresh_hud()
 
 
 ## 清除本帧的独立摆放（退回跟随静态）；若整条轨道都退化成静态，则清空轨道（不再有摆放动画）。
 func _clear_track() -> void:
 	if session == null:
 		return
-	_clear_key(_selected_node if _selected_node != null else session.object, _rig_frame)
-
-
-## 记录任意节点（组=骨骼 / 模型=部件）在当前预览帧的摆放。可撤销。
-func _key_pose(node: QVoxelNode, frame: int) -> void:
-	if session == null or world == null or node == null:
+	var m := session.object
+	var f := clampi(m.active_frame, 0, maxi(m.frame_count() - 1, 0))
+	if f >= m.transform_tracks.size():
 		return
-	var f := maxi(0, frame)
-	var cmd := QVoxelPropertyCommand.begin(node, &"transform_tracks", node, "记录姿势")
-	while node.transform_tracks.size() < f + 1:
-		node.transform_tracks.append(node.local_transform)
-	node.transform_tracks[f] = node.local_transform
-	if cmd.commit():
-		session.history.push(cmd)
-	_rig_frame = f
-	world.preview_frame = f
-	_sess.mark_dirty()
-	_attach_active()
-	_rebuild_view()
-	_refresh_panels()
-
-
-## 清除任意节点在指定帧的独立摆放；整条轨道都退回静态时清空轨道。
-func _clear_key(node: QVoxelNode, frame: int) -> void:
-	if session == null or world == null or node == null:
-		return
-	var f := maxi(0, frame)
-	if f >= node.transform_tracks.size():
-		return
-	var cmd := QVoxelPropertyCommand.begin(node, &"transform_tracks", node, "清除姿势")
-	node.transform_tracks[f] = node.local_transform
+	var cmd := QVoxelPropertyCommand.begin(m, &"transform_tracks", m, "清除摆放")
+	m.transform_tracks[f] = m.local_transform
 	var all_static := true
-	for t in node.transform_tracks:
-		if not t.is_equal_approx(node.local_transform):
+	for t in m.transform_tracks:
+		if not t.is_equal_approx(m.local_transform):
 			all_static = false
 			break
 	if all_static:
-		node.transform_tracks.clear()
+		m.transform_tracks.clear()
 	if cmd.commit():
 		session.history.push(cmd)
 	_sess.mark_dirty()
 	_attach_active()
 	_rebuild_view()
-	_refresh_panels()
-
-
-## 只切换预览帧（不写数据）：骨骼/摆放动画按它采样。
-func _set_rig_frame(frame: int) -> void:
-	if world == null:
-		return
-	var f := maxi(0, frame)
-	if f == _rig_frame:
-		return
-	_rig_frame = f
-	world.preview_frame = f
-	_timeline_section.stop_playback()
-	_attach_active()
-	_rebuild_view()
-	_refresh_panels()
+	_refresh_hud()
 
 
 ## 把一次"帧结构编辑"夹成一条属性命令：`mutate` 里做真正的改动（begin 之后、commit 之前）。
@@ -2949,106 +2896,3 @@ func _set_anim_meta(prop: StringName, value: Variant, label: String) -> void:
 	if cmd.commit():
 		session.history.push(cmd)
 	_after_frame_change()
-
-
-# 烘焙体素帧（骨骼/摆放动画 → ANIM）
-# 【为什么根节点默认取"层级里选中的节点"】烘焙范围必须由用户明确指定：
-# 一个世界可能有多套 rig，自动猜父组很容易把别的角色一起烘进去。
-# 没选中时才退回当前模型的父组，再退回当前模型本身（单模型整体动画）。
-
-func _open_bake_dialog() -> void:
-	if world == null or session == null or session.object == null:
-		return
-	var root: QVoxelNode = _selected_node
-	if root == null:
-		root = world.find_parent(session.object)
-	if root == null:
-		root = session.object
-	var fps := 12
-	if session.object.is_animated():
-		fps = maxi(1, session.object.anim_fps)
-	_bake_dialog.open(root, {
-		"source_fps": fps,
-		"frame_step": 1,
-		"padding": 1,
-		"fill_gaps": true,
-		"gap_min_neighbors": 3,
-		# 源 rig 可能在上一次烘焙后被自动隐藏；此时默认把它包含进来，才能重复烘焙。
-		"include_hidden": _has_hidden_model(root),
-		"exclude_root_motion": false,
-		"hide_source": true,
-		"name": "%s Baked" % root.display_name(),
-	})
-
-
-func _bake_rig(root: QVoxelNode, options: Dictionary) -> void:
-	if world == null or session == null or root == null:
-		return
-	_timeline_section.stop_playback()
-	var exclude_root_motion := bool(options.get("exclude_root_motion", false))
-	var parent: QVoxelGroup = world.find_parent(root)
-	# 根运动留在节点上时，产物挂到根组下面最自然：它会跟着根节点一起动。
-	# 根运动被烘进体素时，产物挂到根的父级（否则会跟着根再动一次）。
-	if root.is_group() and exclude_root_motion:
-		parent = root as QVoxelGroup
-	# 先离线烘焙，再挂进世界：目标若提前挂到根下，会被 _collect_models(root) 当成源部件
-	# （QVoxelRigBaker 会拒绝"目标在子树里"以避免边读边写）。
-	var model_name := str(options.get("name", "Baked")).strip_edges()
-	if model_name.is_empty():
-		model_name = "Baked"
-	options = options.duplicate()
-	options["name"] = model_name
-	var source_models: Array[QVoxelModel] = []
-	_collect_models_under(root, source_models)
-	var target: QVoxelModel = RIG_BAKER.bake(world, root, options)
-	if target == null:
-		hud.flash("烘焙失败：子树里没有可烘焙的模型（隐藏的源需勾选「包含隐藏模型」）")
-		return
-	# 产物是根的局部空间；挂在根的父级时要补上根的静止变换，否则位置会掉回原点。
-	if not (root.is_group() and exclude_root_motion):
-		target.local_transform = root.local_transform * target.local_transform
-	if not world.attach_node(target, parent, -1):
-		hud.flash("烘焙失败：无法挂到目标父级")
-		return
-	_rig_frame = 0
-	world.preview_frame = 0
-	# 烘焙后源 rig 与产物会重叠：按选项隐藏源（保留数据，层级里的眼睛可恢复）。
-	# 产物挂在根下时只隐藏源模型（根还要驱动产物）；挂在根的父级时整棵根都可以隐藏。
-	var hide_source := bool(options.get("hide_source", true))
-	if hide_source:
-		if parent == root:
-			for sm in source_models:
-				sm.visible = false
-		else:
-			root.visible = false
-	_sess.register_model(target)
-	_sess.mark_dirty()
-	hud.flash("已烘焙 %d 帧：%s%s" % [target.frame_count(), target.display_name(),
-			"（源 rig 已隐藏）" if hide_source else ""])
-	_attach_active()
-	_rebuild_view()
-	_refresh_hud()
-
-
-## 子树里是否有被隐藏的模型（含隐藏组）。用于重复烘焙时默认把源 rig 包含进来。
-func _has_hidden_model(n: QVoxelNode) -> bool:
-	if n == null:
-		return false
-	if not _sess.node_visible(n):
-		return true
-	if n.is_model():
-		return false
-	for c in (n as QVoxelGroup).child_nodes:
-		if _has_hidden_model(c):
-			return true
-	return false
-
-
-func _collect_models_under(n: QVoxelNode, out: Array[QVoxelModel]) -> void:
-	if n == null:
-		return
-	if n.is_model():
-		out.append(n as QVoxelModel)
-		return
-	for c in (n as QVoxelGroup).child_nodes:
-		_collect_models_under(c, out)

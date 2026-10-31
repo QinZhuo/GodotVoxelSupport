@@ -15,12 +15,6 @@ signal offset_changed(node: QVoxelNode, value: Vector3i)
 signal resize_requested(node: QVoxelNode, value: Vector3i)
 ## 世界级旋转：三个轴的欧拉角（度）。轴对齐时为 90 的倍数。
 signal rotation_changed(node: QVoxelNode, degrees: Vector3)
-## 把选中节点在当前预览帧的 local_transform 记进 transform_tracks[frame]（骨骼姿势关键帧）。
-signal key_pose_requested(node: QVoxelNode, frame: int)
-## 清除选中节点在 frame 的独立摆放（退回静态）。
-signal clear_key_requested(node: QVoxelNode, frame: int)
-## 切换"当前预览帧"（只改预览，不写数据）。
-signal rig_frame_changed(frame: int)
 
 var _node: QVoxelNode
 var _name: LineEdit
@@ -30,9 +24,6 @@ var _offset_spins: Array[SpinBox] = []
 var _size_spins: Array[SpinBox] = []
 var _rot_spins: Array[SpinBox] = []
 var _info: VBoxContainer
-var _frame_spin: SpinBox
-var _key_info: Label
-var _frame := 0
 
 
 func section_title() -> String:
@@ -120,36 +111,6 @@ func _build_body(body: VBoxContainer) -> void:
 		sizerow.add_child(sp)
 		_size_spins.append(sp)
 
-	# 关键帧：给骨骼/部件记录当前帧的摆放。帧号是**世界预览帧**，与体素帧解耦，
-	# 这样静态部件也能被摆姿势；烘焙器再按这个帧号采样 transform_tracks。
-	var keyrow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
-	body.add_child(keyrow)
-	var klabel := QVoxelUi.label("关键帧", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
-	klabel.custom_minimum_size.x = 32
-	klabel.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	keyrow.add_child(klabel)
-	_frame_spin = SpinBox.new()
-	_frame_spin.min_value = 0
-	_frame_spin.max_value = 999
-	_frame_spin.step = 1
-	_frame_spin.tooltip_text = "世界预览帧：骨骼/摆放动画按它采样（与当前模型的体素帧独立）"
-	_frame_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_frame_spin.value_changed.connect(func(v: float): rig_frame_changed.emit(int(v)))
-	keyrow.add_child(_frame_spin)
-	var key_btn := QVoxelUi.icon_button("记录", "把当前摆放记进这一帧（可撤销）")
-	key_btn.pressed.connect(func():
-		if _node != null:
-			key_pose_requested.emit(_node, int(_frame_spin.value)))
-	keyrow.add_child(key_btn)
-	var clr_btn := QVoxelUi.icon_button("清除", "清除这一帧的独立摆放")
-	clr_btn.pressed.connect(func():
-		if _node != null:
-			clear_key_requested.emit(_node, int(_frame_spin.value)))
-	keyrow.add_child(clr_btn)
-
-	_key_info = QVoxelUi.label("", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
-	body.add_child(_key_info)
-
 	_info = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	body.add_child(_info)
 	_rebuild()
@@ -185,26 +146,6 @@ func bind(node: QVoxelNode) -> void:
 	_rebuild()
 
 
-## App 同步"当前预览帧"（只改显示，不写数据、不发 rig_frame_changed）。
-func set_frame(frame: int) -> void:
-	_frame = maxi(0, frame)
-	if _frame_spin != null:
-		_frame_spin.set_value_no_signal(_frame)
-	_update_key_info()
-
-
-func _update_key_info() -> void:
-	if _key_info == null:
-		return
-	if _node == null:
-		_key_info.text = "（未选中对象）"
-		return
-	var f := int(_frame_spin.value) if _frame_spin != null else _frame
-	var has := f >= 0 and f < _node.transform_tracks.size() \
-			and not _node.transform_tracks[f].is_equal_approx(_node.local_transform)
-	_key_info.text = "本帧：独立摆放" if has else "本帧：跟随静态"
-
-
 ## 双击树行触发：聚焦名字输入框并全选 —— 直接开改名。
 func begin_rename(node: QVoxelNode) -> void:
 	bind(node)
@@ -223,8 +164,6 @@ func _rebuild() -> void:
 	_name.editable = has
 	_vis.disabled = not has
 	_lock.disabled = not has
-	if _frame_spin != null:
-		_frame_spin.editable = has
 	for sp in _offset_spins:
 		sp.editable = has
 	for sp in _size_spins:
@@ -247,7 +186,6 @@ func _rebuild() -> void:
 	if not has:
 		_name.text = ""
 		_info.add_child(QVoxelUi.label("（未选中对象）", QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT))
-		_update_key_info()
 		return
 	# 正在输入时不要回写名字（刷新会打断用户打字）。
 	if not _name.has_focus():
@@ -266,7 +204,6 @@ func _rebuild() -> void:
 		_kv("类型", "组")
 		_kv("子模型", "%d" % grp.count_models())
 		_kv("位置", "%d, %d, %d" % [grp.offset.x, grp.offset.y, grp.offset.z])
-	_update_key_info()
 
 
 func _kv(k: String, v: String) -> void:
