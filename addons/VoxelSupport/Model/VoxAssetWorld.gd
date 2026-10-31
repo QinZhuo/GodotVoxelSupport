@@ -140,7 +140,7 @@ static func _build_world_node(w: QVoxelWorld, vox: VoxAsset, id: int, parent: QV
 	var g := w.create_group(_group_name(vox, n), parent)
 	g.visible = _group_visible(vox, n)
 	g.local_transform = xf
-	# 多帧摆放动画 → 逐帧轨道（`.vox` 的 nTRN 多帧）。被折叠结构壳的静态变换(carry)并入每帧。
+	# 多帧摆放动画 → 逐帧轨道（`.vox` 的 nTRN 多帧；只移动整体物件，不是体素帧）。被折叠结构壳的静态变换(carry)并入每帧。
 	if _has_transform_anim(n):
 		var tracks := _transform_tracks(n)
 		for i in tracks.size():

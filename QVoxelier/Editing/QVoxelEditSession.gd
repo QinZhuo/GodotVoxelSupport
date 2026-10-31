@@ -126,7 +126,7 @@ func begin(pick: QVoxelBrushTool.Pick) -> bool:
 # 帧（§12.6）
 
 ## 切换"正在编辑 / 预览的帧"。**只动游标**，不重渲染 —— 调用方接着调 `rebuild()`
-## （时间轴面板把"切帧 + 重渲染"合成一步，见 QVoxelierTimelineSection）。
+## （时间轴面板把"切帧 + 重渲染"合成一步，见 QVoxelierTimeline）。
 func set_active_frame(index: int) -> void:
 	if object == null:
 		return

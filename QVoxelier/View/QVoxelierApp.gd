@@ -52,7 +52,6 @@ var _dock: QVoxelierDock
 var _color_section: QVoxelierColorSection
 var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
-var _timeline_section: QVoxelierTimelineSection
 ## 底部动画帧条（常驻一行，只显示当前模型的帧）。
 var _timeline: QVoxelierTimeline
 ## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
@@ -352,27 +351,7 @@ func _build_ui() -> void:
 
 	# 生成：选程序化算子 + 参数 + 合并方式，一次性烘焙进当前模型。
 
-
-	# 时间轴（§12）：帧条 / 播放头 / 逐帧时长 / 标签 / 播放预览。
-	_timeline_section = QVoxelierTimelineSection.new()
-	_timeline_section.frame_selected.connect(_select_frame)
-	_timeline_section.insert_requested.connect(_insert_frame)
-	_timeline_section.remove_requested.connect(_remove_frame)
-	_timeline_section.move_requested.connect(_move_frame)
-	_timeline_section.duration_edit_began.connect(_begin_frame_duration)
-	_timeline_section.duration_changed.connect(_live_frame_duration)
-	_timeline_section.duration_edit_ended.connect(_end_frame_duration)
-	_timeline_section.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
-	_timeline_section.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
-	_timeline_section.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
-	_timeline_section.track_record_requested.connect(_record_track)
-	_timeline_section.track_clear_requested.connect(_clear_track)
-	# 时间轴分组不再显示，只作为**播放内核**（帧时钟）的宿主 —— 但必须入树，否则 _ready 不跑、
-	# 控件不建、bind()/播放会空引用。入树后立即隐藏。
-	add_child(_timeline_section)
-	_timeline_section.visible = false
-
-	# 底部动画帧条：常驻一行，只显示当前模型的帧（播放仍由隐藏的时间轴分组驱动）。
+	# 底部时间轴：常驻一行，显示当前模型的帧并驱动播放。
 	_timeline = QVoxelierTimeline.new()
 	_timeline.name = "Timeline"
 	add_child(_timeline)
@@ -383,8 +362,14 @@ func _build_ui() -> void:
 		if session != null and session.object != null and session.object.is_animated():
 			_remove_frame(session.object.active_frame))
 	_timeline.move_frame_requested.connect(_move_frame)
-	_timeline.play_toggled.connect(func(on: bool): _timeline_section.play(on))
 	_timeline.loop_toggled.connect(func(on: bool): _set_anim_meta(&"anim_loop", on, "改循环"))
+	_timeline.duration_edit_began.connect(_begin_frame_duration)
+	_timeline.duration_changed.connect(_live_frame_duration)
+	_timeline.duration_edit_ended.connect(_end_frame_duration)
+	_timeline.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
+	_timeline.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
+	_timeline.track_record_requested.connect(_record_track)
+	_timeline.track_clear_requested.connect(_clear_track)
 	# 渲染（原「快照」）：离屏出图，做成顶栏一个按钮弹出的浮层（不再是右列的一页）。
 	_snapshot_section = QVoxelierSnapshotSection.new()
 	_snapshot_section.save_requested.connect(_request_snapshot_save)
@@ -449,6 +434,8 @@ func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 ## 【为什么必须共用】新建若漏掉它，新工程一进来材质还指着旧编号；启动首屏也是这条路径，
 ## 于是"打开工程取过景、新建 / 首屏却停在默认机位"这种分叉就会一直存在。
 func _reset_edit_state() -> void:
+	if _timeline != null:
+		_timeline.stop_playback()
 	_material_id = 1
 	_stroke = false
 	_gizmo_active = false
@@ -476,7 +463,7 @@ func _activate(model_id: int, flash := true) -> void:
 	if o == null:
 		return
 	# 换对象前先停预览：时间轴马上要绑到另一个模型上，让计时器继续跑就成了"播着 A、突然跳去播 B"。
-	_timeline_section.stop_playback()
+	_timeline.stop_playback()
 	if session != null and session.object == o:
 		return
 	if _stroke and session != null:
@@ -1209,7 +1196,7 @@ func _begin_stroke(screen: Vector2, op: int) -> void:
 		return
 	# 预览中落笔 = 这一笔会画在"播放头正好停住的那一帧"上，而播放头还在动 —— 用户根本
 	# 说不清自己画到了第几帧。先停下播放再落笔（停在哪一帧就是哪一帧，看得见）。
-	_timeline_section.stop_playback()
+	_timeline.stop_playback()
 	_stroke_op = op
 	if not session.begin(_pick_at(screen, op)):
 		hud.flash("这儿落不了笔：把光标放到网格上，或已经画出来的体素上")
@@ -1422,7 +1409,7 @@ func _stamp_at(screen: Vector2) -> void:
 	if not pick.valid():
 		hud.flash("这儿落不了：把光标放到网格或已有体素上")
 		return
-	_timeline_section.stop_playback()
+	_timeline.stop_playback()
 	var center := pick.hit if pick.hit != Vector3i.MIN else pick.place
 	var obj := session.object
 	var cmd := QVoxelEditCommand.begin(obj, session.edit_frame())
@@ -1847,16 +1834,15 @@ func _refresh_panels() -> void:
 		pbr[key] = world.material_scalar(_material_id, StringName(key))
 	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0), pbr)
 	_tree_section.set_world(world, session.object.model_id)
-	# 底部动画帧条绑到当前对象；播放按下态由隐藏的时间轴分组给出。
+	# 底部时间轴绑到当前对象；摆放轨道跟随当前选中节点。
 	if _timeline != null:
 		_timeline.bind(session.object)
-		_timeline.set_playing(_timeline_section.is_playing())
+		_timeline.set_track_target(_selected_node if _selected_node != null else session.object)
 	# 对象属性页跟着当前选中的节点（撤销 / 重做后重看一眼数据）。
 	if _object_section != null:
 		_object_section.bind(_selected_node)
 	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
-	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimelineSection.bind），播放期间不重建控件。
-	_timeline_section.bind(session.object)
+	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimeline.bind），播放期间不重建控件。
 	# 快照只读世界，且 set_world 幂等（同一个世界直接返回），故挂在这条唯一刷新路径上 ——
 	# 新建 / 打开换世界时它自然会收到新世界并把旧预览作废（见 QVoxelierSnapshotSection.set_world）。
 	_snapshot_section.set_world(world)
@@ -2533,6 +2519,8 @@ func _on_tree_selected(node: QVoxelNode) -> void:
 	_selected_node = node
 	if _object_section != null:
 		_object_section.bind(node)
+	if _timeline != null and session != null:
+		_timeline.set_track_target(node if node != null else session.object)
 	if _dock != null:
 		_dock.show_property_by_title("对象")
 
@@ -2751,17 +2739,22 @@ func _after_frame_change() -> void:
 	_refresh_hud()
 
 
-## 把当前节点摆放记进 `transform_tracks[当前帧]`（可撤销）。轨道按帧号稠密，缺的帧用静态摆放补齐。
+## 把当前选中节点的摆放记进 `transform_tracks[当前帧]`（可撤销）。
+## 只移动整体物件，不做骨骼/逐体素重采样；缺的帧用静态摆放补齐。
 ## 与体素帧共用同一帧号：播放第 k 帧 = 体素取 FRAM 第 k 帧 + 摆放取本数组第 k 项（QVoxelSpec §12）。
 func _record_track() -> void:
 	if session == null:
 		return
-	var m := session.object
-	var f := clampi(m.active_frame, 0, maxi(m.frame_count() - 1, 0))
-	var cmd := QVoxelPropertyCommand.begin(m, &"transform_tracks", m, "记录摆放")
-	while m.transform_tracks.size() < f + 1:
-		m.transform_tracks.append(m.local_transform)
-	m.transform_tracks[f] = m.local_transform
+	var node := _selected_node if _selected_node != null else session.object
+	if node == null:
+		return
+	if _timeline != null:
+		_timeline.stop_playback()
+	var f := clampi(session.object.active_frame, 0, maxi(session.object.frame_count() - 1, 0))
+	var cmd := QVoxelPropertyCommand.begin(node, &"transform_tracks", node, "记录摆放")
+	while node.transform_tracks.size() < f + 1:
+		node.transform_tracks.append(node.local_transform)
+	node.transform_tracks[f] = node.local_transform
 	if cmd.commit():
 		session.history.push(cmd)
 	_sess.mark_dirty()
@@ -2770,23 +2763,27 @@ func _record_track() -> void:
 	_refresh_hud()
 
 
-## 清除本帧的独立摆放（退回跟随静态）；若整条轨道都退化成静态，则清空轨道（不再有摆放动画）。
+## 清除当前选中节点在本帧的独立摆放（退回跟随静态）；整条轨道都退化成静态则清空轨道。
 func _clear_track() -> void:
 	if session == null:
 		return
-	var m := session.object
-	var f := clampi(m.active_frame, 0, maxi(m.frame_count() - 1, 0))
-	if f >= m.transform_tracks.size():
+	var node := _selected_node if _selected_node != null else session.object
+	if node == null:
 		return
-	var cmd := QVoxelPropertyCommand.begin(m, &"transform_tracks", m, "清除摆放")
-	m.transform_tracks[f] = m.local_transform
+	if _timeline != null:
+		_timeline.stop_playback()
+	var f := clampi(session.object.active_frame, 0, maxi(session.object.frame_count() - 1, 0))
+	if f >= node.transform_tracks.size():
+		return
+	var cmd := QVoxelPropertyCommand.begin(node, &"transform_tracks", node, "清除摆放")
+	node.transform_tracks[f] = node.local_transform
 	var all_static := true
-	for t in m.transform_tracks:
-		if not t.is_equal_approx(m.local_transform):
+	for t in node.transform_tracks:
+		if not t.is_equal_approx(node.local_transform):
 			all_static = false
 			break
 	if all_static:
-		m.transform_tracks.clear()
+		node.transform_tracks.clear()
 	if cmd.commit():
 		session.history.push(cmd)
 	_sess.mark_dirty()
@@ -2802,6 +2799,8 @@ func _clear_track() -> void:
 func _run_frame_edit(label: String, mutate: Callable) -> void:
 	if session == null or world == null:
 		return
+	if _timeline != null:
+		_timeline.stop_playback()
 	var m := session.object
 	var cmd := QVoxelPropertyCommand.begin(m, &"frames", m, label)
 	# §12.2：动画生效即静态源让位。`blocks` 因此必须进**同一条**命令的撤销范围 ——

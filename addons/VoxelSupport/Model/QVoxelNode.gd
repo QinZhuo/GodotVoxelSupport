@@ -49,7 +49,9 @@ var offset: Vector3i:
 	set(value):
 		local_transform.origin = Vector3(value)
 
-## 逐帧摆放轨道：`transform_tracks[k]` = 第 k 帧的摆放。**空 = 静态**（用 local_transform）。
+## 逐帧摆放轨道：`transform_tracks[k]` = 第 k 帧的**整体节点**摆放。**空 = 静态**（用 local_transform）。
+## 【只移动整体物件】它旋转/平移的是整个节点（组会带着整棵子树），不做骨骼、蒙皮或逐体素重采样；
+## 需要"每个体素重新落到网格上"的效果请用 FRAM/ANIM 体素帧。
 ## 与 FRAM 的帧号对齐 —— 播放第 k 帧时，体素取 FRAM 第 k 帧、摆放取这里第 k 项，
 ## "变换动画"与"体素动画"共用同一个帧号，播放器只需推进一个游标。
 ## 缺省空 ⇒ 零成本（P2），静态节点不背这条数据。逐帧整数变换与 .vox 的 nTRN.frames 同构。
