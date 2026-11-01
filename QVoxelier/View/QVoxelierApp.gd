@@ -36,12 +36,20 @@ extends Node3D
 ## 导入模型时的体素分辨率 = 模型最长边的体素数（其余轴按比例）。越大越精细、也越吃内存。
 @export var import_resolution := 96
 
-@onready var model: VoxelRenderer = $Model
-@onready var camera: QVoxelViewCamera = $Camera
-@onready var grid_floor: QVoxelGridFloor = $Model/Floor
+# 3D 内容全部住在 `ViewHost/View/ViewRoot` 里：中间的编辑区是一个 SubViewport，
+## 铺在左右两栏之间（见 `_layout_view`）。
+## 【结构必须写在 .tscn 里】SubViewport 的场景要入树后才注册，运行时 `reparent` 3D 节点进来，
+## 引擎会在"从旧视口摘可见性掩码"那一步拿到 null scenario。
+@onready var _view_container: SubViewportContainer = $ViewHost
+@onready var _view_root: Node3D = $ViewHost/View/ViewRoot
+@onready var model: VoxelRenderer = $ViewHost/View/ViewRoot/Model
+@onready var camera: QVoxelViewCamera = $ViewHost/View/ViewRoot/Camera
+@onready var grid_floor: QVoxelGridFloor = $ViewHost/View/ViewRoot/Model/Floor
 @onready var hud: QVoxelierHud = $Hud
-@onready var _key_light: DirectionalLight3D = $KeyLight
-@onready var _env_node: WorldEnvironment = $WorldEnvironment
+@onready var _key_light: DirectionalLight3D = $ViewHost/View/ViewRoot/KeyLight
+## 环境光挂在视口自己的世界里（它靠 "enter world" 注册，跟着 3D 走才生效）。
+## `_setup_sky` / `_apply_quality` 改的是它的 `environment`，即 3D 正在用的那一份。
+@onready var _env_node: WorldEnvironment = $ViewHost/View/ViewRoot/WorldEnvironment
 
 ## 应用栏 / 工具坞 / 调色板：**在代码里建**而不是摆进 .tscn —— 它们的内容完全由运行时数据决定
 ## （工具表、世界的材质表），在场景里预摆只会得到一份立刻被推翻的空壳；
@@ -57,9 +65,11 @@ var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
 ## 底部动画帧条（常驻一行，只显示当前模型的帧）。
 var _timeline: QVoxelierTimeline
-## 左右栏的宽度拖动条：拖它调栏宽，松手把宽度写进偏好。
-var _left_handle: QVoxelierResizeHandle
+## 右栏的宽度拖动条：拖它调栏宽，松手把宽度写进偏好。
+## 【左栏故意没有】左列全是透明图标按钮，宽度由内容定死就行 —— 给它一条可拖的边，
+## 用户反而要猜"拖宽了能多出什么"，答案是什么也没有。
 var _right_handle: QVoxelierResizeHandle
+## 长操作（体素化）进行中：Esc 置 `_import_cancel`，操作在下一帧边界收手。
 ## 长操作（体素化）进行中：Esc 置 `_import_cancel`，操作在下一帧边界收手。
 ## 多帧模型可能跑几十秒，没有这条通道时用户只能等（或强杀进程丢掉未存的改动）。
 var _importing := false
@@ -164,15 +174,13 @@ var _gizmo_base_lo := Vector3i.ZERO
 var _nav_key := &""
 ## 触摸 / 触摸板手势解析（双指拖 = 旋转、捏合 = 缩放）。解析与相机动作分离，见 QVoxelierGestureNav。
 var _gesture := QVoxelierGestureNav.new()
-## 左右两条侧栏占掉的宽度（可见区 = 窗口减这两块）。取景按它把模型对齐可见中心，见 frame_view。
+## 左侧栏（只有调色板那一列）的宽度。3D 视口与左栏底板按它让位。
+var _left_panel_w := 0.0
+## 浮层（上下文条、状态栏、坐标轴）要绕开的宽度：左栏 + 浮在画布上的工具列。
 var _left_inset := 0.0
 var _right_inset := 0.0
-## 待执行的"取景对齐可见中心" —— 放 _process 做：那时 inset 已由 sync 算出、相机也完成布局。
-var _pending_center := false
-## 已经补过的侧栏像素量。补偿按**差值**做：inset 结算晚于首帧时（布局未稳），
-## 后续 sync 只补差额 —— 重复调用不会叠加，也不会吃掉用户自己的平移。
-var _center_done_px := 0.0
-## 右侧栏的背景条（把右列的浮板连成整条侧栏）。左列工具是独立图标按钮、不带统一底色，故无左条。
+## 左右侧栏的背景条：把一列面板连成整条侧栏，缝里不漏出窗口底色。
+var _left_rail: Panel
 var _right_rail: Panel
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
@@ -239,6 +247,7 @@ func _ready() -> void:
 	_sess.dirty_changed.connect(_on_dirty_changed)
 	_bind_actions()
 	_build_dialogs()
+	# UI 在 3D 视口之后入树，天然压在画面之上（左列图标浮在 3D 上就靠这个次序）。
 	_build_ui()
 	_disable_focus(self)
 	# 天空里的"太阳盘"调小：材质 metallic=1 会把天空的太阳反射成一个大光球（用户不想要）。
@@ -268,6 +277,43 @@ func _disable_focus(node: Node) -> void:
 		_disable_focus(ch)
 
 
+## 3D 视口让开左右两条栏 —— 它们都是实心面板，画到它底下的东西看不见也点不到，等于白画。
+## 顶栏 / 时间轴 / 状态栏同理，故纵向也让。
+## 【左边只让调色板那一栏】工具列是浮在画布上的透明图标（见 `_tools`），让位等于把它挪进面板里。
+## 【让出来的地方不能露窗口底】左右各有一条 `_make_rail` 兜住栏底色，否则那圈就是灰的。
+func _layout_view() -> void:
+	if _view_container == null:
+		return
+	_view_container.anchor_left = 0.0
+	_view_container.anchor_top = 0.0
+	_view_container.anchor_right = 1.0
+	_view_container.anchor_bottom = 1.0
+	_view_container.offset_left = _left_panel_w
+	_view_container.offset_right = -_right_inset
+	_view_container.offset_top = QVoxelUi.bar_height()
+	_view_container.offset_bottom = -(QVoxelUi.status_height() + float(QVoxelUi.strip_height()))
+
+
+## 屏幕坐标 → 3D 视口坐标：差的只是容器左上角那一点位移。
+## 所有"投影 / 反投影"都必须吃视口坐标，否则射线会整体偏掉一个左栏的宽度。
+func _to_view(screen: Vector2) -> Vector2:
+	if _view_container == null:
+		return screen
+	return screen - _view_container.get_global_rect().position
+
+
+## 视口坐标 → 屏幕坐标。框选矩形画在 UI 层（主视口坐标），投影结果要先换回来才比得了。
+func _to_screen(view_point: Vector2) -> Vector2:
+	if _view_container == null:
+		return view_point
+	return view_point + _view_container.get_global_rect().position
+
+
+## 这一下点/滚轮是不是落在 3D 画布内（两侧栏、顶栏、状态栏底下都算外）。
+func _in_view(screen: Vector2) -> bool:
+	return _view_container != null and _view_container.get_global_rect().has_point(screen)
+
+
 ## 装配三个界面面板并接线。面板只发"用户想干什么"的信号，**不收会话**：
 ## 于是界面层永远不碰编辑逻辑，换视口（独立窗口 → Dock 内嵌）时面板一行都不用改。
 ## （状态栏是例外：它要读会话才能显示工具与撤销栈，所以在 _install 里注入 session。）
@@ -276,8 +322,10 @@ func _build_ui() -> void:
 	_toolbar.name = "Toolbar"
 	add_child(_toolbar)
 
-	# 右侧整栏背景：把抽屉里的浮板连成一条完整侧栏，3D 不从面板缝隙里漏出来。
-	# 先入树压在所有面板之下，只作背景不吃事件。（左列是独立图标按钮，不需要这条。）
+	# 两侧整栏背景：把一列面板连成一条完整侧栏，3D 不从面板缝隙里漏出来。
+	# 先入树压在所有面板之下，只作背景不吃事件。
+	_left_rail = _make_rail(false)
+	add_child(_left_rail)
 	_right_rail = _make_rail(true)
 	add_child(_right_rail)
 	_toolbar.new_requested.connect(request_new)
@@ -344,13 +392,10 @@ func _build_ui() -> void:
 	_dock.name = "Dock"
 	add_child(_dock)
 
-	# 两侧栏的宽度拖动条：贴在栏的外缘，横向位置由 `_sync_rails` 跟着栏宽更新。
-	_left_handle = _make_resize_handle(Vector2(0, 0))
+	# 右栏的宽度拖动条：贴在外缘，横向位置由 `_sync_rails` 跟着栏宽更新。
 	_right_handle = _make_resize_handle(Vector2(1, 1))
-	_left_handle.dragged.connect(_on_tools_resize)
 	_right_handle.dragged.connect(_on_dock_resize)
 	# 拖动过程中不写盘（每帧一次太频繁），松手才记下来。
-	_left_handle.released.connect(_save_layout)
 	_right_handle.released.connect(_save_layout)
 
 	# 层级树：唯一的层级入口，固定在右列**上方**。
@@ -576,7 +621,7 @@ func _on_dirty_changed(_on: bool) -> void:
 ## 【幂等 + 复用】本函数在切对象、图层可见性变化、撤销图层命令后都会被调到，所以它必须
 ## "算出现状"，而不是"推倒重来"：已有且仍该显示的渲染器原地复用（只改 visible），
 ## 该消失的回收，该新增的才建。若每次都重建，多对象场景每落一笔就重建一遍网格，会闪。
-## 【为什么活动对象固定用 model】视口脚本按场景路径 $Model 引着它，重指代价大；
+## 【为什么活动对象固定用 model】视口脚本按场景路径引着它（`ViewHost/View/ViewRoot/Model`），重指代价大；
 ## 于是约定"model 永远渲染当前活动对象"，其余对象才走 _extra_root。切换只是换 model.data。
 func _rebuild_view() -> void:
 	if world == null or session == null:
@@ -584,7 +629,8 @@ func _rebuild_view() -> void:
 	if _extra_root == null:
 		_extra_root = Node3D.new()
 		_extra_root.name = "Objects"
-		add_child(_extra_root)
+		# 必须挂在 3D 视口里：挂在 App 根节点下等于留在主世界，主视口会把它们再渲染一遍。
+		_view_root.add_child(_extra_root)
 
 	var active_id: int = session.object.model_id
 	# 活动对象由 model 渲染，其唤醒回调必须指回 model.request_update。
@@ -633,13 +679,8 @@ func frame_view() -> void:
 		return
 	var g := Vector3(session.output_size()) * model.voxel_scale
 	# 取景对准**整块网格盒的中心**（而不是地板中心）—— 背景面有地板也有侧墙，盒子中心才是视觉中心。
+	# 视口边界就是可见区，这个中心落下去就是屏幕中心，不需要再补侧栏差额。
 	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, g), true)
-	_pending_center = false
-
-
-## 居中补偿：已停用（见 frame_view 的说明）。保留空实现以兼容调用点。
-func _apply_view_center() -> void:
-	_pending_center = false
 
 
 ## 取景整个世界：所有模型（按各自摆放）联合包围盒的中心。布局模式的聚焦用。
@@ -686,7 +727,8 @@ func _rebuild_layout_overlay() -> void:
 	if _layout_overlay == null:
 		_layout_overlay = Node3D.new()
 		_layout_overlay.name = "LayoutOverlay"
-		add_child(_layout_overlay)
+		# 同 `_extra_root`：它是 3D 线框，必须和模型待在同一个视口里。
+		_view_root.add_child(_layout_overlay)
 	for c in _layout_overlay.get_children():
 		_layout_overlay.remove_child(c)
 		c.queue_free()
@@ -938,16 +980,13 @@ func _end_box_select(add := false) -> void:
 			continue
 		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
 		var c := (bb.position + bb.end) * 0.5 * vs
-		if r.has_point(camera.unproject_position(c)):
+		if r.has_point(_to_screen(camera.unproject_position(c))):
 			_layout_sel[m.model_id] = true
 	_rebuild_layout_overlay()
 	_refresh_hud()
 
 
 func _process(_delta: float) -> void:
-	# 条件不满足就不清标记 —— 下一帧重试，直到 inset 与视口都就绪。
-	if _pending_center:
-		_apply_view_center()
 	_update_gizmo_size()
 
 
@@ -980,11 +1019,11 @@ func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
 	return h
 
 
-## 侧栏背景条：宽 = 内容 + 两侧缝，高 = 顶栏下缘到状态栏上缘。只作背景，不吃鼠标事件。
+## 侧栏背景条：纵向上顶栏下缘 → 状态栏上缘，横向各锚在所属那一侧，宽度由 `_sync_rails` 给。
+## 只作背景，不吃鼠标事件。
 func _make_rail(right: bool) -> Panel:
 	var p := Panel.new()
 	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# 纵向贴满（顶栏下缘 → 状态栏上缘），横向各自锚定到所属侧；宽度由 _sync_rails 按内容更新。
 	p.anchor_top = 0.0
 	p.anchor_bottom = 1.0
 	p.offset_top = QVoxelUi.bar_height()
@@ -993,37 +1032,39 @@ func _make_rail(right: bool) -> Panel:
 		p.anchor_left = 1.0
 		p.anchor_right = 1.0
 		p.offset_right = 0.0
+		# 右栏有个近似的默认档；左栏没有（零宽 = 首帧不画），等 `_sync_rails` 按内容量。
 		p.offset_left = -QVoxelUi.dock_width() - QVoxelUi.space_m() * 2.0
 	else:
 		p.anchor_left = 0.0
 		p.anchor_right = 0.0
 		p.offset_left = 0.0
-		p.offset_right = QVoxelUi.dock_width() + QVoxelUi.space_m() * 2.0
-	p.add_theme_stylebox_override("panel",
-			QVoxelUi.box(QVoxelUi.SURFACE_SOLID, QVoxelUi.BORDER, 1, 0, 0, 0))
+		p.offset_right = 0.0
+	# 分隔线只画在**与画布相接**那一边：贴窗口外缘的几条画了就是一道突兀的亮边。
+	var sb := QVoxelUi.box(QVoxelUi.SURFACE_SOLID, QVoxelUi.BORDER, 0, 0, 0, 0)
+	sb.set_border_width(SIDE_LEFT if right else SIDE_RIGHT, 1)
+	p.add_theme_stylebox_override("panel", sb)
 	return p
 
 
-## 两条侧栏的宽度与"可见区裁切量"随邻居实际宽度更新 —— rail 背景、状态栏让位、
-## 坐标轴让位、取景补偿从此共用同一组数。
+## 两条侧栏的宽度随邻居实际宽度更新 —— rail 背景、视口让位、状态栏让位、坐标轴让位、
+## 上下文条让位共用同一组数。
 func _sync_rails() -> void:
-	# 左列 = 最左的调色板列 + 工具列。inset 要含两者，可见区才让得对。
-	_left_inset = (QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
-			+ _tools.size.x + QVoxelUi.space_m())
+	# 左栏只有调色板那一列（它左右各留一道缝）；工具列是浮在画布上的，不算进栏宽。
+	_left_panel_w = QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
+	# 浮层还要多让出工具列（连同它的右缝）：工具列压在画布最左边，浮层压上去就会挡住它。
+	_left_inset = _left_panel_w + _tools.size.x + QVoxelUi.space_m()
 	_right_inset = _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
+	_left_rail.offset_right = _left_panel_w
 	_right_rail.offset_left = -_right_inset
 	# 拖动条贴在栏的**外缘**：栏一宽一窄，它自动跟过去（不需要用户重新找它）。
-	if _left_handle != null:
-		_left_handle.offset_left = _left_inset - QVoxelUi.space_s()
-		_left_handle.offset_right = _left_handle.offset_left + QVoxelierResizeHandle.WIDTH
 	if _right_handle != null:
 		_right_handle.offset_right = -(_dock.size.x + QVoxelUi.space_m())
 		_right_handle.offset_left = _right_handle.offset_right - QVoxelierResizeHandle.WIDTH
 	# 上下文选项条横跨可见区（两侧让开左右栏），故也吃同一组 inset。
 	if _context != null:
 		_context.set_insets(_left_inset, _right_inset)
-	# 宽度变了 = 可见区中心也变了。补差额（只在取过景之后有欠账，别的场景 delta 为 0）。
-	_apply_view_center()
+	# 栏宽变了 = 3D 视口的边界也变了，跟着重排。
+	_layout_view()
 
 
 ## 拖右栏左缘：向左拖（delta < 0）= 右栏变宽。
@@ -1036,12 +1077,6 @@ func _on_dock_resize(delta: float) -> void:
 	_gizmo.right_inset = _right_inset
 
 
-## 拖左栏右缘：向右拖 = 左栏变宽（撑的是工具坞的最小宽度，内容更宽时仍以内容为准）。
-func _on_tools_resize(delta: float) -> void:
-	_tools.custom_minimum_size.x = clampf(_tools.size.x + delta, 72.0, 420.0)
-	_sync_rails()
-
-
 ## 恢复上次拖出来的栏宽（没有记录就用默认档）。与"上次目录"共用同一个 cfg。
 func _load_layout() -> void:
 	var cfg := ConfigFile.new()
@@ -1050,18 +1085,14 @@ func _load_layout() -> void:
 	var dw := int(cfg.get_value(PREFS_SECTION, "dock_w", 0))
 	if dw > 0:
 		QVoxelUi.set_dock_width(dw)
-	var tw := int(cfg.get_value(PREFS_SECTION, "tools_w", 0))
-	if tw > 0 and _tools != null:
-		_tools.custom_minimum_size.x = tw
 
 
 func _save_layout() -> void:
-	if _tools == null:
+	if _dock == null:
 		return
 	var cfg := ConfigFile.new()
 	cfg.load(PREFS_PATH)
 	cfg.set_value(PREFS_SECTION, "dock_w", QVoxelUi.dock_width())
-	cfg.set_value(PREFS_SECTION, "tools_w", int(_tools.custom_minimum_size.x))
 	cfg.save(PREFS_PATH)
 
 
@@ -1095,12 +1126,18 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _on_mouse_button(e: InputEventMouseButton) -> void:
+	# 3D 判定一律走**视口坐标**（`vp`）；框选矩形画在 UI 层，仍用主视口的 `e.position`。
+	var vp := _to_view(e.position)
+	# 按在画布外不算操作：那底下是两侧栏 / 顶栏 / 状态栏，落到那里的射线只会画在看不见的地方。
+	# 松手**不拦** —— 笔拖到栏外再松开，仍要能正常收笔。
+	if e.pressed and not _in_view(e.position):
+		return
 	match e.button_index:
 		MOUSE_BUTTON_LEFT:
 			# 取色器优先于一切：开启时左键点击用来"吸取"，不该顺带落一笔。
 			# 拖拽（含导航 / 平移）时若不放开手会一直吸，故只在**按下那一拍**取一次。
 			if _eyedropper and e.pressed:
-				_pick_material_at(e.position)
+				_pick_material_at(vp)
 				return
 			# 触摸屏没有中键：单指拖动画/擦，单指拖动**空白处**即转视角，双指拖动即平移。
 			# 平板上的单指拖动经过 emulate_mouse_from_touch 就是这里的 LEFT，不需要另写触摸分支。
@@ -1116,10 +1153,10 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					if _edit_mode == 1:
 						# 布局：先试 gizmo；否则**点中模型即选中**（任何工具下都行，Shift 加 / Ctrl 减）；
 						# 空处：只有「选择」工具才框选，其它工具（默认「移动」）拖动即转视角。
-						if _gizmo_begin(e.position):
+						if _gizmo_begin(vp):
 							pass
 						else:
-							var lm := _pick_layout_model(e.position)
+							var lm := _pick_layout_model(vp)
 							if lm != null:
 								_layout_select(lm, e.shift_pressed, e.ctrl_pressed)
 							elif session.tool.mode == QVoxelBrushTool.Mode.SELECT:
@@ -1131,19 +1168,19 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 								_nav_key = &"left"
 								_orbit = true
 					elif _tool_kind == ToolKind.BRUSH and session.tool.mode == QVoxelBrushTool.Mode.MOVE:
-						if not _gizmo_begin(e.position):
+						if not _gizmo_begin(vp):
 							_nav_key = &"left"
 							_orbit = true
-					elif not _pick_at(e.position, _op).valid():
+					elif not _pick_at(vp, _op).valid():
 						_nav_key = &"left"
 						_orbit = true
 					elif _tool_kind != ToolKind.BRUSH:
-						_stamp_at(e.position)
+						_stamp_at(vp)
 					else:
 						# 选区手势：Shift 加选 / Ctrl 减选（在按下那一刻定死）。
 						if session.tool.selection_mode():
 							session.selection_combine = 2 if e.ctrl_pressed else (1 if e.shift_pressed else 0)
-						_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op)
+						_begin_stroke(vp, QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op)
 			elif _box_select:
 				_end_box_select(e.shift_pressed)
 			elif _gizmo_active:
@@ -1159,7 +1196,7 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			if _edit_mode == 1 or _tool_kind != ToolKind.BRUSH:
 				return
 			if e.pressed:
-				_begin_stroke(e.position, QVoxelBrushTool.Op.REMOVE)
+				_begin_stroke(vp, QVoxelBrushTool.Op.REMOVE)
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_MIDDLE:
@@ -1204,20 +1241,22 @@ func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 		_box_end = e.position
 		_update_box_rect()
 		return
+	# 同按键：3D 判定用视口坐标；`e.relative` 是像素增量，与视口原点无关，直接喂给相机。
+	var vp := _to_view(e.position)
 	if _gizmo_active:
-		_gizmo_update(e.position)
+		_gizmo_update(vp)
 		return
 	if _stroke:
-		session.drag(_pick_at(e.position, _stroke_op))
-		_refresh_cursor(e.position)
+		session.drag(_pick_at(vp, _stroke_op))
+		_refresh_cursor(vp)
 	elif _orbit:
 		camera.orbit_by_pixels(e.relative)
 	elif _pan:
 		camera.pan_by_pixels(e.relative)
 	else:
 		_hover_op = QVoxelBrushTool.Op.REMOVE if e.shift_pressed else _op
-		_update_gizmo_hover(e.position)
-		_refresh_cursor(e.position)
+		_update_gizmo_hover(vp)
+		_refresh_cursor(vp)
 
 
 func _on_key(e: InputEventKey) -> void:
@@ -2739,6 +2778,8 @@ func _reserve_strip() -> void:
 		_tools.set_bottom_reserved(h)
 	if _gizmo != null:
 		_gizmo.bottom_inset = h
+	# 底部让出一条给帧条之后，可见区变矮了 —— 3D 视口照它重排。
+	_layout_view()
 
 
 ## 空格：播放 / 暂停当前模型的帧动画。与时间轴上的 ▶ 是同一份状态，不另存一份。
