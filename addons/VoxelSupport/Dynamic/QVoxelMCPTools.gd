@@ -42,9 +42,14 @@ const HELP := """# 体素程序化建模 —— API 说明
     import_model(path, resolution := 96)   # 网格(glTF/OBJ) → 体素并**并入**世界; 需 await
     export_mesh(path)                      # 世界 → .glb/.gltf
     preview(path, opts)                    # 离屏渲一张 PNG(**不用导入/不用开软件**); 需 await
-                                           # opts: {file, size, yaw, pitch, dist, bg, transparent}
+                                           # opts: {file, size, yaw, pitch, dist, bg, transparent,
+                                           #        views, frames, gap}
     # 例: await QVoxelScript.import_model("res://art/chair.glb", 64)
     # 例: await QVoxelScript.preview("user://shot.png", {"file": "user://model.qvx", "size": 800})
+    # 例: 三视图+等轴拼一张(行=视角, 列=帧):
+    #     await QVoxelScript.preview("user://sheet.png", {"views": "front,right,top,iso", "size": 320})
+    # 例: 动画全帧横排(时间在横轴):
+    #     await QVoxelScript.preview("user://anim.png", {"frames": -1, "size": 256})
 
 `.qvx` / `.vox` 的读写与"打开文件"走同一条装载路径, 所以外部 `.vox` 打开后可以直接接着改。
 注意 `export_mesh` 依赖 GLTFDocument: 在**编辑器进程**里 Godot 不导出编辑器场景网格,
@@ -115,6 +120,9 @@ const HELP := """# 体素程序化建模 —— API 说明
 
 **看图(自检闭环)**: `voxel_render(path=...)` 或 `QVoxelScript.preview()` 直接出 PNG,
 再用 read_file 打开 —— 不用导入、不用打开软件, 改完再渲一次即可。
+**一张图看全**: `views` 一次出多视角(front/back/left/right/top/bottom/iso 或 `{yaw,pitch}` 数组),
+`frames=-1` 出全部动画帧; 两者同时给就是拼图 —— **视角横向并排、帧纵向叠加**,
+只有帧在变时沿横轴铺开(时间轴)。每格 `size` 见方, `gap` 留缝。单视角单帧原样返回, 与以前逐像素一致。
 需要"编辑器里能像资源一样双击打开"时, 才走 `res://` + `scan()` + `reimport()`。
 【前提】渲染要渲染服务器: 编辑器/游戏进程可以, `--headless` 不行(headless 就是没渲染设备)。
 输出写 `user://`(默认)即可; 写 `res://` 会被编辑器当图片资源导入, 平白多出 `.import`。
@@ -168,10 +176,15 @@ static func _render_schema() -> Dictionary:
 	return {"type": "object", "properties": {
 		"path": MCPToolSchema.str_arg("要渲的 .qvx / .vox 路径(res:// 或 user://)；省略 = 渲 QVoxelScript 当前世界"),
 		"out": MCPToolSchema.str_arg("PNG 输出路径，默认 user://voxel_preview.png"),
-		"size": {"type": "integer", "minimum": 64, "maximum": 4096, "description": "输出边长(像素)，默认 512"},
-		"yaw": {"type": "number", "description": "水平角(度)，默认 35"},
-		"pitch": {"type": "number", "description": "俯仰角(度)，默认 20，范围 -85..85"},
+		"size": {"type": "integer", "minimum": 64, "maximum": 4096, "description": "每格边长(像素)，默认 512"},
+		"yaw": {"type": "number", "description": "水平角(度)，默认 35（未给 views 时生效）"},
+		"pitch": {"type": "number", "description": "俯仰角(度)，默认 20，范围 -85..85（未给 views 时生效）"},
 		"dist": {"type": "number", "description": "相机距离 = dist × 包围球半径，越小越放大，默认 2.6"},
+		"views": MCPToolSchema.str_arg(
+			"多视角拼图：逗号分隔的视角名或角度数组。可选 front/back/left/right/top/bottom/iso，"
+			+ "如 \"front,right,top,iso\"；也可传 [{yaw:0,pitch:0},...]。省略 = 单视角(yaw/pitch)"),
+		"frames": {"type": "integer", "description": "动画帧：0=当前帧(默认)，-1=全部帧，n=前 n 帧。与 views 同时给则视角横排、帧纵叠"},
+		"gap": {"type": "integer", "minimum": 0, "maximum": 64, "description": "拼图格子间距(像素)，默认 0(边对边)"},
 		"bg": MCPToolSchema.str_arg("背景色 #rrggbb，默认 #2a2d33"),
 		"transparent": {"type": "boolean", "description": "透明背景(PNG 带 alpha)，默认 false"},
 	}}
@@ -199,7 +212,10 @@ static func _render(args: Dictionary) -> Dictionary:
 			"渲染失败：目标里没有体素（空世界/空模型），或当前进程没有渲染设备(headless)",
 			"确认 .qvx/.vox 里确实有体素；渲染需要带窗口的编辑器或游戏进程")
 	var o := QVoxelPreview.normalize(opts)
-	return MCPResult.ok_with_meta(
-		"已渲染 %d×%d (yaw %d°, pitch %d°) → %s —— 用 read_file 打开看效果" % [
-			o["size"], o["size"], int(o["yaw"]), int(o["pitch"]), saved],
-		{"path": saved, "size": o["size"], "yaw": o["yaw"], "pitch": o["pitch"]})
+	var views: Array = o["views"]
+	var cell := "%d×%d" % [o["size"], o["size"]]
+	var how := "%s (yaw %d°, pitch %d°)" % [cell, int(o["yaw"]), int(o["pitch"])]
+	if views.size() > 1 or int(o["frames"]) != 0:
+		how = "%d 视角 × frames=%d, 每格 %s(视角横排 帧纵叠)" % [views.size(), int(o["frames"]), cell]
+	return MCPResult.ok_with_meta("已渲染 %s → %s —— 用 read_file 打开看效果" % [how, saved],
+		{"path": saved, "size": o["size"], "views": views.size(), "frames": o["frames"]})
