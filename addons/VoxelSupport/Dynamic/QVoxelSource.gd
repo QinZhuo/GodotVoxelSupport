@@ -335,9 +335,25 @@ func invalidate_chunk_source_range(lo: Vector3i, hi: Vector3i) -> int:
 	for cz in range(c0.z, c1.z + 1):
 		for cy in range(c0.y, c1.y + 1):
 			for cx in range(c0.x, c1.x + 1):
-				invalidate_chunk_source(Vector3i(cx, cy, cz))
+				var ck := Vector3i(cx, cy, cz)
+				invalidate_chunk_source(ck)
+				# 【作废之后必须重新起一次取数】invalidate 会取消在途请求，而渲染层对
+				# "源作废"的 chunk 是**剔除不重建**的（防闪）。不再请求一次，这条链就断在
+				# 这里：撤销 / 删除后数据已经没了，画面上的旧网格却还在 —— 直到下次碰它
+				# 才被顺带刷掉。回填（或判定为空）时 `_accept_chunk_buffer` /
+				# `_maybe_erase_empty_chunk` 会清掉标记并重新标脏，渲染器届时才正确重建。
+				_refill_chunk(ck)
 				n += 1
 	return n
+
+
+## 作废之后重新排队取数：流式从存储读，非流式交给异步生成器（由求值体积产出）。
+func _refill_chunk(ck: Vector3i) -> void:
+	if is_stored(ck):
+		preload_chunk(ck)
+		return
+	if node != null and is_in_node_bounds(ck):
+		_async.request(ck, 0)
 
 
 ## 该 chunk 是否已标脏待重建。**不取走**（取走并清空请用 get_dirty_chunks）。
@@ -850,8 +866,17 @@ func _accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int =
 			return
 		if buf.size() != CHUNK_VOLUME:
 			return
+		var count := _count_voxels(buf)
+		# 【全 0 的缓冲没有任何信息量，不该存在】留着它会让 `has_chunk()` 撒谎：
+		# 渲染器据此认为"这块还有内容"，于是既不清旧网格也不派发重建（空块本来就没网格可建），
+		# 表现为"撤销 / 删除后画面上的体素还在"（实测踩到）。不装缓冲，`has_chunk` 才说真话。
+		if count == 0:
+			_source_invalidated.erase(chunk_key)
+			_dirty.mark(0, chunk_key, VoxelDirtyLedger.MESH)
+			_mark_neighbors_dirty(chunk_key)
+			return
 		_chunk_buffers[chunk_key] = buf
-		_count_set(chunk_key, _count_voxels(buf))
+		_count_set(chunk_key, count)
 		# 内容已回填 → 清除"源作废"标记（渲染层可安全按新内容重建）
 		_source_invalidated.erase(chunk_key)
 		# 数据就绪 → 标网格重建。未修改的粗层块用独立数据层，不依赖 LOD0 回填，故无需失效 ——
