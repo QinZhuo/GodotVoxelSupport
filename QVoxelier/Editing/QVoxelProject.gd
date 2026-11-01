@@ -18,11 +18,21 @@ const EXTENSION := "qvx"
 
 # 对外
 
-## 保存：世界 → 文档 → 字节 → 原子落盘（含滚动备份）。返回 Error。
+## 保存：世界 → 字节 → 原子落盘（含滚动备份）。返回 Error。
 static func save(world: QVoxelWorld, path: String) -> Error:
 	if world == null or path.is_empty():
 		return ERR_INVALID_PARAMETER
-	return SaveTool.save_data(path, encode(world), SaveTool.Mode.BYTES)
+	var bytes := encode_for(world, path)
+	if bytes.is_empty():
+		return ERR_INVALID_DATA
+	return SaveTool.save_data(path, bytes, SaveTool.Mode.BYTES)
+
+
+## 按扩展名选编码器：`.vox` 走 `VoxWriter`（出口格式），其余按 `.qvx` 工程。
+## 【为什么分派只在这一句】编码是格式层的事、落盘是框架的事；本类只回答"用哪个编码器"，
+## 于是 `.vox` 与 `.qvx` 共享同一条原子写 + 备份回退的落盘路径。
+static func encode_for(world: QVoxelWorld, path: String) -> PackedByteArray:
+	return VoxWriter.encode(world) if is_vox_path(path) else encode(world)
 
 
 ## 读取：文件 → 字节 → 文档 → 世界。文件缺失 / 为空 / 不是合法 `.qvx` 一律返回 null。
@@ -72,6 +82,6 @@ static func is_vox_path(path: String) -> bool:
 	return path.get_extension().to_lower() == VoxAsset.VOX_EXTENSION
 
 
-## 补上缺失的 `.qvx` 后缀（已有就不动）。
+## 补上缺失的后缀（已带 `.qvx` / `.vox` 就原样，否则按工程默认 `.qvx` 补）。
 static func ensure_extension(path: String) -> String:
-	return path if is_project_path(path) else path + "." + EXTENSION
+	return path if is_openable(path) else path + "." + EXTENSION

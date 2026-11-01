@@ -1552,25 +1552,36 @@ func _adopt_world(w: QVoxelWorld, path: String, dirty: bool) -> QVoxelModel:
 	return obj
 
 
-## 保存到当前工程（`.qvx`）；还没存过盘、或当前是导入的 `.vox`（`.vox` 只支持导入、不写回）
-## 就转"另存为"。
+## 保存到当前文件：`.qvx` 工程或 `.vox` 模型，由**当前路径的扩展名**决定格式；
+## 还没存过盘就转"另存为"。
 func save_project() -> void:
 	if _stroke:
 		session.cancel()
 		_stroke = false
-	if _sess.project_path.is_empty() or QVoxelProject.is_vox_path(_sess.project_path):
+	if _sess.project_path.is_empty():
 		save_project_as()
 		return
 	_write_project(_sess.project_path)
 
 
-## 另存为：弹文件对话框，默认文件名取世界名。
+## 另存为：弹文件对话框，默认扩展名跟随当前文件类型（打开的是 .vox 就默认存回 .vox）。
 func save_project_as() -> void:
-	_save_dialog.current_file = "%s.%s" % [world.world_name(), QVoxelProject.EXTENSION]
+	var ext := VoxAsset.VOX_EXTENSION if QVoxelProject.is_vox_path(_sess.project_path) \
+			else QVoxelProject.EXTENSION
+	_save_dialog.current_file = "%s.%s" % [world.world_name(), ext]
 	_save_dialog.popup_centered_ratio(0.7)
 
 
 func _write_project(path: String) -> bool:
+	# `.vox` 有几条绕不过去的硬约束（≤256、24 种朝向、整数平移）：先在写盘前把原因说清楚，
+	# 而不是产出一个 MagicaVoxel 打不开、或"看着对了其实整体偏移"的文件。
+	var warnings := PackedStringArray()
+	if QVoxelProject.is_vox_path(path):
+		var report := VoxWriter.check(world)
+		if not report["ok"]:
+			hud.flash("存不了 .vox：%s" % "；".join(report["reasons"]))
+			return false
+		warnings = report["warnings"]
 	var err := QVoxelProject.save(world, path)
 	if err != OK:
 		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
@@ -1578,7 +1589,8 @@ func _write_project(path: String) -> bool:
 	_sess.project_path = path
 	_sess.clear_dirty()
 	_update_title()
-	hud.flash("已保存 %s" % path.get_file())
+	var note := "" if warnings.is_empty() else "（注意：%s）" % "；".join(warnings)
+	hud.flash("已保存 %s%s" % [path.get_file(), note])
 	return true
 
 
@@ -1815,8 +1827,8 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	var d := _make_fs_dialog(mode,
 			"打开工程" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存工程")
 	d.add_filter("*.%s" % QVoxelProject.EXTENSION, "QVoxelier 工程")
-	if mode == FileDialog.FILE_MODE_OPEN_FILE:
-		d.add_filter("*.%s" % VoxAsset.VOX_EXTENSION, "MagicaVoxel 体素")
+	# `.vox` 两种模式都支持：打开是导入，保存是写回（MagicaVoxel 能直接打开）。
+	d.add_filter("*.%s" % VoxAsset.VOX_EXTENSION, "MagicaVoxel 体素")
 	return d
 
 
