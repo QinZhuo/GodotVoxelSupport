@@ -270,6 +270,35 @@ func test_rotate_selection_in_model() -> void:
 	assert_true(m.get_voxel(0, 1, 0) > 0, "转满 360° 回到原位")
 
 
+## ⑬ 盒 = 本地内容盒 × 世界摆放。尺寸**不含旋转**，旋转只由变换施加一次
+## （尺寸先转、盒再乘变换 ⇒ 转两遍：换轴又错位，见布局框与取景踩过的坑）。
+
+func test_box_is_local_times_world_transform() -> void:
+	var w := QVoxelWorld.create_empty()
+	var g := w.create_group("g")
+	var m := w.create_model("m", Vector3i(3, 4, 5), g)
+	m.offset = Vector3i(1, 2, 3)
+
+	assert_eq(QVoxelEvalEngine.local_box(m), AABB(Vector3.ZERO, Vector3(3, 4, 5)),
+			"模型本地盒 = 自身尺寸，位置从原点起")
+	assert_eq(QVoxelEvalEngine.local_box(g), AABB(Vector3(1, 2, 3), Vector3(3, 4, 5)),
+			"组本地盒 = 子盒按各自摆放的并集")
+
+	# 组自己的摆放不进本地盒：只在乘 world_transform 时施加一次
+	g.offset = Vector3i(10, 0, 0)
+	assert_eq(QVoxelEvalEngine.local_box(g), AABB(Vector3(1, 2, 3), Vector3(3, 4, 5)),
+			"本地盒不含本节点摆放")
+	var gb: AABB = w.world_transform(g) * QVoxelEvalEngine.local_box(g)
+	assert_eq(gb.position, Vector3(11, 2, 3), "世界盒 = 本地盒 + 祖先位移")
+
+	# 绕 Y 转 90°：尺寸换轴且只换一次
+	m.local_transform = Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(1, 2, 3))
+	assert_eq(QVoxelEvalEngine.local_box(m), AABB(Vector3.ZERO, Vector3(3, 4, 5)),
+			"旋转不进本地盒")
+	var wb: AABB = w.world_transform(m) * QVoxelEvalEngine.local_box(m)
+	assert_true(wb.size.is_equal_approx(Vector3(5, 4, 3)), "世界盒换轴一次（转两遍会转回原尺寸）")
+
+
 # 夹具
 
 ## 两个图层 + 两个单格模型 + 带位移的场景图。模型 size=1³ ⇒ 居中偏移为 0，摆放即帧位移。
