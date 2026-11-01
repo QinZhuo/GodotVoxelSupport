@@ -148,6 +148,9 @@ func _emit_changed() -> void:
 
 
 # 层级结构（树上的增 / 删 / 移 / 改字段）
+# 【为什么结构操作现在进撤销栈了】早先的理由是"结构增删与体素编辑是两类东西"。但用户不
+# 这么分：删错一个模型、按 Ctrl+Z 没反应，是他能踩到的最直接的"东西丢了"。而三者对世界的
+# 效果其实同构（节点换了个位置），于是一条结构命令就够，不必为增 / 删 / 移各写一遍。
 
 ## 新建模型：尺寸随当前模型（"再做一个同样大小的"是最常见的心智模型）。
 ## 新模型会挂一条展示会话并**直接切过去** —— 建了却停在旧的上面，用户会以为没建成。
@@ -158,16 +161,16 @@ func add_model(parent: QVoxelGroup) -> void:
 	# 当前模型若挂了平铺，照抄种子尺寸会做出一个明显更小的"同样大小"的模型。
 	var o := world.create_model("", session.output_size(), parent)
 	_sessions[o.model_id] = _make_session(o, world)
-	_set_dirty(true)
 	activate(o.model_id)
+	_record_structure(o, null, QVoxelStructureCommand.OFF_TREE, "新建模型")
 
 
 ## 新建组。组没有内容，故只标脏 + 请 View 刷新（不切换编辑对象）。
 func add_group(parent: QVoxelGroup) -> void:
 	if world == null:
 		return
-	world.create_group("Group", parent)
-	_set_dirty(true)
+	var g := world.create_group("Group", parent)
+	_record_structure(g, null, QVoxelStructureCommand.OFF_TREE, "新建组")
 	hint.emit("已新建组")
 	changed.emit()
 
@@ -175,7 +178,6 @@ func add_group(parent: QVoxelGroup) -> void:
 ## 删除节点（连同子树）。
 ## 【为什么删组不先拆散】"删掉这个组"在用户心里就是"这一坨不要了"；想留内容就先把它拖出来。
 ## 拆散是另一个动作，混进来会让"删除"变得不可预期。
-## 【为什么不入撤销栈】结构增删与体素编辑是两类东西：后者才是高频、真正需要逐笔回退的手势。
 func remove_node(node: QVoxelNode) -> void:
 	if world == null or node == null:
 		return
@@ -183,27 +185,103 @@ func remove_node(node: QVoxelNode) -> void:
 	if node.is_model() and world.all_models().size() <= 1:
 		hint.emit("至少要留一个模型")
 		return
+	var from_parent := world.find_parent(node)
+	var from_index := world.index_of(node)
+	# 先抓住"删除前那个对象的栈"：删的可能正是当前对象，摘除后 session 就换人了，
+	# 命令如果跟着新 session 走，就会出现在一个毫不相干的模型的历史里。
+	var hist := session
+	var switched := _drop_node(node)
+	_record_structure(node, from_parent, from_index, "删除 %s" % node.display_name(), hist)
+	if not switched:
+		hint.emit("已删除 %s" % node.display_name())
+
+
+## 把节点放到指定位置（`parent == null` 且 `index < 0` = 从树上摘掉）。
+## 结构命令的 redo / undo 都走这里：挂回时还要把编辑会话一起建回来，否则那个模型不可编辑。
+## 【幂等】已在目标位置就什么都不做 —— `push()` 的重放会再调一次。
+func place_node(node: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
+	if world == null or node == null or _place_is(node, parent, index):
+		return
+	if parent == null and index < 0:
+		_drop_node(node)
+	else:
+		if not world.attach_node(node, parent, index):
+			hint.emit("不能把组放进它自己里面")
+			return
+		_open_sessions(node)
+	_set_dirty(true)
+	changed.emit()
+
+
+## 记一条结构命令。`from` 是变动前的位置，`to` 取节点**现在**的位置（调用方已把树改好）。
+## `hist` 指定进哪条历史（默认当前对象的）；删除会换活动对象，所以调用方要在动手前抓一份。
+func _record_structure(node: QVoxelNode, from_parent: QVoxelGroup, from_index: int,
+		label: String, hist: QVoxelEditSession = null) -> void:
+	var target := hist if hist != null else session
+	if target == null:
+		return
+	var cmd := QVoxelStructureCommand.new()
+	cmd.node = node
+	cmd.host = self
+	cmd.label = label
+	cmd.from_parent = from_parent
+	cmd.from_index = from_index
+	cmd.to_parent = world.find_parent(node)
+	cmd.to_index = world.index_of(node)
+	target.history.push(cmd)
+
+
+## 节点当前是否就在这个位置。索引传负数（末尾 / 摘掉）时只比父。
+func _place_is(node: QVoxelNode, parent: QVoxelGroup, index: int) -> bool:
+	var on_tree := world.nodes.has(node) or world.find_parent(node) != null
+	if parent == null and index < 0:
+		return not on_tree
+	if not on_tree or world.find_parent(node) != parent:
+		return false
+	return index < 0 or world.index_of(node) == index
+
+
+## 从树上摘掉，并清掉子树里所有模型的编辑会话；摘的是当前对象就切到剩下的第一个。
+## 返回"是否换了当前对象"（调用方据此决定提示文案，避免同一句话被说两遍）。
+func _drop_node(node: QVoxelNode) -> bool:
 	var gone: Array[QVoxelModel] = []
 	for n in world.all_nodes():
 		if n.is_model() and _is_under(node, n):
 			gone.append(n as QVoxelModel)
 	for m in gone:
-		var s: QVoxelEditSession = _sessions.get(m.model_id)
-		if s != null and s.history.changed.is_connected(_on_history_changed):
-			s.history.changed.disconnect(_on_history_changed)
-		_sessions.erase(m.model_id)
+		_close_session(m.model_id)
 	var was_active := session != null and gone.has(session.object)
 	world.remove_node(node)
 	_set_dirty(true)
-	if was_active:
-		session = null
+	if not was_active:
+		return false
+	session = null
+	var rest := world.all_models()
+	if not rest.is_empty():
+		activate(rest[0].model_id)
+		hint.emit("已删除当前模型，切到 %s" % rest[0].display_name())
+	return true
+
+
+## 给子树里还没有编辑会话的模型补上（撤销"删除"之后它们要能立刻编辑）。
+func _open_sessions(node: QVoxelNode) -> void:
+	for n in world.all_nodes():
+		if n.is_model() and _is_under(node, n):
+			var m := n as QVoxelModel
+			if not _sessions.has(m.model_id):
+				_sessions[m.model_id] = _make_session(m, world)
+	if session == null:
 		var rest := world.all_models()
 		if not rest.is_empty():
 			activate(rest[0].model_id)
-			hint.emit("已删除当前模型，切到 %s" % rest[0].display_name())
-		return
-	changed.emit()
-	hint.emit("已删除 %s" % node.display_name())
+
+
+## 关掉某个模型的编辑会话（断开它的历史信号，免得已摘下的模型还在影响脏标记）。
+func _close_session(model_id: int) -> void:
+	var s: QVoxelEditSession = _sessions.get(model_id)
+	if s != null and s.history.changed.is_connected(_on_history_changed):
+		s.history.changed.disconnect(_on_history_changed)
+	_sessions.erase(model_id)
 
 
 ## node 是否在 root 的子树里（含 root 自己）。
@@ -256,9 +334,12 @@ func rename_node(node: QVoxelNode, new_name: String) -> void:
 func move_node(node: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
 	if world == null or node == null:
 		return
+	var from_parent := world.find_parent(node)
+	var from_index := world.index_of(node)
 	if not world.attach_node(node, parent, index):
 		hint.emit("不能把组放进它自己里面")
 		return
+	_record_structure(node, from_parent, from_index, "移动 %s" % node.display_name())
 	_set_dirty(true)
 	changed.emit()
 

@@ -10,8 +10,9 @@ extends RefCounted
 
 ## 场景 → 世界。`resolution` = 最长边的体素数；`fill` = true 实心 / false 只留表面壳。
 ## **协程**：多帧时每帧让出一帧（否则大模型的导入会把界面冻住），调用方要 `await`。
+## `progress` 可选，签名 `(已完成帧, 总帧数)`；只在多帧时回调（单帧没有进度可言）。
 static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESOLUTION,
-		fill := true) -> QVoxelWorld:
+		fill := true, progress := Callable()) -> QVoxelWorld:
 	if scene.is_empty():
 		return null
 	var frames: Array = scene.get("frames", [])
@@ -33,6 +34,8 @@ static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESO
 				palette = res["palette"]   # 第 0 个成功的帧定调色板，后续帧复用以免颜色跳变
 			datas.append(res["data"])
 			filled = true
+		if frames.size() > 1 and progress.is_valid():
+			progress.call(i + 1, frames.size())
 		if tree != null and i + 1 < frames.size():
 			await tree.process_frame
 	if not filled:

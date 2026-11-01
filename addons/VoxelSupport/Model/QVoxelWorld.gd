@@ -581,6 +581,12 @@ func find_parent(target: QVoxelNode) -> QVoxelGroup:
 	return null
 
 
+## 节点在父列表里的下标（不在树上返回 -1）。与 `find_parent` 配对，用于记录"撤销要挂回哪儿"。
+func index_of(target: QVoxelNode) -> int:
+	var lst := _list_holding(target)
+	return lst.find(target) if not lst.is_empty() else -1
+
+
 ## 节点在**世界里的组合摆放**：从根到它逐层累乘 local_transform。渲染器据此把模型摆到该处。
 ## 编辑器按"体素坐标本地化 + 渲染器承载摆放"的口径渲染，本函数就是那条摆放的唯一来源。
 func world_transform(target: QVoxelNode) -> Transform3D:

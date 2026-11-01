@@ -7,7 +7,10 @@ extends QVoxelierPanel
 ## 【为什么层级在下】层级是"这个世界里有什么"的常驻总览，放底部与动画轴（展开时）连成一条；
 ## 属性在上、随选择变化。与 Blender 默认（Outliner 上 / Properties 下）上下对调。
 
-var _root: VBoxContainer
+## 上下两半的容器：`VSplitContainer`（引擎自带拖动条）。层级与属性谁更该占地方因人因时而异，
+## 固定比例做不到这件事 —— 而自己实现拖拽只是在重写这个控件。
+var _root: VSplitContainer
+var _split_inited := false
 var _prop_scroll: ScrollContainer
 var _prop_host: VBoxContainer
 var _out_scroll: ScrollContainer
@@ -30,25 +33,21 @@ func _build() -> void:
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
-	_root = QVoxelUi.vbox(0)
+	_root = VSplitContainer.new()
+	_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	bg.add_child(_root)
 
-	# 上：层级（占一半）。
+	# 上：层级。
 	_out_scroll = QVoxelUi.scroll(true)
 	_out_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_out_scroll.size_flags_stretch_ratio = 0.5
 	_root.add_child(_out_scroll)
 	_out_host = QVoxelUi.vbox(QVoxelUi.space_s())
 	_out_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_out_scroll.add_child(_out_host)
 
-	# 中缝：一条分割线（两半之间的唯一分界）。
-	_root.add_child(QVoxelUi.divider())
-
-	# 下：属性（占一半，随选中自动切换）。
+	# 下：属性（随选中自动切换）。
 	_prop_scroll = QVoxelUi.scroll(true)
 	_prop_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_prop_scroll.size_flags_stretch_ratio = 0.5
 	_root.add_child(_prop_scroll)
 	_prop_host = QVoxelUi.vbox(QVoxelUi.space_s())
 	_prop_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -72,6 +71,10 @@ func _fit() -> void:
 		if c is QVoxelierSection:
 			want_w = maxf(want_w, (c as QVoxelierSection).custom_minimum_size.x)
 	offset_left = offset_right - maxf(float(QVoxelUi.dock_width()) + QVoxelUi.space_l(), want_w)
+	# 首次拿到真实高度时平分上下两半；此后保持用户拖出来的位置（不再覆盖）。
+	if not _split_inited and _root.size.y > 40.0:
+		_root.split_offset = int(_root.size.y * 0.5)
+		_split_inited = true
 
 
 ## 追加一个**属性页**组（只在装配时调用）。App 用 show_property 按当前选择切。

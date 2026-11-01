@@ -13,9 +13,12 @@ static func Open(path: String) -> VoxAccess:
 	var file := FileAccess.open(path, FileAccess.READ)
 
 	if file == null:
+		push_error("[VoxAccess] 打不开文件：%s" % path)
 		return null
 
 	if file.get_32() != 0x20584F56:
+		# 把"为什么打不开"留在日志里：用户看到的只有一句概括提示，排查靠这条。
+		push_error("[VoxAccess] 不是 .vox 文件（文件头不是 'VOX '）：%s" % path)
 		file.close()
 		return null
 

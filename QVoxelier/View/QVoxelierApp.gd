@@ -195,6 +195,11 @@ var _snapshot_dialog: FileDialog
 ## 滚轮 / 双指滑一格对应的平移像素量。
 const WHEEL_PAN_STEP := 48.0
 
+## 应用偏好（目前只有"上次待过的目录"）。用引擎自带的 ConfigFile，不另造配置格式。
+const PREFS_PATH := "user://qvoxelier.cfg"
+const PREFS_SECTION := "files"
+
+const ACTION_NEW := &"qvoxelier_new"
 const ACTION_UNDO := &"qvoxelier_undo"
 const ACTION_REDO := &"qvoxelier_redo"
 const ACTION_BRUSH_UP := &"qvoxelier_brush_up"
@@ -213,6 +218,12 @@ const ACTION_CLEAR := &"qvoxelier_clear"
 # 装配
 
 func _ready() -> void:
+	# 窗口下限：再窄下去顶栏按钮会被裁掉、左右两列会互相压住 —— 布局是按内容算宽度的，
+	# 没有断点式重排，所以只能给一个"再小就没法用"的下限。编辑器里不设，免得改到编辑器窗口。
+	if not Engine.is_editor_hint():
+		var win := get_window()
+		if win != null:
+			win.min_size = Vector2i(1024, 640)
 	_sess = QVoxelierSession.new()
 	# 会话不认识渲染器：唤醒回调与三条对外信号都在这里接上（见 QVoxelierSession 类文档）。
 	_sess.render_update = model.request_update
@@ -1079,13 +1090,13 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 				_orbit = false
 				_pan = false
 		MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
-			# 裸滚轮**什么都不做** —— 触摸板双指滑动就是滚轮事件，之前映射成平移/俯仰都太容易
-			# 误触（随手一滑视角就动）。缩放一律走 Ctrl+滚轮；俯仰留给 Alt+滚轮与中键/空白拖拽。
+			# 裸滚轮 = 缩放（与绝大多数三维软件一致）；Ctrl+滚轮保留为等价写法。
+			# 俯仰仍只认 Alt+滚轮与中键/空白拖拽 —— 它是"改变构图"的动作，不该由随手一滑触发。
 			var up := e.button_index == MOUSE_BUTTON_WHEEL_UP
-			if e.ctrl_pressed:
-				camera.zoom_by_steps(1.0 if up else -1.0)
-			elif e.alt_pressed:
+			if e.alt_pressed:
 				camera.pitch_by_degrees(-4.0 if up else 4.0)
+			else:
+				camera.zoom_by_steps(1.0 if up else -1.0)
 		MOUSE_BUTTON_WHEEL_LEFT, MOUSE_BUTTON_WHEEL_RIGHT:
 			# 水平滚轮同样忽略（触摸板双指左右滑）。
 			pass
@@ -1136,6 +1147,8 @@ func _on_key(e: InputEventKey) -> void:
 		save_project_as()
 	elif _pressed(e, ACTION_SAVE):
 		save_project()
+	elif _pressed(e, ACTION_NEW):
+		request_new()
 	elif _pressed(e, ACTION_OPEN):
 		request_open()
 	elif _pressed(e, ACTION_EXPORT):
@@ -1159,6 +1172,14 @@ func _on_key(e: InputEventKey) -> void:
 	elif e.keycode == KEY_HOME:
 		frame_view()
 		hud.flash("已取景")
+	elif e.keycode == KEY_SPACE:
+		_toggle_playback()
+	elif e.keycode == KEY_LEFT:
+		_step_frame(-1)
+	elif e.keycode == KEY_RIGHT:
+		_step_frame(1)
+	elif e.keycode == KEY_F5:
+		_toggle_render_popup()
 	elif e.keycode == KEY_E:
 		# E = 在「添加 / 移除」之间切换操作模式（平板点顶部选项条，桌面按 E，同一份状态）。
 		_set_op(QVoxelBrushTool.Op.ADD if _op == QVoxelBrushTool.Op.REMOVE else QVoxelBrushTool.Op.REMOVE)
@@ -1524,6 +1545,7 @@ func open_project(path: String) -> bool:
 	if _adopt_world(loaded, path, false) == null:
 		hud.flash("这个工程里没有可编辑的对象：%s" % path.get_file())
 		return false
+	_remember_dir(path)
 	var total := loaded.all_models().size()
 	hud.flash("已打开 %s%s" % [path.get_file(),
 			"（共 %d 个模型，可在右侧「层级」里切换）" % total if total > 1 else ""])
@@ -1586,6 +1608,7 @@ func _write_project(path: String) -> bool:
 	if err != OK:
 		hud.flash("保存失败（错误码 %d）：%s" % [err, path.get_file()])
 		return false
+	_remember_dir(path)
 	_sess.project_path = path
 	_sess.clear_dirty()
 	_update_title()
@@ -1675,6 +1698,7 @@ func _on_mesh_path_selected(path: String) -> void:
 	if err != OK:
 		hud.flash("导出失败（错误码 %d）：%s" % [err, path.get_file()])
 		return
+	_remember_dir(path)
 	hud.flash("已导出网格 %s" % path.get_file())
 
 
@@ -1767,7 +1791,8 @@ func _import_mesh(path: String, opts: Dictionary) -> bool:
 		hud.flash("打不开这个模型：%s（只支持 %s）" % [path.get_file(), MeshAccess.describe()])
 		return false
 	var imported: QVoxelWorld = await MeshVoxelWorld.to_world(scene, resolution,
-			bool(opts.get("fill", true)))
+			bool(opts.get("fill", true)),
+			func(done: int, total: int): hud.flash("体素化 %d/%d 帧…" % [done, total]))
 	if imported == null:
 		hud.flash("体素化失败（模型里没有可用三角面）：%s" % path.get_file())
 		return false
@@ -1901,11 +1926,28 @@ func _make_format_dialog(mode: FileDialog.FileMode, filter: String, filter_name:
 ##   移动 / Web：`user://` —— 那是唯一保证可写的沙箱，Android 的分区存储下写系统目录会被拒。
 ## 取不到系统目录（精简系统 / 权限受限）时一律退回 `user://`，绝不留下一个点不进去的首路径。
 static func _default_dir() -> String:
+	# 先用上次待过的目录：模型一多，"每次从文档根目录点三层"就成了每小时的重复劳动。
+	var cfg := ConfigFile.new()
+	if cfg.load(PREFS_PATH) == OK:
+		var last := String(cfg.get_value(PREFS_SECTION, "last_dir", ""))
+		if not last.is_empty() and DirAccess.dir_exists_absolute(last):
+			return last
 	if OS.has_feature("pc"):
 		var docs := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 		if not docs.is_empty() and DirAccess.dir_exists_absolute(docs):
 			return docs
 	return ProjectSettings.globalize_path("user://")
+
+
+## 记住这次用到的目录（供下次文件对话框起步）。失败静默 —— 记不住路径不该打断保存。
+static func _remember_dir(path: String) -> void:
+	var dir := path.get_base_dir()
+	if dir.is_empty():
+		return
+	var cfg := ConfigFile.new()
+	cfg.load(PREFS_PATH)
+	cfg.set_value(PREFS_SECTION, "last_dir", dir)
+	cfg.save(PREFS_PATH)
 
 
 ## 把 `.qvx` / `.vox` / 外部模型拖进窗口即打开（建模时最顺手的一步）；其它文件一律忽略。
@@ -2484,6 +2526,7 @@ func _bind_actions() -> void:
 	])
 	InputTool.register_action(ACTION_SAVE, [InputTool.key_event(KEY_S, true)])
 	InputTool.register_action(ACTION_SAVE_AS, [InputTool.key_event(KEY_S, true, true)])
+	InputTool.register_action(ACTION_NEW, [InputTool.key_event(KEY_N, true)])
 	InputTool.register_action(ACTION_OPEN, [InputTool.key_event(KEY_O, true)])
 	InputTool.register_action(ACTION_EXPORT, [InputTool.key_event(KEY_E, true)])
 	# 选区 / 剪贴板：与"存 / 开"同属"带修饰键的操作"，故一律走 InputTool 注册的动作，
@@ -2599,6 +2642,16 @@ func _reserve_strip() -> void:
 		_tools.set_bottom_reserved(h)
 	if _gizmo != null:
 		_gizmo.bottom_inset = h
+
+
+## 空格：播放 / 暂停当前模型的帧动画。与时间轴上的 ▶ 是同一份状态，不另存一份。
+func _toggle_playback() -> void:
+	if _timeline == null or session == null or session.object == null:
+		return
+	if not session.object.is_animated():
+		hud.flash("当前模型没有帧动画")
+		return
+	_timeline.play(not _timeline.is_playing())
 
 
 ## 逐帧步进（帧条的 ◀ / ▶）。
