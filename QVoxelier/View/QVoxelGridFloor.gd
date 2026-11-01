@@ -73,7 +73,10 @@ func face_factor(i: int) -> float:
 	return smoothstep(thr - FADE_BAND, thr, ang)
 
 
-## 当前可作落笔面的面（边框可见的那些）——供网格拾取对齐，保证"有边框的面才作画笔地面"。
+## 当前可作落笔面的面 —— 供网格拾取对齐，保证"落笔落在地面、而不是半空中"。
+## 判据只有**角度因子**（该面此刻够不够背离镜头），**与 `borders_visible` 无关**：
+## 顶栏「网格线」关掉的是**边框的画**，不是"能不能在地面上画"。两者分开是对的 ——
+## 关网格线通常只为看清模型，若连落笔一起禁掉，用户得先开回来才能继续建模。
 func visible_faces() -> PackedInt32Array:
 	var out := PackedInt32Array()
 	for i in _FACES.size():
@@ -91,6 +94,12 @@ func rebuild() -> void:
 	var colors := PackedColorArray()
 	if borders_visible:
 		_build_cage(verts, colors)
+	# 【空顶点必须直接收工】`add_surface_from_arrays` 拿到空数组会报 ERR_INVALID_DATA，
+	# 紧接着 `set_surface_override_material(0, …)` 又会因为"没有 surface 0"越界。
+	# 两种情形都会走到这里：关掉网格线（顶栏开关）、以及视角把每条棱都判成"不作背景面"。
+	if verts.is_empty():
+		mesh = null
+		return
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts

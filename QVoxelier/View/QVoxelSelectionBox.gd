@@ -160,6 +160,11 @@ static func _edge_key(p0: Vector3, p1: Vector3) -> String:
 
 ## 顶点 → 网格 → 材质 → 缩放，两种模式共用的提交动作。
 func _commit(verts: PackedVector3Array, colors: PackedColorArray) -> void:
+	# 空顶点不加 surface：`add_surface_from_arrays` 会报 ERR_INVALID_DATA，
+	# 紧接着 `set_surface_override_material(0, …)` 又会因为"没有 surface 0"越界。
+	if verts.is_empty():
+		mesh = null
+		return
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
