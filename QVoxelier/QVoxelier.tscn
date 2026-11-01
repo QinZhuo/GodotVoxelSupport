@@ -693,6 +693,7 @@ script = ExtResource("3_floor")
 [node name="Camera" type="Camera3D" parent="ViewHost/View/ViewRoot" unique_id=1004]
 transform = Transform3D(1, 0, 0, 0, 0.90630776, 0.42261827, 0, -0.42261827, 0.90630776, 0, 2.5357096, 5.437847)
 current = true
+fov = 32.0
 script = ExtResource("4_camera")
 
 [node name="KeyLight" type="DirectionalLight3D" parent="ViewHost/View/ViewRoot" unique_id=1005]

@@ -223,6 +223,8 @@ func _apply() -> void:
 
 
 func _ready() -> void:
+	# 长焦：观感配方统一给（快照相机也是本类，FOV 因此天然一致）。
+	fov = QVoxelRenderPreset.FOV
 	if not Engine.is_editor_hint():
 		# 建模视口要能看清最近的体素：远端按最远距离给足。
 		near = 0.01

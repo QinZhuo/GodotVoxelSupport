@@ -58,6 +58,7 @@ var _stage: Node3D
 var _camera: QVoxelViewCamera
 var _renderer: VoxelRenderer
 var _env: WorldEnvironment
+var _sun: DirectionalLight3D
 
 
 func section_title() -> String:
@@ -243,24 +244,14 @@ func _build_stage() -> void:
 	_env.environment = Environment.new()
 	_stage.add_child(_env)
 
-	# 打光与 QVoxelier.tscn 的 KeyLight / FillLight 同一套变换与能量 —— 快照与视口里看到的
-	# 明暗关系一致，用户不必为了"截图好看"重新调光。抄数字比凭感觉写角度可靠。
-	# ⚠️ 写法是 `Transform3D(x_axis, y_axis, z_axis, origin)`（**列**为轴）：本版本的 GDScript
-	# 没有 12 参的 `Transform3D`，也没有 9 参的 `Basis`，故 .tscn 里那种按**行**铺开的写法
-	# 不能照抄 —— 下面的三个 Vector3 是同一矩阵的列（已按 .tscn 的 KeyLight / FillLight 核对）。
-	var key := DirectionalLight3D.new()
-	key.transform = Transform3D(Vector3(-0.5, 0.35, -0.75), Vector3(0.0, 0.866, 0.5),
-			Vector3(0.866, 0.35, 0.433), Vector3(0.0, 6.0, 0.0))
-	key.light_energy = 1.7
-	key.shadow_enabled = true
-	_stage.add_child(key)
+	# 打光与视口同源（方向 / 能量 / 阴影全在 QVoxelRenderPreset），快照的明暗关系因此天然跟着视口走。
+	_sun = DirectionalLight3D.new()
+	_stage.add_child(_sun)
+	QVoxelRenderPreset.apply_sun(_sun, true)
 
 	var fill := DirectionalLight3D.new()
-	fill.transform = Transform3D(Vector3(-0.70711, -0.31879, 0.63117), Vector3(0.0, 0.89262, 0.45084),
-			Vector3(-0.70711, 0.31879, -0.63117), Vector3(0.0, 6.0, 0.0))
-	fill.light_energy = 0.9
-	fill.light_color = Color(0.92, 0.92, 0.92)
 	_stage.add_child(fill)
+	QVoxelRenderPreset.apply_fill(fill)
 
 	_camera = QVoxelViewCamera.new()
 	_camera.name = "SnapshotCamera"
@@ -317,7 +308,8 @@ func _sync_stage(res: QVoxelEvalResult) -> void:
 	_viewport.transparent_bg = _transparent
 
 	var env := _env.environment
-	# 透明走 CLEAR_COLOR，不透明走纯色 —— 两者都不需要天空，故环境光 / 反射都取自**颜色**：
+	var vs := _world.voxel_size()
+	# 透明走 CLEAR_COLOR，不透明走纯色 —— 快照不带天空，故环境光 / 反射都取自**颜色**：
 	# 透明那张没有天空可借，若两种背景走两条取光路径，明暗会差一档。
 	env.background_mode = Environment.BG_CLEAR_COLOR if _transparent \
 		else Environment.BG_COLOR
@@ -326,21 +318,20 @@ func _sync_stage(res: QVoxelEvalResult) -> void:
 	env.ambient_light_color = Color(0.44, 0.44, 0.44)
 	env.ambient_light_energy = 1.0
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_BG
-	# 与视口同款色调映射：不然快照的明暗关系会和视口里看到的不一样。
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	# 接触阴影让体素之间的凹角有层次；但透明背景下它会在模型边缘留一圈暗晕，故只在不透明时开。
-	env.ssao_enabled = not _transparent
-	env.ssao_radius = 0.6
-	env.ssao_intensity = 1.4
+	# 色调映射 / AO / 辉光与视口共用同一份配方；透明背景下 AO 会在模型边缘留暗晕，故只在不透明时开。
+	QVoxelRenderPreset.apply_environment(env, vs, not _transparent, false)
 
 	var src := QVoxelSource.from_eval_result(_world, res)
-	_renderer.voxel_scale = _world.voxel_size()
+	_renderer.voxel_scale = vs
 	_renderer.data = src
 
 	# 先摆角度再框盒：frame_aabb 会同时算好透视距离与正交可见高度（两者都写，切换镜头即对齐）。
 	_camera.set_lens(_lens)
 	_camera.apply_view(_view)
-	_camera.frame_aabb(QVoxelSnapshot.frame_aabb(res, _world.voxel_size()))
+	_camera.frame_aabb(QVoxelSnapshot.frame_aabb(res, vs))
+	# 取景定了才知道阴影范围与对焦距离。
+	QVoxelRenderPreset.apply_sun(_sun, true, _camera.distance * 3.0)
+	QVoxelRenderPreset.apply_dof(_camera, _camera.distance)
 
 
 ## 等离屏渲染器把网格建完。

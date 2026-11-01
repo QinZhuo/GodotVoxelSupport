@@ -47,6 +47,7 @@ extends Node3D
 @onready var grid_floor: QVoxelGridFloor = $ViewHost/View/ViewRoot/Model/Floor
 @onready var hud: QVoxelierHud = $Hud
 @onready var _key_light: DirectionalLight3D = $ViewHost/View/ViewRoot/KeyLight
+@onready var _fill_light: DirectionalLight3D = $ViewHost/View/ViewRoot/FillLight
 ## 环境光挂在视口自己的世界里（它靠 "enter world" 注册，跟着 3D 走才生效）。
 ## `_setup_sky` / `_apply_quality` 改的是它的 `environment`，即 3D 正在用的那一份。
 @onready var _env_node: WorldEnvironment = $ViewHost/View/ViewRoot/WorldEnvironment
@@ -2255,71 +2256,24 @@ func _set_preview_box(sel: QVoxelSelection) -> void:
 	_selection_box.set_box(lo, hi - lo + Vector3i.ONE)
 
 
-## 天空里的"太阳盘"**完全隐藏**：材质 metallic=1 会把天空的太阳反射成一个大光球（用户不想看到）。
+## 天空按配方上色：它同时是环境光与反射的来源，颜色亮度直接决定画面通透度。
+## （太阳盘不再整个藏掉 —— 之前会反射成光球是因为默认 30° 视直径，收到 2° 就是正常的一颗太阳。）
 func _setup_sky() -> void:
 	if _env_node == null or _env_node.environment == null:
 		return
-	var sky := _env_node.environment.sky
-	if sky != null and sky.sky_material is ProceduralSkyMaterial:
-		var mat := sky.sky_material as ProceduralSkyMaterial
-		mat.sun_angle_max = 0.0
-		mat.sun_curve = 1.0
+	QVoxelRenderPreset.apply_sky(_env_node.environment.sky)
 
 
-## 按编辑层级套渲染设置：
-##   模型编辑 → 关阴影 / SSAO / SSIL / SSR / 辉光（这些会干扰"看体素判断形状"）；
-##   布局（世界）→ 全开并精调（高质阴影 + SSAO + SSIL + SSR + 适度辉光 + ACES），逼近渲染图。
+## 按编辑层级套渲染设置（数值全在 QVoxelRenderPreset，视口与快照共用同一份）：
+##   模型编辑 → 只留太阳的明暗，关阴影 / 屏幕空间 / 后期（它们会干扰"看体素判断形状"）；
+##   布局（世界）→ 全开，逼近渲染图。
 func _apply_render_mode() -> void:
-	var best := _edit_mode == 1
-	if _key_light != null:
-		_key_light.shadow_enabled = best
-		# 阴影质量拉高：4 段 PSSM + 混合分割 + 软阴影 + 更细的偏置。
-		_key_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
-		_key_light.directional_shadow_blend_splits = true
-		_key_light.directional_shadow_max_distance = 120.0
-		_key_light.directional_shadow_fade_start = 0.8
-		_key_light.shadow_blur = 1.5
-		_key_light.shadow_bias = 0.03
-		_key_light.shadow_normal_bias = 1.5
-		_key_light.shadow_opacity = 0.9
-		_key_light.light_angular_distance = 0.6
-	var env := _env_node.environment if _env_node != null else null
-	if env == null:
-		return
-	env.ssao_enabled = best
-	env.ssil_enabled = best
-	env.ssr_enabled = best
-	env.glow_enabled = best
-	if best:
-		# 环境光遮蔽：稍强、稍大半径 → 凹处层次更明显。
-		env.ssao_intensity = 2.0
-		env.ssao_radius = 0.8
-		# 屏幕空间间接光：让缝隙 / 背光面得到更自然的补光。
-		env.ssil_intensity = 1.0
-		env.ssil_radius = 5.0
-		env.ssil_sharpness = 0.98
-		env.ssil_normal_rejection = 1.0
-		# 屏幕空间反射：金属/光滑面能映出周围体素与地面。
-		env.ssr_max_steps = 64
-		env.ssr_fade_in = 0.15
-		env.ssr_fade_out = 2.0
-		env.ssr_depth_tolerance = 0.2
-		# 辉光调低（此前偏强）：阈值抬高，只有真发光才溢出。
-		env.glow_intensity = 0.5
-		env.glow_bloom = 0.02
-		env.glow_hdr_threshold = 1.2
-		# 环境光：更亮的间接照明 + 更多天空贡献。
-		env.ambient_light_energy = 1.3
-		env.ambient_light_sky_contribution = 0.6
-		# 色调映射：ACES（更接近渲染图）。
-		env.tonemap_mode = Environment.TONE_MAPPER_ACES
-		env.tonemap_white = 6.0
-		env.tonemap_exposure = 1.0
-	else:
-		env.ambient_light_energy = 1.0
-		env.ambient_light_sky_contribution = 0.3
-		env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-		env.tonemap_exposure = 1.0
+	var rich := _edit_mode == 1
+	# 阴影距离跟着取景走：模型小、相机近时收紧，纹素才落得准。
+	QVoxelRenderPreset.apply_sun(_key_light, rich, camera.distance * 3.0 if camera != null else 0.0)
+	QVoxelRenderPreset.apply_fill(_fill_light)
+	if _env_node != null:
+		QVoxelRenderPreset.apply_environment(_env_node.environment, model.voxel_scale, rich, true)
 
 
 ## 切换编辑层级（Tab）：模型内部 ⇄ 布局（类似 Blender 的模式切换）。
