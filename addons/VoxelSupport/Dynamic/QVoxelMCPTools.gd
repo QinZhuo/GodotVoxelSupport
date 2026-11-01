@@ -31,7 +31,8 @@ const HELP := """# 体素程序化建模 —— API 说明
 
 - 运行时场景里有 QVoxelier → 走应用内部命令路径: **看得见、可撤销**。用 `eval_code(process="game")`。
 - `process="editor"` → **一律走无头**(内存里的 QVoxelWorld), 不会碰你正开着的场景; 生成完写文件即可。
-- 想在编辑器里看到结果: 存到 `res://` → `reimport` → `render_model`(见 §9 自检闭环)。
+- 想看效果: `voxel_render`(MCP) 或 `QVoxelScript.preview()` 直接出 PNG, 再用 read_file 看图 ——
+  **不需要导入、不需要打开软件**(见 §9)。
 - 状态在同一进程内跨 `eval_code` **保持**(静态字段), 所以可以分多次调用逐步搭建。
 
 ## 2. 文件
@@ -40,7 +41,10 @@ const HELP := """# 体素程序化建模 —— API 说明
     save(path := "user://voxel_model.qvx") # 按扩展名选格式; 没写扩展名按 .qvx 补
     import_model(path, resolution := 96)   # 网格(glTF/OBJ) → 体素并**并入**世界; 需 await
     export_mesh(path)                      # 世界 → .glb/.gltf
+    preview(path, opts)                    # 离屏渲一张 PNG(**不用导入/不用开软件**); 需 await
+                                           # opts: {file, size, yaw, pitch, dist, bg, transparent}
     # 例: await QVoxelScript.import_model("res://art/chair.glb", 64)
+    # 例: await QVoxelScript.preview("user://shot.png", {"file": "user://model.qvx", "size": 800})
 
 `.qvx` / `.vox` 的读写与"打开文件"走同一条装载路径, 所以外部 `.vox` 打开后可以直接接着改。
 注意 `export_mesh` 依赖 GLTFDocument: 在**编辑器进程**里 Godot 不导出编辑器场景网格,
@@ -103,14 +107,17 @@ const HELP := """# 体素程序化建模 —— API 说明
 ## 9. 格式与硬约束
 
 - **.qvx**(工程, 无损): 完整模型树、帧动画、组、相机、PBR。block_size 必须是 2 的幂(默认 32)。
-- **.vox**(MagicaVoxel 交换格式)硬约束 —— 不合规时 `save` 返回 false 且不落盘:
+- **.vox**(MagicaVoxel 交换格式)硬约束 —— 不合规时 `save` 返回 false 且不落盘
+  (报错里带具体原因, 也可先问 `VoxWriter.check(world)` 拿全量 reasons/warnings):
   尺寸 ≤ 256 / 旋转只能是 90° 整数倍 / 平移必须是整数格 / 体素帧动画只写**当前帧** /
   调色板 8 位色。需要"多帧都带走"就存 .qvx, 或用 export_mesh 出 .glb。
 - 无头模式 grid_size 只是参考(坐标可为负, .qvx bounds 按实际体素自动算); 实时模型才是硬边界。
 
-**自检闭环**(编辑器里看得见): 存到 `res://` → `reimport("res://art/x.qvx")` →
-`render_model("res://art/x.qvx")` 出离屏图。新文件需先让编辑器扫到:
-`EditorInterface.get_resource_filesystem().scan()`, 否则 reimport 会报"资源不存在"。
+**看图(自检闭环)**: `voxel_render(path=...)` 或 `QVoxelScript.preview()` 直接出 PNG,
+再用 read_file 打开 —— 不用导入、不用打开软件, 改完再渲一次即可。
+需要"编辑器里能像资源一样双击打开"时, 才走 `res://` + `scan()` + `reimport()`。
+【前提】渲染要渲染服务器: 编辑器/游戏进程可以, `--headless` 不行(headless 就是没渲染设备)。
+输出写 `user://`(默认)即可; 写 `res://` 会被编辑器当图片资源导入, 平白多出 `.import`。
 
 ## 10. 约定与坑
 
@@ -126,9 +133,13 @@ const RESOURCE_URI := "voxel://api"
 
 static func register(add_tool: Callable) -> void:
 	add_tool.call("voxel_help",
-		"体素程序化建模的**完整 API 说明**: QVoxelScript 统一入口(文件/对象树/材质/体素/帧/相机/导入导出)、"
-		+ "实时与无头分流、.qvx 与 .vox 的硬约束、自检闭环。返回指向资源 %s 的链接。" % RESOURCE_URI,
+		"体素程序化建模的**完整 API 说明**: QVoxelScript 统一入口(文件/对象树/材质/体素/帧/相机/导入导出/预览)、"
+		+ "实时与无头分流、.qvx 与 .vox 的硬约束。返回指向资源 %s 的链接。" % RESOURCE_URI,
 		MCPToolSchema.no_arg(), _help)
+	add_tool.call("voxel_render",
+		"把 .qvx / .vox（或 QVoxelScript 当前世界）离屏渲染成 PNG, **不需要导入、不需要打开 QVoxelier**。"
+		+ "返回图片路径, 用 read_file 打开即可看图; 造型不对就改完再渲一次。视角/尺寸/背景可调。",
+		_render_schema(), _render)
 
 
 ## MCP 静态文档资源(内嵌内容, 编辑器与运行时都可用)。由 MCPResourceDocs 注册。
@@ -144,10 +155,51 @@ static func resources() -> Array:
 
 ## 追加到服务器级 instructions 的一句话(见 MCPDevServer.BASE_INSTRUCTIONS)。
 static func instructions() -> String:
-	return "体素建模: 用 QVoxelScript 脚本(自动分流实时/无头)完成全部操作; API 见资源 %s 或工具 voxel_help。" % RESOURCE_URI
+	return "体素建模: 用 QVoxelScript 脚本(自动分流实时/无头)完成全部操作, voxel_render 出图自检; API 见资源 %s 或工具 voxel_help。" % RESOURCE_URI
 
 
 ## 返回文档: 正文内联为 text(资源感知之外的客户端也能直接读到), 另附 resource_link 供拉取/缓存。
 static func _help(_args: Dictionary) -> Dictionary:
 	return MCPResult.resource_link(RESOURCE_URI, "体素程序化建模 API", "text/markdown", HELP,
 		"QVoxelScript 全量接口说明")
+
+
+static func _render_schema() -> Dictionary:
+	return {"type": "object", "properties": {
+		"path": MCPToolSchema.str_arg("要渲的 .qvx / .vox 路径(res:// 或 user://)；省略 = 渲 QVoxelScript 当前世界"),
+		"out": MCPToolSchema.str_arg("PNG 输出路径，默认 user://voxel_preview.png"),
+		"size": {"type": "integer", "minimum": 64, "maximum": 4096, "description": "输出边长(像素)，默认 512"},
+		"yaw": {"type": "number", "description": "水平角(度)，默认 35"},
+		"pitch": {"type": "number", "description": "俯仰角(度)，默认 20，范围 -85..85"},
+		"dist": {"type": "number", "description": "相机距离 = dist × 包围球半径，越小越放大，默认 2.6"},
+		"bg": MCPToolSchema.str_arg("背景色 #rrggbb，默认 #2a2d33"),
+		"transparent": {"type": "boolean", "description": "透明背景(PNG 带 alpha)，默认 false"},
+	}}
+
+
+## 渲一张预览图。世界为空/无体素/headless 时明确失败 —— 不产出"纯背景色"的假截图。
+## 先各自预检，让"路径写错"和"没渲染设备"报的不是同一句话。
+static func _render(args: Dictionary) -> Dictionary:
+	var src := str(args.get("path", "")).strip_edges()
+	if not src.is_empty() and not FileAccess.file_exists(src):
+		return MCPResult.err_validation("找不到 %s" % src,
+			"确认路径(res:// 或 user://)；省略 path 则渲 QVoxelScript 当前世界")
+	var out := str(args.get("out", "user://voxel_preview.png")).strip_edges()
+	if out.get_extension().is_empty():
+		out += ".png"
+	var dir := out.get_base_dir()
+	if not dir.is_empty() and not DirAccess.dir_exists_absolute(dir):
+		return MCPResult.err_validation("输出目录不存在: %s" % dir,
+			"换一个已存在的目录，或用默认的 user://")
+	var opts := args.duplicate()
+	opts["file"] = src
+	var saved: String = await QVoxelScript.preview(out, opts)
+	if saved.is_empty():
+		return MCPResult.err_validation(
+			"渲染失败：目标里没有体素（空世界/空模型），或当前进程没有渲染设备(headless)",
+			"确认 .qvx/.vox 里确实有体素；渲染需要带窗口的编辑器或游戏进程")
+	var o := QVoxelPreview.normalize(opts)
+	return MCPResult.ok_with_meta(
+		"已渲染 %d×%d (yaw %d°, pitch %d°) → %s —— 用 read_file 打开看效果" % [
+			o["size"], o["size"], int(o["yaw"]), int(o["pitch"]), saved],
+		{"path": saved, "size": o["size"], "yaw": o["yaw"], "pitch": o["pitch"]})

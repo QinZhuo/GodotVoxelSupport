@@ -160,3 +160,6 @@ target.damage_ray(origin, direction, max_distance)
 
 `.qvx` 是工程文件（无损），`.vox` 是 MagicaVoxel 交换格式（≤256、90° 旋转、整数平移、
 只写当前帧）—— 详见 `docs/QVX_FORMAT.md`。
+
+不开软件也能确认造型：`await QVoxelScript.preview("user://shot.png", {"file": "user://m.qvx"})`
+把世界**离屏渲成 PNG**（MCP 侧是 `voxel_render`），不走导入管线、不需要 `reimport`。

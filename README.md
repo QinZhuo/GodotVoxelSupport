@@ -171,3 +171,6 @@ MCP `voxel_help` tool / `voxel://api` resource documents, so AI can model withou
 
 `.qvx` is the project file (lossless), `.vox` the MagicaVoxel exchange format (≤ 256, 90° rotations,
 integer offsets, current frame only) — see `docs/QVX_FORMAT.md`.
+
+To see the result without opening the app: `await QVoxelScript.preview("user://shot.png", {"file": "user://m.qvx"})`
+renders the world offscreen to a PNG (MCP tool: `voxel_render`) — no import pipeline, no `reimport`.

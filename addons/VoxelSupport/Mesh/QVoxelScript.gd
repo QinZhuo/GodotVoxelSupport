@@ -9,6 +9,7 @@ extends RefCounted
 ## 【进程选择】改正在运行的应用用 `eval_code(process="game")`；`process="editor"` 一律落无头
 ## （不碰用户正开着的场景），生成完写文件即可。
 ## 【形状算法】`VoxelPrimitives`（与画笔同一份实现）产出格子集合，再交给 `paint`。
+## 【看效果】`preview()` 离屏渲一张 PNG，**不用导入、不用开软件**（`QVoxelPreview`）。
 ## 【节点 id】模型 = `model_id`（> 0）；组 = `-node_uid`（< 0，仅内存内稳定）。见 `nodes()`。
 
 static var _world: QVoxelWorld = null
@@ -81,6 +82,19 @@ static func export_mesh(path: String) -> bool:
 	var ext := path.get_extension().to_lower()
 	var p := path if ext in QVoxelMeshExport.EXTENSIONS else path + "." + QVoxelMeshExport.EXTENSIONS[0]
 	return QVoxelMeshExport.export(_w(), p) == OK
+
+
+## 渲一张预览图（离屏），返回落盘路径；失败返回空串。需要 `await`。
+## 【看不看得见都不用开软件】`file` 为空渲当前世界，否则渲那个 `.qvx`/`.vox`（不动当前世界）。
+## 选项：`size`(512) `yaw`(35) `pitch`(20) `dist`(2.6) `bg`(#2a2d33) `transparent`(false)。
+static func preview(path := "user://voxel_preview.png", opts := {}) -> String:
+	var file := str(opts.get("file", ""))
+	# 不走 world()：它会顺手建一个空世界，而渲染一个空世界既没意义也不该有副作用。
+	var w: QVoxelWorld = QVoxelFileIO.load_world(file) if not file.is_empty() else _current_world()
+	if w == null:
+		return ""
+	var p := path if not path.get_extension().is_empty() else path + ".png"
+	return p if await QVoxelPreview.render_to(w, p, opts) == OK else ""
 
 
 # ---------------- 对象树 ----------------
@@ -522,6 +536,12 @@ static func _w() -> QVoxelWorld:
 	if _world == null:
 		new_model()
 	return _world
+
+
+## 只读地取当前世界：有就返回，没有返回 null（不建）。只读用法（预览）走这个。
+static func _current_world() -> QVoxelWorld:
+	var app: Variant = _app()
+	return app.call("script_world") if app != null else _world
 
 
 static func _model(id := -1) -> QVoxelModel:

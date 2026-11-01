@@ -65,11 +65,14 @@ static func load_world(path: String) -> QVoxelWorld:
 
 ## 世界 → 磁盘。`.vox` 不合规（超 256 / 非整数平移 / 朝向）时 encode 返回空，
 ## 这里据此拒绝落盘 —— 绝不写出一份打不开的文件。
+## 【失败必须留话】界面 / 脚本 / MCP 三处调用方拿到的都只是 bool，静默 false 等于让人猜；
+## 原因统一在这里落日志（`.vox` 用 `VoxWriter.check` 的原话）。
 static func save(world: QVoxelWorld, path: String) -> bool:
 	if world == null or path.is_empty():
 		return false
 	var bytes := encode(world, path)
 	if bytes.is_empty():
+		push_error("[QVX] %s 未写入：%s" % [path, _failure_reason(world, path)])
 		return false
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
@@ -78,3 +81,11 @@ static func save(world: QVoxelWorld, path: String) -> bool:
 	f.store_buffer(bytes)
 	f.close()
 	return true
+
+
+## 为什么写不出这个文件（`.vox` 的硬约束 / 空世界 / 工程数据无效）。
+static func _failure_reason(world: QVoxelWorld, path: String) -> String:
+	if not is_vox_path(path):
+		return "不是有效的 .qvx 工程数据"
+	var reasons: PackedStringArray = VoxWriter.check(world)["reasons"]
+	return "；".join(reasons) if not reasons.is_empty() else "编码失败"

@@ -48,11 +48,12 @@ static func build_mesh(world: QVoxelWorld,
 		voxel_scale := DEFAULT_VOXEL_SCALE) -> ArrayMesh:
 	if world == null:
 		return null
-	var res := QVoxelEvalEngine.evaluate_world(world, QVoxelEvalContext.new())
-	if res.solid_count() == 0:
+	# 直接判字典空否：先 solid_count() 再建字典等于把整个体积扫两遍（大模型是热点）。
+	var voxels := _voxel_dict(QVoxelEvalEngine.evaluate_world(world, QVoxelEvalContext.new()))
+	if voxels.is_empty():
 		return null
 	var materials := _materials(world)
-	var arrays := NativeLoader.generate_arrays_native(_voxel_dict(res),
+	var arrays := NativeLoader.generate_arrays_native(voxels,
 			VoxelMaterial.build_trans_flags(materials), voxel_scale, Vector3.ZERO)
 	if arrays.is_empty():
 		return null
@@ -71,18 +72,24 @@ static func build_mesh(world: QVoxelWorld,
 # 内部
 
 ## 求值体积 → 稀疏体素字典（世界坐标 → 材质ID），供原生几何内核消费。
+## 【按线性下标扫，只给非空格算坐标】体积是稠密的：三层 for 会为每个空气格都算一遍乘加，
+## 而稀疏模型里九成以上是空气，坐标换算只在命中时才值得做。
 static func _voxel_dict(res: QVoxelEvalResult) -> Dictionary:
 	var out := {}
+	var vol := res.volume
 	var gs := res.grid_size
+	if gs.x <= 0 or gs.y <= 0 or gs.z <= 0 or vol.is_empty():
+		return out
 	var o := res.origin
-	var i := 0
-	for z in gs.z:
-		for y in gs.y:
-			for x in gs.x:
-				var m := res.volume[i]
-				if m > 0:
-					out[Vector3i(o.x + x, o.y + y, o.z + z)] = m
-				i += 1
+	var plane := gs.x * gs.y
+	var n := mini(vol.size(), plane * gs.z)
+	for i in n:
+		var m := vol[i]
+		if m <= 0:
+			continue
+		var rest := i % plane
+		var lx := rest % gs.x
+		out[Vector3i(o.x + lx, o.y + (rest - lx) / gs.x, o.z + (i - rest) / plane)] = m
 	return out
 
 
