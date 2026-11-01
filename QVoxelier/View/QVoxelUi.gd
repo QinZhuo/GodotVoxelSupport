@@ -149,9 +149,28 @@ static func palette_width() -> int:
 	return hit_size() + space_s() * 2
 
 
-## 左侧工具坞的目标宽度（下限：内容更宽时以内容为准）。
+## 右列的目标宽度（0 = 用默认档）。由拖动条改写，见 `set_dock_width`。
+## 【为什么用 0 当哨兵，而不是给 static var 一个初值】本项目实测：**新建**脚本里的 static var
+## 在编辑器热加载下可能读回 0（静态初值没落地）。这里 0 恰好就是"未设置"，所以撞车无害。
+static var _dock_w := 0
+
+## 右列（层级 / 属性）的目标宽度。内容更宽时以内容为准（见 `QVoxelierDock._fit`）。
 static func dock_width() -> int:
+	if _dock_w > 0:
+		return _dock_w
 	return 116 if compact() else 132
+
+
+## 拖动条改右列宽度。夹到 [96, 360]：再窄放不下层级条目，再宽视口就没了。
+static func set_dock_width(w: float) -> void:
+	_dock_w = clampi(int(round(w)), 96, 360)
+
+
+## 用户是否亲手调过右列宽度。
+## 【为什么需要这个判断】没拖过时，内容比默认档宽要让它撑开（否则滑条会被裁）；
+## 拖过之后就该以用户给的值为准 —— 再被内容撑回去，拖动就成了"拖了没反应"。
+static func dock_width_custom() -> bool:
+	return _dock_w > 0
 
 
 ## 小间距：同组控件之间、面板内边距。

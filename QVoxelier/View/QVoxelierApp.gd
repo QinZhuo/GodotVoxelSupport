@@ -57,6 +57,13 @@ var _tree_section: QVoxelierTreeSection
 var _object_section: QVoxelierObjectSection
 ## 底部动画帧条（常驻一行，只显示当前模型的帧）。
 var _timeline: QVoxelierTimeline
+## 左右栏的宽度拖动条：拖它调栏宽，松手把宽度写进偏好。
+var _left_handle: QVoxelierResizeHandle
+var _right_handle: QVoxelierResizeHandle
+## 长操作（体素化）进行中：Esc 置 `_import_cancel`，操作在下一帧边界收手。
+## 多帧模型可能跑几十秒，没有这条通道时用户只能等（或强杀进程丢掉未存的改动）。
+var _importing := false
+var _import_cancel := false
 ## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
 ## （参数与预览是分组自己的状态，见 QVoxelierSnapshotSection）。
 var _snapshot_section: QVoxelierSnapshotSection
@@ -337,6 +344,15 @@ func _build_ui() -> void:
 	_dock.name = "Dock"
 	add_child(_dock)
 
+	# 两侧栏的宽度拖动条：贴在栏的外缘，横向位置由 `_sync_rails` 跟着栏宽更新。
+	_left_handle = _make_resize_handle(Vector2(0, 0))
+	_right_handle = _make_resize_handle(Vector2(1, 1))
+	_left_handle.dragged.connect(_on_tools_resize)
+	_right_handle.dragged.connect(_on_dock_resize)
+	# 拖动过程中不写盘（每帧一次太频繁），松手才记下来。
+	_left_handle.released.connect(_save_layout)
+	_right_handle.released.connect(_save_layout)
+
 	# 层级树：唯一的层级入口，固定在右列**上方**。
 	_tree_section = QVoxelierTreeSection.new()
 	_tree_section.node_selected.connect(_on_tree_selected)
@@ -430,6 +446,8 @@ func _build_ui() -> void:
 		_gizmo.right_inset = _right_inset
 	_tools.resized.connect(_sync_rails)   # 工具坞按内容变宽时，左栏背景也要跟
 	_dock.resized.connect(sync_right)
+	# 恢复上次拖出来的栏宽（没有记录就保持默认档）；必须在装配末尾，前面的面板尺寸才已确定。
+	_load_layout()
 	sync_right.call_deferred()
 
 
@@ -942,6 +960,26 @@ func _update_gizmo_size() -> void:
 	_move_gizmo.set_size_factor(clampf(d * 0.06 / vs, 0.15, 40.0))
 
 
+## 造一条栏宽拖动条：纵向贴满可用高度（顶栏下缘 → 状态栏上缘），横向位置由 `_sync_rails` 算。
+## `anchor_x.x` = 0 表示贴左栏右缘，1 表示贴右栏左缘。
+func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
+	var h := QVoxelierResizeHandle.new()
+	h.anchor_top = 0.0
+	h.anchor_bottom = 1.0
+	h.offset_top = QVoxelUi.bar_height() + QVoxelUi.space_s()
+	h.offset_bottom = -QVoxelUi.status_height()
+	h.anchor_left = anchor_x.x
+	h.anchor_right = anchor_x.y
+	if anchor_x.x < 0.5:
+		h.offset_left = 0.0
+		h.offset_right = QVoxelierResizeHandle.WIDTH
+	else:
+		h.offset_left = -QVoxelierResizeHandle.WIDTH
+		h.offset_right = 0.0
+	add_child(h)
+	return h
+
+
 ## 侧栏背景条：宽 = 内容 + 两侧缝，高 = 顶栏下缘到状态栏上缘。只作背景，不吃鼠标事件。
 func _make_rail(right: bool) -> Panel:
 	var p := Panel.new()
@@ -974,11 +1012,57 @@ func _sync_rails() -> void:
 			+ _tools.size.x + QVoxelUi.space_m())
 	_right_inset = _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
 	_right_rail.offset_left = -_right_inset
+	# 拖动条贴在栏的**外缘**：栏一宽一窄，它自动跟过去（不需要用户重新找它）。
+	if _left_handle != null:
+		_left_handle.offset_left = _left_inset - QVoxelUi.space_s()
+		_left_handle.offset_right = _left_handle.offset_left + QVoxelierResizeHandle.WIDTH
+	if _right_handle != null:
+		_right_handle.offset_right = -(_dock.size.x + QVoxelUi.space_m())
+		_right_handle.offset_left = _right_handle.offset_right - QVoxelierResizeHandle.WIDTH
 	# 上下文选项条横跨可见区（两侧让开左右栏），故也吃同一组 inset。
 	if _context != null:
 		_context.set_insets(_left_inset, _right_inset)
 	# 宽度变了 = 可见区中心也变了。补差额（只在取过景之后有欠账，别的场景 delta 为 0）。
 	_apply_view_center()
+
+
+## 拖右栏左缘：向左拖（delta < 0）= 右栏变宽。
+## 宽度写进 `QVoxelUi` 再由 Dock 重排 —— "目标宽度"只有一处，拖动与偏好都作用在它上面。
+func _on_dock_resize(delta: float) -> void:
+	QVoxelUi.set_dock_width(QVoxelUi.dock_width() - delta)
+	_dock.refit()
+	_sync_rails()
+	hud.set_right_inset(_right_inset)
+	_gizmo.right_inset = _right_inset
+
+
+## 拖左栏右缘：向右拖 = 左栏变宽（撑的是工具坞的最小宽度，内容更宽时仍以内容为准）。
+func _on_tools_resize(delta: float) -> void:
+	_tools.custom_minimum_size.x = clampf(_tools.size.x + delta, 72.0, 420.0)
+	_sync_rails()
+
+
+## 恢复上次拖出来的栏宽（没有记录就用默认档）。与"上次目录"共用同一个 cfg。
+func _load_layout() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load(PREFS_PATH) != OK:
+		return
+	var dw := int(cfg.get_value(PREFS_SECTION, "dock_w", 0))
+	if dw > 0:
+		QVoxelUi.set_dock_width(dw)
+	var tw := int(cfg.get_value(PREFS_SECTION, "tools_w", 0))
+	if tw > 0 and _tools != null:
+		_tools.custom_minimum_size.x = tw
+
+
+func _save_layout() -> void:
+	if _tools == null:
+		return
+	var cfg := ConfigFile.new()
+	cfg.load(PREFS_PATH)
+	cfg.set_value(PREFS_SECTION, "dock_w", QVoxelUi.dock_width())
+	cfg.set_value(PREFS_SECTION, "tools_w", int(_tools.custom_minimum_size.x))
+	cfg.save(PREFS_PATH)
 
 
 # 输入翻译
@@ -1253,6 +1337,11 @@ func _no_change_hint(picking: bool) -> String:
 
 func _cancel() -> void:
 	_gizmo_active = false
+	# 体素化进行中：Esc 先叫停它 —— 那是"等不下去"的表述，不该顺带退掉选区（另一个意图）。
+	if _importing:
+		_import_cancel = true
+		hud.flash("正在取消导入…")
+		return
 	if _stroke:
 		session.cancel()
 		_stroke = false
@@ -1790,9 +1879,17 @@ func _import_mesh(path: String, opts: Dictionary) -> bool:
 	if scene.is_empty():
 		hud.flash("打不开这个模型：%s（只支持 %s）" % [path.get_file(), MeshAccess.describe()])
 		return false
+	_importing = true
+	_import_cancel = false
 	var imported: QVoxelWorld = await MeshVoxelWorld.to_world(scene, resolution,
 			bool(opts.get("fill", true)),
-			func(done: int, total: int): hud.flash("体素化 %d/%d 帧…" % [done, total]))
+			func(done: int, total: int): hud.flash("体素化 %d/%d 帧…（Esc 取消）" % [done, total]),
+			func() -> bool: return _import_cancel)
+	_importing = false
+	# 先判取消再判空：取消时 `to_world` 也返回 null，不说清楚就会被当成"模型有问题"。
+	if _import_cancel:
+		hud.flash("已取消导入：%s" % path.get_file())
+		return false
 	if imported == null:
 		hud.flash("体素化失败（模型里没有可用三角面）：%s" % path.get_file())
 		return false

@@ -11,8 +11,11 @@ extends RefCounted
 ## 场景 → 世界。`resolution` = 最长边的体素数；`fill` = true 实心 / false 只留表面壳。
 ## **协程**：多帧时每帧让出一帧（否则大模型的导入会把界面冻住），调用方要 `await`。
 ## `progress` 可选，签名 `(已完成帧, 总帧数)`；只在多帧时回调（单帧没有进度可言）。
+## `cancel` 可选，返回 true 即放弃：**帧边界**上检查，逐帧 await 时最多多跑完当前这一帧。
+## 为什么取消也返回 null（而不是报错）：调用方本来就分得清 —— 它自己置的取消标志还在，
+## 由此决定提示"已取消"还是"体素化失败"。
 static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESOLUTION,
-		fill := true, progress := Callable()) -> QVoxelWorld:
+		fill := true, progress := Callable(), cancel := Callable()) -> QVoxelWorld:
 	if scene.is_empty():
 		return null
 	var frames: Array = scene.get("frames", [])
@@ -26,6 +29,8 @@ static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESO
 	var datas: Array = []
 	var filled := false
 	for i in frames.size():
+		if cancel.is_valid() and cancel.call():
+			return null
 		var res := MeshVoxelizer.voxelize_frame(scene, i, rast, fill, palette)
 		if res.is_empty():
 			datas.append(null)   # 该帧没有可用三角面：占位，保持帧序不错位

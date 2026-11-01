@@ -71,7 +71,17 @@ func _fit() -> void:
 	for c in _out_host.get_children():
 		if c is QVoxelierSection:
 			want_w = maxf(want_w, (c as QVoxelierSection).custom_minimum_size.x)
-	offset_left = offset_right - maxf(float(QVoxelUi.dock_width()) + QVoxelUi.space_l(), want_w)
+	# 宽度：用户拖过就以拖的为准（拖窄了内容会被横向裁掉，那是他自己的选择）；
+	# 没拖过才让内容兜底撑开，免得属性面板的滑条一开局就被裁。
+	var target := float(QVoxelUi.dock_width()) + QVoxelUi.space_l()
+	if not QVoxelUi.dock_width_custom():
+		target = maxf(target, want_w)
+	offset_left = offset_right - target
+
+
+## 外部改了目标宽度（拖动条拖过）之后重排一次。
+func refit() -> void:
+	_fit()
 
 
 ## 追加一个**属性页**组（只在装配时调用）。App 用 show_property 按当前选择切。

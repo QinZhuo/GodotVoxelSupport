@@ -74,6 +74,21 @@ func test_frames_become_voxel_animation() -> void:
 	assert_true(not m.frames[0].is_empty() and not m.frames[1].is_empty(), "两帧都应有内容")
 
 
+## 取消：帧边界上收手，返回 null。
+## 返回 null 与"体素化失败"同形，调用方（App）靠自己的取消标志区分提示 —— 这里只钉住"确实停了"。
+func test_cancel_aborts_voxelizing() -> void:
+	var w: QVoxelWorld = await MeshVoxelWorld.to_world(_scene([_cube_part()]), 4, true,
+			Callable(), func() -> bool: return true)
+	assert_true(w == null, "取消后不应产出世界")
+
+
+## 对照：cancel 恒 false 时必须照常产出 —— 否则"取消"会变成"导入永远失败"。
+func test_cancel_false_does_not_block() -> void:
+	var w: QVoxelWorld = await MeshVoxelWorld.to_world(_scene([_cube_part()]), 4, true,
+			Callable(), func() -> bool: return false)
+	assert_true(w != null, "cancel 返回 false 时应正常建出世界")
+
+
 ## 追加导入：并进现有世界时材质 ID 整体平移，体素仍指向同一个颜色。
 func test_merge_from_shifts_materials() -> void:
 	var dst: QVoxelWorld = await MeshVoxelWorld.to_world(_scene([_cube_part()]), 4)
