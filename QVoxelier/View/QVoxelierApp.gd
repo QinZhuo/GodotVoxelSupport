@@ -46,8 +46,8 @@ extends Node3D
 @onready var camera: QVoxelViewCamera = $ViewHost/View/ViewRoot/Camera
 @onready var grid_floor: QVoxelGridFloor = $ViewHost/View/ViewRoot/Model/Floor
 @onready var hud: QVoxelierHud = $Hud
-@onready var _key_light: DirectionalLight3D = $ViewHost/View/ViewRoot/KeyLight
-@onready var _fill_light: DirectionalLight3D = $ViewHost/View/ViewRoot/FillLight
+## 灯组由配方按 RIG 现建（数量/颜色/方位只写一份），不在 .tscn 里摆第二份数值。
+var _lights: Array = []
 ## 环境光挂在视口自己的世界里（它靠 "enter world" 注册，跟着 3D 走才生效）。
 ## `_setup_sky` / `_apply_quality` 改的是它的 `environment`，即 3D 正在用的那一份。
 @onready var _env_node: WorldEnvironment = $ViewHost/View/ViewRoot/WorldEnvironment
@@ -250,9 +250,11 @@ func _ready() -> void:
 	# UI 在 3D 视口之后入树，天然压在画面之上（左列图标浮在 3D 上就靠这个次序）。
 	_build_ui()
 	_disable_focus(self)
-	# 天空里的"太阳盘"调小：材质 metallic=1 会把天空的太阳反射成一个大光球（用户不想要）。
 	_setup_sky()
+	_lights = QVoxelRenderPreset.build_rig(_view_root)
 	_apply_render_mode()
+	# 光跟着视点走：转视角就要重新摆灯，否则会转到背光面。
+	camera.view_changed.connect(_on_view_changed)
 	# 按钮/控件的悬停提示统一送到状态栏显示（本应用不用悬浮气泡）。
 	QVoxelUi.hint_sink = hud.show_hover_hint
 	new_model()
@@ -2269,11 +2271,15 @@ func _setup_sky() -> void:
 ##   布局（世界）→ 全开，逼近渲染图。
 func _apply_render_mode() -> void:
 	var rich := _edit_mode == 1
-	# 阴影距离跟着取景走：模型小、相机近时收紧，纹素才落得准。
-	QVoxelRenderPreset.apply_sun(_key_light, rich, camera.distance * 3.0 if camera != null else 0.0)
-	QVoxelRenderPreset.apply_fill(_fill_light)
+	# 阴影距离跟着取景走：模型小、相机近时收紧，纹素才落得准（原先是 ×3，大部分纹素摊在空处）。
+	QVoxelRenderPreset.apply_rig(_lights, camera.global_transform.basis, rich, camera.distance * 1.8)
 	if _env_node != null:
 		QVoxelRenderPreset.apply_environment(_env_node.environment, model.voxel_scale, rich, true)
+
+
+## 视角一变就摆灯（只改朝向，能量与阴影不动）—— 这是"任何角度都好看"的唯一实现处。
+func _on_view_changed() -> void:
+	QVoxelRenderPreset.aim_rig(_lights, camera.global_transform.basis)
 
 
 ## 切换编辑层级（Tab）：模型内部 ⇄ 布局（类似 Blender 的模式切换）。

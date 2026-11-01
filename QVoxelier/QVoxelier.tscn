@@ -674,7 +674,7 @@ mouse_filter = 2
 own_world_3d = true
 world_3d = SubResource("World3D_view")
 handle_input_locally = false
-msaa_3d = 2
+msaa_3d = 3
 
 [node name="ViewRoot" type="Node3D" parent="ViewHost/View" unique_id=1011]
 
@@ -695,16 +695,6 @@ transform = Transform3D(1, 0, 0, 0, 0.90630776, 0.42261827, 0, -0.42261827, 0.90
 current = true
 fov = 32.0
 script = ExtResource("4_camera")
-
-[node name="KeyLight" type="DirectionalLight3D" parent="ViewHost/View/ViewRoot" unique_id=1005]
-transform = Transform3D(-0.5, 0, 0.866, 0.35, 0.866, 0.35, -0.75, 0.5, 0.433, 0, 6, 0)
-light_energy = 1.7
-shadow_enabled = true
-
-[node name="FillLight" type="DirectionalLight3D" parent="ViewHost/View/ViewRoot" unique_id=1008]
-transform = Transform3D(-0.7071075, -1.1800969e-06, -0.7071061, -0.31878886, 0.89260733, 0.318788, 0.6311677, 0.4508349, -0.63116974, 0.3317994, 6.46597, -0.71150744)
-light_color = Color(0.92, 0.929, 0.949, 1)
-light_energy = 0.9
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ViewHost/View/ViewRoot" unique_id=1006]
 environment = SubResource("Environment_1")

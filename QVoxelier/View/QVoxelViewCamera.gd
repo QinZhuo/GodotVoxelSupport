@@ -21,6 +21,9 @@ extends Camera3D
 ## 用它当枚举名会直接编译不过；而 `Camera3D` 自带 `projection` 属性，任何 `set_projection()`
 ## 都会被当成"试图遮蔽内建 setter"。换个名字（镜头）语义一样准确，还省掉一堆遮蔽告警。
 
+## 视角有变（轨道 / 平移 / 缩放 / 换视图 / 换镜头）。观感配方里的灯光跟着视点走，靠这个信号摆位。
+signal view_changed
+
 ## 镜头类型。透视有纵深感，正交没有近大远小 —— 体素对齐、量比例必须用正交。
 enum Lens { PERSPECTIVE, ORTHO }
 
@@ -220,6 +223,7 @@ func _apply() -> void:
 		size = ortho_height
 	else:
 		projection = Camera3D.PROJECTION_PERSPECTIVE
+	view_changed.emit()
 
 
 func _ready() -> void:

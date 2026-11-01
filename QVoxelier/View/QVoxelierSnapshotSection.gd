@@ -58,7 +58,7 @@ var _stage: Node3D
 var _camera: QVoxelViewCamera
 var _renderer: VoxelRenderer
 var _env: WorldEnvironment
-var _sun: DirectionalLight3D
+var _lights: Array = []
 
 
 func section_title() -> String:
@@ -244,14 +244,8 @@ func _build_stage() -> void:
 	_env.environment = Environment.new()
 	_stage.add_child(_env)
 
-	# 打光与视口同源（方向 / 能量 / 阴影全在 QVoxelRenderPreset），快照的明暗关系因此天然跟着视口走。
-	_sun = DirectionalLight3D.new()
-	_stage.add_child(_sun)
-	QVoxelRenderPreset.apply_sun(_sun, true)
-
-	var fill := DirectionalLight3D.new()
-	_stage.add_child(fill)
-	QVoxelRenderPreset.apply_fill(fill)
+	# 打光与视口同源（灯组 / 能量 / 阴影全在 QVoxelRenderPreset），快照的明暗关系因此天然跟着视口走。
+	_lights = QVoxelRenderPreset.build_rig(_stage)
 
 	_camera = QVoxelViewCamera.new()
 	_camera.name = "SnapshotCamera"
@@ -329,8 +323,8 @@ func _sync_stage(res: QVoxelEvalResult) -> void:
 	_camera.set_lens(_lens)
 	_camera.apply_view(_view)
 	_camera.frame_aabb(QVoxelSnapshot.frame_aabb(res, vs))
-	# 取景定了才知道阴影范围与对焦距离。
-	QVoxelRenderPreset.apply_sun(_sun, true, _camera.distance * 3.0)
+	# 取景定了才知道阴影范围、对焦距离，也才知道灯该往哪边摆（按相机基准，任何视角都对）。
+	QVoxelRenderPreset.apply_rig(_lights, _camera.global_transform.basis, true, _camera.distance * 1.8)
 	QVoxelRenderPreset.apply_dof(_camera, _camera.distance)
 
 

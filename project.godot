@@ -46,6 +46,11 @@ window/vsync/vsync_mode=0
 
 enabled=PackedStringArray("res://addons/DEVFramework/plugin.cfg", "res://addons/VoxelSupport/plugin.cfg")
 
+[rendering]
+
+lights_and_shadows/directional_shadow/size=4096.0
+lights_and_shadows/directional_shadow/soft_shadow_filter_quality=4.0
+
 [threading]
 
 worker_pool/max_threads=16.0
