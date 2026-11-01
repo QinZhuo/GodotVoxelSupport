@@ -80,18 +80,25 @@ func test_world_position_preserved() -> void:
 	assert_eq(_voxel_world(back, back.all_models()[0]), want, "每个体素的世界坐标应保持")
 
 
-## 读回再写必须与首次逐字节相同：这是"读写约定对称"的最强证据（任何 axis/offset 偏差都会破坏它）。
+## **收敛后**的编码必须逐字节稳定：读回的世界再写一遍，与上一次落盘的字节完全相同。
+## 【为什么不是"第一次 == 第二次"】手造世界的 `local_transform` 是恒等，而读回来的世界是
+## `T(base + offset)`（读端把模型紧致化后必须补回居中偏移）—— 两者几何等价，但 `_t` 的
+## 写法不同。真正该守住的是"再写一次不再变"这个不动点。
 func test_encode_is_stable() -> void:
 	var w := _box_world()
-	var first := VoxWriter.encode(w)
-	_save(first)
+	_save(VoxWriter.encode(w))
 	var back := VoxAssetWorld.to_world(VoxAsset.from_asset(TMP))
 	assert_true(back != null, "应能重建世界")
 	if back == null:
 		return
+	var first := VoxWriter.encode(back)
+	_save(first)
+	var back2 := VoxAssetWorld.to_world(VoxAsset.from_asset(TMP))
+	if back2 == null:
+		return
 	# 用 assert_true 而不是 assert_eq：失败时不要把几 KB 的字节数组整个打印出来。
-	var second := VoxWriter.encode(back)
-	assert_true(second == first, "第二次编码应与第一次完全一致（长度 %d vs %d）"
+	var second := VoxWriter.encode(back2)
+	assert_true(second == first, "读回后再编码应逐字节稳定（长度 %d vs %d）"
 			% [first.size(), second.size()])
 
 

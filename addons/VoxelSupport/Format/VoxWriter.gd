@@ -279,10 +279,7 @@ static func _palette_chunk(world: QVoxelWorld) -> PackedByteArray:
 	# 按它遍历会让同一份内容写出不同字节；按 used_materials 遍历则与内部形状无关。
 	var content := PackedByteArray()
 	content.resize(VoxSpace.PALETTE_SLOTS * 4)
-	for key in world.used_materials():
-		var id := int(key)
-		if id < 1 or id >= VoxSpace.PALETTE_SLOTS:
-			continue
+	for id in _write_ids(world):
 		var c := world.material_color(id)
 		var o := VoxSpace.palette_item(id) * 4
 		content[o] = int(round(clampf(c.r, 0.0, 1.0) * 255.0))
@@ -295,25 +292,27 @@ static func _palette_chunk(world: QVoxelWorld) -> PackedByteArray:
 ## 只写"非默认 diffuse"的材质（`.vox` 缺省就是 diffuse，写全量只是徒增体积）。
 static func _material_chunks(world: QVoxelWorld) -> PackedByteArray:
 	var out := PackedByteArray()
-	for key in world.used_materials():
-		var mid := int(key)
+	for mid in _write_ids(world):
 		var mat := VoxelMaterial.from_mate(world.materials[mid], mid)
 		if mat == null:
 			continue
 		var attrs := {}
-		if mat.trans > 0.0 and mat.metal > 0.0:
-			attrs["_type"] = "_blend"
+		# 【判据是"有没有非默认值"，不是"metal > 0"】rough 可以独立于类型存在
+		# （真实资产里就有 `_type:"_metal"` 而 `_metal:0`、只调了粗糙度的条目）。
+		# 若只按 metal>0 判断，这类材质会整条不写，读回后静默回落成默认 rough=1。
+		var rough_custom := absf(mat.rough - 1.0) > 0.0005
+		if mat.trans > 0.0:
+			attrs["_type"] = "_blend" if mat.metal > 0.0 else "_glass"
 			attrs["_trans"] = _num(mat.trans)
-			attrs["_metal"] = _num(mat.metal)
-			attrs["_rough"] = _num(mat.rough)
-		elif mat.trans > 0.0:
-			attrs["_type"] = "_glass"
-			attrs["_trans"] = _num(mat.trans)
+			if mat.metal > 0.0:
+				attrs["_metal"] = _num(mat.metal)
 			attrs["_rough"] = _num(mat.rough)
 		elif mat.emission > 0.0:
 			attrs["_type"] = "_emit"
 			attrs["_emit"] = _num(mat.emission)
-		elif mat.metal > 0.0:
+		elif mat.metal > 0.0 or rough_custom:
+			# `_metal` 同时也承载"只有粗糙度不同"的材质：读端会照 `_metal` + `_rough`
+			# 两个字段原样还原，metal 为 0 也合法。
 			attrs["_type"] = "_metal"
 			attrs["_metal"] = _num(mat.metal)
 			attrs["_rough"] = _num(mat.rough)
@@ -324,6 +323,35 @@ static func _material_chunks(world: QVoxelWorld) -> PackedByteArray:
 		content.append_array(_dict(attrs))
 		out.append_array(_chunk("MATL", content))
 	return out
+
+
+## 要落盘的材质 ID：**被体素用到的** + **表里确有内容的**（排序保证字节稳定）。
+## 【为什么不是只写 used】真实资产里常有"配好了但这次没摆出来"的材质；只写 used 会让它们的
+## 颜色与 PBR 属性在往返后丢失（读端 palette 落 0 变成空气）。判"空气"用全零条目，
+## 与 `VoxelMaterial.air_mate()` 一致，所以空白工程不会凭空多出 255 个黑槽。
+static func _write_ids(world: QVoxelWorld) -> Array:
+	var ids := {}
+	for k in world.used_materials():
+		var id := int(k)
+		if id >= 1 and id < VoxSpace.PALETTE_SLOTS:
+			ids[id] = true
+	for i in range(1, mini(VoxSpace.PALETTE_SLOTS, world.materials.size())):
+		if not _is_air(world.materials[i]):
+			ids[i] = true
+	var out := ids.keys()
+	out.sort()
+	return out
+
+
+## 判"空气"只看**有没有颜色 / 金属度 / 自发光**。
+## 读端给未使用的调色板槽建出来的条目是 `rgba=0`（全透明黑）配 rough/hardness/mass 的默认值；
+## 若把 rough 也算进来，这些空槽会被当成真材质写满 255 个 —— `.qvx ↔ .vox` 往返就永远不稳
+## （第一次写 2 个槽，第二次写 255 个）。
+static func _is_air(entry: Dictionary) -> bool:
+	if int(entry.get("rgba", 0)) != 0:
+		return false
+	return int(entry.get("metal", 0)) == 0 and int(entry.get("e_r", 0)) == 0 \
+			and int(entry.get("e_g", 0)) == 0 and int(entry.get("e_b", 0)) == 0
 
 
 # ---- 字节工具 ----

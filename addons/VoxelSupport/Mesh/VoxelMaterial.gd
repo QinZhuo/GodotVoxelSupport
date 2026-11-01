@@ -74,7 +74,13 @@ static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
 	var er := float(int(entry.get("e_r", 0))) / 255.0
 	var eg := float(int(entry.get("e_g", 0))) / 255.0
 	var eb := float(int(entry.get("e_b", 0))) / 255.0
-	mat.emission = maxf(er, maxf(eg, eb))
+	# 【必须按颜色分量反解】`to_mate` 存的是 `color × emission × 255`。直接取 max 等于把
+	# "颜色最亮的那一路"也当成强度算进去 —— 于是每往返一次就乘一次该分量，自发光逐次衰减
+	# （深色材质衰减更快，实测 0.545→0.435→…）。对"e 与颜色无关"的旧数据（peak 近 0）
+	# 退化为取 max，与旧行为一致。
+	var peak := maxf(mat.color.r, maxf(mat.color.g, mat.color.b))
+	var top := maxf(er, maxf(eg, eb))
+	mat.emission = top / peak if peak > 0.001 else top
 	return mat
 
 
