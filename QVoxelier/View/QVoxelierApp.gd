@@ -985,13 +985,30 @@ func _process(_delta: float) -> void:
 	_update_gizmo_size()
 
 
-## gizmo 手柄**屏幕大小恒定**：几何缩放系数按相机到 gizmo 中心的距离设定（世界尺寸 ∝ 距离）。
+## gizmo 手柄**屏幕大小恒定**：旋转环半径占视口短边的比例（轴臂同理，见 gizmo 的 ARM/RING_R）。
+const GIZMO_RING_RATIO := 0.085
+
+
+## 按"中心处每世界单位多少像素"反推几何缩放。
+## 【为什么不用相机距离】透视下世界尺寸 ∝ 距离，正交下两者无关 —— 按距离折算会让正交视图
+## 缩放一点点就把手柄撑满屏幕。投影换算对两种镜头同一套公式。
 func _update_gizmo_size() -> void:
-	if _move_gizmo == null or not _move_gizmo.visible or session == null:
+	if _move_gizmo == null or not _move_gizmo.visible or session == null or camera == null:
 		return
-	var vs := maxf(model.voxel_scale, 1e-4)
-	var d := camera.global_position.distance_to(_move_gizmo.center_global())
-	_move_gizmo.set_size_factor(clampf(d * 0.06 / vs, 0.15, 40.0))
+	var px := _px_per_unit(_move_gizmo.center_global())
+	if px <= 0.0:
+		return
+	# 祖先的缩放已经烘进 global_transform，故用实测的世界尺度换算，不假设 scale 链。
+	var unit := maxf(_move_gizmo.global_transform.basis.get_scale().x, 1e-6)
+	var view := camera.get_viewport().get_visible_rect().size
+	var want_px := minf(view.x, view.y) * GIZMO_RING_RATIO
+	_move_gizmo.set_size_factor(want_px / (px * unit * QVoxelierMoveGizmo.RING_R))
+
+
+## 某点处一个世界单位有多少屏幕像素：沿相机右轴量一单位再投影（透视 / 正交通用）。
+func _px_per_unit(at: Vector3) -> float:
+	return camera.unproject_position(at).distance_to(
+			camera.unproject_position(at + camera.global_transform.basis.x))
 
 
 ## 造一条栏宽拖动条：纵向贴满可用高度（顶栏下缘 → 状态栏上缘），横向位置由 `_sync_insets` 算。
