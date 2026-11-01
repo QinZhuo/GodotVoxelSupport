@@ -40,7 +40,7 @@ var camera: Camera3D
 ## 【为什么不能按常量摆】右列宽度是**内容驱动**的（同工具坞，见 QVoxelierDock._fit），
 ## 展开「层级」后实测 228px；而指示器是 160px 见方钉在右下角 —— 按常量摆会被整块压住，
 ## 只透过面板的半透明底露出几根轴的鬼影。
-var right_inset := float(QVoxelUi.dock_width() + QVoxelUi.space_l() + QVoxelUi.space_m()):
+var right_inset := float(QVoxelUi.side_width(QVoxelUi.dock_width()) + QVoxelUi.space_s()):
 	set(v):
 		right_inset = v
 		_sync_rect()

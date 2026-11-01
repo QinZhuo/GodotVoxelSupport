@@ -22,10 +22,13 @@ var _sig := PackedStringArray()
 
 
 func _build() -> void:
+	# 贴窗口左缘、上下贯通 —— 这一列**自己就是**左侧栏，外面不再套底板。
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
-	position = Vector2(QVoxelUi.space_m(), QVoxelUi.bar_height() + QVoxelUi.space_m())
+	position = Vector2(0.0, QVoxelUi.bar_height())
 
-	var panel := QVoxelUi.panel(QVoxelUi.space_s())
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel",
+			QVoxelUi.side_panel(SIDE_LEFT, QVoxelUi.space_m(), QVoxelUi.space_s()))
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(panel)
 
@@ -50,11 +53,11 @@ func _build() -> void:
 	_resize()
 
 
-## 高度贯通上下：从顶栏下沿到底部帧条上沿。
+## 高度贯通上下：从顶栏下沿到底部帧条上沿。整宽含两侧内边距（见 QVoxelUi.side_width）。
 func _resize() -> void:
 	var h := (get_viewport_rect().size.y - position.y - QVoxelUi.status_height()
-			- QVoxelUi.strip_height() - QVoxelUi.space_s())
-	size = Vector2(QVoxelUi.palette_width(), maxf(h, 120.0))
+			- QVoxelUi.strip_height())
+	size = Vector2(QVoxelUi.side_width(QVoxelUi.palette_width()), maxf(h, 120.0))
 
 
 # 对外：状态同步（只由 App 调用）

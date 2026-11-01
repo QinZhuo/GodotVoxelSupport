@@ -3,7 +3,7 @@ class_name QVoxelierResizeHandle
 extends Control
 ## 面板边缘的竖向拖动条：拖它改相邻面板的宽度。
 ## 【为什么不用 SplitContainer】我们的布局是"锚点 + 按内容算宽度"，不是容器嵌套 ——
-## 改成 SplitContainer 会牵动 `_sync_rails` / `_reserve_strip` / 侧栏让位一整套逻辑。
+## 改成 SplitContainer 会牵动 `_sync_insets` / `_reserve_strip` / 侧栏让位一整套逻辑。
 ## 一条自绘的细条只改一个数字，其余照旧，才是这个架构下改动最小的一档。
 ## 【为什么常态不画任何东西】它压在视口边缘上，常驻一条线会在每次看模型时都多一道噪点；
 ## 悬停才亮起，既是"这里能拖"的提示，也不打扰画面。

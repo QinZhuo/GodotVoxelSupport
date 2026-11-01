@@ -23,14 +23,16 @@ var bottom_reserved := 0.0
 
 
 func _build() -> void:
+	# 贴窗口右缘、上下贯通 —— 这一列**自己就是**右侧栏，外面不再套底板。
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	offset_right = -QVoxelUi.space_m()
-	offset_top = QVoxelUi.bar_height() + QVoxelUi.space_m()
-	var w := float(QVoxelUi.dock_width()) + QVoxelUi.space_l()
-	offset_left = offset_right - w
+	offset_right = 0.0
+	offset_top = QVoxelUi.bar_height()
+	offset_left = offset_right - float(QVoxelUi.dock_width()) - QVoxelUi.space_s() * 2.0
 
 	# 整列**一块背景**（各分组自己不再带背景），中间一条分割线把"层级 / 属性"两半分开。
-	var bg := QVoxelUi.panel(QVoxelUi.space_s())
+	var bg := PanelContainer.new()
+	bg.add_theme_stylebox_override("panel",
+			QVoxelUi.side_panel(SIDE_RIGHT, QVoxelUi.space_m(), QVoxelUi.space_s()))
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
@@ -59,11 +61,11 @@ func _build() -> void:
 	get_viewport().size_changed.connect(_fit)
 
 
-## 右列矩形：纵向吃满可用高度（上下两栏各自滚动），横向取所有组里最宽的。
+## 右列矩形：纵向吃满可用高度（上到下都贴住邻居），横向取所有组里最宽的。
 func _fit() -> void:
 	if _root == null:
 		return
-	var avail := get_viewport_rect().size.y - offset_top - QVoxelUi.status_height() - QVoxelUi.space_s() - bottom_reserved
+	var avail := get_viewport_rect().size.y - offset_top - QVoxelUi.status_height() - bottom_reserved
 	offset_bottom = offset_top + maxf(avail, 120.0)
 	var want_w := 0.0
 	for s in _prop_sections:
@@ -73,7 +75,7 @@ func _fit() -> void:
 			want_w = maxf(want_w, (c as QVoxelierSection).custom_minimum_size.x)
 	# 宽度：用户拖过就以拖的为准（拖窄了内容会被横向裁掉，那是他自己的选择）；
 	# 没拖过才让内容兜底撑开，免得属性面板的滑条一开局就被裁。
-	var target := float(QVoxelUi.dock_width()) + QVoxelUi.space_l()
+	var target := QVoxelUi.side_width(QVoxelUi.dock_width())
 	if not QVoxelUi.dock_width_custom():
 		target = maxf(target, want_w)
 	offset_left = offset_right - target

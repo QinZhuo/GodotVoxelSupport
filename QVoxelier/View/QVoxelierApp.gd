@@ -174,14 +174,13 @@ var _gizmo_base_lo := Vector3i.ZERO
 var _nav_key := &""
 ## 触摸 / 触摸板手势解析（双指拖 = 旋转、捏合 = 缩放）。解析与相机动作分离，见 QVoxelierGestureNav。
 var _gesture := QVoxelierGestureNav.new()
-## 左侧栏（只有调色板那一列）的宽度。3D 视口与左栏底板按它让位。
+## 左右两条侧栏的宽度（调色板列 / 抽屉列）。3D 视口的左右边界按它让位。
 var _left_panel_w := 0.0
-## 浮层（上下文条、状态栏、坐标轴）要绕开的宽度：左栏 + 浮在画布上的工具列。
+var _right_panel_w := 0.0
+## 浮层（上下文条、状态栏、坐标轴）要绕开的宽度：栏宽再各留一道缝；
+## 左侧还多算上浮在画布上的工具列。
 var _left_inset := 0.0
 var _right_inset := 0.0
-## 左右侧栏的背景条：把一列面板连成整条侧栏，缝里不漏出窗口底色。
-var _left_rail: Panel
-var _right_rail: Panel
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
 var _eyedropper := false
@@ -280,7 +279,6 @@ func _disable_focus(node: Node) -> void:
 ## 3D 视口让开左右两条栏 —— 它们都是实心面板，画到它底下的东西看不见也点不到，等于白画。
 ## 顶栏 / 时间轴 / 状态栏同理，故纵向也让。
 ## 【左边只让调色板那一栏】工具列是浮在画布上的透明图标（见 `_tools`），让位等于把它挪进面板里。
-## 【让出来的地方不能露窗口底】左右各有一条 `_make_rail` 兜住栏底色，否则那圈就是灰的。
 func _layout_view() -> void:
 	if _view_container == null:
 		return
@@ -289,7 +287,7 @@ func _layout_view() -> void:
 	_view_container.anchor_right = 1.0
 	_view_container.anchor_bottom = 1.0
 	_view_container.offset_left = _left_panel_w
-	_view_container.offset_right = -_right_inset
+	_view_container.offset_right = -_right_panel_w
 	_view_container.offset_top = QVoxelUi.bar_height()
 	_view_container.offset_bottom = -(QVoxelUi.status_height() + float(QVoxelUi.strip_height()))
 
@@ -322,12 +320,6 @@ func _build_ui() -> void:
 	_toolbar.name = "Toolbar"
 	add_child(_toolbar)
 
-	# 两侧整栏背景：把一列面板连成一条完整侧栏，3D 不从面板缝隙里漏出来。
-	# 先入树压在所有面板之下，只作背景不吃事件。
-	_left_rail = _make_rail(false)
-	add_child(_left_rail)
-	_right_rail = _make_rail(true)
-	add_child(_right_rail)
 	_toolbar.new_requested.connect(request_new)
 	_toolbar.open_requested.connect(request_open)
 	_toolbar.save_requested.connect(save_project)
@@ -392,7 +384,7 @@ func _build_ui() -> void:
 	_dock.name = "Dock"
 	add_child(_dock)
 
-	# 右栏的宽度拖动条：贴在外缘，横向位置由 `_sync_rails` 跟着栏宽更新。
+	# 右栏的宽度拖动条：压在栏的左缘，横向位置由 `_sync_insets` 跟着栏宽更新。
 	_right_handle = _make_resize_handle(Vector2(1, 1))
 	_right_handle.dragged.connect(_on_dock_resize)
 	# 拖动过程中不写盘（每帧一次太频繁），松手才记下来。
@@ -485,11 +477,11 @@ func _build_ui() -> void:
 	# 目标值都是**布局算出来的**（不是常量），故挂信号 + 装配末尾补一次初值：
 	# 邻面板的矩形一般要到下一帧最小尺寸结算完才定下来。
 	var sync_right := func() -> void:
-		_sync_rails()
+		_sync_insets()
 		# 三者共用一个宽度而不是各算各的 —— 状态栏"避开右列"与坐标轴"避开状态栏"从此是一个数。
 		hud.set_right_inset(_right_inset)
 		_gizmo.right_inset = _right_inset
-	_tools.resized.connect(_sync_rails)   # 工具坞按内容变宽时，左栏背景也要跟
+	_tools.resized.connect(_sync_insets)   # 工具坞按内容变宽时，浮层让位也要跟
 	_dock.resized.connect(sync_right)
 	# 恢复上次拖出来的栏宽（没有记录就保持默认档）；必须在装配末尾，前面的面板尺寸才已确定。
 	_load_layout()
@@ -999,7 +991,7 @@ func _update_gizmo_size() -> void:
 	_move_gizmo.set_size_factor(clampf(d * 0.06 / vs, 0.15, 40.0))
 
 
-## 造一条栏宽拖动条：纵向贴满可用高度（顶栏下缘 → 状态栏上缘），横向位置由 `_sync_rails` 算。
+## 造一条栏宽拖动条：纵向贴满可用高度（顶栏下缘 → 状态栏上缘），横向位置由 `_sync_insets` 算。
 ## `anchor_x.x` = 0 表示贴左栏右缘，1 表示贴右栏左缘。
 func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
 	var h := QVoxelierResizeHandle.new()
@@ -1019,46 +1011,19 @@ func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
 	return h
 
 
-## 侧栏背景条：纵向上顶栏下缘 → 状态栏上缘，横向各锚在所属那一侧，宽度由 `_sync_rails` 给。
-## 只作背景，不吃鼠标事件。
-func _make_rail(right: bool) -> Panel:
-	var p := Panel.new()
-	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	p.anchor_top = 0.0
-	p.anchor_bottom = 1.0
-	p.offset_top = QVoxelUi.bar_height()
-	p.offset_bottom = -QVoxelUi.status_height()
-	if right:
-		p.anchor_left = 1.0
-		p.anchor_right = 1.0
-		p.offset_right = 0.0
-		# 右栏有个近似的默认档；左栏没有（零宽 = 首帧不画），等 `_sync_rails` 按内容量。
-		p.offset_left = -QVoxelUi.dock_width() - QVoxelUi.space_m() * 2.0
-	else:
-		p.anchor_left = 0.0
-		p.anchor_right = 0.0
-		p.offset_left = 0.0
-		p.offset_right = 0.0
-	# 分隔线只画在**与画布相接**那一边：贴窗口外缘的几条画了就是一道突兀的亮边。
-	var sb := QVoxelUi.box(QVoxelUi.SURFACE_SOLID, QVoxelUi.BORDER, 0, 0, 0, 0)
-	sb.set_border_width(SIDE_LEFT if right else SIDE_RIGHT, 1)
-	p.add_theme_stylebox_override("panel", sb)
-	return p
-
-
-## 两条侧栏的宽度随邻居实际宽度更新 —— rail 背景、视口让位、状态栏让位、坐标轴让位、
-## 上下文条让位共用同一组数。
-func _sync_rails() -> void:
-	# 左栏只有调色板那一列（它左右各留一道缝）；工具列是浮在画布上的，不算进栏宽。
-	_left_panel_w = QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
+## 两侧栏宽随邻居实际矩形更新 —— 视口让位、状态栏让位、坐标轴让位、上下文条让位、
+## 拖动条位置共用同一组数。
+func _sync_insets() -> void:
+	# 左栏只有调色板那一列（工具列是浮在画布上的，不算进栏宽）。
+	_left_panel_w = QVoxelUi.side_width(QVoxelUi.palette_width())
 	# 浮层还要多让出工具列（连同它的右缝）：工具列压在画布最左边，浮层压上去就会挡住它。
 	_left_inset = _left_panel_w + _tools.size.x + QVoxelUi.space_m()
-	_right_inset = _dock.size.x + QVoxelUi.space_m() + QVoxelUi.space_s()
-	_left_rail.offset_right = _left_panel_w
-	_right_rail.offset_left = -_right_inset
-	# 拖动条贴在栏的**外缘**：栏一宽一窄，它自动跟过去（不需要用户重新找它）。
+	_right_panel_w = _dock.size.x
+	# 浮层与右栏之间留一道缝，免得贴死在栏边。
+	_right_inset = _right_panel_w + QVoxelUi.space_s()
+	# 拖动条压在栏的**左缘**：栏一宽一窄，它自动跟过去（不需要用户重新找它）。
 	if _right_handle != null:
-		_right_handle.offset_right = -(_dock.size.x + QVoxelUi.space_m())
+		_right_handle.offset_right = -_right_panel_w
 		_right_handle.offset_left = _right_handle.offset_right - QVoxelierResizeHandle.WIDTH
 	# 上下文选项条横跨可见区（两侧让开左右栏），故也吃同一组 inset。
 	if _context != null:
@@ -1072,7 +1037,7 @@ func _sync_rails() -> void:
 func _on_dock_resize(delta: float) -> void:
 	QVoxelUi.set_dock_width(QVoxelUi.dock_width() - delta)
 	_dock.refit()
-	_sync_rails()
+	_sync_insets()
 	hud.set_right_inset(_right_inset)
 	_gizmo.right_inset = _right_inset
 

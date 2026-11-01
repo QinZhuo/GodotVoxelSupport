@@ -515,6 +515,21 @@ static func panel(margin := -1, bg := SURFACE) -> PanelContainer:
 	return p
 
 
+## 侧栏面板（贴窗口左右边、贯通上下的那条长栏）。
+## 【为什么单独一个】一条栏就是**一块**面板：贴边不圆角、只在朝画布那一侧画分隔线。
+## 再套一层底板、或反过来在栏里塞一张卡片，描边与圆角就会各画一遍 —— 看着像几层浮窗叠着。
+## `side` 传这条栏在屏幕的哪一侧（SIDE_LEFT / SIDE_RIGHT）。
+static func side_panel(side: Side, pad_x := -1, pad_y := -1) -> StyleBoxFlat:
+	var sb := box(SURFACE_SOLID, BORDER, 0, 0, pad_x, pad_y)
+	sb.set_border_width(SIDE_RIGHT if side == SIDE_LEFT else SIDE_LEFT, 1)
+	return sb
+
+
+## 侧栏整宽 = 内容宽 + 两侧同宽的缝（缝就是内容的内边距，栏贴边不另留白）。
+static func side_width(content_w: float) -> float:
+	return content_w + space_m() * 2.0
+
+
 static func vbox(sep := -1) -> VBoxContainer:
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", space_s() if sep < 0 else sep)
