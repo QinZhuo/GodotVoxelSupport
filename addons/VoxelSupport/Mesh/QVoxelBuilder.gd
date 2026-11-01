@@ -2,8 +2,9 @@
 class_name QVoxelBuilder
 extends RefCounted
 
-## 程序化建模的**统一入口**：图元（`VoxelPrimitives`，与画笔同一实现）+ 调色板 + 落盘（`QVoxelFile`）。
-## 【给谁用】脚本 / AI 生成 `.qvx`：
+## 单模型的轻量构造器：图元（`VoxelPrimitives`，与画笔同一实现）+ 调色板 + 落盘。
+## 【和 QVoxelScript 的分工】脚本 / AI 走 `QVoxelScript`（多模型、帧、材质、相机、文件读写都齐）；
+## 这里只保留"一个字典装模型"的最快路径，适合纯算法测试或极简生成：
 ##     var b := QVoxelBuilder.new()
 ##     var skin := b.add_material(Color(0.79, 0.54, 0.36))
 ##     b.box(Vector3i(12, 23, 4), Vector3i(17, 28, 9), skin)
@@ -118,15 +119,19 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 	return doc
 
 
-## 写成 `.qvx`（含 CRC）。返回是否成功。
+## 落盘：按**扩展名**选格式（`.vox` 走出口校验，其余按 `.qvx` 工程，含 CRC）。返回是否成功。
+## 【`.qvx` 走原地序列化】HEAD.bounds 按实际体素块对齐（比过一遍世界更紧凑）。
 func save(path: String) -> bool:
-	var f := FileAccess.open(path, FileAccess.WRITE)
-	if f == null:
-		push_error("[QVoxelBuilder] 无法写入 %s" % path)
-		return false
-	f.store_buffer(QVoxelFile.serialize(to_document(), true))
-	f.close()
-	return true
+	var p := QVoxelFileIO.ensure_extension(path)
+	if not QVoxelFileIO.is_vox_path(p):
+		var f := FileAccess.open(p, FileAccess.WRITE)
+		if f == null:
+			push_error("[QVoxelBuilder] 无法写入 %s" % p)
+			return false
+		f.store_buffer(QVoxelFile.serialize(to_document(), true))
+		f.close()
+		return true
+	return QVoxelFileIO.save(QVoxelWorld.from_document(to_document()), p)
 
 
 # 内部

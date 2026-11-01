@@ -403,6 +403,21 @@ func resize_grid(new_size: Vector3i) -> void:
 	content_changed.emit()
 
 
+# 任意点集写入（画笔、图元、脚本 paint 的共同落点）
+
+## 批量写一批格子（当前体素源）。返回实际改动的格数。
+## 【为什么不逐格 set_voxel】单格写要"取块 → 改 1 格 → 写回整块"，写回会整块复制
+## （B³×4 字节）；几万格就是几 GB 的搬运。这里先按块分桶，每块只取一次、只写回一次
+## —— 与 `_write_box` 的"逐块推进"同一思路，只是盒换成了任意点集。
+func paint_cells(cells: Array[Vector3i], material_id: int) -> int:
+	return _paint_cells_table(source_blocks(), cells, material_id)
+
+
+## 同 paint_cells，写到指定帧（`frame < 0` = 静态源）。
+func paint_frame_cells(frame: int, cells: Array[Vector3i], material_id: int) -> int:
+	return _paint_cells_table(blocks_for(frame), cells, material_id)
+
+
 # 内部：盒写入（唯一的体素写入路径，fill/set/apply/undo 全走它）
 
 ## 盒内写入。data 为空 = 用 material_id 填满；否则 data 是按 VoxelVolume.index_of 布局的
@@ -464,6 +479,40 @@ func _write_box(target: Dictionary, a: Vector3i, b: Vector3i, material_id: int,
 			for bk in touched:
 				if _is_block_empty(target.get(bk)):
 					target.erase(bk)
+		base_revision += 1
+	return n
+
+
+## 点集写入（按表）。越界格静默丢弃；块创建、空块回收、标脏与 `_write_box` 同一套约定。
+func _paint_cells_table(target: Dictionary, cells: Array[Vector3i], material_id: int) -> int:
+	var bs := block_size
+	var buckets := {}
+	for p in cells:
+		if p.x < 0 or p.y < 0 or p.z < 0 \
+				or p.x >= grid_size.x or p.y >= grid_size.y or p.z >= grid_size.z:
+			continue
+		var bk := QVoxelSpec.block_of(p, bs)
+		var o := QVoxelSpec.block_origin(bk, bs)
+		var idx := QVoxelSpec.local_index(p.x - o.x, p.y - o.y, p.z - o.z, bs)
+		var list: PackedInt32Array = buckets.get(bk, PackedInt32Array())
+		list.append(idx)
+		buckets[bk] = list
+	var n := 0
+	for bk: Vector3i in buckets:
+		var blk := _block_of_table(target, bk)
+		if blk.is_empty():
+			if material_id == 0:
+				continue  # 擦空一个未分配的块：本就不存在
+			blk = PackedInt32Array()
+			blk.resize(QVoxelSpec.block_volume(bs))
+		for idx in buckets[bk]:
+			if blk[idx] != material_id:
+				blk[idx] = material_id
+				n += 1
+		target[bk] = blk
+		if material_id == 0 and _is_block_empty(blk):
+			target.erase(bk)
+	if n > 0:
 		base_revision += 1
 	return n
 

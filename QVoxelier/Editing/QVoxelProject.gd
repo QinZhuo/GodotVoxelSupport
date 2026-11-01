@@ -1,87 +1,59 @@
 @tool
 class_name QVoxelProject
 extends RefCounted
-## 工程文件（`.qvx`）读写：**世界 ⇄ 字节 ⇄ 磁盘** 这一段接线。
-## 【为什么它在应用层】"编辑模型 ⇄ 传输结构"（`QVoxelWorld.to_document/from_document`）与
-## "传输结构 ⇄ 字节"（`QVoxelFile`）都在插件里，缺的只是"字节 ⇄ 磁盘"。而这一步必须用框架的
-## `SaveTool`（原子写 + 滚动备份 + 损坏回退）—— DEVFramework 与 VoxelSupport 两插件之间禁止
-## 互引，所以这条接线只能在 QVoxelier 这一侧。
-## 【为什么单独一类，而不是塞进视口】视口要知道的是"能不能打开 / 怎么提示用户"；
-## "文件长什么样、写坏了怎么办"是另一个问题。分开之后本类无节点、无场景树、不碰界面，
-## 于是往返、坏字节、备份回退这些边界都能在 TestCase 里逐条钉住（视口本身没有可测的纯逻辑）。
-## 【失败一律用返回值表达】读失败返回 null、写失败返回 Error —— 调用方据此提示，
-## 而不是让一个坏文件把整个应用打崩。
+## 工程文件读写（`.qvx` / `.vox`）：在 `QVoxelFileIO` 的字节层之上再套一层**落盘策略**。
+## 【为什么还留这一层】格式分派（按扩展名选编码器、`.vox` 烘焙）已经下沉到插件层，
+## 编辑器这边唯一多出来的是框架的 `SaveTool`（原子写 + 滚动备份 + 损坏回退）；
+## 而 DEVFramework 与 VoxelSupport 两插件禁止互引，这条接线只能落在 QVoxelier 一侧。
+## 【失败一律用返回值表达】读失败 null、写失败 Error / 空字节 —— 坏文件不该打崩应用。
 
-## 工程文件扩展名（"另存为"补后缀、拖放过滤都用它）。
-const EXTENSION := "qvx"
+const EXTENSION := QVoxelFileIO.PROJECT_EXTENSION
 
 
-# 对外
-
-## 保存：世界 → 字节 → 原子落盘（含滚动备份）。返回 Error。
+## 保存：世界 → 字节（按扩展名选编码器）→ 原子落盘（含滚动备份）。返回 Error。
 static func save(world: QVoxelWorld, path: String) -> Error:
 	if world == null or path.is_empty():
 		return ERR_INVALID_PARAMETER
-	var bytes := encode_for(world, path)
+	var bytes := QVoxelFileIO.encode(world, path)
 	if bytes.is_empty():
 		return ERR_INVALID_DATA
 	return SaveTool.save_data(path, bytes, SaveTool.Mode.BYTES)
 
 
-## 按扩展名选编码器：`.vox` 走 `VoxWriter`（出口格式），其余按 `.qvx` 工程。
-## 【为什么分派只在这一句】编码是格式层的事、落盘是框架的事；本类只回答"用哪个编码器"，
-## 于是 `.vox` 与 `.qvx` 共享同一条原子写 + 备份回退的落盘路径。
-static func encode_for(world: QVoxelWorld, path: String) -> PackedByteArray:
-	return VoxWriter.encode(world) if is_vox_path(path) else encode(world)
-
-
-## 读取：文件 → 字节 → 文档 → 世界。文件缺失 / 为空 / 不是合法 `.qvx` 一律返回 null。
-## 【把 `decode` 交给 SaveTool，而不是"读完再自己校验"】读得出来 ≠ 能用：`.qvx` 的签名 / CRC /
-## 结构校验是在**格式层**才知道结果的。若在框架外自己判，框架就只看到"字节读成功"，
-## 永远不会去翻备份 —— 文件写坏了只能报错，而"原子写 + 滚动备份"等于白做。
-## 把判据交回去之后，"写坏了"与"读不出来"在框架眼里是同一种失败，都退回上一次的存档。
-## 【`.vox` 也能直接打开】按扩展名分派：`.vox` 走 VoxAssetWorld.to_world() 得到同一个 QVoxelWorld。
-## 于是"打开 MagicaVoxel 文件来编辑"与"打开 .qvx 工程"是同一个动作、同一条会话路径。
+## 读取：文件 → 字节 → 文档 → 世界。
+## 【`decode` 交给 SaveTool】读得出来 ≠ 能用 —— 签名 / CRC / 结构校验只有格式层知道结果。
+## 把判据交回去之后，"写坏了"与"读不出来"在框架眼里是同一种失败，都会退回上一次的存档。
 static func load_world(path: String) -> QVoxelWorld:
 	if path.is_empty() or not FileAccess.file_exists(path):
 		return null
-	if is_vox_path(path):
-		var vox := VoxAsset.from_asset(path)
-		return VoxAssetWorld.to_world(vox) if vox != null else null
+	if QVoxelFileIO.is_vox_path(path):
+		return QVoxelFileIO.load_world(path)
 	return SaveTool.load_data(path, SaveTool.Mode.BYTES, decode) as QVoxelWorld
 
 
 ## 世界 → `.qvx` 字节（不落盘）。导出、剪贴板、测试都用它。
 static func encode(world: QVoxelWorld) -> PackedByteArray:
-	if world == null:
-		return PackedByteArray()
-	return QVoxelFile.serialize(world.to_document())
+	return QVoxelFileIO.encode(world)
 
 
-## 字节 → 世界（不读盘）。给"打开一份刚生成的字节"这类调用方用。
+## 字节 → 世界（不读盘）。
 static func decode(bytes: PackedByteArray) -> QVoxelWorld:
-	if bytes.is_empty():
-		return null
-	var doc := QVoxelFile.parse(bytes)
-	if doc == null:
-		return null
-	return QVoxelWorld.from_document(doc)
+	return QVoxelFileIO.decode(bytes)
 
 
-## 扩展名判定（大小写不敏感）：给"另存为"补后缀、给拖放过滤。
 static func is_project_path(path: String) -> bool:
-	return path.get_extension().to_lower() == EXTENSION
+	return QVoxelFileIO.is_project_path(path)
 
 
 ## 是否可由 `load_world` 打开（`.qvx` 工程 + `.vox` 外部文件）。
 static func is_openable(path: String) -> bool:
-	return is_project_path(path) or is_vox_path(path)
+	return QVoxelFileIO.is_openable(path)
 
 
 static func is_vox_path(path: String) -> bool:
-	return path.get_extension().to_lower() == VoxAsset.VOX_EXTENSION
+	return QVoxelFileIO.is_vox_path(path)
 
 
-## 补上缺失的后缀（已带 `.qvx` / `.vox` 就原样，否则按工程默认 `.qvx` 补）。
+## 补上缺失的后缀（已带 `.qvx` / `.vox` 就原样）。
 static func ensure_extension(path: String) -> String:
-	return path if is_openable(path) else path + "." + EXTENSION
+	return QVoxelFileIO.ensure_extension(path)

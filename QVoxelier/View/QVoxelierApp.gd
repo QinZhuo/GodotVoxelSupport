@@ -1801,16 +1801,15 @@ func _on_save_path_selected(path: String) -> void:
 	_write_project(QVoxelProject.ensure_extension(path))
 
 
-# ======= 外部程序化生成接口(脚本 / 运行时 MCP) =======
+# ======= 脚本接口(QVoxelScript 的实时分支) =======
 ##
-## 供外部以**字符串方法名**调用(`scene.call("script_xxx", ...)`), 于是调用方(QVoxelMCPTools)
-## 在编译期**不需要认识 QVoxelierApp**。
-## 只放**程序化生成模型**所需: 材质 / 写格(见 QVoxelEditSession.apply_cells) / 存盘 / 统计。
-## 编辑类操作(撤销 / 选区 / 剪贴板 / 帧)是给人按界面的, 不是脚本生成所需, 故不放这里。
-## 每个入口都复用应用内部同一条时间线/落盘路径, 不新开第二条写入通道。
+## 由 `QVoxelScript` 按**字符串方法名**调用(`app.call("script_xxx", ...)`), 于是脚本层在编译期
+## **不需要认识 QVoxelierApp**。`QVoxelScript` 里每个方法都有同名的 `script_xxx`, 参数一致。
+## 【铁律：只翻译，不另开门】一律转调应用内已有的那条路径(命令 / 时间线 / 落盘 / 会话),
+## 不新开第二条写入通道 —— 否则脚本改的和界面改的会落在两套撤销栈与两套刷新上。
 
 ## 新增材质(颜色 + PBR), 返回材质 ID。与色板"新增材质"按钮同一条命令(可撤销) + 同一次纹理刷新。
-func script_add_material(color: Color, metal := 0.0, rough := 0.8) -> int:
+func script_add_material(color: Color, metal := 0.0, rough := 0.8, emission := 0.0) -> int:
 	if world == null or session == null:
 		return -1
 	var cmd := QVoxelPropertyCommand.begin(world, &"materials", null, "新增材质")
@@ -1819,6 +1818,8 @@ func script_add_material(color: Color, metal := 0.0, rough := 0.8) -> int:
 		session.history.push(cmd)
 	world.set_material_scalar(id, &"metal", metal)
 	world.set_material_scalar(id, &"rough", rough)
+	if emission > 0.0:
+		world.set_material_scalar(id, &"emission", emission)
 	_sync_material(id)
 	_set_material(id)
 	return id
@@ -1854,15 +1855,353 @@ func script_new(grid := Vector3i.ZERO) -> bool:
 	return session != null
 
 
-## 改当前活动模型的分辨率(输出盒尺寸)。保留新旧尺寸交集内的体素, 超出部分丢弃 —— 与对象属性
-## 面板的"尺寸"走同一条可撤销命令(_resize_model → QVoxelResizeCommand)。尺寸非法 / 未变返回 false。
-func script_resize(size: Vector3i) -> bool:
-	if session == null or session.object == null:
+## 改分辨率(输出盒尺寸)。保留新旧交集内的体素, 超出部分丢弃 —— 与对象属性面板的"尺寸"
+## 走同一条可撤销命令(_resize_model → QVoxelResizeCommand)。`id < 0` = 当前模型。
+func script_resize(size: Vector3i, id := -1) -> bool:
+	var m := _target_model(id)
+	if m == null or size.x <= 0 or size.y <= 0 or size.z <= 0 or size == m.grid_size:
 		return false
-	if size.x <= 0 or size.y <= 0 or size.z <= 0 or size == session.object.grid_size:
-		return false
-	_resize_model(session.object, size)
+	_resize_model(m, size)
 	return true
+
+
+## 打开文件(`.qvx` / `.vox`)：与"打开"按钮同一条装载路径, 只是省掉未保存确认。
+func script_open(path: String) -> bool:
+	return open_project(path)
+
+
+## 导入外部内容(网格 → 体素化), 与拖放 / 导入菜单共用 import_source。
+func script_import(path: String, opts := {}) -> bool:
+	return await import_source(path, opts)
+
+
+## 导出网格到指定路径：与"导出"按钮同一条烘制路径(QVoxelMeshExport)。
+func script_export_mesh(path: String) -> bool:
+	if world == null:
+		return false
+	var p := _ensure_mesh_ext(path)
+	var err := QVoxelMeshExport.export(world, p)
+	if err != OK:
+		hud.flash("导出失败（错误码 %d）：%s" % [err, p.get_file()])
+		return false
+	_remember_dir(p)
+	hud.flash("已导出网格 %s" % p.get_file())
+	return true
+
+
+## 读 / 设活动模型(id > 0 才切换)。返回切换后的 model_id。
+func script_active(id := -1) -> int:
+	if session == null or session.object == null:
+		return 0
+	if id > 0 and world != null and world.find_model(id) != null and id != session.object.model_id:
+		_activate(id)
+	return session.object.model_id if session.object != null else 0
+
+
+## 全部模型(与脚本侧同一套字段)。
+func script_models() -> Array:
+	if world == null:
+		return []
+	var out: Array = []
+	for m in world.all_models():
+		out.append({
+			"id": m.model_id,
+			"name": m.display_name(),
+			"grid_size": [m.grid_size.x, m.grid_size.y, m.grid_size.z],
+			"offset": [m.offset.x, m.offset.y, m.offset.z],
+			"visible": _sess.node_visible(m),
+			"frames": m.frame_count(),
+			"solid": m.count_solid(),
+		})
+	return out
+
+
+## 全部节点(含组)。
+func script_nodes() -> Array:
+	if world == null:
+		return []
+	var out: Array = []
+	for n in world.all_nodes():
+		var p := world.find_parent(n)
+		out.append({
+			"id": world.node_id(n),
+			"kind": n.kind(),
+			"name": n.display_name(),
+			"parent": world.node_id(p) if p != null else 0,
+			"visible": _sess.node_visible(n),
+			"frames": (n as QVoxelModel).frame_count() if n.is_model() else 0,
+		})
+	return out
+
+
+func script_add_model(node_name := "", grid := Vector3i.ZERO, parent_id := 0) -> int:
+	if world == null:
+		return 0
+	var m := _sess.add_model(_find_node(parent_id) as QVoxelGroup)
+	if m == null:
+		return 0
+	if not node_name.is_empty():
+		_sess.rename_node(m, node_name)
+	if grid.x > 0 and grid.y > 0 and grid.z > 0 and grid != m.grid_size:
+		_resize_model(m, grid)
+	return m.model_id
+
+
+func script_add_group(node_name := "Group", parent_id := 0) -> int:
+	if world == null:
+		return 0
+	var g := _sess.add_group(_find_node(parent_id) as QVoxelGroup)
+	if g == null:
+		return 0
+	if not node_name.is_empty():
+		_sess.rename_node(g, node_name)
+	return world.node_id(g)
+
+
+func script_remove_node(id: int) -> bool:
+	var n := _find_node(id)
+	if n == null or (n.is_model() and world.all_models().size() <= 1):
+		return false
+	_sess.remove_node(n)
+	return true
+
+
+func script_rename_node(id: int, node_name: String) -> bool:
+	var n := _find_node(id)
+	if n == null:
+		return false
+	_sess.rename_node(n, node_name)
+	return true
+
+
+func script_move_node(id: int, parent_id: int, index := -1) -> bool:
+	var n := _find_node(id)
+	if n == null:
+		return false
+	_sess.move_node(n, _find_node(parent_id) as QVoxelGroup, index)
+	return true
+
+
+func script_set_offset(id: int, offset: Vector3i) -> bool:
+	var n := _find_node(id)
+	if n == null:
+		return false
+	_set_node_offset(n, offset)
+	return true
+
+
+func script_set_rotation(id: int, degrees: Vector3) -> bool:
+	var n := _find_node(id)
+	if n == null:
+		return false
+	_set_node_rotation(n, degrees)
+	return true
+
+
+func script_set_visible(id: int, on: bool) -> bool:
+	var n := _find_node(id)
+	if n == null:
+		return false
+	_sess.set_node_visible(n, on)
+	return true
+
+
+## 改材质颜色(与色板同一条可撤销命令 + 同一次纹理刷新)。
+func script_set_material_color(id: int, color: Color) -> bool:
+	if world == null or session == null or id <= 0 or id >= world.materials.size():
+		return false
+	var cmd := QVoxelPropertyCommand.begin(world, &"materials", null, "改材质颜色")
+	world.set_material_color(id, color)
+	if cmd.commit():
+		session.history.push(cmd)
+	_sync_material(id)
+	_set_material(id)
+	return true
+
+
+## 改 PBR 通道(负数 = 该项不动)。
+func script_set_material_pbr(id: int, metal := -1.0, rough := -1.0, emission := -1.0) -> bool:
+	if world == null or session == null or id <= 0 or id >= world.materials.size():
+		return false
+	var cmd := QVoxelPropertyCommand.begin(world, &"materials", null, "改材质 PBR")
+	if metal >= 0.0:
+		world.set_material_scalar(id, &"metal", metal)
+	if rough >= 0.0:
+		world.set_material_scalar(id, &"rough", rough)
+	if emission >= 0.0:
+		world.set_material_scalar(id, &"emission", emission)
+	if cmd.commit():
+		session.history.push(cmd)
+	_sync_material(id)
+	_set_material(id)
+	return true
+
+
+## 调色板(不含 0 号空气槽)。
+func script_materials() -> Array:
+	if world == null:
+		return []
+	var out: Array = []
+	for i in range(1, world.materials.size()):
+		out.append({
+			"id": i,
+			"color": world.material_color(i),
+			"metal": world.material_scalar(i, &"metal"),
+			"rough": world.material_scalar(i, &"rough"),
+			"emission": world.material_scalar(i, &"emission"),
+		})
+	return out
+
+
+## 程序化写格：与粘贴/清空同一条 apply_cells 时间线(可撤销)。返回改动格数。
+func script_paint(cells: Array[Vector3i], material := 1) -> int:
+	if session == null or cells.is_empty():
+		return 0
+	return session.apply_cells(cells, maxi(material, 0))
+
+
+func script_get_voxel(pos: Vector3i, id := -1) -> int:
+	var m := _target_model(id)
+	return m.get_voxel(pos.x, pos.y, pos.z) if m != null else 0
+
+
+func script_count_solid(id := -1) -> int:
+	var m := _target_model(id)
+	return m.count_solid() if m != null else 0
+
+
+func script_frames(id := -1) -> Dictionary:
+	var m := _target_model(id)
+	if m == null:
+		return {}
+	var durs: Array = []
+	for f in m.frames:
+		durs.append(f.duration_ms)
+	return {
+		"count": m.frame_count(),
+		"active": m.active_frame,
+		"fps": m.anim_fps,
+		"loop": m.anim_loop,
+		"durations": durs,
+	}
+
+
+## 在当前帧之后插一帧(`duplicate` = 复制当前帧)。返回新帧索引。
+func script_add_frame(duplicate := false, id := -1) -> int:
+	if not _focus_model(id):
+		return -1
+	_insert_frame(duplicate)
+	return session.object.active_frame
+
+
+func script_remove_frame(index: int, id := -1) -> bool:
+	if not _focus_model(id):
+		return false
+	var m := session.object
+	if not m.is_animated() or m.frame_count() <= 1 or index < 0 or index >= m.frame_count():
+		return false
+	_remove_frame(index)
+	return true
+
+
+func script_move_frame(from: int, to: int, id := -1) -> bool:
+	if not _focus_model(id) or world == null:
+		return false
+	var m := session.object
+	if not m.is_animated() or from == to:
+		return false
+	if from < 0 or from >= m.frame_count() or to < 0 or to >= m.frame_count():
+		return false
+	_move_frame(from, to)
+	return true
+
+
+func script_set_frame(index: int, id := -1) -> bool:
+	var m := _target_model(id)
+	if m == null or not m.is_animated() or index < 0 or index >= m.frame_count():
+		return false
+	if not _focus_model(id):
+		return false
+	_select_frame(index)
+	return true
+
+
+func script_set_frame_duration(index: int, ms: int, id := -1) -> bool:
+	if not _focus_model(id):
+		return false
+	var m := session.object
+	var f := m.frame_at(index) if m != null else null
+	if f == null:
+		return false
+	_run_frame_edit("改帧时长", func(md: QVoxelModel) -> void:
+		var f2 := md.frame_at(index)
+		if f2 != null:
+			f2.duration_ms = maxi(0, ms))
+	return true
+
+
+func script_set_anim(fps := 12, loop := true, id := -1) -> bool:
+	if not _focus_model(id):
+		return false
+	_set_anim_meta(&"anim_fps", maxi(1, fps), "改帧率")
+	_set_anim_meta(&"anim_loop", loop, "改循环")
+	return true
+
+
+func script_cameras() -> Array:
+	return world.cameras().duplicate(true) if world != null else []
+
+
+func script_add_camera(node_name := "camera") -> int:
+	if world == null:
+		return -1
+	var i := world.add_camera(node_name)
+	_sess.mark_dirty()
+	return i
+
+
+func script_remove_camera(index: int) -> bool:
+	if world == null or not world.remove_camera(index):
+		return false
+	_sess.mark_dirty()
+	return true
+
+
+func script_set_camera(index: int, key: String, value: Variant) -> bool:
+	if world == null or not world.set_camera_field(index, key, value):
+		return false
+	_sess.mark_dirty()
+	return true
+
+
+# --- script_* 的寻址助手(组用负 id, 见 QVoxelWorld.node_id) ---
+
+func script_world() -> QVoxelWorld:
+	return world
+
+
+func script_model(id := -1) -> QVoxelModel:
+	return _target_model(id)
+
+func _find_node(id: int) -> QVoxelNode:
+	return world.find_node(id) if world != null else null
+
+
+func _target_model(id: int) -> QVoxelModel:
+	if world == null:
+		return null
+	if id > 0:
+		return world.find_model(id)
+	return session.object if session != null else null
+
+
+## 把 `id` 指定的模型切成活动对象(帧操作要进它的撤销栈)。`id < 0` = 当前。
+func _focus_model(id: int) -> bool:
+	if _target_model(id) == null:
+		return false
+	if id > 0 and (session.object == null or session.object.model_id != id):
+		_activate(id)
+	return session != null and session.object != null
 
 
 ## 导出网格：把当前世界烘成三角网格，写成 glTF 2.0（`.glb`/`.gltf` 由扩展名决定）。

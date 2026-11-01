@@ -49,6 +49,11 @@ var offset: Vector3i:
 	set(value):
 		local_transform.origin = Vector3(value)
 
+## 组的运行时编号（模型不用它，走落盘的 `model_id`）。**不落盘**：
+## 只服务"脚本/树面板按标量定位一个组"这件事，重新读档后按遍历顺序重发。
+## 与 `model_id` 共用一套 id 空间，靠符号区分（见 QVoxelWorld.node_id）。
+var node_uid := 0
+
 ## 树面板里的展开状态。**纯 UI 状态**：不入档、不参与 signature（它不是数据，
 ## 展开与否不改变任何求值结果）。放在这里而不是面板里，是因为面板每次重投影都重建行，
 ## 状态得有地方活着。

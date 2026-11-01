@@ -156,25 +156,27 @@ func _emit_changed() -> void:
 
 ## 新建模型：尺寸随当前模型（"再做一个同样大小的"是最常见的心智模型）。
 ## 新模型会挂一条展示会话并**直接切过去** —— 建了却停在旧的上面，用户会以为没建成。
-func add_model(parent: QVoxelGroup) -> void:
+func add_model(parent: QVoxelGroup) -> QVoxelModel:
 	if world == null or session == null:
-		return
+		return null
 	# 尺寸随**当前输出盒**（= 屏幕上看到的那个大小），而不是手绘种子的尺寸：
 	# 当前模型若挂了平铺，照抄种子尺寸会做出一个明显更小的"同样大小"的模型。
 	var o := world.create_model("", session.output_size(), parent)
 	_sessions[o.model_id] = _make_session(o, world)
 	activate(o.model_id)
 	_record_structure(o, null, QVoxelStructureCommand.OFF_TREE, "新建模型")
+	return o
 
 
 ## 新建组。组没有内容，故只标脏 + 请 View 刷新（不切换编辑对象）。
-func add_group(parent: QVoxelGroup) -> void:
+func add_group(parent: QVoxelGroup) -> QVoxelGroup:
 	if world == null:
-		return
+		return null
 	var g := world.create_group("Group", parent)
 	_record_structure(g, null, QVoxelStructureCommand.OFF_TREE, "新建组")
 	hint.emit("已新建组")
 	changed.emit()
+	return g
 
 
 ## 删除节点（连同子树）。

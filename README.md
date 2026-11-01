@@ -160,3 +160,14 @@ Related properties are **hidden in the Inspector automatically** when they have 
 
 `res://demo/streaming_demo.tscn` — **key 0** switches between disk-file stream and procedural infinite world.
 Controls: WASD move, Q/E up/down, Space fast, 1 streaming on/off, 2 frustum culling on/off.
+
+## Voxel modeling (QVoxelier + scripts)
+
+`res://QVoxelier/QVoxelier.tscn` is a standalone voxel modeler built on this plugin.
+Its whole capability is also exposed to code through **`QVoxelScript`** — one method per UI action
+(models, groups, materials, voxels, frames, cameras, file I/O, mesh export) — which is what the
+MCP `voxel_help` tool / `voxel://api` resource documents, so AI can model without the GUI:
+`new_model` → `material` → `paint(VoxelPrimitives.*)` → `save`.
+
+`.qvx` is the project file (lossless), `.vox` the MagicaVoxel exchange format (≤ 256, 90° rotations,
+integer offsets, current frame only) — see `docs/QVX_FORMAT.md`.

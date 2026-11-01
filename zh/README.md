@@ -150,3 +150,13 @@ target.damage_ray(origin, direction, max_distance)
 
 `res://demo/streaming_demo.tscn` — 按键 **0** 在 磁盘文件流 与 程序化无限世界 间切换。
 操作：WASD 移动、Q/E 升降、空格加速、1 流式开关、2 视锥剔除开关。
+
+## 体素建模（QVoxelier + 脚本）
+
+`res://QVoxelier/QVoxelier.tscn` 是基于本插件的独立体素建模软件。它界面上能做的每个动作，
+代码侧都有对应方法 —— 统一入口 **`QVoxelScript`**（模型 / 组 / 材质 / 体素 / 帧 / 相机 /
+文件读写 / 网格导出），也就是 MCP 的 `voxel_help` 工具与 `voxel://api` 资源里的那份说明，
+所以 AI 不开界面也能建模：`new_model` → `material` → `paint(VoxelPrimitives.*)` → `save`。
+
+`.qvx` 是工程文件（无损），`.vox` 是 MagicaVoxel 交换格式（≤256、90° 旋转、整数平移、
+只写当前帧）—— 详见 `docs/QVX_FORMAT.md`。

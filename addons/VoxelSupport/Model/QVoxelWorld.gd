@@ -39,6 +39,11 @@ extends Resource
 ## CACH 块（派生数据，删掉语义为零）。求解缓存、缩略图这类东西放这里。
 var cach: Array = []
 
+## 组的运行时编号发号器（见 node_id / QVoxelNode.node_uid）。
+## 【为什么是 static】读档时编号由静态递归 `_node_from_entry` 发放，静态函数碰不到实例字段。
+## 全局单调递增顺带保证跨世界合并时不会撞号。
+static var _uid_seq := 1
+
 ## 每次"影响文件内容"的改动自增。UI 据此判断"是否需要提示保存"。
 var revision := 0
 
@@ -123,6 +128,7 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 	var kind := str(entry.get("kind", ""))
 	if kind == QVoxelNode.KIND_GROUP:
 		var g := QVoxelGroup.new()
+		g.node_uid = _take_uid()
 		_read_common(g, entry)
 		var kids: Variant = entry.get("children")
 		if kids is Array:
@@ -430,8 +436,37 @@ func create_model(node_name := "", grid := Vector3i.ZERO, parent: QVoxelGroup = 
 func create_group(group_name := "Group", parent: QVoxelGroup = null) -> QVoxelGroup:
 	var g := QVoxelGroup.new()
 	g.node_name = group_name
+	g.node_uid = _take_uid()
 	_attach(g, parent, -1)
 	return g
+
+
+## 取一个新组编号（见 _uid_seq）。
+static func _take_uid() -> int:
+	var v := _uid_seq
+	_uid_seq += 1
+	return v
+
+
+## 节点的标量 id：模型用落盘的 `model_id`（> 0），组用 `-node_uid`（< 0）。
+## 【为什么两套编号】模型 id 要进文件（.qvx 的 model_id、撤销命令都引用它），组不落盘；
+## 组合成一个 id 空间只靠符号区分，读写都只经过 node_id / find_node 这一对函数。
+func node_id(n: QVoxelNode) -> int:
+	if n == null:
+		return 0
+	return n.model_id if n.is_model() else -n.node_uid
+
+
+## 由标量 id 找回节点（node_id 的逆运算）。
+func find_node(id: int) -> QVoxelNode:
+	if id > 0:
+		return find_model(id)
+	if id == 0:
+		return null
+	for n in all_nodes():
+		if n.is_group() and n.node_uid == -id:
+			return n
+	return null
 
 
 ## 合并另一份世界：材质与模型全部并进本世界，材质 ID 整体平移（体素值跟着改）。
