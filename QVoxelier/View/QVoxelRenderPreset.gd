@@ -172,6 +172,53 @@ static func apply_environment(env: Environment, voxel_scale: float, quality: boo
 	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
 
 
+## ── 自发光照明（GI）─────────────────────────────────────────────
+## 材质的 emission 只让体素自己发亮，照不到邻居；"灯笼照亮屋子"只能靠 GI。
+## 三条路实测：SDFGI 免烘焙，但光晕出不了几个体素（+0.1 倍亮度）；LightmapGI 质量最好，
+## 却要 UV2 且只能在编辑器里烘（运行时无 API）；VoxelGI 的 `bake()` 是运行时 API，
+## 一次几百毫秒 —— 于是只在**布局（非编辑）层级**烘一次，编辑时每落笔重烘做不到也不需要。
+## GI 只在本盒内生效，贴边会切出硬边，故比模型大一圈。
+const GI_MARGIN := 1.12
+## 格边长目标（体素）：比体素小、比面片粗一点，发光体素才不会糊成一团。
+## 别往 0.25 压：那会让 32³ 网格跳到 256³，实测一次烘 1.7 秒（128³ 只要 0.4 秒）。
+const GI_CELL_VOXELS := 0.4
+## subdiv 是**指数**：0=64³ 1=128³ 2=256³ 3=512³。
+## 上限压在 2 —— 烘焙耗时随格数平方涨，512³ 在大模型上是秒级，编辑体验会崩。
+const GI_SUBDIV_MAX := 2
+## 世界变化后隔这么久才重烘：连续拖动 / 连笔只烘最后那一次。
+const GI_BAKE_DELAY := 0.5
+
+
+## 建 GI 探针。初始 `data` 为空（= 不生效），由调用方在布局层级烘。
+static func build_gi(parent: Node3D) -> VoxelGI:
+	if parent == null:
+		return null
+	var gi := VoxelGI.new()
+	gi.name = "VoxelGI"
+	parent.add_child(gi)
+	return gi
+
+
+## 把 GI 盒摆成"刚好罩住 aabb"并选好精度。
+## 返回 false 表示没有可照的东西（空世界），调用方应清掉 `data`（GI 随之失效）。
+static func fit_gi(gi: VoxelGI, aabb: AABB, voxel_scale: float) -> bool:
+	if gi == null or aabb.size == Vector3.ZERO:
+		return false
+	var size := aabb.size * GI_MARGIN
+	gi.position = aabb.get_center()
+	gi.size = size
+	var cell := maxf(voxel_scale * GI_CELL_VOXELS, 0.0001)
+	gi.subdiv = _subdiv_for(maxf(size.x, maxf(size.y, size.z)) / cell) as VoxelGI.Subdiv
+	return true
+
+
+static func _subdiv_for(cells: float) -> int:
+	var sub := 0
+	while sub < GI_SUBDIV_MAX and (64 << sub) < cells:
+		sub += 1
+	return sub
+
+
 ## 景深挂在相机上（4.x 从 Environment 移到了 CameraAttributes），且只在出图时开：
 ## 浏览与编辑时糊掉当前模型只会碍事。`focus_distance <= 0` 即关闭。
 static func apply_dof(camera: Camera3D, focus_distance: float) -> void:

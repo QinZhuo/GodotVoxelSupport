@@ -21,6 +21,9 @@ static func generate_mesh(voxel: VoxAsset, options: Dictionary, path: String = "
 
 
 # 材质魔术值：编辑器导入与运行时生成共用，避免两处漂移
+## 自发光倍率。20 不是随手调亮的 HDR 值 —— 它是把 MagicaVoxel 的自发光观感
+## （同一套 ACES + 曝光 1.8）对齐到本管线实测出来的倍率，**不要按直觉下调**：
+## 改它等于改所有已有模型的发光语义，动之前先拿 MagicaVoxel 出图重新对一遍。
 const MATERIAL_EMISSION_ENERGY := 20.0
 const MATERIAL_REFRACTION_SCALE := 0.01
 

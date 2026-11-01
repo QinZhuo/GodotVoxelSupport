@@ -48,6 +48,12 @@ extends Node3D
 @onready var hud: QVoxelierHud = $Hud
 ## 灯组由配方按 RIG 现建（数量/颜色/方位只写一份），不在 .tscn 里摆第二份数值。
 var _lights: Array = []
+## 自发光照明：只有 GI 能把 emission 照到周围（见 QVoxelRenderPreset 的 GI 段）。
+## 只在布局层级持有数据，编辑层级清空 `data`（等于关掉），不白养一份探针。
+var _gi: VoxelGI
+## 待烘标记 + 是否已有一次烘焙在排队（两者一起做"只烘最后状态"的防抖）。
+var _gi_dirty := false
+var _gi_waiting := false
 ## 环境光挂在视口自己的世界里（它靠 "enter world" 注册，跟着 3D 走才生效）。
 ## `_setup_sky` / `_apply_quality` 改的是它的 `environment`，即 3D 正在用的那一份。
 @onready var _env_node: WorldEnvironment = $ViewHost/View/ViewRoot/WorldEnvironment
@@ -252,6 +258,7 @@ func _ready() -> void:
 	_disable_focus(self)
 	_setup_sky()
 	_lights = QVoxelRenderPreset.build_rig(_view_root)
+	_gi = QVoxelRenderPreset.build_gi(_view_root)
 	_apply_render_mode()
 	# 光跟着视点走：转视角就要重新摆灯，否则会转到背光面。
 	camera.view_changed.connect(_on_view_changed)
@@ -664,6 +671,9 @@ func _rebuild_view() -> void:
 		r.visible = _sess.node_visible(s.object)
 
 	model.visible = _sess.node_visible(session.object)
+	# 几何/摆放变了 → 布局层级下的间接光要重烘（编辑层级没有 GI，不必排队）。
+	if _edit_mode == 1:
+		_request_gi_bake()
 
 
 ## 取景：把"有东西可落笔"的范围落进画面（新建 / 打开 / Home 键）。
@@ -682,26 +692,28 @@ func frame_view() -> void:
 func frame_world() -> void:
 	if world == null:
 		return
+	var box := _world_bounds()
+	if box.size == Vector3.ZERO:
+		frame_view()
+		return
+	camera.frame_aabb(box, true)
+
+
+## 所有模型按各自摆放合起来的世界包围盒（**世界单位**）。取景与 GI 盒共用同一份。
+func _world_bounds() -> AABB:
+	if world == null:
+		return AABB()
 	var vs := world.voxel_size()
+	var box := AABB()
 	var any := false
-	var lo := Vector3.ZERO
-	var hi := Vector3.ZERO
 	for m in world.all_models():
 		var sz := QVoxelEvalEngine.output_grid_size(m)
 		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
 			continue
 		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
-		if not any:
-			lo = bb.position
-			hi = bb.end
-			any = true
-		else:
-			lo = Vector3(minf(lo.x, bb.position.x), minf(lo.y, bb.position.y), minf(lo.z, bb.position.z))
-			hi = Vector3(maxf(hi.x, bb.end.x), maxf(hi.y, bb.end.y), maxf(hi.z, bb.end.z))
-	if not any:
-		frame_view()
-		return
-	camera.frame_aabb(AABB(lo * vs, (hi - lo) * vs), true)
+		box = bb if not any else box.merge(bb)
+		any = true
+	return AABB(box.position * vs, box.size * vs)
 
 
 ## 把一块"局部盒 [lo, lo+size)"按变换 xf 摆进世界后的轴对齐包围盒（体素单位）。
@@ -2292,6 +2304,64 @@ func _apply_render_mode() -> void:
 	QVoxelRenderPreset.apply_rig(_lights, camera.global_transform.basis, rich, camera.distance * 1.8)
 	if _env_node != null:
 		QVoxelRenderPreset.apply_environment(_env_node.environment, model.voxel_scale, rich, true)
+	# 自发光照明只在布局层级烧：它一次要几百毫秒，编辑时每落笔重烘是不可能的。
+	if _gi != null:
+		if rich:
+			_request_gi_bake()
+		else:
+			_gi.data = null
+
+
+## 排队重烘：世界一变就调，但只在**最后一次**变化后烘一次（连续拖动不该每帧烘）。
+func _request_gi_bake() -> void:
+	if _gi == null or _edit_mode != 1:
+		return
+	_gi_dirty = true
+	if _gi_waiting:
+		return
+	_gi_waiting = true
+	await get_tree().create_timer(QVoxelRenderPreset.GI_BAKE_DELAY).timeout
+	_gi_waiting = false
+	if not _gi_dirty or _edit_mode != 1 or _gi == null or not is_inside_tree():
+		return
+	_gi_dirty = false
+	_bake_gi()
+
+
+## 真正的那一次烘焙（同步，几百毫秒）。只让体素模型进 GI ——
+## 地板网格 / 选区线框 / gizmo / 预览块都是辅助物，进了 GI 就变成挡光或反光的假几何。
+func _bake_gi() -> void:
+	if _gi == null:
+		return
+	# 整个世界里没有一个自发光材质时，烘出来也是一片黑 —— 直接省掉几百毫秒的等待。
+	if world == null or not _has_emissive():
+		_gi.data = null
+		return
+	for n in _view_root.find_children("*", "GeometryInstance3D", true, false):
+		var voxel := _in_voxel_renderer(n)
+		(n as GeometryInstance3D).gi_mode = (GeometryInstance3D.GI_MODE_STATIC if voxel
+				else GeometryInstance3D.GI_MODE_DISABLED)
+	if not QVoxelRenderPreset.fit_gi(_gi, _world_bounds(), model.voxel_scale):
+		_gi.data = null
+		return
+	_gi.bake(_view_root, false)
+
+
+## 世界里有没有**在用的**自发光材质（调色板里有、但没摆出来的不算）。
+func _has_emissive() -> bool:
+	for id in world.used_materials():
+		if world.material_scalar(int(id), &"emission") > 0.0:
+			return true
+	return false
+
+
+func _in_voxel_renderer(n: Node) -> bool:
+	var p := n.get_parent()
+	while p != null and p != _view_root:
+		if p is VoxelRenderer:
+			return true
+		p = p.get_parent()
+	return false
 
 
 ## 视角一变就摆灯（只改朝向，能量与阴影不动）—— 这是"任何角度都好看"的唯一实现处。
