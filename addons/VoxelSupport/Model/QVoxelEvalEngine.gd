@@ -83,34 +83,26 @@ static func evaluate_world(world: QVoxelWorld, ctx: QVoxelEvalContext,
 	return res
 
 
-## 一个节点的输出盒尺寸（模型 = grid_size；组 = 子树内容并集包围盒）。UI / 装配用。
-static func output_grid_size(node: QVoxelNode) -> Vector3i:
+## 节点在**自身空间**的内容盒（体素单位）：模型 = [0, grid_size)，组 = 子节点按各自 offset
+## 摆放后的并集。**不含本节点自己的摆放变换** —— 平移 / 旋转只在 `world_transform` 上施加一次。
+## 【为什么不能直接用"旋转后的尺寸"】尺寸先转一次、盒子再乘一次变换，旋转就应用了两遍：
+## 尺寸换轴、盒子整体错位（.vox 把朝向写在每个 nTRN 上时尤其明显）。
+## 要世界盒就是 `world.world_transform(node) * local_box(node)`。
+static func local_box(node: QVoxelNode) -> AABB:
 	if node == null or not node.visible:
-		return Vector3i.ZERO
+		return AABB()
 	if node.is_model():
-		return _rotated_size((node as QVoxelModel).grid_size, node.local_transform.basis)
-	var g := node as QVoxelGroup
+		return AABB(Vector3.ZERO, Vector3((node as QVoxelModel).grid_size))
+	var box := AABB()
 	var any := false
-	var lo := Vector3i.ZERO
-	var hi := Vector3i.ZERO
-	for c in g.child_nodes:
-		if c == null or not c.visible:
+	for c in (node as QVoxelGroup).child_nodes:
+		var cb := local_box(c)
+		if cb.size.x <= 0.0 or cb.size.y <= 0.0 or cb.size.z <= 0.0:
 			continue
-		var sz := output_grid_size(c)
-		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
-			continue
-		var clo := c.offset
-		var chi := clo + sz
-		if not any:
-			lo = clo
-			hi = chi
-			any = true
-		else:
-			lo = Vector3i(mini(lo.x, clo.x), mini(lo.y, clo.y), mini(lo.z, clo.z))
-			hi = Vector3i(maxi(hi.x, chi.x), maxi(hi.y, chi.y), maxi(hi.z, chi.z))
-	if not any:
-		return Vector3i.ZERO
-	return _rotated_size(hi - lo, g.local_transform.basis)
+		cb.position += Vector3(c.offset)
+		box = cb if not any else box.merge(cb)
+		any = true
+	return box
 
 
 # 节点摆放（位置 + 旋转）的唯一应用点
@@ -174,25 +166,6 @@ static func _rotate_box(vol: PackedInt32Array, size: Vector3i, lo: Vector3i, bas
 				if m != 0:
 					out[row + x] = m
 	return {"volume": out, "size": nsize, "lo": mn}
-
-
-## 一块尺寸经轴对齐旋转后的包围盒尺寸（非轴对齐或恒等返回原尺寸）。
-static func _rotated_size(size: Vector3i, basis: Basis) -> Vector3i:
-	if size.x <= 0 or size.y <= 0 or size.z <= 0:
-		return size
-	var b := basis.orthonormalized()
-	if b.is_equal_approx(Basis.IDENTITY) or not _is_axis_aligned(b):
-		return size
-	var hi := size - Vector3i.ONE
-	var mn := Vector3i(2147483647, 2147483647, 2147483647)
-	var mx := Vector3i(-2147483648, -2147483648, -2147483648)
-	for cx in [0, hi.x]:
-		for cy in [0, hi.y]:
-			for cz in [0, hi.z]:
-				var ip := _round3(b * Vector3(cx, cy, cz))
-				mn = Vector3i(mini(mn.x, ip.x), mini(mn.y, ip.y), mini(mn.z, ip.z))
-				mx = Vector3i(maxi(mx.x, ip.x), maxi(mx.y, ip.y), maxi(mx.z, ip.z))
-	return mx - mn + Vector3i.ONE
 
 
 static func _round3(v: Vector3) -> Vector3i:

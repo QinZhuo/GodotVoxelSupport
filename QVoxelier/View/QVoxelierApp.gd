@@ -705,34 +705,28 @@ func frame_world() -> void:
 	camera.frame_aabb(box, true)
 
 
+## 模型在世界里的包围盒（体素单位）：本地内容盒 × 世界摆放。
+## 尺寸来自 `local_box`（不含旋转），旋转只由 `world_transform` 施加一次 —— 两步分开才不会转两遍。
+func _model_box(m: QVoxelModel) -> AABB:
+	if world == null or m == null:
+		return AABB()
+	return world.world_transform(m) * QVoxelEvalEngine.local_box(m)
+
+
 ## 所有模型按各自摆放合起来的世界包围盒（**世界单位**）。取景与 GI 盒共用同一份。
 func _world_bounds() -> AABB:
 	if world == null:
 		return AABB()
-	var vs := world.voxel_size()
 	var box := AABB()
 	var any := false
 	for m in world.all_models():
-		var sz := QVoxelEvalEngine.output_grid_size(m)
-		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
+		var bb := _model_box(m)
+		if bb.size == Vector3.ZERO:
 			continue
-		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
 		box = bb if not any else box.merge(bb)
 		any = true
+	var vs := world.voxel_size()
 	return AABB(box.position * vs, box.size * vs)
-
-
-## 把一块"局部盒 [lo, lo+size)"按变换 xf 摆进世界后的轴对齐包围盒（体素单位）。
-func _world_aabb(xf: Transform3D, lo: Vector3, size: Vector3) -> AABB:
-	var mn := Vector3(INF, INF, INF)
-	var mx := Vector3(-INF, -INF, -INF)
-	for cx in [lo.x, lo.x + size.x]:
-		for cy in [lo.y, lo.y + size.y]:
-			for cz in [lo.z, lo.z + size.z]:
-				var p := xf * Vector3(cx, cy, cz)
-				mn = Vector3(minf(mn.x, p.x), minf(mn.y, p.y), minf(mn.z, p.z))
-				mx = Vector3(maxf(mx.x, p.x), maxf(mx.y, p.y), maxf(mx.z, p.z))
-	return AABB(mn, mx - mn)
 
 
 ## 棚拍地面：布局层的一块纯色接影地板。无高光、不投影，只负责把太阳的投影接住。
@@ -785,15 +779,18 @@ func _rebuild_layout_overlay() -> void:
 		return
 	var vs := world.voxel_size()
 	for m in world.all_models():
-		var sz := QVoxelEvalEngine.output_grid_size(m)
-		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
+		var lb := QVoxelEvalEngine.local_box(m)
+		if lb.size == Vector3.ZERO:
 			continue
-		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
+		# 本地盒是体素单位：乘 voxel_scale 后与 `_display_transform` 同尺度（后者只承载旋转与位置）。
+		lb = AABB(lb.position * vs, lb.size * vs)
 		# 未选中：透明灰；选中 / 活动：与编辑模式选区线框同色（强调色）。
 		var col := Color(0.65, 0.65, 0.70, 0.35)
 		if _layout_sel.has(m.model_id) or (session != null and m == session.object):
 			col = Color(QVoxelUi.ACCENT, 0.95)
-		_layout_overlay.add_child(_line_box(AABB(bb.position * vs, bb.size * vs), col))
+		# 画的是**有向盒**：本地盒过该模型的摆放变换，框因此贴着模型一起转
+		# （与 Blender / Unity 的选中框同一套观感）；世界 AABB 只用于取景与点选这类粗筛。
+		_layout_overlay.add_child(_line_box(lb, col, _display_transform(m, vs)))
 	# 世界中心十字（表示原点位置）。
 	_layout_overlay.add_child(_cross_lines(maxf(vs * 4.0, 0.4), Color(0.95, 0.8, 0.3)))
 
@@ -808,10 +805,9 @@ func _pick_layout_model(screen: Vector2) -> QVoxelModel:
 	var best: QVoxelModel = null
 	var best_t := INF
 	for m in world.all_models():
-		var sz := QVoxelEvalEngine.output_grid_size(m)
-		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
+		var bb := _model_box(m)
+		if bb.size == Vector3.ZERO:
 			continue
-		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
 		var t := _ray_aabb(ro, rd, AABB(bb.position * vs, bb.size * vs))
 		if t >= 0.0 and t < best_t:
 			best_t = t
@@ -843,14 +839,15 @@ func _ray_aabb(ro: Vector3, rd: Vector3, bb: AABB) -> float:
 	return tmin
 
 
-## 一个轴对齐盒的 12 条棱（线段，与编辑模式的选区线框同一套观感）。
-func _line_box(bb: AABB, col: Color) -> MeshInstance3D:
+## 一个盒的 12 条棱（线段，与编辑模式的选区线框同一套观感）。
+## `xf` 用来摆**有向盒**（本地盒过模型摆放，框贴着模型转）；缺省即轴对齐盒。
+func _line_box(bb: AABB, col: Color, xf := Transform3D.IDENTITY) -> MeshInstance3D:
 	var c := []
 	for i in 8:
-		c.append(bb.position + Vector3(
+		c.append(xf * (bb.position + Vector3(
 				bb.size.x if (i & 1) else 0.0,
 				bb.size.y if (i & 2) else 0.0,
-				bb.size.z if (i & 4) else 0.0))
+				bb.size.z if (i & 4) else 0.0)))
 	var edges := [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7],
 			[0, 4], [1, 5], [2, 6], [3, 7]]
 	var im := ImmediateMesh.new()
@@ -1022,10 +1019,9 @@ func _end_box_select(add := false) -> void:
 	if not add:
 		_layout_sel.clear()
 	for m in world.all_models():
-		var sz := QVoxelEvalEngine.output_grid_size(m)
-		if sz.x <= 0 or sz.y <= 0 or sz.z <= 0:
+		var bb := _model_box(m)
+		if bb.size == Vector3.ZERO:
 			continue
-		var bb := _world_aabb(world.world_transform(m), Vector3.ZERO, Vector3(sz))
 		var c := (bb.position + bb.end) * 0.5 * vs
 		if r.has_point(_to_screen(camera.unproject_position(c))):
 			_layout_sel[m.model_id] = true
@@ -2937,9 +2933,7 @@ func _set_node_rotation(node: QVoxelNode, degrees: Vector3) -> void:
 
 ## 节点盒中心（体素单位，节点本地坐标系）—— 旋转绕它，与 .vox 的"模型居中后再转"一致。
 func _node_center_voxel(node: QVoxelNode) -> Vector3:
-	if node == null:
-		return Vector3.ZERO
-	return Vector3(QVoxelEvalEngine.output_grid_size(node)) * 0.5
+	return QVoxelEvalEngine.local_box(node).get_center()
 
 
 ## 把 base 的旋转换成 b，同时**保持盒中心 C 不动**（new*C == base*C）→ 原地自转，不甩到别处。
