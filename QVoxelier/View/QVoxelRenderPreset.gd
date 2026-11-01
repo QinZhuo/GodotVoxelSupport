@@ -6,63 +6,93 @@ extends RefCounted
 ## 半径按**体素**给：世界单位随 voxel_scale 变（默认 0.1），写死世界值一改缩放就失效。
 
 ## 视直径同时决定软阴影半影宽度与金属里那颗太阳盘的大小。
-## 1° 就够：半影再宽一点，低纹素密度下反而碎成台阶（角直径越大，PCSS 采样越容易露馅）。
-const SUN_ANGULAR := 1.0
+## 1° 时影子几乎是硬边，落在光滑地面上像贴了张黑纸；4 级级联 + 8192 之后纹素够密，
+## 给到 2.2° 只会得到柔和的半影，不会碎成台阶。
+const SUN_ANGULAR := 2.2
 
 ## 长焦取景：压缩透视，模型才像"摆拍的模型"而不是"游戏截图"。
 const FOV := 32.0
 
+## 照着 MagicaVoxel 的「胶片」面板抄：曝光 1.0、暗角 0、ACES、2.2。
+## MV 那个 2.2 是输出 gamma（Godot 的 sRGB 输出已等效，不需要再设），拿来当 ACES 白点正合适：
+## 1.0 线性压到 ~0.84，白车顶保住层次、红蓝警灯还是红蓝。
+## 【曾把白点开到 6、曝光补到 1.8】那是拿曲线去救"光打太猛"的高光，结果中间调一起被抬起来，
+## 整幅发灰发虚 —— 根子在灯太亮（见 RIG），曲线只是背锅的。
 const TONEMAP := Environment.TONE_MAPPER_ACES
-const TONEMAP_WHITE := 6.0
-## white = 6 是很"压"的曲线（1.0 亮度只落到 ~0.25），曝光必须跟着补，否则整幅欠曝。
-## 补过头则浅色 palette（白墙、浅灰基座）整片贴到纯白，高光全丢 —— 1.8 是两类模型的分界。
-const EXPOSURE := 1.8
-## 调色板本就不艳，再压一档立刻"干净"。
-const SATURATION := 0.92
+const TONEMAP_WHITE := 2.2
+const EXPOSURE := 0.95
+## MV 是"方向明暗 × 原色"的体素着色，颜色一点不掉；PBR + ACES 只要亮面逼近 1.0 就开始掉饱和
+## （青蓝车身的红通道被抬起来，看着发白）。补一层饱和把这部分拽回来，别再往灯上加。
+const SATURATION := 1.20
 
-const AO_VOXELS := 1.6
-const AO_INTENSITY := 2.2
+const AO_VOXELS := 2.2
+const AO_INTENSITY := 3.0
+## AO 只压环境光时几乎看不见；放到 0.45 才会在凹槽与接缝上留下暗线（体素模型的"立体感"多靠它）。
+const AO_LIGHT_AFFECT := 0.45
 const SSIL_VOXELS := 8.0
 
 ## 泛光只该负责"发光体自己的边缘"：真正的照明已交给 GI（见下文 GI 段），屏幕光晕再压一层
 ## 就只有糊掉发光体轮廓。故门槛抬到 2.0（普通白面 1.0 附近不再触发）、强度压到 0.2。
 ## 没有 GI 时这两个值会显得偏素 —— 但"素"是安全方向，过曝的发光体是救不回来的。
-const GLOW_THRESHOLD := 2.0
+const GLOW_THRESHOLD := 2.6
 const GLOW_INTENSITY := 0.2
 
-## 天空既是环境光也是反射源，亮度直接决定通透度；背景另给深色平涂，别把编辑界面刷成白天。
+## 天空既是环境光也是反射源，亮度直接决定通透度。
 const SKY_TOP := Color(0.34, 0.42, 0.55)
 const SKY_HORIZON := Color(0.66, 0.62, 0.56)
 const SKY_GROUND := Color(0.18, 0.17, 0.16)
 const SKY_GROUND_HORIZON := Color(0.30, 0.29, 0.27)
+## 编辑层用深色平涂，别把建模界面刷成白天。
 const BACKGROUND := Color(0.09, 0.10, 0.115)
+## 布局层是"看图"的层级，用中灰棚底衬托模型。
+## 【背景要给得比地面 albedo 亮】背景是**未经光照**的纯色，地面还要挨一轮太阳与环境光；
+## 两者用同一个值时，地面在屏幕上明显更亮，模型四周会多出一条硬邦邦的地平线。
+const STUDIO_BACKGROUND := Color(0.385, 0.395, 0.41)
+## 棚拍地面的 albedo（受光后屏幕上正好落到背景那一档，见 QVoxelierApp 的 ground）。
+## 【跟着 RIG 走】地面亮度 = albedo × 主光；主光一降，albedo 不提就塌成比背景暗的一条带。
+const GROUND_ALBEDO := Color(0.34, 0.35, 0.365)
+## 环境光只是补暗部：给满等于四面加了一层无影灯，方向光就白打了，各面亮度糊成一档。
+const SKY_AMBIENT := 0.5
+const AMBIENT_ENERGY := 0.15
+## 快照没有天空可借，环境光只能走颜色。亮度要跟视口那份"天空 × 强度"折算后的一档，
+## 否则同一批模型在视口里通透、导出就成了满屏奶白。
+const SNAPSHOT_AMBIENT := Color(0.16, 0.16, 0.17)
 
 const SHADOW_DISTANCE := 20.0
 
 ## 阴影伪影有三个来源，别混为一谈：
-## 1) 受光面上的斜向细纹 —— **shadow acne**，主因。bias 太小，45° 入射的梯级薄片深度梯度
-##    每纹素跨一个多纹素，0.03 这种室外大场景默认值必然起斜纹，实测 0.2 才压得住；
-## 2) 半影边缘的阶梯 —— **纹素密度**。4 级级联把一张图切成四份、max_distance 又把纹素摊到
-##    模型不存在的地方，故用 2 级级联 + 收紧距离（实测 4096→8192 无改善，说明瓶颈不在这里）；
+## 1) 受光面上的斜向细纹 —— **shadow acne**，靠 bias 压；
+## 2) 半影边缘的阶梯 —— **纹素密度**，靠级联与收紧距离（实测 4096→8192 无改善，瓶颈不在这）；
 ## 3) 斜边台阶 —— 其实是**几何边缘**，阴影贴图再大也治不了，只能靠 MSAA（见 .tscn 的 msaa_3d）。
-const SHADOW_BLUR := 1.2
-const SHADOW_BIAS := 0.2
-## 沿法线偏移是压 acne 的另一半：bias 管深度梯度，normal_bias 管陡坡。
-## 体素是厚实方块，给到 4.0 也不会像细杆模型那样明显漏光。
-const SHADOW_NORMAL_BIAS := 4.0
+## 【bias 必须以体素为尺度】旧值 0.2 / 4.0 是按"室外大场景"给的量级：一台 32³ 的小车只有
+## 3 个世界单位高，normal_bias 4.0 等于把整条阴影沿法线推出模型之外 —— 实测阴影**完全不出现**，
+## 画面只剩环境光，所有模型都像贴纸浮在底上。1 体素 ≈ 0.1 世界单位，故取 0.06 / 1.0。
+const SHADOW_BLUR := 2.6
+const SHADOW_BIAS := 0.06
+const SHADOW_NORMAL_BIAS := 1.0
+## 满强度投出来是纯黑洞（环境光进不去、边缘又硬）；留一点直射穿透，影子才落成"灰"。
+const SHADOW_OPACITY := 0.75
 
 ## 灯组：一律按**相机基准**摆位 —— 视点是最常变的东西，钉死在世界的灯一转就正对背光面。
 ## 方位角 0 = 正对观察者、负值偏屏幕左；仰角正值 = 灯在模型上方。
 ## 三点布光：主光定方向（唯一投影），辅光定暗部下限，轮廓光把边缘从深背景里剥出来，
-## 底光化掉体素朝下的死黑面。主辅比 3:1 上下 —— 再高只剩两块明暗，再低模型就发平。
+## 底光化掉体素朝下的死黑面。
+## 【能量别往 3 上堆】主光 2.9 时受光面的辐射亮度到 1.6 以上，ACES 一压就整片去饱和：
+## 青蓝车身洗成灰白、橙色褪成浅桃。
+## 【1.2 是量出来的，不是估的】过曝从来不是"白车顶辐射 1.0 就爆"，而是**整幅都停在
+## ACES 的肩部**：白顶 0.85、蓝顶 0.86、橙 0.8，所有面挤在同一档，眼睛只看到一片亮。
+## 主光 1.2 后白顶落到 0.78、蓝顶 0.79，明暗差回来了，颜色才立住。
+## 别再用"把背景压暗"去救过曝 —— 那只会让模型更黑地贴在灰底上，模型本身一点没降。
+## 【仰角也别抬到 48】太阳一高，顶面吃满、侧面只剩环境光，车身上半截亮下半截暗，
+## 明暗差被 ACES 压成两档 —— 而 MV 的侧面同样挨光。压到 41°，侧面才回到同一亮度区间。
 const RIG := [
-	{ "azimuth": -38.0, "elevation": 48.0, "energy": 1.7,
+	{ "azimuth": -38.0, "elevation": 41.0, "energy": 1.2,
 		"color": Color(1.0, 0.96, 0.91), "shadow": true, "sky": true },
-	{ "azimuth": 65.0, "elevation": 6.0, "energy": 0.45,
+	{ "azimuth": 65.0, "elevation": 6.0, "energy": 0.12,
 		"color": Color(0.86, 0.90, 1.0), "shadow": false, "sky": false },
-	{ "azimuth": 140.0, "elevation": 22.0, "energy": 0.9,
+	{ "azimuth": 140.0, "elevation": 22.0, "energy": 0.16,
 		"color": Color(1.0, 0.97, 0.94), "shadow": false, "sky": false },
-	{ "azimuth": 0.0, "elevation": -52.0, "energy": 0.18,
+	{ "azimuth": 0.0, "elevation": -52.0, "energy": 0.05,
 		"color": Color(0.90, 0.93, 1.0), "shadow": false, "sky": false },
 ]
 
@@ -125,10 +155,12 @@ static func _apply_shadow(light: DirectionalLight3D, enabled: bool, max_distance
 		return
 	light.light_angular_distance = SUN_ANGULAR
 	light.shadow_blur = SHADOW_BLUR
-	light.shadow_opacity = 1.0
+	# 满强度（1.0）投出来的影子是纯黑：环境光进不去、边缘又硬，观感像贴了张黑纸。
+	# 留一点直射穿透（0.62），影子才落成"灰"而不是"洞"。
+	light.shadow_opacity = SHADOW_OPACITY
 	light.shadow_bias = SHADOW_BIAS
 	light.shadow_normal_bias = SHADOW_NORMAL_BIAS
-	light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	light.directional_shadow_blend_splits = true
 	# 阴影距离跟着取景走：模型小、相机近时收紧，纹素才落得准。
 	light.directional_shadow_max_distance = maxf(max_distance, 5.0)
@@ -143,11 +175,15 @@ static func apply_environment(env: Environment, voxel_scale: float, quality: boo
 		return
 	if use_sky:
 		env.background_mode = Environment.BG_COLOR
-		env.background_color = BACKGROUND
+		env.background_color = STUDIO_BACKGROUND if quality else BACKGROUND
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-		env.ambient_light_sky_contribution = 1.0
-		env.ambient_light_energy = 1.0
+		env.ambient_light_sky_contribution = SKY_AMBIENT
+		env.ambient_light_energy = AMBIENT_ENERGY
 		env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	else:
+		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		env.ambient_light_color = SNAPSHOT_AMBIENT
+		env.ambient_light_energy = 1.0
 	env.tonemap_mode = TONEMAP
 	env.tonemap_white = TONEMAP_WHITE
 	env.tonemap_exposure = EXPOSURE
@@ -163,7 +199,8 @@ static func apply_environment(env: Environment, voxel_scale: float, quality: boo
 	env.ssao_radius = AO_VOXELS * vs
 	env.ssao_intensity = AO_INTENSITY
 	env.ssao_detail = 0.5
-	env.ssao_light_affect = 0.12
+	# 只压环境光（0.12）时 AO 几乎看不见；放到 0.45 才在体素的凹槽与接缝上留下暗线。
+	env.ssao_light_affect = AO_LIGHT_AFFECT
 	env.ssil_radius = SSIL_VOXELS * vs
 	env.ssil_intensity = 1.0
 	env.ssil_sharpness = 0.98

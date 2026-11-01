@@ -51,6 +51,11 @@ var _lights: Array = []
 ## 自发光照明：只有 GI 能把 emission 照到周围（见 QVoxelRenderPreset 的 GI 段）。
 ## 只在布局层级持有数据，编辑层级清空 `data`（等于关掉），不白养一份探针。
 var _gi: VoxelGI
+## 棚拍地面：布局层才显示的一块纯色接影地板。没有它，方向光的投影无处可落，
+## 模型就像贴纸浮在底上 —— 对比渲染图差的最大一块就是它。
+var _ground: MeshInstance3D
+## 上次同步阴影纵深时的视距（见 _sync_shadow_reach）。
+var _shadow_reach_d := -1.0
 ## 待烘标记 + 是否已有一次烘焙在排队（两者一起做"只烘最后状态"的防抖）。
 var _gi_dirty := false
 var _gi_waiting := false
@@ -259,6 +264,7 @@ func _ready() -> void:
 	_setup_sky()
 	_lights = QVoxelRenderPreset.build_rig(_view_root)
 	_gi = QVoxelRenderPreset.build_gi(_view_root)
+	_build_ground()
 	_apply_render_mode()
 	# 光跟着视点走：转视角就要重新摆灯，否则会转到背光面。
 	camera.view_changed.connect(_on_view_changed)
@@ -729,8 +735,42 @@ func _world_aabb(xf: Transform3D, lo: Vector3, size: Vector3) -> AABB:
 	return AABB(mn, mx - mn)
 
 
+## 棚拍地面：布局层的一块纯色接影地板。无高光、不投影，只负责把太阳的投影接住。
+func _build_ground() -> void:
+	_ground = MeshInstance3D.new()
+	_ground.name = "StudioGround"
+	_ground.mesh = PlaneMesh.new()
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = QVoxelRenderPreset.GROUND_ALBEDO
+	mat.roughness = 1.0
+	mat.metallic_specular = 0.0
+	_ground.material_override = mat
+	_ground.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_ground.visible = false
+	_view_root.add_child(_ground)
+
+
+## 铺在**所有模型的最低处**（不是 y=0：模型摆到半空时也该有东西接着投影），
+## 边长取世界包围盒水平尺寸的数倍 —— 大到一个投影都出不了边界。
+func _fit_ground() -> void:
+	if _ground == null:
+		return
+	var box := _world_bounds()
+	_ground.visible = _edit_mode == 1 and box.size != Vector3.ZERO
+	if not _ground.visible:
+		return
+	var plane := _ground.mesh as PlaneMesh
+	var side := maxf(box.size.x, box.size.z) * 3.0
+	if not is_equal_approx(plane.size.x, side):
+		plane.size = Vector2(side, side)
+	var pos := Vector3(box.get_center().x, box.position.y, box.get_center().z)
+	if not _ground.position.is_equal_approx(pos):
+		_ground.position = pos
+
+
 ## 布局叠加层：每个模型的不透明包围盒线框 + 世界中心十字。仅布局模式可见，随数据变化重画。
 func _rebuild_layout_overlay() -> void:
+	_fit_ground()
 	if _layout_overlay == null:
 		_layout_overlay = Node3D.new()
 		_layout_overlay.name = "LayoutOverlay"
@@ -995,6 +1035,20 @@ func _end_box_select(add := false) -> void:
 
 func _process(_delta: float) -> void:
 	_update_gizmo_size()
+	_sync_shadow_reach()
+
+
+## 阴影纵深 = 视距 + 场景半径（Godot 从**相机**量起）。拉远后不跟着放大，模型就会整片掉出
+## 阴影范围 —— 表现不是影子变淡，而是**投影完全消失**，看起来像贴纸。
+func _shadow_reach() -> float:
+	return maxf(camera.distance + _world_bounds().get_longest_axis_size(), 5.0)
+
+
+func _sync_shadow_reach() -> void:
+	if _lights.is_empty() or is_equal_approx(camera.distance, _shadow_reach_d):
+		return
+	_shadow_reach_d = camera.distance
+	(_lights[0] as DirectionalLight3D).directional_shadow_max_distance = _shadow_reach()
 
 
 ## gizmo 手柄**屏幕大小恒定**：旋转环半径占视口短边的比例（轴臂同理，见 gizmo 的 ARM/RING_R）。
@@ -2300,8 +2354,9 @@ func _setup_sky() -> void:
 ##   布局（世界）→ 全开，逼近渲染图。
 func _apply_render_mode() -> void:
 	var rich := _edit_mode == 1
-	# 阴影距离跟着取景走：模型小、相机近时收紧，纹素才落得准（原先是 ×3，大部分纹素摊在空处）。
-	QVoxelRenderPreset.apply_rig(_lights, camera.global_transform.basis, rich, camera.distance * 1.8)
+	_fit_ground()
+	_shadow_reach_d = camera.distance
+	QVoxelRenderPreset.apply_rig(_lights, camera.global_transform.basis, rich, _shadow_reach())
 	if _env_node != null:
 		QVoxelRenderPreset.apply_environment(_env_node.environment, model.voxel_scale, rich, true)
 	# 自发光照明只在布局层级烧：它一次要几百毫秒，编辑时每落笔重烘是不可能的。

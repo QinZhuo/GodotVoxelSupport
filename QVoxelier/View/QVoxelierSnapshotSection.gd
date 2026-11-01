@@ -338,9 +338,6 @@ func _sync_stage(res: QVoxelEvalResult) -> void:
 	env.background_mode = Environment.BG_CLEAR_COLOR if _transparent \
 		else Environment.BG_COLOR
 	env.background_color = BACKGROUND
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.44, 0.44, 0.44)
-	env.ambient_light_energy = 1.0
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_BG
 	# 色调映射 / AO / 辉光与视口共用同一份配方；透明背景下 AO 会在模型边缘留暗晕，故只在不透明时开。
 	QVoxelRenderPreset.apply_environment(env, vs, not _transparent, false)
