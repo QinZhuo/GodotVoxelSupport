@@ -367,15 +367,9 @@ static func _write_ids(world: QVoxelWorld) -> Array:
 	return out
 
 
-## 判"空气"只看**有没有颜色 / 金属度 / 自发光**。
-## 读端给未使用的调色板槽建出来的条目是 `rgba=0`（全透明黑）配 rough/hardness/mass 的默认值；
-## 若把 rough 也算进来，这些空槽会被当成真材质写满 255 个 —— `.qvx ↔ .vox` 往返就永远不稳
-## （第一次写 2 个槽，第二次写 255 个）。
+## 判"空气"的规则归 `VoxelMaterial` 所有（材质语义），这里只是本地别名。
 static func _is_air(entry: Dictionary) -> bool:
-	if int(entry.get("rgba", 0)) != 0:
-		return false
-	return int(entry.get("metal", 0)) == 0 and int(entry.get("e_r", 0)) == 0 \
-			and int(entry.get("e_g", 0)) == 0 and int(entry.get("e_b", 0)) == 0
+	return VoxelMaterial.is_air_entry(entry)
 
 
 # ---- 字节工具 ----

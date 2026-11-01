@@ -235,6 +235,27 @@ func test_deer_vox_unchanged() -> void:
 	assert_true(not ids.has(0), "colorIndex 0 不该出现（1..255 才是颜色）")
 
 
+## 材质表已满（256 项）时，合并必须复用"未被体素引用"的槽，而不是直接拒绝。
+## 从 `.vox` 读回来的世界正是这种形状：255 个槽都有颜色，实际只用到几十个。
+func test_merge_reuses_free_slots() -> void:
+	var a := _box_world()
+	while a.materials.size() < 256:
+		a.materials.append(VoxelMaterial.air_mate())
+	var b := _box_world()
+	var added: Array[QVoxelModel] = a.merge_from(b)
+	assert_eq(added.size(), 1, "表满时仍应能复用未引用的槽")
+	assert_eq(a.materials.size(), 256, "复用而不是继续增长")
+	if added.is_empty():
+		return
+	var ids := added[0].used_materials().keys()
+	ids.sort()
+	assert_eq(ids.size(), 2, "两个材质都该有归属")
+	assert_true(int(ids[0]) >= 3, "应落到空闲槽（1、2 已被 a 占用）")
+	# src_ids 排序后按顺序分配，于是 b 的 1/2 恰好落到槽 3/4。
+	assert_true(_same_color(a.material_color(3), b.material_color(1)), "第一个材质搬到槽 3")
+	assert_true(_same_color(a.material_color(4), b.material_color(2)), "第二个材质搬到槽 4")
+
+
 # 内部
 
 func _box_world() -> QVoxelWorld:

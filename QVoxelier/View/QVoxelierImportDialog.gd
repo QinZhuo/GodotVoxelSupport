@@ -10,9 +10,18 @@ extends ConfirmationDialog
 const RESOLUTIONS := [32, 64, 96, 128, 192, 256]
 
 var _resolution: OptionButton
+var _resolution_row: HBoxContainer
 var _append: CheckBox
 var _fill: CheckBox
 var _choosing_file := true
+
+
+## 体素文件（`.vox`）只需问"追加还是替换"：分辨率与实心是三角网格体素化才有的参数。
+## 注意这些控件只是隐藏，`options()` 仍返回完整字典 —— 调用方按类型取用，不必分支。
+func set_world_only(on: bool) -> void:
+	_resolution_row.visible = not on
+	_fill.visible = not on
+	title = "导入体素" if on else "导入模型"
 
 
 func _init() -> void:
@@ -29,7 +38,8 @@ func _init() -> void:
 	_resolution.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for r: int in RESOLUTIONS:
 		_resolution.add_item("最长边 %d 体素" % r)
-	box.add_child(_row("分辨率", _resolution))
+	_resolution_row = _row("分辨率", _resolution)
+	box.add_child(_resolution_row)
 
 	_append = _check("追加到当前工程（不勾选 = 替换整个工程）")
 	box.add_child(_append)

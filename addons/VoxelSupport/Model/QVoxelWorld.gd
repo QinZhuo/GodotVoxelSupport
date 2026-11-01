@@ -442,32 +442,65 @@ func merge_from(other: QVoxelWorld) -> Array[QVoxelModel]:
 	var added: Array[QVoxelModel] = []
 	if other == null or other == self:
 		return added
-	# 材质表容量是硬上限：装不下就整体放弃，而不是并进去一半、保存时静默丢材质。
-	if materials.size() + other.materials.size() - 1 > QVoxelSpec.MATERIAL_COUNT:
-		push_warning("[QVoxelWorld] 合并后材质数会超过 %d，已跳过" % QVoxelSpec.MATERIAL_COUNT)
+	# 只搬**实际用到的**材质，并按"旧 ID → 新 ID"建映射。
+	# 【为什么不能按 `materials.size()` 平移】材质表的长度不等于颜色数：从 `.vox` 读回来的
+	# 世界固定 256 项，其中绝大多数是空槽 —— 按表长判断会把"30 色的模型"算成"256 色"、
+	# 直接误判成装不下；照表长逐个 append 也会把一堆空槽灌进当前工程。
+	var src_ids := other.used_materials().keys()
+	src_ids.sort()
+	var slots: Array[int] = _free_material_slots(src_ids.size())
+	if slots.size() < src_ids.size():
+		push_warning("[QVoxelWorld] 材质槽已用尽（上限 %d），合并中止" % QVoxelSpec.MATERIAL_COUNT)
 		return added
-	var touched := false
-	# 材质 0 在两边都是空气，故只需拷 1..n，平移量 = 本世界原有材质数 - 1。
-	var shift := materials.size() - 1
-	for i in range(1, other.materials.size()):
-		materials.append((other.materials[i] as Dictionary).duplicate(true))
-		touched = true
+	# 先按需扩容到覆盖最大槽位，再逐条写 —— 中途不会留下"表长了但槽是空的"这种半成品。
+	var need := 0
+	for s in slots:
+		need = maxi(need, int(s) + 1)
+	while materials.size() < need:
+		materials.append(VoxelMaterial.air_mate())
+	var remap := {}
+	for k in src_ids.size():
+		var sid := int(src_ids[k])
+		var slot := int(slots[k])
+		materials[slot] = (other.materials[sid] as Dictionary).duplicate(true)
+		remap[sid] = slot
 	for m in other.all_models():
 		if m == null:
 			continue
 		var nm := create_model(m.node_name, m.grid_size, null)
 		nm.local_transform = m.local_transform
-		_copy_voxels(m, nm, shift)
+		_copy_voxels(m, nm, remap)
 		added.append(nm)
-	if touched:
+	if not remap.is_empty():
 		_touch()
 	return added
 
 
-## 把 src 的体素（连同帧动画与材质 ID 平移）复制进 dst。
-static func _copy_voxels(src: QVoxelModel, dst: QVoxelModel, shift: int) -> void:
+## 找出 n 个可写的材质槽：表尾还有空间就往后长，不够再复用**未被任何体素引用**的槽。
+## 【为什么判据是"没被引用"而不是"是空气"】`.vox` 的调色板是 255 色全表 —— 从它读回来的
+## 世界里几乎每个槽都有颜色，只是大多没被摆出来（实测 deer.vox：255 个槽全有颜色、只用到 30 个）。
+## 只有"未引用"的槽才能安全复用，否则 256 项的表永远合不进第二份。
+func _free_material_slots(n: int) -> Array[int]:
+	var out: Array[int] = []
+	var grow := QVoxelSpec.MATERIAL_COUNT - materials.size()
+	for k in mini(n, grow):
+		out.append(materials.size() + k)
+	if out.size() < n:
+		var used := used_materials()
+		for i in range(1, materials.size()):
+			if out.size() >= n:
+				break
+			if not used.has(i):
+				out.append(i)
+	if out.size() < n:
+		return []
+	return out
+
+
+## 把 src 的体素（连同帧动画与材质 ID 重映射）复制进 dst。
+static func _copy_voxels(src: QVoxelModel, dst: QVoxelModel, remap: Dictionary) -> void:
 	if not src.is_animated():
-		dst.blocks = _shift_table(src.blocks, shift)
+		dst.blocks = _remap_table(src.blocks, remap)
 		return
 	dst.make_animated()
 	for i in range(1, src.frame_count()):
@@ -477,23 +510,22 @@ static func _copy_voxels(src: QVoxelModel, dst: QVoxelModel, shift: int) -> void
 		var df := dst.frame_at(i)
 		if sf == null or df == null:
 			continue
-		df.blocks = _shift_table(sf.blocks, shift)
+		df.blocks = _remap_table(sf.blocks, remap)
 		df.duration_ms = sf.duration_ms
 	dst.anim_fps = src.anim_fps
 	dst.anim_loop = src.anim_loop
 	dst.anim_tags = src.anim_tags.duplicate(true)
 
 
-## 块表深拷 + 材质 ID 平移（0 恒为空，不参与平移）。
-static func _shift_table(src: Dictionary, shift: int) -> Dictionary:
+## 块表深拷 + 材质 ID 按映射表改写（0 恒为空；映射不到的退回 0，宁可少一格也不指向错色）。
+static func _remap_table(src: Dictionary, remap: Dictionary) -> Dictionary:
 	var out := {}
 	for k: Vector3i in src:
 		var buf: PackedInt32Array = (src[k] as PackedInt32Array).duplicate()
-		if shift != 0:
-			for i in buf.size():
-				var v := buf[i]
-				if v > 0:
-					buf[i] = v + shift
+		for i in buf.size():
+			var v := buf[i]
+			if v > 0:
+				buf[i] = int(remap.get(v, 0))
 		out[k] = buf
 	return out
 

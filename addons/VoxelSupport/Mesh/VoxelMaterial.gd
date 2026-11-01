@@ -56,6 +56,17 @@ static func air_mate() -> Dictionary:
 			"e_r": 0, "e_g": 0, "e_b": 0}
 
 
+## 这是不是"空条目"（没有颜色、没有金属度、没有自发光）。
+## 【为什么要这个判据】读端给未使用的调色板槽建出来的条目是 `rgba=0` 配 rough/hardness
+## 的默认值 —— 若把 rough 也算进来，空槽会被当成真材质（`.qvx ↔ .vox` 往返会写出 255 个空槽，
+## 合并世界时也会把空槽算进容量而误判"装不下"）。
+static func is_air_entry(entry: Dictionary) -> bool:
+	if int(entry.get("rgba", 0)) != 0:
+		return false
+	return int(entry.get("metal", 0)) == 0 and int(entry.get("e_r", 0)) == 0 \
+			and int(entry.get("e_g", 0)) == 0 and int(entry.get("e_b", 0)) == 0
+
+
 ## MATE 条目 → 材质。id 为条目下标，即材质ID。
 static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
 	var rgba := int(entry.get("rgba", 0)) & 0xFFFFFFFF

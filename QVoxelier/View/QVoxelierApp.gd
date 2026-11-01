@@ -267,7 +267,7 @@ func _build_ui() -> void:
 	_toolbar.save_requested.connect(save_project)
 	_toolbar.save_as_requested.connect(save_project_as)
 	_toolbar.export_mesh_requested.connect(export_mesh)
-	_toolbar.import_model_requested.connect(request_import_model)
+	_toolbar.import_model_requested.connect(request_import)
 	_toolbar.render_requested.connect(_toggle_render_popup)
 	_toolbar.undo_requested.connect(_undo)
 	_toolbar.redo_requested.connect(_redo)
@@ -1678,12 +1678,30 @@ func _on_mesh_path_selected(path: String) -> void:
 	hud.flash("已导出网格 %s" % path.get_file())
 
 
-## 导入模型（path 为空 = 先问参数再选文件；非空 = 拖放进来的，只问参数）。
+## 一份外部内容的来源。
+## 【为什么集中在一处】"什么文件、怎么进来"原先散在三处（`is_openable` / `MeshAccess.handles`
+## / 拖放的两段 if），加一种格式要改三遍，漏一处就表现为"拖进去没反应"。
+enum SrcKind { NONE, PROJECT, WORLD, MESH }
+
+
+static func source_kind(path: String) -> SrcKind:
+	if QVoxelProject.is_project_path(path):
+		return SrcKind.PROJECT
+	if QVoxelProject.is_vox_path(path):
+		return SrcKind.WORLD
+	if MeshAccess.handles(path):
+		return SrcKind.MESH
+	return SrcKind.NONE
+
+
+## 导入（path 为空 = 先问参数再选文件；非空 = 拖放进来的，只问参数）。
 ## 【为什么先参数后文件】分辨率决定内存（256³ 是 67MB），追加还是替换决定当前工程存亡 ——
 ## 两者都必须在动手前定，选完文件再问等于让人重来。
-func request_import_model(path := "") -> void:
+func request_import(path := "") -> void:
 	_pending_import_path = path
 	_import_opts = {}
+	# 已知是体素文件时只问"追加/替换"：分辨率与实心是三角网格才有的参数。
+	_import_dialog.set_world_only(not path.is_empty() and source_kind(path) == SrcKind.WORLD)
 	_import_dialog.set_defaults(import_resolution, false, true, path.is_empty())
 	_import_dialog.popup_centered()
 
@@ -1696,20 +1714,53 @@ func _on_import_options() -> void:
 	if path.is_empty():
 		_model_dialog.popup_centered_ratio(0.7)
 	else:
-		_confirm_discard("导入模型", _import_now.bind(path))
+		_confirm_discard("导入", _import_now.bind(path))
 
 
 func _on_model_path_selected(path: String) -> void:
-	_confirm_discard("导入模型", _import_now.bind(path))
+	_confirm_discard("导入", _import_now.bind(path))
 
 
 func _import_now(path: String) -> void:
-	import_model(path, _import_opts)
+	import_source(path, _import_opts)
 
 
-## 外部网格 → 体素 → **替换**当前工程（与打开 .vox 同一条装配路径）。失败时视口保持原样。
-## 【协程】加载与逐帧体素化都会让出帧，界面不冻。`opts`：{resolution, append, fill}。
+## 一份外部文件 → 当前工程。
+## `.qvx` 等同"打开"（工程替换、路径跟着换）；`.vox` 与三角网格则**可选追加** ——
+## 追加时当前工程原地长大、工程路径不变。三条路共用 `_adopt_world` 的接管尾部。
+## 【协程】网格路径要加载 + 逐帧体素化，都会让出帧，界面不冻。
+func import_source(path: String, opts := {}) -> bool:
+	match source_kind(path):
+		SrcKind.PROJECT:
+			return open_project(path)
+		SrcKind.WORLD:
+			var loaded := QVoxelProject.load_world(path)
+			if loaded == null:
+				hud.flash("打不开这个体素文件（缺失或已损坏）：%s" % path.get_file())
+				return false
+			if bool(opts.get("append", false)) and world != null:
+				return _append_world(loaded, path.get_file())
+			# 替换 = 打开它：路径跟着换，Ctrl+S 存回原文件。
+			if _adopt_world(loaded, path, false) == null:
+				hud.flash("这个文件里没有可编辑的对象：%s" % path.get_file())
+				return false
+			var total := loaded.all_models().size()
+			hud.flash("已打开 %s%s" % [path.get_file(),
+					"（共 %d 个模型，可在右侧「层级」里切换）" % total if total > 1 else ""])
+			return true
+		SrcKind.MESH:
+			return await _import_mesh(path, opts)
+	hud.flash("不认得的文件：%s" % path.get_file())
+	return false
+
+
+## 兼容旧调用点（网格专用）。新代码请用 `import_source`。
 func import_model(path: String, opts := {}) -> bool:
+	return await _import_mesh(path, opts)
+
+
+## 三角网格 → 体素 → 当前工程。`opts`：{resolution, append, fill}。
+func _import_mesh(path: String, opts: Dictionary) -> bool:
 	var resolution := int(opts.get("resolution", import_resolution))
 	var scene: Dictionary = await MeshAccess.load_scene(path, self)
 	if scene.is_empty():
@@ -1721,7 +1772,7 @@ func import_model(path: String, opts := {}) -> bool:
 		hud.flash("体素化失败（模型里没有可用三角面）：%s" % path.get_file())
 		return false
 	if bool(opts.get("append", false)) and world != null:
-		return _append_import(imported, path, resolution)
+		return _append_world(imported, path.get_file(), "（最长边 %d）" % resolution)
 	var obj := _adopt_world(imported, "", true)
 	if obj == null:
 		hud.flash("体素化结果为空：%s" % path.get_file())
@@ -1732,18 +1783,18 @@ func import_model(path: String, opts := {}) -> bool:
 	return true
 
 
-## 追加：把导入结果的模型与材质并进**当前世界**（不换掉它）。工程路径保持不变。
-func _append_import(imported: QVoxelWorld, path: String, resolution: int) -> bool:
-	var added: Array[QVoxelModel] = world.merge_from(imported)
+## 追加：把一份现成世界的模型与材质并进**当前世界**（不换掉它），工程路径保持不变。
+## `.vox` 与三角网格共用这一条 —— 素材从哪来，与"并进去"这件事无关。
+func _append_world(src: QVoxelWorld, label: String, suffix := "") -> bool:
+	var added: Array[QVoxelModel] = world.merge_from(src)
 	if added.is_empty():
-		hud.flash("这个模型里没有可用的体素：%s" % path.get_file())
+		hud.flash("没有可并进当前工程的内容：%s" % label)
 		return false
 	_install(world, added[0])
 	_sess.mark_dirty()
 	_update_title()
 	var anim := ("，%d 帧体素动画" % added[0].frame_count()) if added[0].is_animated() else ""
-	hud.flash("已追加 %s → %s（最长边 %d）%s" % [path.get_file(), str(added[0].grid_size),
-			resolution, anim])
+	hud.flash("已追加 %s → %s%s%s" % [label, str(added[0].grid_size), suffix, anim])
 	return true
 
 
@@ -1762,8 +1813,10 @@ func _build_dialogs() -> void:
 	_mesh_dialog.add_filter("*.gltf", "glTF 文本（.gltf）")
 	_mesh_dialog.file_selected.connect(_on_mesh_path_selected)
 
-	# 导入模型：过滤项由 MeshAccess 生成（格式事实只有一处），先过参数框再选文件。
-	_model_dialog = _make_fs_dialog(FileDialog.FILE_MODE_OPEN_FILE, "导入模型")
+	# 导入：体素文件与三角网格都能进（`.vox` 可追加），过滤项由 MeshAccess 生成 ——
+	# 格式事实只有一处，加 `.ply` 时不用改这里。
+	_model_dialog = _make_fs_dialog(FileDialog.FILE_MODE_OPEN_FILE, "导入")
+	_model_dialog.add_filter("*.%s" % VoxAsset.VOX_EXTENSION, "MagicaVoxel 体素（.vox）")
 	for spec: Array in MeshAccess.filter_specs():
 		_model_dialog.add_filter(spec[0], spec[1])
 	_model_dialog.file_selected.connect(_on_model_path_selected)
@@ -1858,13 +1911,14 @@ static func _default_dir() -> String:
 ## 把 `.qvx` / `.vox` / 外部模型拖进窗口即打开（建模时最顺手的一步）；其它文件一律忽略。
 func _on_files_dropped(files: PackedStringArray) -> void:
 	for f in files:
-		# 拖进来同样是"整体换掉当前世界"，走 request_* 才有那道未保存确认。
-		if QVoxelProject.is_openable(f):
-			request_open(f)
-			return
-		if MeshAccess.handles(f):
-			request_import_model(f)
-			return
+		match source_kind(f):
+			SrcKind.PROJECT:
+				request_open(f)
+				return
+			SrcKind.WORLD, SrcKind.MESH:
+				# `.vox` 与三角网格都走"导入"：能选追加，替换时也会保留工程路径。
+				request_import(f)
+				return
 	hud.flash("只认得 .%s 工程 / .%s 体素文件，以及 %s 模型"
 			% [QVoxelProject.EXTENSION, VoxAsset.VOX_EXTENSION, MeshAccess.describe()])
 
