@@ -24,12 +24,11 @@ static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext,
 	if node == null or not node.visible:
 		return res
 	res.epoch = ctx.epoch if ctx != null else 0
-	var frame := ctx.frame if ctx != null else 0
 	if node.is_model():
 		var m := node as QVoxelModel
 		res.volume = m.to_volume()
 		res.grid_size = m.grid_size
-		_place(res, Vector3i.ZERO, m.transform_at(frame))
+		_place(res, Vector3i.ZERO, m.local_transform)
 		res.input_signature = "%d|%d|%d,%d,%d|%d" % [
 				m.get_instance_id(), m.base_revision,
 				m.grid_size.x, m.grid_size.y, m.grid_size.z, m.active_frame]
@@ -38,7 +37,7 @@ static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext,
 	var comp := _composite(g.child_nodes, ctx)
 	res.volume = comp["volume"]
 	res.grid_size = comp["size"]
-	_place(res, comp["lo"], g.transform_at(frame))
+	_place(res, comp["lo"], g.local_transform)
 	res.input_signature = comp["key"]
 	return res
 

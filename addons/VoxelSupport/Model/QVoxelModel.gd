@@ -64,8 +64,9 @@ var anim_loop := true
 ## 缺省帧率（每秒帧数）。逐帧作画的手感偏慢，默认 4 fps（一秒 4 帧）。
 var anim_fps := 4
 
-## 命名区间（Aseprite 的 tag）：每项 `{name, from, to, direction}`，
-## `direction ∈ {forward, reverse, pingpong}`。缺省空（不写 anim.tags）。
+## 命名区间（Aseprite 的 tag）：每项 `{name, from, to, direction, color, repeat}`。
+## `direction ∈ {forward, reverse, pingpong, pingpong_reverse}`；`repeat=0` 表示无限循环。
+## 缺省空（不写 anim.tags）。
 var anim_tags: Array = []
 
 ## 基础体素的版本号 —— 每次手绘编辑自增。求值引擎用它判断能否复用上一次结果。
@@ -77,11 +78,6 @@ var base_revision := 0
 
 func is_animated() -> bool:
 	return not frames.is_empty()
-
-
-## 渲染 / 求值当前该看的帧号（= active_frame）。摆放轨道与体素帧共用它，见 QVoxelNode.transform_at。
-func current_frame() -> int:
-	return active_frame
 
 
 func frame_count() -> int:

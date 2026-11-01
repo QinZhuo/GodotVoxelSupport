@@ -12,11 +12,13 @@ extends RefCounted
 ## 【为什么"时长 0 回退帧率"写在这里】这是 §12.3 的语义（逐帧时长优先，0 = 跟随帧率），
 ## 属于格式定义的一部分。放在内核里，两个消费者就都不必各自实现一遍这个回退。
 
-## 标签方向（§12.3）。`forward` 是缺省，另两种都只在**标签区间内**生效。
+## 标签方向（§12.3）。`forward` 是缺省，其余都只在**标签区间内**生效。
+## `pingpong_reverse` = 从区间末尾进入的乒乓；`repeat` = 完整循环次数（0 无限）。
 const DIR_FORWARD := "forward"
 const DIR_REVERSE := "reverse"
 const DIR_PINGPONG := "pingpong"
-const DIRECTIONS := [DIR_FORWARD, DIR_REVERSE, DIR_PINGPONG]
+const DIR_PINGPONG_REVERSE := "pingpong_reverse"
+const DIRECTIONS := [DIR_FORWARD, DIR_REVERSE, DIR_PINGPONG, DIR_PINGPONG_REVERSE]
 
 ## 单帧时长下限（毫秒）。避免"时长为 0 且帧率非法"时推进变成忙循环。
 const MIN_FRAME_MS := 1
@@ -41,6 +43,9 @@ var _from := 0
 var _to := 0
 var _direction := DIR_FORWARD
 var _tag_name := ""
+## 标签重复次数：0 = 无限；>0 = 播完这么多个完整循环后停。
+var _repeat := 0
+var _repeat_left := 0
 ## pingpong 的行进方向（+1 / -1）；另两种方向恒为 +1，由 _step() 的分支直接处理。
 var _sign := 1
 
@@ -57,6 +62,8 @@ func configure(durations_ms: PackedInt32Array, fps: int, loop: bool, tags: Array
 	_index = 0
 	_elapsed = 0.0
 	_playing = false
+	_repeat = 0
+	_repeat_left = 0
 	_sign = 1
 	_resolve("")
 
@@ -95,11 +102,17 @@ func play(tag_name: String = "") -> void:
 	if _to <= _from:
 		_playing = false
 		return
-	# 反向播放从区间末尾进入更符合直觉（用户按下播放，看到的应该是"往回放"）
-	if _index < _from or _index > _to:
-		_index = _to if _direction == DIR_REVERSE else _from
+	# 反向播放从区间末尾进入更符合直觉（用户按下播放，看到的应该是"往回放"）。
+	# pingpong_reverse 即使当前在区间内也从末尾进入，否则"反向"看不出来。
+	if _direction == DIR_PINGPONG_REVERSE:
+		_index = _to
+	elif _direction == DIR_REVERSE and (_index < _from or _index > _to):
+		_index = _to
+	elif _index < _from or _index > _to:
+		_index = _from
 	_elapsed = 0.0
-	_sign = 1
+	_sign = -1 if _direction == DIR_PINGPONG_REVERSE else 1
+	_repeat_left = _repeat
 	_playing = true
 
 
@@ -175,6 +188,8 @@ func _resolve(tag_name: String) -> void:
 	_to = maxi(0, _durations.size() - 1)
 	_direction = DIR_FORWARD
 	_tag_name = ""
+	_repeat = 0
+	_sign = 1
 	if tag_name.is_empty():
 		return
 	for t in _tags:
@@ -187,6 +202,8 @@ func _resolve(tag_name: String) -> void:
 		_to = clampi(int(d.get("to", _from)), _from, _to)
 		var dir := String(d.get("direction", DIR_FORWARD))
 		_direction = dir if DIRECTIONS.has(dir) else DIR_FORWARD
+		_repeat = maxi(0, int(d.get("repeat", 0)))
+		_sign = -1 if _direction == DIR_PINGPONG_REVERSE else 1
 		_tag_name = tag_name
 		return
 
@@ -206,29 +223,36 @@ func _step() -> void:
 		DIR_REVERSE:
 			if _index > _from:
 				_index -= 1
-			elif _loop:
-				_index = _to
-			else:
+			elif not _cycle_done(_to):
 				_playing = false
-		DIR_PINGPONG:
+		DIR_PINGPONG, DIR_PINGPONG_REVERSE:
 			var nxt := _index + _sign
 			if nxt > _to:
 				# 到顶折返。span >= 1 保证 nxt 回退后仍在区间内。
 				_sign = -1
 				nxt = _index - 1
 			elif nxt < _from:
-				# 回到起点：循环则再折返，否则一个来回播完就停
-				if _loop:
-					_sign = 1
-					nxt = _index + 1
-				else:
+				# 回到起点：一次完整往返结束，再决定继续还是停。
+				if not _cycle_done(_index):
 					_playing = false
 					return
+				_sign = 1
+				nxt = _index + 1
 			_index = nxt
 		_:
 			if _index < _to:
 				_index += 1
-			elif _loop:
-				_index = _from
-			else:
+			elif not _cycle_done(_from):
 				_playing = false
+
+
+## 一次循环/往返结束。返回 true 表示还应继续循环；false 表示到重复次数上限（停在当前帧）。
+func _cycle_done(next_index: int) -> bool:
+	if _repeat > 0:
+		_repeat_left -= 1
+		if _repeat_left <= 0:
+			return false
+	if not _loop:
+		return false
+	_index = next_index
+	return true

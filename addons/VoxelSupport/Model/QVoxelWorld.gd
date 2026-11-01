@@ -42,10 +42,6 @@ var cach: Array = []
 ## 每次"影响文件内容"的改动自增。UI 据此判断"是否需要提示保存"。
 var revision := 0
 
-## 编辑器预览用的**共享帧号**（瞬态，不落盘）：所有节点的 `transform_tracks` 都按它采样。
-## 由 App 在切帧时设为当前活动模型的 active_frame —— 摆放动画与体素动画因此共用同一时间轴。
-var preview_frame := 0
-
 signal content_changed
 
 
@@ -163,7 +159,6 @@ static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 	n.visible = bool(entry.get("visible", true))
 	n.locked = bool(entry.get("locked", false))
 	n.local_transform = QVoxelTransform.transform_from_json(entry.get("transform"))
-	n.transform_tracks = QVoxelTransform.transform_tracks_from_json(entry.get("transform_tracks"))
 
 
 # 导出为传输结构（保存路径）
@@ -498,8 +493,7 @@ func world_transform(target: QVoxelNode) -> Transform3D:
 		return Transform3D.IDENTITY
 	var xf := Transform3D.IDENTITY
 	for n in path:
-		# 用 transform_at(preview_frame)：带逐帧摆放轨道的节点在编辑器里就能预览到动画位移。
-		xf = xf * n.transform_at(preview_frame)
+		xf = xf * n.local_transform
 	return xf
 
 
@@ -756,9 +750,6 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 	var xf := QVoxelTransform.transform_to_json(n.local_transform)
 	if not xf.is_empty():
 		e["transform"] = xf
-	var tracks := QVoxelTransform.transform_tracks_to_json(n.transform_tracks)
-	if not tracks.is_empty():
-		e["transform_tracks"] = tracks
 	if n.is_model():
 		var mo := n as QVoxelModel
 		e["model_id"] = mo.model_id

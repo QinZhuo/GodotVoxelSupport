@@ -18,8 +18,7 @@ extends RefCounted
 # v4（当前）：三处赘余被收敛 ——
 #   ① HEAD 的 `channels` 数组（恒为长度 1、却暗示多通道）→ 扁平单键 `channel` + `bpp`；
 #   ② NODE 一肩挑三事 → 拆成 NODE（场景树）/ CAMR（相机）/ ANIM（动画）；
-#   ③ 动画的时序（fps/loop/tags）从 NODE 节点条目收进 ANIM 块，与体素帧内聚一处
-#      （节点摆放轨道 transform_tracks 仍属节点：只移动整体物件，组也能做摆放动画，见 ANIM 注释）。
+#   ③ 动画的时序（fps/loop/tags）从 NODE 节点条目收进 ANIM 块，与体素帧内聚一处。
 # v3：场景图从 `layers` 下标体系改为 NODE 嵌套节点树。
 # v2：VXEL 模型头 6 → 10 字节，新增 uint32 payload_length。
 # v1 及更早与后续版本不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，无需背负历史包袱。
@@ -219,7 +218,8 @@ const VOX_BLOCK_HEADER_SIZE := 17
 #   payload_length = 其后全部字节数（meta + 帧，不含本头、不含顶层填充）—— 与 VXEL 同构，
 #   让"解析到哪里才算正好用完"退化成一次等式比较（P4）。
 # 紧跟头之后是**时序 meta**：uint32 meta_len + meta_len 字节 JSON
-#   （{"fps":N,"loop":bool,"tags":[...]}；meta_len=0 表示全缺省）。时序与体素帧同处一块。
+#   （{"fps":N,"loop":bool,"tags":[{name,from,to,direction,color,repeat}]}；meta_len=0 表示全缺省）。
+#   时序与体素帧同处一块。
 # 每帧（6 字节定长前置）：uint16 duration_ms + uint32 payload_length + byte[] 块级增量。
 #   duration_ms = 0 表示"用 meta.fps 的缺省帧率"。
 # 【帧增量的语义】第 0 帧基线为空（其 delta 即全量块表，与一个 VXEL 的负载逐字节同构）；
@@ -231,8 +231,8 @@ const VOX_BLOCK_HEADER_SIZE := 17
 # 【为什么 codec=0 在 ANIM 里合法】§5.2 说"读到 codec=0 视为损坏"约束的是 VXEL 的块
 # （那里空块用"坐标缺失"表示，0 因此是冗余值）；而增量的本质是"与上一帧的**差异**"，
 # "变成空"也是一种差异、必须有编码。给 ANIM 一个自己的命名空间即可，不污染 VXEL 语义。
-# 【为什么摆放轨道不在这里】transform_tracks 是**节点**属性（只移动整体物件，组也能做摆放动画），而 ANIM
-# 按 model_id 绑定（模型专有）；粒度不同，故摆放轨道留在 NODE 的节点条目里（§2）。
+# 【只做体素帧动画】节点摆放是静态属性（NODE 的 transform）；ANIM 只描述某个 model_id
+# 的体素帧与逐帧时长，不承载节点/组级变换动画。
 const ANIM_MODEL_HEADER_SIZE := 8
 const ANIM_FRAME_HEADER_SIZE := 6
 

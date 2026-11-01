@@ -22,10 +22,6 @@ var is_cancelled_callable := Callable()
 ## 与 QVoxelSource._ensure_volume() 的"提交前比对尺寸"是同一思路。
 var epoch := 0
 
-## 本次求值的帧号 —— 节点摆放轨道据此取第几帧（静态节点忽略）。与 FRAM 体素帧共用同一时间轴。
-var frame := 0
-
-
 static func make(grid_size_: Vector3i, seed_ := 0) -> QVoxelEvalContext:
 	var ctx := QVoxelEvalContext.new()
 	ctx.grid_size = grid_size_
@@ -48,7 +44,6 @@ func at_grid_size(gs: Vector3i) -> QVoxelEvalContext:
 	c.progress = progress
 	c.is_cancelled_callable = is_cancelled_callable
 	c.epoch = epoch
-	c.frame = frame
 	return c
 
 

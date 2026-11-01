@@ -176,7 +176,6 @@ func _ensure_volume() -> bool:
 	if not _volume_built:
 		var gs := grid_size
 		var ctx := QVoxelEvalContext.make(gs, seed)
-		ctx.frame = node.current_frame()
 		var res := QVoxelEvalEngine.evaluate_local(node, ctx)
 		if gs == grid_size:
 			_volume = res.volume

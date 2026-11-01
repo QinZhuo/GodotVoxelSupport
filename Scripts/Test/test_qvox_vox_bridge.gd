@@ -1,11 +1,11 @@
 extends TestCase
 
 ## `.vox → QVoxelWorld` 桥接 + 节点摆放统一表示的测试。
-## 钉死四件事：
+## 钉死三件事：
 ##   ① 图层 ↔ 组一一对应（组名 = 图层名，可见性 = 图层可见性），模型挂到所属图层的组下；
 ##   ② 节点摆放只写 `transform`（不再有 `pos`），且位置 + 旋转都随节点树往返；
-##   ③ 求值真的应用旋转（轴对齐 90° 保持整数）；
-##   ④ 逐帧摆放轨道（`transform_tracks`，整体物件摆放，不是体素帧）随文件往返，并按 ctx.frame 采样。
+##   ③ 求值真的应用旋转（轴对齐 90° 保持整数）。
+## 动画只保留体素帧；`.vox` 的 nTRN 多帧摆放只取首帧（不导入节点摆放轨道）。
 ## 最后用 demo 真实样例验"`.vox` 取出的体素集合"与"`.vox → 世界求值"的体素数一致 ——
 ## 这是"两种格式显示一致"的可测代理。
 
@@ -88,32 +88,7 @@ func test_eval_applies_axis_aligned_rotation() -> void:
 	assert_eq(res.grid_size, Vector3i(1, 1, 3), "绕 Y 转 90° 后 x/z 尺寸互换（仍是整数）")
 
 
-# ④ 逐帧摆放轨道
-
-func test_transform_tracks_roundtrip_and_eval() -> void:
-	var w := QVoxelWorld.create_empty()
-	var mat := w.add_material(Color.RED)
-	var m := w.create_model("m", Vector3i(1, 1, 1))
-	m.set_voxel(0, 0, 0, mat)
-	m.local_transform = Transform3D(Basis.IDENTITY, Vector3(0, 0, 0))
-	m.transform_tracks = [Transform3D(Basis.IDENTITY, Vector3(0, 0, 0)),
-			Transform3D(Basis.IDENTITY, Vector3(0, 7, 0))]
-
-	var rep := QVoxelFile.QVoxelReport.new()
-	var parsed := QVoxelFile.parse(QVoxelFile.serialize(w.to_document()), true, rep, true)
-	var w2 := QVoxelWorld.from_document(parsed)
-	var m2 := w2.all_models()[0]
-	assert_eq(m2.transform_tracks.size(), 2, "轨道两帧存活")
-	assert_eq(m2.transform_tracks[1].origin, Vector3(0, 7, 0), "第 1 帧位移存活")
-
-	var ctx := QVoxelEvalContext.new()
-	ctx.frame = 1
-	var res := QVoxelEvalEngine.evaluate_world(w2, ctx)
-	assert_eq(res.solid_count(), 1)
-	assert_eq(res.origin, Vector3i(0, 7, 0), "求值按第 1 帧摆放")
-
-
-# ⑤ demo 真实样例：.vox 取出的体素集合 ↔ .vox→世界求值（体素数一致）
+# ④ demo 真实样例：.vox 取出的体素集合 ↔ .vox→世界求值（体素数一致）
 
 func test_demo_samples_parity() -> void:
 	var files := _list_vox(SAMPLES_DIR)
@@ -184,25 +159,9 @@ func test_resize_command_undo_restores_voxels() -> void:
 	assert_eq(m.count_solid(), 1, "重做后仍是盒内那一个")
 
 
-## ⑨ 逐帧摆放轨道：world_transform（渲染器摆放的唯一来源）按当前帧取轨道
+## ⑨ `.vox` 多帧 nTRN 烘焙成体素帧动画（不保留节点摆放轨）
 
-func test_transform_track_preview() -> void:
-	var w := QVoxelWorld.create_empty()
-	var mat := w.add_material(Color.RED)
-	var m := w.create_model("m", Vector3i(1, 1, 1))
-	m.set_voxel(0, 0, 0, mat)
-	m.local_transform = Transform3D(Basis.IDENTITY, Vector3.ZERO)
-	m.transform_tracks = [Transform3D(Basis.IDENTITY, Vector3.ZERO),
-			Transform3D(Basis.IDENTITY, Vector3(0, 7, 0))]
-	w.preview_frame = 1
-	assert_eq(w.world_transform(m).origin, Vector3(0, 7, 0), "world_transform 按共享帧取摆放轨道")
-	w.preview_frame = 0
-	assert_eq(w.world_transform(m).origin, Vector3.ZERO, "第 0 帧回到静态摆放")
-
-
-## ⑩ `.vox` 多帧 nTRN → transform_tracks（摆放动画导入）
-
-func test_vox_transform_animation_import() -> void:
+func test_vox_multiframe_transform_bakes_to_voxel_frames() -> void:
 	var vox := VoxAsset.new()
 	vox.materials.resize(256)
 	vox.models.append(_one_voxel_model())
@@ -222,19 +181,75 @@ func test_vox_transform_animation_import() -> void:
 	vox.nodes[3] = _shp(3, 0)
 
 	var w := VoxAssetWorld.to_world(vox)
-	var found: QVoxelGroup = null
-	for n in w.all_nodes():
-		if n is QVoxelGroup and n.transform_tracks.size() == 2:
-			found = n
-	assert_true(found != null, "应导入一个带逐帧摆放轨道的组")
-	if found != null:
-		w.preview_frame = 1
-		assert_eq(w.world_transform(found).origin, Vector3(0, 7, 0), "第 1 帧位移")
-		w.preview_frame = 0
-		assert_eq(w.world_transform(found).origin, Vector3.ZERO, "第 0 帧位移")
+	var m := w.all_models()[0]
+	assert_true(m.is_animated(), "nTRN 多帧应转成体素帧动画")
+	assert_eq(m.frame_count(), 2, "全局两帧")
+	m.active_frame = 0
+	assert_eq(m.get_voxel(0, 0, 0), 1, "第 0 帧在原点")
+	m.active_frame = 1
+	assert_eq(m.get_voxel(0, 7, 0), 1, "第 1 帧烘焙位移")
 
 
-## ⑪ 模型内部旋转：绕选区中心，90° 整数旋转，四圈归位
+## ⑩ nSHP 逐帧换模型：也烘焙成体素帧
+
+func test_vox_shape_animation_bakes_to_voxel_frames() -> void:
+	var vox := VoxAsset.new()
+	vox.materials.resize(256)
+	vox.models.append(_one_voxel_model())
+	var wide := VoxAsset.VoxelModel.new()
+	wide.size = Vector3(6, 1, 1)
+	wide.voxels[Vector3i(5, 0, 0)] = 1
+	vox.models.append(wide)
+	vox.nodes[0] = _trn(0, 1, -1, Vector3.ZERO)
+	var shape := VoxAsset.VoxelNode.new()
+	shape.id = 1
+	var a := VoxAsset.VoxelFrame.new()
+	a.model_id = 0
+	var b := VoxAsset.VoxelFrame.new()
+	b.model_id = 1
+	shape.frames[0] = a
+	shape.frames[1] = b
+	vox.nodes[1] = shape
+
+	var w := VoxAssetWorld.to_world(vox)
+	var m := w.all_models()[0]
+	assert_true(m.is_animated(), "nSHP 多帧应转成体素帧动画")
+	m.active_frame = 0
+	assert_eq(m.get_voxel(0, 0, 0), 1, "第 0 帧用 model 0")
+	m.active_frame = 1
+	assert_eq(m.get_voxel(2, 0, 0), 1, "第 1 帧用 model 1 并保留其居中偏移")
+
+
+## ⑪ 命名组的 nTRN 多帧：动画烘焙进子模型，组本身保持静态摆放
+
+func test_named_group_transform_bakes_into_children() -> void:
+	var vox := VoxAsset.new()
+	vox.materials.resize(256)
+	vox.models.append(_one_voxel_model())
+	vox.models.append(_one_voxel_model())
+	vox.nodes[0] = _trn(0, 1, -1, Vector3.ZERO)
+	var g := _grp(1, [2, 3])
+	g.name = "mover"
+	g.frames[0] = VoxAsset.VoxelFrame.new()
+	g.frames[1] = VoxAsset.VoxelFrame.new()
+	g.frames[1].position = Vector3(0, 7, 0)
+	vox.nodes[1] = g
+	vox.nodes[2] = _shp(2, 0)
+	vox.nodes[3] = _shp(3, 1)
+	vox.nodes[3].frames[0].position = Vector3(2, 0, 0)
+
+	var w := VoxAssetWorld.to_world(vox)
+	var models := w.all_models()
+	assert_eq(models.size(), 2, "两个子模型")
+	for m in models:
+		assert_true(m.is_animated(), "子模型获得体素帧")
+		m.active_frame = 1
+		assert_eq(m.get_voxel(0, 7, 0), 1, "组动画烘焙到子模型体素")
+	var res := QVoxelEvalEngine.evaluate_world(w, QVoxelEvalContext.new())
+	assert_eq(res.solid_count(), 2, "两个子模型各有体素")
+
+
+## ⑫ 模型内部旋转：绕选区中心，90° 整数旋转，四圈归位
 
 func test_rotate_selection_in_model() -> void:
 	var w := QVoxelWorld.create_empty()

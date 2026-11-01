@@ -301,7 +301,8 @@ func test_world_roundtrip_preserves_frames_and_anim() -> void:
 	m.add_frame(f1)
 	m.anim_loop = false
 	m.anim_fps = 8
-	m.anim_tags = [{"name": "walk", "from": 0, "to": 1}]
+	m.anim_tags = [{"name": "walk", "from": 0, "to": 1,
+			"direction": "pingpong_reverse", "color": "#ff8800", "repeat": 3}]
 
 	var doc := w.to_document()
 	assert_true(doc.frames.has(m.model_id), "动画模型进 frames")
@@ -327,6 +328,9 @@ func test_world_roundtrip_preserves_frames_and_anim() -> void:
 	assert_false(m2.anim_loop, "loop 元数据往返")
 	assert_eq(m2.anim_fps, 8, "fps 元数据往返")
 	assert_eq(m2.anim_tags.size(), 1, "tags 元数据往返")
+	assert_eq(m2.anim_tags[0]["direction"], "pingpong_reverse", "标签方向往返")
+	assert_eq(m2.anim_tags[0]["color"], "#ff8800", "标签颜色往返")
+	assert_eq(m2.anim_tags[0]["repeat"], 3, "标签重复次数往返")
 	assert_eq(m2.get_voxel(1, 1, 1), MAT, "第 0 帧的体素往返")
 
 
@@ -411,6 +415,41 @@ func test_clock_pingpong_bounces_within_range() -> void:
 		c.advance(10)
 		seen.append(c.index())
 	assert_eq(seen, [0, 1, 2, 1, 0, 1, 2], "0→1→2→1→0→1→2 折返")
+
+
+## pingpong_reverse：从区间末尾进入，先往回再折返。
+func test_clock_pingpong_reverse_starts_at_end() -> void:
+	var c := QVoxelFrameClock.new()
+	c.configure(_durations([10, 10, 10]), 12, true,
+			[{"name": "pr", "from": 0, "to": 2, "direction": "pingpong_reverse"}])
+	c.play("pr")
+	var seen := [c.index()]
+	for i in 5:
+		c.advance(10)
+		seen.append(c.index())
+	assert_eq(seen, [2, 1, 0, 1, 2, 1], "2→1→0→1→2→1 折返")
+
+
+## 标签重复次数：repeat=1 播完一趟停住；repeat=2 播两趟。
+func test_clock_tag_repeat_stops_after_count() -> void:
+	var c := QVoxelFrameClock.new()
+	c.configure(_durations([10, 10, 10]), 12, true,
+			[{"name": "once", "from": 0, "to": 2, "repeat": 1}])
+	c.play("once")
+	c.advance(30)
+	assert_false(c.is_playing(), "一趟播完停住")
+	assert_eq(c.index(), 2, "停在区间末帧")
+
+	var d := QVoxelFrameClock.new()
+	d.configure(_durations([10, 10, 10]), 12, true,
+			[{"name": "twice", "from": 0, "to": 2, "repeat": 2}])
+	d.play("twice")
+	d.advance(30)
+	assert_true(d.is_playing(), "第一趟结束仍继续")
+	assert_eq(d.index(), 0, "回绕到起点")
+	d.advance(30)
+	assert_false(d.is_playing(), "第二趟结束停住")
+	assert_eq(d.index(), 2)
 
 
 ## 非循环：播到区间尽头自己停，is_playing() 如实转 false（UI 靠它灭播放键）。

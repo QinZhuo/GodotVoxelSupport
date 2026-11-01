@@ -49,30 +49,6 @@ var offset: Vector3i:
 	set(value):
 		local_transform.origin = Vector3(value)
 
-## 逐帧摆放轨道：`transform_tracks[k]` = 第 k 帧的**整体节点**摆放。**空 = 静态**（用 local_transform）。
-## 【只移动整体物件】它旋转/平移的是整个节点（组会带着整棵子树），不做骨骼、蒙皮或逐体素重采样；
-## 需要"每个体素重新落到网格上"的效果请用 FRAM/ANIM 体素帧。
-## 与 FRAM 的帧号对齐 —— 播放第 k 帧时，体素取 FRAM 第 k 帧、摆放取这里第 k 项，
-## "变换动画"与"体素动画"共用同一个帧号，播放器只需推进一个游标。
-## 缺省空 ⇒ 零成本（P2），静态节点不背这条数据。逐帧整数变换与 .vox 的 nTRN.frames 同构。
-var transform_tracks: Array[Transform3D] = []
-
-
-## 第 frame 帧的摆放（无轨道或越界 → 静态 local_transform）。
-func transform_at(frame: int) -> Transform3D:
-	if frame >= 0 and frame < transform_tracks.size():
-		return transform_tracks[frame]
-	return local_transform
-
-
-func is_transform_animated() -> bool:
-	return not transform_tracks.is_empty()
-
-
-## 当前该看到的帧号（同步 FRAM 体素帧）。静态节点恒 0，动画模型返回 active_frame。
-func current_frame() -> int:
-	return 0
-
 ## 树面板里的展开状态。**纯 UI 状态**：不入档、不参与 signature（它不是数据，
 ## 展开与否不改变任何求值结果）。放在这里而不是面板里，是因为面板每次重投影都重建行，
 ## 状态得有地方活着。

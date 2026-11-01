@@ -8,7 +8,7 @@ extends QVoxelierSection
 ## 且触摸命中区不达标；自绘则每行都是**整行按钮**，行内可放任意控件。
 ## 【为什么本面板只发信号、不直接改数据】改动要能撤销，而撤销命令属于应用层
 ## （QVoxelPropertyCommand）。面板只报告"用户想做什么"，由 App 决定怎么记。
-## 【动画帧编辑不在这里】最下方另有一条独立的「动画帧条」（QVoxelierTimeline）只显示当前模型的帧。
+## 【动画帧编辑不在这里】最下方另有一条独立的「动画帧条」（QVoxelierTimeline）只显示当前模型的体素帧。
 
 ## 选中某个节点（模型用于切换当前编辑对象；组用于后续"整组操作"）。
 signal node_selected(node: QVoxelNode)

@@ -368,8 +368,6 @@ func _build_ui() -> void:
 	_timeline.duration_edit_ended.connect(_end_frame_duration)
 	_timeline.fps_changed.connect(func(fps: int): _set_anim_meta(&"anim_fps", fps, "改帧率"))
 	_timeline.tags_changed.connect(func(tags: Array): _set_anim_meta(&"anim_tags", tags, "改标签"))
-	_timeline.track_record_requested.connect(_record_track)
-	_timeline.track_clear_requested.connect(_clear_track)
 	# 渲染（原「快照」）：离屏出图，做成顶栏一个按钮弹出的浮层（不再是右列的一页）。
 	_snapshot_section = QVoxelierSnapshotSection.new()
 	_snapshot_section.save_requested.connect(_request_snapshot_save)
@@ -484,9 +482,6 @@ func _activate(model_id: int, flash := true) -> void:
 func _attach_active() -> void:
 	if session == null or world == null:
 		return
-	# 摆放动画与体素动画共用同一时间轴：共享帧号取当前活动模型的帧，供 world_transform 采样轨道。
-	if session.object != null:
-		world.preview_frame = session.object.active_frame
 	var vs := world.voxel_size()
 	if model.data != session.data:
 		model.data = session.data
@@ -1834,10 +1829,9 @@ func _refresh_panels() -> void:
 		pbr[key] = world.material_scalar(_material_id, StringName(key))
 	_color_section.bind(_material_id, world.material_color(_material_id) if has else Color(0, 0, 0, 0), pbr)
 	_tree_section.set_world(world, session.object.model_id)
-	# 底部时间轴绑到当前对象；摆放轨道跟随当前选中节点。
+	# 底部时间轴绑到当前编辑对象（帧是模型自己的属性）。
 	if _timeline != null:
 		_timeline.bind(session.object)
-		_timeline.set_track_target(_selected_node if _selected_node != null else session.object)
 	# 对象属性页跟着当前选中的节点（撤销 / 重做后重看一眼数据）。
 	if _object_section != null:
 		_object_section.bind(_selected_node)
@@ -2519,8 +2513,6 @@ func _on_tree_selected(node: QVoxelNode) -> void:
 	_selected_node = node
 	if _object_section != null:
 		_object_section.bind(node)
-	if _timeline != null and session != null:
-		_timeline.set_track_target(node if node != null else session.object)
 	if _dock != null:
 		_dock.show_property_by_title("对象")
 
@@ -2714,7 +2706,7 @@ func _ensure_mesh_ext(path: String) -> String:
 # 时间轴（右侧抽屉·时间轴组，QVoxelSpec §12.6）
 # 与层级树那一段同构：本段只做一件事 —— 把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"。
 # 帧的结构改动走 QVoxelPropertyCommand（`frames` 就是属性），而切帧 / 播放**不入栈**：
-# active_frame 是"正在看第几帧"，是游标不是数据（§12.6）。
+# 模型 active_frame 是"正在看第几帧"，是游标不是数据（§12.6）。
 
 ## 切帧：改游标 → 重算 → 刷界面。**不标脏、不入栈**。
 ## 【为什么不记进历史】"我看了第 3 帧"不是一次内容改动。若它也占一格，用户画一笔再翻十帧，
@@ -2724,7 +2716,6 @@ func _select_frame(index: int) -> void:
 		return
 	# 同步换帧（见 QVoxelEditSession.apply_frame）——播放才跟得上，不会"体素不变"。
 	session.apply_frame(index)
-	# 逐帧摆放轨道也随帧走：重挂显示层（渲染器 transform = world_transform，后者按当前帧取轨道）。
 	_attach_active()
 	_rebuild_view()
 	_refresh_hud()
@@ -2736,59 +2727,6 @@ func _after_frame_change() -> void:
 	if session == null:
 		return
 	session.rebuild()
-	_refresh_hud()
-
-
-## 把当前选中节点的摆放记进 `transform_tracks[当前帧]`（可撤销）。
-## 只移动整体物件，不做骨骼/逐体素重采样；缺的帧用静态摆放补齐。
-## 与体素帧共用同一帧号：播放第 k 帧 = 体素取 FRAM 第 k 帧 + 摆放取本数组第 k 项（QVoxelSpec §12）。
-func _record_track() -> void:
-	if session == null:
-		return
-	var node := _selected_node if _selected_node != null else session.object
-	if node == null:
-		return
-	if _timeline != null:
-		_timeline.stop_playback()
-	var f := clampi(session.object.active_frame, 0, maxi(session.object.frame_count() - 1, 0))
-	var cmd := QVoxelPropertyCommand.begin(node, &"transform_tracks", node, "记录摆放")
-	while node.transform_tracks.size() < f + 1:
-		node.transform_tracks.append(node.local_transform)
-	node.transform_tracks[f] = node.local_transform
-	if cmd.commit():
-		session.history.push(cmd)
-	_sess.mark_dirty()
-	_attach_active()
-	_rebuild_view()
-	_refresh_hud()
-
-
-## 清除当前选中节点在本帧的独立摆放（退回跟随静态）；整条轨道都退化成静态则清空轨道。
-func _clear_track() -> void:
-	if session == null:
-		return
-	var node := _selected_node if _selected_node != null else session.object
-	if node == null:
-		return
-	if _timeline != null:
-		_timeline.stop_playback()
-	var f := clampi(session.object.active_frame, 0, maxi(session.object.frame_count() - 1, 0))
-	if f >= node.transform_tracks.size():
-		return
-	var cmd := QVoxelPropertyCommand.begin(node, &"transform_tracks", node, "清除摆放")
-	node.transform_tracks[f] = node.local_transform
-	var all_static := true
-	for t in node.transform_tracks:
-		if not t.is_equal_approx(node.local_transform):
-			all_static = false
-			break
-	if all_static:
-		node.transform_tracks.clear()
-	if cmd.commit():
-		session.history.push(cmd)
-	_sess.mark_dirty()
-	_attach_active()
-	_rebuild_view()
 	_refresh_hud()
 
 

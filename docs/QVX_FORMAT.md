@@ -62,8 +62,6 @@
 > **v4 的三处收敛**：① `HEAD` 的 `channels` 数组（恒为长度 1、却暗示多通道）改为扁平单键
 > `"channel":"material"` + `"bpp":16`；② `NODE` 一肩挑三事拆成 `NODE`/`CAMR`/`ANIM`；
 > ③ 动画时序（fps/loop/tags）从 `NODE` 节点条目收进 `ANIM` 块，与体素帧内聚一处。
-> 节点摆放轨道 `transform_tracks` 仍属**节点**（组也能做摆放动画，与按 model_id 绑定的
-> `ANIM` 粒度不同）。
 
 删除全部 `CACH` 块后，文件必须加载出**完全相同的结果**——只是首次加载更慢（P5）。
 
@@ -83,22 +81,25 @@
 - 缺省 = 恒等，**不写字面量**（P2）：`transform` 键整体缺失即恒等。
 - 轴对齐 90° 旋转（`.vox` 的 24 朝向的等价物）是**整数保序**的，体素盒不被破坏；
   非轴对齐旋转 / 缩放由运行时导入器逐体素融合处理，编辑器世界按"不旋转 + 告警"处理。
-- 读写唯一实现：`QVoxelNode.transform_from_json` / `transform_to_json`。**全项目不得另抄一份**。
+- 读写唯一实现：`QVoxelTransform.transform_from_json` / `transform_to_json`。**全项目不得另抄一份**。
 
-逐帧摆放（变换动画）用一个并列的 `transform_tracks` 键 —— `transform_tracks[k]` 是第 k 帧的
-`transform`，与 `ANIM` 的体素帧**共用同一帧号**（播放第 k 帧 = 体素取 ANIM 第 k 帧 + 摆放取
-本数组第 k 项）。空数组 = 静态（零成本）。`transform_tracks` 留在节点（组也能做摆放动画），
-而 `ANIM` 按 `model_id` 绑定（模型专有）—— 粒度不同。
+节点摆放是**静态属性**：一个节点只有 `transform` 一份摆放，不随时间轴变化。
+动画只存在于 `ANIM` 块里，按 `model_id` 描述该模型自己的体素帧。
 
-> **分工**：`transform_tracks` 只移动/旋转**整个物件**（组会带着整棵子树），不做骨骼、蒙皮或
-> 逐体素重采样；需要"每个体素重新落格"的效果请用 `ANIM` 体素帧。
-> 导入 `.vox` 时，nTRN 多帧 → `transform_tracks`，nSHP 逐帧换模型 → `ANIM` 体素帧，两者不混。
+> **为什么不做节点/组摆放动画**：当前编辑器专注 Aseprite 式的**体素逐帧动画**。
+> 节点/组变换动画会让"模型内容帧"和"物件摆放轨"两套时间语义并排存在，增加格式、
+> 播放与 UI 的复杂度。导入 `.vox` 时，nTRN 多帧摆放与 nSHP 逐帧换模型都会**烘焙成
+> 体素帧**（按全局帧把世界变换与模型内容写进 `ANIM`），再作为普通体素动画编辑。
+>
+> **`anim.tags` 就是 Aseprite 的 tag**：每项 `{name, from, to, direction, color, repeat}`；
+> `direction ∈ {forward, reverse, pingpong, pingpong_reverse}`，`repeat=0` 表示无限循环。
+> 它只是命名帧区间，不拥有独立轨道，也不叫 Clip。
 
 ## 3. `.vox` ⇄ `.qvx` 的图层 / 组映射
 
 `.vox` 的 `LAYR`（图层，含 `_name` / `_hidden`）与 `.qvx` 的组**一一对应**：
 一个图层 = 一个 `QVoxelGroup`，**组名 = 图层名**，**可见性 = `_hidden` 的反**。导入器
-（`VoxAsset.to_world()`）从 `node 0` 递归、跳过隐藏图层的整棵子树、同一模型被多个形状引用
+（`VoxAssetWorld.to_world()`）从 `node 0` 递归、跳过隐藏图层的整棵子树、同一模型被多个形状引用
 就摆多份 —— 于是"世界求值出的体素集合"与 `.vox` 的渲染路径 `VoxAsset.get_voxels()` **逐格一致**。
 `.qvx` 与 `.vox` 因此都落到同一个 `QVoxelWorld`，渲染只有一套语义。
 
