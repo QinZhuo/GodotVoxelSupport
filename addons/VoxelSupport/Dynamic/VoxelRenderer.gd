@@ -515,6 +515,14 @@ func get_voxel(pos: Vector3i) -> int:
 	return -1
 
 
+## 入树可能只是"临时挪窝"（reparent）后又回来：_exit_tree 已置 _exiting 并清了网格。
+## 不在此恢复，之后所有 worker 结果都会被 _on_batch_result 静默丢弃 —— 渲染器会永久空着。
+func _enter_tree() -> void:
+	_exiting = false
+	if data != null:
+		request_update()
+
+
 func _exit_tree() -> void:
 	# 退出：等待所有 worker 任务完成后再释放，否则 worker 完成时 call_deferred
 	# 会打到已释放实例（"Cannot call method 'call_deferred' on a previously freed instance"）。

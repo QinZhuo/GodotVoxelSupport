@@ -24,9 +24,11 @@ const AO_VOXELS := 1.6
 const AO_INTENSITY := 2.2
 const SSIL_VOXELS := 8.0
 
-## 阈值压在 1.3：浅色 palette 的白面本身就在 1.0 附近，取 1.0 会让整片白墙发光、边缘发糊。
-const GLOW_THRESHOLD := 1.3
-const GLOW_INTENSITY := 0.35
+## 泛光只该负责"发光体自己的边缘"：真正的照明已交给 GI（见下文 GI 段），屏幕光晕再压一层
+## 就只有糊掉发光体轮廓。故门槛抬到 2.0（普通白面 1.0 附近不再触发）、强度压到 0.2。
+## 没有 GI 时这两个值会显得偏素 —— 但"素"是安全方向，过曝的发光体是救不回来的。
+const GLOW_THRESHOLD := 2.0
+const GLOW_INTENSITY := 0.2
 
 ## 天空既是环境光也是反射源，亮度直接决定通透度；背景另给深色平涂，别把编辑界面刷成白天。
 const SKY_TOP := Color(0.34, 0.42, 0.55)
@@ -167,7 +169,7 @@ static func apply_environment(env: Environment, voxel_scale: float, quality: boo
 	env.ssil_sharpness = 0.98
 	env.ssil_normal_rejection = 1.0
 	env.glow_intensity = GLOW_INTENSITY
-	env.glow_bloom = 0.03
+	env.glow_bloom = 0.012
 	env.glow_hdr_threshold = GLOW_THRESHOLD
 	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
 

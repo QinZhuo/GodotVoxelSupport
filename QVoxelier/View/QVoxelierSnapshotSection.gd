@@ -26,6 +26,14 @@ signal save_requested
 ## 模型越大等得越久；但不能没有上限 —— 卡住时"永远停在渲染中"比"渲得慢"更糟。
 const MESH_WAIT_FRAMES := 600
 
+## 等网格时"账本连续多少帧不增长"就认定等完了：块可能被 LOD 带筛掉而永不建（大模型），
+## 死等满 MESH_WAIT_FRAMES 等于白卡十秒。
+const MESH_STALL_FRAMES := 60
+
+## 等 GI 烘焙的上限帧数。烘焙是异步的（几百毫秒），同样不能没有上限：
+## 卡住时宁可出一张没有自发光照明的图，也不要让按钮永远停在"渲染中"。
+const GI_WAIT_FRAMES := 240
+
 ## 快照背景色（不透明时）。取一档中性深灰：快照多半是拿去当素材，深底比浅底耐看，
 ## 也不会与常见的浅色模型糊在一起；**不带色相**是为了不给素材偷加一层底色偏色
 ## （这条刻意独立于界面主题：素材底色是产出的一部分，不该跟着 UI 换肤一起变）。
@@ -45,7 +53,6 @@ var _preview_key := ""
 ## 当前预览图的一句话描述（状态行显示的是它，而不是"当前参数"）。
 var _preview_desc := ""
 var _busy := false
-var _mesh_signal_seen := false
 
 var _render_button: Button
 var _save_button: Button
@@ -59,6 +66,8 @@ var _camera: QVoxelViewCamera
 var _renderer: VoxelRenderer
 var _env: WorldEnvironment
 var _lights: Array = []
+## 自发光照明：出图是最该有它的一处 —— 只在这一次快照里烘（见 render_now）。
+var _gi: VoxelGI
 
 
 func section_title() -> String:
@@ -114,8 +123,12 @@ func render_now() -> void:
 	# ③ 等网格建完再按快门。
 	await _await_meshes()
 
+	# ③′ 自发光照明：GI 要把**刚挂好的网格**烘进去，故只能在网格就绪之后。
+	await _bake_gi()
+
 	# ④ 抓图。取色交给框架的 ScreenshotTool —— 它按 Image 的**数据格式**判定要不要做 sRGB
 	#    编码（8 位格式读回来已是显示值，再编码一次会蒙一层灰白，见其类文档）。
+	#    常态 DISABLED（平时不占 GPU），只在按快门这一帧开 ALWAYS。
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_image = await ScreenshotTool.grab(_viewport)
 	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -228,14 +241,23 @@ func _build_preview() -> PanelContainer:
 
 ## 离屏舞台。own_world_3d 是关键：它自带一套世界，于是主视口里的网格地板、选区线框、
 ## 朝向指示器都不会跟进来 —— 这正是快照要的"干净"。
+## 【为什么挂在树根，而不是本分组下面】SubViewport 的渲染跟着父 CanvasItem 的可见性走：
+## 视口挂在**收起来的**快照弹窗里时，怎么设 UPDATE_ALWAYS 都不渲染，抓回来是一张纯黑。
+## 树根不是 CanvasItem，于是显隐与出图彻底解耦（即便弹窗没开也能出图）。
+## 也**不要**改成"抓图前 reparent 到树根"：那会让整个舞台离树（见 VoxelRenderer._exit_tree：
+## 取消批次 + 清网格），抓到的只会是一张没有模型的空场景。
 func _build_stage() -> void:
+	# 离屏舞台只在运行时建：它要挂到树根上，不该落进被编辑的场景里。
+	if Engine.is_editor_hint():
+		return
 	_viewport = SubViewport.new()
 	_viewport.name = "SnapshotStage"
 	_viewport.own_world_3d = true
 	_viewport.msaa_3d = Viewport.MSAA_4X
 	# 常态 DISABLED：这个视口只在按快门那一瞬需要出图，平时不该占 GPU。
 	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	add_child(_viewport)
+	# 本函数跑在 App 的 _ready 里，树根此刻还在装配子节点 —— 直接 add_child 会被引擎拒绝。
+	_attach_viewport.call_deferred()
 
 	_stage = Node3D.new()
 	_viewport.add_child(_stage)
@@ -263,6 +285,14 @@ func _build_stage() -> void:
 	_renderer.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	_renderer.lod_count = 1
 	_stage.add_child(_renderer)
+
+	# 自发光照明：离屏舞台里只有模型与灯，不必像视口那样再排除地板与浮层。
+	_gi = QVoxelRenderPreset.build_gi(_stage)
+
+
+func _attach_viewport() -> void:
+	if is_instance_valid(_viewport) and _viewport.get_parent() == null:
+		get_tree().root.add_child(_viewport)
 
 
 # ---------------------------------------------------------------- 参数联动
@@ -327,26 +357,60 @@ func _sync_stage(res: QVoxelEvalResult) -> void:
 	QVoxelRenderPreset.apply_rig(_lights, _camera.global_transform.basis, true, _camera.distance * 1.8)
 	QVoxelRenderPreset.apply_dof(_camera, _camera.distance)
 
+	# GI 盒只摆不烘：烘一次几百毫秒，留到网格就绪那一刻（见 _bake_gi）。
+	if _gi != null and not QVoxelRenderPreset.fit_gi(_gi, QVoxelSnapshot.frame_aabb(res, vs), vs):
+		_gi.data = null
+
 
 ## 等离屏渲染器把网格建完。
-## 【为什么要等】渲染器的重建是**跨帧**的：worker 生成网格 → 批次结算（mesh_updated）→
-## 上传队列每帧限量挂载（见 VoxelRenderer._mesh_build_per_frame）。喂完数据就抓图，
-## 只会抓到一张空场景。
-## 【为什么判据是"信号到了 + 队列空了"】只等信号会抓到半张（批次结算时还有大半块排在
-## 上传队列里）；只等固定帧数则在小模型上白等、在大模型上等不够。两个条件一起用才是
-## "该挂的都挂上了"。
+## 【为什么要等】渲染器的重建是**跨帧**的：worker 生成网格 → 批次结算 → 上传队列每帧限量挂载
+## （见 VoxelRenderer._mesh_build_per_frame）。喂完数据就抓图，只会抓到一张空场景。
+## 【判据为什么是"本源的块都有账本条目"】批次结算只说明 worker 跑完了，之后还有上传队列；
+## 只有每一块都有了条目（null 也算 —— 那是"确定无体素"的标记），才算"该挂的都挂上了"。
+## 只看结算信号会抓到半张，只看固定帧数则小模型白等、大模型等不够。
 ## 【为什么有上限】worker 或帧循环任何一环卡住，按钮就会永远停在"渲染中…"。
 ## 宁可超时渲一张不完整的图并说明，也不要无限转圈。
 func _await_meshes() -> void:
-	_mesh_signal_seen = false
-	var seen := func(): _mesh_signal_seen = true
-	_renderer.mesh_updated.connect(seen)
+	var progress := _mesh_progress()
+	var stalled := 0
 	for i in MESH_WAIT_FRAMES:
 		await get_tree().process_frame
-		if _mesh_signal_seen and not _has_queued_mesh():
-			break
-	if _renderer.mesh_updated.is_connected(seen):
-		_renderer.mesh_updated.disconnect(seen)
+		var now := _mesh_progress()
+		if now.x == now.y and not _has_queued_mesh():
+			return
+		if now.x == progress.x:
+			stalled += 1
+			if stalled >= MESH_STALL_FRAMES:
+				return
+		else:
+			stalled = 0
+			progress = now
+
+
+## 本源块的"已挂上 / 总数"。没有数据源时是 (0, 0)，判据即"等完了"。
+func _mesh_progress() -> Vector2i:
+	var src: QVoxelSource = _renderer.data
+	if src == null:
+		return Vector2i.ZERO
+	var keys := src.get_all_chunk_keys()
+	var built := 0
+	for ck in keys:
+		if _renderer.has_lod_mesh(0, ck):
+			built += 1
+	return Vector2i(built, keys.size())
+
+
+## 烘一次 GI：把自发光体素变成照到周围的光。烘不出来（超时）就照常拍，
+## 只是没有自发光照明 —— 比卡在"渲染中…"强。
+func _bake_gi() -> void:
+	if _gi == null:
+		return
+	_gi.data = null
+	_gi.bake(_stage, false)
+	for i in GI_WAIT_FRAMES:
+		if _gi.data != null:
+			return
+		await get_tree().process_frame
 
 
 ## 上传队列里还有没有本源的块（有 = 网格还没全挂上，此刻抓图会缺块）。
@@ -363,6 +427,12 @@ func _has_queued_mesh() -> bool:
 func _end_render() -> void:
 	_busy = false
 	_render_button.disabled = false
+
+
+func _exit_tree() -> void:
+	# 视口挂在树根上（不随本分组一起释放），故要显式带走。
+	if is_instance_valid(_viewport):
+		_viewport.queue_free()
 
 
 func _drop_preview() -> void:

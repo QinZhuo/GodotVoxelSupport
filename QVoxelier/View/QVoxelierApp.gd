@@ -2325,7 +2325,19 @@ func _request_gi_bake() -> void:
 	if not _gi_dirty or _edit_mode != 1 or _gi == null or not is_inside_tree():
 		return
 	_gi_dirty = false
+	# 先判有没有发光体素：没有就没什么可烘，别为一次空转弹"烘焙中"。
+	if not _has_emissive():
+		_gi.data = null
+		return
+	hud.set_busy("烘焙间接光…")
+	# 烘焙是同步的（几百毫秒），会把整帧堵住 —— 先等这一帧**画完**，
+	# 状态栏才真的出现在屏幕上；否则用户看到的只是一次没有解释的停顿。
+	await RenderingServer.frame_post_draw
+	if _gi == null or _edit_mode != 1 or not is_inside_tree():
+		hud.set_busy("")
+		return
 	_bake_gi()
+	hud.set_busy("")
 
 
 ## 真正的那一次烘焙（同步，几百毫秒）。只让体素模型进 GI ——

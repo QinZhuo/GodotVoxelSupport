@@ -24,6 +24,11 @@ var _selection: Label
 var _toast: Label
 ## 悬停提示（按钮/控件的 tooltip 首行）。非空时状态栏显示它，否则显示当前工具提示。
 var _hover_hint := ""
+## 后台任务（烘焙间接光、体素化…）。非空时压过工具提示显示，**带转圈** ——
+## 这些活会阻塞整帧，没有可见状态的话用户只会觉得界面卡死了。
+var _busy_text := ""
+var _busy_frame := 0
+var _busy_t := 0.0
 var _legend: PanelContainer
 var _log: PanelContainer
 var _log_scroll: ScrollContainer
@@ -41,8 +46,19 @@ const LOG_HEIGHT := 220.0
 ## 只留最近 N 行 —— 日志是"回看刚才发生了什么"，不是审计档案；无界增长会一直吃内存。
 const LOG_MAX := 200
 
+## 后台任务指示：四个方向依次转，比"..."更能让人看出"它还在动"。
+const SPINNER := ["◐", "◓", "◑", "◒"]
+## 转圈帧间隔（秒）。再快就像闪烁了。
+const SPIN_INTERVAL := 0.12
+
 
 func _process(delta: float) -> void:
+	if not _busy_text.is_empty():
+		_busy_t += delta
+		if _busy_t >= SPIN_INTERVAL:
+			_busy_t = 0.0
+			_busy_frame = (_busy_frame + 1) % SPINNER.size()
+			_apply_hint()
 	if _toast_left <= 0.0:
 		return
 	_toast_left -= delta
@@ -56,10 +72,8 @@ func _process(delta: float) -> void:
 func refresh() -> void:
 	if session == null:
 		return
-	var t := session.tool
-	_tool.text = t.label()
-	# 有悬停提示时优先显示它（本应用把按钮提示统一放到这里，不用悬浮气泡）。
-	_hint.text = _hover_hint if not _hover_hint.is_empty() else t.hint()
+	_tool.text = session.tool.label()
+	_apply_hint()
 	_selection.text = _selection_readout()
 	# 有选区时点亮：选区是"下次复制 / 移动会作用在哪"的答案，用户必须一眼能看出它在不在。
 	_selection.add_theme_color_override("font_color",
@@ -69,9 +83,35 @@ func refresh() -> void:
 ## 悬停某个按钮 / 控件时把它的提示送到状态栏（空串 = 恢复默认的工具提示）。
 func show_hover_hint(text: String) -> void:
 	_hover_hint = text
-	if session == null:
+	_apply_hint()
+
+
+## 设 / 清后台任务状态（空串 = 结束）。**不进日志**：它是"正在进行"，不是"刚发生了什么"；
+## 烘一次间接光就记一条，日志会被自动行为灌满。
+func set_busy(text: String) -> void:
+	if text == _busy_text:
 		return
-	_hint.text = text if not text.is_empty() else session.tool.hint()
+	_busy_text = text
+	_busy_frame = 0
+	_busy_t = 0.0
+	_apply_hint()
+
+
+func is_busy() -> bool:
+	return not _busy_text.is_empty()
+
+
+## 状态栏中间那一格：后台任务 > 悬停提示 > 当前工具的用法。
+func _apply_hint() -> void:
+	if _hint == null:
+		return
+	if not _busy_text.is_empty():
+		_hint.text = "%s %s" % [SPINNER[_busy_frame], _busy_text]
+		_hint.add_theme_color_override("font_color", QVoxelUi.ACCENT)
+		return
+	_hint.add_theme_color_override("font_color", QVoxelUi.TEXT_DIM)
+	_hint.text = _hover_hint if not _hover_hint.is_empty() else (
+			session.tool.hint() if session != null else "")
 
 
 ## 光标所在格（Vector3i.MIN = 没指到网格上）。轴名用与坐标轴 gizmo 同一套红绿蓝。
