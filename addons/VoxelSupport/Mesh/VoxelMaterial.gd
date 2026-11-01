@@ -74,13 +74,7 @@ static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
 	var er := float(int(entry.get("e_r", 0))) / 255.0
 	var eg := float(int(entry.get("e_g", 0))) / 255.0
 	var eb := float(int(entry.get("e_b", 0))) / 255.0
-	# 【必须按颜色分量反解】`to_mate` 存的是 `color × emission × 255`。直接取 max 等于把
-	# "颜色最亮的那一路"也当成强度算进去 —— 于是每往返一次就乘一次该分量，自发光逐次衰减
-	# （深色材质衰减更快，实测 0.545→0.435→…）。对"e 与颜色无关"的旧数据（peak 近 0）
-	# 退化为取 max，与旧行为一致。
-	var peak := maxf(mat.color.r, maxf(mat.color.g, mat.color.b))
-	var top := maxf(er, maxf(eg, eb))
-	mat.emission = top / peak if peak > 0.001 else top
+	mat.emission = maxf(er, maxf(eg, eb))
 	return mat
 
 
@@ -115,9 +109,13 @@ static func to_mate(m: Variant) -> Dictionary:
 		"rough": clampi(int(round(float(m.rough) * 255.0)), 0, 255) if ("rough" in m) else 255,
 		"hardness": clampi(int(round(float(m.hardness))), 0, 255) if ("hardness" in m) else 1,
 		"mass": clampi(int(round(float(m.mass))), 0, 255) if ("mass" in m) else 1,
-		"e_r": clampi(int(round(color.r * em * 255.0)), 0, 255),
-		"e_g": clampi(int(round(color.g * em * 255.0)), 0, 255),
-		"e_b": clampi(int(round(color.b * em * 255.0)), 0, 255),
+		# 【灰度，不乘基色】`e_*` 只承载**强度**：读端（`from_mate`）取三通道最大值还原。
+		# 若按 `color × 强度` 写，读回会再乘一遍基色亮度（深色材质更狠）—— 实测 .vox 往返
+		# 每次衰减一档（0.681→0.545→0.435）。自发光颜色由渲染侧的 `color × emission` 提供，
+		# 不需要在这里重复表达。
+		"e_r": clampi(int(round(em * 255.0)), 0, 255),
+		"e_g": clampi(int(round(em * 255.0)), 0, 255),
+		"e_b": clampi(int(round(em * 255.0)), 0, 255),
 	}
 
 

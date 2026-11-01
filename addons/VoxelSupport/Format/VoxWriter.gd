@@ -13,6 +13,11 @@ const VERSION := 150
 ## 根节点编号：MagicaVoxel 的约定是 nTRN(0) 套 nGRP(1)，所有顶层节点挂在它下面。
 const ROOT_TRN := 0
 const ROOT_GRP := 1
+## 所有节点统一的图层号。
+## 【为什么只有一个】`.vox` 的 LAYR 只是"图层可见性开关"，不承担分组语义 —— 我们的分组在
+## `nTRN`/`nGRP` 的树上、可见性在每个节点的 `_hidden` 上。按节点建图层等于凭空造出第二套
+## 并行的层级。留一个默认层只是让 `layer_id` 有归属，不引用到不存在的图层。
+const DEFAULT_LAYER := 0
 
 
 ## 世界 → `.vox` 字节。失败返回空数组（原因先问 `check()`）。
@@ -153,52 +158,69 @@ static func vox_shift(size_godot: Vector3i) -> Vector3i:
 static func _scene_chunks(world: QVoxelWorld, state: Dictionary) -> PackedByteArray:
 	var out := PackedByteArray()
 	var root_ids: Array = []
-	var layers: Array = []
-	var body := PackedByteArray()
-	body.append_array(_emit_list(world.nodes, root_ids, state, layers, -1))
+	var body := _emit_list(world.nodes, root_ids, state, _writable_nodes(world, state))
 	# 根壳：nTRN(0) → nGRP(1)。缺了它 MagicaVoxel 会当成"无场景"，只显示第一个模型。
 	out.append_array(_ntrn(ROOT_TRN, "", ROOT_GRP, -1, Transform3D.IDENTITY, Vector3i.ZERO))
 	out.append_array(_ngrp(ROOT_GRP, root_ids))
 	out.append_array(body)
-	for l in layers:
-		out.append_array(l)
+	out.append_array(_layer_chunk())
 	return out
+
+
+## 可写节点集合：有体素的模型 + 子树里含可写模型的组。
+## 一次后序递归算好，避免每层都重扫子树（那样会退化成 O(n²)）。
+static func _writable_nodes(world: QVoxelWorld, state: Dictionary) -> Dictionary:
+	var out := {}
+	var model_of: Dictionary = state["model_of"]
+	for n in world.nodes:
+		if n != null:
+			_mark_writable(n, model_of, out)
+	return out
+
+
+static func _mark_writable(node: QVoxelNode, model_of: Dictionary, out: Dictionary) -> bool:
+	if node is QVoxelModel:
+		if model_of.has(node):
+			out[node] = true
+			return true
+		return false
+	var any := false
+	for c in (node as QVoxelGroup).child_nodes:
+		if c != null and _mark_writable(c, model_of, out):
+			any = true
+	if any:
+		out[node] = true
+	return any
 
 
 ## 递归一层节点：分配 id、写 nTRN + 自己的 nGRP/nSHP，把 nTRN id 填进 `out_ids`。
 ## 【顺序】必须先递归子层拿到 children（nGRP 的内容），再写本层 chunk。
 ## 【`.vox` 的 nTRN 是**相对父**的局部变换】读端会沿父链累乘，把累积变换写进去等于让孩子
 ## 把父的位移/旋转再吃一遍 —— 层级越深偏得越多（单层结构不会暴露这个错）。
-## `layer` = 所属图层号；顶层节点各占一层（本项目的"组即层"直接对应 LAYR），子树继承。
-static func _emit_list(nodes: Array, out_ids: Array, state: Dictionary, layers: Array,
-		layer: int) -> PackedByteArray:
+## 【可见性写在节点上】`_hidden` 是 `.vox` 的对象级开关，与 `QVoxelNode.visible` 一一对应；
+## 图层不参与。空模型与"子树里一个可写节点都没有"的组整条跳过 —— 写出去只会得到读端会丢弃的
+## 空壳，凭空多一层噪声。
+static func _emit_list(nodes: Array, out_ids: Array, state: Dictionary,
+		writable: Dictionary) -> PackedByteArray:
 	var out := PackedByteArray()
 	var model_of: Dictionary = state["model_of"]
 	for item in nodes:
 		var n := item as QVoxelNode
-		if n == null:
+		if n == null or not writable.has(n):
 			continue
-		var is_model := n is QVoxelModel
-		if is_model and not model_of.has(n):
-			continue   # 空模型：不产出 chunk，父节点的 children 里也就不该有它
-		var my_layer := layer
-		if my_layer < 0:
-			my_layer = layers.size()
-			layers.append(_layr(my_layer, n))
-		var local := n.local_transform
 		var trn_id: int = state["next_id"]
 		var body_id := trn_id + 1
 		state["next_id"] = trn_id + 2
 		out_ids.append(trn_id)
-		if is_model:
-			out.append_array(_ntrn(trn_id, n.node_name, body_id, my_layer, local,
-					(n as QVoxelModel).grid_size))
+		if n is QVoxelModel:
+			out.append_array(_ntrn(trn_id, n.node_name, body_id, DEFAULT_LAYER, n.local_transform,
+					(n as QVoxelModel).grid_size, n.visible))
 			out.append_array(_nshp(body_id, int(model_of[n])))
 		else:
 			var kids: Array = []
-			var child_chunks := _emit_list((n as QVoxelGroup).child_nodes, kids, state, layers,
-					my_layer)
-			out.append_array(_ntrn(trn_id, n.node_name, body_id, my_layer, local, Vector3i.ZERO))
+			var child_chunks := _emit_list((n as QVoxelGroup).child_nodes, kids, state, writable)
+			out.append_array(_ntrn(trn_id, n.node_name, body_id, DEFAULT_LAYER, n.local_transform,
+					Vector3i.ZERO, n.visible))
 			out.append_array(_ngrp(body_id, kids))
 			out.append_array(child_chunks)
 	return out
@@ -208,7 +230,7 @@ static func _emit_list(nodes: Array, out_ids: Array, state: Dictionary, layers: 
 ##   ① 模型居中偏移（`VoxSpace.origin_offset`）；② 写入时为避开负坐标做的 `vox_shift`。
 ## 于是读端算出的世界位置恰好等于 `父链累积 × 本节点局部坐标`。
 static func _ntrn(id: int, node_name: String, child: int, layer: int, local_xf: Transform3D,
-		model_size: Vector3i) -> PackedByteArray:
+		model_size: Vector3i, visible := true) -> PackedByteArray:
 	var fix := _origin_fix(model_size)
 	var t_godot := local_xf * fix
 	var t_vox := VoxSpace.to_vox_vec3(t_godot)
@@ -217,6 +239,9 @@ static func _ntrn(id: int, node_name: String, child: int, layer: int, local_xf: 
 	var node_attrs := {}
 	if not node_name.is_empty():
 		node_attrs["_name"] = node_name
+	if not visible:
+		# 对象级可见性就在这里（`.vox` 的 `_hidden`），不在 LAYR 上 —— 后者是整层开关。
+		node_attrs["_hidden"] = "1"
 	content.append_array(_dict(node_attrs))
 	content = _put_u32(content, child)
 	content = _put_u32(content, -1)          # reserved
@@ -259,15 +284,14 @@ static func _nshp(id: int, model_id: int) -> PackedByteArray:
 	return _chunk("nSHP", content)
 
 
-static func _layr(layer: int, n: QVoxelNode) -> PackedByteArray:
+## 唯一的图层块：id 固定、无名字、不隐藏。
+## 不按节点建图层，是因为 `.vox` 的 LAYR 只是"图层可见性开关"：我们的分组在 nTRN/nGRP 树上、
+## 可见性在节点 `_hidden` 上，再按节点铺一遍图层就是两套并行的层级。这里留一个默认层，
+## 只为了让 `layer_id` 有归属、不引用到不存在的图层。
+static func _layer_chunk() -> PackedByteArray:
 	var content := PackedByteArray()
-	content = _put_u32(content, layer)
-	var attrs := {}
-	if not n.node_name.is_empty():
-		attrs["_name"] = n.node_name
-	if not n.visible:
-		attrs["_hidden"] = "1"
-	content.append_array(_dict(attrs))
+	content = _put_u32(content, DEFAULT_LAYER)
+	content.append_array(_dict({}))
 	return _chunk("LAYR", content)
 
 

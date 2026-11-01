@@ -167,8 +167,11 @@ static func _build_world_node(w: QVoxelWorld, vox: VoxAsset, id: int, parent: QV
 			_build_world_node(w, vox, int(c), parent, xf, ctx, parent_abs0)
 		return
 	var has_model := _has_model_frame(vox, n)
-	# 命名包装（nTRN 带 name、单子且子是形状）：名字并进模型，不单独成组 —— 于是"模型名"能往返。
-	if not has_model and not n.name.is_empty() and kids.size() == 1:
+	# 「变换节点 + 单个形状节点」折叠成一个模型，不单独成组。
+	# 【为什么无名字也折叠】MagicaVoxel 的对象就是"一个 nTRN(变换) 挂一个 nSHP(形状)"，
+	# 而我们的 `QVoxelModel` 本身带 `local_transform` —— 再包一层组只是把同一件事拆成两层。
+	# 不折叠的话每次往返都会多出一批"只有一个孩子的空组"（实测 cars.vox：9 个 nTRN 涨到 15）。
+	if not has_model and kids.size() == 1:
 		var cid := int(kids[0])
 		var c0: VoxAsset.VoxelNode = vox.nodes.get(cid)
 		if c0 != null and _has_model_frame(vox, c0) and _child_ids(vox, cid).is_empty():
@@ -177,14 +180,16 @@ static func _build_world_node(w: QVoxelWorld, vox: VoxAsset, id: int, parent: QV
 			var cxf := xf * _node_xf(c0)
 			var cmid := _model_id_at(vox, c0, 0)
 			if cmid >= 0:
-				_make_world_model(w, vox.models[cmid], cxf, parent, n.name)
+				var qm := _make_world_model(w, vox.models[cmid], cxf, parent, n.name)
+				qm.visible = not (n.hidden or c0.hidden)
 			return
 	if has_model and kids.is_empty():
 		if ctx.animated and _make_baked_model(w, vox, n.id, parent, parent_abs0, ctx):
 			return
 		var mid := _model_id_at(vox, n, 0)
 		if mid >= 0:
-			_make_world_model(w, vox.models[mid], xf, parent)
+			var qm := _make_world_model(w, vox.models[mid], xf, parent)
+			qm.visible = not n.hidden
 		return
 	if not has_model and kids.is_empty():
 		return  # 空壳节点：没有内容
@@ -205,8 +210,9 @@ static func _build_world_node(w: QVoxelWorld, vox: VoxAsset, id: int, parent: QV
 
 
 ## 一个形状引用 → QVoxelModel（本地内容 + 紧致盒重定位；摆放 = 形状节点变换 × 居中/重定位平移）。
+## 可见性由调用方设置 —— 它取决于"节点 hidden ∨ 图层 hidden"，只有调用处同时持有两者。
 static func _make_world_model(w: QVoxelWorld, m: VoxAsset.VoxelModel, xf: Transform3D,
-		parent: QVoxelGroup, node_name := "") -> void:
+		parent: QVoxelGroup, node_name := "") -> QVoxelModel:
 	var bounds := _voxel_bounds(m.voxels)
 	var grid: Vector3i = bounds["size"]
 	var base: Vector3i = bounds["min"]
@@ -217,6 +223,7 @@ static func _make_world_model(w: QVoxelWorld, m: VoxAsset.VoxelModel, xf: Transf
 	# world = xf * (voxel + offset)，局部坐标 c = voxel - base ⇒
 	# world = (xf ∘ T(base+offset)) * c。整数平移 ⇒ 旋转仍保整数。
 	qm.local_transform = xf * _offset_shift(m, base)
+	return qm
 
 
 ## 该形状节点有几帧带模型（>1 = .vox 体素动画）。
@@ -283,6 +290,7 @@ static func _make_baked_model(w: QVoxelWorld, vox: VoxAsset, node_id: int, paren
 	var grid := mx - mn + Vector3i.ONE
 
 	var qm := w.create_model(node_name, grid, parent)
+	qm.visible = not n.hidden
 	qm.make_animated()
 	for i in range(1, frame_count):
 		qm.add_frame(QVoxelFrame.new(), i)
@@ -307,7 +315,8 @@ static func _baked_pos(d: Transform3D, p: Vector3, anchor: Vector3) -> Vector3i:
 	return Vector3i(roundi(v.x), roundi(v.y), roundi(v.z))
 
 
-## 组名：节点自带名优先，其次图层名（无名图层给 "Layer N"），都没有则留空（用默认名）。
+## 组名：节点自带名优先。节点没名字时退一步借外部文件的图层名 —— 那是**读取兼容**
+## （某些 .vox 把名字记在 LAYR 上），本项目的组名只来自节点自身，不从图层推导。
 static func _group_name(vox: VoxAsset, n: VoxAsset.VoxelNode) -> String:
 	if not n.name.is_empty():
 		return n.name
@@ -319,7 +328,11 @@ static func _group_name(vox: VoxAsset, n: VoxAsset.VoxelNode) -> String:
 	return ""
 
 
+## 可见性 = **节点级 `_hidden` 与图层级隐藏取与**：两处任一为隐藏，整棵子树都不显示。
+## 本项目的 `QVoxelNode.visible` 是节点属性，图层只是外部文件里的另一种隐藏来源。
 static func _group_visible(vox: VoxAsset, n: VoxAsset.VoxelNode) -> bool:
+	if n.hidden:
+		return false
 	if vox.layers.has(n.layerId) and vox.layers[n.layerId] != null:
 		return vox.layers[n.layerId].isVisible
 	return true

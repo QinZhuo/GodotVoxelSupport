@@ -166,7 +166,57 @@ func test_empty_world_rejected() -> void:
 	assert_true(not VoxWriter.check(QVoxelWorld.create_empty())["ok"], "空世界应拒绝")
 
 
-# 读取侧回归（VoxSpace 抽取不得改变行为）
+## 可见性是**节点属性**，导出写 `nTRN._hidden`（不是 LAYR）：子节点的隐藏必须能往返。
+func test_hidden_child_roundtrip() -> void:
+	var w := QVoxelWorld.create_empty()
+	var c := w.add_material(Color.RED)
+	var g := w.create_group("g", null)
+	var m := w.create_model("m", Vector3i(2, 2, 2), g)
+	m.set_voxel(0, 0, 0, c)
+	m.visible = false
+	_save(VoxWriter.encode(w))
+	var back := VoxAssetWorld.to_world(VoxAsset.from_asset(TMP))
+	assert_true(back != null, "应能重建世界")
+	if back == null:
+		return
+	var seen := {}
+	for n in back.all_nodes():
+		seen[n.node_name] = n.visible
+	assert_eq(seen.get("m", true), false, "隐藏的子模型应保持隐藏")
+	assert_eq(seen.get("g", false), true, "父组应仍可见")
+
+
+## 空组（子树里没有任何可写节点）整条跳过：写出去只会得到一个读端会丢弃的空 nGRP。
+func test_empty_group_dropped() -> void:
+	var w := QVoxelWorld.create_empty()
+	var c := w.add_material(Color.RED)
+	w.create_group("empty", null)
+	var m := w.create_model("m", Vector3i(2, 2, 2), null)
+	m.set_voxel(0, 0, 0, c)
+	_save(VoxWriter.encode(w))
+	var back := VoxAssetWorld.to_world(VoxAsset.from_asset(TMP))
+	assert_true(back != null, "应能重建世界")
+	if back == null:
+		return
+	var names := []
+	for n in back.all_nodes():
+		names.append(n.node_name)
+	assert_true(not names.has("empty"), "空组不该出现在往返结果里")
+	assert_true(names.has("m"), "有内容的模型必须保留")
+
+
+## 畸形文件不能让解析器原地打转（实测过一次：坏 size 字段能把编辑器主线程卡死）。
+## 这条用例的价值在于"它没卡住"本身 —— 保护若失效，整个测试进程会挂住而不是失败。
+func test_malformed_chunk_terminates() -> void:
+	var bytes := VoxWriter.encode(_box_world())
+	assert_true(bytes.size() > 40, "应有可用的样例文件")
+	if bytes.size() <= 40:
+		return
+	# 8 字节文件头 + 12 字节 MAIN 头 = 20，第一个子块从 20 开始，其 size 字段在 24。
+	bytes.encode_u32(24, 0x7FFFFFF0)
+	_save(bytes)
+	var vox := VoxAsset.from_asset(TMP)
+	assert_true(vox != null, "应返回（残缺）结果，而不是卡死或崩溃")
 
 func test_deer_vox_unchanged() -> void:
 	var vox := VoxAsset.from_asset("res://demo/deer.vox")

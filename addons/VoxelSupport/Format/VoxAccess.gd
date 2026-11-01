@@ -46,9 +46,15 @@ func _init(file: FileAccess):
 
 
 func read_chunk():
+	var start := _file.get_position()
 	var id := _get_string(4)
 	var size := _get_32()
 	var chunks := _get_32()
+	# 坏块保护：size 超出剩余字节说明文件被截断或字段损坏，整块放弃（跳到末尾）。
+	# 不挡的话 `seek(不可达位置)` 会让外层 while 原地打转 —— 实测能把编辑器主线程卡死。
+	if size < 0 or size > _remain():
+		_file.seek(_file.get_length())
+		return
 	var end := _file.get_position() + size
 	match id:
 		"SIZE":
@@ -59,10 +65,13 @@ func read_chunk():
 			var z := _get_32()
 			model.size = VoxSpace.to_godot_size(Vector3i(x, y, z))
 		"XYZI":
+			if voxel.models.is_empty():
+				_file.seek(end)
+				return
 			var model := voxel.models.back()
-			var num_voxels = _get_32()
+			var num_voxels = _safe_count(_get_32(), 4)
 			var buffer = _file.get_buffer(num_voxels * 4)
-			for i in range(num_voxels):
+			for i in range(mini(num_voxels, buffer.size() / 4)):
 				var offset = i * 4
 				var pos := VoxSpace.to_godot_pos(Vector3i(
 						buffer[offset], buffer[offset + 1], buffer[offset + 2]))
@@ -71,7 +80,7 @@ func read_chunk():
 		"RGBA":
 			# 官方映射：文件项 0..254 → 调色板 1..255（调色板 0 恒为透明，不读）。
 			var buffer = _file.get_buffer((VoxSpace.PALETTE_SLOTS - 1) * 4)
-			for i in range(VoxSpace.PALETTE_SLOTS - 1):
+			for i in range(mini(VoxSpace.PALETTE_SLOTS - 1, buffer.size() / 4)):
 				var offset = i * 4
 				voxel.materials[i + 1].color = Color(buffer[offset] / 255.0, buffer[offset + 1] / 255.0, buffer[offset + 2] / 255.0, buffer[offset + 3] / 255.0)
 		"nTRN":
@@ -79,7 +88,7 @@ func read_chunk():
 			node.child_nodes.append(_get_32())
 			_get_32() # reserved id (must be -1)
 			node.layerId = _get_32()
-			for i in _get_32():
+			for i in _safe_count(_get_32(), 4):
 				var frame_attributes := _get_dictionary()
 				var frame_index := int(frame_attributes.get('_f', '0'))
 				var frame := node.get_frame(frame_index)
@@ -90,11 +99,11 @@ func read_chunk():
 					frame.rotation = VoxSpace.decode_rotation(int(frame_attributes['_r']))
 		"nGRP":
 			var node := _get_node()
-			for i in _get_32():
+			for i in _safe_count(_get_32(), 4):
 				node.child_nodes.append(_get_32())
 		"nSHP":
 			var node := _get_node()
-			for i in _get_32():
+			for i in _safe_count(_get_32(), 8):
 				var model_id := _get_32()
 				var model_attributes := _get_dictionary()
 				var frame_index := int(model_attributes.get('_f', '0'))
@@ -133,7 +142,8 @@ func read_chunk():
 		_:
 			pass
 
-	_file.seek(end)
+	# 至少前进一个 chunk 头：size=0 且无 children 的坏块会让外层 while 原地打转。
+	_file.seek(maxi(end, start + 12))
 
 
 func get_trans(attributes: Dictionary) -> float:
@@ -148,12 +158,23 @@ func get_trans(attributes: Dictionary) -> float:
 func _get_32() -> int:
 	return _file.get_32()
 
+## 剩余可读字节（畸形文件保护用）。
+func _remain() -> int:
+	return maxi(0, _file.get_length() - _file.get_position())
+
+
+## 把"声明的项数"夹到"剩余字节装得下的数量"（每项 item_bytes 字节）。
+## 【为什么必须有】这些字段直接决定循环次数：一个坏值就能让主线程空转几十亿次。
+func _safe_count(declared: int, item_bytes: int) -> int:
+	return clampi(declared, 0, _remain() / maxi(1, item_bytes))
+
+
 func _get_string(length: int) -> String:
-	return _file.get_buffer(length).get_string_from_ascii()
+	return _file.get_buffer(clampi(length, 0, _remain())).get_string_from_ascii()
 
 func _get_dictionary() -> Dictionary[String, String]:
 	var dictionary: Dictionary[String, String]
-	for _p in range(_get_32()):
+	for _p in _safe_count(_get_32(), 8):
 		var key = _get_string(_get_32())
 		dictionary[key] = _get_string(_get_32())
 	return dictionary
@@ -164,5 +185,6 @@ func _get_node() -> VoxAsset.VoxelNode:
 	var attributes := _get_dictionary()
 	if attributes.has("_name"):
 		node.name = attributes.get("_name")
+	node.hidden = attributes.get("_hidden", "0") == "1"
 	voxel.nodes[node.id] = node
 	return node

@@ -91,6 +91,10 @@ class VoxelNode:
 
 	var layerId := -1
 
+	## 节点级可见性（`nTRN` 的 `_hidden`）。`.vox` 的隐藏有两处：节点级（这个）与图层级（LAYR）。
+	## 本项目的 `QVoxelNode.visible` 是节点属性，导入时两者取"与"。
+	var hidden := false
+
 	var child_nodes: Array[int]
 
 	var frames: Dictionary[int, VoxelFrame]
@@ -186,10 +190,14 @@ class VoxelFrame:
 	func _to_string() -> String:
 		return str(' model_id: ', model_id, ' position: ', position, ' rotation: ', rotation)
 
+## `.vox` 的 LAYR：只承载"图层可见性 + 图层名"这两项**外部文件**信息。
+## 【为什么不映射成节点】本项目的分组与可见性都在节点树上（`QVoxelNode.visible`）：
+## 分组 = 父子关系、可见 = 节点属性。这里保留 LAYR 只为读懂别人的文件、并在读入时让
+## 被隐层的对象不显示；导出时不写（只留一个占位层）。
 class VoxelLayer:
 	var id: int;
 
 	var isVisible: bool;
 
-	## 图层名（LAYR 的 `_name`）。与 QVX 的组名一一对应。
+	## 图层名（LAYR 的 `_name`）。仅作读入时的组名兜底，不参与本项目的分组语义。
 	var name: String = ""
