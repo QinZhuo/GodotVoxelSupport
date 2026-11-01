@@ -30,7 +30,7 @@ extends Node3D
 	Color(0.90, 0.90, 0.90), Color(0.34, 0.35, 0.38),
 ]
 
-## 笔刷上限（体素笔/盒笔/线笔的加粗半径）。
+## 笔刷上限（体素笔/盒笔/线笔的笔头边长，与 MagicaVoxel 的 size 同义；可取偶数）。
 @export var max_brush_size := 16
 
 ## 导入模型时的体素分辨率 = 模型最长边的体素数（其余轴按比例）。越大越精细、也越吃内存。
@@ -1522,8 +1522,8 @@ func _step_brush(delta: int) -> void:
 	_set_brush(session.tool.brush_size + delta)
 
 
-## 笔刷乘除（工具坞的 2X / 1÷2）。÷2 向下取整并兜底到 1 —— 与细调同一条底线：
-## 笔刷永远至少一格，界面不必认识"上限"（clamp 仍在 _set_brush 一处）。
+## 笔刷乘除（工具坞的 2X / 1÷2）：1 → 2 → 4 → 8 → 16，正是 MagicaVoxel 的偶数档位。
+## ÷2 向下取整并兜底到 1 —— 与细调同一条底线：笔刷永远至少一格。
 func _scale_brush(up: bool) -> void:
 	var s: int = session.tool.brush_size
 	_set_brush(s * 2 if up else maxi(1, s >> 1))

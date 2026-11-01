@@ -85,7 +85,7 @@ const HELP := """# 体素程序化建模 —— API 说明
     count_solid(id := -1) -> int
 
 `VoxelPrimitives`(与画笔同一份实现)产出格子集合: `line(a, b)` `box(a, b)` `ball(center, radius)`
-`dilate(cells, radius)` `dilate_plane(cells, radius, normal)` `region(seeds, accept, step)`。
+`dilate(cells, radius)` `dilate_plane(cells, size, normal)` `region(seeds, accept, step)`。
 自定义算法直接拼 `Array[Vector3i]` 交给 paint。
 
 ## 6. 帧动画

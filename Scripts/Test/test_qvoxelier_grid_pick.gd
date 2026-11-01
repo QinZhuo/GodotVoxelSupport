@@ -127,11 +127,11 @@ func test_erasing_on_the_floor_writes_nothing() -> void:
 
 func test_brush_paints_on_the_floor_with_the_current_material() -> void:
 	var s := _session()
-	s.tool.brush_size = 2
+	s.tool.brush_size = 3
 	var pick := s.pick_from_hit(_look_down(s), QVoxelBrushTool.Op.ADD, MAT)
 	s.begin(pick)
 	s.release()
-	# 笔刷尺寸 2 ⇒ 以落笔格为中心、半径 1 的球（欧氏）；网格内应出现一片底层格子。
+	# 笔刷尺寸 3 ⇒ 边长 3、以落笔格为中心、半径 1 的球（欧氏）；网格内应出现一片底层格子。
 	assert_eq(s.object.get_voxel(2, 0, 3), MAT, "中心格必在")
 	assert_eq(s.object.get_voxel(3, 0, 3), MAT, "加粗到邻近列（底层仍是 y = 0）")
 	assert_eq(s.object.get_voxel(2, -1, 3), 0, "越界那一格被丢弃：地板上不会写出网格外的体素")

@@ -108,6 +108,9 @@ class Pick extends RefCounted:
 
 
 var mode: Mode = Mode.VOXEL
+## 笔头**边长**（格），与 MagicaVoxel 的 size 同义；可取任意正整数（含偶数 2 / 4 / 8）。
+## 【为什么是边长而不是半径】用户量的是"这一笔有多宽"：尺寸 3 就该刷满 3×3，而不是 5×5。
+## 球形态内切于边长 size 的立方（偶数时球心偏半格），平面形态直接铺成 size × size。
 var brush_size := 1
 ## 加粗形态（见 [enum Shape]）。只在 [method supports_brush_size] 且尺寸 > 1 时起作用。
 var brush_shape: Shape = Shape.BALL
@@ -412,15 +415,17 @@ static func _clip(p: Vector3i, pick: Pick) -> Vector3i:
 ## 【为什么要在这里裁】对象侧的越界处理是"丢弃"，让越界坐标走一趟只会白白记账
 ## （撤销里出现一堆从未生效的格）。裁剪放在唯一的出口，预览与落笔因此看到同一批格。
 func _finish(cells: Array[Vector3i], pick: Pick) -> Array[Vector3i]:
-	var radius := brush_size - 1
-	if supports_brush_size() and radius > 0:
+	var size := maxi(brush_size, 1)
+	if supports_brush_size() and size > 1:
 		if brush_shape == Shape.PLANE:
 			# 平面形态要一个"面"来定摊开方向：取拾取面的法线。没命中（pick 为空）时退化成 XY 平面 ——
 			# 那种情况 pick.valid() 本就为假、这一笔不会真的落下，退化值没有副作用。
-			cells = VoxelPrimitives.dilate_plane(cells, radius,
+			cells = VoxelPrimitives.dilate_plane(cells, size,
 					pick.normal if pick != null else Vector3i.ZERO)
 		else:
-			cells = VoxelPrimitives.dilate(cells, radius)
+			# 球内切于边长 size 的立方：尺寸 2 = 2×2×2 实心块、3 = 3×3×3 去 8 角、
+			# 4 = 4 格宽的圆 —— 偶数尺寸的球心落在半格上（见 VoxelPrimitives.dilate_ball）。
+			cells = VoxelPrimitives.dilate_ball(cells, size)
 	if pick == null or pick.grid == Vector3i.ZERO:
 		return cells
 	if symmetry != Vector3i.ZERO:

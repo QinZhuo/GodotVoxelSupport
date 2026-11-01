@@ -98,14 +98,32 @@ static func ball(center: Vector3i, radius: int) -> Array[Vector3i]:
 static func dilate(cells: Array[Vector3i], radius: int) -> Array[Vector3i]:
 	if radius <= 0 or cells.is_empty():
 		return cells
+	return _dilate_shifted(cells, float(radius), 0.0)
+
+
+## 以「直径 size 的球」膨胀 —— 球**内切于 size³ 的立方体**，球心对齐立方体的几何中心。
+## 【为什么与 dilate 分开】dilate 的球心恒在源格上，只能表达奇数直径；而笔刷尺寸 2 / 4 / 8 是
+## MagicaVoxel 的常用档位，尺寸 2 的笔头必须是 2×2×2 的实心块、尺寸 3 必须是 3×3×3 去掉 8 个角。
+## 偶数直径的球心落在半格上（三轴各偏 -0.5），用 `shift` 把它交给同一套距离变换：
+## 距离项从 (i-j)² 变成 (i-j-shift)²，扫描本身仍是 O(n)（抛物线的顶点只是平移了）。
+static func dilate_ball(cells: Array[Vector3i], size: int) -> Array[Vector3i]:
+	if size <= 1 or cells.is_empty():
+		return cells
+	var shift := -0.5 if (size & 1) == 0 else 0.0
+	return _dilate_shifted(cells, size * 0.5, shift)
+
+
+## 距离变换的共用主体：半径是浮点，`shift` 是**球心相对源格的偏移**（0 = 球心在格上）。
+static func _dilate_shifted(cells: Array[Vector3i], radius: float, shift: float) -> Array[Vector3i]:
+	var grow := int(ceil(radius))
 	# 输出范围：源集包围盒各向外扩 radius（球不可能跑出这个盒子）
 	var lo := cells[0]
 	var hi := cells[0]
 	for c in cells:
 		lo = Vector3i(mini(lo.x, c.x), mini(lo.y, c.y), mini(lo.z, c.z))
 		hi = Vector3i(maxi(hi.x, c.x), maxi(hi.y, c.y), maxi(hi.z, c.z))
-	lo -= Vector3i.ONE * radius
-	hi += Vector3i.ONE * radius
+	lo -= Vector3i.ONE * grow
+	hi += Vector3i.ONE * grow
 	var sx := hi.x - lo.x + 1
 	var sy := hi.y - lo.y + 1
 	var sz := hi.z - lo.z + 1
@@ -124,10 +142,10 @@ static func dilate(cells: Array[Vector3i], radius: int) -> Array[Vector3i]:
 	env_pos.resize(span)
 	env_val.resize(span + 1)
 	f_buf.resize(span)
-	_edt_axis(d, sx, sy, sz, 0, env_pos, env_val, f_buf)
-	_edt_axis(d, sx, sy, sz, 1, env_pos, env_val, f_buf)
-	_edt_axis(d, sx, sy, sz, 2, env_pos, env_val, f_buf)
-	var r2 := float(radius * radius)
+	_edt_axis(d, sx, sy, sz, 0, shift, env_pos, env_val, f_buf)
+	_edt_axis(d, sx, sy, sz, 1, shift, env_pos, env_val, f_buf)
+	_edt_axis(d, sx, sy, sz, 2, shift, env_pos, env_val, f_buf)
+	var r2 := radius * radius
 	var out: Array[Vector3i] = []
 	for qz in sz:
 		for qy in sy:
@@ -138,17 +156,23 @@ static func dilate(cells: Array[Vector3i], radius: int) -> Array[Vector3i]:
 	return out
 
 
-## 用「平面」把一组格子膨胀 —— 只在拾取面的两个轴向摊开，**沿法线的厚度不变**。
+## 用「平面」把一组格子膨胀成边长 `size` 的方片 —— 只在拾取面的两个轴向摊开，
+## **沿法线的厚度不变**。
 ## 【与 dilate（欧氏球）的分工】球是各向同性地鼓起来，平面是"只在表面上摊开"。
 ## 在表面上刷一条宽笔触时，球会把大约一半体积埋进实心内部 —— 看不见，却实实在在撑大了体积、
 ## 也多写了一倍的格（还会把本该留空的邻格填掉）；平面只铺出一层薄片。这就是"形状"要区分的用途。
 ## 【可分离】平面方形 = 两个线段的闵可夫斯基和，故等价于沿平面内两轴各做一次一维膨胀 ——
-## 于是不必真的枚举 (2r+1)² 个偏移（半径 15 就是 961 个/格，对盒笔照样会爆炸）。
-static func dilate_plane(cells: Array[Vector3i], radius: int, normal: Vector3i) -> Array[Vector3i]:
-	if radius <= 0 or cells.is_empty():
+## 于是不必真的枚举 size² 个偏移（边长 15 就是 225 个/格，对盒笔照样会爆炸）。
+## 【尺寸取边长而不是半径】偶数边长（2 / 4 / 8）在体素里没有整数半径可表达，
+## 只能中心偏半格：向负方向多铺一格、向正方向少铺一格（与 MagicaVoxel 的偶数笔头同向）。
+static func dilate_plane(cells: Array[Vector3i], size: int, normal: Vector3i) -> Array[Vector3i]:
+	if size <= 1 or cells.is_empty():
 		return cells
 	var ax := face_axes(normal)
-	return _dilate_axis(_dilate_axis(cells, _axis_index(ax[0]), radius), _axis_index(ax[1]), radius)
+	var neg := size >> 1
+	var pos := (size - 1) >> 1
+	return _dilate_axis(_dilate_axis(cells, _axis_index(ax[0]), neg, pos),
+			_axis_index(ax[1]), neg, pos)
 
 
 ## 轴向向量的轴序号（0/1/2）。只用于 [method face_axes] 的产物（单轴单位向量）。
@@ -158,10 +182,10 @@ static func _axis_index(v: Vector3i) -> int:
 	return 1 if v.y != 0 else 2
 
 
-## 沿单个轴向做一维膨胀：每个格扩成 ±radius 的线段。
-## 【为什么按线归组再并区间】"每格盖一条线"是 `格数 × (2r+1)` 次写入；把同一条线上的源格先归组、
+## 沿单个轴向做一维膨胀：每个格扩成 `[-neg, +pos]` 的线段（总长 neg + pos + 1 = 笔头边长）。
+## 【为什么按线归组再并区间】"每格盖一条线"是 `格数 × 边长` 次写入；把同一条线上的源格先归组、
 ## 再把区间求并，代价就只由**结果长度**决定（与 dilate 的取向一致：不随笔刷尺寸乘性爆炸）。
-static func _dilate_axis(cells: Array[Vector3i], axis: int, radius: int) -> Array[Vector3i]:
+static func _dilate_axis(cells: Array[Vector3i], axis: int, neg: int, pos: int) -> Array[Vector3i]:
 	var lines := {}    # 其余两轴的坐标 → 沿 axis 的坐标表
 	for c in cells:
 		var key := _rest2(c, axis)
@@ -174,14 +198,14 @@ static func _dilate_axis(cells: Array[Vector3i], axis: int, radius: int) -> Arra
 	for key in lines:
 		var ts: Array = lines[key]
 		ts.sort()
-		var lo: int = ts[0] - radius
-		var hi: int = ts[0] + radius
+		var lo: int = ts[0] - neg
+		var hi: int = ts[0] + pos
 		for i in range(1, ts.size()):
 			var t: int = ts[i]
-			if t - radius > hi + 1:
+			if t - neg > hi + 1:
 				_emit_span(out, key, axis, lo, hi)
-				lo = t - radius
-			hi = maxi(hi, t + radius)
+				lo = t - neg
+			hi = maxi(hi, t + pos)
 		_emit_span(out, key, axis, lo, hi)
 	return out
 
@@ -217,21 +241,21 @@ const _FAR := 1 << 28
 
 ## 把体积里所有沿 `axis` 的直线依次交给 `_edt_line` 做一维变换。
 ## 三个轴各跑一轮；下包络法的可分离性保证三轮叠加后就是精确的三维平方欧氏距离。
-static func _edt_axis(d: PackedFloat64Array, sx: int, sy: int, sz: int, axis: int,
+static func _edt_axis(d: PackedFloat64Array, sx: int, sy: int, sz: int, axis: int, shift: float,
 		env_pos: PackedInt32Array, env_val: PackedFloat64Array, f_buf: PackedFloat64Array) -> void:
 	match axis:
 		0:
 			for qz in sz:
 				for qy in sy:
-					_edt_line(d, sx * (qy + sy * qz), 1, sx, env_pos, env_val, f_buf)
+					_edt_line(d, sx * (qy + sy * qz), 1, sx, shift, env_pos, env_val, f_buf)
 		1:
 			for qz in sz:
 				for qx in sx:
-					_edt_line(d, qx + sx * sy * qz, sx, sy, env_pos, env_val, f_buf)
+					_edt_line(d, qx + sx * sy * qz, sx, sy, shift, env_pos, env_val, f_buf)
 		_:
 			for qy in sy:
 				for qx in sx:
-					_edt_line(d, qx + sx * qy, sx * sy, sz, env_pos, env_val, f_buf)
+					_edt_line(d, qx + sx * qy, sx * sy, sz, shift, env_pos, env_val, f_buf)
 
 
 ## 一维平方距离变换（下包络法，O(n)）：令 d[start + i*stride] ← min over j of ((i-j)² + 原值)。
@@ -239,21 +263,23 @@ static func _edt_axis(d: PackedFloat64Array, sx: int, sy: int, sz: int, axis: in
 ## 的原值 —— 否则读到的是已经变小的 D[j]，结果会系统性偏小（笔刷球被算成"漏气的蜂窝"）。
 ## f_buf 就是这一行的原值副本（复用缓冲，长度 >= n）。env_pos / env_val 同样复用，
 ## 避免体积里上万行每行都新建数组。
-static func _edt_line(d: PackedFloat64Array, start: int, stride: int, n: int,
+static func _edt_line(d: PackedFloat64Array, start: int, stride: int, n: int, shift: float,
 		env_pos: PackedInt32Array, env_val: PackedFloat64Array, f_buf: PackedFloat64Array) -> void:
 	if n <= 1:
 		return
 	# ① 自左向右：把每点看成一条抛物线，求出它们组成的下包络（哪些点上榜、交点在哪）
+	# `shift` 只把每条抛物线的顶点从下标 q 挪到 q + shift（源点不在格心时用它），交点公式随之平移。
 	var k := 0
 	env_pos[0] = 0
 	env_val[0] = -INF
 	env_val[1] = INF
 	for q in range(1, n):
-		var fq := d[start + q * stride] + float(q * q)
+		var fq := d[start + q * stride] + (q + shift) * (q + shift)
 		var cross := 0.0
 		while true:
 			var p := env_pos[k]
-			cross = (fq - d[start + p * stride] - float(p * p)) / float(2 * (q - p))
+			var fp := d[start + p * stride] + (p + shift) * (p + shift)
+			cross = (fq - fp) / float(2 * (q - p))
 			if cross > env_val[k]:
 				break
 			k -= 1
@@ -269,7 +295,8 @@ static func _edt_line(d: PackedFloat64Array, start: int, stride: int, n: int,
 		while env_val[k + 1] < float(q):
 			k += 1
 		var p := env_pos[k]
-		d[start + q * stride] = float((q - p) * (q - p)) + f_buf[p]
+		var t := float(q - p) - shift
+		d[start + q * stride] = t * t + f_buf[p]
 
 
 ## 与给定法线垂直的两个轴向（单位向量，顺序固定）。

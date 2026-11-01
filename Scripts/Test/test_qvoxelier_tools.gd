@@ -123,6 +123,41 @@ func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 		assert_eq(only_want.size(), 0, "半径 %d 漏算了（距离变换偏大）: %s" % [r, str(only_want.slice(0, 8))])
 
 
+func test_dilate_ball_is_the_inscribed_sphere() -> void:
+	# dilate_ball 的定义：球心是 size³ 立方的几何中心（偶数尺寸就落在半格上），直径 = size。
+	# 这条用"逐格枚举判据"的笨办法对照距离变换的 shift 实现 —— 半格偏移写错一个符号，
+	# 尺寸 2 的笔头就会少一格（2×2×2 变成缺角的蜂窝）。
+	var one: Array[Vector3i] = [Vector3i(0, 0, 0)]
+	for size: int in [2, 3, 4, 5, 6, 8]:
+		var got := _cells_of(VoxelPrimitives.dilate_ball(one, size))
+		var neg := size >> 1
+		var pos := (size - 1) >> 1
+		var c := float(pos - neg) * 0.5
+		var r2 := float(size * size) * 0.25
+		var want := {}
+		for z in range(-neg, pos + 1):
+			for y in range(-neg, pos + 1):
+				for x in range(-neg, pos + 1):
+					var dz := float(z) - c
+					var dy := float(y) - c
+					var dx := float(x) - c
+					if dx * dx + dy * dy + dz * dz <= r2:
+						want[Vector3i(x, y, z)] = true
+		var only_got: Array[Vector3i] = []
+		var only_want: Array[Vector3i] = []
+		for k: Vector3i in got:
+			if not want.has(k):
+				only_got.append(k)
+		for k: Vector3i in want:
+			if not got.has(k):
+				only_want.append(k)
+		assert_eq(only_got.size(), 0, "尺寸 %d 多算了: %s" % [size, str(only_got.slice(0, 8))])
+		assert_eq(only_want.size(), 0, "尺寸 %d 漏算了: %s" % [size, str(only_want.slice(0, 8))])
+	assert_eq(VoxelPrimitives.dilate_ball(one, 2).size(), 8, "尺寸 2 = 2×2×2 实心块")
+	assert_eq(VoxelPrimitives.dilate_ball(one, 3).size(), 19, "尺寸 3 = 3³ 去 8 角")
+	assert_eq(VoxelPrimitives.dilate_ball(one, 1), one, "尺寸 1 原样返回")
+
+
 func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 	# dilate_plane 走的是"平面内两轴各一轮一维膨胀"（代价随输出走），而它的定义是
 	# "每格盖一个平面方块"。与上面那条球的一样：这条把"快"钉在"对"上 —— 两条路径同一集合。
@@ -132,12 +167,13 @@ func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 			seeds.append(Vector3i(x * 2 - 1, x - z, z * 3))
 	for normal in [Vector3i(0, 1, 0), Vector3i(1, 0, 0), Vector3i(0, 0, -1)]:
 		var ax := VoxelPrimitives.face_axes(normal)
-		for r in [1, 2, 4]:
-			var got := _cells_of(VoxelPrimitives.dilate_plane(seeds, r, normal))
+		# 边长 2 / 3 / 4 / 5 一起验：偶数边长是"中心偏半格"的那一档，最容易写错边界。
+		for n in [2, 3, 4, 5]:
+			var got := _cells_of(VoxelPrimitives.dilate_plane(seeds, n, normal))
 			var want := {}
 			for c in seeds:
-				for i in range(-r, r + 1):
-					for j in range(-r, r + 1):
+				for i in range(-(n >> 1), ((n - 1) >> 1) + 1):
+					for j in range(-(n >> 1), ((n - 1) >> 1) + 1):
 						want[c + ax[0] * i + ax[1] * j] = true
 			var only_got: Array[Vector3i] = []
 			var only_want: Array[Vector3i] = []
@@ -148,24 +184,28 @@ func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 				if not got.has(k):
 					only_want.append(k)
 			assert_eq(only_got.size(), 0,
-				"法线 %s 半径 %d 多算了: %s" % [str(normal), r, str(only_got.slice(0, 8))])
+				"法线 %s 边长 %d 多算了: %s" % [str(normal), n, str(only_got.slice(0, 8))])
 			assert_eq(only_want.size(), 0,
-				"法线 %s 半径 %d 漏算了: %s" % [str(normal), r, str(only_want.slice(0, 8))])
+				"法线 %s 边长 %d 漏算了: %s" % [str(normal), n, str(only_want.slice(0, 8))])
 
 
 func test_dilate_plane_is_flat_where_the_ball_is_round() -> void:
 	# 「球 / 平面」的差别就落在这一步：球会朝法线两侧也鼓出去，平面只在面内摊开。
 	var one: Array[Vector3i] = [Vector3i(5, 5, 5)]
-	var flat := VoxelPrimitives.dilate_plane(one, 2, Vector3i(0, 1, 0))
-	assert_eq(flat.size(), 25, "法线 +Y、半径 2 的平面 = 5×5 的一片（(2r+1)²）")
+	var flat := VoxelPrimitives.dilate_plane(one, 5, Vector3i(0, 1, 0))
+	assert_eq(flat.size(), 25, "法线 +Y、边长 5 的平面 = 5×5 的一片")
 	for c in flat:
 		assert_eq(c.y, 5, "厚度恒为 1：平面不朝法线方向鼓")
 	assert_true(VoxelPrimitives.dilate(one, 2).size() > flat.size(),
-		"同半径下球比平面厚（球会朝法线两侧也长出去）")
-	assert_eq(VoxelPrimitives.dilate_plane(one, 0, Vector3i(0, 1, 0)), one, "半径 0 原样返回")
-	assert_eq(VoxelPrimitives.dilate_plane(one, 3, Vector3i(0, 1, 0)),
-		VoxelPrimitives.dilate_plane(one, 3, Vector3i(0, -1, 0)),
+		"同样 5 格宽，球比平面厚（球会朝法线两侧也长出去）")
+	assert_eq(VoxelPrimitives.dilate_plane(one, 1, Vector3i(0, 1, 0)), one, "边长 1 原样返回")
+	assert_eq(VoxelPrimitives.dilate_plane(one, 4, Vector3i(0, 1, 0)),
+		VoxelPrimitives.dilate_plane(one, 4, Vector3i(0, -1, 0)),
 		"平面的两个朝向等价（face_axes 只看轴向，不看正负）")
+	# 偶数边长（MagicaVoxel 的 2 / 4 / 8 档）：中心偏半格 —— 向负方向多一格、正方向少一格。
+	assert_eq(VoxelPrimitives.dilate_plane(one, 2, Vector3i(0, 1, 0)).size(), 4, "2 体素 = 2×2")
+	assert_eq(VoxelPrimitives.dilate_plane(one, 4, Vector3i(0, 1, 0)).size(), 16, "4 体素 = 4×4")
+	assert_eq(VoxelPrimitives.dilate_plane(one, 8, Vector3i(0, 1, 0)).size(), 64, "8 体素 = 8×8")
 
 
 func test_ball_offsets_are_one_shared_cached_table() -> void:
@@ -338,12 +378,33 @@ func test_fill_brush_stops_at_material_boundary() -> void:
 
 func test_brush_size_dilates_the_stroke() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
-	tool.brush_size = 2
+	tool.brush_size = 3
 	var solid := {}
 	tool.begin(_pick(solid, Vector3i(0, 0, 0), Vector3i(0, 1, 0)))
 	var cells := tool.release()
-	assert_eq(cells.size(), 7, "笔刷尺寸 2 → 半径 1 的球（中心 + 6 面邻）")
+	assert_eq(cells.size(), 19, "尺寸 3 = 内切于 3³ 的球 = 27 - 8 个角")
 	assert_true(cells.has(Vector3i(0, 1, 0)), "中心仍是落笔格")
+
+
+## 尺寸是**边长**（MagicaVoxel 的 size）：球内切于 size³ 的立方，平面直接铺成 size×size。
+## 曾经把尺寸当半径用，size 3 会画出 5×5。
+func test_brush_size_is_edge_length() -> void:
+	# 球：2 → 2×2×2 实心块（8 格）、3 → 3³ 去 8 角（19 格）、5 → 半径 2.5 的球（81 格）。
+	# 4 的格数比 3 少是体素化的必然（半格球心），但投影宽度仍是 4 → 单调变宽。
+	var ball_want := {1: 1, 2: 8, 3: 19, 4: 32, 5: 81}
+	for size in ball_want:
+		var ball := _tool(QVoxelBrushTool.Mode.VOXEL)
+		ball.brush_size = size
+		ball.begin(_pick({}, Vector3i(4, 0, 4), Vector3i(0, 1, 0)))
+		assert_eq(ball.release().size(), int(ball_want[size]), "尺寸 %d 的球格数" % size)
+	# 平面：边长就是实际宽度，偶数也精确（2×2 / 4×4 / 8×8）。
+	var plane_want := {1: 1, 2: 4, 4: 16, 8: 64}
+	for size in plane_want:
+		var plane := _tool(QVoxelBrushTool.Mode.VOXEL)
+		plane.brush_size = size
+		plane.set_shape(QVoxelBrushTool.Shape.PLANE)
+		plane.begin(_pick({}, Vector3i(8, 0, 8), Vector3i(0, 1, 0)))
+		assert_eq(plane.release().size(), int(plane_want[size]), "尺寸 %d 的平面片格数" % size)
 
 
 func test_plane_shape_keeps_a_wide_stroke_on_the_surface() -> void:
@@ -355,7 +416,7 @@ func test_plane_shape_keeps_a_wide_stroke_on_the_surface() -> void:
 	var solid := {}
 	tool.begin(_pick(solid, Vector3i(4, 0, 4), Vector3i(0, 1, 0)))
 	var cells := tool.release()
-	assert_eq(cells.size(), 25, "尺寸 3 → 半径 2 的平面片（(2·2+1)² = 25）")
+	assert_eq(cells.size(), 9, "尺寸 3 → 3×3 的平面片")
 	for c in cells:
 		assert_eq(c.y, 1, "整片都在落笔层（法线 +Y），没有一格陷进地板或飘在空中")
 	assert_eq(_tool(QVoxelBrushTool.Mode.VOXEL).brush_shape, QVoxelBrushTool.Shape.BALL,
@@ -364,12 +425,12 @@ func test_plane_shape_keeps_a_wide_stroke_on_the_surface() -> void:
 
 func test_out_of_grid_cells_are_dropped() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
-	tool.brush_size = 2
+	tool.brush_size = 3
 	var solid := {}
 	var grid := Vector3i(4, 4, 4)
 	tool.begin(_pick(solid, Vector3i(3, 2, 3), Vector3i(0, 1, 0), {"grid": grid}))
 	var cells := tool.release()
-	assert_eq(cells.size(), 4, "球有一半伸出网格 → 越界格必须被裁掉")
+	assert_true(cells.size() < 19, "球有一半伸出网格 → 越界格必须被裁掉")
 	for c in cells:
 		assert_true(c.x < grid.x and c.y < grid.y and c.z < grid.z, "产物必须全在网格内")
 
