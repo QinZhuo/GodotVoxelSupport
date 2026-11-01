@@ -12,6 +12,13 @@ extends RefCounted
 ## 网格原点与体素边长不在这里定 —— 体素化要求所有帧共用一套网格，故由 `MeshVoxelizer` 统一算。
 
 const EXTENSIONS := ["glb", "gltf", "obj", "stl"]
+## 各格式在对话框里的显示名。扩展名事实只有 `EXTENSIONS` 一处，这里只是"人怎么读它"。
+const FILTER_NAMES := {
+	"glb": "glTF 二进制（.glb）",
+	"gltf": "glTF 文本（.gltf）",
+	"obj": "Wavefront OBJ（.obj）",
+	"stl": "STL 网格（.stl）",
+}
 ## 动画采样帧率与帧数上限。体素帧动画本来只有 4~12 fps 的观感，采太密只是白烧内存。
 const ANIM_FPS := 12.0
 const MAX_FRAMES := 64
@@ -23,17 +30,29 @@ static func handles(path: String) -> bool:
 	return path.get_extension().to_lower() in EXTENSIONS
 
 
-## 载入外部模型。返回 `{name, frames: Array[{parts: Array[part], time: float}], animated: bool}`；
-## 失败返回空字典。`host` 用于把临时场景挂进树（动画 seek / 骨骼求值必须有树），
-## 传 null 时按节点自身的 `transform` 链推算。
+## 文件对话框过滤器 `[[匹配串, 显示名], …]` —— 对话框、拖放判定、失败提示共用这一份。
+static func filter_specs() -> Array:
+	var out := []
+	for ext: String in EXTENSIONS:
+		out.append(["*.%s" % ext, String(FILTER_NAMES.get(ext, ext.to_upper()))])
+	return out
+
+
+## 人类可读的格式清单（提示文案用）。
+static func describe() -> String:
+	return ", ".join(EXTENSIONS)
+
+
+## 载入外部模型。返回 `{name, frames: Array[{parts, time}], animated, slots, fps}`；失败返回空字典。
+## `host` 用于把临时场景挂进树（动画 seek / 骨骼求值必须有树），传 null 时按节点自身的
+## transform 链推算。**协程**：采样多帧时每帧让出一帧 —— 否则大模型的导入会把界面冻住。
 static func load_scene(path: String, host: Node = null) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		return {}
-	var ext := path.get_extension().to_lower()
 	var out := {}
-	match ext:
+	match path.get_extension().to_lower():
 		"glb", "gltf":
-			out = _load_gltf(path, host)
+			out = await _load_gltf(path, host)
 		"obj":
 			out = _load_obj(path)
 		"stl":
@@ -43,6 +62,23 @@ static func load_scene(path: String, host: Node = null) -> Dictionary:
 	if String(out.get("name", "")).is_empty():
 		out["name"] = path.get_file().get_basename()
 	return out
+
+
+## 三处 `_load_*` 共用的空槽表（材质 → 槽下标）。
+static func _new_book() -> Dictionary:
+	return {"list": [], "map": {}}
+
+
+## 三处 `_load_*` 共用的返回值装配：形状只在这里拼一次（`animated` 也由帧数推导）。
+## `fps` 一并带出去，下游（体素帧动画的播放速率）因此不必反向依赖本类的常量。
+static func _make_scene(file_name: String, frames: Array, book: Dictionary) -> Dictionary:
+	return {
+		"name": file_name.get_basename(),
+		"frames": frames,
+		"animated": frames.size() > 1,
+		"slots": book["list"],
+		"fps": ANIM_FPS,
+	}
 
 
 # glTF / GLB
@@ -56,33 +92,35 @@ static func _load_gltf(path: String, host: Node) -> Dictionary:
 	if root == null:
 		return {}
 	var attached := host != null and host.is_inside_tree()
+	var tree: SceneTree = host.get_tree() if attached else null
 	if attached:
 		if root is Node3D:
 			(root as Node3D).visible = false
 		host.add_child(root)
-	var out := {"name": path.get_file().get_basename(), "frames": [], "animated": false}
 	var player := _animation_player(root)
 	var anim := _pick_animation(player)
 	var times: Array = anim["times"]
-	if player != null and not String(anim["name"]).is_empty():
+	var playing := player != null and not String(anim["name"]).is_empty()
+	if playing:
 		player.play(anim["name"])
 		player.pause()
-	var book := {"list": [], "map": {}}
-	var frames: Array = out["frames"]
-	for t: float in times:
-		if player != null and not String(anim["name"]).is_empty():
-			player.seek(t, true)
+	var book := _new_book()
+	var frames: Array = []
+	for i in times.size():
+		if playing:
+			player.seek(times[i], true)
 			_refresh_transforms(root)
 		var parts: Array = []
 		_collect_parts(root, parts, book)
-		frames.append({"parts": parts, "time": t})
-	out["animated"] = times.size() > 1
-	out["slots"] = book["list"]
+		frames.append({"parts": parts, "time": times[i]})
+		if tree != null and i + 1 < times.size():
+			await tree.process_frame
+	var scene := _make_scene(path.get_file(), frames, book)
 	if attached:
 		root.queue_free()
 	else:
 		root.free()
-	return out
+	return scene
 
 
 static func _animation_player(root: Node) -> AnimationPlayer:
@@ -272,7 +310,7 @@ static func _load_obj(path: String) -> Dictionary:
 	var pos: Array[Vector3] = []
 	var uv: Array[Vector2] = []
 	var materials := _load_mtl(path)
-	var book := {"list": [], "map": {}}
+	var book := _new_book()
 	var groups := {}
 	var current := ""
 	for raw in text.split("\n"):
@@ -310,9 +348,7 @@ static func _load_obj(path: String) -> Dictionary:
 		})
 	if parts.is_empty():
 		return {}
-	return {"name": path.get_file().get_basename(),
-			"frames": [{"parts": parts, "time": 0.0}], "animated": false,
-			"slots": book["list"]}
+	return _make_scene(path.get_file(), [{"parts": parts, "time": 0.0}], book)
 
 
 static func _obj_group(groups: Dictionary, name: String) -> Dictionary:
@@ -431,10 +467,8 @@ static func _load_stl(path: String) -> Dictionary:
 				idx.append(idx.size())
 	if verts.is_empty():
 		return {}
-	var book := {"list": [], "map": {}}
+	var book := _new_book()
 	var slot := _slot_index(null, book)
 	var part := {"verts": verts, "indices": idx, "uvs": PackedVector2Array(),
 			"colors": PackedColorArray(), "slot": slot}
-	return {"name": path.get_file().get_basename(),
-			"frames": [{"parts": [part], "time": 0.0}], "animated": false,
-			"slots": book["list"]}
+	return _make_scene(path.get_file(), [{"parts": [part], "time": 0.0}], book)

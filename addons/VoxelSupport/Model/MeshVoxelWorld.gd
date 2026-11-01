@@ -8,33 +8,33 @@ extends RefCounted
 ## 【多帧 = 体素帧动画】glTF 自带动画按帧采样后逐帧体素化，写进同一个模型的帧序列，
 ## 时间轴 / 播放预览 / 存盘全部复用现成的那条链。
 
-## `opts`：`resolution`（最长边体素数，默认 96）· `fill`（true = 实心，false = 只留表面壳）。
-static func to_world(scene: Dictionary, opts := {}) -> QVoxelWorld:
+## 场景 → 世界。`resolution` = 最长边的体素数；`fill` = true 实心 / false 只留表面壳。
+## **协程**：多帧时每帧让出一帧（否则大模型的导入会把界面冻住），调用方要 `await`。
+static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESOLUTION,
+		fill := true) -> QVoxelWorld:
 	if scene.is_empty():
 		return null
 	var frames: Array = scene.get("frames", [])
 	if frames.is_empty():
 		return null
-	var rast := MeshVoxelizer.frame_grid(scene, int(opts.get("resolution",
-			MeshVoxelizer.DEFAULT_RESOLUTION)))
+	var rast := MeshVoxelizer.frame_grid(scene, resolution)
 	if rast.get("empty", true):
 		return null
-	var fill := bool(opts.get("fill", true))
+	var tree := Engine.get_main_loop() as SceneTree
 	var palette := PackedByteArray()
 	var datas: Array = []
 	var filled := false
 	for i in frames.size():
-		var o := {"fill": fill}
-		if not palette.is_empty():
-			o["palette"] = palette
-		var res := MeshVoxelizer.voxelize_frame(scene, i, rast, o)
+		var res := MeshVoxelizer.voxelize_frame(scene, i, rast, fill, palette)
 		if res.is_empty():
-			datas.append(null)
-			continue
-		if palette.is_empty():
-			palette = res["palette"]
-		datas.append(res["data"])
-		filled = true
+			datas.append(null)   # 该帧没有可用三角面：占位，保持帧序不错位
+		else:
+			if palette.is_empty():
+				palette = res["palette"]   # 第 0 个成功的帧定调色板，后续帧复用以免颜色跳变
+			datas.append(res["data"])
+			filled = true
+		if tree != null and i + 1 < frames.size():
+			await tree.process_frame
 	if not filled:
 		return null
 	var world := QVoxelWorld.create_empty()
@@ -45,7 +45,7 @@ static func to_world(scene: Dictionary, opts := {}) -> QVoxelWorld:
 		model.make_animated()
 		for i in range(1, datas.size()):
 			model.add_frame(QVoxelFrame.new())
-		model.anim_fps = maxi(1, int(round(MeshAccess.ANIM_FPS)))
+		model.anim_fps = maxi(1, int(round(float(scene.get("fps", 12.0)))))
 	for i in datas.size():
 		var data: Variant = datas[i]
 		if data == null:

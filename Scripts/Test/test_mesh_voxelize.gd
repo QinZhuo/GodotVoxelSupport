@@ -26,7 +26,7 @@ func test_solid_cube_fills_interior() -> void:
 	var scene := _scene([_cube_part()])
 	var rast := MeshVoxelizer.frame_grid(scene, 8)
 	assert_eq(rast["grid"], Vector3i(8, 8, 8), "1³ 立方体在 8 分辨率下应正好 8³")
-	var res := MeshVoxelizer.voxelize_frame(scene, 0, rast, {})
+	var res := MeshVoxelizer.voxelize_frame(scene, 0, rast)
 	assert_true(not res.is_empty(), "应产出体积")
 	assert_eq(int(res["count"]), 512, "封闭立方体内部应被填实（8³ 全满）")
 
@@ -35,7 +35,7 @@ func test_open_plane_degrades_to_shell() -> void:
 	var scene := _scene([_quad_part()])
 	var rast := MeshVoxelizer.frame_grid(scene, 4)
 	assert_eq(rast["grid"], Vector3i(4, 4, 1), "平面在 Z 上只有 1 层")
-	var res := MeshVoxelizer.voxelize_frame(scene, 0, rast, {})
+	var res := MeshVoxelizer.voxelize_frame(scene, 0, rast)
 	assert_eq(int(res["count"]), 16, "开放平面只应得到表面那一层（4×4）")
 
 
@@ -48,7 +48,7 @@ func test_grid_keeps_aspect() -> void:
 # 世界侧
 
 func test_world_palette_and_materials() -> void:
-	var w := MeshVoxelWorld.to_world(_scene([_cube_part()]), {"resolution": 4})
+	var w: QVoxelWorld = await MeshVoxelWorld.to_world(_scene([_cube_part()]), 4)
 	assert_true(w != null, "应能建出世界")
 	if w == null:
 		return
@@ -64,7 +64,7 @@ func test_frames_become_voxel_animation() -> void:
 	var scene := _scene([_cube_part()])
 	var moved := _scene([_cube_part(Vector3(2, 0, 0))])
 	(scene["frames"] as Array).append((moved["frames"] as Array)[0])
-	var w := MeshVoxelWorld.to_world(scene, {"resolution": 4})
+	var w: QVoxelWorld = await MeshVoxelWorld.to_world(scene, 4)
 	assert_true(w != null, "多帧也应能建世界")
 	if w == null:
 		return
@@ -72,6 +72,28 @@ func test_frames_become_voxel_animation() -> void:
 	assert_true(m.is_animated(), "多帧应建成体素帧动画")
 	assert_eq(m.frame_count(), 2, "两帧就是两帧")
 	assert_true(not m.frames[0].is_empty() and not m.frames[1].is_empty(), "两帧都应有内容")
+
+
+## 追加导入：并进现有世界时材质 ID 整体平移，体素仍指向同一个颜色。
+func test_merge_from_shifts_materials() -> void:
+	var dst: QVoxelWorld = await MeshVoxelWorld.to_world(_scene([_cube_part()]), 4)
+	var src: QVoxelWorld = await MeshVoxelWorld.to_world(_scene([_cube_part()]), 4)
+	var base := dst.materials.size()   # src 的材质 1 平移后恰好落在 base
+	var added: Array[QVoxelModel] = dst.merge_from(src)
+	assert_eq(added.size(), 1, "并入一个模型")
+	assert_eq(dst.materials.size(), base + src.materials.size() - 1, "材质按需追加（空气共用）")
+	var m := added[0]
+	assert_true(m.used_materials().has(base), "体素应指向平移后的材质 ID")
+	assert_eq(dst.material_color(base), Color.RED, "平移后仍是同一颜色")
+	assert_eq(_filled(m), 64, "并入的模型内容完整（4³ 实心）")
+
+
+## 对话框过滤项由 MeshAccess 生成：格式事实只有一处。
+func test_filter_specs_cover_extensions() -> void:
+	var specs := MeshAccess.filter_specs()
+	assert_eq(specs.size(), MeshAccess.EXTENSIONS.size(), "每个扩展名一条过滤")
+	assert_eq(String(specs[0][0]), "*.glb", "首个过滤器匹配 .glb")
+	assert_true(MeshAccess.describe().contains("obj"), "提示文案应列出全部格式")
 
 
 # OBJ
@@ -83,7 +105,7 @@ func test_obj_parses_quad() -> void:
 		return
 	f.store_string("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n")
 	f.close()
-	var scene := MeshAccess.load_scene(TMP_OBJ)
+	var scene: Dictionary = await MeshAccess.load_scene(TMP_OBJ)
 	assert_true(not scene.is_empty(), "应能解析 OBJ")
 	if scene.is_empty():
 		return
@@ -99,7 +121,8 @@ func test_obj_is_voxelizable() -> void:
 		return
 	f.store_string("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n")
 	f.close()
-	var w := MeshVoxelWorld.to_world(MeshAccess.load_scene(TMP_OBJ), {"resolution": 4})
+	var scene: Dictionary = await MeshAccess.load_scene(TMP_OBJ)
+	var w: QVoxelWorld = await MeshVoxelWorld.to_world(scene, 4)
 	assert_true(w != null, "OBJ → 体素世界应走通")
 	if w != null:
 		assert_eq(w.all_models()[0].grid_size, Vector3i(4, 4, 1), "平面 OBJ 只有一层")
@@ -142,6 +165,15 @@ func _quad_part() -> Dictionary:
 		"colors": PackedColorArray(),
 		"slot": 0,
 	}
+
+
+## 模型里非空体素数（一次 read_box，比逐格 get_voxel 快一个量级）。
+func _filled(m: QVoxelModel) -> int:
+	var n := 0
+	for v in m.read_box(Vector3i.ZERO, m.grid_size):
+		if v > 0:
+			n += 1
+	return n
 
 
 ## 任意尺寸的轴对齐长方体（封闭）。

@@ -179,8 +179,14 @@ var _open_dialog: FileDialog
 var _save_dialog: FileDialog
 ## 导出网格对话框（glTF 2.0：*.glb / *.gltf）。
 var _mesh_dialog: FileDialog
-## 导入模型对话框（glTF/GLB、OBJ、STL）。
+## 选模型文件的对话框（过滤项由 MeshAccess.filter_specs() 生成）。
 var _model_dialog: FileDialog
+## 导入参数对话框（分辨率 / 追加 / 实心）：**先定参数、再选文件**。
+var _import_dialog: QVoxelierImportDialog
+## 拖放进来的模型路径：有值时跳过文件选择，确认参数即导入。
+var _pending_import_path := ""
+## 本次导入参数（参数框确认时写入，文件选完/拖放确认后取用）。
+var _import_opts: Dictionary = {}
 var _palette_import_dialog: FileDialog
 var _palette_export_dialog: FileDialog
 ## 快照落盘对话框（*.png）。与调色板导出同走自绘那套 —— 默认文件名由分组按视图名给出。
@@ -1511,26 +1517,39 @@ func _confirm_discard(action: String, cb: Callable) -> void:
 
 ## 打开工程：读盘 → 接管世界 → 重建会话。**失败时视口保持原样**（绝不半途换掉用户正编辑的东西）。
 func open_project(path: String) -> bool:
-	if _stroke:
-		session.cancel()
-		_stroke = false
 	var loaded := QVoxelProject.load_world(path)
 	if loaded == null:
 		hud.flash("打不开这个工程（缺失或已损坏）：%s" % path.get_file())
 		return false
-	var obj := QVoxelierSession.pick_editable(loaded)
-	if obj == null:
+	if _adopt_world(loaded, path, false) == null:
 		hud.flash("这个工程里没有可编辑的对象：%s" % path.get_file())
 		return false
-	_install(loaded, obj)
-	# 记住路径：Ctrl+S 直接**存回原文件**（.vox 就存回 .vox，.qvx 就存回 .qvx）。
-	_sess.project_path = path
-	_sess.clear_dirty()
-	_update_title()
 	var total := loaded.all_models().size()
 	hud.flash("已打开 %s%s" % [path.get_file(),
 			"（共 %d 个模型，可在右侧「层级」里切换）" % total if total > 1 else ""])
 	return true
+
+
+## 接管一份世界：取消进行中的手势 → 选可编辑对象 → 装配 → 记工程状态。返回活动对象（失败 null）。
+## 【为什么只留一条】打开工程 / 导入模型 / 将来的合并都会换掉整个世界，尾部这几步必须完全一致 ——
+## 各抄一份迟早漏掉"取消手势"或"标脏"。提示文案归调用方：三种来源各有各的说法。
+func _adopt_world(w: QVoxelWorld, path: String, dirty: bool) -> QVoxelModel:
+	if w == null:
+		return null
+	var obj := QVoxelierSession.pick_editable(w)
+	if obj == null:
+		return null
+	if _stroke and session != null:
+		session.cancel()
+	_stroke = false
+	_install(w, obj)
+	_sess.project_path = path
+	if dirty:
+		_sess.mark_dirty()
+	else:
+		_sess.clear_dirty()
+	_update_title()
+	return obj
 
 
 ## 保存到当前工程（`.qvx`）；还没存过盘、或当前是导入的 `.vox`（`.vox` 只支持导入、不写回）
@@ -1647,43 +1666,72 @@ func _on_mesh_path_selected(path: String) -> void:
 	hud.flash("已导出网格 %s" % path.get_file())
 
 
-## 导入模型（path 为空 = 弹文件对话框）。
-## 【与"打开"同一道确认】导入整体换掉当前世界，未落盘的改动同样会丢。
+## 导入模型（path 为空 = 先问参数再选文件；非空 = 拖放进来的，只问参数）。
+## 【为什么先参数后文件】分辨率决定内存（256³ 是 67MB），追加还是替换决定当前工程存亡 ——
+## 两者都必须在动手前定，选完文件再问等于让人重来。
 func request_import_model(path := "") -> void:
+	_pending_import_path = path
+	_import_opts = {}
+	_import_dialog.set_defaults(import_resolution, false, true, path.is_empty())
+	_import_dialog.popup_centered()
+
+
+## 参数框确认：还有文件要选就弹选择框；拖放进来的直接进未保存确认。
+func _on_import_options() -> void:
+	_import_opts = _import_dialog.options()
+	var path := _pending_import_path
+	_pending_import_path = ""
+	if path.is_empty():
+		_model_dialog.popup_centered_ratio(0.7)
+	else:
+		_confirm_discard("导入模型", _import_now.bind(path))
+
+
+func _on_model_path_selected(path: String) -> void:
 	_confirm_discard("导入模型", _import_now.bind(path))
 
 
 func _import_now(path: String) -> void:
-	if path.is_empty():
-		_model_dialog.popup_centered_ratio(0.7)
-	else:
-		import_model(path)
+	import_model(path, _import_opts)
 
 
-## 外部网格 → 体素世界 → 接管为当前工程（与打开 .vox 同一条装配路径）。失败时视口保持原样。
-func import_model(path: String) -> bool:
-	if _stroke and session != null:
-		session.cancel()
-		_stroke = false
-	var scene := MeshAccess.load_scene(path, self)
+## 外部网格 → 体素 → **替换**当前工程（与打开 .vox 同一条装配路径）。失败时视口保持原样。
+## 【协程】加载与逐帧体素化都会让出帧，界面不冻。`opts`：{resolution, append, fill}。
+func import_model(path: String, opts := {}) -> bool:
+	var resolution := int(opts.get("resolution", import_resolution))
+	var scene: Dictionary = await MeshAccess.load_scene(path, self)
 	if scene.is_empty():
-		hud.flash("打不开这个模型：%s（只支持 glb / gltf / obj / stl）" % path.get_file())
+		hud.flash("打不开这个模型：%s（只支持 %s）" % [path.get_file(), MeshAccess.describe()])
 		return false
-	var imported := MeshVoxelWorld.to_world(scene, {"resolution": import_resolution})
+	var imported: QVoxelWorld = await MeshVoxelWorld.to_world(scene, resolution,
+			bool(opts.get("fill", true)))
 	if imported == null:
 		hud.flash("体素化失败（模型里没有可用三角面）：%s" % path.get_file())
 		return false
-	var obj := QVoxelierSession.pick_editable(imported)
+	if bool(opts.get("append", false)) and world != null:
+		return _append_import(imported, path, resolution)
+	var obj := _adopt_world(imported, "", true)
 	if obj == null:
 		hud.flash("体素化结果为空：%s" % path.get_file())
 		return false
-	_install(imported, obj)
-	# 导入结果还没有对应的磁盘文件：清掉旧路径并标脏，Ctrl+S 会走"另存为"。
-	_sess.project_path = ""
+	var anim := ("，%d 帧体素动画" % obj.frame_count()) if obj.is_animated() else ""
+	hud.flash("已导入 %s → %s（最长边 %d）%s" % [path.get_file(), str(obj.grid_size),
+			resolution, anim])
+	return true
+
+
+## 追加：把导入结果的模型与材质并进**当前世界**（不换掉它）。工程路径保持不变。
+func _append_import(imported: QVoxelWorld, path: String, resolution: int) -> bool:
+	var added: Array[QVoxelModel] = world.merge_from(imported)
+	if added.is_empty():
+		hud.flash("这个模型里没有可用的体素：%s" % path.get_file())
+		return false
+	_install(world, added[0])
 	_sess.mark_dirty()
 	_update_title()
-	var anim := ("，%d 帧体素动画" % obj.frame_count()) if obj.is_animated() else ""
-	hud.flash("已导入 %s → %s%s" % [path.get_file(), str(obj.grid_size), anim])
+	var anim := ("，%d 帧体素动画" % added[0].frame_count()) if added[0].is_animated() else ""
+	hud.flash("已追加 %s → %s（最长边 %d）%s" % [path.get_file(), str(added[0].grid_size),
+			resolution, anim])
 	return true
 
 
@@ -1702,13 +1750,14 @@ func _build_dialogs() -> void:
 	_mesh_dialog.add_filter("*.gltf", "glTF 文本（.gltf）")
 	_mesh_dialog.file_selected.connect(_on_mesh_path_selected)
 
-	# 导入模型：与导出同一组格式里挑**运行期读得动**的那几个（见 MeshAccess 的类头）。
-	_model_dialog = _make_format_dialog(FileDialog.FILE_MODE_OPEN_FILE, "*.glb",
-			"glTF 模型（.glb/.gltf）", "导入模型")
-	_model_dialog.add_filter("*.gltf", "glTF 文本（.gltf）")
-	_model_dialog.add_filter("*.obj", "Wavefront OBJ（.obj）")
-	_model_dialog.add_filter("*.stl", "STL 网格（.stl）")
-	_model_dialog.file_selected.connect(import_model)
+	# 导入模型：过滤项由 MeshAccess 生成（格式事实只有一处），先过参数框再选文件。
+	_model_dialog = _make_fs_dialog(FileDialog.FILE_MODE_OPEN_FILE, "导入模型")
+	for spec: Array in MeshAccess.filter_specs():
+		_model_dialog.add_filter(spec[0], spec[1])
+	_model_dialog.file_selected.connect(_on_model_path_selected)
+	_import_dialog = QVoxelierImportDialog.new()
+	add_child(_import_dialog)
+	_import_dialog.confirmed.connect(_on_import_options)
 
 	_palette_import_dialog = _make_format_dialog(FileDialog.FILE_MODE_OPEN_FILE, "*.png",
 			"调色板 PNG（256×1）", "导入调色板")
@@ -1804,8 +1853,8 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 		if MeshAccess.handles(f):
 			request_import_model(f)
 			return
-	hud.flash("只认得 .%s 工程 / .%s 体素文件，以及 glb·gltf·obj·stl 模型"
-			% [QVoxelProject.EXTENSION, VoxAsset.VOX_EXTENSION])
+	hud.flash("只认得 .%s 工程 / .%s 体素文件，以及 %s 模型"
+			% [QVoxelProject.EXTENSION, VoxAsset.VOX_EXTENSION, MeshAccess.describe()])
 
 
 func _update_title() -> void:

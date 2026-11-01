@@ -186,6 +186,9 @@ static func index_in_block(voxel: Vector3i, block_size: int) -> int:
 
 const MATE_ENTRY_SIZE := 12
 
+# 材质表容量（索引即材质 ID，0 恒为空气）。渲染层的调色板数组与合并世家的上限都取它。
+const MATERIAL_COUNT := 256
+
 # VXEL 模型头（10 字节，刻意不 4 对齐）
 # uint16  model_id          模型编号，供 NODE 的 kind="model" 节点引用
 # uint32  block_count       本模型包含的块数（只计非空块）

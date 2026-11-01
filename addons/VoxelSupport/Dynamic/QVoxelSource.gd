@@ -575,7 +575,7 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
 
 	# 材质数组以**数组索引**为准（索引 i 即材质ID = 体素值），来源对象的 id 字段未设置也正确。
 	# 索引 0 保留为空占位（材质ID 0 = 空），不复制。
-	res.materials.resize(256)
+	res.materials.resize(QVoxelSpec.MATERIAL_COUNT)
 	for i in range(1, voxel_data.materials.size()):
 		var src: VoxelMaterial = voxel_data.materials[i]
 		if src == null:

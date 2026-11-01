@@ -434,6 +434,70 @@ func create_group(group_name := "Group", parent: QVoxelGroup = null) -> QVoxelGr
 	return g
 
 
+## 合并另一份世界：材质与模型全部并进本世界，材质 ID 整体平移（体素值跟着改）。
+## 返回并入的模型列表（空 = 来源没有模型）。
+## 【为什么放在 world 上】"把另一个文件并进当前工程"是数据侧的事，与"它来自哪个文件"无关 ——
+## 导入外部模型用它，将来合并两份 .qvx 也走这一条，不必各写一份。
+func merge_from(other: QVoxelWorld) -> Array[QVoxelModel]:
+	var added: Array[QVoxelModel] = []
+	if other == null or other == self:
+		return added
+	# 材质表容量是硬上限：装不下就整体放弃，而不是并进去一半、保存时静默丢材质。
+	if materials.size() + other.materials.size() - 1 > QVoxelSpec.MATERIAL_COUNT:
+		push_warning("[QVoxelWorld] 合并后材质数会超过 %d，已跳过" % QVoxelSpec.MATERIAL_COUNT)
+		return added
+	var touched := false
+	# 材质 0 在两边都是空气，故只需拷 1..n，平移量 = 本世界原有材质数 - 1。
+	var shift := materials.size() - 1
+	for i in range(1, other.materials.size()):
+		materials.append((other.materials[i] as Dictionary).duplicate(true))
+		touched = true
+	for m in other.all_models():
+		if m == null:
+			continue
+		var nm := create_model(m.node_name, m.grid_size, null)
+		nm.local_transform = m.local_transform
+		_copy_voxels(m, nm, shift)
+		added.append(nm)
+	if touched:
+		_touch()
+	return added
+
+
+## 把 src 的体素（连同帧动画与材质 ID 平移）复制进 dst。
+static func _copy_voxels(src: QVoxelModel, dst: QVoxelModel, shift: int) -> void:
+	if not src.is_animated():
+		dst.blocks = _shift_table(src.blocks, shift)
+		return
+	dst.make_animated()
+	for i in range(1, src.frame_count()):
+		dst.add_frame(QVoxelFrame.new())
+	for i in src.frame_count():
+		var sf := src.frame_at(i)
+		var df := dst.frame_at(i)
+		if sf == null or df == null:
+			continue
+		df.blocks = _shift_table(sf.blocks, shift)
+		df.duration_ms = sf.duration_ms
+	dst.anim_fps = src.anim_fps
+	dst.anim_loop = src.anim_loop
+	dst.anim_tags = src.anim_tags.duplicate(true)
+
+
+## 块表深拷 + 材质 ID 平移（0 恒为空，不参与平移）。
+static func _shift_table(src: Dictionary, shift: int) -> Dictionary:
+	var out := {}
+	for k: Vector3i in src:
+		var buf: PackedInt32Array = (src[k] as PackedInt32Array).duplicate()
+		if shift != 0:
+			for i in buf.size():
+				var v := buf[i]
+				if v > 0:
+					buf[i] = v + shift
+		out[k] = buf
+	return out
+
+
 func next_model_id() -> int:
 	var top := -1
 	for m in all_models():

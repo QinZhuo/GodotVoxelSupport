@@ -27,11 +27,11 @@ func test_gltf_roundtrip_voxelizes() -> void:
 	DirAccess.make_dir_recursive_absolute(DIR)
 	var path := DIR.path_join("solid.glb")
 	assert_eq(QVoxelMeshExport.export(_solid_world(), path), OK, "应能导出 .glb")
-	var scene := MeshAccess.load_scene(path)
+	var scene: Dictionary = await MeshAccess.load_scene(path)
 	assert_true(not scene.is_empty(), "应能读回模型")
 	if scene.is_empty():
 		return
-	var out := MeshVoxelWorld.to_world(scene, {"resolution": 16})
+	var out: QVoxelWorld = await MeshVoxelWorld.to_world(scene, 16)
 	assert_true(out != null, "应能体素化")
 	if out == null:
 		return
@@ -48,13 +48,13 @@ func test_animated_gltf_becomes_voxel_frames() -> void:
 	DirAccess.make_dir_recursive_absolute(DIR)
 	var path := DIR.path_join("anim.glb")
 	assert_eq(_write_animated_gltf(path), OK, "应能写出带动画的 .glb")
-	var scene := MeshAccess.load_scene(path)
+	var scene: Dictionary = await MeshAccess.load_scene(path)
 	assert_true(not scene.is_empty(), "应能读回带动画的模型")
 	if scene.is_empty():
 		return
 	assert_true(scene.get("animated", false), "应识别出动画")
 	assert_true((scene["frames"] as Array).size() > 1, "应采样出多帧")
-	var out := MeshVoxelWorld.to_world(scene, {"resolution": 8})
+	var out: QVoxelWorld = await MeshVoxelWorld.to_world(scene, 8)
 	assert_true(out != null, "动画模型应能体素化")
 	if out == null:
 		return

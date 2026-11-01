@@ -28,9 +28,10 @@ static func frame_grid(scene: Dictionary, resolution := DEFAULT_RESOLUTION) -> D
 	return {"origin": box.position, "cell": cell, "grid": grid, "empty": false}
 
 
-## 指定帧 → 原生体素化。`opts` 里传上一帧算出的 `palette` 可让多帧共用一套颜色。
+## 指定帧 → 原生体素化。`fill` = 实心化（外部泛洪判定内部）；`palette` 非空则复用它
+## （多帧共用一套调色板，否则每帧独立量化会让动画帧间颜色跳变）。
 static func voxelize_frame(scene: Dictionary, frame_index: int, rast: Dictionary,
-		opts := {}) -> Dictionary:
+		fill := true, palette := PackedByteArray()) -> Dictionary:
 	var frames: Array = scene.get("frames", [])
 	if frame_index < 0 or frame_index >= frames.size() or rast.get("empty", true):
 		return {}
@@ -62,10 +63,12 @@ static func voxelize_frame(scene: Dictionary, frame_index: int, rast: Dictionary
 		tri_slots.append_array(tri)
 	if indices.is_empty():
 		return {}
-	var o: Dictionary = opts.duplicate()
-	o["palette_max"] = int(o.get("palette_max", 255))
+	# 原生选项只在这里组装一次（调色板上限固定 255 = 材质表除空气外的容量）。
+	var opts := {"fill": fill}
+	if not palette.is_empty():
+		opts["palette"] = palette
 	return NativeLoader.voxelize_mesh(verts, indices, uvs, colors, tri_slots,
-			scene.get("slots", []), rast["origin"], rast["cell"], rast["grid"], o)
+			scene.get("slots", []), rast["origin"], rast["cell"], rast["grid"], opts)
 
 
 # 内部
