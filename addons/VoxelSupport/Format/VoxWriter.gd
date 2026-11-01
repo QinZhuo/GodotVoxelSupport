@@ -155,7 +155,7 @@ static func _scene_chunks(world: QVoxelWorld, state: Dictionary) -> PackedByteAr
 	var root_ids: Array = []
 	var layers: Array = []
 	var body := PackedByteArray()
-	body.append_array(_emit_list(world.nodes, root_ids, state, layers, Transform3D.IDENTITY, -1))
+	body.append_array(_emit_list(world.nodes, root_ids, state, layers, -1))
 	# 根壳：nTRN(0) → nGRP(1)。缺了它 MagicaVoxel 会当成"无场景"，只显示第一个模型。
 	out.append_array(_ntrn(ROOT_TRN, "", ROOT_GRP, -1, Transform3D.IDENTITY, Vector3i.ZERO))
 	out.append_array(_ngrp(ROOT_GRP, root_ids))
@@ -167,9 +167,11 @@ static func _scene_chunks(world: QVoxelWorld, state: Dictionary) -> PackedByteAr
 
 ## 递归一层节点：分配 id、写 nTRN + 自己的 nGRP/nSHP，把 nTRN id 填进 `out_ids`。
 ## 【顺序】必须先递归子层拿到 children（nGRP 的内容），再写本层 chunk。
+## 【`.vox` 的 nTRN 是**相对父**的局部变换】读端会沿父链累乘，把累积变换写进去等于让孩子
+## 把父的位移/旋转再吃一遍 —— 层级越深偏得越多（单层结构不会暴露这个错）。
 ## `layer` = 所属图层号；顶层节点各占一层（本项目的"组即层"直接对应 LAYR），子树继承。
 static func _emit_list(nodes: Array, out_ids: Array, state: Dictionary, layers: Array,
-		parent_xf: Transform3D, layer: int) -> PackedByteArray:
+		layer: int) -> PackedByteArray:
 	var out := PackedByteArray()
 	var model_of: Dictionary = state["model_of"]
 	for item in nodes:
@@ -183,32 +185,32 @@ static func _emit_list(nodes: Array, out_ids: Array, state: Dictionary, layers: 
 		if my_layer < 0:
 			my_layer = layers.size()
 			layers.append(_layr(my_layer, n))
-		var xf := parent_xf * n.local_transform
+		var local := n.local_transform
 		var trn_id: int = state["next_id"]
 		var body_id := trn_id + 1
 		state["next_id"] = trn_id + 2
 		out_ids.append(trn_id)
 		if is_model:
-			out.append_array(_ntrn(trn_id, n.node_name, body_id, my_layer, xf,
+			out.append_array(_ntrn(trn_id, n.node_name, body_id, my_layer, local,
 					(n as QVoxelModel).grid_size))
 			out.append_array(_nshp(body_id, int(model_of[n])))
 		else:
 			var kids: Array = []
 			var child_chunks := _emit_list((n as QVoxelGroup).child_nodes, kids, state, layers,
-					xf, my_layer)
-			out.append_array(_ntrn(trn_id, n.node_name, body_id, my_layer, xf, Vector3i.ZERO))
+					my_layer)
+			out.append_array(_ntrn(trn_id, n.node_name, body_id, my_layer, local, Vector3i.ZERO))
 			out.append_array(_ngrp(body_id, kids))
 			out.append_array(child_chunks)
 	return out
 
 
-## nTRN。`_t` 必须补偿读端会自动加上的两段位移：
+## nTRN（**相对父**的局部变换）。`_t` 还要补偿读端会自动加上的两段位移：
 ##   ① 模型居中偏移（`VoxSpace.origin_offset`）；② 写入时为避开负坐标做的 `vox_shift`。
-## 于是读端算出的世界位置恰好等于 `world_xf * 局部坐标`。
-static func _ntrn(id: int, node_name: String, child: int, layer: int, world_xf: Transform3D,
+## 于是读端算出的世界位置恰好等于 `父链累积 × 本节点局部坐标`。
+static func _ntrn(id: int, node_name: String, child: int, layer: int, local_xf: Transform3D,
 		model_size: Vector3i) -> PackedByteArray:
 	var fix := _origin_fix(model_size)
-	var t_godot := world_xf * fix
+	var t_godot := local_xf * fix
 	var t_vox := VoxSpace.to_vox_vec3(t_godot)
 	var content := PackedByteArray()
 	content = _put_u32(content, id)
@@ -221,7 +223,7 @@ static func _ntrn(id: int, node_name: String, child: int, layer: int, world_xf: 
 	content = _put_u32(content, layer)
 	content = _put_u32(content, 1)           # frame 数
 	var frame_attrs := {}
-	var code := VoxSpace.encode_rotation(world_xf.basis)
+	var code := VoxSpace.encode_rotation(local_xf.basis)
 	if code >= 0:
 		frame_attrs["_r"] = str(code)
 	if t_vox.length_squared() > 0.0001:

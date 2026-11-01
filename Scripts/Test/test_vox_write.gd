@@ -111,6 +111,31 @@ func test_material_roundtrip() -> void:
 	assert_true(absf(vox.materials[1].rough - 0.3) < 0.05, "粗糙度应保持")
 
 
+## 嵌套组：`.vox` 的 nTRN 是**相对父**的局部变换，写绝对变换会让子层把父的位移/旋转再吃一遍。
+## 这一条是 cars.vox 那类"多层嵌套 + 每层都有旋转"的真实结构的回归钉子。
+func test_nested_group_transform() -> void:
+	var w := QVoxelWorld.create_empty()
+	var c := w.add_material(Color.RED)
+	var outer := w.create_group("outer", null)
+	outer.local_transform = Transform3D(Basis(Vector3.RIGHT, PI / 2), Vector3(4, 0, 0))
+	var inner := w.create_group("inner", outer)
+	inner.local_transform = Transform3D(Basis(Vector3.FORWARD, PI / 2), Vector3(0, 3, 0))
+	var m := w.create_model("box", Vector3i(3, 3, 3), inner)
+	m.fill_box(Vector3i(0, 0, 0), Vector3i(1, 1, 1), c)
+	m.local_transform = Transform3D(Basis(Vector3.UP, PI / 2), Vector3(1, 0, 2))
+	var want := _voxel_world(w, m)
+	var bytes := VoxWriter.encode(w)
+	assert_true(not bytes.is_empty(), "嵌套组应能编码")
+	if bytes.is_empty():
+		return
+	_save(bytes)
+	var back := VoxAssetWorld.to_world(VoxAsset.from_asset(TMP))
+	assert_true(back != null, "应能重建世界")
+	if back == null:
+		return
+	assert_eq(_voxel_world(back, back.all_models()[0]), want, "嵌套组下的体素世界坐标应保持")
+
+
 # 边界
 
 func test_reject_oversize() -> void:
