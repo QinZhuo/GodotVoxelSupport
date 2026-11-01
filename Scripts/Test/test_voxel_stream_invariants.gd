@@ -387,6 +387,40 @@ func test_incremental_flush_leaves_other_chunks_intact() -> void:
 
 # 辅助
 
+## 作废后回填的**空块**不能留下缓冲。
+## 【为什么这条重要】`has_chunk()` 若为真，渲染器会认为"这块还有内容"，于是既不清旧网格、
+## 也不派发重建（空块本来就没网格可建）—— 表现就是"撤销 / 删除后画面上的体素还在，
+## 直到下次碰它才被顺带刷掉"。数据层全绿、只有屏幕是错的，所以必须在这里钉住。
+func test_emptied_chunk_not_installed_after_backfill() -> void:
+	var d := _bare_source()
+	var ck := Vector3i.ZERO
+	d.set_voxel(Vector3i(1, 1, 1), 1, false)
+	assert_true(d.has_chunk(ck), "写入后该块应在内存")
+
+	# 编辑收笔走的就是"作废缓冲、等重新取数"这条路
+	d.invalidate_chunk_source(ck)
+	assert_false(d.has_chunk(ck), "作废后缓冲应被丢掉")
+	assert_true(d._is_chunk_source_invalidated(ck), "应标记为「源作废」")
+
+	# 异步生成器回填：内容已经空了（被撤销 / 删除）
+	var empty := PackedInt32Array()
+	empty.resize(VoxelChunk.CHUNK_VOLUME)
+	d._accept_chunk_buffer(ck, empty, 0)
+	assert_false(d.has_chunk(ck), "空块回填后不得留下缓冲（否则渲染器不会清旧网格）")
+	assert_false(d._is_chunk_source_invalidated(ck), "「源作废」标记应被清掉")
+	assert_true(d.is_chunk_mesh_dirty(ck), "应标脏，让渲染器重建（重建即清掉旧网格）")
+
+
+## 一个不依赖文件流的最小数据源：只跑"块生命周期"这类不涉及磁盘的断言。
+func _bare_source() -> QVoxelSource:
+	var m := QVoxelModel.new()
+	m.grid_size = Vector3i(32, 32, 32)
+	var d := QVoxelSource.new()
+	d.node = m
+	d.grid_size = m.grid_size
+	return d
+
+
 ## 一组**内容互不相同且都非空**的块（键也各不相同），用于验证"只改一块"时其余块不动。
 ## 各块靠"体素个数 + 位置"区分，材质值统一取 1 —— 必须 < 材质表条目数（§9），否则
 ## 解析期会被判为"引用了不存在的材质"而整块丢弃（既不干净，也会掩盖真实问题）。

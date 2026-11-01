@@ -143,6 +143,51 @@ func test_nested_group_transform() -> void:
 	assert_eq(_voxel_world(back, back.all_models()[0]), want, "嵌套组下的体素世界坐标应保持")
 
 
+## 粗糙度**独立于**金属度存在：真实资产里就有 `_type:"_metal"` 而 `_metal:0`、只调了 rough 的条目
+## （`cars.vox` 的 142/152/208）。写端若只按 `metal > 0` 决定要不要写 MATL，这类材质整条丢失，
+## 读回静默回落成默认 `rough = 1` —— 表面上看不出来，直到用户发现"材质被重置了"。
+func test_rough_without_metal_roundtrip() -> void:
+	var w := QVoxelWorld.create_empty()
+	var c := w.add_material(Color(0, 1, 1))
+	w.set_material_scalar(c, &"rough", 0.25)
+	var m := w.create_model("m", Vector3i(2, 2, 2))
+	m.set_voxel(0, 0, 0, c)
+	_save(VoxWriter.encode(w))
+	var vox := VoxAsset.from_asset(TMP)
+	assert_true(vox != null, "应能被读回")
+	if vox == null:
+		return
+	assert_true(absf(vox.materials[1].rough - 0.25) < 0.05,
+			"金属度为 0 时粗糙度也必须落盘（实为 %.3f）" % vox.materials[1].rough)
+	assert_true(vox.materials[1].metal < 0.05, "金属度应仍为 0")
+
+
+## 导出只写**一个**占位图层。
+## 【为什么钉这条】`.vox` 的 LAYR 只是"图层可见性开关"，分组在 `nTRN`/`nGRP` 树上、可见性在
+## 每个节点的 `_hidden` 上。按顶层节点建图层等于凭空造出第二套并行层级 —— 这是**设计决定**，
+## 不是代码细节，所以要有测试盯着，避免哪天被"顺手改回去"。
+func test_single_layer_chunk() -> void:
+	var w := QVoxelWorld.create_empty()
+	var c := w.add_material(Color.RED)
+	for i in 2:
+		var m := w.create_model("m%d" % i, Vector3i(2, 2, 2))
+		m.set_voxel(0, 0, 0, c)
+	var bytes := VoxWriter.encode(w)
+	assert_true(not bytes.is_empty(), "应能编码")
+	if bytes.is_empty():
+		return
+	var layers := 0
+	var pos := 20
+	while pos < bytes.size() - 11:
+		var id := bytes.slice(pos, pos + 4).get_string_from_ascii()
+		var size := bytes.decode_u32(pos + 4)
+		var child := bytes.decode_u32(pos + 8)
+		if id == "LAYR":
+			layers += 1
+		pos += 12 + size + child
+	assert_eq(layers, 1, "两个顶层模型仍只写 1 个图层")
+
+
 # 边界
 
 func test_reject_oversize() -> void:

@@ -9,8 +9,9 @@ extends QVoxelierPanel
 
 ## 上下两半的容器：`VSplitContainer`（引擎自带拖动条）。层级与属性谁更该占地方因人因时而异，
 ## 固定比例做不到这件事 —— 而自己实现拖拽只是在重写这个控件。
+## 【不要碰 `split_offset`】它是**相对中线的偏移**（0 = 平分），不是"第一个子节点的高度"。
+## 按后者去写（`size.y * 0.5`）会把下半区推到可视区外，属性面板直接变成 0 高。
 var _root: VSplitContainer
-var _split_inited := false
 var _prop_scroll: ScrollContainer
 var _prop_host: VBoxContainer
 var _out_scroll: ScrollContainer
@@ -71,10 +72,6 @@ func _fit() -> void:
 		if c is QVoxelierSection:
 			want_w = maxf(want_w, (c as QVoxelierSection).custom_minimum_size.x)
 	offset_left = offset_right - maxf(float(QVoxelUi.dock_width()) + QVoxelUi.space_l(), want_w)
-	# 首次拿到真实高度时平分上下两半；此后保持用户拖出来的位置（不再覆盖）。
-	if not _split_inited and _root.size.y > 40.0:
-		_root.split_offset = int(_root.size.y * 0.5)
-		_split_inited = true
 
 
 ## 追加一个**属性页**组（只在装配时调用）。App 用 show_property 按当前选择切。

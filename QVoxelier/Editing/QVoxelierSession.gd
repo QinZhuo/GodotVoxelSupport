@@ -90,8 +90,10 @@ func activate(model_id: int) -> bool:
 	return true
 
 
-## 一期只编辑一个模型：优先挑"有内容"的那个（打开样例时第一眼就有东西看），都没有就取第一个。
-## 多模型 / 组是二期的事。
+## 打开时挑哪个模型作为**初始活动对象**：优先"有内容"的那个（打开样例时第一眼就有东西看），
+## 都没有就取第一个。
+## 【只挑一个 ≠ 只能有一个】其余模型仍在树上：`install` 给每个模型都建了编辑会话，
+## 右列「层级」随时可以切换。本函数只决定"第一眼落在谁身上"。
 static func pick_editable(w: QVoxelWorld) -> QVoxelModel:
 	var first: QVoxelModel = null
 	for o in w.all_models():

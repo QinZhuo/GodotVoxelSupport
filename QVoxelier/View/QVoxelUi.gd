@@ -187,7 +187,35 @@ static func _build_theme() -> Theme:
 	_theme_slider(t)
 	_theme_line_edit(t)
 	_theme_tooltip(t)
+	_theme_split(t)
 	return t
+
+
+## 分割容器（`VSplitContainer` / `HSplitContainer`）。
+## 【为什么必须画】引擎默认主题在分隔条上**什么都不画**：拖动区是存在的，但用户看不见它在哪，
+## 于是"布局可以拖"这件事等于不存在。给一条细线 + 两侧留白，把能力变成看得见的东西。
+static func _theme_split(t: Theme) -> void:
+	# 横向分隔（上下分栏）：一条水平细线，上下各留 5px 抓取余量 —— 看得见也抓得住。
+	var hbar := StyleBoxFlat.new()
+	hbar.bg_color = Color(0, 0, 0, 0)
+	hbar.border_color = BORDER
+	hbar.border_width_top = 1
+	hbar.border_width_bottom = 1
+	hbar.content_margin_top = 5
+	hbar.content_margin_bottom = 5
+	t.set_stylebox("split_bar_background", "VSplitContainer", hbar)
+	t.set_constant("separation", "VSplitContainer", 10)
+
+	# 竖向分隔（左右分栏）：同理，只是换成竖线。
+	var vbar := StyleBoxFlat.new()
+	vbar.bg_color = Color(0, 0, 0, 0)
+	vbar.border_color = BORDER
+	vbar.border_width_left = 1
+	vbar.border_width_right = 1
+	vbar.content_margin_left = 5
+	vbar.content_margin_right = 5
+	t.set_stylebox("split_bar_background", "HSplitContainer", vbar)
+	t.set_constant("separation", "HSplitContainer", 10)
 
 
 ## 按钮：常态 / 悬停 / 按下 / 禁用 / 焦点五态。**键盘焦点框刻意不做醒目**（本应用
