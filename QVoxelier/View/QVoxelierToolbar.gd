@@ -18,6 +18,8 @@ signal save_as_requested
 ## 导出网格：世界 → glTF 2.0（`.glb`/`.gltf`）。Godot 内核唯一自带的网格交换格式，
 ## 与"保存（.qvx，下次还能接着编辑）"是两件事。
 signal export_mesh_requested
+## 导入模型：外部网格（glTF/OBJ/STL）→ 体素化后成为**新工程**（与"打开"同一层级）。
+signal import_model_requested
 ## 渲染（离屏出图，原「快照」）：与保存同一层级的一个按钮。
 signal render_requested
 signal undo_requested
@@ -67,6 +69,9 @@ func _build() -> void:
 	row.add_child(_action(new_requested.emit, "", "new"))
 	row.add_child(_action(open_requested.emit, "打开（Ctrl+O）\n打开 .qvx 工程或 .vox 体素文件，也可以直接把文件拖进窗口",
 			"open"))
+	# 导入与打开同级：都产出"一份新工程"，只是源文件是三角网格而不是体素。
+	row.add_child(_action(import_model_requested.emit,
+			"导入模型\n把 glTF/GLB、OBJ、STL 体素化后装进工程\n模型自带的动画会转成体素帧动画", "model"))
 	# 保存是主操作：整条栏里唯一带强调描边与强调字的按钮（样式见 QVoxelUi.VARIATION_ACCENT）。
 	row.add_child(_action(save_requested.emit, "保存（Ctrl+S）\n存成 .qvx 工程（保留修改器链与相机）",
 			"save", QVoxelUi.VARIATION_ACCENT))

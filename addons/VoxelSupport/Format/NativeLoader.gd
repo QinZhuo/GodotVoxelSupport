@@ -48,6 +48,8 @@ const REQUIRED_METHODS: Array[StringName] = [
 	# 破坏内核：VoxelDestructible 的硬依赖。此前漏列，导致"库方法不全"这类版本不匹配
 	# 在校验阶段被放过，直到实际调破坏时才炸。
 	&"damage_shape",
+	# 网格体素化（外部模型导入）
+	&"voxelize_mesh",
 ]
 
 static var _inst: Object = null
@@ -273,6 +275,19 @@ static func crc32(data: PackedByteArray, start: int = -1, length: int = -1) -> i
 	if inst == null:
 		return 0
 	return int(inst.call(&"crc32", data, start, length))
+
+
+## 三角网格 → 调色板索引密集体积（保守表面光栅化 + 内部填充 + 颜色采样 + 量化，全在原生）。
+## verts 已是**世界空间**；slots 每项 {tex: PackedByteArray(RGBA8), size: Vector2i, color: Color}；
+## 返回 {size, data: PackedInt32Array(0=空，其余 = 调色板下标+1), palette: PackedByteArray(RGBA8), count}。
+static func voxelize_mesh(verts: PackedVector3Array, indices: PackedInt32Array,
+		uvs: PackedVector2Array, colors: PackedColorArray, tri_slots: PackedInt32Array,
+		slots: Array, origin: Vector3, cell: float, grid: Vector3i, opts: Dictionary) -> Dictionary:
+	var inst := instance()
+	if inst == null:
+		return {}
+	return inst.call(&"voxelize_mesh", verts, indices, uvs, colors, tri_slots, slots,
+			origin, cell, grid, opts)
 
 
 ## 多段 CRC32：等价于把各段顺序拼接后算一次（免去 GDScript 侧临时拼接）。

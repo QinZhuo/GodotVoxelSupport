@@ -7,7 +7,10 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/vector3i.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/vector2.hpp>
@@ -205,6 +208,22 @@ public:
 	// 把扁平 (x, y, z, mat) 四元组装回 chunk 缓冲，返回 {chunk_key: PackedInt32Array(32³)}（均为新缓冲）。
 	// 与 collect_all_flat 成对（收 / 装），供存档载荷重建。
 	static Dictionary install_flat_voxels(const PackedInt32Array &flat);
+
+	// ---- 网格体素化（外部模型导入）----
+	// 三角网格 → 调色板索引密集体积。一趟完成：保守表面光栅化（tri-box SAT）→ 内部填充
+	// （外部泛洪自动降级）→ 表面颜色采样（贴图 / 顶点色 / 材质基色）→ 向内颜色传播 → 调色板量化。
+	//   verts/indices：世界空间三角网格；uvs/vcolors：可为空
+	//   tri_slots：每个三角形所属材质槽（空 = 全 0）
+	//   slots：每槽 {tex: PackedByteArray(RGBA8 行优先), size: Vector2i, color: Color}
+	//   origin/cell/grid：网格原点（世界坐标）、体素边长、各轴格数
+	//   opts：fill(0 壳/1 自动/2 实心) · palette(PackedByteArray 预置调色板，空 = 现算)
+	//         · palette_max(int, 默认 255) · alpha_cutoff(float, 默认 0.1)
+	// 返回 {size: Vector3i, data: PackedInt32Array(密集体积, 0=空, 其余 = 调色板下标+1),
+	//       palette: PackedByteArray(RGBA8×n), count: int}
+	static Dictionary voxelize_mesh(const PackedVector3Array &verts, const PackedInt32Array &indices,
+			const PackedVector2Array &uvs, const PackedColorArray &vcolors,
+			const PackedInt32Array &tri_slots, const Array &slots,
+			const Vector3 &origin, float cell, const Vector3i &grid, const Dictionary &opts);
 
 	// ---- QVX 格式：CRC32（读写两端唯一实现） ----
 	// 标准 CRC32（IEEE 802.3，反射多项式 0xEDB88320），与 zlib 口径一致。

@@ -2642,6 +2642,534 @@ Array VoxelNative::collect_box_positions(const Dictionary &buffers, const Vector
 	return out;
 }
 
+// ----------------------------------------------------------------------------
+// 网格体素化：三角网格 → 调色板索引密集体积（外部模型导入）
+// ----------------------------------------------------------------------------
+
+namespace {
+
+struct VoxSlot {
+	std::vector<uint8_t> px;
+	int w = 0;
+	int h = 0;
+	Color base = Color(1, 1, 1, 1);
+};
+
+struct ColorEntry {
+	uint32_t rgba;
+	int64_t count;
+};
+
+struct PalBox {
+	int begin;
+	int end;
+	int64_t count;
+};
+
+inline float clamp01(float v) {
+	return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+inline uint32_t pack_rgba8(const Color &c) {
+	const uint32_t r = (uint32_t)std::lround(clamp01(c.r) * 255.0f);
+	const uint32_t g = (uint32_t)std::lround(clamp01(c.g) * 255.0f);
+	const uint32_t b = (uint32_t)std::lround(clamp01(c.b) * 255.0f);
+	const uint32_t a = (uint32_t)std::lround(clamp01(c.a) * 255.0f);
+	return (r << 24) | (g << 16) | (b << 8) | a;
+}
+
+inline uint32_t channel_of(uint32_t rgba, int ch) {
+	return (rgba >> (24 - 8 * ch)) & 0xFFu;
+}
+
+// 三角形与立方体盒（半边长 e，中心在原点）相交测试 —— 13 轴分离轴。
+// 保守性来源：只要三角形与盒子有任何接触就返回 true，因此表面体素不漏孔。
+inline bool tri_box_overlap(const Vector3 &a, const Vector3 &b, const Vector3 &c, float e) {
+	float mn = std::min(a.x, std::min(b.x, c.x));
+	float mx = std::max(a.x, std::max(b.x, c.x));
+	if (mn > e || mx < -e) return false;
+	mn = std::min(a.y, std::min(b.y, c.y));
+	mx = std::max(a.y, std::max(b.y, c.y));
+	if (mn > e || mx < -e) return false;
+	mn = std::min(a.z, std::min(b.z, c.z));
+	mx = std::max(a.z, std::max(b.z, c.z));
+	if (mn > e || mx < -e) return false;
+
+	const Vector3 f0 = b - a;
+	const Vector3 f1 = c - b;
+	const Vector3 fs[3] = { f0, f1, a - c };
+	const Vector3 vs[3] = { a, b, c };
+	for (int k = 0; k < 3; ++k) {
+		const Vector3 &f = fs[k];
+		const Vector3 axes[3] = {
+			Vector3(0.0f, -f.z, f.y),
+			Vector3(f.z, 0.0f, -f.x),
+			Vector3(-f.y, f.x, 0.0f),
+		};
+		for (int j = 0; j < 3; ++j) {
+			const Vector3 &ax = axes[j];
+			const float r = e * (std::fabs(ax.x) + std::fabs(ax.y) + std::fabs(ax.z));
+			float lo = ax.dot(vs[0]);
+			float hi = lo;
+			for (int i = 1; i < 3; ++i) {
+				const float p = ax.dot(vs[i]);
+				lo = std::min(lo, p);
+				hi = std::max(hi, p);
+			}
+			if (lo > r || hi < -r) return false;
+		}
+	}
+	const Vector3 n = f0.cross(f1);
+	const float r = e * (std::fabs(n.x) + std::fabs(n.y) + std::fabs(n.z));
+	return std::fabs(n.dot(a)) <= r;
+}
+
+// 点到三角形的最近点（返回重心坐标 bu/bv/bw 与距离平方）。Ericson, RTCD 5.1.5。
+inline float closest_bary(const Vector3 &p, const Vector3 &a, const Vector3 &b, const Vector3 &c,
+		float &bu, float &bv, float &bw) {
+	const Vector3 ab = b - a;
+	const Vector3 ac = c - a;
+	const Vector3 ap = p - a;
+	const float d1 = ab.dot(ap);
+	const float d2 = ac.dot(ap);
+	if (d1 <= 0.0f && d2 <= 0.0f) {
+		bu = 1.0f; bv = 0.0f; bw = 0.0f;
+		return ap.length_squared();
+	}
+	const Vector3 bp = p - b;
+	const float d3 = ab.dot(bp);
+	const float d4 = ac.dot(bp);
+	if (d3 >= 0.0f && d4 <= d3) {
+		bu = 0.0f; bv = 1.0f; bw = 0.0f;
+		return bp.length_squared();
+	}
+	const float vc = d1 * d4 - d3 * d2;
+	if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+		const float t = d1 / (d1 - d3);
+		bu = 1.0f - t; bv = t; bw = 0.0f;
+		return (a + ab * t - p).length_squared();
+	}
+	const Vector3 cp = p - c;
+	const float d5 = ab.dot(cp);
+	const float d6 = ac.dot(cp);
+	if (d6 >= 0.0f && d5 <= d6) {
+		bu = 0.0f; bv = 0.0f; bw = 1.0f;
+		return cp.length_squared();
+	}
+	const float vb = d5 * d2 - d1 * d6;
+	if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+		const float t = d2 / (d2 - d6);
+		bu = 1.0f - t; bv = 0.0f; bw = t;
+		return (a + ac * t - p).length_squared();
+	}
+	const float va = d3 * d6 - d5 * d4;
+	if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+		const float t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		bu = 0.0f; bv = 1.0f - t; bw = t;
+		return (b + (c - b) * t - p).length_squared();
+	}
+	const float denom = 1.0f / (va + vb + vc);
+	const float v = vb * denom;
+	const float w = vc * denom;
+	bu = 1.0f - v - w;
+	bv = v;
+	bw = w;
+	return (a + ab * v + ac * w - p).length_squared();
+}
+
+// 材质槽取样：贴图（双线性 + REPEAT）× 基色 × 顶点色。
+inline uint32_t sample_slot(const VoxSlot &s, const Vector2 &uv, const Color &vc, bool has_uv, bool has_vc) {
+	float r = s.base.r;
+	float g = s.base.g;
+	float b = s.base.b;
+	float al = s.base.a;
+	if (s.w > 0 && s.h > 0 && has_uv) {
+		const float u = uv.x - std::floor(uv.x);
+		const float v = uv.y - std::floor(uv.y);
+		const float x = u * (float)s.w - 0.5f;
+		const float y = v * (float)s.h - 0.5f;
+		const int x0 = (int)std::floor(x);
+		const int y0 = (int)std::floor(y);
+		const float fx = x - (float)x0;
+		const float fy = y - (float)y0;
+		const uint8_t *base = s.px.data();
+		auto texel = [&](int xx, int yy) -> const uint8_t * {
+			xx %= s.w;
+			if (xx < 0) xx += s.w;
+			yy %= s.h;
+			if (yy < 0) yy += s.h;
+			return base + ((size_t)yy * (size_t)s.w + (size_t)xx) * 4;
+		};
+		const uint8_t *t00 = texel(x0, y0);
+		const uint8_t *t10 = texel(x0 + 1, y0);
+		const uint8_t *t01 = texel(x0, y0 + 1);
+		const uint8_t *t11 = texel(x0 + 1, y0 + 1);
+		float ch[4];
+		for (int i = 0; i < 4; ++i) {
+			const float top = (float)t00[i] * (1.0f - fx) + (float)t10[i] * fx;
+			const float bot = (float)t01[i] * (1.0f - fx) + (float)t11[i] * fx;
+			ch[i] = (top * (1.0f - fy) + bot * fy) / 255.0f;
+		}
+		r *= ch[0];
+		g *= ch[1];
+		b *= ch[2];
+		al *= ch[3];
+	}
+	if (has_vc) {
+		r *= vc.r;
+		g *= vc.g;
+		b *= vc.b;
+		al *= vc.a;
+	}
+	return pack_rgba8(Color(r, g, b, al));
+}
+
+// 加权中位切分：逐次把像素数最多的箱子沿跨度最大的通道对半切。
+PackedByteArray build_palette(std::vector<ColorEntry> &entries, int max_colors) {
+	PackedByteArray pal;
+	if (entries.empty() || max_colors <= 0) {
+		return pal;
+	}
+	int64_t total = 0;
+	for (const ColorEntry &e : entries) {
+		total += e.count;
+	}
+	std::vector<PalBox> boxes;
+	boxes.push_back({ 0, (int)entries.size(), total });
+	while ((int)boxes.size() < max_colors) {
+		int pick = -1;
+		int64_t best = 0;
+		for (int i = 0; i < (int)boxes.size(); ++i) {
+			if (boxes[i].end - boxes[i].begin > 1 && boxes[i].count > best) {
+				best = boxes[i].count;
+				pick = i;
+			}
+		}
+		if (pick < 0) break;
+		const PalBox box = boxes[pick];
+		uint32_t lo[3] = { 255, 255, 255 };
+		uint32_t hi[3] = { 0, 0, 0 };
+		for (int i = box.begin; i < box.end; ++i) {
+			for (int ch = 0; ch < 3; ++ch) {
+				const uint32_t v = channel_of(entries[i].rgba, ch);
+				lo[ch] = std::min(lo[ch], v);
+				hi[ch] = std::max(hi[ch], v);
+			}
+		}
+		int axis = 0;
+		uint32_t span = hi[0] - lo[0];
+		for (int ch = 1; ch < 3; ++ch) {
+			if (hi[ch] - lo[ch] > span) {
+				span = hi[ch] - lo[ch];
+				axis = ch;
+			}
+		}
+		std::sort(entries.begin() + box.begin, entries.begin() + box.end,
+				[axis](const ColorEntry &x, const ColorEntry &y) {
+					return channel_of(x.rgba, axis) < channel_of(y.rgba, axis);
+				});
+		int64_t acc = 0;
+		int mid = box.end - 1;
+		for (int i = box.begin; i < box.end - 1; ++i) {
+			acc += entries[i].count;
+			if (acc * 2 >= box.count) {
+				mid = i + 1;
+				break;
+			}
+		}
+		int64_t left = 0;
+		for (int i = box.begin; i < mid; ++i) {
+			left += entries[i].count;
+		}
+		boxes[pick] = { box.begin, mid, left };
+		boxes.push_back({ mid, box.end, box.count - left });
+	}
+	pal.resize((int)boxes.size() * 4);
+	uint8_t *pw = pal.ptrw();
+	for (int i = 0; i < (int)boxes.size(); ++i) {
+		double sum[4] = { 0.0, 0.0, 0.0, 0.0 };
+		double w = 0.0;
+		for (int k = boxes[i].begin; k < boxes[i].end; ++k) {
+			const double c = (double)entries[k].count;
+			for (int ch = 0; ch < 4; ++ch) {
+				sum[ch] += (double)channel_of(entries[k].rgba, ch) * c;
+			}
+			w += c;
+		}
+		if (w <= 0.0) w = 1.0;
+		for (int ch = 0; ch < 4; ++ch) {
+			pw[i * 4 + ch] = (uint8_t)std::lround(sum[ch] / w);
+		}
+	}
+	return pal;
+}
+
+} // namespace
+
+Dictionary VoxelNative::voxelize_mesh(const PackedVector3Array &verts, const PackedInt32Array &indices,
+		const PackedVector2Array &uvs, const PackedColorArray &vcolors,
+		const PackedInt32Array &tri_slots, const Array &slots,
+		const Vector3 &origin, float cell, const Vector3i &grid, const Dictionary &opts) {
+	Dictionary out;
+	const int gx = grid.x;
+	const int gy = grid.y;
+	const int gz = grid.z;
+	const int64_t total = (int64_t)gx * gy * gz;
+	if (total <= 0 || cell <= 0.0f || verts.is_empty() || indices.size() < 3) {
+		return out;
+	}
+
+	const bool fill_interior = opts.get("fill", true);
+	const float alpha_cutoff = opts.get("alpha_cutoff", 0.1f);
+	const int palette_max = std::max(1, (int)opts.get("palette_max", 255));
+
+	std::vector<VoxSlot> tex(slots.size());
+	for (int i = 0; i < slots.size(); ++i) {
+		const Dictionary d = slots[i];
+		tex[i].base = (Color)d.get("color", Color(1, 1, 1, 1));
+		const PackedByteArray px = d.get("tex", PackedByteArray());
+		const Vector2i sz = d.get("size", Vector2i());
+		if (sz.x > 0 && sz.y > 0 && (int64_t)px.size() >= (int64_t)sz.x * sz.y * 4) {
+			tex[i].w = sz.x;
+			tex[i].h = sz.y;
+			tex[i].px.assign(px.ptr(), px.ptr() + (size_t)sz.x * (size_t)sz.y * 4);
+		}
+	}
+
+	// state: 0 = 空（含内部）｜1 = 表面｜2 = 外部空气。col = RGBA8，near = 最近面距离平方。
+	std::vector<uint8_t> state((size_t)total, 0);
+	std::vector<uint32_t> col((size_t)total, 0);
+	std::vector<float> near((size_t)total, 3.4e38f);
+
+	const bool has_uv = uvs.size() == verts.size();
+	const bool has_vc = vcolors.size() == verts.size();
+	const float half = cell * 0.5f;
+	const int tri_count = indices.size() / 3;
+	const int *ip = indices.ptr();
+	const Vector3 *vp = verts.ptr();
+	const Vector2 *up = has_uv ? uvs.ptr() : nullptr;
+	const Color *cp = has_vc ? vcolors.ptr() : nullptr;
+
+	auto cell_center = [&](int x, int y, int z) {
+		return Vector3(origin.x + ((float)x + 0.5f) * cell,
+				origin.y + ((float)y + 0.5f) * cell,
+				origin.z + ((float)z + 0.5f) * cell);
+	};
+
+	for (int t = 0; t < tri_count; ++t) {
+		const int ia = ip[t * 3];
+		const int ib = ip[t * 3 + 1];
+		const int ic = ip[t * 3 + 2];
+		if (ia < 0 || ib < 0 || ic < 0 || ia >= verts.size() || ib >= verts.size() || ic >= verts.size()) {
+			continue;
+		}
+		const Vector3 a = vp[ia];
+		const Vector3 b = vp[ib];
+		const Vector3 c = vp[ic];
+		// 退化三角形（面积近零）不构成表面
+		if ((b - a).cross(c - a).length_squared() < 1e-20f) {
+			continue;
+		}
+		const int slot = t < tri_slots.size() ? tri_slots[t] : 0;
+		const VoxSlot &s = tex[(size_t)std::max(0, std::min(slot, (int)tex.size() - 1))];
+
+		const float mnx = std::min(a.x, std::min(b.x, c.x));
+		const float mxx = std::max(a.x, std::max(b.x, c.x));
+		const float mny = std::min(a.y, std::min(b.y, c.y));
+		const float mxy = std::max(a.y, std::max(b.y, c.y));
+		const float mnz = std::min(a.z, std::min(b.z, c.z));
+		const float mxz = std::max(a.z, std::max(b.z, c.z));
+		// 两端各自夹取到 [0, n-1]：正面恰好落在网格右边界时 floor 会给出 n，
+		// 若写成"起点 max / 终点 min"就得到 x0>n-1>x1 而整面被跳过（壳上开大洞）。
+		const int x0 = std::clamp((int)std::floor((mnx - origin.x) / cell), 0, gx - 1);
+		const int x1 = std::clamp((int)std::floor((mxx - origin.x) / cell), 0, gx - 1);
+		const int y0 = std::clamp((int)std::floor((mny - origin.y) / cell), 0, gy - 1);
+		const int y1 = std::clamp((int)std::floor((mxy - origin.y) / cell), 0, gy - 1);
+		const int z0 = std::clamp((int)std::floor((mnz - origin.z) / cell), 0, gz - 1);
+		const int z1 = std::clamp((int)std::floor((mxz - origin.z) / cell), 0, gz - 1);
+
+		for (int z = z0; z <= z1; ++z) {
+			for (int y = y0; y <= y1; ++y) {
+				for (int x = x0; x <= x1; ++x) {
+					const Vector3 ctr = cell_center(x, y, z);
+					if (!tri_box_overlap(a - ctr, b - ctr, c - ctr, half)) {
+						continue;
+					}
+					float bu = 0.0f;
+					float bv = 0.0f;
+					float bw = 0.0f;
+					const float d2 = closest_bary(ctr, a, b, c, bu, bv, bw);
+					const int64_t idx = (int64_t)x + (int64_t)y * gx + (int64_t)z * gx * gy;
+					if (d2 >= near[(size_t)idx]) {
+						continue;
+					}
+					Vector2 uv;
+					Color vc(1, 1, 1, 1);
+					if (has_uv) {
+						uv = up[ia] * bu + up[ib] * bv + up[ic] * bw;
+					}
+					if (has_vc) {
+						vc = cp[ia] * bu + cp[ib] * bv + cp[ic] * bw;
+					}
+					near[(size_t)idx] = d2;
+					col[(size_t)idx] = sample_slot(s, uv, vc, has_uv, has_vc);
+					state[(size_t)idx] = 1;
+				}
+			}
+		}
+	}
+
+	// 外部空气泛洪（6 邻接）：到不了的空格即内部。开放模型自然退化为"只有壳"。
+	std::vector<int64_t> queue;
+	queue.reserve(4096);
+	auto push_air = [&](int x, int y, int z) {
+		if (x < 0 || y < 0 || z < 0 || x >= gx || y >= gy || z >= gz) {
+			return;
+		}
+		const int64_t i = (int64_t)x + (int64_t)y * gx + (int64_t)z * gx * gy;
+		if (state[(size_t)i] != 0) {
+			return;
+		}
+		state[(size_t)i] = 2;
+		queue.push_back(i);
+	};
+	for (int z = 0; z < gz; ++z) {
+		for (int y = 0; y < gy; ++y) {
+			push_air(0, y, z);
+			push_air(gx - 1, y, z);
+		}
+	}
+	for (int z = 0; z < gz; ++z) {
+		for (int x = 0; x < gx; ++x) {
+			push_air(x, 0, z);
+			push_air(x, gy - 1, z);
+		}
+	}
+	for (int y = 0; y < gy; ++y) {
+		for (int x = 0; x < gx; ++x) {
+			push_air(x, y, 0);
+			push_air(x, y, gz - 1);
+		}
+	}
+	const int64_t gxy = (int64_t)gx * gy;
+	for (size_t head = 0; head < queue.size(); ++head) {
+		const int64_t i = queue[head];
+		const int x = (int)(i % gx);
+		const int y = (int)((i / gx) % gy);
+		const int z = (int)(i / gxy);
+		push_air(x - 1, y, z);
+		push_air(x + 1, y, z);
+		push_air(x, y - 1, z);
+		push_air(x, y + 1, z);
+		push_air(x, y, z - 1);
+		push_air(x, y, z + 1);
+	}
+
+	// 颜色向内传播：多源 BFS 从表面出发，只进入内部格 —— 剖切时不露黑洞。
+	if (fill_interior) {
+		queue.clear();
+		for (int64_t i = 0; i < total; ++i) {
+			if (state[(size_t)i] == 1) {
+				queue.push_back(i);
+			}
+		}
+		for (size_t head = 0; head < queue.size(); ++head) {
+			const int64_t i = queue[head];
+			const uint32_t c = col[(size_t)i];
+			if (c == 0) {
+				continue;
+			}
+			const int x = (int)(i % gx);
+			const int y = (int)((i / gx) % gy);
+			const int z = (int)(i / gxy);
+			const int nx[6] = { x - 1, x + 1, x, x, x, x };
+			const int ny[6] = { y, y, y - 1, y + 1, y, y };
+			const int nz[6] = { z, z, z, z, z - 1, z + 1 };
+			for (int k = 0; k < 6; ++k) {
+				if (nx[k] < 0 || ny[k] < 0 || nz[k] < 0 || nx[k] >= gx || ny[k] >= gy || nz[k] >= gz) {
+					continue;
+				}
+				const int64_t ni = (int64_t)nx[k] + (int64_t)ny[k] * gx + (int64_t)nz[k] * gxy;
+				if (state[(size_t)ni] == 0 && col[(size_t)ni] == 0) {
+					col[(size_t)ni] = c;
+					queue.push_back(ni);
+				}
+			}
+		}
+	}
+
+	// 调色板：预设优先（帧间一致），否则按颜色直方图中位切分。
+	PackedByteArray palette = opts.get("palette", PackedByteArray());
+	if (palette.size() < 4) {
+		std::unordered_map<uint32_t, int64_t> hist;
+		hist.reserve(4096);
+		for (int64_t i = 0; i < total; ++i) {
+			if (state[(size_t)i] == 2 || col[(size_t)i] == 0) {
+				continue;
+			}
+			hist[col[(size_t)i]] += 1;
+		}
+		std::vector<ColorEntry> entries;
+		entries.reserve(hist.size());
+		for (const auto &kv : hist) {
+			entries.push_back({ kv.first, kv.second });
+		}
+		palette = build_palette(entries, palette_max);
+	}
+	const int pal_n = palette.size() / 4;
+	if (pal_n <= 0) {
+		return out;
+	}
+	const uint8_t *pal8 = palette.ptr();
+
+	std::unordered_map<uint32_t, int> lut;
+	lut.reserve(4096);
+	auto nearest = [&](uint32_t c) -> int {
+		const auto it = lut.find(c);
+		if (it != lut.end()) {
+			return it->second;
+		}
+		int best = 0;
+		int64_t bd = -1;
+		for (int i = 0; i < pal_n; ++i) {
+			const int64_t dr = (int64_t)channel_of(c, 0) - (int64_t)pal8[i * 4 + 0];
+			const int64_t dg = (int64_t)channel_of(c, 1) - (int64_t)pal8[i * 4 + 1];
+			const int64_t db = (int64_t)channel_of(c, 2) - (int64_t)pal8[i * 4 + 2];
+			const int64_t d = dr * dr * 3 + dg * dg * 4 + db * db * 2;
+			if (bd < 0 || d < bd) {
+				bd = d;
+				best = i;
+			}
+		}
+		lut[c] = best;
+		return best;
+	};
+
+	PackedInt32Array data;
+	data.resize((int)total);
+	int32_t *dp = data.ptrw();
+	memset(dp, 0, (size_t)total * sizeof(int32_t));
+	int64_t count = 0;
+	const uint8_t cutoff = (uint8_t)std::lround(clamp01(alpha_cutoff) * 255.0f);
+	for (int64_t i = 0; i < total; ++i) {
+		if (state[(size_t)i] == 2) {
+			continue;
+		}
+		const uint32_t c = col[(size_t)i];
+		if (c == 0 || (uint8_t)(c & 0xFFu) < cutoff) {
+			continue;
+		}
+		dp[i] = nearest(c) + 1;
+		++count;
+	}
+
+	out["size"] = grid;
+	out["data"] = data;
+	out["palette"] = palette;
+	out["count"] = (int64_t)count;
+	return out;
+}
+
 void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("choose_and_pack", "buf", "n"), &VoxelNative::choose_and_pack);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("pack_with_codec", "codec", "buf", "n"), &VoxelNative::pack_with_codec);
@@ -2677,6 +3205,7 @@ void VoxelNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_positions", "positions"), &VoxelNative::find_unsupported_positions);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("flood_fill_positions", "seeds", "allowed"), &VoxelNative::flood_fill_positions);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
+	ClassDB::bind_static_method("VoxelNative", D_METHOD("voxelize_mesh", "verts", "indices", "uvs", "vcolors", "tri_slots", "slots", "origin", "cell", "grid", "opts"), &VoxelNative::voxelize_mesh);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32", "data", "start", "length"), &VoxelNative::crc32);
 	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32_segments", "data", "offsets", "lengths"), &VoxelNative::crc32_segments);
 }
