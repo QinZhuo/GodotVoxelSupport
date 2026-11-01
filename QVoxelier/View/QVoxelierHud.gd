@@ -32,7 +32,7 @@ var _log_empty: Label
 var _toast_left := 0.0
 ## 两块浮层右侧要让开的宽度。装配时由 App 报进来（抽屉的实际宽度随内容变，见
 ## QVoxelierDock._fit），默认退回设计宽度 —— HUD 单独跑时也摆得对。
-var _right_inset := QVoxelUi.side_width(QVoxelUi.dock_width()) + QVoxelUi.space_s()
+var _right_inset := QVoxelUi.dock_width() + QVoxelUi.space_s()
 
 const TOAST_SECONDS := 2.5
 ## 日志浮层：宽固定（长消息换行，而不是把面板撑到半个屏幕），高固定（内容超出就滚动）。
@@ -327,7 +327,7 @@ func _refresh_log_empty() -> void:
 	_log_scroll.visible = not empty
 
 
-## 两块浮层右侧要让开的宽度：右侧栏（`QVoxelUi.side_width(dock_width)`）再加一条缝。
+## 两块浮层右侧要让开的宽度：右侧栏（`dock_width`）再加一条缝。
 ## 【为什么不能让浮层贴屏幕右缘】说明与日志和右列抽屉锚在同一个角上（PRESET_TOP_RIGHT），
 ## 贴右缘就会被抽屉整条压住 —— 实测「操作说明」右半边被「颜色」面板盖掉，
 ## "Ctrl+O 打开""无需键盘即可完成全部操作"这几行直接读不到。

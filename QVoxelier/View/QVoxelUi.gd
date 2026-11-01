@@ -144,7 +144,8 @@ static func strip_height() -> int:
 	return status_height()
 
 
-## 左侧调色板列的宽度（竖排色块，像工具栏一样）。
+## 左侧调色板列的宽度（竖排色块，像工具栏一样）= 色块 + 两侧各一道缝。
+## 栏背景不再吃左右边（见 `side_panel`），缝隙全在这里，改一处就够。
 static func palette_width() -> int:
 	return hit_size() + space_s() * 2
 
@@ -161,9 +162,14 @@ static func dock_width() -> int:
 	return 116 if compact() else 132
 
 
-## 拖动条改右列宽度。夹到 [96, 360]：再窄放不下层级条目，再宽视口就没了。
-static func set_dock_width(w: float) -> void:
-	_dock_w = clampi(int(round(w)), 96, 360)
+## 右列宽度的硬上限：再宽画布就没了。
+const DOCK_MAX_W := 640
+
+## 拖动条改右列宽度。夹到 [96, cap]：再窄放不下层级条目，再宽画布就没了。
+## `max_w <= 0` 时用 `DOCK_MAX_W`；App 传窗口的一半进来，宽窗口才拖得开。
+static func set_dock_width(w: float, max_w := -1.0) -> void:
+	var cap := float(DOCK_MAX_W) if max_w <= 0.0 else minf(max_w, float(DOCK_MAX_W))
+	_dock_w = clampi(int(round(w)), 96, int(cap))
 
 
 ## 用户是否亲手调过右列宽度。
@@ -518,16 +524,13 @@ static func panel(margin := -1, bg := SURFACE) -> PanelContainer:
 ## 侧栏面板（贴窗口左右边、贯通上下的那条长栏）。
 ## 【为什么单独一个】一条栏就是**一块**面板：贴边不圆角、只在朝画布那一侧画分隔线。
 ## 再套一层底板、或反过来在栏里塞一张卡片，描边与圆角就会各画一遍 —— 看着像几层浮窗叠着。
+## 【左右不设内边距】栏边离内容多远由内容自己定（组内边距 / 色块列的缝），
+## 背景再吃一道就是双重留白 —— 面板看着就空。
 ## `side` 传这条栏在屏幕的哪一侧（SIDE_LEFT / SIDE_RIGHT）。
-static func side_panel(side: Side, pad_x := -1, pad_y := -1) -> StyleBoxFlat:
-	var sb := box(SURFACE_SOLID, BORDER, 0, 0, pad_x, pad_y)
+static func side_panel(side: Side, pad_y := -1) -> StyleBoxFlat:
+	var sb := box(SURFACE_SOLID, BORDER, 0, 0, 0, pad_y)
 	sb.set_border_width(SIDE_RIGHT if side == SIDE_LEFT else SIDE_LEFT, 1)
 	return sb
-
-
-## 侧栏整宽 = 内容宽 + 两侧同宽的缝（缝就是内容的内边距，栏贴边不另留白）。
-static func side_width(content_w: float) -> float:
-	return content_w + space_m() * 2.0
 
 
 static func vbox(sep := -1) -> VBoxContainer:

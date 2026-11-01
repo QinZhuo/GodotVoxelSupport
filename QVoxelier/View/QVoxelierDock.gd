@@ -27,12 +27,11 @@ func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 	offset_right = 0.0
 	offset_top = QVoxelUi.bar_height()
-	offset_left = offset_right - float(QVoxelUi.dock_width()) - QVoxelUi.space_s() * 2.0
+	offset_left = offset_right - float(QVoxelUi.dock_width())
 
 	# 整列**一块背景**（各分组自己不再带背景），中间一条分割线把"层级 / 属性"两半分开。
 	var bg := PanelContainer.new()
-	bg.add_theme_stylebox_override("panel",
-			QVoxelUi.side_panel(SIDE_RIGHT, QVoxelUi.space_m(), QVoxelUi.space_s()))
+	bg.add_theme_stylebox_override("panel", QVoxelUi.side_panel(SIDE_RIGHT, QVoxelUi.space_s()))
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
@@ -75,7 +74,7 @@ func _fit() -> void:
 			want_w = maxf(want_w, (c as QVoxelierSection).custom_minimum_size.x)
 	# 宽度：用户拖过就以拖的为准（拖窄了内容会被横向裁掉，那是他自己的选择）；
 	# 没拖过才让内容兜底撑开，免得属性面板的滑条一开局就被裁。
-	var target := QVoxelUi.side_width(QVoxelUi.dock_width())
+	var target := float(QVoxelUi.dock_width())
 	if not QVoxelUi.dock_width_custom():
 		target = maxf(target, want_w)
 	offset_left = offset_right - target

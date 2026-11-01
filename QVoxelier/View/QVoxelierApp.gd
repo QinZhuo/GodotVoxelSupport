@@ -343,8 +343,8 @@ func _build_ui() -> void:
 	_tools = QVoxelierTools.new()
 	_tools.name = "Tools"
 	add_child(_tools)
-	# 工具列排在调色板列的右边（最左一列是调色板）。
-	_tools.position.x = QVoxelUi.space_m() + QVoxelUi.palette_width() + QVoxelUi.space_m()
+	# 工具列排在调色板列的右边（最左一列是调色板），隔一道缝。
+	_tools.position.x = QVoxelUi.palette_width() + QVoxelUi.space_s()
 	_tools.tool_selected.connect(_set_tool)
 
 	# 上下文选项条：只显示当前工具用得到的选项（笔刷 / 形态 / 对称 / 选区动作）。
@@ -1015,9 +1015,9 @@ func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
 ## 拖动条位置共用同一组数。
 func _sync_insets() -> void:
 	# 左栏只有调色板那一列（工具列是浮在画布上的，不算进栏宽）。
-	_left_panel_w = QVoxelUi.side_width(QVoxelUi.palette_width())
-	# 浮层还要多让出工具列（连同它的右缝）：工具列压在画布最左边，浮层压上去就会挡住它。
-	_left_inset = _left_panel_w + _tools.size.x + QVoxelUi.space_m()
+	_left_panel_w = QVoxelUi.palette_width()
+	# 浮层让到工具列右边再留一道缝：工具列压在画布最左边，浮层压上去就会挡住它。
+	_left_inset = _tools.position.x + _tools.size.x + QVoxelUi.space_m()
 	_right_panel_w = _dock.size.x
 	# 浮层与右栏之间留一道缝，免得贴死在栏边。
 	_right_inset = _right_panel_w + QVoxelUi.space_s()
@@ -1035,11 +1035,16 @@ func _sync_insets() -> void:
 ## 拖右栏左缘：向左拖（delta < 0）= 右栏变宽。
 ## 宽度写进 `QVoxelUi` 再由 Dock 重排 —— "目标宽度"只有一处，拖动与偏好都作用在它上面。
 func _on_dock_resize(delta: float) -> void:
-	QVoxelUi.set_dock_width(QVoxelUi.dock_width() - delta)
+	QVoxelUi.set_dock_width(QVoxelUi.dock_width() - delta, _dock_cap())
 	_dock.refit()
 	_sync_insets()
 	hud.set_right_inset(_right_inset)
 	_gizmo.right_inset = _right_inset
+
+
+## 右栏能拖多宽：最多占一半，剩下一半永远留给画布。
+func _dock_cap() -> float:
+	return get_viewport().get_visible_rect().size.x * 0.5
 
 
 ## 恢复上次拖出来的栏宽（没有记录就用默认档）。与"上次目录"共用同一个 cfg。
@@ -1049,7 +1054,7 @@ func _load_layout() -> void:
 		return
 	var dw := int(cfg.get_value(PREFS_SECTION, "dock_w", 0))
 	if dw > 0:
-		QVoxelUi.set_dock_width(dw)
+		QVoxelUi.set_dock_width(dw, _dock_cap())
 
 
 func _save_layout() -> void:

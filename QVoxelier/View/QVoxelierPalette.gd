@@ -27,8 +27,7 @@ func _build() -> void:
 	position = Vector2(0.0, QVoxelUi.bar_height())
 
 	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel",
-			QVoxelUi.side_panel(SIDE_LEFT, QVoxelUi.space_m(), QVoxelUi.space_s()))
+	panel.add_theme_stylebox_override("panel", QVoxelUi.side_panel(SIDE_LEFT, QVoxelUi.space_s()))
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(panel)
 
@@ -53,11 +52,11 @@ func _build() -> void:
 	_resize()
 
 
-## 高度贯通上下：从顶栏下沿到底部帧条上沿。整宽含两侧内边距（见 QVoxelUi.side_width）。
+## 高度贯通上下：从顶栏下沿到底部帧条上沿。
 func _resize() -> void:
 	var h := (get_viewport_rect().size.y - position.y - QVoxelUi.status_height()
 			- QVoxelUi.strip_height())
-	size = Vector2(QVoxelUi.side_width(QVoxelUi.palette_width()), maxf(h, 120.0))
+	size = Vector2(QVoxelUi.palette_width(), maxf(h, 120.0))
 
 
 # 对外：状态同步（只由 App 调用）
