@@ -83,3 +83,17 @@ func test_voxel_resources_instructions_help() -> void:
 	assert_true(str(content[0]["text"]).contains("QVoxelScript"), "正文应内联(资源不支持的客户端也能读到)")
 	assert_eq(content[1]["type"], "resource_link")
 	assert_eq(content[1]["uri"], "voxel://api")
+
+
+## 参数 schema 必须真的由框架的 MCPToolSchema 产出。两者是运行期绑定（没有框架就整份 provider
+## 不注册），而 `call` 写错方法名只会返回 null 而不报错 —— 那样工具在 IDE 里静默丢了参数，
+## 属于典型的假绿，只有把返回结构断言出来才拦得住。
+func test_register_binds_framework_factories() -> void:
+	assert_true(QVoxelMCPTools.framework_available(), "有框架时应能惰性载入契约工厂")
+	var got := {}
+	QVoxelMCPTools.register(func(name: String, _desc: String, schema: Dictionary, _fn: Callable):
+		got[name] = schema)
+	assert_eq(got.size(), 2, "应注册 voxel_help + voxel_render")
+	assert_eq(got["voxel_help"], {"type": "object", "properties": {}}, "no_arg = 空对象 schema")
+	assert_eq(got["voxel_render"]["type"], "object")
+	assert_true(got["voxel_render"]["properties"].has("views"), "properties 应由 str_arg 产出")

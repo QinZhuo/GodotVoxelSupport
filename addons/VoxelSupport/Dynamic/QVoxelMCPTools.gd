@@ -4,6 +4,7 @@ extends RefCounted
 ## ======= 体素程序化建模 —— 项目侧 MCP provider =======
 ##
 ## 由 DEVFramework 的 MCPDevServer 按项目设置 `dev_framework/mcp/providers` 加载并调用 `register`。
+## 框架是用它的项目自己的事: 缺席时本 provider **静默不注册**, 连解析期报错都不留。
 ##
 ## 【只剩一个"说明"工具】建模能力已收敛到脚本侧: 用 `QVoxelScript`(全局类, 自动分流实时/无头)
 ## 写脚本, 在 eval_code(process="editor"|"game") 里执行 —— 这比固定形状的 MCP 工具更自由。
@@ -12,8 +13,11 @@ extends RefCounted
 ## 【说明为何内嵌】打包运行时 .md 不进包、源码文本也不可读, 只有随包编译的字符串还能拿到 ——
 ## 这正是本工具存在的理由。
 
-const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
+const MCP_DIR := "res://addons/DEVFramework/MCP/"
+
+## 框架的两个契约工厂（结果封装 / 参数 schema），缺席时为 null。
+static var _result: GDScript = null
+static var _schema: GDScript = null
 
 const HELP := """# 体素程序化建模 —— API 说明
 全部入口在一个类: **QVoxelScript**(全局类)。软件(QVoxelier)界面上能做的每个动作,
@@ -139,11 +143,27 @@ const HELP := """# 体素程序化建模 —— API 说明
 const RESOURCE_URI := "voxel://api"
 
 
+## 框架是否在场 —— 在场才惰性载入两个契约工厂。
+## 【为什么不用 preload】preload 是编译期绑定, 框架不复存在时那两行就是一个 Parse Error,
+## 于是"插件放进任意项目"连编译都过不去; 而 MCP 本就是可选的开发期能力。静态方法可以经
+## 脚本对象 `call` 调用, 故换成运行期绑定后, 缺席的代价从"报错"降为"不注册"。
+static func framework_available() -> bool:
+	if _result != null:
+		return true
+	if not ResourceLoader.exists(MCP_DIR + "MCPResult.gd"):
+		return false
+	_result = load(MCP_DIR + "MCPResult.gd") as GDScript
+	_schema = load(MCP_DIR + "MCPToolSchema.gd") as GDScript
+	return _result != null and _schema != null
+
+
 static func register(add_tool: Callable) -> void:
+	if not framework_available():
+		return
 	add_tool.call("voxel_help",
 		"体素程序化建模的**完整 API 说明**: QVoxelScript 统一入口(文件/对象树/材质/体素/帧/相机/导入导出/预览)、"
 		+ "实时与无头分流、.qvx 与 .vox 的硬约束。返回指向资源 %s 的链接。" % RESOURCE_URI,
-		MCPToolSchema.no_arg(), _help)
+		_schema.call("no_arg"), _help)
 	add_tool.call("voxel_render",
 		"把 .qvx / .vox（或 QVoxelScript 当前世界）离屏渲染成 PNG, **不需要导入、不需要打开 QVoxelier**。"
 		+ "返回图片路径, 用 read_file 打开即可看图; 造型不对就改完再渲一次。视角/尺寸/背景可调。",
@@ -168,24 +188,27 @@ static func instructions() -> String:
 
 ## 返回文档: 正文内联为 text(资源感知之外的客户端也能直接读到), 另附 resource_link 供拉取/缓存。
 static func _help(_args: Dictionary) -> Dictionary:
-	return MCPResult.resource_link(RESOURCE_URI, "体素程序化建模 API", "text/markdown", HELP,
-		"QVoxelScript 全量接口说明")
+	if not framework_available():
+		return {}
+	var r: Dictionary = _result.call("resource_link", RESOURCE_URI, "体素程序化建模 API",
+		"text/markdown", HELP, "QVoxelScript 全量接口说明")
+	return r
 
 
 static func _render_schema() -> Dictionary:
 	return {"type": "object", "properties": {
-		"path": MCPToolSchema.str_arg("要渲的 .qvx / .vox 路径(res:// 或 user://)；省略 = 渲 QVoxelScript 当前世界"),
-		"out": MCPToolSchema.str_arg("PNG 输出路径，默认 user://voxel_preview.png"),
+		"path": _schema.call("str_arg", "要渲的 .qvx / .vox 路径(res:// 或 user://)；省略 = 渲 QVoxelScript 当前世界"),
+		"out": _schema.call("str_arg", "PNG 输出路径，默认 user://voxel_preview.png"),
 		"size": {"type": "integer", "minimum": 64, "maximum": 4096, "description": "每格边长(像素)，默认 512"},
 		"yaw": {"type": "number", "description": "水平角(度)，默认 35（未给 views 时生效）"},
 		"pitch": {"type": "number", "description": "俯仰角(度)，默认 20，范围 -85..85（未给 views 时生效）"},
 		"dist": {"type": "number", "description": "相机距离 = dist × 包围球半径，越小越放大，默认 2.6"},
-		"views": MCPToolSchema.str_arg(
+		"views": _schema.call("str_arg", 
 			"多视角拼图：逗号分隔的视角名或角度数组。可选 front/back/left/right/top/bottom/iso，"
 			+ "如 \"front,right,top,iso\"；也可传 [{yaw:0,pitch:0},...]。省略 = 单视角(yaw/pitch)"),
 		"frames": {"type": "integer", "description": "动画帧：0=当前帧(默认)，-1=全部帧，n=前 n 帧。与 views 同时给则视角横排、帧纵叠"},
 		"gap": {"type": "integer", "minimum": 0, "maximum": 64, "description": "拼图格子间距(像素)，默认 0(边对边)"},
-		"bg": MCPToolSchema.str_arg("背景色 #rrggbb，默认 #2a2d33"),
+		"bg": _schema.call("str_arg", "背景色 #rrggbb，默认 #2a2d33"),
 		"transparent": {"type": "boolean", "description": "透明背景(PNG 带 alpha)，默认 false"},
 	}}
 
@@ -193,22 +216,24 @@ static func _render_schema() -> Dictionary:
 ## 渲一张预览图。世界为空/无体素/headless 时明确失败 —— 不产出"纯背景色"的假截图。
 ## 先各自预检，让"路径写错"和"没渲染设备"报的不是同一句话。
 static func _render(args: Dictionary) -> Dictionary:
+	if not framework_available():
+		return {}
 	var src := str(args.get("path", "")).strip_edges()
 	if not src.is_empty() and not FileAccess.file_exists(src):
-		return MCPResult.err_validation("找不到 %s" % src,
+		return _result.call("err_validation", "找不到 %s" % src,
 			"确认路径(res:// 或 user://)；省略 path 则渲 QVoxelScript 当前世界")
 	var out := str(args.get("out", "user://voxel_preview.png")).strip_edges()
 	if out.get_extension().is_empty():
 		out += ".png"
 	var dir := out.get_base_dir()
 	if not dir.is_empty() and not DirAccess.dir_exists_absolute(dir):
-		return MCPResult.err_validation("输出目录不存在: %s" % dir,
+		return _result.call("err_validation", "输出目录不存在: %s" % dir,
 			"换一个已存在的目录，或用默认的 user://")
 	var opts := args.duplicate()
 	opts["file"] = src
 	var saved: String = await QVoxelScript.preview(out, opts)
 	if saved.is_empty():
-		return MCPResult.err_validation(
+		return _result.call("err_validation", 
 			"渲染失败：目标里没有体素（空世界/空模型），或当前进程没有渲染设备(headless)",
 			"确认 .qvx/.vox 里确实有体素；渲染需要带窗口的编辑器或游戏进程")
 	var o := QVoxelPreview.normalize(opts)
@@ -217,5 +242,7 @@ static func _render(args: Dictionary) -> Dictionary:
 	var how := "%s (yaw %d°, pitch %d°)" % [cell, int(o["yaw"]), int(o["pitch"])]
 	if views.size() > 1 or int(o["frames"]) != 0:
 		how = "%d 视角 × frames=%d, 每格 %s(视角横排 帧纵叠)" % [views.size(), int(o["frames"]), cell]
-	return MCPResult.ok_with_meta("已渲染 %s → %s —— 用 read_file 打开看效果" % [how, saved],
+	var r: Dictionary = _result.call("ok_with_meta",
+		"已渲染 %s → %s —— 用 read_file 打开看效果" % [how, saved],
 		{"path": saved, "size": o["size"], "views": views.size(), "frames": o["frames"]})
+	return r
