@@ -13,7 +13,13 @@ signal view_finished
 @export var view_scene: PackedScene:
 	set(value):
 		view_scene = value
+		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
 		_preview()
+## 对象池 key（留空 = 每次现场实例化）
+@export var pool_key: String = "":
+	set(value):
+		pool_key = value
+		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
 ## 每帧生成数量，0 表示全部立即生成（默认）。大于 0 时分帧创建子节点，
 ## 避免大量 UI 节点一次性 instantiate 导致掉帧。
 @export var items_per_frame: int = 0
@@ -32,6 +38,9 @@ var data: Array:
 ## 视图走 tween_free 淡出时旧节点还挂在子节点里一会儿，子节点序号会和 data 错位
 var views: Array[Node] = []
 
+## 对象池（pool_key 自动解析到这里；也可直接注入）
+var pool: Pool
+
 ## 当前生成批次；refresh / clear 都会 +1，用来作废进行中的分帧生成
 var _generation_id := 0
 ## 已完成生成到的批次（== _generation_id 表示"没有待生成的内容"）
@@ -40,6 +49,7 @@ var _finished_generation := 0
 ## 刷新视图，根据当前数据重新显示所有项目
 func refresh() -> void:
 	_generation_id += 1
+	ArrayViewTool.ensure_pool(self)
 	_clear_children()
 	if not data or data.is_empty():
 		_mark_finished()
@@ -76,7 +86,7 @@ func clear() -> void:
 
 func _clear_children() -> void:
 	for view in get_children():
-		ArrayViewTool.free_view(view, null)
+		ArrayViewTool.free_view(view, pool)
 	views.clear()
 
 ## 创建 item 的视图并放到 index 位置（views 不够长就补空位）
@@ -85,7 +95,7 @@ func _insert_view(index: int, item) -> Node:
 		return null
 	while views.size() <= index:
 		views.append(null)
-	var view := ArrayViewTool.create_view(view_scene, null, item, index)
+	var view := ArrayViewTool.create_view(view_scene, pool, item, index)
 	if not view:
 		return null
 	add_child(view)
@@ -119,7 +129,7 @@ func refresh_at(index: int) -> Node:
 
 ## 移除第 index 个视图（**不改 data**）
 func remove_at(index: int) -> void:
-	ArrayViewTool.free_at(views, index, null)
+	ArrayViewTool.free_at(views, index, pool)
 
 ## ---- 数据项接口（便利重载：① ② ③ 骨架统一在 ArrayViewTool.refresh_item）----
 

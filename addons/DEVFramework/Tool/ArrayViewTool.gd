@@ -170,17 +170,26 @@ static func _class_name_of(item: Object) -> String:
 			return cls
 	return item.get_class()
 
+## 按 pool_key 解析池：空 key / 没视图场景 / 编辑器下一律不池化（返回 null）
+static func resolve_pool(pool_key: String, view_scene: PackedScene) -> Pool:
+	if pool_key.is_empty() or view_scene == null or Engine.is_editor_hint():
+		return null
+	return PoolService.ensure(pool_key, view_scene.instantiate)
+
+## 惰性解析并写回宿主的 pool：data 可能早于 _ready 赋值，池不能等 _ready 才就绪
+static func ensure_pool(host) -> void:
+	if host.pool == null:
+		host.pool = resolve_pool(host.pool_key, host.view_scene)
+
 ## 创建并配置一个数据项的视图实例。
-## 池空时自动回退为 view_scene 现场实例化(不再返回 null), pool_push 对外来节点会 queue_free 释放。
-## [param view_scene] 用于实例化的 PackedScene(pool 为空/池不足时的兜底, 必填)
-## [param pool] 可选的 BakedPool 对象池
+## 有池先借，池空或没有池才现场实例化（不会返回 null）。
+## [param view_scene] 用于实例化的 PackedScene（必填）
+## [param pool] 可选对象池
 ## [param item] 数据项
 ## [param index] 数据项索引（仅用于生成可读的视图名）
 ## [returns] 配置好的视图节点，失败返回 null
-static func create_view(view_scene: PackedScene, pool, item, index: int = -1) -> Node:
-	var view: Node
-	if pool:
-		view = pool.pool_get()
+static func create_view(view_scene: PackedScene, pool: Pool, item, index: int = -1) -> Node:
+	var view: Node = pool.pool_get() if pool else null
 	if view == null:
 		if not view_scene:
 			LogTool.error("数组视图", "view_scene 未赋值!")
@@ -193,14 +202,14 @@ static func create_view(view_scene: PackedScene, pool, item, index: int = -1) ->
 	return view
 
 ## 释放一个视图节点。
-## 优先使用对象池回收，否则尝试 tween_free，最后 queue_free。
+## 优先归还对象池，否则尝试 tween_free，最后 queue_free。
 ## [param view] 要释放的视图节点
-## [param pool] 可选的 BakedPool 对象池
-static func free_view(view: Node, pool):
+## [param pool] 可选对象池
+static func free_view(view: Node, pool: Pool):
 	if not is_instance_valid(view):
 		return
 	if pool:
-		pool.pool_push(view)
+		pool.pool_return(view)
 	else:
 		if "tween_free" in view:
 			view.tween_free()

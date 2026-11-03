@@ -12,7 +12,14 @@ class_name SlotArrayView2D extends Node2D
 @export var view_scene: PackedScene:
 	set(value):
 		view_scene = value
+		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
 		_preview_setup()
+
+## 对象池 key（留空 = 每次现场实例化）。填了就复用视图实例，重刷不再重建节点
+@export var pool_key: String = "":
+	set(value):
+		pool_key = value
+		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
 
 ## 数据数组（赋值即刷新）
 var data: Array:
@@ -26,15 +33,14 @@ var data: Array:
 		auto_hide_empty = value
 		_update_slot_visibility()
 
-## 可选对象池：只需实现 pool_get() / pool_push()，BakedPool 与 BakedPool2D 都兼容
-##（框架侧按鸭子类型调用，见 ArrayViewTool）。留空则每次现场实例化 view_scene。
-## ⚠️ BakedPoolManager.find_pool() 只返回 3D 的 BakedPool，要用统一注册需自行建池节点后注入
-var pool
+## 对象池（pool_key 自动解析到这里；也可直接注入）
+var pool: Pool
 
 ## 与 data 一一对应的视图列表（框架每次刷新都会把长度对齐到槽位数；业务侧只读）
 var views: Array[Node2D] = []
 
 func _ready():
+	ArrayViewTool.ensure_pool(self)
 	_resize_views()
 	_preview_setup()
 
@@ -51,6 +57,7 @@ func _get_slots() -> Array[Node2D]:
 
 ## 按 data 重建全部槽位视图
 func refresh() -> void:
+	ArrayViewTool.ensure_pool(self)
 	ArrayViewTool.slot_refresh(self)
 
 ## 清空所有槽位视图（不改 data）
