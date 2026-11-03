@@ -31,7 +31,7 @@
 ##     ...
 ##     _scope.call_after(2.0, stop)
 ##
-## func on_pool_push() -> void:          # 对象归还池 = 这一轮结束
+## func on_pool_return() -> void:        # 对象归还池 = 这一轮结束
 ##     _scope.cancel_all()
 ## [/codeblock]
 ##

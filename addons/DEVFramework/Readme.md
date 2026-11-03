@@ -72,6 +72,7 @@ res://Scripts/        # 游戏脚本
 | `dev_framework/log/show_timestamps` | bool | false | 是否显示时间戳 |
 | `dev_framework/log/ignored_tags` | PackedStringArray | `[]` | 被忽略的日志标签 |
 | `dev_framework/save_tool/encrypt_salt` | String | 项目名 | 存档加密盐（备用） |
+| `dev_framework/lightmap/scan_dir` | String | `res://Scenes` | 编辑器兜底扫描烘焙产物（`*_lightmap_set.res`）的根目录 |
 | `dev_framework/mcp/ignored_error_patterns` | PackedStringArray | `[]` | 运行期错误的过滤子串（如 `"对象池"`），命中即不随结果返回。追加在内置模式之后——内置已含 `Unrecognized UID`（编辑器重启后 UID 缓存重建期的无害噪音）。对 eval 附带错误与通用工具诊断两条上报路径同时生效 |
 
 ---
@@ -517,7 +518,7 @@ array_view.refresh_item(item)       # 局部刷新
 array_view.remove_item(item)
 ```
 
-视图子节点约定：`data` 属性接收数据项，`get_view_name()`（或 Def 名）作为唯一标识；配合 `BakedPool` / `BakedPoolManager` 可实现对象池复用。
+视图子节点约定：`data` 属性接收数据项（定位按「视图当前显示的 data」比对，**不要求** `get_view_name()`；没实现时节点名退化为「类名_索引」）。需要复用实例时填 `pool_key`，见 [6.5 对象池](#65-对象池)。
 
 ### 6.3 按钮 / 交互
 
@@ -535,7 +536,7 @@ array_view.remove_item(item)
 | `OutlineEffect` | 多实例后处理描边（一个实例 = 一种描边，在 Compositor 资源里配置颜色/宽度/标记通道）。项目侧 @export 直接引用实例资源，调用实例的 `set_marked(true, mesh)` 开关；框架内部悬停走静态快捷方式 `OutlineEffect.set_outlined(true, mesh)`（固定通道 0）。颜色动画由项目侧每帧改实例的 `outline_color` 驱动 |
 | `GLSLShaderEffect` | 可编程后处理（填 `define_code` / `main_code` 实时编译） |
 | `Trail3D` | 拖尾网格 |
-| `BakedPool / BakedPoolManager` | 烘焙对象池（编辑器一键生成池子，运行时 `pool_get`/`pool_push`） |
+| `BakedMeshInstance3D` | 自带烘焙光照的网格实例（见 [6.6 资产光照贴图](#66-资产光照贴图)） |
 | `ScreenshotCapture` | 延迟自动截图（`auto_capture_delay`，默认 3 秒；启动后自动截一张，无手动触发入口。默认不透明背景，需抠图时勾 `transparent_background`；含抖动量化） |
 | `SubView3D` | 3D 子视口（把 2D UI 投影到 3D 表面） |
 | `Background` | 视差滚动背景 |
@@ -544,6 +545,83 @@ array_view.remove_item(item)
 | `ShaderProgressBar` | 通过 shader 参数驱动的进度条（`Range` 子类） |
 | `Sprite3dLight` | Sprite3D 光效播放（Tween 进出场） |
 | `OptionSelector` | 选项选择器（SPINNER / TOGGLE 两种模式，支持键盘导航） |
+
+### 6.5 对象池
+
+三层各管一件事：
+
+| 类 | 职责 |
+|---|---|
+| `Pool` | 池本体（`RefCounted`）：`pool_get` / `pool_return` / `prewarm` / `clear`，`factory` 决定怎么造 |
+| `PoolService` | 静态注册表：`ensure(key, factory)` / `find` / `pool_get(key)` / `pool_return(key, item)` / `trim` / `remove` / `clear`；空闲实例统一挂在常驻隐藏节点 `PoolIdle` 下 |
+| `ArrayViewTool` | 视图接线：`resolve_pool` / `create_view` / `free_view`（有池先借，没有才 instantiate） |
+
+池化视图只需填两个字段（编辑器下一律不池化）：
+
+```gdscript
+# ArrayView / SlotArrayView2D / SlotArrayView3D 通用
+view.pool_key = "CardView"     # 同 key = 同一批实例，多个视图可共用同一批
+view.pool_size = 8             # 首次使用前预建 8 个空闲实例，同时是空闲上限（0 = 不预热、不限）
+```
+
+视图可实现的钩子（**只有前两个会被调用**）：
+
+| 钩子 | 时机 | 该做什么 |
+|---|---|---|
+| `on_pool_get()` | 借出 | 重置状态、播放入场动画 |
+| `on_pool_return()` | 归还（隐藏前） | kill 补间、撤销异步、断开外部信号、把 `data` 置空 |
+| ~~`on_pool_push()`~~ | 已废弃 | 旧名，不会被调用 |
+
+契约要点：
+
+- 归还即隐藏并挂回 `PoolIdle`：**不要**继续持有引用当活的用。
+- 池不会替你清 `data`（`bool` 之类接不了 null，且 setter 常有副作用）——要断开的引用在 `on_pool_return()` 里自己清。
+- 池只保证「脱离旧父节点 + 隐藏 + 回调」，坐标/旋转/缩放由下一次宿主摆放决定。
+- `PoolService.trim()`：场景切换后收掉空闲实例的内存峰值，池与 key 保留。
+- 观测量：`Pool/InUse`、`Pool/Idle`、`Pool/Created`、`Pool/Reuse`（命中率 = Reuse / (Reuse + Created)）。
+- 同一个 key 被两个不同 `view_scene` 使用会告警：池里实例可能属于另一个场景。
+
+### 6.6 资产光照贴图
+
+资源级烘焙光照：**一类网格只烘一次**，摆多少个实例都共用同一份图集，不额外加 `LightmapGI`，也不复制贴图。
+
+| 类 | 职责 |
+|---|---|
+| `AssetLightmapStage` | 编辑器烘焙舞台：按资源摆一份实体 → 借检查器按钮触发烘焙 → 导出 `<场景名>_lightmap_set.res` |
+| `AssetLightmapSet` | 光照库：`data`（图集）+ `regions`（键 = 资源文件名 → 区域）；`current` 是全局生效库 |
+| `AssetLightmapRegion` | 一类资源在图集里占的矩形 + 页号 |
+| `AssetLightmapBinder` | 把区域挂到实例每个 surface 材质的 `next_pass`（主材质资源不动） |
+| `BakedMeshInstance3D` | 对外门面：`MeshInstance3D` 换成它即自带光，进树自动挂 |
+
+用法：
+
+1. 建一个**专用烘焙场景**（工具场景，运行时不用）：`AssetLightmapStage` 当根节点，下面放 `LightmapGI` + 灯，
+   舞台填 `dirs`（整目录）或 `meshes`（点名）。网格要带 **UV2** 且**有材质**
+   （没材质就没有 `next_pass` 可挂，运行时会告警"挂不上烘焙光"）；
+2. 点舞台的「烘焙并导出」：几何变动才自动重烘；**只改了灯 / 环境 / 自发光**时点「强制重烘并导出」。
+   导出会自动保存场景（`LightmapGI.light_data` 引用和烘焙副本都要进场景文件）；
+3. **使用场景另建**（展示/关卡场景里不要放舞台和 `LightmapGI`），加载时接管产物：
+
+```gdscript
+# 产物跟着烘焙场景走：<烘焙场景>_lightmap_set.res
+AssetLightmapSet.attach("res://Scenes/Lightmap/LightmapBake.tscn")
+# 或直接给产物路径
+AssetLightmapSet.attach_path("res://Scenes/Lightmap/LightmapBake_lightmap_set.res")
+
+BakedMeshInstance3D.set_all_visible(false)               # 全局关光，对着原材质看差别
+BakedMeshInstance3D.set_strength(0.2)                    # 全局亮度，不必重烘
+```
+
+要点：
+
+- **烘焙的灯必须是 Static**：Godot 4.4 起 `Light3D.light_bake_mode` 默认 `Dynamic`，不进 lightmap，
+  烘出来 l0 全黑（舞台会在导出时检查并告警）。实时补光用的灯保持 Dynamic 即可，别让它重复进烘焙。
+- `LightmapGI.directional` 必须开：SH 叠加层要读 l1 方向项，没有就是一片没有方向、没有高光的平光（舞台会自动开）。
+- 换库（给 `current` 赋值）会自动重挂**所有在树上的**实例，与场景加载顺序无关。
+- 键 = 网格文件名；无路径的运行时网格退回 `resource_name`。**不同目录的同名模型会撞车**。
+- 逐面判定：只有缺 UV2 的面被跳过，不拖累同一模型上其它面。
+- 换 `mesh` / 换 `material_override` 后要自己调一次 `apply_lightmap()`（节点不会自动感知）。
+- 池化实例跨场景复用前必须摘光，否则会顶着上一个场景的光出现（`DefMeshView` 已内置，其它视图调 `AssetLightmapBinder.clear(self)`）。
 
 ---
 
@@ -796,8 +874,8 @@ Def 需声明 `@tool`，且在编辑器打开资源时通过 `zh_name` / `tr_des
 **Q3：`ModifierValue.value` 赋值为什么报错？**
 该属性只读，请通过 `base_value` 或 `add_modifier/apply_modifier` 修改，保证修饰链与信号正常。
 
-**Q4：对象池取不到对象？**
-`pool_get()` 在池子为空时返回 null 并打印「对象池不足」。请确保 `BakedPoolManager` 已生成足够数量的池成员，或在代码中兜底创建。
+**Q4：对象池没生效 / 取到 null？**
+`Pool.pool_get()` 池空时会调 `factory` 现场创建，只有 `factory` 无效才返回 null；`PoolService.pool_get(key)` 则是没注册该 key 时返回 null。常见原因：`pool_key` 为空、跑在编辑器里（一律不池化）、或视图没走 `ArrayViewTool.create_view`。复用情况看 `Pool/Reuse` 与 `Pool/Created`。
 
 **Q5：`UITool.back()` 没反应？**
 `back()` 只处理 `DIALOG` 与 `PANEL` 层级；请检查面板的 `layer` 属性与栈状态（`UITool.debug()` 可查看当前栈）。

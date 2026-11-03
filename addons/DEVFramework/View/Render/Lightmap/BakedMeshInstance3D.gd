@@ -20,15 +20,13 @@ class_name BakedMeshInstance3D extends MeshInstance3D
 ## 全局开关：一次摘掉所有实例的光，不用逐个关
 static var all_visible := true
 
-## 活着的实例，全局切换时逐个刷新
-static var _live: Dictionary = {}
-
+## 进出树登记到 Binder：它持有"谁在树上"，换光照库时整体重挂
 func _enter_tree() -> void:
-	_live[get_instance_id()] = weakref(self)
+	AssetLightmapBinder.track(self)
 	apply_lightmap()
 
 func _exit_tree() -> void:
-	_live.erase(get_instance_id())
+	AssetLightmapBinder.untrack(self)
 
 ## 幂等：重复调用只更新参数，不会叠出第二层 next_pass
 func apply_lightmap() -> void:
@@ -38,15 +36,12 @@ func apply_lightmap() -> void:
 	elif AssetLightmapSet.bind_to(self):
 		lightmap_state = "已挂载"
 	else:
-		AssetLightmapBinder.clear(self)
+		## 没有库 / 没有这份网格的数据：bind_to 内部已擦干净，这里只更新状态
 		lightmap_state = "无烘焙数据"
 
 static func set_all_visible(value: bool) -> void:
 	all_visible = value
-	for ref in _live.values():
-		var node := ref.get_ref() as BakedMeshInstance3D
-		if node != null:
-			node.apply_lightmap()
+	AssetLightmapBinder.refresh_all()
 
 ## 全局亮度：0 等于没有叠加光，1.0 ≈ 与烘焙图一致。不必重烘
 static func set_strength(value: float) -> void:

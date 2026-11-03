@@ -20,6 +20,8 @@ signal view_finished
 	set(value):
 		pool_key = value
 		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
+## 池容量（0 = 不预热、空闲不限）：首次使用前预建这么多个空闲实例，同时作为空闲上限
+@export var pool_size: int = 0
 ## 每帧生成数量，0 表示全部立即生成（默认）。大于 0 时分帧创建子节点，
 ## 避免大量 UI 节点一次性 instantiate 导致掉帧。
 @export var items_per_frame: int = 0

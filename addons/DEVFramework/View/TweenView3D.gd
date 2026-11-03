@@ -28,7 +28,7 @@ func on_pool_get() -> void:
 
 ## 被归还进池时：停放待命，不播动画
 ## 否则动画播完会触发 tween 上的释放回调，把还在池里的自己销毁掉，池子就被悄悄掏空
-func on_pool_push() -> void:
+func on_pool_return() -> void:
 	if tween and tween.cur_tween:
 		tween.cur_tween.kill()
 

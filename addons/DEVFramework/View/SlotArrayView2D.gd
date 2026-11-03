@@ -20,6 +20,8 @@ class_name SlotArrayView2D extends Node2D
 	set(value):
 		pool_key = value
 		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
+## 池容量（0 = 不预热、空闲不限）：首次使用前预建这么多个空闲实例，同时作为空闲上限
+@export var pool_size: int = 0
 
 ## 数据数组（赋值即刷新）
 var data: Array:

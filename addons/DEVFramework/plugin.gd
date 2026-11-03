@@ -34,6 +34,8 @@ func _enter_tree() -> void:
 	_register("dev_framework/log/show_timestamps", TYPE_BOOL, false)
 	_register("dev_framework/log/ignored_tags", TYPE_PACKED_STRING_ARRAY, PackedStringArray())
 	_register("dev_framework/save_tool/encrypt_salt", TYPE_STRING, ProjectSettings.get_setting("application/config/name", "GodotProject"))
+	# 编辑器兜底扫描烘焙产物的根目录（*_lightmap_set.res）
+	_register("dev_framework/lightmap/scan_dir", TYPE_STRING, "res://Scenes")
 	_register("dev_framework/mcp/enabled", TYPE_BOOL, true)
 	_register("dev_framework/mcp/port", TYPE_INT, 8931)
 	_register("dev_framework/mcp/token", TYPE_STRING, "")

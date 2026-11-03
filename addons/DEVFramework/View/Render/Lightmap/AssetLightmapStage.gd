@@ -13,12 +13,12 @@
 ## 用法：点「烘焙并导出」。副本会自动同步，变动过就连烘焙一起跑完。
 class_name AssetLightmapStage extends Node3D
 
+## 副本标记：sync 只清理带这个标记的节点
+const META := &"bake_copy"
+
 ## 每行摆几份、相邻副本间距。只影响烘焙时互不遮挡，和运行时容量无关
 const PER_ROW := 10
 const SPACING := 10.0
-
-## 副本标记：sync 只清理带这个标记的节点
-const META := &"bake_copy"
 
 @export_group("要烘焙的资源")
 ## 逐个点名网格：目录里混着不需要烘焙的模型时用这个
@@ -27,11 +27,8 @@ const META := &"bake_copy"
 @export_dir var dirs: Array[String] = []
 
 @export_tool_button("烘焙并导出") var export_button: Callable = export_all
-
-## 键 = 资源文件名（不是路径）。节点名、光贴图、区域表都靠它对齐
-static func key_of(res: Resource) -> String:
-	var path := res.resource_path
-	return path.get_file().get_basename() if path else res.resource_name
+## 改了灯 / 环境 / 自发光之后用这个：几何没变时普通导出不会再烘
+@export_tool_button("强制重烘并导出") var reexport_button: Callable = _export_forced
 
 ## 键 → 资源。目录内容在导出时才读，不和场景重复维护。
 ## 只收烘得动的：LightmapGI 对没有 UV2 的网格不写任何光照数据，
@@ -50,29 +47,46 @@ func _collect() -> Dictionary:
 			_take(out, ResourceLoader.load(dir_path.path_join(file)))
 	return out
 
+## 节点名、光贴图、区域表都靠同一个键对齐（键规则见 [method AssetLightmapSet.key_of]）
 static func _take(out: Dictionary, res: Resource) -> void:
-	if res is ArrayMesh and AssetLightmapBinder.can_bake(res):
-		out[key_of(res)] = res
+	if not (res is ArrayMesh) or not AssetLightmapBinder.can_bake(res):
+		return
+	var key := AssetLightmapSet.key_of(res)
+	if not key.is_empty():
+		out[key] = res
 
 ## 导出。副本同步是导出的前置步骤，所以不单独给按钮：
 ## 忘了同步就烘焙，等于拿旧几何体烘出来的光照去配新资源，而且不会有任何提示
-func export_all() -> void:
+## [param force] 无视几何快照直接重烘（改过灯 / 环境 / 自发光时用）
+func export_all(force := false) -> void:
 	if not Engine.is_editor_hint():
 		return
 	var scene_path := _scene_path()
 	if scene_path.is_empty():
 		LogTool.warn("烘焙", "场景未保存，导出路径无法推导")
 		return
-	if not sync():
-		LogTool.log("烘焙", "副本已变动，开始烘焙…")
+	_warn_without_static_light()
+	## SH 叠加层要读 l1（方向项）：不勾 Bake Directional 时图集里只有 l0，
+	## 光的"朝向感"和高光全都没有，看起来就是一片平淡的亮度
+	var stale := false
+	var gi := _lightmap()
+	if gi != null and not gi.directional:
+		gi.directional = true
+		stale = true
+		LogTool.log("烘焙", "已开启 LightmapGI 的 Bake Directional（SH 叠加层需要方向数据）")
+	## 一次扫描供同步 / 导出 / 核对共用：导出中途目录内容不会变。
+	## ⚠️ 同步必须无条件跑：它同时负责把副本摆进场景，短路掉就会拿着空舞台去烘
+	var all := _collect()
+	var fresh := sync(all)
+	if force or stale or not fresh:
+		LogTool.log("烘焙", "开始烘焙…")
 		if not await bake():
 			LogTool.warn("烘焙", "烘焙未完成，请点 LightmapGI 的 Bake Lightmaps 后再次导出")
 			return
 
-	var set := _export_set()
+	var set := _export_set(all)
 	if set == null:
 		return
-	var all := _collect()
 	_report(set, all)
 
 	var path := AssetLightmapSet.path_of(scene_path)
@@ -80,17 +94,37 @@ func export_all() -> void:
 		LogTool.warn("烘焙", "保存失败:", path)
 		return
 	LogTool.log("烘焙", "光照", set.regions.size(), "类 →", path)
+	## 场景必须一起存：LightmapGI 的 light_data 引用只在场景里，不存的话下次打开就没有烘焙数据，
+	## 既看不到效果，也没法在旧结果上增量重烘。
+	## ⚠️ 用 save_scene_as 显式给路径：save_scene() 在"当前场景"解析不到保存目标时
+	## （例如场景是程序化 reload 进来的）会弹「保存到」对话框，脚本化烘焙不该打断用户。
+	## 注意它没有返回值（void），别写成 `if ... != OK`（会直接编译失败）
+	EditorInterface.save_scene_as(scene_path)
+	## 新产物立刻可用：否则编辑器兜底还拿着上一次的扫描结论
+	AssetLightmapSet.invalidate()
 	EditorInterface.get_resource_filesystem().scan()
 
-## 两个方向都要报：数据里有资源没有（副本删了但烘焙快照还在），
-## 资源有数据没有（副本被遮挡、UV2 缺失，烘完静默丢失）
+## 4.4 起 Light3D.light_bake_mode 默认是 DYNAMIC：不进 lightmap，只靠"灯"烘的话结果全黑
+func _warn_without_static_light() -> void:
+	var visible := 0
+	var baked := 0
+	for node in _root().find_children("*", "Light3D", true, false):
+		var light := node as Light3D
+		if not light.is_visible_in_tree():
+			continue
+		visible += 1
+		if light.light_bake_mode == Light3D.BAKE_STATIC:
+			baked += 1
+	if baked == 0:
+		LogTool.warn("烘焙", "场景里没有 Static 烘焙模式的灯（可见灯 %d 个，全为 Dynamic/Disabled）——"
+			% visible + "烘出来会全黑；把要参与烘焙的灯设为 Static 再重烘")
+
+func _export_forced() -> void:
+	export_all(true)
+
+## 资源有数据没有（副本被遮挡、UV2 缺失，烘完会静默丢失）。
+## 反方向由 [method _export_set] 自己报：它录入时就会跳过已不存在的资源
 static func _report(set: AssetLightmapSet, all: Dictionary) -> void:
-	var unknown := []
-	for key in set.regions:
-		if not all.has(key):
-			unknown.append(key)
-	if not unknown.is_empty():
-		LogTool.warn("烘焙", "这些光照没有对应资源（副本节点名必须等于资源文件名）:", unknown)
 	var missing := []
 	for key in all:
 		if not set.regions.has(key):
@@ -99,8 +133,10 @@ static func _report(set: AssetLightmapSet, all: Dictionary) -> void:
 		LogTool.warn("烘焙", "这些资源没烘出光照（检查 UV2，或副本被遮挡）:", missing)
 
 ## 同步副本：补缺、清多余、按顺序摆位。返回 false 表示几何体变过，光贴图已过期
-func sync() -> bool:
-	var all := _collect()
+## [param all] 可选的「键 → 资源」表；不传就自己扫一遍（导出路径会传进来，省一次目录扫描）
+func sync(all := {}) -> bool:
+	if all.is_empty():
+		all = _collect()
 	var fresh := true
 	## 已有的副本保持原顺序：光照是按位置烘的，不能因为列表顺序变了就整体搬家
 	var placed := 0
@@ -128,7 +164,9 @@ func sync() -> bool:
 		node.name = key
 		node.set_meta(META, true)
 		add_child(node)
-		node.owner = self
+		## owner 必须是场景根（PackedScene 只存 owner == 根 的节点）：
+		## 记成舞台自己的话副本不会进场景文件，light_data 里 "../CardBox" 这些路径下次加载就找不到
+		node.owner = _root()
 		node.position = _slot(placed)
 		placed += 1
 		fresh = false
@@ -143,24 +181,41 @@ func bake() -> bool:
 	if gi == null:
 		LogTool.warn("烘焙", "找不到 LightmapGI")
 		return false
+	if DisplayServer.get_name() == "headless":
+		LogTool.warn("烘焙", "headless 下没有检查器按钮，无法触发烘焙")
+		return false
+	var expect := _copies().size()
+	if expect <= 0:
+		LogTool.warn("烘焙", "舞台里没有副本，没有东西可烘")
+		return false
 	EditorInterface.edit_node(gi)
-	## 检查器要下一帧才把按钮造出来
-	for i in 8:
+	for i in 12:
 		await get_tree().process_frame
 	var btn := _bake_button(EditorInterface.get_base_control())
 	if btn == null:
+		LogTool.warn("烘焙", "检查器里找不到 Bake Lightmaps 按钮，请手动烘焙后再次导出")
 		return false
+
+	## 完成判据：副本数到位 **且** `.lmbake` 被重写。
+	## ⚠️ 两个坑都别踩：
+	##   ① 只看"副本数"——上一次烘焙的数据早就是这个数，按下瞬间就满足，导出的是旧数据
+	##      （regions 的 uv/页号与新图集对不上 ⇒ 模型上出现斜条纹）；
+	##   ② 先把 light_data 置空再按——编辑器会以为还没有烘焙文件，弹「选择光照贴图烘焙文件」
+	var data_path := gi.light_data.resource_path if gi.light_data != null else ""
+	var before_mtime := FileAccess.get_modified_time(data_path) if not data_path.is_empty() else 0
 	btn.pressed.emit()
-	## 烘完每个副本在 user_data 里占一组，中途尺寸对不上。
-	## 全量烘焙可能跑十几分钟，轮询只是兜底，别卡太紧
-	var expect := _copies().size()
 	for i in 18000:
 		await get_tree().create_timer(0.05).timeout
 		if not is_instance_valid(gi):
+			LogTool.warn("烘焙", "烘焙过程中 LightmapGI 被销毁")
 			return false
-		var raw: Array = gi.light_data.get("user_data") if gi.light_data else []
-		if raw.size() / 4 == expect:
+		if gi.light_data == null or gi.light_data.get_user_count() != expect or i < 30:
+			continue
+		## 以 .lmbake 落盘时间为准：副本数在按下瞬间就满足，实例 id 也会被编辑器提前换掉，
+		## 只有"文件被重写"才说明这一次真的烘完了
+		if data_path.is_empty() or FileAccess.get_modified_time(data_path) > before_mtime:
 			return true
+	LogTool.warn("烘焙", "等待烘焙超时（%d 份副本未全部产出或数据未更新），请确认烘焙是否仍在进行" % expect)
 	return false
 
 ## 按钮由编辑器插件自己造，没有可查询的入口，只能按文本认
@@ -200,13 +255,12 @@ func _scene_path() -> String:
 	return root.scene_file_path if root else ""
 
 ## 把烘焙结果读成位置表。user_data 每 4 项一组：副本路径、图集矩形、页号、实例序号
-func _export_set() -> AssetLightmapSet:
+func _export_set(all: Dictionary) -> AssetLightmapSet:
 	var gi := _lightmap()
 	if gi == null or gi.light_data == null:
 		LogTool.warn("烘焙", "找不到 LightmapGI 或其 light_data")
 		return null
 	var raw: Array = gi.light_data.get("user_data")
-	var all := _collect()
 	var set := AssetLightmapSet.new()
 	set.data = gi.light_data
 	var dead := 0
@@ -234,8 +288,11 @@ static func _key_of_path(path: String) -> String:
 		i += 1
 	return segs[i] if i < segs.size() else ""
 
+## 搜索起点：整个场景（LightmapGI 放在舞台里还是场景根节点下都能找到）
+func _root() -> Node:
+	return owner if owner else self
+
 ## LightmapGI 放在舞台里还是场景根节点下都能找到
 func _lightmap() -> LightmapGI:
-	var root := owner if owner else self
-	var found := root.find_children("*", "LightmapGI", true, false)
+	var found := _root().find_children("*", "LightmapGI", true, false)
 	return found[0] as LightmapGI if not found.is_empty() else null
