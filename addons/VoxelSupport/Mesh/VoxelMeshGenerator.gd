@@ -11,10 +11,13 @@ static func generate_mesh(voxel: VoxAsset, options: Dictionary, path: String = "
 	gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
 	gen.start_generate_mesh(voxel.get_voxels(gen.frame_index))
-	gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
-	if not gen.mesh:
+	var unwrap: bool = options[VoxelImportOptions.UNWRAP_UV2]
+	gen.wait_finished(unwrap, options[VoxelImportOptions.UV2_TEXEL_SIZE])
+	if not gen.mesh or gen.mesh.get_surface_count() == 0:
 		return null
-	if options[VoxelImportOptions.UNWRAP_UV2]:
+	# 球体路径的 UV2 只在单网格入口展开（wait_finished 刻意跳过），且只展开这一次 ——
+	# 此前这里对 cube 又展开一遍，同一张网格白跑两次昂贵的 unwrap。
+	if unwrap and gen.shape == VoxelImportOptions.Shape.sphere:
 		gen.mesh.lightmap_unwrap(Transform3D.IDENTITY, options[VoxelImportOptions.UV2_TEXEL_SIZE])
 	print_verbose("generate_mesh mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms", gen.mesh.get_faces().size() / 6, "face")
 	return gen.mesh
@@ -89,54 +92,67 @@ static func _build_channel_images(materials: Array) -> Dictionary:
 		"rough": rough_image, "emission": emission_image,
 	}
 
+## `.vox` → MeshLibrary。分项拆解在 `_mesh_library_items`，写库骨架在 `_commit_mesh_library`。
 static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: String = "") -> MeshLibrary:
+	var mode := int(options[VoxelImportOptions.MESH_MODE])
+	var frame := int(options.get(VoxelImportOptions.FRAME_INDEX, 0))
 	var root_gen := VoxelMeshGenerator.new(voxel, options, path)
 	root_gen.generate_materials(options)
 	var time := Time.get_ticks_usec()
-
-	var gens: Array[VoxelMeshGenerator]
-	var res: Resource = ResourceLoader.load(path) if FileAccess.file_exists(path) else null
-	var voxel_mesh_library: MeshLibrary = res if res is MeshLibrary else null
-	if not voxel_mesh_library:
-		voxel_mesh_library = MeshLibrary.new()
-	var names: Array[String]
-	for item in _mesh_library_items(voxel, root_gen.frame_index, options[VoxelImportOptions.MESH_MODE]):
-		var name: String = item["name"]
+	var built: Array = []
+	for item in _mesh_library_items(voxel, frame, mode):
 		var gen := VoxelMeshGenerator.new(voxel, options, path)
 		gen.materials = root_gen.materials
-		gen.mesh = _get_mesh(name, path, options)
+		gen.mesh = _get_mesh(item["name"], path, options)
 		gen.start_generate_mesh(item["voxels"])
-		gens.append(gen)
-		names.append(name)
-
-	var old_meshes: Array[ArrayMesh]
-	for i in voxel_mesh_library.get_item_list():
-		var old_mesh := voxel_mesh_library.get_item_mesh(i)
-		if old_mesh:
-			old_meshes.append(old_mesh)
-	voxel_mesh_library.clear()
-	var idx := 0
-	for i in gens.size():
-		var child_mesh := gens[i].wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
-		if not child_mesh or child_mesh.get_surface_count() == 0:
-			continue
-		voxel_mesh_library.create_item(idx)
-		voxel_mesh_library.set_item_mesh(idx, child_mesh)
-		# 项名取自 items 而非 child_mesh.resource_name：不开 import_meshes 时
-		# `_get_mesh` 返回的是无名 ArrayMesh，按它命名会让所有项名字都是空的。
-		voxel_mesh_library.set_item_name(idx, names[i])
-		idx += 1
-		if options[VoxelImportOptions.IMPORT_MESHES] and path:
-			ResourceSaver.save(child_mesh)
-	for old_mesh in old_meshes:
-		# 只清"上次落盘、这次不再生成"的分项网格文件。resource_path 为空说明它没落过盘
-		# （import_meshes 关闭），对空路径 remove_absolute 是无意义且危险的调用。
-		if old_mesh.resource_path == "" or voxel_mesh_library.find_item_by_name(old_mesh.resource_name) >= 0:
-			continue
-		DirAccess.remove_absolute(old_mesh.resource_path)
-		print_verbose("delete ", old_mesh.resource_path)
+		gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
+		built.append({"name": item["name"], "mesh": gen.mesh})
 	print_verbose("generate_mesh_library mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
-	return voxel_mesh_library
+	return _commit_mesh_library(built, options, path)
+
+
+## 写库骨架（`.vox` / `.qvx` 共用）：收集旧网格 → 清库 → 逐项写入 → 删掉本次未再生成的旧文件。
+## 项名一律取 `built[i]["name"]`，绝不取 `mesh.resource_name` —— 不开 import_meshes 时
+## `_get_mesh` 返回的是无名 ArrayMesh，按它命名会让所有项名字都是空的。
+static func _commit_mesh_library(built: Array, options: Dictionary, path: String) -> MeshLibrary:
+	var lib: MeshLibrary = null
+	if path != "" and FileAccess.file_exists(path):
+		var res: Resource = ResourceLoader.load(path)
+		if res is MeshLibrary:
+			lib = res
+	if lib == null:
+		lib = MeshLibrary.new()
+	var old_meshes: Array[ArrayMesh] = []
+	for i in lib.get_item_list():
+		var old := lib.get_item_mesh(i)
+		if old:
+			old_meshes.append(old)
+	lib.clear()
+	var idx := 0
+	# 本次"仍在用"的落盘路径。判删只认它，不按项名反查：项名经过净化（`a/b` → `a_b`）
+	# 后与资源名不再一致，按名字反查会误删刚写好的文件。
+	var keep := {}
+	for item in built:
+		var mesh: ArrayMesh = item["mesh"]
+		# 空网格不建项：GridMap 里一个"看不见的项"只会让人以为导入失败
+		if mesh == null or mesh.get_surface_count() == 0:
+			continue
+		lib.create_item(idx)
+		lib.set_item_mesh(idx, mesh)
+		lib.set_item_name(idx, item["name"])
+		idx += 1
+		if mesh.resource_path != "":
+			keep[mesh.resource_path] = true
+			if options[VoxelImportOptions.IMPORT_MESHES] and path:
+				ResourceSaver.save(mesh)
+	# 只清"上次落盘、这次不再生成"的分项网格文件。resource_path 为空说明它没落过盘
+	# （import_meshes 关闭），对空路径 remove_absolute 是无意义且危险的调用。
+	for old_mesh in old_meshes:
+		var old_path := old_mesh.resource_path
+		if old_path != "" and not keep.has(old_path):
+			DirAccess.remove_absolute(old_path)
+			print_verbose("delete ", old_path)
+	return lib
 
 
 ## MeshMode → `[{name, voxels}]`（三种分项的**唯一**拆解处，网格生成只消费结果）。
@@ -148,41 +164,63 @@ static func _mesh_library_items(voxel: VoxAsset, frame_index: int, mode: int) ->
 	match mode:
 		VoxelImportOptions.MeshMode.split_by_node:
 			var used := {}
-			var seq := 0
 			for node_id in voxel.top_node_ids():
 				var node: VoxAsset.VoxelNode = voxel.nodes.get(node_id)
 				if node == null:
 					continue
-				var nm := node.get_name(voxel, frame_index)
-				# 无名/重名时退化为稳定编号 —— 项名是 MeshLibrary 项的身份，不能撞
-				while nm == "" or used.has(nm):
-					seq += 1
-					nm = "node_%d" % seq
-				used[nm] = true
-				out.append({"name": nm, "voxels": node.get_voxels(voxel, frame_index, true)})
+				out.append({
+					"name": _unique_name(used, node.get_name(voxel, frame_index)),
+					"voxels": node.get_voxels(voxel, frame_index, true),
+				})
 		VoxelImportOptions.MeshMode.split_by_frame:
-			for i in frame_index + 1:
-				out.append({"name": "frame_" + str(i), "voxels": voxel.get_voxels(i)})
+			# 帧数取资产本身的（`VoxAsset.frame_count`），不是 frame_index —— 后者是"导哪一帧"，
+			# 拿它当上限会让 4 帧动画的逐帧导出只得到第 0 帧（静默少 3 项）。
+			for i in voxel.frame_count():
+				out.append({"name": "frame_%d" % i, "voxels": voxel.get_voxels(i)})
 		_:
 			for i in voxel.models.size():
-				out.append({"name": "model_" + str(i), "voxels": voxel.models[i].get_voxels()})
+				out.append({"name": "model_%d" % i, "voxels": voxel.models[i].get_voxels()})
 	return out
 
 
+## 项名去重：重名或空名一律退化为 `node_N`（N 单调递增）—— 项名是 MeshLibrary 项的身份，
+## 空名/撞名会让 `find_item_by_name` 失效，也让"旧网格文件该不该删"的判断失准。
+## 判重按**落盘文件名**（净化后）而不是原串：`a/b` 与 `a_b` 名字不同却会写到同一个 .res 上。
+static func _unique_name(used: Dictionary, wanted: String) -> String:
+	if wanted != "" and not used.has(_safe_file_name(wanted)):
+		used[_safe_file_name(wanted)] = true
+		return wanted
+	var seq := used.size() + 1
+	var nm := "node_%d" % seq
+	while used.has(_safe_file_name(nm)):
+		seq += 1
+		nm = "node_%d" % seq
+	used[_safe_file_name(nm)] = true
+	return nm
+
+
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
-	if options[VoxelImportOptions.IMPORT_MESHES] and path:
-		DirAccess.make_dir_absolute(path.get_basename())
-		var child_path := path.get_basename() + "/" + name + ".res"
-		# 存在性检查必须针对**要加载的那个文件**（child_path）。此前检查的是源资产 path，
-		# 于是"缓存的 .res 存在但源资产不在"时会漏加载，反之也会误走加载分支。
-		var mesh := ResourceLoader.load(child_path) as ArrayMesh if FileAccess.file_exists(child_path) else null
-		if not mesh:
-			mesh = ArrayMesh.new()
-			mesh.resource_path = child_path
-			mesh.resource_name = name
-		return mesh
-	else:
+	if not (options[VoxelImportOptions.IMPORT_MESHES] and path):
 		return ArrayMesh.new()
+	DirAccess.make_dir_absolute(path.get_basename())
+	# 项名可能来自用户写的节点名（`/`、`:` 等是非法路径字符）：落盘前先净化，否则保存失败。
+	var child_path := path.get_basename() + "/" + _safe_file_name(name) + ".res"
+	# 存在性检查必须针对**要加载的那个文件**（child_path）。此前检查的是源资产 path，
+	# 于是"缓存的 .res 存在但源资产不在"时会漏加载，反之也会误走加载分支。
+	var mesh := ResourceLoader.load(child_path) as ArrayMesh if FileAccess.file_exists(child_path) else null
+	if not mesh:
+		mesh = ArrayMesh.new()
+		mesh.resource_path = child_path
+		mesh.resource_name = name
+	return mesh
+
+
+## 资源文件名安全化：只替换文件系统/Godot 资源路径不接受的字符，其余原样保留。
+static func _safe_file_name(name: String) -> String:
+	var out := ""
+	for ch in name:
+		out += "_" if ch in "/\\:*?\"<>|" else ch
+	return out if out != "" else "item"
 
 
 ## 材质通道图（albedo/metal/rough/emission）——一次导入只构建一次。
@@ -215,13 +253,6 @@ static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: 
 ## 继续按 split_by_model 处理会让"逐帧导出"的用户拿到 N 个模型而不是 N 帧 —— 静默的错产物。
 static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary,
 		path: String = "") -> MeshLibrary:
-	var lib: MeshLibrary = null
-	if path != "" and FileAccess.file_exists(path):
-		var res: Resource = ResourceLoader.load(path)
-		if res is MeshLibrary:
-			lib = res
-	if lib == null:
-		lib = MeshLibrary.new()
 	var frame := int(options.get(VoxelImportOptions.FRAME_INDEX, 0))
 	var items: Array
 	match int(options[VoxelImportOptions.MESH_MODE]):
@@ -231,8 +262,7 @@ static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary
 			items = _items_by_frame(qvx)
 		_:
 			items = _items_by_model(qvx, frame)
-	_fill_mesh_library(lib, qvx.materials, items, options, path)
-	return lib
+	return _commit_mesh_library(_build_qvx_items(qvx, items, options, path), options, path)
 
 
 ## 每个体素源一项。**动画模型不能只查 models 字典**（它们不在里面）—— 走 all_model_ids()
@@ -247,15 +277,11 @@ static func _items_by_model(qvx: QVoxelAsset, frame: int = 0) -> Array:
 static func _items_by_node(qvx: QVoxelAsset, frame: int = 0) -> Array:
 	var out: Array = []
 	var used := {}
-	var seq := 0
 	for p in qvx.placements:
-		var nm: String = String(p.get("name", ""))
-		# 无名/重名时退化为稳定编号 —— 项名是 MeshLibrary 项的身份，不能撞
-		while nm == "" or used.has(nm):
-			nm = "node_%d" % seq
-			seq += 1
-		used[nm] = true
-		out.append({"name": nm, "chunks": qvx.frame_blocks(int(p["model_id"]), frame)})
+		out.append({
+			"name": _unique_name(used, String(p.get("name", ""))),
+			"chunks": qvx.frame_blocks(int(p["model_id"]), frame),
+		})
 	return out
 
 
@@ -270,44 +296,26 @@ static func _items_by_frame(qvx: QVoxelAsset) -> Array:
 	return out
 
 
-## 按 items（[{name, chunks}]）逐项生成网格写入 MeshLibrary。
+## 按 items（[{name, chunks}]）逐项生成网格（不写库，交给 `_commit_mesh_library`）。
 ## 每项按 origin_mode 各自摆正（VoxelWorldUtil.origin_offset）—— MeshLibrary 的每一项都是独立资产，
 ## 本就该各自有原点，否则往场景里放第 N 项时位置会带着别的模型的偏移。
-static func _fill_mesh_library(lib: MeshLibrary, materials: Array, items: Array,
-		options: Dictionary, path: String) -> void:
-	var old_meshes: Array[ArrayMesh] = []
-	for i in lib.get_item_list():
-		var old := lib.get_item_mesh(i)
-		if old:
-			old_meshes.append(old)
-	lib.clear()
-	var idx := 0
+static func _build_qvx_items(qvx: QVoxelAsset, items: Array, options: Dictionary,
+		path: String) -> Array:
+	var built: Array = []
 	for item in items:
 		var chunks: Dictionary = item["chunks"]
 		if chunks.is_empty():
 			continue
-		var item_name: String = item["name"]
-		var child := _get_mesh(item_name, path, options)
-		child.clear_surfaces()
+		var child := _get_mesh(item["name"], path, options)
 		var gen := VoxelMeshGenerator.new(null, options, path)
 		gen.mesh = child
-		gen.runtime_materials = materials
+		gen.runtime_materials = qvx.materials
 		gen.generate_materials(options)
 		gen.start_generate_mesh_from_chunks(
 				chunks, VoxelWorldUtil.origin_offset(QVoxelAsset.bounds_for_blocks(chunks), gen.origin_mode))
 		gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
-		if child.get_surface_count() == 0:
-			continue
-		lib.create_item(idx)
-		lib.set_item_mesh(idx, child)
-		lib.set_item_name(idx, item_name)
-		idx += 1
-		if options[VoxelImportOptions.IMPORT_MESHES] and path:
-			ResourceSaver.save(child)
-	# 清掉本次未再生成的旧网格文件（与 .vox 路径同策略：按项名反查，找不到即删）
-	for old in old_meshes:
-		if old.resource_path != "" and lib.find_item_by_name(old.resource_name) < 0:
-			DirAccess.remove_absolute(old.resource_path)
+		built.append({"name": item["name"], "mesh": child})
+	return built
 
 
 var scale: float = 1

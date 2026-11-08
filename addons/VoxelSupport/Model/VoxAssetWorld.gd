@@ -14,7 +14,7 @@ static func to_world(vox: VoxAsset) -> QVoxelWorld:
 	var w := QVoxelWorld.create_empty()
 	w.materials = _world_materials(vox)
 	var ctx := {
-		"frames": _frame_count(vox),
+		"frames": vox.frame_count(),
 		"animated": false,
 		"abs": {},
 	}
@@ -34,18 +34,6 @@ static func to_world(vox: VoxAsset) -> QVoxelWorld:
 		_build_world_node(w, vox, int(id), null, Transform3D.IDENTITY, ctx,
 				Transform3D.IDENTITY)
 	return w
-
-
-## `.vox` 的全局帧数 = 所有节点关键帧的最大帧号 + 1（至少 1）。
-static func _frame_count(vox: VoxAsset) -> int:
-	var n := 1
-	for id in vox.nodes:
-		var node: VoxAsset.VoxelNode = vox.nodes[id]
-		if node == null:
-			continue
-		for k in node.frames:
-			n = maxi(n, int(k) + 1)
-	return n
 
 
 ## 预计算每个节点在每一帧的**世界变换**（含祖先）；节点缺失的帧沿用上一关键帧。
@@ -91,11 +79,9 @@ static func _abs0(ctx: Dictionary, id: int, fallback: Transform3D) -> Transform3
 	return fallback
 
 
+## 该节点在**任意帧**是否引用了有效模型（关键帧可从任意帧号起，只看第 0 帧会漏）。
 static func _has_model_frame(vox: VoxAsset, n: VoxAsset.VoxelNode) -> bool:
-	if not n.frames.has(0):
-		return false
-	var f: VoxAsset.VoxelFrame = n.frames[0]
-	return f != null and f.model_id >= 0 and f.model_id < vox.models.size()
+	return vox.has_model(n)
 
 
 ## 节点自身局部变换（无 position/rotation 则恒等）。
@@ -210,16 +196,6 @@ static func _make_world_model(w: QVoxelWorld, m: VoxAsset.VoxelModel, xf: Transf
 	# world = (xf ∘ T(base+offset)) * c。整数平移 ⇒ 旋转仍保整数。
 	qm.local_transform = xf * _offset_shift(m, base)
 	return qm
-
-
-## 该形状节点有几帧带模型（>1 = .vox 体素动画）。
-static func _model_frame_count(vox: VoxAsset, n: VoxAsset.VoxelNode) -> int:
-	var c := 0
-	for k in n.frames:
-		var f: VoxAsset.VoxelFrame = n.frames[k]
-		if f != null and f.model_id >= 0 and f.model_id < vox.models.size():
-			c += 1
-	return c
 
 
 ## `.vox` 的 nTRN 摆放动画 + nSHP 逐帧换模型 → **一个 QVoxelModel 的体素帧动画**。

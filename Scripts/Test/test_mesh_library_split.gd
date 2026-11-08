@@ -1,10 +1,13 @@
 extends TestCase
 
-## MeshLibrary 三种分项（model / node / frame）的回归测试。
+## MeshLibrary 三种分项（model / node / frame）与 `.vox` 场景图内省的回归测试。
 ## 钉死的是"分项产物与整网格必须一致"这件事 —— 分项最容易出的错不是崩溃，而是**静默变成另一个模型**：
 ##   · split_by_node 曾把整棵子树的 nTRN 变换都丢掉（只留模型居中偏移），
 ##     于是多部件对象的所有部件叠在同一个中心，编辑器里看到的是一团糊掉的东西；
-##   · 项名曾取自 `child_mesh.resource_name`，不开 import_meshes 时它是空的 → 每一项都没有名字。
+##   · 项名曾取自 `child_mesh.resource_name`，不开 import_meshes 时它是空的 → 每一项都没有名字；
+##   · 逐帧分项曾拿 `frame_index+1` 当帧数 → 4 帧动画只导出一项；
+##   · 隐藏节点（`_hidden`）曾不影响网格 → 与"世界化按 visible 过滤"不一致；
+##   · 关键帧从非 0 号开始时曾直接 `frames[0]` 越界 → 后续解引用 Nil 报错。
 ## 判据用**独立预言机**：测试里自己累乘节点树变换算出每项应有的包围盒，
 ## 不复用被测实现（`VoxAsset.get_voxels` 那条递归），否则它错我也错。
 
@@ -90,10 +93,11 @@ func test_item_names_never_empty_or_duplicated() -> void:
 		seen[nm] = true
 
 
-# ③ 边界：没有场景图的 .vox 不能崩，且仍能分项
+# ③ 边界：没有场景图的 .vox
 
-## 无 NODE 块的文件由 `check_nodes` 兜出一个合成根节点：
-## split_by_node 此时应产出 1 项且有几何，而不是空库或越界报错（本用例只钉"不崩"这一层）。
+## 无 NODE 块的文件由 `check_nodes` 兜出"根 + 每模型一个子节点"。
+## 【为什么不是"根挂 N 个帧"】帧是同一对象的逐帧变化，第 k 帧只取 ≤k 的关键帧 ——
+## 于是 frame_index=0 只看得见 model 0，多模型文件会静默只剩第一个。本用例钉死这一点。
 func test_split_by_node_without_scene_graph() -> void:
 	var vox := VoxAsset.new()
 	vox.materials.resize(256)
@@ -101,9 +105,95 @@ func test_split_by_node_without_scene_graph() -> void:
 	vox.models.append(_unit_model())
 	vox.check_nodes()
 
+	# 整资产（默认 frame 0）也必须看见两个模型：节点树里应是"根 + 2 个形状子节点"
+	assert_eq(vox.nodes[0].child_nodes.size(), 2, "两个模型 → 根下两个子节点（而非根上两个帧）")
+	assert_eq(vox.nodes[0].get_models(vox, 0).size(), 2, "第 0 帧应收集到两个模型")
+
+	var by_node := _split(vox, VoxelImportOptions.MeshMode.split_by_node)
+	assert_eq(by_node.get_item_list().size(), 2, "无场景图 → 每个模型一项")
+	for i in by_node.get_item_list():
+		assert_true(by_node.get_item_mesh(i).get_surface_count() > 0, "第 %d 项应有几何" % i)
+
+	var by_model := _split(vox, VoxelImportOptions.MeshMode.split_by_model)
+	assert_eq(_item_names(by_model), ["model_0", "model_1"], "按模型分项同样两个模型都要出")
+
+
+## 逐帧分项的项数 = **资产帧数**，不是 frame_index+1。后者是"导哪一帧"，
+## 拿它当上限会让 4 帧动画只导出第 0 帧（静默少 3 项，且看起来像"文件里就一帧"）。
+func test_split_by_frame_covers_all_frames() -> void:
+	var vox := _animated_asset(4)
+	assert_eq(vox.frame_count(), 4, "夹具应是 4 帧")
+	var lib := _split(vox, VoxelImportOptions.MeshMode.split_by_frame)
+	assert_eq(_item_names(lib), ["frame_0", "frame_1", "frame_2", "frame_3"],
+			"逐帧分项必须覆盖全部帧")
+	# 每帧的形状不同（第 k 帧位移 k 格），AABB 应逐帧递增
+	for i in lib.get_item_list():
+		var aabb: AABB = lib.get_item_mesh(i).get_aabb()
+		assert_true(absf(aabb.position.x - float(i) * SCALE) < 0.01,
+				"第 %d 帧的网格应摆在第 %d 格（实得 %s）" % [i, i, str(aabb.position)])
+
+
+## 关键帧从非 0 帧开始（作者只写 `_f=2`）时：
+##   ① 第 0 帧**不能崩**（旧实现直接 `frames[0]` 越界取空 → 后续解引用 Nil）；
+##   ② 关键帧语义是"从这一帧起生效"，于是第 2 帧起才看得见该模型 —— 与
+##      `VoxAssetWorld` 的 `_frame_xf` / `_model_id_at` 取"≤frame 的最近关键帧"一致。
+func test_sparse_keyframe_starting_late() -> void:
+	var vox := VoxAsset.new()
+	vox.materials.resize(256)
+	vox.models.append(_unit_model())
+	vox.nodes[0] = _trn(0, 1, Vector3.ZERO)
+	var shape := VoxAsset.VoxelNode.new()
+	shape.id = 1
+	shape.layerId = -1
+	var late := VoxAsset.VoxelFrame.new()
+	late.model_id = 0
+	late.position = Vector3(3, 0, 0)
+	shape.frames[2] = late
+	vox.nodes[1] = shape
+
+	assert_eq(vox.frame_count(), 3, "关键帧到第 2 帧 → 资产共 3 帧")
+	assert_eq(vox.get_voxels(0).size(), 0, "关键帧之前的帧没有内容（不崩即可）")
+	var v2 := vox.get_voxels(2)
+	assert_eq(v2.size(), 1, "关键帧生效那一帧应看见模型")
+	assert_true(v2.has(Vector3i(3, 0, 0)), "关键帧位移应生效（实得 %s）" % str(v2.keys()))
+	assert_eq(vox.get_voxels(1).size(), 0, "关键帧之前同样为空")
+
+
+## 节点级 `_hidden` 必须让对象从网格里消失 —— 世界化那条链路按 `not n.hidden` 设可见性，
+## 网格链路若只判图层，同一份资产在编辑器里"一半看得见一半看不见"。
+func test_hidden_node_excluded_from_mesh() -> void:
+	var vox := _two_part_asset()
+	vox.nodes[2].hidden = true
 	var lib := _split(vox, VoxelImportOptions.MeshMode.split_by_node)
-	assert_eq(lib.get_item_list().size(), 1, "无场景图 → 全部内容归一项")
-	assert_true(lib.get_item_mesh(0).get_surface_count() > 0, "该项应有几何")
+	assert_eq(lib.get_item_list().size(), 0, "唯一顶级对象被隐藏 → 没有项")
+	assert_eq(vox.get_voxels(0).size(), 0, "整资产取体素也应排除隐藏子树")
+
+
+## 畸形文件的 child 指回祖先不能让递归栈溢出（编辑器会整体卡死）。
+func test_cycle_does_not_hang() -> void:
+	var vox := _two_part_asset()
+	vox.nodes[6].child_nodes.append(2)   # 形状节点指回顶级对象 → 环
+	vox.nodes[7].child_nodes.append(3)
+	var lib := _split(vox, VoxelImportOptions.MeshMode.split_by_node)
+	assert_true(lib != null, "环引用不应让分项崩掉")
+	assert_eq(vox.get_voxels(0).size(), 2, "环引用下仍应取到两个部件的体素（不重复展开）")
+
+
+## 同一个模型被两处引用是合法的（MagicaVoxel 允许复用形状），必须摆两份。
+## 环保护若写成"全局已访问集"，第二处会被误判为环而静默丢掉。
+func test_same_model_referenced_twice() -> void:
+	var vox := _two_part_asset()
+	# 让第二个部件也引用 model 0，并挪到 (0, 20, 0)
+	vox.nodes[7].frames.clear()
+	vox.nodes[7].frames[0] = VoxAsset.VoxelFrame.new()
+	vox.nodes[7].frames[0].model_id = 0
+	vox.nodes[5].frames[0].position = Vector3(0, 20, 0)
+
+	var lib := _split(vox, VoxelImportOptions.MeshMode.split_by_node)
+	assert_eq(lib.get_item_list().size(), 1, "仍是同一个顶级对象 → 一项")
+	assert_eq(vox.get_voxels(0).size(), 2, "同一模型摆两处 → 两个体素")
+	assert_true(lib.get_item_mesh(0).get_aabb().size.is_equal_approx(Vector3(1, 21, 1) * SCALE),
+			"两处引用都应进入网格（实得 %s）" % str(lib.get_item_mesh(0).get_aabb().size))
 
 
 # 辅助：被测入口
@@ -145,6 +235,28 @@ func _two_part_asset() -> VoxAsset:
 	vox.nodes[6] = _shp(6, 0)
 	vox.nodes[5] = _trn(5, 7, Vector3(0, 9, 0))
 	vox.nodes[7] = _shp(7, 1)
+	return vox
+
+
+## N 帧位移动画：根 → 一个形状节点，第 k 帧位移 (k,0,0)。
+## 用来验"逐帧分项覆盖全部帧"与"关键帧回溯"。
+func _animated_asset(frames: int) -> VoxAsset:
+	var vox := VoxAsset.new()
+	vox.materials.resize(256)
+	for i in range(1, 256):
+		var mat := VoxelMaterial.new()
+		mat.id = i
+		vox.materials[i] = mat
+	vox.models.append(_unit_model())
+	vox.nodes[0] = _trn(0, 1, Vector3.ZERO)
+	var shape := _shp(1, 0)
+	for k in frames:
+		var f := VoxAsset.VoxelFrame.new()
+		f.model_id = 0
+		if k > 0:
+			f.position = Vector3(k, 0, 0)
+		shape.frames[k] = f
+	vox.nodes[1] = shape
 	return vox
 
 

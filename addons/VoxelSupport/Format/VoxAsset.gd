@@ -35,23 +35,44 @@ var nodes: Dictionary[int, VoxelNode]
 
 var layers: Dictionary[int, VoxelLayer]
 
+## 整个资产在第 frame_index 帧的体素（世界坐标）。
+## 根节点在 0 号时从它进（保留根 nTRN 的变换）；没有 0 号节点（手工/畸形文件）则从顶级对象进，
+## 绝不静默返回空 —— 空结果会表现为"导出的网格是空的"，与"文件里本来没东西"长得一模一样。
 func get_voxels(frame_index: int = 0) -> Dictionary[Vector3i, int]:
-	if nodes.size() > 0:
-		return nodes[0].get_voxels(self, frame_index)
-	return {}
+	var ids: Array = [0] if (nodes.has(0) and nodes[0] != null) else top_node_ids()
+	var out: Dictionary[Vector3i, int]
+	for id in ids:
+		var node: VoxelNode = nodes.get(id)
+		if node != null:
+			out.merge(node.get_voxels(self, frame_index))
+	return out
 
 
 ## `[模型, 变换]` 列表 → 世界体素字典。**整资产与 MeshLibrary 分项共用这一套合成规则**：
 ## 分项导出只要换掉"从哪棵子树取 models"，落在体素上的坐标语义就必须是同一个。
+## 坐标取整用 `round` 而不是截断：变换里有浮点乘法（旋转矩阵的元素是 ±1 与 0，
+## 但经过矩阵相乘后可能带 1e-16 级误差，截断会把 5.9999999 取成 5）。
 static func models_to_voxels(models: Array) -> Dictionary[Vector3i, int]:
 	var voxels: Dictionary[Vector3i, int]
 	for i in models.size():
 		var model: VoxelModel = models[i][0]
 		var transform: Transform3D = models[i][1]
 		for pos in model.voxels:
-			var new_pos := transform * Vector3(pos)
-			voxels[Vector3i(new_pos)] = model.voxels[pos]
+			voxels[Vector3i((transform * Vector3(pos)).round())] = model.voxels[pos]
 	return voxels
+
+
+## 全局帧数 = 所有节点关键帧的最大帧号 + 1（至少 1）。
+## 逐帧导出（split_by_frame）与动画烘焙共用这一处：帧数是**资产属性**，不该由调用方猜。
+func frame_count() -> int:
+	var n := 1
+	for id in nodes:
+		var node: VoxelNode = nodes[id]
+		if node == null:
+			continue
+		for k in node.frames:
+			n = maxi(n, int(k) + 1)
+	return n
 
 
 ## 场景图里的"顶级对象"：折叠根部的结构壳样板链（MagicaVoxel 的 nTRN(0) → nGRP(1) → …）。
@@ -60,7 +81,9 @@ static func models_to_voxels(models: Array) -> Dictionary[Vector3i, int]:
 ## 此前两边各写一份，分项那边只认"根→容器→孩子"一种层级，换一种布局就取不到对象。
 func top_node_ids() -> Array:
 	if not nodes.has(0) or nodes[0] == null:
-		return []
+		# 没有 0 号根（手工拼装 / 畸形文件）：把"没有父节点的节点"当顶层，绝不再返回空 ——
+		# 空表会一路表现为"导入出来是空的"，与"文件里本来没东西"无法区分。
+		return _roots_without_parent()
 	var id := 0
 	var guard := 0
 	while guard < 64 and is_structural_node(id) and nodes[id].child_nodes.size() == 1:
@@ -71,6 +94,21 @@ func top_node_ids() -> Array:
 	return [id]
 
 
+func _roots_without_parent() -> Array:
+	var has_parent := {}
+	for id in nodes:
+		var n: VoxelNode = nodes[id]
+		if n == null:
+			continue
+		for c in n.child_nodes:
+			has_parent[int(c)] = true
+	var out: Array = []
+	for id in nodes:
+		if nodes[id] != null and not has_parent.has(int(id)):
+			out.append(int(id))
+	return out
+
+
 ## 结构壳 = 无名字、不属任何图层、无模型帧、但有子节点（纯结构的 nTRN / nGRP）。
 func is_structural_node(id: int) -> bool:
 	if not nodes.has(id) or nodes[id] == null:
@@ -78,21 +116,36 @@ func is_structural_node(id: int) -> bool:
 	var n: VoxelNode = nodes[id]
 	if not n.name.is_empty() or layers.has(n.layerId) or n.child_nodes.is_empty():
 		return false
-	if not n.frames.has(0):
-		return true
-	var f: VoxelFrame = n.frames[0]
-	return f == null or f.model_id < 0 or f.model_id >= models.size()
+	return not has_model(n)
+
+
+## 该节点在**任意帧**是否引用了有效模型。
+## 【为什么不能只看 frames[0]】关键帧可以从任意帧号开始（作者只写 `_f=3`）。
+## 只判第 0 帧会把"动画从第 3 帧才出模型"的形状节点当成空壳折叠掉 —— 模型整块消失。
+func has_model(n: VoxelNode) -> bool:
+	for k in n.frames:
+		var f: VoxelFrame = n.frames[k]
+		if f != null and f.model_id >= 0 and f.model_id < models.size():
+			return true
+	return false
 
 
 func check_nodes() -> Dictionary:
-	# 当 .vox 无场景图(scene graph)时，为每个 model 建一个帧节点，确保能取到体素
-	if nodes.size() == 0 and models.size() > 0:
-		var node := VoxelNode.new()
-		nodes[0] = node
+	# 当 .vox 无场景图(scene graph)时，为每个 model 建一个**独立子节点**（根是结构壳）。
+	# 【为什么不是"根节点挂 N 个帧"】帧表示同一对象的逐帧变化，第 k 帧只取 ≤k 的关键帧，
+	# 于是 frame_index=0 只看得见 model 0 —— 多模型文件会静默只剩第一个。
+	if nodes.is_empty() and models.size() > 0:
+		var root := VoxelNode.new()
+		root.id = 0
+		nodes[0] = root
 		for i in models.size():
+			var child := VoxelNode.new()
+			child.id = i + 1
 			var frame := VoxelFrame.new()
 			frame.model_id = i
-			node.frames[i] = frame
+			child.frames[0] = frame
+			nodes[child.id] = child
+			root.child_nodes.append(child.id)
 	return nodes
 
 
@@ -144,32 +197,36 @@ class VoxelNode:
 
 	var models: Array[Array]
 
-	func get_name(voxel: VoxAsset, frame_index: int = 0, is_root: bool = true) -> String:
-		if name:
+	## 节点显示名：自身名字优先，否则借第一个有名字的子孙（MagicaVoxel 的组名常记在子孙上）。
+	## 最后兜底 `node_<id>` —— 无名节点也需要一个稳定身份（MeshLibrary 项名靠它区分）。
+	func get_name(voxel: VoxAsset, _frame_index: int = 0, visited: Dictionary = {}) -> String:
+		if not name.is_empty():
 			return name
+		if visited.has(id):
+			return ""
+		visited[id] = true
 		for i in child_nodes:
-			var child_name := voxel.nodes[i].get_name(voxel, frame_index, false)
-			if child_name:
+			var child: VoxelNode = voxel.nodes.get(i)
+			if child == null:
+				continue
+			var child_name := child.get_name(voxel, 0, visited)
+			if not child_name.is_empty():
 				return child_name
-		if is_root:
-			return str("node_", id)
-		else:
-			return name
+		return "node_%d" % id
 
 	func get_frame(index: int, merge: bool = false) -> VoxelFrame:
-		if merge:
-			if index == 0 and frames.size() > 0:
-				return frames[0]
-			var frame := VoxelFrame.new()
-			for i in index + 1:
-				if not frames.has(i):
-					continue
-				frame.merge_frame(frames[i])
-			return frame
-		else:
+		if not merge:
 			if not frames.has(index):
 				frames[index] = VoxelFrame.new()
 			return frames[index]
+		# 回溯语义：取 ≤index 的关键帧依次合成（关键帧只标"从这一帧起生效"，中间帧沿用）。
+		# 【为什么不能直接返回 frames[0]】关键帧号不连续时（作者只写 _f=3）那会越界取空，
+		# 且返回的是字典里的**同一个对象**（调用方一改就污染资产）。
+		var frame := VoxelFrame.new()
+		for i in index + 1:
+			if frames.has(i) and frames[i] != null:
+				frame.merge_frame(frames[i])
+		return frame
 
 	## 递归收集本节点子树的 [模型, 变换] 列表（结果缓存在本节点的 models 字段）。
 	## 直接递归：子节点的 models 字段本身就是缓存，交给线程池再立刻 wait 只会让
@@ -179,13 +236,30 @@ class VoxelNode:
 	## 分项导出 —— 每一项都该是独立资产，不能带着它在整场景里的摆放。
 	## 【只作用于本节点，绝不向子节点传递】子节点的变换表达的是"部件之间的相对关系"，
 	## 一旦也丢掉，各部件会全叠在同一个中心（曾经因此让分项网格整片糊成一团）。
-	func get_models(voxel: VoxAsset, frame_index: int, local: bool = false) -> Array:
-		if layerId in voxel.layers and not voxel.layers[layerId].isVisible:
-			return models
+	##
+	## [param path] 环保护 = **当前递归路径**（不是全局已访问集）：畸形文件的 child 可以指回祖先，
+	## 没有它会栈溢出卡死编辑器；但同一节点被两处引用是合法的（MagicaVoxel 允许），
+	## 用全局集去重会让"摆两份"的对象少一份。
+	func get_models(voxel: VoxAsset, frame_index: int, local: bool = false,
+			path: Dictionary = {}) -> Array:
+		if path.has(id):
+			return []
+		path[id] = true
+		# 隐藏（节点级 `_hidden` 或所属图层不可见）时整棵子树不参与，返回**空数组**而不是
+		# 缓存字段 —— 缓存可能装着上一轮（仍可见时）收集的模型，直接返回会让"一隐藏"反而导出旧内容。
+		# 节点级隐藏必须一起判：世界那条链路按 `not n.hidden` 设可见性，只判图层会让
+		# "隐藏的对象"在网格里照常出现（同一份资产两条链路显示不一致）。
+		if hidden or (layerId in voxel.layers and not voxel.layers[layerId].isVisible):
+			models.clear()
+			path.erase(id)
+			return []
 		models.clear()
 		for i in child_nodes:
-			models.append_array(voxel.nodes[i].get_models(voxel, frame_index))
+			var child: VoxelNode = voxel.nodes.get(i)
+			if child != null:
+				models.append_array(child.get_models(voxel, frame_index, false, path))
 		get_frame(frame_index, true).merge_models(voxel, models, local)
+		path.erase(id)
 		return models
 
 	func get_voxels(voxel: VoxAsset, frame_index: int, local: bool = false) -> Dictionary[Vector3i, int]:
@@ -208,7 +282,8 @@ class VoxelFrame:
 	## 把本帧（自身模型的居中偏移 + 本节点变换）合进 models 列表。
 	## [param local] = 跳过本节点自身的 position/rotation，只留模型居中偏移。
 	func merge_models(voxel: VoxAsset, models: Array[Array], local: bool):
-		if model_id >= 0:
+		# 越界检查：畸形文件的 nSHP 可以指向不存在的 model_id，不挡就是整条导入链路崩溃。
+		if model_id >= 0 and model_id < voxel.models.size():
 			var model := voxel.models[model_id]
 			models.append([model, Transform3D.IDENTITY.translated(model.offset)])
 		if local:
