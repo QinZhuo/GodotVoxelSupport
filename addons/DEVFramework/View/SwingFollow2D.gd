@@ -22,6 +22,10 @@ var current_offset: Vector2 = Vector2.ZERO
 # 偏移量变化的速度
 var velocity: Vector2 = Vector2.ZERO
 
+## 偏移安全上限（像素）：高倍速/低帧率时 delta 可能超过 1/damping，
+## 弹簧会从"阻尼"变成"反向加速"并发散；夹住阻尼系数与偏移量，避免把跟随的 UI 推出屏幕。
+const MAX_OFFSET := 200.0
+
 func _ready() -> void:
 	if target:
 		global_position = target.global_position
@@ -36,7 +40,9 @@ func _process(delta):
 	current_offset += velocity * delta
 
 	# 应用阻尼：降低速度以模拟阻力
-	velocity *= (1 - damping * delta)
+	# clamp 到 [0,1]：delta 过大时 1 - damping*delta 会变负，速度反向增长 ⇒ 偏移发散
+	velocity *= clampf(1 - damping * delta, 0.0, 1.0)
+	current_offset = current_offset.limit_length(MAX_OFFSET)
 
 	global_position = target.global_position + current_offset
 

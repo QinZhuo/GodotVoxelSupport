@@ -377,7 +377,8 @@ func _sync_display() -> void:
 	match display_mode:
 		DisplayMode.SPINNER:
 			if _value_btn:
-				_value_btn.text = options[current_index] if not options.is_empty() else ""
+				# 选项变少时当前下标可能越界（如按模式切换重建列表），先收敛再取值
+				_value_btn.text = options[_clamp_index(current_index)] if not options.is_empty() else ""
 		DisplayMode.TOGGLE:
 			for i in _toggle_btns.size():
 				if _toggle_btns[i]:

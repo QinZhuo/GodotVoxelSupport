@@ -6,6 +6,7 @@ class_name GLSLShaderEffect extends CompositorEffect
 		mutex.lock()
 		define_code = value
 		shader_is_dirty = true
+		_sync_needs()
 		mutex.unlock()
 
 @export_multiline var main_code: String = "color.rgb = (get_normal_roughness(uv_norm).rgb - 0.5) * SCALE;":
@@ -13,6 +14,7 @@ class_name GLSLShaderEffect extends CompositorEffect
 		mutex.lock()
 		main_code = value
 		shader_is_dirty = true
+		_sync_needs()
 		mutex.unlock()
 
 var rd: RenderingDevice
@@ -27,6 +29,15 @@ var shader_is_dirty: bool = true
 func _init() -> void:
 	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
 	rd = RenderingServer.get_rendering_device()
+	_sync_needs()
+
+
+## normal/motion 缓冲只在 effect 声明需要时才生成；漏声明时 get_texture 会拿到空 RID 并每帧报错。
+## 按 shader 是否用到对应采样自动声明，省去在资源里手填。
+func _sync_needs() -> void:
+	var code := define_code + main_code
+	needs_normal_roughness = code.contains("get_normal_roughness")
+	needs_motion_vectors = code.contains("get_motion_vector")
 
 
 # 系统通知，我们要对提醒我们即将被销毁的通知做出反应。

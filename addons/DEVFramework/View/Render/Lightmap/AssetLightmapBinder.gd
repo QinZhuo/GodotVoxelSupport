@@ -1,28 +1,40 @@
 ## 把一份 [AssetLightmapRegion] 绑到 MeshInstance3D 的材质上。
 ##
-## 做法：把实例实际用到的每个 surface 材质复制一份，把 SH 加色 shader 接在 next_pass 上。
-## 主材质资源不动（同一份 mesh 能被任意多个实例共用），也不必额外挂一个重合的 MeshInstance3D。
+## 唯一的做法：把实例实际用到的每个 surface 材质复制一份，在副本上挂一层 next_pass
+## （[AssetLightmapPass.gdshader]）。主材质资源一个字节都不动，同一份 mesh 能被任意多个
+## 实例共用；而 next_pass 对任何材质都成立（StandardMaterial3D / ShaderMaterial / 第三方），
+## 也不要求业务 shader 认识烘焙光——**这是本项目唯一通用、且运行时换材质也安全的供光方式**。
+##
+## 为什么不是引擎原生 LightmapGI：它按场景节点路径绑定，对象池借出来的实例路径对不上；
+## 手动 `instance_geometry_set_lightmap` 实测在本引擎版本上无效（绑上去全黑）。
 ##
 ## 为什么不是 material_overlay：它是「整个实例一份材质」，多 surface 模型（盒体 + 玻璃罩）
 ## 会被同一份材质盖到每个 surface 上，光叠加不止一次；而且描边（OutlineEffect）已经占着它。
-## next_pass 挂在具体 surface 的材质上，surface 各管各的，与 material_overlay 互不干扰。
 ##
-## 代价：surface 材质换成实例级副本（material_override / set_surface_override_material）。
 ## 副本按「光照 + 基材质」缓存，同类物品共用一份，不随实例数量膨胀，重复 apply 也不会再套一层。
 @tool
 class_name AssetLightmapBinder
 
 const SHADER := preload("res://addons/DEVFramework/View/Render/Lightmap/AssetLightmapPass.gdshader")
 
-## 全局混合强度：加色叠加层的整体亮度，1.0 ≈ 与烘焙图一致。
-## 调它不需要重烘，设为 0 等于关掉叠加光
-static var strength := 0.2
+## 全局混合强度，1.0 ≈ 与烘焙场景里引擎 LightmapGI 的观感一致（实测平均亮度比 1.00）。
+## 调它不需要重烘，设为 0 等于关掉烘焙光
+static var strength := 1.0
+
+## 主材质「已经算过的那份环境光」的等效辐照度：加色层减掉它，才等价于引擎的「替换」语义。
+##
+## 烘焙光在引擎里是替换环境光，而 next_pass 只能往上加；不减的话就是「环境光 + 烘焙光」
+## 算两遍，实测偏亮 1.36 倍。减去标定值后为 1.00 倍，单模型最大偏差 7%。
+##
+## 这个值取决于现场 environment 的 ambient_light_energy / 天空贡献，换光照配置需要重标。
+## 设为 0 等于退回纯叠加行为（只想"更亮一点"时可以用）
+static var ambient_ref := 0.055
 
 ## 宿主材质上记着它复制自哪份基材质。重复 apply 时靠它找回原材质，
-## 避免把宿主再复制一遍套出第二层 next_pass，也避免换场景换光照后残留旧光
+## 避免把宿主再复制一遍套出第二层，也避免换场景换光照后残留旧光
 const BASE_META := &"asset_lightmap_base"
 
-## 「光照 + 基材质」→ 复制出来的宿主材质（宿主再 next_pass → SH 材质）
+## 「光照 + 基材质」→ 复制出来的宿主材质（宿主 next_pass → 偏移层）
 static var _pairs: Dictionary = {}
 
 ## 已挂光的实例（instance_id → weakref）：换光照库 / 全局开关时靠它整体重挂。
@@ -77,7 +89,7 @@ static func _warn_missing_material(mi: MeshInstance3D) -> void:
 	_warned_no_material = true
 	LogTool.warn("光照", "%s 的面没有材质，挂不上烘焙光（给网格或其 surface 指定材质）" % mi.name)
 
-## 透明面（玻璃罩）叠加加色会把背后的画面糊成一片白雾，跳过
+## 透明面（玻璃罩）叠加会把背后的画面糊成一片，跳过
 static func _opaque(mat: Material) -> bool:
 	return not (mat is BaseMaterial3D) or (mat as BaseMaterial3D).transparency == BaseMaterial3D.TRANSPARENCY_DISABLED
 
@@ -110,8 +122,7 @@ static func _surface_bakeable(mesh: Mesh, i: int) -> bool:
 	var arrays := mesh.surface_get_arrays(i)
 	return arrays.size() > Mesh.ARRAY_TEX_UV2 and arrays[Mesh.ARRAY_TEX_UV2] != null
 
-## 基材质 → 挂了 SH next_pass 的副本。同一份基材质 + 同一份光照只复制一次。
-## ⚠️ 基材质自带的 next_pass 会被替换掉：物品材质是标准材质直出，不存在这条链
+## 基材质 → 挂了 next_pass 的副本。同一份基材质 + 同一份光照只复制一次。
 static func _shared(base: Material, light: AssetLightmapRegion, atlas: TextureLayered) -> Material:
 	## 传进来的可能已经是上次挂好的宿主，先还原成它复制自的那份
 	if base.has_meta(BASE_META):
@@ -121,6 +132,7 @@ static func _shared(base: Material, light: AssetLightmapRegion, atlas: TextureLa
 	if cached != null:
 		return cached
 	var host: Material = base.duplicate()
+	## ⚠️ 基材质自带的 next_pass 会被替换掉：本框架假定业务材质不用这条链
 	host.next_pass = _pass(base, light, atlas)
 	host.set_meta(BASE_META, base)
 	_pairs[key] = host
@@ -136,13 +148,21 @@ static func release(light: AssetLightmapRegion) -> void:
 		if String(key).begins_with(prefix):
 			_pairs.erase(key)
 
-## 运行中整体调亮度：已经挂好的 pass 一起改，不必重烘也不必重新挂
+## 运行中整体调亮度：已经挂好的层一起改，不必重烘也不必重新挂
 static func set_strength(value: float) -> void:
 	strength = value
 	for host in _pairs.values():
 		var sm := (host as Material).next_pass as ShaderMaterial
 		if sm != null:
 			sm.set_shader_parameter(&"strength", value)
+
+## 运行中整体调「减掉多少环境光」：等效于从「叠加」拉到「替换」
+static func set_ambient_ref(value: float) -> void:
+	ambient_ref = value
+	for host in _pairs.values():
+		var sm := (host as Material).next_pass as ShaderMaterial
+		if sm != null:
+			sm.set_shader_parameter(&"ambient_ref", value)
 
 ## 登记一个在树上的挂光实例（由 [BakedMeshInstance3D] 调用）
 static func track(mi: MeshInstance3D) -> void:
@@ -181,7 +201,7 @@ static func clear(mi: MeshInstance3D) -> void:
 		var base := m.get_meta(BASE_META) as Material
 		mi.set_surface_override_material(i, null if base == mi.mesh.surface_get_material(i) else base)
 
-## SH 材质按「光照 + 基材质」各一份：albedo / 粗糙度这些 PBR 特征要从基材质取
+## 偏移层：图集位置 + 全局参数 + 从基材质取的色面
 static func _pass(base: Material, light: AssetLightmapRegion, atlas: TextureLayered) -> ShaderMaterial:
 	var mat := ShaderMaterial.new()
 	mat.shader = SHADER
@@ -189,17 +209,35 @@ static func _pass(base: Material, light: AssetLightmapRegion, atlas: TextureLaye
 	mat.set_shader_parameter(&"lm_uv", light.uv)
 	mat.set_shader_parameter(&"lm_slice", light.slice * 4)
 	mat.set_shader_parameter(&"strength", strength)
-	## 0 = 纯加色、不写 alpha（见 shader 里的 premul_alpha 说明）
+	mat.set_shader_parameter(&"ambient_ref", ambient_ref)
+	## 0 = 纯加减、不写 alpha（见 shader 里的 premul_alpha 说明）
 	mat.set_shader_parameter(&"opacity", 0.0)
 
-	## 从基材质取 PBR 参数，让 SH 求值后的颜色仍然带材质特征
-	if base is StandardMaterial3D:
-		var std := base as StandardMaterial3D
-		mat.set_shader_parameter(&"albedo_tex", std.albedo_texture)
-		mat.set_shader_parameter(&"roughness_tex", std.roughness_texture)
-		mat.set_shader_parameter(&"metallic", std.metallic)
-		mat.set_shader_parameter(&"roughness_default", std.roughness)
-	else:
-		mat.set_shader_parameter(&"metallic", 0.0)
-		mat.set_shader_parameter(&"roughness_default", 0.5)
+	var pbr := _pbr_of(base)
+	mat.set_shader_parameter(&"albedo_tex", pbr["albedo_tex"])
+	mat.set_shader_parameter(&"albedo_tint", pbr["albedo_tint"])
 	return mat
+
+## 取基材质的色面。标准材质直接读属性；ShaderMaterial 按约定的同名 uniform 找，
+## 找不到就用白 —— 此时这层光会偏亮，是「能挂任意材质」必须付的代价
+static func _pbr_of(base: Material) -> Dictionary:
+	var out := {"albedo_tex": null, "albedo_tint": Color.WHITE}
+	var std := base as StandardMaterial3D
+	if std != null:
+		out["albedo_tex"] = std.albedo_texture
+		out["albedo_tint"] = std.albedo_color
+		return out
+	var sm := base as ShaderMaterial
+	if sm == null or sm.shader == null:
+		return out
+	## 只在 shader 真的声明了这个 uniform 时才读，避免 set 出无主参数
+	var names := {}
+	for u in sm.shader.get_shader_uniform_list():
+		names[String(u.get("name", ""))] = true
+	if names.has("albedo_tex"):
+		out["albedo_tex"] = sm.get_shader_parameter(&"albedo_tex")
+	if names.has("albedo_tint"):
+		var tint = sm.get_shader_parameter(&"albedo_tint")
+		if tint is Color:
+			out["albedo_tint"] = tint
+	return out

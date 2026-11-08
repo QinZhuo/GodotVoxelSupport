@@ -28,7 +28,7 @@ func _enter_tree() -> void:
 func _exit_tree() -> void:
 	AssetLightmapBinder.untrack(self)
 
-## 幂等：重复调用只更新参数，不会叠出第二层 next_pass
+## 幂等：重复调用只更新参数，不会叠出第二层
 func apply_lightmap() -> void:
 	if not lightmap_visible or not all_visible:
 		AssetLightmapBinder.clear(self)
@@ -43,9 +43,13 @@ static func set_all_visible(value: bool) -> void:
 	all_visible = value
 	AssetLightmapBinder.refresh_all()
 
-## 全局亮度：0 等于没有叠加光，1.0 ≈ 与烘焙图一致。不必重烘
+## 全局亮度：0 等于没有烘焙光，1.0 ≈ 与烘焙场景里引擎 LightmapGI 的观感一致。不必重烘
 static func set_strength(value: float) -> void:
 	AssetLightmapBinder.set_strength(value)
+
+## 全局「减掉多少环境光」：0 = 纯叠加（更亮），标定值 = 等价替换（与烘焙场景一致）
+static func set_ambient_ref(value: float) -> void:
+	AssetLightmapBinder.set_ambient_ref(value)
 
 ## 状态是给人看的，别存进场景
 func _validate_property(prop: Dictionary) -> void:

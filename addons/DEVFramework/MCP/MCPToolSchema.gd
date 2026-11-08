@@ -67,7 +67,7 @@ static func simulate_click() -> Dictionary:
 		"ref": {"type": "string", "description": "get_interactables 返回的元素引用(如 e3)。**优先用这个**: 2D 元素由服务端解析成实时位置(无需自己算坐标, 界面动过也不会点偏); 3D 元素(space=3d)则由工具在物体自身上激活, 不需要坐标"},
 		"x": {"type": "integer", "description": "点击位置 X(窗口坐标); 仅在拿不到 ref 时用"},
 		"y": {"type": "integer", "description": "点击位置 Y(窗口坐标); 仅在拿不到 ref 时用"},
-		"space": {"type": "string", "enum": ["window", "viewport"], "description": "x/y 所属坐标系, 默认 window。传 viewport 时服务端按 content_scale 自动换算"},
+		"space": {"type": "string", "enum": ["window", "viewport"], "description": "x/y 所属坐标系, 默认 window。传 viewport 时服务端按 content_scale 自动换算。子视口(space=subviewport, 贴在 3D 显示器/平板上的 UI)不在此列 —— 它只能靠 ref 点, 传 x/y 怎么算都打不中"},
 	}}
 
 

@@ -49,6 +49,45 @@ static func design_ratio() -> float:
 	return ratio_of(design_size())
 
 
+# ── 窗口模式与尺寸 ──
+
+## 两档：窗口化 / 全屏。全屏是铺满显示器的无边框全屏，输出分辨率由显示器决定。
+## 存档写 [method window_mode_key] 的字符串而不是下标，以后加档位不会让旧存档失效。
+enum WindowMode { WINDOWED, FULLSCREEN }
+const WINDOW_MODE_KEYS: Array[String] = ["windowed", "fullscreen"]
+const DEFAULT_WINDOW_MODE := WindowMode.FULLSCREEN
+
+
+## 应用窗口模式：全屏与窗口化的桌面档（fill）都用无边框铺满，其余为普通窗口。
+## 先清 borderless 再切模式：带标志切模式会残留上一次的边框状态
+static func apply_window_mode(window: Window, mode: int, fill := false) -> void:
+	var target := Window.MODE_FULLSCREEN if mode == WindowMode.FULLSCREEN or fill else Window.MODE_WINDOWED
+	if window.mode == target:
+		return
+	window.borderless = false
+	window.mode = target
+
+
+static func window_mode_key(mode: int) -> String:
+	return WINDOW_MODE_KEYS[clampi(mode, 0, WINDOW_MODE_KEYS.size() - 1)]
+
+
+## 存档值 → 模式。只认 key 字符串，缺失/脏数据一律回落默认模式
+static func window_mode_from_saved(value: Variant) -> int:
+	if value is not String:
+		return DEFAULT_WINDOW_MODE
+	var idx := WINDOW_MODE_KEYS.find(value)
+	return idx if idx >= 0 else DEFAULT_WINDOW_MODE
+
+
+## 变更窗口尺寸并摆到合适位置：可用区内居中；比可用区还大时左上对齐，保证标题栏可见
+static func apply_window_size(window: Window, size: Vector2i) -> void:
+	window.size = size
+	var usable := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
+	var pos := usable.position + (usable.size - size) / 2
+	window.position = Vector2i(maxi(pos.x, usable.position.x), maxi(pos.y, usable.position.y))
+
+
 # ── 应用 ──
 
 ## 运行时分辨率适配主入口：按"设计分辨率 vs 当前窗口"选出保持基准轴，

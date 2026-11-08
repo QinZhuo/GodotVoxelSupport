@@ -1824,7 +1824,7 @@ func _register_game_play_tools() -> void:
 		MCPUITools._handle_get_interactables)
 
 	_register_game_play_tool("simulate_click",
-		"在游戏窗口模拟鼠标左键点击(按下+释放)。**推荐先用 get_interactables 拿到元素 ref, 再用 ref=e3 点击** —— 由服务端解析成实时位置, 不必自己换算坐标。ref 指向 3D 物体(space=3d)时改为在该物体自身上激活一次点击、**不注入鼠标事件**(相机可动, 投影坐标必点偏)。也可直接传 x/y(默认窗口坐标, 传 space=viewport 则按视口坐标换算)。【副作用】注入的是**真实输入事件**, 会打进用户此刻正在玩的那个游戏窗口并走完整业务链路 —— 重复调用会重复扣血/重复触发, 故不可自动重试; 游戏未在运行时调用会失败。",
+		"在游戏窗口模拟鼠标左键点击(按下+释放)。**推荐先用 get_interactables 拿到元素 ref, 再用 ref=e3 点击** —— 由服务端解析成实时位置, 不必自己换算坐标。ref 指向 3D 物体(space=3d)时改为在该物体自身上激活一次点击、**不注入鼠标事件**(相机可动, 投影坐标必点偏)。ref 指向子视口元素(space=subviewport, 贴在 3D 显示器/平板模型上的 UI)时事件直接 push_input 进那个子视口 —— 那块 UI 不在窗口 GUI 层, 只用 x/y 走主窗口**永远点不到**; 此时别怀疑输入被吞, 拿 ref 点即可(x/y 无法指定子视口)。也可直接传 x/y(默认窗口坐标, 传 space=viewport 则按视口坐标换算)。【副作用】注入的是**真实输入事件**, 会打进用户此刻正在玩的那个游戏窗口并走完整业务链路 —— 重复调用会重复扣血/重复触发, 故不可自动重试; 游戏未在运行时调用会失败。",
 		MCPToolSchema.simulate_click(),
 		_call_simulate_click)
 
@@ -1942,7 +1942,7 @@ func _call_simulate_click(args: Dictionary) -> Dictionary:
 			return _fail("需提供 ref(get_interactables 返回的元素引用), 或 x + y; 可加 space 声明 x/y 属于 window(默认) 还是 viewport")
 		space = VariantTool.get_string(args, "space", "window").strip_edges().to_lower()
 		if space != "window" and space != "viewport":
-			return _fail("space 只能是 window 或 viewport, 收到: %s" % space)
+			return _fail("space 只能是 window 或 viewport, 收到: %s; 子视口里的 UI(space=subviewport)请改用 ref 点击" % space)
 		pos = Vector2(VariantTool.get_int(args, "x"), VariantTool.get_int(args, "y"))
 		if space == "viewport":
 			pos *= MCPUITools.window_scale()
