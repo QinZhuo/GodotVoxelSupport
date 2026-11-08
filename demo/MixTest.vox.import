@@ -1,14 +1,14 @@
 [remap]
 
-importer="voxel_mesh"
-type="Mesh"
+importer="voxel_mesh_library"
+type="MeshLibrary"
 uid="uid://dmqtmkfe0x1lo"
-path="res://.godot/imported/MixTest.vox-dcc5a5af3f7b9755dc07eef43a4e095c.mesh"
+path="res://.godot/imported/MixTest.vox-dcc5a5af3f7b9755dc07eef43a4e095c.res"
 
 [deps]
 
 source_file="res://demo/MixTest.vox"
-dest_files=["res://.godot/imported/MixTest.vox-dcc5a5af3f7b9755dc07eef43a4e095c.mesh"]
+dest_files=["res://.godot/imported/MixTest.vox-dcc5a5af3f7b9755dc07eef43a4e095c.res"]
 
 [params]
 
@@ -21,3 +21,5 @@ mesh/frame_index=0
 mesh/unwrap_lightmap_uv2=false
 mesh/uv2_texel_size=0.2
 material/import_materials_textures=false
+mesh/mode=1
+mesh/import_meshes=false

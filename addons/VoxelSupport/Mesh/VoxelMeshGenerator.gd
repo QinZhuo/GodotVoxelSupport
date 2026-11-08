@@ -99,38 +99,15 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 	var voxel_mesh_library: MeshLibrary = res if res is MeshLibrary else null
 	if not voxel_mesh_library:
 		voxel_mesh_library = MeshLibrary.new()
-	match options[VoxelImportOptions.MESH_MODE]:
-		VoxelImportOptions.MeshMode.split_by_model:
-			for i in voxel.models.size():
-				var gen := VoxelMeshGenerator.new(voxel, options, path)
-				gen.materials = root_gen.materials
-				gen.mesh = _get_mesh("model_" + str(i), path, options)
-				gen.start_generate_mesh(voxel.models[i].get_voxels())
-				gens.append(gen)
-
-		VoxelImportOptions.MeshMode.split_by_node:
-			var root_node := voxel.nodes[voxel.nodes[0].child_nodes[0]]
-			var gen_nodes: Array[String]
-			for node_id in root_node.child_nodes:
-				var node := voxel.nodes[node_id]
-				if node.name:
-					if gen_nodes.has(node.name):
-						printerr("Nodes cannot have the same name [", node.name, "] path: ", path)
-						continue
-					gen_nodes.append(node.name)
-				var gen := VoxelMeshGenerator.new(voxel, options, path)
-				gen.materials = root_gen.materials
-				gen.mesh = _get_mesh(node.get_name(voxel, root_gen.frame_index), path, options)
-				gen.start_generate_mesh(node.get_voxels(voxel, root_gen.frame_index, true), )
-				gens.append(gen)
-
-		VoxelImportOptions.MeshMode.split_by_frame:
-			for i in root_gen.frame_index + 1:
-				var gen := VoxelMeshGenerator.new(voxel, options, path)
-				gen.materials = root_gen.materials
-				gen.mesh = _get_mesh("frame_" + str(i), path, options)
-				gen.start_generate_mesh(voxel.get_voxels(i))
-				gens.append(gen)
+	var names: Array[String]
+	for item in _mesh_library_items(voxel, root_gen.frame_index, options[VoxelImportOptions.MESH_MODE]):
+		var name: String = item["name"]
+		var gen := VoxelMeshGenerator.new(voxel, options, path)
+		gen.materials = root_gen.materials
+		gen.mesh = _get_mesh(name, path, options)
+		gen.start_generate_mesh(item["voxels"])
+		gens.append(gen)
+		names.append(name)
 
 	var old_meshes: Array[ArrayMesh]
 	for i in voxel_mesh_library.get_item_list():
@@ -138,22 +115,59 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 		if old_mesh:
 			old_meshes.append(old_mesh)
 	voxel_mesh_library.clear()
+	var idx := 0
 	for i in gens.size():
 		var child_mesh := gens[i].wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
-		if not child_mesh:
+		if not child_mesh or child_mesh.get_surface_count() == 0:
 			continue
-		voxel_mesh_library.create_item(i)
-		voxel_mesh_library.set_item_mesh(i, child_mesh)
-		voxel_mesh_library.set_item_name(i, child_mesh.resource_name)
+		voxel_mesh_library.create_item(idx)
+		voxel_mesh_library.set_item_mesh(idx, child_mesh)
+		# 项名取自 items 而非 child_mesh.resource_name：不开 import_meshes 时
+		# `_get_mesh` 返回的是无名 ArrayMesh，按它命名会让所有项名字都是空的。
+		voxel_mesh_library.set_item_name(idx, names[i])
+		idx += 1
 		if options[VoxelImportOptions.IMPORT_MESHES] and path:
 			ResourceSaver.save(child_mesh)
 	for old_mesh in old_meshes:
-		var i := voxel_mesh_library.find_item_by_name(old_mesh.resource_name)
-		if i < 0:
-			DirAccess.remove_absolute(old_mesh.resource_path)
-			print_verbose("delete ", old_mesh.resource_path)
+		# 只清"上次落盘、这次不再生成"的分项网格文件。resource_path 为空说明它没落过盘
+		# （import_meshes 关闭），对空路径 remove_absolute 是无意义且危险的调用。
+		if old_mesh.resource_path == "" or voxel_mesh_library.find_item_by_name(old_mesh.resource_name) >= 0:
+			continue
+		DirAccess.remove_absolute(old_mesh.resource_path)
+		print_verbose("delete ", old_mesh.resource_path)
 	print_verbose("generate_mesh_library mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
 	return voxel_mesh_library
+
+
+## MeshMode → `[{name, voxels}]`（三种分项的**唯一**拆解处，网格生成只消费结果）。
+## 【坐标语义】每项都是独立资产：只去掉该项节点自己的摆放，子树内部的相对摆放必须保留——
+## 全丢掉会让多部件对象的所有部件叠到同一个中心（整体糊成一团）。
+## 与 `_items_by_node`（.qvx 侧）同构：重名/无名退化为稳定编号，项名不撞。
+static func _mesh_library_items(voxel: VoxAsset, frame_index: int, mode: int) -> Array:
+	var out: Array = []
+	match mode:
+		VoxelImportOptions.MeshMode.split_by_node:
+			var used := {}
+			var seq := 0
+			for node_id in voxel.top_node_ids():
+				var node: VoxAsset.VoxelNode = voxel.nodes.get(node_id)
+				if node == null:
+					continue
+				var nm := node.get_name(voxel, frame_index)
+				# 无名/重名时退化为稳定编号 —— 项名是 MeshLibrary 项的身份，不能撞
+				while nm == "" or used.has(nm):
+					seq += 1
+					nm = "node_%d" % seq
+				used[nm] = true
+				out.append({"name": nm, "voxels": node.get_voxels(voxel, frame_index, true)})
+		VoxelImportOptions.MeshMode.split_by_frame:
+			for i in frame_index + 1:
+				out.append({"name": "frame_" + str(i), "voxels": voxel.get_voxels(i)})
+		_:
+			for i in voxel.models.size():
+				out.append({"name": "model_" + str(i), "voxels": voxel.models[i].get_voxels()})
+	return out
+
 
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
 	if options[VoxelImportOptions.IMPORT_MESHES] and path:

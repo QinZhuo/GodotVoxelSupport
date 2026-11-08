@@ -41,6 +41,49 @@ func get_voxels(frame_index: int = 0) -> Dictionary[Vector3i, int]:
 	return {}
 
 
+## `[模型, 变换]` 列表 → 世界体素字典。**整资产与 MeshLibrary 分项共用这一套合成规则**：
+## 分项导出只要换掉"从哪棵子树取 models"，落在体素上的坐标语义就必须是同一个。
+static func models_to_voxels(models: Array) -> Dictionary[Vector3i, int]:
+	var voxels: Dictionary[Vector3i, int]
+	for i in models.size():
+		var model: VoxelModel = models[i][0]
+		var transform: Transform3D = models[i][1]
+		for pos in model.voxels:
+			var new_pos := transform * Vector3(pos)
+			voxels[Vector3i(new_pos)] = model.voxels[pos]
+	return voxels
+
+
+## 场景图里的"顶级对象"：折叠根部的结构壳样板链（MagicaVoxel 的 nTRN(0) → nGRP(1) → …）。
+## 停在一个结构壳（如包住所有对象的 nGRP）上时把它的孩子提上来 —— 顶级就是用户真正建的层 / 组。
+## 【为什么在 Format 层】这是 `.vox` 场景图的读入约定，网格分项与世界化两条链路必须用同一套判定；
+## 此前两边各写一份，分项那边只认"根→容器→孩子"一种层级，换一种布局就取不到对象。
+func top_node_ids() -> Array:
+	if not nodes.has(0) or nodes[0] == null:
+		return []
+	var id := 0
+	var guard := 0
+	while guard < 64 and is_structural_node(id) and nodes[id].child_nodes.size() == 1:
+		id = int(nodes[id].child_nodes[0])
+		guard += 1
+	if is_structural_node(id):
+		return Array(nodes[id].child_nodes)
+	return [id]
+
+
+## 结构壳 = 无名字、不属任何图层、无模型帧、但有子节点（纯结构的 nTRN / nGRP）。
+func is_structural_node(id: int) -> bool:
+	if not nodes.has(id) or nodes[id] == null:
+		return false
+	var n: VoxelNode = nodes[id]
+	if not n.name.is_empty() or layers.has(n.layerId) or n.child_nodes.is_empty():
+		return false
+	if not n.frames.has(0):
+		return true
+	var f: VoxelFrame = n.frames[0]
+	return f == null or f.model_id < 0 or f.model_id >= models.size()
+
+
 func check_nodes() -> Dictionary:
 	# 当 .vox 无场景图(scene graph)时，为每个 model 建一个帧节点，确保能取到体素
 	if nodes.size() == 0 and models.size() > 0:
@@ -131,27 +174,22 @@ class VoxelNode:
 	## 递归收集本节点子树的 [模型, 变换] 列表（结果缓存在本节点的 models 字段）。
 	## 直接递归：子节点的 models 字段本身就是缓存，交给线程池再立刻 wait 只会让
 	## 父任务占着线程等子任务（层级深时可能饿死线程池），且任务返回值本身也取不到。
-	func get_models(voxel: VoxAsset, frame_index: int, ignore_trans: bool = false) -> Array:
+	##
+	## [param local] 坐标**相对本节点自身**：不乘本节点自己的 nTRN 变换。用于 MeshLibrary
+	## 分项导出 —— 每一项都该是独立资产，不能带着它在整场景里的摆放。
+	## 【只作用于本节点，绝不向子节点传递】子节点的变换表达的是"部件之间的相对关系"，
+	## 一旦也丢掉，各部件会全叠在同一个中心（曾经因此让分项网格整片糊成一团）。
+	func get_models(voxel: VoxAsset, frame_index: int, local: bool = false) -> Array:
 		if layerId in voxel.layers and not voxel.layers[layerId].isVisible:
 			return models
 		models.clear()
 		for i in child_nodes:
-			# ignore_trans 必须继续往下传：漏传会让子树永远按 ignore_trans=false 展开，
-			# 于是"忽略透明体素"这个选项只在当前层生效（层级一深就失效）。
-			models.append_array(voxel.nodes[i].get_models(voxel, frame_index, ignore_trans))
-		get_frame(frame_index, true).merge_models(voxel, models, ignore_trans)
+			models.append_array(voxel.nodes[i].get_models(voxel, frame_index))
+		get_frame(frame_index, true).merge_models(voxel, models, local)
 		return models
 
-	func get_voxels(voxel: VoxAsset, frame_index: int, center: bool = false) -> Dictionary[Vector3i, int]:
-		var voxels: Dictionary[Vector3i, int]
-		var models := get_models(voxel, frame_index, center)
-		for i in models.size():
-			var model: VoxelModel = models[i][0]
-			var transform: Transform3D = models[i][1]
-			for pos in model.voxels:
-				var new_pos := transform * Vector3(pos)
-				voxels[Vector3i(new_pos)] = model.voxels[pos]
-		return voxels
+	func get_voxels(voxel: VoxAsset, frame_index: int, local: bool = false) -> Dictionary[Vector3i, int]:
+		return VoxAsset.models_to_voxels(get_models(voxel, frame_index, local))
 
 	func _to_string() -> String:
 		return str('[', name, '] childs: ', child_nodes)
@@ -167,11 +205,13 @@ class VoxelFrame:
 		get(): return Transform3D(rotation if rotation else Quaternion.IDENTITY,
 			position if position else Vector3.ZERO)
 
-	func merge_models(voxel: VoxAsset, models: Array[Array], ignore_trans: bool):
+	## 把本帧（自身模型的居中偏移 + 本节点变换）合进 models 列表。
+	## [param local] = 跳过本节点自身的 position/rotation，只留模型居中偏移。
+	func merge_models(voxel: VoxAsset, models: Array[Array], local: bool):
 		if model_id >= 0:
 			var model := voxel.models[model_id]
 			models.append([model, Transform3D.IDENTITY.translated(model.offset)])
-		if ignore_trans:
+		if local:
 			return
 		if rotation or position:
 			for i in models.size():

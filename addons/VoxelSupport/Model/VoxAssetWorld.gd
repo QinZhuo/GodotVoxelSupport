@@ -64,29 +64,15 @@ static func _collect_abs_frames(vox: VoxAsset, id: int, parent_abs: Array[Transf
 		_collect_abs_frames(vox, int(c), abs, out, visited)
 
 
-## 顶层节点：折叠根部的"结构壳"样板链（MagicaVoxel 的 nTRN(0) → nGRP(1) → …），
-## 若停在结构壳（如包住所有对象的 nGRP）则把它的孩子提到顶层 —— 世界顶层就是用户真正建的层 / 组。
+## 顶层节点：判定统一在 `VoxAsset.top_node_ids()`（网格分项共用同一份，避免两边各写一套）。
 static func _top_vox_ids(vox: VoxAsset) -> Array:
-	if not vox.nodes.has(0) or vox.nodes[0] == null:
-		return []
-	var id := 0
-	var guard := 0
-	while guard < 64 and _is_structural(vox, id) and _child_ids(vox, id).size() == 1:
-		id = int(_child_ids(vox, id)[0])
-		guard += 1
-	if _is_structural(vox, id):
-		return _child_ids(vox, id)
-	return [id]
+	return vox.top_node_ids()
 
 
 ## 结构壳 = 无名字、不属任何图层、无模型帧、但有子节点（纯结构的 nTRN / nGRP）。
 ## 导入时**不单独成组**：它的变换并入孩子、它的孩子提到上一层 —— 于是不会多出"匿名组"。
 static func _is_structural(vox: VoxAsset, id: int) -> bool:
-	if not vox.nodes.has(id) or vox.nodes[id] == null:
-		return false
-	var n: VoxAsset.VoxelNode = vox.nodes[id]
-	return n.name.is_empty() and not vox.layers.has(n.layerId) and not _has_model_frame(vox, n) \
-			and _child_ids(vox, id).size() > 0
+	return vox.is_structural_node(id)
 
 
 static func _child_ids(vox: VoxAsset, id: int) -> Array:
