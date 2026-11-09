@@ -10,7 +10,7 @@
 ## 节点名就是资源键（= 资源文件名），光照位置和运行时挂光都靠它对齐，
 ## 所以不要再给副本套一层容器节点。
 ##
-## 用法：点「烘焙并导出」。副本会自动同步，变动过就连烘焙一起跑完。
+## 用法：点「烘焙并导出」。副本自动同步后无条件重烘，改灯 / 环境 / 自发光都不会漏。
 class_name AssetLightmapStage extends Node3D
 
 ## 副本标记：sync 只清理带这个标记的节点
@@ -20,15 +20,12 @@ const META := &"bake_copy"
 const PER_ROW := 10
 const SPACING := 10.0
 
-@export_group("要烘焙的资源")
 ## 逐个点名网格：目录里混着不需要烘焙的模型时用这个
 @export var meshes: Array[ArrayMesh] = []
 ## 整目录扫描：目录里全是物品模型时用它，键 = 文件名
 @export_dir var dirs: Array[String] = []
 
 @export_tool_button("烘焙并导出") var export_button: Callable = export_all
-## 改了灯 / 环境 / 自发光之后用这个：几何没变时普通导出不会再烘
-@export_tool_button("强制重烘并导出") var reexport_button: Callable = _export_forced
 
 ## 键 → 资源。目录内容在导出时才读，不和场景重复维护。
 ## 只收烘得动的：LightmapGI 对没有 UV2 的网格不写任何光照数据，
@@ -56,9 +53,9 @@ static func _take(out: Dictionary, res: Resource) -> void:
 		out[key] = res
 
 ## 导出。副本同步是导出的前置步骤，所以不单独给按钮：
-## 忘了同步就烘焙，等于拿旧几何体烘出来的光照去配新资源，而且不会有任何提示
-## [param force] 无视几何快照直接重烘（改过灯 / 环境 / 自发光时用）
-func export_all(force := false) -> void:
+## 忘了同步就烘焙，等于拿旧几何体烘出来的光照去配新资源，而且不会有任何提示。
+## 每次都重烘：几何没变的判断不可靠（灯 / 环境 / 自发光都改不到几何上），增量省下的时间不值得
+func export_all() -> void:
 	if not Engine.is_editor_hint():
 		return
 	var scene_path := _scene_path()
@@ -68,21 +65,18 @@ func export_all(force := false) -> void:
 	_warn_without_static_light()
 	## SH 叠加层要读 l1（方向项）：不勾 Bake Directional 时图集里只有 l0，
 	## 光的"朝向感"和高光全都没有，看起来就是一片平淡的亮度
-	var stale := false
 	var gi := _lightmap()
 	if gi != null and not gi.directional:
 		gi.directional = true
-		stale = true
 		LogTool.log("烘焙", "已开启 LightmapGI 的 Bake Directional（SH 叠加层需要方向数据）")
 	## 一次扫描供同步 / 导出 / 核对共用：导出中途目录内容不会变。
 	## ⚠️ 同步必须无条件跑：它同时负责把副本摆进场景，短路掉就会拿着空舞台去烘
 	var all := _collect()
-	var fresh := sync(all)
-	if force or stale or not fresh:
-		LogTool.log("烘焙", "开始烘焙…")
-		if not await bake():
-			LogTool.warn("烘焙", "烘焙未完成，请点 LightmapGI 的 Bake Lightmaps 后再次导出")
-			return
+	sync(all)
+	LogTool.log("烘焙", "开始烘焙…")
+	if not await bake():
+		LogTool.warn("烘焙", "烘焙未完成，请点 LightmapGI 的 Bake Lightmaps 后再次导出")
+		return
 
 	var set := _export_set(all)
 	if set == null:
@@ -119,9 +113,6 @@ func _warn_without_static_light() -> void:
 		LogTool.warn("烘焙", "场景里没有 Static 烘焙模式的灯（可见灯 %d 个，全为 Dynamic/Disabled）——"
 			% visible + "烘出来会全黑；把要参与烘焙的灯设为 Static 再重烘")
 
-func _export_forced() -> void:
-	export_all(true)
-
 ## 资源有数据没有（副本被遮挡、UV2 缺失，烘完会静默丢失）。
 ## 反方向由 [method _export_set] 自己报：它录入时就会跳过已不存在的资源
 static func _report(set: AssetLightmapSet, all: Dictionary) -> void:
@@ -132,12 +123,12 @@ static func _report(set: AssetLightmapSet, all: Dictionary) -> void:
 	if not missing.is_empty():
 		LogTool.warn("烘焙", "这些资源没烘出光照（检查 UV2，或副本被遮挡）:", missing)
 
-## 同步副本：补缺、清多余、按顺序摆位。返回 false 表示几何体变过，光贴图已过期
+## 同步副本：补缺、清多余、按顺序摆位
 ## [param all] 可选的「键 → 资源」表；不传就自己扫一遍（导出路径会传进来，省一次目录扫描）
-func sync(all := {}) -> bool:
+func sync(all := {}) -> void:
 	if all.is_empty():
 		all = _collect()
-	var fresh := true
+	var changed := false
 	## 已有的副本保持原顺序：光照是按位置烘的，不能因为列表顺序变了就整体搬家
 	var placed := 0
 	for node in _copies():
@@ -146,11 +137,11 @@ func sync(all := {}) -> bool:
 		if not all.has(key):
 			remove_child(node)
 			node.queue_free()
-			fresh = false
+			changed = true
 			continue
 		if node.position != _slot(placed):
 			node.position = _slot(placed)
-			fresh = false
+			changed = true
 		if node.get_index() != placed:
 			move_child(node, placed)
 		placed += 1
@@ -169,10 +160,9 @@ func sync(all := {}) -> bool:
 		node.owner = _root()
 		node.position = _slot(placed)
 		placed += 1
-		fresh = false
-	if not fresh:
+		changed = true
+	if changed:
 		LogTool.log("烘焙", "副本已同步", placed, "份")
-	return fresh
 
 ## 引擎没给 LightmapGI 暴露烘焙 API，只能借检查器上那个按钮：选中它再按下。
 ## 找不到按钮（编辑器换语言/改版）就返回 false，让调用方退回手动
@@ -203,6 +193,8 @@ func bake() -> bool:
 	##   ② 先把 light_data 置空再按——编辑器会以为还没有烘焙文件，弹「选择光照贴图烘焙文件」
 	var data_path := gi.light_data.resource_path if gi.light_data != null else ""
 	var before_mtime := FileAccess.get_modified_time(data_path) if not data_path.is_empty() else 0
+	## ⚠️ 预期噪音：编辑器在烘焙开始时重建 Inspector，按钮在信号发射途中被释放，
+	## 引擎会打印 "Object was freed while a signal is being emitted"。不影响烘焙结果，别当错误排查
 	btn.pressed.emit()
 	for i in 18000:
 		await get_tree().create_timer(0.05).timeout

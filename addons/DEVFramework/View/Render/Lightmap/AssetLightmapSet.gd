@@ -93,8 +93,10 @@ static func bind_to(mi: MeshInstance3D) -> bool:
 	return current.bind(mi)
 
 ## 让编辑器兜底重新扫一遍：烘焙舞台导出新产物后调用，否则本次编辑会一直用旧结论
+## 同时丢掉已生效的旧对象：产物被重写后 load() 仍可能拿到缓存里的旧实例（旧 rect 配新图集）
 static func invalidate() -> void:
 	_fallback_done = false
+	current = null
 
 ## 编辑器里没有项目侧加载入口来设 current：扫一份烘焙产物直接用，调光时能立刻看到效果。
 ## 只在编辑器、且第一次需要时扫一次
@@ -103,7 +105,8 @@ static func _editor_fallback() -> AssetLightmapSet:
 		return null
 	_fallback_done = true
 	for path in _all_produced(str(ProjectSettings.get_setting(SCAN_DIR_SETTING, "res://Scenes"))):
-		var res := load(path) as AssetLightmapSet
+		## 重写过的产物必须绕过缓存重读，否则一直拿着重烘前的旧 rect
+		var res := ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE) as AssetLightmapSet
 		if res != null:
 			return res
 	return null
