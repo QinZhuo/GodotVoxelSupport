@@ -215,16 +215,17 @@ static func _unique_name(used: Dictionary, wanted: String) -> String:
 	return nm
 
 
-## 分项网格的落盘目录。**带上源扩展名**：同目录下 `cars.vox` 与 `cars.qvx` 的 stem 相同，
-## 只按 stem 建目录会让两者的分项互相覆盖（`.vox → .qvx` 迁移期这很常见）。
+## 分项网格的落盘目录 = 源资产去掉扩展名的同名目录（`cars.vox` → `cars/`）。
+## 【不要加扩展名后缀】曾一度返回 `<stem>_<ext>`（`cars.vox` → `cars_vox/`）以避免同名情况下
+## `.vox` 与 `.qvx` 的分项互相覆盖，但那让所有既有项目的产物目录集体改名、留下一地孤儿目录，
+## 代价远大于收益。目录名保持与历史版本一致，是**对外契约**，别再改。
 static func _item_dir(path: String) -> String:
-	var ext := path.get_extension()
-	return path.get_basename() if ext == "" else "%s_%s" % [path.get_basename(), ext]
+	return path.get_basename()
 
 
 ## 取该项的网格载体：开 import_meshes 时复用磁盘上的旧网格（逐项缓存的挂载点），
 ## 否则每次新建（无缓存可命中）。
-## 【想强制重建某一项】删掉 `<stem>_<ext>/` 下对应的 `.res` 即可 —— 缺失即重建。
+## 【想强制重建某一项】删掉 `<stem>/` 下对应的 `.res` 即可 —— 缺失即重建。
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
 	if not (bool(options[VoxelImportOptions.IMPORT_MESHES]) and path != ""):
 		return ArrayMesh.new()

@@ -137,6 +137,23 @@ func test_generated_items_are_registered() -> void:
 	assert_true(quiet.is_empty(), "关闭时不应登记产物（实得 %s）" % str(quiet))
 
 
+## 【回归】分项目录名 = 源资产去掉扩展名的同名目录（`cars.vox` → `cars/`），与历史版本一致。
+## 曾经改成 `<stem>_<ext>/`（`cars_vox/`）以躲"同 stem 的 .vox 与 .qvx 撞目录"，结果所有既有
+## 项目的产物目录集体改名、旧目录变成没人回收的孤儿。这条断言把目录名钉成对外契约。
+func test_item_dir_has_no_extension_suffix() -> void:
+	var dir := _fresh_dir("item_dir")
+	var vox := _asset([1, 2])
+	# 两种源格式都验：目录名只由 stem 决定，扩展名不参与命名。
+	for src in ["asset.vox", "asset.qvx"]:
+		var gen_files: Array = []
+		VoxelMeshGenerator.generate_mesh_library(vox,
+				_opts(VoxelImportOptions.MeshMode.split_by_node, true), dir + "/" + src, gen_files)
+		assert_true(gen_files.size() > 0, "%s 应产出分项网格" % src)
+		for p in gen_files:
+			assert_eq(p.get_base_dir().get_file(), "asset",
+					"分项目录名应等于源资产的 stem（不得带 _vox/_qvx 后缀），实得 %s" % p)
+
+
 ## `.qvx` 的分项走块级入口，但用的是同一套逐项缓存（块表 hash + 选项 + 原点偏移）。
 ## 修复前这里无条件重建：改一个模型，其余项全量重算。
 func test_qvx_items_reuse_unchanged_items() -> void:
@@ -157,7 +174,7 @@ func test_qvx_items_reuse_unchanged_items() -> void:
 		return
 	var target := lib1.get_item_name(0)
 	assert_ne(_verts_of(lib1)[target], 3, "真实网格的顶点数不应与哨兵相同（否则本用例失效）")
-	_tamper(dir + "/asset_qvx/" + target + ".res")
+	_tamper(dir + "/asset/" + target + ".res")
 
 	var lib2 := VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, opts, path)
 	assert_eq(_verts_of(lib2)[target], 3,
@@ -173,9 +190,9 @@ func _opts(mode: int, import_meshes: bool) -> Dictionary:
 	return opts
 
 
-## 分项目录（与 VoxelMeshGenerator._item_dir 同一规则：<stem>_<ext>）。
+## 分项目录（与 VoxelMeshGenerator._item_dir 同一规则：源资产去掉扩展名的同名目录）。
 func _item_dir(dir: String) -> String:
-	return dir + "/asset_vox"
+	return dir + "/asset"
 
 
 func _child(dir: String, name: String) -> String:

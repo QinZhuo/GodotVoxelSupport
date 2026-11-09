@@ -1,6 +1,7 @@
 [remap]
 
 importer="voxel_mesh_library"
+importer_version=1
 type="MeshLibrary"
 uid="uid://dmqtmkfe0x1lo"
 path="res://.godot/imported/MixTest.vox-dcc5a5af3f7b9755dc07eef43a4e095c.res"

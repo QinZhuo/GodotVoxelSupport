@@ -1,0 +1,28 @@
+[remap]
+
+importer="voxel_mesh_library"
+importer_version=2
+type="MeshLibrary"
+uid="uid://wgvqk68un8cs"
+path="res://.godot/imported/cars_array_test.vox-3fa52f3559f3d28aa7d22724314398c1.res"
+
+[deps]
+
+files=["res://demo/cars_array_test/node_3.res", "res://demo/cars_array_test/node_9.res", "res://demo/cars_array_test/node_17.res"]
+
+source_file="res://demo/cars_array_test.vox"
+dest_files=["res://.godot/imported/cars_array_test.vox-3fa52f3559f3d28aa7d22724314398c1.res", "res://demo/cars_array_test/node_3.res", "res://demo/cars_array_test/node_9.res", "res://demo/cars_array_test/node_17.res"]
+
+[params]
+
+mesh/scale=0.1
+mesh/origin=0
+mesh/shape=0
+mesh/sphere_subdivisions=0
+mesh/sphere_scale=1.0
+mesh/frame_index=0
+mesh/unwrap_lightmap_uv2=true
+mesh/uv2_texel_size=0.2
+material/import_materials_textures=false
+mesh/mode=1
+mesh/import_meshes=true
