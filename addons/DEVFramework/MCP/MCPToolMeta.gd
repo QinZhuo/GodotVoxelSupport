@@ -29,6 +29,8 @@ const READ_ONLY := [
 	"get_scene_tree", "get_node_info", "get_interactables",
 	# -- 项目观测 --
 	"get_project_info", "get_editor_activity",
+	# -- 多实例观测 --
+	"list_instances",
 	# -- 代码/符号检索 --
 	"search_symbols", "find_resource_users", "script_status", "get_resource_info",
 	# -- 文件观测 --
@@ -89,6 +91,10 @@ const IDEMPOTENT := [
 	"connect_signal", "create_resource",
 	"clear_logs",
 	"refresh_tools",
+	# use_instance: 只改"默认目标编辑器"这一个进程内设置, 同参数重放结果相同。
+	# 但**不列进 READ_ONLY**: 它确实改变了后续工具调用的去向, 声明只读会诱导客户端
+	# 在重试链里悄悄把目标切走。
+	"use_instance",
 	# -- 刻意不列 --
 	# duplicate_node: 每次生成一个 *_copy, 重放会多出一份
 	# add_node:  重放会产生同名/同类型重复节点

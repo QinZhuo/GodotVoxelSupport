@@ -106,7 +106,7 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 		gen.mesh = _get_mesh(item["name"], path, options)
 		gen.start_generate_mesh(item["voxels"])
 		gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
-		built.append({"name": item["name"], "mesh": gen.mesh})
+		built.append({"name": item["name"], "mesh": gen.mesh, "dirty": gen.regenerated})
 	print_verbose("generate_mesh_library mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
 	return _commit_mesh_library(built, options, path)
 
@@ -143,7 +143,9 @@ static func _commit_mesh_library(built: Array, options: Dictionary, path: String
 		idx += 1
 		if mesh.resource_path != "":
 			keep[mesh.resource_path] = true
-			if options[VoxelImportOptions.IMPORT_MESHES] and path:
+			# 只落盘本次真的重建过的项：缓存命中的项内容与磁盘上完全一致，
+			# 重写一次只会刷掉 mtime、制造 VCS 噪音，还会让引擎丢弃它的资源缓存。
+			if options[VoxelImportOptions.IMPORT_MESHES] and path and bool(item.get("dirty", true)):
 				ResourceSaver.save(mesh)
 	# 只清"上次落盘、这次不再生成"的分项网格文件。resource_path 为空说明它没落过盘
 	# （import_meshes 关闭），对空路径 remove_absolute 是无意义且危险的调用。
@@ -345,6 +347,9 @@ var origin_mode: int = VoxelWorldUtil.OriginMode.WORLD_ORIGIN
 const SPHERE_VERTEX_BUDGET := 4_000_000
 ## 原生几何内核返回的 arrays（start_generate_mesh 填充，wait_finished 消费）
 var _native_arrays: Dictionary = {}
+## 本次调用是否真的重建了几何（缓存命中的项为 false）。
+## MeshLibrary 分项落盘只认它：内容与磁盘完全一致的项没必要重写（那会白刷 mtime）。
+var regenerated := false
 
 
 func _init(voxel: VoxAsset, options: Dictionary, path: String = "") -> void:
@@ -430,10 +435,15 @@ func generate_emission_texture(save_path: String = "") -> ImageTexture:
 ## cube = 面片贪婪合并；sphere = 每体素一颗小球（原生内部按顶点预算自动降采样）。
 ## 结果为原生 arrays，实际组装成 surface 在 wait_finished 完成。
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
-	# hash 必须包含所有影响几何的选项：MeshLibrary 模式会复用磁盘上的旧 mesh(带 meta)，
-	# 若只含体素数据，单独修改 scale/sphere_* 时会被短路、保留旧网格
-	var voxels_hash := hash([voxels.hash(), scale, shape, sphere_subdivisions, sphere_scale, origin_mode])
+	# hash 必须包含所有影响几何的**输入**：MeshLibrary 模式会复用磁盘上的旧 mesh(带 meta)，
+	# 漏一项就会被短路、保留旧网格。透明标志也算输入 —— 它决定体素进 solid 还是 trans 桶，
+	# 只改材质透明度（体素一个没动）同样会换出不同的网格。
+	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
+	var voxels_hash := hash([voxels.hash(), scale, shape, sphere_subdivisions, sphere_scale,
+			origin_mode, trans_flags])
 	_native_arrays = {}
+	regenerated = true
 	if not mesh:
 		mesh = ArrayMesh.new()
 	else:
@@ -441,6 +451,7 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 		# 否则会把"空网格 + 正确 hash"（原生库曾不可用导致）当成最新版本，永远不再重建。
 		if mesh.has_meta("hash") and voxels_hash == mesh.get_meta("hash") \
 				and (voxels.is_empty() or mesh.get_surface_count() > 0):
+			regenerated = false
 			return
 		mesh.clear_surfaces()
 
@@ -448,8 +459,6 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 		mesh.set_meta("hash", voxels_hash)
 		return
 
-	var trans_flags := VoxelMaterial.build_trans_flags(
-			runtime_materials if not runtime_materials.is_empty() else voxel.materials)
 	# 原点偏移（体素单位）：按内容 AABB 算一次交给原生内核（cube 路径原生就支持 offset，
 	# 不必事后搬运顶点）。WORLD_ORIGIN 模式跳过求界——那是一次 O(体素数) 的字典扫描。
 	var offset := Vector3.ZERO
