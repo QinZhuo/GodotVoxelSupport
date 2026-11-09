@@ -3,9 +3,8 @@ extends TestCase
 ## MeshLibrary 分项**重复导入**时的重用边界：改 `.vox` 里一个模型，另外 N-1 个模型会不会跟着重建。
 ## 三层结论（本文件逐层钉死）：
 ##   ① 引擎层：一个 `.vox` = 一个导入产物，文件一改就整体重导 —— 这一层无法绕过，也不该绕；
-##   ② 几何层：分项网格的落盘策略（`mesh/storage`，与 ResourceImporterScene 的 materials/extract 同构）
-##      决定有没有跨导入的逐项缓存。extract_once 下未改动的项 hash 一致 → 不跑原生内核、不重写文件；
-##      built_in 下每项都是新建的 ArrayMesh，缓存无从命中 → 全部重建；
+##   ② 几何层：开关只有 `mesh/import_meshes` 一个 bool。开 → 分项落盘，未改动的项 hash 一致、
+##      不跑原生内核、不重写文件；关 → 每项都是新建的 ArrayMesh，缓存无从命中，全部重建；
 ##   ③ 落盘层：缓存命中的项内容与磁盘完全一致，重写它只会白刷 mtime 并让引擎丢弃资源缓存 ——
 ##      故 `_commit_mesh_library` 只保存本次真的重建过的项；产物一律登记进 `gen_files`，
 ##      由引擎纳入依赖与清理（否则项名/分项方式一变就留下孤儿文件）。
@@ -27,7 +26,7 @@ func cleanup() -> void:
 func test_only_changed_item_is_rebuilt() -> void:
 	var dir := _fresh_dir("by_node")
 	var vox := _asset([1, 2, 3])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.extract_once)
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, true)
 	var path := dir + "/asset.vox"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
@@ -59,7 +58,7 @@ func test_only_changed_item_is_rebuilt() -> void:
 func test_split_by_model_reuses_unchanged_items() -> void:
 	var dir := _fresh_dir("by_model")
 	var vox := _asset([1, 2, 3])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model, VoxelImportOptions.Storage.extract_once)
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model, true)
 	var path := dir + "/asset.vox"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
@@ -81,7 +80,7 @@ func test_split_by_model_reuses_unchanged_items() -> void:
 func test_material_transparency_invalidates_cache() -> void:
 	var dir := _fresh_dir("trans")
 	var vox := _asset_multi_material()
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model, VoxelImportOptions.Storage.extract_once)
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model, true)
 	var path := dir + "/asset.vox"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
@@ -93,34 +92,18 @@ func test_material_transparency_invalidates_cache() -> void:
 			"材质改透明后必须重建（旧 hash 会短路、留下单桶网格）")
 
 
-## extract_overwrite：每次都重算并覆盖，缓存标记被主动丢弃。
-## 这是"改生成逻辑但 hash 没变"时唯一能强制刷新的手段（built_in 之外的第二条路）。
-func test_extract_overwrite_forces_rebuild() -> void:
-	var dir := _fresh_dir("overwrite")
-	var vox := _asset([2])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model,
-			VoxelImportOptions.Storage.extract_overwrite)
-	var path := dir + "/asset.vox"
-
-	VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
-	_tamper(_child(dir, "model_0"))
-
-	var lib := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
-	assert_ne(_verts_of(lib)["model_0"], 3, "extract_overwrite 下篡改哨兵应被覆盖（每次都重建）")
-
-
-## built_in：不落盘 → 没有可命中的缓存，改一个模型时所有项全部重建。
-## 这是"改一个模型全量重建"这个现象的根因，也是三种策略里唯一的无散文件选项。
-func test_built_in_rebuilds_every_item() -> void:
-	var dir := _fresh_dir("built_in")
+## 关掉开关：不落盘 → 没有可命中的缓存，改一个模型时所有项全部重建。
+## 这就是"改一个模型全量重建"这个现象的根因（也是默认配置下的行为）。
+func test_disabled_rebuilds_every_item() -> void:
+	var dir := _fresh_dir("disabled")
 	var vox := _asset([1, 2])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.built_in)
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, false)
 	var path := dir + "/asset.vox"
 
 	var lib := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
 	assert_eq(lib.get_item_list().size(), 2, "两项都应生成")
 	for i in lib.get_item_list():
-		assert_eq(lib.get_item_mesh(i).resource_path, "", "built_in 下项网格不应有落盘路径")
+		assert_eq(lib.get_item_mesh(i).resource_path, "", "关闭时不落盘，项网格不应有路径")
 	assert_false(DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(_item_dir(dir))),
 			"不应产生分项目录（也就没有可命中的缓存）")
 
@@ -128,15 +111,15 @@ func test_built_in_rebuilds_every_item() -> void:
 	var lib2 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
 	for i in lib2.get_item_list():
 		assert_false(ids_before.has(lib2.get_item_mesh(i).get_instance_id()),
-				"built_in 下项网格不可能被复用（每项都是新建的）")
+				"关闭时项网格不可能被复用（每项都是新建的）")
 
 
 ## 分项网格是导入产物，**必须**登记进 gen_files：否则引擎不知道它们依赖源文件，
-## 项名/分项方式一变就留下没人回收的孤儿。同时确认没登记主产物与不存在的路径。
+## 项名/分项方式一变就留下没人回收的孤儿。
 func test_generated_items_are_registered() -> void:
 	var dir := _fresh_dir("gen_files")
 	var vox := _asset([1, 2])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.extract_once)
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, true)
 	var gen_files: Array = []
 
 	VoxelMeshGenerator.generate_mesh_library(vox, opts, dir + "/asset.vox", gen_files)
@@ -146,12 +129,12 @@ func test_generated_items_are_registered() -> void:
 		assert_true(gen_files.has(p), "应登记 %s（实得 %s）" % [p, str(gen_files)])
 		assert_true(FileAccess.file_exists(p), "登记前文件必须真的写出来了：%s" % p)
 
-	# built_in 不产生文件，也就不该登记任何东西
+	# 开关关闭时不产生文件，也就不该登记任何东西
 	var quiet: Array = []
 	VoxelMeshGenerator.generate_mesh_library(vox,
-			_opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.built_in),
+			_opts(VoxelImportOptions.MeshMode.split_by_node, false),
 			dir + "/quiet.vox", quiet)
-	assert_true(quiet.is_empty(), "built_in 下不应登记产物（实得 %s）" % str(quiet))
+	assert_true(quiet.is_empty(), "关闭时不应登记产物（实得 %s）" % str(quiet))
 
 
 ## `.qvx` 的分项走块级入口，但用的是同一套逐项缓存（块表 hash + 选项 + 原点偏移）。
@@ -165,7 +148,7 @@ func test_qvx_items_reuse_unchanged_items() -> void:
 	if qvx == null:
 		return
 	var dir := _fresh_dir("qvx")
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.extract_once)
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, true)
 	var path := dir + "/asset.qvx"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, opts, path)
@@ -183,10 +166,10 @@ func test_qvx_items_reuse_unchanged_items() -> void:
 
 # 辅助：被测入口
 
-func _opts(mode: int, storage: int) -> Dictionary:
+func _opts(mode: int, import_meshes: bool) -> Dictionary:
 	var opts := VoxelMeshLibraryImporter.default_options()
 	opts[VoxelImportOptions.MESH_MODE] = mode
-	opts[VoxelImportOptions.STORAGE] = storage
+	opts[VoxelImportOptions.IMPORT_MESHES] = import_meshes
 	return opts
 
 

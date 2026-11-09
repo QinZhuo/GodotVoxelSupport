@@ -132,7 +132,7 @@ static func _commit_mesh_library(built: Array, options: Dictionary, path: String
 		if old:
 			old_meshes.append(old)
 	lib.clear()
-	var writes := VoxelImportOptions.storage_writes(VoxelImportOptions.storage_of(options)) and path != ""
+	var writes := bool(options[VoxelImportOptions.IMPORT_MESHES]) and path != ""
 	var idx := 0
 	# 本次"仍在用"的落盘路径。判删只认它，不按项名反查：项名经过净化（`a/b` → `a_b`）
 	# 后与资源名不再一致，按名字反查会误删刚写好的文件。
@@ -222,9 +222,11 @@ static func _item_dir(path: String) -> String:
 	return path.get_basename() if ext == "" else "%s_%s" % [path.get_basename(), ext]
 
 
+## 取该项的网格载体：开 import_meshes 时复用磁盘上的旧网格（逐项缓存的挂载点），
+## 否则每次新建（无缓存可命中）。
+## 【想强制重建某一项】删掉 `<stem>_<ext>/` 下对应的 `.res` 即可 —— 缺失即重建。
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
-	var storage := VoxelImportOptions.storage_of(options)
-	if not (VoxelImportOptions.storage_writes(storage) and path != ""):
+	if not (bool(options[VoxelImportOptions.IMPORT_MESHES]) and path != ""):
 		return ArrayMesh.new()
 	DirAccess.make_dir_absolute(_item_dir(path))
 	# 项名可能来自用户写的节点名（`/`、`:` 等是非法路径字符）：落盘前先净化，否则保存失败。
@@ -236,10 +238,6 @@ static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayM
 		mesh = ArrayMesh.new()
 		mesh.resource_path = child_path
 		mesh.resource_name = name
-	elif not VoxelImportOptions.storage_reuses(storage):
-		# extract_overwrite：丢掉缓存标记，强制本次重算（否则 hash 一致会直接短路，
-		# 该策略就退化成 extract_once 了）。
-		mesh.remove_meta("hash")
 	return mesh
 
 

@@ -12,11 +12,6 @@ extends RefCounted
 enum Shape { cube, sphere }
 ## MeshLibrary 的分项方式。
 enum MeshMode { split_by_model, split_by_node, split_by_frame }
-## 分项网格的落盘策略。与 `ResourceImporterScene` 的 `materials/extract` 同构：
-##   built_in         不落盘，每次导入全部重建（无散文件，改一项就会全量重算）
-##   extract_once     落盘，未改动的项直接复用（跨导入的分项缓存）
-##   extract_overwrite 落盘且每次覆盖（缓存命不命中都重算，用于验证生成逻辑）
-enum Storage { built_in, extract_once, extract_overwrite }
 
 # 选项名
 const SCALE := "mesh/scale"
@@ -29,10 +24,10 @@ const UNWRAP_UV2 := "mesh/unwrap_lightmap_uv2"
 const UV2_TEXEL_SIZE := "mesh/uv2_texel_size"
 const IMPORT_MATERIALS_TEXTURES := "material/import_materials_textures"
 const MESH_MODE := "mesh/mode"
-## 旧键，保留为**兼容读取**：既有 `.import` 里存的是布尔。
-## 选项名是落进 `.import` 的稳定键，只增不改 —— 新写入一律用 STORAGE。
+## 分项网格是否落盘为独立 `.res`。
+## 【它就是"逐项缓存"的开关】不落盘 → 每项都是新建的 ArrayMesh，改一个模型全部重建；
+## 落盘 → 未改动的项从磁盘取回（带 hash meta）直接复用，只有改动的项重跑内核。
 const IMPORT_MESHES := "mesh/import_meshes"
-const STORAGE := "mesh/storage"
 
 
 ## 网格导入器的选项表（VoxelMeshImporter 用）。
@@ -103,33 +98,12 @@ static func mesh_library_specs() -> Array[Dictionary]:
 			hint_string = "split_by_model,split_by_node,split_by_frame",
 		},
 		{
-			name = STORAGE,
-			default_value = Storage.extract_once,
-			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
-			hint_string = "built_in,extract_once,extract_overwrite",
+			# 默认关闭：不产生散文件，代价是每次导入全部重建。要逐项缓存就打开它。
+			name = IMPORT_MESHES,
+			default_value = false,
 		},
 	])
 	return options
-
-
-## 分项落盘策略（把两种历史形态归一到一个判据）。
-## 优先级：新键 STORAGE 存在即用它；否则回退旧布尔 IMPORT_MESHES（true → extract_once）。
-## 【为什么默认 extract_once】分项网格一旦落盘就能跨导入复用；不落盘时改一个模型会全量重建，
-## 而"不产生散文件"这个理由在 `gen_files` 登记之后已不成立（产物由引擎代管清理）。
-static func storage_of(options: Dictionary) -> int:
-	if options.has(STORAGE):
-		return int(options[STORAGE])
-	return Storage.extract_once if bool(options.get(IMPORT_MESHES, false)) else Storage.built_in
-
-
-## 该策略下分项要不要落盘。
-static func storage_writes(storage: int) -> bool:
-	return storage != Storage.built_in
-
-
-## 该策略下缓存是否可以命中（extract_overwrite = 每次都重算）。
-static func storage_reuses(storage: int) -> bool:
-	return storage == Storage.extract_once
 
 
 ## 选项表 → {名: 默认值}（给拿不到插件实例的调用方：headless 测试 / 工具脚本）。
