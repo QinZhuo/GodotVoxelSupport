@@ -92,8 +92,11 @@ static func _build_channel_images(materials: Array) -> Dictionary:
 		"rough": rough_image, "emission": emission_image,
 	}
 
-## `.vox` → MeshLibrary。分项拆解在 `_mesh_library_items`，写库骨架在 `_commit_mesh_library`。
-static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: String = "") -> MeshLibrary:
+## `.vox` → MeshLibrary。分项拆解在 `_mesh_library_items`，写入库的骨架在 `_commit_mesh_library`。
+## [param gen_files] 引擎的产物登记数组：分项网格落到 res:// 之后必须登记，
+## 否则引擎不知道它们是导入产物，项名/分项方式一变就留下没人回收的孤儿文件。
+static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: String = "",
+		gen_files: Array = []) -> MeshLibrary:
 	var mode := int(options[VoxelImportOptions.MESH_MODE])
 	var frame := int(options.get(VoxelImportOptions.FRAME_INDEX, 0))
 	var root_gen := VoxelMeshGenerator.new(voxel, options, path)
@@ -108,13 +111,14 @@ static func generate_mesh_library(voxel: VoxAsset, options: Dictionary, path: St
 		gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
 		built.append({"name": item["name"], "mesh": gen.mesh, "dirty": gen.regenerated})
 	print_verbose("generate_mesh_library mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms")
-	return _commit_mesh_library(built, options, path)
+	return _commit_mesh_library(built, options, path, gen_files)
 
 
 ## 写库骨架（`.vox` / `.qvx` 共用）：收集旧网格 → 清库 → 逐项写入 → 删掉本次未再生成的旧文件。
-## 项名一律取 `built[i]["name"]`，绝不取 `mesh.resource_name` —— 不开 import_meshes 时
+## 项名一律取 `built[i]["name"]`，绝不取 `mesh.resource_name` —— built_in 策略下
 ## `_get_mesh` 返回的是无名 ArrayMesh，按它命名会让所有项名字都是空的。
-static func _commit_mesh_library(built: Array, options: Dictionary, path: String) -> MeshLibrary:
+static func _commit_mesh_library(built: Array, options: Dictionary, path: String,
+		gen_files: Array = []) -> MeshLibrary:
 	var lib: MeshLibrary = null
 	if path != "" and FileAccess.file_exists(path):
 		var res: Resource = ResourceLoader.load(path)
@@ -128,6 +132,7 @@ static func _commit_mesh_library(built: Array, options: Dictionary, path: String
 		if old:
 			old_meshes.append(old)
 	lib.clear()
+	var writes := VoxelImportOptions.storage_writes(VoxelImportOptions.storage_of(options)) and path != ""
 	var idx := 0
 	# 本次"仍在用"的落盘路径。判删只认它，不按项名反查：项名经过净化（`a/b` → `a_b`）
 	# 后与资源名不再一致，按名字反查会误删刚写好的文件。
@@ -141,14 +146,23 @@ static func _commit_mesh_library(built: Array, options: Dictionary, path: String
 		lib.set_item_mesh(idx, mesh)
 		lib.set_item_name(idx, item["name"])
 		idx += 1
-		if mesh.resource_path != "":
-			keep[mesh.resource_path] = true
-			# 只落盘本次真的重建过的项：缓存命中的项内容与磁盘上完全一致，
-			# 重写一次只会刷掉 mtime、制造 VCS 噪音，还会让引擎丢弃它的资源缓存。
-			if options[VoxelImportOptions.IMPORT_MESHES] and path and bool(item.get("dirty", true)):
-				ResourceSaver.save(mesh)
+		if mesh.resource_path == "":
+			continue
+		keep[mesh.resource_path] = true
+		if not writes:
+			continue
+		# 只落盘本次真的重建过的项：缓存命中的项内容与磁盘上完全一致，
+		# 重写一次只会刷掉 mtime、制造 VCS 噪音，还会让引擎丢弃它的资源缓存。
+		if bool(item.get("dirty", true)):
+			ResourceSaver.save(mesh)
+		# 登记给引擎（含复用的项：它们同样是本次导入的产物，不登记就会在
+		# 项名/分项方式变化后变成孤儿文件）。
+		if not gen_files.has(mesh.resource_path):
+			gen_files.append(mesh.resource_path)
 	# 只清"上次落盘、这次不再生成"的分项网格文件。resource_path 为空说明它没落过盘
-	# （import_meshes 关闭），对空路径 remove_absolute 是无意义且危险的调用。
+	# （built_in 策略），对空路径 remove_absolute 是无意义且危险的调用。
+	# 【为什么引擎登记了还要自己删】引擎对"上次登记过、这次没再生成"的 dest_files
+	# 清理并不总能覆盖（项名变化/分项方式切换），这一步是幂等兜底。
 	for old_mesh in old_meshes:
 		var old_path := old_mesh.resource_path
 		if old_path != "" and not keep.has(old_path):
@@ -201,12 +215,20 @@ static func _unique_name(used: Dictionary, wanted: String) -> String:
 	return nm
 
 
+## 分项网格的落盘目录。**带上源扩展名**：同目录下 `cars.vox` 与 `cars.qvx` 的 stem 相同，
+## 只按 stem 建目录会让两者的分项互相覆盖（`.vox → .qvx` 迁移期这很常见）。
+static func _item_dir(path: String) -> String:
+	var ext := path.get_extension()
+	return path.get_basename() if ext == "" else "%s_%s" % [path.get_basename(), ext]
+
+
 static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayMesh:
-	if not (options[VoxelImportOptions.IMPORT_MESHES] and path):
+	var storage := VoxelImportOptions.storage_of(options)
+	if not (VoxelImportOptions.storage_writes(storage) and path != ""):
 		return ArrayMesh.new()
-	DirAccess.make_dir_absolute(path.get_basename())
+	DirAccess.make_dir_absolute(_item_dir(path))
 	# 项名可能来自用户写的节点名（`/`、`:` 等是非法路径字符）：落盘前先净化，否则保存失败。
-	var child_path := path.get_basename() + "/" + _safe_file_name(name) + ".res"
+	var child_path := _item_dir(path) + "/" + _safe_file_name(name) + ".res"
 	# 存在性检查必须针对**要加载的那个文件**（child_path）。此前检查的是源资产 path，
 	# 于是"缓存的 .res 存在但源资产不在"时会漏加载，反之也会误走加载分支。
 	var mesh := ResourceLoader.load(child_path) as ArrayMesh if FileAccess.file_exists(child_path) else null
@@ -214,6 +236,10 @@ static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayM
 		mesh = ArrayMesh.new()
 		mesh.resource_path = child_path
 		mesh.resource_name = name
+	elif not VoxelImportOptions.storage_reuses(storage):
+		# extract_overwrite：丢掉缓存标记，强制本次重算（否则 hash 一致会直接短路，
+		# 该策略就退化成 extract_once 了）。
+		mesh.remove_meta("hash")
 	return mesh
 
 
@@ -229,8 +255,7 @@ static func _safe_file_name(name: String) -> String:
 ## 此前每张纹理都重新构建全部 4 张图（4 材质 × 4 纹理 = 16 次），纯浪费。
 func _get_channel_images() -> Dictionary:
 	if _channel_images.is_empty():
-		var mats: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-		_channel_images = _build_channel_images(mats)
+		_channel_images = _build_channel_images(_materials_src())
 	return _channel_images
 
 
@@ -254,7 +279,7 @@ static func generate_mesh_from_qvx(qvx: QVoxelAsset, options: Dictionary, path: 
 ## 【为什么 split_by_frame 对 .qvx 不再降级】FRAM 落地后 .qvx 真的有体素动画帧了（§12.7）。
 ## 继续按 split_by_model 处理会让"逐帧导出"的用户拿到 N 个模型而不是 N 帧 —— 静默的错产物。
 static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary,
-		path: String = "") -> MeshLibrary:
+		path: String = "", gen_files: Array = []) -> MeshLibrary:
 	var frame := int(options.get(VoxelImportOptions.FRAME_INDEX, 0))
 	var items: Array
 	match int(options[VoxelImportOptions.MESH_MODE]):
@@ -264,7 +289,8 @@ static func generate_mesh_library_from_qvx(qvx: QVoxelAsset, options: Dictionary
 			items = _items_by_frame(qvx)
 		_:
 			items = _items_by_model(qvx, frame)
-	return _commit_mesh_library(_build_qvx_items(qvx, items, options, path), options, path)
+	return _commit_mesh_library(
+			_build_qvx_items(qvx, items, options, path), options, path, gen_files)
 
 
 ## 每个体素源一项。**动画模型不能只查 models 字典**（它们不在里面）—— 走 all_model_ids()
@@ -316,7 +342,7 @@ static func _build_qvx_items(qvx: QVoxelAsset, items: Array, options: Dictionary
 		gen.start_generate_mesh_from_chunks(
 				chunks, VoxelWorldUtil.origin_offset(QVoxelAsset.bounds_for_blocks(chunks), gen.origin_mode))
 		gen.wait_finished(options[VoxelImportOptions.UNWRAP_UV2], options[VoxelImportOptions.UV2_TEXEL_SIZE])
-		built.append({"name": item["name"], "mesh": child})
+		built.append({"name": item["name"], "mesh": child, "dirty": gen.regenerated})
 	return built
 
 
@@ -435,11 +461,10 @@ func generate_emission_texture(save_path: String = "") -> ImageTexture:
 ## cube = 面片贪婪合并；sphere = 每体素一颗小球（原生内部按顶点预算自动降采样）。
 ## 结果为原生 arrays，实际组装成 surface 在 wait_finished 完成。
 func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
+	var trans_flags := VoxelMaterial.build_trans_flags(_materials_src())
 	# hash 必须包含所有影响几何的**输入**：MeshLibrary 模式会复用磁盘上的旧 mesh(带 meta)，
 	# 漏一项就会被短路、保留旧网格。透明标志也算输入 —— 它决定体素进 solid 还是 trans 桶，
 	# 只改材质透明度（体素一个没动）同样会换出不同的网格。
-	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
-	var trans_flags := VoxelMaterial.build_trans_flags(materials_src)
 	var voxels_hash := hash([voxels.hash(), scale, shape, sphere_subdivisions, sphere_scale,
 			origin_mode, trans_flags])
 	_native_arrays = {}
@@ -482,14 +507,37 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 
 ## 由块缓冲生成网格（QVX 路径的实例入口：整资产 / MeshLibrary 分项共用）。
 ## layout_offset 为体素单位的原点偏移（见 VoxelWorldUtil.origin_offset）。
+## 与体素路径同一套逐项缓存：命中就不跑内核 —— `.qvx` 分项此前无条件重建，
+## 改一个模型时其余项全量重算，正是"分项缓存只覆盖 .vox"这个缺口的来源。
 func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3) -> void:
-	_reset_mesh()
+	var trans_flags := VoxelMaterial.build_trans_flags(_materials_src())
+	# 块表 hash 的代价是扫一遍 PackedInt32Array，远小于重跑一次原生内核。
+	var chunks_hash := hash([chunks.hash(), scale, shape, sphere_subdivisions, sphere_scale,
+			origin_mode, layout_offset, trans_flags])
 	_native_arrays = {}
-	if chunks.is_empty():
+	regenerated = true
+	if mesh and mesh.has_meta("hash") and chunks_hash == mesh.get_meta("hash") \
+			and (chunks.is_empty() or mesh.get_surface_count() > 0):
+		regenerated = false
 		return
-	var materials_src: Array = runtime_materials if not runtime_materials.is_empty() else voxel.materials
+	_reset_mesh()
+	if chunks.is_empty():
+		mesh.set_meta("hash", chunks_hash)
+		return
 	_native_arrays = NativeLoader.generate_arrays_from_chunks_native(
-			chunks, VoxelMaterial.build_trans_flags(materials_src), scale, layout_offset)
+			chunks, trans_flags, scale, layout_offset)
+	if _native_arrays.is_empty():
+		push_error("[VoxelSupport] 体素网格生成返回空（原生库 VoxelNative 不可用或版本不匹配）: %s" % root_path)
+		mesh.remove_meta("hash")
+		return
+	mesh.set_meta("hash", chunks_hash)
+
+
+## 材质来源（运行时材质优先；`.qvx` 路径的 `voxel` 为 null，故要兜底）。
+func _materials_src() -> Array:
+	if not runtime_materials.is_empty():
+		return runtime_materials
+	return voxel.materials if voxel != null else []
 
 
 ## 生成整个 QVX 资产：恒等摆放走块级（零逐体素展开），有变换时逐体素融合。

@@ -56,9 +56,9 @@ func _get_option_visibility(_path: String, option_name: StringName, options: Dic
 	return true
 
 
-func _from_qvx(qvx, options, source_file) -> Resource:
+func _from_qvx(qvx, options, source_file, _gen_files) -> Resource:
 	return VoxelMeshGenerator.generate_mesh_from_qvx(qvx, options, source_file)
 
 
-func _from_vox(vox, options, source_file) -> Resource:
+func _from_vox(vox, options, source_file, _gen_files) -> Resource:
 	return VoxelMeshGenerator.generate_mesh(vox, options, source_file)

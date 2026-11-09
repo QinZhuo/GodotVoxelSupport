@@ -3,17 +3,16 @@ extends TestCase
 ## MeshLibrary 分项**重复导入**时的重用边界：改 `.vox` 里一个模型，另外 N-1 个模型会不会跟着重建。
 ## 三层结论（本文件逐层钉死）：
 ##   ① 引擎层：一个 `.vox` = 一个导入产物，文件一改就整体重导 —— 这一层无法绕过，也不该绕；
-##   ② 几何层：只有 `mesh/import_meshes=true` 时才有跨导入的分项缓存（分项 `.res` 带 hash meta，
-##      `_get_mesh` 从磁盘取回同一个网格）。未改动的项 hash 一致 → 不跑原生内核、不重写文件；
-##      该开关默认 **false**，此时每项都是新建的 ArrayMesh，缓存无从命中 → 全部重建（见 `test_items_are_not_persisted...`）；
+##   ② 几何层：分项网格的落盘策略（`mesh/storage`，与 ResourceImporterScene 的 materials/extract 同构）
+##      决定有没有跨导入的逐项缓存。extract_once 下未改动的项 hash 一致 → 不跑原生内核、不重写文件；
+##      built_in 下每项都是新建的 ArrayMesh，缓存无从命中 → 全部重建；
 ##   ③ 落盘层：缓存命中的项内容与磁盘完全一致，重写它只会白刷 mtime 并让引擎丢弃资源缓存 ——
-##      故 `_commit_mesh_library` 只保存本次真的重建过的项。
+##      故 `_commit_mesh_library` 只保存本次真的重建过的项；产物一律登记进 `gen_files`，
+##      由引擎纳入依赖与清理（否则项名/分项方式一变就留下孤儿文件）。
 ##
 ## 判据用**篡改哨兵**：把某一项的分项文件换成 1 个三角（3 顶点）。若该项重导后仍是 3 顶点，
 ## 说明它连内核都没进（缓存命中）；这是唯一能区分"重建了但结果相同"与"根本没重建"的观测手段。
 ##
-## 已知缺口（未覆盖、也不在此处修）：`.qvx` 的分项走块级入口，没有 hash 缓存，
-## 每次重导都会全量重建 —— 逐项缓存只存在于 `.vox` 路径。
 ## 另：`split_by_frame` 的每一项都是**整个资产**在某一帧的样子，改一个模型本就该让每一帧都变，
 ## 不存在"只重建一帧"的语义，故这里不对该模式做逐项缓存的断言。
 
@@ -28,18 +27,17 @@ func cleanup() -> void:
 func test_only_changed_item_is_rebuilt() -> void:
 	var dir := _fresh_dir("by_node")
 	var vox := _asset([1, 2, 3])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node)
-	var path := dir + "/lib.res"
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.extract_once)
+	var path := dir + "/asset.vox"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
-	ResourceSaver.save(lib1, path)
 	assert_eq(_names(lib1), ["A", "B", "C"], "夹具应是三个独立顶级对象")
 	var verts_before := _verts_of(lib1)
 
 	# 篡改 C 的分项文件：清空后塞一个三角。缓存命中时它必须原样活到下一轮。
-	_tamper(dir + "/lib/C.res")
+	_tamper(_child(dir, "C"))
 	# mtime 只到秒，睡过一整秒才能把"重写"与"没重写"区分开。
-	var mtimes_before := _mtimes(dir + "/lib", ["A.res", "B.res", "C.res"])
+	var mtimes_before := _mtimes(dir, ["A", "B", "C"])
 	OS.delay_msec(1100)
 
 	# 只改 A 的模型（远端加一格，与已有体素不相邻）
@@ -51,23 +49,23 @@ func test_only_changed_item_is_rebuilt() -> void:
 	assert_eq(verts_after["B"], verts_before["B"], "未改动的项内容应保持不变")
 	assert_eq(verts_after["C"], 3, "未改动的项应命中缓存（篡改哨兵原样保留 = 连内核都没进）")
 
-	var mtimes_after := _mtimes(dir + "/lib", ["A.res", "B.res", "C.res"])
-	assert_ne(mtimes_after["A.res"], mtimes_before["A.res"], "被改动的项应重新落盘")
-	assert_eq(mtimes_after["B.res"], mtimes_before["B.res"], "未改动的项不应被重写（mtime 会被白刷）")
-	assert_eq(mtimes_after["C.res"], mtimes_before["C.res"], "缓存命中的项同样不应被重写")
+	var mtimes_after := _mtimes(dir, ["A", "B", "C"])
+	assert_ne(mtimes_after["A"], mtimes_before["A"], "被改动的项应重新落盘")
+	assert_eq(mtimes_after["B"], mtimes_before["B"], "未改动的项不应被重写（mtime 会被白刷）")
+	assert_eq(mtimes_after["C"], mtimes_before["C"], "缓存命中的项同样不应被重写")
 
 
 ## split_by_model：同一套逐项缓存（按模型分项时每项就是单个模型，边界最清楚）。
 func test_split_by_model_reuses_unchanged_items() -> void:
 	var dir := _fresh_dir("by_model")
 	var vox := _asset([1, 2, 3])
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model)
-	var path := dir + "/lib.res"
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model, VoxelImportOptions.Storage.extract_once)
+	var path := dir + "/asset.vox"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
 	assert_eq(_names(lib1), ["model_0", "model_1", "model_2"], "按模型分项的项名")
 	var verts_before := _verts_of(lib1)
-	_tamper(dir + "/lib/model_1.res")
+	_tamper(_child(dir, "model_1"))
 
 	vox.models[0].voxels[Vector3i(10, 0, 0)] = 1
 	var lib2 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
@@ -83,8 +81,8 @@ func test_split_by_model_reuses_unchanged_items() -> void:
 func test_material_transparency_invalidates_cache() -> void:
 	var dir := _fresh_dir("trans")
 	var vox := _asset_multi_material()
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model)
-	var path := dir + "/lib.res"
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model, VoxelImportOptions.Storage.extract_once)
+	var path := dir + "/asset.vox"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
 	assert_eq(lib1.get_item_mesh(0).get_surface_count(), 1, "两格都不透明时应只有 solid 一个 surface")
@@ -95,35 +93,70 @@ func test_material_transparency_invalidates_cache() -> void:
 			"材质改透明后必须重建（旧 hash 会短路、留下单桶网格）")
 
 
-## 默认关闭 import_meshes 时分项网格不落盘：没有磁盘缓存，每项都会重建。
-## 这是开关的代价（不产生 N 个散文件），不是 bug —— 但"改一个模型全量重建"正是它导致的。
-func test_items_are_not_persisted_by_default() -> void:
-	var dir := _fresh_dir("no_files")
+## extract_overwrite：每次都重算并覆盖，缓存标记被主动丢弃。
+## 这是"改生成逻辑但 hash 没变"时唯一能强制刷新的手段（built_in 之外的第二条路）。
+func test_extract_overwrite_forces_rebuild() -> void:
+	var dir := _fresh_dir("overwrite")
+	var vox := _asset([2])
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_model,
+			VoxelImportOptions.Storage.extract_overwrite)
+	var path := dir + "/asset.vox"
+
+	VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
+	_tamper(_child(dir, "model_0"))
+
+	var lib := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
+	assert_ne(_verts_of(lib)["model_0"], 3, "extract_overwrite 下篡改哨兵应被覆盖（每次都重建）")
+
+
+## built_in：不落盘 → 没有可命中的缓存，改一个模型时所有项全部重建。
+## 这是"改一个模型全量重建"这个现象的根因，也是三种策略里唯一的无散文件选项。
+func test_built_in_rebuilds_every_item() -> void:
+	var dir := _fresh_dir("built_in")
 	var vox := _asset([1, 2])
-	var opts := VoxelMeshLibraryImporter.default_options()
-	assert_false(opts[VoxelImportOptions.IMPORT_MESHES], "默认应是关闭（否则会默认产出散文件）")
-	opts[VoxelImportOptions.MESH_MODE] = VoxelImportOptions.MeshMode.split_by_node
-	var path := dir + "/lib.res"
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.built_in)
+	var path := dir + "/asset.vox"
 
 	var lib := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
 	assert_eq(lib.get_item_list().size(), 2, "两项都应生成")
 	for i in lib.get_item_list():
-		assert_eq(lib.get_item_mesh(i).resource_path, "", "未开 import_meshes 时项网格不应有落盘路径")
-	assert_false(FileAccess.file_exists(dir + "/lib/A.res"), "不应产生分项文件（也就没有可命中的缓存）")
+		assert_eq(lib.get_item_mesh(i).resource_path, "", "built_in 下项网格不应有落盘路径")
+	assert_false(DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(_item_dir(dir))),
+			"不应产生分项目录（也就没有可命中的缓存）")
 
-	# 没有磁盘缓存 → 每次导入都是全新实例，几何无条件重算（改一个模型，全部项目一起重建）。
-	# 这是"默认配置下会全量重导"的直接证据，也是本文件要回答的现象的根因之一。
 	var ids_before := _instance_ids(lib)
 	var lib2 := VoxelMeshGenerator.generate_mesh_library(vox, opts, path)
 	for i in lib2.get_item_list():
 		assert_false(ids_before.has(lib2.get_item_mesh(i).get_instance_id()),
-				"未开 import_meshes 时项网格不可能被复用（每项都是新建的）")
+				"built_in 下项网格不可能被复用（每项都是新建的）")
 
 
-## `.qvx` 的分项**没有** hash 缓存（走块级入口 `start_generate_mesh_from_chunks`），
-## 开了 import_meshes 也照样全量重建。本用例把这条现状钉住：它一旦开始命中缓存，
-## 说明 .qvx 侧补上了逐项缓存，届时把断言改成与 `test_only_changed_item_is_rebuilt` 同构即可。
-func test_qvx_items_are_always_rebuilt() -> void:
+## 分项网格是导入产物，**必须**登记进 gen_files：否则引擎不知道它们依赖源文件，
+## 项名/分项方式一变就留下没人回收的孤儿。同时确认没登记主产物与不存在的路径。
+func test_generated_items_are_registered() -> void:
+	var dir := _fresh_dir("gen_files")
+	var vox := _asset([1, 2])
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.extract_once)
+	var gen_files: Array = []
+
+	VoxelMeshGenerator.generate_mesh_library(vox, opts, dir + "/asset.vox", gen_files)
+	var expected := [_child(dir, "A"), _child(dir, "B")]
+	assert_eq(gen_files.size(), expected.size(), "两项都应登记（实得 %s）" % str(gen_files))
+	for p in expected:
+		assert_true(gen_files.has(p), "应登记 %s（实得 %s）" % [p, str(gen_files)])
+		assert_true(FileAccess.file_exists(p), "登记前文件必须真的写出来了：%s" % p)
+
+	# built_in 不产生文件，也就不该登记任何东西
+	var quiet: Array = []
+	VoxelMeshGenerator.generate_mesh_library(vox,
+			_opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.built_in),
+			dir + "/quiet.vox", quiet)
+	assert_true(quiet.is_empty(), "built_in 下不应登记产物（实得 %s）" % str(quiet))
+
+
+## `.qvx` 的分项走块级入口，但用的是同一套逐项缓存（块表 hash + 选项 + 原点偏移）。
+## 修复前这里无条件重建：改一个模型，其余项全量重算。
+func test_qvx_items_reuse_unchanged_items() -> void:
 	const SAMPLE := "res://demo/samples/cars.qvx"
 	if not FileAccess.file_exists(SAMPLE):
 		return
@@ -132,29 +165,38 @@ func test_qvx_items_are_always_rebuilt() -> void:
 	if qvx == null:
 		return
 	var dir := _fresh_dir("qvx")
-	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node)
-	var path := dir + "/lib.res"
+	var opts := _opts(VoxelImportOptions.MeshMode.split_by_node, VoxelImportOptions.Storage.extract_once)
+	var path := dir + "/asset.qvx"
 
 	var lib1 := VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, opts, path)
 	assert_true(lib1.get_item_list().size() > 1, "夹具应有多项")
 	if lib1.get_item_list().is_empty():
 		return
 	var target := lib1.get_item_name(0)
-	var verts_before: int = _verts_of(lib1)[target]
-	_tamper(dir + "/lib/" + target + ".res")
+	assert_ne(_verts_of(lib1)[target], 3, "真实网格的顶点数不应与哨兵相同（否则本用例失效）")
+	_tamper(dir + "/asset_qvx/" + target + ".res")
 
 	var lib2 := VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, opts, path)
-	assert_eq(_verts_of(lib2)[target], verts_before,
-			"篡改哨兵应被覆盖 = 该项被重建（.qvx 分项暂无逐项缓存）")
+	assert_eq(_verts_of(lib2)[target], 3,
+			"未改动的项应命中缓存（篡改哨兵原样保留）")
 
 
 # 辅助：被测入口
 
-func _opts(mode: int) -> Dictionary:
+func _opts(mode: int, storage: int) -> Dictionary:
 	var opts := VoxelMeshLibraryImporter.default_options()
 	opts[VoxelImportOptions.MESH_MODE] = mode
-	opts[VoxelImportOptions.IMPORT_MESHES] = true
+	opts[VoxelImportOptions.STORAGE] = storage
 	return opts
+
+
+## 分项目录（与 VoxelMeshGenerator._item_dir 同一规则：<stem>_<ext>）。
+func _item_dir(dir: String) -> String:
+	return dir + "/asset_vox"
+
+
+func _child(dir: String, name: String) -> String:
+	return _item_dir(dir) + "/" + name + ".res"
 
 
 ## 项名 → 首 surface 的顶点数。空网格记 0。
@@ -198,18 +240,17 @@ func _tamper(child_path: String) -> void:
 	ResourceSaver.save(mesh, child_path)
 
 
-func _mtimes(dir: String, files: Array) -> Dictionary:
+func _mtimes(dir: String, names: Array) -> Dictionary:
 	var out := {}
-	for f in files:
-		out[f] = FileAccess.get_modified_time(dir + "/" + f)
+	for n in names:
+		out[n] = FileAccess.get_modified_time(_child(dir, n))
 	return out
 
 
 func _fresh_dir(name: String) -> String:
 	var dir := DIR + "/" + name
+	_remove_dir(dir)
 	DirAccess.make_dir_recursive_absolute(dir)
-	for f in DirAccess.get_files_at(dir):
-		DirAccess.remove_absolute(dir + "/" + f)
 	return dir
 
 
@@ -224,7 +265,7 @@ func _remove_dir(dir_path: String) -> void:
 		if dir.current_is_dir():
 			_remove_dir(full)
 		else:
-			DirAccess.remove_absolute(full)
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(full))
 		name = dir.get_next()
 	dir.list_dir_end()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(dir_path))

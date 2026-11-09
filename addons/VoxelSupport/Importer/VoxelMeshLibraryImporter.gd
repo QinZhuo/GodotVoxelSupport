@@ -6,7 +6,10 @@ extends VoxelMeshImporter
 ## 继承网格导入器的全部选项 + 两项专属（见 VoxelImportOptions.mesh_library_specs）。
 
 const MeshMode = VoxelImportOptions.MeshMode
+const Storage = VoxelImportOptions.Storage
 const mesh_mode := VoxelImportOptions.MESH_MODE
+const storage := VoxelImportOptions.STORAGE
+## 兼容别名：旧引用点仍在用这个键名（读取时回退到它，见 VoxelImportOptions.storage_of）。
 const import_meshes := VoxelImportOptions.IMPORT_MESHES
 
 
@@ -40,9 +43,9 @@ static func default_options() -> Dictionary:
 	return VoxelImportOptions.defaults(VoxelImportOptions.mesh_library_specs())
 
 
-func _from_qvx(qvx, options, source_file) -> Resource:
-	return VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, options, source_file)
+func _from_qvx(qvx, options, source_file, gen_files) -> Resource:
+	return VoxelMeshGenerator.generate_mesh_library_from_qvx(qvx, options, source_file, gen_files)
 
 
-func _from_vox(vox, options, source_file) -> Resource:
-	return VoxelMeshGenerator.generate_mesh_library(vox, options, source_file)
+func _from_vox(vox, options, source_file, gen_files) -> Resource:
+	return VoxelMeshGenerator.generate_mesh_library(vox, options, source_file, gen_files)

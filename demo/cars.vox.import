@@ -1,6 +1,7 @@
 [remap]
 
 importer="voxel_mesh"
+importer_version=1
 type="Mesh"
 uid="uid://btugifwnxf3jv"
 path="res://.godot/imported/cars.vox-50fb7c6b40dc9527f5c5c77a52e50aba.mesh"
