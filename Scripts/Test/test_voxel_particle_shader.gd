@@ -167,13 +167,15 @@ func test_particle_shape_switches() -> void:
 	r.display_mode = VoxelRenderer.DisplayMode.PARTICLES
 	var node_before := r.particle_node
 
-	r.particle_shape = VoxelRenderer.ParticleShape.CUBE
+	r.voxel_shape = VoxelRenderer.VoxelShape.CUBE
 	var cube := r.particle_node.get_draw_pass_mesh(0)
 	assert_true(cube is BoxMesh, "CUBE 形状应使用 BoxMesh（拼起来严丝合缝）")
 
-	r.particle_shape = VoxelRenderer.ParticleShape.SPHERE
+	r.voxel_shape = VoxelRenderer.VoxelShape.SPHERE
 	var sphere := r.particle_node.get_draw_pass_mesh(0)
 	assert_true(sphere is SphereMesh, "SPHERE 形状应使用 SphereMesh")
+	# 兼容别名读写同一属性
+	assert_eq(r.particle_shape, VoxelRenderer.VoxelShape.SPHERE, "particle_shape 应是 voxel_shape 的别名")
 	# 切换到球后，两个通道（不透明/透明）都应是球
 	assert_true(r.particle_node.get_draw_pass_mesh(1) is SphereMesh,
 			"透明通道也要跟着换形状，否则一块玻璃是球、另一块是方块")
@@ -187,8 +189,8 @@ func test_particle_shape_switches() -> void:
 func test_sphere_radius_fits_voxel() -> void:
 	var r := _renderer_with_data()
 	r.display_mode = VoxelRenderer.DisplayMode.PARTICLES
-	r.particle_sphere_scale = 1.0
-	r.particle_shape = VoxelRenderer.ParticleShape.SPHERE
+	r.sphere_scale = 1.0
+	r.voxel_shape = VoxelRenderer.VoxelShape.SPHERE
 	var sphere := r.particle_node.get_draw_pass_mesh(0) as SphereMesh
 	assert_true(sphere != null, "应为球网格")
 	# 半径 0.5 = 直径 1，乘 voxel_size 后正好等于体素边长
@@ -236,3 +238,25 @@ func _code_only(src: String) -> String:
 			continue
 		out.append(line)
 	return "\n".join(out)
+
+
+## 【回归：方块/球是渲染器属性，网格与粒子共用】
+## 早期形状只有**导入期**（mesh/shape 选项）能选，运行时路径只有方块面 ——
+## 于是"模型导成球、运行时显示成方块"，同一份数据两条路径长得不一样。
+## 现在 voxel_shape 统一控制：网格按球体重建 chunk mesh，粒子换 draw mesh。
+func test_shape_is_shared_by_mesh_and_particles() -> void:
+	var r := _renderer_with_data()
+	r.voxel_shape = VoxelRenderer.VoxelShape.SPHERE
+	# 粒子侧的 draw mesh 换成球
+	r.display_mode = VoxelRenderer.DisplayMode.PARTICLES
+	assert_true(r.particle_node.get_draw_pass_mesh(0) is SphereMesh,
+			"粒子通道也应使用球网格")
+	# 网格侧按球体重建：chunk 网格顶点数应远多于方块（20 面球 = 每体素 12 顶点）
+	r.display_mode = VoxelRenderer.DisplayMode.MESH
+	assert_eq(r.voxel_shape, VoxelRenderer.VoxelShape.SPHERE, "形状属性应保留")
+	# 形状参数（半径/面数）也是共用的
+	r.sphere_scale = 0.5
+	assert_true(absf(r.sphere_scale - 0.5) < 0.001, "sphere_scale 应可设置")
+	r.sphere_subdivisions = 2
+	assert_eq(r.sphere_subdivisions, 2, "sphere_subdivisions 应可设置")
+	r.queue_free()

@@ -92,35 +92,60 @@ var particle_mode: bool:
 	set(v):
 		display_mode = DisplayMode.PARTICLES if v else DisplayMode.MESH
 
-## 粒子形状：方块还是球。
-## 【为什么粒子侧也要这个】网格路径早就有 cube/sphere 两种形状（导入选项 mesh/shape），
-## 粒子若只能画方块，"小球粒子"这类效果就得项目自己做 mesh —— 而那正是插件该给的机制。
-## 两者几何不同但**共用同一份点云**：方块是 6 面立方体，球是低面数 icosphere，
-## 顶点都在插件这边生成，项目只换一个 draw mesh 即可。
-enum ParticleShape {
+## 体素的显示形状：方块还是球。**网格与粒子共用这一个开关**。
+##
+## 【为什么形状该是渲染器的属性，而不是粒子专属】
+## 导入路径早就有 cube/sphere 两种形状（导入选项 mesh/shape），但那是**烘焙期**的选择：
+## 运行时换形状就得重新导入。而运行时路径（generate_chunk_dense）此前只有方块面 ——
+## 于是"导成球的模型在运行时显示成方块"，同一份数据两条路径长得不一样。
+## 现在两条路径都支持，且由同一个属性控制：
+##   · MESH 模式：chunk 网格按球体重建（原生 generate_spheres_native）
+##   · PARTICLES 模式：draw mesh 换成 SphereMesh（不重建粒子节点）
+enum VoxelShape {
 	CUBE,    ## 体素方块（默认，拼起来严丝合缝）
-	SPHERE,  ## 小球（体素观感更柔和，散开后像粒子）
+	SPHERE,  ## 小球（观感柔和，散开后像粒子）
 }
 
-@export var particle_shape: ParticleShape = ParticleShape.CUBE:
+## 体素显示形状。网格与粒子都跟着它变。
+@export var voxel_shape: VoxelShape = VoxelShape.CUBE:
 	set(v):
-		particle_shape = v
+		voxel_shape = v
+		if v == VoxelShape.SPHERE:
+			# 球体网格必须按球重建（方块面不能靠换材质变成球）
+			_clear_lod_meshes()
+			if data:
+				for ck in data.get_loaded_chunk_keys():
+					data.mark_chunk_dirty(ck)
+			request_update()
+		else:
+			_clear_lod_meshes()
+			if data:
+				for ck in data.get_loaded_chunk_keys():
+					data.mark_chunk_dirty(ck)
+			request_update()
 		if particle_node != null:
 			_apply_particle_shape()
 
-## 球半径相对体素边长的比例（仅 particle_shape = SPHERE 生效）。
-@export_range(0.1, 2.0, 0.01) var particle_sphere_scale: float = 1.0:
+## 【兼容别名】等价于 voxel_shape（早期只有粒子侧用，故叫 particle_shape）。
+var particle_shape: VoxelShape:
+	get:
+		return voxel_shape
 	set(v):
-		particle_sphere_scale = v
-		if particle_node != null:
-			_apply_particle_shape()
+		voxel_shape = v
 
-## 球的面数分档（仅 SPHERE 生效）。0 = 20 面（最省），1 = 80 面，2 = 320 面。
-@export_range(0, 2, 1) var particle_sphere_subdivisions: int = 0:
+## 球半径相对体素边长的比例（两种模式共用）。
+@export_range(0.1, 2.0, 0.01) var sphere_scale: float = 1.0:
 	set(v):
-		particle_sphere_subdivisions = v
-		if particle_node != null:
-			_apply_particle_shape()
+		sphere_scale = v
+		_rebuild_for_shape_change()
+
+## 球的面数分档。0 = 20 面（最省），1 = 80 面，2 = 320 面。网格与粒子共用。
+@export_range(0, 2, 1) var sphere_subdivisions: int = 0:
+	set(v):
+		sphere_subdivisions = v
+		_rebuild_for_shape_change()
+
+
 
 ## 粒子点数上限。超出按确定性抽样缩减（同输入同输出，回放可复现）。
 @export_range(100, 500000, 100) var particle_max_points: int = 200000
@@ -640,18 +665,18 @@ func _ensure_particle_node(count: int) -> void:
 ## 球按同一边长缩放后就正好内切于体素格 —— 与网格渲染的 sphere 形状观感一致。
 func _make_particle_mesh(mat: Material) -> Mesh:
 	var m: Mesh
-	if particle_shape == ParticleShape.SPHERE:
+	if voxel_shape == VoxelShape.SPHERE:
 		var sphere := SphereMesh.new()
 		# 【面数分档对齐网格路径的 icosphere 档位】20 / 80 / 320 面。
 		# SphereMesh 是 UV 球，用 rings/radial_segments 近似：0 -> 6x8、1 -> 10x16、2 -> 18x32。
-		var idx := clampi(particle_sphere_subdivisions, 0, 2)
+		var idx := clampi(sphere_subdivisions, 0, 2)
 		var rings: int = [6, 10, 18][idx]
 		var segs: int = [8, 16, 32][idx]
 		sphere.rings = rings
 		sphere.radial_segments = segs
 		# 直径 = 1（半径 0.5），再乘用户给的比例
-		sphere.radius = 0.5 * particle_sphere_scale
-		sphere.height = 1.0 * particle_sphere_scale
+		sphere.radius = 0.5 * sphere_scale
+		sphere.height = 1.0 * sphere_scale
 		m = sphere
 	else:
 		var box := BoxMesh.new()
@@ -662,6 +687,17 @@ func _make_particle_mesh(mat: Material) -> Mesh:
 
 
 ## 形状参数变了：换掉两个 draw pass 的网格（不用重建粒子节点）。
+## 形状参数（球半径 / 面数）变了：网格要重建、粒子要换 mesh。
+func _rebuild_for_shape_change() -> void:
+	if particle_node != null:
+		_apply_particle_shape()
+	_clear_lod_meshes()
+	if data:
+		for ck in data.get_loaded_chunk_keys():
+			data.mark_chunk_dirty(ck)
+	request_update()
+
+
 func _apply_particle_shape() -> void:
 	if particle_node == null:
 		return
@@ -1147,6 +1183,10 @@ func _update_mesh_async() -> void:
 	var w_scale := voxel_scale
 	var w_offset := render_offset
 	var w_diag := diag_enabled
+	# 形状参数同样按值捕获（worker 不能读节点属性）
+	var w_shape := int(voxel_shape)
+	var w_subdiv := sphere_subdivisions
+	var w_sphere_scale := sphere_scale
 	for ck in visible:
 		# 【必须用 lambda 显式绑定 out 的位置】Godot 4 的 Callable.bind() 把绑定实参放在
 		# call() 实参**之后**，所以 `_generate_chunk_worker.bind(args...).call(out)` 会让 out
@@ -1155,7 +1195,7 @@ func _update_mesh_async() -> void:
 		# 下面的 lambda 只有一个自由形参 out，与 VoxelMeshBatch._wrap 的调用方式严格对应。
 		batch.spawn(func(out: Dictionary) -> void:
 			_generate_chunk_worker(snapshot, aligned_materials, trans_flags, ck,
-				w_scale, w_offset, w_diag, out))
+				w_scale, w_offset, w_diag, out, w_shape, w_subdiv, w_sphere_scale))
 	# 一个任务都没派发出去时必须立即结算：否则 _batch 永远"在途"，会挡住后续所有更新
 	# （旧实现用裸计数 0 天然表示"无在途"，换成对象后要显式结清）。
 	batch.settle_if_idle()
@@ -1236,11 +1276,22 @@ func _apply_stats_from_result(result: Dictionary) -> void:
 ## diag_enabled 由主线程派发时捕获传入，子线程只读参数，避免跨线程访问节点属性
 func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: PackedByteArray,
 		chunk_key: Vector3i, scale: float, offset: Vector3 = Vector3.ZERO,
-		diag_enabled: bool = false, out: Dictionary = {}) -> void:
+		diag_enabled: bool = false, out: Dictionary = {},
+		shape: int = VoxelShape.CUBE, subdivisions: int = 0, sphere_scale_v: float = 1.0) -> void:
 	var t0 := Time.get_ticks_usec()
 	var halo := VoxelChunkGenerator.build_halo_from_buffers(buffers, chunk_key)
-	var arr := VoxelChunkGenerator.generate_single_chunk_dense(
-			halo, materials, scale, chunk_key, offset, trans_flags)
+	var arr: Dictionary
+	if shape == VoxelShape.SPHERE:
+		# 球体路径：每体素一颗小球。顶点在 **chunk 局部空间**（与方块路径同一约定），
+		# 由 _apply_built_chunk 里的 chunk_mesh.position 定位到世界。
+		# 【offset 必须传】与方块路径同一约定（顶点 = (体素坐标 + offset) × scale）。
+		# 漏掉它会让球体整体偏一个模型尺寸 —— 正是"球模式与其它形态位置对不上"的原因。
+		arr = VoxelChunkGenerator.generate_spheres_for_chunk(
+				halo, materials, scale, subdivisions, sphere_scale_v,
+				VoxelChunkGenerator.SPHERE_VERTEX_BUDGET, offset)
+	else:
+		arr = VoxelChunkGenerator.generate_single_chunk_dense(
+				halo, materials, scale, chunk_key, offset, trans_flags)
 	var gen_time_ms := (Time.get_ticks_usec() - t0) / 1000.0
 
 	# 诊断：每 chunk 生成耗时 > 5ms 时打印（仅诊断模式开启时）

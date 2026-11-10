@@ -206,11 +206,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _renderer.display_mode == VoxelRenderer.DisplayMode.PARTICLES
 				else VoxelRenderer.DisplayMode.PARTICLES)
 		KEY_F:
-			# 形状是渲染器的机制（方块 / 球），和"怎么动"无关，故仍归插件
-			_renderer.particle_shape = (
-				VoxelRenderer.ParticleShape.SPHERE
-				if _renderer.particle_shape == VoxelRenderer.ParticleShape.CUBE
-				else VoxelRenderer.ParticleShape.CUBE)
+			# 形状是渲染器的机制（方块 / 球），网格与粒子共用同一个开关
+			_renderer.voxel_shape = (
+				VoxelRenderer.VoxelShape.SPHERE
+				if _renderer.voxel_shape == VoxelRenderer.VoxelShape.CUBE
+				else VoxelRenderer.VoxelShape.CUBE)
 
 
 func _set_mode(mode: String) -> void:
@@ -292,7 +292,7 @@ func _update_hud() -> void:
 		"体素粒子 —— 项目侧自定义效果示例",
 		"当前：%s" % titles.get(_mode, _mode),
 		"粒子 %d  ·  形状 %s  ·  FPS %d" % [n,
-			"球" if _renderer.particle_shape == VoxelRenderer.ParticleShape.SPHERE else "方块",
+			"球" if _renderer.voxel_shape == VoxelRenderer.VoxelShape.SPHERE else "方块",
 			Engine.get_frames_per_second()],
 		"",
 		"1 静态   2 漂浮   3 散开   4 聚合   空格 重放   T 切网格/粒子   F 切形状",

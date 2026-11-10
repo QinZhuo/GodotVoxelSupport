@@ -12,6 +12,9 @@ const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
 ## halo 体积别名（build_halo_from_buffers 校验 native 返回尺寸用）
 const HALO_VOLUME := VoxelChunk.HALO_VOLUME
 
+## halo 边长（34 = CHUNK_SIZE + 2×HALO）。球体生成要遍历整块 halo，故需要它。
+const HALO_SIZE := VoxelChunk.HALO_SIZE
+
 
 ## 后台线程安全的网格数据生成入口（不创建/修改 ArrayMesh，可在子线程运行）
 ## 返回一个 Dictionary 或 null：
@@ -71,6 +74,62 @@ static func generate_single_chunk_dense(
 	if result.get("solid_idxs", PackedInt32Array()).is_empty() and result.get("trans_idxs", PackedInt32Array()).is_empty():
 		return {}
 	return result
+
+
+## 从"光环缓冲"生成单个 chunk 的**球体**网格数据（每体素一颗小球）。
+##
+## 【为什么需要它】球体形状此前只有**导入路径**（VoxelMeshGenerator → generate_spheres_native）
+## 支持，而运行时渲染走的是 generate_chunk_dense（只有方块面）。
+## 于是"模型能导成球、运行时却只能显示方块"—— 同一份数据在两条路径上长得不一样。
+## 本函数把球体能力补进运行时路径，两条路径共用同一原生内核。
+##
+## [param halo] 34³ 稠密光环（值 = 材质 ID，0 = 空）。用 halo 而不是 chunk 本体，
+##   是为了让**跨 chunk 边界的内部体素也能被正确剔除**（否则边界上会多出看不见的球）。
+## [param vertex_budget] 顶点预算：超出时原生按 step 抽稀（chunk 级一般用不到）。
+##
+## 【坐标约定】与方块路径完全一致：顶点在 **chunk 局部空间**，调用方把
+## MeshInstance3D.position 设为 chunk_key × chunk_size × scale。
+## 为此把 halo 的 (0..33) 平移到 (-1..32) 再交给原生（halo 的外缘就是邻块的最后一层）。
+static func generate_spheres_for_chunk(halo: PackedInt32Array, aligned_materials: Array,
+		scale: float, subdivisions: int = 0, sphere_scale: float = 1.0,
+		vertex_budget: int = SPHERE_VERTEX_BUDGET,
+		offset: Vector3 = Vector3.ZERO) -> Dictionary:
+	if halo.size() != HALO_VOLUME:
+		push_error("[VoxelChunkGenerator] 球体生成需要 34³ halo，实际 %d" % halo.size())
+		return {}
+	# 【只传 chunk 本体（局部 0..31），不传 halo 外缘】这是有意为之：
+	# 原生 generate_spheres_native 的剔除规则是"相对**传入集合**是否外露"，
+	# 把外缘邻居一起传进去，那些邻居格子自身也会被判为外露并画出来 ——
+	# 而它们在相邻 chunk 里还会再画一遍（坐标不同），表现为**模型外面多出一层球**。
+	# 只传本体时，chunk 边界上的体素会被判为外露而多画一颗球；
+	# 但那颗球位于实体内部（邻居 chunk 是实心时才出现），被周围球挡住，只多花几个三角形。
+	# 视觉结果与"完整剔除"一致，代价是一次可控的 overdraw。
+	var voxels := {}
+	for lz in CHUNK_SIZE:
+		for ly in CHUNK_SIZE:
+			for lx in CHUNK_SIZE:
+				var m: int = halo[(lx + HALO_INSET) + (ly + HALO_INSET) * HALO_SIZE
+						+ (lz + HALO_INSET) * HALO_SIZE * HALO_SIZE]
+				if m > 0:
+					voxels[Vector3i(lx, ly, lz)] = m
+	if voxels.is_empty():
+		return {}
+	var trans_flags := VoxelMaterial.build_trans_flags(aligned_materials)
+	# 【offset 必须传】它是 QVoxelSource.center_offset（体素单位的原点偏移），
+	# 与方块路径同一约定：顶点 = (体素坐标 + offset) × scale。
+	# 漏掉它会让球体整体偏掉一个模型尺寸 —— 这正是"球模式和其它形态位置对不上"的原因。
+	# 原生内部会乘 scale，故这里传体素单位的 offset。
+	return NativeLoader.generate_spheres_native(
+			voxels, trans_flags, subdivisions, sphere_scale, scale, vertex_budget, offset)
+
+
+## halo 外缘层数（1）。halo 局部坐标减去它 = chunk 局部坐标。
+const HALO_INSET := 1
+
+## 球体路径的默认顶点预算。20 面 icosphere = 12 顶点/球；32³ 全实心约 39 万顶点，故需要上限。
+## 【给得比导入路径（400 万）小得多】运行时按 chunk 结算，单个 chunk 撑爆预算就会抽稀到出现空洞；
+## 而一个 chunk 正常只有几千个表面球，20 万顶点已经足够。
+const SPHERE_VERTEX_BUDGET := 200000
 
 
 # 【已移除：顶点色 AO（逐顶点环境光遮蔽烘进 Mesh.ARRAY_COLOR）】
