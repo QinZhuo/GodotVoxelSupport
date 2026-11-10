@@ -572,6 +572,16 @@ func particle_voxel_size() -> float:
 
 # ── 粒子渲染：内部 ────────────────────────────────────────────────────────────
 
+## 网格此刻是否应当可见（粒子模式下网格必须整体隐藏）。
+## 【为什么需要这个函数，而不是只在切换时遍历一遍】
+## 网格是**异步分批**建出来的：切到粒子模式的那一刻 _lod_meshes 可能还是空的，
+## 之后建出的 Chunk_* 节点默认 visible=true —— 于是粒子与网格同时存在。
+## 方块形状下两者重合、被粒子挡着看不出来；换成球形就露馅（球之间有缝，能看见底下的网格）。
+## 故**创建处**也必须按当前模式设可见性。
+func _meshes_should_be_visible() -> bool:
+	return display_mode != DisplayMode.PARTICLES
+
+
 func _apply_display_mode() -> void:
 	var use_particles := display_mode == DisplayMode.PARTICLES
 	if particle_node != null:
@@ -950,6 +960,9 @@ func mount_lod_mesh(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 		mi = MeshInstance3D.new()
 		mi.name = "LOD%dB_%d_%d_%d" % [level, bk.x, bk.y, bk.z]
 		add_child(mi)
+		# 新建的节点默认可见 —— 粒子模式下必须立刻隐藏，否则会和粒子同屏
+		# （见 _meshes_should_be_visible 的注释：切换时账本可能还是空的）
+		mi.visible = _meshes_should_be_visible()
 		mi.position = Vector3(bk) * _lod_block_edge_world(level)
 	if mesh != null and mesh.get_surface_count() > 0:
 		_apply_materials(mesh)
@@ -1431,6 +1444,8 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 		chunk_mesh = MeshInstance3D.new()
 		chunk_mesh.name = "Chunk_%d_%d_%d" % [chunk_key.x, chunk_key.y, chunk_key.z]
 		add_child(chunk_mesh)
+		# 新建的节点默认可见 —— 粒子模式下必须立刻隐藏（异步建网格的竞态，见 _meshes_should_be_visible）
+		chunk_mesh.visible = _meshes_should_be_visible()
 		_lod_meshes[0][chunk_key] = chunk_mesh
 
 	var has_mesh := false
