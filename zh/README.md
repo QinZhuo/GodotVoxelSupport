@@ -151,6 +151,93 @@ target.damage_ray(origin, direction, max_distance)
 `res://demo/streaming_demo.tscn` — 按键 **0** 在 磁盘文件流 与 程序化无限世界 间切换。
 操作：WASD 移动、Q/E 升降、空格加速、1 流式开关、2 视锥剔除开关。
 
+## 体素粒子（底层接口）
+
+把体素模型**显示成一大堆体素方块**。插件只提供这一层机制，**不实现任何具体动效** ——
+漂浮、消散、聚合、A→B 变形都是你的项目的表现效果，应该由项目自己写。
+
+```gdscript
+$VoxelRenderer.display_mode = VoxelRenderer.DisplayMode.PARTICLES   # 切到粒子（自动隐藏网格）
+$VoxelRenderer.particle_shape = VoxelRenderer.ParticleShape.SPHERE  # 方块 / 球
+var node := $VoxelRenderer.particle_node    # 一个已填好点云的 GPUParticles3D
+node.process_material = my_particles_shader # 换掉它，自己决定粒子怎么动
+$VoxelRenderer.particle_points              # 点数据（PackedFloat32Array）
+```
+
+演示：`res://demo/particle_demo.tscn`（1 静态 / 2 漂浮 / 3 散开 / 4 聚合 / T 切网格与粒子 / F 切形状）。
+它展示**两种自定义方式**：改 uniform（漂浮），或换整个 process 着色器（散开/聚合）。
+
+### 两个枚举控制显示
+
+| 枚举 | 取值 | 说明 |
+|---|---|---|
+| `DisplayMode` | `MESH` / `PARTICLES` | 网格（合并面片，默认）还是粒子（每体素一个方块） |
+| `ParticleShape` | `CUBE` / `SPHERE` | 粒子画成方块还是球；换形状**不重建粒子节点**，只换 draw pass 的网格 |
+
+球的几何也在插件侧生成（`SphereMesh`，按 `particle_sphere_subdivisions` 分 6/10/18 环三档），
+`particle_sphere_scale` 控制相对体素边长的半径。它与网格路径的 `mesh/shape = sphere` 是同一个观感目标，
+只是网格那边是导入期烘焙、粒子这边是运行时换 draw mesh。
+
+`particle_mode` 布尔保留为**兼容别名**（读写都同步到 `display_mode`），新代码请用枚举。
+
+### 数据从哪来：`QVoxelSource.build_particle_points()`
+
+**没有单独的点云资源类** —— 那是同一份数据的第二种视图，会引入"两套真值谁先更新"的问题。
+点云是 `QVoxelSource` 的一个**派生查询**，随时可重算、不落盘：
+
+```gdscript
+# 只拿点数组（自己算配对/偏移用）
+var pts := source.build_particle_points(0.1, 200000, true)
+
+# 或者连 GPU 纹理一起拿（渲染器内部就是这么用的）
+var tex := source.build_particle_textures(0.1, 200000, true)
+tex["positions"]   # ImageTexture RGBAF：xyz
+tex["colors"]      # ImageTexture RGBAF：线性基色 + 不透明度
+tex["props"]       # ImageTexture RGBAF：metal / rough / emission
+tex["grid_width"]  # 着色器用它把 INDEX 映射到纹素
+```
+
+**每点 12 个 float**（`QVoxelSource.PARTICLE_STRIDE`）：
+
+| 偏移 | 内容 |
+|---|---|
+| `P_POS` (0) +0..2 | 世界坐标 = (体素坐标 + center_offset) × scale，**与网格渲染完全重合** |
+| `P_MAT` (3) | 材质 ID |
+| `P_COLOR` (4) +0..2 | 基色（sRGB） |
+| `P_SEED` (7) | 稳定随机 0..1（由坐标决定，同一格恒同值） |
+| `P_EMIT` (8) | 自发光 0..1 |
+| `P_METAL` (9) | 金属度 0..1 |
+| `P_ROUGH` (10) | 粗糙度 0..1 |
+| `P_TRANS` (11) | 透明度 0..1（0 = 不透明） |
+
+### 观感保真：几个必须做对、做错了不报错的地方
+
+渲染器已经把这些处理好了。若你自己写 process 着色器，注意别把它们弄丢：
+
+| 问题 | 现象 | 正确做法 |
+|---|---|---|
+| 粒子尺寸写死 | 方块比体素大 5 倍，前层遮后层，像被透视 | 边长 = `voxel_scale × particle_scale` |
+| 颜色空间（双重 gamma） | 暗部提亮一倍以上、整体发白变平 | 烘焙时 `srgb_to_linear()`（`FORMAT_RGBAF` 是线性纹理） |
+| 只带颜色、不带材质 | 金属没金属感、玻璃是实心色块 | 输出 `METALLIC / ROUGHNESS / EMISSION`，走真 PBR |
+| 单一材质分不开透明/不透明 | 要么透视，要么玻璃把后面的体素裁没 | **拆成两个 draw pass**，靠 alpha 分流 |
+| 不透明通道写了 ALPHA | 公式上被归为透明材质 -> 不写深度 -> 透视 | 不透明通道**绝对不要写 ALPHA** |
+| 表面过滤误删玻璃 | 车窗整片消失 | 透明体素**永远保留**（被包住也看得见后面） |
+| 忘设 `preprocess` | 只有零星几个点，像没生效 | `preprocess = lifetime`，粒子一开始就全部存在 |
+
+实测（cars.vox，同机位同环境）：网格与粒子的平均亮度差 **1.5%**、逐像素平均差 **0.065**、
+金属部分平均亮度差 **0.7%**、过曝纯白像素两边都是 **0**。
+
+### 可选的配对工具：`VoxelMorphMap`
+
+A→B 变形需要算"A 的第 i 个点该飞向 B 的第几个点"。这是**算法**不是**效果**，故留作工具类：
+
+```gdscript
+var map := VoxelMorphMap.build(a_points, b_points)   # 默认 Morton 排序配对
+map.b_index[i]   # A 的第 i 个点 -> B 的第 b_index[i] 个点
+```
+
+按索引硬配会让粒子满天乱飞拉出交叉长线。实测 2 万点：Morton 约 30ms、平均配对距离 0.418；
+单轴排序 130ms / 1.039；空间哈希 0.108 但慢 30%；贪心 O(n²) 在 5000 点就 >2 秒，不可用。
 ## 体素建模（QVoxelier + 脚本）
 
 `res://QVoxelier/QVoxelier.tscn` 是基于本插件的独立体素建模软件。它界面上能做的每个动作，

@@ -492,6 +492,8 @@ func get_dirty_chunks() -> Array[Vector3i]:
 const CHUNK_SIZE := VoxelChunk.CHUNK_SIZE
 const CHUNK_VOLUME := VoxelChunk.CHUNK_VOLUME
 const CHUNK_SLICE := VoxelChunk.CHUNK_SLICE
+## 块内最大合法下标（= CHUNK_SIZE - 1）。块边界的邻居判断用。
+const CHUNK_LAST := VoxelChunk.CHUNK_SIZE - 1
 const HALO := VoxelChunk.HALO
 const HALO_SIZE := VoxelChunk.HALO_SIZE
 const HALO_VOLUME := VoxelChunk.HALO_VOLUME
@@ -2256,6 +2258,249 @@ func get_chunk_voxels(chunk_key: Vector3i) -> Array:
 ## O(1) 判断指定 chunk 数据是否已就绪（内存已加载 / 流中已存）。可生成但尚未生成的返回 false。
 func has_chunk(chunk_key: Vector3i) -> bool:
 	return _chunk_buffers.has(chunk_key) or is_stored(chunk_key)
+
+
+# ── 粒子点数据（把体素导出成 GPU 可直接消费的点云）──────────────────────────
+# 【为什么放在数据层，而不是单独一个"点云资源"】
+# 早前实现过一个 VoxelPointBuffer 资源类来承载这些数据 —— 那是错的：它与 QVoxelSource
+# 是**同一份数据的两种视图**，于是出现了"两套真值、谁先更新"的问题（烘焙后源改了，
+# 点云还是旧的），还要为它单独做导入器、单独做资源类型。
+# 现在只作为**派生查询**存在：随时可从源头重算，不持有任何权威状态，
+# 也不落盘（要缓存就自己存纹理，那才是 GPU 真正需要的东西）。
+
+## 每个粒子点的 float 数。布局见 build_particle_points 的说明。
+const PARTICLE_STRIDE := 12
+
+## 通道偏移（= PARTICLE_STRIDE 布局的下标）
+const P_POS := 0      ## +0..2 世界坐标
+const P_MAT := 3      ## 材质 ID
+const P_COLOR := 4    ## +0..2 sRGB 基色
+const P_SEED := 7     ## 稳定随机 0..1
+const P_EMIT := 8     ## 自发光 0..1
+const P_METAL := 9    ## 金属度 0..1
+const P_ROUGH := 10   ## 粗糙度 0..1
+const P_TRANS := 11   ## 透明度 0..1（0 = 不透明）
+
+## 默认粒子点上限。超过走确定性下采样（步长抽样，同输入同输出）。
+## 依据：20 万点的三张纹理各约 4 MB；实测 26 万粒子渲染增量仅 2.5 ms。
+const PARTICLE_DEFAULT_MAX := 200000
+
+
+## 把当前体素导出成**连续定长**的粒子点数组（GPU 可直接消费）。
+##
+## 布局（每点 PARTICLE_STRIDE = 12 float）：
+##   [0..2]  世界坐标 = (体素坐标 + center_offset) × scale —— 与网格渲染同一套定位，
+##           故粒子与网格**天然重合**，不需要调用方再去对原点
+##   [3]     材质 ID（0 = 空气，不产生点）
+##   [4..6]  基色（**sRGB 存储值**，上传纹理时才转线性）
+##   [7]     稳定随机种子 0..1（由坐标决定，同一格恒同值，供错峰/相位用）
+##   [8..11] emission / metal / rough / trans（0..1）
+##
+## [param scale] 每体素的世界单位；<= 0 时用 default_scale。
+## [param max_points] 点数上限，超出按均匀步长下采样（确定性，可复现）。
+## [param surface_only] 只留表面体素。**透明体素永远保留**（玻璃被包住也能看见后面）。
+func build_particle_points(scale: float = -1.0, max_points: int = PARTICLE_DEFAULT_MAX,
+		surface_only: bool = true) -> PackedFloat32Array:
+	var s := scale if scale > 0.0 else default_scale
+	var limit := maxi(1, max_points)
+	var tbl := _particle_mat_table()
+
+	# 【单遍构建，不预先计数】先数一遍再建一遍会把烘焙成本翻倍（实测 84ms -> 140ms）。
+	# 下采样改用"按已收集数判断"的近似步长：先按最坏情况估一个步长，
+	# 收集到上限后步长随时间翻倍（reservoir 式），结果仍是确定性的。
+	var out := PackedFloat32Array()
+	var step := 1.0
+	var next_take := 0.0
+	var seen := 0
+	for ck: Vector3i in _chunk_buffers:
+		# 单层 break 只能跳出内层，外层必须再判一次 —— 否则上限到了还会遍历完所有 chunk
+		if out.size() / PARTICLE_STRIDE >= limit:
+			break
+		var buf: PackedInt32Array = _chunk_buffers[ck]
+		var origin := VoxelChunk.origin_of(ck)
+		for i in CHUNK_VOLUME:
+			var mat_id := buf[i]
+			if mat_id <= 0:
+				continue
+			# 透明体素永远保留：玻璃被邻居包住时**仍能看见后面**，
+			# 按不透明规则过滤会让车窗整片消失（实测出现过 1050 px 空洞）。
+			if surface_only and tbl[mat_id * 5] < 0.5 and _is_inside(ck, i):
+				continue
+			# 已满上限：直接停（比"翻倍步长继续抽"更简单，也让点数严格 <= limit）
+			if out.size() / PARTICLE_STRIDE >= limit:
+				break
+			if float(seen) < next_take:
+				seen += 1
+				continue
+			seen += 1
+			next_take += step
+
+			var pos: Vector3i = origin + _local_from_index(i)
+			var world := (Vector3(pos) + center_offset) * s
+			var col := _particle_color(mat_id)
+			var tb := mat_id * 5
+			out.append(world.x)
+			out.append(world.y)
+			out.append(world.z)
+			out.append(float(mat_id))
+			out.append(col.r)
+			out.append(col.g)
+			out.append(col.b)
+			out.append(_particle_seed(pos))
+			out.append(tbl[tb + 1])
+			out.append(tbl[tb + 2])
+			out.append(tbl[tb + 3])
+			out.append(tbl[tb + 4])
+	return out
+
+
+## 把点数据上传成 GPU 纹理。返回：
+##   points      PackedFloat32Array（同 build_particle_points）
+##   positions   ImageTexture RGBAF：xyz + 占位
+##   colors      ImageTexture RGBAF：线性基色 + **不透明度**
+##   props       ImageTexture RGBAF：metal / rough / emission / 占位
+##   count       实际点数
+##   grid_width  纹理排布宽度（着色器用它把 INDEX 映射到纹素）
+##   bounds      内容包围盒（世界单位）
+##   stride      每点 float 数
+##
+## 【为什么颜色要转线性】FORMAT_RGBAF 是线性纹理，引擎不做 sRGB→linear 转换；
+## VoxelMaterial.color 存的是 sRGB 显示值。直接塞进去等于**双重 gamma** ——
+## 暗部整体提亮一倍以上（#444444 显示成 #8d8d8d），画面又白又平。
+## 网格路径的 albedo 纹理是 RGBA8(sRGB)，引擎会自动转换，所以两条路径必须在此对齐。
+func build_particle_textures(scale: float = -1.0, max_points: int = PARTICLE_DEFAULT_MAX,
+		surface_only: bool = true) -> Dictionary:
+	var pts := build_particle_points(scale, max_points, surface_only)
+	var n := pts.size() / PARTICLE_STRIDE
+	if n <= 0:
+		return {"points": pts, "count": 0, "grid_width": 1, "stride": PARTICLE_STRIDE,
+				"positions": null, "colors": null, "props": null, "bounds": AABB()}
+	var w := maxi(1, int(ceil(sqrt(float(n)))))
+	var h := maxi(1, int(ceil(float(n) / float(w))))
+	var pos_img := Image.create(w, h, false, Image.FORMAT_RGBAF)
+	var col_img := Image.create(w, h, false, Image.FORMAT_RGBAF)
+	var props_img := Image.create(w, h, false, Image.FORMAT_RGBAF)
+	var min_v := Vector3(INF, INF, INF)
+	var max_v := -min_v
+	for i in n:
+		var b := i * PARTICLE_STRIDE
+		var x := i % w
+		var y := i / w
+		var p := Vector3(pts[b], pts[b + 1], pts[b + 2])
+		pos_img.set_pixel(x, y, Color(p.x, p.y, p.z, 1.0))
+		var lin := Color(pts[b + 4], pts[b + 5], pts[b + 6]).srgb_to_linear()
+		col_img.set_pixel(x, y, Color(lin.r, lin.g, lin.b, 1.0 - pts[b + 11]))
+		props_img.set_pixel(x, y, Color(pts[b + 9], pts[b + 10], pts[b + 8], 1.0))
+		min_v = Vector3(minf(min_v.x, p.x), minf(min_v.y, p.y), minf(min_v.z, p.z))
+		max_v = Vector3(maxf(max_v.x, p.x), maxf(max_v.y, p.y), maxf(max_v.z, p.z))
+	return {
+		"points": pts,
+		"count": n,
+		"grid_width": w,
+		"stride": PARTICLE_STRIDE,
+		"positions": ImageTexture.create_from_image(pos_img),
+		"colors": ImageTexture.create_from_image(col_img),
+		"props": ImageTexture.create_from_image(props_img),
+		"bounds": AABB(min_v, max_v - min_v),
+	}
+
+
+## 材质通道表：扁平数组，每材质 5 个 float：
+##   [i*5 + 0] 是否透明（表面过滤据此放行）
+##   [i*5 + 1] emission  0..1
+##   [i*5 + 2] metal     0..1
+##   [i*5 + 3] rough     0..1
+##   [i*5 + 4] trans     0..1
+##
+## 【为什么要预计算成扁平数组】逐体素去查 materials 数组要几十毫秒（20 万点量级），
+## 而且每次都要判断"是 VoxelMaterial 还是磁盘读回的 MATE Dictionary"。
+## 一张表算一次，之后按材质 ID 直接取 5 个 float。
+func _particle_mat_table() -> PackedFloat32Array:
+	var n := maxi(materials.size(), 256)
+	var tbl := PackedFloat32Array()
+	tbl.resize(n * 5)
+	for i in n:
+		var m: Variant = materials[i] if i < materials.size() else null
+		var base := i * 5
+		if m == null:
+			tbl[base] = 0.0
+			tbl[base + 1] = 0.0
+			tbl[base + 2] = 0.0
+			tbl[base + 3] = 1.0
+			tbl[base + 4] = 0.0
+			continue
+		var mat: VoxelMaterial = m if m is VoxelMaterial else VoxelMaterial.from_mate(m, i)
+		tbl[base] = 1.0 if mat.trans > 0.001 else 0.0
+		tbl[base + 1] = clampf(mat.emission, 0.0, 1.0)
+		tbl[base + 2] = clampf(mat.metal, 0.0, 1.0)
+		tbl[base + 3] = clampf(mat.rough, 0.0, 1.0)
+		tbl[base + 4] = clampf(mat.trans, 0.0, 1.0)
+	return tbl
+
+
+## 材质 -> 基色（sRGB）。兼容 VoxelMaterial 与磁盘读回的 MATE Dictionary。
+func _particle_color(mat_id: int) -> Color:
+	if mat_id <= 0 or mat_id >= materials.size():
+		return Color.WHITE
+	var m: Variant = materials[mat_id]
+	if m == null:
+		return Color.WHITE
+	if m is VoxelMaterial:
+		return VoxelMaterial.albedo_color(m)
+	if m is Dictionary:
+		return VoxelMaterial.albedo_color(VoxelMaterial.from_mate(m, mat_id))
+	return Color.WHITE
+
+
+## 稳定随机：由体素坐标决定，同一格永远同值。
+## 【为什么不用 randf】重建点云会重跑，随机种子会让每次运行的粒子相位都不同，回放对不上。
+static func _particle_seed(pos: Vector3i) -> float:
+	var h := (pos.x * 73856093) ^ (pos.y * 19349663) ^ (pos.z * 83492791)
+	return float(absi(h) % 100000) / 100000.0
+
+
+## 该格是否被 6 邻居完全包住（表面过滤用）。
+## 【透明体素不能在调用处被过滤掉】玻璃被包住时仍能看见后面 —— 见 build_particle_points。
+func _is_inside(ck: Vector3i, idx: int) -> bool:
+	# 【性能】这条在 2 万体素上会被调用上万次，任何"每次新建数组/字典"的写法都会
+	# 把烘焙拖到 100ms 以上（实测未优化时 174ms）。故全部展开成标量判断。
+	var local: Vector3i = _local_from_index(idx)
+	var cx := local.x
+	var cy := local.y
+	var cz := local.z
+	# 块内快路径：6 邻居都在本块里，直接读密集缓冲（无字典查找）
+	if cx > 0 and cy > 0 and cz > 0 and cx < CHUNK_LAST and cy < CHUNK_LAST and cz < CHUNK_LAST:
+		var buf: PackedInt32Array = _chunk_buffers[ck]
+		var cs := CHUNK_SIZE
+		var sl := CHUNK_SLICE
+		var i := cx + cy * cs + cz * sl
+		return buf[i + 1] > 0 and buf[i - 1] > 0 \
+				and buf[i + cs] > 0 and buf[i - cs] > 0 \
+				and buf[i + sl] > 0 and buf[i - sl] > 0
+	# 块边界：逐轴查相邻块（不存在即视为空气 -> 不算被包住）
+	var origin: Vector3i = VoxelChunk.origin_of(ck)
+	var wx: int = origin.x + cx
+	var wy: int = origin.y + cy
+	var wz: int = origin.z + cz
+	if not _solid_at(wx + 1, wy, wz): return false
+	if not _solid_at(wx - 1, wy, wz): return false
+	if not _solid_at(wx, wy + 1, wz): return false
+	if not _solid_at(wx, wy - 1, wz): return false
+	if not _solid_at(wx, wy, wz + 1): return false
+	if not _solid_at(wx, wy, wz - 1): return false
+	return true
+
+
+## 世界坐标处是否有实体素（只看内存块，不查磁盘流 —— 表面过滤是近似判断，
+## 为了它去加载磁盘块不值得；未加载的块按空气处理会让边界体素被判为"外露"，
+## 那只是多画几个点，方向是安全的）。
+func _solid_at(x: int, y: int, z: int) -> bool:
+	var ck: Vector3i = VoxelChunk.chunk_of(Vector3i(x, y, z))
+	if not _chunk_buffers.has(ck):
+		return false
+	var buf: PackedInt32Array = _chunk_buffers[ck]
+	var o: Vector3i = VoxelChunk.origin_of(ck)
+	return buf[VoxelChunk.buf_index(x - o.x, y - o.y, z - o.z)] > 0
 
 
 # 连通性检测（崩塌支撑判定）：算法与 NEIGHBORS_6 真值都在 VoxelConnectivity，本类只做薄转发，

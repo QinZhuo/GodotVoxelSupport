@@ -57,6 +57,103 @@ signal mesh_updated
 ## 【依赖方向】内核只回答"按 chunk 建 / 删网格"，视点决策全部委托给它（详见 VoxelInfiniteLayer）。
 ## 【为何惰性创建而非 _init 里建】脚本热重载不会对既有节点实例重跑 _init，用 getter 可自愈，
 ## 避免"重载后旧实例的 infinite_layer 仍为 null"这类只在编辑器里冒出来的空引用。
+# ── 粒子渲染（可选）──────────────────────────────────────────────────────────
+# 【定位】渲染器负责"把体素显示成粒子"这一层**机制**：把数据导出成点云、上传纹理、
+# 维护 GPU 粒子节点、按不透明/透明双通道绘制。
+# 【不负责什么】粒子怎么动（漂浮/消散/变形/聚合）**不在这里实现** —— 那是具体项目的
+# 表现效果，应由项目自己写粒子着色器或直接操作 particle 节点。
+# 本类只保证：给你一个已经填好点云、材质、双通道材质的 GPUParticles3D，
+# 并且它的坐标与网格渲染**完全重合**（同一套 center_offset × voxel_scale）。
+#
+# 用法：
+#   $VoxelRenderer.display_mode = VoxelRenderer.DisplayMode.PARTICLES   # 切粒子
+#   $VoxelRenderer.particle_node                 # 自己的粒子着色器接上去
+#   $VoxelRenderer.display_mode = VoxelRenderer.DisplayMode.MESH       # 切回网格
+
+## 显示方式：网格（合并面片）还是粒子（每个体素一个方块）。
+## 【为什么是枚举而不是 bool】三态是常态：网格 / 粒子 / （将来的）体积直渲。
+## bool 一加第三种取值就要破坏 API；枚举只加一项，调用方代码不用改。
+enum DisplayMode {
+	MESH,       ## 合并面片网格（默认，性能最好）
+	PARTICLES,  ## 每个体素一个 GPU 粒子方块（可做形变类表现）
+}
+
+## 当前显示方式。切换时自动隐藏另一种（同屏两套会互相穿插，且没有意义）。
+@export var display_mode: DisplayMode = DisplayMode.MESH:
+	set(v):
+		display_mode = v
+		_apply_display_mode()
+
+## 【兼容别名】等价于 display_mode == PARTICLES。
+## 保留是因为早期版本用它，且读起来比枚举比较更短；写入会同步 display_mode。
+var particle_mode: bool:
+	get:
+		return display_mode == DisplayMode.PARTICLES
+	set(v):
+		display_mode = DisplayMode.PARTICLES if v else DisplayMode.MESH
+
+## 粒子形状：方块还是球。
+## 【为什么粒子侧也要这个】网格路径早就有 cube/sphere 两种形状（导入选项 mesh/shape），
+## 粒子若只能画方块，"小球粒子"这类效果就得项目自己做 mesh —— 而那正是插件该给的机制。
+## 两者几何不同但**共用同一份点云**：方块是 6 面立方体，球是低面数 icosphere，
+## 顶点都在插件这边生成，项目只换一个 draw mesh 即可。
+enum ParticleShape {
+	CUBE,    ## 体素方块（默认，拼起来严丝合缝）
+	SPHERE,  ## 小球（体素观感更柔和，散开后像粒子）
+}
+
+@export var particle_shape: ParticleShape = ParticleShape.CUBE:
+	set(v):
+		particle_shape = v
+		if particle_node != null:
+			_apply_particle_shape()
+
+## 球半径相对体素边长的比例（仅 particle_shape = SPHERE 生效）。
+@export_range(0.1, 2.0, 0.01) var particle_sphere_scale: float = 1.0:
+	set(v):
+		particle_sphere_scale = v
+		if particle_node != null:
+			_apply_particle_shape()
+
+## 球的面数分档（仅 SPHERE 生效）。0 = 20 面（最省），1 = 80 面，2 = 320 面。
+@export_range(0, 2, 1) var particle_sphere_subdivisions: int = 0:
+	set(v):
+		particle_sphere_subdivisions = v
+		if particle_node != null:
+			_apply_particle_shape()
+
+## 粒子点数上限。超出按确定性抽样缩减（同输入同输出，回放可复现）。
+@export_range(100, 500000, 100) var particle_max_points: int = 200000
+
+## 只渲染表面体素（跳过被完全包住的）。**透明体素永远保留**（玻璃被包住也看得见后面）。
+## cars.vox 实测内部体素占 51%；关掉它们粒子数减半、观感更接近网格渲染。
+## 散开/漂浮/变形类效果应关掉 —— 那时内部体素散开后是看得见的。
+@export var particle_surface_only: bool = true
+
+## 自发光强度倍率，与网格路径的 MATERIAL_EMISSION_ENERGY 同量级（= 20）。
+@export_range(0.0, 100.0, 0.5) var particle_emission_energy: float = 20.0
+
+## 粒子（体素方块）的显示尺寸倍率：1.0 = 与体素等比，拼起来严丝合缝。
+@export_range(0.05, 3.0, 0.01) var particle_scale: float = 1.0
+
+## 粒子整体透明度（出场/退场淡出用）。
+@export_range(0.0, 1.0, 0.01) var particle_alpha: float = 1.0
+
+## 实际的 GPU 粒子节点。为空表示尚未创建。
+## 【交给项目使用】想自定义运动（漂浮/散开/聚合）时，直接给它换 process_material，
+## 或读本类的 particle_points 自己上传纹理 —— 本类不做任何"动起来"的事。
+var particle_node: GPUParticles3D = null
+
+## 最近一次导出的点数据（PackedFloat32Array，布局见 QVoxelSource.build_particle_points）。
+## 项目若要自己做形态变换，可直接拿它算配对/偏移，不必再问数据层要一遍。
+var particle_points: PackedFloat32Array = PackedFloat32Array()
+
+var _particle_process_mat: ShaderMaterial = null
+var _particle_draw_mat: ShaderMaterial = null
+var _particle_draw_trans_mat: ShaderMaterial = null
+var _particle_mesh: Mesh = null
+var _particle_mesh_trans: Mesh = null
+
 var infinite_layer: VoxelInfiniteLayer:
 	get:
 		if _infinite_layer == null:
@@ -99,6 +196,8 @@ enum VisibilityMode {
 		if not _lod_meshes.is_empty() and not _lod_meshes[0].is_empty():
 			_clear_lod_meshes()
 		request_update()
+		if display_mode == DisplayMode.PARTICLES:
+			rebuild_particles()
 
 ## 数据变化时是否自动重新生成 mesh
 @export var auto_update: bool = true
@@ -441,8 +540,162 @@ func _process(_delta: float) -> void:
 	_update_mesh()
 
 
+# ── 粒子渲染：公开接口 ────────────────────────────────────────────────────────
+
+## 【兼容别名】等价于 display_mode = PARTICLES / MESH。
+func show_as_particles(on: bool = true) -> void:
+	display_mode = DisplayMode.PARTICLES if on else DisplayMode.MESH
+
+
+## 重新导出点云并重建 GPU 资源。
+## 【何时调用】数据改了、voxel_scale 改了、粒子参数改了 —— 任何影响点云内容的变化。
+## 纯"运动"变化（进度、漂浮幅度）不需要，那是项目自己的着色器 uniform 的事。
+func rebuild_particles() -> void:
+	if data == null:
+		_clear_particles()
+		return
+	var tex := data.build_particle_textures(
+			voxel_scale, particle_max_points, particle_surface_only)
+	particle_points = tex.get("points", PackedFloat32Array())
+	if int(tex.get("count", 0)) <= 0:
+		_clear_particles()
+		return
+	_ensure_particle_node(int(tex["count"]))
+	_upload_particles(tex)
+	_apply_display_mode()
+
+
+## 粒子方块的边长（世界单位）= 体素边长 × particle_scale。
+func particle_voxel_size() -> float:
+	return voxel_scale * particle_scale
+
+
+# ── 粒子渲染：内部 ────────────────────────────────────────────────────────────
+
+func _apply_display_mode() -> void:
+	var use_particles := display_mode == DisplayMode.PARTICLES
+	if particle_node != null:
+		particle_node.visible = use_particles
+	# 粒子模式下隐藏网格：两条渲染路径画的是同一份数据，同屏会互相穿插
+	for lod in _lod_meshes:
+		for bk in lod:
+			var mi = lod[bk]
+			if mi is Node3D:
+				(mi as Node3D).visible = not use_particles
+	if use_particles and particle_node == null and data != null:
+		rebuild_particles()
+
+
+func _ensure_particle_node(count: int) -> void:
+	if particle_node != null and particle_node.amount == count:
+		return
+	if particle_node != null:
+		particle_node.queue_free()
+		particle_node = null
+	if _particle_process_mat == null:
+		_particle_process_mat = VoxelParticleShader.make_process_material()
+	if _particle_draw_mat == null:
+		_particle_draw_mat = VoxelParticleShader.make_draw_material()
+	if _particle_draw_trans_mat == null:
+		_particle_draw_trans_mat = VoxelParticleShader.make_draw_material_trans()
+	_particle_mesh = _make_particle_mesh(_particle_draw_mat)
+	_particle_mesh_trans = _make_particle_mesh(_particle_draw_trans_mat)
+
+	var gp := GPUParticles3D.new()
+	gp.name = "VoxelParticles"
+	gp.amount = maxi(count, 1)
+	gp.lifetime = 100.0
+	# 【必须预热满一个 lifetime】否则粒子是"逐渐发射"的，第一帧只有几颗，
+	# 起点形状根本不成形（实测踩过：连续三次渲染都只有几个散点）。
+	gp.preprocess = 100.0
+	gp.explosiveness = 0.0
+	gp.local_coords = false
+	gp.process_material = _particle_process_mat
+	# 两个 draw pass：不透明通道写深度（遮挡正确），透明通道不写深度（玻璃能透、不裁后面）
+	gp.set_draw_passes(2)
+	gp.set_draw_pass_mesh(0, _particle_mesh)
+	gp.set_draw_pass_mesh(1, _particle_mesh_trans)
+	# 【必须给 custom_aabb】否则粒子飞出原始包围盒后会被视锥剔除整片消失
+	gp.visibility_aabb = AABB(Vector3(-1000, -1000, -1000), Vector3(2000, 2000, 2000))
+	gp.emitting = true
+	add_child(gp)
+	particle_node = gp
+	gp.restart()
+
+
+## 按 particle_shape 生成粒子用的网格（尺寸由绘制着色器的 voxel_size 统一缩放，
+## 故这里一律生成**单位尺度**的几何：立方体边长 1、球直径 1）。
+##
+## 【为什么球也用单位直径】绘制着色器的 voxel_size 是"方块世界边长"，
+## 球按同一边长缩放后就正好内切于体素格 —— 与网格渲染的 sphere 形状观感一致。
+func _make_particle_mesh(mat: Material) -> Mesh:
+	var m: Mesh
+	if particle_shape == ParticleShape.SPHERE:
+		var sphere := SphereMesh.new()
+		# 【面数分档对齐网格路径的 icosphere 档位】20 / 80 / 320 面。
+		# SphereMesh 是 UV 球，用 rings/radial_segments 近似：0 -> 6x8、1 -> 10x16、2 -> 18x32。
+		var idx := clampi(particle_sphere_subdivisions, 0, 2)
+		var rings: int = [6, 10, 18][idx]
+		var segs: int = [8, 16, 32][idx]
+		sphere.rings = rings
+		sphere.radial_segments = segs
+		# 直径 = 1（半径 0.5），再乘用户给的比例
+		sphere.radius = 0.5 * particle_sphere_scale
+		sphere.height = 1.0 * particle_sphere_scale
+		m = sphere
+	else:
+		var box := BoxMesh.new()
+		box.size = Vector3.ONE
+		m = box
+	m.material = mat
+	return m
+
+
+## 形状参数变了：换掉两个 draw pass 的网格（不用重建粒子节点）。
+func _apply_particle_shape() -> void:
+	if particle_node == null:
+		return
+	_particle_mesh = _make_particle_mesh(_particle_draw_mat)
+	_particle_mesh_trans = _make_particle_mesh(_particle_draw_trans_mat)
+	particle_node.set_draw_pass_mesh(0, _particle_mesh)
+	particle_node.set_draw_pass_mesh(1, _particle_mesh_trans)
+
+
+func _upload_particles(tex: Dictionary) -> void:
+	if _particle_process_mat == null:
+		return
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_SRC_POS, tex["positions"])
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_DST_POS, tex["positions"])
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_COLORS, tex["colors"])
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_PROPS, tex["props"])
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_GRID_WIDTH, tex["grid_width"])
+	# 进度停在 0：本类不驱动运动，只负责把"当前形状"摆出来。
+	# 项目要动起来，就把自己的 process_material 换上，或每帧改 particle_node 的 uniform。
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_PROGRESS, 0.0)
+	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_ALPHA, particle_alpha)
+
+	var vs := particle_voxel_size()
+	for mat in [_particle_draw_mat, _particle_draw_trans_mat]:
+		if mat == null:
+			continue
+		mat.set_shader_parameter(VoxelParticleShader.U_VOXEL_SIZE, vs)
+		mat.set_shader_parameter(VoxelParticleShader.U_EMISSION_ENERGY, particle_emission_energy)
+		mat.set_shader_parameter(VoxelParticleShader.U_ALPHA, particle_alpha)
+
+
+func _clear_particles() -> void:
+	particle_points = PackedFloat32Array()
+	if particle_node != null:
+		particle_node.queue_free()
+		particle_node = null
+
+
 func _on_data_changed() -> void:
 	request_update()
+	# 粒子模式下数据变了要重导点云（网格那套脏账本对点云不适用：
+	# 点云没有 chunk 级增量，整份重导 66ms / 2 万点，比维护一套增量账本简单可靠）
+	if display_mode == DisplayMode.PARTICLES:
+		rebuild_particles()
 
 
 func request_update() -> void:

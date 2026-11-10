@@ -34,6 +34,8 @@ const KERNEL_PUBLIC_API: Array[String] = [
 	# E. 兼容别名 / 插件公开 API（P4 收口）
 	"mark_dirty", "force_update", "regenerate_materials",
 	"set_voxel", "remove_voxel", "get_voxel",
+	# F. 粒子渲染（机制，不含效果）
+	"show_as_particles", "rebuild_particles", "particle_voxel_size",
 ]
 
 
@@ -299,6 +301,8 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"invalidate_chunk_source", "invalidate_chunk_source_range", "invalidate",
 	# 帧动画（整份块表替换，切帧的唯一入口）
 	"apply_block_table",
+	# 粒子点导出（派生查询：可随时重算、不落盘，故归【公开】）
+	"build_particle_points", "build_particle_textures",
 ]
 
 
