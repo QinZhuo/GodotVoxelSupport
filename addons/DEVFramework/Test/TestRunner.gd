@@ -1,21 +1,10 @@
 class_name TestRunner extends RefCounted
 
 ## 轻量测试运行器(基建): 扫描项目 Scripts/Test/ 目录下所有用例类, 自动发现 test_ 开头方法执行。
-## 框架只提供机制; 用例内容由项目编写(对齐 GUT/gdUnit4 的"框架=runner, 项目=用例"分工)。
-##
-## 用例按**进程归属**分两类(见 `TestCase.needs_game_process()`):
 ##   · 进程无关(默认) —— 纯逻辑/资源层面, 编辑器进程即可, 快且无副作用;
-##   · 需要游戏进程 —— 依赖 MonitorGame / 场景树 / 真实时间轴, 只能由 `run_tests(process=game)`
-##     (MCP, 游戏进程内) 或 headless `--game` 执行。
-## 在错误的进程里跑某类用例时, 它会被列为 **skipped 并出现在结果文本里** ——
-## 绝不静默通过, 也绝不因"缺环境"而假失败。
-##
-## 入口:
+##   · 需要游戏进程 —— 依赖项目单例 / 场景树 / 真实时间轴, 只能由 `run_tests(process=game)`
 ##   - MCP 工具 run_tests(process=editor|game, script=必填) —— script 为脚本路径子串(或 "all" 全量,
-##     不推荐), 也可**直接传内联 GDScript 源码**(见 run_all 的 [param script])
 ##   - headless CLI: godot --headless --script res://addons/DEVFramework/Test/run_headless.gd [-- --game]
-##     (CLI 传空 script = 全量, 供 CI 用)
-## 用例方法可含 await(协程), runner 自动等待完成后再判定。
 
 const TESTS_DIR := "res://Scripts/Test/"
 ## 内联源码长度上限(字符)。与 eval_code 的 MAX_EVAL_LENGTH 同量级: 临时用例够用, 又挡住误传巨型文本。
@@ -32,7 +21,6 @@ const MODE_GAME := "game"
 const MODE_BOTH := "both"
 
 ## 长用例心跳间隔(毫秒): 单个方法可能跑几十秒到几分钟, 只打一行"开始"会让人分不清
-## 是还在跑还是卡死。心跳只在方法**让出主循环**(await)时才有机会打, 纯死循环打不出来。
 const HEARTBEAT_MS := 15000
 
 ## 防重入: 同一进程内不允许两轮 run_all 并发 —— 用例会改共享单例/存档/时间倍率,
@@ -43,14 +31,8 @@ static var _running_mode := ""
 ## [param script] 二选一(靠内容自动判别, 不新增参数):
 ##   · 测试脚本路径子串(如 "test_game_replay"); "all" = 全量(不推荐); 空串 = 全量(仅 headless CI 用);
 ##   · **内联 GDScript 源码**(含换行 或 以 "extends " 开头即判为源码)—— `extends TestCase` 定义
-##     test_ 方法即可, 直接编译运行、**不落盘**, 适合临时验证。
-##   单个 token 一律按选择器处理: 打错脚本名得到的是"未找到匹配..."而不是莫名其妙的解析错。
-## [param logger] 可选: 宿主的错误缓冲(MCPLogger)。仅用于内联源码编译失败时取回**具体解析错行**;
-##   传 null(如 headless CLI)则退回通用提示。鸭子式调用(只用到 get_error_cursor/describe_errors_since),
-##   故 Test 域不依赖 MCP 的具体类型。
 static func run_all(script := "", mode := MODE_EDITOR, logger: Object = null) -> Dictionary:
 	# 闸门放在唯一入口: 两个宿主(编辑器 MCP / 游戏进程 MCP / headless)共用同一道,
-	# 而不是各宿主自己记一个"正在跑"标志(那种写法必然漏掉新增的宿主)。
 	if _running_mode != "":
 		return _error_result("已有测试在运行(%s), 本轮拒绝执行: 并发的两轮测试会互相污染共享状态(单例/存档/时间倍率)。等它跑完再来。"
 			% _mode_label(_running_mode), script, mode)
@@ -90,8 +72,6 @@ static func _run_all(script: String, mode: String, logger: Object) -> Dictionary
 		var script_res: Script = load(str(path))
 		if script_res == null:
 			# 无法加载用例脚本。**编辑器/F5(编辑器二进制)里这是真问题**(用例写坏/依赖缺失),
-			# 记为失败; 而**导出包**里这是预期 —— 引用了编辑器类(如 EditorImportPlugin)的用例
-			# 本就无法在发布版加载。此时记为 skipped(可见, 但不误报成失败)。
 			if OS.has_feature("editor"):
 				acc["failures"].append("%s: 用例脚本加载失败" % path)
 				acc["failed"] = int(acc["failed"]) + 1
@@ -115,15 +95,12 @@ static func is_inline_source(script: String) -> bool:
 
 
 ## 仅编译校验内联源码(不执行), 返回错误文案(含具体解析错行) 或 "" 表示可编译。
-## 供 process=game 转发前在编辑器内拦截语法错 —— **游戏进程里解析错会触发调试器断点中断游戏**,
-## 与 eval 的转发预检同理(见 MCPDevServer._call_game_eval_proxy)。
 static func precheck_inline(source: String, logger: Object = null) -> String:
 	var c := _compile_inline(source, logger)
 	return "" if c.get("ok", false) else str(c.get("error", ""))
 
 
 ## 编译内联源码为 GDScript。返回 {ok:true, script} 或 {ok:false, error}。
-## 编译前记错误游标, 失败时据此取回**引擎刚打印的**具体解析错(含行号)。
 static func _compile_inline(source: String, logger: Object) -> Dictionary:
 	if source.length() > MAX_INLINE_LEN:
 		return {"ok": false, "error": "内联测试代码过长: %d 字符, 超过上限 %d。请精简后重试, 或写成文件放到 %s 下。" % [source.length(), MAX_INLINE_LEN, TESTS_DIR]}
@@ -181,8 +158,9 @@ static func _run_one_case(res: Script, label: String, mode: String, acc: Diction
 		var err: String = await _run_one(inst, mname, remaining, _make_heartbeat("%s › %s" % [label, mname], started_at))
 		var elapsed := Time.get_ticks_msec() - started_at
 		## 兜底收尾：不论成败都跑。手动收尾只覆盖"正常跑完"那条路，中途 return /
-		## 协程被超时中断都会跳过它 —— 对会写玩家档案的用例，那等于把测试数据留在存档里。
 		await _run_cleanup(inst, maxi(1000, remaining - elapsed))
+		## 用例间复位会话级静态状态：漏清会让下一个用例读到上一个的残留
+		ResetTool.all()
 		var limit := int(inst.max_duration_ms())
 		if limit > 0 and elapsed > limit:
 			## suggested_max_ms: 按实测值向上取整到秒, 供脚本作者直接更新 max_duration_ms。
@@ -230,12 +208,6 @@ static func _summary(acc: Dictionary, script_label: String, mode: String, text: 
 
 
 ## 合并多段摘要(编辑器段 + 游戏段)为一份, 供 MCP process=both 使用。
-##
-## 全量本该是一条命令: 拆成两次调用时, "只跑了记得的那一半就宣布全绿"是高频误判,
-## 而且两份汇总谁都没覆盖对方 —— 合并后 total/failed 才是真正的全量口径。
-##
-## 跳过项的处理是本函数的关键: 某脚本在 editor 段被跳过、在 game 段跑了, 属于**正常分工**,
-## 不是"缺环境"; 只有**每一段都跳过它**才保留(那才是真跑不了的用例)。
 static func merge_summaries(parts: Array, script_label: String) -> Dictionary:
 	var total := 0
 	var failed := 0
@@ -314,7 +286,6 @@ static func _test_methods(script: Script) -> Array:
 
 
 ## 跑一个用例方法, 最多 timeout_ms 毫秒。返回 "" = 正常结束, 否则为超时文案。
-## 协程用例（方法体含 await）在 Godot 4 里会返回一个协程句柄; 复用 `AsyncTool.await_coroutine`:
 ## 它先判 is_valid 再等待, 且**带时限** —— 规避"await 已失效句柄永久挂起"这个引擎坑, 同时给硬超时兜底。
 static func _run_one(inst: TestCase, method_name: String, timeout_ms: int, on_tick := Callable()) -> String:
 	var done := await AsyncTool.await_coroutine(inst.call(method_name), timeout_ms, on_tick)
@@ -322,7 +293,6 @@ static func _run_one(inst: TestCase, method_name: String, timeout_ms: int, on_ti
 
 
 ## 心跳回调: 由等待内核每帧调用一次, 这里按 HEARTBEAT_MS 节流成"每 15s 一行"。
-## 用 box 而非裸 int 承载上次打印时刻(闭包对局部变量是值捕获, 直接写不会留到下次调用)。
 static func _make_heartbeat(label: String, started_at: int) -> Callable:
 	var box := {last = started_at}
 	return func() -> void:
@@ -355,7 +325,6 @@ static func _collect_cases(base: String, out: Array) -> void:
 
 
 ## 逐条进度输出: 全量动辄几分钟, 没有进度就分不清"还在跑"还是"卡死"。
-## 与最终汇总区分开(`[测试]` 前缀), 编辑器输出面板 / 游戏窗口 / CI 日志里都能看到当前位置。
 static func _progress(msg: String) -> void:
 	print("[测试] %s" % msg)
 

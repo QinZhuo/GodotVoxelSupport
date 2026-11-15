@@ -2,47 +2,15 @@
 extends RefCounted
 
 ## ======= 代码与资源索引域 =======
-##
-## 从 MCPDevServer 拆出的第一个**域文件**, 也是后续各域的样板。收录"在磁盘上找东西"这一类
-## 能力: list_dir / search_symbols / find_resource_users, 外加一个进程内辅助 global_classes_info()。
-##
-## ## 为什么按"域"切而不是按"逻辑角色"切
-##
-## 先前的拆分是按角色切的(MCPResult 管响应形状、MCPToolSchema 管请求形状、MCPToolMeta 管
-## 注解), 结果每个文件都只有一两百行, 而一个工具域的 schema + 实现 + 辅助函数仍然散在主文件里。
-## 按域切之后, 同一个工具的注册、schema、handler、它专属的辅助函数都在一个文件内, 改一个工具
-## 不必再去主文件找三处。
-##
-## ## 依赖方向: 严格单向
-##
-## 本文件**不引用** MCPDevServer, 也不持有任何服务器状态。只依赖:
 ##   - MCPResult      响应封装
 ##   - MCPToolSchema  请求 schema 工厂
 ##   - VariantTool    全局 class_name, 入参读取
-## 注册靠"把 _add_tool 当 Callable 传进来"完成, 所以连服务器的类型都不需要认识。
-##
-## ## 为什么 handler 一律 static
-##
-## 1. MCPToolAudit 的入参一致性自检靠 handler.get_method() 拿函数名、再去源码里切函数体。
 ##    静态函数取到的 get_method() 同样返回函数名(实测 "GDScript::_handle_xxx"), 自检照常工作;
-##    而若改用 lambda 注册, get_method() 返回空串, 那批工具会**静默跳过**入参自检 ——
-##    正是这个自检文件开头警告的"比不自检更糟"的失效模式。
-## 2. 本域实现体经实测对实例状态零依赖, 静态化不损失任何东西。真正依赖实例状态的那批
-##    (调试桥接的 debugger_plugin、运行期的 _pending)刻意留在主服务器里。
-##
-## **必须带 @tool 且不声明 class_name**, 两条都是踩过的坑, 详见 MCPDevServer 顶部注释。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
 
 
 ## ======= 域注册入口 =======
-##
-## 由 MCPDevServer._register_editor_tools() 调用一次。add_tool 是服务器 `_add_tool` 的
-## Callable, 签名 (name, desc, input_schema, handler)。
-##
-## 与主文件里其余 _register_* 的区别: 那些是服务器的方法、可以直接调 self._add_tool, 而本文件
-## 不认识服务器, 只能把方法当值传进来。代价是多一层 Callable 间接, 换来的是域文件可以被独立
-## 阅读、独立修改、独立静态检查。
 static func register(add_tool: Callable) -> void:
 	add_tool.call("list_dir",
 		"列出res://或user://目录下的文件/子目录。",
@@ -63,7 +31,7 @@ static func register(add_tool: Callable) -> void:
 	add_tool.call("find_resource_users",
 		"查任意资源的双向依赖: users=谁引用该资源(反向), deps=该资源依赖谁(正向依赖链, 含脚本/配置/场景/资产类型标签)。兼容 Godot4 的 res://路径 与 uid://xxx 两种引用形式。目标为带全局类名的脚本时, 额外扫描其它 .gd 中类名的词边界使用点(类型注解/extends/静态调用等, kind=class_ref)。改名/删除/移动资源前查完整影响面。",
 		{"type": "object", "properties": {
-			"path": MCPToolSchema.str_arg("目标资源路径(如 res://Scenes/Main.tscn 或 Scenes/Main.tscn)"),
+			"path": MCPToolSchema.str_arg("目标资源路径(如 res://Scenes/<场景>.tscn, 也可省略 res://)"),
 			"max_results": {"type": "integer", "description": "最多返回引用文件数, 默认 100"},
 			"include_script_refs": {"type": "boolean", "description": "是否包含 .gd 脚本里的 preload/load 引用, 默认 true"},
 			"include_class_refs": {"type": "boolean", "description": "是否包含全局类名在 .gd 中的词边界引用扫描(仅目标是带 class_name 的脚本时生效), 默认 true"}
@@ -116,8 +84,6 @@ static func _collect_dir(base: String, dirs: Array, files: Array) -> void:
 
 
 ## 已注册全局类清单。**刻意不是工具**: 它没有 schema、不进注册表, 而是由 get_project_info
-## (kind=classes) 在进程内直接分派。把它注册成工具等于对外承诺一个契约, 而它的形状完全依附于
-## get_project_info 的调用场景 —— 那是对外契约膨胀, 不是能力缺失。
 static func global_classes_info() -> Dictionary:
 	var list := ProjectSettings.get_global_class_list()
 	var out: Array = []
@@ -443,10 +409,6 @@ static func _resource_type_label(path: String) -> String:
 
 
 ## 收集场景依赖链的全部资源文件(递归: 场景依赖 → 资源依赖), 含脚本/配置/图片/音频/字体等。
-## 排除 .godot 缓存与 .import 元数据, 只看用户资源。
-##
-## 本函数原先住在 MCPDevServer 的运行校验域, 被本域的 find_resource_users 使用 —— 放在本域
-## 的理由是它与其它扫描器同族(都是"沿 res:// 递归解析资源图"), 依赖单向;
 static func collect_scene_deps(scene: String) -> Dictionary:
 	var deps := {}
 	var visited := {}

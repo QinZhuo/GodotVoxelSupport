@@ -1,5 +1,4 @@
 ## 计数任务实体 — 由 CountTaskDef 驱动: 信号累加计数, 达到目标数量完成。
-## 计数进度计入存档(save_data/load_data), 断点续玩不丢计数。
 class_name CountTask extends SignalTask
 
 var _count: int = 0

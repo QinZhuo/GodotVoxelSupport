@@ -2,78 +2,15 @@
 extends RefCounted
 
 ## ======= 资源与项目设置域 =======
-##
-## 从 MCPDevServer 拆出。收录"改动/查询**编辑器侧资源与项目配置**"这一类能力:
-##   open_scene / set_main_scene / project_setting / save_all / reimport
-##   create_resource / get_resource_info
-##
-## 与 MCPCodeIndex 的分工: 那边是**只读地找**(在磁盘上搜索符号与引用), 这边是**改与查实体**
 ## (打开场景、写项目设置、创建/读取 .tres、触发重新导入)。两者唯一的交集是都要走 res:// 路径
-## 规范化, 故没有共用辅助函数。
-##
-## ## 本文件的职责
-##
-## **tools/\* 工具**(下方"域注册入口"一节): open_scene / project_setting /
-## create_resource / get_resource_info 等 —— 改与查编辑器侧实体资源, 走 tools/call。
-##
-## **resources/\* 协议端点不在此文件**: 静态文档资源改为项目侧 provider 声明(内嵌内容), 由
-## 导出安全的 MCPResourceDocs 承载(见其类文档)。原因: 运行时也要能用, 而本文件含编辑器工具,
-## 导出包解析不了 —— 这正是"资源"从本文件迁走、且不再硬编码框架文档的理由。
-##
-## ## 依赖方向: 严格单向
-##
-## 与 MCPCodeIndex 同一条规矩, 理由照抄那份文件: 本文件**不引用** MCPDevServer, 也不持有任何
-## 服务器状态, 只依赖 MCPResult / MCPToolSchema / VariantTool, 注册靠传入 _add_tool 的 Callable
-## 完成。7 个 handler 全部零实例状态依赖, 因此**一律 static** —— 这也是入参一致性自检能工作的
-## 前提(改用 lambda 注册会让 get_method() 返回空串, 那批工具会静默跳过自检)。
-##
-## ## 本域的编辑器依赖
-##
-## open_scene / reimport / save_all 三个走 EditorInterface, 在非编辑器进程(游戏运行期)不可用,
-## 各自保留原有的 `Engine.is_editor_hint()` 守卫。project_setting / set_main_scene /
-## create_resource / get_resource_info 只用 ProjectSettings 与 ResourceLoader, 游戏进程里也能跑,
-## 故**不**加该守卫 —— 与原实现逐条一致, 不借拆分之机改行为。
-##
-## ## 接缝判据(全局统一, 不是本域的偏好)
-##
 ## 接缝可以存在, 但漏调必须可见; 漏调会静默失效的场合一律不许用接缝。据此各域给了不同答案,
 ## 且都正确, 不要为了"看起来统一"而改:
 ##   - log 域→ 注入 bind_logger: 漏调后果是 get_logs 返回"日志捕获器未就绪", **显式报错**。
-##   - validate 域 → 域内自建: 漏调后果是编译错误捕获不到、validate 恒返回 valid=true,
-##     **静默失效**, 所以它必须否决接缝。
-##   - dev 域 → 注入: _mode / _game_started_at 是实例状态且不可推导, 没有自建选项; 漏调后果
-##     最隐蔽, 所以它自带告警。
-##
-## **本域的答案是"零状态接缝"(第四种形态)**: 本域没有任何 bind_xxx, 因为它**没有实例状态** ——
-## 7 个 handler 对 _pending / _http / debugger_plugin / _mode / _logger /
-## _game_started_at 等**零引用**, 不存在"必须由服务器递进来"的东西, 自然也就没有可漏调的绑定。
-## 全域唯一的接缝是注册用的 add_tool, 而它的漏调后果是**显式**的: 7 个工具整体不进 _tool_defs,
-## tools/list 里查不到, 调用直接回 Unknown tool; 而且因为 handler 全 static 且无状态, 不存在
-## "注册了但注入失败、工具在却行为错"的中间态 —— 漏调在注册阶段就全无, 比 log 域的 null 捕获器
-## 更靠前一步。
-##
-## MCPResult / MCPToolSchema 是 preload const、VariantTool 是全局 class_name, 三者都是**编译期**
-## 解析, 不是接缝: 漏写只会编译失败, 无"静默跑偏"可言。
-##
-## 本域真正的静默风险点**不是接缝, 而是引擎前提**: EditorInterface 在非编辑器进程里不可用,
-## 而 open_scene / reimport 的方法返回 void, 误跑时不会自己冒出来。故凡是走 EditorInterface 的
-## handler 都以 `Engine.is_editor_hint()` + `MCPResult.fail("仅在编辑器模式可用")` **显式挡下**
-## (reimport 的顺序是先校验资源存在、后校验编辑器模式, 与原实现一致)。
-##
-## 反向也要提醒: 别为了"和 open_scene 看起来统一"给 project_setting / set_main_scene /
-## create_resource / get_resource_info 也补上 is_editor_hint 守卫 —— 那会**收窄能力**(把本来
-## 在游戏进程里可用的工具变成不可用), 与本判据同属"为了统一而改"这一类错。
-##
-## **必须带 @tool 且不声明 class_name**, 两条都是踩过的坑, 详见 MCPDevServer 顶部注释。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
 
 
 ## ======= 域注册入口 =======
-##
-## 由 MCPDevServer._register_editor_tools() 调用一次。add_tool 是服务器 `_add_tool` 的
-## Callable, 签名 (name, desc, input_schema, handler)。工具排列顺序与主文件
-## _register_dev_tools 里原先的注册顺序一致, 便于对照迁移前后的 tools/list。
 static func register(add_tool: Callable) -> void:
 	add_tool.call("open_scene",
 		"在编辑器打开场景(res://路径)。",
@@ -154,11 +91,6 @@ static func _handle_open_scene(args: Dictionary) -> Dictionary:
 
 
 ## 设置主场景。
-##
-## **同一资源不重写**: 主场景在 project.godot 里常以 uid:// 形式存储, 而调用方几乎总是拿着
-## res:// 路径(从 get_scene_tree / find_resource_users 得到的就是这个形式)。无条件写入会把
-## uid:// 覆盖成 res:// —— 资源没变, project.godot 却多出一行无信息量的 diff, 而它会混进真正的
-## 改动里被 review 掉。故先比资源身份(两种引用形式解析后相等即同一资源), 相同就不碰磁盘。
 static func _handle_set_main_scene(args: Dictionary) -> Dictionary:
 	var path := VariantTool.get_string(args, "path").strip_edges()
 	if path.is_empty():
@@ -175,10 +107,6 @@ static func _handle_set_main_scene(args: Dictionary) -> Dictionary:
 
 
 ## uid:// 或裸路径 → res:// 路径, 解析不出来返回空串。
-##
-## 只为**比较**两个引用是否指向同一资源, 故不做 UID 缓存未就绪时的重扫兜底(那是
-## MCPScriptSync.resolve_scene_path 的职责, 它的调用方需要拿到可直接用的路径)。此处解析失败
-## 一律退回"两边原文不相等", 后果至多是多写一次内容相同的设置, 不会写错资源。
 static func _to_res_path(ref: String) -> String:
 	var s := ref.strip_edges()
 	if s.begins_with("uid://"):
@@ -203,33 +131,14 @@ static func _handle_get_project_setting(args: Dictionary) -> Dictionary:
 
 
 ## ======= 一处合法的裸读: "value" =======
-##
-## 下面 _handle_set_project_setting 的 "value" 走裸 args.get("value", null), 因为它的
-## **目标类型事先未知**: 由用户任意指定。强行套进 VariantTool.get_* 反而会丢信息
-## (get_string 会把数组/对象 str() 成一段文本)。
-##
-## 原文(主文件「统一入参读取」小节)的说明, 照搬备查:
-##   set_node_property 与 set_project_setting 的 "value" 走裸 args.get("value", null),
-##   因为它们的**目标类型事先未知**: 前者要靠 node.get(property) 的 typeof() 反推, 后者由用户
-##   任意指定。这两处接 VariantTool.infer(猜类型) / VariantTool.coerce(对齐目标类型),
-##   强行套进 get_* 反而会丢信息。除这两处外, handler 里的 args.get( 一律是漂移。
-##
 ##   注意这是**约定而非守卫**: 契约自检(_audit_tools / MCPToolAudit.audit_handler_params)校验的是
-##   "schema 声明了哪些键、schema 与 handler 声明是否一致", 不校验 handler 是否绕过
 ##   VariantTool 裸读。新增 handler 时只能靠自律 —— 这点必须写明, 否则后人会误以为
-##   已经有检查兜着。想让它变成真守卫, 需在 MCPToolAudit.audit_handler_params 加一条: handler 源码中
-##   出现 args.get( 且该键不在 VariantTool.get_* 调用列表中 → 报问题。
-##
-##   历史教训(留着提醒别走回头路): 主文件此前同时存在 `_to_bool`(支持 "true"/数字)与 9 处
-##   绕过它的裸转, 而 `_arg_int` 更是长期零调用 —— 入口摆在那里却一行防护都没生效。
-##   "同一个参数两种读法"长期共存, 每处裸转都是一个潜在的静默反转。
 static func _handle_set_project_setting(args: Dictionary) -> Dictionary:
 	var name := VariantTool.get_string(args, "name")
 	if name.is_empty():
 		return MCPResult.fail("必须提供 name")
 	var value: Variant = args.get("value", null)
 	# 防御: 部分 JSON→Variant 链路会把数组/对象退化为字符串(形如 ["a","b"]/{"k":1}),
-	# 此处尝试还原为真正的 Variant, 保证数组类设置(如 PackedStringArray 语义项)可被原生读取。
 	if value is String:
 		var s := str(value).strip_edges()
 		if (s.begins_with("[") and s.ends_with("]")) or (s.begins_with("{") and s.ends_with("}")):
@@ -249,11 +158,7 @@ static func _handle_save_all(_args: Dictionary) -> Dictionary:
 
 
 ## 重新导入资源。
-##
 ## **必须先确认该资源归导入系统管**: reimport_files 是拿同名 .import 去驱动导入器的, 而
-## .gd/.json/.tres 等纯文本资源没有 .import(它们直接读源文件), 对它们调用不会"什么都不做",
-## 而是让引擎在导入器查找处触发内部断言 —— 用户看到的是一句带 node.cpp 的晦涩 BUG 报错,
-## 既没提路径也没提"这资源不需要导入"。这类"参数语义错但报成引擎故障"的错最费时间, 故挡在调用前。
 static func _handle_reimport(args: Dictionary) -> Dictionary:
 	var path := VariantTool.get_string(args, "path")
 	if path.is_empty() or not ResourceLoader.exists(path):
@@ -383,9 +288,6 @@ static func _value_type(v: Variant) -> String:
 
 
 ## preview_resource: 取编辑器生成的资源预览缩略图 → 存 PNG。
-## 【为什么用 EditorResourcePreview】那是 FileSystem 面板出缩略图的**同一套机制**: 对"已导入资源"
-## (含 .vox/.qvx 导入成的 .mesh)自动可用, 不必自己搭离屏渲染。代价是**异步回调** + 缩略图尺寸。
-## 回调经 PreviewReceiver(把异步结果转成可 await 信号的 RefCounted)接住。
 static func _handle_preview_resource(args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return MCPResult.fail("仅在编辑器模式可用")
@@ -422,17 +324,6 @@ class PreviewReceiver extends RefCounted:
 
 
 ## ======= render_model: 可调相机的离屏渲染预览 =======
-##
-## 【为什么不复用 preview_resource】那是 FileSystem 缩略图机制(EditorResourcePreview): 视角固定、
-## 尺寸由编辑器设置决定, **没有任何角度/缩放入参**(见该工具说明)。想要"自由调角度、放大缩小"就得
-## 自建离屏渲染: 一个 SubViewport + Camera3D, 相机位置由 yaw/pitch/dist 决定。
-##
-## 【为什么挂在编辑器根控件下】SubViewport 只要在场景树里且 update_mode != DISABLED 就会渲染到自己的
-## 纹理(不需要 SubViewportContainer 显示)。挂在 base_control 下即随编辑器帧循环出图, 读完即释放,
-## 不干扰用户界面。
-##
-## 【为什么等几帧】刚 add_child 时子视口尚未产出画面; get_texture().get_image() 要等至少一帧渲染
-## 完成才有内容。取 4 帧留足余量(编辑器帧循环下代价可忽略)。
 static func _handle_render_model(args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return MCPResult.fail("仅在编辑器模式可用")

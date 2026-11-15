@@ -1,6 +1,5 @@
 @tool
 ## 游戏命令：一次玩家/AI 决策或操作的记录单元（命令即数据）。
-## 序列化后可用于回放、战绩审计与 headless 自动化测试。
 class_name GameCommand extends RefCounted
 
 ## 命令类型，如 &"use_equip"、&"levelup_pick"

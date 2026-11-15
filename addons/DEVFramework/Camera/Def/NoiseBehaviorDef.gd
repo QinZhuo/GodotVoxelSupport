@@ -1,11 +1,5 @@
 @tool
 ## 手持抖动行为: 给机位画面叠加常驻的"手持感"晃动。
-##
-## 与震屏的区别: 本行为是[b]常驻[/b]的镜头质感(让画面不呆板), 且只作用于本机位;
-## 爆炸/受击那种[b]事件性[/b]震动请用 [method CameraTool.impulse] / [method CameraTool.shake]。
-##
-## 抖动通过 [method offset] 叠加, [b]不写回节点[/b]: 既不污染场景 transform,
-## 也不会反馈给同机位的跟随/死区计算。
 class_name NoiseBehaviorDef extends CameraBehaviorDef
 
 ## 各机位共用的默认噪声。Noise 采样是无状态纯函数, 因此共享安全

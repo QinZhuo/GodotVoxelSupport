@@ -1,15 +1,11 @@
 @tool
 ## MCP 日志与错误捕获器 — 继承 Godot 4.5+ 的 Logger
-## 捕获引擎内所有 print 消息(_log_message)与错误(含 GDScript 栈追踪 _log_error)
-## 采用线程安全(Mutex)环形缓冲, 供 MCP 工具读取
 class_name MCPLogger extends Logger
 
 const CAPACITY := 2000        # 环形缓冲容量(日志条目数)
 const ERROR_CAPACITY := 500   # 错误条目容量(含栈追踪, 占空间)
 
 ## 日志条目结构: {"time":int毫秒, "message":String, "is_error":bool}
-## 环形缓冲容量满后头部条目被丢弃, 用"逻辑基数"(已丢弃条数)保持增量游标语义稳定:
-## 数组偏移 i 对应的逻辑序号 = base + i。客户端拿到的 next 是逻辑序号, 与实地址无关。
 var _messages: Array = []
 var _errors: Array = []
 var _base_index := 0          # 已从 _messages 头部丢弃的逻辑消息数
@@ -85,7 +81,6 @@ func _push_error(entry: Dictionary) -> void:
 
 
 ## 剥离 ANSI 转义序列(颜色码等)。这些控制字符会被 JSON.stringify 原样输出,
-## 导致 MCP 工具返回非法 JSON。捕获时统一清洗, 保证 get_logs/get_errors 输出合法。
 func _strip_ansi(text: String) -> String:
 	if not text.contains(String.chr(27)):
 		return text
@@ -113,9 +108,6 @@ func _strip_ansi(text: String) -> String:
 
 
 ## 合并连续重复的条目为一条, 减少 JSON 体积节省 token。
-## 相邻且签名相同的条目视为重复(日志以 message 为准, 错误叠加 type/file/line/code),
-## 合并后保留首条内容, 添加 repeat 计数; 数量 >1 时附 first_time/last_time 便于知道重复的时间区间。
-## 只合并相邻重复, 不跨间隔归并, 避免掩盖正常信息流。entries 会被原地增加字段(调用方传入已去引用的副本)。
 func merge_duplicates(entries: Array) -> Array:
 	if entries.is_empty():
 		return entries
@@ -158,7 +150,6 @@ func _entry_key(e: Dictionary) -> String:
 
 
 ## 获取新增日志(自 last_index 起), 返回 [entries, new_index]
-## 环形缓冲容量满后头部被丢弃, 用逻辑索引(_base_index + 数组偏移)保证增量语义稳定
 func take_logs_since(last_index: int) -> Dictionary:
 	_mutex.lock()
 	var new_entries: Array = []
@@ -171,7 +162,6 @@ func take_logs_since(last_index: int) -> Dictionary:
 
 
 ## 获取新增错误(自 last_index 起的逻辑序号)
-## 与 take_logs_since 一致: 用逻辑拷标(_err_base_index + 数组偏移)保证环形缓冲满后增量语义稳定。
 func take_errors_since(last_index: int) -> Dictionary:
 	_mutex.lock()
 	var new_entries: Array = []
@@ -193,8 +183,6 @@ func get_error_cursor() -> int:
 
 
 ## 把"自 cursor 起新增的引擎报错"格式化成可读详情(每条带行号, 最多 5 条)。
-## **单一实现**: eval 的语法预检与内联测试的编译失败都调它 —— 解析错来源只有引擎缓冲一处,
-## 各写一份必然漂移(message/line 的取法一变, 只有一边跟上)。
 func describe_errors_since(cursor: int) -> String:
 	if cursor < 0:
 		return "(未提供错误游标, 详细解析错见 get_logs kind=error)"

@@ -1,7 +1,5 @@
 @tool
 ## 跟随行为: 让机位跟随 [member VirtualCamera3D.target] 的位置。
-##
-## 支持偏移、按目标朝向计算偏移、按轴独立阻尼, 以及死区 + 软区(消除目标小幅抖动导致的画面晃动)。
 class_name FollowBehaviorDef extends CameraBehaviorDef
 
 ## 相对目标的位置偏移
@@ -33,7 +31,6 @@ func apply(vcam: VirtualCamera3D, delta: float, instant: bool = false) -> void:
 
 
 ## 死区 + 软区: 目标留在死区内相机不动; 越出后按超出量/软区厚度成比例追赶, 出软区则全速。
-## 在机位局部空间计算, 因此死区随镜头朝向走(等价于屏幕空间的框)。
 func _apply_zone(vcam: VirtualCamera3D, desired: Vector3) -> Vector3:
 	if dead_zone == Vector3.ZERO:
 		return desired

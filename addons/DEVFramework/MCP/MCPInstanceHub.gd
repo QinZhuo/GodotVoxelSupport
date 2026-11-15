@@ -2,41 +2,16 @@
 extends RefCounted
 
 ## ======= MCP 多实例中枢(实例注册表 + 目标路由 + HTTP 转发) =======
-##
-## 解决的问题: 同一台机器上同时打开多个装了 DEVFramework 的 Godot 编辑器时, 每个实例都想绑
-## 同一个固定端口 → 只有一个能绑上, 其余实例的 MCP 服务器直接起不来(而且端口值还写在各自的
-## project.godot 里, 所以"换个端口"就等于让 AI 客户端再加一条配置)。结果: 多个编辑器 = 多份
-## MCP 配置, 且很容易连到错的那个。
-##
-## 做法(hub-and-spoke):
 ##   · 一个**机器级**固定端口(见 MCPDevServer.SETTING_HUB_PORT)只有**一个**实例能持有, 它就是这个
-##     "中枢(hub)";
 ##   · 其余实例各绑一个**系统分配的临时端口**(listen(0)), 每 4 秒把自己登记到中枢;
 ##   · 中枢对外只暴露固定端口那一个 MCP 端点, 工具表就是它自己的全量工具(每个工具多一个可选
-##     `instance` 参数), tools/call 时按目标实例把 JSON-RPC **原样转发**到该实例的临时端口 ——
-##     于是在中枢上调 eval_code / game_control / 场景编辑, 都会真正落到你指定的那个编辑器。
 ##   · 中枢退出后, 成员心跳连续失败 → 抢绑固定端口(bind 是原子的), 抢到的那个成为新中枢,
-##     其余成员下个心跳周期自动登记到它。
-##
-## 为什么不聚合工具名(instance__tool): 那是工具数 × 实例数, 上下文直接爆掉; 而且改成转发后
-## 每个工具的 schema/语义都不用动。详见 Readme §7.3 的方案对比。
-## 为什么不引入外部 hub 进程: 中枢本身就是一个编辑器实例, 天然拥有完整工具实现, 零外部依赖
-## (不需要 node/python/额外二进制)。代价是中枢随那个编辑器退出, 由接管逻辑补偿。
-##
-## 本文件由 MCPDevServer 以 `_mod("MCPInstanceHub")` 动态编译并 `.new()` 持有。
-## **不声明 class_name**(理由同其它 MCP 域脚本, 见 MCPDevServer 顶部注释)。
-##
-## 边界: 本模块只管"注册表 + 目标路由 + HTTP 转发", 不含任何工具实现, 也不碰 MCP 协议形状。
-## 工具/协议仍在 MCPDevServer 里, 这里只回普通字典, 由服务器负责包成 JSON-RPC。
-## **导出安全**: 本文件不引用任何编辑器类(虽然只在编辑器进程被实例化, 但保持可解析)。
 
 ## 心跳周期: 成员每隔这么久向中枢登记一次(登记即续约, 不另设 ping)。
-## 4 秒是在"中枢退出后多快能接管"与"空转 HTTP 请求量"之间取的: 单机零成本, 接管窗口约 3 拍。
 const HEARTBEAT_MS := 4000
 ## 成员存活上限: 心跳停止超过这个时长即从表中剔除。
 ## 它只用于"手动关掉一个编辑器"后的清理 —— 崩溃/强杀同样走这条路径, 故不能太长(否则
 ## 会对着已死的实例报错); 也不能太短(否则一次 GC 卡顿就被误判为退出)。
-## **不用 pid 存活判断**: Windows 的 pid 会被复用, 判错的方向恰恰是"把死实例当成活的"。
 const MEMBER_TTL_MS := 20000
 ## 连接阶段的独立超时(见 post_json 的说明)。本机回环一次握手是微秒级, 2 秒足够宽容;
 ## 超过它就只能判定"那个端口上没有活着的服务端"。**不能**与工具执行超时共用: 后者可达
@@ -49,15 +24,20 @@ const HUB_UNREGISTER_PATH := "/hub/unregister"
 const HUB_INSTANCES_PATH := "/hub/instances"
 const HUB_HEALTH_PATH := "/hub/health"
 
+## 默认目标落盘的文件名(机器级共享; 目录见 _target_path)
+const TARGET_FILE := "devframework_mcp_target.json"
+
+## 测试用: 覆盖目标状态文件路径。空 = 用默认位置。
+## 用例必须设它 —— 否则跑一次测试就会改掉开发者真实会话的默认目标。
+static var target_path_override := ""
+
 ## uid -> 实例条目。条目形状见 _make_entry()。
 var members := {}
-## 默认目标实例的 instance_id(项目级身份)。空串 = 不转发, 就地执行。
-##
-## 为什么是**全局单值**而不是"按 MCP 会话绑定": 工具 handler 拿不到会话 id(handler 签名是
-## args 字典), 把 sid 一路穿进 50+ 个 handler 只为这一个功能不划算; 且 MCP 2026-07-28 起
-## 协议级会话被移除, 按会话 pin 在那之后本来就会失效。单值默认目标 + 单次调用 `instance`
-## 参数覆盖, 覆盖了全部真实用法(一个开发者、一个 agent 会话对着一个编辑器干活)。
-var active_instance := ""
+## 默认目标(服务端唯一的全局状态)。三个字段一起落盘: uid 里的进程号会变, 而 instance_id
+var active_instance := ""        # 目标 uid(带进程号, 唯一)
+var active_instance_id := ""     # 目标项目级身份(重启不变, uid 失效时的恢复依据)
+var active_project_path := ""    # 目标项目路径(仅用于报错/展示)
+var _target_loaded := false
 
 ## 本实例身份
 var own_uid := ""
@@ -81,10 +61,6 @@ var auth_token := ""
 
 
 ## ------- 常量访问器 -------
-## 服务器侧拿到的是本脚本的**动态实例**(Variant), 而 GDScript 的常量不是对象属性 ——
-## `inst.SOME_CONST` 在动态访问下取不到("Invalid get index")。故把服务器需要的那几个常量
-## 经方法暴露出来: 用方法而不是让服务器自己抄一份字面量, 是为了让"心跳周期/端点路径"这两个
-## 约定仍只有一处定义(hub 与 member 两端都用同一个值才算对得上)。
 
 func heartbeat_ms() -> int:
 	return HEARTBEAT_MS
@@ -101,19 +77,12 @@ func instances_path() -> String:
 ## ------- 身份 -------
 
 ## 实例 id: "<项目名>@<项目路径哈希前 8 位>"。
-## 与 MCP for Unity 的 `Name@hash` 同构: 人能一眼看出是哪个项目, 机器能稳定复现,
-## 且盘符大小写/斜杠/尾分隔符差异不会算出两个 id(见 _normalize_path)。
-## 同一项目被打开两次时两者 id 相同 —— 这正是"默认实例应该按项目记"的依据,
-## 而单次调用可以用 uid(带进程号)精确指定到某一个进程。
 static func make_instance_id(project_name: String, project_path: String) -> String:
 	return "%s@%s" % [safe_name(project_name), hash8(_normalize_path(project_path))]
 
 
 ## 路径规范化: 反斜杠统一 + 去尾分隔符 + 转小写。
 ## **传进来的必须是绝对路径**(调用方负责 globalize): 传 "res://" 这种相对路径会让所有项目的
-## 哈希都撞在一起, 于是多个项目的实例 id 相同, 默认目标会随机落到其中一个。
-## 也用于展示: globalize_path("res://") 带尾斜杠, 不统一就会出现 ".../Framework/" 与
-## ".../Framework" 两种写法并列在实例清单里。
 static func normalize_path(path: String) -> String:
 	var norm := path.strip_edges().replace("\\", "/")
 	while norm.ends_with("/"):
@@ -130,7 +99,6 @@ static func hash8(text: String) -> String:
 
 
 ## 把项目名压成可用作 id 前缀的形式(空格/路径分隔符/冒号/@ 一律换成下划线)。
-## 不做这一步的话 "My Game@a1b2c3d4" 里的空格会让复制粘贴到 URL/命令行时出错。
 static func safe_name(raw: String) -> String:
 	var out := ""
 	for i in raw.length():
@@ -152,7 +120,6 @@ func set_self(uid: String, instance_id: String, project_name: String, project_pa
 	own_instance_id = instance_id
 	own_name = project_name
 	# 存规范化后的路径(去尾分隔符/统一斜杠): globalize_path("res://") 带尾斜杠, 原样存会让
-	# 实例清单里出现 ".../Framework/" 与 .../Framework 两种写法并列, 复制粘贴时容易出错。
 	own_project_path = normalize_path(project_path)
 	members[uid] = _make_entry(uid, instance_id, project_name, own_project_path, own_port, true)
 
@@ -228,7 +195,6 @@ func prune(now: int = -1) -> void:
 
 ## 成员侧: 用中枢回包里的实例表**整体替换**非自身条目。
 ## 这样成员的 list_instances 也能看到全机器, 而不是只看到自己 —— 否则"选错实例"时的候选
-## 清单在成员进程里只有一个条目, 等于没给。
 func sync_from_snapshot(instances: Array) -> void:
 	var self_entry: Variant = members.get(own_uid, null)
 	members = {}
@@ -245,7 +211,6 @@ func sync_from_snapshot(instances: Array) -> void:
 		var copy: Dictionary = e.duplicate(true)
 		copy["is_self"] = false
 		# 中枢给的是 age_ms(相对它自己的时钟), 换算回本进程时间轴, 否则 prune 会拿中枢的
-		# 时间戳和本地 ticks 比, 结果要么立刻全删要么永不过期(中枢与本机同机, 时钟同源)。
 		copy["last_seen"] = now - int(e.get("age_ms", 0))
 		members[uid] = copy
 
@@ -266,11 +231,8 @@ func live_members() -> Array:
 
 
 ## 对外可读快照(list_instances 工具 / /hub/instances)。附带 age_ms(心跳有多旧)与 is_hub
-## 两个派生字段: 调用方(以及 AI)判断"这个实例是不是已经死了"靠的就是 age_ms, 不给就得自己算。
-##
 ## **必须先 prune**: 快照是"当前有哪几个编辑器"的唯一对外答案, 若它把已经死掉的成员也列出来,
 ## 调用方就会去选一个已经关掉的实例, 然后收到一次转发超时。实测就是这样: 强杀第二个编辑器后,
-## 中枢的快照仍然列出它(age_ms 一路涨到 56 秒), 而 prune 只在 /hub/register 里被调。
 func snapshot(now: int = -1) -> Array:
 	var t := now if now >= 0 else Time.get_ticks_msec()
 	prune(t)
@@ -285,7 +247,6 @@ func snapshot(now: int = -1) -> Array:
 
 
 ## 按 instance_id(= 项目级身份)查条目。**同项目多开时会把多个命中都返回**, 由调用方自己决定
-## 怎么处理 —— 把"选哪个"藏在这里必然选出不可预期的那个(见 resolve 的歧义说明)。
 func find_all_by_instance_id(instance_id: String) -> Array:
 	var out: Array = []
 	if instance_id.is_empty():
@@ -305,11 +266,6 @@ func find_by_uid(uid: String) -> Dictionary:
 
 ## 解析调用方给的实例标识。四档匹配, 从精确到宽松:
 ##   1. uid 精确("MyGame@a1b2c3d4#12345", 带进程号, **唯一**, 路由与绑定都用它)
-##   2. 端口号(手工记过端口的场合仍可用)
-##   3. instance_id 精确("MyGame@a1b2c3d4", 项目级) —— **同项目多开时会命中多个**:
-##      此时不猜, 返回空并由调用方报"有歧义 + 候选清单", 让调用方改用 uid 或端口。
-##      为什么这里不像 use_instance 那样优柔地挑一个: 一次写操作打错项目的代价远高于多一次调用,
-##      而"同项目多开"恰恰是两个窗口各改各的场景, 挑错就等于把 A 窗口的改动写进 B 窗口。
 ##   4. 前缀(项目名 / hash / hash 前缀 / uid 前缀) —— 必须**唯一命中**, 否则同样返回空。
 func resolve(query: String) -> Dictionary:
 	var q := query.strip_edges()
@@ -361,19 +317,99 @@ func count_matches(query: String) -> int:
 
 
 ## ------- 目标绑定 -------
-##
 ## 绑定用 **uid** 而非 instance_id: uid 带进程号, 唯一; 而 instance_id 在同项目多开时会撞,
-## 用它做键会让"选中 A 窗口"在 B 窗口也生效(且两边 id 相同, 从错误信息里看不出问题)。
-func set_active(uid: String) -> void:
-	active_instance = uid
+func set_active(entry: Dictionary) -> void:
+	active_instance = str(entry.get("uid", ""))
+	active_instance_id = str(entry.get("instance_id", ""))
+	active_project_path = str(entry.get("project_path", ""))
+	_target_loaded = true
+	_save_target()
+
+
+## 是否设过默认目标(可能已离线 —— 调用方据此区分"从未设过"与"设过但不在线")。
+func has_active() -> bool:
+	_ensure_target_loaded()
+	return not active_instance.is_empty() or not active_instance_id.is_empty()
+
+
+## 当前默认目标对应的在线实例; 空字典 = 没设过 / 目标不在线(调用方必须报错, **不要就地执行**)。
+func resolve_active() -> Dictionary:
+	_ensure_target_loaded()
+	if not active_instance.is_empty():
+		var hit := find_by_uid(active_instance)
+		if not hit.is_empty():
+			return hit
+	if active_instance_id.is_empty():
+		return {}
+	# 同项目多开时 resolve 会返回空(歧义), 此时同样交给调用方报错, 不挑一个。
+	var again := resolve(active_instance_id)
+	if not again.is_empty():
+		set_active(again)   # uid 换代: 改写并落盘
+	return again
+
+
+## 默认目标的 uid(先确保已从磁盘恢复; 直接读字段会在首次调用前拿到空串)。
+func get_active_uid() -> String:
+	_ensure_target_loaded()
+	return active_instance
+
+
+## 默认目标的可读标签(报错用): 优先项目路径, 回退 instance_id。
+func active_label() -> String:
+	_ensure_target_loaded()
+	if not active_project_path.is_empty():
+		return "%s (%s)" % [active_project_path, active_instance_id]
+	return active_instance_id if not active_instance_id.is_empty() else active_instance
 
 
 ## 默认目标是否落在**别的**实例上(落在自己身上等于不转发)。
 func active_is_remote() -> bool:
-	if active_instance.is_empty():
-		return false
-	var e := find_by_uid(active_instance)
+	var e := resolve_active()
 	return not e.is_empty() and not bool(e.get("is_self", false))
+
+
+## ------- 默认目标持久化 -------
+## 位置必须**机器级**: user:// 按项目隔离, 换一个项目当中枢就读不到上个项目写下的目标。
+
+func _target_path() -> String:
+	if not target_path_override.is_empty():
+		return target_path_override
+	var base := OS.get_environment("LOCALAPPDATA")
+	if base.is_empty():
+		base = OS.get_temp_dir()
+	return base.path_join("DEVFrameworkMCP").path_join(TARGET_FILE)
+
+
+func _ensure_target_loaded() -> void:
+	if _target_loaded:
+		return
+	_target_loaded = true
+	if not active_instance.is_empty() or not active_instance_id.is_empty():
+		return   # 本进程内先设过, 以内存为准
+	var path := _target_path()
+	if not FileAccess.file_exists(path):
+		return
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if parsed is Dictionary:
+		active_instance = str(parsed.get("uid", ""))
+		active_instance_id = str(parsed.get("instance_id", ""))
+		active_project_path = str(parsed.get("project_path", ""))
+
+
+func _save_target() -> void:
+	var path := _target_path()
+	var dir := path.get_base_dir()
+	if not DirAccess.dir_exists_absolute(dir):
+		DirAccess.make_dir_recursive_absolute(dir)
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return   # 落盘失败不影响本进程; 下一个中枢会走"目标不在线 → 报错"的安全路径
+	f.store_string(JSON.stringify({
+		"uid": active_instance,
+		"instance_id": active_instance_id,
+		"project_path": active_project_path,
+	}))
+	f.close()
 
 
 ## ------- 可读描述 -------
@@ -403,12 +439,6 @@ func has_other_members() -> bool:
 ## ------- tools/list 整形 -------
 
 ## 给中枢对外暴露的每一条工具 schema 注入可选的 `instance` 参数。
-##
-## 为什么不给每个工具各写一份带 instance 的 schema: 50+ 个工具 × 两份 = 必然漂移,
-## 而漂移的症状是"某个工具忘了带 instance, 于是它永远只能作用于中枢自己" —— 静默且难查。
-## 为什么不改 _tool_defs 本身: 中枢的转发目标(成员)也跑同一套代码, 若把 instance 写进通用
-## schema, 成员侧也会多收一个自己不会处理、却会进入参校验的参数。
-## [param skip] 不需要注入的工具名(实例管理工具: 它们自己的 instance 参数语义不同)。
 static func inject_instance_arg(defs: Array, desc: String, skip: Array = []) -> Array:
 	var out: Array = []
 	for d in defs:
@@ -436,7 +466,6 @@ static func inject_instance_arg(defs: Array, desc: String, skip: Array = []) -> 
 ## ------- 中枢侧 HTTP 端点 -------
 
 ## 处理一条 /hub/* 请求, 返回 {"status": int, "body": Dictionary}。
-## 由 MCPDevServer 的 HTTP 处理器调用, 本函数不碰 socket。
 func handle(method: String, path: String, body: Dictionary) -> Dictionary:
 	var now := Time.get_ticks_msec()
 	prune(now)
@@ -482,7 +511,6 @@ func register_to(hub_port: int, payload: Dictionary) -> Dictionary:
 
 ## 把一条 JSON-RPC 请求原样转发给目标实例的 MCP 端点, 返回它解析后的 JSON-RPC 响应。
 ## proto 经 HTTP 头带过去: 目标实例要按同一协议版本整形结果(2026-07-28 起 result 必须带
-## resultType/ttlMs), 不带的话客户端拿到的响应形状会与协商版本不符。
 func forward(port: int, rpc: Dictionary, timeout_ms: int, proto: String = "") -> Dictionary:
 	var extra := PackedStringArray()
 	if not proto.is_empty():
@@ -491,17 +519,9 @@ func forward(port: int, rpc: Dictionary, timeout_ms: int, proto: String = "") ->
 
 
 ## 最小 HTTP 客户端: POST 一个 JSON, 读回一个 JSON。
-##
-## 不引 HTTPRequest 节点: 那需要节点进场景树 + 信号接线, 而这里只是"成员↔中枢"的内部往返,
-## HTTPClient 足够且不引入节点生命周期问题(转发请求可能在中枢被关掉时仍在飞)。
 ## 循环里的 `await` 是必须的 —— 不给主循环机会, 编辑器会整段卡住(转发是阻塞语义)。
-##
 ## ## 连接阶段必须用**独立短超时**
-##
-## 转发工具调用时总超时给的是"游戏调用上限 + 余量"(最长约 610 秒), 那是给**工具执行**用的。
-## 若连接阶段也共用它, 则"目标实例已关闭"这一最常见情况会表现为: connect 异步发起 →
 ## 端口没监听 → 一直等到 610 秒才报错。实测就是这样(中枢转发给一个已关闭实例时挂死)。
-## 死实例的判定本来就是确定的、只需一次 TCP 握手的时间, 故连接阶段单独给 CONNECT_TIMEOUT_MS。
 func post_json(port: int, path: String, payload: Dictionary, timeout_ms := 3000, extra_headers: PackedStringArray = PackedStringArray()) -> Dictionary:
 	if port <= 0 or port > 65535:
 		return {}
@@ -554,7 +574,6 @@ func post_json(port: int, path: String, payload: Dictionary, timeout_ms := 3000,
 	var status := client.get_response_code()
 	client.close()
 	# 状态码不参与判定: 本服务器在"传输层拒绝"时也回 JSON-RPC 错误体(400/401/403),
-	# 丢掉它会让上层只看到"实例无响应", 掩盖真正原因(例如 token 不匹配的 401)。
 	var parsed: Variant = JSON.parse_string(buf.get_string_from_utf8())
 	if parsed is Dictionary:
 		return parsed

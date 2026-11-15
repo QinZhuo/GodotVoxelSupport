@@ -1,11 +1,6 @@
 class_name TaskTool
 
 ## 任务跟踪表(可选基建): 显式注册任务, 提供"活动列表 / 按 Def 查找 / 聚合存读档"。
-##
-## 框架不做隐式生命周期 —— 注册与注销由调用方控制(与 Task 系统的"外部驱动"一致);
-## 任务进入终态(完成/失败/取消)时自动从 active 移入 finished。
-## 典型用法: 教程/任务管理器共用一张表 —— 界面读 get_active() 画任务日志, 存档时 save_all()。
-##
 ## 注意: 静态表持有任务强引用, 场景销毁时请 untrack(或整表 clear), 否则任务不会被释放。
 
 static var _active: Array[Task] = []
@@ -59,7 +54,6 @@ static func save_all() -> Dictionary:
 
 
 ## 聚合读档: 按存档逐条 Task.restore 并注册, 返回还原出的任务列表。
-## [param data] 上下文(全部任务共用一份; 通常为宿主节点)
 static func load_all(saved: Dictionary, data = null) -> Array[Task]:
 	var out: Array[Task] = []
 	for key: String in saved:
@@ -69,6 +63,11 @@ static func load_all(saved: Dictionary, data = null) -> Array[Task]:
 		track(task)
 		out.append(task)
 	return out
+
+
+## 会话级复位：清空跟踪表
+static func reset() -> void:
+	clear()
 
 
 ## 清空跟踪表(不 touch 任务本身)

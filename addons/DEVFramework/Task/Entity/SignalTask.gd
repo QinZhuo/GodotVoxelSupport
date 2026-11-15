@@ -25,7 +25,6 @@ func _connect_signals(data) -> void:
 	if not task_def or task_def.signals.is_empty():
 		return
 	# 兼容任意参数宽度的信号：无参(如 Button.pressed)、单参(自定义 data 回调)、
-	# 或多参(如 card_levelup_requested(card, options)) 均可，多余实参由 rest 兜底收集。
 	_handler = func(_signal_data = null, ..._extra):
 		if not is_active or is_completed:
 			return

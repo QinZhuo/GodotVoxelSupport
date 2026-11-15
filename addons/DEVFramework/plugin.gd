@@ -4,11 +4,8 @@ extends EditorPlugin
 # MCP 服务器由两个开关协作管理:
 #   - 插件启用/停用: 决定 autoload 行(project.godot)和编辑器服务器节点的存在
 #   - dev_framework/mcp/enabled: 独立主开关, 可在项目设置里单独控制,
-#     MCPDevServer 启动时读取它, 为 false 则编辑器/游戏进程都不起服务器
-# autoload 行(DevMCP)只对"游戏运行进程"起作用(run_game 时游戏内开启运行时服务器),
-# 编辑器本身的服务器由本插件持有的 MCPDevServer 节点提供, 两者互不冲突。
 
-const DEF_TABLE_SCENE := "res://addons/DEVFramework/DefTable/DefTableView.tscn"
+const DEF_TABLE_SCENE := "res://addons/DEVFramework/Core/Editor/DefTable/DefTableView.tscn"
 ## 虚拟机位 3D 视图可视化(仅编辑器加载, 故用路径而非全局类)
 const CAMERA_GIZMO_SCRIPT := "res://addons/DEVFramework/Camera/Editor/VirtualCameraGizmo.gd"
 ## 虚拟机位取景器(底部面板, 预览机位看到的画面)
@@ -38,32 +35,27 @@ func _enter_tree() -> void:
 	_register("dev_framework/lightmap/scan_dir", TYPE_STRING, "res://Scenes")
 	_register("dev_framework/mcp/enabled", TYPE_BOOL, true)
 	# 旧的项目级端口。**多实例中枢默认开启时它不被使用**(中枢走 mcp/hub_port);
-	# 只有把 dev_framework/mcp/hub 关掉、回到"一进程一端口"的旧行为时才生效。
 	_register("dev_framework/mcp/port", TYPE_INT, 8931)
 	_register("dev_framework/mcp/token", TYPE_STRING, "")
 	_register("dev_framework/mcp/max_output_chars", TYPE_INT, MCPDevServer.DEFAULT_MAX_OUTPUT_CHARS)
+	# get_scene_tree 默认展开深度(UI 层级深的项目可调小, 避免一次拉平整片子树)
+	_register("dev_framework/mcp/scene_tree_depth", TYPE_INT, 8)
+	# 调试分支名(英文逗号分隔多个; 命中即视为 debug 环境, 空=正式分支)
+	_register("dev_framework/debug/branch_names", TYPE_STRING, "")
 	_register("dev_framework/mcp/log_tool_results", TYPE_BOOL, false)
 	# 游戏调用单次等待上限: 编辑器等游戏经调试线回包, 以及 run_tests(process=game) 的单次阻塞
-	# 共用它。默认 600s(10 分钟, 与测试硬超时对齐); 过小会截到安全下限, 过大也会截到上限。
 	_register("dev_framework/mcp/game_call_timeout_ms", TYPE_INT, MCPDevServer.DEFAULT_GAME_CALL_TIMEOUT_MS)
 	# 运行时服务器: 勾选后**导出包/独立运行**进程复用同一端口(mcp/port), 自动注册运行时
-	# 可编译的全部框架工具(不含 eval)。默认 false —— 导出包不应默认暴露任何本地端口。
 	_register("dev_framework/mcp/runtime_enabled", TYPE_BOOL, false)
 	# 项目侧 provider: 列出项目自定义 MCP 工具域的 .gd 路径(每个提供 static register(add_tool))。
 	_register("dev_framework/mcp/providers", TYPE_PACKED_STRING_ARRAY, PackedStringArray())
 	# 多实例中枢: 同时打开多个装了本框架的编辑器时, 只有一个能占住 hub_port 并成为"中枢",
-	# 其余实例自动退让到系统分配的临时端口并登记到中枢 —— 于是客户端只需要**一个** URL、
-	# 一份配置, 就能通过工具的 instance 参数操作任意一个编辑器。
-	# 关掉则回到旧行为: 抢不到 mcp/port 的实例直接不启动服务器(多个编辑器时只有第一个有 MCP)。
 	_register("dev_framework/mcp/hub", TYPE_BOOL, true)
 	# 中枢端口:**全机器唯一的通用端口**, 所有项目一律不写、统一走这个默认值。
-	# 只有当它被别的程序占死需要排障时才临时写一行覆盖(写了的项目会自己拉一个独立中枢,
-	# 于是又回到"两个端点互相看不见" —— 所以例外只该是临时的)。
 	_register("dev_framework/mcp/hub_port", TYPE_INT, MCPDevServer.DEFAULT_HUB_PORT)
 	# 先开启 MCP 调试服务器, 避免后续初始化(工具菜单/DefTable)出错时阻断调试链路
 	_set_mcp_enabled(true)
 	# 导出过滤: 未勾选 runtime_enabled 时, 正式包剔除 DevMCP autoload(零 MCP 入口);
-	# 勾选时保留, 让导出包能起 runtime 端口。
 	_pack_mcp_filter = _PackMcpFilter.new(EXPORT_AUTOLOAD_KEY, "dev_framework/mcp/runtime_enabled")
 	add_export_plugin(_pack_mcp_filter)
 	# 所有编辑器工具统一由 Tool 目录下 extends EditorScript 的脚本自动注册
@@ -71,6 +63,8 @@ func _enter_tree() -> void:
 	_setup_def_table()
 	_setup_camera_gizmo()
 	_setup_camera_viewfinder()
+	## 清掉上一轮编辑器会话残留的静态状态（@tool 脚本 reload 后可能留住旧值）
+	ResetTool.all()
 
 
 func _exit_tree() -> void:
@@ -83,6 +77,7 @@ func _exit_tree() -> void:
 		_pack_mcp_filter = null
 	# 停用插件: 最后关闭 MCP
 	_set_mcp_enabled(false)
+	ResetTool.all()
 
 
 ## DefTable: 顶部 Main Screen Tab, 查看/复制/粘贴 Def 静态数据
@@ -149,7 +144,6 @@ func _teardown_camera_viewfinder() -> void:
 
 ## 插件标识(与 plugin.cfg 的 name 一致): 主屏幕标签与插件列表都取这里。
 ## 不能写 "DefTable" —— DefTable 只是本插件提供的一个面板, 写成面板名会让整个框架插件
-## 在编辑器里显示成单个面板。
 func _get_plugin_name() -> String:
 	return "DEVFramework"
 
@@ -167,15 +161,13 @@ func _make_visible(visible: bool) -> void:
 
 func _get_plugin_icon() -> Texture2D:
 	# 直接引用本地白色表格图标, 避免每次动态查找编辑器主题图标
-	var tex := load("res://addons/DEVFramework/DefTable/icon_table.png") as Texture2D
+	var tex := load("res://addons/DEVFramework/Core/Editor/DefTable/icon_table.png") as Texture2D
 	if tex != null:
 		return tex
 	return get_editor_interface().get_base_control().get_theme_icon("Data", "EditorIcons")
 
 
 ## 插件开关: enable=true 写 autoload 单例行并启动编辑器服务器; false 只停止服务器。
-## **单例只添加不自动删除**: 关闭游戏/禁用插件时不动 project.godot, 避免每次关闭游戏产生 git 差异。
-## 不触碰 dev_framework/mcp/enabled —— 那是独立的项目设置主开关, 由 MCPDevServer 读取。
 func _set_mcp_enabled(enable: bool) -> void:
 	if enable:
 		# 只添加单例(enable=false 不删除, 见上方说明)
@@ -209,8 +201,6 @@ func _set_mcp_enabled(enable: bool) -> void:
 
 
 ## 写入 project.godot 的 autoload 行(供游戏运行进程的运行时服务器使用)。
-## 刻意只提供"添加"这一个方向: 关闭游戏/禁用插件都不删单例, 保持 project.godot 稳定
-## (删除只在导出时由 _PackMcpFilter 临时完成)。
 func _add_autoload_row() -> void:
 	ProjectSettings.set_setting("autoload/" + AUTOLOAD_NAME, "*" + AUTOLOAD_PATH)
 	ProjectSettings.save()
@@ -224,9 +214,6 @@ func _register(name: String, type: int, default) -> void:
 
 
 ## 导出过滤器：未勾选运行时服务器时, 正式包临时移除 DevMCP autoload，结束后恢复。
-## 背景：DevMCP(MCPDevServer.gd) 现已是"导出安全"的单服务器(编辑器/运行时双模式), 其自身
-## 解析图不再含任何编辑器类; 但默认仍不希望导出包带 MCP 入口 —— 仅当用户勾选
-## dev_framework/mcp/runtime_enabled 时才保留 autoload, 让导出包能起 runtime 端口。
 class _PackMcpFilter extends EditorExportPlugin:
 	var _autoload_key: String
 	var _runtime_key: String
@@ -238,7 +225,6 @@ class _PackMcpFilter extends EditorExportPlugin:
 		_runtime_key = runtime_key
 
 	## EditorExportPlugin 要求重写 _get_name(): 未重写时导出会报
-	## "Required virtual method EditorExportPlugin::_get_name must be overridden"(非致命噪音)。
 	func _get_name() -> String:
 		return "DEVFramework MCP Autoload Filter"
 

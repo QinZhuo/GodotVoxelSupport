@@ -1,15 +1,5 @@
 @tool
 ## 相机模块统一入口(静态): 查询真实相机/生效机位、代码侧切换机位、冲击(震屏)、共享数学。
-##
-## [codeblock]
-## CameraTool.get_camera().global_position          # 真实渲染相机(无 Brain 时退回视口相机)
-## CameraTool.activate(vcam, 0.5)                   # 切机位, 0.5 秒过渡
-## CameraTool.deactivate(vcam)                      # 退出机位, 回落上一个
-## CameraTool.find(game_root, &"ResultCamera")      # 按节点名找机位
-## CameraTool.snap()                                # 立即对齐当前机位
-## CameraTool.impulse(hit_pos, 1.0)                 # 定向冲击: 从爆点扩散, 按距离衰减
-## CameraTool.shake(0.6)                            # 无方向震屏
-## [/codeblock]
 class_name CameraTool
 
 ## 冲击位移的世界缩放: strength=1 时相机最大偏移约 0.35 米
@@ -32,6 +22,14 @@ static var _rr_active: VirtualCamera3D = null
 
 ## 相机所在视口: 3D 画面被包进 SubViewport 时由业务注册, 缺省为主窗口
 static var viewport: Viewport
+
+
+## 会话级复位：清空冲击与轮转游标（`viewport` 属注入配置，不清）
+static func reset() -> void:
+	_impulses.clear()
+	_shake = {}
+	_rr_index = 0
+	_rr_active = null
 
 
 # ── 查询 ──
@@ -91,7 +89,6 @@ static func snap() -> void:
 # ── 冲击 / 震屏 ──
 
 ## 定向冲击: 从 origin 向外传播, 相机越远震得越轻越晚(对齐 Cinemachine Impulse)。
-## radius 为影响半径(米), 超出则完全无感; duration 为单次冲击持续时间(秒)。
 static func impulse(origin: Vector3, strength: float = 1.0, radius: float = 25.0, duration: float = 0.5) -> void:
 	if strength <= 0.0 or radius <= 0.0 or duration <= 0.0:
 		return
@@ -106,8 +103,6 @@ static func impulse(origin: Vector3, strength: float = 1.0, radius: float = 25.0
 
 
 ## 无方向震屏(全屏抖动), 用于爆炸在画面外 / 纯 UI 反馈等没有爆点的场合。
-## direction 为位移主方向(世界空间, 单位向量即可, 旋轉抖動不受其影响):
-## 传相机右向可实现"受击向侧后方 punch"的打击感, 默认全向。
 static func shake(strength: float = 1.0, duration: float = 0.4, direction: Vector3 = Vector3.ZERO) -> void:
 	if strength <= 0.0 or duration <= 0.0:
 		return
@@ -212,7 +207,6 @@ enum BlendStyle {
 }
 
 ## 姿态混合: 旋转恒为四元数 slerp; 位置按 style 走直线 / 球面 / 柱面轨迹。
-## pivot 为球面与柱面的枢纽点(通常是瞄准目标), 允许为 null; style 非 LINEAR 但枢纽点缺失时退化为直线。
 static func interpolate_transform(from: Transform3D, to: Transform3D, pivot: Variant, weight: float, style: BlendStyle) -> Transform3D:
 	if style == BlendStyle.LINEAR or pivot == null:
 		return from.interpolate_with(to, weight)

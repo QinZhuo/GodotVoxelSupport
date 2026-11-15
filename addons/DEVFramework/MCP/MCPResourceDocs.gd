@@ -2,14 +2,7 @@
 extends RefCounted
 
 ## ======= MCP 资源(静态文档)注册表 =======
-##
-## 项目侧 provider 用 `static func resources() -> Array` 声明文档, 每项:
-##   {"uri": "...", "name": "...", "description": "...", "mimeType": "text/markdown", "content": "..."}
-## **content 是内嵌字符串**(不读文件) —— 于是导出包没有 .md 也能提供资源, 运行时同样可用。
-##
 ## 本文件**必须导出安全**(不得出现 EditorInterface 等编辑器引用): resources/list|read 在
-## 编辑器与运行时两个进程都要能 _mod 它。这也是它独立于 MCPResourceTools 的原因 —— 后者含
-## 编辑器工具(open_scene 等), 导出包解析不了。
 
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 
@@ -51,7 +44,6 @@ static func list_all() -> Array:
 
 
 ## resources/read 的 result 体。成功 {contents:[...]}; uri 未知返回 MCPResult 的 validation
-## 错误(自带 content + isError), 两种情况都是合法 result。
 static func read(uri: String) -> Dictionary:
 	var i := _index_of(uri)
 	if i < 0:

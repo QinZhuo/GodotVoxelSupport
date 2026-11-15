@@ -1,20 +1,5 @@
 @tool
 ## 相机大脑: 场景中唯一的真实相机, 每帧跟随当前生效的 [VirtualCamera3D], 切换机位时平滑混合。
-##
-## 机位只负责"取景意图", Brain 负责"怎么过去":
-## [br]- 混合按固定时长 + Tween 曲线求权重; 旋转走四元数 slerp, 位置可走直线 / 球面 / 柱面轨迹
-## [br]- 混合结束后持续跟随机位: 机位自己移动(或跟随目标)时相机不会掉队
-## [br]- 连续快速切换从"当前实际姿态"起混, 不会互相打断跳变
-## [br]- 震屏 / 手持抖动 / 鼠标跟随等叠加层走 [member position_offset] / [member rotation_offset]
-##   与 [CameraTool.impulse], 与机位混合互不争写 transform
-##
-## 用法:
-## [codeblock]
-## CameraTool.get_brain()          # 取当前 Brain
-## brain.snap_to_current()         # 传送/场景切换后立即对齐机位
-## brain.position_offset = shake   # 常态叠加偏移(TweenShake 可直接写此属性)
-## CameraTool.impulse(pos, 1.0)    # 事件性震屏(定向、按距离衰减)
-## [/codeblock]
 class_name CameraBrain3D extends Camera3D
 
 ## 开始混合到新机位(from 可能为 null)
@@ -74,7 +59,6 @@ func _enter_tree() -> void:
 	main = self
 	# 分辨率自适应：进场时对齐全局保持基准轴（规则见 DisplayTool）。
 	# 必须先于 _ready 抓取 _base_fov，否则错误基准会被逐帧驱动放大。
-	# 编辑器里 Brain 是工具脚本, 不改动编辑器窗口
 	if not Engine.is_editor_hint():
 		DisplayTool.apply_to_window(get_window(), self)
 
@@ -110,9 +94,6 @@ func _process(delta: float) -> void:
 # ── 对外 API ──
 
 ## 本帧推进步长。
-##
-## [member ignore_time_scale] 时按**真实时间**推进: `_process` 的 delta 已被 `Engine.time_scale`
-## 缩放，慢动作下 `delta / time_scale` 即可还原; 但暂停(time_scale = 0)时 delta 恒为 0，
 ## 除法还原不出真实时间 ⇒ 改用真实时钟差值，否则机位混合 / 跟随会整个冻住。
 func _step(delta: float) -> float:
 	var now := Time.get_ticks_usec()
@@ -232,7 +213,6 @@ func _solve(instant: bool) -> void:
 
 
 ## 球面/柱面混合的枢纽点: 优先机位行为的瞄准点, 其次 Brain 的 blend_pivot, 都没有则返回 null(退化为直线)。
-## 这里不认识任何具体行为类型, 由机位统一代问, 因此自定义行为也能提供枢纽点。
 func _resolve_pivot(vcam: VirtualCamera3D) -> Variant:
 	var point: Variant = vcam.get_aim_point()
 	if point != null:

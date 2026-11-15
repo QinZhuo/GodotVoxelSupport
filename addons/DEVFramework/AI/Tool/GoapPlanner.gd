@@ -1,16 +1,11 @@
 class_name GoapPlanner extends RefCounted
 
 ## GOAP A* 规划器 — 从当前世界状态出发，反向搜索一条代价最小的行动序列，
-## 使得执行后满足目标状态。返回按执行顺序排列的 GoapAction 数组。
-## 规划失败（无可行方案）返回空数组。
 
 var max_depth: int = 12
 
 
 ## start      : 当前世界状态
-## goal_state : 目标状态（键值对字典）
-## action_defs: 候选行动定义数组（Array[GoapActionDef]）
-## depth      : 搜索深度限制（<=0 使用 max_depth）
 func plan(start: GoapWorldState, goal_state: Dictionary, action_defs: Array, depth: int = 0) -> Array[GoapAction]:
 	var limit := max_depth if depth <= 0 else depth
 	if goal_state.is_empty() or action_defs.is_empty():

@@ -1,22 +1,14 @@
 class_name GoapAction extends Entity
 
 ## GOAP 行动实例 — 由 GoapActionDef 通过 create_entity() 创建。
-## 每次规划都会创建一批新的行动实例（RefCounted，轻量），
-## 生命周期由 GoapAgent 管理。
-##
-## 生命周期: begin(agent) -> execute(agent) -> end(agent)
 ##   - begin(): 行动开始前调用，可覆写做初始化（如绑定目标引用）
 ##   - execute(): 触发执行逻辑（配置的 perform_method）
 ##   - end():    行动结束(成功/失败/中断)后必定调用，负责清理资源。
-##               框架在此自动清空 target，防止目标引用残留导致
-##               "世界状态与实际世界脱节 -> replan 死循环"。
 
 var def: GoapActionDef
 var _performing := false
 
 ## 行动目标上下文（如要走向的草、要追踪的猎物）。由 begin() 设置，
-## end() 时框架自动清空。规划时用世界状态描述需求，执行时用此引用
-## 绑定真实对象，二者由 Agent 负责保持一致。
 var target: Object = null
 
 
@@ -38,8 +30,6 @@ func get_cost() -> float:
 
 
 ## 行动开始钩子：框架会先调用 agent.begin_<行动名>(action)（若存在，用于绑定目标
-## 等初始化），再触发执行。约定: perform_method 形如 "perform_find_food"，对应的
-## begin 方法为 "begin_find_food"（去掉 perform_ 前缀）。基类无需覆写; end() 负责清理。
 func begin(agent: GoapAgent) -> void:
 	_performing = true
 	if def.perform_method.is_empty():
@@ -51,10 +41,6 @@ func begin(agent: GoapAgent) -> void:
 
 
 ## 触发执行。
-## 无 perform_method      → 纯配置行动，直接完成并应用 effects
-## perform_method 返回 bool → 同步完成 / 同步失败（方法应声明 -> bool）
-## perform_method 返回 null → 异步，等待 agent.notify_action_finished(success)
-##                            （异步方法请声明 -> Variant 或不声明返回类型）
 func execute(agent: GoapAgent) -> void:
 	_performing = true
 	if def.perform_method.is_empty():
@@ -66,7 +52,6 @@ func execute(agent: GoapAgent) -> void:
 
 
 ## 行动结束钩子：无论成功 / 失败 / 中断都必定调用（由 GoapAgent 统一触发）。
-## 可覆写做清理；基类默认清空 target 引用，防止失效对象被长期持有。
 func end(_agent: GoapAgent) -> void:
 	_performing = false
 	target = null

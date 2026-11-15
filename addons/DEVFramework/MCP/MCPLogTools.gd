@@ -2,42 +2,8 @@
 extends RefCounted
 
 ## ======= 日志 / 错误域 =======
-##
-## 提供"读 / 清**本进程**日志缓冲"的**实现件**(handler): _call_get_logs / _call_clear_errors,
-## 外加供主服务器复用的底层件 _call_collect_logs。MCP 工具 get_logs / clear_logs **已收进
-## MCPDevServer._register_game_play_tools**(带必填 process: editor|game, 编辑器侧转发 / 运行时
-## 就地), 由它按进程调用本文件的实现 —— 故本文件不再有 register()。
-##
-## ## 进程归属: process 参数显式指定, 不做静默切换
-##
-## 工具恒读**调用它的那个进程**的缓冲; "读游戏缓冲"由 MCPDevServer 的 editor 路由(process=game
-## → 调试线转发)完成。旧实现给 get_logs 加过 source=auto: 会在游戏运行时静默改读游戏缓冲 ——
-## 编辑器侧 eval_code 捕获的错误用 get_logs 查出来就成了游戏的错误, 且无从察觉。现改为 process
-## **必填**、缺省即报错, 杜绝"默认读错进程"。
-##
-## ## 依赖方向: 严格单向
-##
-## 本文件**不引用** MCPDevServer, 也不持有服务器实例状态 —— 只暴露静态实现, 由主文件调用。
-##
-## 捕获器用 static 注入的原因: handler 签名由协议定死(只收 args), 而捕获器是 MCPDevServer 的
-## 实例字段, 本文件既不认识它也不该自己再造一个(再造一个等于把引擎输出抄到第二个缓冲, 于是
-## get_logs 读的那份与主服务器诊断读的那份彼此独立, clear_logs 只清得掉其中一份)。
 ## 绑定必须发生在**捕获器建好之后**, 两个进程各一次; 漏绑不崩, 只报"日志捕获器未就绪"。
-##
-## handler 一律 static、禁 lambda: MCPToolAudit 靠 handler.get_method() 拿函数名去源码切函数体,
-## lambda 会返回 "<anonymous lambda>", 那批工具会被记成"检查缺失"。
-##
-## ## 主文件侧调用形式
-##
-##   bind_logger(_logger)              两个进程各一次, 漏绑只报"未就绪"
-##   _call_get_logs(args)              get_logs 的实现(读本进程缓冲, 按 kind 过滤)
-##   _call_collect_logs(args, is_err)  底层件(get_logs / 主文件超时回查错误复用)
-##   _call_clear_errors(args)          clear_logs 的实现
-##
 ## **主文件不得保留同名函数**: MCPToolAudit.func_body 按函数名在全目录找第一个命中, 而
-## "MCPDevServer.gd" 字典序在 "MCPLogTools.gd" 之前 —— 主文件若还留着同名的一份, 切出来的
-## 永远是不该被检查的那份, 入参自检会张冠李戴。
-##
 ## **必须带 @tool 且不声明 class_name**, 详见 MCPDevServer 顶部注释。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
@@ -47,12 +13,7 @@ static var _logger: MCPLogger = null
 
 
 ## 绑定本进程日志捕获器。以最后一次为准: 热重载会新建捕获器, 重新注册时再绑一次。
-##
 ## **接缝判据(全局统一)**: 接缝可以存在, 但漏调必须可见; 漏调会静默失效的场合一律不许用接缝。
-## 本域选注入: 漏调后果是工具返回"日志捕获器未就绪", **显式报错**。validate 域否决接缝(漏调会
-## 让 validate 恒返回 valid=true, 静默失效); dev 域也注入但自带告警(漏调后果最隐蔽)。
-## 本域专属的否决理由: 捕获器在本进程内只有 MCPDevServer 那一个, 自建副本等于把引擎输出抄到
-## 第二个缓冲 —— clear_logs 只清得掉其中一份, 这是**用户可见的语义错误**。
 static func bind_logger(logger: MCPLogger) -> void:
 	_logger = logger
 
@@ -60,7 +21,6 @@ static func bind_logger(logger: MCPLogger) -> void:
 ## ======= 实现 =======
 
 ## get_logs: 只读**本进程**(编辑器侧)缓冲, kind=log/warning/error。
-## 不设 source 跨进程取日志 —— 缘由见本文件顶部"进程归属"一节。
 static func _call_get_logs(args: Dictionary) -> Dictionary:
 	var kind := VariantTool.get_string(args, "kind", "log")
 	var is_errors := kind == "error" or kind == "warning"
@@ -68,9 +28,6 @@ static func _call_get_logs(args: Dictionary) -> Dictionary:
 	var result: Dictionary = _call_collect_logs(args, is_errors)
 	if is_errors:
 		# 错误必须原样返回, 不能进过滤分支: payload 兜底取的是 result 本身,
-		# 对错误结果而言 .get("errors") 恒为 [] —— 于是 game_stopped / transient 这类
-		# "取不到日志" 会被渲染成"成功, 0 条错误", 把一个该重试或该重启游戏的故障
-		# 报成"一切正常"。这是本函数最容易骗过 AI 的一处, 故在分流点上拦。
 		if bool(result.get("is_error", false)):
 			return result
 		# 按类别过滤: warning 只要 type==warning; error 排除 warning(script_error/shader_error/stderr/error)
@@ -87,7 +44,6 @@ static func _call_get_logs(args: Dictionary) -> Dictionary:
 
 
 ## 清空**本进程**的日志/错误缓冲(clear_logs 的进程侧实现)。跨进程转发由 MCPDevServer 的路由
-## handler(process=game)负责。签名与 handler 一致(args -> Dictionary)。
 static func _call_clear_errors(args: Dictionary) -> Dictionary:
 	var scope := VariantTool.get_string(args, "scope", "all")
 	if _logger:
@@ -101,12 +57,7 @@ static func _call_clear_errors(args: Dictionary) -> Dictionary:
 ## ======= 底层件: get_logs 与游戏侧 get_game_* 共用 =======
 
 ## 收集**本进程**的日志/错误: is_errors=true 取错误, false 取日志。刻意不做跨进程代理 ——
-## 进程归属由调用它的工具名决定, 跨进程只有 editor lambda 一条通路(内部再代理一次曾让
-## source=auto 静默把"查编辑器错误"换成游戏缓冲)。
-##
-## 处理顺序固定为 contains 过滤 → merge 合并 → max 截断, 故 max 的语义是**合并后**的条数
 ## (与 MCPToolSchema.logs() 的描述必须一致)。游戏侧也调本函数: 两个进程读的必须是同一套参数
-## 语义, 各写一份必然漂移。
 static func _call_collect_logs(args: Dictionary, is_errors: bool) -> Dictionary:
 	if _logger == null:
 		return MCPResult.fail("错误捕获器未就绪" if is_errors else "日志捕获器未就绪")
@@ -123,8 +74,6 @@ static func _call_collect_logs(args: Dictionary, is_errors: bool) -> Dictionary:
 			c.message = _logger.sanitize(str(c.message))
 		clean.append(c)
 	# contains: 按 message 子串过滤。位置很关键 —— 必须在 merge 之前(先缩小范围再合并更省)
-	# 且在 max 截断之前: 反过来就变成"最近 max 条里的匹配", 目标条目出现得早一点就再也捞不到,
-	# 而"捞不到"对调试工具是最严重的失败模式(且它伪装成"日志里没有", 会把人引向错误的结论)
 	var contains := VariantTool.get_string(args, "contains").strip_edges()
 	if not contains.is_empty():
 		clean = clean.filter(func(e: Dictionary): return contains in str(e.get("message", "")))
@@ -138,7 +87,6 @@ static func _call_collect_logs(args: Dictionary, is_errors: bool) -> Dictionary:
 		"next": int(result.get("next", 0)),
 		"total_raw": clean.size(),
 		# 回显过滤条件: 传了 contains 却漏实现时, 至少能从响应里看出来,
-		# 而不必把"没捞到"误判成"日志里没有" —— 后者会把排查引向完全错误的方向
 		"contains": contains,
 		"hint": hint,
 	}

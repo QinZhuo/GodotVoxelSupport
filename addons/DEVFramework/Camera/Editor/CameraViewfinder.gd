@@ -1,10 +1,5 @@
 @tool
 ## 机位取景器(编辑器底部面板): 实时预览某个 VirtualCamera3D 看到的画面。
-##
-## 做法: 用一个 SubViewport 共享编辑器 3D 视口的 World3D, 内部放一台预览相机并对齐到目标机位。
-## 因此不需要复制场景、不改动场景树, 看到的就是编辑中的真实场景。
-## 画面按 项目实际游戏分辨率比例 letterbox 显示, 取景范围与运行时一致。
-## 由 DEVFramework 插件挂载到底部面板(无 class_name, 仅编辑器加载)。
 extends Control
 
 ## 项目分辨率设置项
@@ -89,7 +84,6 @@ func _build_ui() -> void:
 	bar.add_child(_solo)
 
 	# 按游戏分辨率比例 letterbox: AspectRatioContainer 会把每个 Control 子节点
-	# 摆到同一个按比例居中的矩形, 因此画面与构图线叠层能精确对齐。
 	_aspect = AspectRatioContainer.new()
 	_aspect.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_aspect.ratio = _ratio
@@ -113,7 +107,6 @@ func _build_ui() -> void:
 
 	# 叠层与画面同为 AspectRatioContainer 的子节点 => 两者矩形完全一致。
 	# 注意: 不能把叠层塞进 SubViewportContainer 里靠 anchors 撑满,
-	# 那是 Container, 会覆盖子节点 anchors, 叠层拿不到画面的完整尺寸(构图线会错位)。
 	_overlay = Control.new()
 	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay.draw.connect(_draw_guides)
@@ -159,8 +152,6 @@ func _update(delta: float) -> void:
 		_show_tip("无法访问编辑器 3D 视口, 取景器不可用")
 		return
 	# 关键: 要用 find_world_3d() 而不是 world_3d 属性。
-	# 编辑器视口从不显式设置 world_3d(读出来恒为 null), 实际用的是它内部自动创建的 world;
-	# find_world_3d() 才能拿到那个 world。共享它 = 共享 scenario, 于是能渲染到同一份场景内容。
 	var world = view.find_world_3d() if view.has_method("find_world_3d") else null
 	if world == null:
 		# 主屏幕不在 3D 视图时编辑器视口尚未建立 world, 切到 3D 页即可恢复
@@ -314,9 +305,6 @@ func _draw_guides() -> void:
 
 
 ## 注意: 不要给返回值/变量标注 EditorInterface 类型。
-## 对 Engine.get_singleton() 的返回值做 EditorInterface 类型化的 return / as,
-## 会触发 GDScript VM 内部错误(OPCODE_RETURN: Condition "!nc" is true), 每帧刷屏。
-## 因此这里一律走无类型(Variant)返回 + 动态调用。
 func _editor_interface():
 	if not Engine.has_singleton(&"EditorInterface"):
 		return null

@@ -1,22 +1,5 @@
 @tool
 ## 虚拟机位: 只描述"想要的取景姿态与镜头参数", 自身不渲染画面。
-##
-## 场景里放任意多个机位 + 一个 [CameraBrain3D](真实相机), Brain 每帧选出优先级最高的
-## 激活机位并平滑混合过去。分工参考 Unity Cinemachine 的 vcam / Brain 拆分:
-## [br]- [member active] + [member priority] 决定谁生效(同优先级取最后激活者, 天然支持"临时机位入栈/出栈")
-## [br]- blend_* 描述"切到本机位"的过渡, 每个机位可单独配置; 留空(-1)则用 Brain 默认时长
-## [br]- [member target] + [member behaviors] 让机位自己跟随/瞄准目标, Brain 只负责混合。
-##   行为是资源(见 [CameraBehaviorDef]), 不挂行为就是固定取景 —— 这也是最常用的形态
-## [br]- [member lens_fov] 可覆盖 Brain 的视场角, 混合期间一并插值
-## [br]- noise_* 提供常驻"手持感"抖动, 作为机位姿态的一部分参与混合(不写回节点)
-##
-## 用法:
-## [codeblock]
-## vcam.set_active(true)      # 场景信号可直接连到 set_active(bind true/false)
-## vcam.activate(0.5)         # 代码切换, 并指定本次过渡时长
-## vcam.deactivate()          # 退出竞争, 自动回落到上一个激活机位
-## CameraTool.get_current()   # 当前生效机位
-## [/codeblock]
 class_name VirtualCamera3D extends Node3D
 
 ## 未生效时的更新策略(对齐 Cinemachine 的 Standby Update: 省 CPU, 但冷机位可能带着旧姿态上台)
@@ -82,7 +65,6 @@ var is_current: bool = false
 ## 过渡缓动方式
 @export var blend_ease: Tween.EaseType = Tween.EASE_IN_OUT
 ## 位置混合轨迹(枚举归属 [CameraTool], 见 [enum CameraTool.BlendStyle]);
-## SPHERICAL / CYLINDRICAL 需要枢纽点(机位行为的瞄准点, 或 Brain 的 blend_pivot), 取不到时退化为 LINEAR
 @export var blend_style: CameraTool.BlendStyle = CameraTool.BlendStyle.SPHERICAL
 
 @export_group("镜头", "lens_")
@@ -96,8 +78,6 @@ var is_current: bool = false
 		target = value
 		_refresh_process()
 ## 决定机位如何根据 [member target] 计算姿态; 按顺序依次执行。
-## 留空 = 机位固定不动(绝大多数机位的用法)。框架内置 [FollowBehaviorDef]、[LookAtBehaviorDef]
-## 与 [NoiseBehaviorDef], 也可继承 [CameraBehaviorDef] 自定义。资源形式, 可跨机位复用
 @export var behaviors: Array[CameraBehaviorDef]:
 	set(value):
 		behaviors = value
@@ -148,7 +128,6 @@ func set_active(value: bool) -> void:
 
 
 ## 激活本机位; blend_override >= 0 时覆盖本次过渡时长。
-## 已激活时会重新排到末尾, 从而在同优先级下取胜。
 func activate(blend_override: float = -1.0) -> void:
 	_blend_override = blend_override
 	if not active:
@@ -166,8 +145,6 @@ func deactivate() -> void:
 
 
 ## 代码侧添加行为。
-## 推荐用本方法而不是直接给 [member behaviors] 赋值: 本版本的 GDScript 会把数组字面量
-## 推断为无类型 Array, 赋值给类型化数组属性会报 "Invalid assignment" 而失败。
 func add_behavior(behavior: CameraBehaviorDef) -> void:
 	if behavior == null or behaviors.has(behavior):
 		return
@@ -199,7 +176,6 @@ func consume_blend_time() -> float:
 
 
 ## 本机位的最终姿态: 基础姿态 + 各行为的叠加偏移(如手持抖动)。
-## 偏移不写回节点, 因此不污染场景、也不反馈给跟随计算。Brain 读取本方法的结果去混合。
 func get_pose() -> Transform3D:
 	var pose := global_transform.orthonormalized()
 	for behavior: CameraBehaviorDef in behaviors:
@@ -209,7 +185,6 @@ func get_pose() -> Transform3D:
 
 
 ## 行为共用的累积时间(秒)。行为是可共享的配置资源, 不存运行时状态,
-## 因此按机位累积的相位统一由宿主机位持有。
 func get_behavior_time() -> float:
 	return _behavior_time
 

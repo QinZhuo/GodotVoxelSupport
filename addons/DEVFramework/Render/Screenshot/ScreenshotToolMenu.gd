@@ -1,0 +1,42 @@
+@tool
+class_name ScreenshotToolMenu
+extends EditorScript
+
+## 编辑器菜单入口 — 「项目 → 工具 → EditorScript → ScreenshotToolMenu」。
+## 也不可用(实测: "Class 'EditorScript' can only be instantiated by editor"),
+
+## 编辑器视口截图的最大宽度(超过则等比缩小; 0 表示保留原始分辨率)
+const MAX_WIDTH := 0
+
+
+func _run() -> void:
+	var res: Dictionary = await _capture_editor()
+	if res.get("ok", false):
+		LogTool.log("截图", "已保存:", res.get("path", ""),
+			"(%dx%d, %d 字节)" % [res.get("width", 0), res.get("height", 0), res.get("bytes", 0)])
+	else:
+		LogTool.error("截图", "失败:", res.get("error", "未知错误"))
+
+
+## 捕获编辑器主视口并保存。返回 ScreenshotTool 结果字典。
+func _capture_editor() -> Dictionary:
+	if not Engine.is_editor_hint():
+		return {"ok": false, "error": "该入口只能在编辑器内运行"}
+	var base: Control = EditorInterface.get_base_control()
+	if base == null:
+		return {"ok": false, "error": "无法获取编辑器根控件"}
+	var viewport := base.get_viewport()
+	if viewport == null:
+		return {"ok": false, "error": "无法获取编辑器视口"}
+	var tree := base.get_tree()
+	if tree != null:
+		# 编辑器主循环由 process_frame 驱动, frame_post_draw 不保证按时触发,
+		for i in 2:
+			await tree.process_frame
+	return await ScreenshotTool.capture(viewport, {
+		"dir": ScreenshotTool.DEFAULT_DIR_RES,
+		"prefix": "editor",
+		"max_width": MAX_WIDTH,
+		"await_draw": false,
+		"capture_type": "editor",
+	})

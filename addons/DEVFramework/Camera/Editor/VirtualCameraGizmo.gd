@@ -1,6 +1,5 @@
 @tool
 ## 虚拟机位可视化: 在 3D 视图里画出机位视锥与上方向, 生效中的机位高亮为橙色。
-## 由 DEVFramework 插件在 _enter_tree() 中注册(无 class_name, 仅编辑器加载)。
 extends EditorNode3DGizmoPlugin
 
 ## 视锥线框长度(米)与假定画面宽高比

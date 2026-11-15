@@ -1,984 +1,195 @@
-# DEVFramework 使用说明
+# DEVFramework
 
-DEVFramework 是一套面向 Godot 4 的数据驱动开发框架，通过「Def（静态数据）→ Entity（运行时实体）→ View（显示视图）」的分层架构，配合一批通用工具类，让游戏内容的配置、运行与界面展示解耦，实现「改数据不改代码」的开发模式。
+Godot 4.7 数据驱动框架：`Def`（静态配置）→ `Entity`（运行时）→ `View`（显示），配一批静态 Tool 与一个内置 MCP 调试服务器。
 
----
+- **框架 = 机制，项目 = 内容**：换一款游戏仍成立的进框架，玩法语义留在项目。边界规则见 [LAYERS.md](LAYERS.md)。
+- **Def 只描述配置**，不存运行时状态；运行时数据在 Entity / Component / 节点上。
 
-## 目录
+## 设计语言
 
-1. [快速开始](#一快速开始)
-2. [整体架构](#二整体架构)
-3. [Def 数据定义层](#三def-数据定义层)
-4. [Entity 实体层](#四entity-实体层)
-5. [Tool 工具层](#五tool-工具层)
-6. [View 视图层](#六view-视图层)
-7. [MCP 调试服务器](#七mcp-调试服务器)
-8. [典型使用流程](#八典型使用流程)
-9. [已知引擎陷阱](#九已知引擎陷阱必读)
-10. [FAQ](#十faq)
+**四角色**（新代码必属其一，没有第五种）
 
----
+| 角色 | 是什么 | 判别 |
+|---|---|---|
+| `Def` | 编辑器可配的静态数据，路径即身份 | 策划要在检查器里改？ |
+| `Entity` | 运行时状态载体，不被看见 | 跑起来才有、且有状态？ |
+| `View` | 投影，只读 `data` | 玩家看得见 / 要交互？ |
+| `Tool` | 横切机制，全 static，状态放 `static var` | 换游戏仍成立、不要实例？ |
 
-## 一、快速开始
+**两条流向**：`Def → Entity → View` 单向，不回溯；Tool 被调用，不持有调用者。
 
-1. 将 `addons/DEVFramework` 目录复制到项目的 `addons/` 下。
-2. 在 Godot 编辑器：`项目设置 → 插件 → 启用 DEVFramework`。
-3. 通过菜单 **项目 → 工具 → 创建 DEV 项目结构...** 一键生成框架约定的目录骨架：
+**五律**
 
-```
-res://Assets/
-├── Def/              # 静态数据资源（*.tres）
-│   ├── Attribute/    # 属性定义
-│   ├── Buff/         # Buff 定义
-│   ├── Signal/       # 信号定义
-│   └── Tag/          # 标签定义
-└── Translation/      # 翻译 CSV（中文配置表）
-res://Scenes/         # 场景
-res://Scripts/        # 游戏脚本
-├── Def/              # Def 子类脚本（按类目分子目录）
-├── Entity/           # 实体脚本
-└── View/             # 视图脚本
-```
+1. **数据不下行**：View 不写 Entity，Entity 不写 Def；要反馈就抛信号或 `Callable`。
+2. **一个角色一个基类**：不为同类问题开第二个基类。
+3. **静态优先**：无实例状态一律 `static`。允许 `static var`，当且仅当它属于当前游戏会话且能被 `ResetTool.all()` 清空；否则进 Entity 或存档。进程级缓存在类头标 `## Reset: 进程级`。
+4. **删除测试**：删掉整个文件或模块目录，框架仍能编译运行。唯一例外是编辑器面板接线，且只在 `plugin.gd` 出现。
+5. **简单 · 易用 · 易拓展**：**简单** = 一条路径做完一件事，没有可选分支、没有中间层；**易用** = 常用调用一行写完，零注册、零初始化，默认值就是最佳实践；**易拓展** = 加新能力只加文件，不改调用方。三条缺一，就是还没设计完。
 
-4. 在代码中直接使用全局类名（`LogTool`、`SaveTool`、`UITool`、`AsyncTool` 等），无需额外引入。
+**语法**
 
----
-
-## 二、整体架构
-
-框架遵循三层结构：
-
-```
-┌─────────────────────────────────────────────┐
-│  View 视图层    UITool / UIPanel / ArrayView ... │
-├─────────────────────────────────────────────┤
-│  Entity 实体层  Modifier / Task / StateMachine / ECS桥接 │
-├─────────────────────────────────────────────┤
-│  Def 定义层     EntityDef / EffectDef / ValueDef │   ← 策划可配置的 *.tres 资源
-└─────────────────────────────────────────────┘
-```
-
-**设计原则：**
-- **框架 = 机制，项目 = 内容**：框架只保留换一款游戏仍成立的数学/协议/管线（Modifier、Task、EffectDef 协议等）；具体游戏语义（Buff、属性容器、伤害效果）放项目 `Scripts/` 继承实现。边界规则见 [`LAYERS.md`](LAYERS.md)。
-- **Def 只描述静态配置**，不保存运行时状态（见 `Def.gd` 注释）。任何运行时数据都存放在外部上下文（Entity / Component / 场景节点）中。
-- **Entity 是运行时数据载体**，由 `EntityDef` 驱动，可序列化。
-- **View 负责显示**，通过 `data` 属性与数据解耦，数据变化驱动刷新。
-
-### 项目设置项（插件注册时自动写入）
-
-| 设置项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `dev_framework/log/enabled` | bool | true | 日志总开关 |
-| `dev_framework/log/show_timestamps` | bool | false | 是否显示时间戳 |
-| `dev_framework/log/ignored_tags` | PackedStringArray | `[]` | 被忽略的日志标签 |
-| `dev_framework/save_tool/encrypt_salt` | String | 项目名 | 存档加密盐（备用） |
-| `dev_framework/lightmap/scan_dir` | String | `res://Scenes` | 编辑器兜底扫描烘焙产物（`*_lightmap_set.res`）的根目录 |
-| `dev_framework/mcp/ignored_error_patterns` | PackedStringArray | `[]` | 运行期错误的过滤子串（如 `"对象池"`），命中即不随结果返回。追加在内置模式之后——内置已含 `Unrecognized UID`（编辑器重启后 UID 缓存重建期的无害噪音）。对 eval 附带错误与通用工具诊断两条上报路径同时生效 |
-
----
-
-## 三、Def 数据定义层
-
-### 3.1 Def 基类（`Def.gd`）
-
-所有定义的基类，继承自 `Resource`。核心能力：
-
-| 成员 | 说明 |
+| 形 | 义 |
 |---|---|
-| `name` | 资源名。内置（built-in）资源取脚本 `class_name`，文件资源取文件名，自动兼容 |
-| `_to_string()` | 显示为 `tr(name)`，支持翻译 |
-| `get_desc(data)` | 描述文本（可携带上下文），静态调用见 `Def.get_def_desc(def, data)` |
-| `save_data()` / `load_data(path)` | 存档短路径（相对 `res://Assets/Def/`）与还原，文件缺失返回 null 并打日志 |
-| `_get_zh / _set_zh` | 中文配置读写，自动对接 `res://Assets/Translation/*.csv` |
-| `get_root_def()` | 获取外层根 Def（用于 built-in 子资源回写翻译） |
-| `_init_def` | 若子类定义了此方法，在属性校验时自动调用（常用于初始化默认导出） |
+| `_foo()` | 宿主 / 引擎回调，我被动被调 |
+| `on_xxx` | 信号，过去式 = 完成态（`on_opened`） |
+| `get_` / `is_` / `has_` | 纯读与谓词，无副作用 |
+| `apply` / `revert` | 可逆效果，必须成对 |
+| `defer` | 延后到本 tick / 帧末 |
+| `await_*` | 协程，返回结果或 `false`，禁止 `void` |
+| `XxxTool` / `XxxDef` / `XxxSystem` | 机制 / 配置 / 被调度逻辑 |
 
-**Def 中文翻译约定：** 在编辑器里通过 `zh_name` / `tr_desc` / `zh_desc` 等导出的中文属性修改，会自动保存到对应 CSV（列名为 `zh`），运行期 `tr()` 生效。
+返回约定：`bool` = 是否生效；`void` = 已受理；`Error` = 仅 IO；`null` = 查询未命中。
 
-### 3.2 定义类族谱
+单例状态一律 `Tool` + `static var`，没有 `XxxService`；真需要多份实例且要 dispose 时才新增该后缀。
+
+每个基类文件头写三行 `## 契约`：**谁调我 / 我保证 / 我禁止**。归属与形态判定见 [LAYERS.md](LAYERS.md)。
+
+## 目录结构
+
+**一条规则**：目录名 = 能力名。找不到对应能力，就是那个能力还没有名字 —— 先起名，再建目录。
 
 ```
-Def
-├── EntityDef            # 通用实体定义（中文名、图标、主题色、效果、强度值）
-│   ├── TagDef           # 标签定义（tag 匹配判断）
-│   ├── TipDef           # 提示/图鉴定义
-│   └── TaskDef          # 任务定义（抽象）
-│       ├── SignalTaskDef   # 信号驱动任务
-│       └── GroupTaskDef    # 分组任务（顺序/任意/任一完成）
-├── ConditionDef         # 条件（抽象）→ is_met(context)
-│   └── ValueConditionDef  # 数值比较条件（=、!=、>、<、>=、<=）
-├── EffectDef            # 效果（抽象）→ apply(context) / revert(context)
-│   ├── EffectsDef       # 效果组合（依次执行）
-│   └── SystemEffectDef # 内置文本效果（占位，仅描述）
-├── ValueDef             # 数值表达式（抽象）→ get_float / get_int
-│   ├── IntValueDef / FloatValueDef        # 常量
-│   ├── AddValueDef / SubtractValueDef     # 加减
-│   ├── MultiplyValueDef / DivideValueDef  # 乘除
-│   ├── PercentValueDef                     # 百分比（10 取整）
-│   ├── FractionValueDef                    # 分数
-│   └── MaxValueDef / MinValueDef           # 最大/最小
-└── SignalDef            # 信号定义（抽象）→ connect/disconnect_signal(data, callable)
-    └── ConditionSignalDef  # 带条件的信号包装
-
-# 项目层扩展示例（本仓库，见 LAYERS.md 分层约定）
-EntityDef ├── AttributeDef（属性）/ BuffDef（Buff）/ AttributeTagDef / BuffTagDef
+addons/DEVFramework/
+├─ Core/          跨能力复用、无业务语义
+│   ├─ Def/       Def、EntityDef、Tag/（通用数据基类）
+│   ├─ Entity/    Entity、Entity2D/3D、Modifier、ModifierValue、StateMachine
+│   ├─ Tool/      通用无状态工具：Log / Input / Pointer / Math / File / CSV /
+│   │             Save / Time / GameTimer / Tick / Display / NodeTree / Tip /
+│   │             UI / Steam / Prewarm / Reset / Debug / Variant
+│   ├─ Async/     AsyncTool、AsyncScope
+│   ├─ Pool/      Pool、PoolTool
+│   └─ Editor/    仅编辑器/构建期：Setup/、Generate/、DefTable/、EditorScriptMenuTool
+│
+├─ 能力模块（各自内部按需分层）
+│   ├─ Dialogue/  Def Entity View Tool   ← 对话/气泡
+│   ├─ Task/      Def Entity View Tool   ← 任务/教程
+│   ├─ AI/        Def Entity Tool        ← GOAP
+│   ├─ Camera/    Def Editor Tool        ← 相机
+│   ├─ ECS/       Component Def System World
+│   ├─ Tween/     Entity Tool View
+│   ├─ ArrayView/ 流式/槽位/偏移 列表视图
+│   ├─ UI/        UIPanel、OptionSelector、ButtonView、DragView3D…
+│   ├─ Focus/     FocusMask、FocusMaskSpotlight、FocusMaskTool
+│   ├─ Render/    OutlineEffect、GLSLShaderEffect、Trail3D、Lightmap/、Screenshot/
+│   ├─ Value/ Effect/ Signal/            数值表达式 / 效果 / 信号
+│   ├─ Audio/ Translation/ Changelog/ GameCommand/ Test/
+│   └─ MCP/       扁平（见下）
+│
+├─ Native/        原生库与 dev.gdextension（**不要移动**：含二进制，路径被 .gdextension 写死）
+├─ plugin.cfg / plugin.gd / Readme.md / LAYERS.md     插件入口与文档
 ```
 
-### 3.3 扩展一个新的 Def
+**内部层名固定五个**：`Def`（数据）/ `Entity`（运行时）/ `View`（展示）/ `Tool`（静态入口）/ `Editor`（仅编辑器）。
+文件少于 3 个就不要建子目录，扁平即可。
 
-以实际项目中的 `DamageEffectDef` 为例：
+### 什么时候独立成目录
+
+| 条件 | 归属 |
+|---|---|
+| ≥2 个脚本，或已有 Def+Entity+Tool 多层 | 独立目录（如 `Focus/`） |
+| 只被一个模块使用 | 放进那个模块内部 |
+| 被 3+ 模块依赖、无业务语义 | `Core/` |
+| 纯视觉控件、无状态逻辑 | 对应能力模块的 `View/` 或 `UI/` |
+
+### 两个例外（都有明确理由）
+
+| 模块 | 形态 | 原因 |
+|---|---|---|
+| `MCP/` | **扁平**，29 个脚本不分层 | 内部是 `preload` 硬编码网 + `autoload`（`project.godot` 里的 `DevMCP`）。分层只会让每次移动都要改多处路径字符串，收益为零 |
+| `Native/` | 保持顶层 | 含 `.dll/.dylib/.so` 与 `dev.gdextension`；`dev.gdextension` 里的库路径是写死的相对路径，移动后原生库直接加载失败 |
+
+### 改目录时必须做的三件事
+
+1. 用 `git mv` 移动（保留历史），`.gd` 与同名 `.uid` 一起移；
+2. **替换所有引用**，注意扩展名不止 `.gd` —— `plugin.gd` 里就有 `.tscn` / `.png`，`.godot` 里还有 autoload 路径；
+3. 跑 `run_tests test_framework_compile`：其中 `test_all_framework_paths_exist` 会扫描所有 `res://addons/DEVFramework/...` 字符串并断言文件存在，漏改会直接红。
+
+## 安装
+
+1. 复制 `addons/DEVFramework/` 到项目 `addons/`，在插件面板启用。
+2. 菜单 **项目 → 工具 → 创建 DEV 项目结构** 生成 `Assets/Def/`、`Scenes/`、`Scripts/{Def,Entity,View}/` 骨架。
+
+C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/README.md)。
+
+## 三层
+
+| 层 | 基类 | 职责 |
+|---|---|---|
+| Def | `Def`(Resource) | 策划配置的 `.tres`：名称 / 翻译 / 存档路径 |
+| Entity | `Entity`(RefCounted)、`Entity2D`/`Entity3D`(Node) | 运行时数据载体，由 Def 驱动 |
+| View | `UIPanel` / `ArrayView` / … | 只负责显示，`data` 变化即刷新 |
+
+**Def 家族**：`EntityDef`、`ConditionDef`、`EffectDef`（`apply`/`revert`）、`ValueDef`（`get_float`）、`SignalDef`（`connect/disconnect`）。组合这些就能在编辑器里搭出效果与数值表达式。
 
 ```gdscript
 @tool
 class_name DamageEffectDef extends EffectDef
-
 @export var value: ValueDef
-@export var damage_type: DamageTagDef
-
-func apply(data: GameContext):
-	if not value:
-		return
-	data.damage = ceili(data.get_value(value))
-	data.damage_type = damage_type
-	await data.user.fight.deal_damage(data)
-
-func get_desc(data) -> String:
-	return tr("DamageEffect").format({value = get_def_desc(value, data)})
-
-func _to_string():
-	return tr("DamageEffect").format({value = value})
+func apply(ctx) -> void:
+	ctx.damage = value.get_int(ctx)
 ```
 
-要点：
-- 定义类声明 `@tool`，方便编辑器实时刷新。
-- `@export` 组合其他 Def（`ValueDef`、`TagDef`…）即可在编辑器中可视化配置数值表达式与标签。
-- 需要重写 `apply()`（效果执行）、`_to_string()`（调试/配置面板展示）、`get_desc()`（玩家可见描述，通常使用 `tr()` + 翻译键）。
-- 需要恢复时重写 `revert()`。
+**Entity 家族**：`Modifier` / `ModifierValue`（base + 修饰链，`value` 只读，改 `base_value` 或 `add_modifier`）、`StateMachine`（异步转换、guard/enter/exit）。
 
-### 3.4 任务（Task）体系
+挂在实体下的逻辑用**普通 Node**（需要实体就 `@export var entity: Entity2D` 或 `get_parent() as Entity2D`），框架不再提供"节点组件"基类。
 
-`TaskDef` 定义任务，`Task` 负责运行时推进。状态机：`INACTIVE → ACTIVE → COMPLETED / FAILED / CANCELLED`。
+`def` 是鸭子约定：子类自己声明 `var def: XxxDef`，`Entity.new(some_def)` 才能注入。
 
-| 子类 | 行为 |
+## Tool（全部静态类）
+
+| 分类 | 类 |
 |---|---|
-| `SignalTaskDef` / `SignalTask` | 任一信号触发即完成 |
-| `CountTaskDef` / `CountTask` | 计数目标：信号累加到 `required` 即完成（进度型） |
-| `GroupTaskDef` / `GroupTask` | 三种模式：`SEQUENTIAL`（顺序）、`ANY_ORDER`（任意顺序全部）、`COMPLETE_ANY`（任一完成即结束） |
-
-```gdscript
-var task := Task.create(task_def)  # 通过工厂创建实体
-task.activate(data)
-task.completed.connect(_on_task_done)
-task.get_progress()                # Vector2i(已完成数, 总数)
-```
-
-任务实体支持 `save_data()` / `load_data()` 与 `Task.restore()` 存档还原；`TaskTool` 提供活动列表/按 Def 查找/聚合存读档。详见 [`Task/Readme.md`](Task/Readme.md)。
-
----
-
-## 四、Entity 实体层
-
-### 4.1 Entity 基类（`Entity.gd`）
-
-运行时实体基类（`RefCounted`）。提供了 `entity_changed` 信号、统一的 `def` 驱动模式与 `get_desc()`。
-
-### 4.2 Buff（`Buff.gd`，项目层）
-
-> 本仓库已将 Buff 下沉到项目 `Scripts/Entity/Buff.gd`（含业务语义：层数触发效果、联机策略），框架不再内置。以下用法不变，仅位置在项目层。
-
-带层数（stacks）的实体：
-
-```gdscript
-var buff = Buff.new(buff_def)
-buff.data = context                    # 效果执行的上下文
-buff.stacks += 2                       # 加层 → 触发 def.effect.apply(data)
-buff.stacks -= 1                       # 减层 → 0 跨边界触发 effect.revert(data)
-buff.stacks_changed.connect(func(offset): ...)
-```
-
-**关键逻辑：** `stacks` 从 0→正数时执行 `def.effect.apply(data)`；从正数→0 时执行 `revert(data)`。层数最小为 0。
-
-### 4.3 Modifier 与 ModifierValue（属性修饰系统）
-
-`ModifierValue` 是带基础值 + 修饰器链的数值：
-
-```gdscript
-var attr := ModifierValue.new(attr_def)
-attr.base_value = 100
-attr.add_modifier(Modifier.new(source, 20))                       # +20 → 120
-attr.add_modifier(Modifier.new(source, 50, Modifier.Mode.PERCENT)) # ×50% → 60
-attr.remove_modifiers(source)     # 移除某来源的所有修饰
-attr.value_changed.connect(func(modifier): ...)
-```
-
-- `base_value`：基础值，可直接赋值。
-- `value`：只读，禁止直接修改（赋值会报错）。
-- `Modifier.Mode.VALUE`：加/减固定值；`Modifier.Mode.PERCENT`：乘百分比。
-
-### 4.4 Component（节点组件）
-
-组件继承 `Component`（本质是 `Node`），挂载到场景节点上。框架只提供 `Component` 基类（宿主查找 + ECS 桥接）；业务容器属项目层，如本仓库的：
-
-| 组件（项目层） | 职责 | 关键 API |
-|---|---|---|
-| `AttributeComponent` | 管理一组属性 | `get_attribute(name)`、`add_modifier(attr, mod, immediate)`、`remove_modifiers(source)`、`clear()`、`save_data()` |
-| `BuffComponent` | 管理 Buff 层数 | `get_buff(name)`、`add_stacks(name, n)`、`remove_stacks(name, n)`、`clear_stacks(name)`、`save_data()` |
-
-```gdscript
-# BuffComponent 支持上下文提供者
-buff_component.context_provider = func(buff): return GameContext.new(...)
-```
-
-`AttributeComponent` / `BuffComponent` 均实现了 `game_ready()`（清空）与 `save_data()` / `load_data()`，配合 `ActorTool` 可一键接入存档流程。
-
-### 4.5 StateMachine（状态机）
-
-通用流程级状态机（`RefCounted`）：
-
-```gdscript
-var sm = StateMachine.new(State.Start)
-sm.add_transition(State.Start, State.Shop)
-sm.on_guard(State.Shop, _can_enter_shop)   # 守卫，返回 false 阻止转换
-sm.on_enter(State.Shop, _on_enter_shop)    # 进入回调（支持 async）
-sm.on_exit(State.Shop, _on_exit_shop)      # 退出回调
-await sm.transition(State.Shop)            # 异步转换（会 await guard/exit/enter）
-sm.force_set(State.Start)                  # 强制设置，不触发回调
-sm.allow_self_transition(true)
-```
-
-> 注意：`transition()` 是异步函数；适用于流程级状态管理，不用于海量短生命周期对象。
-
-### 4.6 ECS 高性能实体组件系统（`ECS/`）
-
-框架内置一套 **C++ 原生高性能 ECS**（SoA 列存储、签名增量视图、规则 DSL 批量运算、系统并行调度、生命周期钩子、Prefab / 序列化等），用于海量实体的数值逻辑与数据处理。与 Godot 场景节点配合：海量实体渲染直读、关键实体用 `Component` 桥接。
-
-```gdscript
-var world := ECSWorld.new()
-world.register_component(HealthComponent)
-var e := world.create_entity()
-world.add_component(e, HealthComponent)
-world.register_system(HealSystem.new())
-world.tick(delta)
-```
-
-**完整使用说明见 [`ECS/Readme.md`](ECS/Readme.md)**。
-
-### 4.6b 框架级共享原生库（`Native/`）
-
-整个 DEVFramework 的 C++ 原生能力集中在**唯一一个共享扩展**：
-`res://addons/DEVFramework/Native/dev.gdextension`（编译产物也在该目录）。任何模块的原生类都注册在这一个库里，共用一份二进制。当前已注册：
-- `ECSCore` — ECS 高性能实体组件系统
-
-> 已编译产物 `dev.gdextension` 内**仍注册着已移除模块的原生类**：6 个 PCG 原生类（`PCGWFC3D` / `PCGCave3D` /
-> `PCGWFC` / `PCGWFCAnimator` / `PCGErode` / `PCGLSystem`）与 `AudioSynthEngine`。它们的 C++ 源码已随之移除，
-> 但**没有任何 GDScript 调用方**，故不阻塞运行；下次重编译 `dev.gdextension` 时会自动消失。
-
-由 **`FrameworkNative`**（`Native/FrameworkNative.gd`）统一懒加载与校验：
-- `FrameworkNative.get_native(&"ECSCore", required_methods)` — 按类名取共享实例（缓存 + 方法集版本校验）
-- `FrameworkNative.instantiate_script(script)` — 稳定的脚本实例化（规避全局类注册时序问题）
-- `FrameworkNative.refresh(...)` — 清缓存（库热重载/测试）
-
-新增模块原生能力时：把 C++ 类注册进 `dev.gdextension`（需源码重编译），GDScript 侧通过 `FrameworkNative.get_native(&"你的类名", [...])` 访问，不要各自维护一份 ClassDB 检测逻辑。
-
-### 4.8 Camera 虚拟机位（`Camera/`）
-
-3D 镜头管理模块，思路对齐 Unity Cinemachine：场景里摆若干**机位**（`VirtualCamera3D`，只描述取景意图），
-由场景中唯一的**大脑**（`CameraBrain3D`，真实 `Camera3D`）每帧挑出生效机位并平滑混合过去。
-
-```gdscript
-vcam.set_active(true)        # 参与竞争(面板信号可直连 set_active(bind true/false))
-vcam.activate(0.5)           # 代码切换, 本次过渡 0.5 秒
-vcam.deactivate()            # 退出竞争, 自动回落到上一个机位
-CameraTool.get_camera()      # 真实渲染相机(无 Brain 时退回视口相机)
-CameraTool.snap()            # 立即对齐当前机位(传送/场景切换)
-```
-
-- **竞争规则**：`priority` 大者胜，同级取最后激活者 → 「开面板激活机位 / 关面板取消激活」天然构成机位栈；生效机位带缓存，不每帧遍历。
-- **混合**：固定时长 + Tween 曲线（每个机位可单独配 `blend_time/trans/ease`）；位置可选 **直线 / 球面 / 柱面** 轨迹（绕枢纽点绕行，不会切过目标内部）；`lens_fov` 一并插值；混合结束后持续跟随机位。需要 **A→B 专属过渡** 或按来源/目标统一过渡时，在 Brain 的 `blends` 挂 [过渡规则](Camera/Readme.md#过渡规则表blends)（按机位名匹配、支持通配、精确者胜）。
-- **机位能力**：默认固定取景（Inspector 极简）；需要动态取景时挂 [行为资源](Camera/Readme.md#三行为资源camerabehaviordef)——内置 `FollowBehaviorDef`（跟随 + 按轴阻尼 + **死区/软区**）、`LookAtBehaviorDef`（瞄准 + 可配 up）、`NoiseBehaviorDef`（常驻手持抖动，噪声源用 Godot 原生 `Noise`），也可继承 `CameraBehaviorDef` 自定义；另有 `lens_fov`（覆盖视场角）。
-- **不重复造轮子**：碰撞回避用 `SpringArm3D`、路径运镜用 `PathFollow3D`、物理插值用引擎设置——见 [用 Godot 原生能力组合高级机位](Camera/Readme.md#五用-godot-原生能力组合高级机位)。
-- **待机策略**：`standby_update` 三档（ALWAYS / ROUND_ROBIN / NEVER），未生效机位不白跑；上台瞬间自动对齐姿态。
-- **冲击与震屏**：`CameraTool.impulse(pos, strength, radius, duration)` 定向冲击（传播延迟 + 距离衰减）、`CameraTool.shake(strength)` 无方向震屏。
-- **叠加偏移层**：常态特效/鼠标跟随一律写 Brain 的 `position_offset` / `rotation_offset`，与机位混合互不争写 transform（`TweenShake` 把 `property` 指向 `:position_offset` 即可）。
-- **编辑器**：机位有视锥 gizmo（插件注册，生效中显示橙色）与「对齐到编辑器视角」按钮；底部面板 **Camera Viewfinder** 可实时预览机位画面（共享编辑器 3D 视口的 World3D，带三分线构图辅助与 Solo）。
-
-**完整使用说明见 [`Camera/Readme.md`](Camera/Readme.md)**。
-
----
-
-## 五、Tool 工具层
-
-全部为静态类，随处可调用。
-
-### 5.1 LogTool — 日志
-
-```gdscript
-LogTool.log("战斗", "造成伤害:", 10)        # 彩色标签日志
-LogTool.warn("战斗", "数值异常")            # 黄色
-LogTool.error("战斗", "严重错误")           # 红色
-LogTool.timer("加载", "加载卡池").stop()   # 计时器，stop() 时输出耗时
-
-LogTool.set_enabled(false)                # 全局开关
-LogTool.disable_tag("战斗")               # 忽略某个标签
-```
-
-### 5.2 SaveTool — 存档
-
-- `SaveTool.save_data(path, data, Mode.JSON/GZIP)`
-- `SaveTool.load_data(path, mode)`：主档损坏自动三级 `.bak` 回退。
-- `SaveTool.save_async()` / `load_async()`：异步保存（同路径连续请求只保留最新数据）。
-- `SaveTool.merge_data(local, cloud, rules)`：本地/云端合并（用于云存档冲突处理）。
-- `SaveTool.check_version(data, version, defaults)`：版本迁移 + 缺失字段补齐。
-- `SaveTool.load_defs(dir, filter, extensions = [".tres"])`：递归扫描目录加载 Def 资源（兼容导出后的 `.remap`；需要同时认 `.res` 时显式传 `extensions`）。
-
-```gdscript
-# 合并规则示例
-SaveTool.merge_data(local, cloud, {
-	name = SaveTool.MergeMode.NON_EMPTY,     # 非空才覆盖
-	gold = SaveTool.MergeMode.MAX,           # 取大值
-	inventory = [SaveTool.MergeMode.ARRAY_UNION, "id", 50],  # 按 id 去重并截断
-})
-```
-
-### 5.3 AsyncTool — 异步
-
-```gdscript
-await AsyncTool.load_resource_async("res://big_tex.png")       # 后台加载资源
-var result = await AsyncTool.thread_call(work_callable)        # 后台线程执行
-await AsyncTool.await_until(func(): return _flag)              # 每帧轮询
-await AsyncTool.await_signals(sig_a, sig_b)                    # 等待多个信号各触发一次
-await AsyncTool.call_in_frames(items, 30, process_fn)          # 分帧批量处理，防掉帧
-await AsyncTool.await_with_timeout(action, 5000, "取名")       # 等待到完成，超时只告警（看门狗）
-AsyncTool.await_emit(sig, args...)                             # 手动触发信号并同步 await 回调
-```
-
-### 5.4 InputTool — 输入管理
-
-```gdscript
-InputTool.set_input_mode(InputTool.Mode.NAVIGATION)   # 切换指针/导航模式
-InputTool.detect_mode(event)                          # 自动识别输入设备
-InputTool.register_focus_group([btn1, btn2, btn3])    # 注册焦点组（2D 自动导航 / 3D 手动）
-InputTool.handle_input(event)                         # 统一入口（游戏循环里调用）
-
-# InputMap 操作与持久化
-InputTool.register_action(&"jump", [InputTool.key_event(KEY_SPACE)])
-InputTool.save() / InputTool.load()                   # 键位存档
-InputTool.bind_shortcut(button, &"open_menu", KEY_ESCAPE)
-```
-
-### 5.5 TimeTool — 时间缩放
-
-```gdscript
-TimeTool.set_base_speed(1.5)        # 基础游戏速度
-TimeTool.set_modifier("slow_mo", 0.3)  # 按 key 叠加倍率修改器
-TimeTool.pause() / TimeTool.resume()
-TimeTool.get_current_scale()        # 当前最终 time_scale
-```
-
-**步进队列（`TickTool` + `GameTimer`）** —— 让"同一物理 tick 内多个等待恢复的先后"可复现：
-
-```gdscript
-TickTool.defer(order_key, action)   # 登记"本 tick 末尾按序执行"的动作
-```
-
-宿主每物理 tick 末尾调用一次 `TickTool.tick()`（须在角色 `_physics_process` 之后）。派发按
-`order_key` 升序、同 key 按登记先后（FIFO）⇒ 顺序是队列内容的**纯函数**，与场景树顺序、启动时机、
-帧率都无关；`order_key` 的含义由项目决定（框架不解释）。未调用过 `tick()` 时 `defer` 立即执行 ——
-行为与不使用本工具一致，不会因未接线而挂住等待。`GameTimer` 是它的计时器载体：到期/提前停止都进
-同一队列，计时基准为物理 tick。
-
-### 5.6 TranslationTool — 翻译
-
-```gdscript
-TranslationTool.initialize()                     # 扫描 + 按系统语言加载
-TranslationTool.set_locale("zh_CN")              # 切换语言
-TranslationTool.get_locales() / get_display_name("zh_CN")
-```
-
-### 5.7 ActorTool — 生命周期编排
-
-按约定在场景节点上实现 `game_init()`、`game_ready()`、`save_data()`、`load_data()` 方法，由父节点统一调度：
-
-```gdscript
-await ActorTool.game_ready(root)      # 遍历子节点调用 game_ready
-var data = await ActorTool.save_data(root)
-await ActorTool.load_data(root, data)
-```
-
-### 5.8 通用音频管理（AudioTool）
-
-> 程序化音频合成（Def 驱动的逐采样合成、C++ `AudioSynthEngine` 内核、风格/编曲模板与示例音效库）
-> 已于 2026-10 从本仓移除。AudioTool 现在只做**通用音频管理**：播放任意 `AudioStream`、总线效果、
-> WAV 保存、流查询、效果录音。
-
-```gdscript
-AudioTool.play_stream(stream, -6.0, "SFX")          # 播放任意音频流(播放结束自动释放)
-AudioTool.get_stream_info(stream)                   # 查询时长/采样率/声道/循环
-AudioTool.save_wav(stream, "res://out/sfx.wav")      # 导出标准立体声 WAV
-AudioTool.save_resource(stream, "res://out/sfx.tres")# 存为 Godot 音频资源(可直接拖入播放器)
-AudioTool.setup_audio_buses()                       # 一键生成 Master/SFX/BGM/UI 标准总线布局
-```
-
-**音频处理全部交给 Godot 内置能力，框架不做任何逐采样合成**：
-
-| 能力 | 实现 | 说明 |
-|---|---|---|
-| 播放 / 循环 | **Godot 内置 `AudioStreamPlayer`** | `play_stream()` 播放结束自动释放；循环用 `AudioStreamWAV.loop_mode` |
-| 混响 / 延迟 / 失真 / 限幅 / 压缩 / EQ | **Godot 内置 `AudioEffect`** | 播放时路由到带效果的总线；`create_fx(name)` 取标准预设、`fxs_from_names([...])` 批量构建 |
-| 总线布局 | **Godot 内置 `AudioServer` / `AudioBusLayout`** | `setup_audio_buses()` 生成布局并写入项目设置；`ensure_bus()` 幂等建任意效果总线 |
-| 效果录音 | 内置 `AudioEffectRecord` | `render_with_fx(stream, fx)` 真实播放 + 录音固化效果链（需可用音频设备） |
-| WAV 写盘 | 自写 44 字节标准 PCM 头 | 见下方说明 |
-
-标准预设名：`reverb` / `reverb_hall` / `delay` / `distortion` / `limiter` / `compressor` / `eq_lowpass` / `eq_highpass` / `eq_bandpass` / `spectrum`。
-
-- `resolve_bus(bus, fx)`：`fx` 非空时自动建 `FX_<bus>` 效果总线，`play_stream()` 内部自动调用。
-- WAV 写盘说明：4.7.1 内置 `AudioStreamWAV.save_to_wav()` 会把 16bit 立体声写成 mono 头（数据仍交错），Godot 重导入后声道/时长错乱，故 `save_wav()` 自写标准头。
-
-### 5.9 其他工具
-
-| 工具 | 用途 |
+| 日志 / 存档 | `LogTool`（标签 + 计时）、`SaveTool`（JSON/GZIP、`.bak` 回退、merge、版本迁移、`load_defs`） |
+| 异步 | `AsyncTool`（`load_resource_async` / `thread_call` / `await_until` / `call_in_frames` / `await_with_timeout` / `await_coroutine`） |
+| 输入 / 时间 | `InputTool`（模式切换、焦点组、InputMap 持久化）、`TimeTool`（基础速度 + keyed 倍率 + 暂停） |
+| 步进 | `TickTool.defer(order_key, action)` + 宿主每物理帧末 `tick()`；`GameTimer` |
+| 文本 | `TranslationTool` / `CSVDataAccess` / `TipTool` |
+| 生命周期 | `NodeTreeTool`（按约定调 `game_init` / `game_ready` / `save_data` / `load_data`） |
+| 音频 | `AudioTool`（常驻复音通道、3D 定位）、`AudioMixerTool`（效果预设 + 总线）、`AudioBakeTool`（录音 + WAV） |
+| UI | `UITool`（6 层栈）、`UIPanelTool`（2D/3D 共用状态机）、`FocusMaskTool`（焦点遮罩）、`ArrayViewTool` |
+| 其它 | `CameraTool` / `ChangelogTool` / `DisplayTool` / `FileTool` / `PointerTool` / `PrewarmTool` / `ScreenshotTool` |
+
+项目设置项（插件注册时写入）：`dev_framework/log/*`（开关、时间戳、忽略标签）、`save_tool/encrypt_salt`、`lightmap/scan_dir`、`mcp/*`（见下文 MCP 一节）。
+
+## View
+
+- `UIPanel` / `UIPanel3D`：`open` / `close` / `toggle` / `popup` / `await_closed`，信号 `on_open` / `on_opened` / `on_close` / `on_closed`，可覆写 `_back()` / `_focus_enter()` / `_focus_exit()`。
+- `UITool` 六层：`BACKGROUND` / `HUD` / `PANEL` / `DIALOG`（同层互斥）/ `TOOLTIP`（单实例）/ `TOP`；`back()` 只处理 DIALOG 与 PANEL。
+- 数组视图：`ArrayView`（流式）、`SlotArrayView2D/3D`（固定槽）、`OffsetArrayView2D/3D`（按 offset 排列）。填 `pool_key` + `pool_size` 走对象池（`Pool` / `PoolTool`），归还时自己清 `data`、断信号。
+- 焦点遮罩：`FocusMask`（全场变暗，只有目标保持原样可交互；3D 目标单独重渲染到暗区之上，2D 目标提升绘制顺序），入口 `FocusMaskTool`（全局唯一，自动挂最高层 CanvasLayer）。
+- 渲染：`OutlineEffect`、`GLSLShaderEffect`、`Trail3D`、`BakedMeshInstance3D`（资源级光照贴图）、`SubView3D`、`ShaderProgressBar`。
+
+**约定：UI 一律用 `.tscn` 搭，不代码生成。**
+
+## 模块
+
+| 模块 | 文档 |
 |---|---|
-| `CSVDataAccess` | CSV 读写（`get_csv_value` / `set_csv_value` 等） |
-| `ArrayViewTool` | 数组视图通用逻辑：`get_item_name` / `create_view` / `free_view`（配合对象池） |
-| `TweenViewTool` | Tween 显隐控制与释放：`update_visible` / `finish_and_free` |
+| ECS（C++ 列存储 + 系统 + 查询链 DSL） | [ECS/Readme.md](ECS/Readme.md) |
+| 3D 镜头（机位竞争 + 混合 + 冲击） | [Camera/Readme.md](Camera/Readme.md) |
+| 任务 / 教程 | [Task/Readme.md](Task/Readme.md) |
+| 对话 / 气泡 | [Dialogue/Readme.md](Dialogue/Readme.md) |
+| GOAP AI | [AI/Readme.md](AI/Readme.md) |
+| 命令回放 | [GameCommand/Readme.md](GameCommand/Readme.md) |
 
-| `CameraTool` | Camera 模块统一入口：`get_brain` / `get_camera` / `get_current` / `activate` / `deactivate` / `find` / `snap` |
-| `DevProjectSetup` | 一键创建项目目录结构（编辑器菜单触发） |
-| `SpriteFramesToAnimationLibrary` | `EditorScript`：将选中的 SpriteFrames 生成 AnimationLibrary |
+## MCP 调试服务器
 
-### 5.10 更新日志（ChangelogTool）
+插件启用即监听 `http://127.0.0.1:9988/mcp`（所有项目共用这一个端口）。
 
-面向玩家的「版本更新提示」：框架只负责**版本判定 / 条目过滤 / 已见状态记录**，**UI 由项目自行实现**。
+- 同时开多个项目时先 `list_instances`，用 `use_instance` 选默认目标，或给单次调用带 `instance`。
+- 默认目标跨重启保留；目标不在线时直接报错，不会改到别的项目。
+- 每条工具结果末尾会带一行 `[target: 项目@哈希 (路径)]`，用来确认这次究竟落在哪个项目。
+- 常用工具：`validate`、`get_logs`、`eval_code`、`get_scene_tree`、`set_node_property`、`create_resource`、`run_tests`、`game_control`、`restart_editor`。
+- 导出包默认不带 MCP 入口（`dev_framework/mcp/runtime_enabled = false`）。
 
-- 当前版本：Godot 内置项目设置 `application/config/version`（项目设置 → Application → Config → Version，发布时修改；未配置时回退到日志 Def 中的最高版本）。
-- 内容：在 `Assets/Def/` 下建 `ChangelogDef` 的 .tres，每个 `ChangelogEntryDef` 介绍**一个**功能更新（`version / date / category / text / debug_only`）；`target` 可指向任意资源（配置 Def / 图片 / 模型等），如何展示由项目决定；`debug_only = true` 的条目只在 Debug 模式（编辑器 / 调试分支）展示。示例见 `Assets/Def/Changelog/ChangelogExample.tres`。
-- 已见版本：**不单独存储文件**，由项目并入自己的游戏存档持久化（读 `get_seen_version()`，写入用 `mark_seen()`/`load_seen_version()`）；不并入则视为首次运行，不弹窗。
+## 引擎陷阱
 
-```gdscript
-# 读档（游戏启动加载存档后、判断更新前）
-ChangelogTool.load_seen_version(save_data.get("changelog_version", ""))
-if ChangelogTool.has_update():
-    var entries: Array = ChangelogTool.get_pending_entries()  # 待展示条目（新→旧）
-    changelog_popup.show_entries(entries)  # 项目自建弹窗
-    ChangelogTool.mark_seen()              # 展示后记录已见版本
-# 存档时
-save_data["changelog_version"] = ChangelogTool.get_seen_version()
-```
+1. **改框架代码后必须重启编辑器**（`restart_editor`）：已注册的全局类不会真正 reload，行为与源码不符且无提示。
+2. `await` 已完成的协程句柄会永久挂起 → 用 `AsyncTool.await_coroutine`。
+3. 脚本 reload 后，跨编译代次的类型化赋值可能静默得到 null → 跨边界传对象用无类型变量。
+4. `can_instantiate()` 对 `RefCounted` 全局类可能误报 false → 直接 `new()` 判空。
 
----
+## 存档与翻译
 
-## 六、View 视图层
-
-### 6.1 UI 管理（UITool + UIPanel / UIPanel3D）
-
-**UITool** 是纯栈管理器，将 UI 分为 6 层：
-
-| 层级 | 值 | 行为 |
-|---|---|---|
-| `BACKGROUND` | 0 | 常驻背景，入栈、最低优先级 |
-| `HUD` | 100 | 抬头显示，多元素共存，不参与返回键 |
-| `PANEL` | 200 | 主界面，入栈、可共存、参与返回键 |
-| `DIALOG` | 300 | 对话框，同层互斥（开新的自动关旧的） |
-| `TOOLTIP` | 400 | 提示，不入栈、单实例 |
-| `TOP` | 500 | 系统顶层（Loading/通知），覆盖一切 |
-
-面板继承 `UIPanel`（2D `Control`）或 `UIPanel3D`（3D `Node3D`），二者 API 完全对齐：
-
-```gdscript
-panel.open()              # 注册到 UITool 并播放进入动画
-panel.close()             # 播放离开动画并从栈注销
-panel.toggle()
-panel.popup()             # 弹窗式：打开后 await on_closed
-await panel.await_closed()  # 等待关闭（可检测是否被重新打开）
-
-# 生命周期信号
-on_open / on_opened / on_close / on_closed
-
-# 返回键：可重写 _back()，默认调用 close()
-# 焦点：可重写 _focus_enter() / _focus_exit()
-
-UITool.back()          # 返回键处理（优先 DIALOG，其次 PANEL）
-UITool.close_all()     # 关闭全部
-UITool.is_focus(panel)
-```
-
-> 遵循项目规范：UI 一律通过场景（`.tscn`）搭建，UIPanel 挂在 Canvas 下，不做纯代码 UI。
-
-### 6.2 数组视图
-
-| 类 | 用途 |
-|---|---|
-| `ArrayView` | 通用数组视图（`FlowContainer`），数据变化即重建，支持分帧生成 |
-| `SlotArrayView2D/3D` | 固定插槽视图，数据逐项填充到预先排布的插槽 |
-| `OffsetArrayView2D/3D` | 按 `offset` 间距自动排列的插槽视图（拖拽排序场景） |
-
-```gdscript
-array_view.data = my_items          # 赋值即自动刷新
-array_view.refresh_item(item)       # 局部刷新
-array_view.remove_item(item)
-```
-
-视图子节点约定：`data` 属性接收数据项（定位按「视图当前显示的 data」比对，**不要求** `get_view_name()`；没实现时节点名退化为「类名_索引」）。需要复用实例时填 `pool_key`，见 [6.5 对象池](#65-对象池)。
-
-### 6.3 按钮 / 交互
-
-| 类 | 说明 |
-|---|---|
-| `ButtonView` | 2D 按钮（`Button`），连接 `TweenAnimation` 显隐，可重写 `_mouse_enter/_mouse_exit` |
-| `ButtonView3D` | 3D 按钮（`Area3D`），悬停/按下 Tween + 描边 + 音效，支持手柄激活 |
-| `DragView3D` | 3D 拖拽视图，内置拖拽/排序生命周期（`_on_drag_started/_on_drag_move/_on_drag_ended` 可重写） |
-
-### 6.4 特效与渲染
-
-| 类 | 说明 |
-|---|---|
-| `TweenView / 2D / 3D` | 通过 `tween_visible` 布尔驱动 Tween 显隐 |
-| `OutlineEffect` | 多实例后处理描边（一个实例 = 一种描边，在 Compositor 资源里配置颜色/宽度/标记通道）。项目侧 @export 直接引用实例资源，调用实例的 `set_marked(true, mesh)` 开关；框架内部悬停走静态快捷方式 `OutlineEffect.set_outlined(true, mesh)`（固定通道 0）。颜色动画由项目侧每帧改实例的 `outline_color` 驱动 |
-| `GLSLShaderEffect` | 可编程后处理（填 `define_code` / `main_code` 实时编译） |
-| `Trail3D` | 拖尾网格 |
-| `BakedMeshInstance3D` | 自带烘焙光照的网格实例（见 [6.6 资产光照贴图](#66-资产光照贴图)） |
-| `ScreenshotCapture` | 延迟自动截图（`auto_capture_delay`，默认 3 秒；启动后自动截一张，无手动触发入口。默认不透明背景，需抠图时勾 `transparent_background`；含抖动量化） |
-| `SubView3D` | 3D 子视口（把 2D UI 投影到 3D 表面） |
-| `Background` | 视差滚动背景 |
-| `SwingFollow2D` | 摆动跟随动画 |
-| `GimbalView` | 反相缩放/旋转的“云台”控件（2D UI 始终面向相机） |
-| `ShaderProgressBar` | 通过 shader 参数驱动的进度条（`Range` 子类） |
-| `Sprite3dLight` | Sprite3D 光效播放（Tween 进出场） |
-| `OptionSelector` | 选项选择器（SPINNER / TOGGLE 两种模式，支持键盘导航） |
-
-### 6.5 对象池
-
-三层各管一件事：
-
-| 类 | 职责 |
-|---|---|
-| `Pool` | 池本体（`RefCounted`）：`pool_get` / `pool_return` / `prewarm` / `clear`，`factory` 决定怎么造 |
-| `PoolService` | 静态注册表：`ensure(key, factory)` / `find` / `pool_get(key)` / `pool_return(key, item)` / `trim` / `remove` / `clear`；空闲实例统一挂在常驻隐藏节点 `PoolIdle` 下 |
-| `ArrayViewTool` | 视图接线：`resolve_pool` / `create_view` / `free_view`（有池先借，没有才 instantiate） |
-
-池化视图只需填两个字段（编辑器下一律不池化）：
-
-```gdscript
-# ArrayView / SlotArrayView2D / SlotArrayView3D 通用
-view.pool_key = "CardView"     # 同 key = 同一批实例，多个视图可共用同一批
-view.pool_size = 8             # 首次使用前预建 8 个空闲实例，同时是空闲上限（0 = 不预热、不限）
-```
-
-视图可实现的钩子（**只有前两个会被调用**）：
-
-| 钩子 | 时机 | 该做什么 |
-|---|---|---|
-| `on_pool_get()` | 借出 | 重置状态、播放入场动画 |
-| `on_pool_return()` | 归还（隐藏前） | kill 补间、撤销异步、断开外部信号、把 `data` 置空 |
-| ~~`on_pool_push()`~~ | 已废弃 | 旧名，不会被调用 |
-
-契约要点：
-
-- 归还即隐藏并挂回 `PoolIdle`：**不要**继续持有引用当活的用。
-- 池不会替你清 `data`（`bool` 之类接不了 null，且 setter 常有副作用）——要断开的引用在 `on_pool_return()` 里自己清。
-- 池只保证「脱离旧父节点 + 隐藏 + 回调」，坐标/旋转/缩放由下一次宿主摆放决定。
-- `PoolService.trim()`：场景切换后收掉空闲实例的内存峰值，池与 key 保留。
-- 观测量：`Pool/InUse`、`Pool/Idle`、`Pool/Created`、`Pool/Reuse`（命中率 = Reuse / (Reuse + Created)）。
-- 同一个 key 被两个不同 `view_scene` 使用会告警：池里实例可能属于另一个场景。
-
-### 6.6 资产光照贴图
-
-资源级烘焙光照：**一类网格只烘一次**，摆多少个实例都共用同一份图集，不额外加 `LightmapGI`，也不复制贴图。
-
-| 类 | 职责 |
-|---|---|
-| `AssetLightmapStage` | 编辑器烘焙舞台：按资源摆一份实体 → 借检查器按钮触发烘焙 → 导出 `<场景名>_lightmap_set.res` |
-| `AssetLightmapSet` | 光照库：`data`（图集）+ `regions`（键 = 资源文件名 → 区域）；`current` 是全局生效库 |
-| `AssetLightmapRegion` | 一类资源在图集里占的矩形 + 页号 |
-| `AssetLightmapBinder` | 把区域挂到实例每个 surface 材质的 `next_pass`（主材质资源不动） |
-| `BakedMeshInstance3D` | 对外门面：`MeshInstance3D` 换成它即自带光，进树自动挂 |
-
-用法：
-
-1. 建一个**专用烘焙场景**（工具场景，运行时不用）：`AssetLightmapStage` 当根节点，下面放 `LightmapGI` + 灯，
-   舞台填 `dirs`（整目录）或 `meshes`（点名）。网格要带 **UV2** 且**有材质**
-   （没材质就没有 `next_pass` 可挂，运行时会告警"挂不上烘焙光"）；
-2. 点舞台的「烘焙并导出」：几何变动才自动重烘；**只改了灯 / 环境 / 自发光**时点「强制重烘并导出」。
-   导出会自动保存场景（`LightmapGI.light_data` 引用和烘焙副本都要进场景文件）；
-3. **使用场景另建**（展示/关卡场景里不要放舞台和 `LightmapGI`），加载时接管产物：
-
-```gdscript
-# 产物跟着烘焙场景走：<烘焙场景>_lightmap_set.res
-AssetLightmapSet.attach("res://Scenes/Lightmap/LightmapBake.tscn")
-# 或直接给产物路径
-AssetLightmapSet.attach_path("res://Scenes/Lightmap/LightmapBake_lightmap_set.res")
-
-BakedMeshInstance3D.set_all_visible(false)               # 全局关光，对着原材质看差别
-BakedMeshInstance3D.set_strength(0.2)                    # 全局亮度，不必重烘
-```
-
-要点：
-
-- **烘焙的灯必须是 Static**：Godot 4.4 起 `Light3D.light_bake_mode` 默认 `Dynamic`，不进 lightmap，
-  烘出来 l0 全黑（舞台会在导出时检查并告警）。实时补光用的灯保持 Dynamic 即可，别让它重复进烘焙。
-- `LightmapGI.directional` 必须开：SH 叠加层要读 l1 方向项，没有就是一片没有方向、没有高光的平光（舞台会自动开）。
-- 换库（给 `current` 赋值）会自动重挂**所有在树上的**实例，与场景加载顺序无关。
-- 键 = 网格文件名；无路径的运行时网格退回 `resource_name`。**不同目录的同名模型会撞车**。
-- 逐面判定：只有缺 UV2 的面被跳过，不拖累同一模型上其它面。
-- 换 `mesh` / 换 `material_override` 后要自己调一次 `apply_lightmap()`（节点不会自动感知）。
-- 池化实例跨场景复用前必须摘光，否则会顶着上一个场景的光出现（`DefMeshView` 已内置，其它视图调 `AssetLightmapBinder.clear(self)`）。
-
----
-
-## 七、MCP 调试服务器
-
-DEV Framework 内置一个 **MCP（Model Context Protocol）调试服务器**，由**编辑器插件**持有，随插件启用/停用而开启/关闭，让 AI 助手（opencode / Claude Code / Cursor 等）直接连接正在打开的编辑器，辅助编辑场景、校验脚本、诊断错误。
-
-### 7.1 原理与架构
-
-```
-AI 助手 ──MCP Streamable HTTP──▶ http://127.0.0.1:9988/mcp  (Godot 编辑器内嵌)
-```
-
-- Godot 编辑器内部用 `TCPServer` 实现了一个轻量 HTTP 服务器（`MCPTcpHttpServer`）。
-- 由 `plugin.gd` 在**启用插件时启动**、**停用时关闭**，不依赖 autoload、不污染导出构建。
-- 通过 `MCPDevServer`（`RefCounted`）持有；通过继承 Godot 4.5+ 的 `Logger`（`MCPLogger`）**捕获编辑器控制台输出与错误（含 GDScript 栈追踪）**，线程安全。
-- 每帧由 `plugin.gd::_process` 驱动服务器处理请求。
-
-### 7.2 启用与配置
-
-- 编辑器启用 `DEV Framework` 插件即自动开启 MCP 服务器（`_enter_tree`）。
-- 配置项（`项目设置 → DEV Framework` 或直接改 `project.godot`）：
-
-| 设置项 | 默认值 | 说明 |
-|---|---|---|
-| `dev_framework/mcp/enabled` | `true` | MCP 服务器总开关 |
-| `dev_framework/mcp/port` | `8931` | 旧的项目级端口（仅本机 `127.0.0.1`）。**多实例中枢开启时不被使用**；只有 `hub=false` 时才生效 |
-| `dev_framework/mcp/hub` | `true` | 多实例中枢：同时打开多个装了本框架的编辑器时，只有一个占住 `hub_port` 当"中枢"，其余实例退让到系统分配的临时端口并登记到它 —— 客户端只需**一个 URL、一份配置**就能操作任意一个编辑器 |
-| `dev_framework/mcp/hub_port` | **`9988`** | **机器级通用端口**，所有项目一律**不写**、全部走默认值（写了就等于给自己开例外，会拉出独立中枢）。客户端只连这一个端口；多个编辑器同时打开时靠 `instance` 参数切换 |
-| `dev_framework/mcp/log_tool_results` | `false` | 是否把**每次工具调用**（入参 + 返回摘要）打进 Godot 输出面板。默认关闭：日志捕获器挂在引擎 `print` 通道上，MCP 自己的回声会被 `get_logs` 原样返回给 AI，白占上下文并淹没项目日志。工具**报错**始终以 error 级别输出，不受此开关影响 |
-| `dev_framework/mcp/providers` | `[]` | 项目自定义 MCP 工具域脚本路径（每个提供 `static register(add_tool)`） |
-| `dev_framework/mcp/runtime_enabled` | `false` | 导出包/独立运行进程是否开启 MCP 端点（见 §7.6） |
-
-### 7.3 多实例（一个端口、一份客户端配置）
-
-MCP 服务器跑在**编辑器进程内**。旧实现是"每个编辑器各绑一个端口"，于是同时开多个项目时：端口只有一个能绑上、其余实例的 MCP 直接起不来；想绕开就改端口，那就变成**每个项目一份端口 + 每个端口一条客户端配置**，还很容易连到错的项目（最常见的翻车：改完代码没反应，因为在改另一个窗口）。
-
-**方案：首个抢到端口者当"中枢"，其余自动登记。**
-
-```
-┌─────────────┐   POST /mcp (9988, 唯一对客户端可见)   ┌──────────────────────────┐
-│ AI 客户端    │ ────────────────────────────────────▶ │ 实例 A（中枢 hub）        │
-│ (一条配置)   │ ◀──────────────────────────────────── │  127.0.0.1:9988          │
-└─────────────┘                                       │  · 自己的全量工具         │
-                                                      │  · 实例注册表 + 路由      │
-                                                      └───────┬──────────┬───────┘
-                                                              │ 转发      │ 转发
-                                                    ┌─────────▼──────┐  ┌▼───────────────┐
-                                                    │ 实例 B（成员）  │  │ 实例 C（成员）  │
-                                                    │ 临时端口        │  │ 临时端口        │
-                                                    └────────────────┘  └────────────────┘
-```
-
-1. 每个实例启动时先算身份（`项目名@项目路径哈希`）。
-2. 尝试绑**机器级固定端口** `mcp/hub_port`（默认 **9988**，所有项目都不写）。绑上 = 本实例是中枢。
-3. 绑不上 = 已有中枢。退让到 `listen(0)` 让**系统分配**临时端口（内核保证唯一，比"端口+1"可靠），然后每 4 秒向中枢登记。
-4. 客户端**只连中枢那一个地址**。工具表就是中枢自己的全量工具，每个工具多一个可选 `instance` 参数；带上就转发到目标实例，省略就用 `use_instance` 的默认目标，再省略就作用于中枢自己。
-
-对 AI 来说只多了两个工具：`list_instances`（看有哪几个编辑器）与 `use_instance`（选一个）。
-
-#### 中枢端口是怎么定的（两档）
-
-1. `project.godot` 里**显式**写了 `mcp/hub_port` → 用它（**仅限排障**：9988 被占死时临时换口）；
-2. 没写 → 用默认值 **9988**（正常情况永远走这一档）。
-
-**刻意不回落 `mcp/port`。** 那条兼容档曾短暂存在（让存量项目升级后端口不变），但与"统一端口"直接冲突：只要有一个项目把 `mcp/port` 改成 9991，它就会自己拉起独立中枢，又回到"两个端点互相看不见"——实测过（8932 与 9991 各自 `role=hub`、各自 `count=1`）。**留一格例外就等于留一个会静默分裂的隐患。**
-
-> 判定"显式写了"必须读 `project.godot` 文本：插件 `_enter_tree` 里 `add_property_info` + `set_initial_value` 之后，`ProjectSettings.has_setting()` 对每个注册项都返回 true，分不出"项目改过"与"只是注册了默认值"。
-
-#### 中枢退出怎么办
-
-成员心跳连续失败 3 次（约 12 秒）后尝试抢绑中枢端口：抢到 → 自己升格为中枢，其余成员下个周期自动登记到它；抢不到 → 说明有别的实例先接管了（端口互斥由内核保证，不会出现两个中枢），继续按成员运行。正常关闭编辑器时会主动发一次注销（不等响应），所以常见情况不会等满 12 秒。
-
-**为什么不用注册表文件 + pid 判断**：能绑上端口本身就是一次**原子的、内核保证的**互斥判定；文件方案要靠轮询 + 陈旧清理 + 原子写，崩溃残留会让"谁是中枢"变成需要容错的状态。Windows 上 pid 还会被复用，用 pid 判断存活的方向恰恰是错的。
-
-#### `instance` 参数能填什么
-
-| 形式 | 例子 | 说明 |
-|---|---|---|
-| `uid` | `PCG@a1b2c3d4#42424` | **唯一**。同一项目打开两次时用它精确指定某一个进程 |
-| `instance_id` | `PCG@a1b2c3d4` | 项目级身份。**同项目多开时会有歧义**，此时明确报歧义而不是猜一个 |
-| 唯一前缀 | `a1b2` / `PCG` | hash 或项目名前缀，必须唯一命中 |
-| 端口号 | `52600` | 手工记过端口时可用 |
-
-`use_instance` 的默认目标按 **uid** 记：用 `instance_id` 做键会让"选中 A 窗口"在同项目的 B 窗口也生效，而两边 id 完全相同，从错误信息里根本看不出问题。
-
-#### 边界与坑
-
-- **不做"唯一的其他实例自动选中"**：开了两个项目、只想改当前这个时，自动选中会静默改错项目。报错并要求显式选择只多一次调用。
-- **成员进程自己也是 MCP 服务器**：临时端口上跑着同一套工具与协议，直接连也能用，但客户端配置里不该写它（端口每次启动都会变）。
-- **`/hub/*` 是实例间内部端点**，不属于 MCP 协议，客户端不需要知道。非中枢实例收到会回 404 并说明原因。
-- **统一端口后唯一的单点故障**：9988 被**非本框架**的程序占用时，所有编辑器都会退让到临时端口，谁也无法被客户端找到。日志会打一条只出现一次的明确告警（`MCP 多实例【端口冲突】...`），并给出两条出路：关掉占用者，或临时给该项目写 `mcp/hub_port` 换口并同步改客户端 URL。它与"中枢正忙/正在重启"区分开——后者不告警，等着即可。
-- **跨项目 Token 必须一致**：中枢转发时带自己的 token；目标实例配了不同 token 会回 401，表现为可见的转发失败而不是静默串味。
-- **导出运行时（§7.6）不参与多实例**：导出包里那个进程只有一个 MCP 端点，注入 `instance` 没有意义，故 tools/list 里不会出现该参数。
-
-#### 从旧端口迁移（一次性）
-
-| 旧端口 | 谁在用 | 要改什么 |
-|---|---|---|
-| `8931` | 插件历史默认（多数项目没显式配置） | 客户端 URL → `9988` |
-| `8932` | 本仓库原有配置 | 客户端 URL → `9988`，并删掉 `project.godot` 里的 `mcp/hub_port` |
-| `9991` 等自定义 | 个别项目曾把 `mcp/port` 当端口用 | 客户端 URL → `9988`，删掉 `mcp/port` |
-
-服务端**什么都不用配**（默认值就是 9988）；要动的只是客户端配置里的 URL。
-
-> **多个编辑器同时打开**：不再需要为每个项目配一个端口。第一次遇到多个实例时，AI 调
-> `list_instances` 看到清单、用 `use_instance` 选一个（或给单次调用带 `instance` 参数）即可。
-
-### 7.4 AI 助手连接配置
-
-DEV Framework 的 MCP 使用 **Streamable HTTP** 传输，端点为 `http://127.0.0.1:9988/mcp`（仅本机，需先启用插件）。下面按**配置文件格式**分组给出各工具接入方式。
-
-#### A. opencode / Claude Code 等 CLI 工具
-
-**opencode**（`opencode.json` / `opencode.jsonc`，`mcp` 直接按服务器名作 key）：
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "devframework-godot-mcp": {
-      "type": "remote",
-      "url": "http://127.0.0.1:9988/mcp",
-      "enabled": true
-    }
-  }
-}
-```
-
-**Claude Code**（命令行，无需手写 JSON）：
-
-```bash
-claude mcp add --transport http devframework-godot-mcp http://127.0.0.1:9988/mcp
-claude mcp list        # 查看已配置
-```
-
-#### B. `mcpServers` 格式（Cline / Roo Code / TRAE / Cherry Studio / 通义灵码 / VS Code 等）
-
-这类工具共用 `mcpServers` 对象结构，把 `devframework-godot-mcp` 加入即可：
-
-```jsonc
-{
-  "mcpServers": {
-    "devframework-godot-mcp": {
-      "url": "http://127.0.0.1:9988/mcp"
-    }
-  }
-}
-```
-
-各工具放置位置与字段差异：
-
-| 工具 | 配置位置 | 说明 |
-|---|---|---|
-| **Cline** | `~/.cline/mcp.json`，或 MCP Servers → Configure → 编辑 JSON | `type` 写 `streamableHttp` |
-| **Roo Code** | 扩展设置 `settings.json` → `mcpServers` | `type` 必须写 `streamable-http` |
-| **TRAE** | 项目级 `.trae/mcp.json`，或 设置 → MCP → 手动添加 | 仅需 `url`，`type` 可省略 |
-| **Cherry Studio** | 设置 → MCP 服务器 → 添加 / 从 JSON 导入 | `type` 写 `streamableHttp` |
-| **通义灵码** | 个人设置 → MCP 服务 → 配置文件添加 | 也支持界面手动添加（见下）|
-| **VS Code** | `.vscode/mcp.json` | 顶层为 `servers`，字段以官方文档为准 |
-
-#### C. 界面手动添加（无需 JSON，Cursor / 通义灵码 / 豆包 MarsCode 等）
-
-| 工具 | 操作路径 | 填写内容 |
-|---|---|---|
-| **Cursor** | Settings → MCP → Add | 类型选 remote/HTTP，URL 填 `http://127.0.0.1:9988/mcp` |
-| **通义灵码** | 个人设置 → MCP 服务 → `+` → 手动添加 | 类型选 SSE/HTTP，服务地址填 `http://127.0.0.1:9988/mcp` |
-| **豆包 MarsCode** | 设置 → MCP → 添加 | 类型选 HTTP，URL 填 `http://127.0.0.1:9988/mcp` |
-| **腾讯云 AI 代码助手** | 设置 → MCP → 添加 | URL 填 `http://127.0.0.1:9988/mcp` |
-
-> 若工具界面没有"远程/HTTP"类型选项，可改用 `mcpServers` JSON 方式（见 B 组）。
->
-> 注意：必须先启用 `DEV Framework` 插件，该 MCP 才会监听端口。
-
-### 7.5 内置工具清单
-
-| 工具名 | 作用 |
-|---|---|
-| `validate` | **统一验证入口**（`kind=script/resource`）。script: 校验 GDScript 语法/可编译性（传 `path` 或 `code`，兼容非 `@tool`/纯工具类脚本）；resource: 校验资源/场景能否被引擎加载 |
-| `list_dir` | 列出目录内容（支持递归）|
-| `classdb_query` | 查询 Godot 类的 API（方法/属性/信号签名）或按关键字搜索类名，供 AI 写脚本前确认原生 API |
-| `get_logs` | **编辑器侧**日志/警告/错误获取：`kind=log/warning/error`、增量游标、重复合并。恒读编辑器进程缓冲 |
-| `clear_logs` | 清空**编辑器侧**日志/错误缓冲（`scope=all/logs/errors`）|
-| `get_game_logs` | **游戏进程侧**日志（print/printerr），增量游标、重复合并。编辑器调用时经调试线转发 |
-| `get_game_errors` | **游戏进程侧**错误（脚本错误/assert/push_error，含文件/行号/栈追踪）。游戏断点暂停时仍可安全调用 |
-| `clear_game_logs` / `clear_game_errors` | 清空**游戏进程侧**缓冲（`scope=all/logs/errors`）|
-
-> 日志类工具的进程归属**只由工具名决定**：不带 `game_` 的读本进程缓冲，带 `game_` 的读游戏进程缓冲。
-> 早期 `get_logs` 另有 `source=auto/editor/game` 三档，其中 `auto` 会在游戏运行时静默改读游戏缓冲——
-> 查编辑器自己的错误却拿到游戏的错误，且调用方无从察觉。故已删除该参数，跨进程只保留一条通路。
-| `take_screenshot` | 截图四模式：text（节点布局文本化）/ game / editor / scene |
-| `get_scene_tree` | 获取当前编辑场景的节点树结构 |
-| `get_node_info` | 读取编辑场景中指定节点属性列表及当前值 |
-| `set_node_property` | 修改编辑场景中节点属性（UndoRedo 可撤销；保存才写回 .tscn）。含 position/rotation/scale 等 transform 属性（Vector 可传 `'1,2'` 字符串）|
-| `call_node_method` | 触发编辑场景中节点方法 |
-| `add_node` / `remove_node` / `duplicate_node` | 添加 / 删除 / 复制场景节点（UndoRedo 可撤销）|
-| `connect_signal` | 连接场景节点信号到方法（随场景保存）|
-| `create_resource` | 创建 .tres 资源配置（指定脚本 + 属性字典，配置驱动开发用）|
-| `get_resource_info` | 读取 .tres/.tscn 资源完整属性树（递归，理解配置结构）|
-| `get_editor_activity` | 感知编辑器当前状态（打开场景/选中节点/运行中游戏），用于 AI 与人类协作不踩踏 |
-| `get_project_info` | 项目信息统一入口：`section=basic`(默认)/`settings`(主场景/autoload/输入映射)/`classes`(全局类清单) |
-| `game_control` | 游戏运行控制：`action=start`(支持 uid:// 场景；已在运行时自动接管重启)/`stop` |
-| `restart_editor` | **重启编辑器**：修改框架代码后调用以统一全局类脚本代次让新逻辑生效（原重扫逻辑已由编辑器自动处理）；**总会先保存全部已打开的场景**（封装 `EditorInterface.restart_editor(true)`）；`delay_sec` 延迟触发；重启期间 MCP 断开、回来自动恢复 |
-| `eval_code` | 在编辑器内执行一段 GDScript 代码并返回结果。**支持 await**：代码含 `await` 时等待协程完成后回传最终返回值（`timeout_ms` 默认 8000/上限 15000，超时协程继续后台执行、实例自动延迟回收）|
-| `open_scene` | 在编辑器打开指定场景 |
-| `set_main_scene` | 设置项目主场景并保存 |
-| `project_setting` | 读/写任意 ProjectSettings 项：`value` 缺省=读取，提供=写入保存（数组/对象自动还原 Variant）|
-| `save_all` | 保存全部场景与项目设置 |
-| `reimport` | 重新导入指定资源（重建导入缓存）|
-| `search_symbols` | 跨脚本/场景/资源搜索符号（函数/变量/类定义与引用，支持节点名与资源路径）|
-| `find_resource_users` | **双向依赖查询**：`users`=谁引用该资源（反向），`deps`=该资源依赖谁（正向，带类型标签）。目标为带全局类名的脚本时额外扫描类名在其它 .gd 中的词边界使用点（kind=class_ref，覆盖 @onready/类型注解/静态调用等无路径引用场景）。改/删资源前查完整影响面 |
-| `run_tests` | 运行**指定**的单元测试（`Scripts/Test/`，extends TestCase）：`script` 必填，两种用法——① 脚本路径子串（`all`=全量但不推荐）；② **直接传内联 GDScript 源码**（含换行或 `extends ` 开头即视为源码，`extends TestCase` + `test_` 方法，不落盘，临时验证用）。`process=editor` 同步跑完返回（进程无关用例）；`process=game` 跑 `needs_game_process()` 用例，**调用阻塞到本轮跑完才返回**（无中途进度查询）。**测试整体硬超时 10 分钟**：到点判失败并停止等待。结果含每个用例 `elapsed_ms` 与超声明上限的 `SLOW` 提示 |
-| `refresh_tools` | 手动重建 MCP 工具注册表：改框架脚本后调用，客户端重拉 tools/list 即生效（免重启） |
-| `list_instances` | 列出本机所有装了本框架的 Godot 编辑器实例（`instance_id` / 端口 / 项目路径 / `age_ms` / `is_self` / `is_hub`）。**同时打开多个项目时先调它** |
-| `use_instance` | 设置默认目标实例（之后所有工具调用转发到它）；传空字符串恢复为「本实例」。`instance` 可填 uid（唯一，同项目多开时用它）/ 唯一前缀 / 端口号 |
-
-> **提示**：修改插件代码（`MCPDevServer.gd` 等）后，新工具需**重启编辑器**才会注册（脚本热重载不会重建工具注册表）。可调用 `restart_editor` 工具一键重启（保存后重启），或改完后调 `refresh_tools` 重建注册表。
-
-### 7.7 典型 AI 调试流程
-
-1. 打开项目并启用 `DEV Framework` 插件，连接 http://127.0.0.1:9988/mcp。
-   - 同时开了多个项目时**不需要**加配置：连的还是这一个地址，用 `list_instances` + `use_instance` 切换目标（见 §7.3）。
-2. AI `list_dir` / `validate` 排查脚本与资源问题。
-3. AI `get_scene_tree` / `get_node_info` 理解当前编辑场景的节点与属性。
-4. AI 用 `set_node_property` / `call_node_method` 快速验证逻辑，`get_logs`(kind=error) 定位报错。
-5. `take_screenshot` 查看编辑器画面实际表现。
-
-> **回归测试**：把关键流程写成 `Scripts/Test/` 下的 TestCase（断言 + 档案护栏 + `cleanup`），用 `run_tests(process=game, script=...)` 跑（**阻塞到跑完返回**，整体硬超时 10 分钟）。
-> **临时冒烟**：无需写用例，直接 `game_control(action=start)` + `simulate_click/key/drag` + `get_logs(kind=error)` 手工编排，最后 `game_control(action=stop)`。
-
-### 7.8 AI 开发规范（AI 助手必读）
-
-本框架让 AI 不仅能读项目，还能按**项目既有规范**安全地修改场景与脚本。请遵循以下规则，保证 AI 的改动符合"正常游戏开发规范"且不会破坏用户的工作。
-
-**架构与目录约定**
-- 项目遵循 **Def（静态数据 .tres）→ Entity（运行时实体）→ View（显示）** 三层架构，配合 `Tool/*` 静态工具类。
-- 代码按类目放到 `Scripts/Def/`、`Scripts/Entity/`、`Scripts/View/`，不要把所有脚本塞进单个场景脚本。
-- **UI 等可显示内容一律用场景（.tscn）搭建，不要用代码 `new`**（见框架 `View/*` 与 `UITool`）。改动 UI 优先在场景里调整节点属性，而非写代码生成。
-- 优先**配置驱动**：能通过 `.tres` 资源配置的数据（数值、效果、标签、GOAP 行动/目标）就用资源，不硬编码在脚本里。
-- **3D 程序化生成已拆为独立插件**：原 `addons/DEVFramework/PCG/`（3D 栅格 / 分块世界 / 生成管线 / `SdfField` 双投影 / 造型与摆放双契约 / seed 可复现）已于 2026-10 移出本仓库，改为独立插件项目 `d:\Work\GodotProject\PCG`（插件名 `pcg`，零 autoload、零 `.tres` 依赖）。需要 3D 生成能力时装入该插件并遵循其 Readme；本框架不再内置任何生成器。
-- 写脚本时使用显式类型标注（`func foo(x: int) -> void`）、`@onready` 获取节点引用、`@export` 暴露可调参数，与 `Scenes/AI/GoapDemo.gd` 等示例风格一致。
-
-**MCP 工具使用规范**
-- **同时打开了多个项目时**：先 `list_instances` 看清单，用 `use_instance` 选一个（或在单次调用里带 `instance` 参数）。省略两者时操作落在**当前连着的那个进程**上——这与旧行为一致，但在多开时就是"改错项目"的最大来源。
-- 改任何场景节点前，先用 `get_scene_tree` / `get_node_info` 看清结构与当前属性，再动手。
-- **不确定 Godot 原生 API 的用法时，先用 `classdb_query` 查询**（方法/属性/信号签名），再写代码，避免臆造 API。
-- `set_node_property` 与 `add_node` 已接入 UndoRedo，AI 的修改用户可按 **Ctrl+Z 撤销**——请放心使用，但也不要反复试探性乱改，尽量一次改对。
-- 修改场景节点或新建脚本/资源后，记得 `save_scene`（新 class_name 全局类识别依赖重启/扫描，见陷阱1）。
-- 长任务（重编译、导出）会占用编辑器，且单次 MCP 调用有超时，**拆成小步骤**完成，不要一次塞超长指令。
-- 排查脚本问题时：先 `validate` 验证语法，再 `get_logs`(kind=error) 看运行期错误（含栈追踪），配合 `get_logs` 定位。
-
-**安全边界**
-- 编辑器 **运行游戏时**（`get_editor_activity` 显示 game_running=true），应避免对编辑场景做结构性改动；如需改结构先 `game_control`(action=stop)。
-- `eval_code` / `game_eval` 可执行任意 GDScript，是**可信开发者工具**，AI 应最小权限使用：只读/求解优先，改动场景尽量走 `set_node_property` 等专门工具而非 eval。
-- `write_file` / `delete_file` 会直接读写磁盘，先确认路径无误，避免越界到已知目标文件之外。
-
-**协作约定**
-- 动手前先 `get_editor_activity` 看用户在编辑器里做了什么（打开哪个场景/选中哪个节点/是否在运行游戏），避免与用户正在进行的操作踩踏。
-
-### 7.6 导出包 / 独立运行的运行时 MCP（`runtime_enabled`）
-
-默认**关闭**：正式包里不带 MCP 入口（导出时 `_PackMcpFilter` 会把 `DevMCP` autoload 临时从 `project.godot` 移除）。勾选 `dev_framework/mcp/runtime_enabled = true` 后：
-
-- 导出包/独立运行进程会在 **`dev_framework/mcp/port`**（默认 `8931`）起一个 MCP 端点；
-- 工具集 = 共享域（文件/校验/代码索引）+ 游戏操作工具（截图/UI 交互/日志/用例/eval），`eval_code` 在此进程内就地执行；
-- **不使用 `hub_port`，也不参与多实例**。这是刻意设计，三个理由：
-
-  1. **语义不同。** `hub_port` 代表"本机**开发环境**的入口"，9988 天然属于编辑器那一侧。导出包代表"一个正在运行的产品"，它与编辑器同时存在是常态 —— 若也去抢 9988，就会互相把对方挤成"成员"，于是编辑器那台中枢可能变成运行中游戏的成员，AI 的 `eval_code` 就打到游戏进程里去了。这是最坏的一种串味。
-  2. **没有可路由的东西。** 导出包进程里只有它自己一组工具，注册表里也只有自己一个实例，转发永远落空；而 tools/list 注入 `instance` 参数只会诱导模型传一个被忽略的值。
-  3. **产品进程不该跑开发期的编排逻辑。** 接管/心跳是为"多个编辑器抢一个入口"设计的交互式场景，在产品里跑心跳会持续产生本机 HTTP 往返，零收益。
-
-| 进程形态 | 端口 | 多实例路由 | `instance` 参数 |
-|---|---|---|---|
-| 编辑器进程 | `hub_port`（9988） | ✅ 全功能 | 出现在 tools/list |
-| F5 游戏进程 | 不开端口（走调试线桥接） | ❌ | 不出现 |
-| 导出包 / 独立运行 | `mcp/port`（8931） | ❌ | 不出现 |
-
-> 判据是 `_hub == null`（而不是 `Engine.is_editor_hint()`）："能不能路由"的事实由"有没有注册表"决定。这样将来若真要给运行时也开多实例，改动点只有一处。
-
----
-
-## 八、典型使用流程
-
-### 场景一：新增一种卡牌效果
-
-1. 在 `Scripts/Def/Effect/` 新建脚本继承 `EffectDef`，实现 `apply()`（和可选 `revert()`）。
-2. 在 `Assets/Def/` 下创建 `.tres` 资源，编辑器里组合 `ValueDef` 表达式与标签。
-3. 在 Def 资源上配置 `zh_name` / 描述，自动写入翻译 CSV。
-4. 运行时由对应组件（如 BuffComponent、技能系统）触发 `def.effect.apply(data)`。
-
-### 场景二：做一个带属性/Buff 的角色
-
-1. 定义 `AttributeDef` / `BuffDef` 资源。
-2. 场景节点挂 `AttributeComponent` + `BuffComponent`。
-3. 代码中 `add_modifier` / `add_stacks` 驱动数值与效果。
-4. 节点实现 `game_ready()` / `save_data()` / `load_data()`，由 `ActorTool` 统一调度存档。
-
-### 场景三：弹出一个设置面板
-
-1. 场景中搭建面板，根节点挂 `UIPanel`（选好 `layer`，如 `PANEL`/`DIALOG`）。
-2. 连接 `on_open/on_closed` 处理动画或数据刷新。
-3. 代码 `panel.open()`；返回键由 `UITool.back()` 统一接管。
-
-### 场景四：日志与存档接入
-
-```gdscript
-# 初始化
-LogTool.set_enabled(OS.is_debug_build())
-TranslationTool.initialize()
-
-# 存档
-var err = await SaveTool.save_async("user://save.json", game_data, SaveTool.Mode.JSON)
-var data = await SaveTool.load_async("user://save.json", SaveTool.Mode.JSON)
-```
-
----
-
-## 九、已知引擎陷阱（与框架协作必读）
-
-以下均为 Godot 4.7 实测行为，无报错、难排查，编写/修改框架及使用协程时务必知晓：
-
-### 陷阱1：改框架代码后必须重启编辑器
-运行中的编辑器对**已注册全局类脚本**的 `reload()` 静默无效——磁盘是新代码，运行实例永远执行旧逻辑，且无任何提示。
-- 症状：新加的方法调用报 "Nonexistent function"、行为与源码不符
-- 根因：GDScriptCache 命中缓存时不校验文件 mtime（引擎 issue #49298）；外部编辑器的改动依赖编辑器窗口聚焦时的 mtime 比对（issue #72825）
-- **自动化路径（推荐）**：MCP 工具 `restart_editor` —— 直接封装 `EditorInterface.restart_editor(true)`，AI 改完框架代码后自主调用，延迟 1 秒触发（先送达确认响应再重启），引擎先保存全部已打开的场景再重启、MCP 自动回连，用户零操作
-- 缓解：`refresh_tools` 可重建工具注册表（仅工具清单，不解决类逻辑）
-- 辅助：开启编辑器设置 `text_editor/behavior/files/auto_reload_scripts_on_external_change` 后，普通项目脚本的外部修改会自动重载（历史版本有 bug，4.4+ 基本可用）
-
-### 陷阱2：await 已完成的协程句柄会永久挂起
-对已执行完毕的 `GDScriptFunctionState` 再 `await`，协程永不恢复且零报错。
-典型场景：先 emit 信号唤醒子协程、再 await 其句柄——唤醒瞬间链条已完成，随后的 await 即死锁。
-- 正确姿势：保持"先挂起、后触发、再等待"的顺序；或用 `AsyncTool.await_coroutine(fs, ms)`（先经 `is_valid()` 判定，失效句柄立即返回；并对死等加超时）
-
-### 陷阱3：跨编译代次的类型化赋值静默失败
-脚本被 reload 后产生新的类代次，此时 `var x: OldClass = new_obj` 若两侧代次不同，赋值结果为 **null 且不报错**。
-- 正确姿势：框架内部跨 reload 边界传递对象用无类型变量；怀疑时用 `is` 断言代替信任类型标注
-
-### 陷阱4：can_instantiate() 对 RefCounted 脚本可能误报 false
-`extends RefCounted` 的全局类脚本 `can_instantiate()` 返回 false 但实际可正常 `new()`。
-- 正确姿势：直接 `new()` 并判空，不要依赖该判定
-
----
-
-## 十、FAQ
-
-**Q1：Def 能否存运行时数据？**
-不能。Def 是纯配置（`Resource`），运行时状态应放 Entity / Component / 场景节点，通过外部上下文（如 `GameContext`）传入。
-
-**Q2：为什么我的中文配置没写进 CSV？**
-Def 需声明 `@tool`，且在编辑器打开资源时通过 `zh_name` / `tr_desc` 等 `zh_*` 属性修改才会写入对应 CSV；运行期 `tr()` 读取翻译。
-
-**Q3：`ModifierValue.value` 赋值为什么报错？**
-该属性只读，请通过 `base_value` 或 `add_modifier/apply_modifier` 修改，保证修饰链与信号正常。
-
-**Q4：对象池没生效 / 取到 null？**
-`Pool.pool_get()` 池空时会调 `factory` 现场创建，只有 `factory` 无效才返回 null；`PoolService.pool_get(key)` 则是没注册该 key 时返回 null。常见原因：`pool_key` 为空、跑在编辑器里（一律不池化）、或视图没走 `ArrayViewTool.create_view`。复用情况看 `Pool/Reuse` 与 `Pool/Created`。
-
-**Q5：`UITool.back()` 没反应？**
-`back()` 只处理 `DIALOG` 与 `PANEL` 层级；请检查面板的 `layer` 属性与栈状态（`UITool.debug()` 可查看当前栈）。
+- Def 存档只存**相对 `res://Assets/Def/` 的路径**，DLC 靠同路径覆盖资源；纪律见 [LAYERS.md](LAYERS.md) §七。
+- 在编辑器改 `tr_name` 等属性会自动写回 `Assets/Translation/*.csv`（Def 子类需 `@tool`）。

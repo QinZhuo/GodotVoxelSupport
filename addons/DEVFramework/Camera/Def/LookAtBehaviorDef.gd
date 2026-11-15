@@ -1,7 +1,5 @@
 @tool
 ## 朝向行为: 让机位始终瞄准 [member VirtualCamera3D.target]。
-##
-## 结果同时用作球面/柱面混合的枢纽点(见 [method get_aim_point])。
 ## 注意: 使用本机位时机位不应挂在带缩放的父节点下。
 class_name LookAtBehaviorDef extends CameraBehaviorDef
 

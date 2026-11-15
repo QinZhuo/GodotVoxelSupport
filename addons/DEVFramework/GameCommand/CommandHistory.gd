@@ -2,7 +2,6 @@
 class_name CommandHistory extends RefCounted
 
 ## 会话命令日志：按序记录 GameCommand，支持按 tick 过滤与序列化。
-## 由实战答案源在命令成功后写入；回放器据此重放。
 
 var commands: Array[GameCommand] = []
 

@@ -1,15 +1,6 @@
 extends SceneTree
 
 ## 测试 headless 入口:
-##   godot --headless --script res://addons/DEVFramework/Test/run_headless.gd
-##     → 只跑**进程无关**用例(编辑器进程语义, 快、无副作用)
-##   godot --headless --script res://addons/DEVFramework/Test/run_headless.gd -- --game
-##     → 先加载项目主场景(游戏进程语义: autoload + 场景树 + 真实时间), 再跑**需要游戏进程**的用例
-##   追加 `--script <名字>` 只跑指定用例(长用例回归时免去全量开销)
-## 退出码: 全部通过=0, 存在失败=1(CI 可直接判定)。
-##
-## 进程归属由用例自行声明(`TestCase.needs_game_process()`); 跑错进程的用例会被列为 skipped,
-## 不会假失败也不会静默通过 —— 所以两种模式的结果合起来才是全量。
 
 ## 等待主场景就绪的最长帧数(约 4s@60fps): 游戏用例依赖场景树/单例/首帧逻辑都已就位
 const GAME_READY_MAX_FRAMES := 240
@@ -47,8 +38,7 @@ func _script_arg() -> String:
 
 
 ## 游戏进程模式: 先起主场景, 等它就绪, 再跑游戏用例。
-## ⚠️ 依赖 autoload(如 RankManager)与主场景节点在 headless 下能正常初始化;
-## 若项目的主场景在 headless 下跑不起来, 应改用 MCP `run_tests(process=game, script=...)`(跑在真实游戏进程里)。
+## ⚠️ 依赖项目 autoload 与主场景节点在 headless 下能正常初始化;
 func _run_game() -> void:
 	var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
 	if main_scene.is_empty():
