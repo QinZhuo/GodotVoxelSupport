@@ -25,8 +25,8 @@ namespace godot {
 //   - find_unsupported_around: 支撑失稳检测（列支撑判定，运行期唯一实现）
 //   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速）
 //   - partition_connected:    连通分组（大崩塌掉落体分组提速）
-class VoxelNative : public RefCounted {
-	GDCLASS(VoxelNative, RefCounted)
+class VoxelSupportNative : public RefCounted {
+	GDCLASS(VoxelSupportNative, RefCounted)
 
 protected:
 	static void _bind_methods();

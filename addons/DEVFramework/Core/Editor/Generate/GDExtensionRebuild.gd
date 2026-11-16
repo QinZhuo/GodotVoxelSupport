@@ -19,14 +19,14 @@ const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行�
 const KEY_BUILD_TYPES := "dev_framework/gdextension_build/build_types"   # 要构建的构建类型(Array[String], 如 ["release"]=仅 release); 空=当前编辑器类型+另一版本
 const KEY_NATIVE_TARGET := "dev_framework/gdextension_build/target_name"   # 共享库目标名(产物名/入口符号都基于它), 默认 dev
 const SCAFFOLD_PATH := "res://addons/DEVFramework/Core/Editor/Generate/NativeScaffold.gd"
-## 原生源码目录: 插件内(推荐, 随插件一起拷走) → 项目根(旧布局兼容) → addons/* 自动发现。
-## 插件内那份带 .gdignore, 编辑器不会去扫 godot-cpp 的上万个文件。
-const NATIVE_SRC_DIR := "res://addons/DEVFramework/NativeSrc"
-const LEGACY_SRC_DIR := "res://gdextension"
+## 唯一构建区: 项目根 res://gdextension/(CMakeLists + godot-cpp + 构建缓存)。
+## 插件源码一律在 addons/<插件>/Native/src, 由生成的 CMakeLists 引用。
+const BUILD_ZONE := "res://gdextension"
 
 
-## 所有插件的原生源码目录: addons/*/Native/src(多插件模型 A: 每插件一库, 共用 godot-cpp)。
-## 兼容旧的 res://gdextension/src(单工程布局)。
+## 所有插件的原生源码目录: <插件>/Native/src(每插件一库, 共用 godot-cpp)。
+## 旧布局则退回 res://gdextension/src —— 只扫 src, 绝不能扫 gdextension/ 根
+## (godot-cpp 就在旁边, 扫进去会把第三方的 36 个 .cpp 当成"我们的源码"判新鲜度)。
 static func native_source_dirs() -> Array[String]:
 	var out: Array[String] = []
 	var root := ProjectSettings.globalize_path("res://").simplify_path()
@@ -34,10 +34,6 @@ static func native_source_dirs() -> Array[String]:
 	if scaf != null:
 		for p in scaf.discover_plugins(root):
 			out.append("res://" + String(p["src_abs"]).replace(root, "").replace("\\", "/").trim_prefix("/"))
-	if out.is_empty():
-		for d in [NATIVE_SRC_DIR, LEGACY_SRC_DIR]:
-			if DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(String(d).path_join("src"))):
-				out.append(String(d))
 	return out
 
 
@@ -309,20 +305,12 @@ func _finish_with(result: String) -> void:
 
 ## 定位构建目标 —— 只需 CMakeLists 给出 目标名 + 输出目录:
 func _locate() -> Dictionary:
-	var dirs: Array[String] = []
-	for cand in [NATIVE_SRC_DIR, LEGACY_SRC_DIR]:
-		if _is_ext_source(String(cand)):
-			dirs.append(String(cand))
-	if dirs.is_empty():
-		dirs = discover_source_dirs()
-	if dirs.is_empty():
-		_log("未发现 GDExtension 工程。请确认 %s(或 addons/*/) 含 CMakeLists.txt + godot-cpp/ submodule。" % NATIVE_SRC_DIR)
+	# 唯一构建区: 项目根 gdextension/(CMakeLists + godot-cpp)。
+	# 插件源码在 addons/<插件>/Native/src —— 两者分工固定, 不再支持其它历史布局。
+	var source_dir := BUILD_ZONE
+	if not _is_ext_source(source_dir):
+		_log("未找到原生构建区: 需要 %s/CMakeLists.txt + godot-cpp/。插件源码放 addons/<插件>/Native/src, 构建脚本会自动生成骨架。" % BUILD_ZONE)
 		return {}
-	var source_dir: String = dirs[0]
-	if dirs.size() > 1:
-		_log("发现多个工程目录, 取首个: ", source_dir)
-		for d in dirs:
-			_log("    - 候选: ", d)
 	var info := _read_cmake_info(source_dir)
 	var gdext_res := _find_gdextension(info)
 
@@ -401,14 +389,15 @@ func _declared_missing_archs(gdext_res: String, host: String) -> Array[String]:
 	return missing
 
 
-## 工具规范产物名: lib<名>.<平台>.<debug|release>.<架构>.dylib /
+## 工具规范产物名: lib<名>.<平台>.<debug|release>.<架构>.<ext>
+## 全平台统一带 lib 前缀 —— 与 godot-cpp 官方模板一致(libgdexample.windows.release.x86_64.dll),
+## 也和 CMake/MinGW 的 SHLIBPREFIX 默认值一致, 于是不需要 PREFIX "" 这种平台特例。
+## (GDExtension 对文件名没有硬性要求, 唯一硬约束是[库名]与 .gdextension 的 [libraries] 一字不差。)
 func _canonical_file(target: String, type: String, arch := "") -> String:
 	var ext := ""
-	var prefix := "lib"
 	match _os_label():
 		"windows":
 			ext = ".dll"
-			prefix = ""
 		"macos":
 			ext = ".dylib"
 		"linux":
@@ -416,7 +405,7 @@ func _canonical_file(target: String, type: String, arch := "") -> String:
 		_:
 			return ""
 	var a := arch if arch != "" else _arch()
-	return "%s%s.%s.%s.%s%s" % [prefix, target, _os_label(), type, a, ext]
+	return "lib%s.%s.%s.%s%s" % [target, _os_label(), type, a, ext]
 
 
 ## CMake if/elseif 条件文本 → "平台.构建类型" 归档键(仅识别本工具支持的模板写法)
@@ -448,21 +437,10 @@ func _abs_to_res(p: String) -> String:
 
 ## 自动发现工程目录候选(静态, 供外部/MCP 复用): 项目根 gdextension/ + 各 addons/*/
 static func discover_source_dirs() -> Array[String]:
+	# 构建区只有一处: 插件源码不再各自带 CMakeLists, 所以"发现多个工程"的概念已不存在。
 	var out: Array[String] = []
-	for cand in [NATIVE_SRC_DIR, LEGACY_SRC_DIR]:
-		if _is_ext_source(String(cand)):
-			out.append(String(cand))
-	var addons := DirAccess.open("res://addons")
-	if addons:
-		addons.list_dir_begin()
-		var entry := addons.get_next()
-		while entry != "":
-			if addons.current_is_dir() and not entry.begins_with("."):
-				var cand := "res://addons/%s" % entry
-				if _is_ext_source(cand):
-					out.append(cand)
-			entry = addons.get_next()
-		addons.list_dir_end()
+	if _is_ext_source(BUILD_ZONE):
+		out.append(BUILD_ZONE)
 	return out
 
 
@@ -1529,11 +1507,11 @@ func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: S
 	return best > 0 and best > deployed_ms and best >= src_ms
 
 
-## CMake 默认直出名(macOS lib<名>.dylib / Windows <名>.dll / Linux lib<名>.so; 未钉 OUTPUT_NAME 时 CMake 的输出文件名)
+## CMake 默认直出名: 全平台 lib<名>.<ext>(CMake/MinGW 的 SHLIBPREFIX 默认就是 lib, 与规范名同前缀)
 func _default_out_file(target: String) -> String:
 	match _os_label():
 		"windows":
-			return "%s.dll" % target
+			return "lib%s.dll" % target
 		"macos":
 			return "lib%s.dylib" % target
 		"linux":

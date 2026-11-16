@@ -1,7 +1,7 @@
 extends TestCase
 
 ## 体素支撑模型回归测试（编辑器进程即可，无需游戏进程）。
-## 覆盖崩塌判定内核 VoxelNative.find_unsupported_around（**基线规则，无横向支撑**）：
+## 覆盖崩塌判定内核 VoxelSupportNative.find_unsupported_around（**基线规则，无横向支撑**）：
 ##   稳定 ⟺ LOWER_5（正下 + 4 个"水平相邻的下方" = 宽脚）里任意一个存在且未失稳；y==0 恒稳定
 ##   传播 = UPPER_5（竖向，无上限）+ HORIZONTAL_4（横向连带扫落，无上限）
 ##   —— 横向**不算支撑**：楼板（1 格厚、下方空心）自身恒无支撑，被横向连带时整层扫落。

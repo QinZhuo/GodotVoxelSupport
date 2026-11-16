@@ -1,6 +1,6 @@
 class_name VoxelMeshGenerator
 ## 体素网格生成器（编辑器导入路径）
-## 几何内核统一下沉 C++（NativeLoader → VoxelNative），与运行时管线共用同一套实现：
+## 几何内核统一下沉 C++（NativeLoader → VoxelSupportNative），与运行时管线共用同一套实现：
 ##   cube   面片网格（分方向可见性 + 贪婪合并）
 ##   sphere 每体素一颗 icosphere（自动按顶点预算降采样）
 ## 此处只负责：材质纹理、MeshLibrary 分割编排，以及把原生 arrays 交给引擎 API 组装。
@@ -498,7 +498,7 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 	# 原生库不可用/版本不匹配时返回 {}：此时**不登记 hash** 并报错，
 	# 否则空网格会被当作最新缓存，后续导入全部短路、再也修不回来。
 	if _native_arrays.is_empty():
-		push_error("[VoxelSupport] 体素网格生成返回空（原生库 VoxelNative 不可用或版本不匹配）: %s" % root_path)
+		push_error("[VoxelSupport] 体素网格生成返回空（原生库 VoxelSupportNative 不可用或版本不匹配）: %s" % root_path)
 		mesh.remove_meta("hash")
 		return
 	mesh.set_meta("hash", voxels_hash)
@@ -526,7 +526,7 @@ func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3)
 	_native_arrays = NativeLoader.generate_arrays_from_chunks_native(
 			chunks, trans_flags, scale, layout_offset)
 	if _native_arrays.is_empty():
-		push_error("[VoxelSupport] 体素网格生成返回空（原生库 VoxelNative 不可用或版本不匹配）: %s" % root_path)
+		push_error("[VoxelSupport] 体素网格生成返回空（原生库 VoxelSupportNative 不可用或版本不匹配）: %s" % root_path)
 		mesh.remove_meta("hash")
 		return
 	mesh.set_meta("hash", chunks_hash)

@@ -1,7 +1,7 @@
 extends TestCase
 
 ## 体素 LOD 降采样内核回归测试（编辑器进程即可，无需游戏进程）。
-## 覆盖 VoxelNative 里 LOD 大格降采样相关的三条路径 —— T3-2 把原本四处手写的
+## 覆盖 VoxelSupportNative 里 LOD 大格降采样相关的三条路径 —— T3-2 把原本四处手写的
 ## "取第一个非空材质"合并为唯一实现 downsample_cell 后，它们必须仍然彼此自洽：
 ##   · 全量：build_lod_block_halo_from_buffers_native（中心 32³ 与 6 外缘面）
 ##   · 增量：patch_lod_block（只重算指定脏大格，其余复用入参 coarse）

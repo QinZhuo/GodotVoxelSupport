@@ -120,7 +120,7 @@ func _run_vkey_collision_probe() -> void:
 	for p in coords:
 		positions.append(p)
 		expect[Vector3i(p.x >> 5, p.y >> 5, p.z >> 5)] = true
-	var got: Array = VoxelNative.collect_chunks(positions)
+	var got: Array = VoxelSupportNative.collect_chunks(positions)
 	# collect_chunks 返回去重后的 chunk 列表
 	var got_set := {}
 	for ck in got:

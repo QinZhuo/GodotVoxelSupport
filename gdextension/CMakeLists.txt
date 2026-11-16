@@ -12,7 +12,7 @@ cmake_minimum_required(VERSION 3.17)
 # 平台支持：macOS(arm64/x86_64) / Windows(x86_64) / Linux(x86_64)
 #   通过 CMake 内置 -DCMAKE_OSX_ARCHITECTURES / 交叉工具链实现
 
-project(voxelnative LANGUAGES CXX)
+project(voxelsupport LANGUAGES CXX)
 
 # godot-cpp 需要 gdextension API 文件：默认 master(v10) 自带 4.3~4.7 的 api 文件
 # 若想自定义，可设置 GODOTCPP_GDEXTENSION_DIR 指向自定义扩展 API 目录
@@ -47,20 +47,24 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 # 引入 godot-cpp（其 CMake 通过 GODOTCPP_API_VERSION 选择对应 extension_api.json）
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp ${CMAKE_CURRENT_BINARY_DIR}/godot-cpp)
 
-add_library(voxelnative SHARED
-    src/register_types.cpp
-    src/voxel_native.cpp
+# 源码位置: 插件自己的 C++ 放在 addons/VoxelSupport/Native/src(随插件分发),
+# 构建区/第三方(godot-cpp)留在项目根 gdextension/。本文件只做"编排"。
+set(VOXEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native/src)
+
+add_library(voxelsupport SHARED
+    ${VOXEL_SRC_DIR}/register_types.cpp
+    ${VOXEL_SRC_DIR}/voxel_native.cpp
 )
 
 # 链接 godot-cpp（godot-cpp 目标名为 godot-cpp）
-target_link_libraries(voxelnative PRIVATE godot-cpp)
+target_link_libraries(voxelsupport PRIVATE godot-cpp)
 
 # godot-cpp 要求 C++17（其头文件使用 is_base_of_v 等 C++17 特性）
-set_target_properties(voxelnative PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+set_target_properties(voxelsupport PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 # macOS: 允许在子目录中构建动态库
 if(APPLE)
-    set_target_properties(voxelnative PROPERTIES
+    set_target_properties(voxelsupport PROPERTIES
         MACOSX_RPATH ON
     )
 endif()
@@ -69,16 +73,12 @@ endif()
 # （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，产物落盘即到位，无需手动复制）
 # 产物命名交给 GDExtensionRebuild(项目→工具)统一改名为 .gdextension 声明的规范名
 # (<名>.<平台>.<类型>.<架构>.<ext>)；CMake 只负责直出默认名：
-#   Windows: voxelnative.dll / macOS: libvoxelnative.dylib / Linux: libvoxelnative.so
+#   Windows: voxelsupport.dll / macOS: libvoxelsupport.dylib / Linux: libvoxelsupport.so
 # 注意：不经工具的裸 cmake 构建，产物名未经规范命名，交付前需跑一次工具（或手动改名）。
-# Windows 必须显式去前缀：MSVC 默认无前缀，但 MinGW/GCC 的 CMake 会默认加 "lib"
-# （CMAKE_SHARED_LIBRARY_PREFIX=lib），直出 libvoxelnative.dll 与工具约定的默认名
-# voxelnative.dll 不符 → 部署分支误判（旧库被当新产物、新产物被当残留清理）。
-# macOS/Linux 需保留默认 "lib" 前缀（与 .gdextension 条目匹配），故不设置 PREFIX ""。
-if(WIN32)
-    set_target_properties(voxelnative PROPERTIES PREFIX "")
-endif()
-set_target_properties(voxelnative PROPERTIES
+# 不设 PREFIX: 全平台统一 lib 前缀(与 godot-cpp 官方模板、CMake 的 SHLIBPREFIX 默认值一致),
+# 直出名 libvoxelsupport.dll 与规范名 libvoxelsupport.windows.<类型>.<架构>.dll 同前缀。
+# (GDExtension 对文件名没有硬性要求, 唯一硬约束是规范名与 .gdextension 的 [libraries] 一字不差。)
+set_target_properties(voxelsupport PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native

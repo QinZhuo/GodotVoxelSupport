@@ -9,29 +9,29 @@
 
 using namespace godot;
 
-void initialize_voxelnative_module(ModuleInitializationLevel p_level) {
+void initialize_voxelsupport_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
-	GDREGISTER_CLASS(VoxelNative);
+	GDREGISTER_CLASS(VoxelSupportNative);
 }
 
-void uninitialize_voxelnative_module(ModuleInitializationLevel p_level) {
+void uninitialize_voxelsupport_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
 }
 
 extern "C" {
-// 与 native/voxelnative.gdextension 中 entry_symbol 对应
-GDExtensionBool GDE_EXPORT voxelnative_library_init(
+// 与 native/voxelsupport.gdextension 中 entry_symbol 对应
+GDExtensionBool GDE_EXPORT voxelsupport_library_init(
 		GDExtensionInterfaceGetProcAddress p_get_proc_address,
 		GDExtensionClassLibraryPtr p_library,
 		GDExtensionInitialization *r_initialization) {
 	godot::GDExtensionBinding::InitObject init_obj(p_get_proc_address, p_library, r_initialization);
 
-	init_obj.register_initializer(initialize_voxelnative_module);
-	init_obj.register_terminator(uninitialize_voxelnative_module);
+	init_obj.register_initializer(initialize_voxelsupport_module);
+	init_obj.register_terminator(uninitialize_voxelsupport_module);
 	init_obj.set_minimum_library_initialization_level(MODULE_INITIALIZATION_LEVEL_SCENE);
 
 	return init_obj.init();

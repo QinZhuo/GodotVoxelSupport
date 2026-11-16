@@ -1376,7 +1376,7 @@ static func index_vxel_blocks(payload: PackedByteArray, _block_size: int) -> Dic
 	return out
 
 
-## CRC32（标准 IEEE 802.3）——统一由原生 VoxelNative 计算，读写两端共用这一处实现。
+## CRC32（标准 IEEE 802.3）——统一由原生 VoxelSupportNative 计算，读写两端共用这一处实现。
 ## 原生下 1.4MB 约 0.5ms；GDScript 逐字节查表要 ~84ms，且 crc32_combine 拼接在解释器下
 ## 比整扫更慢（实测 1.48ms/次），故不保留兜底 —— 原生库为硬依赖（见 NativeLoader）。
 static func _slice_crc(data: PackedByteArray, start: int, length: int) -> int:

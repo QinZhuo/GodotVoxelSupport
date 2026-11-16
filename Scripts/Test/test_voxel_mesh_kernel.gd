@@ -2,7 +2,7 @@ extends TestCase
 
 ## 体素网格几何内核回归测试（编辑器进程即可，无需游戏进程）。
 ## 背景：编辑器导入网格（VoxelMeshGenerator）的几何生成已全量下沉 C++
-## （VoxelNative.generate_arrays_native / generate_spheres_native），GDScript 侧
+## （VoxelSupportNative.generate_arrays_native / generate_spheres_native），GDScript 侧
 ## 只负责材质与引擎 API 组装。原先"GDScript 生成 ↔ C++ 生成"的对照探针是一次性的，
 ## 用完即删，内核一改就没有任何东西会报警。
 ## 所以这里用**手算可验证的黄金三角形数**钉住内核行为（注意贪婪合并会把共面同材质格

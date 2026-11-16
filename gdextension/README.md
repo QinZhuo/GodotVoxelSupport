@@ -16,15 +16,15 @@ godot-cpp/              # git submodule (固定 commit，克隆后需 init)
 
 ## 产物分发目录
 
-构建产物输出到 `addons/VoxelSupport/Native/`，文件名与 `voxelnative.gdextension`
+构建产物输出到 `addons/VoxelSupport/Native/`，文件名与 `VoxelSupportNative.gdextension`
 中的 8 个平台条目严格对应：
 
 | 平台 | Debug | Release |
 |------|-------|---------|
-| Windows x86_64 | `voxelnative.windows.debug.x86_64.dll` | `voxelnative.windows.release.x86_64.dll` |
-| Linux x86_64 | `libvoxelnative.linux.debug.x86_64.so` | `libvoxelnative.linux.release.x86_64.so` |
-| macOS arm64 | `libvoxelnative.macos.debug.arm64.dylib` | `libvoxelnative.macos.release.arm64.dylib` |
-| macOS x86_64 | `libvoxelnative.macos.debug.x86_64.dylib` | `libvoxelnative.macos.release.x86_64.dylib` |
+| Windows x86_64 | `VoxelSupportNative.windows.debug.x86_64.dll` | `VoxelSupportNative.windows.release.x86_64.dll` |
+| Linux x86_64 | `libVoxelSupportNative.linux.debug.x86_64.so` | `libVoxelSupportNative.linux.release.x86_64.so` |
+| macOS arm64 | `libVoxelSupportNative.macos.debug.arm64.dylib` | `libVoxelSupportNative.macos.release.arm64.dylib` |
+| macOS x86_64 | `libVoxelSupportNative.macos.debug.x86_64.dylib` | `libVoxelSupportNative.macos.release.x86_64.dylib` |
 
 ## 本地构建 (Windows + MinGW 示例)
 
@@ -35,15 +35,15 @@ git submodule update --init --recursive
 # 准备工具链 (以 w64devkit 便携版为例)
 export PATH="/path/to/w64devkit/bin:$PATH"
 
-# Debug 构建 (CMake 自动输出 voxelnative.windows.debug.x86_64.dll)
+# Debug 构建 (CMake 自动输出 VoxelSupportNative.windows.debug.x86_64.dll)
 cmake -S gdextension -B gdextension/build-win -G Ninja \
       -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Debug
 cmake --build gdextension/build-win
 
-# MinGW 会多出 lib 前缀 (libvoxelnative.windows.debug.x86_64.dll)，
+# MinGW 会多出 lib 前缀 (libVoxelSupportNative.windows.debug.x86_64.dll)，
 # 需复制为 .gdextension 期望的无 lib 前缀名
 cd addons/VoxelSupport/Native
-cp libvoxelnative.windows.debug.x86_64.dll voxelnative.windows.debug.x86_64.dll
+cp libVoxelSupportNative.windows.debug.x86_64.dll VoxelSupportNative.windows.debug.x86_64.dll
 ```
 
 构建缓存目录 `gdextension/build*/` 已在 `.gitignore` 中忽略。

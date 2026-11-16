@@ -1,11 +1,11 @@
 class_name NativeLoader
 extends RefCounted
 
-## GDExtension 原生核心桥（VoxelNative）——**硬依赖**。
+## GDExtension 原生核心桥（VoxelSupportNative）——**硬依赖**。
 ## 插件全部热路径（网格生成 / 崩塌检测 / 批量体素写 / 快照 / CRC）都实现在原生库里，
 ## 因此不保留任何 GDScript 兜底：库缺失或方法不全时，这里统一报一次错并返回空值。
 ## 单一实现 = 单一行为，不会出现"有库/无库两条路径表现不一致"。
-## 【为什么动态绑定】编辑器启动早期（扩展注册完成前）GDScript 静态引用 VoxelNative
+## 【为什么动态绑定】编辑器启动早期（扩展注册完成前）GDScript 静态引用 VoxelSupportNative
 ## 会直接 SIGKILL；经 ClassDB + Object.call 动态绑定对任何启动时序都安全。
 
 ## 必需方法清单（版本不匹配 = 整体不可用，一次性报错）。
@@ -63,17 +63,17 @@ static func instance() -> Object:
 	if _failed:
 		return null
 	_failed = true
-	if not ClassDB.class_exists(&"VoxelNative"):
-		push_error("[VoxelSupport] 缺少原生库 VoxelNative（GDExtension 未加载）。"
+	if not ClassDB.class_exists(&"VoxelSupportNative"):
+		push_error("[VoxelSupport] 缺少原生库 VoxelSupportNative（GDExtension 未加载）。"
 				+ "请确认 addons/VoxelSupport/Native/ 下有匹配当前平台与 Godot 版本的动态库。")
 		return null
 	for m in REQUIRED_METHODS:
-		if not ClassDB.class_has_method(&"VoxelNative", m, false):
-			push_error("[VoxelSupport] 原生库 VoxelNative 缺少方法 '%s'（库与插件版本不匹配）。" % m)
+		if not ClassDB.class_has_method(&"VoxelSupportNative", m, false):
+			push_error("[VoxelSupport] 原生库 VoxelSupportNative 缺少方法 '%s'（库与插件版本不匹配）。" % m)
 			return null
-	_inst = ClassDB.instantiate(&"VoxelNative")
+	_inst = ClassDB.instantiate(&"VoxelSupportNative")
 	if _inst == null:
-		push_error("[VoxelSupport] VoxelNative 实例化失败，插件不可用。")
+		push_error("[VoxelSupport] VoxelSupportNative 实例化失败，插件不可用。")
 	return _inst
 
 

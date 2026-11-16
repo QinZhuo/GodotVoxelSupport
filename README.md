@@ -139,7 +139,7 @@ Related properties are **hidden in the Inspector automatically** when they have 
 - `generate_collision` is **false by default** — enable it for physics collision
 - `voxel_scale` = world units per voxel (data coordinates are 1-voxel units); all distances are in world units
 - **The native library is a hard dependency** — mesh generation, destruction and CRC all live in
-  `addons/VoxelSupport/Native/` (GDExtension `VoxelNative`). If it is missing or version-mismatched,
+  `addons/VoxelSupport/Native/` (GDExtension `VoxelSupportNative`). If it is missing or version-mismatched,
   the plugin logs one clear error and draws nothing; there is no GDScript fallback.
 - **Asset origin is one shared import option: `mesh/origin`** — default `world_origin` = keep the file's
   coordinates: a `.vox` stays where the author put it in the MagicaVoxel world (model `SIZE`-box centre

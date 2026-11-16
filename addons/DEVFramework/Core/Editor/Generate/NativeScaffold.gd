@@ -130,7 +130,8 @@ static func render_cmake_multi(plugins: Array, api_default: String) -> String:
 		out += "target_link_libraries(%s PRIVATE godot-cpp)\n" % t
 		out += "set_target_properties(%s PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)\n" % t
 		out += "if(NOT MSVC)\n\ttarget_compile_options(%s PRIVATE -ffp-contract=off)\nendif()\n" % t
-		out += "if(WIN32)\n\tset_target_properties(%s PROPERTIES PREFIX \"\")\nendif()\n" % t
+		# 不设 PREFIX: 全平台统一 lib 前缀(官方模板/CMake 默认), 与规范名保持同前缀
+
 		out += "# 产物直出到该插件自己的 Native 目录(声明就在旁边, 引擎直接加载)\n"
 		out += "set_target_properties(%s PROPERTIES\n" % t
 		for kind in ["LIBRARY", "RUNTIME", "ARCHIVE"]:

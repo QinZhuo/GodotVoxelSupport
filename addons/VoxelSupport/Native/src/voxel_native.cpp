@@ -17,7 +17,7 @@ using namespace godot;
 // 贪婪网格合并
 // ----------------------------------------------------------------------------
 
-Dictionary VoxelNative::greedy_merge_dense(PackedInt32Array p_grid, int width, int height) {
+Dictionary VoxelSupportNative::greedy_merge_dense(PackedInt32Array p_grid, int width, int height) {
 	PackedInt32Array pos_arr;
 	PackedInt32Array size_arr;
 	PackedInt32Array val_arr;
@@ -369,20 +369,20 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 
 } // namespace
 
-Dictionary VoxelNative::generate_chunk_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
+Dictionary VoxelSupportNative::generate_chunk_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 		float scale, const Vector3i &chunk, bool use_local_space, const Vector3 &offset) {
 	// LOD0: 16x16x16, reuse generic dense generator
 	return generate_dense_impl(halo, trans_flags, scale, chunk * CHUNK_SIZE, use_local_space, offset, CHUNK_SIZE);
 }
 
 // LOD1 big block: generate a 32x32x32 voxel-grid mesh in one pass (godot_voxel style big block).
-Dictionary VoxelNative::generate_lod1_block_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
+Dictionary VoxelSupportNative::generate_lod1_block_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 		float scale, const Vector3i &block_key, const Vector3 &offset) {
 	constexpr int LOD1_BLOCK_SIZE = 32;
 	return generate_dense_impl(halo, trans_flags, scale, block_key * LOD1_BLOCK_SIZE, true, offset, LOD1_BLOCK_SIZE);
 }
 
-PackedInt32Array VoxelNative::build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk) {
+PackedInt32Array VoxelSupportNative::build_halo_from_buffers(const Dictionary &buffers, const Vector3i &chunk) {
 	// 构建 34³ halo（中心 32³ + 1 外缘）：遍历 27 邻居 chunk 与光环的重叠区，数组下标读取。
 	// 下沉 C++ 替代 GDScript 逐体素循环（worker 端 halo 构建吞吐提升）。
 	PackedInt32Array halo;
@@ -448,7 +448,7 @@ void append_arrays_native(PackedVector3Array &verts, PackedVector3Array &normals
 } // namespace
 
 // 稀疏体素字典 → 网格 arrays（掉落体大块/大范围破坏核心：分 chunk + 原生 dense 面生成 + 合并，全 C++）
-Dictionary VoxelNative::generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
+Dictionary VoxelSupportNative::generate_arrays_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
 		float scale, const Vector3 &offset) {
 	// 1. 分 chunk：体素按 chunk key 分组；体素材质查表
 	std::unordered_map<uint64_t, std::vector<Vector3i>> chunks;
@@ -595,7 +595,7 @@ inline int grid_floor_div(int v, int d) {
 //
 // 坐标约定：use_local_space=false → 顶点 = (体素坐标 + offset) × scale，即**绝对世界坐标**，
 // 于是各块结果可直接拼接；块边界面"负方向本块负责、正方向看邻居"的约定保证每个跨界只生成一次。
-Dictionary VoxelNative::generate_arrays_from_chunks_native(const Dictionary &chunks, const PackedByteArray &trans_flags,
+Dictionary VoxelSupportNative::generate_arrays_from_chunks_native(const Dictionary &chunks, const PackedByteArray &trans_flags,
 		float scale, const Vector3 &offset) {
 	PackedVector3Array sv, sn, tv, tn;
 	PackedVector2Array su, tu;
@@ -639,7 +639,7 @@ Dictionary VoxelNative::generate_arrays_from_chunks_native(const Dictionary &chu
 //   - 结果按 实体 / 透明 分桶；UV 采样纹素中心 (mat_id+0.5)/256, v=0.5
 // 返回 Dictionary：{solid_verts, solid_normals, solid_uvs, solid_idxs,
 //                   trans_verts, trans_normals, trans_uvs, trans_idxs, step}
-Dictionary VoxelNative::generate_spheres_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
+Dictionary VoxelSupportNative::generate_spheres_native(const Dictionary &voxels, const PackedByteArray &trans_flags,
 		int subdivisions, float sphere_scale, float scale, int vertex_budget, const Vector3 &offset) {
 	const uint8_t *tflags = trans_flags.ptr();
 	const int n_mats = trans_flags.size();
@@ -821,7 +821,7 @@ inline int32_t downsample_cell(const GetVoxel &get_voxel, int bx, int by, int bz
 
 // 通用降采样：从 LOD0 chunk buffers 构建 LOD 大块 34³ halo（任意 lod_shift）。
 // lod_shift=1 → cell=2（原 LOD1）；更高层每大格 = 2^lod_shift 体素。
-PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dictionary &buffers, const Vector3i &block_key, int lod_shift) {
+PackedInt32Array VoxelSupportNative::build_lod_block_halo_from_buffers_native(const Dictionary &buffers, const Vector3i &block_key, int lod_shift) {
 	constexpr int BS = 32;       // 大块大格边长
 	constexpr int HS = BS + 2;   // halo 边长
 	const int cell = 1 << lod_shift;                       // 每大格体素
@@ -918,7 +918,7 @@ PackedInt32Array VoxelNative::build_lod_block_halo_from_buffers_native(const Dic
 
 // 中心 32³ = block 自身；6 外缘面 = 相邻 block 边界 1 大格层（跨界可见性）。
 // 对应 GDScript VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers（Voxel Tools 式独立数据层网格入口）。
-PackedInt32Array VoxelNative::build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers, const Vector3i &block_key) {
+PackedInt32Array VoxelSupportNative::build_lod_block_halo_from_lod_buffers_native(const Dictionary &buffers, const Vector3i &block_key) {
 	constexpr int BS = 32;       // 大块大格边长
 	constexpr int HS = BS + 2;   // halo 边长
 	constexpr int G3 = BS * BS * BS;
@@ -1028,7 +1028,7 @@ inline int buf_index(const Vector3i &local) {
 
 } // namespace
 
-Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const Array &removed) {
+Dictionary VoxelSupportNative::find_unsupported_around(const Dictionary &buffers, const Array &removed) {
 	// 结果：失稳体素集合
 	Dictionary unstable;
 	if (buffers.is_empty() || removed.is_empty()) {
@@ -1145,7 +1145,7 @@ Dictionary VoxelNative::find_unsupported_around(const Dictionary &buffers, const
 //   消除原 GDScript 版逐邻居的 has_voxel/get_voxel 字典查询 + as 对象转换（破坏瞬间主线程热点）。
 // 复用 find_unsupported_around 的 chunk 惰性加载 + buffer 直读模式（C++ 指针访问，零 GDScript 开销）。
 // 返回 Array[Vector3i]（应力断裂的体素位置）。
-Array VoxelNative::propagate_stress(const Dictionary &buffers, const Array &removed,
+Array VoxelSupportNative::propagate_stress(const Dictionary &buffers, const Array &removed,
 		const PackedFloat32Array &strength_table, int max_steps, float force, float decay) {
 	Array result;
 	if (buffers.is_empty() || removed.is_empty()) {
@@ -1224,7 +1224,7 @@ Array VoxelNative::propagate_stress(const Dictionary &buffers, const Array &remo
 // 批量收集体素材质 ID（替代 GDScript 逐体素 get_voxel 字典查询，破坏管线热点）。
 // 与 GDScript get_voxel 语义一致：有体素 → 材质 ID（>0），无体素 → -1。
 // 返回 Dictionary{pos(Vector3i): int}。
-Dictionary VoxelNative::collect_materials(const Dictionary &buffers, const Array &positions) {
+Dictionary VoxelSupportNative::collect_materials(const Dictionary &buffers, const Array &positions) {
 	Dictionary result;
 	if (buffers.is_empty() || positions.is_empty()) {
 		return result;
@@ -1404,7 +1404,7 @@ Dictionary qvox_damage_impl(const Dictionary &buffers, const Dictionary &damage_
 // 统一形状破坏内核（球/盒 + 噪声/方向偏置）：破坏时的一趟"框定 chunk → 读材质 → 比硬度
 // → 累加/判移除"全在这里完成。**这是运行期在用的路径**（VoxelDestructible._apply_damage_native
 // 经 NativeLoader.damage_shape 调用，并在 _bind_methods 中绑定），不是备查实现。
-Dictionary VoxelNative::damage_shape(const Dictionary &buffers, const Dictionary &damage_chunks, int shape,
+Dictionary VoxelSupportNative::damage_shape(const Dictionary &buffers, const Dictionary &damage_chunks, int shape,
 		const Vector3 &center, float radius, const Vector3i &vmin_in, const Vector3i &vmax_in,
 		const PackedFloat32Array &hardness_table, float damage, bool use_health, const Dictionary &opts) {
 	// 统一形状内核：球（shape=0，center/radius）与盒（shape=1，闭区间 vmin..vmax）只差一个"有符号距离"。
@@ -1487,7 +1487,7 @@ Dictionary VoxelNative::damage_shape(const Dictionary &buffers, const Dictionary
 			hardness_table, damage, use_health);
 }
 
-Dictionary VoxelNative::install_flat_voxels(const PackedInt32Array &flat) {
+Dictionary VoxelSupportNative::install_flat_voxels(const PackedInt32Array &flat) {
 	Dictionary out;
 	const int n = flat.size();
 	if (n < 4) {
@@ -1538,7 +1538,7 @@ Dictionary VoxelNative::install_flat_voxels(const PackedInt32Array &flat) {
 // coarse: 现有 block 大格数据（PackedInt32Array 32³，未脏大格保留）；为空则先建空 buffer。
 // buffers: LOD0 chunk 缓冲（chunk key -> PackedInt32Array 32³）。
 // 返回完整 block 大格数据（脏大格已更新，未脏大格保持 coarse 旧值）。
-PackedInt32Array VoxelNative::patch_lod_block(const Dictionary &buffers, const Vector3i &block_key,
+PackedInt32Array VoxelSupportNative::patch_lod_block(const Dictionary &buffers, const Vector3i &block_key,
 		int lod_shift, const PackedInt32Array &coarse,
 		const Vector3i &rmin, const Vector3i &rmax) {
 	constexpr int BS = 32;
@@ -1590,7 +1590,7 @@ PackedInt32Array VoxelNative::patch_lod_block(const Dictionary &buffers, const V
 // 故"逐级上推"与"从 L0 全量重算"得到相同结果。
 // coarse_buffers: 上一层 block → PackedInt32Array(32³ 大格) 字典。
 // coarse: 当前 block 现有大格数据（未脏大格保留）。返回完整当前 block 大格数据。
-PackedInt32Array VoxelNative::patch_lod_block_from_lod(const Dictionary &coarse_buffers,
+PackedInt32Array VoxelSupportNative::patch_lod_block_from_lod(const Dictionary &coarse_buffers,
 		const Vector3i &block_key, int lod, const PackedInt32Array &coarse,
 		const Vector3i &rmin, const Vector3i &rmax) {
 	constexpr int BS = 32;
@@ -1632,7 +1632,7 @@ PackedInt32Array VoxelNative::patch_lod_block_from_lod(const Dictionary &coarse_
 	return buf;
 }
 
-Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
+Dictionary VoxelSupportNative::remove_voxels_bulk(const Dictionary &buffers, const Array &positions) {
 	// 批量移除体素：按 chunk 分组，把修改后的 PackedInt32Array 放回结果，供 GDScript 覆盖。
 	// 大崩塌（每帧 4096+ 体素）时替代 GDScript 逐体素循环，主线程提速。
 	Dictionary result;
@@ -1695,7 +1695,7 @@ Dictionary VoxelNative::remove_voxels_bulk(const Dictionary &buffers, const Arra
 	return result;
 }
 
-Dictionary VoxelNative::set_voxels_bulk(const Dictionary &buffers, const Array &positions, int material_id) {
+Dictionary VoxelSupportNative::set_voxels_bulk(const Dictionary &buffers, const Array &positions, int material_id) {
 	// 批量设置体素为同一材质（对称 remove_voxels_bulk）：按 chunk 分组直接改 PackedInt32Array。
 	// 旧值 0（空）→ material_id 计入新增数；旧值非 0 → 原地替换不增计数。
 	// 大体积批量写入（水模拟/世界构建）替代 GDScript 逐体素字典写，主线程提速。
@@ -1780,7 +1780,7 @@ Dictionary VoxelNative::set_voxels_bulk(const Dictionary &buffers, const Array &
 	return result;
 }
 
-Array VoxelNative::collect_chunks(const Array &positions) {
+Array VoxelSupportNative::collect_chunks(const Array &positions) {
 	// 收集 positions 涉及的 chunk key（去重）。供流式模式 preload：避免 GDScript
 	// 逐体素计算 chunk 的主线程字典开销——遍历在原生，GDScript 只拿到去重后的 chunk 列表。
 	Array result;
@@ -1795,7 +1795,7 @@ Array VoxelNative::collect_chunks(const Array &positions) {
 	return result;
 }
 
-Array VoxelNative::partition_connected(const Array &positions) {
+Array VoxelSupportNative::partition_connected(const Array &positions) {
 	// 连通分组：positions 按 6 方向连通性分组（与 QVoxelSource.partition_connected 一致）。
 	// 只依据 positions 集合内连通（不查世界体素），供大崩塌掉落体分组使用。
 	// BFS 阶段用 std::vector 收集（避免逐体素跨语言 Array.append），最后一次性构建。
@@ -1845,7 +1845,7 @@ Array VoxelNative::partition_connected(const Array &positions) {
 	return result;
 }
 
-Dictionary VoxelNative::flood_fill_positions(const Array &seeds, const Dictionary &allowed) {
+Dictionary VoxelSupportNative::flood_fill_positions(const Array &seeds, const Dictionary &allowed) {
 	// 集合受限泛洪：只在 allowed 内扩散（不查世界体素）。与 VoxelConnectivity.flood_fill 的
 	// restrict 分支逐体素等价：种子不在 allowed 内则跳过；邻居不在 allowed 内则不扩散。
 	// BFS 用 std::vector 收集，最后一次性构建返回字典（避免逐体素跨语言 Dictionary 写入）。
@@ -1902,7 +1902,7 @@ Dictionary VoxelNative::flood_fill_positions(const Array &seeds, const Dictionar
 //   那些块会被当成空气 → 其体素全被误判悬空 → 整个世界崩塌（数据级事故）。
 //   故只收**已枚举好的位置集合**：调用方用 get_positions()，它已把"内存 + 仅磁盘"统一枚举。
 // 返回未与地面连通的体素位置（与 GDScript 版同语义）。
-Array VoxelNative::find_unsupported_positions(const Array &positions) {
+Array VoxelSupportNative::find_unsupported_positions(const Array &positions) {
 	Array result;
 	if (positions.is_empty()) {
 		return result;
@@ -1948,7 +1948,7 @@ Array VoxelNative::find_unsupported_positions(const Array &positions) {
 	return result;
 }
 
-Dictionary VoxelNative::snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks) {
+Dictionary VoxelSupportNative::snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks) {
 	// 快照受影响区域（chunks + 27 邻居）。用 COW 共享而非逐 buffer duplicate：
 	// PackedInt32Array 是原子引用计数，worker 只读 const（ptr），主线程后续写 buffers
 	// 时触发写时拷贝 → 省去 758 次 64KB 深拷贝（大场景快照主线程提速）。
@@ -2004,7 +2004,7 @@ static uint32_t qvox_crc32_run(const uint8_t *p, int64_t n) {
 	return crc ^ 0xFFFFFFFFu;
 }
 
-int64_t VoxelNative::crc32(const PackedByteArray &p_data, int64_t p_start, int64_t p_length) {
+int64_t VoxelSupportNative::crc32(const PackedByteArray &p_data, int64_t p_start, int64_t p_length) {
 	const int64_t total = p_data.size();
 	int64_t start = p_start < 0 ? 0 : p_start;
 	if (start > total) {
@@ -2026,7 +2026,7 @@ int64_t VoxelNative::crc32(const PackedByteArray &p_data, int64_t p_start, int64
 	return (int64_t)qvox_crc32_run(p_data.ptr() + start, length);
 }
 
-int64_t VoxelNative::crc32_segments(const PackedByteArray &p_data, const PackedInt64Array &p_offsets, const PackedInt64Array &p_lengths) {
+int64_t VoxelSupportNative::crc32_segments(const PackedByteArray &p_data, const PackedInt64Array &p_offsets, const PackedInt64Array &p_lengths) {
 	const int64_t total = p_data.size();
 	const int64_t nseg = p_offsets.size() < p_lengths.size() ? p_offsets.size() : p_lengths.size();
 	const uint32_t *table = qvox_crc32_table();
@@ -2244,7 +2244,7 @@ void qvox_for_each_voxel(const Dictionary &buffers, F &&fn) {
 
 } // namespace
 
-PackedByteArray VoxelNative::pack_with_codec(int codec, const PackedInt32Array &buf, int n) {
+PackedByteArray VoxelSupportNative::pack_with_codec(int codec, const PackedInt32Array &buf, int n) {
 	if (n > buf.size()) {
 		n = buf.size();
 	}
@@ -2254,7 +2254,7 @@ PackedByteArray VoxelNative::pack_with_codec(int codec, const PackedInt32Array &
 	return qvox_pack_any(codec, buf.ptr(), n);
 }
 
-Vector2i VoxelNative::voxel_value_range(const PackedInt32Array &buf) {
+Vector2i VoxelSupportNative::voxel_value_range(const PackedInt32Array &buf) {
 	const int n = buf.size();
 	if (n <= 0) {
 		return Vector2i(0, 0);
@@ -2273,7 +2273,7 @@ Vector2i VoxelNative::voxel_value_range(const PackedInt32Array &buf) {
 	return Vector2i(mn, mx);
 }
 
-PackedInt32Array VoxelNative::unpack_block(int codec, const PackedByteArray &payload, int n) {
+PackedInt32Array VoxelSupportNative::unpack_block(int codec, const PackedByteArray &payload, int n) {
 	PackedInt32Array out;
 	if (n <= 0) {
 		return out;
@@ -2393,7 +2393,7 @@ PackedInt32Array VoxelNative::unpack_block(int codec, const PackedByteArray &pay
 	}
 }
 
-Dictionary VoxelNative::choose_and_pack(const PackedInt32Array &buf, int n) {
+Dictionary VoxelSupportNative::choose_and_pack(const PackedInt32Array &buf, int n) {
 	if (n > buf.size()) {
 		n = buf.size();
 	}
@@ -2480,7 +2480,7 @@ Dictionary VoxelNative::choose_and_pack(const PackedInt32Array &buf, int n) {
 	return out;
 }
 
-Array VoxelNative::collect_all_positions(const Dictionary &buffers) {
+Array VoxelSupportNative::collect_all_positions(const Dictionary &buffers) {
 	Array out;
 	qvox_for_each_voxel(buffers, [&out](const Vector3i &pos, int32_t) {
 		out.push_back(pos);
@@ -2488,7 +2488,7 @@ Array VoxelNative::collect_all_positions(const Dictionary &buffers) {
 	return out;
 }
 
-PackedInt32Array VoxelNative::collect_all_flat(const Dictionary &buffers) {
+PackedInt32Array VoxelSupportNative::collect_all_flat(const Dictionary &buffers) {
 	int64_t count = 0;
 	qvox_for_each_voxel(buffers, [&count](const Vector3i &, int32_t) {
 		++count;
@@ -2509,7 +2509,7 @@ PackedInt32Array VoxelNative::collect_all_flat(const Dictionary &buffers) {
 	return out;
 }
 
-Array VoxelNative::collect_bounds(const Dictionary &buffers) {
+Array VoxelSupportNative::collect_bounds(const Dictionary &buffers) {
 	Array out;
 	bool any = false;
 	int32_t mn[3] = { 0, 0, 0 };
@@ -2540,7 +2540,7 @@ Array VoxelNative::collect_bounds(const Dictionary &buffers) {
 	return out;
 }
 
-Array VoxelNative::collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius) {
+Array VoxelSupportNative::collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius) {
 	Array out;
 	if (radius < 0.0f) {
 		return out;
@@ -2601,7 +2601,7 @@ Array VoxelNative::collect_sphere_positions(const Dictionary &buffers, const Vec
 	return out;
 }
 
-Array VoxelNative::collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p) {
+Array VoxelSupportNative::collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p) {
 	Array out;
 	if (min_p.x > max_p.x || min_p.y > max_p.y || min_p.z > max_p.z) {
 		return out;
@@ -2906,7 +2906,7 @@ PackedByteArray build_palette(std::vector<ColorEntry> &entries, int max_colors) 
 
 } // namespace
 
-Dictionary VoxelNative::voxelize_mesh(const PackedVector3Array &verts, const PackedInt32Array &indices,
+Dictionary VoxelSupportNative::voxelize_mesh(const PackedVector3Array &verts, const PackedInt32Array &indices,
 		const PackedVector2Array &uvs, const PackedColorArray &vcolors,
 		const PackedInt32Array &tri_slots, const Array &slots,
 		const Vector3 &origin, float cell, const Vector3i &grid, const Dictionary &opts) {
@@ -3170,42 +3170,42 @@ Dictionary VoxelNative::voxelize_mesh(const PackedVector3Array &verts, const Pac
 	return out;
 }
 
-void VoxelNative::_bind_methods() {
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("choose_and_pack", "buf", "n"), &VoxelNative::choose_and_pack);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("pack_with_codec", "codec", "buf", "n"), &VoxelNative::pack_with_codec);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("unpack_block", "codec", "payload", "n"), &VoxelNative::unpack_block);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("voxel_value_range", "buf"), &VoxelNative::voxel_value_range);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_all_positions", "buffers"), &VoxelNative::collect_all_positions);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_all_flat", "buffers"), &VoxelNative::collect_all_flat);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_bounds", "buffers"), &VoxelNative::collect_bounds);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_sphere_positions", "buffers", "center", "radius"), &VoxelNative::collect_sphere_positions);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_box_positions", "buffers", "min_p", "max_p"), &VoxelNative::collect_box_positions);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelNative::greedy_merge_dense);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelNative::generate_chunk_dense);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelNative::generate_lod1_block_dense);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelNative::build_halo_from_buffers);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_arrays_from_chunks_native", "chunks", "trans_flags", "scale", "offset"), &VoxelNative::generate_arrays_from_chunks_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("generate_spheres_native", "voxels", "trans_flags", "subdivisions", "sphere_scale", "scale", "vertex_budget", "offset"), &VoxelNative::generate_spheres_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelNative::build_lod_block_halo_from_buffers_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelNative::patch_lod_block_from_lod);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelNative::build_lod_block_halo_from_lod_buffers_native);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelNative::find_unsupported_around);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelNative::propagate_stress);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelNative::collect_materials);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("install_flat_voxels", "flat"), &VoxelNative::install_flat_voxels);
+void VoxelSupportNative::_bind_methods() {
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("choose_and_pack", "buf", "n"), &VoxelSupportNative::choose_and_pack);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("pack_with_codec", "codec", "buf", "n"), &VoxelSupportNative::pack_with_codec);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("unpack_block", "codec", "payload", "n"), &VoxelSupportNative::unpack_block);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("voxel_value_range", "buf"), &VoxelSupportNative::voxel_value_range);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_all_positions", "buffers"), &VoxelSupportNative::collect_all_positions);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_all_flat", "buffers"), &VoxelSupportNative::collect_all_flat);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_bounds", "buffers"), &VoxelSupportNative::collect_bounds);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_sphere_positions", "buffers", "center", "radius"), &VoxelSupportNative::collect_sphere_positions);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_box_positions", "buffers", "min_p", "max_p"), &VoxelSupportNative::collect_box_positions);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelSupportNative::greedy_merge_dense);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelSupportNative::generate_chunk_dense);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelSupportNative::generate_lod1_block_dense);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelSupportNative::build_halo_from_buffers);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_arrays_native", "voxels", "trans_flags", "scale", "offset"), &VoxelSupportNative::generate_arrays_native);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_arrays_from_chunks_native", "chunks", "trans_flags", "scale", "offset"), &VoxelSupportNative::generate_arrays_from_chunks_native);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_spheres_native", "voxels", "trans_flags", "subdivisions", "sphere_scale", "scale", "vertex_budget", "offset"), &VoxelSupportNative::generate_spheres_native);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("build_lod_block_halo_from_buffers_native", "buffers", "block_key", "lod_shift"), &VoxelSupportNative::build_lod_block_halo_from_buffers_native);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("patch_lod_block", "buffers", "block_key", "lod_shift", "coarse", "rmin", "rmax"), &VoxelSupportNative::patch_lod_block);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("patch_lod_block_from_lod", "coarse_buffers", "block_key", "lod", "coarse", "rmin", "rmax"), &VoxelSupportNative::patch_lod_block_from_lod);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("build_lod_block_halo_from_lod_buffers_native", "buffers", "block_key"), &VoxelSupportNative::build_lod_block_halo_from_lod_buffers_native);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("find_unsupported_around", "buffers", "removed"), &VoxelSupportNative::find_unsupported_around);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("propagate_stress", "buffers", "removed", "strength_table", "max_steps", "force", "decay"), &VoxelSupportNative::propagate_stress);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_materials", "buffers", "positions"), &VoxelSupportNative::collect_materials);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("install_flat_voxels", "flat"), &VoxelSupportNative::install_flat_voxels);
 	// 破坏内核（统一形状 + 一趟内完成 范围→材质→硬度比较→累伤/判移除）。判定/崩塌规则仍是基线那套，
 	// 这里只是把"伤害结算"这一热点下沉原生（对应 4ddfe43 的优化），不改任何判定语义。
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("damage_shape", "buffers", "damage_chunks", "shape", "center", "radius", "vmin", "vmax", "hardness_table", "damage", "use_health", "opts"), &VoxelNative::damage_shape);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelNative::remove_voxels_bulk);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelNative::set_voxels_bulk);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("collect_chunks", "positions"), &VoxelNative::collect_chunks);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("partition_connected", "positions"), &VoxelNative::partition_connected);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("find_unsupported_positions", "positions"), &VoxelNative::find_unsupported_positions);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("flood_fill_positions", "seeds", "allowed"), &VoxelNative::flood_fill_positions);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelNative::snapshot_chunks_halo);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("voxelize_mesh", "verts", "indices", "uvs", "vcolors", "tri_slots", "slots", "origin", "cell", "grid", "opts"), &VoxelNative::voxelize_mesh);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32", "data", "start", "length"), &VoxelNative::crc32);
-	ClassDB::bind_static_method("VoxelNative", D_METHOD("crc32_segments", "data", "offsets", "lengths"), &VoxelNative::crc32_segments);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("damage_shape", "buffers", "damage_chunks", "shape", "center", "radius", "vmin", "vmax", "hardness_table", "damage", "use_health", "opts"), &VoxelSupportNative::damage_shape);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("remove_voxels_bulk", "buffers", "positions"), &VoxelSupportNative::remove_voxels_bulk);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("set_voxels_bulk", "buffers", "positions", "material_id"), &VoxelSupportNative::set_voxels_bulk);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_chunks", "positions"), &VoxelSupportNative::collect_chunks);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("partition_connected", "positions"), &VoxelSupportNative::partition_connected);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("find_unsupported_positions", "positions"), &VoxelSupportNative::find_unsupported_positions);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("flood_fill_positions", "seeds", "allowed"), &VoxelSupportNative::flood_fill_positions);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("snapshot_chunks_halo", "buffers", "chunks"), &VoxelSupportNative::snapshot_chunks_halo);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("voxelize_mesh", "verts", "indices", "uvs", "vcolors", "tri_slots", "slots", "origin", "cell", "grid", "opts"), &VoxelSupportNative::voxelize_mesh);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("crc32", "data", "start", "length"), &VoxelSupportNative::crc32);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("crc32_segments", "data", "offsets", "lengths"), &VoxelSupportNative::crc32_segments);
 }

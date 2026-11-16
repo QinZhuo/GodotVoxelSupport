@@ -1,0 +1,14 @@
+[configuration]
+
+entry_symbol = "voxelsupport_library_init"
+compatibility_minimum = "4.3"
+
+[libraries]
+
+macos.debug = "res://addons/VoxelSupport/Native/libvoxelsupport.macos.release.universal.dylib"
+macos.release = "res://addons/VoxelSupport/Native/libvoxelsupport.macos.release.universal.dylib"
+windows.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.windows.release.x86_64.dll"
+windows.release.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.windows.release.x86_64.dll"
+linux.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.linux.debug.x86_64.so"
+linux.release.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.linux.release.x86_64.so"
+macos.release.universal = "res://addons/VoxelSupport/Native/libvoxelsupport.macos.release.universal.dylib"
