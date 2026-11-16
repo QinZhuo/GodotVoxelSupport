@@ -9,7 +9,7 @@ static var layer: int = UITool.Layer.TOP
 static var _mask: FocusMask
 
 
-## 聚焦一组目标。items 元素: Node 或 {node, padding}; opts 见 FocusMask.focus
+## 聚焦一组目标节点。opts 见 FocusMask.focus
 ## host 仅用于挂载画布层(默认挂在当前场景根节点, 随场景销毁)
 static func focus(items: Array, opts: Dictionary = {}, host: Node = null) -> FocusMask:
 	var mask := _ensure(host)

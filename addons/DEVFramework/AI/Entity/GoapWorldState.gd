@@ -7,6 +7,17 @@ var _values: Dictionary = {}
 signal changed(key, old_value, new_value)
 
 
+## 稳定指纹(键排序) —— 供计划缓存做 key: 只反映**值**, 不含对象身份。
+## 用指纹而不是 hash(对象): 不同 agent 的等价状态必须命中同一条缓存。
+func fingerprint() -> String:
+	var keys := _values.keys()
+	keys.sort_custom(func(a, b) -> bool: return str(a) < str(b))
+	var parts := PackedStringArray()
+	for k in keys:
+		parts.append("%s=%s" % [k, str(_values[k])])
+	return ";".join(parts)
+
+
 func set_value(key, value) -> void:
 	var old := _values.get(key, null)
 	if old == value:

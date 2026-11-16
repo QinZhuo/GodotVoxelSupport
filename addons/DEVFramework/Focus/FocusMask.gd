@@ -55,7 +55,6 @@ var drag_checker: Callable
 ## 项目要换外观: DialogueTool.view_scene = 自己的场景 / DialogueTool.register(...)
 
 var _targets: Array[Node] = []
-var _paddings := PackedFloat32Array()
 ## 舞台根(收光源用)
 var _host: Node
 ## 目标 → 真正被点亮的节点(子视口里的目标升级为承载它的 SubView3D 面板)
@@ -117,27 +116,17 @@ func _exit_tree() -> void:
 # 公开 API
 # ------------------------------------------------------------
 
-## 聚焦一组目标。items 元素: Node, 或 {node, padding}
-## opts: dim(Color) / block(bool) / click_to_complete(bool) / advance_action(StringName) /
-##       drag_checker(Callable) / tip(String)
+## 聚焦一组目标(节点)。命中区 = 每个目标自身的屏幕矩形, 不做任何外扩
+## opts: dim(Color) / focus_boost(float) / block(bool) / click_to_complete(bool) /
+##       advance_action(StringName) / drag_checker(Callable) / tip(String)
 ## host = 舞台根(收光源/兜底范围用)
 func focus(items: Array, opts: Dictionary = {}, host: Node = null) -> void:
 	_apply_opts(opts)
 	_host = host
 	_targets.clear()
-	_paddings = PackedFloat32Array()
 	for item in items:
-		var node: Node = null
-		var padding := 0.0
-		if item is Node:
-			node = item
-		elif item is Dictionary:
-			node = item.get("node")
-			padding = float(item.get("padding", 0.0))
-		if node == null or not is_instance_valid(node):
-			continue
-		_targets.append(node)
-		_paddings.append(padding)
+		if item is Node and is_instance_valid(item):
+			_targets.append(item)
 	_active = true
 	visible = true
 	_apply_presentation()
@@ -152,7 +141,6 @@ func clear() -> void:
 	visible = false
 	_release_presentation()
 	_targets.clear()
-	_paddings = PackedFloat32Array()
 	_hit_rects = []
 	DialogueTool.hide()
 
@@ -344,7 +332,7 @@ func _tick_silhouette() -> void:
 	var node: Node = _targets[_sil_rect_index]
 	if not is_instance_valid(node):
 		return
-	var rect := screen_rect(node)  # 不含 padding: 轮廓要贴控件本体
+	var rect := screen_rect(node)
 	if rect.size == Vector2.ZERO or rect == _sil_rect:
 		return
 	if rect.size != _sil_rect.size and _sil_view == _contour_view:
@@ -540,7 +528,9 @@ func _release_presentation() -> void:
 func _input(event: InputEvent) -> void:
 	if not _active or not block_input:
 		return
-	if drag_checker.is_valid() and drag_checker.call():
+	if drag_checker.is_valid() and drag_checker.call() and _is_release_or_move(event):
+		## 拖拽期间只放行"移动/松手/右键取消"(拖出挖孔才不会被截断);
+		## 左键按下仍按目标区域拦 —— 否则拖拽窗口里点摇杆等流程入口也会一起放行
 		return
 	if click_to_complete and (_is_primary_press(event) or _is_advance(event)):
 		blank_pressed.emit()
@@ -561,10 +551,25 @@ func _input(event: InputEvent) -> void:
 func _contain_focus(event: InputEvent) -> bool:
 	var focusables := _focusables()
 	if focusables.is_empty():
-		return _is_nav(event)
+		if _is_nav(event):
+			return true
+		## 确认键: 3D 导航下会直接激活"焦点所在的可交互物"(摇杆等流程入口),
+		## 焦点不在目标上时必须一并吞掉, 否则等于绕过了目标外拦截
+		return _is_advance(event) and not _focus_in_targets()
 	if _is_nav(event):
 		_cycle_focus(-1 if _is_back_nav(event) else 1, focusables)
 		return true
+	return false
+
+
+## 3D 导航焦点是否落在某个目标上(是则放行确认键, 让玩家照常操作目标)
+func _focus_in_targets() -> bool:
+	var focus := InputTool.get_3d_focus()
+	if focus == null:
+		return false
+	for node in _targets:
+		if is_instance_valid(node) and (node == focus or node.is_ancestor_of(focus) or focus.is_ancestor_of(node)):
+			return true
 	return false
 
 
@@ -646,6 +651,19 @@ static func _pointer_position(event: InputEvent) -> Vector2:
 	return Vector2.INF
 
 
+## 拖拽期间需要放行的事件: 移动(拖拽本体)、松手(收尾)、右键(取消拖拽)。
+## 左键按下不算 —— 它可能是"再点一下别的东西", 该照常按目标区域拦。
+static func _is_release_or_move(event: InputEvent) -> bool:
+	if event is InputEventMouseMotion or event is InputEventScreenDrag:
+		return true
+	if event is InputEventMouseButton:
+		var button := event as InputEventMouseButton
+		return not button.pressed or button.button_index == MOUSE_BUTTON_RIGHT
+	if event is InputEventScreenTouch:
+		return not (event as InputEventScreenTouch).pressed
+	return false
+
+
 func _contains(pos: Vector2) -> bool:
 	for rect in _hit_rects:
 		if rect.has_point(pos):
@@ -673,7 +691,7 @@ func _update_geometry() -> void:
 				rect = _panel_rect(node)
 			if rect.size == Vector2.ZERO:
 				continue
-			rect = rect.grow(_paddings[i] if i < _paddings.size() else 0.0).intersection(screen)
+			rect = rect.intersection(screen)
 			if rect.size == Vector2.ZERO:
 				rect = _panel_rect(node).intersection(screen)
 			if rect.size == Vector2.ZERO:
@@ -716,6 +734,8 @@ func _merged_rects() -> Rect2:
 func _apply_opts(opts: Dictionary) -> void:
 	if opts.has("dim"):
 		dim_color = opts.dim
+	if opts.has("focus_boost"):
+		focus_boost = opts.focus_boost
 	if opts.has("block"):
 		block_input = opts.block
 	if opts.has("click_to_complete"):
@@ -820,7 +840,7 @@ static func _rect_3d(node: Node3D) -> Rect2:
 		var p := cam.unproject_position(aabb.get_endpoint(i))
 		rect = rect.expand(p) if i > 0 else Rect2(p, Vector2.ZERO)
 	if rect.size == Vector2.ZERO:
-		# 所有角投影重叠(目标极小/极远): 以中心投影点为单位矩形, 交由 padding 外扩兜底
+		# 所有角投影重叠(目标极小/极远): 以中心投影点为单位矩形兜底
 		var c := cam.unproject_position(aabb.get_center())
 		return Rect2(c - Vector2.ONE * 0.5, Vector2.ONE)
 	return rect

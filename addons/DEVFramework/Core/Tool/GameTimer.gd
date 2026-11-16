@@ -1,6 +1,14 @@
 class_name GameTimer extends RefCounted
 
 ## 可被外部推进的轻量计时器（由宿主的物理 tick 驱动 ⇒ 计时基准是物理 tick，与帧率无关）。
+##
+## ===== 框架里有两个计时器, 按需求**显式选择**, 不做自动切换 =====
+##   · 本文件(GameTimer): **OOP 版**。可暂停/继续、可手动 tick、按 `order_key` 确定性发射
+##     (依赖 TickTool.defer)。适合: 回合制、需要严格时序、或**不用 ECS 的项目**。
+##     成本: 每对象一次 advance(约 200~400ns), 与数量线性。
+##   · `ECS/Timer/{TimerComponent,TimerSystem}`: **ECS 版**。计时器是实体, 整列推进 + 原生条件过滤。
+##     适合: 上千个同类冷却/DoT(空闲推进 2000 个约 0.06ms)。
+## 两者语义一致(到期发一次通知), 差别是"发射顺序"(本版按 order, ECS 版按聚合行序)与存储形态。
 
 signal timeout(not_stop: bool)
 

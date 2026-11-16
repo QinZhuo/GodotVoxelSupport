@@ -12,9 +12,11 @@ signal stopped()
 
 ## 无目标步骤的"继续"动作(键盘/手柄); 空 = 只能点击
 @export var advance_action: StringName = &"ui_accept"
-## 暗区颜色(全流程统一)
-@export var dim_color := Color(0.0, 0.0, 0.0, 0.62)
-## 拖拽放行(可选): 返回 true 时放行全部指针事件(目标需要被拖出可交互区域)
+## 暗区颜色(全流程统一)。alpha 只做"轻微压暗", 焦点目标靠 focus_boost 提亮来拉差异
+@export var dim_color := Color(0.039, 0.039, 0.051, 0.5)
+## 目标提亮倍数(>1 = 比平时更亮, 与压暗的周围拉开对比)
+@export var focus_boost := 1.6
+## 拖拽放行(可选): 返回 true 时放行移动/松手/右键(拖出可交互区域不被截断), 左键按下照旧按目标拦
 var drag_checker: Callable
 
 var _task: GroupTask
@@ -120,11 +122,13 @@ func show_step(step: Task) -> void:
 	if def and def.silent:
 		_clear_mask()
 		return
-	var targets: Array = def.find_targets(_host) if def else []
+	var targets: Array[Node] = def.find_targets(_host) if def else []
 	var has_targets := not targets.is_empty()
 	var click := def.click_to_complete_for(has_targets) if def else true
 	var visible := has_targets or click
-	var block := (def.block_input if def else true) and visible
+	## 拦截与"是否建暗场"解耦: 无目标但等信号的步骤(看了就得点某处推进)以前一律不拦,
+	## 玩家能直接点到摇杆等流程入口。要放行就用 targets 圈出可点的区域, 或显式 block_input=false
+	var block := def.block_input if def else true
 	var dim := dim_color if visible and (def == null or def.dim) else Color(dim_color, 0.0)
 	_mask = FocusMaskTool.focus(targets, {
 		"block": block,
@@ -132,6 +136,7 @@ func show_step(step: Task) -> void:
 		"advance_action": advance_action,
 		"drag_checker": drag_checker,
 		"dim": dim,
+		"focus_boost": focus_boost,
 	}, _host)
 	## 文案直接交给对话子系统 —— 遮罩只负责"锚在哪", 不再当 Task→Dialogue 的传话人
 	if _mask:

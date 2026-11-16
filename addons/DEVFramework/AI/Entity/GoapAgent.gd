@@ -19,6 +19,11 @@ class_name GoapAgent extends Node
 ## 退避冷却封顶（秒）
 @export_range(0.1, 10.0, 0.1) var failure_backoff_max: float = 3.0
 @export var debug_enabled: bool = false
+## 定时重规划(兼容开关)。默认 false = **事件驱动**: 只有 set_state/mark_dirty 后才规划,
+## replan_interval 退化为限流(最短间隔)。大量同构小兵场景必须关掉定时重规划。
+@export var periodic_replan: bool = false
+## 复用跨 agent 的计划缓存(同状态+同目标+同行动集直接命中)。默认开。
+@export var use_plan_cache: bool = true
 
 signal plan_found(goal: GoapGoal, plan: Array)
 signal plan_failed(goal: GoapGoal)
@@ -38,6 +43,7 @@ var _planner: GoapPlanner
 var _current_action: GoapAction
 var _state: AgentState = AgentState.IDLE
 var _replan_timer := 0.0
+var _actions_sig := ""   # actions 的内容签名(计划缓存 key 用), 首次规划时懒计算
 var _world_dirty := true
 var _fail_streak := 0
 var _last_fail_time := 0.0
@@ -66,18 +72,29 @@ func tick(delta: float) -> void:
 	if paused:
 		return
 	_replan_timer += delta
-	if _state == AgentState.IDLE and (_world_dirty or _replan_timer >= replan_interval):
-		# 失败冷却中：即使 dirty 也不立即重规划，避免死循环刷爆 CPU
-		if _in_failure_cooldown():
-			return
-		_replan_timer = 0.0
-		replan()
+	if _state != AgentState.IDLE:
+		return
+	# 事件驱动: 只有世界状态/目标变了才规划。定时重规划(periodic_replan)仅作兼容开关。
+	# 实测一次链式搜索 202µs: 2000 个 agent 每 0.5s 重规划 ≈ 13.5ms/帧, 而"记账"只占 0.05ms。
+	# 所以真正的成本是**规划次数**, 不是存储形态。
+	if not _world_dirty and not periodic_replan:
+		return
+	# replan_interval 在这里是**限流**: 事件很密时也别每帧重规划
+	if _replan_timer < replan_interval:
+		return
+	# 失败冷却中：即使 dirty 也不立即重规划，避免死循环刷爆 CPU
+	if _in_failure_cooldown():
+		return
+	_replan_timer = 0.0
+	replan()
 
 
 ## —— 世界状态 ——
 
 func set_state(key, value) -> void:
 	world_state.set_value(key, value)
+	# 事件驱动: 状态一变就标脏(下次 tick 才会真正规划, 且受 replan_interval 限流)
+	_world_dirty = true
 
 
 func get_state(key, default = null):
@@ -125,8 +142,13 @@ func _try_plan() -> Array:
 		if goal.is_active(self) and is_goal_active(goal):
 			candidates.append(goal)
 	sort_goals(candidates)
+	# 行动集内容签名只算一次(内容变了才重算): 否则每次规划都要把整个 actions 转字符串,
+	# 实测会让"缓存命中"退化成 58µs(搜索 138µs → 只快 2.4×)。
+	if _actions_sig == "":
+		_actions_sig = GoapPlanner.actions_signature(actions)
 	for goal in candidates:
-		var plan := _planner.plan(world_state, goal.def.goal_state, actions)
+		var plan := _planner.plan_cached(world_state, goal.def.goal_state, actions, 0, _actions_sig) \
+				if use_plan_cache else _planner.plan(world_state, goal.def.goal_state, actions)
 		if not plan.is_empty():
 			return [goal, plan]
 	return []

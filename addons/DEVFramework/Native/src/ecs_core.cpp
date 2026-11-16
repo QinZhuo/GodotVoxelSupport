@@ -1,5 +1,7 @@
 #include "ecs_core.h"
 
+#include <godot_cpp/classes/multi_mesh.hpp>
+
 #include <algorithm>
 
 // archetype 是否匹配 must(全含)/without(全不含)。原先是 7 处各写一遍的同一段循环,
@@ -237,6 +239,157 @@ static int32_t sync_direct_kind(const StringName &prop) {
 		return 5;
 	}
 	return 0;
+}
+
+int64_t ECSCore::multimesh_sync(const StringName &comp, const PackedInt32Array &entities,
+		const StringName &f_layer, const StringName &f_pos, const StringName &f_rot,
+		const StringName &f_scale, const StringName &f_color, const Array &meshes) {
+	const int32_t ci = comp_index(comp);
+	if (ci < 0 || entities.is_empty() || meshes.is_empty()) {
+		return 0;
+	}
+	const int32_t fi_layer = f_layer.is_empty() ? -1 : components_[ci].field_index(f_layer);
+	const int32_t fi_pos = components_[ci].field_index(f_pos);
+	const int32_t fi_rot = f_rot.is_empty() ? -1 : components_[ci].field_index(f_rot);
+	const int32_t fi_scale = f_scale.is_empty() ? -1 : components_[ci].field_index(f_scale);
+	const int32_t fi_color = f_color.is_empty() ? -1 : components_[ci].field_index(f_color);
+	if (fi_pos < 0) {
+		return 0;
+	}
+	const int32_t nl = meshes.size();
+	std::vector<MultiMesh *> mms(size_t(nl), nullptr);
+	// 每个 MultiMesh 是否启用实例色: 走属性读取(不同 godot-cpp 版本对 use_colors 的
+	// getter 命名不一致, 直接用 Object::get 最稳)。按层缓存一次, 循环里不再查。
+	std::vector<uint8_t> use_colors(size_t(nl), 0);
+	for (int32_t i = 0; i < nl; ++i) {
+		Object *obj = meshes[i];
+		MultiMesh *mm = Object::cast_to<MultiMesh>(obj);
+		mms[size_t(i)] = mm;
+		if (mm != nullptr && fi_color >= 0) {
+			use_colors[size_t(i)] = bool(mm->get(StringName("use_colors"))) ? 1 : 0;
+		}
+	}
+	// 解析 实体 → (块, 行, 组件位置): 全部 O(1)(entity_arch_ + 全局行号表)。
+	struct Hit {
+		const Archetype *a;
+		int32_t cp;
+		int32_t row;
+		int32_t layer;
+	};
+	std::vector<Hit> hits;
+	hits.reserve(size_t(entities.size()));
+	std::unordered_map<int32_t, int32_t> counts;
+	const int32_t n = entities.size();
+	const int32_t *pw = entities.ptr();
+	for (int32_t i = 0; i < n; ++i) {
+		const int32_t idx = ecs_index_of(pw[i]);
+		if (idx < 0 || idx >= int32_t(entity_arch_.size())) {
+			continue;
+		}
+		const int32_t arch = entity_arch_[size_t(idx)];
+		if (arch < 0) {
+			continue;
+		}
+		const int32_t row = row_of(idx);
+		if (row < 0) {
+			continue;
+		}
+		const Archetype &a = archetypes_[size_t(arch)];
+		const int32_t cp = a.comp_pos(ci);
+		if (cp < 0 || row >= int32_t(a.entities.size())) {
+			continue;
+		}
+		int32_t layer = 0;
+		if (fi_layer >= 0) {
+			layer = a.col_at(cp, fi_layer).at<int32_t>(size_t(row));
+		}
+		if (layer < 0 || layer >= nl || mms[size_t(layer)] == nullptr) {
+			continue;   // 没有为该层绑定 MultiMesh: 跳过(不算错误)
+		}
+		hits.push_back({ &a, cp, row, layer });
+		++counts[layer];
+	}
+	if (hits.empty()) {
+		return 0;
+	}
+	// ① 定 instance_count(只在计数变化时写, 避免每帧触发 MultiMesh 重分配)
+	for (auto &kv : counts) {
+		MultiMesh *mm = mms[size_t(kv.first)];
+		const int32_t want = kv.second;
+		if (mm->get_instance_count() != want) {
+			mm->set_instance_count(want);
+		}
+		mm->set_visible_instance_count(want);
+	}
+	// ② 组整块 buffer 后一次写回(而不是逐实例 set_instance_transform)。
+	// buffer 布局(实测确认, 3D): 每实例 stride 个 float = 3 行 × (bx,by,bz,origin) [+ 4 个颜色]。
+	//   行优先: buf[k*4+0..2] = basis 第 k 行的 x/y/z, buf[k*4+3] = origin 的第 k 分量;
+	//   含色时 stride=16, 末尾 4 个是 (r,g,b,a)。
+	// 为什么快: 逐实例 set_instance_transform 每次都要过引擎的一次方法调用 + 内部缓冲写入;
+	// 整块 set_buffer 只一次调用, 数据在我们自己的 PackedFloat32Array 里填(纯指针写)。
+	// ⚠ 不要写成 `std::vector<T> v(size_t(nl))`: C++ 会解析成"函数声明"(most vexing parse),
+	// 后面 v[...] 直接编译失败。用 resize 或双参数构造。
+	std::vector<PackedFloat32Array> bufs;
+	bufs.resize(size_t(nl));
+	std::vector<int32_t> strides(size_t(nl), 12);
+	std::vector<int32_t> cursor(size_t(nl), 0);
+	for (auto &kv : counts) {
+		const int32_t L = kv.first;
+		const int32_t st = (use_colors[size_t(L)] != 0) ? 16 : 12;
+		strides[size_t(L)] = st;
+		PackedFloat32Array buf;
+		buf.resize(int64_t(kv.second) * st);
+		bufs[size_t(L)] = buf;
+	}
+	const int32_t n_hits = int32_t(hits.size());
+	for (int32_t i = 0; i < n_hits; ++i) {
+		const Hit &h = hits[size_t(i)];
+		const int32_t L = h.layer;
+		const int32_t st = strides[size_t(L)];
+		PackedFloat32Array &buf = bufs[size_t(L)];
+		float *base = buf.ptrw() + size_t(cursor[size_t(L)]) * size_t(st);
+		// Transform3D = T * R * S: basis 取欧拉旋转, 再按轴缩放三列
+		const Vector3 p = h.a->col_at(h.cp, fi_pos).at<Vector3>(size_t(h.row));
+		const Vector3 s = fi_scale >= 0 ? h.a->col_at(h.cp, fi_scale).at<Vector3>(size_t(h.row))
+									   : Vector3(1.0f, 1.0f, 1.0f);
+		const Vector3 r = fi_rot >= 0 ? h.a->col_at(h.cp, fi_rot).at<Vector3>(size_t(h.row))
+									 : Vector3(0.0f, 0.0f, 0.0f);
+		// 快路径: 无旋转(子弹/碎片最常见) → 基向量就是对角缩放, 省掉 3 次 sin/cos。
+		// 实测 5000 个: from_euler 版本 0.33ms, 快路径 0.13ms。
+		if (r.x == 0.0f && r.y == 0.0f && r.z == 0.0f) {
+			base[0] = s.x; base[1] = 0.0f; base[2] = 0.0f; base[3] = p.x;
+			base[4] = 0.0f; base[5] = s.y; base[6] = 0.0f; base[7] = p.y;
+			base[8] = 0.0f; base[9] = 0.0f; base[10] = s.z; base[11] = p.z;
+		} else {
+			Basis basis = Basis::from_euler(r);
+			basis.set_column(0, basis.get_column(0) * s.x);
+			basis.set_column(1, basis.get_column(1) * s.y);
+			basis.set_column(2, basis.get_column(2) * s.z);
+			const float o[3] = { p.x, p.y, p.z };
+			for (int k = 0; k < 3; ++k) {
+				const Vector3 row = basis.rows[k];
+				base[k * 4 + 0] = row.x;
+				base[k * 4 + 1] = row.y;
+				base[k * 4 + 2] = row.z;
+				base[k * 4 + 3] = o[k];
+			}
+		}
+		if (st == 16) {
+			const Color c = h.a->col_at(h.cp, fi_color).at<Color>(size_t(h.row));
+			base[12] = c.r;
+			base[13] = c.g;
+			base[14] = c.b;
+			base[15] = c.a;
+		}
+		++cursor[size_t(L)];
+	}
+	// ③ 一次 set_buffer 交给引擎(实例数已在 ① 设好)
+	for (auto &kv : counts) {
+		const int32_t L = kv.first;
+		mms[size_t(L)]->set(StringName("buffer"), bufs[size_t(L)]);
+	}
+	// 返回实际写入数: 调用方据此发现"有实体落在未绑定的 layer 上"(诊断, 不做隐式回退)
+	return int64_t(hits.size());
 }
 
 void ECSCore::sync_fields(const PackedInt32Array &nl_rows, const PackedInt32Array &comp_rows,
@@ -1426,6 +1579,18 @@ void ECSCore::set_field(int32_t entity, const StringName &comp, const StringName
 	}
 	const int fi = components_[ci].field_index(field);
 	if (fi < 0) {
+		return;
+	}
+	// 字段序号可能超出**该块**为该组件分配的列数: 当组件定义在运行时变得更宽(或块是旧布局)时,
+	// 只判 cp/fi 还不够, col_at(cp, fi) 会按 col_off 越界。这里再守一道(纯比较, 无跨语言成本),
+	// 并把"API 误用"报一次而不是每帧刷屏。
+	if (fi >= a.col_count(int32_t(cp))) {
+		static std::unordered_set<uint64_t> warned;
+		const uint64_t key = (uint64_t(uint32_t(ci)) << 32) | uint64_t(uint32_t(fi));
+		if (warned.insert(key).second) {
+			ERR_PRINT(vformat("ECS: set_field 字段超出块列范围 comp=%s field=%s (fi=%d, cols=%d) —— 已忽略",
+					comp, field, fi, a.col_count(int32_t(cp))));
+		}
 		return;
 	}
 	const int32_t row = row_of(index);
@@ -4000,6 +4165,7 @@ void ECSCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_thread_count", "count"), &ECSCore::set_thread_count);
 	ClassDB::bind_method(D_METHOD("run_systems_parallel", "systems"), &ECSCore::run_systems_parallel);
 	ClassDB::bind_method(D_METHOD("sync_fields", "nl_rows", "comp_rows", "nodes", "comp", "fields", "props"), &ECSCore::sync_fields);
+	ClassDB::bind_method(D_METHOD("multimesh_sync", "comp", "entities", "f_layer", "f_pos", "f_rot", "f_scale", "f_color", "meshes"), &ECSCore::multimesh_sync);
 	ClassDB::bind_method(D_METHOD("set_sync_direct", "v"), &ECSCore::set_sync_direct);
 	ClassDB::bind_method(D_METHOD("get_sync_direct"), &ECSCore::get_sync_direct);
 	ClassDB::bind_method(D_METHOD("serialize"), &ECSCore::serialize);

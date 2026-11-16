@@ -578,6 +578,16 @@ private:
 	// nl_rows: NodeLink 行号(dense); comp_rows: 与 nl_rows 对齐的 comp 组件行号;
 	// nodes: Array[Node], 索引 = NodeLink 行号(允许 null);
 	// comp: 组件名; fields: 字段名; props: 节点属性名(与 fields 等长)。
+	// ---- MultiMesh 批量渲染(调用方**显式**选择的视图后端) ----
+	// 一次跨语言把"实体列(pos/rot/scale/color)"写进多个 MultiMesh, 按 `layer` 字段分组:
+	//   meshes[layer] = MultiMesh(或 null)。
+	// 逐实例 set_instance_transform_2d 仍在 C++ 内完成 —— 省掉"GDScript 逐节点写 property"
+	// 那一层(后者在 10k 实例时是主要瓶颈)。每帧调用一次即可。
+	// 返回**实际写入的实例数**: 调用方用它判断有无实体落在未绑定 layer 上(诊断用, 不做隐式回退)。
+	int64_t multimesh_sync(const StringName &comp, const PackedInt32Array &entities,
+			const StringName &f_layer, const StringName &f_pos, const StringName &f_rot,
+			const StringName &f_scale, const StringName &f_color, const Array &meshes);
+
 	void sync_fields(const PackedInt32Array &nl_rows, const PackedInt32Array &comp_rows,
 			const Array &nodes, const StringName &comp,
 			const PackedStringArray &fields, const PackedStringArray &props);

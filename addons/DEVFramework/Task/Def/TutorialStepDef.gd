@@ -23,13 +23,13 @@ func get_desc(data) -> String:
 	return "" if silent else super(data)
 
 
-## 解析本步目标为 Spotlight 输入: [{node, padding}], 缺失节点直接跳过
-func find_targets(host: Node) -> Array:
-	var result := []
+## 解析本步目标节点, 缺失节点直接跳过
+func find_targets(host: Node) -> Array[Node]:
+	var result: Array[Node] = []
 	for target in targets:
 		var node := target.resolve(host) if target else null
 		if node:
-			result.append({"node": node, "padding": target.padding})
+			result.append(node)
 	return result
 
 
