@@ -152,6 +152,9 @@ var _next_req_id := 1
 var _game_breaked := false
 ## 断点暂停时仍可安全执行的工具(只读缓冲, 不依赖游戏主循环):
 const _BREAK_SAFE_TOOLS := ["get_logs", "clear_logs"]
+## 游戏用例运行期间仍可用的工具: 用例自己就是长任务, 轮询进度/取消必须放行。
+## job_wait 只等主循环帧(用例本就让出帧), job_cancel 是纯同步操作 —— 都不会被用例拖死。
+const _GAME_TESTS_OPEN_TOOLS := ["run_tests", "job_wait", "job_cancel"]
 
 ## 逐条 JSON-RPC 请求日志的开关(现场可 set, 不必重启编辑器)。
 static var _log_rpc := false
@@ -237,9 +240,9 @@ func _on_debugger_message(message: String, data: Array) -> bool:
 func _call_runtime_tool_async(req_id: int, tool_name: String, args: Dictionary) -> void:
 	var result: Dictionary
 	## 长任务(游戏用例)运行期间: 需要主循环的工具会被用例拖慢, 多数会干等到超时才报错。
-	if _game_tests_running and tool_name != "run_tests" and not _BREAK_SAFE_TOOLS.has(tool_name):
-		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请先反复调用 run_tests(process=game, script=...) 读进度直到 running=false, 或用 game_control(action=stop) 终止用例。" % tool_name,
-			"busy", true, "run_tests(process=game, script=...)读进度至running=false后再调用; 或game_control(action=stop)终止用例")
+	if _game_tests_running and not _GAME_TESTS_OPEN_TOOLS.has(tool_name) and not _BREAK_SAFE_TOOLS.has(tool_name):
+		result = _err("游戏用例正在运行, 工具 %s 需要主循环, 现在调用既会拖慢用例也大概率超时。\n请用 job_wait(job_id) 或 run_tests(process=game, script=...) 读进度直到 running=false, 再调本工具; 要中断用 job_cancel 或 game_control(action=stop)。" % tool_name,
+			"busy", true, "job_wait(job_id)读进度至running=false后再调用; 或job_cancel/game_control(action=stop)中断用例")
 	elif _tool_handlers.has(tool_name):
 		result = await _tool_handlers[tool_name].call(args)
 	else:
@@ -725,6 +728,7 @@ func _register_editor_only_domains() -> void:
 	_mod("MCPResourceTools").register(_add_tool)
 	_register_run_tools()
 	_register_refresh_tool()
+	_register_build_tool()
 	_register_instance_tools()
 
 
@@ -827,6 +831,19 @@ func _register_refresh_tool() -> void:
 		"手动重建 MCP 工具注册表(免重启编辑器), 响应含工具数、schema_fingerprint 与契约自检结果。**判定'是否真的生效': 跨次对比 schema_fingerprint** —— 指纹不变即工具表没变。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 客户端缓存的旧 tools/list 不会自动刷新, 需在 IDE 侧重连 MCP 才更新; 在此之前, 以 tools/list 直查服务器为准, 勿把会话开始时的快照当权威。【重要: 适用范围】改动 **MCP 目录下任一域脚本**(MCPResourceTools / MCPSceneTools 等: 新增或修改工具、注解名单、入参构造、handler)时有效 —— 本工具会先把域脚本缓存换成磁盘版本, 再按路径动态注册, 免重启生效。**唯一例外是 MCPDevServer.gd 自身**: 运行实例的方法体不会被热替换, 必须重建服务器实例(禁用再启用 DEVFramework 插件, 或 restart_editor); 该情况下本工具仍返回成功但注册表原样不变 —— 正是靠 schema_fingerprint 不变来识别这种'假成功'。",
 		MCPToolSchema.no_arg(),
 		_call_refresh_tools)
+
+
+## -- 原生扩展构建 --
+## 为什么要做成工具: 构建入口原先只有编辑器菜单(EditorScript), AI/CI 完全没有可调用面,
+## 于是"改了 gdextension/src 却没重编"变成静默失效(测试跑的是旧 dll, 全绿)。
+func _register_build_tool() -> void:
+	_add_tool("build_native",
+		"构建 GDExtension 原生扩展(gdextension/ → 产物部署到 addons/DEVFramework/Native)。**改动 gdextension/src/** 之后必须调用**, 否则游戏与测试跑的是旧库且不会报任何错。action=status: 只比较\"源码 vs 已编译库\"的时间戳, 零等待, 建议每次改完先查; action=build: 完整流程(CMake 配置 → 增量编译 → 规范命名部署), 是长任务 —— 超出等待窗口后返回 job_id, 用 job_wait 轮询到 running=false。restart=true 时构建完成后自动重载编辑器(Windows 上运行中的编辑器会锁住 dll, 部署会退化为改写 .gdextension 指向新产物, 必须重载才生效)。",
+		{"type": "object", "properties": {
+			"action": {"type": "string", "enum": ["status", "build"], "description": "status=检查是否需要重编(不编译); build=执行构建"},
+			"restart": {"type": "boolean", "description": "action=build 时: 完成后是否自动重载编辑器(默认 false, 由调用方决定何时重启)"},
+		}, "required": ["action"]},
+		_call_build_native_local)
 
 
 ## -- 多实例中枢: 实例管理工具 --
@@ -1341,6 +1358,36 @@ func _call_run_tests_routed(args: Dictionary) -> Dictionary:
 	return await _runtime().call_run_tests_routed(args)
 
 
+## perf（帧率/指标采样、历史基线）实现见 MCPRuntime。
+func _call_perf_local(args: Dictionary) -> Dictionary:
+	return await _runtime().call_perf_local(args)
+
+
+func _call_perf_routed(args: Dictionary) -> Dictionary:
+	return await _runtime().call_perf_routed(args)
+
+
+## build_native（原生扩展构建）实现见 MCPRuntime；构建流程本身在 GDExtensionRebuild。
+func _call_build_native_local(args: Dictionary) -> Dictionary:
+	return await _runtime().call_build_native_local(args)
+
+
+func _call_job_wait_local(args: Dictionary) -> Dictionary:
+	return await _runtime().call_job_wait_local(args)
+
+
+func _call_job_wait_routed(args: Dictionary) -> Dictionary:
+	return await _runtime().call_job_wait_routed(args)
+
+
+func _call_job_cancel_local(args: Dictionary) -> Dictionary:
+	return await _runtime().call_job_cancel_local(args)
+
+
+func _call_job_cancel_routed(args: Dictionary) -> Dictionary:
+	return await _runtime().call_job_cancel_routed(args)
+
+
 ## 游戏运行控制（start / stop / continue）：实现见 MCPRuntime。
 func _call_game_control(args: Dictionary) -> Dictionary:
 	return await _runtime().call_game_control(args)
@@ -1442,16 +1489,62 @@ func _register_game_play_tools() -> void:
 	var tests_schema := {
 		"type": "object",
 		"properties": {
-			"process": {"type": "string", "enum": ["editor", "game", "both"], "description": "在哪个进程跑: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **阻塞到本轮跑完才返回**; 无运行中的游戏时**自动启动**; 导出运行时=本进程); both=先 editor 段再 game 段并合并成一份汇总(跑全量用这个)。必填。"},
+			"process": {"type": "string", "enum": ["editor", "game", "both"], "description": "在哪个进程跑: editor=编辑器进程(只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 无运行中的游戏时自动启动); both=先 editor 段再 game 段合并(同步阻塞)。"},
 			"script": {"type": "string", "description": "必填。二选一(靠内容自动判别): ①测试脚本路径子串(如 'test_game_replay'), 只运行匹配的用例文件; 'all'=全量(**不推荐**: 耗时可能过长)。②**内联 GDScript 源码**——含换行 或 以 'extends ' 开头即判为源码, 需 `extends TestCase` 并定义 test_ 开头的断言方法, 直接编译运行、**不落盘**, 适合临时验证(上限 8192 字符)。单个词(含打错的脚本名)一律按选择器处理。"},
 		},
 		"required": ["process", "script"],
 	}
 	_register_game_play_tool("run_tests",
-		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(同步跑完才返回; 只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; **阻塞到本轮跑完才返回**; 无运行中的游戏时自动启动一个; 已有会话不重启); both=先 editor 段再 game 段并合并成一份汇总(**跑全量用它**, 游戏段没跑成会记成一条失败而不是静默省略)。**逐条进度**(每个用例方法的开始/结束、长方法的 15s 心跳)只 print 到宿主控制台 —— 编辑器输出面板 / 游戏窗口 / headless stdout, 工具返回值只有最终汇总, 阻塞期间查不到中途进度。**测试整体硬超时 10 分钟**: 到点判失败并停止等待。",
+		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 无运行中的游戏时自动启动一个); both=先 editor 段再 game 段并合并(**同步阻塞**, 跑全量用)。**长任务语义(通用, 不用额外参数)**: 默认最多等 25 秒, 跑完直接返回完整汇总; 超过 25 秒则返回 `{job_id, running:true, progress, current, elapsed_ms}`, 此时用 **`job_wait(job_id)`** 继续等(完成即返回结果, **不会重跑**)。测试整体硬超时 10 分钟。",
 		tests_schema,
 		_call_run_tests_local,
 		_call_run_tests_routed)
+
+	# 通用长任务轮询: 任何返回 `job_id + running` 的接口都走这两个, 与具体工具无关
+	var job_wait_schema := {
+		"type": "object",
+		"properties": {
+			"job_id": {"type": "string", "description": "长任务返回体里的 job_id。"},
+			"job_id_note": {"type": "string", "description": "等待时长固定 28 秒(不提供参数): 超过 MCP 客户端 30s 上限的等待一定会被客户端掐断, 没有意义。"},
+		},
+		"required": ["job_id"],
+	}
+	_register_game_play_tool("job_wait",
+		"等待长任务结束(**通用**: 任何返回 `job_id + running:true` 的接口都适用, 且不会重跑任务)。每次调用固定等 28 秒(不超过 MCP 客户端 30s 上限, 调用方无需也不能指定): 完成 → 返回完整结果(status=done/failed); 未完成 → 返回同一 job_id 的进度快照(progress/current/elapsed_ms), 继续调它即可。job 在哪个进程不用管, 工具会自动找到(先本地, 再转游戏进程)。典型用法: 拿到 job_id 后循环 `job_wait(job_id)` 直到 `running == false`。",
+		job_wait_schema,
+		_call_job_wait_local,
+		_call_job_wait_routed)
+
+	var job_cancel_schema := {
+		"type": "object",
+		"properties": {
+			"job_id": {"type": "string", "description": "要取消的 job_id。"},
+		},
+		"required": ["job_id"],
+	}
+	_register_game_play_tool("job_cancel",
+		"请求取消长任务(在任务的下一个检查点生效; 正在 await 的协程无法中途掐断, 所以可能还要等当前用例跑完)。",
+		job_cancel_schema,
+		_call_job_cancel_local,
+		_call_job_cancel_routed)
+
+	# 性能采样: 帧率/引擎指标/历史基线。进程必填(编辑器自己的帧率没有参考价值, 游戏才是目标)。
+	var perf_schema := {
+		"type": "object",
+		"properties": {
+			"process": {"type": "string", "enum": ["editor", "game"], "description": "在哪个进程采样: editor=编辑器进程; game=游戏进程(需游戏运行; 导出运行时=本进程)。必填。"},
+			"action": {"type": "string", "enum": ["snapshot", "fps", "history", "reset"], "description": "snapshot=当前即时指标(零等待); fps=采样 N 帧算 p50/p95/卡顿; history=历史耗时基线; reset=清空基线重新积累。"},
+			"frames": {"type": "integer", "description": "action=fps 时采样的帧数, 默认 120(约 2 秒 @60fps), 上限 1200。"},
+			"warmup": {"type": "integer", "description": "action=fps 时先丢弃的预热帧数, 默认 30 —— 首帧的着色器编译/资源加载会让结果高出量级。"},
+			"key": {"type": "string", "description": "action=history 时的 key 子串过滤(如 'test:' 只看测试基线, 'job:run_tests' 只看测试任务); 省略=全部。"},
+		},
+		"required": ["process", "action"],
+	}
+	_register_game_play_tool("perf",
+		"性能采样。action=snapshot: 即时 fps/帧时间/process/physics/绘制调用/节点数/内存(零等待, 适合频繁轮询); action=fps: 等待并采样 N 帧, 返回 avg/p50/p95/p99、**fps_1pct_low(最差 1% 帧的等效帧率, 判断手感的标准口径)**、卡顿次数(@stutter_ms 阈值)、CV(>10% 说明测量本身不可信) 与 env(GPU/CPU/max_fps/vsync/窗口/聚焦 —— 这些不同则数字互不可比); action=history: 读历史耗时基线(测试用例/长任务各自一条 EMA, 可用来判断'这次是不是变慢了'); action=reset: 清空基线。process 必填: 测游戏帧率必须 process=game(编辑器进程会被空闲节流压到 10fps)。**逻辑微基准不要用本工具**: 用 run_tests 传内联 TestCase(`await assert_fps_at_least(...)` / `assert_under_ms(...)`), 那里的阈值能进 CI。",
+		perf_schema,
+		_call_perf_local,
+		_call_perf_routed)
 
 	# 日志读/清: 统一入口, process 必填(editor|game)。编辑器进程: editor=本进程缓冲, game=转发;
 	var logs_schema := MCPToolSchema.logs("200(log)/100(warning|error)", "条目", {
@@ -1646,24 +1739,6 @@ func _call_simulate_key(args: Dictionary) -> Dictionary:
 
 ## 运行中的测试标志: run_tests(process=game) 阻塞执行期间为 true —— 供 _call_runtime_tool_async
 var _game_tests_running := false
-
-
-## 运行时: 在**游戏进程**里跑需要游戏进程的用例(`TestRunner` MODE_GAME)。**阻塞至跑完才返回**。
-func _runtime_run_game_tests(args: Dictionary) -> Dictionary:
-	var script := VariantTool.get_string(args, "script").strip_edges()
-	if script.is_empty():
-		return _fail("必须指定测试脚本(script: 脚本路径子串如 'test_game_replay', 或 'all' 全量, 或内联 GDScript 源码; 不支持默认全跑)")
-	if _game_tests_running:
-		return _err_validation("已有测试在运行, 请等待其结束或 game_control(action=stop) 终止后再调用",
-			"等待当前用例结束(running=false)后再试")
-	_game_tests_running = true
-	# 传 _logger: 内联源码在游戏进程编译失败时取回该进程的具体解析错行。
-	var summary: Dictionary = await TestRunner.run_all(script, TestRunner.MODE_GAME, _logger)
-	_game_tests_running = false
-	# run_all 已含 script 标签(内联为 "<inline>")/aborted/text 等; 补 done/running 供调用方判定。
-	summary["running"] = false
-	summary["done"] = true
-	return _ok_json(summary)
 
 
 ## 运行时: 捕获游戏视口真实截图(文件名自动生成)

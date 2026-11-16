@@ -127,34 +127,45 @@ static func _colored_tag(tag: String) -> String:
 
 
 ## 计时器 — 创建时传入日志信息，调用 stop() 输出自创建起的耗时
+## 只用于"确认某步花多久"的调试输出; 要统计/断言性能用 PerfTool(它有预热、分位数与历史基线)。
 class LogTimer:
 	var _start: int
 	var _tag: String
 	var _msg: String
+	var _timeout_sec: float
 	var _stopped := false
 
-	func _init(tag: String, msg: String):
+	func _init(tag: String, msg: String, timeout_sec: float):
 		_start = Time.get_ticks_usec()
 		_tag = tag
 		_msg = msg
+		_timeout_sec = timeout_sec
 		_start_timeout_watch()
 
 	func _start_timeout_watch():
+		# <=0 关闭泄漏告警: 基准/长任务场景本来就要跑很久, 5s 就报错是误报
+		if _timeout_sec <= 0.0:
+			return
 		var tree := Engine.get_main_loop() as SceneTree
 		if not tree:
 			return
-		var timer := tree.create_timer(5.0)
+		var timer := tree.create_timer(_timeout_sec)
 		timer.timeout.connect(_on_timeout)
 
 	func _on_timeout():
 		if _stopped:
 			return
-		LogTool.error(_tag, str("计时器超时(>5s): ", _msg))
+		LogTool.error(_tag, str("计时器超时(>%ss): " % _timeout_sec, _msg))
+
+	## 自创建起的耗时(毫秒), 不打印
+	func elapsed_ms() -> float:
+		return float(Time.get_ticks_usec() - _start) / 1000.0
 
 	func stop() -> void:
 		_stopped = true
-		LogTool.log(_tag, str(_msg, " (", (Time.get_ticks_usec() - _start) / 1000.0, "ms)"))
+		LogTool.log(_tag, str(_msg, " (", elapsed_ms(), "ms)"))
 
 ## 创建计时器，返回 LogTimer 对象，调用 stop() 输出耗时
-static func timer(tag: String, msg: String) -> LogTimer:
-	return LogTimer.new(tag, msg)
+## [param timeout_sec] 超过多久未 stop 就报错(默认 5 秒), <=0 关闭该告警
+static func timer(tag: String, msg: String, timeout_sec := 5.0) -> LogTimer:
+	return LogTimer.new(tag, msg, timeout_sec)

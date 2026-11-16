@@ -20,6 +20,7 @@ static func all() -> void:
 	PrewarmTool.reset()
 	InputTool.reset()
 	AsyncTool.reset()
+	JobTool.clear()
 	CameraTool.reset()
 	TaskTool.reset()
 	DialogueTool.reset()

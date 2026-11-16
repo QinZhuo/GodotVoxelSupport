@@ -96,10 +96,17 @@ func _maybe_prune() -> void:
 
 func _pop_idle() -> Node:
 	while not _idle.is_empty():
-		var item: Node = _idle.pop_back()
-		if is_instance_valid(item):
-			_reparent(item, null)
-			return item
+		# 必须先用**无类型**变量接住: 空闲队列里可能残留已被外部释放的节点,
+		# 直接 `var item: Node = _idle.pop_back()` 会在赋值时抛
+		# "Trying to assign invalid previously freed instance"(类型化赋值要校验实例).
+		var raw: Variant = _idle.pop_back()
+		if not is_instance_valid(raw):
+			continue
+		var item := raw as Node
+		if item == null:
+			continue
+		_reparent(item, null)
+		return item
 	return null
 
 func _push_idle(item: Node) -> void:

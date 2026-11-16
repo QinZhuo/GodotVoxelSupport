@@ -256,11 +256,11 @@ func _run() -> int:
 				var norm := []
 				for c in act.fields:
 					norm.append({"comp": _comp_name(c), "fields": act.fields[c]})
-				# 借出列(独占引用, 回调内写列无 COW 深拷贝) → 回调 → 归还
-				var data: Dictionary = world.borrow_columns(norm)
+				# 取列 → 回调(可原地改) → 整列写回。一次跨语言取/写, 不逐实体调用。
+				var data: Dictionary = world.get_columns(norm)
 				total += frows.size()
 				act.callable.call(frows, data)
-				world.return_columns(data)
+				world.set_columns(data)
 			"call_with":
 				# with(字段...) 声明 → 回调直接收列参数(顺序对应), 零跨语言 + 自动写回
 				var waligned: Array = world.query_aligned_where(anchor, must, without,
@@ -271,12 +271,12 @@ func _run() -> int:
 				if wrows.is_empty():
 					continue
 				var wnorm := [{"comp": _comp_name(anchor), "fields": act.fields}]
-				var wdata: Dictionary = world.borrow_columns(wnorm)
+				var wdata: Dictionary = world.get_columns(wnorm)
 				var wcols: Dictionary = wdata.get(_comp_name(anchor), {})
 				var wargs: Array = [wrows]
 				for f in act.fields:
 					wargs.append(wcols.get(f))
 				total += wrows.size()
 				act.callable.callv(wargs)
-				world.return_columns(wdata)
+				world.set_columns(wdata)
 	return total

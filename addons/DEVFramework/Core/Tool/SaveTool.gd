@@ -258,11 +258,13 @@ static func _wait_save_done(path: String) -> void:
 
 ## 检查并处理同一路径的待处理保存，有则递归补存
 static func _flush_pending(path: String, last_err: Error) -> Error:
-	if _save_states[path] is Array:
-		var pending = _save_states[path]
-		_save_states.erase(path)
-		return await save_async(path, pending[0], pending[1])
+	## 必须用 get(): _wait_save_done 超时接管时会先 erase 掉该路径,
+	## 这里再用 [] 访问就会报 "Invalid access to property or key ... on Dictionary",
+	## 而且报错发生在 await 链里, 会把整条保存流程中断。
+	var pending: Variant = _save_states.get(path)
 	_save_states.erase(path)
+	if pending is Array:
+		return await save_async(path, pending[0], pending[1])
 	return last_err
 
 ## 异步加载（主线程读 → 后台解码；损坏时同步回退 .bak）

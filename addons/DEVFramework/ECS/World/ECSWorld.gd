@@ -38,7 +38,8 @@ var _core: Object = null                 # ECSCore 原生实例
 
 # ---------------- 组件注册表 ----------------
 var _component_registered := {}          # Script -> bool (避免重复注册)
-var _component_names := {}               # Script -> StringName
+var _component_names := {}               # Script -> StringName (已注册)
+var _name_cache := {}                    # Script -> StringName (解析结果缓存, 含负缓存; 注册时失效)
 var _components: Array[Script] = []
 
 # ---------------- 系统调度(状态全在 ECSScheduler) ----------------
@@ -51,12 +52,14 @@ var parallel_enabled: bool:
 	set(value):
 		scheduler().parallel_enabled = value
 
-## 并行线程数(0=自动; 转发给调度器)。
+## 并行线程数(0=自动)。一处开关管两头: 调度器的分批宽度 + 原生线程池大小 ——
+## 只改前者会出现"设了 4 线程但池子仍按硬件起 8 个"的错觉。
 var parallel_threads: int:
 	get:
 		return scheduler().parallel_threads
 	set(value):
 		scheduler().parallel_threads = value
+		_core.set_thread_count(maxi(value, 0))
 
 
 ## 调度器懒创建(它要回指本世界: 解析组件名、取原生核心、作上下文宿主)。
@@ -92,6 +95,8 @@ var _event_queues := {}                  # type(StringName) -> Array[Variant]
 var _event_subscribers := {}             # type(StringName) -> Array[Callable]
 
 # ---------------- 查询缓存(增量失效) ----------------
+## 行集缓存条数上限: 超出按插入序淘汰一半(不是整表清空, 避免查询种类偏多时每帧重建)
+const QUERY_CACHE_MAX := 64
 var _query_cache := {}
 var _comp_versions := {}                  # 组件名 -> 结构版本(该组件实体集合变化的代数)
 var _world_version := 0                   # 全局结构版本(destroy/批量结构变更时 +1)
@@ -137,6 +142,7 @@ func register_component(component_class: Script) -> bool:
 		return false
 	_component_registered[component_class] = true
 	_component_names[component_class] = name
+	_name_cache.erase(component_class)   # 之前可能是"解析不出"的负缓存, 注册后必须失效
 	_component_by_name[name] = component_class
 	var sch: Array = []
 	for fi in fnames.size():
@@ -289,16 +295,23 @@ func remove_component(entity: int, component) -> void:
 		_fire_component_remove(name, entity)
 
 ## 统一的组件名解析入口(全框架唯一实现): Script -> 注册名 / 反射类名; String(Name) 原样返回。
+## ⚠ 解析结果**必须缓存**(包括"解析不出来"): 这条路径在 destroy_entity → get_parent →
+## has_component(ECSParent) 这类热路径上每实体都会走, 而"未注册"分支要实例化脚本 + 反射 schema。
+## 实测 8000 个实体 destroy: 不缓存 78.5µs/实体, 缓存后约 1µs —— 差 70 倍。
 func resolve_component_name(component) -> StringName:
 	if component is Script:
 		var n: StringName = _component_names.get(component, &"")
 		if n != &"":
 			return n
+		if _name_cache.has(component):
+			return _name_cache[component]   # 含 &"(已知解析不出)"的负缓存
 		# 未注册: 尝试从 resource_path 稳定获取类名(统一走 ECSNative.collect_schema)
 		var probe: Variant = ECSNative.instantiate_script(component)
+		var resolved: StringName = &""
 		if probe != null:
-			return ECSNative.collect_schema(probe).get("name", &"")
-		return &""
+			resolved = ECSNative.collect_schema(probe).get("name", &"")
+		_name_cache[component] = resolved
+		return resolved
 	if component is StringName or component is String:
 		return StringName(component)
 	return &""
@@ -306,15 +319,48 @@ func resolve_component_name(component) -> StringName:
 # ============================================================
 
 func get_field(entity: int, component, field: StringName):
+	_note_entity_access()
 	var cn := resolve_component_name(component)
 	_record_access(cn)
 	return _core.get_field(entity, cn, field)
 
 func set_field(entity: int, component, field: StringName, value) -> void:
+	_note_entity_access()
 	var cn := resolve_component_name(component)
 	_record_access(cn)
 	_core.set_field(entity, cn, field, value)
 	_mark_dirty(cn)
+
+
+# ---- 逐实体读写守卫(防静默慢) ----
+## get_field/set_field 每次约 2.8µs(跨语言), 1000 个实体就是 2.8ms —— 一帧的 17%。
+## 在系统循环里这么写不会报错、也不会卡顿, 只会悄悄吃掉帧预算, 所以这里当场告警。
+## 阈值取得比"正常的零星单点访问"高一截(256), 避免误报。
+const ENTITY_CALL_WARN := 256
+var _sys_depth := 0            # >0 = 当前在系统执行上下文内(并行批内也成立)
+var _sys_current := ""         # 最近的系统名(并行时可能不是精确的那个, 仅用于告警定位)
+var _entity_calls := 0         # 本帧系统内的逐实体读写次数
+
+## 调度器在系统执行前调用。
+func begin_system(name: String) -> void:
+	_sys_depth += 1
+	_sys_current = name
+
+## 调度器在系统执行后调用。
+func end_system() -> void:
+	_sys_depth = maxi(_sys_depth - 1, 0)
+
+## 调度器每帧开始调用: 计数器归零。
+func begin_frame_stats() -> void:
+	_entity_calls = 0
+
+func _note_entity_access() -> void:
+	if _sys_depth == 0:
+		return   # 系统外的访问(初始化/夹具/工具)不算误用
+	_entity_calls += 1
+	if _entity_calls == ENTITY_CALL_WARN:
+		push_warning("ECS: 本帧在系统里做了 %d 次逐实体 get/set_field(约 %.1fms, 每次≈2.8µs), 最近系统 %s。批量读写请用 columns_of/set_columns_of 或 batch_apply_*。" % [
+			_entity_calls, _entity_calls * 0.0028, _sys_current])
 
 # ============================================================
 
@@ -334,46 +380,14 @@ var change_detection: bool:
 	set(v):
 		_core.set_change_detection(v)
 
-## 查询匹配实体, 直接返回实体 ID 数组(archetype 下最直观: 配 get_field/set_field 使用)。
+## 查询匹配实体, 返回**实体 ID**(不是行号)。要按列索引请用 query_rows。
 func query_entities(anchor, must: Array = [], without: Array = []) -> PackedInt32Array:
-	var anchor_name := resolve_component_name(anchor)
-	if anchor_name == &"":
+	var args := _resolve_query_args(anchor, must, without)
+	if args.is_empty():
 		return PackedInt32Array()
-	_record_access(anchor_name)
-	var must_names := PackedStringArray()
-	for m in must:
-		var mn := resolve_component_name(m)
-		if mn == &"":
-			continue
-		must_names.append(mn)
-		_record_access(mn)
-	var without_names := PackedStringArray()
-	for w in without:
-		var wn := resolve_component_name(w)
-		if wn == &"":
-			continue
-		without_names.append(wn)
-		_record_access(wn)
-	return _core.query_entities(anchor_name, must_names, without_names)
+	return _core.query_entities(args[0], args[1], args[2])
 
-## 全量聚合行号(无条件查询): 返回该组件所有实体的聚合行号(0..N-1)。
-var _all_rows_cache := {}
 
-func query_all_rows(anchor) -> PackedInt32Array:
-	var cn: StringName = resolve_component_name(anchor)
-	if cn == &"":
-		return PackedInt32Array()
-	_record_access(cn)
-	# 并行批内主线程可能正在改结构 → 绕过缓存, 避免读到陈旧行集(与 query_rows 一致)
-	if scheduler().is_parallel_active():
-		return _core.query_rows(cn, [], [])
-	var cv: int = _comp_versions.get(cn, 0)
-	var entry: Dictionary = _all_rows_cache.get(cn, {})
-	if not entry.is_empty() and entry.comp_v == cv and entry.world_v == _world_version:
-		return entry.result
-	var rows: PackedInt32Array = _core.query_rows(cn, [], [])
-	_all_rows_cache[cn] = {"result": rows, "comp_v": cv, "world_v": _world_version}
-	return rows
 
 ## 统一解析查询参数: anchor/must/without 的类名解析 + 访问记录(三条查询路径共用)。
 func _resolve_query_args(anchor, must: Array, without: Array) -> Array:
@@ -484,28 +498,6 @@ func set_columns(values: Dictionary) -> void:
 		norm[cn] = values[comp]
 	_core.set_columns(norm)
 
-## 借出列(写路径消除 COW): 把内部列移出返回独占引用, 回调内写列 O(1) 无深拷贝。
-## 借出期间内部该列为空, 不得被其他路径读取; 必须配 return_columns() 归还。
-func borrow_columns(comps_fields: Array) -> Dictionary:
-	var norm := []
-	for cf in comps_fields:
-		var cn := resolve_component_name(cf.get("comp", &""))
-		if cn == &"":
-			continue
-		_record_access(cn)
-		norm.append({"comp": cn, "fields": cf.get("fields", [])})
-	return _core.borrow_columns(norm)
-
-## 归还借出列(内部列 = 返回数组, 指针交换 O(1))。
-func return_columns(borrowed: Dictionary) -> void:
-	_core.return_columns(borrowed)
-	for comp in borrowed:
-		_mark_dirty(resolve_component_name(comp))
-
-## 是否有未归还的借出列(调试/防御)。
-func is_column_borrowed() -> bool:
-	return _core.is_column_borrowed()
-
 ## 列间运算: 对满足条件的实体, 用 src 组件字段列对目标字段做运算。
 func batch_apply_col(anchor, must: Array, op_comp, op_field: StringName,
 		src_comp, src_field: StringName, op: int, factor: float = 1.0,
@@ -588,8 +580,12 @@ func _entry_valid(entry: Dictionary) -> bool:
 ## 写入缓存条目(锁内调用)。deps = anchor + must + without 全部组件。
 func _cache_store(key: String, anchor_name: StringName, must_names: PackedStringArray,
 		without_names: PackedStringArray, result) -> void:
-	if _query_cache.size() > 64:
-		_query_cache.clear()  # 缓存过大时清空(防内存膨胀)
+	if _query_cache.size() >= QUERY_CACHE_MAX:
+		# 淘汰最早插入的一半, 而不是整表清空: 全清会让"查询种类略多"的场景每帧重建全部行集。
+		# Dictionary 保持插入序, 所以 keys() 前半就是最旧的那批。
+		var keys: Array = _query_cache.keys()
+		for i in int(keys.size() / 2):
+			_query_cache.erase(keys[i])
 	var deps := PackedStringArray()
 	deps.append(anchor_name)
 	for mn in must_names:
@@ -628,6 +624,26 @@ func get_columns(comps_fields: Array) -> Dictionary:
 		_record_access(cn)
 		norm.append({"comp": cn, "fields": cf.get("fields", [])})
 	return _core.get_columns(norm)
+
+## **逐帧读多列就走这里**: 一个组件的 N 个字段 = 1 次跨语言调用 + 1 份返回字典。
+## 返回 {字段: Packed 数组}(键与传入的字段同名)。
+## 对应业界的批量访问器(flecs `field<T>(i)` / EnTT `view.get<T>()` 都是"按组件整批取"),
+## 而不是逐字段 get_column —— 后者是 N 次跨语言 + N 次整列拷贝。
+func columns_of(component, fields: Array) -> Dictionary:
+	var cn := resolve_component_name(component)
+	if cn == &"":
+		return {}
+	_record_access(cn)
+	return _core.get_columns([{"comp": cn, "fields": fields}]).get(cn, {})
+
+## 与 columns_of 配对: 回写一个组件的多列(一次跨语言 + 一次脏标记)。
+func set_columns_of(component, fields: Dictionary) -> void:
+	var cn := resolve_component_name(component)
+	if cn == &"" or fields.is_empty():
+		return
+	_record_access(cn)
+	_core.set_columns({cn: fields})
+	_mark_dirty(cn)
 
 ## 行号 -> 实体 id(anchor 组件的 dense 行号转实体)。
 func entity_of_row(component, row: int) -> int:
@@ -729,6 +745,42 @@ func cmd_remove_component(entity: int, component) -> void:
 		_core.cmd_remove_component(entity, name)
 		_cmd_ops.append(["remove", entity, name])
 		_cmd_mutex.unlock()
+
+# ---- 批量入队: N 条命令 = 1 次跨语言(逐条排队在 2000 实体时要 4000 次调用) ----
+
+## 批量排队创建, 返回占位句柄(负值, 可直接交给 cmd_add_many)。
+func cmd_create_many(count: int) -> PackedInt32Array:
+	if count <= 0:
+		return PackedInt32Array()
+	_cmd_mutex.lock()
+	var handles: PackedInt32Array = _core.cmd_create_many(count)
+	_cmd_create_count += handles.size()
+	for i in handles.size():
+		_cmd_ops.append(["create"])
+	_cmd_mutex.unlock()
+	return handles
+
+## 批量排队: 给一组实体加同一个组件。
+func cmd_add_many(entities: PackedInt32Array, component) -> void:
+	var name := resolve_component_name(component)
+	if name == &"" or entities.is_empty():
+		return
+	_cmd_mutex.lock()
+	_core.cmd_add_many(entities, name)
+	for e in entities:
+		_cmd_ops.append(["add", e, name])
+	_cmd_mutex.unlock()
+
+## 批量排队: 销毁一组实体。
+func cmd_destroy_many(entities: PackedInt32Array) -> void:
+	if entities.is_empty():
+		return
+	_cmd_mutex.lock()
+	_core.cmd_destroy_many(entities)
+	for e in entities:
+		if e >= 0:
+			_cmd_ops.append(["destroy", e])
+	_cmd_mutex.unlock()
 
 ## 待执行命令数。
 func cmd_pending_count() -> int:
@@ -843,9 +895,7 @@ func get_entity_view(entity: int) -> Dictionary:
 		view[cn] = fields
 	return view
 
-## 调试: 设置实体的组件字段值(查看器改值用)。
-func set_entity_field(entity: int, comp, field: StringName, value) -> void:
-	set_field(entity, comp, field, value)
+
 
 ## 调试: 按 archetype(组件组合)分组枚举实体: [{comps, entities}](查看器分组显示用)。
 func get_archetype_groups() -> Array:
@@ -1093,6 +1143,17 @@ func deserialize(data: Dictionary) -> Array:
 ## 内存统计(调试)
 func debug_stats() -> Dictionary:
 	return _core.debug_stats()
+
+## 压缩空 archetype 块: 长跑游戏反复刷怪/死亡后, "已经没有实体的组件组合块"会越积越多,
+## 聚合与遍历每帧都得跳过它们。块下标会重建 ⇒ 匹配缓存/迁移图自动失效, 下一次查询重扫一次。
+## 返回移除的块数(0 = 没有空块, 无副作用)。
+func compact_archetypes() -> int:
+	_struct_mutex.lock()
+	var removed: int = _core.compact_archetypes()
+	if removed > 0:
+		_world_version += 1
+	_struct_mutex.unlock()
+	return removed
 
 # ============================================================
 

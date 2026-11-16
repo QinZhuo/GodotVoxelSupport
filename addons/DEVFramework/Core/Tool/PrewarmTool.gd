@@ -11,6 +11,8 @@ static var _pending: Dictionary = {}
 static var _ready: Dictionary = {}
 ## 组名 → 预热中
 static var _running: Dictionary = {}
+## 组名 → 开始时间(算已用/剩余时间)
+static var _started: Dictionary = {}
 
 ## 单组预热的兜底上限（毫秒）
 const TIMEOUT_MS := 30000
@@ -23,6 +25,7 @@ static func reset() -> void:
 	_pending.clear()
 	_ready.clear()
 	_running.clear()
+	_started.clear()
 
 
 static func register(group: StringName, paths: PackedStringArray) -> void:
@@ -34,6 +37,7 @@ static func prewarm(group: StringName) -> void:
 	if _running.has(group) or _ready.has(group) or not _groups.has(group):
 		return
 	_running[group] = true
+	_started[group] = Time.get_ticks_msec()
 	_run(group)
 
 
@@ -66,6 +70,26 @@ static func get_progress(group: StringName) -> float:
 	return float(done) / paths.size()
 
 
+## 进度 + 已用 + 预计剩余(给加载界面显示"还需 2.3s")。
+## eta_ms = -1 表示尚不可估(还没开始/一项都没完成), 0 表示已完成。
+static func get_status(group: StringName) -> Dictionary:
+	var progress := get_progress(group)
+	var elapsed := 0
+	var eta := 0 if _ready.has(group) else -1
+	if _started.has(group):
+		elapsed = Time.get_ticks_msec() - int(_started[group])
+		# 已有完成项时按"已用 / 完成比例"线性外推
+		if progress > 0.0 and progress < 1.0:
+			eta = int(float(elapsed) * (1.0 - progress) / progress)
+	return {
+		"group": str(group),
+		"progress": progress,
+		"elapsed_ms": elapsed,
+		"eta_ms": eta,
+		"eta_text": "未知" if eta < 0 else PerfTool.fmt_ms(float(eta)),
+	}
+
+
 static func _run(group: StringName) -> void:
 	var paths: PackedStringArray = _groups.get(group, PackedStringArray())
 	var started := Time.get_ticks_msec()
@@ -82,8 +106,12 @@ static func _run(group: StringName) -> void:
 		for p in paths:
 			_poll(p)
 	_running.erase(group)
+	_started.erase(group)
 	_ready[group] = true
-	LogTool.log("预热", "%s 完成: %d 项 %dms" % [group, paths.size(), Time.get_ticks_msec() - started])
+	var elapsed := Time.get_ticks_msec() - started
+	# 历史基线: 下次同组预热在开始前就能给出"大概要多久"
+	PerfTool.record("prewarm:" + str(group), float(elapsed))
+	LogTool.log("预热", "%s 完成: %d 项 %dms" % [group, paths.size(), elapsed])
 
 
 static func _request(path: String) -> void:

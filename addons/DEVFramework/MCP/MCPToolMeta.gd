@@ -57,6 +57,10 @@ const IDEMPOTENT := [
 	"connect_signal", "create_resource",
 	"clear_logs",
 	"refresh_tools",
+	# perf: snapshot/fps/history 只读, reset 只是清掉可重建的历史基线(同 clear_logs 的道理)
+	"perf",
+	# build_native: 重复构建同一份源码得到同一产物, 可安全重放
+	"build_native",
 	# use_instance: 只改"默认目标编辑器"这一个进程内设置, 同参数重放结果相同。
 	"use_instance",
 	# -- 刻意不列 --

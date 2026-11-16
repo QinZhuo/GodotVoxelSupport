@@ -92,7 +92,7 @@ func _on_debug_req(msg: String, data: Array) -> void:
 				EngineDebugger.send_message("ecs_debug:view", [{"entity": e, "view": ecs.get_entity_view(e)}])
 		"set":
 			if data.size() >= 5:
-				ecs.set_entity_field(int(data[1]), data[2], data[3], data[4])
+				ecs.set_field(int(data[1]), data[2], data[3], data[4])
 				var e2 := int(data[1])
 				EngineDebugger.send_message("ecs_debug:view", [{"entity": e2, "view": ecs.get_entity_view(e2)}])
 

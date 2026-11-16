@@ -19,7 +19,7 @@ var _last_times := {}             # 系统耗时缓存(算占比)
 var _entity_edit: LineEdit = null
 var _entity_list: Tree = null
 var _entity_tree: Tree = null
-var _time_hist := {}   # 系统名 -> Array[ms] 历史(算 avg/max)
+var _time_hist := {}   # 系统名 -> PerfTool.Rolling(最近 60 帧, 算 avg/max)
 var _type_hint: Label = null
 
 
@@ -63,6 +63,9 @@ func _build_ui() -> void:
 	_entity_tree = null
 	_topo_label = null
 	_type_hint = null
+	# 历史窗口跟随 UI 重建: 跨会话残留会让 avg/max 混进上一个游戏进程的数据
+	_time_hist.clear()
+	_last_times.clear()
 
 	_ui = (load("res://addons/DEVFramework/ECS/ECSDebuggerView.tscn") as PackedScene).instantiate()
 	_ui.name = "ECS 查看器"
@@ -137,11 +140,11 @@ func _update_systems() -> void:
 			vals[s] = float(x) if (x is float or x is int) else 0.0
 	# 累计历史(最近 60 帧)
 	for s in vals:
-		var arr: Array = _time_hist.get(s, [])
-		arr.append(vals[s])
-		if arr.size() > 60:
-			arr.pop_front()
-		_time_hist[s] = arr
+		var win: PerfTool.Rolling = _time_hist.get(s)
+		if win == null:
+			win = PerfTool.Rolling.new(60)
+			_time_hist[s] = win
+		win.push(float(vals[s]))
 	_sys_tree.clear()
 	var total := 0.0
 	for s in vals:
@@ -153,16 +156,10 @@ func _update_systems() -> void:
 		it.set_text(0, str(s))
 		it.set_text(1, "%.3f" % vals[s])
 		it.set_text(2, "%.1f%%" % (vals[s] / total * 100.0 if total > 0.0 else 0.0))
-		var hist: Array = _time_hist.get(s, [])
-		if hist.size() > 1:
-			var avg := 0.0
-			var mx := 0.0
-			for m in hist:
-				avg += m
-				mx = maxf(mx, m)
-			avg /= hist.size()
-			it.set_text(3, "%.3f" % avg)
-			it.set_text(4, "%.3f" % mx)
+		var win: PerfTool.Rolling = _time_hist.get(s)
+		if win != null and win.size() > 1:
+			it.set_text(3, "%.3f" % win.avg())
+			it.set_text(4, "%.3f" % win.peak())
 			it.set_text(5, "%d" % runs.get(s, 0))
 
 

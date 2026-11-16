@@ -32,19 +32,12 @@ func load_data(dict: Dictionary, data = null) -> void:
 	progress_changed.emit()
 
 
-## 计数信号接入: 任一信号触发 +1, 达到 required 即完成(与 SignalTask 复用同一套断开逻辑)
-func _connect_signals(data) -> void:
-	var task_def := def as CountTaskDef
-	if not task_def or task_def.signals.is_empty():
-		return
-	# 兼容任意参数宽度的信号(计数信号通常无参, 多余实参由 rest 兜底收集)
-	_handler = func(_signal_data = null, ..._extra):
-		if not is_active or is_completed:
+## 触发回调: 任一信号触发 +1, 达到 required 即完成(连接/断开复用基类)
+func _make_handler() -> Callable:
+	return func(_signal_data = null, ..._extra):
+		if not is_active:
 			return
 		_count += 1
 		progress_changed.emit()
 		if _count >= get_required():
 			complete()
-	for s in task_def.signals:
-		if s:
-			s.connect_signal(data, _handler)

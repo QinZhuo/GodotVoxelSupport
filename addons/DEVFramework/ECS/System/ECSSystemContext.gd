@@ -76,7 +76,9 @@ func _auto_execute() -> void:
 			else:
 				cond_qs.append(q)
 		if not uncond.is_empty():
-			var rows: PackedInt32Array = world.query_all_rows(qs[0].anchor)
+			# 走统一的行集入口(带 must/without): 原来用"无条件全量行集"会忽略 must,
+			# 让带 must 但无条件的查询也遍历全部 anchor 行。
+			var rows: PackedInt32Array = world.query_rows(qs[0].anchor, qs[0].must, qs[0].without)
 			for q in uncond:
 				q._apply_rows(rows)
 		if not cond_qs.is_empty():

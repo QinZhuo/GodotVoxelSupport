@@ -14,6 +14,7 @@ const KEY_CROSS_ARCHS := "dev_framework/gdextension_build/cross_archs"       # m
 const GDEXT_TYPES := ["debug", "release", "template_debug", "template_release"]   # 声明键中的构建类型 tag
 const GDEXT_ARCHS := ["arm64", "x86_64", "arm32", "x86_32", "universal"]          # 声明键/规范名中的架构 tag
 const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # 检测到卡死(无新目标且无编译器进程)时自动终止进程树
+const KEY_HARD_TIMEOUT := "dev_framework/gdextension_build/hard_timeout_sec"  # 零推进多久判死(秒, 0=关闭)
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
 const KEY_BUILD_TYPES := "dev_framework/gdextension_build/build_types"   # 要构建的构建类型(Array[String], 如 ["release"]=仅 release); 空=当前编辑器类型+另一版本
 
@@ -25,6 +26,9 @@ const HEARTBEAT_INTERVAL_SEC := 10                            # 输出静默后�
 const DISK_REPORT_TICKS := DISK_REPORT_SEC * TICKS_PER_SEC     # 10 拍
 const HEARTBEAT_SILENT_TICKS := HEARTBEAT_INTERVAL_SEC * TICKS_PER_SEC   # 50 拍
 const STALL_TIMEOUT_SEC := 500                                # 无新目标累计 500s 且无编译器进程 → 判卡死
+## 兜底硬超时: 不看进程表, 只要这么久零新目标就判死并终止。正常编译再慢也会推进,
+## 零推进只可能是被挂住的进程句柄/杀软锁文件 —— 这条兜底专治"进程已死但 is_process_running 仍为 true"。
+const HARD_TIMEOUT_SEC := 600
 const MIN_JOBS := 2                                           # 自动并行度下限
 const MAX_JOBS := 16                                          # 自动并行度上限
 
@@ -88,9 +92,14 @@ func _run() -> void:
 		_state_write("构建进行中(%s.%s): 配置 CMake…" % [type, arch])
 		if not _ready_build_dir(build_dir, source_dir, info, type, arch):
 			return _finish_with("CMake 配置失败(%s.%s)" % [type, arch])
-		var ok := await _build(build_dir, type)
-		if not ok:
-			return _finish_with("编译失败(%s.%s, 查看 build.log)" % [type, arch])
+		# 断点续跑: 上次"编译完成但没走到部署"(编辑器脚本重载会取消挂起的协程, state 会停在
+		# "编译中"; 实测踩过两次)。产物已比已部署库新且不比源码旧 → 直接部署, 不要白编一轮。
+		if _artifact_ready(info, type, arch, target_res):
+			_log("产物已是最新(上次构建未完成部署), 跳过编译: ", _canonical_file(String(info.get("target", "")), type, arch))
+		else:
+			var ok := await _build(build_dir, type)
+			if not ok:
+				return _finish_with("编译失败(%s.%s, 查看 build.log)" % [type, arch])
 		var actual := _deploy(target_res, info, type, arch)
 		if actual == "":
 			return _finish_with("产物部署失败(%s.%s, 查看 build.log)" % [type, arch])
@@ -116,8 +125,13 @@ func _run() -> void:
 			if gdext_res != "":
 				for f in files:
 					var fname := String(f)
+					# 规范名用作"同一个库的另一种名字"判据(回退部署时尤其重要)
+					var fa := _file_arch(fname)
+					if fa == "":
+						fa = _arch()
+					var canon := _canonical_file(target_name, String(type), fa)
 					if _opt(KEY_SYNC_GDEXT, true):
-						_gdext_sync(gdext_res, _abs_to_res(String(info.get("out_dirs", [])[0])).path_join(fname), platform, String(type), fname)
+						_gdext_sync(gdext_res, _abs_to_res(String(info.get("out_dirs", [])[0])).path_join(fname), platform, String(type), fname, canon)
 					else:
 						_gdext_verify(gdext_res, platform, String(type), fname)
 	# 终清: 声明(此刻已是最终形态) + universal 产物之外的一切动态库残留
@@ -143,6 +157,63 @@ func _run() -> void:
 	else:
 		_log("需 项目→重新加载当前项目 生效(引擎启动时才加载扩展)。")
 	_finish()
+
+
+# ============================================================
+# 可编程入口 (MCP build_native / CI 复用)
+# 构建流程只此一份: 菜单 _run() 与 build_now() 走同一套, 不要在调用方重写。
+# ============================================================
+
+const STATE_PATH := "res://.godot/gdextension_build/state.txt"
+const SUMMARY_PATH := "res://.godot/gdextension_build/last_build.txt"
+
+
+## 跑完整流程并等它结束: {ok, summary, state}。
+## [param restart] 完成后是否自动重载编辑器 —— Windows 上编辑器锁着 dll 时, 部署会退化成
+## "改写 .gdextension 指向新产物", 只有重载编辑器才会真正加载新库。
+static func build_now(restart := false) -> Dictionary:
+	var started := int(Time.get_unix_time_from_system())
+	var prev_reload := bool(ProjectSettings.get_setting(KEY_RELOAD_EDITOR, true))
+	ProjectSettings.set_setting(KEY_RELOAD_EDITOR, restart)
+	var inst := GDExtensionRebuild.new()
+	await inst._run()
+	ProjectSettings.set_setting(KEY_RELOAD_EDITOR, prev_reload)
+	var summary := FileTool.read_text(SUMMARY_PATH)
+	# 摘要必须是**本次**构建写的: 卡死/异常退出时旧摘要还留在盘上,
+	# 不校验新鲜度就会把上一次的成功当成这一次的成功(实测踩过)。
+	var ts := 0
+	if FileAccess.file_exists(SUMMARY_PATH):
+		ts = int(FileAccess.get_modified_time(SUMMARY_PATH))
+	var fresh := ts >= started
+	return {
+		"ok": fresh and summary.contains("构建成功"),
+		"summary": summary if fresh else "(本次构建没有产出摘要, 视为失败; 详见 build.log)",
+		"state": FileTool.read_text(STATE_PATH),
+		"log": "res://.godot/gdextension_build/build.log",
+	}
+
+
+## 原生源码是否比已部署的库新 —— "改了 C++ 却没重编"的检测点(测试与 MCP 共用)。
+## 只比时间戳: 源码树与产物足以判定, 不需要额外的指纹文件。
+static func native_status() -> Dictionary:
+	var src_ms := 0
+	for f in FileTool.list_files("res://gdextension/src", PackedStringArray([".cpp", ".h", ".hpp"])):
+		src_ms = maxi(src_ms, int(FileAccess.get_modified_time(f)))
+	var lib_ms := 0
+	var lib := ""
+	for f in FileTool.list_files("res://addons/DEVFramework/Native", PackedStringArray([".dll", ".so", ".dylib"])):
+		var ms := int(FileAccess.get_modified_time(f))
+		if ms > lib_ms:
+			lib_ms = ms
+			lib = f
+	return {
+		"source_ms": src_ms,
+		"lib_ms": lib_ms,
+		"lib": lib,
+		"has_native": src_ms > 0,
+		# 没有原生源码(纯 GDScript 项目)或还没编过产物时不算 stale, 免得误报
+		"stale": src_ms > 0 and lib_ms > 0 and src_ms > lib_ms,
+	}
 
 
 ## 提前失败收尾: 记录摘要与状态, 并弹编辑器提示
@@ -459,7 +530,9 @@ func _cache_files() -> Array[String]:
 	return out
 
 
-## 从 CMakeCache.txt 读某个路径项(前缀匹配 "<key>:<TYPE>=", 覆盖 FILEPATH/INTERNAL 等);
+## 从 CMakeCache.txt 读某个路径项(前缀匹配 "<key>:<TYPE>=", 覆盖 FILEPATH/INTERNAL 等)。
+## 行格式是 `<KEY>:<TYPE>=<VALUE>`, 必须再切掉 `=<TYPE>` 段才能拿到值 ——
+## 少了这一步, 拿到的是 "FILEPATH=C:/..." 这种串, 调用方会把它当成"不存在的路径"。
 func _cache_value(cache: String, key: String) -> String:
 	var f := FileAccess.open(cache, FileAccess.READ)
 	if f == null:
@@ -470,6 +543,9 @@ func _cache_value(cache: String, key: String) -> String:
 		if not line.begins_with(prefix):
 			continue
 		var val := line.substr(prefix.length()).strip_edges()
+		var eq := val.find("=")          # 去掉 "FILEPATH=" / "STRING=" 等类型段
+		if eq >= 0:
+			val = val.substr(eq + 1).strip_edges()
 		if val.is_empty() or val.find("NOTFOUND") >= 0:
 			return ""
 		return val
@@ -488,14 +564,19 @@ func _cache_toolchain_dir(cache: String, key: String) -> String:
 	return ""
 
 
-## 校验缓存里记录的工具链绝对路径是否仍指向真实存在的文件 —— 换机器 / 换工具链安装位置后
-## 这些路径会失效(缓存随文件夹一起被拷走时尤其典型), 此时必须作废重配, 否则 cmake --build
+## 校验缓存里记录的工具链**绝对路径**是否仍指向真实存在的文件 —— 换机器 / 换工具链安装位置后
+## 这些路径会失效(缓存随文件夹一起被拷走时尤其典型), 此时必须作废重配。
+## ⚠ CMake 若在 PATH 中找到工具, cache 里存的是**裸程序名**(cmake.exe / c++.exe / mingw32-make.exe),
+## 那不是"失效路径", 而是交给 PATH 解析的引用。把它当失效会让每一轮构建都 wipe 重建缓存:
+## 缓存一重建, godot-cpp 的绑定就重新生成, 1000+ 目标全部重编 —— 表现就是"永远不增量"(实测踩过)。
 func _dead_toolchain_paths(build_dir: String) -> Array[String]:
 	var cache := build_dir.path_join("CMakeCache.txt")
 	var dead: Array[String] = []
 	for key in ["CMAKE_MAKE_PROGRAM", "CMAKE_CXX_COMPILER", "CMAKE_C_COMPILER", "CMAKE_COMMAND"]:
-		var v := _cache_value(cache, key)
-		if v != "" and not FileAccess.file_exists(v):
+		var v := _cache_value(cache, key).replace("\\", "/")
+		if v == "" or not v.is_absolute_path():
+			continue   # 裸程序名: 由 PATH 解析, 不判失效
+		if not FileAccess.file_exists(v):
 			dead.append("%s=%s" % [key, v.get_file()])
 	return dead
 
@@ -791,6 +872,7 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, t
 			var dead_tc := _dead_toolchain_paths(build_dir)
 			if cached_type == type and cached_arch == arch and dead_tc.is_empty():
 				_log("复用构建目录(以缓存配置为准): ", build_dir)
+				_ensure_ccache(build_dir)
 				return true
 			if not dead_tc.is_empty():
 				_log("缓存工具链已失效(", ", ".join(dead_tc), "), 作废重新配置。")
@@ -813,6 +895,11 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, t
 	if api != "":
 		args.append("-DGODOTCPP_API_VERSION=%s" % api)
 	args.append("-DCMAKE_BUILD_TYPE=%s" % type.capitalize())
+	# ccache: godot-cpp 的绑定生成器是 custom target(每次都重写 gen/*, 内容通常不变),
+	# 没有编译缓存时"改一个 .cpp"会连带重编 1000+ 个 gen 目标; 有 ccache 则整批命中。
+	var cc := _ccache_exe()
+	if cc != "":
+		args.append("-DCMAKE_CXX_COMPILER_LAUNCHER=%s" % cc)
 	# macOS 交叉构建: Apple 工具链原生支持 -arch 交叉, 按架构钉死目标(本机/交叉统一走此参数)
 	if _os_label() == "macos":
 		args.append("-DCMAKE_OSX_ARCHITECTURES=%s" % arch)
@@ -881,6 +968,42 @@ func _has_snapshot(source_dir: String, api: String) -> bool:
 	if api == "":
 		return false
 	return FileAccess.file_exists(_api_file(_abs(source_dir).path_join("godot-cpp/gdextension"), api))
+
+
+## 编译缓存工具(ccache): 存在即用, 不存在就静默跳过 —— 纯加速选项, 不改变构建结果。
+## 为什么要它: godot-cpp 的绑定生成器是 custom target, 每次都重写 gen/*(内容通常不变),
+## 于是"改一个 .cpp"会连带重编 1000+ 个 gen 目标; ccache 按预处理内容哈希命中, 整批跳过。
+static func _ccache_exe() -> String:
+	var out: Array = []
+	return "ccache" if OS.execute("ccache", ["--version"], out) == 0 else ""
+
+
+## 老缓存里没有 launcher 时补一条(只改缓存, 不重新配置整棵树):
+## 否则"复用构建目录"会让 ccache 永远不生效, 增量也就永远不成立。
+func _ensure_ccache(build_dir: String) -> void:
+	var cc := _ccache_exe()
+	if cc == "":
+		return
+	if _cache_has_launcher(build_dir):
+		return
+	var out: Array = []
+	if OS.execute("cmake", ["-B", build_dir, "-DCMAKE_CXX_COMPILER_LAUNCHER=" + cc], out, true) == 0:
+		_log("已为现有构建缓存启用编译缓存(ccache): 下次构建起生效。")
+	else:
+		_print_out(out)
+
+
+static func _cache_has_launcher(build_dir: String) -> bool:
+	var f := FileAccess.open(build_dir.path_join("CMakeCache.txt"), FileAccess.READ)
+	if f == null:
+		return false
+	while not f.eof_reached():
+		var line := f.get_line()
+		if line.begins_with("CMAKE_CXX_COMPILER_LAUNCHER:") and line.get_slice("=", 1).strip_edges() != "":
+			f.close()
+			return true
+	f.close()
+	return false
 
 
 ## 读取 CMakeCache 确认生成器是否为 Makefiles(后端一致性检查)
@@ -971,7 +1094,17 @@ func _build(build_dir: String, type: String) -> bool:
 	_state_write("编译中: 启动…")
 	var tick := 0
 	var silent := 0
-	while OS.is_process_running(pid):
+	var hard_sec := int(ProjectSettings.get_setting(KEY_HARD_TIMEOUT, HARD_TIMEOUT_SEC))
+	var exit_code := -1
+	while true:
+		# 结束判定必须多信号: 只靠 is_process_running 会因 pid 残留(cmd.exe 退出但句柄未回收)死等,
+		# 表现就是"没有编译器进程、日志不再更新、state 卡在编译中"—— 实测踩过一次。
+		exit_code = OS.get_process_exit_code(pid)
+		if exit_code != -1:
+			break
+		if not OS.is_process_running(pid):
+			exit_code = OS.get_process_exit_code(pid)
+			break
 		var had := _drain_log(raw)
 		if had:
 			silent = 0
@@ -987,12 +1120,25 @@ func _build(build_dir: String, type: String) -> bool:
 				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d/%d 目标文件" % [silent / TICKS_PER_SEC, d, t])
 			else:
 				_log_raw("[心跳] 编译仍在进行(已静默 %d 秒)… 已生成 %d 个目标(总数未知)" % [silent / TICKS_PER_SEC, d])
-			# 卡死熔断: 目标长期不增长 + 无编译器子进程存活 → 构建系统在等不存在的子进程(非编译慢)
+			# 目标长期不增长 → 累计"无推进"时长
 			if d == _prev_done_count:
 				_no_advance += HEARTBEAT_INTERVAL_SEC
 			else:
 				_no_advance = 0
 				_prev_done_count = d
+			# 兜底硬超时: 无论进程表怎么说, 只要这么久一个目标都没新增就判死 ——
+			# 正常编译再慢也会推进, 零推进只能是被挂住的进程句柄/杀软锁文件。
+			if hard_sec > 0 and _no_advance >= hard_sec and not _stall_killed:
+				_stall_checked = true
+				_log_raw("硬超时: %d 秒内没有任何新目标, 判定构建卡死。" % _no_advance)
+				if _stall_kill_enabled():
+					_kill_build_tree(pid)
+					_stall_killed = true
+					_log_raw("已终止进程树(pid %d)。可直接重跑(从已编译部分继续)。" % pid)
+				else:
+					_log_raw("自动终止已关闭(ProjectSettings: %s=false)。请在任务管理器结束 cmake/make 后重跑。" % KEY_STALL_KILL)
+				break
+			# 卡死熔断: 目标长期不增长 + 无编译器子进程存活 → 构建系统在等不存在的子进程(非编译慢)
 			if _no_advance >= STALL_TIMEOUT_SEC and not _stall_checked and not _stall_killed:
 				var active := _active_compile_procs()
 				if active == 0:
@@ -1012,13 +1158,18 @@ func _build(build_dir: String, type: String) -> bool:
 	_drain_log(raw)   # 进程退出会 flush 全部缓冲, 收尾再读一次
 	if _stall_killed:
 		_log("构建已被工具终止(疑似卡死)。")
+		_state_write("编译失败: 疑似卡死(已终止进程树)")
 		return false
-	var exit_code := OS.get_process_exit_code(pid)
-	if exit_code == 0:
-		_log("编译成功。")
-	else:
+	if exit_code == -1:
+		exit_code = OS.get_process_exit_code(pid)
+	# 失败状态**立即**落盘: 否则调用方(build_native / 人)只能看到一个永远停在"编译中"的 state
+	if exit_code != 0:
 		_log("编译失败(退出码 %d), 请按上方报错定位。" % exit_code)
-	return exit_code == 0
+		_state_write("编译失败(退出码 %d)" % exit_code)
+		return false
+	_log("编译成功。")
+	_state_write("编译完成: %s" % type)
+	return true
 
 
 ## 子进程原始输出落点(每次构建覆盖)
@@ -1161,6 +1312,30 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String) -
 	return actual
 
 
+## 输出目录里是否已有一个"比已部署库新、且不比源码旧"的产物 —— 即上次编译完成但没部署。
+## 两个条件缺一不可: 只比已部署库新, 改了源码也会误判为"不用编"; 只比源码新, 刚部署完也会说"要重编"。
+func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: String) -> bool:
+	var out_dirs: Array = info.get("out_dirs", [])
+	var target := String(info.get("target", ""))
+	if out_dirs.is_empty() or target == "":
+		return false
+	var out_dir := String(out_dirs[0])
+	var deployed_ms := 0
+	if FileAccess.file_exists(_abs(target_res)):
+		deployed_ms = int(FileAccess.get_modified_time(_abs(target_res)))
+	var src_ms := 0
+	for f in FileTool.list_files("res://gdextension/src", PackedStringArray([".cpp", ".h", ".hpp", ".c"])):
+		src_ms = maxi(src_ms, int(FileAccess.get_modified_time(f)))
+	var best := 0
+	for cand in [_default_out_file(target), _canonical_file(target, type, arch)]:
+		if cand == "":
+			continue
+		var p := out_dir.path_join(cand)
+		if FileAccess.file_exists(p):
+			best = maxi(best, int(FileAccess.get_modified_time(p)))
+	return best > 0 and best > deployed_ms and best >= src_ms
+
+
 ## CMake 默认直出名(macOS lib<名>.dylib / Windows <名>.dll / Linux lib<名>.so; 未钉 OUTPUT_NAME 时 CMake 的输出文件名)
 func _default_out_file(target: String) -> String:
 	match _os_label():
@@ -1174,12 +1349,23 @@ func _default_out_file(target: String) -> String:
 			return ""
 
 
-## 同目录改名(先清旧规范名残留); 失败返回 false(Windows 编辑器锁定 dll 等场景)
+## 同目录改名。目标已存在且**正被加载**(Windows 上编辑器锁着 dll)时, 走 rename-then-replace:
+## MSDN《Dynamic-Link Library Updates》的官方做法 —— 加载中的 DLL 不允许删除/覆盖, 但**允许重命名**,
+## 于是把它旁置成 `<名>.old.<tick>`, 再把新产物改名到规范名。
+## 这样规范名永远是最新的, 声明不用退化成"指向 libdev.dll"这种别名,
+## 也就不存在"debug 键还指着旧的规范名文件 → 构建成功却跑旧库"。
+## 旁置文件当次删不掉(仍被加载), 由 _cleanup_native 在下次构建(通常已重启过)时清掉。
 func _rename_lib(dir_path: String, from_file: String, to_file: String) -> bool:
+	var from_abs := String(dir_path).path_join(from_file)
 	var to_abs := String(dir_path).path_join(to_file)
-	if FileAccess.file_exists(to_abs):
-		DirAccess.remove_absolute(to_abs)
-	return DirAccess.rename_absolute(String(dir_path).path_join(from_file), to_abs) == OK
+	if from_abs == to_abs:
+		return true
+	if FileAccess.file_exists(to_abs) and DirAccess.remove_absolute(to_abs) != OK:
+		var aside := "%s.old.%d" % [to_abs, Time.get_ticks_usec()]
+		if DirAccess.rename_absolute(to_abs, aside) != OK:
+			return false   # 连重命名都不行: 调用方回退到"按实盘名部署 + 改写声明"
+		_log("旧产物被占用, 已旁置: ", aside.get_file(), "(下次构建时清理)")
+	return DirAccess.rename_absolute(from_abs, to_abs) == OK
 
 
 ## 终清: 全部轮次与合并完成后执行一次(轮间零清理, 合并输入绝不误删)。
@@ -1409,9 +1595,11 @@ static func _gdext_key_matches(key: String, platform: String, type: String, arch
 	if has_type and not tags.has(type):
 		return false
 	# 架构校验: 键含架构 tag → 必须与产物架构一致(杜绝 arm64 键被 x86_64 产物覆盖);
+	# 无架构 tag = 通用键(windows.release), 对本架构同样适用 —— 早先要求 "arch == universal"
+	# 会让这类键永远匹配不上, 于是每次同步都**追加一条重复键**(实测写坏过 dev.gdextension)。
 	if not arch_tags.is_empty():
 		return arch_tags.has(arch)
-	return arch == "universal"
+	return true
 
 
 ## 从规范名/声明值文件名中提取架构 tag(无架构段返回 "")
@@ -1422,44 +1610,65 @@ static func _file_arch(file: String) -> String:
 	return m.get_string(1) if m != null else ""
 
 
-## 声明同步: 以实盘产物为准, 把 [libraries] 里"本平台+本类型"的键值写成产物路径。
-func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: String, file: String) -> void:
+## 声明同步: 以实盘产物为准, 把 [libraries] 里"本平台"的键值对齐到本次产物。
+## 命中条件(任一):
+##   · 键 = 本平台 + 本类型(+架构匹配) —— 本次构建直接负责的键;
+##   · 键指向的文件**已不存在** —— 产物改名/清理后留下的悬空声明, 不自愈会让引擎加载失败;
+##   · 键指向的文件就是本次产物的**规范名** —— 同一个库的另一种名字(典型: 一个产物同时供
+##     debug/release 两个键)。Windows 上编辑器锁着 dll 时部署只能回退到非规范名,
+##     若只改"本类型"的键, 调试版编辑器加载的 windows.debug.x86_64 会一直指向旧的规范名文件,
+##     表现是"构建成功但跑的还是旧库"。
+func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: String, file: String,
+		canonical := "") -> void:
 	var parsed := _gdext_parse(gdext_res)
 	if parsed.is_empty():
 		return
 	var lines: PackedStringArray = parsed["lines"]
-	var found_key := ""
-	var found_line := -1
-	var found_val := ""
+	var value := "\"%s\"" % file_res
+	var arch := _file_arch(file)
+	var changed := false
+	var touched: Array[String] = []
 	for ent in parsed["entries"]:
 		var key := String(ent.get("key"))
-		if _gdext_key_matches(key, platform, type, _file_arch(file)):
-			found_key = key
-			found_line = int(ent.get("line"))
-			found_val = String(parsed["values"].get(key, ""))
-			break
-	var value := "\"%s\"" % file_res
-	if found_line >= 0:
-		if found_val == file_res:
-			_log("声明已一致, 无需同步: ", String(gdext_res).get_file(), " [", found_key, "]")
-			return
-		lines[found_line] = "%s = %s" % [found_key, value]
-		_synced.append("%s → %s(更新)" % [found_key, file_res])
-		_log("已同步声明(更新): ", gdext_res, " [", found_key, "] = ", value)
-	else:
-		var arch := _file_arch(file)
-		var new_key := "%s.%s" % [platform, type]
-		if arch != "":
-			new_key += "." + arch
-		var at: int = parsed["lib_end"]
-		while at > 0 and String(lines[at - 1]).strip_edges() == "":
-			at -= 1
-		lines.insert(at, "%s = %s" % [new_key, value])
-		_synced.append("%s → %s(新增)" % [new_key, file_res])
-		_log("已同步声明(新增): ", gdext_res, " [", new_key, "] = ", value)
+		if not key.begins_with(platform + "."):
+			continue
+		var declared := String(parsed["values"].get(key, ""))
+		var matched := _gdext_key_matches(key, platform, type, arch)
+		var dangling := declared != "" and not FileAccess.file_exists(declared)
+		var same_product := canonical != "" and declared.get_file() == canonical
+		if not matched and not dangling and not same_product:
+			continue
+		if declared == file_res:
+			continue   # 已一致
+		lines[int(ent.get("line"))] = "%s = %s" % [key, value]
+		touched.append(key)
+		changed = true
+	if not changed:
+		_log("声明已一致, 无需同步: ", String(gdext_res).get_file())
+		return
+	for k in touched:
+		_synced.append("%s → %s" % [k, file_res])
+		_log("已同步声明: ", gdext_res, " [", k, "] = ", value)
 	if FileTool.atomic_write_text(gdext_res, "\n".join(lines)) != OK:
 		_log("声明写回失败: ", gdext_res)
 		return
+
+	# 本平台没有任何可用的键(纯 CMake 新工程)才补一条; 同名键已存在时改写而非追加,
+	# 否则每轮构建都会多一条重复键(实测写坏过 dev.gdextension)。
+	for ent in parsed["entries"]:
+		if String(ent.get("key")).begins_with(platform + "."):
+			return
+	var new_key := "%s.%s" % [platform, type]
+	if arch != "":
+		new_key += "." + arch
+	var at: int = parsed["lib_end"]
+	while at > 0 and String(lines[at - 1]).strip_edges() == "":
+		at -= 1
+	lines.insert(at, "%s = %s" % [new_key, value])
+	_synced.append("%s → %s(新增)" % [new_key, file_res])
+	_log("已同步声明(新增): ", gdext_res, " [", new_key, "] = ", value)
+	if FileTool.atomic_write_text(gdext_res, "\n".join(lines)) != OK:
+		_log("声明写回失败: ", gdext_res)
 
 
 ## sync 关闭时的退化模式: 只校验不回写 —— 声明与实盘不一致时明确告警(引擎将加载失败)。
@@ -1535,7 +1744,9 @@ func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 	var entry := dir.get_next()
 	while entry != "":
 		var low := entry.to_lower()
-		var is_tmp := entry.begins_with("~") or low.ends_with(".tmp") or low.ends_with(".temp")
+		# .old = 被占用旧库的旁置文件(见 _rename_lib): 当次删不掉, 下次构建时已随重启释放
+		var is_tmp := entry.begins_with("~") or low.ends_with(".tmp") or low.ends_with(".temp") \
+				or low.contains(".old.")
 		var is_lib := low.ends_with(".dll") or low.ends_with(".so") or low.ends_with(".dylib") \
 				or low.ends_with(".a") or low.ends_with(".lib")
 		if not dir.current_is_dir() and not keep_set.has(entry) and (is_tmp or is_lib):

@@ -24,11 +24,20 @@ func _connect_signals(data) -> void:
 	var task_def := def as SignalTaskDef
 	if not task_def or task_def.signals.is_empty():
 		return
-	# 兼容任意参数宽度的信号：无参(如 Button.pressed)、单参(自定义 data 回调)、
-	_handler = func(_signal_data = null, ..._extra):
-		if not is_active or is_completed:
+	# 必须用局部 handler: 连第一个信号就可能"状态兜底"立即回调→完成→_teardown 清空 _handler,
+	# 继续用 _handler 会把空 Callable 传给后续 Def(报 null instance)
+	var handler := _make_handler()
+	_handler = handler
+	for s in task_def.signals:
+		if s == null:
+			continue
+		s.connect_signal(data, handler)
+		if not is_active:
+			break   # 连接期已触发完成, 剩余信号不必再连
+
+## 触发回调(子类覆写)。兼容任意参数宽度的信号：无参(如 Button.pressed)、单参(自定义 data 回调)等
+func _make_handler() -> Callable:
+	return func(_signal_data = null, ..._extra):
+		if not is_active:
 			return
 		complete()
-	for s in task_def.signals:
-		if s:
-			s.connect_signal(data, _handler)
