@@ -842,6 +842,7 @@ func _register_build_tool() -> void:
 		{"type": "object", "properties": {
 			"action": {"type": "string", "enum": ["status", "build"], "description": "status=检查是否需要重编(不编译); build=执行构建"},
 			"restart": {"type": "boolean", "description": "action=build 时: 完成后是否自动重载编辑器(默认 false, 由调用方决定何时重启)"},
+			"plugin": {"type": "string", "description": "action=build 时: 只构建某个原生目标(插件的 target 名, 如 dev); 默认 all 构建全部。多插件工程改一个插件时用它省掉其它插件的编译"},
 		}, "required": ["action"]},
 		_call_build_native_local)
 

@@ -65,7 +65,8 @@ C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/
 
 - 多项目并存：`list_instances` → `use_instance` 选默认，或单次调用带 `instance`
 - 常用：`validate` / `get_logs` / `eval_code` / `run_tests` / `perf` / `build_native` / `game_control` / `restart_editor`
-- 改 `gdextension/src/**` 后**必须** `build_native`（`action=status` 查过期 → `action=build` 构建 → 重载生效），否则测试跑的是旧库且全绿
+- 改 `addons/DEVFramework/Native/src/**` 后**必须** `build_native`（`action=status` 查过期 → `action=build` 构建 → 重载生效），否则测试跑的是旧库且全绿
+- 目录约定：**插件自己的 C++ 放 `addons/<插件>/Native/src`**（随插件分发）；构建区与第三方（godot-cpp）在项目根 `gdextension/`。多个插件各有 `Native/src` 时各编一个库、共用一份 godot-cpp
 - 导出包默认不带入口（`dev_framework/mcp/runtime_enabled = false`）
 
 ## 引擎陷阱

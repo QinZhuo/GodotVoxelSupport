@@ -1,0 +1,13 @@
+[configuration]
+
+entry_symbol = "devframework_library_init"
+compatibility_minimum = "4.3"
+
+[libraries]
+
+macos.debug = "res://addons/DEVFramework/Native/libdevframework.macos.release.universal.dylib"
+macos.release = "res://addons/DEVFramework/Native/libdevframework.macos.release.universal.dylib"
+windows.debug.x86_64 = "res://addons/DEVFramework/Native/devframework.windows.release.x86_64.dll"
+windows.release.x86_64 = "res://addons/DEVFramework/Native/devframework.windows.release.x86_64.dll"
+linux.debug.x86_64 = "res://addons/DEVFramework/Native/libdevframework.linux.debug.x86_64.so"
+linux.release.x86_64 = "res://addons/DEVFramework/Native/libdevframework.linux.release.x86_64.so"

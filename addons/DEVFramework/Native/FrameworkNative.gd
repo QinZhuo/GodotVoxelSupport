@@ -8,7 +8,7 @@ extends RefCounted
 ##   - 提供稳定的类实例化（ClassDB 派发 + 脚本 resource_path 加载两条路径）
 
 ## 共享原生库配置路径（相对 res://）
-const NATIVE_EXTENSION_PATH := "res://addons/DEVFramework/Native/dev.gdextension"
+const NATIVE_EXTENSION_PATH := "res://addons/DEVFramework/Native/devframework.gdextension"
 
 ## 已缓存的原生实例（模块类名 → Object）
 static var _cache: Dictionary = {}

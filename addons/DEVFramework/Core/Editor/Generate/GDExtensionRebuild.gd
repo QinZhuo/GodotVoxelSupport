@@ -17,6 +17,43 @@ const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # �
 const KEY_HARD_TIMEOUT := "dev_framework/gdextension_build/hard_timeout_sec"  # 零推进多久判死(秒, 0=关闭)
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
 const KEY_BUILD_TYPES := "dev_framework/gdextension_build/build_types"   # 要构建的构建类型(Array[String], 如 ["release"]=仅 release); 空=当前编辑器类型+另一版本
+const KEY_NATIVE_TARGET := "dev_framework/gdextension_build/target_name"   # 共享库目标名(产物名/入口符号都基于它), 默认 dev
+const SCAFFOLD_PATH := "res://addons/DEVFramework/Core/Editor/Generate/NativeScaffold.gd"
+## 原生源码目录: 插件内(推荐, 随插件一起拷走) → 项目根(旧布局兼容) → addons/* 自动发现。
+## 插件内那份带 .gdignore, 编辑器不会去扫 godot-cpp 的上万个文件。
+const NATIVE_SRC_DIR := "res://addons/DEVFramework/NativeSrc"
+const LEGACY_SRC_DIR := "res://gdextension"
+
+
+## 所有插件的原生源码目录: addons/*/Native/src(多插件模型 A: 每插件一库, 共用 godot-cpp)。
+## 兼容旧的 res://gdextension/src(单工程布局)。
+static func native_source_dirs() -> Array[String]:
+	var out: Array[String] = []
+	var root := ProjectSettings.globalize_path("res://").simplify_path()
+	var scaf: GDScript = load(SCAFFOLD_PATH) as GDScript
+	if scaf != null:
+		for p in scaf.discover_plugins(root):
+			out.append("res://" + String(p["src_abs"]).replace(root, "").replace("\\", "/").trim_prefix("/"))
+	if out.is_empty():
+		for d in [NATIVE_SRC_DIR, LEGACY_SRC_DIR]:
+			if DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(String(d).path_join("src"))):
+				out.append(String(d))
+	return out
+
+
+## 首个原生源码目录(单工程兼容用; 多插件时请用 native_source_dirs)。
+static func native_source_dir() -> String:
+	var dirs := native_source_dirs()
+	return dirs[0] if not dirs.is_empty() else ""
+
+
+## 各插件源码的最新 mtime —— "改了 C++ 却没重编" 的公共判定量。
+static func _native_src_mtime(exts: PackedStringArray) -> int:
+	var ms := 0
+	for d in native_source_dirs():
+		for f in FileTool.list_files(d, exts):
+			ms = maxi(ms, int(FileAccess.get_modified_time(f)))
+	return ms
 
 ## 异步构建轮询节拍: 每 0.2s 一拍; 下面所有间隔都按"拍"从秒换算, 改节拍即整体缩放
 const POLL_INTERVAL_SEC := 0.2
@@ -48,6 +85,7 @@ var _stall_checked := false # 卡死检测已判定并处理
 var _stall_killed := false  # 已自动终止卡死进程树
 var _synced: Array[String] = []   # 本次运行同步的声明条目(最终摘要展示)
 var _build_types: Array[String] = []   # 本次实际要构建的构建类型(由配置决定, 部署保活/清理据此收敛)
+var _plugin_filter := "all"   # 只构建某个原生目标(插件 target 名); "all"/"" = 全部
 
 
 func _run() -> void:
@@ -55,15 +93,26 @@ func _run() -> void:
 	_start_ms = Time.get_ticks_msec()
 	var cache_dir := _abs("res://.godot/gdextension_build")
 	DirAccess.make_dir_recursive_absolute(cache_dir)
-	_state_write("构建进行中: 定位扩展…")
+	_state_write("构建进行中: 检查原生工程骨架…")
 	_log("━━━━ GDExtension 一键构建 ━━━━")
+	# 零配置: gdextension/src 下只要有 .cpp, 就把 CMakeLists / godot-cpp / 自动注册 / 声明补齐
+	_ensure_scaffold()
+	_state_write("构建进行中: 定位扩展…")
 	var loc := _locate()
 	if loc.is_empty():
 		return _finish()
 	var source_dir: String = loc.get("source")
-	var targets: Array = loc.get("targets")
-	if targets.is_empty():
+	var all_targets: Array = loc.get("targets")
+	if all_targets.is_empty():
 		return _finish()
+	var targets: Array = filter_targets(all_targets, _plugin_filter)
+	if targets.is_empty():
+		var names: Array[String] = []
+		for tg in all_targets:
+			var n := String(tg.get("target", ""))
+			if not names.has(n):
+				names.append(n)
+		return _finish_with("没有名为 '%s' 的原生目标, 可选: %s" % [_plugin_filter, ", ".join(names)])
 	_log("源码工程: ", source_dir)
 
 	if not _precheck(source_dir):
@@ -76,16 +125,20 @@ func _run() -> void:
 		await _sync_godot_cpp(source_dir)
 	# 双版本 × 架构依次: 配置 → 编译 → 部署验证 (当前编辑器类型+本机架构先行, 编辑器尽快可用)
 	var info: Dictionary = loc.get("info")
-	var gdext_res := String(loc.get("gdext"))
-	if gdext_res == "":
-		_log("产物输出目录未发现 *.gdextension, 跳过声明同步(引擎加载扩展仍需自行提供)。")
+	var gdext_by_target: Dictionary = loc.get("gdext_by_target", {})
 	var done: Array[String] = []
-	var type_archs: Dictionary = {}   # 类型 → 已部署架构产物文件名列表(lipo 合并用)
+	# 分组键 = "<target>|<type>": 多插件时每个插件的产物/声明必须各自成组,
+	# 只按 type 做键会把两个插件的文件混在一起(lipo 会把别家的库当自己的架构产物、同步会写错声明)。
+	var groups: Dictionary = {}       # key -> 已部署文件名列表
+	var group_out: Dictionary = {}    # key -> 输出目录
+	var group_gdext: Dictionary = {}  # key -> 该插件的 .gdextension(res://)
 	for tg in targets:
 		var type := String(tg.get("type"))
 		var arch := String(tg.get("arch"))
+		var tgt := String(tg.get("target", ""))
+		var out_dir := String(tg.get("out_dir", ""))
 		var target_res := String(tg.get("artifact"))
-		_log("──── %s / %s ────" % [type, arch])
+		_log("──── %s / %s / %s ────" % [tgt, type, arch])
 		var build_dir := _pick_build_dir(source_dir, type, arch)
 		if build_dir.is_empty():
 			return _finish()
@@ -94,48 +147,56 @@ func _run() -> void:
 			return _finish_with("CMake 配置失败(%s.%s)" % [type, arch])
 		# 断点续跑: 上次"编译完成但没走到部署"(编辑器脚本重载会取消挂起的协程, state 会停在
 		# "编译中"; 实测踩过两次)。产物已比已部署库新且不比源码旧 → 直接部署, 不要白编一轮。
-		if _artifact_ready(info, type, arch, target_res):
-			_log("产物已是最新(上次构建未完成部署), 跳过编译: ", _canonical_file(String(info.get("target", "")), type, arch))
+		if _artifact_ready(info, type, arch, target_res, out_dir, tgt):
+			_log("产物已是最新(上次构建未完成部署), 跳过编译: ", _canonical_file(tgt, type, arch))
 		else:
-			var ok := await _build(build_dir, type)
+			var only := "" if String(_plugin_filter).strip_edges().to_lower() in ["", "all"] else tgt
+			var ok := await _build(build_dir, type, only)
 			if not ok:
 				return _finish_with("编译失败(%s.%s, 查看 build.log)" % [type, arch])
-		var actual := _deploy(target_res, info, type, arch)
+		var actual := _deploy(target_res, info, type, arch, out_dir, tgt)
 		if actual == "":
 			return _finish_with("产物部署失败(%s.%s, 查看 build.log)" % [type, arch])
 		done.append(target_res)
-		if not type_archs.has(type):
-			type_archs[type] = []
-		type_archs[type].append(actual)
-	# 各类型多架构产物齐 → lipo 合并 universal 并删除输入架构文件(macOS 自带 lipo; 非 macOS/单架构自动跳过);
-	var target_name := String(info.get("target", ""))
+		var key := "%s|%s" % [tgt, type]
+		if not groups.has(key):
+			groups[key] = []
+		groups[key].append(actual)
+		group_out[key] = out_dir
+		group_gdext[key] = String(gdext_by_target.get(tgt, ""))
+	# 每个 (插件, 类型) 一组: 多架构产物齐 → lipo 合并 universal → 同步该插件自己的声明
 	var platform := _os_label()
-	if target_name != "":
-		for type in type_archs:
-			var files: Array = type_archs[type]
-			var uni := _lipo_merge(info, target_name, String(type), files)
-			if uni != "":
-				done.append(uni)
-				if gdext_res != "":
-					if _opt(KEY_SYNC_GDEXT, true):
-						_gdext_adopt_universal(gdext_res, platform, String(type), uni)
-					else:
-						_log("警告: 声明未指向 universal(%s.%s), 请切换 %s.%s.universal 键或开启 sync_gdextension。" % [type, type, platform, type])
-				continue
-			if gdext_res != "":
-				for f in files:
-					var fname := String(f)
-					# 规范名用作"同一个库的另一种名字"判据(回退部署时尤其重要)
-					var fa := _file_arch(fname)
-					if fa == "":
-						fa = _arch()
-					var canon := _canonical_file(target_name, String(type), fa)
-					if _opt(KEY_SYNC_GDEXT, true):
-						_gdext_sync(gdext_res, _abs_to_res(String(info.get("out_dirs", [])[0])).path_join(fname), platform, String(type), fname, canon)
-					else:
-						_gdext_verify(gdext_res, platform, String(type), fname)
-	# 终清: 声明(此刻已是最终形态) + universal 产物之外的一切动态库残留
-	_final_cleanup(info, gdext_res, target_name)
+	for key in groups:
+		var parts := String(key).split("|")
+		var tname := parts[0]
+		var btype := parts[1]
+		var files: Array = groups[key]
+		var gd := String(group_gdext.get(key, ""))
+		var odir := String(group_out.get(key, ""))
+		if gd == "":
+			_log("插件 %s 的产物目录未发现 *.gdextension, 跳过声明同步。" % tname)
+			continue
+		var uni := _lipo_merge(odir, tname, btype, files)
+		if uni != "":
+			done.append(uni)
+			if _opt(KEY_SYNC_GDEXT, true):
+				_gdext_adopt_universal(gd, platform, btype, uni)
+			else:
+				_log("警告: 声明未指向 universal(%s.%s), 请切换 %s.%s.universal 键或开启 sync_gdextension。" % [btype, btype, platform, btype])
+			continue
+		for f in files:
+			var fname := String(f)
+			# 规范名用作"同一个库的另一种名字"判据(回退部署时尤其重要)
+			var fa := _file_arch(fname)
+			if fa == "":
+				fa = _arch()
+			var canon := _canonical_file(tname, btype, fa)
+			if _opt(KEY_SYNC_GDEXT, true):
+				_gdext_sync(gd, _abs_to_res(odir).path_join(fname), platform, btype, fname, canon)
+			else:
+				_gdext_verify(gd, platform, btype, fname)
+	# 终清: 逐插件清理(白名单取并集, 绝不跨插件误删)
+	_final_cleanup(targets, gdext_by_target)
 	var elapsed := (Time.get_ticks_msec() - _start_ms) / 1000.0
 	var types_txt: Array[String] = []
 	for tg in targets:
@@ -171,11 +232,13 @@ const SUMMARY_PATH := "res://.godot/gdextension_build/last_build.txt"
 ## 跑完整流程并等它结束: {ok, summary, state}。
 ## [param restart] 完成后是否自动重载编辑器 —— Windows 上编辑器锁着 dll 时, 部署会退化成
 ## "改写 .gdextension 指向新产物", 只有重载编辑器才会真正加载新库。
-static func build_now(restart := false) -> Dictionary:
+## [param plugin] 只构建某个原生目标(插件 target 名); "all"/"" = 全部。
+static func build_now(restart := false, plugin := "all") -> Dictionary:
 	var started := int(Time.get_unix_time_from_system())
 	var prev_reload := bool(ProjectSettings.get_setting(KEY_RELOAD_EDITOR, true))
 	ProjectSettings.set_setting(KEY_RELOAD_EDITOR, restart)
 	var inst := GDExtensionRebuild.new()
+	inst._plugin_filter = plugin
 	await inst._run()
 	ProjectSettings.set_setting(KEY_RELOAD_EDITOR, prev_reload)
 	var summary := FileTool.read_text(SUMMARY_PATH)
@@ -196,9 +259,7 @@ static func build_now(restart := false) -> Dictionary:
 ## 原生源码是否比已部署的库新 —— "改了 C++ 却没重编"的检测点(测试与 MCP 共用)。
 ## 只比时间戳: 源码树与产物足以判定, 不需要额外的指纹文件。
 static func native_status() -> Dictionary:
-	var src_ms := 0
-	for f in FileTool.list_files("res://gdextension/src", PackedStringArray([".cpp", ".h", ".hpp"])):
-		src_ms = maxi(src_ms, int(FileAccess.get_modified_time(f)))
+	var src_ms := _native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp"]))
 	var lib_ms := 0
 	var lib := ""
 	for f in FileTool.list_files("res://addons/DEVFramework/Native", PackedStringArray([".dll", ".so", ".dylib"])):
@@ -206,7 +267,27 @@ static func native_status() -> Dictionary:
 		if ms > lib_ms:
 			lib_ms = ms
 			lib = f
+	# 逐插件新鲜度: 多插件时"哪个插件旧了"比一个全局布尔有用得多
+	var per_target: Array = []
+	var scaf: GDScript = load(SCAFFOLD_PATH) as GDScript
+	if scaf != null:
+		var root := ProjectSettings.globalize_path("res://").simplify_path()
+		for p in scaf.discover_plugins(root):
+			var src_abs := String(p["src_abs"])
+			var nat_abs := String(p["native_abs"])
+			var s_ms := 0
+			for f in FileTool.list_files(src_abs, PackedStringArray([".cpp", ".h", ".hpp", ".c"])):
+				s_ms = maxi(s_ms, int(FileAccess.get_modified_time(f)))
+			var l_ms := 0
+			for f in FileTool.list_files(nat_abs, PackedStringArray([".dll", ".so", ".dylib"])):
+				l_ms = maxi(l_ms, int(FileAccess.get_modified_time(f)))
+			per_target.append({
+				"target": String(p["target"]), "plugin": String(p["plugin"]),
+				"stale": s_ms > 0 and l_ms > 0 and s_ms > l_ms,
+				"source_ms": s_ms, "lib_ms": l_ms,
+			})
 	return {
+		"targets": per_target,
 		"source_ms": src_ms,
 		"lib_ms": lib_ms,
 		"lib": lib,
@@ -229,12 +310,13 @@ func _finish_with(result: String) -> void:
 ## 定位构建目标 —— 只需 CMakeLists 给出 目标名 + 输出目录:
 func _locate() -> Dictionary:
 	var dirs: Array[String] = []
-	if _is_ext_source("res://gdextension"):
-		dirs.append("res://gdextension")
-	else:
+	for cand in [NATIVE_SRC_DIR, LEGACY_SRC_DIR]:
+		if _is_ext_source(String(cand)):
+			dirs.append(String(cand))
+	if dirs.is_empty():
 		dirs = discover_source_dirs()
 	if dirs.is_empty():
-		_log("未发现 GDExtension 工程。请确认 res://gdextension(或 addons/*/) 含 CMakeLists.txt + godot-cpp/ submodule。")
+		_log("未发现 GDExtension 工程。请确认 %s(或 addons/*/) 含 CMakeLists.txt + godot-cpp/ submodule。" % NATIVE_SRC_DIR)
 		return {}
 	var source_dir: String = dirs[0]
 	if dirs.size() > 1:
@@ -248,28 +330,43 @@ func _locate() -> Dictionary:
 	var types: Array[String] = _plan_build_types()
 	var archs := _plan_archs(gdext_res)
 	var targets: Array = []
-	for t in types:
-		for a in archs:
-			var art := _expected_artifact(info, t, a)
-			if art.is_empty():
-				_log("CMakeLists.txt 无法推导产物: 需要 add_library(<name> SHARED) 与 *_OUTPUT_DIRECTORY 直出目录。")
-				return {}
-			targets.append({"type": t, "arch": a, "artifact": String(art.get("res"))})
-	_log("已锁定(CMake 推导): ", source_dir)
+	var outputs: Dictionary = info.get("outputs", {})
+	var names: Array = outputs.keys()
+	if names.is_empty():
+		names = [String(info.get("target", ""))]
+	for tgt in names:
+		var od: String = String(outputs.get(tgt, ""))
+		for t in types:
+			for a in archs:
+				var art := _expected_artifact(info, t, a, od, String(tgt))
+				if art.is_empty():
+					_log("CMakeLists.txt 无法推导产物: 需要 add_library(<name> SHARED) 与 *_OUTPUT_DIRECTORY 直出目录。")
+					return {}
+				targets.append({"target": String(tgt), "type": t, "arch": a,
+						"artifact": String(art.get("res")), "out_dir": od})
+	# 每个 target 自己的声明(多插件时不能共用一份)
+	var gdext_by_target := {}
+	for tgt in names:
+		gdext_by_target[String(tgt)] = _find_gdextension_for(String(tgt), String(outputs.get(tgt, "")), info)
+	_log("已锁定(CMake 推导): ", source_dir, " 目标: ", ", ".join(PackedStringArray(names)))
 	for tg in targets:
-		_log("预期产物(%s.%s): %s" % [String(tg.get("type")), String(tg.get("arch")), String(tg.get("artifact"))])
-	return {"source": source_dir, "targets": targets, "info": info, "gdext": gdext_res}
+		_log("预期产物(%s,%s.%s): %s" % [String(tg.get("target")), String(tg.get("type")),
+				String(tg.get("arch")), String(tg.get("artifact"))])
+	return {"source": source_dir, "targets": targets, "info": info,
+			"gdext": gdext_by_target.get(names[0], ""), "gdext_by_target": gdext_by_target}
 
 
 ## 由 CMake 信息推导指定构建类型/架构的预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
-func _expected_artifact(info: Dictionary, type: String, arch := "") -> Dictionary:
+func _expected_artifact(info: Dictionary, type: String, arch := "", out_dir := "", tgt := "") -> Dictionary:
 	var out_dirs: Array = info.get("out_dirs", [])
-	var target := String(info.get("target", ""))
-	if out_dirs.is_empty() or target == "":
+	var target := tgt if tgt != "" else String(info.get("target", ""))
+	var dir := out_dir
+	if dir == "" and not out_dirs.is_empty():
+		dir = String(out_dirs[0])
+	if dir == "" or target == "":
 		return {}
 	var file := _canonical_file(target, type, arch)
-	var out_abs := String(out_dirs[0])
-	return {"file": file, "res": _abs_to_res(out_abs).path_join(file), "abs": out_abs.path_join(file)}
+	return {"file": file, "res": _abs_to_res(dir).path_join(file), "abs": String(dir).path_join(file)}
 
 
 ## 本轮要构建的架构列表: 本机架构恒在; macOS 额外补齐 *.gdextension 声明中缺失的架构
@@ -352,8 +449,9 @@ func _abs_to_res(p: String) -> String:
 ## 自动发现工程目录候选(静态, 供外部/MCP 复用): 项目根 gdextension/ + 各 addons/*/
 static func discover_source_dirs() -> Array[String]:
 	var out: Array[String] = []
-	if _is_ext_source("res://gdextension"):
-		out.append("res://gdextension")
+	for cand in [NATIVE_SRC_DIR, LEGACY_SRC_DIR]:
+		if _is_ext_source(String(cand)):
+			out.append(String(cand))
 	var addons := DirAccess.open("res://addons")
 	if addons:
 		addons.list_dir_begin()
@@ -392,7 +490,7 @@ func _read_cmake_info(project_dir: String) -> Dictionary:
 		info.target = m.get_string(1)
 
 	var re_out := RegEx.new()
-	re_out.compile("(?:LIBRARY|RUNTIME|ARCHIVE)_OUTPUT_DIRECTORY\\s+([^\\s#]+)")
+	re_out.compile("(?:LIBRARY|RUNTIME|ARCHIVE)_OUTPUT_DIRECTORY\\s+([^\\s#)]+)")
 	var out_set := {}
 	for om in re_out.search_all(text):
 		var raw: String = om.get_string(1).trim_prefix('"').trim_suffix('"')
@@ -403,6 +501,10 @@ func _read_cmake_info(project_dir: String) -> Dictionary:
 		if not normalized.is_empty() and not out_set.has(normalized):
 			out_set[normalized] = true
 			info.out_dirs.append(normalized)
+
+	# 多 target(每个原生插件一个): 记录 target -> 输出目录。部署/声明同步按 target 分别落位,
+	# 否则多插件工程只有第一个目标会被正确命名与校验(其余产物留在目录里但没人管)。
+	info.outputs = parse_target_outputs(text, _abs(project_dir))
 
 	var re_api := RegEx.new()
 	re_api.compile("set\\s*\\(\\s*GODOTCPP_API_VERSION\\s+(?:\"([0-9.]+)\"|([0-9.]+))")
@@ -442,8 +544,39 @@ func _read_cmake_info(project_dir: String) -> Dictionary:
 	return info
 
 
+## 解析 CMakeLists 里每个 target 的输出目录: {target: 绝对路径}。
+## 按 `add_library(<name>` 分段, 只取该段之后的 `*_OUTPUT_DIRECTORY` —— 多插件时每个 target
+## 的产物落在自己的 Native 目录, 部署/清理/声明同步都依赖这份映射。
+static func parse_target_outputs(text: String, cmake_dir_abs: String) -> Dictionary:
+	var re_out := RegEx.new()
+	# 排除右括号: 单行写法 `set_target_properties(X PROPERTIES RUNTIME_OUTPUT_DIRECTORY <path>)` 里
+	# 路径后面紧跟 `)`, 不排除就会把括号当成路径的一部分(实测踩过, 部署会去找不存在的目录)。
+	re_out.compile("(?:LIBRARY|RUNTIME|ARCHIVE)_OUTPUT_DIRECTORY\\s+([^\\s#)]+)")
+	var re_addlib := RegEx.new()
+	re_addlib.compile("add_library\\s*\\(\\s*([A-Za-z_][A-Za-z0-9_]*)")
+	var outputs := {}
+	var cur_tgt := ""
+	for line in text.split("\n"):
+		var lm := re_addlib.search(line)
+		if lm != null:
+			cur_tgt = lm.get_string(1)
+			continue
+		if cur_tgt == "":
+			continue
+		var om := re_out.search(line)
+		if om == null:
+			continue
+		var raw: String = om.get_string(1).trim_prefix('"').trim_suffix('"')
+		if raw.is_empty() or raw.contains("${CMAKE_CURRENT_BINARY_DIR}"):
+			continue
+		var nz := _normalize_abs(raw.replace("${CMAKE_CURRENT_SOURCE_DIR}", cmake_dir_abs))
+		if not nz.is_empty():
+			outputs[cur_tgt] = nz
+	return outputs
+
+
 ## 规范化绝对路径(展开 .. 与 .), 支持 Windows "C:/..." 与 POSIX "/..."
-func _normalize_abs(path: String) -> String:
+static func _normalize_abs(path: String) -> String:
 	path = path.replace("\\", "/")
 	var is_win := path.length() > 2 and path[1] == ":"
 	var drive := path.substr(0, 2) if is_win else ""
@@ -629,6 +762,48 @@ static func _hint_hit(low: String) -> bool:
 		if low.contains(h):
 			return true
 	return false
+
+## 目标名(共享库名/入口符号/产物名前缀), 默认 "dev"。
+static func native_target_name() -> String:
+	var t := String(ProjectSettings.get_setting(KEY_NATIVE_TARGET, "dev")).strip_edges()
+	return t if t != "" else "dev"
+
+
+## 引擎主次版本("4.7"), 作为 godot-cpp API 版本的缺省提示。
+static func _engine_api_hint() -> String:
+	var v := Engine.get_version_info()
+	return "%d.%d" % [int(v.get("major", 4)), int(v.get("minor", 0))]
+
+
+## 零配置骨架: 只要 res://gdextension/src 下有 .cpp, 就把构建需要的一切补齐。
+## 只补缺失项(见 NativeScaffold): 手写 CMakeLists 的工程完全不受影响。
+func _ensure_scaffold() -> void:
+	# 多插件: 每个 addons/<Plugin>/Native/src 有 .cpp 就算一个插件, 各编一个库(共用 godot-cpp)。
+	# 用 load 而不是全局类名: 新增的 class_name 要等编辑器重载脚本缓存才可见,
+	# 而构建工具经常在"刚加完文件"的状态下被调用(与 ECSNative.instantiate_script 同一个理由)。
+	var scaf: GDScript = load(SCAFFOLD_PATH) as GDScript
+	if scaf == null:
+		_log("警告: NativeScaffold 脚本缺失, 跳过骨架生成。")
+		return
+	var root := ProjectSettings.globalize_path("res://").simplify_path()
+	var res: Dictionary = scaf.ensure_project(root, _engine_api_hint(), true,
+			func(msg: String) -> void: _log(msg))
+	var plugins: Array = res.get("plugins", [])
+	if plugins.is_empty():
+		return
+	var names: Array[String] = []
+	for p in plugins:
+		names.append("%s(%s)" % [String(p["plugin"]), String(p["target"])])
+	_log("原生插件 %d 个: %s" % [plugins.size(), ", ".join(names)])
+	var created: Array = res.get("created", [])
+	for item in created:
+		_log("骨架自动生成: ", String(item))
+	# 跨插件同名类会让引擎在加载时报难以定位的错, 提前判出
+	var conflicts: Array = res.get("conflicts", [])
+	for c in conflicts:
+		_log("错误: 类名 %s 同时出现在插件 %s —— 同进程注册同名类会冲突, 请改名。" % [
+			String(c["name"]), ", ".join(c["targets"])])
+
 
 func _precheck(source_dir: String) -> bool:
 	var abs := _abs(source_dir)
@@ -1050,8 +1225,20 @@ func _cache_osx_archs(build_dir: String) -> String:
 
 # ------------------------------------------------------------ 异步构建
 
-func _build(build_dir: String, type: String) -> bool:
-	_log("开始编译 (", type, ")…… 编辑器保持可用, 输出实时回显。")
+## 按插件/目标名过滤构建目标(纯函数, 便于测试): "all"/"" = 全部; 否则大小写不敏感匹配 target 名。
+static func filter_targets(targets: Array, plugin: String) -> Array:
+	var want := plugin.strip_edges().to_lower()
+	if want == "" or want == "all":
+		return targets
+	var out: Array = []
+	for tg in targets:
+		if String(tg.get("target", "")).to_lower() == want:
+			out.append(tg)
+	return out
+
+
+func _build(build_dir: String, type: String, tgt := "") -> bool:
+	_log("开始编译 (%s%s)…… 编辑器保持可用, 输出实时回显。" % [type, "" if tgt == "" else ", " + tgt])
 	var jobs := int(ProjectSettings.get_setting(KEY_JOBS, 0))
 	if jobs <= 0:
 		jobs = clampi(OS.get_processor_count(), MIN_JOBS, MAX_JOBS)
@@ -1061,8 +1248,10 @@ func _build(build_dir: String, type: String) -> bool:
 	_raw_log_pos = 0
 	var shell := "sh"
 	var run_args := PackedStringArray()
-	var cmd_line := "cmake --build \"%s\" --config %s --parallel %d > \"%s\" 2>&1" \
-			% [build_dir, type.capitalize(), jobs, raw]
+	# 指定插件时用 --target 只编那一个库(省时间); all 时一次调用编全部目标
+	var tgt_arg := "" if tgt == "" else " --target %s" % tgt
+	var cmd_line := "cmake --build \"%s\" --config %s --parallel %d%s > \"%s\" 2>&1" \
+			% [build_dir, type.capitalize(), jobs, tgt_arg, raw]
 	if OS.get_name() == "Windows":
 		# 写入临时 .cmd 再执行, 避免 cmd /c 内联多层引号在含空格路径下转义出错
 		var bat := raw.get_base_dir().path_join("run_build.cmd")
@@ -1266,9 +1455,12 @@ func _drain_log(raw_path: String) -> bool:
 # ------------------------------------------------------------ 部署: CMake 直出验证 + 纯 CMake 推导的残留清理
 
 ## 部署: 默认名直出 → 实盘最新非常规名动态库 → 已存在规范名, 三级判定后统一**改名**为规范名
-func _deploy(target_res: String, info: Dictionary, type: String, arch: String) -> String:
-	var out_dir: String = info.get("out_dirs", [])[0]
-	var target := String(info.get("target", ""))
+func _deploy(target_res: String, info: Dictionary, type: String, arch: String,
+		out_dir_override := "", tgt := "") -> String:
+	var out_dir: String = out_dir_override
+	if out_dir == "" and not (info.get("out_dirs", []) as Array).is_empty():
+		out_dir = String(info.get("out_dirs", [])[0])
+	var target := tgt if tgt != "" else String(info.get("target", ""))
 	var canonical := _canonical_file(target, type, arch)
 	var actual := ""
 	var direct := _default_out_file(target)   # CMake 默认直出名(刚链接, mtime 最新, 内容必然新鲜)
@@ -1314,18 +1506,19 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String) -
 
 ## 输出目录里是否已有一个"比已部署库新、且不比源码旧"的产物 —— 即上次编译完成但没部署。
 ## 两个条件缺一不可: 只比已部署库新, 改了源码也会误判为"不用编"; 只比源码新, 刚部署完也会说"要重编"。
-func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: String) -> bool:
+func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: String,
+		out_dir_override := "", tgt := "") -> bool:
 	var out_dirs: Array = info.get("out_dirs", [])
-	var target := String(info.get("target", ""))
-	if out_dirs.is_empty() or target == "":
+	var target := tgt if tgt != "" else String(info.get("target", ""))
+	var out_dir := out_dir_override
+	if out_dir == "" and not out_dirs.is_empty():
+		out_dir = String(out_dirs[0])
+	if out_dir == "" or target == "":
 		return false
-	var out_dir := String(out_dirs[0])
 	var deployed_ms := 0
 	if FileAccess.file_exists(_abs(target_res)):
 		deployed_ms = int(FileAccess.get_modified_time(_abs(target_res)))
-	var src_ms := 0
-	for f in FileTool.list_files("res://gdextension/src", PackedStringArray([".cpp", ".h", ".hpp", ".c"])):
-		src_ms = maxi(src_ms, int(FileAccess.get_modified_time(f)))
+	var src_ms := _native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"]))
 	var best := 0
 	for cand in [_default_out_file(target), _canonical_file(target, type, arch)]:
 		if cand == "":
@@ -1369,20 +1562,43 @@ func _rename_lib(dir_path: String, from_file: String, to_file: String) -> bool:
 
 
 ## 终清: 全部轮次与合并完成后执行一次(轮间零清理, 合并输入绝不误删)。
-func _final_cleanup(info: Dictionary, gdext_res: String, target: String) -> void:
-	var native_dir: String = info.get("out_dirs", [])[0]
-	var keep := _gdext_keep_files(gdext_res)
+## 逐插件清理: 每个 target 只清自己 Native 目录, 白名单只含自己的声明/产物,
+## 否则多插件时会把别家的库当"非必要产物"删掉(实测这是最危险的一类误删)。
+func _final_cleanup(targets: Array, gdext_by_target: Dictionary) -> void:
 	var types: Array[String] = _build_types if not _build_types.is_empty() else ["debug", "release"]
-	for a in _declared_archs(gdext_res):   # 声明仍是架构键的类型(合并失败/未合并) → 规范名保护(仅保护实际构建的类型)
-		for bt in types:
-			keep.append(_canonical_file(target, bt, a))
-	if _os_label() == "macos":
-		for bt in types:   # lipo 合并产物恒保(仅保护实际构建的类型)
-			keep.append(_universal_file(target, bt))
-	if keep.is_empty():
-		_log("无清理白名单, 跳过 Native 清理。")
-		return
-	_cleanup_native(native_dir, keep)
+	var seen := {}
+	for tg in targets:
+		var target := String(tg.get("target", ""))
+		var native_dir := String(tg.get("out_dir", ""))
+		var dir_key := "%s|%s" % [target, native_dir]
+		if target == "" or native_dir == "" or seen.has(dir_key):
+			continue
+		seen[dir_key] = true
+		var gdext_res := String(gdext_by_target.get(target, ""))
+		var keep := _gdext_keep_files(gdext_res) if gdext_res != "" else PackedStringArray()
+		keep.append(target + ".gdextension")
+		for a in (["x86_64", "arm64", "arm32", "x86_32"] if gdext_res == "" else _declared_archs(gdext_res)):
+			for bt in types:
+				keep.append(_canonical_file(target, bt, a))
+		if _os_label() == "macos":
+			for bt in types:
+				keep.append(_universal_file(target, bt))
+		_cleanup_native(native_dir, keep)
+
+
+## 某个 target 自己的声明: 优先 <输出目录>/<target>.gdextension(多插件时唯一正确),
+## 找不到再退回"输出目录里的第一个"(单插件工程的既有行为)。
+func _find_gdextension_for(target: String, out_dir: String, info: Dictionary) -> String:
+	var dir := out_dir
+	if dir == "":
+		var ds: Array = info.get("out_dirs", [])
+		if not ds.is_empty():
+			dir = String(ds[0])
+	if dir != "":
+		var p := dir.path_join(target + ".gdextension")
+		if FileAccess.file_exists(p):
+			return _abs_to_res(p)
+	return _find_gdextension(info)
 
 
 ## 在产物输出目录(*_OUTPUT_DIRECTORY)里定位 *.gdextension(与产物同目录是框架约定)。
@@ -1408,10 +1624,10 @@ func _universal_file(target: String, type: String) -> String:
 
 
 ## lipo 合并: 同类型多架构产物 → universal 单文件, 成功后**删除输入架构文件**
-func _lipo_merge(info: Dictionary, target: String, type: String, files: Array) -> String:
+func _lipo_merge(out_dir_override: String, target: String, type: String, files: Array) -> String:
 	if _os_label() != "macos" or files.size() < 2:
 		return ""
-	var out_dir: String = info.get("out_dirs", [])[0]
+	var out_dir := out_dir_override
 	var out_name := _universal_file(target, type)
 	var out_abs := String(out_dir).path_join(out_name)
 	var args := PackedStringArray(["-create"])

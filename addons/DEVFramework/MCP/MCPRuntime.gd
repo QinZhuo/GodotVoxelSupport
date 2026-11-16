@@ -380,8 +380,9 @@ func call_build_native_local(args: Dictionary) -> Dictionary:
 			return server._ok_json(GDExtensionRebuild.native_status())
 		"build":
 			var restart := bool(args.get("restart", false))
+			var plugin := VariantTool.get_string(args, "plugin", "all")
 			return await _run_as_job("build_native",
-				func() -> Dictionary: return await GDExtensionRebuild.build_now(restart))
+				func() -> Dictionary: return await GDExtensionRebuild.build_now(restart, plugin))
 	return server._fail("action 必须是 status / build, 收到: '%s'" % action)
 
 
