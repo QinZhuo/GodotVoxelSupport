@@ -136,7 +136,11 @@ func _run() -> void:
 			return _finish_with("CMake 配置失败(%s.%s)" % [type, arch])
 		# 断点续跑: 上次"编译完成但没走到部署"(编辑器脚本重载会取消挂起的协程, state 会停在
 		# "编译中"; 实测踩过两次)。产物已比已部署库新且不比源码旧 → 直接部署, 不要白编一轮。
-		if _artifact_ready(info, type, arch, target_res, out_dir, tgt):
+		if _up_to_date(target_res, out_dir, tgt):
+			# 无源码变更: 不调 cmake/make —— 否则会因"直出产物已被改名"而必然重链,
+			# 既白花时间, 又让产物字节每次都变(让人误以为"没改代码却变了")。
+			_log("源码与构建配置均未变更, 跳过编译(产物保持原样): ", _canonical_file(tgt, type, arch))
+		elif _artifact_ready(info, type, arch, target_res, out_dir, tgt):
 			_log("产物已是最新(上次构建未完成部署), 跳过编译: ", _canonical_file(tgt, type, arch))
 		else:
 			var only := "" if String(_plugin_filter).strip_edges().to_lower() in ["", "all"] else tgt
@@ -1450,6 +1454,26 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String,
 	return actual
 
 
+## 源码/构建配置都没变 → 本次可**完全跳过编译**。
+##
+## 为什么需要它: 部署会把链接器直出的 `lib<名>.dll` 改名成规范名 `lib<名>.<平台>.<类型>.<架构>.dll`,
+## 于是下一次 make 发现"链接目标文件不存在"就必然重链 —— 即使一行代码没改。
+## 表现就是"没改代码, 产物 mtime/字节却变了"(链接器每次输出含 build-id/时间戳, 内容必然不同),
+## 而且每次白花 7~9 秒。这里用"源码 mtime ≤ 已部署产物 mtime, 且 CMakeLists 也没更新"来提前收工。
+func _up_to_date(target_res: String, out_dir: String, tgt: String) -> bool:
+	if not FileAccess.file_exists(_abs(target_res)):
+		return false
+	var deployed := int(FileAccess.get_modified_time(_abs(target_res)))
+	# 源码(含 .h)比产物新 → 必须重编
+	if _native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"])) > deployed:
+		return false
+	# 生成的 CMakeLists 变过(换模板/加插件/改参数) → 也要重配+重编
+	for cfg in ["res://gdextension/CMakeLists.txt"]:
+		if FileAccess.file_exists(cfg) and int(FileAccess.get_modified_time(cfg)) > deployed:
+			return false
+	return true
+
+
 ## 输出目录里是否已有一个"比已部署库新、且不比源码旧"的产物 —— 即上次编译完成但没部署。
 ## 两个条件缺一不可: 只比已部署库新, 改了源码也会误判为"不用编"; 只比源码新, 刚部署完也会说"要重编"。
 func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: String,
@@ -1874,6 +1898,9 @@ func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 	if dir == null:
 		return
 	var removed := 0
+	# ⚠ 必须包含隐藏文件: Windows 的 ReplaceFile 残留(`xxx.dll~RF123abc.TMP`)与部分改名旁置
+	# 文件带 hidden 属性, 默认枚举会跳过它们 → 清理循环"看不见"这些垃圾(实测残留堆了十几 MB)。
+	dir.include_hidden = true
 	dir.list_dir_begin()
 	var entry := dir.get_next()
 	while entry != "":
@@ -1890,6 +1917,10 @@ func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 			if dir.remove(entry) == OK:
 				removed += 1
 				_log("清理非必要产物: ", entry)
+			elif entry.begins_with("~lib"):
+				# Windows 上 Godot 会把扩展库复制成 `~<原名>` 再加载(为了能覆盖原文件),
+				# 这份副本被引擎进程占用, 只要编辑器活着就删不掉 —— 它不是我们的产物, 不必当失败。
+				_log("跳过引擎运行期副本(重启编辑器后可清理): ", entry)
 			else:
 				_log("清理失败(文件可能被占用): ", entry)
 		entry = dir.get_next()

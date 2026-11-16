@@ -1,85 +1,56 @@
+# 由 DEVFramework 生成: 每个原生插件一个 target, 共用一份 godot-cpp 构建
 cmake_minimum_required(VERSION 3.17)
 
-# 体素插件原生核心 (GDExtension)
-# 多平台构建：godot-cpp 官方模板同款 CMake 方案
-# 用法：
-#   Debug   （编辑器/F5 调试运行时加载 debug 命名的库）：
-#     cmake -S . -B build -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Debug
-#     cmake --build build
-#   Release （导出游戏运行时加载 release 命名的库）：
-#     cmake -S . -B build-release -DGODOTCPP_API_VERSION=4.7 -DCMAKE_BUILD_TYPE=Release
-#     cmake --build build-release
-# 平台支持：macOS(arm64/x86_64) / Windows(x86_64) / Linux(x86_64)
-#   通过 CMake 内置 -DCMAKE_OSX_ARCHITECTURES / 交叉工具链实现
+project(dev_native LANGUAGES CXX)
 
-project(voxelsupport LANGUAGES CXX)
-
-# godot-cpp 需要 gdextension API 文件：默认 master(v10) 自带 4.3~4.7 的 api 文件
-# 若想自定义，可设置 GODOTCPP_GDEXTENSION_DIR 指向自定义扩展 API 目录
 if(NOT DEFINED GODOTCPP_API_VERSION)
-    set(GODOTCPP_API_VERSION "4.7")
+	set(GODOTCPP_API_VERSION "4.7")
 endif()
 
-# godot-cpp 用 GODOTCPP_TARGET（而非 CMAKE_BUILD_TYPE）决定 debug/release 特性
-# （DEBUG_ENABLED 宏等）。根据 CMAKE_BUILD_TYPE 自动对齐，否则 Release 构建
-# 仍会以 template_debug 特性编译（带调试断言/日志），库与 .gdextension 的
-# release 条目语义不符：
-#   CMAKE_BUILD_TYPE=Debug   → GODOTCPP_TARGET=template_debug
-#   CMAKE_BUILD_TYPE=Release → GODOTCPP_TARGET=template_release
-if(NOT DEFINED GODOTCPP_TARGET)
-    if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        set(GODOTCPP_TARGET "template_release")
-    else()
-        set(GODOTCPP_TARGET "template_debug")
-    endif()
-endif()
-
-# 符号可见性: GDExtension 只需导出入口函数(GDE_EXPORT 已标记 default 可见性)。
-# 隐藏其余符号 —— 必须放在 add_subdirectory(godot-cpp) 之前:
-# godot-cpp 是静态库, 符号可见性在编译期烙进 .o, 目录级变量会被子目录继承。
-# 若不隐藏, godot-cpp 的内联 weak 符号(如 DefaultAllocator::alloc)会被多个
-# 扩展 dylib 各自导出, macOS 动态链接器做符号抢占(interposing):
-# 某个扩展加载失败(入口符号缺失等)后, 其未初始化的副本会抢占后续扩展的符号,
-# 导致后者调用到空函数指针(EXC_BAD_ACCESS at 0x0, 崩在 _bind_methods 分配内存处)。
+# 多扩展同进程加载: 必须隐藏非入口符号, 否则 godot-cpp 的 inline weak 符号会互相抢占
+# (interposing), 表现为某个扩展把另一个扩展的函数指针覆盖成空 → 崩在 _bind_methods。
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
-# 引入 godot-cpp（其 CMake 通过 GODOTCPP_API_VERSION 选择对应 extension_api.json）
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp ${CMAKE_CURRENT_BINARY_DIR}/godot-cpp)
-
-# 源码位置: 插件自己的 C++ 放在 addons/VoxelSupport/Native/src(随插件分发),
-# 构建区/第三方(godot-cpp)留在项目根 gdextension/。本文件只做"编排"。
-set(VOXEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native/src)
-
-add_library(voxelsupport SHARED
-    ${VOXEL_SRC_DIR}/register_types.cpp
-    ${VOXEL_SRC_DIR}/voxel_native.cpp
-)
-
-# 链接 godot-cpp（godot-cpp 目标名为 godot-cpp）
-target_link_libraries(voxelsupport PRIVATE godot-cpp)
-
-# godot-cpp 要求 C++17（其头文件使用 is_base_of_v 等 C++17 特性）
-set_target_properties(voxelsupport PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
-
-# macOS: 允许在子目录中构建动态库
-if(APPLE)
-    set_target_properties(voxelsupport PROPERTIES
-        MACOSX_RPATH ON
-    )
+# 性能: 本机构建开 -march=native(允许自动向量化); fp 融合关掉, 保证与 GDScript 结果 bit 级一致
+if(NOT MSVC)
+	add_compile_options(-ffp-contract=off)
+	if(NOT CMAKE_OSX_ARCHITECTURES MATCHES ";")
+		add_compile_options(-march=native)
+	endif()
 endif()
 
-# 将编译产物直接输出到插件分发目录 addons/VoxelSupport/Native/
-# （.gdextension 引用路径为 res://addons/VoxelSupport/Native/xxx，产物落盘即到位，无需手动复制）
-# 产物命名交给 GDExtensionRebuild(项目→工具)统一改名为 .gdextension 声明的规范名
-# (<名>.<平台>.<类型>.<架构>.<ext>)；CMake 只负责直出默认名：
-#   Windows: voxelsupport.dll / macOS: libvoxelsupport.dylib / Linux: libvoxelsupport.so
-# 注意：不经工具的裸 cmake 构建，产物名未经规范命名，交付前需跑一次工具（或手动改名）。
-# 不设 PREFIX: 全平台统一 lib 前缀(与 godot-cpp 官方模板、CMake 的 SHLIBPREFIX 默认值一致),
-# 直出名 libvoxelsupport.dll 与规范名 libvoxelsupport.windows.<类型>.<架构>.dll 同前缀。
-# (GDExtension 对文件名没有硬性要求, 唯一硬约束是规范名与 .gdextension 的 [libraries] 一字不差。)
-set_target_properties(voxelsupport PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
-    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp ${CMAKE_CURRENT_BINARY_DIR}/godot-cpp)
+
+# ---- devframework ----
+include(${CMAKE_CURRENT_SOURCE_DIR}/generated/devframework_sources.cmake)
+# 工程自带 register_types.cpp, 入口由它提供
+add_library(devframework SHARED ${DEVFRAMEWORK_SOURCES})
+target_link_libraries(devframework PRIVATE godot-cpp)
+set_target_properties(devframework PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+if(NOT MSVC)
+	target_compile_options(devframework PRIVATE -ffp-contract=off)
+endif()
+# 产物直出到该插件自己的 Native 目录(声明就在旁边, 引擎直接加载)
+set_target_properties(devframework PROPERTIES
+	LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/DEVFramework/Native
+	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/DEVFramework/Native
+	ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/DEVFramework/Native
 )
+
+# ---- voxelsupport ----
+include(${CMAKE_CURRENT_SOURCE_DIR}/generated/voxelsupport_sources.cmake)
+# 工程自带 register_types.cpp, 入口由它提供
+add_library(voxelsupport SHARED ${VOXELSUPPORT_SOURCES})
+target_link_libraries(voxelsupport PRIVATE godot-cpp)
+set_target_properties(voxelsupport PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+if(NOT MSVC)
+	target_compile_options(voxelsupport PRIVATE -ffp-contract=off)
+endif()
+# 产物直出到该插件自己的 Native 目录(声明就在旁边, 引擎直接加载)
+set_target_properties(voxelsupport PROPERTIES
+	LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
+	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
+	ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../addons/VoxelSupport/Native
+)
+
