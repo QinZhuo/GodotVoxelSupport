@@ -33,6 +33,9 @@ static var target_path_override := ""
 
 ## uid -> 实例条目。条目形状见 _make_entry()。
 var members := {}
+# 最近离开的实例(uid → {name, project_path, at_ms, clean, reason}), clean=false 表示没走注销(崩溃/强杀)。
+# 这是"项目是不是崩了"的唯一判据 —— 心跳超时被 prune 掉的人不会自己说再见。
+var recent_exits := {}
 ## 默认目标(服务端唯一的全局状态)。三个字段一起落盘: uid 里的进程号会变, 而 instance_id
 var active_instance := ""        # 目标 uid(带进程号, 唯一)
 var active_instance_id := ""     # 目标项目级身份(重启不变, uid 失效时的恢复依据)
@@ -155,6 +158,8 @@ func _make_entry(uid: String, instance_id: String, project_name: String, project
 		"port": int(port),
 		"is_self": is_self,
 		"last_seen": Time.get_ticks_msec(),
+		# 首次登记时间: 崩溃时用它算 uptime —— "启动 3 秒就崩"和"跑了 9 小时才崩"是两类问题
+		"first_seen": Time.get_ticks_msec(),
 	}
 
 
@@ -167,13 +172,17 @@ func upsert(data: Dictionary) -> void:
 	var port := int(data.get("port", 0))
 	if port <= 0 or port > 65535:
 		return
-	members[uid] = _make_entry(
+	var prev: Dictionary = members.get(uid, {})
+	var e := _make_entry(
 		uid,
 		str(data.get("instance_id", "")).strip_edges(),
 		str(data.get("name", "")).strip_edges(),
 		str(data.get("project_path", "")).strip_edges(),
 		port,
 		false)
+	if not prev.is_empty():
+		e["first_seen"] = int(prev.get("first_seen", e["first_seen"]))   # 保留首次登记时间
+	members[uid] = e
 
 
 func touch_self() -> void:
@@ -190,7 +199,113 @@ func prune(now: int = -1) -> void:
 		if bool(e.get("is_self", false)):
 			continue
 		if t - int(e.get("last_seen", 0)) > MEMBER_TTL_MS:
+			# 心跳超时 = 该实例**没有走正常注销**(崩溃/被强杀/断电)。
+			# 这正是"怎么知道项目崩了"的判据: 正常关闭会先 unregister(clean=true)。
+			_note_exit(e, false, "heartbeat_timeout")
 			members.erase(uid)
+
+
+## 记录一次实例离开(供 list_instances / launch_project 回溯"上次是不是崩的")。
+func _note_exit(entry: Dictionary, clean: bool, reason: String) -> void:
+	var uid := str(entry.get("uid", ""))
+	if uid.is_empty():
+		return
+	var fs := int(entry.get("first_seen", 0))
+	recent_exits[uid] = {
+		"uid": uid,
+		"instance_id": str(entry.get("instance_id", "")),
+		"name": str(entry.get("name", "")),
+		"project_path": str(entry.get("project_path", "")),
+		"at_ms": Time.get_ticks_msec(),
+		"clean": clean,
+		"reason": reason,
+		# 存活时长: "启动就崩"和"跑很久才崩"是两类问题, 靠它区分(0 = 未知)
+		"uptime_ms": (Time.get_ticks_msec() - fs) if fs > 0 else 0,
+	}
+	_journal_append(recent_exits[uid])   # 落盘: 中枢自己崩掉时也留得下证据
+	# 只留最近 8 条(内存里的小环形), 避免长期运行无限增长
+	if recent_exits.size() > 8:
+		var oldest_uid := ""
+		var oldest_t := 1 << 62
+		for k in recent_exits:
+			var at := int(recent_exits[k].get("at_ms", 0))
+			if at < oldest_t:
+				oldest_t = at
+				oldest_uid = k
+		if oldest_uid != "":
+			recent_exits.erase(oldest_uid)
+
+
+## 某个项目最近一次离开记录(用于"重启前告诉调用方上次是否崩溃")。
+func last_exit_for(project_path: String) -> Dictionary:
+	_journal_load()
+	var want := project_path.simplify_path()
+	var best: Dictionary = {}
+	for k in recent_exits:
+		var e: Dictionary = recent_exits[k]
+		if str(e.get("project_path", "")).simplify_path() != want:
+			continue
+		if best.is_empty() or int(e.get("at_ms", 0)) > int(best.get("at_ms", 0)):
+			best = e
+	if not best.is_empty():
+		best = best.duplicate()
+		best["ago_ms"] = Time.get_ticks_msec() - int(best.get("at_ms", 0))
+		best.erase("at_ms")
+	return best
+
+
+## 崩溃环判定: 同一项目在 window_ms 内**非正常退出** >= limit 次 → 不建议再自动拉起。
+## 额外区分"启动期崩溃"(uptime < 60s): 那基本是原生库/初始化问题, 自动重启一百次也没用。
+## 设计取自 systemd 的 StartLimitBurst / StartLimitIntervalSec。
+func crash_loop(project_path: String, limit := 3, window_ms := 600000) -> Dictionary:
+	_journal_load()
+	var want := project_path.simplify_path()
+	var now := Time.get_ticks_msec()
+	var crashes: Array = []
+	for k in recent_exits:
+		var e: Dictionary = recent_exits[k]
+		if str(e.get("project_path", "")).simplify_path() != want:
+			continue
+		if bool(e.get("clean", true)):
+			continue
+		if now - int(e.get("at_ms", 0)) > window_ms:
+			continue
+		crashes.append(e)
+	var startup := 0
+	for e in crashes:
+		if int(e.get("uptime_ms", 1 << 60)) < 60000:
+			startup += 1
+	var allowed := crashes.size() < limit
+	var hint := "可以拉起。"
+	if not allowed:
+		hint = "**崩溃环**: %d 分钟内有 %d 次非正常退出(阈值 %d)。先修再拉, 否则会把机器刷满；确认要强制拉起就传 force=true。" % [
+			window_ms / 60000, crashes.size(), limit]
+	elif startup >= 2:
+		hint = "注意: 最近有 %d 次是**启动 60 秒内**就崩 —— 多半是原生库/初始化问题, 重启不一定有用, 先看 crash_report。" % startup
+	return {
+		"count": crashes.size(),
+		"limit": limit,
+		"window_ms": window_ms,
+		"allowed": allowed,
+		"startup_crashes": startup,
+		"startup_loop": startup >= 2,
+		"hint": hint,
+	}
+
+
+## 最近的实例离开记录(新的在前), 供 list_instances 附在结果里。
+func exits_snapshot(limit := 5) -> Array:
+	_journal_load()
+	var out: Array = []
+	for k in recent_exits:
+		var e: Dictionary = (recent_exits[k] as Dictionary).duplicate()
+		e["ago_ms"] = Time.get_ticks_msec() - int(e.get("at_ms", 0))
+		e.erase("at_ms")
+		out.append(e)
+	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("ago_ms", 0)) < int(b.get("ago_ms", 0))
+	)
+	return out.slice(0, limit)
 
 
 ## 成员侧: 用中枢回包里的实例表**整体替换**非自身条目。
@@ -380,6 +495,86 @@ func _target_path() -> String:
 	return base.path_join("DEVFrameworkMCP").path_join(TARGET_FILE)
 
 
+## ------- 崩溃日志落盘 -------
+## 为什么必须落盘: `recent_exits` 在中枢进程内存里, 而**中枢自己崩掉时**它随之消失 ——
+## 下次启动完全不知道"刚才崩过"。业界做法(systemd 的 clean_exit 标记、IDE 的 crash journal)
+## 都是 append-only 小文件, 进程死了文件还在。
+const JOURNAL_FILE := "devframework_mcp_crash.jsonl"
+const JOURNAL_MAX_LINES := 200
+
+var _journal_loaded := false
+
+
+func _journal_path() -> String:
+	var base := OS.get_environment("LOCALAPPDATA")
+	if base.is_empty():
+		base = OS.get_temp_dir()
+	return base.path_join("DEVFrameworkMCP").path_join(JOURNAL_FILE)
+
+
+## 追加一条离开记录(一行 JSON)。失败不影响主流程 —— 崩溃日志是"锦上添花", 绝不能因此报错。
+func _journal_append(e: Dictionary) -> void:
+	var path := _journal_path()
+	var dir := path.get_base_dir()
+	if not DirAccess.dir_exists_absolute(dir):
+		DirAccess.make_dir_recursive_absolute(dir)
+	var line := JSON.stringify({
+		"at_unix": int(Time.get_unix_time_from_system()),
+		"uid": str(e.get("uid", "")),
+		"instance_id": str(e.get("instance_id", "")),
+		"name": str(e.get("name", "")),
+		"project_path": str(e.get("project_path", "")),
+		"clean": bool(e.get("clean", false)),
+		"reason": str(e.get("reason", "")),
+		"uptime_ms": int(e.get("uptime_ms", 0)),
+	})
+	var f := FileAccess.open(path, FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return
+	f.seek_end()
+	f.store_line(line)
+	var too_long := f.get_length() > 64 * 1024
+	f.close()
+	if too_long:
+		_journal_trim()
+
+
+## 控制文件大小: 超过阈值就只留最后 JOURNAL_MAX_LINES 行。
+func _journal_trim() -> void:
+	var path := _journal_path()
+	var lines := FileAccess.get_file_as_string(path).split("\n", false)
+	if lines.size() <= JOURNAL_MAX_LINES:
+		return
+	var keep := lines.slice(lines.size() - JOURNAL_MAX_LINES)
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f != null:
+		f.store_string("\n".join(keep) + "\n")
+
+
+## 首次访问时把历史读回内存(只补内存里没有的 uid, 以本进程记录为准)。
+func _journal_load() -> void:
+	if _journal_loaded:
+		return
+	_journal_loaded = true
+	var path := _journal_path()
+	if not FileAccess.file_exists(path):
+		return
+	var now_unix := int(Time.get_unix_time_from_system())
+	for raw in FileAccess.get_file_as_string(path).split("\n", false):
+		var parsed: Variant = JSON.parse_string(raw)
+		if not (parsed is Dictionary):
+			continue
+		var e: Dictionary = parsed
+		var uid := str(e.get("uid", ""))
+		if uid == "" or recent_exits.has(uid):
+			continue
+		var age_ms := maxi(0, now_unix - int(e.get("at_unix", now_unix))) * 1000
+		e["at_ms"] = Time.get_ticks_msec() - age_ms
+		recent_exits[uid] = e
+
+
 func _ensure_target_loaded() -> void:
 	if _target_loaded:
 		return
@@ -484,6 +679,8 @@ func handle(method: String, path: String, body: Dictionary) -> Dictionary:
 				return {"status": 405, "body": {"ok": false, "error": "unregister 需要 POST"}}
 			var uid := str(body.get("uid", "")).strip_edges()
 			if not uid.is_empty() and uid != own_uid:
+				if members.has(uid):
+					_note_exit(members[uid], true, "unregister")   # 正常关闭
 				members.erase(uid)
 			return {"status": 200, "body": {"ok": true}}
 		HUB_INSTANCES_PATH:

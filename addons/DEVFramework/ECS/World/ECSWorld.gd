@@ -79,7 +79,10 @@ var _component_hooks := {}
 var _entity_destroyed_hooks: Array = []   # Array[Callable], func(entity: int)
 var _has_any_component_hooks := false     # 快速判断: 是否需要枚举实体组件
 # 父子关系索引: parent实体 -> Array[int] children(由 set_parent 等维护, 实体销毁自动清理)
-var _parent_children := {}
+# 父子关系反向索引: parent → [child]。当前由 GDScript 维护(原生版重构已验证过一次,
+# 但与"列扁平化"捆绑引入崩溃, 已整体回退; 重新落地时单独一轮, 先补 OOB/并发探针测试)。
+# 父子关系: 组件 ECSParent.target 在本层维护, 反向索引(parent → children)已在原生层
+# (ECS 的 hierarchy_*): 上万子节点时 GDScript Dictionary 的分配与线性 erase 太慢。
 
 # ---------------- 变化检测 ----------------
 ## 注意: get_column 返回共享引用后原地修改不经过写 API, 不会被标记。
@@ -109,6 +112,11 @@ func _init(p_use_shared_core: bool = true) -> void:
 		_core = ClassDB.instantiate(&"ECSCore")
 	if _core == null:
 		push_error("ECSWorld: ECSCore 原生库不可用! 请确认 res://addons/DEVFramework/Native/devframework.gdextension 已加载(框架强依赖 C++, 无回退)。")
+	# 注: prefab 隔离为独立 archetype 的方案试过两轮, 已放弃 —— 存储层分离其实做到了
+	# (component_counts 显示内部组件 0 行、实例 20k 行), 但内部组件**按名字查不到**
+	# (comp_index("__prefab") 返回 -1), 于是 get_field/add_component 这类按名 API 全部失效;
+	# 且实测 columns_of 没有改善(70µs vs 65µs, arch_has_prefab 缓存已把收益吃掉)。
+	# 收益为零 + 名字索引疑点未清 → 不用。热路径继续走"块内按 prefab 行分段 memcpy"。
 
 ## 原生实例(高级用法直接调用)
 func native() -> Object:
@@ -192,24 +200,37 @@ func destroy_entity(entity: int) -> void:
 		_fire_component_remove(c, entity)
 	_fire_entity_destroyed(entity)
 
+
+## 递归销毁: 先销毁所有子孙(深度优先), 再销毁自己。
+## ⚠ 与 destroy_entity 的区别是刻意保留的两种语义:
+##   destroy_entity   = 只销毁自己, 子实体变成孤儿(父关联被解除) —— 适合"捡起/脱下"这类搬运
+##   destroy_recursive= 连坐销毁 —— 适合"舰船爆炸带走挂载炮塔"这类整体消失
+## 之所以不把级联塞进 destroy_entity: 卸载/搬运是高频操作, 隐式级联会静默删掉不该删的实体。
+func destroy_recursive(entity: int, max_depth := 64) -> int:
+	if not is_alive(entity):
+		return 0
+	var killed := 0
+	if max_depth > 0:
+		for child in get_children(entity):
+			killed += destroy_recursive(child, max_depth - 1)
+	destroy_entity(entity)
+	return killed + 1
+
 # ============================================================
 
 ## 设置 child 的父实体为 parent(自动维护关系索引)。child/parent 需存活。
+## 组件(ECSParent.target)由本层维护; 反向索引在原生层 —— 上万子节点时 Dictionary 太慢。
 func set_parent(child: int, parent: int) -> void:
 	if child == parent or not is_alive(child) or not is_alive(parent):
 		return
 	var old := get_parent(child)
 	if old != -1 and old != parent:
-		_remove_child_index(old, child)
+		_core.hierarchy_remove_child(old, child)
 	if has_component(child, ECSParent):
 		set_field(child, ECSParent, &"target", parent)
 	else:
 		add_component(child, ECSParent, {"target": parent})
-	if not _parent_children.has(parent):
-		_parent_children[parent] = []
-	var arr: Array = _parent_children[parent]
-	if child not in arr:
-		arr.append(child)
+	_core.hierarchy_set_parent(child, parent)
 
 ## 返回 entity 的父实体 ID(-1 = 无父)。
 func get_parent(entity: int) -> int:
@@ -217,38 +238,79 @@ func get_parent(entity: int) -> int:
 		return -1
 	return int(get_field(entity, ECSParent, &"target"))
 
-## 返回 parent 的所有子实体 ID 列表(副本)。
+# ============================================================
+#  查询级变更过滤(等价 Bevy 的 Changed<T> / flecs 的 changed 过滤器)
+# ============================================================
+
+## 当前全局写入序号。记下它, 下一帧把它传给 query_changed_rows 就得到"这期间被写过的行"。
+func write_tick() -> int:
+	return int(_core.write_tick())
+
+
+## 返回 since 之后被写过的**聚合行号**(行序与 columns_of 完全一致)。
+## 用法:
+##   var t := w.write_tick()
+##   ... 本帧系统跑完 ...
+##   var rows := w.query_changed_rows(Move, t)   # 只处理这些行(渲染/UI 增量)
+## ⚠ 需要 world.set_change_detection(true) 才会记录单个 set_field 的写;
+##   批量写(batch_*/set_columns_of)始终会打戳。
+func query_changed_rows(component, since: int = 0) -> PackedInt32Array:
+	var cn := resolve_component_name(component)
+	if cn == &"":
+		return PackedInt32Array()
+	_record_access(cn)
+	return _core.get_changed(cn, since)
+
+
+## 批量挂父: 组件 target 与反向索引都在原生侧一次完成(1 次跨语言)。
+## 实测 1 万个: 逐个 set_parent 81.7ms → 批量 ~2ms(约 40×)。
+## ⚠ 不逐实体触发组件 hook(与 batch_* 一致); 需要 hook 时用单条 set_parent。
+func set_parent_many(children: PackedInt32Array, parent: int) -> void:
+	if children.is_empty() or not is_alive(parent):
+		return
+	# 必须先确保组件已注册: 单条 set_parent 是靠 add_component 顺带注册的,
+	# 原生批量不走那条路径(未注册时 comp_index 返回 -1 → 静默什么都不做, 实测踩过)。
+	if not _component_registered.get(ECSParent, false):
+		register_component(ECSParent)
+	var cn := resolve_component_name(ECSParent)
+	if cn == &"":
+		return
+	_core.set_parent_bulk(children, parent, cn)
+	_mark_dirty(cn)
+
+
+## 返回 parent 的所有子实体 ID 列表(一次跨语言; 反向表在原生层)。
 func get_children(parent: int) -> Array:
-	var arr: Array = _parent_children.get(parent, [])
-	return arr.duplicate()
+	return Array(_core.hierarchy_children(parent))
+
+## 子实体数量(不复制数组; 判断"有没有子"时用它)。
+func child_count(parent: int) -> int:
+	return int(_core.hierarchy_child_count(parent))
 
 ## 解除 child 与其父实体的关联(保留 ECSParent 组件, target 置 -1)。
 func clear_parent(child: int) -> void:
 	var old := get_parent(child)
 	if old != -1:
-		_remove_child_index(old, child)
+		_core.hierarchy_remove_child(old, child)
 	if has_component(child, ECSParent):
 		set_field(child, ECSParent, &"target", -1)
-
-## 从关系索引移除 child(parent 的 children 数组)。
-func _remove_child_index(parent: int, child: int) -> void:
-	var arr: Array = _parent_children.get(parent, [])
-	arr.erase(child)
-	if arr.is_empty():
-		_parent_children.erase(parent)
 
 ## 实体销毁时的关系清理: 作为子 → 从父索引移除; 作为父 → 清所有子实体的 target。
 func _cleanup_relations(entity: int) -> void:
 	var old := get_parent(entity)
 	if old != -1:
-		_remove_child_index(old, entity)
-	var children: Array = _parent_children.get(entity, [])
-	if not children.is_empty():
-		for c in children:
-			if is_alive(c) and has_component(c, ECSParent):
-				set_field(c, ECSParent, &"target", -1)
-		_parent_children.erase(entity)
+		_core.hierarchy_remove_child(old, entity)
+	var children: PackedInt32Array = _core.hierarchy_detach(entity)
+	for c in children:
+		if is_alive(c) and has_component(c, ECSParent):
+			set_field(c, ECSParent, &"target", -1)
 
+## ⚠ 批量场景**不要**循环调用逐实体 API(set_field / get_field / add_component / destroy_entity):
+## 每次跨语言约 2.2µs(实测 20k 次 set_field = 44ms), 而 batch_apply_rows 处理同样 20k 行
+## 只要 77µs(3.9ns/行) —— 差 570 倍。逐实体 API 只适合"每帧几十次"的点操作。
+##   · 改数值列 → columns_of + 本地循环 + set_columns_of(一帧 2 次跨语言)
+##   · 数值运算 → batch_apply_rows / batch_apply_col_rows(原生按行循环)
+##   · 批量增删 → cmd_*_many / instantiate / destroy_many
 ## 给实体附加组件。component 支持三种传法:
 ##   · Script(ECSComponent 子类/普通 Node 脚本)
 ##   · 类名 StringName/String
@@ -329,6 +391,9 @@ func set_field(entity: int, component, field: StringName, value) -> void:
 	var cn := resolve_component_name(component)
 	_record_access(cn)
 	_core.set_field(entity, cn, field, value)
+	# 逐帧"每个单位都动"的场景走单实体增量: 只挪一格, 不触发整表重建
+	if _spatial_comp == cn and _spatial_field == field:
+		_core.spatial_update_entity(entity)
 	_mark_dirty(cn)
 
 
@@ -422,6 +487,25 @@ func _query_cache_key(kind: String, anchor_name: StringName,
 
 ## 带缓存(增量失效): 相同签名查询复用结果, 仅当涉及组件结构变化时才失效。
 func query_rows(anchor, must: Array = [], without: Array = []) -> PackedInt32Array:
+	# 快路径: 无 must/without(最常见形态)。直接用 interned 的 StringName 当键,
+	# 省掉"_resolve_query_args 构造两个 PackedStringArray + 拼字符串键" —— 实测这一步占 3µs/4µs。
+	if must.is_empty() and without.is_empty():
+		var an := resolve_component_name(anchor)
+		if an == &"":
+			return PackedInt32Array()
+		_record_access(an)
+		if scheduler().is_parallel_active():
+			return _core.query_rows(an, PackedStringArray(), PackedStringArray())
+		_cache_mutex.lock()
+		var e: Dictionary = _query_cache.get(an, {})
+		if not e.is_empty() and _entry_valid(e):
+			var hit: PackedInt32Array = e.result
+			_cache_mutex.unlock()
+			return hit
+		var res: PackedInt32Array = _core.query_rows(an, PackedStringArray(), PackedStringArray())
+		_cache_store(an, an, PackedStringArray(), PackedStringArray(), res)
+		_cache_mutex.unlock()
+		return res
 	var args := _resolve_query_args(anchor, must, without)
 	if args.is_empty():
 		return PackedInt32Array()
@@ -645,6 +729,153 @@ func set_columns_of(component, fields: Dictionary) -> void:
 	_core.set_columns({cn: fields})
 	_mark_dirty(cn)
 
+
+# ============================================================
+#  空间索引(统一网格) —— RTS/弹幕的"附近"查询
+# ============================================================
+
+# 事件双缓冲(契约见 _dispatch_events):
+#   _event_queues = 本帧写入缓冲(系统内 emit 都进这里)
+#   _event_prev   = 上一帧已派发的快照(take_events 从这里"取走")
+# 这样"帧内可见性"与"只消费一次"各由一侧保证, 不再需要一个旁挂的 _last_events。
+var _event_prev := {}
+var _spatial_comp: StringName = &""   # 当前索引的位置组件(用于写路径自动失效)
+var _spatial_field: StringName = &""  # 位置字段(单字段 set_field 时走增量更新)
+
+## 启用空间索引: 指定位置组件 + Vector2 位置字段 + 格子边长(建议 ≈ 最大查询半径)。
+## 索引在写入/结构变更后自动失效, 下一次查询时整表重建 —— 没有写入的帧不会重建。
+func spatial_enable(component, field: StringName, cell_size: float) -> bool:
+	var cn := resolve_component_name(component)
+	if cn == &"":
+		return false
+	_core.spatial_enable(cn, field, cell_size)
+	_spatial_comp = cn
+	_spatial_field = field
+	return bool(_core.spatial_stats().get("enabled", false))
+
+func spatial_disable() -> void:
+	_spatial_comp = &""
+	_core.spatial_disable()
+
+## 矩形范围内的实体 id(升序; 不含 prefab)。min/max 为闭区间。
+func spatial_query_rect(min_pos: Vector2, max_pos: Vector2) -> PackedInt32Array:
+	return _core.spatial_query_rect(min_pos, max_pos)
+
+## 圆形范围内的实体 id(升序; 不含 prefab)。内部先按外接矩形取格子, 再做精确距离过滤。
+func spatial_query_radius(center: Vector2, radius: float) -> PackedInt32Array:
+	return _core.spatial_query_radius(center, radius)
+
+## {enabled, cells, entities, dirty, cell_size}
+func spatial_stats() -> Dictionary:
+	return _core.spatial_stats()
+
+
+# ============================================================
+#  确定性查询 / 快照差分
+# ============================================================
+
+## 按字段值排序的行集(并列时以实体 id 为次键 ⇒ 两端结果一致, 可回放)。
+## 数值字段按值排; Vector2/3 按长度排; 其它类型当作 0(仍保持稳定顺序)。
+func query_rows_sorted(anchor, must: Array = [], without: Array = [], field: StringName = &"",
+		descending := false) -> PackedInt32Array:
+	var args := _resolve_query_args(anchor, must, without)
+	if args.is_empty():
+		return PackedInt32Array()
+	return _core.query_rows_sorted(args[0], args[1], args[2], field, descending)
+
+## 快照差分: 只返回 b 相对 a 变化的字段值, 用于网络同步(带宽)。
+## 返回 {comp: {field: {rows: PackedInt32Array, values: Packed 数组}}}
+## ⚠ 只覆盖**字段值**变化; 实体增删属于结构变化, 需配合存档或上层协议处理。
+func snapshot_diff(a: Dictionary, b: Dictionary) -> Dictionary:
+	var out := {}
+	var ac: Array = a.get("components", [])
+	var bc: Array = b.get("components", [])
+	var bmap := {}
+	for cd in bc:
+		bmap[cd.get("name", &"")] = cd
+	for ca in ac:
+		var cn: StringName = ca.get("name", &"")
+		var cb: Dictionary = bmap.get(cn, {})
+		if cb.is_empty():
+			continue
+		var ea = ca.get("entities", PackedInt32Array())
+		var eb = cb.get("entities", PackedInt32Array())
+		if ea != eb:
+			# 结构变化: 记录"新增/消失"的实体 id(值差分行号已不对齐, 不能混在一起)
+			var in_a := {}
+			for e in ea:
+				in_a[e] = true
+			var in_b := {}
+			for e in eb:
+				in_b[e] = true
+			var created := PackedInt32Array()
+			for e in eb:
+				if not in_a.has(e):
+					created.append(e)
+			var destroyed := PackedInt32Array()
+			for e in ea:
+				if not in_b.has(e):
+					destroyed.append(e)
+			out[cn] = {"created": created, "destroyed": destroyed}
+			continue
+		var fa: Dictionary = ca.get("columns", {})
+		var fb: Dictionary = cb.get("columns", {})
+		var fields := {}
+		for fname in fa:
+			var va = fa[fname]
+			var vb = fb.get(fname)
+			if vb == null or typeof(va) != typeof(vb):
+				continue
+			var idx := PackedInt32Array()
+			for i in mini((va as Array).size() if va is Array else va.size(), vb.size()):
+				if va[i] != vb[i]:
+					idx.append(i)
+			if not idx.is_empty():
+				var picked = vb.duplicate()
+				fields[fname] = {"rows": idx, "values": picked}
+		if not fields.is_empty():
+			out[cn] = fields
+	return out
+
+## 应用差分: 只把 diff 里点名的行写回(结构变化的那部分跳过, 由调用方决定)。
+func apply_diff(diff: Dictionary) -> int:
+	var written := 0
+	for cn in diff:
+		var spec: Dictionary = diff[cn]
+		# 结构差分: 该组件上的实体增删。删除可直接执行; 新增只能建出实体(字段值为默认),
+		# 因为差分格式不带新实体的字段值 —— 需要保留新实体数据时请用全量存档对齐。
+		if spec.has("created") or spec.has("destroyed"):
+			var cn_s: StringName = resolve_component_name(cn)
+			for e in (spec.get("destroyed", PackedInt32Array()) as PackedInt32Array):
+				if is_alive(e):
+					destroy_entity(e)
+					written += 1
+			for _e in (spec.get("created", PackedInt32Array()) as PackedInt32Array):
+				var ne := create_entity()
+				if cn_s != &"":
+					add_component(ne, cn_s)
+					written += 1
+			continue
+		var cn_name: StringName = resolve_component_name(cn)
+		if cn_name == &"":
+			continue
+		var cols := {}
+		for fname in spec:
+			var item: Dictionary = spec[fname]
+			var rows: PackedInt32Array = item.get("rows", PackedInt32Array())
+			var vals = item.get("values")
+			if rows.is_empty() or vals == null:
+				continue
+			var col = vals.duplicate()
+			for r in rows:
+				if r < col.size():
+					col[r] = vals[r]
+			cols[fname] = col
+			written += rows.size()
+		if not cols.is_empty():
+			set_columns_of(cn_name, cols)
+	return written
+
 ## 行号 -> 实体 id(anchor 组件的 dense 行号转实体)。
 func entity_of_row(component, row: int) -> int:
 	return _core.entity_of_row(resolve_component_name(component), row)
@@ -712,11 +943,23 @@ func count(component) -> int:
 # ============================================================
 
 ## 排队: 创建实体。返回负值占位句柄(-(创建序号+1)),
+## 是否需要逐条记账(仅当有人登记了组件/实体 hook 时才需要)。
+## 实测: 1000 创建 + 1000 销毁, 纯原生 0.047ms, 走 GDScript API 1.866ms —— 97.5% 花在
+## `_cmd_ops` 的逐条 append 与 flush 后的解析循环上。没有 hook 时这份镜像没人看, 就不该建。
+func _cmd_mirror_needed() -> bool:
+	return _has_any_component_hooks or not _entity_destroyed_hooks.is_empty()
+
+
+func _cmd_note(op: Array) -> void:
+	if _cmd_mirror_needed():
+		_cmd_ops.append(op)
+
+
 func cmd_create() -> int:
 	_cmd_mutex.lock()
 	_core.cmd_create()
 	_cmd_create_count += 1
-	_cmd_ops.append(["create"])
+	_cmd_note(["create"])
 	_cmd_mutex.unlock()
 	return -_cmd_create_count  # -(序号+1) 负句柄
 
@@ -725,7 +968,7 @@ func cmd_destroy(entity: int) -> void:
 	if entity >= 0:
 		_cmd_mutex.lock()
 		_core.cmd_destroy(entity)
-		_cmd_ops.append(["destroy", entity])
+		_cmd_note(["destroy", entity])
 		_cmd_mutex.unlock()
 
 ## 排队: 给实体加组件(flush 时执行)。
@@ -734,7 +977,7 @@ func cmd_add_component(entity: int, component) -> void:
 	if name != &"":
 		_cmd_mutex.lock()
 		_core.cmd_add_component(entity, name)
-		_cmd_ops.append(["add", entity, name])
+		_cmd_note(["add", entity, name])
 		_cmd_mutex.unlock()
 
 ## 排队: 给实体移除组件(flush 时执行)。
@@ -743,7 +986,7 @@ func cmd_remove_component(entity: int, component) -> void:
 	if name != &"":
 		_cmd_mutex.lock()
 		_core.cmd_remove_component(entity, name)
-		_cmd_ops.append(["remove", entity, name])
+		_cmd_note(["remove", entity, name])
 		_cmd_mutex.unlock()
 
 # ---- 批量入队: N 条命令 = 1 次跨语言(逐条排队在 2000 实体时要 4000 次调用) ----
@@ -755,8 +998,9 @@ func cmd_create_many(count: int) -> PackedInt32Array:
 	_cmd_mutex.lock()
 	var handles: PackedInt32Array = _core.cmd_create_many(count)
 	_cmd_create_count += handles.size()
-	for i in handles.size():
-		_cmd_ops.append(["create"])
+	if _cmd_mirror_needed():
+		for i in handles.size():
+			_cmd_note(["create"])
 	_cmd_mutex.unlock()
 	return handles
 
@@ -767,8 +1011,9 @@ func cmd_add_many(entities: PackedInt32Array, component) -> void:
 		return
 	_cmd_mutex.lock()
 	_core.cmd_add_many(entities, name)
-	for e in entities:
-		_cmd_ops.append(["add", e, name])
+	if _cmd_mirror_needed():
+		for e in entities:
+			_cmd_note(["add", e, name])
 	_cmd_mutex.unlock()
 
 ## 批量排队: 销毁一组实体。
@@ -777,9 +1022,10 @@ func cmd_destroy_many(entities: PackedInt32Array) -> void:
 		return
 	_cmd_mutex.lock()
 	_core.cmd_destroy_many(entities)
-	for e in entities:
-		if e >= 0:
-			_cmd_ops.append(["destroy", e])
+	if _cmd_mirror_needed():
+		for e in entities:
+			if e >= 0:
+				_cmd_note(["destroy", e])
 	_cmd_mutex.unlock()
 
 ## 待执行命令数。
@@ -791,6 +1037,17 @@ func cmd_pending_count() -> int:
 
 ## 立即执行全部排队命令(通常由 tick() 帧末自动调用)。
 func cmd_flush() -> void:
+	# 快路径: 没有 hook 时 `_cmd_ops` 是空的(见 _cmd_mirror_needed) → 一次原生 flush + 粗粒度失效。
+	# 这些都是"结构变更", 本就该让全部查询缓存失效, 比逐条精确失效更省。
+	if _cmd_ops.is_empty():
+		_cmd_mutex.lock()
+		_core.flush_commands()
+		_cmd_mutex.unlock()
+		_world_version += 1
+		# 占位句柄计数必须**每批重置**: 下一批的 create 占位从 -1 重新开始
+		# (漏了这句会让第二批句柄变成 -2, 解析到上一批的实体 —— 用例当场抓到)
+		_cmd_create_count = 0
+		return
 	# flush 前收集 destroy 目标的组件(destroy 后无法枚举)
 	var destroy_comps := {}
 	var need_enum := _has_any_component_hooks or not _entity_destroyed_hooks.is_empty()
@@ -989,6 +1246,10 @@ func _fire_entity_destroyed(entity: int) -> void:
 func _mark_dirty(comp: StringName) -> void:
 	if comp == &"":
 		return
+	# 空间索引靠这里失效: 所有写路径(单字段/整列/批量)最终都会走到 _mark_dirty,
+	# 所以在 C++ 的 set_field 里逐个挂钩反而不如这里一处可靠。
+	if _spatial_comp != &"" and comp == _spatial_comp:
+		_core.spatial_invalidate()
 	_dirty_mutex.lock()
 	_dirty_comps[comp] = _frame_count
 	_dirty_mutex.unlock()
@@ -1059,6 +1320,21 @@ func off_event(type: StringName, handler: Callable) -> void:
 	var arr: Array = _event_subscribers.get(type, [])
 	arr.erase(handler)
 
+## 取走本帧某类事件(取一次即清空, 再取返回空)。
+## 与 on_event 订阅是**两种并存**的消费方式:
+##   on_event    = 广播, 所有订阅者都看到本帧全部事件(适合"通知多方")
+##   take_events = 抢占, 第一个取的拿到并从队列移除(适合"只应由一个系统处理")
+func take_events(type: StringName) -> Array:
+	var out: Array = _event_prev.get(type, [])
+	_event_prev.erase(type)
+	return out
+
+
+## 上一帧是否有该类事件未被取走(不清空)。
+func has_last_events(type: StringName) -> bool:
+	return not (_event_prev.get(type, []) as Array).is_empty()
+
+
 func has_pending_events(type: StringName) -> bool:
 	_event_mutex.lock()
 	var b: bool = _event_queues.has(type) and not (_event_queues[type] as Array).is_empty()
@@ -1110,8 +1386,12 @@ func _entity_matches_conds(eid: int, conditions: Array) -> bool:
 				if not num != float(value): return false
 	return true
 
+## 帧末派发(事件契约的唯一出口):
+##   1) 取快照并清空**写缓冲**(_event_queues) —— 并行系统可能仍在投递, 故快照后统一在主线程派发;
+##   2) 快照整份交给**读缓冲**(_event_prev): 下一帧 take_events 从这里"取走", 取一次即没了;
+##   3) 订阅者(on_event)按快照广播 —— 与本帧系统顺序无关(系统内 emit 一律本帧末可见)。
+## 两条消费方式语义互补: 广播=通知多方, 取走=只应有一个系统处理。
 func _dispatch_events() -> void:
-	# 快照拷贝(并行系统可能仍在投递), 主线程统一派发
 	_event_mutex.lock()
 	var snapshot := {}
 	for type in _event_queues:
@@ -1121,6 +1401,8 @@ func _dispatch_events() -> void:
 		snapshot[type] = queue.duplicate()
 		queue.clear()
 	_event_mutex.unlock()
+	# 双缓冲交换: 上一帧的读缓冲被本帧快照替换(未取走的旧事件随之丢弃, 与"每帧一批"语义一致)
+	_event_prev = snapshot
 	for type in snapshot:
 		var handlers: Array = _event_subscribers.get(type, [])
 		for payload in snapshot[type]:

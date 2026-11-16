@@ -123,10 +123,30 @@ static func _build_plan(case_paths: Array, mode: String, acc: Dictionary) -> Arr
 			continue
 		# 探针实例只用来问 needs_game_process, 随即丢弃 —— 真正执行时再实例化,
 		# 否则实例会在整轮运行期存活, 被中途的 ResetTool.all() 弄成残留状态
+		# ⚠ GDScript 没有 try/catch: 对"有解析错误"的脚本直接 .new() 会抛
+		# "Nonexistent function 'new'", 把**整批**计划打断成 0 项(实测 VoxelSupport 的
+		# test 目录里有这种脚本, script=all 直接 0 项、连正确的用例都跑不到)。
+		# 判据用源码里的 TestCase 继承声明: 解析失败的脚本 source_code 为空 → 自然跳过。
+		# (不用 can_instantiate(): 实测它对这里的正常用例也返回 false, 会误杀全部。)
+		var src: String = script_res.source_code if script_res is GDScript else ""
+		if not src.contains("TestCase"):
+			acc["skipped"].append({case = label, reason = "不是 TestCase 子类"})
+			_progress("跳过 %s（非用例）" % label)
+			continue
+		# 解析失败的脚本: source_code 仍有文本(所以上面那句放它过去), 但 new() 会抛异常。
+		# reload() 的返回码是唯一可靠的"能否编译"判据(实测 can_instantiate() 对正常用例也返回 false)。
+		if script_res is GDScript and script_res.reload() != OK:
+			acc["skipped"].append({case = label, reason = "脚本解析失败(修好之前无法运行)"})
+			_progress("跳过 %s（解析失败）" % label)
+			continue
 		var probe = script_res.new()
 		if probe == null:
 			acc["failures"].append("%s: 用例类无法实例化" % label)
 			acc["failed"] = int(acc["failed"]) + 1
+			continue
+		if not (probe is TestCase):
+			acc["skipped"].append({case = label, reason = "不是 TestCase 子类"})
+			_progress("跳过 %s（非 TestCase）" % label)
 			continue
 		var wants_game: bool = probe.has_method("needs_game_process") and bool(probe.needs_game_process())
 		var skip := _skip_reason(mode, wants_game)

@@ -2,6 +2,7 @@
 #define DECS_ECS_CORE_H
 
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -59,14 +60,31 @@ inline int32_t ecs_version_of(int32_t entity) {
 // ---------------------------------------------------------------------------
 struct ECSColumn {
 	Variant::Type type = Variant::NIL;
-	std::vector<int32_t> i32;   // INT
-	std::vector<float> f32;     // FLOAT
-	std::vector<uint8_t> b;     // BOOL (bool 位打包不利多线程写, 用 uint8)
-	std::vector<Vector2> v2;    // VECTOR2
-	std::vector<Vector3> v3;    // VECTOR3
-	std::vector<Vector4> v4;    // VECTOR4
-	std::vector<Color> col;     // COLOR
-	std::vector<String> s;      // STRING (引用计数, 列并行写不适用; 低频字段用)
+	// 单块字节缓冲: 元素按 type 紧排(stride 由 type 决定)。
+	// 早先是 8 个 std::vector 的联合体 —— 每个列常驻 8×24B 的空头部, 8 个字段的组件就是 1.5KB
+	// 纯空转, 且访问要过 8 个分支。现在只剩一个指针 + 长度, 访问器按类型 reinterpret。
+	std::vector<uint8_t> bytes;
+	// STRING 是非平凡类型(String 有构造/析构), 不能塞进字节缓冲, 单独一列。
+	std::vector<String> s;
+
+	static size_t stride(Variant::Type t);
+
+	template <typename T>
+	T *ptr() {
+		return reinterpret_cast<T *>(bytes.data());
+	}
+	template <typename T>
+	const T *ptr() const {
+		return reinterpret_cast<const T *>(bytes.data());
+	}
+	template <typename T>
+	T &at(size_t row) {
+		return ptr<T>()[row];
+	}
+	template <typename T>
+	const T &at(size_t row) const {
+		return ptr<T>()[row];
+	}
 
 	void resize(size_t n);
 	void push_default(const Variant &value);
@@ -113,10 +131,15 @@ struct ECSFilterCond {
 // ---------------------------------------------------------------------------
 struct Archetype {
 	std::vector<int32_t> comps;
-	std::vector<std::vector<ECSColumn>> cols; // [comp_pos][field]
+	// 扁平列存储: cols[col_off[cp] + fi]。早先是 vector<vector<ECSColumn>>(两层):
+	// 每块每组件一次小分配, 且每次字段访问多一次指针追逐。
+	std::vector<ECSColumn> cols;
+	std::vector<int32_t> col_off;            // 每组件起始下标; size = comps.size()+1(末位=总列数)
 	std::vector<int32_t> entities;            // 实体 index
-	std::vector<int32_t> row_map;             // 实体 index -> 行号(-1)
-	std::vector<uint32_t> row_ver;            // 每行写版本(变更检测: 写时递增)
+	// 注: 行号映射已上移到 ECSCore::entity_row_(全局一张表)。
+	// 这里是 std::vector<int32_t> row_map(每块按最大实体下标开的稀疏表), 内存是 4 × 块数 × 池大小,
+	// 20 个块 + 池涨到 100 万就是 80MB, 且只写 -1 从不缩容 —— 长会话里的泄漏型增长。
+	std::vector<uint64_t> row_ver;            // 每行写版本(变更检测: 写时递增; 64 位避免回绕)
 	uint64_t bits = 0;                        // 组件位集(comp < 64, 参考 Flecs/Bevy 位匹配)
 
 	// 组件位置(升序 comps): 用位集 popcount O(1)(comp<64), 超 64 fallback 二分
@@ -136,8 +159,24 @@ struct Archetype {
 		}
 		return std::binary_search(comps.begin(), comps.end(), comp);
 	}
-	inline int32_t row_of(int32_t entity) const {
-		return (int32_t(entity) < int32_t(row_map.size())) ? row_map[entity] : -1;
+	inline int32_t col_count(int cp) const { return col_off[size_t(cp) + 1] - col_off[size_t(cp)]; }
+	// 带边界检查的列访问。**越界不再返回野指针**: 打一条错误, 返回一个空列(写=丢弃, 读=默认值)。
+	// 上次崩溃就是"把总字段数当组件数"导致 cp 越界读 col_off —— 有这层检查就只会红不会崩。
+	inline ECSColumn &col_at(int cp, int fi) {
+		if (cp < 0 || size_t(cp) + 1 >= col_off.size() || fi < 0 || fi >= col_count(cp)) {
+			ERR_PRINT("ECS: col_at() 越界 (cp/fi 超出该块的组件与字段范围)");
+			static ECSColumn dummy;
+			return dummy;
+		}
+		return cols[size_t(col_off[size_t(cp)] + size_t(fi))];
+	}
+	inline const ECSColumn &col_at(int cp, int fi) const {
+		if (cp < 0 || size_t(cp) + 1 >= col_off.size() || fi < 0 || fi >= col_count(cp)) {
+			ERR_PRINT("ECS: col_at() 越界 (cp/fi 超出该块的组件与字段范围)");
+			static ECSColumn dummy;
+			return dummy;
+		}
+		return cols[size_t(col_off[size_t(cp)] + size_t(fi))];
 	}
 };
 
@@ -155,6 +194,12 @@ public:
 	// name: 组件类名; fnames: 字段名; ftypes: 字段 Variant::Type; fdefaults: 默认值
 	int32_t register_component(const StringName &name, const PackedStringArray &fnames,
 			const PackedInt32Array &ftypes, const Array &fdefaults);
+
+	// 内部标记组件(名字以 "__" 开头, 对 GDScript 隐藏, 不进存档)。
+	// 用途: 让 prefab 实体落在**独立 archetype 块**里 —— 否则模板与实例同块, 每次聚合/批量写
+	// 都会因为"块内有 prefab"退化到逐行 Variant 装箱(实测 20k 单列 30µs → 块内纯 memcpy 2µs)。
+	int32_t prefab_tag();
+	bool is_internal_comp(int32_t ci) const;
 
 	// ---- 实体 ----
 	int32_t create_entity();
@@ -199,7 +244,14 @@ public:
 	// 聚合行号(某组件的 get_column 索引) -> 实体 ID(archetype 下跨块聚合顺序)。
 	int32_t get_entity_at(const StringName &comp, int32_t row) const;
 	// 变更检测: 返回该组件所有"行版本 > since"的聚合行号(增量同步/系统用)。
-	PackedInt32Array get_changed(const StringName &comp, uint32_t since) const;
+	// 全局写入序号: 每次写把一个**全局自增**的值盖到该行的 row_ver 上(而不是每行自增)。
+	// 这样 get_changed(comp, since) 的 since 才是"时间点"而不是"该行被写过几次"。
+	int64_t write_tick() const { return int64_t(write_tick_); }
+
+	// 查询级变更过滤(Bevy Changed<T> / flecs changed 的等价物):
+	// 返回 row_ver > since 的行, 行序与 columns_of 一致 → 渲染/UI 只处理变化的行。
+	// since 用 int64(与 64 位 row_ver 同宽, 不会回绕); 传 0 等于全量。
+	PackedInt32Array get_changed(const StringName &comp, int64_t since) const;
 	// 变更检测开关(默认关: 避免全量写标记开销; 开启后 batch 写递增行版本, 供 get_changed 增量查询)。
 	void set_change_detection(bool enabled);
 	bool is_change_detection() const;
@@ -219,6 +271,51 @@ public:
 	// 一次写回多组件多列: values = {compName: {fieldName: PackedArray}}
 	// (与 get_columns 返回结构一致), 一次跨语言替代 N 次 set_column。
 	void set_columns(const Dictionary &values);
+
+	// ---- 空间索引(统一网格): RTS/弹幕的"附近"查询, 避免每帧全表扫 ----
+	// 业界做法(flecs 无内置, 常见是格子哈希/四叉树; Bevy 靠 avian 等插件): 网格最省事且 O(1) 插删。
+	// 启用: 指定"位置组件 + 位置字段(必须是 VECTOR2) + 格子边长"。
+	// 维护: 结构变更/该列写入时标脏, 下一次查询时**整表重建**(O(n), 20k 约 100µs) ——
+	// 比"每次 set_field 增量更新"简单且不会漏; 无写入的帧不会重建。
+	void spatial_enable(const StringName &comp, const StringName &field, double cell_size);
+	void spatial_disable();
+	// 标脏(由 GDScript 在 _mark_dirty(该组件) 时调用): 结构变化走这条(整表重建)。
+	void spatial_invalidate() { spatial_mark_dirty(); }
+	// 单实体增量更新: 只把该实体从旧格子挪到新格子(O(1))。
+	// 逐帧"每个单位都动"的场景下, 整表重建(O(n)+哈希)比全表扫还慢(实测 0.110ms vs 0.056ms);
+	// 走增量后, 值写入不再触发重建, 只有增删组件/实体才重建。
+	void spatial_update_entity(int32_t id);
+	// 返回落在矩形/圆内的**实体 id**(升序, 保证确定性; 不含 prefab)。
+	PackedInt32Array spatial_query_rect(const Vector2 &min_pos, const Vector2 &max_pos);
+	PackedInt32Array spatial_query_radius(const Vector2 &center, double radius);
+	// {enabled, cells, entities, dirty, cell_size}
+	Dictionary spatial_stats();
+
+	// 内部 prefab 标记组件: 世界初始化时调用一次(幂等, 组件名 `__prefab`)。
+	// 作用是让模板落到独立 archetype; is_internal_comp 已在上面声明。
+	void set_prefab_tag(const StringName &comp);
+
+	// ---- 层级索引(原生反向表 parent → children) ----
+	// 组件语义(ECSParent.target)仍由 GDScript 维护, 这里只承担**索引**:
+	// 上万子节点时 Dictionary 的逐次数组分配与线性 erase 是主要开销。
+	// 与列存储无耦合(不碰 cols/col_off), 所以是重构中最安全的一块。
+	void hierarchy_set_parent(int32_t child, int32_t parent);
+	// 批量挂父: 组件(target)与反向索引都在原生侧一次做完。
+	// 单独 set_parent 每次要 4 次跨语言(get_parent/set_field|add_component/hierarchy_set_parent),
+	// 实测 1 万个 = 81.7ms; 批量版只 1 次跨语言。
+	// ⚠ 不逐实体触发组件 hook(与其它 batch_* 一致的取舍), 需要 hook 请用单条 set_parent。
+	void set_parent_bulk(const PackedInt32Array &children, int32_t parent, const StringName &parent_comp);
+	void hierarchy_remove_child(int32_t parent, int32_t child);
+	PackedInt32Array hierarchy_children(int32_t parent) const;
+	// 销毁前调用: 返回并清空该实体的子列表(调用方负责把子实体的父置 -1)。
+	PackedInt32Array hierarchy_detach(int32_t entity);
+	int32_t hierarchy_child_count(int32_t parent) const;
+
+	// ---- 确定性查询: 按字段值排序的行集 ----
+	// 联机/回放要求"同样的输入 → 同样的遍历顺序"。行集本身按块内行号稳定,
+	// 但需要按业务键(如距离/血量)排序时必须有确定性的并列规则 → 这里以实体 id 作次键。
+	PackedInt32Array query_rows_sorted(const StringName &anchor, const PackedStringArray &must,
+			const PackedStringArray &without, const StringName &field, bool descending = false);
 
 	// ---- Tier 0: 原生批量运算 (纯 C++ 循环, 无 GDScript 解释开销) ----
 	enum BatchOp { BATCH_ADD = 0, BATCH_MUL_ADD = 1, BATCH_SET = 2, BATCH_CLAMP = 3 };
@@ -381,6 +478,14 @@ private:
 	std::vector<int32_t> free_list_;
 	// 实体 index -> 所属 archetype(-1 = 无组件)
 	std::vector<int32_t> entity_arch_;
+	// 实体 index -> 所在块内的行号(全局一张表, 与 entity_arch_ 同步维护)。
+	// 取代了原先"每块一张按最大实体下标开的稀疏 row_map": 内存从 4×块数×池大小 降到 4×池大小,
+	// 且少一次间接寻址(row_of 一次索引, 原来要先按 index 查块内稀疏表)。
+	std::vector<int32_t> entity_row_;
+	uint64_t write_tick_ = 0;   // 全局写入序号(见 write_tick())
+	inline int32_t row_of(int32_t index) const {
+		return (index >= 0 && index < int32_t(entity_row_.size())) ? entity_row_[size_t(index)] : -1;
+	}
 	// 查询缓存: 查询签名(anchor+must+without 组件索引) -> 匹配 archetype 列表。
 	// scanned = 已扫描到的 archetypes_ 下标: archetype 只增不删, 新查询只需补扫新增部分。
 	struct ArchMatch {
@@ -392,8 +497,47 @@ private:
 	bool change_detection_ = false;
 	// prefab 模板标记: 按实体 index 的位图(O(1) 判定, 取代原先的线性扫描)
 	std::vector<uint8_t> prefab_bitmap_;
+	// 内部 prefab 标记组件(注册索引; -1 = 尚未注册)
+	int32_t prefab_tag_comp_ = -1;
+	// 块内"是否含 prefab 行"的缓存(按 struct_version_ 失效)。
+	// 聚合/散射是**每列**调用一次, 若每次都扫一遍块(20k 行), 5 列就要扫 10 万次 ——
+	// 实测 5 列 128µs vs 1 列 15µs, 多出来的全是这个扫描。
+	mutable std::vector<int8_t> prefab_flag_;   // -1 未知 / 0 无 / 1 有
+	mutable uint64_t prefab_flag_ver_ = ~uint64_t(0);
 	// 组件名 -> components_ 下标(注册时填一次, 之后只读 —— 并行系统里查也安全)
 	std::unordered_map<uint64_t, int32_t> component_index_;
+	// 块内是否含 prefab 行(带 struct_version_ 缓存): 聚合/散射按列调用, 不能每列都扫全块。
+	// 实测 5 列 128µs → 78µs(去掉的是 5 × 2 万行的重复扫描)。
+	bool arch_has_prefab(int32_t arch, const Archetype &a) const;
+
+	// prefab 行位置缓存(按 struct_version_ 失效)。
+	// 聚合/散射是**每列**调用一次; 早先每次都做两趟 O(行数) 扫描(数非 prefab 行 + 逐行判 prefab),
+	// 20k × 5 列 = 20 万次判定 —— 实测 5 列 68µs 里绝大部分是这个。缓存后每列只剩纯 memcpy。
+	struct ArchPrefabInfo {
+		int32_t non_prefab = 0;      // 非 prefab 行数(聚合总长直接累加它)
+		std::vector<int32_t> rows;   // prefab 行号(升序, 拷贝时按它切段)
+	};
+	const ArchPrefabInfo &arch_prefab_info(int32_t arch, const Archetype &a) const;
+	mutable std::vector<ArchPrefabInfo> prefab_info_;
+	mutable uint64_t prefab_info_ver_ = ~uint64_t(0);
+	mutable std::mutex arch_cache_mutex_;   // 并行批量算子也会读这些缓存 → 串行化
+
+	// 空间索引状态: 统一网格(格子 → 实体 id 列表)。dirty 时下次查询整表重建。
+	int32_t spatial_comp_ = -1;
+	int32_t spatial_field_ = -1;
+	float spatial_cell_ = 0.0f;
+	bool spatial_dirty_ = true;
+	bool spatial_enabled_ = false;
+	std::unordered_map<int64_t, std::vector<int32_t>> spatial_cells_;
+	// 实体 id → 所在格子。增量更新时用它 O(1) 找到旧格子, 避免全表扫描。
+	std::unordered_map<int32_t, int64_t> spatial_owner_;
+	// 层级反向索引: parent → children(原生, 取代 GDScript 的 Dictionary)
+	std::unordered_map<int32_t, std::vector<int32_t>> children_;
+	int32_t spatial_built_entities_ = 0;
+	void spatial_mark_dirty();
+	void spatial_rebuild();
+	static int64_t spatial_key(int32_t cx, int32_t cy);
+
 	// archetype 迁移图(flecs 的 "edge" 缓存): (源块, 组件) → 目标块。
 	// find_archetype 是线性扫全部块, 每次 add/remove 都扫一遍; 组件组合一多(100+ 块)会退化。
 	// 块只增不删 ⇒ 边一旦算出永远有效, 无需失效。

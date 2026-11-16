@@ -17,7 +17,7 @@ const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # �
 const KEY_HARD_TIMEOUT := "dev_framework/gdextension_build/hard_timeout_sec"  # 零推进多久判死(秒, 0=关闭)
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
 const KEY_BUILD_TYPES := "dev_framework/gdextension_build/build_types"   # 要构建的构建类型(Array[String], 如 ["release"]=仅 release); 空=当前编辑器类型+另一版本
-const KEY_NATIVE_TARGET := "dev_framework/gdextension_build/target_name"   # 共享库目标名(产物名/入口符号都基于它), 默认 dev
+# 目标名不再可配: 统一由"插件名/插件内已有 .gdextension 文件名"决定(NativeScaffold._plugin_target)
 const SCAFFOLD_PATH := "res://addons/DEVFramework/Core/Editor/Generate/NativeScaffold.gd"
 ## 唯一构建区: 项目根 res://gdextension/(CMakeLists + godot-cpp + 构建缓存)。
 ## 插件源码一律在 addons/<插件>/Native/src, 由生成的 CMakeLists 引用。
@@ -37,13 +37,6 @@ static func native_source_dirs() -> Array[String]:
 	return out
 
 
-## 首个原生源码目录(单工程兼容用; 多插件时请用 native_source_dirs)。
-static func native_source_dir() -> String:
-	var dirs := native_source_dirs()
-	return dirs[0] if not dirs.is_empty() else ""
-
-
-## 各插件源码的最新 mtime —— "改了 C++ 却没重编" 的公共判定量。
 static func _native_src_mtime(exts: PackedStringArray) -> int:
 	var ms := 0
 	for d in native_source_dirs():
@@ -322,6 +315,10 @@ func _locate() -> Dictionary:
 	var names: Array = outputs.keys()
 	if names.is_empty():
 		names = [String(info.get("target", ""))]
+	# 共享插件(junction)的产物目录带**其它项目**的归属标记 → 本项目不构建。
+	# 否则消费方会用自己 CMakeLists 里的规则重编同一批源码: 产物互相覆盖, 还会多出 debug 版本
+	# (实测 SoL 构建把 DEVFramework 的 release 库换成了非优化版本, 帧耗涨 10 倍)。
+	# 不做"谁才能构建"的限制: 任何项目触发构建, 都按同一套规则产出同名同规格的库。
 	for tgt in names:
 		var od: String = String(outputs.get(tgt, ""))
 		for t in types:
@@ -342,6 +339,10 @@ func _locate() -> Dictionary:
 				String(tg.get("arch")), String(tg.get("artifact"))])
 	return {"source": source_dir, "targets": targets, "info": info,
 			"gdext": gdext_by_target.get(names[0], ""), "gdext_by_target": gdext_by_target}
+
+
+## 不做"谁能构建"的限制: 任何项目触发构建都产出同名同规格的库。
+## 一致性靠"所有项目的 CMakeLists 都由 NativeScaffold 统一生成"来保证, 而不是靠归属白名单。
 
 
 ## 由 CMake 信息推导指定构建类型/架构的预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
@@ -433,15 +434,6 @@ static func _cond_key(cond: String) -> String:
 ## 绝对路径 → res:// 路径(项目根内); 项目根外原样返回
 func _abs_to_res(p: String) -> String:
 	return FileTool.abs_to_res(p)
-
-
-## 自动发现工程目录候选(静态, 供外部/MCP 复用): 项目根 gdextension/ + 各 addons/*/
-static func discover_source_dirs() -> Array[String]:
-	# 构建区只有一处: 插件源码不再各自带 CMakeLists, 所以"发现多个工程"的概念已不存在。
-	var out: Array[String] = []
-	if _is_ext_source(BUILD_ZONE):
-		out.append(BUILD_ZONE)
-	return out
 
 
 static func _is_ext_source(dir_path: String) -> bool:
@@ -741,13 +733,6 @@ static func _hint_hit(low: String) -> bool:
 			return true
 	return false
 
-## 目标名(共享库名/入口符号/产物名前缀), 默认 "dev"。
-static func native_target_name() -> String:
-	var t := String(ProjectSettings.get_setting(KEY_NATIVE_TARGET, "dev")).strip_edges()
-	return t if t != "" else "dev"
-
-
-## 引擎主次版本("4.7"), 作为 godot-cpp API 版本的缺省提示。
 static func _engine_api_hint() -> String:
 	var v := Engine.get_version_info()
 	return "%d.%d" % [int(v.get("major", 4)), int(v.get("minor", 0))]
@@ -823,12 +808,6 @@ static func _git_exe() -> String:
 	return _git_path
 
 
-static func _git_exec(args: PackedStringArray, out: Array = []) -> int:
-	return OS.execute(_git_exe(), args, out)
-
-
-## 把 godot-cpp submodule 与当前引擎对齐 —— 但以"永不全量重建"为最高约束:
-##   唯一原则: 本地存在任何可编译的绑定快照(钉版或引擎回退) → 直接跳过(无网络、不切版本、不重建);
 func _sync_godot_cpp(source_dir: String) -> void:
 	var vi: Dictionary = Engine.get_version_info()
 	var engine_api := "%d.%d" % [int(vi.get("major", 4)), int(vi.get("minor", 0))]
@@ -997,17 +976,6 @@ func _pick_build_dir(source_dir: String, type: String, arch: String) -> String:
 	if not FileAccess.file_exists(dir.path_join("CMakeCache.txt")):
 		_log("未发现(%s.%s)已配置构建缓存, 将新建: " % [type, arch], dir)
 	return dir
-
-
-static func _newest_cache(dirs: Array) -> String:
-	var best := String(dirs[0])
-	var t := -1.0
-	for d in dirs:
-		var m := FileAccess.get_modified_time(String(d).path_join("CMakeCache.txt"))
-		if m > t:
-			t = m
-			best = String(d)
-	return best
 
 
 func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, type: String, arch: String) -> bool:
@@ -1898,34 +1866,6 @@ func _gdext_keep_files(gdext_res: String) -> PackedStringArray:
 	return keep
 
 
-## CMake OUTPUT_NAME 全量平台条目 → 各平台产物文件名白名单。
-func _cmake_keep_names(info: Dictionary) -> PackedStringArray:
-	var keep := PackedStringArray()
-	var names: Dictionary = info.get("output_names", {})
-	for key in names:
-		var k := String(key)
-		var os := k.split(".")[0]
-		var name := String(names[key])
-		match os:
-			"windows":
-				keep.append("%s.dll" % name)
-			"macos":
-				keep.append("lib%s.dylib" % name)
-			"linux":
-				keep.append("lib%s.so" % name)
-	if names.is_empty() and String(info.get("target", "")) != "":
-		# CMakeLists 未钉 OUTPUT_NAME: 按默认规则 target 名即产物名(本机平台)
-		match _os_label():
-			"windows":
-				keep.append("%s.dll" % String(info.get("target")))
-			"macos":
-				keep.append("lib%s.dylib" % String(info.get("target")))
-			"linux":
-				keep.append("lib%s.so" % String(info.get("target")))
-	return keep
-
-
-## 部署后清理产物目录: 只保留 CMake OUTPUT_NAME 推导出的各平台产物。
 func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 	var keep_set := {}
 	for k in keep:
@@ -1938,9 +1878,12 @@ func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 	var entry := dir.get_next()
 	while entry != "":
 		var low := entry.to_lower()
-		# .old = 被占用旧库的旁置文件(见 _rename_lib): 当次删不掉, 下次构建时已随重启释放
+		# 垃圾文件统一规则(不限于动态库后缀):
+		#   ~*            = Windows ReplaceFile 的临时残留(~xxxx.TMP), 与 ~libdev.dll 这类旁置副本
+		#   *.old.*       = 被占用旧库的旁置文件(见 _rename_lib), 下次构建时已随重启释放
+		#   *.dll.a       = MinGW 导入库(构建副产物, 运行时不需要)
 		var is_tmp := entry.begins_with("~") or low.ends_with(".tmp") or low.ends_with(".temp") \
-				or low.contains(".old.")
+				or low.contains(".old.") or low.ends_with(".dll.a")
 		var is_lib := low.ends_with(".dll") or low.ends_with(".so") or low.ends_with(".dylib") \
 				or low.ends_with(".a") or low.ends_with(".lib")
 		if not dir.current_is_dir() and not keep_set.has(entry) and (is_tmp or is_lib):
@@ -1980,15 +1923,6 @@ func _arch() -> String:
 	return "x86_64"
 
 
-func _os_token() -> String:
-	match OS.get_name():
-		"Windows": return "win"
-		"macOS", "OSX": return "mac"
-		"Linux": return "linux"
-	return _os_label()
-
-
-## 构建类型跟随当前编辑器(debug 编辑器 → debug 产物优先构建)
 func _build_type() -> String:
 	return "debug" if OS.is_debug_build() else "release"
 
@@ -2002,10 +1936,10 @@ func _plan_build_types() -> Array[String]:
 		if (s == "debug" or s == "release") and not out.has(s):
 			out.append(s)
 	if out.is_empty():
-		out = [_build_type()]
-		for t in ["debug", "release"]:
-			if not out.has(t):
-				out.append(t)
+		# 统一规则: 一律 release —— 与"哪个项目触发构建"无关。
+		# 曾按"当前编辑器类型"取, 于是 debug 版编辑器(如 SoL)会产出 12MB 未优化库,
+		# 覆盖掉宿主项目的 1.7MB 优化库(实测帧耗涨 10 倍)。需要 debug 请显式配 build_types。
+		out = ["release"]
 	_build_types = out
 	_log("构建类型清单: ", " ".join(out))
 	return out

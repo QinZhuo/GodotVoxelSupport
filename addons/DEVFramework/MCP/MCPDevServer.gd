@@ -861,6 +861,260 @@ func _register_instance_tools() -> void:
 		}},
 		_call_use_instance)
 
+	# ---- 崩溃恢复: 目标实例已经死了也能拉起 ----
+	# restart_editor 只能在**目标还活着**时用(它调的是该进程的 EditorInterface.restart_editor),
+	# 崩溃/被强杀后就没有任何实例能响应它。launch_project 由**当前活着的实例**直接 spawn 新进程,
+	# 所以是崩溃后唯一的自助恢复路径。
+	_add_tool("launch_project",
+		"启动(或重启)某个项目的 Godot 编辑器 —— **即使那个项目的实例已经崩溃/被关闭**也能用: 由当前活着的实例直接 spawn 新进程。返回 pid、是否已注册、上次离开记录(previous_exit.clean=false 即上次是崩溃/强杀)。默认不阻塞(wait_ms=0), 之后用 list_instances 轮询它上线; 传 wait_ms>0 会在本实例里阻塞等待(最长该值), 期间本编辑器无响应。",
+		{"type": "object", "properties": {
+			"project_path": {"type": "string", "description": "项目根目录绝对路径(含 project.godot), 如 D:/Work/GodotProject/DEV Framework"},
+			"wait_ms": {"type": "integer", "description": "阻塞等待实例上线的毫秒数; 0(默认)=立即返回, 由调用方轮询 list_instances"},
+			"force": {"type": "boolean", "description": "崩溃环保护: 10 分钟内非正常退出 >=3 次时默认拒绝拉起(避免刷屏); 确认要强拉就传 true"},
+		}, "required": ["project_path"]},
+		_call_launch_project)
+
+	_add_tool("crash_report",
+		"崩溃取证: 汇总某项目最近的非正常退出记录(含存活时长)、editor 日志尾部、以及 Windows 事件日志里的**故障模块@偏移**。若连续两次的 模块+偏移 相同, 会直接标 same_fault=true —— 那说明上一个修复没生效。崩溃后先看它, 再决定改代码还是拉起。",
+		{"type": "object", "properties": {
+			"project_path": {"type": "string", "description": "项目根目录绝对路径; 省略则用当前实例所属项目"},
+			"log_lines": {"type": "integer", "description": "附带多少行 editor 日志尾部(默认 80)"},
+		}},
+		_call_crash_report)
+
+	_add_tool("project_exits",
+		"最近有哪些实例离开过、是否正常退出(clean=false 表示心跳超时=崩溃/强杀)。**判断'项目是不是崩了'就看这里**: 正常关闭会先注销(clean=true), 崩溃不会。",
+		MCPToolSchema.no_arg(),
+		_call_project_exits)
+
+
+## launch_project: 拉起一个项目的编辑器(崩溃恢复用)。
+func _call_launch_project(args: Dictionary) -> Dictionary:
+	var raw := String(args.get("project_path", "")).strip_edges()
+	if raw == "":
+		return MCPResult.err_validation("project_path 不能为空", "传项目根目录的绝对路径(含 project.godot)")
+	var path := raw.simplify_path()
+	if not FileAccess.file_exists(path.path_join("project.godot")):
+		return MCPResult.err_validation("不是 Godot 项目(缺 project.godot): %s" % path,
+				"确认路径指向项目根目录(不是 addons/ 或子目录)")
+	var prev: Dictionary = _hub.last_exit_for(path)
+	# 崩溃环保护(等价 systemd 的 StartLimitBurst/IntervalSec): 短时间反复崩就别再拉了,
+	# 否则一个必崩的库会被拉起几百次 —— 而我们刚刚就遇到过这种"必崩"场景。
+	var guard: Dictionary = _hub.crash_loop(path)
+	if not bool(guard.get("allowed", true)) and not bool(args.get("force", false)):
+		return MCPResult.err_validation(
+				"拒绝拉起: %s\n%s" % [str(guard.get("hint", "")), str(prev)],
+				"先修崩溃原因(用 crash_report 取证); 确实要强拉就传 force=true。")
+	var wait_ms := int(args.get("wait_ms", 0))
+	var exe := OS.get_executable_path()
+	var pid := OS.create_process(exe, PackedStringArray(["--editor", "--path", path]))
+	if pid <= 0:
+		return MCPResult.err_internal("无法启动编辑器进程: %s" % exe, "手动启动编辑器, 或检查 Godot 路径是否可执行")
+	var t0 := Time.get_ticks_msec()
+	var hit: Dictionary = {}
+	if wait_ms > 0:
+		while Time.get_ticks_msec() - t0 < wait_ms:
+			for e in _hub.snapshot():
+				if String(e.get("project_path", "")).simplify_path() == path:
+					hit = e
+					break
+			if not hit.is_empty():
+				break
+			OS.delay_msec(400)
+	var out := {
+		"pid": pid,
+		"exe": exe,
+		"project_path": path,
+		"registered": not hit.is_empty(),
+		"waited_ms": Time.get_ticks_msec() - t0,
+		"instance_id": str(hit.get("instance_id", "")),
+		"uid": str(hit.get("uid", "")),
+		"port": int(hit.get("port", 0)),
+		"previous_exit": prev,
+	}
+	if prev.is_empty():
+		out["hint"] = "没有该项目的离开记录(可能是首次启动, 或记录已滚出最近 8 条)。"
+	elif bool(prev.get("clean", true)):
+		out["hint"] = "上次是**正常退出**, 已重新启动。"
+	else:
+		out["hint"] = "上次是**非正常退出**(%s, 约 %d 秒前) —— 若反复崩溃请查 editor 日志: %s" % [
+			str(prev.get("reason", "")), int(prev.get("ago_ms", 0)) / 1000,
+			"user://logs/godot.log"]
+	if not out["registered"]:
+		out["next"] = "用 list_instances 轮询, 出现在列表里后再 use_instance 选定它(通常 3~6 秒)。"
+	return MCPResult.ok_json(out)
+
+
+## crash_report: 崩溃取证 —— 退出记录 + 日志尾部 + Windows 事件日志里的 模块@偏移。
+## "同模块同偏移连续出现"是最有价值的信号: 说明上一个修复没生效(我们自己踩过一次)。
+func _call_crash_report(args: Dictionary) -> Dictionary:
+	var proj := String(args.get("project_path", "")).strip_edges()
+	if proj == "":
+		proj = ProjectSettings.globalize_path("res://").simplify_path()
+	proj = proj.simplify_path()
+	var n_lines := maxi(10, int(args.get("log_lines", 80)))
+
+	var mine: Array = []
+	for e in _hub.exits_snapshot(20):
+		if String(e.get("project_path", "")).simplify_path() == proj:
+			mine.append(e)
+	var evr: Dictionary = windows_crash_events_ex(5)
+	var events: Array = evr.get("events", [])
+	var same := false
+	var sig := ""
+	if events.size() >= 2:
+		sig = "%s@%s" % [str(events[0].get("module", "")), str(events[0].get("offset", ""))]
+		var sig2 := "%s@%s" % [str(events[1].get("module", "")), str(events[1].get("offset", ""))]
+		same = sig != "@" and sig == sig2
+	var out := {
+		"project_path": proj,
+		"exits": mine,
+		"crashed_count": mine.size(),
+		"log_file": project_log_path(proj),
+		"log_tail": tail_lines(project_log_path(proj), n_lines),
+		"windows_events": events,
+		"windows_events_error": String(evr.get("error", "")),
+		"fault_signature": sig,
+		"same_fault": same,
+	}
+	if same:
+		out["hint"] = "连续两次崩溃都在 **%s** —— 同一个崩溃点复发, 说明上次的修复没生效(先改代码, 别急着拉起)。" % sig
+	elif not mine.is_empty():
+		out["hint"] = "有 %d 次非正常退出; 可先看 windows_events 的 模块@偏移 定位。要恢复用 launch_project。" % mine.size()
+	else:
+		out["hint"] = "该项目没有非正常退出记录(可能是首次启动, 或记录已滚出)。"
+	return MCPResult.ok_json(out)
+
+
+## 项目 → editor 日志路径。user:// 按项目名隔离, 所以要从对方 project.godot 读 config/name。
+static func project_log_path(proj: String) -> String:
+	var name := proj.get_file()
+	var cfg := proj.path_join("project.godot")
+	if FileAccess.file_exists(cfg):
+		var re := RegEx.new()
+		re.compile("config/name=\"([^\"]*)\"")
+		var m := re.search(FileAccess.get_file_as_string(cfg))
+		if m != null:
+			name = m.get_string(1)
+	var base := OS.get_environment("APPDATA")
+	if base.is_empty():
+		base = OS.get_environment("XDG_DATA_HOME")
+	if base.is_empty():
+		return ""
+	return base.path_join("Godot/app_userdata").path_join(name).path_join("logs/godot.log")
+
+
+static func tail_lines(path: String, n: int) -> Array:
+	if path == "" or not FileAccess.file_exists(path):
+		return []
+	var all := FileAccess.get_file_as_string(path).split("\n", false)
+	return all.slice(maxi(0, all.size() - n))
+
+
+## Windows 事件日志里的崩溃条目(最近 N 条)。只 Windows 有; 其它平台返回空数组。
+## 用 PowerShell 一次抽出 time|module|offset|code —— 避免在 GDScript 里解析本地化的长文本。
+static func windows_crash_events(limit: int) -> Array:
+	var r: Dictionary = windows_crash_events_ex(limit)
+	return r.get("events", [])
+
+
+## 同上, 但把失败原因也带出来(取证工具不能"静默空结果" —— 那和"没有崩溃"无法区分)。
+## ⚠ 整个 PowerShell 片段只用**单引号**: 经 OS.execute 转发时, 命令行里的双引号会被再解析一次,
+## 实测会让 ps 报 "Unexpected token" 从而一条都拿不到。
+static func windows_crash_events_ex(limit: int) -> Dictionary:
+	if OS.get_name() != "Windows":
+		return {"events": [], "error": "只有 Windows 有应用事件日志"}
+	# 输出格式: "@@时间 <整条消息压成一行>"。用 @@ 作分隔而不是换行 —— OS.execute 的输出可能
+	# 把多条事件合进一个字符串(实测), 按 \n split 会把两条事件粘成一条、字段错位。
+	var ps := ("Get-WinEvent -FilterHashtable @{LogName='Application';Id=1000;StartTime=(Get-Date).AddHours(-24)} " +
+			"-MaxEvents %d -ErrorAction SilentlyContinue | ForEach-Object { " % limit +
+			"'@@' + $_.TimeCreated.ToString('MM-dd HH:mm:ss') + ' ' + ($_.Message -replace '\\s+', ' ') }")
+	for exe in PackedStringArray(["powershell", "pwsh"]):
+		var out: Array = []
+		var code := OS.execute(exe, PackedStringArray(["-NoProfile", "-NonInteractive", "-Command", ps]), out, true)
+		var all := ""
+		for line in out:
+			all += String(line)
+		var events: Array = _parse_crash_lines(all)
+		if not events.is_empty():
+			return {"events": events, "error": ""}
+		if code == 0:
+			return {"events": [], "error": "近 24 小时没有应用崩溃事件(或事件日志已滚动)"}
+		var first := all.strip_edges()
+		if first != "":
+			return {"events": [], "error": "%s: %s" % [exe, first.substr(0, 200)]}
+	return {"events": [], "error": "无法执行 powershell/pwsh"}
+
+
+## 去掉十六进制的零填充: 0x000000000001ca42 → 0x1ca42(便于跨次比较"同一崩溃点")。
+static func _norm_hex(h: String) -> String:
+	if not h.begins_with("0x") and not h.begins_with("0X"):
+		return h
+	var digits := h.substr(2).lstrip("0")
+	if digits == "":
+		digits = "0"
+	return "0x" + digits.to_lower()
+
+
+## 解析 "@@时间 <消息>" 片段。模块取消息里**最后一个**库文件名(app 的 .exe 在前, 故障模块在后),
+## 异常代码/偏移按标签取(见 _norm_hex 的注释: 不能靠"第一个 0x..")。
+static func _parse_crash_lines(all: String) -> Array:
+	var events: Array = []
+	for chunk in all.split("@@"):
+		var s := chunk.strip_edges()
+		if s.length() < 8:
+			continue
+		var at := ""
+		var m_at := RegEx.new()
+		m_at.compile("^(\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d)")
+		var mm := m_at.search(s)
+		if mm != null:
+			at = mm.get_string(1)
+		# ⚠ 模式里**不要出现中文**: Godot 的 RegEx 对含全角字符的 pattern 会编译失败(实测
+		# "Exception code|异常代码" 整条 search 恒为 null)。所以只认 ASCII 形态 + 位置。
+		var code := ""
+		var after_code := 0
+		var m_code := RegEx.new()
+		m_code.compile("0xc[0-9a-fA-F]{7}")
+		var mc := m_code.search(s)
+		if mc != null:
+			code = mc.get_string(0)
+			after_code = mc.get_end()
+		# 偏移 = 异常代码**之后**出现的第一个十六进制(>=4 位)。消息顺序是
+		#   ... Exception code: 0xc0000005 | Fault offset: 0x... | Faulting process id: 0x...
+		# 而 time stamp(8 位)在代码之前被位置条件排除, process id 在偏移之后不会先命中。
+		var offset := ""
+		var m_off := RegEx.new()
+		m_off.compile("0x[0-9a-fA-F]{4,}")
+		for mo in m_off.search_all(s):
+			if mo.get_start() >= after_code and mo.get_string(0) != code:
+				offset = _norm_hex(mo.get_string(0))
+				break
+		var module := ""
+		var m_mod := RegEx.new()
+		m_mod.compile("([~A-Za-z0-9_.\\-]+\\.(?:dll|dylib|so))")
+		var matches := m_mod.search_all(s)
+		if not matches.is_empty():
+			module = matches[matches.size() - 1].get_string(1)   # app 名(.exe)在前, 故障模块在后
+		if at == "" and module == "" and code == "":
+			continue
+		events.append({"at": at, "module": module, "offset": offset, "code": code})
+	return events
+
+
+## project_exits: 最近的实例离开记录(崩溃 vs 正常关闭)。
+func _call_project_exits(_args: Dictionary) -> Dictionary:
+	var exits: Array = _hub.exits_snapshot(8)
+	var crashed := 0
+	for e in exits:
+		if not bool(e.get("clean", true)):
+			crashed += 1
+	return MCPResult.ok_json({
+		"exits": exits,
+		"crashed_count": crashed,
+		"hint": "clean=false 的条目说明该实例没走正常注销(心跳超时被剔除) → 崩溃/被强杀。用 launch_project 拉起后, 可通过 previous_exit 看到这次判断。",
+	})
+
 
 ## ======= MCP 协议处理 =======
 

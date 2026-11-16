@@ -97,9 +97,32 @@ func forward(req: Dictionary, req_id: Variant, _tool_name: String, route: Dictio
 		# 先探注册表里它还活着吗: 心跳过期与"TCP 拒绝"是两种不同诊断。
 		var still: Dictionary = hub.find_by_uid(str(route.get("uid", "")))
 		var tail := "该实例已不在注册表中(可能刚被关闭)。" if still.is_empty() else "该实例仍在注册表中, 但端口 %d 不接受连接(可能正在启动/卡住/防火墙拦截)。" % int(route["port"])
+		# —— 崩溃判定与自助恢复 ——
+		# 这段存在的理由: 目标进程**崩了**的时候, 没有任何实例能替它调用 restart_editor
+		# (那是在目标自己进程里调 EditorInterface.restart_editor)。所以"它崩没崩"和
+		# "怎么把它拉回来"必须写进**这条错误本身** —— 调用方(AI)只有这一条信息可用。
+		var proj := str(still.get("project_path", ""))
+		if proj == "":
+			proj = str(hub.active_project_path)
+		var why := ""
+		var ex: Dictionary = hub.last_exit_for(proj) if proj != "" else {}
+		if not ex.is_empty():
+			var ago := int(ex.get("ago_ms", 0)) / 1000
+			if bool(ex.get("clean", true)):
+				why = "诊断: 该实例上次是**正常退出**(约 %d 秒前), 不是崩溃。" % ago
+			else:
+				why = "诊断: 该实例**上次是非正常退出(崩溃/被强杀)** —— %s, 约 %d 秒前。" % [str(ex.get("reason", "")), ago]
+		var recovery := ""
+		if proj != "":
+			recovery = "若确认它需要重启: 调 launch_project(project_path=\"%s\") 由本实例拉起新进程(崩溃后 restart_editor 不可用, 因为它调的是目标进程自己的重启), 随后 list_instances → use_instance 选定新实例。想看更多证据用 project_exits。" % proj
+		else:
+			recovery = "用 list_instances 确认清单; 目标已关闭/崩溃时用 launch_project(project_path=...) 拉起, 或 use_instance 换成活着的实例。"
+		var parts := PackedStringArray(["转发到实例 %s 失败(%s)。" % [str(route.get("target", "?")), route.get("via", "")], tail])
+		if why != "":
+			parts.append(why)
+		parts.append("当前可用实例:\n" + hub.describe())
 		return {"jsonrpc": "2.0", "id": req_id, "result": MCPResult.for_protocol(MCPResult.err_transient(
-			"转发到实例 %s 失败(%s)。\n%s\n当前可用实例:\n%s" % [str(route.get("target", "?")), route.get("via", ""), tail, hub.describe()],
-			"用 list_instances 确认实例清单后重试; 若该实例已关闭, 用 use_instance 换成活着的那个(或传空串恢复为「本实例」)。"))}
+			"\n".join(parts), recovery))}
 	if resp.has("error"):
 		return resp
 	resp["id"] = req_id
