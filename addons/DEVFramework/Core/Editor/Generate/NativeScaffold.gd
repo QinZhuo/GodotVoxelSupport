@@ -305,22 +305,15 @@ static func ensure_project(project_abs: String, api_default: String, fetch_deps 
 	if fetch_deps and not FileAccess.file_exists(build_abs.path_join("godot-cpp/SConstruct")):
 		if _fetch_godot_cpp(build_abs, log_fn):
 			created.append("gdextension/godot-cpp")
-	# 构建规则统一: 所有项目的 CMakeLists 都由这里生成(带 MARKER)。
-	# 手写的那份先备份成 CMakeLists.handwritten.bak(只备份一次)再接管 —— 各项目各编各的规则,
-	# 会导致同一批源码被不同优化参数/构建类型重编(实测: debug 版 12MB 覆盖掉 1.7MB 优化版, 帧耗 10×)。
+	# 构建规则统一: 所有项目的 CMakeLists 都由这里生成(带 MARKER), 手写的那份**直接接管**。
+	# 不另存 .bak —— 版本库里已有历史, 备份文件只会变成"另一份需要维护的旧格式文件"
+	# (而且各项目各编各的规则曾导致同一批源码被不同参数重编: debug 12MB 覆盖 1.7MB 优化版, 帧耗 10×)。
 	var cmake_path := build_abs.path_join("CMakeLists.txt")
 	var own := true
 	if FileAccess.file_exists(cmake_path):
 		var cur := FileAccess.get_file_as_string(cmake_path)
-		if not cur.contains(MARKER):
-			var bak := build_abs.path_join("CMakeLists.handwritten.bak")
-			if not FileAccess.file_exists(bak):
-				var bf := FileAccess.open(bak, FileAccess.WRITE)
-				if bf != null:
-					bf.store_string(cur)
-					bf.close()
-					if log_fn.is_valid():
-						log_fn.call("已备份手写 CMakeLists → gdextension/CMakeLists.handwritten.bak, 之后统一由本工具生成")
+		if not cur.contains(MARKER) and log_fn.is_valid():
+			log_fn.call("检测到手写 CMakeLists, 改由本工具统一生成(原内容见版本库历史)")
 	var gen_abs := build_abs.path_join(GEN_DIR)
 	if own:
 		DirAccess.make_dir_recursive_absolute(gen_abs)
