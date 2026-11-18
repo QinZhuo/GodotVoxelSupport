@@ -429,6 +429,10 @@ var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
 var _collision_rebuild_queue: Dictionary[Vector3i, bool] = {}
 # 每帧最多重建的碰撞体数
 @export_range(1, 100, 1) var _collision_rebuild_per_frame: int = 12
+## 每帧碰撞重建的时间预算（毫秒）。单个 chunk 的 ConcavePolygonShape3D 约 10~15ms，
+## 只按块数限流仍会一帧堆 12 块 → 百毫秒级尖峰。预算到点就停，宁可分几帧建完。
+## 0 = 只受 _collision_rebuild_per_frame 限制。
+@export_range(0.0, 100.0, 0.5) var collision_rebuild_budget_ms: float = 4.0
 
 # GPU 上传限流队列：异步结果先缓存数组数据，_process 帧尾批量构建 mesh（平滑 GPU 上传，
 # 避免连续破坏时一帧大量 ArrayMesh 创建导致 Metal fence 超时）
@@ -512,7 +516,7 @@ func _process(_delta: float) -> void:
 	# 统一流式/程序化驱动：程序化无限世界总是按距离生成（不依赖 visibility_mode——
 	# 无限世界只能按距离生成，设 FULL/FRUSTUM 若不走流式会导致数据永不生成 → 画面空白）；
 	# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
-	if infinite_layer.streaming_enabled or (data and data.node != null):
+	if infinite_layer.streaming_enabled or (data and data.is_streaming()):
 		infinite_layer.process_streaming()
 	# LOD 管理：每 interval 帧限量生成/移除（降低每帧遍历开销，近处 LOD0 / 远处各粗层互补）。
 	# 降频与"数据变化立即处理"的判定都在无限层内部（它持有 _cull_check_counter）。
@@ -531,9 +535,14 @@ func _process(_delta: float) -> void:
 	# 碰撞增量重建：破坏后限量重建 ConcavePolygonShape3D（延迟，避免连续破坏主线程卡顿）
 	if generate_collision and not _collision_rebuild_queue.is_empty():
 		var _built_col := 0
+		var _col_started_us := Time.get_ticks_usec()
+		var _col_budget_us := int(collision_rebuild_budget_ms * 1000.0)
 		var _col_keys := _collision_rebuild_queue.keys()
 		for ck in _col_keys:
 			if _built_col >= _collision_rebuild_per_frame:
+				break
+			# 至少建一个（单块本身可能就超过预算），之后按时间预算截断。
+			if _built_col > 0 and _col_budget_us > 0 and Time.get_ticks_usec() - _col_started_us >= _col_budget_us:
 				break
 			var hm: bool = _collision_rebuild_queue[ck]
 			_collision_rebuild_queue.erase(ck)

@@ -1732,6 +1732,7 @@ func _register_game_play_tools() -> void:
 			"code": MCPToolSchema.code_arg(),
 			"timeout_ms": MCPToolSchema.code_timeout_arg(),
 			"auto_resume": {"type": "boolean", "description": "仅 process=game 有意义: 游戏断点暂停时先 game_control(action=continue) 再执行(默认 false)。"},
+			"allow_stale": {"type": "boolean", "description": "跳过脚本新鲜度闸门，允许在'磁盘已改、进程仍是旧代码'时执行。仅供只读排查；写操作不要用。默认 false。"},
 		},
 		"required": ["process"],
 	}
@@ -1746,11 +1747,12 @@ func _register_game_play_tools() -> void:
 		"properties": {
 			"process": {"type": "string", "enum": ["editor", "game", "both"], "description": "在哪个进程跑: editor=编辑器进程(只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 无运行中的游戏时自动启动); both=先 editor 段再 game 段合并(同步阻塞)。"},
 			"script": {"type": "string", "description": "必填。二选一(靠内容自动判别): ①测试脚本路径子串(如 'test_game_replay'), 只运行匹配的用例文件; 'all'=全量(**不推荐**: 耗时可能过长)。②**内联 GDScript 源码**——含换行 或 以 'extends ' 开头即判为源码, 需 `extends TestCase` 并定义 test_ 开头的断言方法, 直接编译运行、**不落盘**, 适合临时验证(上限 8192 字符)。单个词(含打错的脚本名)一律按选择器处理。"},
+			"wait_sec": {"type": "number", "minimum": 0, "maximum": 25, "description": "启动后最多阻塞等待秒数(默认 5, 0=立即返回 job_id, 上限 25)。长测试建议 0~5, 再用 job_wait(job_id) 轮询，避免客户端 30s 超时丢失 job_id。"},
 		},
 		"required": ["process", "script"],
 	}
 	_register_game_play_tool("run_tests",
-		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 无运行中的游戏时自动启动一个); both=先 editor 段再 game 段并合并(**同步阻塞**, 跑全量用)。**长任务语义(通用, 不用额外参数)**: 默认最多等 25 秒, 跑完直接返回完整汇总; 超过 25 秒则返回 `{job_id, running:true, progress, current, elapsed_ms}`, 此时用 **`job_wait(job_id)`** 继续等(完成即返回结果, **不会重跑**)。测试整体硬超时 10 分钟。",
+		"运行**指定**的项目单元测试(Scripts/Test/ 下, extends TestCase, test_ 开头方法自动发现; 支持协程用例)。**script 必填**: 传脚本路径子串(或 'all' 全量, 不推荐)按文件跑; 或**直接传内联 GDScript 源码**(含换行/以 'extends ' 开头即视为源码, `extends TestCase` + test_ 方法, 不落盘, 临时验证用)。process 必填: editor=编辑器进程(只跑进程无关用例); game=游戏进程(跑 needs_game_process() 用例; 无运行中的游戏时自动启动一个); both=先 editor 段再 game 段并合并(**同步阻塞**, 跑全量用)。**长任务语义**: wait_sec 默认 5 秒（0=立即返回）；窗口内跑完直接给完整汇总，否则返回 `{job_id, running:true, ...}`，用 **`job_wait(job_id)`** 继续等（不会重跑）。建议长测试传 wait_sec=0~5，避免 MCP 客户端 30s 超时把 job_id 丢掉。测试整体硬超时 10 分钟。",
 		tests_schema,
 		_call_run_tests_local,
 		_call_run_tests_routed)

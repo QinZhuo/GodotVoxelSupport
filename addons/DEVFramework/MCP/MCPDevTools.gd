@@ -92,7 +92,8 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 	# (原因与实测过程见 MCPScriptSync._guard_runtime)。
 	# 含编辑器引用不能 preload。故按特征标签分流 —— 非编辑器构建直接跳过守卫(ok=true)。
 	var guard := {"ok": true}
-	if Engine.is_editor_hint() or OS.has_feature("editor"):
+	var allow_stale := bool(args.get("allow_stale", false))
+	if not allow_stale and (Engine.is_editor_hint() or OS.has_feature("editor")):
 		var sync: Variant = load("res://addons/DEVFramework/MCP/MCPScriptSync.gd")
 		if sync != null:
 			guard = await sync.guard_eval(mode, game_started_at, tree)

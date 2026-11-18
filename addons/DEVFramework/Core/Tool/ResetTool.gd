@@ -21,6 +21,7 @@ static func all() -> void:
 	InputTool.reset()
 	AsyncTool.reset()
 	JobTool.clear()
+	ScriptEpochTool.reset()
 	CameraTool.reset()
 	TaskTool.reset()
 	DialogueTool.reset()

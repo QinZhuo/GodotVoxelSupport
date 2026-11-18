@@ -3,7 +3,7 @@ extends RefCounted
 
 ## ECS 原生桥接 —— 懒加载 ECSCore(C++ 库)。
 
-static var _required_methods := [
+static var _required_methods: Array[StringName] = [
 	&"register_component", &"create_entity", &"is_alive", &"destroy_entity",
 	&"add_component", &"has_component", &"remove_component", &"count_entities",
 	&"query_rows", &"query_rows_aligned", &"query_rows_aligned_where", &"entity_of_row", &"get_field", &"set_field",

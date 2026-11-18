@@ -71,15 +71,13 @@ renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级
 
 ```gdscript
 class_name MyWorld
-extends QVoxelSource
+extends ProceduralVoxelSource
 
-## Infinite world: declare it, then override the chunk-supply hooks.
-func can_generate_chunk(_chunk_key: Vector3i) -> bool:
-	return true
-
-## Return a 32³ PackedInt32Array (value = material id, 0 = empty).
+## Only generate() is required: the base fills is_streaming / can_generate_chunk /
+## is_in_node_bounds and configures the async loader at construction.
+## Return a 32³ PackedInt32Array (lod=0) or LOD_BLOCK_SIZE³ (lod>=1), value = material id, 0 = empty.
 ## Must be deterministic: same chunk_key → same terrain.
-func _generate_chunk(chunk_key: Vector3i) -> PackedInt32Array:
+func generate(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 	# e.g. noise-based heightmap — use ABSOLUTE voxel y for cross-layer continuity
 	...
 
@@ -126,17 +124,17 @@ Related properties are **hidden in the Inspector automatically** when they have 
 | `view_distance` / `unload_distance` / `lod_count` | visibility_mode ≠ FULL | visibility_mode = FULL |
 | `_stream_load_per_frame` / `_stream_unload_per_frame` | visibility_mode = STREAMING | otherwise |
 | `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod_count > 1 | lod_count = 1 |
-| `_collision_rebuild_per_frame` | generate_collision = true | generate_collision = false |
+| `_collision_rebuild_per_frame` / `collision_rebuild_budget_ms` | generate_collision = true | generate_collision = false |
 | `max_debris_per_hit` / `debris_*` | spawn_debris_on_damage = true | spawn_debris_on_damage = false |
 
 ### Common pitfalls
 
-- **Procedural world**: use `visibility_mode = STREAMING` — infinite worlds are always distance-driven (FULL/FRUSTUM previously rendered nothing; now auto-fixed)
+- **Procedural world**: extend `ProceduralVoxelSource` (it reports `is_streaming() = true`; the renderer gate uses that instead of `node != null`). `visibility_mode = STREAMING` is still recommended so unload/LOD distance logic is active.
 - `lod_count = 1` disables LOD (everything full-precision); for large worlds set `lod_count >= 2`.
   Band radii are automatic: LOD0 = `view_distance / 2^lod_count`, LOD_i (i>=1) =
   `view_distance / 2^(lod_count-1-i)` — each level doubles, matching Voxel Tools.
 - `unload_distance = 0` falls back to `view_distance * 1.2`
-- `generate_collision` is **false by default** — enable it for physics collision
+- `generate_collision` is **false by default** — enable it for physics collision. Collision rebuild is both count- and time-budgeted (`collision_rebuild_budget_ms`, default 4ms); one chunk may still exceed the budget, so set it lower if your chunk meshes are very dense.
 - `voxel_scale` = world units per voxel (data coordinates are 1-voxel units); all distances are in world units
 - **The native library is a hard dependency** — mesh generation, destruction and CRC all live in
   `addons/VoxelSupport/Native/` (GDExtension `VoxelSupportNative`). If it is missing or version-mismatched,

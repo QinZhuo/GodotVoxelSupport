@@ -72,32 +72,44 @@ C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/
 ## 引擎陷阱
 
 1. **改框架代码后必须重启编辑器**：已注册的全局类不会真正 reload，行为与源码不符且无提示。
+   `TestRunner` 会检测“磁盘 vs 已加载”并拒绝跑旧代码；headless 每次都是全新进程，不受影响。
 2. `await` 已完成的协程句柄会永久挂起 → 用 `AsyncTool.await_coroutine`。
 3. 脚本 reload 后，跨编译代次的类型化赋值可能静默得到 null → 跨边界传对象用无类型变量。
 4. **别把已释放的节点赋给类型化变量**：`var n: Node = arr.pop_back()` 在实例已 `queue_free` 时会抛
    "Trying to assign invalid previously freed instance"（赋值先于 `is_instance_valid` 检查）。
    先用 `Variant` 接住再判空。
 5. **注释/提示文本里的 `res://` 不算路径引用**：批量替换路径时若正则太宽，会把提示文案也改坏。
+6. **`Entity2D/3D` 的 ECS 世界字段叫 `ecs_world`**（不是 `world`）。`world` 留给项目自己的世界对象；
+   旧代码里的 `entity.world` 需改成 `entity.ecs_world`。
+7. **static 缓存不会随热重载消失**：会缓存数据的 Tool/Def 应调用
+   `ScriptEpochTool.register_cache(&"模块", 清缓存回调)`，测试轮次开始时会统一清一次；
+   否则新旧脚本结构混代（地形索引/页缓存踩过）。
 
 ## 改完必跑
 
 ```
-run_tests  process=editor action=run script=test_framework_compile   # 全量编译 + 路径存在性
-run_tests  process=editor action=run script=test_tutorial            # 遮罩/气泡回归
-run_tests  process=editor action=run script=test_dialogue            # 对话链路
+run_tests  process=editor script=test_framework_compile   # 全量编译 + 路径存在性
+run_tests  process=editor script=test_tutorial            # 遮罩/气泡回归
+run_tests  process=editor script=test_dialogue            # 对话链路
+
+# headless / CI：注意是 Godot 的 -s（不是 --script）
+godot --headless --path . -s res://addons/DEVFramework/Test/run_headless.gd -- --script all
 ```
 
 **`run_tests` 是 job 模型**（长任务标准做法）：
 
-| action | 作用 |
+| 调用 | 作用 |
 |---|---|
-| `run` | 启动任务，立即返回 `job_id`；带 `wait_sec`（默认 8）时窗口内跑完就直接给结果 |
-| `status` | 查进度（`progress` 已完成的用例数 / `total` 本轮总数 / `current` 当前用例 / `elapsed_ms` / `rate` / `eta_ms`），**幂等，不重跑** |
-| `result` | 取最终汇总（`text` / `cases` / `failures` / `elapsed_ms`） |
-| `cancel` | 请求取消（当前用例结束后生效） |
+| `run_tests(process, script, wait_sec)` | 启动任务。`wait_sec` 默认 5（0=立即返回）；窗口内跑完直接给完整汇总，否则返回 `{job_id, running:true, ...}` |
+| `job_wait(job_id)` | 轮询同一个 job（固定等 28s，完成返回结果，**不重跑**）；`job` 状态在启动它的进程里 |
 
-慢测试（回放类常 100s+）不要反复调 `run` —— 那会重跑。用 `status` 轮询到 `running: false`。
-`job` 状态存在**跑测试的进程**里，所以 `status`/`result` 的 `process` 必须与启动时一致。
+慢测试（回放类常 100s+）不要反复启动 —— 拿到 `job_id` 后只调 `job_wait`。
+**0 个用例 / 脚本解析失败现在一律判失败**：CI 里“没跑”与“跑了全过”必须可区分。
+编辑器进程若检测到磁盘脚本与已加载版本不一致，会拒绝开跑并提示重启（或改用 headless）。
+
+headless 默认还会挂一个 `MCPLogger`，把运行期 **script/shader/engine error** 算进失败（GUT 的 failure_error_types 语义；warning/printerr 不算，避免误伤故意制造告警的用例）。
+- `-- --allow-errors`：关闭运行期错误统计（给“故意触发错误”的旧用例兜底）。
+- `-- --freshness=strict|warn|off`：编辑器新鲜度策略；默认 strict，也可用项目设置 `dev_framework/test/freshness` 配置。
 
 **进度与 ETA 是内建的**：`total` 在开跑前就按"确认会执行的方法数"算好，`eta_ms` 由最近 3 秒的进度速率外推；
 进度不可用（总数未知/还没推进）时退化到**同类任务的历史用时**（`user://.dev_framework/perf_history.json`）。

@@ -61,7 +61,15 @@ static func start(key: String, work: Callable) -> Dictionary:
 	}
 	_active = id
 	_prune()
-	_run(id, work)   # 有意不 await: 启动即返回
+	# 关键：必须把 work 推到**下一帧**再执行。
+	# 直接调用 _run() 会同步跑这个协程直到它第一次 await —— 若 work 里有长时间同步段
+	# （例如 500 栋建筑生成、100 年数值推进），start() 会被一起阻塞，客户端仍会超时，
+	# "立即返回 job_id" 就是一句空话。用 0 秒 SceneTreeTimer 延后一帧，保证先交凭据。
+	var starter := func() -> void: _run(id, work)
+	# 用 Callable.call_deferred（Godot 的"下一帧空闲"原语），而不是 0 秒 SceneTreeTimer：
+	# 计时器会受 Engine.time_scale 影响（测试/回放常把 time_scale 设 0 → job 永不启动），
+	# call_deferred 进 MessageQueue，与时间缩放无关。
+	starter.call_deferred()
 	return status(id)
 
 

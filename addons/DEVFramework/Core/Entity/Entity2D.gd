@@ -12,8 +12,9 @@ var ecs: ECSLink:
 	set(v):
 		_ecs = v
 
-## 便捷访问
-var world: ECSWorld:
+## 便捷访问（ECS 世界）。刻意不叫 world：world 是项目最常见的世界对象字段名，
+## 框架占用它会让每个项目都被迫改名（本项目实际踩过 "member already exists"）。
+var ecs_world: ECSWorld:
 	get:
 		return ecs.world
 	set(v):
@@ -67,7 +68,7 @@ func destroy() -> void:
 ## 把本节点作为"数据组件"注册进 ECS: 自动注册组件 + 附加 + 写入 @export 初值。
 func register_to_ecs() -> bool:
 	if ecs.world == null:
-		push_warning("Entity2D(%s): 未设置 world, 无法注册到 ECS。" % name)
+		push_warning("Entity2D(%s): 未设置 ecs_world, 无法注册到 ECS。" % name)
 		return false
 	return ecs.add_component(self)
 

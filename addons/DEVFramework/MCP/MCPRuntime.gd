@@ -69,16 +69,19 @@ func _run_tests_start(args: Dictionary, mode: String) -> Dictionary:
 		if pre != "":
 			return server._err_validation("内联测试代码预检未通过:\n%s" % pre,
 				"修正内联测试源码后重试; 或改成文件放到 %s 下再用 script 路径跑" % TestRunner.TESTS_DIR)
+	var wait_sec := clampf(VariantTool.get_float(args, "wait_sec", 5.0), 0.0, 25.0)
 	return await _run_as_job("run_tests:%s" % script,
-		func() -> Dictionary: return await TestRunner.run_all(script, mode, server._logger))
+		func() -> Dictionary: return await TestRunner.run_all(script, mode, server._logger),
+		int(wait_sec * 1000.0))
 
 
 ## 长任务统一收口: 启动 → 等一个窗口(窗口内跑完就直接给结果) → 补"怎么轮询"的提示。
 ## 所有返回 job 凭据的工具都走这里, 否则等待时长与提示文案又会各写一份。
-func _run_as_job(key: String, work: Callable) -> Dictionary:
+func _run_as_job(key: String, work: Callable, wait_ms: int = JobTool.DEFAULT_WAIT_MS) -> Dictionary:
 	var snap: Dictionary = JobTool.start(key, work)
-	if bool(snap.get("running", false)):
-		snap = await JobTool.wait(str(snap.get("job_id", "")), JobTool.DEFAULT_WAIT_MS)
+	if bool(snap.get("running", false)) and wait_ms > 0:
+		# 只等调用方指定的窗口：wait_sec=0 时立即把 job_id 交回去，客户端不会因为 30s 超时丢凭据。
+		snap = await JobTool.wait(str(snap.get("job_id", "")), mini(wait_ms, JobTool.DEFAULT_WAIT_MS))
 	return server._ok_json(_with_job_hint(snap))
 
 

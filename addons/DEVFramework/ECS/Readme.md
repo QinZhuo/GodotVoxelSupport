@@ -7,6 +7,9 @@ C++ 原生列存储（`Native/dev.gdextension`）+ GDScript 封装。
 
 ## 快速开始
 
+> 节点侧（`Entity2D/3D`）的 ECS 世界属性是 **`ecs_world`**，不是 `world`；
+> `world` 留给项目自己的世界对象（避免每个项目被迫改名）。
+
 ```gdscript
 var world := ECSWorld.new()
 world.register_component(HealthComponent)

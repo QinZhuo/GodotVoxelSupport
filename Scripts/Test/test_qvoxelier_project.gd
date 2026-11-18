@@ -21,8 +21,8 @@ func cleanup() -> void:
 	for p in _paths:
 		_remove(p)
 	_paths.clear()
-	for i in range(1, SaveTool.MAX_BACKUPS + 1):
-		_remove("%s.%d.bak" % [MAIN, i])
+	for suffix in [".bak", ".1.bak", ".2.bak"]:
+		_remove(MAIN + suffix)
 	_remove(MAIN)
 	_remove(MAIN + ".tmp")
 	DirAccess.remove_absolute(DIR)
@@ -148,8 +148,8 @@ func test_corrupt_main_falls_back_to_backup() -> void:
 	var second := _world()
 	second.set_world_name("第二版")
 	second.all_models()[0].set_voxel(7, 7, 7, 1)
-	assert_eq(QVoxelProject.save(second, MAIN), OK, "第二版落盘（第一版被滚成 .1.bak）")
-	assert_true(FileAccess.file_exists(MAIN + ".1.bak"), "滚动备份确实生成了")
+	assert_eq(QVoxelProject.save(second, MAIN), OK, "第二版落盘（第一版被滚成 .bak）")
+	assert_true(FileAccess.file_exists(MAIN + ".bak"), "备份确实生成了")
 
 	var f := FileAccess.open(MAIN, FileAccess.WRITE)
 	f.store_buffer("写坏了".to_utf8_buffer())

@@ -676,7 +676,7 @@ func _contains(pos: Vector2) -> bool:
 # ------------------------------------------------------------
 
 func _update_geometry() -> void:
-	var view := get_viewport_rect().size
+	var view := _viewport_size()
 	var hit_rects: Array[Rect2] = []
 	var radii := PackedFloat32Array()
 	if view.x > 0.0 and view.y > 0.0:
@@ -714,6 +714,25 @@ func _update_geometry() -> void:
 	_screen_size = view
 	_push_rects()
 	_sync_bubble()
+
+
+## 本视口尺寸；headless / 无窗口时 get_viewport_rect() 可能是 0，
+## 用项目设置里的设计分辨率兜底，否则命中区全部算不出来（UI 教程测试/服务器构建会假红）。
+func _viewport_size() -> Vector2:
+	# headless/dummy DisplayServer 下 root viewport 可能是 0×0 甚至 1×1，
+	# 直接用项目设计分辨率，UI 几何/命中区才可测（否则教程类测试会假红）。
+	if DisplayServer.get_name() == "headless":
+		return _design_size()
+	var size := get_viewport_rect().size
+	if size.x > 0.0 and size.y > 0.0:
+		return size
+	return _design_size()
+
+
+func _design_size() -> Vector2:
+	return Vector2(
+		float(ProjectSettings.get_setting("display/window/size/viewport_width", 1152)),
+		float(ProjectSettings.get_setting("display/window/size/viewport_height", 648)))
 
 
 ## 目标自己算不出矩形时, 用它所在的 SubView3D 面板(屏幕区域)兜底

@@ -71,6 +71,13 @@ extends Resource
 var _async := VoxelAsyncLoader.new()
 
 
+## 构造期就把编排器指向自己：程序化源不需要 node/stream，若只在 setter 里 configure，
+## 它会处于 source=null → request 被静默撤销 → 画面永远空白（VX-01）。
+## 换源仍走 _sync_source()；这里只是给"无节点/无流"的源一个正确初值。
+func _init() -> void:
+	_async.configure(self)
+
+
 ## 换源：作废在途 / 就绪登记（旧源的请求回填进新数据会写出错坐标的数据），并交给编排器。
 func _sync_source() -> void:
 	_invalidate_volume()
