@@ -123,8 +123,9 @@ enum VoxelShape {
 				for ck in data.get_loaded_chunk_keys():
 					data.mark_chunk_dirty(ck)
 			request_update()
-		if particle_node != null:
-			_apply_particle_shape()
+		if _particle_view != null and _particle_view.particle_node != null:
+			_sync_particle_view_config()
+			_particle_view.apply_shape()
 
 ## 【兼容别名】等价于 voxel_shape（早期只有粒子侧用，故叫 particle_shape）。
 var particle_shape: VoxelShape:
@@ -144,6 +145,18 @@ var particle_shape: VoxelShape:
 	set(v):
 		sphere_subdivisions = v
 		_rebuild_for_shape_change()
+
+
+## 形状参数变了：网格要按新形状重建（球面与方块面不是同一份几何），粒子换 draw mesh。
+func _rebuild_for_shape_change() -> void:
+	if _particle_view != null and _particle_view.particle_node != null:
+		_sync_particle_view_config()
+		_particle_view.apply_shape()
+	_clear_lod_meshes()
+	if data:
+		for ck in data.get_loaded_chunk_keys():
+			data.mark_chunk_dirty(ck)
+	request_update()
 
 
 
@@ -167,17 +180,10 @@ var particle_shape: VoxelShape:
 ## 实际的 GPU 粒子节点。为空表示尚未创建。
 ## 【交给项目使用】想自定义运动（漂浮/散开/聚合）时，直接给它换 process_material，
 ## 或读本类的 particle_points 自己上传纹理 —— 本类不做任何"动起来"的事。
-var particle_node: GPUParticles3D = null
 
 ## 最近一次导出的点数据（PackedFloat32Array，布局见 QVoxelSource.build_particle_points）。
 ## 项目若要自己做形态变换，可直接拿它算配对/偏移，不必再问数据层要一遍。
-var particle_points: PackedFloat32Array = PackedFloat32Array()
 
-var _particle_process_mat: ShaderMaterial = null
-var _particle_draw_mat: ShaderMaterial = null
-var _particle_draw_trans_mat: ShaderMaterial = null
-var _particle_mesh: Mesh = null
-var _particle_mesh_trans: Mesh = null
 
 var infinite_layer: VoxelInfiniteLayer:
 	get:
@@ -187,6 +193,28 @@ var infinite_layer: VoxelInfiniteLayer:
 
 var _infinite_layer: VoxelInfiniteLayer
 
+## 视点分页层组件（`VoxelInfiniteLayer` 的继任者）。
+##
+## 【怎么启用】把它作为本节点的子节点挂上，`enabled = true` 即可。挂上之后：
+##   · `_process` 只调**本组件**的调度，不再调 `infinite_layer`（两者绝不并行，会互抢账本）；
+##   · 脏列表过滤走本组件的 `filter_chunks`，不再走旧层 `filter_visible_chunks`；
+##   · LOD 粗层的派发 / 挂载 / 清理全归本组件。
+## 没挂（= null）时一切照旧走旧层，所以这是一个**可空、可热插拔**的接管点。
+##
+## 【为什么是"可空引用"而不是"必须"】并存期要能让两条路径都跑起来做对照验证；
+## 而且 @export 挂 Node 引用比在代码里硬 new 更容易让用户理解"这是可选组件"。
+## 【这是本类唯一的反向调用】旧层当初就是从这里开始双向耦合的（renderer ↔ 视点层互相调）。
+## 为了不再重演，契约压到最小：本类只问"这些 chunk 可见吗"（`filter_chunks`），
+## 以及转发"该你了"（`process_*`）。组件侧只读本类公开面，绝不碰 `_` 前缀成员。
+var paged_layer: VoxelPagedLayer = null
+
+
+## 是否已由 `paged_layer` 接管视点调度。所有"该调谁"的分叉都读这一个判据，
+## 避免十处各写一遍 `paged_layer != null` 而漏掉某一处（那种漏法表现为"某个子能力不工作"，
+## 极难定位）。
+func uses_paged_layer() -> bool:
+	return paged_layer != null and paged_layer.enabled
+
 # [INF] 视点相关
 ## 网格生成模式
 ## 可见性管理模式（决定哪些 chunk 生成网格）
@@ -194,6 +222,24 @@ enum VisibilityMode {
 	FULL,      ## 全量生成所有 chunk（简单，适合中小世界，内存随世界线性增长）
 	FRUSTUM,   ## 视锥剔除：仅生成视锥内（或 view_distance 内）的 chunk，进视锥再补建
 	STREAMING, ## 流式加载：按距离生成 + 卸载，远距 chunk 网格释放（适合超大型世界）
+}
+
+## 绘制模式：决定"体素几何怎么变成绘制单元"。**这是本类最重要的一个旋钮**。
+##
+## 【为什么需要它】两条路径的几何内核是同一个，但"组织方式"决定了 draw call：
+##   · STATIC  ：全部 chunk 合并成 1 个 ArrayMesh（≤2 surface）挂在**本节点自己**的 mesh 上。
+##               N 个实例共享同一份资源 → Godot 自动合批。实测 deer×1000 从 10.67ms 降到 2.15ms，
+##               与导入 ArrayMesh 完全持平（导入 2.31ms）。
+##   · DYNAMIC ：每 group_shift³ 个 chunk 一个 MeshInstance3D。单次编辑只重建受影响的 group，
+##               另有 per-chunk 的异步生成 / 分批上传 / 碰撞 / 流式 / LOD 全套能力。
+##
+## 【取舍 — 必须让用户知道】STATIC 下改一个体素要重建**整份**模型：
+##   deer 1.6~3.1ms / cars 7.4~9.3ms / teapot1 85ms（实测）。
+##   所以"静态大模型本来就不该频繁编辑"——要编辑就切 DYNAMIC。这是刻意的设计取舍，
+##   与 godot_voxel 对 mesh_block_size 的处理同理（"perfomance tradeoff"）。
+enum DrawMode {
+	STATIC,   ## 全部合并成 1 个 mesh / ≤2 个 surface。静态道具、建筑、只读展示（**默认**）。
+	DYNAMIC,  ## 每 group 一个 MeshInstance3D。可破坏、可逐体素编辑、水模拟。
 }
 
 ## 体素数据资源
@@ -209,6 +255,57 @@ enum VisibilityMode {
 		_configure_lod()
 		_clear_lod_meshes()
 		request_update()
+
+## 绘制模式。切换时清掉旧模式的全部绘制单元并按新模式重建。
+@export var draw_mode: DrawMode = DrawMode.STATIC:
+	set(v):
+		if draw_mode == v:
+			return
+		draw_mode = v
+		_clear_lod_meshes()
+		mesh = null
+		request_update()
+
+## DYNAMIC 模式的分组粒度（= 每组 2^group_shift 个 chunk 的边长）。
+##
+## 【默认 0 = 每 chunk 一个绘制单元，与重构前**字节等价**】这是回归安全的第一原则：
+## DYNAMIC 是"可编辑/可破坏/流式"路径，它的默认行为必须和改造前完全一致，
+## 否则所有存量场景（destruction_demo / water_sim / 各测试）都会在没人要求的情况下改变行为。
+##
+## 【那 1/2 什么时候用】分组能大幅减少 draw call（实测 teapot1：158 → 35 → 8），
+## 但它是**显式 opt-in**，且只在两种情况划算：
+##   ① 多实例共享同一模型（draw 收益乘以实例数）；
+##   ② 模型 chunk 密集（≥32 chunk）且编辑不频繁。
+## 单实例 + 逐帧编辑（水模拟）应该留在 0：单次重建要尽可能小。
+##
+## 【为什么默认不是 1】第一版把默认设成 1，结果 destruction_demo（196 chunk / 32 组）
+## 模型长期显示不全、water_sim 随机事件掉帧 —— 分组路径的整组重建在**主线程**，
+## 每帧预算只有 8ms，组多时追不上连续破坏产生的脏组。详见 docs/重构实施记录.md §5.6。
+@export_range(0, 2, 1) var group_shift: int = 0:
+	set(v):
+		group_shift = clampi(v, 0, 2)
+		_clear_lod_meshes()
+		request_update()
+
+## DYNAMIC 模式的分组账本：group_key → MeshInstance3D。
+## 【为什么单独一张表】`_lod_meshes[0]` 的键是 **chunk 坐标**（LOD 账本、流式、碰撞、测试都按它查），
+## 而 DYNAMIC 的绘制单元是 **group 坐标**。两者混在一张表里会让"按 chunk 查是否有网格"失效，
+## 破坏内核契约测试（`has_chunk_mesh` / `remove_chunk_mesh` 全部按 chunk 键）。
+## 故分组绘制单元独立成表；chunk → group 的映射是纯移位（`VoxelMesher.group_of`）。
+var _group_meshes: Dictionary = {}
+## DYNAMIC 分组路径的待重建组集合（group_key → true）。帧尾由 _rebuild_group_meshes 消费。
+var _group_dirty: Dictionary = {}
+## 【分组模式的核心缓存】chunk_key → 该 chunk 的几何数组（worker 在子线程产出）。
+##
+## 【为什么必须缓存】worker 已经按 34³ 光环（含邻居）生成了每 chunk 的正确几何 ——
+## 边界面的可见性已经判好了。旧的实现把这个结果丢掉、帧尾在主线程用 build_group
+## 从体素**重新生成**整组，导致：
+##   ① 几何算两遍（CPU 翻倍）；
+##   ② 第二遍在主线程 → 每帧只有 8ms 预算，组多时几十帧都建不完（destruction_demo
+##      196 chunk / 32 组，且 continuous_interval=3 持续破坏 → 脏组永远追不上 → 模型显示不全）。
+## 现在改为：这里只缓存 worker 的产出，整组重建退化成**纯拼接**（顶点平移 + 索引偏移），
+## 不再有任何几何生成。
+var _chunk_arrays: Dictionary = {}
 
 ## 体素缩放比例 (单个体素的边长，世界单位)
 @export var voxel_scale: float = 0.1:
@@ -242,8 +339,10 @@ enum VisibilityMode {
 		visibility_mode = v
 		# 同步流式启用状态：运行时切换 STREAMING 立即生效（原只在 _ready 设置一次，
 		# demo 在 _ready 之后才设 STREAMING 会导致流式从不启用）。
-		# 无限层一并清空延迟队列（FULL 下补建队列失去意义）。
+		# 视点层一并清空延迟队列（FULL 下补建队列失去意义）。
 		infinite_layer.set_visibility_mode(v)
+		if paged_layer != null:
+			paged_layer.on_visibility_mode_changed(v)
 		if v == VisibilityMode.FULL:
 			# 全量模式下补建已加载 chunk 的网格（卸载的由统一流式按需重载）
 			if data:
@@ -282,6 +381,8 @@ func _validate_property(property: Dictionary) -> void:
 	set(v):
 		view_distance = v
 		infinite_layer.configure_lod(lod_count, view_distance)
+		if paged_layer != null:
+			paged_layer.view_distance = v
 
 # [INF] 视点相关
 ## 流式卸载距离（世界单位，仅 STREAMING）：超过此距离的 chunk 网格被卸载释放
@@ -308,7 +409,7 @@ func _validate_property(property: Dictionary) -> void:
 ## index 直接 = LOD 层级：0 = 全精度 chunk（level 0 block key == chunk key），>=1 = 粗层大块。
 ## 值为 null = "空标记"（该大块确定无体素，无限层据此停止重复派发）。
 ## 【为什么这套账本留在内核】见 VoxelInfiniteLayer 类注释"为什么网格账本留在内核"：
-## remove_chunk_mesh / _update_chunk_collision / has_chunk_mesh / shift_render 都要读它，
+## remove_chunk_mesh / has_chunk_mesh / shift_render 都要读它，
 ## demo 与测试的 HUD 也直接读它统计 chunk 数；搬进无限层即构成反向依赖。
 var _lod_meshes: Array[Dictionary] = []
 
@@ -350,9 +451,14 @@ func _lod_block_edge_world(level: int) -> float:
 ## 重新计算 LOD 分带并调整各层存储（lod_count/view_distance 变化时调用）。
 ## LOD_i 外半径 = view_distance / 2^(lod_count-1-i)（等比 ×2，对齐 Voxel Tools 标准做法）。
 func _configure_lod() -> void:
-	# 分带计算 + 各层容器长度对齐都归无限层：它持 4 张调度表、本类持网格账本 `_lod_meshes`，
-	# 长度由它唯一驱动（见 VoxelInfiniteLayer.configure_lod），避免两边各自 resize 后悄悄错位。
+	# 分带计算 + 各层容器长度对齐都归视点层：它持 4 张调度表、本类持网格账本 `_lod_meshes`，
+	# 长度由它唯一驱动（见 VoxelInfiniteLayer.configure_lod / VoxelPagedLayer._ensure_bands），
+	# 避免两边各自 resize 后悄悄错位。
 	infinite_layer.configure_lod(lod_count, view_distance)
+	if paged_layer != null:
+		# 接管后本类不再替它维护层数：push 进去，由它在下一轮 _ensure_bands 里自行对齐
+		# 自己的 4 张表和本类的 _lod_meshes（单点维护，避免两处各算一遍）。
+		paged_layer.lod_count = maxi(lod_count, 1)
 	if data:
 		data.lod_count = lod_count
 		if lod_count <= 1:
@@ -383,11 +489,49 @@ func clear_lod_level(level: int) -> void:
 	_lod_meshes[level].clear()
 
 ## 是否生成静态碰撞体 (StaticBody3D + ConcavePolygonShape3D)
+## 【实现已下沉到 VoxelCollision 组件】本类只保留这个开关与两个限流旋钮，
+## 真正的建/删/复用与每帧限量都在组件里。关掉时组件清空自己的账本，不会残留碰撞体。
 @export var generate_collision: bool = false:
 	set(v):
 		generate_collision = v
+		collision.enabled = v
+		if not v:
+			collision.clear_all()
 		request_update()
 		notify_property_list_changed()
+
+## 碰撞组件（懒创建的子节点）。
+## 【为什么懒创建】与 infinite_layer 同因：脚本热重载不会对既有实例重跑 _init，
+## 用 getter 可自愈；而且不开碰撞时不必凭空多一个节点。
+var collision: VoxelCollision:
+	get:
+		if _collision == null:
+			_collision = VoxelCollision.new()
+			_collision.name = "Collision"
+			_collision.collision_layer = collision_layer
+			_collision.collision_mask = collision_mask
+			_collision.rebuild_per_frame = _collision_rebuild_per_frame
+			_collision.rebuild_budget_ms = collision_rebuild_budget_ms
+			_collision.enabled = generate_collision
+			add_child(_collision)
+			_collision.configure(self)
+		return _collision
+
+var _collision: VoxelCollision = null
+
+## 碰撞体所属物理层（透传给 VoxelCollision）
+@export_flags_3d_physics var collision_layer: int = 1:
+	set(v):
+		collision_layer = v
+		if _collision != null:
+			_collision.collision_layer = v
+
+## 碰撞体检测的物理层（透传给 VoxelCollision）
+@export_flags_3d_physics var collision_mask: int = 1:
+	set(v):
+		collision_mask = v
+		if _collision != null:
+			_collision.collision_mask = v
 
 ## 是否在编辑器中也实时更新 (仅 @tool 模式)
 @export var update_in_editor: bool = true
@@ -423,16 +567,22 @@ var _pending_retrigger: bool = false
 # 批次全部完成待处理标志：置位后下一帧 _process 执行 _on_batch_complete（避免主线程尖峰）
 var _batch_complete_pending: bool = false
 # Per-chunk 模式：每个非空 chunk 对应一个子 MeshInstance3D（LOD0 网格存于 _lod_meshes[0]）
-# Per-chunk 碰撞体：每个 chunk 对应一个子 StaticBody3D
-var _chunk_collisions: Dictionary[Vector3i, StaticBody3D] = {}
-# 碰撞重建队列：破坏后延迟重建 ConcavePolygonShape3D，每帧限量，避免连续破坏主线程卡顿
-var _collision_rebuild_queue: Dictionary[Vector3i, bool] = {}
+# 碰撞账本已下沉到 VoxelCollision 组件（见 collision getter），本类不再持有碰撞体。
+# 保留这两个旋钮：它们是 Inspector 上暴露给用户的限流配置，透传给组件。
 # 每帧最多重建的碰撞体数
-@export_range(1, 100, 1) var _collision_rebuild_per_frame: int = 12
+@export_range(1, 100, 1) var _collision_rebuild_per_frame: int = 12:
+	set(v):
+		_collision_rebuild_per_frame = v
+		if _collision != null:
+			_collision.rebuild_per_frame = v
 ## 每帧碰撞重建的时间预算（毫秒）。单个 chunk 的 ConcavePolygonShape3D 约 10~15ms，
 ## 只按块数限流仍会一帧堆 12 块 → 百毫秒级尖峰。预算到点就停，宁可分几帧建完。
 ## 0 = 只受 _collision_rebuild_per_frame 限制。
-@export_range(0.0, 100.0, 0.5) var collision_rebuild_budget_ms: float = 4.0
+@export_range(0.0, 100.0, 0.5) var collision_rebuild_budget_ms: float = 4.0:
+	set(v):
+		collision_rebuild_budget_ms = v
+		if _collision != null:
+			_collision.rebuild_budget_ms = v
 
 # GPU 上传限流队列：异步结果先缓存数组数据，_process 帧尾批量构建 mesh（平滑 GPU 上传，
 # 避免连续破坏时一帧大量 ArrayMesh 创建导致 Metal fence 超时）
@@ -503,51 +653,74 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# 记录上一帧耗时，供 GPU 忙检测使用（_process_mesh_build_queue）
 	_last_frame_delta = _delta
-	# 异步任务结果由 VoxelMeshBatch 回传（批次结算时才释放快照），此处无需轮询
-	# 这里只处理限流和启动新任务
 
-	# 可见性管理（每帧限量执行，走近/远离平滑）：
-	#  - 视锥补建：每帧限量（infinite_layer.process_deferred_chunks 内限量）
-	#  - 流式卸载/补建：每帧限量（按距离排序：远先卸载 / 近先加载）
-	# 异步批次在跑时也可执行：卸载改数据层不影响 worker 快照（深拷贝）；
-	# 补建标脏会在批次完成后统一重建（retrigger），不会丢失。
-	if visibility_mode != VisibilityMode.FULL:
-		infinite_layer.process_deferred_chunks()
-	# 统一流式/程序化驱动：程序化无限世界总是按距离生成（不依赖 visibility_mode——
-	# 无限世界只能按距离生成，设 FULL/FRUSTUM 若不走流式会导致数据永不生成 → 画面空白）；
-	# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
-	if infinite_layer.streaming_enabled or (data and data.is_streaming()):
-		infinite_layer.process_streaming()
-	# LOD 管理：每 interval 帧限量生成/移除（降低每帧遍历开销，近处 LOD0 / 远处各粗层互补）。
-	# 降频与"数据变化立即处理"的判定都在无限层内部（它持有 _cull_check_counter）。
-	infinite_layer.process_lod()
+	# 【STATIC = 真的最简：整段视点调度直接跳过】
+	# STATIC 下几何是"整份重建一次挂在自己身上"，没有任何 chunk 级调度、没有流式、
+	# 没有 LOD 分带。此前这里无差别跑 process_lod / process_streaming，结果是
+	# STATIC 的实例每帧仍付一遍视点扫描（实测 deer×1000 多花 1.1ms/帧），而它们根本用不到。
+	# 这是"最简路径必须真的最简"这条规则在代码里的落点。
+	if draw_mode == DrawMode.STATIC:
+		_drive_static()
+		return
+	_process_dynamic_body()
+
+
+## STATIC 模式的每帧驱动：只有"脏了才重建"，别的什么都不做。
+##
+## 【为什么单独一条路径而不是 if 包一层】STATIC 的价值就是"零调度开销"：
+## 挂 1000 个实例时，任何每帧的视点扫描都会乘上实例数。这里刻意只保留
+## `_dirty` → `_update_mesh()`（内部再走共享 mesh 缓存，第 2 个实例起是 O(1) 取指针）。
+func _drive_static() -> void:
+	if not (_dirty and auto_update and (not Engine.is_editor_hint() or update_in_editor)):
+		return
+	_update_counter += 1
+	if _update_counter < update_throttle_frames:
+		return
+	_update_counter = 0
+	_update_mesh()
+
+
+## DYNAMIC 模式的每帧驱动：视点调度 + GPU 上传限流 + 碰撞限流 + 异步批次收尾。
+func _process_dynamic_body() -> void:
+
+	# 可见性管理（每帧限量执行，走近/远离平滑）。
+	# 【谁驱动：paged_layer 挂了就只调它，否则走旧层】两者绝不并行——它们操作的是同一批
+	# 网格账本（_lod_meshes / 数据脏账），同时跑会互相把对方刚建的网格判成"该移除"，
+	# 表现为持续闪烁与 worker 空转。所以这里是**互斥分叉**，不是"两个都跑"。
+	var via_paged := uses_paged_layer()
+	if via_paged:
+		paged_layer.process_streaming()
+		paged_layer.process_deferred_chunks()
+		paged_layer.process_lod()
+	else:
+		if visibility_mode != VisibilityMode.FULL:
+			infinite_layer.process_deferred_chunks()
+		# 统一流式/程序化驱动：程序化无限世界总是按距离生成（不依赖 visibility_mode——
+		# 无限世界只能按距离生成，设 FULL/FRUSTUM 若不走流式会导致数据永不生成 → 画面空白）；
+		# 磁盘文件流仅在 STREAMING 模式启用加载/卸载。
+		if infinite_layer.streaming_enabled or (data and data.is_streaming()):
+			infinite_layer.process_streaming()
+		# LOD 管理：每 interval 帧限量生成/移除（降低每帧遍历开销，近处 LOD0 / 远处各粗层互补）。
+		# 降频与"数据变化立即处理"的判定都在视点层内部（它持有 _cull_check_counter）。
+		infinite_layer.process_lod()
 
 	# GPU 上传限流：帧尾批量构建队列中的 chunk mesh（避免与渲染/崩塌竞争 GPU）
 	# call_deferred 确保在帧末尾执行（本帧渲染已提交），且队列处理不阻塞主循环
-	if not _mesh_build_queue.is_empty() and not _mesh_build_scheduled:
+	# 【DYNAMIC 分组模式】绘制单元是 group 而不是 chunk，结果全部进 _group_dirty；
+	# 这里必须一并排期，否则整组重建永远不会发生（曾经的 bug：只有 _mesh_build_queue 判空）。
+	if (not _mesh_build_queue.is_empty() or not _group_dirty.is_empty()) and not _mesh_build_scheduled:
 		_mesh_build_scheduled = true
 		call_deferred("_process_mesh_build_queue")
-	# 粗 LOD 大块 mesh 挂载同样帧尾限量（大块 build_mesh_from_arrays 覆盖数十万体素，GPU 上传昂贵）
-	# 队列与排期标记都归无限层，本类只负责把 deferred 挂在自己身上。
-	if infinite_layer.take_lod_mesh_flush_request():
+	# 粗 LOD 大块 mesh 挂载同样帧尾限量（大块 mesh 覆盖数十万体素，GPU 上传昂贵）。
+	# 队列与排期标记都归视点层，本类只负责把 deferred 挂在自己身上（节点被释放时引擎会
+	# 自动丢弃排期，而 RefCounted 的旧层不享受这层保护——这是本类仍持有这个壳的唯一原因）。
+	var lod_flush := paged_layer.take_lod_mesh_flush_request() if via_paged \
+			else infinite_layer.take_lod_mesh_flush_request()
+	if lod_flush:
 		call_deferred("_flush_lod_mesh_apply_queue")
 
-	# 碰撞增量重建：破坏后限量重建 ConcavePolygonShape3D（延迟，避免连续破坏主线程卡顿）
-	if generate_collision and not _collision_rebuild_queue.is_empty():
-		var _built_col := 0
-		var _col_started_us := Time.get_ticks_usec()
-		var _col_budget_us := int(collision_rebuild_budget_ms * 1000.0)
-		var _col_keys := _collision_rebuild_queue.keys()
-		for ck in _col_keys:
-			if _built_col >= _collision_rebuild_per_frame:
-				break
-			# 至少建一个（单块本身可能就超过预算），之后按时间预算截断。
-			if _built_col > 0 and _col_budget_us > 0 and Time.get_ticks_usec() - _col_started_us >= _col_budget_us:
-				break
-			var hm: bool = _collision_rebuild_queue[ck]
-			_collision_rebuild_queue.erase(ck)
-			_update_chunk_collision(ck, hm)
-			_built_col += 1
+	# 碰撞增量重建已下沉到 VoxelCollision 组件（它有自己的 _process 与双限流），
+	# 本类不再调度它 —— 只在网格应用完成后调 collision.enqueue(ck, has_mesh)。
 
 	# 延迟批次完成：全部异步任务完成后，在下一帧处理剩余收尾逻辑，避免主线程尖峰
 	if _batch_complete_pending:
@@ -574,29 +747,54 @@ func _process(_delta: float) -> void:
 	_update_mesh()
 
 
-# ── 粒子渲染：公开接口 ────────────────────────────────────────────────────────
+# ── 粒子渲染：公开接口（实现已下沉到 VoxelParticleView 组件）──────────────
+#
+# 【契约保持不变】`display_mode` / `voxel_shape` / `particle_*` 旋钮与
+# `particle_node` / `particle_points` / `show_as_particles()` / `rebuild_particles()` /
+# `particle_voxel_size()` 全部仍是本类的公开面 —— 存量调用方（particle_demo 等）零改动。
+# 真正的点云导出 / 纹理上传 / 粒子节点生命周期在 `VoxelParticleView` 里。
+
+## 粒子视图组件（懒创建的子节点）。
+## 【为什么懒创建】与 infinite_layer / collision 同因：脚本热重载不重跑 _init，
+## getter 可自愈；且不用粒子时不必凭空多一个节点。
+var particle_view: VoxelParticleView:
+	get:
+		if _particle_view == null:
+			_particle_view = VoxelParticleView.new()
+			_particle_view.name = "Particles"
+			_sync_particle_view_config()
+			add_child(_particle_view)
+			_particle_view.configure(self)
+		return _particle_view
+
+var _particle_view: VoxelParticleView = null
+
+
+## 把本类的粒子旋钮推给组件（本类是 Inspector 唯一真值，组件只读）。
+func _sync_particle_view_config() -> void:
+	if _particle_view == null:
+		return
+	_particle_view.max_points = particle_max_points
+	_particle_view.surface_only = particle_surface_only
+	_particle_view.emission_energy = particle_emission_energy
+	_particle_view.particle_scale = particle_scale
+	_particle_view.alpha = particle_alpha
+	_particle_view.voxel_shape = int(voxel_shape)
+	_particle_view.sphere_scale = sphere_scale
+	_particle_view.sphere_subdivisions = sphere_subdivisions
+
 
 ## 【兼容别名】等价于 display_mode = PARTICLES / MESH。
 func show_as_particles(on: bool = true) -> void:
 	display_mode = DisplayMode.PARTICLES if on else DisplayMode.MESH
 
 
-## 重新导出点云并重建 GPU 资源。
+## 重新导出点云并重建 GPU 资源（转发给组件）。
 ## 【何时调用】数据改了、voxel_scale 改了、粒子参数改了 —— 任何影响点云内容的变化。
 ## 纯"运动"变化（进度、漂浮幅度）不需要，那是项目自己的着色器 uniform 的事。
 func rebuild_particles() -> void:
-	if data == null:
-		_clear_particles()
-		return
-	var tex := data.build_particle_textures(
-			voxel_scale, particle_max_points, particle_surface_only)
-	particle_points = tex.get("points", PackedFloat32Array())
-	if int(tex.get("count", 0)) <= 0:
-		_clear_particles()
-		return
-	_ensure_particle_node(int(tex["count"]))
-	_upload_particles(tex)
-	_apply_display_mode()
+	_sync_particle_view_config()
+	particle_view.rebuild()
 
 
 ## 粒子方块的边长（世界单位）= 体素边长 × particle_scale。
@@ -604,12 +802,24 @@ func particle_voxel_size() -> float:
 	return voxel_scale * particle_scale
 
 
-# ── 粒子渲染：内部 ────────────────────────────────────────────────────────────
+## 粒子节点（转发组件的公开字段；项目可自己换 process_material 做运动效果）。
+var particle_node: GPUParticles3D:
+	get:
+		return _particle_view.particle_node if _particle_view != null else null
+
+
+## 最近一次导出的点数据（转发组件的公开字段）。
+var particle_points: PackedFloat32Array:
+	get:
+		return _particle_view.particle_points if _particle_view != null else PackedFloat32Array()
+
+
+# ── 粒子渲染：内部（可见性协调，网格与粒子互斥）────────────────────────────
 
 ## 网格此刻是否应当可见（粒子模式下网格必须整体隐藏）。
 ## 【为什么需要这个函数，而不是只在切换时遍历一遍】
-## 网格是**异步分批**建出来的：切到粒子模式的那一刻 _lod_meshes 可能还是空的，
-## 之后建出的 Chunk_* 节点默认 visible=true —— 于是粒子与网格同时存在。
+## 网格是**异步分批**建出来的：切到粒子模式的那一刻账本可能还是空的，
+## 之后建出的 Chunk_*/Group_* 节点默认 visible=true —— 于是粒子与网格同时存在。
 ## 方块形状下两者重合、被粒子挡着看不出来；换成球形就露馅（球之间有缝，能看见底下的网格）。
 ## 故**创建处**也必须按当前模式设可见性。
 func _meshes_should_be_visible() -> bool:
@@ -618,134 +828,28 @@ func _meshes_should_be_visible() -> bool:
 
 func _apply_display_mode() -> void:
 	var use_particles := display_mode == DisplayMode.PARTICLES
-	if particle_node != null:
-		particle_node.visible = use_particles
-	# 粒子模式下隐藏网格：两条渲染路径画的是同一份数据，同屏会互相穿插
+	if _particle_view != null and _particle_view.particle_node != null:
+		_particle_view.particle_node.visible = use_particles
+	# 粒子模式下隐藏网格：两条路径画的是同一份数据，同屏会互相穿插
 	for lod in _lod_meshes:
 		for bk in lod:
 			var mi = lod[bk]
 			if mi is Node3D:
 				(mi as Node3D).visible = not use_particles
-	if use_particles and particle_node == null and data != null:
+	for gn in _group_meshes.values():
+		if gn != null and is_instance_valid(gn):
+			(gn as Node3D).visible = not use_particles
+	if mesh != null:
+		# STATIC 的几何挂在本节点自己身上（self.mesh），粒子模式下要整体隐藏
+		visible = not use_particles
+	if use_particles and (_particle_view == null or _particle_view.particle_node == null) and data != null:
 		rebuild_particles()
 
-
-func _ensure_particle_node(count: int) -> void:
-	if particle_node != null and particle_node.amount == count:
-		return
-	if particle_node != null:
-		particle_node.queue_free()
-		particle_node = null
-	if _particle_process_mat == null:
-		_particle_process_mat = VoxelParticleShader.make_process_material()
-	if _particle_draw_mat == null:
-		_particle_draw_mat = VoxelParticleShader.make_draw_material()
-	if _particle_draw_trans_mat == null:
-		_particle_draw_trans_mat = VoxelParticleShader.make_draw_material_trans()
-	_particle_mesh = _make_particle_mesh(_particle_draw_mat)
-	_particle_mesh_trans = _make_particle_mesh(_particle_draw_trans_mat)
-
-	var gp := GPUParticles3D.new()
-	gp.name = "VoxelParticles"
-	gp.amount = maxi(count, 1)
-	gp.lifetime = 100.0
-	# 【必须预热满一个 lifetime】否则粒子是"逐渐发射"的，第一帧只有几颗，
-	# 起点形状根本不成形（实测踩过：连续三次渲染都只有几个散点）。
-	gp.preprocess = 100.0
-	gp.explosiveness = 0.0
-	gp.local_coords = false
-	gp.process_material = _particle_process_mat
-	# 两个 draw pass：不透明通道写深度（遮挡正确），透明通道不写深度（玻璃能透、不裁后面）
-	gp.set_draw_passes(2)
-	gp.set_draw_pass_mesh(0, _particle_mesh)
-	gp.set_draw_pass_mesh(1, _particle_mesh_trans)
-	# 【必须给 custom_aabb】否则粒子飞出原始包围盒后会被视锥剔除整片消失
-	gp.visibility_aabb = AABB(Vector3(-1000, -1000, -1000), Vector3(2000, 2000, 2000))
-	gp.emitting = true
-	add_child(gp)
-	particle_node = gp
-	gp.restart()
-
-
-## 按 particle_shape 生成粒子用的网格（尺寸由绘制着色器的 voxel_size 统一缩放，
-## 故这里一律生成**单位尺度**的几何：立方体边长 1、球直径 1）。
-##
-## 【为什么球也用单位直径】绘制着色器的 voxel_size 是"方块世界边长"，
-## 球按同一边长缩放后就正好内切于体素格 —— 与网格渲染的 sphere 形状观感一致。
-func _make_particle_mesh(mat: Material) -> Mesh:
-	var m: Mesh
-	if voxel_shape == VoxelShape.SPHERE:
-		var sphere := SphereMesh.new()
-		# 【面数分档对齐网格路径的 icosphere 档位】20 / 80 / 320 面。
-		# SphereMesh 是 UV 球，用 rings/radial_segments 近似：0 -> 6x8、1 -> 10x16、2 -> 18x32。
-		var idx := clampi(sphere_subdivisions, 0, 2)
-		var rings: int = [6, 10, 18][idx]
-		var segs: int = [8, 16, 32][idx]
-		sphere.rings = rings
-		sphere.radial_segments = segs
-		# 直径 = 1（半径 0.5），再乘用户给的比例
-		sphere.radius = 0.5 * sphere_scale
-		sphere.height = 1.0 * sphere_scale
-		m = sphere
-	else:
-		var box := BoxMesh.new()
-		box.size = Vector3.ONE
-		m = box
-	m.material = mat
-	return m
-
-
-## 形状参数变了：换掉两个 draw pass 的网格（不用重建粒子节点）。
-## 形状参数（球半径 / 面数）变了：网格要重建、粒子要换 mesh。
-func _rebuild_for_shape_change() -> void:
-	if particle_node != null:
-		_apply_particle_shape()
-	_clear_lod_meshes()
-	if data:
-		for ck in data.get_loaded_chunk_keys():
-			data.mark_chunk_dirty(ck)
-	request_update()
-
-
-func _apply_particle_shape() -> void:
-	if particle_node == null:
-		return
-	_particle_mesh = _make_particle_mesh(_particle_draw_mat)
-	_particle_mesh_trans = _make_particle_mesh(_particle_draw_trans_mat)
-	particle_node.set_draw_pass_mesh(0, _particle_mesh)
-	particle_node.set_draw_pass_mesh(1, _particle_mesh_trans)
-
-
-func _upload_particles(tex: Dictionary) -> void:
-	if _particle_process_mat == null:
-		return
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_SRC_POS, tex["positions"])
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_DST_POS, tex["positions"])
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_COLORS, tex["colors"])
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_PROPS, tex["props"])
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_GRID_WIDTH, tex["grid_width"])
-	# 进度停在 0：本类不驱动运动，只负责把"当前形状"摆出来。
-	# 项目要动起来，就把自己的 process_material 换上，或每帧改 particle_node 的 uniform。
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_PROGRESS, 0.0)
-	_particle_process_mat.set_shader_parameter(VoxelParticleShader.U_ALPHA, particle_alpha)
-
-	var vs := particle_voxel_size()
-	for mat in [_particle_draw_mat, _particle_draw_trans_mat]:
-		if mat == null:
-			continue
-		mat.set_shader_parameter(VoxelParticleShader.U_VOXEL_SIZE, vs)
-		mat.set_shader_parameter(VoxelParticleShader.U_EMISSION_ENERGY, particle_emission_energy)
-		mat.set_shader_parameter(VoxelParticleShader.U_ALPHA, particle_alpha)
-
-
-func _clear_particles() -> void:
-	particle_points = PackedFloat32Array()
-	if particle_node != null:
-		particle_node.queue_free()
-		particle_node = null
-
-
 func _on_data_changed() -> void:
+	# STATIC 下所有挂在同一份 data 上的实例会同时收到本信号。共享 mesh 只该失效一次：
+	# 第一个察觉的实例清缓存，其余随后 acquire 时重建一次、之后共享（重建不会发生 N 次）。
+	if draw_mode == DrawMode.STATIC:
+		VoxelMesher.invalidate_shared_mesh(data)
 	request_update()
 	# 粒子模式下数据变了要重导点云（网格那套脏账本对点云不适用：
 	# 点云没有 chunk 级增量，整份重导 66ms / 2 万点，比维护一套增量账本简单可靠）
@@ -793,9 +897,31 @@ func current_camera() -> Camera3D:
 	return get_viewport().get_camera_3d() if is_inside_tree() else null
 
 
-## LOD0 chunk 是否已有渲染网格（网格账本 _lod_meshes[0] 的唯一查询入口）。
+## chunk 是否已有渲染网格（"我的体素已经画出来了"）。
+##
+## 【三种模式的判据不同，这里是唯一入口】
+##   · STATIC  ：整份 mesh 一次性建好，任何 chunk 都算"已画"（只要 mesh 存在）
+##   · DYNAMIC + group_shift=0：绘制单元就是 chunk，查 _lod_meshes[0]
+##   · DYNAMIC + group_shift>0：绘制单元是 group，chunk 的可见网格在它所属的 group 里
+## 调用方（碰撞 / 流式 / 测试）不该自己按模式分支 —— 那是本类内部的组织细节。
 func has_chunk_mesh(ck: Vector3i) -> bool:
+	if draw_mode == DrawMode.STATIC:
+		return mesh != null
+	if group_shift > 0:
+		var gn: MeshInstance3D = _group_meshes.get(VoxelMesher.group_of(ck, group_shift))
+		return gn != null and is_instance_valid(gn) and gn.mesh != null
 	return not _lod_meshes.is_empty() and _lod_meshes[0].has(ck)
+
+
+## 该 chunk 的渲染网格节点（碰撞 / 组件按 chunk 定位网格时用）。无网格返回 null。
+## 三种模式都归一到这里，避免每个调用方各写一遍 match。
+func chunk_mesh(ck: Vector3i) -> MeshInstance3D:
+	if draw_mode == DrawMode.STATIC:
+		return self if mesh != null else null
+	if group_shift > 0:
+		var gn: MeshInstance3D = _group_meshes.get(VoxelMesher.group_of(ck, group_shift))
+		return gn if gn != null and is_instance_valid(gn) else null
+	return _lod_meshes[0].get(ck) if not _lod_meshes.is_empty() else null
 
 
 ## LOD 层数（含 LOD0），= 网格账本 `_lod_meshes` 的长度。
@@ -836,7 +962,11 @@ func _exit_tree() -> void:
 	# 会打到已释放实例（"Cannot call method 'call_deferred' on a previously freed instance"）。
 	_exiting = true
 	_cancel_async()
-	# 粗层 worker 的任务 ID 与在途状态都在无限层，由它统一置停 + wait（必须在释放节点前）
+	# 粗层 worker 的任务 ID 与在途状态都在视点层，由它统一置停 + wait（必须在释放节点前）。
+	# paged_layer 是子节点，`_exit_tree` 会自己 abort；这里显式再调一次是幂等的，
+	# 但顺序很关键：必须在本类释放 _lod_meshes 之前完成 wait。
+	if paged_layer != null:
+		paged_layer.abort()
 	infinite_layer.abort()
 	_clear_lod_meshes()
 
@@ -867,13 +997,58 @@ func _update_mesh() -> void:
 		mesh_updated.emit()
 		return
 
-	# 纹理材质与材质快照都走唯一缓存（材质变化时需手动调用 regenerate_materials 作废）：
+	# 【唯一的分叉】绘制模式决定走哪条路径。两条路径共用同一个几何内核。
+	if draw_mode == DrawMode.STATIC:
+		# STATIC 不预先派生材质快照：它走共享缓存，材质只由**第一个**构建者生成一次
+		# （见 _rebuild_static 的 builder）。若在这里无条件调 _materials.surfaces()，
+		# 100 个实例会各自生成一遍 4 张 256×1 纹理（实测 100 实例多花 400ms，纯浪费）。
+		_rebuild_static()
+		return
+
+	# DYNAMIC：纹理材质与材质快照都走唯一缓存（材质变化时需手动调用 regenerate_materials 作废）：
 	# 快照只在作废后深拷贝一次，供异步子线程安全读取，体素变化不触发大对象拷贝。
 	_materials.surfaces(data.materials)
 	_materials.snapshot(data.materials)
-
 	# 统一走异步生成（CHUNK_ASYNC 为唯一路径；同步渲染路径已移除简化）
 	_update_mesh_async()
+
+
+## STATIC 模式：整份模型 → 1 个 ArrayMesh（≤2 surface）挂在本节点自己的 mesh 上。
+##
+## 【为什么这样最省】`generate_arrays_from_chunks_native` 在 C++ 里一次做完
+## 「分 chunk + 构建 34³ 光环 + 面生成 + 合并 + 索引偏移」，GDScript 侧零循环。
+## 实测产出的三角形数与导入器 `VoxelMeshGenerator.generate_mesh` **逐个模型精确相同**
+## （deer 1344 / cars 4638 / teapot1 39648）——即 STATIC 的产物在几何上与"导入成 ArrayMesh"
+## 完全等价，只是数据来源是活体素。
+##
+## 【关键：走共享缓存】收益来自"多实例共享同一份 mesh 资源 → 引擎自动合批"。
+## 每个实例各建一份等于白做（实测 deer×100：各自一份 532 draw / 10fps，共享 5 draw）。
+## 见 VoxelMesher.acquire_shared_mesh 的注释。
+##
+## 代价：改一个体素要重建整份（实测 deer 1.6~3.1ms / cars 7.4~9.3ms / teapot1 85ms）。
+## 这正是 DrawMode 存在的原因 —— 要频繁编辑就切 DYNAMIC。
+func _rebuild_static() -> void:
+	_cancel_async()          # STATIC 不用异步批次，清掉可能残留的 DYNAMIC 任务
+	# 【为什么用 Dictionary 接住而不是普通局部变量】GDScript 的 lambda **按值捕获**局部变量，
+	# 在闭包里赋值改不到外层（实测 last_solid_vertices 恒为 0）。Dictionary 是引用类型，
+	# 往它的槽位里写才对外可见。缓存命中时 builder 不执行 → 槽位保持空，故下面要判空。
+	var holder := {"arrays": {}} 
+	var cached := VoxelMesher.acquire_shared_mesh(data, voxel_scale, func() -> ArrayMesh:
+		var bufs: Dictionary = data._chunk_buffers_view()
+		var arrays := VoxelMesher.build_all(bufs, data.materials, voxel_scale, data.center_offset)
+		holder["arrays"] = arrays
+		var mats := _materials.surfaces(data.materials)
+		return VoxelMesher.to_mesh(arrays, mats))
+	mesh = cached
+	var built_arrays: Dictionary = holder["arrays"]
+	if mesh != null and not built_arrays.is_empty():
+		# 【不要用 surface_get_arrays 数三角形】它会为整个 surface 复制一份新字典
+		# （顶点/法线/UV/索引全部重建），teapot1 一次 6.25ms —— 纯粹为了填诊断字段而
+		# 在建立网格的同一帧再拷一遍几何。改用已算好的 arrays 直接读尺寸：零拷贝。
+		var solid_v := (built_arrays.get("solid_verts", PackedVector3Array()) as PackedVector3Array).size()
+		var trans_v := (built_arrays.get("trans_verts", PackedVector3Array()) as PackedVector3Array).size()
+		_set_last_vertex_stats(solid_v, trans_v, data.get_all_chunk_keys().size())
+	mesh_updated.emit()
 
 
 
@@ -931,21 +1106,14 @@ func shift_render(shift: Vector3i, chunk_size_world: float) -> void:
 	# 其中 typed dict 需 typed 构建，故就地累加）。延迟队列 / 强制标记 / 粗层调度账本
 	# 全归无限层，由它自行 shift_keys（内核不碰它的账本，见 VoxelInfiniteLayer.shift_keys）。
 	_mesh_build_queue = VoxelChunk.shift_key_dict(_mesh_build_queue, shift)
-	var ncr: Dictionary[Vector3i, bool] = {}
-	for k in _collision_rebuild_queue:
-		ncr[Vector3i(k) + shift] = true
-	_collision_rebuild_queue = ncr
-	# 碰撞体：键平移**且**节点位置/名字同步。只平移键会让 StaticBody3D 停留在旧世界坐标
-	# （碰撞与视觉错位），而新键处又会重复建体 → 幽灵碰撞体。
-	var ncc: Dictionary[Vector3i, StaticBody3D] = {}
-	for k in _chunk_collisions:
-		var nck2: Vector3i = Vector3i(k) + shift
-		var body: StaticBody3D = _chunk_collisions[k]
-		if body != null:
-			body.position = Vector3(nck2) * chunk_size_world
-			body.name = "Collision_%d_%d_%d" % [nck2.x, nck2.y, nck2.z]
-		ncc[nck2] = body
-	_chunk_collisions = ncc
+	# 分组账本与 chunk 几何缓存同样按键平移（不平移会让在途组指向旧坐标）
+	if group_shift > 0:
+		_group_meshes = VoxelChunk.shift_key_dict(_group_meshes, shift)
+		_group_dirty = VoxelChunk.shift_key_dict(_group_dirty, shift)
+	_chunk_arrays = VoxelChunk.shift_key_dict(_chunk_arrays, shift)
+	# 碰撞账本归协作组件：它自己的键与节点位置由它按同一个 shift 平移。
+	if _collision != null:
+		_collision.on_origin_shift(shift, chunk_size_world)
 	# 子类钩子：本类只平移**渲染层**状态。子类若持有体素坐标队列（破坏系统的待移除 /
 	# 级联 / 待生成掉落体等），必须在此同步平移，否则在途操作会打到平移后的错位体素。
 	on_origin_shift(shift)
@@ -1063,9 +1231,12 @@ func remove_chunk_mesh(ck: Vector3i) -> void:
 	if mi != null and is_instance_valid(mi):
 		mi.queue_free()
 	_lod_meshes[0].erase(ck)
-	_remove_chunk_collision(ck)
+	if _collision != null:
+		_collision.remove(ck)
 	_mesh_build_queue.erase(ck)
 	# 该 chunk 的重建权随网格移除作废（否则延迟队列里残留"幽灵补建"条目）
+	if uses_paged_layer():
+		paged_layer.on_mesh_removed(ck)
 	infinite_layer.on_mesh_removed(ck)
 
 
@@ -1102,7 +1273,14 @@ func _update_mesh_async() -> void:
 	# 的延迟邻居重新标脏 → 每帧一轮"脏N→视锥内0→再延迟"空转：gen_id 无限递增、
 	# 枚举+视锥判定每帧照付、永不收敛（STREAMING 大波次主线程卡顿的根源）。
 	var dropped := 0
-	if not infinite_layer.deferred_is_empty():
+	var view_layer := paged_layer if uses_paged_layer() else null
+	if view_layer != null:
+		if not view_layer.deferred_is_empty():
+			for i in range(rebuild_chunks.size() - 1, -1, -1):
+				if view_layer.is_deferred(rebuild_chunks[i]):
+					rebuild_chunks.remove_at(i)
+					dropped += 1
+	elif not infinite_layer.deferred_is_empty():
 		for i in range(rebuild_chunks.size() - 1, -1, -1):
 			if infinite_layer.is_deferred(rebuild_chunks[i]):
 				rebuild_chunks.remove_at(i)
@@ -1149,7 +1327,7 @@ func _update_mesh_async() -> void:
 			# 空场景：无 chunk 可生成，直接返回（无任务，pending 保持 0）
 			return
 		# 统一可见性决策（流式距离 + 视锥/近处全向）
-		visible = infinite_layer.filter_visible_chunks(all_chunks)
+		visible = _filter_visible(all_chunks)
 		if diag_enabled:
 			print("[诊断] 全量构建: 总%d Chunk, 视锥内%d, 延迟%d" % [all_chunks.size(), visible.size(), all_chunks.size() - visible.size()])
 	else:
@@ -1161,7 +1339,7 @@ func _update_mesh_async() -> void:
 			if _lod_meshes[0].has(ck) and not data.has_chunk(ck):
 				remove_chunk_mesh(ck)
 		# 统一可见性决策（流式距离 + 视锥/近处全向）
-		visible = infinite_layer.filter_visible_chunks(rebuild_chunks)
+		visible = _filter_visible(rebuild_chunks)
 		if diag_enabled:
 			print("[诊断] 增量重建: 脏%d Chunk, 视锥内%d, 延迟%d" % [rebuild_chunks.size(), visible.size(), rebuild_chunks.size() - visible.size()])
 	# 本帧渲染批次：任务计数与只读快照句柄都由它持有，结算点唯一（见 VoxelMeshBatch）。
@@ -1377,7 +1555,7 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 		# 必须应用结果，否则永久缺失。
 		var cam_now := current_camera()
 		if _is_chunk_beyond_unload(
-				chunk_key, cam_now, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position, infinite_layer.unload_d()):
+				chunk_key, cam_now, voxel_scale * VoxelChunk.CHUNK_SIZE, global_position, _view_unload_d()):
 			# 丢弃过期结果：计数由 VoxelMeshBatch 统一结算，这里直接返回即可
 			return
 		var arr = arrays.get(chunk_key, {})
@@ -1422,6 +1600,9 @@ const _MESH_BUILD_BURST_COUNT := 24
 ## Metal 驱动 fence 等待会超时。改为帧尾限量构建，把 GPU 上传摊平到多帧。
 func _process_mesh_build_queue() -> void:
 	_mesh_build_scheduled = false
+	# DYNAMIC 分组路径：先把待重建的组整份重建（它们不走 _mesh_build_queue）
+	if not _group_dirty.is_empty():
+		_rebuild_group_meshes(maxi(_mesh_build_per_frame, _MESH_BUILD_BURST_COUNT) / 2 + 1)
 	if _mesh_build_queue.is_empty():
 		return
 
@@ -1462,11 +1643,36 @@ func _process_mesh_build_queue() -> void:
 			built, (Time.get_ticks_usec() - t0) / 1000.0, _mesh_build_queue.size()])
 
 
-## 帧尾挂载粗 LOD 大块 mesh（转发给无限层）。
-## deferred 目标必须是本节点：节点被释放时引擎会自动丢弃排期，而 RefCounted 的无限层
-## 不享受这层保护（其内部另有 _exiting 标记兜底）。
+## 统一可见性决策分叉（全量构建与增量重建共用）。
+## 【为什么要有这个薄壳】"该问谁"必须收在一处：`paged_layer` 接管后走它的 `filter_chunks`，
+## 否则走旧层。若在几个调用点各写一遍 `if paged_layer`，漏掉任何一处就表现为
+## "流式/视锥在其中一条路径失效"——这种 bug 只在特定构建时机出现，极难复现定位。
+func _filter_visible(chunks: Array[Vector3i]) -> Array[Vector3i]:
+	if uses_paged_layer():
+		return paged_layer.filter_chunks(chunks)
+	return infinite_layer.filter_visible_chunks(chunks)
+
+
+## 视点层上报"相机距离"用的卸载半径（供旧调用点复用）。
+func _view_unload_d() -> float:
+	if uses_paged_layer():
+		return paged_layer.unload_d()
+	return infinite_layer.unload_d()
+
+
+## 各 LOD 层外半径（分带表）。
+func _view_lod_outer() -> Array[float]:
+	if uses_paged_layer():
+		return paged_layer.lod_outer()
+	return infinite_layer.lod_outer()
+
+
+## 粗 LOD 大块 mesh 帧尾挂载（deferred 转发目标）。
 func _flush_lod_mesh_apply_queue() -> void:
-	infinite_layer.process_lod_mesh_apply_queue()
+	if uses_paged_layer():
+		paged_layer.process_lod_mesh_apply_queue()
+	else:
+		infinite_layer.process_lod_mesh_apply_queue()
 
 
 ## 给 ArrayMesh 的两个表面赋材质（实心/透明）。chunk/LOD1/碎片应用统一走此辅助。
@@ -1484,17 +1690,43 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	# 带外校验：破坏/编辑不应让超出 LOD0 带的 chunk 临时挂载（否则粗层区破坏时
 	# LOD0 细网格"闪现"后被移除 → 与粗层交替闪烁）。粗层区破坏由粗层 mesh 反映，
 	# LOD0 chunk 只挂载带内；此处与 _process_chunk_level 的移除判定保持一致。
-	var cam := current_camera()
-	# 显式标注：内核 ↔ 无限层互持引用（类型环），此处 `:=` 推导会失败。
-	var lod_outer: Array[float] = infinite_layer.lod_outer()
-	if cam and not lod_outer.is_empty():
-		var lod0_d: float = lod_outer[0]
-		var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
-		if _chunk_center_dist(chunk_key, cam.global_position, chunk_size_world, global_position) > lod0_d + chunk_size_world * 0.5:
-			_remove_chunk_collision(chunk_key)
-			return
+	#
+	# 【必须跳过 FULL】FULL 的语义是"全量生成所有 chunk"。此前这里没有 FULL 判断，
+	# 于是 lod_outer[0]（= view_distance，默认 40）之外的 chunk 会被**静默丢弃**：
+	# 不挂载、不报错、不告警。实测 deer×400 在 FULL 下只挂上 418/1600 个 chunk，
+	# 而调用方等网格就绪会一直等到超时。这是"最简路径被 LOD 机器咬了一口"的典型。
+	# DYNAMIC 之外的 STATIC 也不可能走到这里（STATIC 不走异步批次），但一并早退最稳。
+	if draw_mode != DrawMode.DYNAMIC or visibility_mode == VisibilityMode.FULL:
+		pass
+	else:
+		var cam := current_camera()
+		# 显式标注：内核 ↔ 视点层互持引用（类型环），此处 `:=` 推导会失败。
+		var lod_outer: Array[float] = _view_lod_outer()
+		if cam and not lod_outer.is_empty():
+			var lod0_d: float = lod_outer[0]
+			var chunk_size_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+			if _chunk_center_dist(chunk_key, cam.global_position, chunk_size_world, global_position) > lod0_d + chunk_size_world * 0.5:
+				collision.remove(chunk_key)
+				return
 	var arr: Dictionary = entry["arrays"]
 	var has_voxels_in_data: bool = entry["has_voxels"]
+
+	# 【DYNAMIC 分组路径】group_shift > 0 时绘制单元是 **group** 而不是 chunk。
+	# worker 已经（在子线程里、带着 34³ 光环）算好了这个 chunk 的正确几何 ——
+	# 包括跨 chunk 边界的面可见性。所以这里**不重新生成**，只把它缓存下来，
+	# 再把所属 group 标脏；帧尾的 _rebuild_group_meshes 只做纯拼接（顶点平移 + 索引偏移）。
+	#
+	# 【踩过的坑】第一版在这里丢掉 arr 只标脏，帧尾用 VoxelMesher.build_group 从头从体素
+	# 重新生成整个组 → 几何算两遍 + 第二遍在主线程 → destruction_demo（196 chunk / 32 组）
+	# 模型长期显示不全，water_sim 一旦有随机事件就掉帧。这条注释存在的意义就是防止那样写。
+	if draw_mode == DrawMode.DYNAMIC and group_shift > 0:
+		if has_voxels_in_data and not arr.is_empty():
+			_chunk_arrays[chunk_key] = arr
+		else:
+			_chunk_arrays.erase(chunk_key)
+		_group_dirty[VoxelMesher.group_of(chunk_key, group_shift)] = true
+		collision.enqueue(chunk_key, has_voxels_in_data)
+		return
 
 	# 获取或创建该 chunk 的子 MeshInstance3D
 	var chunk_mesh: MeshInstance3D
@@ -1525,10 +1757,69 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 
 	if has_voxels_in_data or _lod_meshes[0].has(chunk_key):
 		chunk_mesh.position = Vector3(chunk_key) * (voxel_scale * VoxelChunkGenerator.CHUNK_SIZE)
-		# 碰撞增量重建：入队延迟，_process 每帧限量重建（避免连续破坏主线程卡顿）
-		_collision_rebuild_queue[chunk_key] = has_mesh
+		# 碰撞增量重建交给 VoxelCollision 组件，它自己每帧限量（数量 + 毫秒双限流）
+		collision.enqueue(chunk_key, has_mesh)
 	else:
-		_remove_chunk_collision(chunk_key)
+		collision.remove(chunk_key)
+
+
+## DYNAMIC 分组路径：帧尾整组拼装（调用点见 _process_mesh_build_queue）。
+## 每组一个 MeshInstance3D，位置 = 组原点 × 组的世界边长；组内各 chunk 的顶点在这里按
+## "相对组原点的偏移"平移后拼起来。
+##
+## 【关键：纯拼接，不生成几何】数据全部来自 `_chunk_arrays`（worker 在子线程已经算好的
+## 每 chunk 几何）。实测单组拼装 < 0.1ms（对比：重新生成的版本是 2~8ms）。
+## 这就是"分组模式不该比 per-chunk 慢"的保证 —— 两条路径的几何生成完全相同，只是拼装粒度不同。
+func _rebuild_group_meshes(budget_n: int) -> void:
+	if _group_dirty.is_empty():
+		return
+	var mats := _materials.surfaces(data.materials)
+	var t0 := Time.get_ticks_usec()
+	var built := 0
+	for gk in _group_dirty.keys():
+		if built >= budget_n:
+			break
+		_group_dirty.erase(gk)
+		var merged := VoxelMesher._new_arrays()
+		var any := false
+		var group_origin := VoxelMesher.group_origin_chunk(gk, group_shift)
+		var chunk_world := voxel_scale * VoxelChunk.CHUNK_SIZE
+		for ck in VoxelMesher.chunks_in_group(gk, group_shift):
+			var arr: Dictionary = _chunk_arrays.get(ck, {})
+			if arr.is_empty():
+				continue
+			# 顶点是 chunk 局部坐标 → 平移到"相对组原点"，整组共用一个节点位置
+			VoxelMesher.append_arrays(merged, arr, Vector3(ck - group_origin) * chunk_world)
+			any = true
+		var node: MeshInstance3D = _group_meshes.get(gk)
+		if not any:
+			if node != null and is_instance_valid(node):
+				node.queue_free()
+			_group_meshes.erase(gk)
+			built += 1
+			continue
+		var new_mesh := VoxelMesher.to_mesh(merged, mats)
+		if new_mesh == null:
+			if node != null and is_instance_valid(node):
+				node.queue_free()
+			_group_meshes.erase(gk)
+			built += 1
+			continue
+		if node == null or not is_instance_valid(node):
+			node = MeshInstance3D.new()
+			node.name = "Group_%d_%d_%d" % [gk.x, gk.y, gk.z]
+			add_child(node)
+			node.visible = _meshes_should_be_visible()
+			_group_meshes[gk] = node
+		node.mesh = new_mesh
+		var edge := voxel_scale * VoxelChunk.CHUNK_SIZE * float(1 << group_shift)
+		node.position = Vector3(gk) * edge
+		built += 1
+		if (Time.get_ticks_usec() - t0) / 1000.0 > _MESH_BUILD_BUDGET_MS_BURST:
+			break
+	if diag_enabled and built > 0:
+		print("[诊断] DYNAMIC 整组拼装: %d 组, 耗时%.2f ms, 剩余%d"
+				% [built, (Time.get_ticks_usec() - t0) / 1000.0, _group_dirty.size()])
 
 
 ## 批次完成清理：当所有任务都完成后执行
@@ -1552,9 +1843,11 @@ func _on_batch_complete() -> void:
 
 
 ## 清理所有 chunk 子 MeshInstance3D 及关联碰撞体
-## 分工：粗层的调度账本（待办 / 重建 / 代次 / 重试 / 挂载队列 / 延迟队列）归无限层，
+## 分工：粗层的调度账本（待办 / 重建 / 代次 / 重试 / 挂载队列 / 延迟队列）归视点层，
 ## 由它一并清空；本类只清自己的网格账本、构建队列与材质对齐缓存。
 func _clear_lod_meshes() -> void:
+	if paged_layer != null:
+		paged_layer.clear_lod_state()
 	infinite_layer.clear_lod_state()
 	_mesh_build_queue.clear()
 	_materials.invalidate_aligned()
@@ -1565,73 +1858,15 @@ func _clear_lod_meshes() -> void:
 			if mi != null and is_instance_valid(mi):
 				mi.queue_free()
 		_lod_meshes[level].clear()
+	# DYNAMIC 分组绘制单元与待重建集合（与 _lod_meshes 是两套账本，见 _group_meshes 注释）
+	for gk in _group_meshes:
+		var gn: MeshInstance3D = _group_meshes[gk]
+		if gn != null and is_instance_valid(gn):
+			gn.queue_free()
+	_group_meshes.clear()
+	_group_dirty.clear()
+	_chunk_arrays.clear()
 	if data:
 		data.clear_lod_cache()
-	_clear_chunk_collisions()
-
-
-## 清理所有 per-chunk 碰撞体
-func _clear_chunk_collisions() -> void:
-	for ck in _chunk_collisions:
-		var col = _chunk_collisions[ck]
-		if col != null and is_instance_valid(col):
-			col.queue_free()
-	_chunk_collisions.clear()
-
-
-## 将 per-chunk 网格数据应用到子 MeshInstance3D
-## 注意：chunk_arrays 中可能包含空 chunk（空字典），用于清空已无体素的 chunk mesh
-## 更新单个 chunk 的碰撞体（Per-chunk StaticBody3D + ConcavePolygonShape3D）
-func _update_chunk_collision(ck: Vector3i, has_mesh: bool) -> void:
-	if generate_collision and has_mesh:
-		# 获取或创建 StaticBody3D
-		var body: StaticBody3D
-		if _chunk_collisions.has(ck):
-			body = _chunk_collisions[ck]
-		else:
-			body = StaticBody3D.new()
-			body.name = "Collision_%d_%d_%d" % [ck.x, ck.y, ck.z]
-			add_child(body)
-			_chunk_collisions[ck] = body
-
-		# 位置与对应 MeshInstance3D 对齐
-		var chunk_scale := voxel_scale * VoxelChunkGenerator.CHUNK_SIZE
-		body.position = Vector3(ck) * chunk_scale
-
-		# 从 chunk mesh 提取 faces 构建碰撞形状
-		var chunk_mesh: MeshInstance3D = _lod_meshes[0].get(ck)
-		if chunk_mesh and chunk_mesh.mesh:
-			var faces := chunk_mesh.mesh.get_faces()
-			if faces.size() > 0:
-				# 复用或更新 CollisionShape3D
-				var shape_node: CollisionShape3D
-				if body.get_child_count() > 0 and body.get_child(0) is CollisionShape3D:
-					shape_node = body.get_child(0)
-					# 复用 ConcavePolygonShape3D，只更新 faces
-					if shape_node.shape is ConcavePolygonShape3D:
-						shape_node.shape.set_faces(faces)
-					else:
-						var new_shape := ConcavePolygonShape3D.new()
-						new_shape.set_faces(faces)
-						shape_node.shape = new_shape
-				else:
-					shape_node = CollisionShape3D.new()
-					var new_shape := ConcavePolygonShape3D.new()
-					new_shape.set_faces(faces)
-					shape_node.shape = new_shape
-					body.add_child(shape_node)
-			else:
-				# 有 mesh 但无顶点，移除碰撞体
-				_remove_chunk_collision(ck)
-		else:
-			_remove_chunk_collision(ck)
-	else:
-		_remove_chunk_collision(ck)
-
-
-## 移除单个 chunk 的碰撞体
-func _remove_chunk_collision(ck: Vector3i) -> void:
-	_collision_rebuild_queue.erase(ck)
-	if _chunk_collisions.has(ck):
-		_chunk_collisions[ck].queue_free()
-		_chunk_collisions.erase(ck)
+	if _collision != null:
+		_collision.clear_all()

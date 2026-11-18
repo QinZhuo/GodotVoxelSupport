@@ -1448,6 +1448,35 @@ func _can_mesh_lod_block_standalone(level: int, key: Vector3i) -> bool:
 	return true
 
 
+# ── 粗层快照的公开面（供 VoxelPagedLayer 的 LOD 调度使用）────────────────────
+#
+# 【为什么需要这三个方法】粗层 mesh 的生成必须**在主线程造好只读快照**再交给 worker
+# （快照是 COW 共享的深拷贝，worker 只读它，绝不触碰 QVoxelSource 的活动字典）。
+# 这三件事只能在数据层内部做（要摸 `_chunk_buffers` / `_coarse_buffers`），但调用方是
+# 视点层的 LOD 调度 —— 它是一个独立的 Node 组件，不该读数据层的私有成员。
+# 故开三个薄壳转发：签名与语义完全等同原私有方法，**只是把"谁可以调"从"同类内部"放宽到公开**。
+# 原私有方法保留（内部仍在使用，且测试 oracle 依赖）。
+
+## 该粗层 block 能否只靠自身与 6 邻居大格数据网格化（决定快照走哪条路径）。
+func can_mesh_lod_block_standalone(level: int, block_key: Vector3i) -> bool:
+	return _can_mesh_lod_block_standalone(level, block_key)
+
+
+## 粗层独立数据快照（block 自身 + 27 邻居大格，COW 共享）。**必须在主线程调用**。
+## 返回空字典表示该层粗层缓存里没有这块数据（调用方应回退 LOD0 降采样路径）。
+func read_lod_block_data_snapshot(block_key: Vector3i, level: int) -> Dictionary:
+	return _snapshot_lod_block_data(block_key, level)
+
+
+## LOD0 chunk 缓冲的 halo 快照（降采样路径用）。**必须在主线程调用**。
+## [param readonly] true = 纯只读（不 preload / 不写状态，缺失 chunk 视为空）；
+##   false = 会 preload 大块自身的 chunk（慢，但磁盘流下能拿到更多数据）。
+func read_lod_block_chunk_snapshot(block_key: Vector3i, level: int, readonly: bool = true) -> Dictionary:
+	if readonly:
+		return _snapshot_lod_block_chunks_readonly(block_key, level)
+	return _snapshot_lod_block_chunks(block_key, level)
+
+
 ## 请求异步生成/加载 chunk/block 数据（后台线程：程序化走生成器，文件流走 region 读盘）。
 ## 统一带 lod 参数（0 = LOD0 chunk，>=1 = 粗层 block）。数据就绪后经 poll_all_ready 回填。
 func request_chunk_async(chunk_key: Vector3i, lod: int = 0) -> void:
@@ -1491,6 +1520,13 @@ func _start_lod_downsample(block_key: Vector3i, lod: int) -> void:
 func _lod_downsample_worker(block_key: Vector3i, lod: int, buffers: Dictionary,
 		snapshot: ReadonlySnapshot) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, block_key, lod)
+	# 【必须防空 halo】`buffers` 非空只代表**整块区域里有些 chunk**，不代表本 block 的
+	# 3×3×3 halo 覆盖范围内有足够数据 —— 边界 block（区域边缘 / 半加载状态）会返回空 halo。
+	# 直接交给 extract_center_from_halo 会越界崩溃（实测 1191 > 0）。空 halo 是正常情况
+	# （数据还没到），按空结果回报，由上层走重试计数即可。
+	if halo.size() != VoxelChunkGenerator.LOD_BLOCK_HALO_VOLUME:
+		call_deferred("_on_lod_downsample_ready", block_key, lod, PackedInt32Array(), snapshot)
+		return
 	var buf := VoxelChunk.extract_center_from_halo(halo)
 	call_deferred("_on_lod_downsample_ready", block_key, lod, buf, snapshot)
 

@@ -184,7 +184,12 @@ func test_shift_origin_shifts_damage_keys() -> void:
 ## 漏平移 → 在途的破坏/崩塌/掉落体会打到平移后的错位体素（只有"长距离旅行中恰好
 ## 有在途队列"才暴露，属真跑才现的一类）。
 func test_destructible_queues_follow_origin_shift() -> void:
+	# 破坏系统是"渲染器 + 破坏子组件"：按新用法建宿主再挂组件。
+	var host := VoxelRenderer.new()
+	host.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 	var r := VoxelDestructible.new()
+	host.add_child(r)
+	r.configure(host)
 	r._pending_removed = {Vector3i(5, 5, 5): true}
 	r._hardened_buffer = {Vector3i(1, 2, 3): 0.5}
 	r._cascade_check_positions = [Vector3i(1, 2, 3)]
@@ -208,6 +213,7 @@ func test_destructible_queues_follow_origin_shift() -> void:
 	assert_true(presenter._pending_falling_materials[0].has(Vector3i(12, -2, 4)), "掉落体材质映射应平移")
 	assert_eq(presenter._pending_falling_materials[0].get(Vector3i(12, -2, 4)), 1, "平移后材质值应保持不变")
 	r.free()
+	host.free()
 
 
 # 全量悬空检测下沉原生：结果必须与 GDScript flood_fill 判据逐体素一致

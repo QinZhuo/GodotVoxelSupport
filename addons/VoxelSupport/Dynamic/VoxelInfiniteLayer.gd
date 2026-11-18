@@ -1040,6 +1040,13 @@ func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, lev
 		halo = VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers(snapshot, bk)
 	else:
 		halo = VoxelChunkGenerator.build_lod_block_halo_from_buffers(snapshot, bk, level)
+	# 【必须防空 halo】空快照/边界数据不全是**正常情况**（LOD0 还没加载完），
+	# 原生那时返回空 halo，直接 extract_center_from_halo 会越界崩溃。按空结果回报，
+	# 让主线程走重试计数（_lod_mark_null_or_retry）。
+	if halo.size() != VoxelChunkGenerator.LOD_BLOCK_HALO_VOLUME:
+		call_deferred("_on_lod_thread_result", bk, level, null, gen_id, PackedInt32Array(), handle)
+		return
+	if not standalone:
 		buf = VoxelChunk.extract_center_from_halo(halo)
 	var arr := VoxelChunkGenerator.generate_lod_block_arrays(halo, aligned_materials, scale, bk, offset, level)
 	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
@@ -1051,6 +1058,9 @@ func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, lev
 func _lod_worker_data_only(buffers: Dictionary, bk: Vector3i, level: int, gen_id: int,
 		handle: QVoxelSource.ReadonlySnapshot) -> void:
 	var halo := VoxelChunkGenerator.build_lod_block_halo_from_buffers(buffers, bk, level)
+	if halo.size() != VoxelChunkGenerator.LOD_BLOCK_HALO_VOLUME:
+		call_deferred("_on_lod_data_ready", bk, level, gen_id, PackedInt32Array(), handle)
+		return
 	var buf := VoxelChunk.extract_center_from_halo(halo)
 	call_deferred("_on_lod_data_ready", bk, level, gen_id, buf, handle)
 

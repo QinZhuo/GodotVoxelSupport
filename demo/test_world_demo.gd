@@ -59,8 +59,13 @@ extends Node
 ## 自动测试每组合采样帧数
 @export var auto_test_frames: int = 180
 
-## 可破坏对象
-var _target: VoxelDestructible
+## 可破坏对象：宿主渲染器（可见性 / LOD / 流式 / 网格统计都在它身上）
+## 【为什么拆成两个引用】破坏系统已改成"渲染器 + 破坏子组件"两个节点：渲染旋钮走 `_target`，
+## 破坏旋钮与破坏调用走 `_destruct`。`_target.global_position` 才是移动网格的那一个
+## （组件是宿主的子节点，identity 变换，设它自己的 position 不会移动模型）。
+var _target: VoxelRenderer
+## 破坏组件（宿主的子节点）
+var _destruct: VoxelDestructible
 var _camera: Camera3D
 var _hud: Label
 var _mode_label: Label
@@ -133,41 +138,64 @@ func _process(delta: float) -> void:
 	_update_hud()
 
 
-## 构建测试目标
-## 优先使用场景里预置的 DestructibleVoxels 节点（编辑器可见可调），
-## 缺失时自动创建（方便直接拖入使用）
-func _build_target() -> void:
-	if _target and is_instance_valid(_target) and _target != get_node_or_null("DestructibleVoxels"):
-		_target.queue_free()
+## 场景里宿主的节点名（渲染器 + 其下的破坏组件）
+const HOST_NODE_NAME := "DestructibleVoxels"
+## 宿主下破坏子组件的节点名
+const DESTRUCT_NODE_NAME := "VoxelDestructible"
 
-	_target = get_node_or_null("DestructibleVoxels") as VoxelDestructible
-	if _target == null:
-		_target = VoxelDestructible.new()
-		_target.name = "DestructibleVoxels"
+
+## 构建测试目标：VoxelRenderer（宿主） + 其子节点 VoxelDestructible（破坏组件）。
+## 优先使用场景里预置的节点（编辑器可见可调），缺失时自动创建（方便直接拖入使用）。
+func _build_target() -> void:
+	var scene_host := get_node_or_null(HOST_NODE_NAME)
+	if scene_host is VoxelRenderer:
+		_target = scene_host as VoxelRenderer
+	else:
+		if scene_host != null:
+			scene_host.queue_free()
+		_target = VoxelRenderer.new()
+		_target.name = HOST_NODE_NAME
+		# 【破坏必须 DYNAMIC】STATIC 下改一个体素 = 重建整份模型（实测 22.7~85ms）；
+		# DYNAMIC 只重建受影响的 chunk（0.4~2ms）。
+		_target.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 		add_child(_target)
-	# 标记为可编辑（场景编辑器里可选中调参）
-	_target.owner = get_tree().edited_scene_root if Engine.is_editor_hint() else null
+
+	var scene_destruct := _target.get_node_or_null(DESTRUCT_NODE_NAME)
+	if scene_destruct is VoxelDestructible:
+		_destruct = scene_destruct as VoxelDestructible
+	else:
+		_destruct = VoxelDestructible.new()
+		_destruct.name = DESTRUCT_NODE_NAME
+		_target.add_child(_destruct)
+	# 显式绑定（幂等）：子节点 _ready 里也会从父节点惰性取，这里让两条路径一致。
+	_destruct.configure(_target)
 
 	var data: QVoxelSource
 	if voxel_data_source != null:
-		# 用户可在编辑器场景里给 DestructibleVoxels 的 data 属性直接赋 QVoxelSource 资源
+		# 用户可在编辑器场景里给宿主节点的 data 属性直接赋 QVoxelSource 资源
 		data = voxel_data_source
 	elif _target.data != null:
 		# 场景里已预置 data（或节点属性已设）
 		data = _target.data
 	else:
 		data = _create_test_world_data()
+	# 标记为可编辑（场景编辑器里可选中调参）
+	_target.owner = get_tree().edited_scene_root if Engine.is_editor_hint() else null
+
+	# ── 宿主（渲染 / 可见性）──
 	_target.data = data
 	_target.voxel_scale = voxel_scale
 	_target.visibility_mode = _visibility_mode()
 	_target.view_distance = view_distance
 	_target.unload_distance = unload_distance
-	_target.spawn_debris_on_damage = spawn_debris_on_damage
-	_target.use_voxel_health = true
-	_target.damage_per_voxel = 1.0
-	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
-	_target.local_collapse = true
+	# ── 破坏组件（破坏）──
+	_destruct.spawn_debris_on_damage = spawn_debris_on_damage
+	_destruct.use_voxel_health = true
+	_destruct.damage_per_voxel = 1.0
+	_destruct.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
+	_destruct.local_collapse = true
 
+	# 【必须设在宿主上】组件是子节点，设它自己的位置不会移动模型。
 	var bounds: AABB = data.get_voxels_aabb()
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
 
@@ -405,23 +433,24 @@ func _rebuild_for_test() -> void:
 	_native_available = NativeLoader.is_available()
 
 
-## 中心球形破坏
+## 中心球形破坏（破坏调用走组件）
 func _damage_at_center() -> void:
-	if not _target or not is_instance_valid(_target):
+	if not _destruct or not is_instance_valid(_destruct):
 		return
 	var center := Vector3(world_size.x * 0.5, world_size.y * 0.5, world_size.z * 0.5)
-	_target.damage_sphere(center, damage_radius)
+	_destruct.damage_sphere(center, damage_radius)
 
 
 ## 射线破坏（相机方向）
 func _ray_damage() -> void:
-	if not _target or not is_instance_valid(_target):
+	if not _destruct or not is_instance_valid(_destruct):
 		return
 	var origin := _camera.global_position
 	var dir := -_camera.global_transform.basis.z
+	# 变换用宿主（体素空间是宿主的局部空间；组件与其 identity）
 	var local_origin := _target.to_local(origin)
 	var local_dir := _target.global_transform.basis.inverse() * dir
-	_target.damage_ray(local_origin / voxel_scale, local_dir, 500.0)
+	_destruct.damage_ray(local_origin / voxel_scale, local_dir, 500.0)
 
 
 # ----------------------------------------------------------------------------

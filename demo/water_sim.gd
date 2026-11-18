@@ -192,6 +192,13 @@ func _fill_water(min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max
 func _setup_renderer() -> void:
 	_renderer = VoxelRenderer.new()
 	_renderer.name = "WaterVoxels"
+	# 【必须显式 DYNAMIC】水模拟每帧批量改体素，而 STATIC 的代价是"改一个体素 = 重建整份模型"。
+	# 本场景 40×20×16 = 12800 体素，整份重建实测 20~30ms/次，逐帧跑会直接把帧率打到个位数。
+	# DYNAMIC + group_shift=0（每 chunk 一个绘制单元）才是水模拟这种"每帧大面积编辑"的正确形态。
+	# 注意 group_shift 取 0 而非默认 1：水是逐帧连续改的，单次重建要尽可能小（0.4ms 级），
+	# 分组带来的 draw 收益在这里不重要（只有一个实例）。
+	_renderer.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
+	_renderer.group_shift = 0
 	_renderer.data = _data
 	_renderer.voxel_scale = voxel_scale
 	_renderer.update_throttle_frames = 3

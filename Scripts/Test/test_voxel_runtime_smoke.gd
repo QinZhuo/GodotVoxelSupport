@@ -43,6 +43,10 @@ func test_render_pipeline_produces_lod0_mesh() -> void:
 
 	var r := VoxelRenderer.new()
 	r.visibility_mode = VoxelRenderer.VisibilityMode.FULL   # 不依赖相机，全量构建
+	# 【必须显式选 DYNAMIC】默认已是 STATIC（整份合并成 1 个 mesh，不产生 per-chunk 节点）。
+	# 本用例测的是"chunk 级异步管线"，所以显式指定 DYNAMIC；判据走公开面
+	# has_chunk_mesh / chunk_mesh，不再直读私有 _lod_meshes。
+	r.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 	r.voxel_scale = 0.1
 	r.data = _make_solid_data(8)
 	_attach(tree, r)
@@ -80,12 +84,18 @@ func test_validate_stability_collapses_floating_block() -> void:
 	var before := d.get_voxel_count()
 	assert_eq(before, positions.size(), "悬空块应被写入")
 
+	# 【新用法】破坏系统是"渲染器 + 破坏子组件"：先建宿主（DYNAMIC），再挂组件并绑定。
+	# 改造前这里直接 `VoxelDestructible.new()` 当渲染器用；现在宿主才是渲染/数据侧。
+	var host := VoxelRenderer.new()
+	host.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
+	host.voxel_scale = 0.1
+	host.data = d
+	_attach(tree, host)
 	var r := VoxelDestructible.new()
-	r.voxel_scale = 0.1
 	r.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
 	r.spawn_debris_on_damage = true
-	r.data = d
-	_attach(tree, r)
+	host.add_child(r)
+	r.configure(host)
 
 	r.validate_stability()
 	assert_eq(d.get_voxel_count(), 0, "悬空块应被判定失稳并全部移除 (before=%d)" % before)
@@ -102,10 +112,15 @@ func test_destroy_all_removes_every_voxel() -> void:
 
 	var d := _make_solid_data(8)
 	var before := d.get_voxel_count()
+	# 【新用法】先建宿主（DYNAMIC）再挂破坏组件，见上一个用例的说明。
+	var host := VoxelRenderer.new()
+	host.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
+	host.voxel_scale = 0.1
+	host.data = d
+	_attach(tree, host)
 	var r := VoxelDestructible.new()
-	r.voxel_scale = 0.1
-	r.data = d
-	_attach(tree, r)
+	host.add_child(r)
+	r.configure(host)
 
 	r.destroy_all(false)   # 走原生批量材质收集 + 清空
 	assert_eq(d.get_voxel_count(), 0, "destroy_all 应移除全部体素 (before=%d)" % before)
@@ -186,28 +201,41 @@ func _make_solid_data(edge: int) -> QVoxelSource:
 	return d
 
 
-## 统计 LOD0 层里"确实有网格"的 chunk 数（空块是 null 占位，不算）。
+## 统计"确实有网格"的 chunk 数。
+## 【走公开面 has_chunk_mesh / chunk_mesh】不再直读私有 `_lod_meshes` —— 那张表只在
+## DYNAMIC + group_shift=0 时存在；STATIC 走 `self.mesh`、分组模式走 `_group_meshes`。
+## 判据归一在 `has_chunk_mesh` 里（渲染核心内部细节），测试不该跟着模式分支。
 func _count_lod0_meshes(r: VoxelRenderer) -> int:
-	if r._lod_meshes.is_empty():
+	if r.data == null:
 		return 0
 	var n := 0
-	for bk in r._lod_meshes[0]:
-		var mi = r._lod_meshes[0][bk]
+	for ck in r.data.get_all_chunk_keys():
+		if not r.has_chunk_mesh(ck):
+			continue
+		var mi := r.chunk_mesh(ck)
 		if mi != null and is_instance_valid(mi) and mi.mesh != null and mi.mesh.get_surface_count() > 0:
 			n += 1
 	return n
 
 
-## LOD0 层所有网格的首表面顶点数之和。
+## 所有网格的首表面顶点数之和（同样走公开面，见 _count_lod0_meshes 的注释）。
 ## 【为什么不读 r.last_solid_vertices】那是"最近一次应用的结果"的统计，而边界空邻居 chunk
 ## 也会被派发并以 has_data=false 回传（sv=0），结果到达顺序不确定 → 该字段可能被最后的空结果
 ## 覆盖成 0。直接量网格本身才是确定性的。
 func _lod0_vertex_total(r: VoxelRenderer) -> int:
-	if r._lod_meshes.is_empty():
+	if r.data == null:
 		return 0
 	var total := 0
-	for bk in r._lod_meshes[0]:
-		var mi = r._lod_meshes[0][bk]
-		if mi != null and is_instance_valid(mi) and mi.mesh != null and mi.mesh.get_surface_count() > 0:
+	var seen := {}
+	for ck in r.data.get_all_chunk_keys():
+		var mi := r.chunk_mesh(ck)
+		if mi == null or not is_instance_valid(mi) or mi.mesh == null:
+			continue
+		# 分组/ STATIC 下多个 chunk 共用同一个网格节点 → 只算一次，否则会重复累加
+		var key := mi.get_instance_id()
+		if seen.has(key):
+			continue
+		seen[key] = true
+		if mi.mesh.get_surface_count() > 0:
 			total += mi.mesh.surface_get_array_len(0)
 	return total

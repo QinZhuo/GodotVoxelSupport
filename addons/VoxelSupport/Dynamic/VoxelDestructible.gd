@@ -1,11 +1,39 @@
 @tool
 class_name VoxelDestructible
-extends VoxelRenderer
+extends Node3D
 
-## 动态体素破坏系统
-## 继承 VoxelRenderer，在渲染基础上提供体素破坏能力
+## 动态体素破坏系统 —— **组件形态**：挂在 [VoxelRenderer] 下当子节点，而不是继承它。
+##
+## 【用法】
+## [codeblock]
+## var renderer := VoxelRenderer.new()
+## renderer.data = data
+## renderer.voxel_scale = 0.1
+## renderer.draw_mode = VoxelRenderer.DrawMode.DYNAMIC   # 破坏必须 DYNAMIC，见下
+## add_child(renderer)
+## var destructible := VoxelDestructible.new()
+## renderer.add_child(destructible)
+## destructible.configure(renderer)   # 可省：_ready 会从父节点惰性取
+## destructible.damage_sphere(center, radius)
+## [/codeblock]
+##
+## 【为什么改成组件】继承形态把"渲染"和"破坏"两份职责压进同一个节点：一个节点同时有渲染
+## 旋钮与破坏旋钮（48 个 Inspector 属性），破坏系统也就没法只做破坏这一件事。拆成组件后
+## 渲染器只管渲染、本组件只管破坏（17 个旋钮），依赖方向单向：本组件 → 宿主。
+## 这与仓库里已有的 `VoxelDestructionPresenter`（子节点 + host 引用 + 只读宿主公开面）
+## 完全同构；而破坏系统内部本来就是 `VoxelEditKernel` + `VoxelDestructionPresenter` 的组合，
+## 这次只是把最外层的继承换成挂节点。
+##
+## 【宿主必须设 draw_mode = DYNAMIC】本组件直接改 host.data 的体素，而 STATIC 的代价是
+## "改一个体素 = 重建整份模型"（实测 cars 22.7ms / teapot1 85ms）；DYNAMIC 只重建受影响的
+## chunk（实测 0.4~2ms）。这不是"选个更好的"，而是语义要求：破坏系统存在的意义就是频繁编辑。
+## `configure()` 会对非 DYNAMIC 宿主发 push_warning 提醒。
+##
+## 【依赖方向】本组件 → 宿主：只读宿主公开面（`data` / `voxel_scale` / `infinite_layer` /
+## `diag_enabled` / `draw_mode`），渲染与网格重建全部由宿主负责。不碰宿主私有成员
+## （与 VoxelDestructionPresenter 同一约定）。
+##
 ## 支持球形/盒形/单体素/射线破坏 + 逐体素健康度 + 悬空崩塌 + 粒子碎片
-## 破坏直接修改 QVoxelSource，自动触发 mesh 重新生成
 ## 碎片使用 GPU 粒子系统，无物理碰撞体，高性能
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
@@ -13,6 +41,214 @@ signal voxel_damaged(positions: Array, spawn_debris: bool)      ## 体素被移�
 signal voxel_hardened(pos: Vector3i, remaining: float)          ## 体素受伤但未摧毁 (材质硬度未达)（单发，兼容旧用法）
 signal voxel_hardened_batch(positions: Array, remaining: Dictionary) ## 批量硬化（帧尾合并发射，避免逐体素高频信号）
 signal voxels_about_to_collapse(positions: Array)               ## 悬空体素即将崩塌掉落前
+
+## 【兼容转发信号】宿主渲染器的 `mesh_updated`（网格重建完成）在本组件上重播一次。
+## 【为什么必须有】继承形态下 `d.mesh_updated` 就是宿主那个信号，存量调用方（demo 的性能
+## 日志）直接 connect 它。组件化后宿主才是信号源，但删掉本声明会让这些调用方在运行期
+## 报 "Invalid access to signal" —— 那是最典型的一类静默破坏兼容性问题。
+## 绑定时把宿主的信号接到 `_on_host_mesh_updated`，解绑/退出时断开（见 _exit_tree）。
+signal mesh_updated
+
+
+# ── 宿主绑定（组件形态的核心）────────────────────────────────────────────
+
+## 宿主渲染器（只读）。破坏直接改 host.data，渲染与网格重建由宿主负责。
+## 由 `configure()` 绑定，或在 `_ready()` 里从父节点惰性取（编辑器里把本组件直接拖到
+## VoxelRenderer 下即可，无需写代码）。
+var host: VoxelRenderer = null
+
+
+## 绑定宿主渲染器。重复调用安全（会重新指向新宿主）。
+##
+## 【为什么强制要求宿主 DYNAMIC，但只警告不自动改】STATIC 下"改一个体素 = 重建整份模型"
+## （实测 cars 22.7ms / teapot1 85ms），而破坏系统每次命中都在改体素 —— 那是把 O(chunk)
+## 变成 O(模型)，破坏的手感与帧率会一起崩。但自动强制会覆盖用户在 Inspector 里的显式选择，
+## 而"静态展示为主 + 偶尔破坏"确实是存在的用法（例如破坏后立刻定格），故只警告。
+func configure(host_ref: VoxelRenderer) -> void:
+	# 换宿主时先断开旧宿主的信号（reconfigure 场景：demo 重置会重新绑定）
+	_unbind_host_signals()
+	host = host_ref
+	# 表现层也要换宿主：它本身是本组件的子节点，但它的 host 是**渲染器**（要读 voxel_scale /
+	# data / infinite_layer）。已在 _presenter 的 getter 里用当前 host 构造，故只在已创建时更新，
+	# 避免编辑器里为了传一次引用就白建一个 Node3D。
+	if _presenter_impl != null:
+		_presenter_impl.host = host_ref
+	# 记录当前的数据基准，避免把"绑定前就已发生的 origin shift"误判成一次新平移
+	# （否则首次 _process 会把所有在途队列平移到错误的坐标）。
+	if host != null:
+		_last_origin_chunk = host.infinite_layer.origin_chunk()
+	_bind_host_signals()
+	_flush_pending_to_host()
+	if host != null and host.draw_mode != VoxelRenderer.DrawMode.DYNAMIC:
+		push_warning("[VoxelDestructible] 宿主 draw_mode 不是 DYNAMIC：破坏将触发整份模型重建"
+				+ "（STATIC 下改一个体素实测 22.7~85ms）。请设 host.draw_mode = VoxelRenderer.DrawMode.DYNAMIC。")
+
+
+## 订阅宿主的 `mesh_updated`（转发为本组件的同名信号，见 mesh_updated 声明）。
+## 用 Callable 比对避免重复连接：configure() 可能被重复调用（幂等要求）。
+func _bind_host_signals() -> void:
+	if host == null:
+		return
+	var cb := Callable(self, "_on_host_mesh_updated")
+	if not host.mesh_updated.is_connected(cb):
+		host.mesh_updated.connect(cb)
+
+
+## 断开宿主信号（换宿主 / 退出时调用）。
+## 【为什么必须断】宿主可能在场景树里活得更久（例如 demo 重置时只换 data 不换宿主），
+## 留着连接会让它的信号打到已释放的组件实例上 → "Attempt to call on a freed instance"。
+func _unbind_host_signals() -> void:
+	if host == null or not is_instance_valid(host):
+		return
+	var cb := Callable(self, "_on_host_mesh_updated")
+	if host.mesh_updated.is_connected(cb):
+		host.mesh_updated.disconnect(cb)
+
+
+## 宿主网格重建完成 → 重播本组件的 mesh_updated（兼容层，见 signal mesh_updated 的注释）。
+func _on_host_mesh_updated() -> void:
+	mesh_updated.emit()
+
+
+# ── 【兼容转发】早期本类继承 VoxelRenderer，调用方直接设 `.data` / `.voxel_scale` 等；
+# 改成组件后这些属性归宿主。这里转发给 host，让存量调用点不必一次性全改。
+# 【为什么不"删干净"】删掉后 `d.data = x` 会变成给节点加一个没人读的哑属性（GDScript 允许
+# 这种动态赋值），错误完全静默；转发则让新旧两种写法语义等价。
+# 【暂存规则】host 未绑定时写进 `_pending_*`，`configure()` 时一次性补写进宿主 —— 于是
+# "先 new 后设属性、最后绑定"（老代码的写法）与"先绑定后设属性"两种顺序结果一致。
+# 【转发不回写暂存】host 已绑定时 setter 直接写宿主，**不再**记暂存值：残留的旧暂存会在
+# 下一次 configure() 里把宿主上更新过的值改回去（"陈旧暂存覆盖新值"是一类很难查的时序 bug）。
+
+## 暂存区：host 未绑定时接收转发写入的值（见 _flush_pending_to_host）。
+var _pending_data: QVoxelSource = null
+## 各暂存项是否被真正设过：只有设过的才在 configure() 时补写宿主，
+## 避免"默认值覆盖宿主 Inspector 里的显式配置"。
+var _pending_set: Dictionary = {}
+
+
+## 把暂存值补写进宿主（只在 host 未绑定时攒下的项）。
+func _flush_pending_to_host() -> void:
+	if host == null or _pending_set.is_empty():
+		return
+	if _pending_set.has(&"data"):
+		host.data = _pending_data
+	if _pending_set.has(&"voxel_scale"):
+		host.voxel_scale = _pending_voxel_scale
+	if _pending_set.has(&"generate_collision"):
+		host.generate_collision = _pending_generate_collision
+	if _pending_set.has(&"lod_count"):
+		host.lod_count = _pending_lod_count
+	if _pending_set.has(&"view_distance"):
+		host.view_distance = _pending_view_distance
+	if _pending_set.has(&"visibility_mode"):
+		host.visibility_mode = _pending_visibility_mode
+	_pending_set.clear()
+	_pending_data = null
+
+
+# 暂存字段（仅 host 未绑定时有意义）
+var _pending_voxel_scale: float = 0.1
+var _pending_generate_collision: bool = false
+var _pending_lod_count: int = 1
+var _pending_view_distance: float = 40.0
+var _pending_visibility_mode: VoxelRenderer.VisibilityMode = VoxelRenderer.VisibilityMode.FRUSTUM
+
+
+## 体素数据（转发 host.data）。[兼容转发]
+var data: QVoxelSource:
+	get:
+		return host.data if host != null else _pending_data
+	set(v):
+		if host != null:
+			host.data = v
+		else:
+			_pending_data = v
+			_pending_set[&"data"] = true
+
+
+## 体素边长（转发 host.voxel_scale）。[兼容转发]
+var voxel_scale: float:
+	get:
+		return host.voxel_scale if host != null else _pending_voxel_scale
+	set(v):
+		if host != null:
+			host.voxel_scale = v
+		else:
+			_pending_voxel_scale = v
+			_pending_set[&"voxel_scale"] = true
+
+
+## 是否生成碰撞（转发 host.generate_collision）。[兼容转发]
+var generate_collision: bool:
+	get:
+		return host.generate_collision if host != null else _pending_generate_collision
+	set(v):
+		if host != null:
+			host.generate_collision = v
+		else:
+			_pending_generate_collision = v
+			_pending_set[&"generate_collision"] = true
+
+
+## LOD 层数（转发 host.lod_count）。[兼容转发]
+var lod_count: int:
+	get:
+		return host.lod_count if host != null else _pending_lod_count
+	set(v):
+		if host != null:
+			host.lod_count = v
+		else:
+			_pending_lod_count = v
+			_pending_set[&"lod_count"] = true
+
+
+## 可见性加载距离（转发 host.view_distance）。[兼容转发]
+var view_distance: float:
+	get:
+		return host.view_distance if host != null else _pending_view_distance
+	set(v):
+		if host != null:
+			host.view_distance = v
+		else:
+			_pending_view_distance = v
+			_pending_set[&"view_distance"] = true
+
+
+## 可见性模式（转发 host.visibility_mode）。[兼容转发]
+var visibility_mode: VoxelRenderer.VisibilityMode:
+	get:
+		return host.visibility_mode if host != null else _pending_visibility_mode
+	set(v):
+		if host != null:
+			host.visibility_mode = v
+		else:
+			_pending_visibility_mode = v
+			_pending_set[&"visibility_mode"] = true
+
+
+## 诊断开关（转发 host.diag_enabled）。[兼容转发]
+## 【为什么这个也转发】诊断输出是本组件写的，但开关的真值只有一个 —— 宿主的 Inspector。
+## 保留可写是为了让"只打开破坏侧诊断"的老写法继续可用。
+var diag_enabled: bool:
+	get:
+		return host.diag_enabled if host != null else false
+	set(v):
+		if host != null:
+			host.diag_enabled = v
+
+
+## 无限层（只读转发 host.infinite_layer）。[兼容转发]
+## 早期调用方会用 `d.infinite_layer` 做视锥判定 / 读 origin_chunk；组件化后该能力在宿主上。
+var infinite_layer: VoxelInfiniteLayer:
+	get:
+		return host.infinite_layer if host != null else null
+
+
+## 表面材质表（只读转发 host.surface_materials()）。[兼容转发]
+## 破坏侧曾直接用它取"内核唯一材质缓存"；现在掉落实体走表现层，但外部兼容保留。
+func surface_materials() -> Array:
+	return host.surface_materials() if host != null else []
+
 
 ## 硬化反馈缓冲：pos -> remaining，_process 帧尾合并发 voxel_hardened_batch
 var _hardened_buffer: Dictionary = {}
@@ -26,19 +262,26 @@ var _hardened_dirty: bool = false
 var _edit := VoxelEditKernel.new()
 
 ## 破坏表现层：粒子碎片 / 掉落物理由它演出，宿主只产出数据并委托。
-## 【为何惰性创建】与父类 infinite_layer 同因：脚本热重载不会对既有实例重跑 _init，
+## 【为何惰性创建】与宿主的 infinite_layer 同因：脚本热重载不会对既有实例重跑 _init，
 ## 用 getter 可自愈，避免"重载后旧实例的 _presenter_impl 仍为 null"这类只在编辑器里冒出来的空引用。
 ## 【为何 configure 在 _process 里同步】碎片手感旋钮是本节点的 @export（Inspector 唯一真值），
 ## 而碎片生成全部发生在 _process 的破坏管道内——每帧同步一次即可覆盖全部生成路径，
 ## 且 Inspector 改旋钮下一帧就生效（与原"调用时读字段"的语义等价）。
+## 【注意展示层的 host 是渲染器】它要读 voxel_scale / data / infinite_layer / surface_materials()，
+## 故构造时传的是 `host`（渲染器）而非 `self`（本组件）。host 尚未绑定时传 null 也安全：
+## 表现层的所有方法都对 `host == null` 做了空转保护（且真正生成碎片只在运行期、host 已绑定时）。
+## 绑定顺序不限：getter 在每次取用时把 `host` 与表现层对齐（见 _sync_presenter_host）。
 var _presenter_impl: VoxelDestructionPresenter
 
 var _presenter: VoxelDestructionPresenter:
 	get:
 		if _presenter_impl == null:
-			_presenter_impl = VoxelDestructionPresenter.new(self)
+			_presenter_impl = VoxelDestructionPresenter.new(host)
 			_presenter_impl.name = "_VoxelDestructionPresenter"
 			add_child(_presenter_impl, false, Node.INTERNAL_MODE_BACK)
+		elif _presenter_impl.host != host:
+			# 宿主在表现层创建之后才绑定（先 new 表现层再 configure）→ 就地补上，不必重建节点
+			_presenter_impl.host = host
 		return _presenter_impl
 
 ## 崩塌掉落模式枚举
@@ -56,8 +299,10 @@ enum CollapseMode {
 
 
 ## Inspector 动态可见性：条件不生效时隐藏对应属性。
+## 【为何没有 super 调用】改造前这里转发给 VoxelRenderer 的 `_validate_property`（它隐藏
+## view_distance / lod_count 等视点属性）。组件化后那些属性归宿主，本组件面板里根本不存在，
+## 没有需要转发的目标；Node3D 也没有同名实现可调。
 func _validate_property(property: Dictionary) -> void:
-	super._validate_property(property)
 	var name: StringName = property["name"]
 	if not spawn_debris_on_damage:
 		match name:
@@ -171,8 +416,14 @@ enum FallingMode {
 ## 掉落块落地静置检测时间累计 (秒)
 var _sleep_check_counter: float = 0.0
 
+## 就绪：惰性绑定父节点宿主 + 让表现层准备好碎片根节点。
+##
+## 【为什么在 _ready 里从父节点取宿主】编辑器里把本组件拖到 VoxelRenderer 节点下是零代码的
+## 用法，此时没有人会调 `configure()`。父节点不是 VoxelRenderer（例如先用代码挂到普通 Node3D
+## 下再 configure）时保留 null，等 `configure()` 显式绑定 —— 不报错，只在破坏调用时空转。
 func _ready() -> void:
-	super._ready()
+	if host == null and get_parent() is VoxelRenderer:
+		configure(get_parent() as VoxelRenderer)
 	if not Engine.is_editor_hint():
 		_presenter.ensure_debris_root()
 		# 不再做初始全量稳定性校验：浮空结构默认保持稳定，失稳只由破坏逻辑
@@ -187,18 +438,27 @@ func _exit_tree() -> void:
 	# 表现层 shutdown() 会先 join 在途 mesh worker 再清理（见 VoxelDestructionPresenter）。
 	if _presenter_impl != null:
 		_presenter_impl.shutdown()
-	# 必须转发给父类：它负责置 _exiting、等待在途 worker、清理 LOD 网格——
-	# 漏掉会让 worker 完成时的 call_deferred 打到已释放实例。
-	super._exit_tree()
+	# 断开宿主信号：宿主通常比本组件活得久（demo 重置时只换 data 不换宿主），
+	# 留着连接会让它的 mesh_updated 打到已释放实例。
+	_unbind_host_signals()
+	# 【改造前这里是 super._exit_tree()】那部分归渲染器了：等待在途 mesh worker、置 _exiting、
+	# 清理 LOD 网格都是宿主自己 `_exit_tree` 的职责，本组件作为子节点退出时宿主仍在，
+	# 不需要也不该替它做。
 
 
-## origin shift 钩子：把本节点持有的**体素坐标**在途队列一起平移。
-## 【为什么必须做】父类只平移渲染层状态（网格节点/碰撞体/block 级账本），而破坏系统
-## 的队列里存的是体素坐标。数据坐标整体挪了 shift 后若不平移这些队列，下一帧处理时：
+## origin shift 钩子：把本组件持有的**体素坐标**在途队列一起平移。
+## 【为什么必须做】宿主只平移渲染层状态（网格节点/碰撞体/block 级账本），而破坏系统的
+## 队列里存的是体素坐标。数据坐标整体挪了 shift 后若不平移这些队列，下一帧处理时：
 ##   · `_pending_removed`      → 在错位位置移除体素（破坏打到别处/静默无效）；
 ##   · `_cascade_*`            → 级联检测与移除错位；
 ##   · 表现层的 `_pending_falling_*` → 生成错位的掉落体与材质映射（转发给表现层处理）。
 ## 长距离旅行（触发 origin shift）时这些队列常非空，属"真跑才暴露"的一类。
+##
+## 【为什么改由本组件自己发现】改造前宿主（VoxelRenderer）`shift_render` 末尾会回调
+## `on_origin_shift` 这个"子类钩子"，本组件于是天然收到通知。组件化后那层继承关系没了，
+## 而 VoxelRenderer 是**不可改**的（它已把钩子固定留给子类），故本组件改为在 `_process`
+## 里比对宿主的公开面 `infinite_layer.origin_chunk()`：变了就差分出 shift 并自行平移。
+## 代价是每帧一次整数比较；收益是零侵入宿主。该值只在 `data.infinite` 的无限世界才会变。
 func on_origin_shift(shift: Vector3i) -> void:
 	_pending_removed = VoxelChunk.shift_key_dict(_pending_removed, shift)
 	_hardened_buffer = VoxelChunk.shift_key_dict(_hardened_buffer, shift)
@@ -207,6 +467,24 @@ func on_origin_shift(shift: Vector3i) -> void:
 	_cascade_total = VoxelChunk.shift_positions(_cascade_total, shift)
 	if _presenter_impl != null:
 		_presenter_impl.on_origin_shift(shift)
+
+
+## 上次看到的宿主数据基准 chunk（见 on_origin_shift 的"为什么改由本组件自己发现"）。
+var _last_origin_chunk: Vector3i = Vector3i.ZERO
+
+
+## 轮询宿主的数据基准 chunk，若发生 origin shift 就平移本组件的在途队列。
+## 【为什么是轮询而不是信号】VoxelRenderer 没有暴露 origin shift 信号，且它不可改；
+## `origin_chunk()` 是无限层的公开查询（HUD/调试本来就读它），用它做差分是既有公开面上的最小方案。
+func _sync_origin_shift() -> void:
+	if host == null:
+		return
+	var cur: Vector3i = host.infinite_layer.origin_chunk()
+	if cur == _last_origin_chunk:
+		return
+	var shift := cur - _last_origin_chunk
+	_last_origin_chunk = cur
+	on_origin_shift(shift)
 
 
 # 破坏入口
@@ -627,9 +905,15 @@ func _flush_hardened_signals() -> void:
 
 func _process(_delta: float) -> void:
 	var _diag_t0 := Time.get_ticks_usec() if diag_enabled else 0
-	super._process(_delta)
+	# 【改造前这里是 super._process(_delta)】渲染每帧驱动归宿主：它就是本组件的**父节点**，
+	# Godot 按场景树顺序处理 `_process`（父先于子），故宿主本帧的网格重建一定已经跑完，
+	# 破坏管道看到的渲染状态与改造前"父类先跑"完全等价，无需在此重复调用。
+	# 【STATIC 宿主】若无人在宿主上设 DYNAMIC，configure() 已发过警告，这里不重复拦。
 	if Engine.is_editor_hint():
 		return
+
+	# 宿主发生 origin shift（无限世界走远）时，本组件的体素坐标队列必须同步平移（见 on_origin_shift）。
+	_sync_origin_shift()
 
 	# 把碎片手感 / 掉落旋钮同步给表现层（@export 是本节点唯一真值；
 	# 碎片与掉落生成都在本帧管道内，故每帧推一次即可覆盖运行期改值）

@@ -25,7 +25,7 @@ const KERNEL_PUBLIC_API: Array[String] = [
 	"mount_lod_mesh", "mark_lod_block_empty", "clear_lod_mesh",
 	"set_lod_level_count", "clear_lod_level",
 	# B. 按 chunk 索引 · 查
-	"has_chunk_mesh", "has_lod_mesh", "lod_mesh", "lod_mesh_keys",
+	"has_chunk_mesh", "chunk_mesh", "has_lod_mesh", "lod_mesh", "lod_mesh_keys",
 	"is_mesh_build_queued", "lod_materials", "lod_level_count", "surface_materials",
 	# C. 只读环境
 	"current_camera", "get_data",
@@ -36,6 +36,11 @@ const KERNEL_PUBLIC_API: Array[String] = [
 	"set_voxel", "remove_voxel", "get_voxel",
 	# F. 粒子渲染（机制，不含效果）
 	"show_as_particles", "rebuild_particles", "particle_voxel_size",
+	# G. 视点层接管（VoxelPagedLayer 装配用）
+	#   【为什么它也进内核契约】接管点是 renderer 上的一个可空引用 + 一个判据，
+	#   装配方必须能读/写这两样；组件侧依然只读本类公开面，反向调用面**没有扩大**
+	#   —— 仍然是"renderer 问可见性 / 转发调度"两件事（见 VoxelRenderer.paged_layer 注释）。
+	"uses_paged_layer",
 ]
 
 
@@ -185,12 +190,18 @@ func test_edit_kernel_stress_and_unstable_headless() -> void:
 
 ## 节点与内核**共用同一份数学**：不存在第二套 GDScript 伤害实现。
 func test_destructible_delegates_edit_math_to_kernel() -> void:
+	# 破坏系统已是"渲染器 + 破坏子组件"两个节点：这里按新用法建宿主再挂组件。
+	var host := VoxelRenderer.new()
+	host.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
+	host.voxel_scale = 0.1
 	var node := VoxelDestructible.new()
+	host.add_child(node)
+	node.configure(host)
 	assert_true(node._edit is VoxelEditKernel, "节点必须持有编辑内核实例（P2-4：数学只有一份）")
 	var args := [VoxelEditKernel.SHAPE_SPHERE, Vector3(3.5, 3.5, 3.5), 1.5, Vector3i.ZERO, Vector3i.ZERO]
 
 	var dn := _make_solid(8)
-	node.data = dn
+	host.data = dn
 	node.damage_per_voxel = 10.0
 	node.use_voxel_health = true
 	var via_node: Array = node._apply_damage_native(args[0], args[1], args[2], args[3], args[4])
@@ -211,6 +222,7 @@ func test_destructible_delegates_edit_math_to_kernel() -> void:
 	assert_true(not a.is_empty(), "节点伤害路径应算出被摧毁体素")
 	assert_eq(a, b, "节点与内核直调必须给出同一批被摧毁体素（否则说明数学被复制了一份）")
 	node.free()
+	host.free()
 
 
 # P2-7：编辑路径必须是**脏区域增量**（内核唯一真正的性能风险）
@@ -318,6 +330,9 @@ const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	"apply_ready_results", "is_chunk_pending", "get_unready_chunk_keys",
 	# 只读快照
 	"begin_readonly_snapshot", "end_readonly_snapshot",
+	# 粗层快照的公开面（供 VoxelPagedLayer 的 LOD 调度：主线程造快照 → 交 worker 只读）
+	"read_lod_block_data_snapshot", "read_lod_block_chunk_snapshot",
+	"can_mesh_lod_block_standalone",
 	# 粗层 LOD
 	"get_lod_block", "has_lod_block", "set_lod_block", "store_lod_block",
 	"erase_lod_block", "get_lod_block_keys", "flush_lod_block",
@@ -379,10 +394,15 @@ func test_data_internal_protocols_are_underscored() -> void:
 		assert_true(names.has(n), "内部协议 %s 应存在" % n)
 		assert_true(n.begins_with("_"), "内部协议必须以 `_` 前缀（内核外不可见）: %s" % n)
 	# ② 它们绝不能再以"公开"旧名出现（P4-4 前的名字）
+	# 【例外：三个粗层快照方法】`VoxelPagedLayer` 是内核外的独立组件，它要在主线程造粗层
+	# 快照再交 worker 只读 —— 这件事只能由数据层内部做（要摸 `_chunk_buffers`/`_coarse_buffers`）。
+	# 为了不逼组件去读私有成员，数据层开了**同义公开薄壳**（`read_lod_block_*_snapshot` /
+	# `can_mesh_lod_block_standalone`），原 `_` 版本保留给内部与测试 oracle。
+	# 故这三个名字允许以**新语义的公开方法**存在，但必须是薄壳转发而非第二份实现。
 	for legacy in ["get_chunk_buffers", "get_lod_buffers", "get_damage_buffers",
 			"set_damage_buffers", "accept_chunk_buffer", "snapshot_chunks_halo",
 			"snapshot_lod_block_chunks", "snapshot_lod_block_chunks_readonly",
-			"snapshot_lod_block_data", "can_mesh_lod_block_standalone", "get_chunk_halo"]:
+			"snapshot_lod_block_data", "get_chunk_halo"]:
 		assert_false(names.has(legacy),
 			"内部协议旧名 %s 不得再作为公开方法存在（应已降为 `_` 前缀）" % legacy)
 

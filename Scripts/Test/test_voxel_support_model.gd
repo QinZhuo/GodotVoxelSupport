@@ -189,8 +189,13 @@ func _mini_building() -> Array:
 
 func test_damage_applies_in_same_frame() -> void:
 	var data := _make(_wall(8, 8))
+	# 破坏系统是"渲染器 + 破坏子组件"：按新用法建宿主再挂组件。
+	var host := VoxelRenderer.new()
+	host.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
+	host.data = data
 	var node := VoxelDestructible.new()
-	node.data = data
+	host.add_child(node)
+	node.configure(host)
 	node.use_voxel_health = true
 	node.damage_per_voxel = 2.0
 	node.spawn_debris_on_damage = false
@@ -201,3 +206,4 @@ func test_damage_applies_in_same_frame() -> void:
 	assert_eq(data.get_voxel(Vector3i(3, 3, 0)) <= 0, true, "破坏后同帧即落地")
 	assert_eq(before - data.get_voxel_count() >= 1, true, "同帧内至少移除被破坏的那一格")
 	node.free()
+	host.free()

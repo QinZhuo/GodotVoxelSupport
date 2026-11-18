@@ -30,9 +30,39 @@ QVoxelSource                    — voxel storage & editing (materials, chunk bu
   │    └─ VoxelMemoryStream      — memory only (no persistence; a home for edits)
   └─ node: QVoxelNode            — GENERATION: the data layer's single source of truth
 	   └─ QVoxelModel            — bounded grid + modifier chain (run by QVoxelEvalEngine)
-VoxelRenderer              — async mesh generation, LOD, streaming, collision
-VoxelDestructible          — extends VoxelRenderer: destruction, collapse, falling debris
+
+VoxelMesher                     — MESHING layer: voxels → geometry → ArrayMesh
+								  (stateless, no node; both draw modes share it)
+VoxelRenderer                   — DRAWING CORE: data → visible geometry
+  └─ DrawMode.STATIC / DYNAMIC
+	 STATIC  : whole model → 1 mesh (≤2 surfaces), shared across instances → auto-batched
+	 DYNAMIC : per-chunk (or per-group) MeshInstance3D, incremental rebuild
+
+Optional capability components (plain child nodes of VoxelRenderer):
+  VoxelPagedLayer               — streaming load/unload, LOD bands, frustum culling, origin shift
+  VoxelCollision                — StaticBody3D + ConcavePolygonShape3D per chunk
+  VoxelParticleView             — point cloud → GPUParticles3D
+  VoxelDestructible             — destruction, collapse, falling debris (edited via VoxelEditKernel)
 ```
+
+**Layer rules (one-way dependency, arrows point down only):**
+
+1. **`VoxelRenderer` doesn't know about cameras, LOD, streaming, destruction or particles.**
+   It only knows "data → geometry → draw units". Everything viewpoint-related lives in the
+   optional components, which read the renderer's public surface and subscribe to its signals.
+2. **The simplest path must really be the simplest.** With `DrawMode.STATIC` and no components
+   attached, no LOD/streaming code runs in the frame loop at all.
+3. **Two draw modes are a deliberate tradeoff, not an optimisation switch:**
+
+   | | draw calls (N instances) | cost of editing one voxel |
+   |---|---|---|
+   | `STATIC` (default) | ~N (auto-batched) | rebuilds the **whole** model (deer 1.6–3.1 ms / teapot1 85 ms) |
+   | `DYNAMIC` | N × chunk count | rebuilds only the affected chunk (0.4–2 ms) |
+
+   Use `STATIC` for static props / buildings / display models, `DYNAMIC` for anything you
+   destroy or edit per-voxel (a destruction system **must** use `DYNAMIC`).
+   Measured parity with imported ArrayMesh in `STATIC` mode, plus the reasoning, are in
+   `docs/渲染性能对比_QVX_vs_ArrayMesh.md`.
 
 **Storage and generation are two parallel parts**: `stream` stores (disk or memory), the
 `node` describes what to generate (a bounded `QVoxelModel` whose modifier chain the eval
@@ -57,14 +87,15 @@ var stream := QVoxelStream.new()
 stream.file_path = "user://my_world/world.qvx"
 data.stream = stream
 
-var renderer := VoxelDestructible.new()
+var renderer := VoxelRenderer.new()
 renderer.data = data
 renderer.voxel_scale = 0.2
+renderer.draw_mode = VoxelRenderer.DrawMode.DYNAMIC   # streaming + LOD needs DYNAMIC
 renderer.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
 renderer.view_distance = 60.0
 renderer.unload_distance = 100.0
 renderer.lod_count = 4   # 多级 LOD：4 层（LOD0 全精度 + LOD1/2/3 每级 ×2 粗化），
-						 # 各层距离由 view_distance 自动等比（×2）推导
+						  # 各层距离由 view_distance 自动等比（×2）推导
 ```
 
 ### Procedural infinite world
@@ -105,7 +136,17 @@ Features:
 ### Destruction & collapse
 
 ```gdscript
-var target := renderer as VoxelDestructible
+# Destruction is a COMPONENT, not a subclass:
+#   VoxelRenderer (drawing)  +  VoxelDestructible (editing, child node)
+var renderer := VoxelRenderer.new()
+renderer.data = data
+renderer.draw_mode = VoxelRenderer.DrawMode.DYNAMIC   # REQUIRED: STATIC rebuilds the whole model per edit
+add_child(renderer)
+
+var target := VoxelDestructible.new()
+renderer.add_child(target)
+target.configure(renderer)
+
 target.damage_sphere(center, radius)
 target.damage_voxel(pos)
 target.damage_ray(origin, direction, max_distance)
@@ -123,11 +164,21 @@ Related properties are **hidden in the Inspector automatically** when they have 
 |---|---|---|
 | `view_distance` / `unload_distance` / `lod_count` | visibility_mode ≠ FULL | visibility_mode = FULL |
 | `_stream_load_per_frame` / `_stream_unload_per_frame` | visibility_mode = STREAMING | otherwise |
-| `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod_count > 1 | lod_count = 1 |
+| `_lod_build_per_frame` / `_lod_preload_blocks` | lod_count > 1 | lod_count = 1 |
 | `_collision_rebuild_per_frame` / `collision_rebuild_budget_ms` | generate_collision = true | generate_collision = false |
+| `group_shift` | draw_mode = DYNAMIC | draw_mode = STATIC |
 | `max_debris_per_hit` / `debris_*` | spawn_debris_on_damage = true | spawn_debris_on_damage = false |
 
 ### Common pitfalls
+
+- **`draw_mode` is the first thing to get right.** `STATIC` (default) merges the whole model into
+  one mesh and lets the engine batch instances — that is what makes it match imported ArrayMesh.
+  The price is that editing one voxel rebuilds everything (deer 1.6–3.1 ms, teapot1 85 ms).
+  Anything you destroy / edit per-voxel **must** use `DYNAMIC` (0.4–2 ms per edit).
+- **`group_shift` (DYNAMIC only, default 0).** 0 = one draw unit per chunk (cheapest per edit).
+  `1`/`2` group 8/64 chunks into one draw unit — fewer draw calls (teapot1: 158 → 35 → 8) but the
+  whole group is rebuilt on edit, and that rebuild runs on the main thread. Only raise it for
+  many instances of a chunk-dense model that you rarely edit.
 
 - **Procedural world**: extend `ProceduralVoxelSource` (it reports `is_streaming() = true`; the renderer gate uses that instead of `node != null`). `visibility_mode = STREAMING` is still recommended so unload/LOD distance logic is active.
 - `lod_count = 1` disables LOD (everything full-precision); for large worlds set `lod_count >= 2`.
@@ -167,7 +218,7 @@ presentation, and should be written by your project.
 
 ```gdscript
 $VoxelRenderer.display_mode = VoxelRenderer.DisplayMode.PARTICLES   # switch to particles (mesh hidden)
-$VoxelRenderer.particle_shape = VoxelRenderer.ParticleShape.SPHERE  # cube / sphere
+$VoxelRenderer.voxel_shape = VoxelRenderer.VoxelShape.SPHERE    # cube / sphere
 var node := $VoxelRenderer.particle_node    # a GPUParticles3D with the point cloud already uploaded
 node.process_material = my_particles_shader # replace it; decide how particles move
 $VoxelRenderer.particle_points              # the point data (PackedFloat32Array)
@@ -181,7 +232,7 @@ It shows **two ways to customise**: tweak a uniform (float), or replace the whol
 | Enum | Values | Meaning |
 |---|---|---|
 | `DisplayMode` | `MESH` / `PARTICLES` | merged-face mesh (default) or one cube per voxel |
-| `ParticleShape` | `CUBE` / `SPHERE` | draw each particle as a cube or a sphere; switching **does not** rebuild the particle node, it only swaps the draw-pass meshes |
+| `VoxelShape` | `CUBE` / `SPHERE` | draw each particle as a cube or a sphere; switching **does not** rebuild the particle node, it only swaps the draw-pass meshes |
 
 The sphere geometry is generated by the plugin too (`SphereMesh`, three tiers of 6/10/18 rings via
 `particle_sphere_subdivisions`), with `particle_sphere_scale` as the radius relative to the voxel edge.

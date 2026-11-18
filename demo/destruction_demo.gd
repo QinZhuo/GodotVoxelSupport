@@ -48,8 +48,13 @@ extends Node
 		if is_inside_tree():
 			_build_target()
 
-## 可破坏对象
-var _target: VoxelDestructible
+## 可破坏对象：宿主渲染器（网格重建 / LOD / 材质 / 性能统计都在它身上）
+## 【为什么这里是渲染器而不是破坏组件】场景结构是 VoxelRenderer + 它的子节点 VoxelDestructible。
+## 渲染与破坏已拆成两个节点：渲染相关的读（last_mesh_gen_time_ms / mesh_updated / lod_count /
+## _lod_meshes）走 `_target`，破坏相关的调（damage_* / collapse_mode / stress_force）走 `_destruct`。
+var _target: VoxelRenderer
+## 破坏组件（宿主的子节点）
+var _destruct: VoxelDestructible
 var _hud: Label
 var _mode_label: Label
 var _camera: Camera3D
@@ -184,53 +189,73 @@ func _process(delta: float) -> void:
 			_log_perf_line("[性能] 体素=%d 重建Chunk=%d 三角=%d 生成=%.1fms 应用=%.1fms" % [vc, rebuild_chunks, total_tris, mgt, apply_time])
 
 
+## 场景里宿主的节点名（渲染器 + 它的破坏子组件都在这个子树下）
+const HOST_NODE_NAME := "DestructibleVoxels"
+## 宿主下破坏子组件的节点名
+const DESTRUCT_NODE_NAME := "VoxelDestructible"
+
+
+## 构建目标：VoxelRenderer（宿主） + 它的子节点 VoxelDestructible（破坏组件）。
+## 优先复用场景里预置的节点（编辑器场景树可见、属性可调），缺失时自动创建。
+## 【为什么不再是"一个节点顶两件事"】破坏系统已改成组件：渲染器负责渲染，破坏组件挂在它
+## 下面负责破坏。场景结构（demo/destruction_demo.tscn）与这里保持一致，两种来源都能用。
 func _build_target() -> void:
-	# 优先复用场景里预置的 DestructibleVoxels 节点（编辑器场景树可见、属性可调），
-	# 缺失时自动创建（直接拖入使用也兼容）
-	var scene_target := get_node_or_null("DestructibleVoxels") as VoxelDestructible
-	if scene_target != null:
-		_target = scene_target
-		# 若已有 data 且是用户手动赋的 QVoxelSource，保留它；否则生成默认结构
-		var data: QVoxelSource
-		if voxel_data_source != null:
-			data = voxel_data_source
-		elif _target.data != null:
-			data = _target.data
-		else:
-			data = _create_large_structure_data()
-		_configure_target(data)
-		return
-
-	if _target and is_instance_valid(_target):
-		_target.queue_free()
-
-	_target = VoxelDestructible.new()
-	_target.name = "DestructibleVoxels"
-	add_child(_target)
-
-	var data2: QVoxelSource
-	if voxel_data_source != null:
-		data2 = voxel_data_source
+	var scene_host := get_node_or_null(HOST_NODE_NAME)
+	if scene_host is VoxelRenderer:
+		_target = scene_host as VoxelRenderer
 	else:
-		data2 = _create_large_structure_data()
-	_configure_target(data2)
+		# 场景里没有宿主（或还是改造前那种"官方脚本直接挂在 MeshInstance3D 上"的老场景）
+		if scene_host != null:
+			scene_host.queue_free()
+		_target = VoxelRenderer.new()
+		_target.name = HOST_NODE_NAME
+		# 【破坏必须 DYNAMIC】STATIC 下改一个体素要重建整份模型（实测 22.7~85ms），
+		# DYNAMIC 只重建受影响的 chunk（0.4~2ms）。
+		_target.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
+		add_child(_target)
+
+	# 取得（或补建）宿主下的破坏子组件
+	var scene_destruct := _target.get_node_or_null(DESTRUCT_NODE_NAME)
+	if scene_destruct is VoxelDestructible:
+		_destruct = scene_destruct as VoxelDestructible
+	else:
+		_destruct = VoxelDestructible.new()
+		_destruct.name = DESTRUCT_NODE_NAME
+		_target.add_child(_destruct)
+	# 显式绑定宿主：子节点 _ready 里也会从父节点惰性取，这里调用是为了让"场景节点"与
+	# "代码新建节点"走同一条确定路径（幂等）。
+	_destruct.configure(_target)
+
+	# 若已有 data 且是用户手动赋的 QVoxelSource，保留它；否则生成默认结构
+	var data: QVoxelSource
+	if voxel_data_source != null:
+		data = voxel_data_source
+	elif _target.data != null:
+		data = _target.data
+	else:
+		data = _create_large_structure_data()
+	_configure_target(data)
 
 
 ## 统一配置破坏目标（场景节点与动态创建共用）
+## 渲染旋钮 → 宿主；破坏旋钮 → 破坏组件。
 func _configure_target(data: QVoxelSource) -> void:
+	# ── 宿主（渲染）──
+	_target.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 	_target.data = data
 	_target.voxel_scale = voxel_scale
 	_target.lod_count = 3
-	_target.spawn_debris_on_damage = true
-	_target.max_debris_per_hit = 40
+	# ── 破坏组件（破坏）──
+	_destruct.spawn_debris_on_damage = true
+	_destruct.max_debris_per_hit = 40
 	# 碎片系统已改为纯粒子实现，无物理碰撞体
-	_target.use_voxel_health = true
-	_target.damage_per_voxel = 1.0
-	_target.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
-	_target.local_collapse = true
+	_destruct.use_voxel_health = true
+	_destruct.damage_per_voxel = 1.0
+	_destruct.collapse_mode = VoxelDestructible.CollapseMode.COLLAPSE_DEBRIS
+	_destruct.local_collapse = true
 
-	if not _target.voxels_about_to_collapse.is_connected(_on_voxels_collapse):
-		_target.voxels_about_to_collapse.connect(_on_voxels_collapse)
+	if not _destruct.voxels_about_to_collapse.is_connected(_on_voxels_collapse):
+		_destruct.voxels_about_to_collapse.connect(_on_voxels_collapse)
 	if not _target.mesh_updated.is_connected(_on_mesh_updated):
 		_target.mesh_updated.connect(_on_mesh_updated)
 
@@ -515,11 +540,11 @@ func _handle_input(_delta: float) -> void:
 
 	# 1/2: 调整应力传播强度（9/0）
 	if key_9 and not _prev_9:
-		_target.stress_force = mini(_target.stress_force + 5.0, 50.0)
-		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_target.stress_force, _target.stress_max_steps])
+		_destruct.stress_force = mini(_destruct.stress_force + 5.0, 50.0)
+		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_destruct.stress_force, _destruct.stress_max_steps])
 	if key_0 and not _prev_0:
-		_target.stress_force = maxf(_target.stress_force - 5.0, 5.0)
-		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_target.stress_force, _target.stress_max_steps])
+		_destruct.stress_force = maxf(_destruct.stress_force - 5.0, 5.0)
+		_log_perf_line("应力强度: %.0f (max_steps=%d)" % [_destruct.stress_force, _destruct.stress_max_steps])
 
 	# 1-4: 切换 LOD 层数（与流式 demo 一致）
 	if key_1 and not _prev_1:
@@ -543,7 +568,7 @@ func _handle_input(_delta: float) -> void:
 	# B: 破坏底部支撑层（整层截面 → 结构真正与地面断开 → 整块坠落）
 	# 连通性模型下"只削掉外侧一层皮"不会切断结构（其余截面仍锚定），故这里取整层。
 	if key_b and not _prev_b:
-		_target.damage_box(AABB(Vector3(0, 0, 0), Vector3(structure_size.x, 3.5, structure_size.z)))
+		_destruct.damage_box(AABB(Vector3(0, 0, 0), Vector3(structure_size.x, 3.5, structure_size.z)))
 		_log_perf_line("触发底部支撑层破坏")
 
 	# S/L: 存档/读档
@@ -551,7 +576,10 @@ func _handle_input(_delta: float) -> void:
 		_saved_data = _target.data.save_data()
 		_log_perf_line("存档 (%d 体素)" % _target.data.get_voxel_count())
 	if key_l and not _prev_l and _saved_data != null:
-		_target.clear_damage()
+		# 【修掉一个改造前就存在的错误调用】此前写的是 `_target.clear_damage()`，但
+		# VoxelDestructible 与 VoxelRenderer 都没有这个方法（读档按 L 会抛"不存在的函数"）。
+		# 伤害账归数据层，正确入口是 QVoxelSource.clear_all_damage()。
+		_target.data.clear_all_damage()
 		_target.data.load_data(_saved_data)
 		_log_perf_line("读档重建")
 
@@ -588,6 +616,8 @@ func _handle_input(_delta: float) -> void:
 
 
 func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
+	if _destruct == null or not is_instance_valid(_destruct):
+		return
 	if _target == null or not is_instance_valid(_target):
 		return
 	if _camera == null:
@@ -599,37 +629,37 @@ func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
 				var hit := _mouse_to_voxel()
 				if hit != Vector3i.MIN:
 					var t0 := Time.get_ticks_usec()
-					_target.damage_sphere(Vector3(hit) + Vector3(0.5, 0.5, 0.5), damage_radius)
+					_destruct.damage_sphere(Vector3(hit) + Vector3(0.5, 0.5, 0.5), damage_radius)
 					var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 					_damage_times.append(elapsed)
 					if _damage_times.size() > 100:
 						_damage_times.pop_front()
 					_log_perf_line("球形破坏 半径=%.1f 移除=%d 崩塌=%d 耗时=%.3fms" % [
-						damage_radius, _target.last_damage_count, _target.last_collapse_count, elapsed])
+						damage_radius, _destruct.last_damage_count, _destruct.last_collapse_count, elapsed])
 			DamageMode.RAY:
 				var forward := -_camera.global_transform.basis.z
 				var origin := _camera.global_position
 				var local_origin := _target.to_local(origin)
 				var local_dir := _target.global_transform.basis.inverse() * forward
 				var t0 := Time.get_ticks_usec()
-				_target.damage_ray(local_origin / voxel_scale, local_dir, 1000.0)
+				_destruct.damage_ray(local_origin / voxel_scale, local_dir, 1000.0)
 				var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 				_damage_times.append(elapsed)
 				if _damage_times.size() > 100:
 					_damage_times.pop_front()
 				_log_perf_line("射线破坏 移除=%d 崩塌=%d 耗时=%.3fms" % [
-					_target.last_damage_count, _target.last_collapse_count, elapsed])
+					_destruct.last_damage_count, _destruct.last_collapse_count, elapsed])
 
 	if do_right:
 		var hit := _mouse_to_voxel()
 		if hit != Vector3i.MIN:
 			var t0 := Time.get_ticks_usec()
-			_target.damage_voxel(hit)
+			_destruct.damage_voxel(hit)
 			var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 			_damage_times.append(elapsed)
 			if _damage_times.size() > 100:
 				_damage_times.pop_front()
-			_log_perf_line("单体破坏 移除=%d 崩塌=%d" % [_target.last_damage_count, _target.last_collapse_count])
+			_log_perf_line("单体破坏 移除=%d 崩塌=%d" % [_destruct.last_damage_count, _destruct.last_collapse_count])
 
 	if do_space:
 		var forward := -_camera.global_transform.basis.z
@@ -637,22 +667,23 @@ func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
 		var local_origin := _target.to_local(origin)
 		var local_dir := _target.global_transform.basis.inverse() * forward
 		var t0 := Time.get_ticks_usec()
-		_target.damage_ray(local_origin / voxel_scale, local_dir, 1000.0)
+		_destruct.damage_ray(local_origin / voxel_scale, local_dir, 1000.0)
 		var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 		_damage_times.append(elapsed)
 		if _damage_times.size() > 100:
 			_damage_times.pop_front()
-		_log_perf_line("空格射线 移除=%d 崩塌=%d 耗时=%.3fms" % [_target.last_damage_count, _target.last_collapse_count, elapsed])
+		_log_perf_line("空格射线 移除=%d 崩塌=%d 耗时=%.3fms" % [_destruct.last_damage_count, _destruct.last_collapse_count, elapsed])
 
 
 func _mouse_to_voxel() -> Vector3i:
-	if _camera == null:
+	if _camera == null or _destruct == null:
 		return Vector3i.MIN
 	var from := _camera.project_ray_origin(get_viewport().get_mouse_position())
 	var dir := _camera.project_ray_normal(get_viewport().get_mouse_position())
+	# 拾取用宿主变换（体素空间是宿主的局部空间；破坏组件与其 identity，但按宿主算不会错）
 	var local_origin := _target.to_local(from)
 	var local_dir := _target.global_transform.basis.inverse() * dir
-	return _target.raycast_voxel(local_origin / voxel_scale, local_dir, 1000.0)
+	return _destruct.raycast_voxel(local_origin / voxel_scale, local_dir, 1000.0)
 
 
 func _update_hud() -> void:
@@ -726,7 +757,7 @@ func _update_hud() -> void:
 		perf_rating_color = "浅绿"
 
 	var mode_name := "粒子"
-	var collapse_method := "局部增量" if _target.local_collapse else "全量"
+	var collapse_method := "局部增量" if _destruct.local_collapse else "全量"
 	var dm_name := "球形" if _damage_mode == DamageMode.SPHERE else "射线"
 
 	var lod_info := ""
@@ -745,7 +776,7 @@ LOD: %d层  %s
 """ % [
 		Engine.get_frames_per_second(), vc, destroyed,
 		_target.lod_count, lod_info,
-		dm_name, damage_radius, "开" if _continuous_mode else "关", _target.stress_force,
+		dm_name, damage_radius, "开" if _continuous_mode else "关", _destruct.stress_force,
 		mgt, avg_mgt, total_tris,
 	]
 
