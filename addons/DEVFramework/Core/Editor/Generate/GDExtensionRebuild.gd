@@ -912,8 +912,11 @@ static func _resolve_godot_cpp_ref(godot_cpp_abs: String, engine_version: String
 
 func _restart_editor() -> void:
 	await (Engine.get_main_loop() as SceneTree).create_timer(2.0).timeout
-	if get_editor_interface() != null:
-		get_editor_interface().restart_editor(true)
+	if not Engine.has_singleton(&"EditorInterface"):
+		return
+	var ei = Engine.get_singleton(&"EditorInterface")
+	if ei != null:
+		ei.restart_editor(true)
 
 
 ## 递归清空目录(作废缓存用)
@@ -1634,6 +1637,7 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 	var uni_line := -1        # 已有 universal 键的行号
 	var first_arch_line := -1 # 首个架构专属键行号(无 universal 键时改写为 universal 键)
 	var remove_lines := {}    # 待删除的架构键行号
+	var covered := false      # 已有本平台本类型的**通用键**(macos.release)指向同一 universal 文件
 	for ent in parsed["entries"]:
 		var key := String(ent.get("key"))
 		var tags := key.split(".")
@@ -1646,7 +1650,12 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 				has_type = true
 			elif GDEXT_ARCHS.has(t):
 				has_arch = true
-		if not has_type or not tags.has(type) or not has_arch:
+		if not has_type or not tags.has(type):
+			continue
+		if not has_arch:
+			# 通用键已指向 universal 产物 → 无需再加 universal 键(同类型两条键会触发重复库告警)
+			if String(parsed["values"].get(key, "")) == uni_res:
+				covered = true
 			continue
 		var ln := int(ent.get("line"))
 		if tags.has("universal"):
@@ -1657,7 +1666,17 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 			remove_lines[ln] = true
 	var target_line := -1
 	var write_key := ""
-	if uni_line >= 0:
+	if covered:
+		# 通用键(如 macos.release)已指向 universal → 架构键/universal 键都是多余的, 一并删除,
+		# 否则同类型双声明会触发引擎"重复库"告警
+		var dropped := 0
+		for ln: int in [uni_line, first_arch_line]:
+			if ln >= 0:
+				remove_lines[ln] = true
+				dropped += 1
+		if dropped > 0:
+			_log("通用键已覆盖 universal, 移除多余键 %d 条: " % dropped, String(gdext_res).get_file())
+	elif uni_line >= 0:
 		target_line = uni_line
 		write_key = uni_key
 		if first_arch_line >= 0:
@@ -1672,7 +1691,7 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 			lines[target_line] = "%s = %s" % [write_key, value]
 			_synced.append("%s → %s(切换 universal)" % [uni_key, uni_res])
 			_log("已同步声明(切换 universal): ", gdext_res, " [", uni_key, "] = ", value)
-	else:
+	elif not covered:
 		lines.insert(int(parsed["lib_end"]), "%s = %s" % [uni_key, value])
 		_synced.append("%s → %s(新增)" % [uni_key, uni_res])
 		_log("已同步声明(新增): ", gdext_res, " [", uni_key, "] = ", value)
@@ -1706,13 +1725,17 @@ func _declared_archs(gdext_res: String) -> Array[String]:
 	return archs
 
 
-## 实盘扫描: 输出目录里"本目标"的动态库(dylib/dll/so), 取 mtime 最新 ——
+## 实盘扫描: 输出目录里"本目标"的动态库, 取 mtime 最新 ——
+## 只认**当前平台**的扩展名: 同目录通常还躺着别的平台产物(如 mac 上提交过的 .dll),
+## 混着扫会把 windows dll 当成本次产物改名成 .dylib —— 产出一个 PE 格式的假 dylib
+## (lipo 报 can't figure out the architecture type of ...), 且原 dll 被搬走。
 func _scan_dynamic_libs(dir_path: String, target_name: String, exclude: PackedStringArray) -> String:
 	var best := ""
 	var best_m := -1
 	var excl := {}
 	for k in exclude:
 		excl[k] = true
+	var ext := _default_out_file(target_name).get_extension()
 	var dir := DirAccess.open(String(dir_path))
 	if dir == null:
 		return ""
@@ -1721,7 +1744,7 @@ func _scan_dynamic_libs(dir_path: String, target_name: String, exclude: PackedSt
 	while e != "":
 		if not dir.current_is_dir():
 			var low := e.to_lower()
-			if low.ends_with(".dylib") or low.ends_with(".dll") or low.ends_with(".so"):
+			if ext != "" and low.ends_with("." + ext):
 				if e.contains(".universal.") or e.begins_with("~") or not e.contains(target_name) or excl.has(e):
 					e = dir.get_next()
 					continue   # universal 合并产物/~ 残留/其他目标产物/已知命名 不参与实盘兜底
@@ -2014,7 +2037,10 @@ func _log_path() -> String:
 
 ## 编辑器内自动提示: Godot 4.3+ 顶部 Toaster(非模态、自动消失), 无需翻日志或手动查询。
 func _toast(text: String) -> void:
-	var ei := get_editor_interface()
+	# 走单例取法(而非已弃用的 get_editor_interface()), 非编辑器进程直接跳过
+	if not Engine.has_singleton(&"EditorInterface"):
+		return
+	var ei = Engine.get_singleton(&"EditorInterface")
 	if ei == null or not ei.has_method("get_editor_toaster"):
 		return
 	var toaster = ei.get_editor_toaster()

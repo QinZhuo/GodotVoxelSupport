@@ -69,6 +69,11 @@ static func popup(panel) -> void:
 
 ## 等待面板关闭, 返回关闭时版本是否仍为本轮(期间被重新 open() 则旧等待返回 false)。
 static func await_closed(panel) -> bool:
-	var ver = panel._open_version
-	await panel.on_closed
-	return ver == panel._open_version
+	return await await_closed_since(panel, panel._open_version)
+
+## 同上，但版本由调用方在 open() 之后自行捕获：淡入期间就被关掉时也能立刻返回，
+## 而不是把一个早已发出的 on_closed 再等一遍。
+static func await_closed_since(panel, version: int) -> bool:
+	while is_instance_valid(panel) and panel.is_open and panel._open_version == version:
+		await panel.on_closed
+	return version == panel._open_version

@@ -53,6 +53,15 @@ func popup() -> void:
 func await_closed() -> bool:
 	return await UIPanelTool.await_closed(self)
 
+## 本轮打开版本号：调用方如果在 `open()` 之后还有别的等待（如淡入 / 其它协程），
+## 先记下它再等关闭 —— 否则 `await_closed()` 迟发，会错过早已发生的 `on_closed` 而永久挂起。
+func open_version() -> int:
+	return _open_version
+
+## 等「指定版本这一轮」关闭；已经关掉则立即返回 true。
+func await_closed_since(version: int) -> bool:
+	return await UIPanelTool.await_closed_since(self, version)
+
 ## 返回键处理，由 [method UITool.back] 调用。默认关闭面板并返回 true（已消费）。
 func _back() -> bool:
 	close()
