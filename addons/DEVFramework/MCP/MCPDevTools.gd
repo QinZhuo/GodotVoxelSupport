@@ -95,6 +95,10 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 		var sync: Variant = load("res://addons/DEVFramework/MCP/MCPScriptSync.gd")
 		if sync != null:
 			guard = await sync.guard_eval(mode, game_started_at, tree)
+		else:
+			# 静默放行等于闸门消失: 磁盘改了代码却仍按旧版跑时, eval 会给出看似可信的
+			# 结果。宁可放行也要留痕, 否则排查时看不到"本轮其实没校验"。
+			push_warning("[MCP] eval_code 新鲜度守卫不可用(MCPScriptSync 编译失败), 本轮跳过磁盘/已加载一致性校验")
 	if not bool(guard.get("ok", true)):
 		# category 由守卫按失败原因判定(编辑器侧=磁盘脚本语法错, 游戏侧=跑的是旧代码)。
 		return _attach_warning(MCPResult.err(str(guard.get("message", "")), str(guard.get("category", MCPResult.CAT_STALE_CODE)),

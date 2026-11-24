@@ -95,6 +95,11 @@ C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/
   `ctx.schema` / `ctx.result` 是契约工厂（不用再自己 `load` 框架文件），`ctx.tool_kinds` 为真时
   `add_tool` 可带第 5 个参数自报分类（`read_only` / `non_destructive` / `destructive`，不自报按破坏性兜底）。
   只收 `add_tool` 一个参数的旧写法仍可用；provider 注册出 0 个工具会 `push_warning`，不再静默从 `tools/list` 消失
+- MCP 域脚本的热重载边界：`refresh_tools` 会把域脚本**按磁盘源码重编译**（新对象），所以域文件里
+  改代码/加工具免重启；代价是它们**不能声明 `class_name`**（动态副本会与已注册的全局类重名，Godot 报
+  `Class X hides a global script class`），身份靠路径 + 文件名 —— 域之间互相引用就走 `const X := preload(...)`。
+  但域里 preload 的**叶子**不随域换代（仍解析到缓存里的旧对象），所以 `refresh_tools` 会自检并回报
+  `stale_leaves`（非空 = 那几个文件磁盘已改但当前跑的是旧版），改名/移位域文件后必须 `restart_editor`
 - 改 `addons/DEVFramework/Native/src/**` 后**必须** `build_native`（`action=status` 查过期 → `action=build` 构建 → 重载生效），否则测试跑的是旧库且全绿
 - 目录约定：**插件自己的 C++ 放 `addons/<插件>/Native/src`**（随插件分发）；构建区与第三方（godot-cpp）在项目根 `gdextension/`。多个插件各有 `Native/src` 时各编一个库、共用一份 godot-cpp
 - 导出包默认不带入口（`dev_framework/mcp/runtime_enabled = false`）

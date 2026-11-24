@@ -110,3 +110,19 @@
 `Value/` 里 `DivideValueDef`（公式 A/B，除零给 ±INF）与 `FractionValueDef`（分数/比例，除零回 0）
 看着都是除法，语义并不同，**不要合并**。
 
+### 3. MCP/ 用路径加载脚本（结构必须，不是遗留）
+
+`MCP/` 是唯一"按路径取脚本"的目录，规则自洽：**会被动态重编译的域文件不声明 `class_name`，
+不会被重编译的三个才声明**（`MCPDevServer`、`MCPTcpHttpServer`、`MCPDebuggerPlugin`）。
+
+- 域装配走 `_mod("MCPResult")` → `_script_from_disk(MCP_DIR + name + ".gd")`：读磁盘源码、`GDScript.new()` 重编译成新对象。
+  这样改完框架代码 `refresh_tools` 就能拿到新逻辑，不必重启编辑器（编辑器不打断正在服务的 MCP 连接）。
+- 换成全局 `class_name` 在这里**做不到**：动态副本与已注册全局类重名，`reload()` 直接 `ERR_PARSE_ERROR (43)`，
+  报 `Class "X" hides a global script class`（4.7.2 实测）。所以域脚本的身份 = 路径 + 文件名。
+- 域里引用别的域用 `const X := preload(...)`。**叶子不随域换代**：重编译域只换域自身的代码，域内 preload
+  仍绑定缓存里的叶子对象（`ResourceLoader.load(CACHE_MODE_REPLACE)` 也拿同一对象且不同步刷新源码）。
+  故 `refresh_tools` 会自检并以 `stale_leaves` 回报"磁盘已改但当前仍是旧版"的叶子；改名/移位域文件必须 `restart_editor`。
+- 域外没有这条约束：其余 20 个模块照常用 `class_name`（181 个），`preload` 只用于类型/工具类。
+  插件禁用/启用（`EditorInterface.set_plugin_enabled`）能重扫新增全局类，但会掐断 MCP 自己的连接，只用于
+  "改了 `MCPDevServer.gd` 本身"时替代 `restart_editor`。
+

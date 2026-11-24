@@ -539,16 +539,49 @@ func _schema_fingerprint() -> String:
 	return "%08x" % (JSON.stringify(_tool_defs).hash() & 0xFFFFFFFF)
 
 
-## 重建注册表并返回 {count, fingerprint, issues}; 结果文案由 MCPDevActions 统一拼。
+## 重建注册表并返回 {count, fingerprint, issues, stale_leaves}; 文案由 MCPDevActions 统一拼。
 func _rebuild_registry() -> Dictionary:
 	if not Engine.is_editor_hint():
-		return {"count": 0, "fingerprint": "", "issues": ["仅在编辑器模式可用"]}
+		return {"count": 0, "fingerprint": "", "issues": ["仅在编辑器模式可用"], "stale_leaves": [] as Array}
 	# 注册走 _mod()(从源码重编译磁盘版本), 因此域文件里新增/改动的工具也免重启生效。
 	_register_editor_tools()
 	var count := _tool_defs.size()
 	var fp := _schema_fingerprint()
 	LogTool.log("MCP", "手动重建工具注册表: %d 个工具, 指纹 %s" % [count, fp])
-	return {"count": count, "fingerprint": fp, "issues": _tool_audit_issues.duplicate()}
+	return {"count": count, "fingerprint": fp, "issues": _tool_audit_issues.duplicate(),
+		"stale_leaves": _stale_leaf_scripts()}
+
+
+## 域里 const preload 绑定的"叶子"脚本: 改它们**不会**随 refresh_tools 换代。
+## 实测(4.7.2): 域自身按磁盘源码重编译能拿到新代码, 但域里 preload 的叶子仍解析到
+## ResourceLoader 缓存里的旧对象 —— 除非编辑器的文件系统监听已把它换掉(异步, 不可等)。
+## 故重建后自检一遍, 把"改了却没生效"的叶子报出来, 而不是静默按旧版跑。
+func _stale_leaf_scripts() -> Array:
+	var leaves := {}
+	var tag := "preload(\"%s/" % MCP_DIR
+	for f in DirAccess.get_files_at(MCP_DIR):
+		if not f.ends_with(".gd") or f == "MCPDevServer.gd":
+			continue
+		var src := FileAccess.get_file_as_string(MCP_DIR + "/" + f)
+		var idx := src.find(tag)
+		while idx >= 0:
+			var start := idx + 9
+			var end := src.find("\"", start)
+			if end > start:
+				var leaf := src.substr(start, end - start).get_file()
+				if leaf.ends_with(".gd") and leaf != f:
+					leaves[leaf] = true
+			idx = src.find(tag, end)
+	var stale: Array = []
+	for leaf in leaves.keys():
+		var path := "%s/%s" % [MCP_DIR, leaf]
+		if FileAccess.get_file_as_string(path).is_empty():
+			continue
+		var cached: Variant = ResourceLoader.load(path)
+		if not (cached is GDScript) or str(cached.source_code).strip_edges() != FileAccess.get_file_as_string(path).strip_edges():
+			stale.append(str(leaf))
+	stale.sort()
+	return stale
 
 
 ## 关闭服务器并移除 Logger(退出时由引擎自动调用)
@@ -679,7 +712,10 @@ func _script_from_disk(path: String) -> Variant:
 	var gd := GDScript.new()
 	gd.source_code = src
 	if gd.reload() != OK:
-		push_error("[MCP] 脚本 %s 重编译失败, 回退缓存版本" % path)
+		# 最常见的失败原因: 该文件声明了 class_name。动态重编译出来的是第二个副本, 与
+		# 已注册的全局类重名, Godot 报 "Class X hides a global script class"(ERR 43)。
+		# 所以 MCP 域脚本一律不声明 class_name, 靠路径 + 文件名做身份。
+		push_error("[MCP] 脚本 %s 重编译失败(域脚本不得声明 class_name), 回退缓存版本" % path)
 		gd = ResourceLoader.load(path)
 	return gd
 

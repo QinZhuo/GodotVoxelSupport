@@ -77,19 +77,24 @@ static func _handle_refresh_tools(_args: Dictionary) -> Dictionary:
 	var count := int(r.get("count", 0))
 	var fp := str(r.get("fingerprint", ""))
 	var issues: Array = r.get("issues", [])
+	var stale: Array = r.get("stale_leaves", [])
+	# 叶子改动不生效是"看起来成功了其实跑旧代码", 必须单独说, 不能混进 audit 的通过/失败。
+	var stale_note := "" if stale.is_empty() else "【叶子脚本未换代】%s 是域里 const preload 绑定的, 磁盘已改但当前仍跑旧版(需要 restart_editor, 或等编辑器文件系统重扫后再 refresh_tools)。" % ", ".join(PackedStringArray(stale))
 	if issues.is_empty():
 		return MCPResult.ok_json({
 			"tool_count": count,
 			"schema_fingerprint": fp,
 			"audit": "pass",
-			"message": "服务器侧工具注册表已重建: %d 个工具, 契约自检通过, 指纹 %s。判定'是否真的生效'以本指纹跨次对比为准(指纹不变即注册表没变)。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 因此客户端若缓存了旧的 tools/list, 它手上的 schema 仍是旧的 —— 需在 IDE 侧重连 MCP 才会刷新; 在此之前, 以 tools/list 直查服务器为准, 不要拿会话开始时的快照当权威。" % [count, fp],
+			"stale_leaves": stale,
+			"message": "%s服务器侧工具注册表已重建: %d 个工具, 契约自检通过, 指纹 %s。判定'是否真的生效'以本指纹跨次对比为准(指纹不变即注册表没变)。【客户端不一定同步】本服务器是短连接 HTTP, 发不出 notifications/tools/list_changed(capabilities 已如实报 listChanged:false), 因此客户端若缓存了旧的 tools/list, 它手上的 schema 仍是旧的 —— 需在 IDE 侧重连 MCP 才会刷新; 在此之前, 以 tools/list 直查服务器为准, 不要拿会话开始时的快照当权威。" % [stale_note, count, fp],
 		})
 	return MCPResult.ok_json({
 		"tool_count": count,
 		"schema_fingerprint": fp,
 		"audit": "fail",
 		"issues": issues,
-		"message": "服务器侧工具注册表已重建: %d 个工具, 但契约自检发现 %d 个问题(见 issues), 指纹 %s。判定'是否真的生效'以本指纹跨次对比为准。【客户端不一定同步】本服务器推不出 tools/list_changed, 客户端缓存的旧 tools/list 要到 IDE 侧重连 MCP 才刷新。" % [count, issues.size(), fp],
+		"stale_leaves": stale,
+		"message": "%s服务器侧工具注册表已重建: %d 个工具, 但契约自检发现 %d 个问题(见 issues), 指纹 %s。判定'是否真的生效'以本指纹跨次对比为准。【客户端不一定同步】本服务器推不出 tools/list_changed, 客户端缓存的旧 tools/list 要到 IDE 侧重连 MCP 才刷新。" % [stale_note, count, issues.size(), fp],
 	})
 
 
