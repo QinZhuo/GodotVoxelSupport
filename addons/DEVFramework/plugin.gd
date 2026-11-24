@@ -49,7 +49,8 @@ func _enter_tree() -> void:
 	_register("dev_framework/mcp/game_call_timeout_ms", TYPE_INT, MCPDevServer.DEFAULT_GAME_CALL_TIMEOUT_MS)
 	# 运行时服务器: 勾选后**导出包/独立运行**进程复用同一端口(mcp/port), 自动注册运行时
 	_register("dev_framework/mcp/runtime_enabled", TYPE_BOOL, false)
-	# 项目侧 provider: 列出项目自定义 MCP 工具域的 .gd 路径(每个提供 static register(add_tool))。
+	# 项目侧 provider: 列出项目自定义 MCP 工具域的 .gd 路径(每个提供 static register(add_tool, ctx))。
+# ctx 是框架注入的契约工厂 {"schema", "result"}; 只收一个参数的旧 provider 仍可用。
 	_register("dev_framework/mcp/providers", TYPE_PACKED_STRING_ARRAY, PackedStringArray())
 	# 多实例中枢: 同时打开多个装了本框架的编辑器时, 只有一个能占住 hub_port 并成为"中枢"。
 	_register("dev_framework/mcp/hub", TYPE_BOOL, true)

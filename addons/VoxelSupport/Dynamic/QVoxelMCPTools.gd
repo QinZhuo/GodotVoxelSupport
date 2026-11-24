@@ -3,7 +3,7 @@ extends RefCounted
 
 ## ======= 体素程序化建模 —— 项目侧 MCP provider =======
 ##
-## 由 DEVFramework 的 MCPDevServer 按项目设置 `dev_framework/mcp/providers` 加载并调用 `register`。
+## 由 DEVFramework 的 MCPDevServer 按项目设置 `dev_framework/mcp/providers` 加载并调用 `register(add_tool, ctx)`。
 ## 框架是用它的项目自己的事: 缺席时本 provider **静默不注册**, 连解析期报错都不留。
 ##
 ## 【只剩一个"说明"工具】建模能力已收敛到脚本侧: 用 `QVoxelScript`(全局类, 自动分流实时/无头)
@@ -14,10 +14,15 @@ extends RefCounted
 ## 这正是本工具存在的理由。
 
 const MCP_DIR := "res://addons/DEVFramework/MCP/"
+## 契约工厂文件名: 新框架把 schema 工厂合进了 MCPToolContract.gd(老版本是单独一个 MCPToolSchema.gd)。
+## 按路径载入时必须两个都认 —— 认不出来不报错, 只是整个 provider 静默不注册, 工具从 tools/list 安静消失。
+const CONTRACT_FILES := ["MCPToolContract.gd", "MCPToolSchema.gd"]
 
 ## 框架的两个契约工厂（结果封装 / 参数 schema），缺席时为 null。
 static var _result: GDScript = null
 static var _schema: GDScript = null
+## 宿主是否支持给 add_tool 多传第 5 个参数(自报工具分类)。老版框架只有 4 个参数, 多传会报错。
+static var _kinds_ok := false
 
 const HELP := """# 体素程序化建模 —— API 说明
 全部入口在一个类: **QVoxelScript**(全局类)。软件(QVoxelier)界面上能做的每个动作,
@@ -147,27 +152,54 @@ const RESOURCE_URI := "voxel://api"
 ## 【为什么不用 preload】preload 是编译期绑定, 框架不复存在时那两行就是一个 Parse Error,
 ## 于是"插件放进任意项目"连编译都过不去; 而 MCP 本就是可选的开发期能力。静态方法可以经
 ## 脚本对象 `call` 调用, 故换成运行期绑定后, 缺席的代价从"报错"降为"不注册"。
-static func framework_available() -> bool:
-	if _result != null:
+## 绑定契约工厂: 优先用宿主注入的 ctx(框架 _register_providers 传的是 {schema, result}),
+## 拿不到(独立测试 / 老版框架)再按路径惰性载入。
+static func bind_contract(ctx: Dictionary = {}) -> bool:
+	if ctx.get("result") is GDScript and ctx.get("schema") is GDScript:
+		_result = ctx["result"]
+		_schema = ctx["schema"]
+		_kinds_ok = bool(ctx.get("tool_kinds", false))
 		return true
-	if not ResourceLoader.exists(MCP_DIR + "MCPResult.gd"):
-		return false
-	_result = load(MCP_DIR + "MCPResult.gd") as GDScript
-	_schema = load(MCP_DIR + "MCPToolSchema.gd") as GDScript
+	_kinds_ok = false
+	return framework_available()
+
+
+## 框架是否在场 —— 在场才惰性载入两个契约工厂。
+## 按路径载入这一步同时认新老契约文件名: 认不出就整个 provider 不注册, 且不报错。
+static func framework_available() -> bool:
+	if _result != null and _schema != null:
+		return true
+	if _result == null and ResourceLoader.exists(MCP_DIR + "MCPResult.gd"):
+		_result = load(MCP_DIR + "MCPResult.gd") as GDScript
+	if _schema == null:
+		for f in CONTRACT_FILES:
+			if ResourceLoader.exists(MCP_DIR + str(f)):
+				_schema = load(MCP_DIR + str(f)) as GDScript
+				break
 	return _result != null and _schema != null
 
 
-static func register(add_tool: Callable) -> void:
-	if not framework_available():
+static func register(add_tool: Callable, ctx: Dictionary = {}) -> void:
+	if not bind_contract(ctx):
 		return
-	add_tool.call("voxel_help",
+	# 第 5 个参数是自报分类: 不在框架内置三张名单里的工具, 不自报就只能按破坏性兜底
+	# (客户端每次调用都弹确认)。voxel_render 只新增产物文件, 故按 non_destructive。
+	_reg(add_tool, "voxel_help",
 		"体素程序化建模的**完整 API 说明**: QVoxelScript 统一入口(文件/对象树/材质/体素/帧/相机/导入导出/预览)、"
 		+ "实时与无头分流、.qvx 与 .vox 的硬约束。返回指向资源 %s 的链接。" % RESOURCE_URI,
-		_schema.call("no_arg"), _help)
-	add_tool.call("voxel_render",
+		_schema.call("no_arg"), _help, "read_only")
+	_reg(add_tool, "voxel_render",
 		"把 .qvx / .vox（或 QVoxelScript 当前世界）离屏渲染成 PNG, **不需要导入、不需要打开 QVoxelier**。"
 		+ "返回图片路径, 用 read_file 打开即可看图; 造型不对就改完再渲一次。视角/尺寸/背景可调。",
-		_render_schema(), _render)
+		_render_schema(), _render, "non_destructive")
+
+
+## 分类只有新版框架收; 老版 _add_tool 只有 4 个参数, 多传一个会报"参数过多"。
+static func _reg(add_tool: Callable, name: String, desc: String, schema: Dictionary, handler: Callable, kind: String) -> void:
+	if _kinds_ok:
+		add_tool.call(name, desc, schema, handler, kind)
+	else:
+		add_tool.call(name, desc, schema, handler)
 
 
 ## MCP 静态文档资源(内嵌内容, 编辑器与运行时都可用)。由 MCPResourceDocs 注册。

@@ -98,15 +98,20 @@ const IDEMPOTENT := [
 ]
 
 ## 未列入任何名单的工具 = **破坏性**(保守兜底): 漏标的代价是多弹一次确认, 而不是
-## 静默当安全操作执行。漏标由 audit() 在启动自检里报出来。
+## 静默当安全操作执行。漏标由 audit_against() 在启动自检里报出来。
+## 项目侧 provider 的工具不在上面三张名单里(它们在项目里, 框架没法穷举), 由 provider 在
+## add_tool 的第 5 个参数自报分类 —— 见 MCPDevServer._add_tool。
+const KINDS := ["read_only", "non_destructive", "destructive"]
 
 
 ## ======= 入口: 供 MCPDevServer._add_tool 统一调用 =======
 
 ## 为单个工具生成完整 MCP 工具定义(含 annotations / outputSchema)。
-static func build(name: String, desc: String, input_schema: Dictionary) -> Dictionary:
-	var read_only := READ_ONLY.has(name)
-	var non_destructive := NON_DESTRUCTIVE.has(name)
+static func build(name: String, desc: String, input_schema: Dictionary, kind := "") -> Dictionary:
+	var k := str(kind)
+	# 显式自报的分类优先; 没自报就查内置名单(框架自带工具全走这条路)。
+	var read_only := k == "read_only" or (k.is_empty() and READ_ONLY.has(name))
+	var non_destructive := k == "non_destructive" or (k.is_empty() and NON_DESTRUCTIVE.has(name))
 	# 三张名单之外 = **破坏性**: 漏标只多弹一次确认, 不会静默当安全操作执行。
 	# 显式登记进 NON_DESTRUCTIVE 才降级为"非破坏性"。
 	var destructive := not read_only and not non_destructive
@@ -135,7 +140,7 @@ static func build(name: String, desc: String, input_schema: Dictionary) -> Dicti
 ## ======= 契约自检 =======
 
 ## 反向校验: 名单里是否写了未注册的工具名。
-static func audit_against(registered: Dictionary) -> Array[String]:
+static func audit_against(registered: Dictionary, kinds: Dictionary = {}) -> Array[String]:
 	var issues: Array[String] = []
 	for entry in [["READ_ONLY", READ_ONLY], ["DESTRUCTIVE", DESTRUCTIVE], ["NON_DESTRUCTIVE", NON_DESTRUCTIVE], ["IDEMPOTENT", IDEMPOTENT]]:
 		for n in entry[1]:
@@ -144,6 +149,11 @@ static func audit_against(registered: Dictionary) -> Array[String]:
 	# 反向兜底: build() 把三张名单都没写的工具判成破坏性, 即漏标 —— 会表现为"客户端老让我确认"。
 	for tool_name in registered.keys():
 		if READ_ONLY.has(tool_name) or NON_DESTRUCTIVE.has(tool_name) or DESTRUCTIVE.has(tool_name):
+			continue
+		if kinds.has(tool_name):
+			var k := str(kinds[tool_name])
+			if not KINDS.has(k):
+				issues.append("工具 '%s' 自报的分类 '%s' 非法(只能是 %s)" % [tool_name, k, " / ".join(KINDS)])
 			continue
 		if IDEMPOTENT.has(tool_name):
 			issues.append("工具 '%s' 只写进了 IDEMPOTENT, 未归入 READ_ONLY/NON_DESTRUCTIVE/DESTRUCTIVE —— 它会被 build() 判成破坏性并每次弹确认" % tool_name)

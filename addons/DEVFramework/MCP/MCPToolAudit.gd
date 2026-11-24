@@ -19,7 +19,7 @@ static var _sources_ok := true
 
 ## 自检入口: 返回发现的问题列表(空 = 通过)。
 ## 锚点路径由调用方传入, 不能用 get_script().resource_path —— 那读到的是本文件自己。
-static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_script_path: String, audit_handlers: Dictionary = {}, registry_is_full: bool = true, extra_scripts: Array = []) -> Array[String]:
+static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_script_path: String, audit_handlers: Dictionary = {}, registry_is_full: bool = true, extra_scripts: Array = [], kinds: Dictionary = {}) -> Array[String]:
 	var issues: Array[String] = []
 	# 源码缓存必须每次自检重新读: 缓存的意义只是"一次自检内读一次"(几十个工具共用一份切片)。
 	_load_sources(anchor_script_path, extra_scripts)
@@ -44,7 +44,7 @@ static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_scri
 	# 反向核对, 两项各自独立: 一项拿元数据名单查(名单写了却没注册),
 	# 一项拿源码查(源码里注册了却没进名单)。
 	if registry_is_full:
-		issues.append_array(MCPToolMeta.audit_against(registered))
+		issues.append_array(MCPToolMeta.audit_against(registered, kinds))
 		if _sources_ok:
 			issues.append_array(audit_declared_registrations(registered))
 	return issues

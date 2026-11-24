@@ -124,6 +124,8 @@ var _tool_defs := [] # 工具定义列表(MCP 格式)
 ## 工具名 -> inputSchema。入参校验按名直查, 不能遍历 _tool_defs —— 重名时会静默取到
 ## 注册顺序上的第一个。
 var _tool_schemas := {}
+## 工具名 -> 自报分类(只有项目侧 provider 会填)。框架自带工具的分类在 MCPToolMeta 三张名单里。
+var _tool_kinds := {}
 var _mode := MODE_EDITOR # editor / runtime
 
 ## 编辑器模式: 指向 MCPDebuggerPlugin(由 plugin.gd 注入)。
@@ -645,10 +647,15 @@ func _start(port: int = -1) -> Error:
 
 
 ## ------- 工具注册 -------
-func _add_tool(name: String, desc: String, input_schema: Dictionary, handler: Callable) -> void:
+## 第 5 个参数 kind 供项目侧 provider 自报分类("read_only" / "non_destructive" /
+## "destructive"): 它们的工具名不在框架的三张名单里, 不自报就只能按破坏性兜底。
+func _add_tool(name: String, desc: String, input_schema: Dictionary, handler: Callable, kind := "") -> void:
 	_tool_handlers[name] = handler
 	_tool_schemas[name] = input_schema
-	_tool_defs.append(_mod("MCPToolMeta").build(name, desc, input_schema))
+	var k := str(kind)
+	if not k.is_empty():
+		_tool_kinds[name] = k
+	_tool_defs.append(_mod("MCPToolMeta").build(name, desc, input_schema, k))
 
 
 ## MCP 目录下的域脚本按"当前磁盘版本"动态取用(而非 const preload 的编译期绑定)。
@@ -699,6 +706,7 @@ func _reset_tools() -> void:
 	_tool_defs.clear()
 	# _tool_schemas 与 _tool_audit_handlers 一并清: 三份索引必须同增同减(漏清当下不会报错)。
 	_tool_schemas.clear()
+	_tool_kinds.clear()
 	_tool_audit_handlers.clear()
 	# 域脚本的源码编译缓存也必须每轮重建: 否则 refresh_tools 会复用上一轮编译的旧版本。
 	_mod_cache.clear()
@@ -764,7 +772,10 @@ func _session_facts_provider() -> Dictionary:
 	return facts
 
 
-## 注册项目侧 provider(见 SETTING_PROVIDERS): 加载脚本, 调其 `static register(add_tool)`
+## 注册项目侧 provider(见 SETTING_PROVIDERS): 加载脚本, 调其 `static register(add_tool, ctx)`。
+## ctx 携带契约工厂 {"schema": MCPToolContract, "result": MCPResult} —— provider 别再按路径 load 框架内部文件:
+## 那层绑定在契约改名/合并时不会报错, 只会让 provider 静默不注册(tools/list 安静地少掉它的工具)。
+## 老 provider 只收一个参数, 按方法签名自适应。
 ## 没有运行的游戏时也必须可用; 需要操作"正在运行的游戏"的项目工具应改用脚本 + eval_code(process=game)。
 func _register_providers() -> void:
 	# 资源注册表与服务器说明都随每轮工具注册一起重建(与 _reset_tools 同节奏), 避免残留。
@@ -777,6 +788,9 @@ func _register_providers() -> void:
 	var paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
 	if not (paths is Array or paths is PackedStringArray):
 		return
+	# tool_kinds 是能力标记: 老版 provider 只收 add_tool 一个参数, 不看它;
+	# 新版据此决定要不要给 add_tool 多传第 5 个参数(分类), 避免在老版框架上报参数过多。
+	var ctx := {"schema": _mod("MCPToolContract"), "result": _mod("MCPResult"), "tool_kinds": true}
 	for p in paths:
 		var path := str(p).strip_edges()
 		if path.is_empty():
@@ -786,7 +800,15 @@ func _register_providers() -> void:
 			push_warning("[MCP] provider 脚本无效: %s" % path)
 			continue
 		if script.has_method("register"):
-			script.register(_add_tool)
+			var before := _tool_handlers.size()
+			if _provider_register_takes_ctx(script):
+				script.register(_add_tool, ctx)
+			else:
+				script.register(_add_tool)
+			# 注册 0 个工具基本都不是"这个 provider 本来就没工具", 而是它依赖的契约/条件没满足。
+			# 静默是本域最贵的失败模式(要到调用时才撞 Unknown tool), 所以这里升级成告警。
+			if _tool_handlers.size() == before:
+				push_warning("[MCP] provider 注册了 0 个工具: %s —— 检查它的 register() 是否因契约缺失/条件不满足而提前返回" % path)
 		if script.has_method("resources"):
 			docs.register(script.resources())
 		if script.has_method("instructions"):
@@ -797,6 +819,17 @@ func _register_providers() -> void:
 			push_warning("[MCP] provider 脚本既无 static register(add_tool) / resources() / instructions(): %s" % path)
 
 
+## provider 的 register 是否收第二个 ctx 参数(新协议)。只看签名, 不靠"有没有默认值"猜。
+func _provider_register_takes_ctx(script: Variant) -> bool:
+	if not (script is GDScript) or not script.has_script_method("register"):
+		return false
+	for m in script.get_script_method_list():
+		if str(m.get("name", "")) == "register":
+			var args: Variant = m.get("args", [])
+			return args is Array and (args as Array).size() >= 2
+	return false
+
+
 ## ======= 契约自检 =======
 ## 全部工具都是手写注册, 而协议层的失败模式**全部是静默的**, 故必须有。
 func _audit_tools() -> void:
@@ -805,7 +838,7 @@ func _audit_tools() -> void:
 	# extra_scripts: provider 脚本在 MCP 目录之外, 须并入源码扫描, 否则其 handler 切不到。
 	var provider_paths: Variant = ProjectSettings.get_setting(SETTING_PROVIDERS, PackedStringArray())
 	var extra: Array = Array(provider_paths) if (provider_paths is Array or provider_paths is PackedStringArray) else []
-	_tool_audit_issues = _mod("MCPToolAudit").audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR, extra)
+	_tool_audit_issues = _mod("MCPToolAudit").audit_tools(_tool_defs, _tool_handlers, get_script().resource_path, _tool_audit_handlers, _mode == MODE_EDITOR, extra, _tool_kinds)
 	# 自检通过是常态, 静默即可; 只在发现问题时报警, 否则每次启动都要宣告一遍"没问题"。
 	if not _tool_audit_issues.is_empty():
 		LogTool.log("MCP", "工具契约自检发现 %d 个问题:\n  - %s" % [_tool_audit_issues.size(), "\n  - ".join(_tool_audit_issues)])

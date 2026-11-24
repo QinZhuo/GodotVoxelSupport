@@ -91,6 +91,10 @@ C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/
 - 场景批量改动：`apply_scene_edits`（一次事务，失败整体回滚；复制节点/连信号也是它的 op）+ `undo_redo`；文件改名 `move_file`
 - 点完等结果：`wait_for`（轮询到条件成立，超时带"实际观察值"）；别写死 sleep
 - 长说明不在 `tools/list` 里（常驻开销），按需读 `resources/list` 的 `devframework://docs/*`
+- 项目自定义工具：`dev_framework/mcp/providers` 里列脚本路径，脚本写 `static func register(add_tool: Callable, ctx: Dictionary = {})`。
+  `ctx.schema` / `ctx.result` 是契约工厂（不用再自己 `load` 框架文件），`ctx.tool_kinds` 为真时
+  `add_tool` 可带第 5 个参数自报分类（`read_only` / `non_destructive` / `destructive`，不自报按破坏性兜底）。
+  只收 `add_tool` 一个参数的旧写法仍可用；provider 注册出 0 个工具会 `push_warning`，不再静默从 `tools/list` 消失
 - 改 `addons/DEVFramework/Native/src/**` 后**必须** `build_native`（`action=status` 查过期 → `action=build` 构建 → 重载生效），否则测试跑的是旧库且全绿
 - 目录约定：**插件自己的 C++ 放 `addons/<插件>/Native/src`**（随插件分发）；构建区与第三方（godot-cpp）在项目根 `gdextension/`。多个插件各有 `Native/src` 时各编一个库、共用一份 godot-cpp
 - 导出包默认不带入口（`dev_framework/mcp/runtime_enabled = false`）
