@@ -93,6 +93,7 @@ static func get_status(group: StringName) -> Dictionary:
 static func _run(group: StringName) -> void:
 	var paths: PackedStringArray = _groups.get(group, PackedStringArray())
 	var started := Time.get_ticks_msec()
+	var timed_out := false
 	for p in paths:
 		_request(p)
 	while _pending_count(paths) > 0:
@@ -101,13 +102,16 @@ static func _run(group: StringName) -> void:
 			LogTool.warn("预热", "%s 超时(%dms)，放弃剩余 %d 项" % [group, TIMEOUT_MS, _pending_count(paths)])
 			for p in paths:
 				_pending.erase(p)
+			timed_out = true
 			break
 		await Engine.get_main_loop().process_frame
 		for p in paths:
 			_poll(p)
 	_running.erase(group)
 	_started.erase(group)
-	_ready[group] = true
+	## 超时不算预热完成: 否则 is_ready 为 true 但资源其实没加载, 且再也不会重试
+	if not timed_out:
+		_ready[group] = true
 	var elapsed := Time.get_ticks_msec() - started
 	# 历史基线: 下次同组预热在开始前就能给出"大概要多久"
 	PerfTool.record("prewarm:" + str(group), float(elapsed))

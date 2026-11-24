@@ -40,7 +40,7 @@ static func _take(out: Dictionary, res: Resource) -> void:
 	if not key.is_empty():
 		out[key] = res
 
-## 导出。副本同步是导出的前置步骤，所以不单独给按钮：
+## 导出。副本同步是导出的前置步骤，所以不单独给按钮。
 func export_all() -> void:
 	if not Engine.is_editor_hint():
 		return
@@ -49,7 +49,7 @@ func export_all() -> void:
 		LogTool.warn("烘焙", "场景未保存，导出路径无法推导")
 		return
 	_warn_without_static_light()
-	## SH 叠加层要读 l1（方向项）：不勾 Bake Directional 时图集里只有 l0，
+	## SH 叠加层要读 l1（方向项）：不勾 Bake Directional 时图集里只有 l0。
 	var gi := _lightmap()
 	if gi != null and not gi.directional:
 		gi.directional = true
@@ -136,7 +136,7 @@ func sync(all := {}) -> void:
 		node.name = key
 		node.set_meta(META, true)
 		add_child(node)
-		## owner 必须是场景根（PackedScene 只存 owner == 根 的节点）：
+		## owner 必须是场景根（PackedScene 只存 owner == 根 的节点）。
 		node.owner = _root()
 		node.position = _slot(placed)
 		placed += 1
@@ -166,10 +166,10 @@ func bake() -> bool:
 		return false
 
 	## 完成判据：副本数到位 **且** `.lmbake` 被重写。
-	## ⚠️ 两个坑都别踩：
+	## ⚠️ 两个坑都在下面两段注释里, 别踩。
 	var data_path := gi.light_data.resource_path if gi.light_data != null else ""
 	var before_mtime := FileAccess.get_modified_time(data_path) if not data_path.is_empty() else 0
-	## ⚠️ 预期噪音：编辑器在烘焙开始时重建 Inspector，按钮在信号发射途中被释放，
+	## ⚠️ 预期噪音: 编辑器在烘焙开始时重建 Inspector, 按钮可能在信号发射途中被释放。
 	btn.pressed.emit()
 	for i in 18000:
 		await get_tree().create_timer(0.05).timeout
@@ -178,7 +178,7 @@ func bake() -> bool:
 			return false
 		if gi.light_data == null or gi.light_data.get_user_count() != expect or i < 30:
 			continue
-		## 以 .lmbake 落盘时间为准：副本数在按下瞬间就满足，实例 id 也会被编辑器提前换掉，
+		## 以 .lmbake 落盘时间为准: 副本数在按下瞬间就满足, 实例 id 也会被编辑器提前换掉。
 		if data_path.is_empty() or FileAccess.get_modified_time(data_path) > before_mtime:
 			return true
 	LogTool.warn("烘焙", "等待烘焙超时（%d 份副本未全部产出或数据未更新），请确认烘焙是否仍在进行" % expect)

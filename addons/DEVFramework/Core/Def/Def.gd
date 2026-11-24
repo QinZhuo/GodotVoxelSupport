@@ -32,7 +32,7 @@ func get_desc(_data) -> String:
 static func get_def_desc(def: Def, data):
 	return def.get_desc(data) if def else ""
 
-## 翻译 CSV 路径统一构造: 目录只有 TranslationTool.TRANSLATION_DIR 一处,
+## 翻译 CSV 路径统一构造: 目录只有 TranslationTool.TRANSLATION_DIR 一处。
 static func csv_path(file_stem: String) -> String:
 	return TranslationTool.TRANSLATION_DIR.path_join(file_stem + ".csv")
 

@@ -119,7 +119,7 @@ func _on_input_event(camera: Camera3D, input_event: InputEvent, event_position: 
 		(local_pos.x / mesh_size.x + 0.5) * viewport.size.x,
 		(0.5 - local_pos.y / mesh_size.y) * viewport.size.y)
 
-	# 复制一份再改坐标：这个事件对象是同一帧内所有 Area3D 共用的，
+	# 复制一份再改坐标：这个事件对象是同一帧内所有 Area3D 共用的。
 	var ev := input_event.duplicate() as InputEvent
 	ev.position = event_pos2D
 	if ev is InputEventMouse:

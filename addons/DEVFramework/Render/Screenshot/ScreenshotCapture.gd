@@ -5,7 +5,7 @@ class_name ScreenshotCapture extends Node
 
 @export_file_path("*.png") var save_path: String = "res://screenshot.png"
 @export var custom_resolution: Vector2i = Vector2i(256, 256)
-## 颜色处理模式: auto(默认) = 按读回缓冲的实际数据格式自动判定要不要补 sRGB 编码,
+## 颜色处理模式: auto(默认) = 按读回缓冲的实际数据格式自动判定要不要补 sRGB 编码。
 @export_enum("auto", "srgb", "raw") var color_mode: String = "auto"
 ## 量化到 8 位时是否做误差扩散抖动(dithering), 用于消除大面积渐变上的色阶断层(banding)。
 @export var dithering: bool = false

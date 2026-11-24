@@ -20,7 +20,6 @@ class_name TweenProperty extends TweenValue
 				property = property_path
 				final_value = node.get_indexed(property)
 				from_value = node.get_indexed(property)
-				print(final_value)
 				notify_property_list_changed()
 		popup_property_selector.run()
 

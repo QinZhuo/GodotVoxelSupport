@@ -13,14 +13,7 @@ func _ready() -> void:
 	_update_visible(true)
 
 func _update_visible(reset: bool):
-	if tween:
-		if tween_visible:
-			if reset:
-				tween.play_reset()
-			else:
-				tween.play()
-		else:
-			tween.playback()
+	TweenViewTool.update_visible(tween, tween_visible, reset)
 
 ## 被取出时：重置状态并播放（取出不等于重新入树，_ready 不会重跑，故由此补上）
 func on_pool_get() -> void:

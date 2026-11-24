@@ -1,7 +1,7 @@
 @tool
 ## 时间缩放工具 — 基于 ModifierValue（×100）管理 Engine.time_scale
 ## ⚠️ 改 `time_scale` 的同时抬高物理 tick 频率，使每 tick 的 game delta 保持不变：
-## **运行期反复重设物理频率**会让物理时钟与逻辑时钟错位（实测 3x 结果直接分叉），
+## **运行期反复重设物理频率**会让物理时钟与逻辑时钟错位。
 class_name TimeTool
 
 ## 每帧物理步下限（= Godot 默认值）

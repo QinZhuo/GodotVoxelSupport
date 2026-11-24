@@ -3,7 +3,7 @@
 ##   - Back   : 背景(斑马纹/行染色)
 ##   - Sel    : 选中高亮
 ##   - Content: 内容节点(由子类创建)
-## ⚠ 池化复用与尺寸钳制: 单元格在 View 的两级对象池中跨行/跨目录复用,
+## ⚠ 池化复用与尺寸钳制: 单元格在 View 的两级对象池中跨行/跨目录复用。
 class_name DefTableCell
 extends Control
 
@@ -16,10 +16,10 @@ const CELL_MARGIN_L := 4.0
 const CELL_MARGIN_R := 2.0
 const CELL_MARGIN_T := 2.0
 const CELL_MARGIN_B := 2.0
-## 资源单元格缩略图(模型/贴图预览)边长: 固定较大尺寸, 所在行由 View 撑高以容纳,
+## 资源单元格缩略图(模型/贴图预览)边长: 固定较大尺寸, 所在行由 View 撑高以容纳。
 const RESOURCE_PREVIEW_SIZE := 64.0
 
-## tooltip 气泡限宽: 原生 tooltip 是**不换行的单行 Label**, 长文本会撑出一条超宽气泡;
+## tooltip 气泡限宽: 原生 tooltip 是**不换行的单行 Label**, 长文本会撑出一条超宽气泡。
 const TOOLTIP_MAX_WIDTH := 1000.0
 ## tooltip 字长上限: 超长文本换行后仍会拖慢气泡构建/渲染, 截断到该字符数(加省略号)。
 const TOOLTIP_MAX_CHARS := 2000
@@ -335,3 +335,5 @@ func set_resource_preview(texture: Texture2D) -> void:
 		else:
 			tex.custom_minimum_size = Vector2.ZERO
 			tex.visible = false
+			# 池化复用: 不清纹理的话, 每个休息中的 RESOURCE 格都替旧预览资源把引用留着
+			tex.texture = null

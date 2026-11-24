@@ -1,4 +1,4 @@
-## 池注册表：按 key 存取。空闲实例统一挂在常驻的隐藏节点 PoolIdle 下，
+## 池注册表：按 key 存取。空闲实例统一挂在常驻的隐藏节点 PoolIdle 下。
 class_name PoolTool
 
 ## key -> Pool

@@ -14,7 +14,7 @@ static var strength := 1.0
 ## 算两遍，实测偏亮 1.36 倍。减去标定值后为 1.00 倍，单模型最大偏差 7%。
 static var ambient_ref := 0.055
 
-## 宿主材质上记着它复制自哪份基材质。重复 apply 时靠它找回原材质，
+## 宿主材质上记着它复制自哪份基材质。重复 apply 时靠它找回原材质。
 const BASE_META := &"asset_lightmap_base"
 
 ## 「光照 + 基材质」→ 复制出来的宿主材质（宿主 next_pass → 偏移层）
@@ -78,7 +78,7 @@ static func _opaque(mat: Material) -> bool:
 static func can_bake(mesh: Mesh) -> bool:
 	return true in _surface_flags(mesh)
 
-## 逐面结论（true = 该面能安全叠加）：没有 UV2 就采样不到 SH 贴图，
+## 逐面结论（true = 该面能安全叠加）：没有 UV2 就采样不到 SH 贴图。
 static func _surface_flags(mesh: Mesh) -> Array:
 	if mesh == null or mesh.get_surface_count() == 0:
 		return []
@@ -116,7 +116,7 @@ static func _shared(base: Material, light: AssetLightmapRegion, atlas: TextureLa
 	_pairs[key] = host
 	return host
 
-## 回收某份光照名下的材质副本：缓存键里带着光照实例 id，
+## 回收某份光照名下的材质副本：缓存键里带着光照实例 id。
 static func release(light: AssetLightmapRegion) -> void:
 	if light == null:
 		return

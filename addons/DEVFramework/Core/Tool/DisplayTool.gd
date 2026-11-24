@@ -74,7 +74,7 @@ static func apply_window_size(window: Window, size: Vector2i) -> void:
 
 # ── 应用 ──
 
-## 运行时分辨率适配主入口：按"设计分辨率 vs 当前窗口"选出保持基准轴，
+## 运行时分辨率适配主入口：按"设计分辨率 vs 当前窗口"选出保持基准轴。
 static func apply_to_window(window: Window, cam: Camera3D = null) -> bool:
 	var aspect := design_ratio()
 	var keep_height := keeps_height(aspect, ratio_of(window.size))
@@ -85,10 +85,10 @@ static func apply_to_window(window: Window, cam: Camera3D = null) -> bool:
 
 
 ## 把保持基准轴应用到 3D 相机取景。
-## ⚠️ Camera3D.fov 的含义随 keep_aspect 改变：KEEP_HEIGHT 下是**竖向** fov，
+## ⚠️ Camera3D.fov 的含义随 keep_aspect 改变：KEEP_HEIGHT 下是**竖向** fov。
 static func apply_keep_axis_to_camera(cam: Camera3D, keep_height: bool, design_aspect: float) -> void:
 	if cam.projection != Camera3D.PROJECTION_PERSPECTIVE:
-		# 正交相机的取景基准是 size（世界单位）而非 fov，换算方式不同；
+		# 正交相机的取景基准是 size（世界单位）而非 fov，换算方式不同。
 		push_warning("[DisplayTool] 暂不支持非透视相机的基准轴切换：%s" % cam.get_path())
 		return
 	# 先把相机当前 fov 归一到"设计竖向 fov"（KEEP_WIDTH 下存的是水平 fov，需除回设计宽高比）

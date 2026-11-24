@@ -2,12 +2,12 @@
 extends RefCounted
 
 ## ======= 项目信息域 =======
-## 刻意只调用不复制实现。**必须带 @tool 且不声明 class_name**, 详见 MCPDevServer 顶部注释。
+## 只调用不复制实现。**必须带 @tool 且不声明 class_name**, 详见 MCPDevServer 顶部注释。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
+const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 const MCPCodeIndex := preload("res://addons/DEVFramework/MCP/MCPCodeIndex.gd")
 
-## 编辑根节点的读取走**跨域共享件**: 用点跨三个域, 留私有副本等于埋一份会静默分叉的复制粘贴
+## 编辑根节点的读取走**跨域共享件**: 三个域都在用, 留私有副本等于埋一份会静默分叉的复制粘贴。
 const MCPEditorEnv := preload("res://addons/DEVFramework/MCP/MCPEditorEnv.gd")
 
 ## 会话事实的提供器(无参 Callable)。与 dev 域的 _eval_ctx_provider 同构。
@@ -17,11 +17,9 @@ static var _session_facts_provider: Callable = Callable()
 static var _warned_no_provider := false
 
 
-## 注入会话事实的提供器。以最后一次为准, 无需保留旧的。服务器须在**编辑器进程**调一次(与
-## 接缝可以存在, 但漏调必须可见; 漏调会静默失效的场合一律不许用接缝。三个域给了三种不同答案,
-## 且都正确, 不要为了"看起来统一"而改: log 域注入(漏调显式报错)、validate 域域内自建(漏调会让
-##   1. 没有自建选项: 四个字段都无引擎级静态等价物(见文件末"唯一的状态缝")。
-##   2. 不能整体报错: 这两个工具另有大量与状态无关的载荷(项目名/版本/settings 段、
+## 注入会话事实的提供器(以最后一次为准)。服务器须在**编辑器进程**注册时调一次。
+## 本域选"注入 + 漏调可见"而非域内自建: 四个字段都无引擎级静态等价物(见文件末),
+## 且不能整体报错 —— 这两个工具另有大量与状态无关的载荷。
 static func set_session_facts_provider(provider: Callable) -> void:
 	_session_facts_provider = provider
 	_warned_no_provider = false
@@ -38,7 +36,7 @@ static func register(add_tool: Callable) -> void:
 
 	add_tool.call("get_editor_activity",
 		"编辑器状态(打开场景/选中节点/运行游戏/文件系统选中项), 感知用户在编辑器做了什么避免踩踏。",
-		MCPToolSchema.no_arg(),
+		MCPToolContract.no_arg(),
 		_handle_get_editor_activity)
 
 
@@ -66,13 +64,13 @@ static func _handle_get_project_info(args: Dictionary) -> Dictionary:
 	return MCPResult.ok_json(info)
 
 
-## 感知编辑器当前状态(用于 AI 与人类协作): 打开场景/选中节点/运行状态等
+## 感知编辑器当前状态(用于 AI 与人类协作): 打开场景/选中节点/是否在跑游戏。
+## **只报"人此刻在做什么"**: 进程与会话事实(mcp_running / game_running / bridge_ready /
+## 实例身份)统一由 get_project_info(basic) 给出, 同一份事实不容两个来源。
 static func _handle_get_editor_activity(_args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return MCPResult.fail("仅在编辑器模式可用")
-	var out := {
-		"mode": "editor",
-	}
+	var out := {}
 	# 打开的场景与选中节点
 	var root := MCPEditorEnv.edited_root()
 	if root:
@@ -84,7 +82,10 @@ static func _handle_get_editor_activity(_args: Dictionary) -> Dictionary:
 		for n in selection.get_selected_nodes():
 			selected.append(n)
 		out["selected_nodes"] = selected.map(func(n: Node): return str(n.get_path()))
-	_apply_session_facts(out)
+	# 这是"人在做什么": game_running 说"有没有游戏进程", 这里说"跑的是哪个场景"。
+	var playing := EditorInterface.get_playing_scene()
+	out["playing_scene"] = playing if not playing.is_empty() else null
+	out["hint"] = "进程/会话事实(mcp_running、game_running、bridge_ready、实例身份)见 get_project_info(scope=basic)"
 	return MCPResult.ok_json(out)
 
 
@@ -146,17 +147,16 @@ static func _apply_session_facts(info: Dictionary) -> void:
 	info["mcp_running"] = facts.get("mcp_running")
 	info["game_running"] = facts.get("game_running")
 	info["bridge_ready"] = facts.get("bridge_ready")
-	# session_active 与 game_running 同源(见 set_session_facts_provider 注释), 不由外部注入。
+	# session_active 与 game_running 同源, 不由外部注入。
 	info["session_active"] = facts.get("game_running")
-	# 多实例身份: 只在宿主注入了才出现(旧宿主/运行时进程没有这几个键), 缺省不写 null ——
+	# 多实例身份: 只在宿主注入时才出现(旧宿主/运行时进程没有这几个键), 缺省不写 null。
 	for key in ["instance_id", "instance_role", "mcp_port", "instance_note"]:
 		if facts.has(key):
 			info[key] = facts.get(key)
 	if not facts.is_empty():
 		return
-	# 漏调: 下面两条是"可见性"的全部依据, 缺任一条本域就退化成静默失效。
+	# 漏调的可见性依据: 载荷里显式标注 + 告警一次(缺任一条本域就静默失效)。
 	info["session_facts"] = "unavailable"
-	#  2) push_warning 告警一次 —— 零新依赖。已核实: push_warning 走 Logger 的 error 通道
 	if not _warned_no_provider:
 		_warned_no_provider = true
 		push_warning("MCPProjectTools: 会话事实未注入 —— get_project_info 的 basic 段与 \
@@ -179,14 +179,14 @@ static func _mode() -> String:
 	return "editor"
 
 
-## MCP 中枢端口(默认值即机器级通用端口 9988)。
-## 设置键与默认值在此**重复**一次(唯一定义处是 MCPDevServer.SETTING_HUB_PORT /
+## MCP 中枢端口。设置键与默认值在此**重复**一次: 唯一定义处是 MCPDevServer.SETTING_HUB_PORT,
+## 本域只读不写(默认 9988)。
 static func _mcp_port() -> int:
 	return int(ProjectSettings.get_setting("dev_framework/mcp/hub_port", 9988))
 
 
-## ======= 唯一的状态缝: 为什么这几个字段不自取、也不推导 =======
-## 引擎层没有可替代的静态 API: EditorDebuggerPlugin.get_sessions() 必须有插件实例才能调;
-## 也不能**推导**掉: 推导一个错基准恰好是闸门静默失效的经典形态(自己编一个"看起来合理"的默认,
-## ======= 主文件侧接线(以及"别留同名"的坑) =======
-## _input_actions / _named_layers 任一份, 切出来的就会是不该被检查的那份。故搬完必须
+## ======= 唯一的状态缝: 这几个字段为何不自取、也不推导 =======
+## 引擎层没有可替代的静态 API(如 EditorDebuggerPlugin.get_sessions() 必须有插件实例);
+## 也不能推导 —— 编一个"看起来合理"的默认值恰好是闸门静默失效的经典形态。
+## 主文件侧接线注意**别留同名函数**: audit 按函数名在全目录找第一个命中, 留了旧副本会切错。
+## 搬完必须回头删掉主文件里的同名实现。

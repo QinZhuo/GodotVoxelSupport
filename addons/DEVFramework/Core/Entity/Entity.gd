@@ -58,7 +58,7 @@ func _to_string():
 	return str(hash(self))
 
 
-## —— ECS↔对象桥接: 把本实体(脚本)作为数据组件注册进 ECS ——
+## ECS↔对象桥接: 把本实体(脚本)作为数据组件注册进 ECS。
 func register_to_ecs() -> bool:
 	if ecs.world == null:
 		push_warning("Entity(%s): 未设置 world, 无法注册到 ECS。" % to_string())

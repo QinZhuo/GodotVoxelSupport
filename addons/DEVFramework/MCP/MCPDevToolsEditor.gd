@@ -35,7 +35,7 @@ static func _handle_restart_editor(args: Dictionary) -> Dictionary:
 	if not Engine.is_editor_hint():
 		return MCPResult.fail("仅在编辑器模式可用")
 	var delay_sec: float = clampf(VariantTool.get_float(args, "delay_sec", 1.0), 0.0, 10.0)
-	# 场景清单必须在触发前取: 重启后这段代码不会再跑, 而"到底存了哪些场景"正是重启之后
+	# 场景清单必须在触发前取: 重启后这段代码不会再跑, 而"到底存了哪些场景"正是重启之后要交代的。
 	var open_scenes := PackedStringArray(EditorInterface.get_open_scenes())
 	var names := PackedStringArray()
 	for p in open_scenes:

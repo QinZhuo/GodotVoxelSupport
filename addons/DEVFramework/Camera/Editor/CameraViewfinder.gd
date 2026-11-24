@@ -106,7 +106,7 @@ func _build_ui() -> void:
 	_viewport.add_child(_camera)
 
 	# 叠层与画面同为 AspectRatioContainer 的子节点 => 两者矩形完全一致。
-	# 注意: 不能把叠层塞进 SubViewportContainer 里靠 anchors 撑满,
+	# 注意: 不能把叠层塞进 SubViewportContainer 里靠 anchors 撑满(它的尺寸由 SubViewport 决定)。
 	_overlay = Control.new()
 	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay.draw.connect(_draw_guides)

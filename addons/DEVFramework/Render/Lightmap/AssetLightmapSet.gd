@@ -99,7 +99,7 @@ static func _editor_fallback() -> AssetLightmapSet:
 			return res
 	return null
 
-## 换库时回收旧光照名下的材质副本。实例上已挂的宿主材质不受影响，
+## 换库时回收旧光照名下的材质副本。实例上已挂的宿主材质不受影响。
 func _release() -> void:
 	for light in regions.values():
 		AssetLightmapBinder.release(light as AssetLightmapRegion)

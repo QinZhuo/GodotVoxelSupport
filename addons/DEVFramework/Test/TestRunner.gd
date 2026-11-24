@@ -44,7 +44,7 @@ static var _runs_this_process := 0
 ##   · 测试脚本路径子串(如 "test_game_replay"); "all" = 全量(不推荐); 空串 = 全量(仅 headless CI 用);
 ##   · **内联 GDScript 源码**(含换行 或 以 "extends " 开头即判为源码)—— `extends TestCase` 定义
 static func run_all(script := "", mode := MODE_EDITOR, logger: Object = null) -> Dictionary:
-	# 闸门放在唯一入口: 两个宿主(编辑器 MCP / 游戏进程 MCP / headless)共用同一道,
+	# 闸门放在唯一入口: 两个宿主(编辑器 MCP / 游戏进程 MCP / headless)共用同一道。
 	if _running_mode != "":
 		return _error_result("已有测试在运行(%s), 本轮拒绝执行: 并发的两轮测试会互相污染共享状态(单例/存档/时间倍率)。等它跑完再来。"
 			% _mode_label(_running_mode), script, mode)
@@ -146,7 +146,7 @@ static func _build_plan(case_paths: Array, mode: String, acc: Dictionary) -> Arr
 		var label := path.get_file()
 		var script_res: Script = load(path)
 		if script_res == null:
-			# 无法加载用例脚本。**编辑器/F5(编辑器二进制)里这是真问题**(用例写坏/依赖缺失),
+			# 无法加载用例脚本。**编辑器/F5(编辑器二进制)里这是真问题**(用例写坏/依赖缺失)。
 			if OS.has_feature("editor"):
 				acc["failures"].append("%s: 用例脚本加载失败" % path)
 				acc["failed"] = int(acc["failed"]) + 1

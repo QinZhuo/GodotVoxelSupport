@@ -64,7 +64,7 @@ var is_current: bool = false
 @export var blend_trans: Tween.TransitionType = Tween.TRANS_CUBIC
 ## 过渡缓动方式
 @export var blend_ease: Tween.EaseType = Tween.EASE_IN_OUT
-## 位置混合轨迹(枚举归属 [CameraTool], 见 [enum CameraTool.BlendStyle]);
+## 位置混合轨迹(枚举归属 [CameraTool], 见 [enum CameraTool.BlendStyle])。
 @export var blend_style: CameraTool.BlendStyle = CameraTool.BlendStyle.SPHERICAL
 
 @export_group("镜头", "lens_")
@@ -184,7 +184,7 @@ func get_pose() -> Transform3D:
 	return pose
 
 
-## 行为共用的累积时间(秒)。行为是可共享的配置资源, 不存运行时状态,
+## 行为共用的累积时间(秒)。行为是可共享的配置资源, 不存运行时状态。
 func get_behavior_time() -> float:
 	return _behavior_time
 

@@ -2,42 +2,36 @@
 extends RefCounted
 
 ## ======= 截图域: 编辑器侧捕获(仅编辑器进程) =======
+## 本域只做一件编辑器独有的事: **取编辑器自己的视口像素**。
+## "当前场景缩略图"不再在这里另搭一套 SubViewport —— 那与资源域"把资源渲成一张图"是同一件事,
+## 两份实现必然漂移(一边补了环境光/主光、一边没有, 同样的场景在两处亮度不同)。
+## 现在 scene 直接复用 MCPResourceTools.scene_thumbnail(), 渲染底座只有一份。
 
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const MCPEditorEnv := preload("res://addons/DEVFramework/MCP/MCPEditorEnv.gd")
 const MCPScreenshotTools := preload("res://addons/DEVFramework/MCP/MCPScreenshotTools.gd")
+const MCPResourceTools := preload("res://addons/DEVFramework/MCP/MCPResourceTools.gd")
 
 
 ## ======= 域入口: 编辑器侧捕获 =======
 static func capture_editor_side(capture_type: String, args: Dictionary) -> Dictionary:
 	# 本函数只服务编辑器进程。被误从游戏进程转发进来时, EditorInterface 未必不可用, 但即使用得
+	# 上也拍不到"正在跑的游戏", 所以这里必须硬失败而不是退化成拍编辑器。
 	if not Engine.is_editor_hint():
 		return MCPResult.fail("take_screenshot: editor/scene 只能在编辑器进程捕获, 当前进程不可用(检查主服务器是否漏了 _mode 判断)")
-	var img: Image = null
-	match capture_type:
-		"editor":
-			img = await _capture_editor_viewport()
-			if img == null or img.is_empty():
-				return MCPResult.fail("截图失败: 编辑器视口纹理为空")
-		"scene":
-			img = await _capture_scene_thumbnail(args)
-			if img == null or img.is_empty():
-				return MCPResult.fail("场景缩略图生成失败: 无法渲染场景或场景为空")
-		_:
-			# 这里**故意不做**"视作 editor"的兜底: schema 的 enum + MCPArgCheck 只挡协议路径,
-			return MCPResult.fail("capture_type=%s 不是本域支持的模式(本域只做 editor / scene; game 由主服务器转发去游戏进程)" % capture_type)
+	# scene 的渲染归属在资源域(与 resource_inspect 的 render 同一个底座), 这里只转发。
+	if capture_type == "scene":
+		return await MCPResourceTools.scene_thumbnail(args)
+	if capture_type != "editor":
+		# 这里**故意不做**"视作 editor"的兜底: schema 的 enum + MCPToolContract 只挡协议路径。
+		return MCPResult.fail("capture_type=%s 不是本域支持的模式(本域只做 editor / scene; game 由主服务器转发去游戏进程)" % capture_type)
+	var img: Image = await _capture_editor_viewport()
+	if img == null or img.is_empty():
+		return MCPResult.fail("截图失败: 编辑器视口纹理为空")
 	# 统一走 ScreenshotTool: 颜色处理(auto 判定) -> 缩放 -> 保存。
-	var opts := {
-		"dir": ScreenshotTool.DEFAULT_DIR_RES,
-		"prefix": "mcp",
-		"max_width": VariantTool.get_int(args, "max_width", ScreenshotTool.DEFAULT_MAX_WIDTH),
-		"capture_type": capture_type,
-	}
-	opts.merge(MCPScreenshotTools.color_opts(args))
-	var shot: Dictionary = ScreenshotTool.save_image(img, opts)
+	var shot: Dictionary = MCPResourceTools.save_shot(img, capture_type, args)
 	if not shot.get("ok", false):
 		return MCPResult.fail(str(shot.get("error", "截图失败")))
-	return MCPResult.ok_json({
+	var out := MCPResult.ok_json({
 		"path": shot.get("path", ""),
 		"res_path": shot.get("res_path", ""),
 		"width": int(shot.get("width", 0)),
@@ -46,6 +40,7 @@ static func capture_editor_side(capture_type: String, args: Dictionary) -> Dicti
 		"capture_type": capture_type,
 		"color_mode": str(shot.get("color_mode", "")),
 	})
+	return MCPResult.attach_image(out, str(shot.get("res_path", "")))
 
 
 ## 捕获编辑器视口截图(原始读回数据; 颜色处理由 save_image 自动判定)
@@ -63,46 +58,6 @@ static func _capture_editor_viewport() -> Image:
 	# 编辑器进程的 RenderingServer.frame_post_draw 不一定按时触发(与游戏的标准帧循环不同),
 	# 也不要调用 RenderingServer.force_draw(): 在线程化渲染下同步阻塞可能卡住编辑器。
 	return await ScreenshotTool.grab(viewport, {"await_draw": false})
-
-
-## 生成当前编辑场景的缩略图(原始读回数据; 颜色处理由 save_image 自动判定)
-static func _capture_scene_thumbnail(_args: Dictionary) -> Image:
-	if not Engine.is_editor_hint():
-		return null
-	var thumbnail_size := 256
-	var root := MCPEditorEnv.edited_root()
-	if root == null:
-		return null
-	var scene_path := root.get_scene_file_path()
-	if scene_path.is_empty():
-		return null
-	if not ResourceLoader.exists(scene_path):
-		return null
-	var scene_res: Resource = ResourceLoader.load(scene_path)
-	if not scene_res is PackedScene:
-		return null
-	var scene_instance: Node = scene_res.instantiate()
-	if scene_instance == null:
-		return null
-	var viewport := SubViewport.new()
-	viewport.size = Vector2i(thumbnail_size, thumbnail_size)
-	viewport.transparent_bg = true
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	viewport.add_child(scene_instance)
-	scene_instance.owner = viewport
-	var base: Control = EditorInterface.get_base_control()
-	if base == null:
-		viewport.queue_free()
-		return null
-	var tree := base.get_tree()
-	if tree == null:
-		viewport.queue_free()
-		return null
-	tree.root.add_child(viewport)
-	await _wait_frames(tree, 5, 3000)
-	var img: Image = await ScreenshotTool.grab(viewport, {"await_draw": false})
-	viewport.queue_free()
-	return img
 
 
 ## 等待若干帧, 带超时上限(毫秒, 0 表示不限)

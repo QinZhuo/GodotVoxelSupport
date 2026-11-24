@@ -4,7 +4,7 @@ extends RefCounted
 ## [UIPanel] / [UIPanel3D] 的共享打开/关闭状态机(纯静态工具, 与 [UITool] 同族)。
 ## 两个面板基类必须分别继承 [Control] / [Node3D](GDScript 无多继承), 无法共享基类,
 
-## 应用面板显隐。走面板的 [method UIPanel3D.apply_visibility] / [method UIPanel.apply_visibility]，
+## 应用面板显隐。走面板的 [method UIPanel3D.apply_visibility] / [method UIPanel.apply_visibility]。
 static func _apply_visibility(panel, shown: bool) -> void:
 	if panel.has_method(&"apply_visibility"):
 		panel.apply_visibility(shown)
@@ -20,7 +20,7 @@ static func open(panel) -> void:
 	panel.on_open.emit()
 	_apply_visibility(panel, true)
 	if panel.show_tween:
-		await panel.show_tween.play().finished
+		await TweenViewTool.await_done(panel, panel.show_tween.play())
 	if not is_instance_valid(panel):
 		return
 	panel.on_opened.emit()
@@ -32,7 +32,7 @@ static func close(panel) -> void:
 	UITool.unregister(panel)
 	panel.on_close.emit()
 	if panel.show_tween:
-		await panel.show_tween.playback().finished
+		await TweenViewTool.await_done(panel, panel.show_tween.playback())
 	if not is_instance_valid(panel):
 		return
 	_apply_visibility(panel, false)
@@ -62,6 +62,8 @@ static func toggle(panel) -> void:
 ## 弹窗模式: 打开面板并等待其关闭(可用于异步等待面板交互结果)。
 static func popup(panel) -> void:
 	await open(panel)
+	if not is_instance_valid(panel):
+		return
 	var ver = panel._open_version
 	while is_instance_valid(panel) and panel.is_open and panel._open_version == ver:
 		await panel.on_closed
@@ -76,4 +78,6 @@ static func await_closed(panel) -> bool:
 static func await_closed_since(panel, version: int) -> bool:
 	while is_instance_valid(panel) and panel.is_open and panel._open_version == version:
 		await panel.on_closed
+	if not is_instance_valid(panel):
+		return false   # 面板已释放: 本轮不会再有关闭事件, 让调用方跳过后续动作
 	return version == panel._open_version

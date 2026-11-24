@@ -2,10 +2,10 @@
 extends RefCounted
 
 ## ======= MCP 多实例中枢(实例注册表 + 目标路由 + HTTP 转发) =======
-##   · 一个**机器级**固定端口(见 MCPDevServer.SETTING_HUB_PORT)只有**一个**实例能持有, 它就是这个
-##   · 其余实例各绑一个**系统分配的临时端口**(listen(0)), 每 4 秒把自己登记到中枢;
-##   · 中枢对外只暴露固定端口那一个 MCP 端点, 工具表就是它自己的全量工具(每个工具多一个可选
-##   · 中枢退出后, 成员心跳连续失败 → 抢绑固定端口(bind 是原子的), 抢到的那个成为新中枢,
+##   · 机器级固定端口(见 MCPDevServer.SETTING_HUB_PORT)只有一个实例能持有, 即中枢;
+##   · 其余实例各绑系统分配的临时端口(listen(0)), 每 4 秒向中枢登记一次;
+##   · 中枢对外只暴露固定端口那一个 MCP 端点, 工具表是它的全量工具(每个多一个可选 instance);
+##   · 中枢退出后成员心跳连续失败 → 抢绑固定端口(bind 原子), 抢到的成为新中枢。
 
 ## 心跳周期: 成员每隔这么久向中枢登记一次(登记即续约, 不另设 ping)。
 const HEARTBEAT_MS := 4000
@@ -13,9 +13,8 @@ const HEARTBEAT_MS := 4000
 ## 它只用于"手动关掉一个编辑器"后的清理 —— 崩溃/强杀同样走这条路径, 故不能太长(否则
 ## 会对着已死的实例报错); 也不能太短(否则一次 GC 卡顿就被误判为退出)。
 const MEMBER_TTL_MS := 20000
-## 连接阶段的独立超时(见 post_json 的说明)。本机回环一次握手是微秒级, 2 秒足够宽容;
-## 超过它就只能判定"那个端口上没有活着的服务端"。**不能**与工具执行超时共用: 后者可达
-## 610 秒, 共用会让"目标实例已关闭"表现为挂死十分钟(实测)。
+## 连接阶段的独立超时(见 post_json)。本机回环握手是微秒级, 2 秒足够宽容。
+## **不能**与工具执行超时共用: 后者可达 610 秒, 会让"目标已关闭"表现为挂死十分钟。
 const CONNECT_TIMEOUT_MS := 2000
 
 ## 中枢 HTTP 端点(非 MCP 协议, 只是实例间内部接口; AI 客户端不需要知道它们)
@@ -35,8 +34,10 @@ static var target_path_override := ""
 var members := {}
 # 最近离开的实例(uid → {name, project_path, at_ms, clean, reason}), clean=false 表示没走注销(崩溃/强杀)。
 # 这是"项目是不是崩了"的唯一判据 —— 心跳超时被 prune 掉的人不会自己说再见。
+# clean=false 的语义只在这里产生, list_instances 与 launch_project 都靠它回溯。
 var recent_exits := {}
-## 默认目标(服务端唯一的全局状态)。三个字段一起落盘: uid 里的进程号会变, 而 instance_id
+## 默认目标(服务端唯一的全局状态)。三个字段一起落盘: uid 里的进程号会变,
+## instance_id 重启不变, 用于 uid 失效后重解析。
 var active_instance := ""        # 目标 uid(带进程号, 唯一)
 var active_instance_id := ""     # 目标项目级身份(重启不变, uid 失效时的恢复依据)
 var active_project_path := ""    # 目标项目路径(仅用于报错/展示)
@@ -85,7 +86,7 @@ static func make_instance_id(project_name: String, project_path: String) -> Stri
 
 
 ## 路径规范化: 反斜杠统一 + 去尾分隔符 + 转小写。
-## **传进来的必须是绝对路径**(调用方负责 globalize): 传 "res://" 这种相对路径会让所有项目的
+## **传进来的必须是绝对路径**(调用方负责 globalize), 否则所有项目会撞成同一个 id。
 static func normalize_path(path: String) -> String:
 	var norm := path.strip_edges().replace("\\", "/")
 	while norm.ends_with("/"):
@@ -123,6 +124,7 @@ func set_self(uid: String, instance_id: String, project_name: String, project_pa
 	own_instance_id = instance_id
 	own_name = project_name
 	# 存规范化后的路径(去尾分隔符/统一斜杠): globalize_path("res://") 带尾斜杠, 原样存会让
+	# 同一项目在不同会话里比对不上。
 	own_project_path = normalize_path(project_path)
 	members[uid] = _make_entry(uid, instance_id, project_name, own_project_path, own_port, true)
 
@@ -255,8 +257,8 @@ func last_exit_for(project_path: String) -> Dictionary:
 
 
 ## 崩溃环判定: 同一项目在 window_ms 内**非正常退出** >= limit 次 → 不建议再自动拉起。
-## 额外区分"启动期崩溃"(uptime < 60s): 那基本是原生库/初始化问题, 自动重启一百次也没用。
-## 设计取自 systemd 的 StartLimitBurst / StartLimitIntervalSec。
+## 额外区分"启动期崩溃"(uptime < 60s): 那基本是原生库/初始化问题, 重启无用。
+## 思路取自 systemd 的 StartLimitBurst / StartLimitIntervalSec。
 func crash_loop(project_path: String, limit := 3, window_ms := 600000) -> Dictionary:
 	_journal_load()
 	var want := project_path.simplify_path()
@@ -309,7 +311,7 @@ func exits_snapshot(limit := 5) -> Array:
 
 
 ## 成员侧: 用中枢回包里的实例表**整体替换**非自身条目。
-## 这样成员的 list_instances 也能看到全机器, 而不是只看到自己 —— 否则"选错实例"时的候选
+## 这样成员的 list_instances 也能看到全机器, 而不只是自己。
 func sync_from_snapshot(instances: Array) -> void:
 	var self_entry: Variant = members.get(own_uid, null)
 	members = {}
@@ -326,6 +328,7 @@ func sync_from_snapshot(instances: Array) -> void:
 		var copy: Dictionary = e.duplicate(true)
 		copy["is_self"] = false
 		# 中枢给的是 age_ms(相对它自己的时钟), 换算回本进程时间轴, 否则 prune 会拿中枢的
+		# 时间轴去比本进程的, 条目永远不过期。
 		copy["last_seen"] = now - int(e.get("age_ms", 0))
 		members[uid] = copy
 
@@ -345,9 +348,8 @@ func live_members() -> Array:
 	return out
 
 
-## 对外可读快照(list_instances 工具 / /hub/instances)。附带 age_ms(心跳有多旧)与 is_hub
-## **必须先 prune**: 快照是"当前有哪几个编辑器"的唯一对外答案, 若它把已经死掉的成员也列出来,
-## 调用方就会去选一个已经关掉的实例, 然后收到一次转发超时。实测就是这样: 强杀第二个编辑器后,
+## 对外可读快照(list_instances 工具 / /hub/instances), 附带 age_ms(心跳有多旧)与 is_hub。
+## **必须先 prune**: 列出已死的成员, 调用方就会选中它并收到一次转发超时。
 func snapshot(now: int = -1) -> Array:
 	var t := now if now >= 0 else Time.get_ticks_msec()
 	prune(t)
@@ -355,13 +357,17 @@ func snapshot(now: int = -1) -> Array:
 	for e in live_members():
 		var item: Dictionary = (e as Dictionary).duplicate()
 		item["age_ms"] = t - int(item.get("last_seen", t))
-		item["is_hub"] = hub_mode and str(item.get("uid", "")) == own_uid
+		# 只有自己的条目由本地判定; 别人的条目必须沿用中枢快照里的 is_hub ——
+		# 否则成员进程里看中枢也是 is_hub=false, 客户端会以为这台机器没有中枢。
+		if str(item.get("uid", "")) == own_uid:
+			item["is_hub"] = hub_mode
 		item.erase("last_seen")
 		out.append(item)
 	return out
 
 
 ## 按 instance_id(= 项目级身份)查条目。**同项目多开时会把多个命中都返回**, 由调用方自己决定
+## 怎么呈现。
 func find_all_by_instance_id(instance_id: String) -> Array:
 	var out: Array = []
 	if instance_id.is_empty():
@@ -379,9 +385,10 @@ func find_by_uid(uid: String) -> Dictionary:
 	return members.get(uid, {})
 
 
-## 解析调用方给的实例标识。四档匹配, 从精确到宽松:
-##   1. uid 精确("MyGame@a1b2c3d4#12345", 带进程号, **唯一**, 路由与绑定都用它)
-##   4. 前缀(项目名 / hash / hash 前缀 / uid 前缀) —— 必须**唯一命中**, 否则同样返回空。
+## 解析调用方给的实例标识, 四档匹配, 从精确到宽松:
+##   1. uid 精确("MyGame@a1b2c3d4#12345", 带进程号, **唯一**, 路由与绑定都用它);
+##   2. uid 前缀;  3. instance_id(项目级身份, 同项目多开会撞);
+##   4. 前缀(项目名 / hash / uid 前缀) —— 必须**唯一命中**, 否则返回空。
 func resolve(query: String) -> Dictionary:
 	var q := query.strip_edges()
 	if q.is_empty():
@@ -432,7 +439,7 @@ func count_matches(query: String) -> int:
 
 
 ## ------- 目标绑定 -------
-## 绑定用 **uid** 而非 instance_id: uid 带进程号, 唯一; 而 instance_id 在同项目多开时会撞,
+## 绑定用 **uid** 而非 instance_id: uid 带进程号, 唯一; 而 instance_id 在同项目多开时会撞。
 func set_active(entry: Dictionary) -> void:
 	active_instance = str(entry.get("uid", ""))
 	active_instance_id = str(entry.get("instance_id", ""))
@@ -496,9 +503,8 @@ func _target_path() -> String:
 
 
 ## ------- 崩溃日志落盘 -------
-## 为什么必须落盘: `recent_exits` 在中枢进程内存里, 而**中枢自己崩掉时**它随之消失 ——
-## 下次启动完全不知道"刚才崩过"。业界做法(systemd 的 clean_exit 标记、IDE 的 crash journal)
-## 都是 append-only 小文件, 进程死了文件还在。
+## 必须落盘: `recent_exits` 在内存里, 而**中枢自己崩掉时**它随之消失, 下次启动就不知道
+## "刚才崩过"。用 append-only 小文件, 进程死了文件还在。
 const JOURNAL_FILE := "devframework_mcp_crash.jsonl"
 const JOURNAL_MAX_LINES := 200
 
@@ -708,6 +714,7 @@ func register_to(hub_port: int, payload: Dictionary) -> Dictionary:
 
 ## 把一条 JSON-RPC 请求原样转发给目标实例的 MCP 端点, 返回它解析后的 JSON-RPC 响应。
 ## proto 经 HTTP 头带过去: 目标实例要按同一协议版本整形结果(2026-07-28 起 result 必须带
+## structuredContent)。
 func forward(port: int, rpc: Dictionary, timeout_ms: int, proto: String = "") -> Dictionary:
 	var extra := PackedStringArray()
 	if not proto.is_empty():
@@ -716,9 +723,8 @@ func forward(port: int, rpc: Dictionary, timeout_ms: int, proto: String = "") ->
 
 
 ## 最小 HTTP 客户端: POST 一个 JSON, 读回一个 JSON。
-## 循环里的 `await` 是必须的 —— 不给主循环机会, 编辑器会整段卡住(转发是阻塞语义)。
-## ## 连接阶段必须用**独立短超时**
-## 端口没监听 → 一直等到 610 秒才报错。实测就是这样(中枢转发给一个已关闭实例时挂死)。
+## 循环里的 `await` 是必须的 —— 不给主循环机会, 编辑器会整段卡住。
+## 连接阶段必须用**独立短超时**: 端口没监听时会一直等到工具执行超时(可达 610 秒)才报错。
 func post_json(port: int, path: String, payload: Dictionary, timeout_ms := 3000, extra_headers: PackedStringArray = PackedStringArray()) -> Dictionary:
 	if port <= 0 or port > 65535:
 		return {}
@@ -770,7 +776,7 @@ func post_json(port: int, path: String, payload: Dictionary, timeout_ms := 3000,
 			buf.append_array(chunk)
 	var status := client.get_response_code()
 	client.close()
-	# 状态码不参与判定: 本服务器在"传输层拒绝"时也回 JSON-RPC 错误体(400/401/403),
+	# 状态码不参与判定: 本服务器在"传输层拒绝"时也回 JSON-RPC 错误体(400/401/403)。
 	var parsed: Variant = JSON.parse_string(buf.get_string_from_utf8())
 	if parsed is Dictionary:
 		return parsed

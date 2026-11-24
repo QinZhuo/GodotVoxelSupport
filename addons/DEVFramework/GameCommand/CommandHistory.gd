@@ -6,6 +6,7 @@ class_name CommandHistory extends RefCounted
 var commands: Array[GameCommand] = []
 
 func append(cmd: GameCommand) -> void:
+	# 发布构建会剥掉 assert: 这条只作调试期提示, 不去重(回放里同一条命令重复追加是合法的)
 	assert(not commands.has(cmd), "CommandHistory: 重复追加同一条命令")
 	commands.append(cmd)
 

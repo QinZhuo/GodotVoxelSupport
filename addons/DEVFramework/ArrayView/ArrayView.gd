@@ -18,7 +18,7 @@ signal view_finished
 		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
 ## 池容量（0 = 不预热、空闲不限）：首次使用前预建这么多个空闲实例，同时作为空闲上限
 @export var pool_size: int = 0
-## 每帧生成数量，0 表示全部立即生成（默认）。大于 0 时分帧创建子节点，
+## 每帧生成数量，0 表示全部立即生成（默认）。大于 0 时分帧创建子节点。
 @export var items_per_frame: int = 0
 ## 仅编辑器：铺几个空视图看排版（owner 为空，不会存进场景）
 @export var preview_count: int = 3:
@@ -31,7 +31,7 @@ var data: Array:
 		data = value
 		refresh()
 
-## 与 data 一一对应的视图列表。⚠️ 不能直接拿 get_child(index) 当第 index 项：
+## 与 data 一一对应的视图列表。⚠️ 不能直接拿 get_child(index) 当第 index 项。
 var views: Array[Node] = []
 
 ## 对象池（pool_key 自动解析到这里；也可直接注入）
@@ -75,10 +75,12 @@ func _mark_finished() -> void:
 	view_finished.emit()
 
 ## 清除所有子节点（并作废进行中的分帧生成）
+## ⚠️ 必须走 _mark_finished(): 只改代次不 emit, 卡在 wait_finished 的协程永远等不到 view_finished
+##    (它的循环条件其实已满足, 但要先被唤醒才会去检查)。
 func clear() -> void:
 	_generation_id += 1
 	_clear_children()
-	_finished_generation = _generation_id
+	_mark_finished()
 
 func _clear_children() -> void:
 	for view in get_children():

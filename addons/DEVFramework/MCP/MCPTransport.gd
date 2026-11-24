@@ -2,7 +2,8 @@
 extends RefCounted
 
 ## ======= HTTP / SSE 传输层 =======
-## 由 MCPDevServer 以 preload 常量 `MCPTransport` 引用。**必须 @tool 且不声明 class_name**
+## 由 MCPDevServer 以 preload 常量 `MCPTransport` 引用。**必须 @tool 且不声明 class_name**,
+## 否则导出包解析图会带上编辑器类。同时承载旧式 HTTP+SSE 与 Streamable HTTP 两种形态。
 
 const MCPFormat := preload("res://addons/DEVFramework/MCP/MCPFormat.gd")
 
@@ -63,7 +64,7 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 		server._send_rpc_error(stream, 400, headers, null, ERR_PARSE, "Parse error")
 		return
 	var req: Dictionary = parsed
-	# 协议版本协商(2026-07-28 起逐请求声明)。两处都缺省才回落 PROTOCOL_VERSION ——
+	# 协议版本协商(2026-07-28 起逐请求声明)。两处都缺省才回落 PROTOCOL_VERSION。
 	var proto := str(headers.get(HEADER_VERSION, ""))
 	var meta_version := ""
 	var rparams: Variant = req.get("params", null)
@@ -79,7 +80,8 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 			"Header mismatch: %s 与 _meta 声明的版本不一致" % HEADER_VERSION,
 			{"supported": SUPPORTED_PROTOCOL_VERSIONS, "header": proto, "meta": meta_version})
 		return
-	# declared 与 effective 必须分开: declared = 客户端实际声明了什么(只读, 用于一致性与规范判定);
+	# declared 与 effective 必须分开: declared = 客户端实际声明了什么(用于一致性判定);
+	# effective = 实际按哪个版本解析(降级后可能与 declared 不同)。
 	var declared := proto if not proto.is_empty() else meta_version
 	var rpc_method := str(req.get("method", ""))
 	var effective := declared
@@ -97,6 +99,7 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 				{"supported": SUPPORTED_PROTOCOL_VERSIONS, "requested": declared})
 			return
 	# 2026-07-28 起: 声明了该版本的请求, 其 _meta 必须**同时**带 protocolVersion 与
+	# clientCapabilities, 缺一个就 400(否则后续按能力分派没有依据)。
 	if declared == META_REQUIRED_SINCE and rpc_method != "initialize":
 		var missing: Array[String] = []
 		if meta_version.is_empty():
@@ -114,7 +117,7 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 	# 提前取 sessionId: 旧式 SSE 会话投递的请求要把响应改走 SSE 流, 且日志需与会话对应
 	var sid := query_param(query, "sessionId")
 	# 默认只记**首次**版本协商那一条; 全量开关打开时才记其余请求。
-	# **initialize 必须用 _version_negotiated 收窄**: 客户端每次重连都会重发 initialize,
+	# **initialize 必须用 _version_negotiated 收窄**: 客户端每次重连都会重发 initialize。
 	if bool(server._log_rpc) or (rpc_method == "initialize" and not bool(server._version_negotiated)):
 		LogTool.log("MCP", "POST %s | 版本 %s | 会话 %s" % [rpc_method, effective, sid if not sid.is_empty() else "-"])
 	var response: Dictionary = await server._handle_jsonrpc(req, effective)
@@ -135,21 +138,23 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 
 
 ## GET /mcp → 开启旧式 HTTP+SSE 会话。
-## 一次 POST 都不发, 界面永远停在"连接中"(实测)，所以这里必须真把流开出来。
+## 旧式客户端在收到 endpoint 事件前不会发任何 POST, 所以这里必须真把流开出来,
+## 否则界面永远停在"连接中"。
 func _serve_sse(stream, headers: Dictionary) -> void:
 	var endpoint := _endpoint_url()
-	# 已完成握手的客户端走 Streamable HTTP, 它此刻开的流只是通知/保活通道, 永不承载请求 ——
+	# 已完成握手的客户端走 Streamable HTTP, 它此刻开的流只是通知/保活通道, 永不承载请求。
 	var sid: String = server._http.open_legacy_sse(stream, _sse_headers(headers), endpoint, not bool(server._version_negotiated))
 	if sid.is_empty():
 		# 开不了流(并发已满/连接已断) → 回 405, 客户端仍可退回纯 Streamable HTTP
 		server._send_rpc_error(stream, 405, headers, null, ERR_TRANSPORT_REJECTED, "Method Not Allowed", {}, {"Allow": "POST, GET, OPTIONS"})
 		return
-	# 默认**不记**这条: 客户端每次重连都会走一遍这里, 实测 IDE 抖动就是一串同内容日志。
+	# 默认**不记**这条: 客户端每次重连都会走一遍这里, 记了只会被 IDE 抖动刷成同内容日志。
 	if bool(server._log_rpc):
 		LogTool.log("MCP", "GET /mcp 通告 endpoint=%s, 会话 %s" % [endpoint, sid.substr(0, 8)])
 
 
-## SSE 响应头。与 _cors_headers 分开: 那里是"一次 JSON-RPC 往返"的响应头(带 Mcp-Session-Id),
+## SSE 响应头。刻意不复用 _cors_headers: 那边的 Content-Type 是 application/json 且带
+## Mcp-Session-Id, 都不适用于事件流。
 func _sse_headers(headers: Dictionary) -> Dictionary:
 	var h := {
 		"Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -167,6 +172,7 @@ func _endpoint_url() -> String:
 
 
 ## 从 query 串取参数值(键名大小写不敏感)。旧式 SSE 传输把 sessionId 放在 query 上。
+## 找不到返回空串。
 static func query_param(query: String, key: String) -> String:
 	for pair in query.split("&", false):
 		var kv := pair.split("=", true, 1)
@@ -175,7 +181,7 @@ static func query_param(query: String, key: String) -> String:
 	return ""
 
 
-## CORS 响应头
+## CORS 响应头: 供浏览器内的 web 客户端与其它源的页面直接调本服务器。
 func _cors_headers(headers: Dictionary) -> Dictionary:
 	var h := {
 		"Content-Type": "application/json",

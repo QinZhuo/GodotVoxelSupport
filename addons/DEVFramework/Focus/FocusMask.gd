@@ -13,14 +13,18 @@ class_name FocusMask extends Control
 
 ## 空白处按下(仅 click_to_complete 开启时; 供"点任意处继续")
 signal blank_pressed
-## 气泡完成一次排版(宿主可在这里对气泡做二次布局: 塞模型/改宽度等)
 
 ## 合成层(z_index 上限 4096)
 const DIM_Z := 4088
 const TIP_Z := 4092
 ## 一次最多处理多少个目标矩形(与 shader 里的数组长度保持一致)
 const MAX_RECTS := 16
+## 轮廓一开始建不起来(目标还没有可见网格)时的补建帧数
+const SIL_RETRY_FRAMES := 20
 const _SPOT_SHADER: Shader = preload("res://addons/DEVFramework/Focus/FocusMaskSpotlight.gdshader")
+## 几何实现走 preload 而不是全局类名: 全局类要等编辑器扫描进 class cache 才可解析,
+## 新文件/冷启动时 @tool 脚本会报 "Identifier not declared"; preload 按路径解析, 与扫描顺序无关.
+const FocusRectTool := preload("res://addons/DEVFramework/Focus/FocusRectTool.gd")
 const _NAV_ACTIONS: Array[StringName] = [&"ui_focus_next", &"ui_focus_prev",
 		&"ui_left", &"ui_right", &"ui_up", &"ui_down"]
 const _BACK_ACTIONS: Array[StringName] = [&"ui_focus_prev", &"ui_left", &"ui_up"]
@@ -83,6 +87,8 @@ var _sil_ok := true
 var _sil_check_frames := 0
 ## 目标数超上限是否已提示过(避免每帧刷警告)
 var _warned_overflow := false
+## 轮廓补建剩余帧数(0 = 不再尝试)
+var _sil_retry := 0
 ## 2D 目标的离屏快照(duplicate 一份渲染, 拿它的 alpha 当真实轮廓)
 var _contour_view: SubViewport
 
@@ -215,6 +221,7 @@ static func _promote(node: Node) -> Node:
 
 ## 建"只渲染目标"的轮廓通道: 3D 用层分离重渲, 2D 用离屏快照(子视口里的也算)
 func _setup_silhouette() -> void:
+	_sil_retry = 0
 	if not outline_3d:
 		return
 	for i in _targets.size():
@@ -224,14 +231,32 @@ func _setup_silhouette() -> void:
 			# 只有"有可见网格"的 3D 物体才值得渲染轮廓贴图;
 			# 纯交互体(Area3D 之类)渲出来是空 alpha, 会让目标区域被判成"区域外"⇒ 看着完全不亮。
 			# 多目标时继续往后找: 第一个有网格的物体负责出轮廓。
-			if _visible_mesh_aabb(promoted as Node3D).size != Vector3.ZERO:
+			if FocusRectTool._visible_mesh_aabb(promoted as Node3D).size != Vector3.ZERO:
 				_build_3d_silhouette(promoted as Node3D, i)
 				return
+			# 目标当帧还没有可见网格(视图刚入树 / 模型刚换) ⇒ 留几帧补建,
+			# 否则会一直退化成矩形亮块: 目标本体不贴合、也没有贴形状的描边
+			_sil_retry = SIL_RETRY_FRAMES
 			continue
 		# 2D 目标不建轮廓快照: 控件样式盒经常只画边框/贴图未设置, 快照里"控件内部"是空的,
 		# 于是目标内部会被当成区域外(遮罩不透明时只剩一圈框、本体全黑)。
 		# 2D 直接用"矩形 + 样式盒圆角"的 SDF, 形状与区域都可靠。
 		return
+
+
+## 补建轮廓: 每帧重试一次, 直到目标的可见网格就绪或次数用完(用完就保留矩形保底)
+func _retry_silhouette() -> void:
+	if _sil_retry <= 0:
+		return
+	_sil_retry -= 1
+	for i in _targets.size():
+		var node: Node = _targets[i]
+		if not is_instance_valid(node) or _promoted.get(node) != node:
+			continue
+		if node is Node3D and FocusRectTool._visible_mesh_aabb(node as Node3D).size != Vector3.ZERO:
+			_build_3d_silhouette(node as Node3D, i)
+			_apply_spot_params()
+			return
 
 
 ## 2D 目标的真实轮廓: 把控件自己的样式盒画进离屏视口。
@@ -241,10 +266,10 @@ func _build_2d_contour(node: CanvasItem, index: int) -> bool:
 	if not (node is Control):
 		return false
 	var control := node as Control
-	var box := _style_box_of(control)
+	var box := FocusRectTool._style_box_of(control)
 	if box == null:
 		return false
-	var rect := screen_rect(node)
+	var rect := FocusRectTool.screen_rect(node)
 	if rect.size == Vector2.ZERO:
 		return false
 	var size := Vector2i(maxi(int(ceil(rect.size.x)), 8), maxi(int(ceil(rect.size.y)), 8))
@@ -269,35 +294,6 @@ func _build_2d_contour(node: CanvasItem, index: int) -> bool:
 	return true
 
 
-## 目标自己的圆角(取样式盒四角最大值; 不是 StyleBoxFlat 就是 0 = 用全局默认)
-static func _corner_radius_of(node: Node) -> float:
-	var control := node as Control
-	if control == null:
-		return 0.0
-	var box := _style_box_of(control)
-	if box is StyleBoxFlat:
-		var flat := box as StyleBoxFlat
-		return float(maxi(maxi(flat.corner_radius_top_left, flat.corner_radius_top_right),
-				maxi(flat.corner_radius_bottom_left, flat.corner_radius_bottom_right)))
-	return 0.0
-
-
-## 取控件"实际生效"的样式盒(用来还原它的形状)
-static func _style_box_of(control: Control) -> StyleBox:
-	if control is Button:
-		var btn := control as Button
-		for name in ["normal", "pressed", "hover"]:
-			var box := btn.get_theme_stylebox(name)
-			if box:
-				return box
-	elif control is Panel:
-		var panel_box := (control as Panel).get_theme_stylebox("panel")
-		if panel_box:
-			return panel_box
-	var fallback := control.get_theme_stylebox("panel")
-	return fallback
-
-
 ## 把样式盒画出来的最小画布(只用来生成轮廓 alpha)
 class ContourPainter extends Control:
 	var box: StyleBox
@@ -317,6 +313,7 @@ class ContourPainter extends Control:
 ## 每帧维护轮廓: 验证离屏快照是否真的渲出了内容, 并让轮廓跟随目标移动/缩放
 func _tick_silhouette() -> void:
 	if _sil_view == null or not is_instance_valid(_sil_view) or _sil_rect_index < 0:
+		_retry_silhouette()
 		return
 	if _sil_check_frames > 0:
 		_sil_check_frames -= 1
@@ -332,7 +329,7 @@ func _tick_silhouette() -> void:
 	var node: Node = _targets[_sil_rect_index]
 	if not is_instance_valid(node):
 		return
-	var rect := screen_rect(node)
+	var rect := FocusRectTool.screen_rect(node)
 	if rect.size == Vector2.ZERO or rect == _sil_rect:
 		return
 	if rect.size != _sil_rect.size and _sil_view == _contour_view:
@@ -386,12 +383,12 @@ func _build_3d_silhouette(target: Node3D, index: int) -> void:
 	_sil_ok = true
 	_sil_check_frames = 0  # 3D 重渲是稳定的, 不需要验证
 	var layer_bit := 1 << (highlight_layer - 1)
-	for visual in _visuals_of(_sil_target):
+	for visual in FocusRectTool._visuals_of(_sil_target):
 		if not _sil_layers_backup.has(visual):
 			_sil_layers_backup[visual] = visual.layers
 		visual.layers = layer_bit
 	# 相机的 cull_mask 同样筛光源, 光源不进这一层物体就全黑
-	for light_node in _collect_lights(_sil_target.get_viewport()):
+	for light_node in FocusRectTool._collect_lights(_sil_target.get_viewport()):
 		if not _sil_layers_backup.has(light_node):
 			_sil_layers_backup[light_node] = light_node.layers
 		light_node.layers = light_node.layers | layer_bit
@@ -515,6 +512,7 @@ func _release_presentation() -> void:
 	_sil_target = null
 	_sil_rect_index = -1
 	_sil_rect = Rect2()
+	_sil_retry = 0
 	_contour_view = null
 	_promoted.clear()
 	if _spot:
@@ -675,6 +673,12 @@ func _contains(pos: Vector2) -> bool:
 # 几何
 # ------------------------------------------------------------
 
+## 外部(测试/项目代码)仍按 FocusMask.screen_rect 调用: 这里只转发.
+## 别把几何实现复制回来 —— 两份口径迟早会漂. 实现在 FocusRectTool.
+static func screen_rect(node: Node) -> Rect2:
+	return FocusRectTool.screen_rect(node)
+
+
 func _update_geometry() -> void:
 	var view := _viewport_size()
 	var hit_rects: Array[Rect2] = []
@@ -685,7 +689,7 @@ func _update_geometry() -> void:
 			var node := _targets[i]
 			if not is_instance_valid(node) or not node.is_inside_tree():
 				continue
-			var rect := screen_rect(node)
+			var rect := FocusRectTool.screen_rect(node)
 			if rect.size == Vector2.ZERO:
 				# 目标被裁剪/还没排版好: 退到承载它的那块面板(子视口目标), 不能一片黑
 				rect = _panel_rect(node)
@@ -706,7 +710,7 @@ func _update_geometry() -> void:
 					push_warning("FocusMask: 目标超过 %d 个, 超出的不会被点亮/描边" % MAX_RECTS)
 				break
 			hit_rects.append(rect)
-			radii.append(_corner_radius_of(node))
+			radii.append(FocusRectTool._corner_radius_of(node))
 	if hit_rects == _hit_rects and radii == _hit_radii and view == _screen_size:
 		return
 	_hit_rects = hit_rects
@@ -722,17 +726,11 @@ func _viewport_size() -> Vector2:
 	# headless/dummy DisplayServer 下 root viewport 可能是 0×0 甚至 1×1，
 	# 直接用项目设计分辨率，UI 几何/命中区才可测（否则教程类测试会假红）。
 	if DisplayServer.get_name() == "headless":
-		return _design_size()
+		return FocusRectTool._design_size()
 	var size := get_viewport_rect().size
 	if size.x > 0.0 and size.y > 0.0:
 		return size
-	return _design_size()
-
-
-func _design_size() -> Vector2:
-	return Vector2(
-		float(ProjectSettings.get_setting("display/window/size/viewport_width", 1152)),
-		float(ProjectSettings.get_setting("display/window/size/viewport_height", 648)))
+	return FocusRectTool._design_size()
 
 
 ## 目标自己算不出矩形时, 用它所在的 SubView3D 面板(屏幕区域)兜底
@@ -740,7 +738,7 @@ func _panel_rect(node: Node) -> Rect2:
 	var promoted: Node = _promoted.get(node)
 	if promoted == null or promoted == node:
 		return Rect2()
-	return screen_rect(promoted)
+	return FocusRectTool.screen_rect(promoted)
 
 
 func _merged_rects() -> Rect2:
@@ -781,212 +779,3 @@ func _sync_bubble() -> void:
 		return
 	var view := _screen_size if _screen_size != Vector2.ZERO else get_viewport_rect().size
 	DialogueTool.set_anchor(_merged_rects(), view)
-
-
-# ------------------------------------------------------------
-# 目标 → 屏幕矩形(2D 控件 / Node2D 精灵 / 3D 模型 / 子视口贴面通用)
-# ------------------------------------------------------------
-
-## 节点在屏幕上的可见矩形(失败返回空 Rect2)
-static func screen_rect(node: Node) -> Rect2:
-	if node == null or not node.is_inside_tree():
-		return Rect2()
-	var rect := Rect2()
-	if node is Node3D:
-		rect = _rect_3d(node as Node3D)
-	elif node is CanvasItem:
-		rect = _rect_2d(node as CanvasItem)
-	if rect.size == Vector2.ZERO:
-		return Rect2()
-	# UI 或 3D 画在子视口里(贴图面渲染到 3D 屏幕等)时, 换回主视口坐标
-	return _sub_view_screen_rect(node.get_viewport(), rect)
-
-
-## CanvasItem → 画布矩形: 合并自身与可见子级(父节点可作为"多目标同框"的目标)
-static func _rect_2d(item: CanvasItem) -> Rect2:
-	var rects: Array[Rect2] = []
-	_collect_canvas_rects(item, rects)
-	if rects.is_empty():
-		var origin := item.get_global_transform_with_canvas().origin
-		return Rect2(origin - Vector2.ONE * 0.5, Vector2.ONE)
-	var rect := rects[0]
-	for i in range(1, rects.size()):
-		rect = rect.merge(rects[i])
-	return rect
-
-
-## 子视口内的矩形 → 屏幕矩形。
-## 逐层往上映射: 子视口 → 承载它的 SubView3D → 该面板所在视口 → … → 主视口。
-## (嵌套子视口只映射一层会得到"外层视口坐标"而不是屏幕坐标, 高亮就会跑到左上角)
-static func _sub_view_screen_rect(viewport: Viewport, rect: Rect2) -> Rect2:
-	var current := rect
-	var vp: Viewport = viewport
-	var guard := 0
-	while vp is SubViewport and guard < 8:
-		var panel := _find_panel(vp)
-		if panel == null:
-			break
-		current = panel.viewport_rect_to_screen(current)
-		vp = panel.get_viewport()
-		guard += 1
-	return current
-
-
-## 找到承载某个子视口的 SubView3D(沿祖先链)
-static func _find_panel(viewport: Viewport) -> SubView3D:
-	var node := viewport.get_parent()
-	while node:
-		if node is SubView3D and (node as SubView3D).viewport == viewport:
-			return node as SubView3D
-		node = node.get_parent()
-	return null
-
-
-## Node3D → 屏幕矩形。统一用"可见 mesh 世界 AABB 合并投影"而非顶点投影
-static func _rect_3d(node: Node3D) -> Rect2:
-	var cam := node.get_viewport().get_camera_3d()
-	if cam == null:
-		return Rect2()
-	var aabb := _visible_mesh_aabb(node)
-	if aabb.size == Vector3.ZERO:
-		aabb = _global_aabb(node)  # 无可见网格 → 退回整体 AABB
-	if aabb.size == Vector3.ZERO:
-		aabb = _collision_aabb(node)  # 只有碰撞盒的交互体(Area3D 之类): 用碰撞形状估矩形
-	if cam.is_position_behind(aabb.get_center()):
-		return Rect2()
-	var rect := Rect2()
-	for i in 8:
-		var p := cam.unproject_position(aabb.get_endpoint(i))
-		rect = rect.expand(p) if i > 0 else Rect2(p, Vector2.ZERO)
-	if rect.size == Vector2.ZERO:
-		# 所有角投影重叠(目标极小/极远): 以中心投影点为单位矩形兜底
-		var c := cam.unproject_position(aabb.get_center())
-		return Rect2(c - Vector2.ONE * 0.5, Vector2.ONE)
-	return rect
-
-
-## 汇总"真实显示中"的网格世界 AABB(合并), 收所有可见 MeshInstance3D 与 Label3D
-static func _visible_mesh_aabb(node: Node3D) -> AABB:
-	if not node.is_visible_in_tree():
-		return AABB()
-	var result := AABB()
-	var found := false
-	if node is MeshInstance3D and (node as MeshInstance3D).mesh:
-		result = (node as MeshInstance3D).global_transform * (node as MeshInstance3D).mesh.get_aabb()
-		found = true
-	elif node is Label3D and (node as VisualInstance3D).get_aabb().size != Vector3.ZERO:
-		result = (node as Node3D).global_transform * (node as VisualInstance3D).get_aabb()
-		found = true
-	for child in node.get_children():
-		if child is Node3D:
-			var aabb := _visible_mesh_aabb(child)
-			if aabb.size != Vector3.ZERO:
-				result = result.merge(aabb) if found else aabb
-				found = true
-	return result
-
-
-## 只有碰撞盒、没有可见网格的交互体(Area3D/StaticBody3D 之类):
-## 用它子级 CollisionShape3D 的形状拼出世界 AABB, 否则目标会退化成 1x1 ⇒ 看起来"没高亮"
-static func _collision_aabb(node: Node3D) -> AABB:
-	var result := AABB()
-	var found := false
-	for child in node.find_children("*", "CollisionShape3D", true, false):
-		var box := _shape_aabb(child as CollisionShape3D)
-		if box.size == Vector3.ZERO:
-			continue
-		result = result.merge(box) if found else box
-		found = true
-	return result
-
-
-## 单个 CollisionShape3D 的世界 AABB(按形状尺寸取 8 角投影)
-static func _shape_aabb(shape_node: CollisionShape3D) -> AABB:
-	var shape := shape_node.shape
-	if shape == null:
-		return AABB()
-	var size := Vector3.ZERO
-	if shape is BoxShape3D:
-		size = (shape as BoxShape3D).size
-	elif shape is SphereShape3D:
-		size = Vector3.ONE * (shape as SphereShape3D).radius * 2.0
-	elif shape is CapsuleShape3D:
-		var capsule := shape as CapsuleShape3D
-		size = Vector3(capsule.radius * 2.0, capsule.height, capsule.radius * 2.0)
-	elif shape is CylinderShape3D:
-		var cylinder := shape as CylinderShape3D
-		size = Vector3(cylinder.radius * 2.0, cylinder.height, cylinder.radius * 2.0)
-	if size == Vector3.ZERO:
-		return AABB()
-	var xform := shape_node.global_transform
-	var local := AABB(-size * 0.5, size)
-	var result := AABB(xform * local.position, Vector3.ZERO)
-	for i in 8:
-		result = result.expand(xform * local.get_endpoint(i))
-	return result
-
-
-## 汇总节点(含子级)的全局 AABB
-static func _global_aabb(node: Node3D) -> AABB:
-	if node is VisualInstance3D:
-		return (node as VisualInstance3D).global_transform * (node as VisualInstance3D).get_aabb()
-	var result := AABB()
-	var found := false
-	for child in node.get_children():
-		if child is Node3D:
-			var aabb := _global_aabb(child)
-			if aabb.size == Vector3.ZERO and not found:
-				continue
-			result = result.merge(aabb) if found else aabb
-			found = true
-	if not found:
-		return AABB(node.global_position, Vector3.ZERO)
-	return result
-
-
-## 收集 CanvasItem(含子级, 仅可见)的画布坐标矩形
-static func _collect_canvas_rects(item: CanvasItem, result: Array[Rect2]) -> void:
-	if not item.visible:
-		return
-	if item is Control:
-		result.append((item as Control).get_global_rect())
-	elif item is Sprite2D:
-		var local := (item as Sprite2D).get_rect()
-		if local.size != Vector2.ZERO:
-			result.append(_canvas_rect(item, local))
-	for child in item.get_children():
-		if child is CanvasItem:
-			_collect_canvas_rects(child, result)
-
-
-## 局部矩形 → 画布坐标包围矩形(Node2D 经 global_transform_with_canvas 投影)
-static func _canvas_rect(item: Node2D, local_rect: Rect2) -> Rect2:
-	var t := item.get_global_transform_with_canvas()
-	var p1 := t * local_rect.position
-	var p2 := t * (local_rect.position + local_rect.size)
-	return Rect2(
-		Vector2(minf(p1.x, p2.x), minf(p1.y, p2.y)),
-		Vector2(absf(p2.x - p1.x), absf(p2.y - p1.y)))
-
-
-# ------------------------------------------------------------
-# 辅助
-# ------------------------------------------------------------
-
-static func _collect_lights(node: Node) -> Array[Light3D]:
-	var result: Array[Light3D] = []
-	if node is Light3D:
-		result.append(node)
-	for child in node.get_children():
-		result.append_array(_collect_lights(child))
-	return result
-
-
-## 目标自身及子级里所有真实参与绘制的实例(Area3D 本身不画, 画的是它的 mesh 子节点)
-static func _visuals_of(node: Node) -> Array[VisualInstance3D]:
-	var result: Array[VisualInstance3D] = []
-	if node is VisualInstance3D:
-		result.append(node)
-	for child in node.get_children():
-		result.append_array(_visuals_of(child))
-	return result

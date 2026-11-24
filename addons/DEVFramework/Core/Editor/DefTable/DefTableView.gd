@@ -1,5 +1,5 @@
 @tool
-## DefTable 顶部 Main Screen: 按 Def 类型目录加载 Def 资源(.tres),
+## DefTable 顶部 Main Screen: 按 Def 类型目录加载 Def 资源(.tres)。
 class_name DefTableView
 extends Control
 
@@ -10,7 +10,7 @@ const ROW_HEIGHT := DefTableGrid.MIN_ROW_HEIGHT
 ## Def 根目录: 复用 Def 的唯一常量, 避免多处各写一份字面量而漂移
 const DEFS_BASE := Def.DEFS_BASE
 const MAX_COL_WIDTH := 600.0
-## 单元格内容左右内边距(与 DefTableCell 的 CELL_MARGIN_L/R 一致):
+## 单元格内容左右内边距(与 DefTableCell 的 CELL_MARGIN_L/R 一致)。
 const CELL_PADDING := 8.0
 ## 行高垂直余量: 叠加在字体实测高度上, 给文字上下留呼吸感(单行与多行行高共用)
 const ROW_V_PADDING := 8.0
@@ -102,7 +102,7 @@ func _ready() -> void:
 	refresh_btn.pressed.connect(_on_refresh_pressed)
 	dir_tree.item_selected.connect(_on_dir_selected)
 	_setup_hover_highlight()
-	# 用 _shortcut_input 处理快捷键(Ctrl+C/V 在编辑器里可能先被编辑器自身的快捷键消费,
+	# 用 _shortcut_input 处理快捷键(Ctrl+C/V 在编辑器里可能先被编辑器自身的快捷键消费)。
 	set_process_shortcut_input(true)
 	set_process_unhandled_input(true)
 
@@ -227,10 +227,11 @@ func _load_dir(path: String) -> void:
 	_clear_measure_cache()
 	_compute_layout()
 	_rebuild_header()
+	## 先清选区再渲染: 否则新数据会按旧坐标点亮格子
+	edited_cells.clear()
 	_update_visible_rows(true)
 	count_label.text = "共 %d 个 Def" % rows.size()
 	sel_label.text = "未选中"
-	edited_cells.clear()
 
 
 ## 清空网格中所有单元格节点(目录切换/列结构变化时调用)。
@@ -298,13 +299,20 @@ func can_display_property(p: Dictionary) -> bool:
 	return true
 
 
-func _is_derived_col(col: int) -> bool:
-	return col < 1
+## 名称列的显示名. 不走 Def.name getter: 那个 getter 每读一次都回写 resource_name,
+## 排序/布局/复制时会被反复触发.
+static func _display_name(res: Resource) -> String:
+	if res.resource_path != "":
+		return res.resource_path.get_file().get_basename()
+	if res.is_built_in():
+		var s := res.get_script()
+		return s.get_global_name() if s != null else res.get_class()
+	return res.resource_name
 
 
 func _get_value(res: Resource, col: int) -> Variant:
 	if col == 0:
-		return res.get("name") if "name" in res else res.resource_path.get_file().get_basename()
+		return _display_name(res) if res is Def else res.get("name") if "name" in res else res.resource_path.get_file().get_basename()
 	var pname: StringName = columns[col]
 	return res.get(pname)
 
@@ -315,12 +323,17 @@ func _to_text(value, col: int) -> String:
 	match column_types[col]:
 		TYPE_STRING:
 			return str(value)
-		TYPE_INT, TYPE_FLOAT:
+		TYPE_INT:
+			# 枚举列显示标签而不是裸数字(带 ":值" 的 hint_string 也认)
+			if column_hints[col] == PROPERTY_HINT_ENUM:
+				return _enum_label(column_hint_strings[col], value)
+			return str(value)
+		TYPE_FLOAT:
 			return str(value)
 		TYPE_BOOL:
 			return "true" if value else "false"
 		TYPE_COLOR:
-			return (value as Color).to_html(false)
+			return (value as Color).to_html(true)
 		TYPE_OBJECT:
 			if value is Resource:
 				return _resource_display_text(value)
@@ -338,10 +351,6 @@ func _to_text(value, col: int) -> String:
 		TYPE_NIL:
 			return ""
 		_:
-			if column_hints[col] == PROPERTY_HINT_ENUM:
-				var opts := column_hint_strings[col]
-				if value is int and value >= 0 and value < opts.size():
-					return opts[value]
 			return str(value)
 
 
@@ -367,24 +376,40 @@ func _resource_display_text(value: Resource) -> String:
 		return s
 	if value.resource_path != "":
 		return value.resource_path.get_file().get_basename()
-	return s
+	# 内建/子资源没有路径: 退回类名, 别把 "<Class#id>" 这种串显示给用户
+	return value.get_class()
 
 
 ## 解析粘贴文本为列值。返回 {ok: bool, value: Variant, error: String}
 func _from_text(text: String, col: int) -> Dictionary:
 	var type_name := _type_display_name(column_types[col])
 	if text == "":
-		return {"ok": true, "value": null, "error": ""}
+		# 空文本只有资源列能表达"清空引用"; 其它类型赋 null 会被引擎静默拒绝, 报错比假装成功安全
+		match column_types[col]:
+			TYPE_OBJECT:
+				return _ok(null)
+			TYPE_STRING:
+				return _ok("")
+			TYPE_STRING_NAME:
+				return _ok(&"")
+			TYPE_NODE_PATH:
+				return _ok(NodePath(""))
+		return _err("空文本不能赋给 %s 列" % type_name)
 	match column_types[col]:
 		TYPE_STRING:
+			# 纯文本按原样保留: str_to_var("007") 得到 7, 赋回 String 属性会被引擎拒绝
 			var v = str_to_var(text)
-			return _ok(v if v != null else text)
+			return _ok(v if v is String else text)
+		TYPE_STRING_NAME:
+			return _ok(StringName(text))
+		TYPE_NODE_PATH:
+			return _ok(NodePath(text))
 		TYPE_INT:
 			if column_hints[col] == PROPERTY_HINT_ENUM:
 				var opts := column_hint_strings[col]
-				var idx := opts.find(text)
-				if idx >= 0:
-					return _ok(idx)
+				var hit := _enum_value(opts, text)
+				if hit["found"]:
+					return _ok(hit["value"])
 				if text.is_valid_int():
 					return _ok(text.to_int())
 				return _err("期望枚举 %s, 得到 '%s'" % [type_name, text])
@@ -439,7 +464,12 @@ func _from_text(text: String, col: int) -> Dictionary:
 				return _ok(sv)
 			return _err("期望字典(JSON), 得到 '%s'" % text)
 		_:
-			return _ok(str_to_var(text))
+			# Vector/Rect/Transform 等只认 Variant 字面量(Vector3(0, 1, 0)).
+			# type_convert 对这类文本会静默给出全零值, 不能当兜底, 所以解析失败就直接报错.
+			var gv = str_to_var(text)
+			if gv == null or typeof(gv) != column_types[col]:
+				return _err("无法解析为 %s: '%s'(手输要写 %s(...) 字面量)" % [type_name, text, type_name])
+			return _ok(gv)
 
 
 func _ok(value) -> Dictionary:
@@ -448,6 +478,32 @@ func _ok(value) -> Dictionary:
 
 func _err(msg: String) -> Dictionary:
 	return {"ok": false, "value": null, "error": msg}
+
+
+## 枚举 hint_string 的取值: 带 ":值" 的用冒号后的数, 否则下标即值.
+static func _enum_value(opts: PackedStringArray, text: String) -> Dictionary:
+	for i in opts.size():
+		var o := opts[i]
+		var sep := o.rfind(":")
+		if sep > 0 and o.substr(sep + 1).is_valid_int():
+			if o.substr(0, sep) == text:
+				return {"found": true, "value": o.substr(sep + 1).to_int()}
+		elif o == text:
+			return {"found": true, "value": i}
+	return {"found": false, "value": 0}
+
+
+## 枚举值的显示文本, 与 _enum_value 互为反向.
+static func _enum_label(opts: PackedStringArray, value: int) -> String:
+	for i in opts.size():
+		var o := opts[i]
+		var sep := o.rfind(":")
+		if sep > 0 and o.substr(sep + 1).is_valid_int():
+			if o.substr(sep + 1).to_int() == value:
+				return o.substr(0, sep)
+		elif i == value:
+			return o
+	return str(value)
 
 
 func _type_display_name(t: int) -> String:
@@ -461,7 +517,8 @@ func _type_display_name(t: int) -> String:
 		TYPE_ARRAY: return "array"
 		TYPE_DICTIONARY: return "dictionary"
 		_:
-			return "value"
+			# 向量/矩形/变换等留给引擎自己命名, 报错时才说得清是哪种类型
+			return type_string(t)
 
 
 ## 将序列化的 JSON 值还原为实际值(资源路径 -> load, 数组/字典递归)
@@ -537,7 +594,7 @@ func _compare_values(a, b) -> bool:
 
 ## 计算列宽 + 行高 (单次遍历, 缓存文本测量结果)
 ##   · 文本经 _cell_text 缓存, 布局与渲染共享一份(计算型 getter 只算一次)
-##   · 仅含显式换行的内容做 RTL 实测撑行; 单行内容(BBCode 与否)固定行高,
+##   · 仅含显式换行的内容做 RTL 实测撑行; 单行内容(BBCode 与否)固定行高。
 func _compute_layout() -> void:
 	var font := get_theme_font("font", "Label")
 	var fsize := get_theme_font_size("font", "Label")
@@ -574,10 +631,10 @@ func _compute_layout() -> void:
 			var tw := _measure_text_width(measure_text, font, fsize)
 			if is_bb:
 				tw += text.count("[img]") * IMG_PREVIEW_MIN_WIDTH
-			# 列宽扩到能容纳单行文本: 留足 CELL_PADDING 余量,
+			# 列宽扩到能容纳单行文本: 留足 CELL_PADDING 余量。
 			if tw + CELL_PADDING >= column_widths[col] and column_widths[col] < MAX_COL_WIDTH:
 				column_widths[col] = minf(tw + CELL_PADDING, MAX_COL_WIDTH)
-			# 自动行高: 仅显式多行内容(字典/数组/多段描述)按实际渲染高度撑行;
+			# 自动行高: 仅显式多行内容(字典/数组/多段描述)按实际渲染高度撑行。
 			if measure_text.contains("\n"):
 				var lh := _measure_bbcode_height(text, column_widths[col] - CELL_PADDING)
 				if lh > row_h:
@@ -621,7 +678,7 @@ func _measure_bbcode_height(text: String, width: float) -> float:
 	return rtl.get_content_height() + ROW_V_PADDING
 
 
-## 测量当前主题下单行文本实际高度 + 垂直余量(替代硬编码 ROW_HEIGHT, 适配不同编辑器字号;
+## 测量当前主题下单行文本实际高度 + 垂直余量(替代硬编码 ROW_HEIGHT, 适配不同编辑器字号)。
 func _measure_line_height() -> float:
 	if not is_inside_tree():
 		return ROW_HEIGHT
@@ -635,7 +692,8 @@ func _measure_line_height() -> float:
 
 ## 粗略检测 BBCode(如 [img]/[color]/[font]), 此类文本不参与行高扩展
 func _is_bbcode(text: String) -> bool:
-	return text.contains("[img]") or text.contains("[color") or text.contains("[font") or text.contains("[icon")
+	# 任何 [tag] 都按标记处理: 只认 4 种标签时 [b]/[i] 既算进列宽, 又会被 RichTextLabel 当样式吃掉
+	return text.contains("[")
 
 
 static var _re_img: RegEx
@@ -659,10 +717,12 @@ func _strip_bbcode(text: String) -> String:
 func _measure_text_width(text: String, font: Font, fsize: int) -> float:
 	if text == "" or font == null:
 		return 0.0
-	if _width_cache.has(text):
-		return _width_cache[text]
+	# 键必须带字体与字号: 编辑器换字号/表头与单元格字体不同, 只按文本做键会互相串宽度
+	var key := "%d/%d/%s" % [font.get_instance_id(), fsize, text]
+	if _width_cache.has(key):
+		return _width_cache[key]
 	var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize).x
-	_width_cache[text] = w
+	_width_cache[key] = w
 	return w
 
 
@@ -712,7 +772,7 @@ func _make_header_button(col: int) -> Button:
 	btn.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	btn.pressed.connect(_on_header_pressed.bind(col))
 	btn.tooltip_text = String(columns[col])
-	# 表头分隔线。去掉主题默认内容边距, 让按钮宽度=列宽,
+	# 表头分隔线。去掉主题默认内容边距, 让按钮宽度=列宽。
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.16, 0.16, 0.18, 0.35)
 	sb.set_border_width_all(0)
@@ -744,6 +804,8 @@ func _on_header_pressed(col: int) -> void:
 		sorting_by = col_name
 		sorting_reverse = false
 	_sort_rows()
+	# 排序重排了行: 旧选区坐标现在指向别的 Def, 复制/粘贴会打错对象, 直接清掉
+	_deselect_all()
 	_update_header_arrows()
 	_update_visible_rows(true)
 
@@ -790,7 +852,7 @@ func _update_visible_rows(force_rebuild: bool = false) -> void:
 
 	var view_h := maxf(grid_scroll.size.y, 1.0)
 	var new_first: int = grid.row_index_at(grid_scroll.scroll_vertical)
-	# 累加起点必须是首行的绝对偏移 row_offsets[new_first], 而非 scroll_vertical:
+	# 累加起点必须是首行的绝对偏移 row_offsets[new_first], 而非 scroll_vertical。
 	var acc := 0.0
 	if grid.row_offsets.size() > 0:
 		acc = grid.row_offsets[new_first]
@@ -799,6 +861,13 @@ func _update_visible_rows(force_rebuild: bool = false) -> void:
 		acc += grid.row_heights[new_first + vis_count]
 		vis_count += 1
 	var new_last := mini(new_first + vis_count + 1, rows.size())
+	# 先按当前列宽重算偏移, 再算可见列窗口: 反过来的话第一帧与改列宽后都是拿上一版偏移判断, 会只显示一列或多出/缺列
+	grid.column_offset = 1
+	grid.configure(_scroll_column_widths(), rows.size())
+	frozen_grid.column_offset = 0
+	var frozen_widths: Array[float] = [column_widths[0]]
+	frozen_grid.configure(frozen_widths, rows.size())
+
 	# 列窗口先于早退计算: 纯水平滚动不改行窗口, 仍需走列增删
 	var cols_changed := _compute_visible_cols()
 	if not force_rebuild and new_first == first_row and new_last == last_row and not cols_changed:
@@ -806,13 +875,6 @@ func _update_visible_rows(force_rebuild: bool = false) -> void:
 
 	first_row = new_first
 	last_row = new_last
-
-	# 网格总行数/列宽配置(供滚动定位与布局); 冻结列宽需显式构造类型化数组
-	grid.column_offset = 1
-	grid.configure(_scroll_column_widths(), rows.size())
-	frozen_grid.column_offset = 0
-	var frozen_widths: Array[float] = [column_widths[0]]
-	frozen_grid.configure(frozen_widths, rows.size())
 
 	# 双轴虚拟化: 出窗行整行回收入池; 进场行物化(收编池行携带格); 水平变化时逐行增删列
 	for row in _live_rows.keys():
@@ -865,6 +927,7 @@ func _pool_give_cell(cell: DefTableCellClass, frozen: bool) -> void:
 	if bucket.size() < CELL_POOL_MAX_PER_KIND:
 		bucket.append(cell)
 	else:
+		_cell_fill_cache.erase(cell.get_instance_id())
 		cell.queue_free()
 
 
@@ -1069,7 +1132,7 @@ func _backfill_resource_previews() -> void:
 				_request_resource_preview(cell, v)
 
 
-## 行染色(don-tnowe row stylization): 取该行首个有效 Color 值, 低透明度染整行;
+## 行染色(don-tnowe row stylization): 取该行首个有效 Color 值, 低透明度染整行。
 func _compute_row_tints() -> void:
 	_row_tints.clear()
 	for r in rows.size():
@@ -1096,7 +1159,7 @@ func _row_tint_for(row: int) -> Color:
 	return tint
 
 
-## 悬停行高亮(B3, Excel crosshair 风格): 由 DefTableGrid 自绘(hover_row 属性),
+## 悬停行高亮(B3, Excel crosshair 风格): 由 DefTableGrid 自绘(hover_row 属性)。
 func _setup_hover_highlight() -> void:
 	grid.mouse_exited.connect(func() -> void: _set_hover_row(-1))
 	frozen_grid.mouse_exited.connect(func() -> void: _set_hover_row(-1))
@@ -1201,6 +1264,9 @@ func _fill_cell(cell: DefTableCellClass, pos: Vector2i, tint: Color = Color(1, 1
 				var cval = _get_value(rows[pos.y], pos.x)
 				if cval is Color:
 					cell.set_color_value(cval)
+				else:
+					# 池化复用: 该行没有颜色值时必须清掉上一格留下的色块
+					cell.set_color_value(Color(0, 0, 0, 0))
 			DefTableCellClass.Kind.RESOURCE:
 				cell.set_meta(&"preview_path", "")
 				cell.set_resource_preview(null)
@@ -1330,6 +1396,12 @@ func _select_cells_to(pos: Vector2i) -> void:
 		return
 	var col := edited_cells[0].x
 	if col != pos.x:
+		# 跨列连选不支持: 明确从哪里重新开始, 不能静默不动 —— 用户会以为已连选, 随后粘贴旧列
+		_deselect_all()
+		edited_cells.append(pos)
+		_set_cell_selected(pos, true)
+		_update_sel_label()
+		sel_label.text += " (仅支持同列连选)"
 		return
 	var last_row_idx := edited_cells[-1].y
 	var lo := mini(last_row_idx, pos.y)
@@ -1397,6 +1469,9 @@ func _schedule_scroll_update() -> void:
 	var seq := _scroll_seq
 	_update_visible_rows.call_deferred()
 	await get_tree().create_timer(0.12).timeout
+	# 定时器不随节点销毁而取消: 插件被停用/重载后恢复执行会报 "node was freed"
+	if not is_instance_valid(self) or not is_inside_tree():
+		return
 	if seq == _scroll_seq and _scroll_frame_pending:
 		# 120ms 内无新滚动事件: 视为已停止, 复位标志并补拉可见资源格预览
 		_scroll_frame_pending = false
@@ -1467,10 +1542,33 @@ func _cell_copy_text(value, col: int) -> String:
 			return value.resource_path
 		return ""
 	if t == TYPE_COLOR and value is Color:
-		return "#" + (value as Color).to_html(false)
+		return "#" + (value as Color).to_html(true)
 	if t == TYPE_ARRAY or t == TYPE_DICTIONARY or t == TYPE_PACKED_STRING_ARRAY or t == TYPE_PACKED_BYTE_ARRAY or t == TYPE_PACKED_INT32_ARRAY or t == TYPE_PACKED_INT64_ARRAY or t == TYPE_PACKED_FLOAT32_ARRAY or t == TYPE_PACKED_FLOAT64_ARRAY:
 		return JSON.stringify(_value_to_jsonable(value))
+	if t == TYPE_STRING or t == TYPE_STRING_NAME or t == TYPE_NODE_PATH:
+		# 单行纯文本给原文(粘到外部表格/文档才正确); 含换行或引号时退回字面量, 保证能往返
+		var s := str(value)
+		if not (value is String) or (not s.contains("\n") and not s.contains("\"")):
+			return s
+		return var_to_str(value)
 	return var_to_str(value)
+
+
+func _can_assign(old: Variant, newv: Variant) -> bool:
+	## 类型化数组遇到元素类型不符会整组清空(引擎静默过滤), 这里先拦住
+	if not (old is Array and old.is_typed()):
+		return true
+	if not (newv is Array):
+		return false
+	var script: Variant = old.get_typed_script()
+	var builtin: int = old.get_typed_builtin()
+	for item in newv:
+		if script != null:
+			if not (item is Object) or item.get_script() != script:
+				return false
+		elif builtin != TYPE_NIL and typeof(item) != builtin:
+			return false
+	return true
 
 
 func _paste_to_selected() -> void:
@@ -1522,16 +1620,27 @@ func _paste_to_selected() -> void:
 		var newv = values[i]
 		if old == newv:
 			continue
+		if not _can_assign(old, newv):
+			failed += 1
+			if first_error == "":
+				first_error = "%s 列的元素类型与属性 %s 不匹配" % [String(columns[pos.x]), String(pname)]
+			continue
 		changed += 1
 		undo_redo.add_do_property(res, pname, newv)
 		undo_redo.add_undo_property(res, pname, old)
 		edited_resources[res] = res.resource_path
-	undo_redo.add_do_method(self, "_persist_resources", edited_resources.keys(), edited_resources.values())
-	undo_redo.add_undo_method(self, "_persist_resources", edited_resources.keys(), edited_resources.values())
-	undo_redo.commit_action()
+	if changed == 0:
+		# 没有任何真实改动: 不提交事务, 免得白白存盘 + scan + 全量重载(选中/滚动全部复位)
+		undo_redo.cancel_action()
+	else:
+		undo_redo.add_do_method(self, "_persist_resources", edited_resources.keys(), edited_resources.values())
+		undo_redo.add_undo_method(self, "_persist_resources", edited_resources.keys(), edited_resources.values())
+		undo_redo.commit_action()
 
-	# 粘贴改值后文本/列宽/行高都可能变化: 失效缓存并整体重算布局
+	# 粘贴改值后文本/列宽/行高都可能变化: 失效缓存并整体重算布局。
+	# 填充缓存只按"格位 + 资源路径"做指纹, 不清掉的话值变了也不会重填。
 	_text_cache.clear()
+	_cell_fill_cache.clear()
 	_compute_layout()
 	_update_visible_rows(true)
 	_update_sel_label()
@@ -1546,11 +1655,21 @@ func _paste_to_selected() -> void:
 
 
 func _persist_resources(res_list: Array, path_list: Array) -> void:
+	var failed: Array[String] = []
 	for i in res_list.size():
 		var res: Resource = res_list[i]
 		var path: String = path_list[i]
-		if path != "":
-			ResourceSaver.save(res, path)
+		if path == "" or res == null:
+			continue
+		# 保存失败(只读/被 VCS 锁定/磁盘满)必须报出来: 否则界面显示已改, 磁盘还是旧值
+		var err := ResourceSaver.save(res, path)
+		if err != OK:
+			failed.append("%s(错误码 %d)" % [path, err])
+	if not failed.is_empty():
+		push_error("DefTable: 保存失败, 磁盘上的数据未更新: " + ", ".join(failed))
+		if is_instance_valid(sel_label):
+			sel_label.text = "保存失败: " + failed[0]
+		return
 	if editor_interface != null and editor_interface.get_resource_filesystem() != null:
 		editor_interface.get_resource_filesystem().scan()
 
@@ -1559,10 +1678,13 @@ func _shortcut_input(event: InputEvent) -> void:
 	# 仅当 DefTable 是当前激活的 Main Screen(可见)时才处理快捷键, 避免误吞编辑器其他处的 Ctrl+C/V
 	if not visible or not is_inside_tree():
 		return
-	# 处理 Ctrl+C / Ctrl+V 复制粘贴(在编辑器里 _shortcut_input 比 _unhandled_input 更早触发,
+	# 处理 Ctrl+C / Ctrl+V 复制粘贴(在编辑器里 _shortcut_input 比 _unhandled_input 更早触发)。
 	if event is InputEventKey:
 		var key_event := event as InputEventKey
 		if not key_event.pressed:
+			return
+		# 按住不放会每帧重复: 复制/粘贴没有必要跟着重复
+		if key_event.is_echo():
 			return
 		var is_ctrl: bool = key_event.is_command_or_control_pressed()
 		var keycode: Key = key_event.keycode
@@ -1586,10 +1708,16 @@ func _shortcut_input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# 与 _shortcut_input 同一条守卫: 切到别的编辑器主屏后表格仍挂在树上, 隐藏时不能吞方向键
+	if not visible or not is_inside_tree():
+		return
 	if not (event is InputEventKey):
 		return
 	var key_event := event as InputEventKey
 	if not key_event.pressed:
+		return
+	# 带修饰键的方向键留给编辑器(导航/split 切换), 这里只处理裸方向键
+	if key_event.is_command_or_control_pressed() or key_event.alt_pressed:
 		return
 	var keycode: Key = key_event.keycode
 	if keycode == KEY_UP or keycode == KEY_DOWN:
@@ -1601,7 +1729,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _navigate_vertical(delta: int) -> void:
-	if edited_cells.size() == 0:
+	if edited_cells.size() == 0 or rows.is_empty():
 		return
 	var col := edited_cells[0].x
 	var target_y := edited_cells[-1].y + delta
@@ -1617,18 +1745,45 @@ func _navigate_vertical(delta: int) -> void:
 
 
 func _navigate_horizontal(delta: int) -> void:
-	if edited_cells.size() == 0:
+	if edited_cells.size() == 0 or columns.is_empty():
 		return
 	var current_y := edited_cells[-1].y
 	var col := clampi(edited_cells[0].x + delta, 0, columns.size() - 1)
 	_deselect_all()
 	var new_pos := Vector2i(col, current_y)
 	edited_cells.append(new_pos)
+	_ensure_col_visible(col)
+	# ensure 可能重建格子, 选中态要在之后刷
 	_set_cell_selected(new_pos, true)
 	_update_sel_label()
+	if editor_interface != null and current_y < rows.size():
+		editor_interface.edit_resource(rows[current_y])
+
+
+## 横向滚动到列可见(列 0 是冻结的 name 列, 不参与滚动)
+func _ensure_col_visible(col: int) -> void:
+	var idx := col - 1
+	if idx < 0 or idx >= grid.column_offsets.size():
+		return
+	var x: float = grid.column_offsets[idx]
+	var w: float = column_widths[col] if col < column_widths.size() else 0.0
+	var view_w := maxf(grid_scroll.size.x, 1.0)
+	var sh := float(grid_scroll.scroll_horizontal)
+	if x < sh:
+		grid_scroll.scroll_horizontal = x
+	elif x + w > sh + view_w:
+		grid_scroll.scroll_horizontal = x + w - view_w
 
 
 func _ensure_row_visible(row: int) -> void:
-	if row < first_row or row >= last_row:
-		if row < grid.row_offsets.size():
-			grid_scroll.scroll_vertical = grid.row_offsets[row]
+	## 只在不完全可见时最小幅度滚动: 一律把目标行顶到首行会让连按方向键变成跳页
+	if row < 0 or row >= grid.row_offsets.size():
+		return
+	var top: float = grid.row_offsets[row]
+	var h: float = grid.row_heights[row] if row < grid.row_heights.size() else ROW_HEIGHT
+	var view_h := maxf(grid_scroll.size.y, 1.0)
+	var v := float(grid_scroll.scroll_vertical)
+	if top < v:
+		grid_scroll.scroll_vertical = top
+	elif top + h > v + view_h:
+		grid_scroll.scroll_vertical = top + h - view_h

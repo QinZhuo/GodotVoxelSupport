@@ -112,7 +112,7 @@ var _pc_dilate := PackedByteArray()
 var _pc_restore := PackedByteArray()
 var _pc_dirty := true
 
-## 本效果实际运行过的视口尺寸（RenderSceneBuffersRD 的 internal size），
+## 本效果实际运行过的视口尺寸（RenderSceneBuffersRD 的 internal size）。
 var _active_sizes := {}
 
 
@@ -270,7 +270,7 @@ func _pack(mode: float) -> PackedByteArray:
 	var marker := marker_alpha()
 	# 判定区间 [marker, marker² + 2)：
 	# · 单层实际值是 1 + marker（blend_add 对 alpha 线性相加，实测）；
-	# · 同一像素上多层被标记网格重叠时会累加（1 + marker·k），
+	# · 同一像素上多层被标记网格重叠时会累加（1 + marker·k）。
 	var marker_lo := marker
 	var marker_hi := marker * marker + 2.0
 	var params := PackedFloat32Array([
@@ -316,7 +316,7 @@ func _render_callback(p_type: EffectCallbackType, p_data: RenderData) -> void:
 		var set_rid := UniformSetCacheRD.get_cache(shader, 0, [
 			_bind_image(0, bufs.get_color_layer(view)),
 		])
-		# ① 膨胀合成、② 标记 alpha 归位，必须分两个 compute list：
+		# ① 膨胀合成、② 标记 alpha 归位，必须分两个 compute list。
 		for pc in [_pc_dilate, _pc_restore]:
 			var cl := rd.compute_list_begin()
 			rd.compute_list_bind_compute_pipeline(cl, pipeline)

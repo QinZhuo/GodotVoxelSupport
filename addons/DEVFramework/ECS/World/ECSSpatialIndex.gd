@@ -2,14 +2,18 @@ class_name ECSSpatialIndex
 extends RefCounted
 
 ## ECS 空间索引 —— 网格分桶, 快速邻居查询。
+## 索引里存的是**行号**(与 world.query_rows / get_column 同一套下标, 列按行取值),
+## 不是实体 ID; 要实体对象请再走 world.query_entities(rows)。
 
 var world: ECSWorld
 var comp: Script          # 位置组件
 var field: StringName     # 位置字段
 var cell_size: float      # 网格单元大小
 
-var _cells := {}          # "gx,gy" -> Array[实体ID]
-var _cell_entities := {}  # 实体ID -> 所在格(快速移除)
+var _cells := {}          # "gx,gy" -> Array[行号]
+var _cell_entities := {}  # 行号 -> 所在格(快速移除)
+var _struct_v := -1       # 建索引时的全局结构版本
+var _comp_v := -1         # 建索引时该位置组件的结构版本
 
 ## 需要世界 + 位置组件 + 位置字段 + 网格大小
 func _init(p_world: ECSWorld, p_comp: Script, p_field: StringName = &"pos", p_cell_size: float = 64.0) -> void:
@@ -22,6 +26,9 @@ func _init(p_world: ECSWorld, p_comp: Script, p_field: StringName = &"pos", p_ce
 func rebuild() -> void:
 	_cells.clear()
 	_cell_entities.clear()
+	# 先记版本再取数据: 取的过程中若有结构变更, 下次查询会发现版本不符而重来
+	_struct_v = world.struct_version()
+	_comp_v = world.comp_version(comp)
 	var rows: PackedInt32Array = world.query_rows(comp, [], [])
 	var pos_col: PackedVector2Array = world.get_column(comp, field)
 	for e in rows:
@@ -33,8 +40,16 @@ func rebuild() -> void:
 		_cells[key].append(e)
 		_cell_entities[e] = key
 
-## 半径查询: 返回以 pos 为中心、radius 范围内(可能含 comp 组件)的实体 ID 数组。
+## 行号是 swap-remove 维护的, 结构一变(增删实体/组件)旧索引就会指向错行。
+## 三个查询入口都先过这里: 版本不符就地重建, 拿到的行号永远对应当前世界。
+func _ensure_fresh() -> void:
+	if _struct_v != world.struct_version() or _comp_v != world.comp_version(comp):
+		rebuild()
+
+
+## 半径查询: 返回以 pos 为中心、radius 范围内(含 comp 组件)的**行号**数组。
 func query_radius(pos: Vector2, radius: float) -> Array[int]:
+	_ensure_fresh()
 	var out: Array[int] = []
 	var radius2 := radius * radius
 	# 计算覆盖的网格范围
@@ -71,8 +86,9 @@ func query_nearest(pos: Vector2, radius: float) -> int:
 			best = e
 	return best
 
-## 快速最近实体: 只查所在格及相邻 8 格(比 query_nearest 的半径扫描快,
+## 快速最近实体: 只查所在格及相邻 8 格(比 query_nearest 的半径扫描快)。
 func query_cell_nearest(pos: Vector2, max_dist: float, exclude: int = -1) -> int:
+	_ensure_fresh()
 	var pos_col: PackedVector2Array = world.get_column(comp, field)
 	var best := -1
 	var best_d := max_dist * max_dist

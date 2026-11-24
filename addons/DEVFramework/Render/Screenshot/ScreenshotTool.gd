@@ -27,7 +27,7 @@ const COLOR_RAW := "raw"
 ## ---------------------------------------------------------------------------
 
 
-## 从视口纹理抓取一帧(不保存)。**返回的是原始读回数据, 未做任何颜色转换** ——
+## 从视口纹理抓取一帧(不保存)。**返回的是原始读回数据, 未做任何颜色转换**。
 static func grab(viewport: Viewport, opts: Dictionary = {}) -> Image:
 	if viewport == null:
 		return null
@@ -82,7 +82,7 @@ static func normalize(image: Image, opts: Dictionary = {}) -> Image:
 	if bool(opts.get("dither", false)):
 		_dither_to_rgba8(image, srgb)
 		return image
-	# 统一为 8 位 RGBA8: linear_to_srgb 只在该格式下有定义的良好行为,
+	# 统一为 8 位 RGBA8: linear_to_srgb 只在该格式下有定义的良好行为。
 	if image.get_format() != Image.FORMAT_RGBA8:
 		image.convert(Image.FORMAT_RGBA8)
 	# sRGB 校正: 把线性光值转回 sRGB 显示值(缺省开启)。
@@ -132,7 +132,7 @@ static func save_image(image: Image, opts: Dictionary = {}) -> Dictionary:
 		return _fail("保存失败: 图像为空", capture_type)
 	# 模式必须在 normalize 之前解析: 那之后格式已被统一成 RGBA8, 再判就永远是"非浮点"了。
 	var color_mode := resolve_color_mode(image, opts)
-	# 几何(缩放)排在颜色归一化之前 —— 缩放作用在原始读回数据上: 线性缓冲按线性值平均(物理正确),
+	# 几何(缩放)排在颜色归一化之前 —— 缩放作用在原始读回数据上: 线性缓冲按线性值平均(物理正确)。
 	image = _apply_geometry(image, opts)
 	image = normalize(image, opts)
 	var path := _resolve_path(opts)
@@ -189,7 +189,7 @@ static func list_shots(dir_res: String = DEFAULT_DIR_RES) -> PackedStringArray:
 
 # -------- 抖动量化(防 banding) --------
 
-## sRGB 编码查找表的步数。逐像素 pow() 在高分辨率出图时开销惊人(500 万像素 ≈ 1500 万次 pow),
+## sRGB 编码查找表的步数。逐像素 pow() 在高分辨率出图时开销惊人。
 const SRGB_LUT_STEPS := 1024
 
 ## sRGB 编码 LUT(线性光值 → sRGB 显示值)。延迟构建, 只建一次。

@@ -2,8 +2,8 @@
 extends RefCounted
 
 ## ======= 运行时（游戏进程）桥接 =======
-## 由 MCPDevServer 以 preload 常量 `MCPRuntime` 引用。**必须 @tool 且不声明 class_name**
-## 为什么这些必须集中在一处：它们全都围绕同一条判断"这条请求该在编辑器进程还是游戏进程执行"。
+## 由 MCPDevServer 以 preload 常量 `MCPRuntime` 引用。**必须 @tool 且不声明 class_name**。
+## 集中在一处的原因: 这些实现全都围绕同一条判断 —— 这条请求该在编辑器进程还是游戏进程执行。
 
 const MCPLogTools := preload("res://addons/DEVFramework/MCP/MCPLogTools.gd")
 
@@ -52,7 +52,7 @@ func _require_process(args: Dictionary) -> String:
 
 ## ------- run_tests: 双进程 -------
 
-## runtime 侧(服务器位于游戏进程内): 只能跑 game 用例。
+## runtime 侧(服务器位于游戏进程内): 只能跑 game 用例, editor 段无从执行。
 func call_run_tests_local(args: Dictionary) -> Dictionary:
 	return await _run_tests_start(args, TestRunner.MODE_GAME)
 
@@ -126,13 +126,13 @@ func _run_tests_in_game(args: Dictionary) -> Dictionary:
 		if bool(started.get("is_error", false)):
 			return started
 		auto_started = true
-		# 自动启动在调试线 15s 内未就绪时返回的是**成功文案**，这里必须区分开
+		# 自动启动在调试线 15s 内未就绪时, 启动本身仍返回成功文案, 故必须单独判就绪标志。
 		if not bool(server._game_ready):
 			return server._err_transient("已自动启动游戏, 但调试线 15 秒内未就绪, 本轮测试未执行",
 				"稍后重试; 或 game_control(action=start) 后确认游戏窗口已进入主场景再调 run_tests")
-		# 调试线就绪 ≠ 主场景初始化完：autoload 的 ready 早于场景根 _ready，此刻注入测试会插进
-		# 半初始化状态（实测：自动启动后立刻转发，首轮用例常因依赖对象还是 null 而失败）。
-		# ignore_time_scale=true：用例常把 time_scale 调高，等待不能被它缩短。
+		# 调试线就绪 ≠ 主场景初始化完: autoload 的 ready 早于场景根 _ready, 此刻注入测试会插进
+		# 半初始化状态, 首轮用例常因依赖对象还是 null 而失败。
+		# ignore_time_scale=true: 用例常把 time_scale 调高, 等待不能被它缩短。
 		await server.get_tree().create_timer(2.0, true, false, true).timeout
 	var raw: Dictionary = await server._call_runtime_proxy("run_tests", fwd)
 	if bool(raw.get("is_error", false)):
@@ -216,7 +216,7 @@ func call_game_control(args: Dictionary) -> Dictionary:
 		"continue":
 			return server._call_debug_continue({})
 		"start":
-			# 已在运行时自动停旧实例再启动：旧实例持有的是启动时固化的脚本，而
+			# 已在运行时自动停旧实例再启动：旧实例持有的是启动时固化的脚本, 而重启后才会重新读盘。
 			if _has_game_session():
 				await _call_stop_game({})
 				if not await _wait_game_stopped(5.0):
@@ -266,7 +266,7 @@ func _call_run_game(args: Dictionary) -> Dictionary:
 			return server._err_validation(
 				"必须提供 scene(要运行的场景 res:// 路径), 例如 res://Scenes/<主场景>.tscn",
 				"传入 scene 参数后重试。")
-	# uid:// → res://。解析失败时模块会先重扫 UID 缓存再重试一次 —— 编辑器重启后第一次启动
+	# uid:// → res://。解析失败时模块会先重扫 UID 缓存再重试一次(编辑器重启后首次启动常见)。
 	var scene: String = await server._mod("MCPScriptSync").resolve_scene_path(raw)
 	if scene.is_empty():
 		return server._err_validation("无法把%s解析为项目内资源路径: %s" % [source, raw],
@@ -277,7 +277,7 @@ func _call_run_game(args: Dictionary) -> Dictionary:
 	var scene_res: Resource = ResourceLoader.load(scene)
 	if not scene_res is PackedScene:
 		return server._fail("不是有效场景文件: %s(类型: %s)" % [scene, scene_res.get_class() if scene_res else "null"])
-	# 以调试模式启动(等效编辑器 F5)：编辑器自动建立 EngineDebugger 调试线，
+	# 以调试模式启动(等效编辑器 F5): 编辑器自动建立 EngineDebugger 调试线。
 	server._mod("MCPEditorEnv").play_custom_scene(scene)
 	var ok_ready := await _wait_game_ready(15.0)
 	if not ok_ready:
@@ -292,6 +292,8 @@ func _call_stop_game(_args: Dictionary) -> Dictionary:
 		return server._fail("当前没有运行中的游戏")
 	server._mod("MCPEditorEnv").stop_playing_scene()
 	server._game_ready = false
+	# 主动停止: 上一轮的错误副本不再代表当前状态, 别让下一次调用背上旧的"崩溃"提示
+	server._game_error_digest.clear()
 	return server._ok("已停止游戏")
 
 
@@ -338,6 +340,22 @@ func call_job_cancel_local(args: Dictionary) -> Dictionary:
 
 func call_job_cancel_routed(args: Dictionary) -> Dictionary:
 	return await _route_job("job_cancel", args, call_job_cancel_local)
+
+
+## 列出 job: 本地有就直接给本地; 本地空且有游戏会话时才去问游戏进程。
+## 与 wait/cancel 的"先探本地"不同 —— 列表没有 id 可探, 本地"空列表"本身不是答案。
+func call_job_list_local(_args: Dictionary) -> Dictionary:
+	return server._ok_json(JobTool.list())
+
+
+func call_job_list_routed(args: Dictionary) -> Dictionary:
+	var local: Dictionary = JobTool.list()
+	if int(local.get("count", 0)) > 0 or not _has_game_session():
+		return server._ok_json(local)
+	var r: Dictionary = await server._call_runtime_proxy("job_list", args)
+	if not bool(r.get("is_error", false)):
+		return r
+	return server._ok_json(local)
 
 
 ## ------- perf: 帧率 / 引擎指标 -------

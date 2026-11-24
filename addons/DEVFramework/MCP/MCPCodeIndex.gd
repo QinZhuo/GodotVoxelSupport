@@ -2,27 +2,31 @@
 extends RefCounted
 
 ## ======= 代码与资源索引域 =======
-##   - MCPResult      响应封装
-##   - MCPToolSchema  请求 schema 工厂
-##   - VariantTool    全局 class_name, 入参读取
-##    静态函数取到的 get_method() 同样返回函数名(实测 "GDScript::_handle_xxx"), 自检照常工作;
+## 工具面: list_dir / search_symbols / find_resource_users —— 都是"只读地看项目里有什么"。
+## 依赖: MCPResult(响应封装) + MCPToolContract(请求 schema 工厂) + VariantTool(全局 class_name, 入参读取)。
+## **必须带 @tool 且不声明 class_name**。handler 写成 static func 时 get_method() 仍只返回函数名,
+## 故 MCPToolAudit 的 handler 切片照常工作。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
+const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 
 
 ## ======= 域注册入口 =======
 static func register(add_tool: Callable) -> void:
 	add_tool.call("list_dir",
-		"列出res://或user://目录下的文件/子目录。",
-		{"type": "object", "properties": {"path": MCPToolSchema.str_arg("目录路径, 默认 res://"), "recursive": {"type": "boolean", "description": "是否递归列出子目录, 默认 false"}}},
+		"列出 res:// 或 user:// 目录下的文件/子目录。**自动跳过 .godot/.import 等隐藏目录**(它们是引擎缓存, 不跳过时 res:// 递归会列出上万条)。递归时返回完整路径, 非递归返回裸文件名。只要某类文件请传 extensions。",
+		{"type": "object", "properties": {
+			"path": MCPToolContract.str_arg("目录路径, 默认 res://"),
+			"recursive": {"type": "boolean", "description": "是否递归列出子目录, 默认 false"},
+			"extensions": {"type": "array", "items": {"type": "string"}, "description": "只列这些后缀的文件(如 [\"gd\", \"tscn\"], 带不带点都行), 省略=全部"},
+		}},
 		_handle_list_dir)
 
 	add_tool.call("search_symbols",
 		"跨脚本与场景/资源配置搜索符号。.gd 支持函数/变量/类定义与引用; .tscn/.tres 支持节点定义(node)、资源关联(ext_resource)、引用。改签名/改节点名/查某资源在哪些场景被用, 或找某功能实现位置。",
 		{"type": "object", "properties": {
 			"query": {"type": "string", "description": "要搜索的标识符(如 _generate / player_pos / Player 节点名 / MyClass / 资源路径)"},
-			"kind": {"type": "string", "enum": MCPToolSchema.SEARCH_KIND, "description": "过滤: function/variable/class(仅.gd)/node(节点名)/resource(ext_resource)/ref(引用)/all(默认)"},
-			"path": MCPToolSchema.str_arg("限定搜索目录(res://子路径), 默认 res:// 全项目"),
+			"kind": {"type": "string", "enum": MCPToolContract.SEARCH_KIND, "description": "过滤: function/variable/class(仅.gd)/node(节点名)/resource(ext_resource)/ref(引用)/all(默认)"},
+			"path": MCPToolContract.str_arg("限定搜索目录(res://子路径), 默认 res:// 全项目"),
 			"include_resources": {"type": "boolean", "description": "是否搜索 .tscn/.tres 文件, 默认 true"},
 			"max_results": {"type": "integer", "minimum": 1, "description": "最多返回条数, 默认 100"}
 		}, "required": ["query"]},
@@ -31,7 +35,7 @@ static func register(add_tool: Callable) -> void:
 	add_tool.call("find_resource_users",
 		"查任意资源的双向依赖: users=谁引用该资源(反向), deps=该资源依赖谁(正向依赖链, 含脚本/配置/场景/资产类型标签)。兼容 Godot4 的 res://路径 与 uid://xxx 两种引用形式。目标为带全局类名的脚本时, 额外扫描其它 .gd 中类名的词边界使用点(类型注解/extends/静态调用等, kind=class_ref)。改名/删除/移动资源前查完整影响面。",
 		{"type": "object", "properties": {
-			"path": MCPToolSchema.str_arg("目标资源路径(如 res://Scenes/<场景>.tscn, 也可省略 res://)"),
+			"path": MCPToolContract.str_arg("目标资源路径(如 res://Scenes/<场景>.tscn, 也可省略 res://)"),
 			"max_results": {"type": "integer", "description": "最多返回引用文件数, 默认 100"},
 			"include_script_refs": {"type": "boolean", "description": "是否包含 .gd 脚本里的 preload/load 引用, 默认 true"},
 			"include_class_refs": {"type": "boolean", "description": "是否包含全局类名在 .gd 中的词边界引用扫描(仅目标是带 class_name 的脚本时生效), 默认 true"}
@@ -41,49 +45,81 @@ static func register(add_tool: Callable) -> void:
 
 ## ======= 实现 =======
 
+## 隐藏项一律跳过: .godot/ 是导入缓存, .import/ 是旧版残留, 都不是项目内容。
+## res:// 递归的绝大头都在 .godot/ 里, 不剪枝只会把上下文挤爆。
+const _HIDDEN_PREFIX := "."
+
+
 static func _handle_list_dir(args: Dictionary) -> Dictionary:
 	var path: String = VariantTool.get_string(args, "path", "res://")
 	var recursive := VariantTool.get_bool(args, "recursive")
-	if not path.ends_with("/"):
-		path += "/"
+	var exts := _normalized_exts(args)
 	var dir := DirAccess.open(path)
 	if dir == null:
 		return MCPResult.fail("无法打开目录: %s" % path)
 	var dirs: Array = []
 	var files: Array = []
 	if recursive:
-		_collect_dir(path, dirs, files)
+		_collect_dir(path, dirs, files, exts)
 	else:
-		dir.list_dir_begin()
-		var f := dir.get_next()
-		while not f.is_empty():
-			if dir.current_is_dir() and f != "." and f != "..":
+		_list_one(path, dir, dirs, files, exts, false)
+	var out := {"path": path, "dirs": dirs, "files": files}
+	if not exts.is_empty():
+		out["extensions"] = Array(exts)
+	return MCPResult.ok_json(out)
+
+
+## 列一层。full_path=true 时返回完整路径(递归用), 否则返回裸文件名。
+static func _list_one(base: String, dir: DirAccess, dirs: Array, files: Array, exts: PackedStringArray, full_path: bool) -> void:
+	dir.list_dir_begin()
+	var f := dir.get_next()
+	while not f.is_empty():
+		var is_dir := dir.current_is_dir()
+		if f.begins_with(_HIDDEN_PREFIX):
+			pass
+		elif is_dir:
+			# DirAccess.get_next() 报出的目录名**不带结尾斜杠**, 拼接时必须自己补:
+			# 少了它, base+f 会与下一层的文件名连成 "res://AssetsAudio" 这种不存在的路径。
+			if full_path:
+				dirs.append(base + f + "/")
+			else:
 				dirs.append(f)
-			elif not dir.current_is_dir():
-				files.append(f)
-			f = dir.get_next()
-		dir.list_dir_end()
-	return MCPResult.ok_json({"path": path, "dirs": dirs, "files": files})
+		elif _ext_ok(f, exts):
+			files.append((base + f) if full_path else f)
+		f = dir.get_next()
+	dir.list_dir_end()
 
 
-## 递归收集目录内容(供 list_dir 使用)
-static func _collect_dir(base: String, dirs: Array, files: Array) -> void:
+## 递归收集目录内容(供 list_dir 使用)。
+static func _collect_dir(base: String, dirs: Array, files: Array, exts: PackedStringArray) -> void:
 	var d := DirAccess.open(base)
 	if d == null:
 		return
-	d.list_dir_begin()
-	var f := d.get_next()
-	while not f.is_empty():
-		if d.current_is_dir() and f != "." and f != "..":
-			dirs.append(base + f + "/")
-			_collect_dir(base + f + "/", dirs, files)
-		elif not d.current_is_dir():
-			files.append(base + f)
-		f = d.get_next()
-	d.list_dir_end()
+	# 拼路径的前提是 base 以 "/" 收尾: 调用方常传 "res://Assets"(无斜杠),
+	# 少了这一步就会拼出 "res://AssetsAudio/" 这种不存在的路径, 递归当场断在第一层。
+	var prefix := base if base.ends_with("/") else base + "/"
+	var subdirs: Array = []
+	_list_one(prefix, d, subdirs, files, exts, true)
+	for sd in subdirs:
+		dirs.append(sd)
+		_collect_dir(str(sd), dirs, files, exts)
 
 
-## 已注册全局类清单。**刻意不是工具**: 它没有 schema、不进注册表, 而是由 get_project_info
+## 后缀过滤的规范化: 统一小写、去点、丢空项。空数组 = 不过滤。
+static func _normalized_exts(args: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	for raw in VariantTool.get_array(args, "extensions"):
+		var e := str(raw).strip_edges().to_lower().trim_prefix(".")
+		if not e.is_empty():
+			out.append(e)
+	return out
+
+
+static func _ext_ok(fname: String, exts: PackedStringArray) -> bool:
+	return exts.is_empty() or fname.get_extension().to_lower() in exts
+
+
+## 已注册全局类清单。**刻意不是工具**: 没有 schema、不进注册表, 由 get_project_info(section=classes) 附带输出。
 static func global_classes_info() -> Dictionary:
 	var list := ProjectSettings.get_global_class_list()
 	var out: Array = []
@@ -113,8 +149,8 @@ static func _handle_search_symbols(args: Dictionary) -> Dictionary:
 		base_dir = search_path
 		if not DirAccess.dir_exists_absolute(base_dir):
 			return MCPResult.fail("目录不存在: %s" % base_dir)
-	if kind not in MCPToolSchema.SEARCH_KIND:
-		return MCPResult.fail("kind 无效: %s (可选: %s)" % [kind, " / ".join(MCPToolSchema.SEARCH_KIND)])
+	if kind not in MCPToolContract.SEARCH_KIND:
+		return MCPResult.fail("kind 无效: %s (可选: %s)" % [kind, " / ".join(MCPToolContract.SEARCH_KIND)])
 	# query 若是资源路径/uid, 补充另一形态(uid 或 res://路径)以便双向匹配
 	var needles: Array = [query]
 	if query.begins_with("res://"):
@@ -236,9 +272,18 @@ static func _match_symbol(line: String, needles: Array) -> Variant:
 	# 定义: class_name 名字 或 class 名字
 	if RegEx.create_from_string("\\bclass(?:_name)?\\s+(" + _regex_escape(query) + ")\\b").search(stripped):
 		return {"type": "class", "symbol": query}
-	# 定义: var 名字 / @export var 名字 / const 名字
+	# 定义: @export var 名字 —— 必须在 variable 之前判, 否则同一行会先落进 variable
+	if RegEx.create_from_string("\\b@export[\\w_() ,]*\\s+var\\s+(" + _regex_escape(query) + ")\\b").search(stripped):
+		return {"type": "export", "symbol": query}
+	# 定义: var 名字 / const 名字
 	if RegEx.create_from_string("\\b(?:var|const)\\s+(" + _regex_escape(query) + ")\\s*(?::|=)").search(stripped):
 		return {"type": "variable", "symbol": query}
+	# 定义: signal 名字(声明) 与引用: emit_signal("名字") / 名字.connect(
+	if RegEx.create_from_string("\\bsignal\\s+(" + _regex_escape(query) + ")\\b").search(stripped):
+		return {"type": "signal", "symbol": query}
+	# 着色器只按行文本判: .gdshader 不在本工具的扫描扩展名里, 但 .gd 的 String 里也可能写着它
+	if stripped.contains("shader") and stripped.contains(query):
+		return {"type": "shader", "symbol": query}
 	# 引用: 任一 needle 命中
 	for needle in needles:
 		if stripped.contains(String(needle)):

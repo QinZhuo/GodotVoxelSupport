@@ -1,16 +1,19 @@
 @tool
 extends RefCounted
 ## ======= 运行期可交互元素查询域 =======
-## 各在哪"(给模型定位)。把定位寄生成截图的一个参数, 模型就必须先截图才能点, 而那图只是副产品。
-## 两者差一个 content_scale 系数(项目实测约 0.88) —— 把前者直接当点击坐标, 会稳定点在目标
+## 把"画面里有什么可点的东西、各在哪"结构化地报给模型, 供 simulate_* 用 ref 定位。
+## 坐标一律同时给 viewport_rect 与 window_rect: 两者差一个 content_scale 系数, 拿前者当
+## 点击坐标会点在目标之外。
 ## 依赖: MCPResult + VariantTool。不引用 MCPDevServer。必须带 @tool 且不声明 class_name。
 
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 
 ## ref -> NodePath。以最后一次 get_interactables 为准: 界面一变(节点重建/动画位移)旧 ref 就该
+## 作废, 别指望它还能对上坐标。
 static var _ref_paths: Dictionary = {}
 
 ## 交互判据之一: 有连接才说明"点了有反应"。没挂 pressed 的 Button 点了不会有任何事, 只看类型
+## 会把死按钮也报成可点。
 const _SIGNALS := ["pressed", "gui_input", "toggled", "value_changed", "item_selected",
 	"text_changed", "text_submitted", "item_activated", "focus_entered"]
 
@@ -30,6 +33,7 @@ static func schema() -> Dictionary:
 		"class_filter": {"type": "string", "description": "按类名子串过滤(如 Button); 对 3D 元素额外匹配脚本名(如 ButtonView3D)。注意 2D 只匹配引擎类名(get_class), **不匹配节点名** —— 用节点名会返回空, 要按名字找请用 text_contains 或直接看返回里的 name; 空=不过滤"},
 		"max_nodes": {"type": "integer", "description": "返回条数上限, 默认 60, 上限 200"},
 		"max_depth": {"type": "integer", "description": "遍历深度上限, 默认 24, 上限 32。UI 层级深的项目给小了只能看到空壳容器; 响应里 depth_capped=true 就是撞上了上限"},
+		"include_hidden": {"type": "boolean", "description": "默认 false。开启后把**看不见(或尺寸为 0)的控件**列进 hidden_elements —— 界面看着空、清单里却有一堆节点时用它对照, 判断是'真没这个控件'还是'控件在但没显示'"},
 	}}
 
 
@@ -44,10 +48,12 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 	var max_nodes: int = clampi(VariantTool.get_int(args, "max_nodes", 60), 1, 200)
 	var max_depth: int = clampi(VariantTool.get_int(args, "max_depth", 24), 1, 32)
 
-	# capped 必须单独报出来: 只报 max_nodes 截断的话, "面板真是空的"与"内容在深度上限之外"
-	# 返回的清单长得一模一样(只剩几个空壳容器), 调用方无从下手。实测踩过 —— 设置面板在
+	# capped 必须单独报出来: 否则"面板真是空的"与"内容在深度上限之外"返回的清单长得一模一样
+	# (只剩几个空壳容器), 调用方无从下手。
+	var want_hidden := VariantTool.get_bool(args, "include_hidden", false)
 	var controls: Array = []
-	var depth_capped: bool = _collect_controls(loop.root, controls, max_depth, 0)
+	var hidden_controls: Array = []
+	var depth_capped: bool = _collect_controls(loop.root, controls, max_depth, 0, hidden_controls, want_hidden)
 	var areas_3d: Array = []
 	if _collect_interactables_3d(loop.root, areas_3d, max_depth, 0):
 		depth_capped = true
@@ -65,6 +71,7 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 			continue
 		var interactive := _is_interactive(c)
 		# 子视口内的元素换用**更严**的判据: 那边几乎所有 Label 都被框架挂了 gui_input(3D 物体的
+		# 面板就是这样), 只看有无连接会把整块面板算成可点。
 		var in_window := c.get_viewport() == loop.root
 		if not in_window:
 			interactive = _is_directly_clickable(c)
@@ -94,7 +101,7 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 		items.append({"node": n3, "text": text3, "interactive": true, "is_3d": true,
 			"rank": 2, "dist": cam.global_position.distance_to(n3.global_position) if cam != null else INF})
 
-	# 可交互的排前面, 其余按屏幕位置自上而下、同排自左而右 —— 与人读界面的顺序一致,
+	# 可交互的排前面, 其余按屏幕位置自上而下、同排自左而右 —— 与人读界面的顺序一致。
 	items.sort_custom(_sort_items)
 
 	var truncated := items.size() > max_nodes
@@ -141,6 +148,7 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 					"w": r2.size.x * scale.x, "h": r2.size.y * scale.y}
 			else:
 				# 刻意不给 window_rect: 子视口坐标与窗口坐标之间没有换算关系, 写一个出来只会被
+				# 误点。
 				var sv := c2.get_viewport() as SubViewport
 				e["sub_viewport"] = String(sv.get_path()) if sv != null else ""
 				e["sub_viewport_size"] = {"x": float(sv.size.x), "y": float(sv.size.y)} if sv != null else {}
@@ -149,7 +157,7 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 		elements.append(e)
 
 	var win := Vector2(DisplayServer.window_get_size())
-	return MCPResult.ok_json({
+	var payload := {
 		"count": elements.size(),
 		"count_3d": count_3d,
 		"count_3d_total": total_3d,
@@ -161,7 +169,22 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 		"content_scale": {"x": scale.x, "y": scale.y},
 		"elements": elements,
 		"hint": "用 simulate_click(ref=...) 直接点, 坐标换算与 3D 激活都由工具做, 你不必自己算。space=window 的元素两套矩形都给了; space=subviewport 的元素在子视口内(UI 渲染在 SubViewport 里时), 只给子视口坐标, 点击会被直接投递进那个子视口; space=3d 是 3D 物体(按钮/道具等), 刻意不给坐标——投影点会随相机漂移, 点击由工具在物体自身上激活。3D 元素排在 2D 之后, 若 count_3d < count_3d_total 说明被 max_nodes 截掉了, 用 space=3d 单独查。truncated=true 是被 max_nodes 截断(调大或缩小 space 缩小范围); depth_capped=true 是遍历没走完(调大 max_depth, 或用 space/filter 缩小范围)——两者都true 时面板可能看着空, 其实内容在上限之外, 别急着当项目 bug 查。ref 仅在本次清单内有效, 界面变化后重新查询。",
-	})
+	}
+	if want_hidden:
+		# 只报"在树里但不可见"的那一层: 这是"面板是空的"与"控件没显示"唯一能区分开的地方。
+		var hidden_items: Array = []
+		for h in hidden_controls:
+			var hc := h as Control
+			hidden_items.append({
+				"name": String(hc.name),
+				"class": hc.get_class(),
+				"path": String(hc.get_path()),
+				"text": _visible_text(hc),
+				"size": {"x": hc.size.x, "y": hc.size.y},
+			})
+		payload["hidden_count"] = hidden_items.size()
+		payload["hidden_elements"] = hidden_items
+	return MCPResult.ok_json(payload)
 
 
 ## 窗口/视口的比例系数。点击坐标换算与布局输出共用这一个口径, 免得两处各算一遍而漂移。
@@ -199,6 +222,7 @@ static func resolve_ref(ref: String) -> Dictionary:
 	var vp := c.get_viewport()
 	if vp != loop.root:
 		# 子视口内的元素: get_global_rect() 给的就是子视口像素坐标, 与 SubView3D 把 3D 命中点
+		# 投出来的窗口坐标不是一回事。
 		return {
 			"ok": true,
 			"space": "subviewport",
@@ -220,8 +244,10 @@ static func resolve_ref(ref: String) -> Dictionary:
 	}
 
 
+## 收集可见控件到 out; want_hidden=true 时顺带把"在树里但不可见"的那一层收进 hidden。
+## hidden 与 out 必须分开: 后者是"能点的东西", 前者只是诊断线索, 混在一起会让 ref 指到点不到的控件。
 ## 返回 true = 有子树因触及上限而没被走到(深度上限或节点硬上限), 调用方据此报 depth_capped。
-static func _collect_controls(node: Node, out: Array, max_depth: int, depth: int) -> bool:
+static func _collect_controls(node: Node, out: Array, max_depth: int, depth: int, hidden: Array = [], want_hidden: bool = false) -> bool:
 	# 400 是收集阶段的硬上限: 界面重建时它防住"节点暴涨把一次调用拖死", 不影响结果集大小
 	if depth > max_depth or out.size() >= 400:
 		return true
@@ -231,17 +257,21 @@ static func _collect_controls(node: Node, out: Array, max_depth: int, depth: int
 			var c := child as Control
 			if c.is_visible_in_tree():
 				out.append(c)
-				if _collect_controls(c, out, max_depth, depth + 1):
+				if _collect_controls(c, out, max_depth, depth + 1, hidden, want_hidden):
 					capped = true
-			# 不可见的 Control 直接剪枝: 其子树的 is_visible_in_tree 必然也是 false,
-			# 走进去只会在每帧变化的深层树上白跑一遍(这是本域唯一的性能热点)。
-		elif _collect_controls(child, out, max_depth, depth + 1):
+			elif want_hidden:
+				# 不可见的 Control 对**可见清单**照旧剪枝(子树必然也不可见, 走进去只是白跑)。
+				# 但"控件在树里、清单里没有"正是最常见的那种 bug, 所以要把这一层记下来 ——
+				# 不展开它的子节点, 因为整棵子树都不可见, 逐层列出只是噪声。
+				hidden.append(c)
+		elif _collect_controls(child, out, max_depth, depth + 1, hidden, want_hidden):
 			capped = true
 	return capped
 
 
 static func _sort_items(a: Dictionary, b: Dictionary) -> bool:
 	# 分层: 主视口 UI → 子视口 UI → 3D 物体。3D 排在最后不是"低一等", 而是它没有可直接
+	# 点击的屏幕矩形(点击由工具在物体自身上激活)。
 	if a["rank"] != b["rank"]:
 		return a["rank"] < b["rank"]
 	if a["is_3d"]:
@@ -257,10 +287,10 @@ static func _sort_items(a: Dictionary, b: Dictionary) -> bool:
 
 
 static func _visible_text(c: Control) -> String:
-	# Label 与 BaseButton 各自都有 text, 但两者**无继承关系**(都直接继承 Control), 故必须分开
+	# Label 与 BaseButton 各自都有 text, 但两者**无继承关系**(都直接继承 Control), 故必须分开判。
 	if c is Label:
 		return (c as Label).text
-	# RichTextLabel 的 text 存的是 bbcode 源码, 且用 append_text() 追加的内容不会写回 text,
+	# RichTextLabel 的 text 存的是 bbcode 源码, 且用 append_text() 追加的内容不会写回 text。
 	if c is RichTextLabel:
 		var rtl := c as RichTextLabel
 		return rtl.text if not rtl.text.is_empty() else rtl.get_parsed_text()
@@ -310,6 +340,7 @@ static func _collect_interactables_3d(node: Node, out: Array, max_depth: int, de
 			if co.input_ray_pickable and co.is_visible_in_tree() and _is_interactable_3d(co):
 				out.append(co)
 		# 刻意不像 2D 那样对不可见节点剪枝: 3D 这边节点数远小于 Control, 为省一遍遍历而
+		# 记一份隐藏名单不值得。
 		if _collect_interactables_3d(child, out, max_depth, depth + 1):
 			capped = true
 	return capped

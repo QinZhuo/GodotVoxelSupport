@@ -20,7 +20,6 @@ var _entity_edit: LineEdit = null
 var _entity_list: Tree = null
 var _entity_tree: Tree = null
 var _time_hist := {}   # 系统名 -> PerfTool.Rolling(最近 60 帧, 算 avg/max)
-var _type_hint: Label = null
 
 
 func _setup_session(session_id: int) -> void:
@@ -62,7 +61,6 @@ func _build_ui() -> void:
 	_entity_list = null
 	_entity_tree = null
 	_topo_label = null
-	_type_hint = null
 	# 历史窗口跟随 UI 重建: 跨会话残留会让 avg/max 混进上一个游戏进程的数据
 	_time_hist.clear()
 	_last_times.clear()
@@ -195,7 +193,6 @@ func _fill_entity_groups(groups: Array) -> void:
 ## 实体组件字段树(组件折叠, 字段带类型)。
 func _fill_entity_tree(entity: int, view: Dictionary) -> void:
 	_entity_tree.clear()
-	_type_hint.text = ""
 	var root := _entity_tree.create_item()
 	root.set_text(0, "实体 %d" % entity)
 	for cn in view:

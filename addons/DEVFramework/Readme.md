@@ -21,7 +21,10 @@ Godot 4.7 数据驱动框架：`Def`（配置）→ `Entity`（运行时）→ `
 
 1. **数据不下行**：View 不写 Entity，Entity 不写 Def。要反馈就发信号或 `Callable`。
 2. **一个角色一个基类**：不为同类问题开第二个基类。
-3. **删除测试**：删掉任一模块目录，框架仍能编译运行（唯一例外：`plugin.gd` 里的编辑器接线）。
+3. **依赖方向**：能力模块可引用 `Core`，`Core` 不引用能力模块（`plugin.gd` 只做编辑器接线）。
+
+   现状**未**达标：`Core` 里 9 个文件仍沿 33 处反向引用 8 个能力模块（ECS / Translation / Camera / Tween / Focus / Task / Dialogue / Audio），
+   清单与理由见 [LAYERS.md](LAYERS.md) 第七节。新增代码不要加重这层环，动这些点前先读清单。
 
 ## 目录
 
@@ -30,12 +33,15 @@ addons/DEVFramework/
 ├─ Core/          Def/ Entity/ Tool/ Async/ Pool/ Editor/   ← 跨能力复用
 ├─ <能力>/         Dialogue Task AI Camera ECS Tween UI Focus Render
 │                 ArrayView Value Effect Signal Audio Translation
-│                 Screenshot Changelog GameCommand Test
+│                 Changelog GameCommand Test
 ├─ MCP/           扁平（preload 硬编码网，分层无收益）
 └─ Native/        原生库 + dev.gdextension（禁止移动）
 ```
 
 规则：**目录名 = 能力名**；模块内按 `Def / Entity / View / Tool / Editor` 分层，少于 3 个文件就扁平。
+
+两处按内容命名（比五层贴切，保留）：`ECS/` 用 `Component / System / World / Timer / Render`（列存储 + 调度），
+`Render/` 下分 `Lightmap / Screenshot` 两个子能力。单一角色的模块（`Value/ Signal/ UI/ Audio/` 等）保持扁平。
 
 命名、归属、搬迁纪律全在 [LAYERS.md](LAYERS.md)。
 
@@ -48,14 +54,31 @@ C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/
 
 ## 模块文档
 
+每个模块都有自己的 Readme，写清定位、怎么用、坑与文件结构。MCP 没有模块 Readme，它写在下方
+[MCP 调试服务器](#mcp-调试服务器)一节（对使用者更重要）。
+
 | 模块 | 文档 | 可运行示例 |
 |---|---|---|
+| 基础（Def / Entity / Tool / Async / Pool） | [Core/Readme.md](Core/Readme.md) | — |
 | ECS（列存储 + 系统 + 查询链） | [ECS/Readme.md](ECS/Readme.md) | `Scenes/ECS/ECSDemo.tscn` |
 | 对话 / 气泡 | [Dialogue/Readme.md](Dialogue/Readme.md) | `Scenes/Dialogue/DialogueDemo.tscn` |
 | 任务 / 教程 | [Task/Readme.md](Task/Readme.md) | `Scenes/Tutorial/TutorialDemo.tscn` |
 | GOAP AI | [AI/Readme.md](AI/Readme.md) | `Scenes/AI/GoapDemo.tscn` |
 | 相机（机位竞争 + 混合） | [Camera/Readme.md](Camera/Readme.md) | — |
 | 命令回放 | [GameCommand/Readme.md](GameCommand/Readme.md) | `Scenes/GameCommand/GameCommandDemo.tscn` |
+| UI（面板 / 层级 / 拖拽） | [UI/Readme.md](UI/Readme.md) | — |
+| 渲染（后处理 / 光照贴图 / 截图） | [Render/Readme.md](Render/Readme.md) | — |
+| 补间（动画资产） | [Tween/Readme.md](Tween/Readme.md) | — |
+| 数组视图（虚拟滚动列表） | [ArrayView/Readme.md](ArrayView/Readme.md) | — |
+| 焦点 / 轮廓遮罩 | [Focus/Readme.md](Focus/Readme.md) | — |
+| 数值（ValueDef 树） | [Value/Readme.md](Value/Readme.md) | — |
+| 信号与条件 | [Signal/Readme.md](Signal/Readme.md) | — |
+| 效果（可叠可逆） | [Effect/Readme.md](Effect/Readme.md) | — |
+| 音频 | [Audio/Readme.md](Audio/Readme.md) | — |
+| 多语言 | [Translation/Readme.md](Translation/Readme.md) | — |
+| 更新日志 | [Changelog/Readme.md](Changelog/Readme.md) | — |
+| 测试 | [Test/Readme.md](Test/Readme.md) | — |
+| 原生（C++ 扩展） | [Native/Readme.md](Native/Readme.md) | — |
 
 其余场景见 [Scenes/README.md](../../Scenes/README.md)。
 
@@ -65,6 +88,9 @@ C++ 原生能力（ECS）需编译，见 [gdextension/README](../../gdextension/
 
 - 多项目并存：`list_instances` → `use_instance` 选默认，或单次调用带 `instance`
 - 常用：`validate` / `get_logs` / `eval_code` / `run_tests` / `perf` / `build_native` / `game_control` / `restart_editor`
+- 场景批量改动：`apply_scene_edits`（一次事务，失败整体回滚；复制节点/连信号也是它的 op）+ `undo_redo`；文件改名 `move_file`
+- 点完等结果：`wait_for`（轮询到条件成立，超时带"实际观察值"）；别写死 sleep
+- 长说明不在 `tools/list` 里（常驻开销），按需读 `resources/list` 的 `devframework://docs/*`
 - 改 `addons/DEVFramework/Native/src/**` 后**必须** `build_native`（`action=status` 查过期 → `action=build` 构建 → 重载生效），否则测试跑的是旧库且全绿
 - 目录约定：**插件自己的 C++ 放 `addons/<插件>/Native/src`**（随插件分发）；构建区与第三方（godot-cpp）在项目根 `gdextension/`。多个插件各有 `Native/src` 时各编一个库、共用一份 godot-cpp
 - 导出包默认不带入口（`dev_framework/mcp/runtime_enabled = false`）
@@ -102,12 +128,13 @@ godot --headless --path . -s res://addons/DEVFramework/Test/run_headless.gd -- -
 |---|---|
 | `run_tests(process, script, wait_sec)` | 启动任务。`wait_sec` 默认 5（0=立即返回）；窗口内跑完直接给完整汇总，否则返回 `{job_id, running:true, ...}` |
 | `job_wait(job_id)` | 轮询同一个 job（固定等 28s，完成返回结果，**不重跑**）；`job` 状态在启动它的进程里 |
+| `job_list()` | 不知道 `job_id`（比如上一次响应被客户端超时丢掉）时列出还记着的 job；`job_id` 省略时 `job_wait` 也会回落最近那个 |
 
 慢测试（回放类常 100s+）不要反复启动 —— 拿到 `job_id` 后只调 `job_wait`。
 **0 个用例 / 脚本解析失败现在一律判失败**：CI 里“没跑”与“跑了全过”必须可区分。
 编辑器进程若检测到磁盘脚本与已加载版本不一致，会拒绝开跑并提示重启（或改用 headless）。
 
-headless 默认还会挂一个 `MCPLogger`，把运行期 **script/shader/engine error** 算进失败（GUT 的 failure_error_types 语义；warning/printerr 不算，避免误伤故意制造告警的用例）。
+headless 默认还会挂一个 `LogCaptureTool`，把运行期 **script/shader/engine error** 算进失败（GUT 的 failure_error_types 语义；warning/printerr 不算，避免误伤故意制造告警的用例）。
 - `-- --allow-errors`：关闭运行期错误统计（给“故意触发错误”的旧用例兜底）。
 - `-- --freshness=strict|warn|off`：编辑器新鲜度策略；默认 strict，也可用项目设置 `dev_framework/test/freshness` 配置。
 

@@ -2,21 +2,21 @@
 extends RefCounted
 
 ## ======= 脚本新鲜度: 让 eval 一定跑在最新代码上 =======
-## **本文件必须带 @tool**, 且不声明 class_name, 两条都是踩过的坑, 详见 MCPDevServer 顶部注释。
-## MCP 有两个 eval 入口, 分别落在两个进程里, 撞的是同一个陷阱:
-## 能自动做到什么(实测):
-##    GDScript, 所以编辑器侧必须用 CACHE_MODE_REPLACE, scan 只是补充。)
+## 引擎不热重载已在运行的脚本, 改完 .gd 再 eval 拿到的仍是旧代码。本模块是编辑器进程与
+## 游戏进程两个 eval 入口共用的唯一判定点。
+## 编辑器侧靠 CACHE_MODE_REPLACE 换掉脚本缓存(GDScript 缓存不随文件系统扫描失效), scan 只是补充。
+## **必须带 @tool 且不声明 class_name** —— 导出安全, 理由见 MCPDevServer 顶部。
 
 ## 模式标识(与 MCPDevServer.MODE_* 对齐; 放在本模块以避免反向依赖)
 const MODE_EDITOR := "editor"
 const MODE_RUNTIME := "runtime"
 
-## 编辑器侧 mtime 初筛基准(上次同步时刻)。用于避免每次 eval 都对 600+ 个
+## 编辑器侧 mtime 初筛基准(上次同步时刻)。避免每次 eval 都对目录下全部 .gd 算哈希。
 static var _editor_baseline: int = 0
 
 
-## eval 执行前的新鲜度守卫。两个 eval 入口都应先过这里, 这是唯一的判定点。
-## 注意: 本函数是协程(内部 await 重扫), 调用方必须 await, 否则拿到的是未完成的
+## eval 执行前的新鲜度守卫。两个 eval 入口都先过这里, 这是唯一的判定点。
+## 本函数是协程(内部 await 重扫), 调用方必须 await, 否则拿到的是未完成的结果。
 static func guard_eval(mode: String, baseline: int, tree: SceneTree = null) -> Dictionary:
 	if mode == MODE_EDITOR:
 		return await _guard_editor()
@@ -54,7 +54,7 @@ static func _guard_editor() -> Dictionary:
 			lines.append("  %s —— %s" % [p, str(_unreloadable[p])])
 		return {
 			"ok": false,
-			# 归 stale_code 而非 validation: 跑不动的原因是"跑的是旧代码",
+			# 归 stale_code 而非 validation: 跑不动的原因是"跑的是旧代码"。
 			"category": "stale_code",
 			"message": "这些脚本承载长驻服务, 不能热重载(重载会终止该服务, 且之后所有 MCP 工具都调不到, 无法自救), 已阻止执行:\n%s"
 				% "\n".join(lines),
@@ -74,7 +74,7 @@ static func _guard_editor() -> Dictionary:
 		return _pass(stale)
 	return {
 		"ok": false,
-		# 编辑器侧的失败含义与游戏侧不同: 这里是"磁盘版本自身有问题"(语法错),
+		# 编辑器侧的失败含义与游戏侧不同: 这里是"磁盘版本自身有问题"(语法错)。
 		"category": "validation",
 		"message": "这些脚本改动后无法重新加载(通常是磁盘版本存在语法错误), 已阻止执行:\n%s"
 			% "\n".join(PackedStringArray(failed)),
@@ -85,7 +85,7 @@ static func _guard_editor() -> Dictionary:
 
 
 ## ----- 游戏进程 -----
-## ⇒ 游戏内必是旧代码。唯一理论漏报窗口是"加载 → 就绪"之间的同秒修改。
+## 判据基准是游戏启动时刻: 早于它的脚本已被加载, 之后改的必是旧代码。
 static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 	# 游戏未就绪时无判据可用(也不该有 eval 请求到达)
 	if baseline <= 0:
@@ -93,7 +93,7 @@ static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 	var changed := changed_by_mtime(baseline)
 	if changed.is_empty():
 		return _pass([])
-	# 关键顺序: 先抓住"旧脚本对象"再重载。重载后 ResourceLoader 里已是新版,
+	# 关键顺序: 先抓住"旧脚本对象"再重载。重载后 ResourceLoader 里已是新版。
 	var old_scripts: Dictionary = {}  # path -> 旧脚本对象
 	for p in changed:
 		if ResourceLoader.has_cached(p):
@@ -102,11 +102,10 @@ static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 				old_scripts[p] = cached
 	for p in changed:
 		ResourceLoader.load(p, "", ResourceLoader.CACHE_MODE_REPLACE)
-	# 第 2 级判据: 按脚本对象比对(而非 class_name), 这样没有 class_name、
+	# 第 2 级判据: 按脚本对象比对(而非 class_name), 这样没有 class_name 的脚本也能查。
 	var live := live_instances(tree, old_scripts)
-	# 第 3 级: 全局类(class_name)的引用也切不过来。
-	# 实测(游戏进程): ResourceLoader.CACHE_MODE_REPLACE 确实换掉了脚本缓存,
-	# 这条必须实测判定而非假设: 若把"没修好"当成"已修复"放行, 闸门就退化成
+	# 第 3 级: 全局类(class_name)的引用切不过来, 必须单独判。
+	# 两级都必须实测判定而非假设: 把"没修好"当"已修复"放行, 闸门就退化成静默的旧代码执行。
 	var stuck := stuck_globals(changed)
 	if live.is_empty() and stuck.is_empty():
 		return _pass(changed)
@@ -226,7 +225,7 @@ static func script_status_of(path: String) -> Dictionary:
 
 
 ## 把 uid:// 或裸路径统一解析为可直接使用的 res:// 路径; 解析不出来返回空串。
-## 实测: 手动 fs.scan() 后即恢复, 故这里按需补一次重扫并重试(复用本模块同一入口)。
+## 手动 fs.scan() 后即恢复, 故这里按需补一次重扫并重试(复用本模块同一入口)。
 static func resolve_scene_path(ref: String) -> String:
 	var s := ref.strip_edges()
 	if s.is_empty():

@@ -3,7 +3,7 @@ extends RefCounted
 
 ## ======= 多实例路由：这条调用该落在哪个编辑器 + 实例管理工具 =======
 ## 由 MCPDevServer 以 preload 常量 `MCPRouter` 引用。**必须 @tool 且不声明 class_name**
-## **不做"唯一的其他实例自动选中"**: 那在"开了两个项目、只想改当前这个"时会静默改错项目;
+## **不做"唯一的其他实例自动选中"**: 那在"开了两个项目、只想改当前这个"时会静默改错项目。
 
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 
@@ -12,7 +12,9 @@ const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const HUB_TOOLS := ["list_instances", "use_instance"]
 
 ## 注入进每个工具 schema 的 `instance` 参数说明。
-const INSTANCE_ARG_DESC := "可选: 目标编辑器实例。省略则用 use_instance 设置的默认目标(未设置时=本实例)。可填实例 id(如 MyGame@a1b2c3d4)、唯一前缀、或端口号; 不确定时先调 list_instances。"
+## **这段文字会在每个工具里各存一份**, 故只留"怎么填"一行;
+## 完整规则(歧义判定/默认目标/离线时为何拒执行)见 resources: devframework://docs/instances。
+const INSTANCE_ARG_DESC := "目标编辑器实例: 实例 id / 唯一前缀 / 端口号; 省略则用默认目标(未设置=本实例)。不确定时先 list_instances。"
 
 ## MCPDevServer（Variant: 跨编译代次不信任类型标注）
 var server = null
@@ -25,7 +27,9 @@ func _init(owner) -> void:
 ## tools/list 出口整形: 每个工具多一个可选 `instance` 参数(实例管理工具除外)。
 func tools_for_list(defs: Array) -> Array:
 	var hub = server._hub
-	if hub == null:
+	# 单实例(或中枢被关掉)时 _hub 依然存在, 但 instance 参数没有任何接收方 ——
+	# 注入它等于给每个工具挂一个填了就报错的参数。
+	if hub == null or not bool(hub.hub_mode):
 		return defs
 	return hub.inject_instance_arg(defs, INSTANCE_ARG_DESC, HUB_TOOLS)
 
@@ -33,7 +37,7 @@ func tools_for_list(defs: Array) -> Array:
 ## 解析本条 tools/call 该由谁执行。
 func resolve_route(tool_name: String, args: Dictionary) -> Dictionary:
 	var hub = server._hub
-	# 成员进程没有注册表(它只是被转发的一端): 请求能到这里就说明是直连成员端口的。
+	# 成员进程没有注册表(只是被转发的一端): 请求能到这里就说明是直连成员端口的。
 	if hub == null or not bool(hub.hub_mode):
 		return {"port": 0}
 	# 实例管理工具本身不路由。
@@ -58,7 +62,7 @@ func resolve_route(tool_name: String, args: Dictionary) -> Dictionary:
 	var def: Dictionary = hub.resolve_active()
 	if def.is_empty():
 		if hub.has_active():
-			# 设过目标但不在线 ⇒ 必须报错。就地执行等于打到"当前碰巧当中枢的那个项目"。
+			# 设过目标但不在线 ⇒ 必须报错: 就地执行会打到"当前碰巧当中枢的那个项目"。
 			return {
 				"error": "默认目标 %s 当前不在线(该编辑器正在重启, 或 MCP 中枢已从它切换到别的项目)。为避免改错项目, 本次调用不执行。\n%s" % [str(hub.active_label()), hub.describe()],
 				"recovery": "等目标编辑器启动完成后重试(默认目标不会被清掉, 回来后会按项目身份自动接回); 或先 list_instances 再用 instance 参数指定本次目标。",
@@ -67,7 +71,7 @@ func resolve_route(tool_name: String, args: Dictionary) -> Dictionary:
 	return _route_of(def, "默认目标 %s" % str(def.get("instance_id", "")))
 
 
-## 把注册表条目翻译成路由结果。指向自己时 port=0。target 回填 uid(诊断要落到具体进程)。
+## 把注册表条目翻译成路由结果。指向自己时 port=0; target 回填 uid(诊断落到具体进程)。
 func _route_of(entry: Dictionary, via: String) -> Dictionary:
 	if bool(entry.get("is_self", false)):
 		return {"port": 0}
@@ -81,7 +85,6 @@ func _route_of(entry: Dictionary, via: String) -> Dictionary:
 
 
 ## 转发一条 tools/call 到目标实例, 返回**已经可以回给客户端的** JSON-RPC 响应。
-## 三件事必须做对:
 func forward(req: Dictionary, req_id: Variant, _tool_name: String, route: Dictionary, proto: String, margin_ms: int) -> Dictionary:
 	var hub = server._hub
 	var fwd: Dictionary = req.duplicate(true)
@@ -98,9 +101,8 @@ func forward(req: Dictionary, req_id: Variant, _tool_name: String, route: Dictio
 		var still: Dictionary = hub.find_by_uid(str(route.get("uid", "")))
 		var tail := "该实例已不在注册表中(可能刚被关闭)。" if still.is_empty() else "该实例仍在注册表中, 但端口 %d 不接受连接(可能正在启动/卡住/防火墙拦截)。" % int(route["port"])
 		# —— 崩溃判定与自助恢复 ——
-		# 这段存在的理由: 目标进程**崩了**的时候, 没有任何实例能替它调用 restart_editor
-		# (那是在目标自己进程里调 EditorInterface.restart_editor)。所以"它崩没崩"和
-		# "怎么把它拉回来"必须写进**这条错误本身** —— 调用方(AI)只有这一条信息可用。
+		# 目标进程**崩了**时没有任何实例能替它调 restart_editor(那是目标进程内的事),
+		# 故"崩没崩"与"怎么拉回来"必须写进**这条错误本身** —— 调用方只有这一条信息可用。
 		var proj := str(still.get("project_path", ""))
 		if proj == "":
 			proj = str(hub.active_project_path)
@@ -114,7 +116,7 @@ func forward(req: Dictionary, req_id: Variant, _tool_name: String, route: Dictio
 				why = "诊断: 该实例**上次是非正常退出(崩溃/被强杀)** —— %s, 约 %d 秒前。" % [str(ex.get("reason", "")), ago]
 		var recovery := ""
 		if proj != "":
-			recovery = "若确认它需要重启: 调 launch_project(project_path=\"%s\") 由本实例拉起新进程(崩溃后 restart_editor 不可用, 因为它调的是目标进程自己的重启), 随后 list_instances → use_instance 选定新实例。想看更多证据用 project_exits。" % proj
+			recovery = "若确认它需要重启: 调 launch_project(project_path=\"%s\") 由本实例拉起新进程(崩溃后 restart_editor 不可用, 因为它调的是目标进程自己的重启), 随后 list_instances → use_instance 选定新实例。想看更多证据用 crash_report(scope=\"exits\")。" % proj
 		else:
 			recovery = "用 list_instances 确认清单; 目标已关闭/崩溃时用 launch_project(project_path=...) 拉起, 或 use_instance 换成活着的实例。"
 		var parts := PackedStringArray(["转发到实例 %s 失败(%s)。" % [str(route.get("target", "?")), route.get("via", "")], tail])
@@ -130,7 +132,7 @@ func forward(req: Dictionary, req_id: Variant, _tool_name: String, route: Dictio
 	return resp
 
 
-## 给工具结果盖上"本次在哪个项目执行"的章（`_meta.target` + 正文末尾一行）。
+## 给工具结果盖上"本次在哪个项目执行"的章(`_meta.target` + 正文末尾一行)。
 func stamp(result: Dictionary, iid: String, ppath: String, role: String) -> Dictionary:
 	if iid.is_empty():
 		return result
@@ -150,7 +152,7 @@ func stamp(result: Dictionary, iid: String, ppath: String, role: String) -> Dict
 	return result
 
 
-## 转发结果若没有执行方盖的章(对端还是旧版本代码), 由中枢补一个 ——
+## 转发结果若没有执行方盖的章(对端是旧版本), 由中枢补一个。
 func _stamp_forwarded(resp: Dictionary, route: Dictionary) -> void:
 	var result: Variant = resp.get("result", null)
 	if not (result is Dictionary):
@@ -162,7 +164,7 @@ func _stamp_forwarded(resp: Dictionary, route: Dictionary) -> void:
 	var hub = server._hub
 	if hub != null:
 		var hits: Array = hub.find_all_by_instance_id(iid)
-		# 同项目多开时命中多个，无法确定是哪一个 —— 宁可不填路径，也不要瞎填一个
+		# 同项目多开时命中多个, 无法确定是哪一个 —— 宁可不填, 也不要瞎填。
 		if hits.size() == 1:
 			ppath = str((hits[0] as Dictionary).get("project_path", ""))
 	stamp(result, iid, ppath, "remote")
@@ -173,7 +175,7 @@ func call_list_instances(_args: Dictionary) -> Dictionary:
 	var hub = server._hub
 	if hub == null:
 		return MCPResult.fail("多实例功能未启用(dev_framework/mcp/hub=false)。同一时间只应有一个编辑器在用 MCP; 同时打开多个编辑器时请开启它。")
-	# 成员侧顺手拉一次最新快照: 否则看到的是上一次心跳(最多 4 秒前)的清单。
+	# 成员侧顺手拉一次最新快照, 否则看到的是上一次心跳(最多 4 秒前)的清单。
 	if not bool(hub.hub_mode):
 		var resp: Dictionary = await hub.post_json(server._hub_port, hub.instances_path(), {}, 2000)
 		if bool(resp.get("ok", false)) and resp.get("instances") is Array:

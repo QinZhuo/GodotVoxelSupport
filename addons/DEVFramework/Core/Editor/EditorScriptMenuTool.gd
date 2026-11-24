@@ -106,7 +106,7 @@ static func _translation_dir(path: String) -> String:
 	return FRAMEWORK_TRANSLATION_DIR if path.begins_with(FRAMEWORK_ROOT) else PROJECT_TRANSLATION_DIR
 
 
-## 递归遍历目录树, 仅当 is_tool_root 为真时收集其中的 EditorScript 脚本;
+## 递归遍历目录树, 仅当 is_tool_root 为真时收集其中的 EditorScript 脚本。
 static func _scan_tool_dirs(dir: DirAccess, dir_path: String, is_tool_root: bool, out: Array) -> void:
 	if dir == null:
 		return

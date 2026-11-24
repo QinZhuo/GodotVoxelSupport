@@ -5,7 +5,7 @@ class_name SteamTool extends RefCounted
 ## Steam 入口名（引擎单例名 / autoload 节点名）
 const SINGLETON_NAME := &"Steam"
 
-## `is_initialized()` 的粘性结果：只在"确实已初始化"时缓存（初始化只发生一次，
+## `is_initialized()` 的粘性结果：只在"确实已初始化"时缓存（初始化只发生一次）。
 static var _init_ok := false
 
 

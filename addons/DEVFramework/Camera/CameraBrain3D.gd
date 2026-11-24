@@ -166,6 +166,9 @@ func get_current_camera() -> VirtualCamera3D:
 func _solve(instant: bool) -> void:
 	_dirty = false
 	var next := VirtualCamera3D.current
+	# 机位可能在竞争中被释放, 静态 current 还指着它: 先归一成 null, 否则下面 _set_current 会炸
+	if next != null and not is_instance_valid(next):
+		next = null
 	if next == _current:
 		# 竞争关系没变: 消化掉可能残留的一次性过渡时长
 		if next != null and is_instance_valid(next):

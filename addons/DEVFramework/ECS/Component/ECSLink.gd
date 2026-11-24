@@ -5,7 +5,7 @@ class_name ECSLink extends RefCounted
 var world: ECSWorld
 var entity_id: int = -1
 
-## 持有者(Entity2D/Entity3D/Entity 等)。sync 系列默认以持有者为目标对象,
+## 持有者(Entity2D/Entity3D/Entity 等)。sync 系列默认以持有者为目标对象。
 var owner: Object = null
 
 

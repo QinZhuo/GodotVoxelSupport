@@ -20,7 +20,7 @@ static func get_item_name(item, index: int = -1) -> String:
 	return (text if text.is_valid_identifier() else type_string(typeof(item))) + suffix
 
 ## 安全的等值判断：保留 `==` 的**值语义**（内容相同的 Dictionary 仍能配上），但类型不同时返回 false
-## ⚠️ 不能直接写 `a == b`：GDScript 的 `==` 在类型不同时会**直接抛错**（如 bool vs String），
+## ⚠️ 不能直接写 `a == b`：GDScript 的 `==` 在类型不同时会**直接抛错**（如 bool vs String）。
 static func same_data(a, b) -> bool:
 	if typeof(a) != typeof(b):
 		return false
@@ -182,7 +182,7 @@ static func create_view(view_scene: PackedScene, pool: Pool, item, index: int = 
 			LogTool.error("数组视图", "view_scene 未赋值!")
 			return null
 		view = view_scene.instantiate()
-	## Node 型数据项挂在视图下：必须从旧父节点（上一个拿它的池化视图）迁过来，
+	## Node 型数据项挂在视图下：必须从旧父节点（上一个拿它的池化视图）迁过来。
 	if item is Node and item.get_parent() != view:
 		if item.get_parent() != null:
 			item.get_parent().remove_child(item)
@@ -192,7 +192,7 @@ static func create_view(view_scene: PackedScene, pool: Pool, item, index: int = 
 	view.remove_meta(FREEING_META)
 	return view
 
-## 释放标记：tween_free 淡出期间节点仍在树内（也不在 queue_free 队列里），
+## 释放标记：tween_free 淡出期间节点仍在树内（也不在 queue_free 队列里）。
 const FREEING_META := &"_array_view_freeing"
 
 ## 释放一个视图节点。重复调用、已失效、已进入释放流程的节点直接忽略。

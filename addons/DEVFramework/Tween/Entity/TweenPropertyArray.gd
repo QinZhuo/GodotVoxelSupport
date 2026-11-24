@@ -5,10 +5,11 @@ class_name TweenPropertyArray extends TweenProperty
 
 @export_tool_button("Add Final Value") var add_final_value := func():
 	final_values.append(node.get_indexed(property))
-	print(final_value)
 	notify_property_list_changed()
 
 func _create_tweenr(tween: Tween):
+	if final_values.is_empty():
+		return   # 没配终值: 下面按 size() 均分时长会除零
 	var subtween := create_tween()
 	subtween.set_ignore_time_scale(true)
 	tween.tween_subtween(subtween)

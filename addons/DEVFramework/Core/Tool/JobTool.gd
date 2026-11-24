@@ -107,6 +107,32 @@ static func status(job_id := "") -> Dictionary:
 	return snap
 
 
+## 列出本进程记得的所有 job(最近的在前)。
+## 为什么需要它: 只暴露 wait/cancel 时, 调用方**必须知道 job_id 才能问**; 而 job_id 常在前一次
+## 响应里, 一旦客户端超时丢掉响应、或换了会话接着干, 就再没有入口把 id 拿回来 ——
+## 明明 job 还在跑, 调用方却只能重启一遍任务。这条补的正是"我说的那个 job 现在怎样了"。
+static func list() -> Dictionary:
+	_prune()
+	var ids: Array = _jobs.keys()
+	ids.sort()
+	ids.reverse()
+	var items: Array = []
+	for k in ids:
+		var snap := _snapshot(str(k), _jobs[k])
+		snap["active"] = str(k) == _active
+		# 列表只给"摘要 + 凭据": 完整结果可能很大, 要明细就用 job_wait(job_id)。
+		snap.erase("current")
+		items.append(snap)
+	return {
+		"count": items.size(),
+		"active": _active,
+		"items": items,
+		"hint": "要完整结果(含 result)用 job_wait(job_id); 这里只列摘要。" if not items.is_empty() else "本进程还没有启动过 job。",
+		"process": "editor" if Engine.is_editor_hint() else "game",
+		"kept_max": MAX_KEPT_JOBS,
+	}
+
+
 static func cancel(job_id := "") -> Dictionary:
 	var id := job_id if job_id != "" else _pick()
 	var job: Dictionary = _jobs.get(id, {})

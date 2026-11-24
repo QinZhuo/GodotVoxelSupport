@@ -161,6 +161,10 @@ static func _locale_to_column(path: String, locale: String) -> String:
 		if score > best_score:
 			best_score = score
 			best = col
+	## 表头里还没有这个语种(一个都不匹配)时拿 locale 当新列名: 否则会落到第一列, 把那里的译文覆盖掉。
+	## 新列由 save_csv_data 的"补数据里出现的新列"逻辑落盘。
+	if best_score <= 0:
+		return locale
 	return best
 
 ## 确保 CSV 文件存在，不存在则创建一个空文件（仅 id 列头）

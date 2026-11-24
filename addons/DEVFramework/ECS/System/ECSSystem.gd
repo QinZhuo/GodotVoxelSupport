@@ -9,7 +9,7 @@ var priority: int = 0
 ## 启停开关
 var enabled: bool = true
 
-## —— 频率控制(参考 Flecs interval/rate、Unity RateUtils、Bevy FixedUpdate) ——
+## 频率控制(参考 Flecs interval/rate、Unity RateUtils、Bevy FixedUpdate)。
 var interval: float = 0.0
 var rate: int = 1
 var fixed_step: float = 0.0
@@ -49,7 +49,8 @@ func _schedule(delta: float) -> float:
 		_frame_delta = delta
 		return delta
 	_frame_n += 1
-	if _frame_n % rate != 0:
+	## rate<=0 是"每帧都跑"最常见的误写: 直接取模会除零, 每帧抛错并让本系统调度中断
+	if _frame_n % maxi(rate, 1) != 0:
 		_frame_delta = -1.0
 		return -1.0
 	_frame_delta = delta

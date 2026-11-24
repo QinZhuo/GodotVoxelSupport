@@ -296,7 +296,7 @@ static func coerce(v: Variant, target_type: int) -> Variant:
 	return v
 
 
-## 把 "x, y, z" 形式的文本拆成数字分量。任何一项非法(或为空)即返回空数组,
+## 把 "x, y, z" 形式的文本拆成数字分量。任何一项非法(或为空)即返回空数组。
 static func _components(s: String) -> Array[float]:
 	var body := s.replace("(", "").replace(")", "").replace("[", "").replace("]", "")
 	var out: Array[float] = []

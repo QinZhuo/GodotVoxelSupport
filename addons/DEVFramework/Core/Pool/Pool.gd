@@ -117,7 +117,7 @@ func _push_idle(item: Node) -> void:
 	_reparent(item, idle_parent)
 	_idle.append(item)
 
-## 纯视图（MeshInstance3D / Control）没有 on_pool_return 替它藏，
+## 纯视图（MeshInstance3D / Control）没有 on_pool_return 替它藏。
 func _set_visible(item: Node, visible: bool) -> void:
 	if item is Node3D:
 		(item as Node3D).visible = visible

@@ -9,6 +9,13 @@ class_name UIPanel extends Control
 ## UI 层级（[UITool.Layer] 枚举值，数字越大越靠前）
 @export var layer: UITool.Layer = UITool.Layer.PANEL
 
+## 打开时的返回键提示文案 key（tip.csv），留空则不提示
+@export var back_tip: StringName
+
+## 点击面板外的空白是否退一层（查看类面板用；操作型面板保持关闭，避免误触）。
+## 由 [UITool.dismiss_on_blank_click] 按属性名探测，2D / 3D 面板一致。
+@export var dismiss_on_blank_click: bool = false
+
 # ============================================================
 
 var is_open: bool = false
@@ -32,9 +39,12 @@ signal on_closed()
 ## 打开面板。完整流程见 [UIPanelTool.open]。
 func open() -> void:
 	await UIPanelTool.open(self)
+	if back_tip != &"" and is_open:
+		TipTool.show_tip([[[&"menu"], back_tip]], self, 0)
 
 ## 关闭面板。完整流程见 [UIPanelTool.close]。
 func close() -> void:
+	TipTool.hide_tip(self)
 	await UIPanelTool.close(self)
 
 ## 节点离开场景树时自动注销（兜底，见 [UIPanelTool.on_exit_tree]）。
@@ -66,6 +76,14 @@ func await_closed_since(version: int) -> bool:
 func _back() -> bool:
 	close()
 	return true
+
+## 获取焦点时由 UITool 调用。子类可重写以注册导航按键。
+func _focus_enter() -> void:
+	pass
+
+## 失去焦点时由 UITool 调用。子类需自行清空导航。
+func _focus_exit() -> void:
+	pass
 
 ## 应用面板显隐（[UIPanelTool.open] / [UIPanelTool.close] 调用）。默认切换自身 [member visible]。
 func apply_visibility(shown: bool) -> void:

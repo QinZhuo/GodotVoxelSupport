@@ -1,9 +1,15 @@
 @tool
-## MCP 日志与错误捕获器 — 继承 Godot 4.5+ 的 Logger
-class_name MCPLogger extends Logger
+## 日志/错误捕获器 — 继承 Godot 的 Logger, 环形缓冲 print 与 push_error/脚本错误(含栈追踪)。
+## 为什么放在 Core: 只有引擎依赖, MCP 与 headless 测试两侧都要用; 留在 MCP 会让 Test 反向依赖 MCP。
+## Reset: 进程级（error_sink 是宿主注入的回调, 重载后由宿主重新绑定, 不进 ResetTool）
+class_name LogCaptureTool extends Logger
 
 const CAPACITY := 2000        # 环形缓冲容量(日志条目数)
 const ERROR_CAPACITY := 500   # 错误条目容量(含栈追踪, 占空间)
+
+## 错误旁路: 宿主(如 MCP)注入后, 每条错误额外实时推给另一个进程。
+## 断点暂停时主循环停摆, 对端发来的查询根本不会被执行, 只有这份先推出去的副本能说出真实错误。
+static var error_sink: Callable
 
 ## 日志条目结构: {"time":int毫秒, "message":String, "is_error":bool}
 var _messages: Array = []
@@ -19,15 +25,21 @@ func _init() -> void:
 
 ## 由 _log_message 调用 — 捕获普通 print / printerr(text流)
 func _log_message(message: String, error: bool) -> void:
-	_mutex.lock()
+	var text := _strip_ansi(message)
 	if error:
 		# printerr 输出也计入错误列表末尾, 方便统一查看
-		_push_error({"time": Time.get_ticks_msec(), "message": _strip_ansi(message), "is_error": true, "type": "stderr", "stack": []})
-	else:
-		_messages.append({"time": Time.get_ticks_msec(), "message": _strip_ansi(message), "is_error": false})
-		if _messages.size() > CAPACITY:
-			_messages.pop_front()
-			_base_index += 1
+		var entry := {"time": Time.get_ticks_msec(), "message": text, "is_error": true, "type": "stderr", "stack": []}
+		_mutex.lock()
+		_push_error(entry)
+		_mutex.unlock()
+		if error_sink.is_valid():
+			error_sink.call(entry)
+		return
+	_mutex.lock()
+	_messages.append({"time": Time.get_ticks_msec(), "message": text, "is_error": false})
+	if _messages.size() > CAPACITY:
+		_messages.pop_front()
+		_base_index += 1
 	_mutex.unlock()
 
 
@@ -51,8 +63,7 @@ func _log_error(
 			var ln: int = bt.get_frame_line(i)
 			lines.append("    at %s (%s:%d)" % [label, src, ln])
 		bt_texts.append({"language": bt.get_language_name(), "frames_raw": bt.format(), "lines": lines})
-	_mutex.lock()
-	_push_error({
+	var entry := {
 		"time": Time.get_ticks_msec(),
 		"message": rationale if not rationale.is_empty() else code,
 		"type": _error_type_name(error_type),
@@ -61,8 +72,13 @@ func _log_error(
 		"line": line,
 		"code": code,
 		"stack": bt_texts,
-	})
+	}
+	_mutex.lock()
+	_push_error(entry)
 	_mutex.unlock()
+	# 旁路要在锁外调用: 回调里可能再次打日志
+	if error_sink.is_valid():
+		error_sink.call(entry)
 
 
 func _error_type_name(t: int) -> String:
@@ -80,7 +96,7 @@ func _push_error(entry: Dictionary) -> void:
 		_err_base_index += 1
 
 
-## 剥离 ANSI 转义序列(颜色码等)。这些控制字符会被 JSON.stringify 原样输出,
+## 剥离 ANSI 转义序列(颜色码等)。这些控制字符会被 JSON.stringify 原样输出, 污染客户端解析。
 func _strip_ansi(text: String) -> String:
 	if not text.contains(String.chr(27)):
 		return text

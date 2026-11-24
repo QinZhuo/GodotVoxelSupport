@@ -110,6 +110,11 @@ static func _mirror_flush() -> void:
 	_mirror_buffer.clear()
 	var f := FileAccess.open(_mirror_path, FileAccess.READ_WRITE)
 	if f == null:
+		## 文件存在却打不开(被占用/只读)时**不能**回退 WRITE: 那会把已累积的日志截断成只剩这一批。
+		## 把文本塞回缓冲头部, 下一批追加时一起写; 一直失败就一直攒(镜像本身是调试辅助)。
+		if FileAccess.file_exists(_mirror_path):
+			_mirror_buffer.insert(0, text.substr(0, maxi(text.length() - 1, 0)))
+			return
 		f = FileAccess.open(_mirror_path, FileAccess.WRITE)
 		if f == null:
 			return

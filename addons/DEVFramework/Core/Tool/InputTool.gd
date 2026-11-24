@@ -101,7 +101,8 @@ static func register_focus_group(nodes: Array[Node], default_index: int = 0) -> 
 		_focus_index = -1
 		return
 	_focus_group = nodes.duplicate()
-	_focus_index = default_index
+	## 夹持: 越界索引会让之后每次事件都卡在 _focus_group[_focus_index] 上
+	_focus_index = clampi(default_index, 0, nodes.size() - 1)
 
 	if nodes[0] is Control:
 		_set_group_focus_mode(nodes, true)
@@ -229,6 +230,8 @@ static func _handle_3d_navigation(event: InputEvent) -> bool:
 			return false
 	## ⚠️ 当前焦点节点可能已被释放（注册方销毁时没来得及清）⇒ 重新挑一个有效的，
 	## 否则下面的 _move_3d / _activate_3d 会拿到已释放实例报错
+	if _focus_index >= _focus_group.size():
+		_focus_index = _focus_group.size() - 1
 	if not _is_active(_focus_group[_focus_index]):
 		_ensure_focus()
 		if _focus_index < 0:
@@ -287,6 +290,8 @@ static func _set_focus(index: int) -> void:
 static func _move_3d(direction: Vector2) -> void:
 	if _focus_index < 0:
 		return
+	if _focus_index >= _focus_group.size():
+		_focus_index = _focus_group.size() - 1
 
 	var cur := _focus_group[_focus_index]
 	var meta_key := "focus_up" if direction == Vector2.UP else "focus_down" if direction == Vector2.DOWN else "focus_left" if direction == Vector2.LEFT else "focus_right"
@@ -658,7 +663,7 @@ static func _event_key(event: InputEvent) -> String:
 		return ""
 	return prefix + str(name) if name != null else ""
 
-## 事件是否符合设备：device >= 0 时只认该设备；-1 时按模式（鼠标/触摸归指针，
+## 事件是否符合设备：device >= 0 时只认该设备；-1 时按当前模式判断（导航模式只认摇杆/按键，操作模式只认指针）。
 static func _match_device(event: InputEvent, device := -1) -> bool:
 	if device >= 0:
 		return _device_of(event) == device

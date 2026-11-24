@@ -8,7 +8,7 @@ class_name GoapAction extends Entity
 var def: GoapActionDef
 var _performing := false
 
-## 行动目标上下文（如要走向的草、要追踪的猎物）。由 begin() 设置，
+## 行动目标上下文（如要走向的草、要追踪的猎物）。由 begin() 设置。
 var target: Object = null
 
 

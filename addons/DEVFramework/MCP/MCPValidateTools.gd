@@ -2,47 +2,40 @@
 extends RefCounted
 
 ## ======= 脚本/资源校验域 =======
-## 从 MCPDevServer 拆出的工具域文件, 沿 MCPCodeIndex 的样板。收录"不信任声明、要实测"这一类能力:
+## 收录"不信任声明、要实测"这一类能力:
 ##   - validate        统一验证入口(kind=script 编译校验 / kind=resource 资源可加载性)
 ##   - classdb_query   查 Godot 原生类 API(写脚本前确认方法/属性/信号签名)
-##   - MCPResult      响应封装
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
+const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 
-## 本域私有的编译错误捕获器。**刻意不共用 MCPDevServer 的那个**, 理由见下方"编译错误从哪来";
-static var _compile_log: MCPLogger = null
+## 本域私有的编译错误捕获器。**刻意不共用 MCPDevServer 的那个**, 理由见下方"编译错误从哪来"。
+static var _compile_log: LogCaptureTool = null
 
 
-## ======= 编译错误从哪来: 为什么本域自建一个 MCPLogger =======
-## **接缝判据(全局统一, 不是本域的偏好)**: 接缝可以存在, 但漏调必须可见; 漏调会静默失效的
-## 本域有两处接缝, 按判据给出**不同**答案, 且都正确 —— 不要为了"看起来统一"去改其中任何一处:
-##   - 编译错误捕获器 → 域内自建: 漏调后果是编译错误捕获不到、validate 恒返回 valid=true,
-##     **静默失效**(把编译失败的代码报成合法), 故必须否决接缝。
+## ======= 编译错误从哪来: 本域自建一个日志捕获器 =======
+## 接缝判据: **漏调必须可见**。捕获器若靠注入, 漏调后果是编译错误捕获不到、
+## validate 恒返回 valid=true(把编译失败的代码报成合法)—— 属静默失效, 故必须域内自建。
 
 ## 取本域私有的编译错误捕获器(首次调用时创建并注册到 OS)。
-##    · get_error_cursor() 只取本实例环形缓冲 `_errors` 的写指针, 不动缓冲内容;
-##    · take_errors_since(since) 只按"下标 >= since"读**一段区间**, 不删除数组元素;
-##    · 唯一的破坏性路径是 clear_errors(), 本编译路径**没有**调用它。
-## **因此不要因为看起来"重复注册"就删掉其中任何一个:**
-static func _compile_error_log() -> MCPLogger:
+## 它与主文件的日志捕获器各自独立: get_error_cursor 只取写指针, take_errors_since 只读区间,
+## 本路径不调 clear_errors —— 故不会互相清空。**不要因为看起来"重复注册"就删掉任一个。**
+static func _compile_error_log() -> LogCaptureTool:
 	if _compile_log == null:
-		_compile_log = MCPLogger.new()
+		_compile_log = LogCaptureTool.new()
 		OS.add_logger(_compile_log)
 	return _compile_log
 
 
 ## ======= 域注册入口 =======
-## 满足判据前半句"漏调必须可见"。MCPCodeIndex.register 是同形状、同结论, 各域一致。
-## (如本域的 logger)才必须改成域内自建或补告警; 前者(如本函数)可留接缝, 但别误以为
-## **当前状态(实测)**: 主文件 `_register_validate_tools()` 的函数体只剩一行
-##   · MCPDevServer._add_tool 里 `_tool_handlers[name]` / `_tool_schemas[name]` 是 **Dictionary**,
+## 由 MCPDevServer 传入 _add_tool。MCPCodeIndex.register 同形状同结论, 各域一致。
+## 注册表侧 _tool_handlers[name] / _tool_schemas[name] 都是 Dictionary, 同名工具会静默覆盖。
 static func register(add_tool: Callable) -> void:
 	add_tool.call("validate",
 		"统一验证入口。kind=script: 验证GDScript语法/可编译性(传path读磁盘或传code源码), 返回是否有效与错误明细; kind=resource: 验证资源/场景能否被引擎加载(排查.tres/.tscn损坏或依赖缺失)。",
 		{"type": "object", "properties": {
 			"kind": {"type": "string", "enum": ["script", "resource"], "description": "验证类型, 默认 script"},
-			"path": MCPToolSchema.str_arg("目标 res:// 路径(script 与 code 二选一)"),
-			"code": MCPToolSchema.str_arg("kind=script 时可直接传源码文本")
+			"path": MCPToolContract.str_arg("目标 res:// 路径(script 与 code 二选一)"),
+			"code": MCPToolContract.str_arg("kind=script 时可直接传源码文本")
 		}},
 		_handle_validate)
 
@@ -60,7 +53,7 @@ static func register(add_tool: Callable) -> void:
 
 ## ======= 实现 =======
 
-## validate 的分派: 只按 kind 选实现。刻意做成"薄分派"而不把两支合成一支: 两支验的是完全
+## validate 的分派: 只按 kind 选实现。刻意做成"薄分派"而不把两支合成一支: 两支验的是完全不同的机制(编译源码 / 引擎加载资源)。
 static func _handle_validate(args: Dictionary) -> Dictionary:
 	if VariantTool.get_string(args, "kind", "script") == "resource":
 		return await _handle_validate_resource(args)
@@ -82,9 +75,9 @@ static func _handle_validate_script(args: Dictionary) -> Dictionary:
 		file.close()
 	var script := _make_tmp_script(code)
 	var outcome := _compile_and_collect(script)
-	# 剔除误报: GDScript.new() 临时脚本默认无路径, 引擎会因 class_name 已全局注册
+	# 剔除误报: GDScript.new() 临时脚本默认无路径, 引擎会因 class_name 已全局注册而报重名。
 	outcome.real_errors = _filter_class_conflicts(outcome.real_errors, path, code)
-	# warnings 通道同样过滤: 带 "Warning treated as error" 后缀的 hides 消息会被归入此处
+	# warnings 通道同样过滤: 带 "Warning treated as error" 后缀的 hides 消息会被归入此处, 需一并滤掉。
 	var filtered_warns: Array = []
 	for w in outcome.warnings:
 		var msg := str(w)
@@ -118,8 +111,8 @@ static func _make_tmp_script(code: String) -> GDScript:
 	return script
 
 
-## 编译临时脚本并收集时的新增错误/警告。返回 {"real_errors", "warnings"}。
-## 里有明确警告, 实测踩过。
+## 编译临时脚本并收集此刻新增的错误/警告。返回 {"real_errors", "warnings"}。
+## 必须按游标取增量: 引擎会把历史错误一起返回。
 static func _compile_and_collect(script: GDScript) -> Dictionary:
 	var log := _compile_error_log()
 	var n0: int = log.get_error_cursor() if log else 0
@@ -288,7 +281,7 @@ static func _handle_classdb_query(args: Dictionary) -> Dictionary:
 	return MCPResult.ok_json(out)
 
 
-## 获取类的信号列表: ClassDB.class_get_signal_list 对内置类返回空,
+## 获取类的信号列表: ClassDB.class_get_signal_list 对内置类返回空。
 static func _instance_signal_list(cname: String) -> Array:
 	if not ClassDB.can_instantiate(cname):
 		return []

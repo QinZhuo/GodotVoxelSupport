@@ -7,14 +7,14 @@ extends RefCounted
 ##   - 系统级并行执行(冲突检测分批, 多线程并行)
 ##   - 批量查询与列访问(高频路径)
 
-## —— 批量运算操作符(传给 batch_apply / batch_apply_where 的 op 参数) ——
+## 批量运算操作符(传给 batch_apply / batch_apply_where 的 op 参数)。
 enum BatchOp {
 	ADD_VALUE = 0,       # 加值:   col += addend
 	MULTIPLY_ADD = 1,    # 乘加:   col = col * factor + addend
 	SET_VALUE = 2,       # 赋值:   col = addend
 }
 
-## —— 条件比较符(传给 batch_apply_where / batch_count_where 的 conditions.op) ——
+## 条件比较符(传给 batch_apply_where / batch_count_where 的 conditions.op)。
 enum CondOp {
 	LESS_THAN = 0,        # <   小于
 	LESS_OR_EQUAL = 1,    # <=  小于等于
@@ -24,7 +24,7 @@ enum CondOp {
 	NOT_EQUAL = 5,        # !=  不等于
 }
 
-## —— 列间运算操作符(传给 batch_apply_col 的 op 参数) ——
+## 列间运算操作符(传给 batch_apply_col 的 op 参数)。
 enum ColOp {
 	COL_ADD = 0,  # 目标列 += 源列(可缩放)
 	COL_SUB = 1,  # 目标列 -= 源列(可缩放)
@@ -59,7 +59,9 @@ var parallel_threads: int:
 		return scheduler().parallel_threads
 	set(value):
 		scheduler().parallel_threads = value
-		_core.set_thread_count(maxi(value, 0))
+		## 原生库缺失时 _core 为 null(见 _init), 此处不能直接解引用
+		if _core != null:
+			_core.set_thread_count(maxi(value, 0))
 
 
 ## 调度器懒创建(它要回指本世界: 解析组件名、取原生核心、作上下文宿主)。
@@ -96,6 +98,10 @@ var _dirty_mutex := Mutex.new()
 # ---------------- 事件队列 ----------------
 var _event_queues := {}                  # type(StringName) -> Array[Variant]
 var _event_subscribers := {}             # type(StringName) -> Array[Callable]
+## 实体过滤订阅的"原始 handler → 包装 handler"对应表: 没有它, off_event(原始) 解不掉包装。
+var _event_wrappers := {}                # type(StringName) -> Array[[原始 Callable, 包装 Callable]]
+## 是否正处于 tick() 内(调度器驱动): 期间的结构变更延迟到帧末统一 flush。
+var _in_tick := false
 
 # ---------------- 查询缓存(增量失效) ----------------
 ## 行集缓存条数上限: 超出按插入序淘汰一半(不是整表清空, 避免查询种类偏多时每帧重建)
@@ -105,13 +111,14 @@ var _comp_versions := {}                  # 组件名 -> 结构版本(该组件�
 var _world_version := 0                   # 全局结构版本(destroy/批量结构变更时 +1)
 
 func _init(p_use_shared_core: bool = true) -> void:
-	# 默认使用全局共享核心(游戏通常只有一个世界);
+	# 默认使用全局共享核心(游戏通常只有一个世界)。
 	if p_use_shared_core:
 		_core = ECSNative.get_instance()
 	else:
 		_core = ClassDB.instantiate(&"ECSCore")
 	if _core == null:
 		push_error("ECSWorld: ECSCore 原生库不可用! 请确认 res://addons/DEVFramework/Native/devframework.gdextension 已加载(框架强依赖 C++, 无回退)。")
+		# 不可用时世界退化为空实现: 结构操作直接返回, tick/cmd_flush 空转(见各处 _core 判空)。
 	# 注: prefab 隔离为独立 archetype 的方案试过两轮, 已放弃 —— 存储层分离其实做到了
 	# (component_counts 显示内部组件 0 行、实例 20k 行), 但内部组件**按名字查不到**
 	# (comp_index("__prefab") 返回 -1), 于是 get_field/add_component 这类按名 API 全部失效;
@@ -188,6 +195,10 @@ func is_alive(entity: int) -> bool:
 
 ## 销毁实体(从所有组件移除, 复用 id 防悬垂)
 func destroy_entity(entity: int) -> void:
+	## 已死/重复销毁: 原生 destroy 是空操作, 但这里继续走会把 remove 与 destroyed 钩子再发一遍
+	## (池化对象的双重回收就是这么来的)
+	if not _core.is_alive(entity):
+		return
 	_cleanup_relations(entity)   # 关系清理: 解除该实体的父/子关联(索引 + 对端 target)
 	var pending_comps: Array = []
 	if _has_any_component_hooks or not _entity_destroyed_hooks.is_empty():
@@ -349,11 +360,17 @@ func has_component(entity: int, component) -> bool:
 
 func remove_component(entity: int, component) -> void:
 	var name := resolve_component_name(component)
-	if name != &"":
-		_struct_mutex.lock()
+	if name == &"":
+		return
+	_struct_mutex.lock()
+	## 原生 remove_component 对"没有该组件/实体已死"是幂等空操作, 这里若照样发钩子,
+	## 用户侧的解绑/归还池会被执行两次, 所以先确认真的移除过
+	var had: bool = _core.has_component(entity, name)
+	if had:
 		_core.remove_component(entity, name)
 		_bump_comp(name)
-		_struct_mutex.unlock()
+	_struct_mutex.unlock()
+	if had:
 		_fire_component_remove(name, entity)
 
 ## 统一的组件名解析入口(全框架唯一实现): Script -> 注册名 / 反射类名; String(Name) 原样返回。
@@ -392,9 +409,10 @@ func set_field(entity: int, component, field: StringName, value) -> void:
 	_record_access(cn)
 	_core.set_field(entity, cn, field, value)
 	# 逐帧"每个单位都动"的场景走单实体增量: 只挪一格, 不触发整表重建
-	if _spatial_comp == cn and _spatial_field == field:
+	var spatial_moved := _spatial_comp == cn and _spatial_field == field
+	if spatial_moved:
 		_core.spatial_update_entity(entity)
-	_mark_dirty(cn)
+	_mark_dirty(cn, spatial_moved)
 
 
 # ---- 逐实体读写守卫(防静默慢) ----
@@ -430,7 +448,7 @@ func _note_entity_access() -> void:
 # ============================================================
 
 ## 查询匹配实体(返回 anchor 组件的 dense 行号列表)。
-## 注意: 行号属于 anchor 组件; 跨组件访问时, 先 entity_of_row(anchor, row) 取实体ID,
+## 注意: 行号属于 anchor 组件; 跨组件访问时, 先 entity_of_row(anchor, row) 取实体ID。
 func get_entity_at(component, row: int) -> int:
 	return _core.get_entity_at(resolve_component_name(component), row)
 
@@ -476,7 +494,7 @@ func _resolve_query_args(anchor, must: Array, without: Array) -> Array:
 		_record_access(wn)
 	return [anchor_name, must_names, without_names]
 
-## 查询缓存键: 扁平字符串键(字段间用 \u001e, 数组元素间用 \u001f),
+## 查询缓存键: 扁平字符串键(字段间用 \u001e, 数组元素间用 \u001f)。
 const _QKEY_FIELD := "\u001e"
 const _QKEY_ITEM := "\u001f"
 
@@ -624,7 +642,7 @@ func batch_clamp_where(anchor, must: Array, op_comp, op_field: StringName,
 		mincn, min_field, maxcn, max_field, _normalize_conds(conditions))
 
 
-## int 列钳制的 GDScript 兜底实现(原生 batch_clamp 仅支持 float 列):
+## int 列钳制的 GDScript 兜底实现(原生 batch_clamp 仅支持 float 列)。
 func _gd_batch_clamp_int(an: StringName, must: Array, ocn: StringName, op_field: StringName,
 		mincn: StringName, min_field: StringName, maxcn: StringName, max_field: StringName,
 		conditions: Array) -> int:
@@ -684,6 +702,16 @@ func _cache_store(key: String, anchor_name: StringName, must_names: PackedString
 ## 组件结构版本 +1(该组件实体集合变化)。
 func _bump_comp(comp: StringName) -> void:
 	_comp_versions[comp] = _comp_versions.get(comp, 0) + 1
+
+
+## 全局结构版本(destroy / 批量结构变更 +1)。外部索引可据此判断"我的行号还作数吗"。
+func struct_version() -> int:
+	return _world_version
+
+
+## 某个组件的结构版本(该组件实体集合变化 +1)
+func comp_version(comp) -> int:
+	return _comp_versions.get(resolve_component_name(comp), 0)
 
 ## 取整列数据(返回 Packed 数组拷贝, 按 anchor 组件的 dense 行号索引)。
 func get_column(component, field: StringName):
@@ -965,11 +993,12 @@ func cmd_create() -> int:
 
 ## 排队: 销毁实体(flush 时执行, 若已死亡则忽略)。
 func cmd_destroy(entity: int) -> void:
-	if entity >= 0:
-		_cmd_mutex.lock()
-		_core.cmd_destroy(entity)
-		_cmd_note(["destroy", entity])
-		_cmd_mutex.unlock()
+	## 负句柄是 cmd_create 的占位句柄, 原生 flush 时才解析成真实实体;
+	## 这里若只放行 >=0, "批量建完立刻删"的命令就只建不删(实体与内存持续泄漏)
+	_cmd_mutex.lock()
+	_core.cmd_destroy(entity)
+	_cmd_note(["destroy", entity])
+	_cmd_mutex.unlock()
 
 ## 排队: 给实体加组件(flush 时执行)。
 func cmd_add_component(entity: int, component) -> void:
@@ -1037,13 +1066,19 @@ func cmd_pending_count() -> int:
 
 ## 立即执行全部排队命令(通常由 tick() 帧末自动调用)。
 func cmd_flush() -> void:
+	if _core == null:
+		return
 	# 快路径: 没有 hook 时 `_cmd_ops` 是空的(见 _cmd_mirror_needed) → 一次原生 flush + 粗粒度失效。
 	# 这些都是"结构变更", 本就该让全部查询缓存失效, 比逐条精确失效更省。
 	if _cmd_ops.is_empty():
 		_cmd_mutex.lock()
-		_core.flush_commands()
+		var pending: int = _core.pending_command_count()
+		if pending > 0:
+			_core.flush_commands()
 		_cmd_mutex.unlock()
-		_world_version += 1
+		# 队列本来就空时不能加版本号: tick() 每帧都调这里, 无条件 +1 会让全部查询缓存每帧失效。
+		if pending > 0:
+			_world_version += 1
 		# 占位句柄计数必须**每批重置**: 下一批的 create 占位从 -1 重新开始
 		# (漏了这句会让第二批句柄变成 -2, 解析到上一批的实体 —— 用例当场抓到)
 		_cmd_create_count = 0
@@ -1130,10 +1165,25 @@ func _record_access(comp: StringName) -> void:
 ## 每帧驱动全部系统。内部先按依赖图拓扑排序(优先级仅作同层平级次序)。
 ## 否则回退纯串行(行为与旧版一致)。并行开启时第一帧自动串行预热以采集访问记录。
 func tick(delta: float) -> void:
+	if _core == null:
+		return
 	_frame_count += 1
+	_in_tick = true
 	scheduler().tick(delta)
 	_dispatch_events()
 	cmd_flush()
+	_in_tick = false
+
+
+## 是否处于 tick() 内。系统在 tick 里排队销毁实体后不要自己 flush(会打断本帧其余系统),
+## 交给帧末的 cmd_flush(); 独立调用(测试/手动驱动)仍需自己 flush, 否则同帧断言看不到结果。
+func is_ticking() -> bool:
+	return _in_tick
+
+
+## 原生核心是否可用。不可用时世界为空实现, 只报错不崩溃。
+func is_available() -> bool:
+	return _core != null
 
 ## 调试: 各系统本帧耗时(ms), 键为系统名。
 func get_system_times() -> Dictionary:
@@ -1243,12 +1293,12 @@ func _fire_entity_destroyed(entity: int) -> void:
 #  注意: get_column 返回共享引用后原地修改不经过写 API, 不会被标记。
 
 ## 标记组件本帧被写(写路径内部调用)。
-func _mark_dirty(comp: StringName) -> void:
+func _mark_dirty(comp: StringName, skip_spatial := false) -> void:
 	if comp == &"":
 		return
 	# 空间索引靠这里失效: 所有写路径(单字段/整列/批量)最终都会走到 _mark_dirty,
 	# 所以在 C++ 的 set_field 里逐个挂钩反而不如这里一处可靠。
-	if _spatial_comp != &"" and comp == _spatial_comp:
+	if not skip_spatial and _spatial_comp != &"" and comp == _spatial_comp:
 		_core.spatial_invalidate()
 	_dirty_mutex.lock()
 	_dirty_comps[comp] = _frame_count
@@ -1300,7 +1350,7 @@ func on_entity_event(type: StringName, filter: Array, handler: Callable) -> void
 			if not has_component(eid, comp):
 				return
 		handler.call(eid, payload.get("data", null))
-	on_event(type, wrapped)
+	_subscribe_wrapped(type, handler, wrapped)
 
 ## 订阅"实体事件"并按组件过滤(带 where 条件)。
 func on_entity_event_where(type: StringName, filter: Array, conditions: Array, handler: Callable) -> void:
@@ -1314,11 +1364,28 @@ func on_entity_event_where(type: StringName, filter: Array, conditions: Array, h
 		if not _entity_matches_conds(eid, conditions):
 			return
 		handler.call(eid, payload.get("data", null))
+	_subscribe_wrapped(type, handler, wrapped)
+
+## 登记包装订阅: on_event 存包装版, 本表留"原始 → 包装", off_event(原始) 才有解。
+func _subscribe_wrapped(type: StringName, handler: Callable, wrapped: Callable) -> void:
 	on_event(type, wrapped)
+	if not _event_wrappers.has(type):
+		_event_wrappers[type] = []
+	_event_wrappers[type].append([handler, wrapped])
+
 
 func off_event(type: StringName, handler: Callable) -> void:
 	var arr: Array = _event_subscribers.get(type, [])
 	arr.erase(handler)
+	# 实体过滤订阅存的是包装版: 按原始 handler 找到包装版一并摘掉, 否则回调永久泄漏。
+	var pairs: Array = _event_wrappers.get(type, [])
+	for i in range(pairs.size() - 1, -1, -1):
+		var pair: Array = pairs[i]
+		if pair[0] == handler:
+			arr.erase(pair[1])
+			pairs.remove_at(i)
+	if pairs.is_empty():
+		_event_wrappers.erase(type)
 
 ## 取走本帧某类事件(取一次即清空, 再取返回空)。
 ## 与 on_event 订阅是**两种并存**的消费方式:
@@ -1466,7 +1533,7 @@ func batch_count_where(anchor, must: Array, conditions: Array) -> int:
 		_record_access(resolve_component_name(c.get("comp", &"")))
 	return _core.batch_count(an, _names(must), _normalize_conds(conditions))
 
-## 批量收集: 单次遍历匹配 anchor+must(不含 without)的签名实体, 同时判定多组条件,
+## 批量收集: 单次遍历匹配 anchor+must(不含 without)的签名实体, 同时判定多组条件。
 func batch_collect(anchor, must: Array, without: Array, groups: Array) -> Array:
 	var an := resolve_component_name(anchor)
 	_record_access(an)

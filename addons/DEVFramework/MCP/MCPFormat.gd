@@ -2,13 +2,13 @@
 extends RefCounted
 
 ## ======= 输出整形域 =======
-## (主文件的 _output_cap() 是唯一读设置处)。截断策略的每个分支都对应一种真实事故, 无状态
+## (主文件的 _output_cap() 是唯一读设置处)。截断策略的每个分支都对应一种真实事故。
 
 
 ## 补齐 JSON 字符串里剩余的 C0 控制字符转义。
 static func json_safe(s: String) -> String:
 	# 全程在 PackedByteArray 上做: 用 String.chr(c) 当 needle 会在 c == 0 那轮造出内含 NUL 的
-	# "Unexpected NUL character" 纯噪音。检测也必须留在 C++ 侧: tools/list 响应有 38K,
+	# 字符串并输出 "Unexpected NUL character" 噪音; 检测留在 C++ 侧也更快。
 	var bytes := s.to_utf8_buffer()
 	# \t \n \r 已由 JSON.stringify 处理, 再转义反而会变成字面量 "\t" 之外的乱码
 	var dirty := bytes.find(0) != -1
@@ -21,7 +21,7 @@ static func json_safe(s: String) -> String:
 				break
 	if not dirty:
 		return s
-	# 只在真有脏字节时才重建。追加式而非 resize+赋值: 转义后长度必然变化,
+	# 只在真有脏字节时才重建。追加式而非 resize+赋值: 转义后长度必然变化。
 	var out := PackedByteArray()
 	for i in bytes.size():
 		var b := bytes[i]
@@ -29,7 +29,7 @@ static func json_safe(s: String) -> String:
 			out.append_array(("\\u%04x" % b).to_utf8_buffer())
 		else:
 			out.append(b)
-	# 此时 out 里已无任何 C0 字节, get_string_from_utf8() 不会再报 NUL
+	# 此时 out 里已无 C0 字节, get_string_from_utf8() 不会再报 NUL。
 	return out.get_string_from_utf8()
 
 
@@ -44,10 +44,10 @@ static func enforce_output_cap(tool_name: String, result: Dictionary, cap: int) 
 	# 预留说明的位置: 说明本身也计入上限, 否则"截断后的结果"仍可能超限。
 	var notice := _truncation_notice(tool_name, original_len, cap)
 	if notice.length() >= cap:
-		# cap 被调到比说明还小时(实测 cap=120 而说明长 329), keep 会退化成 0, 结果是
+		# cap 比说明还小时 keep 会退化成 0, 此时只保留说明本身。
 		notice = ("[已截断] 原文 %d 字符, 超出上限 %d" % [original_len, cap]).substr(0, cap)
 	var keep := maxi(0, cap - notice.length())
-	# 按行边界回退到最近的换行, 避免把一行劈成两半产生半截 JSON/半截路径。
+	# 按行边界回退到最近的换行, 避免把一行劈成半截 JSON / 半截路径。
 	var head := text.substr(0, keep)
 	var nl := head.rfind("\n")
 	if nl > keep / 2:
@@ -58,12 +58,11 @@ static func enforce_output_cap(tool_name: String, result: Dictionary, cap: int) 
 	out["text"] = new_text
 	out["truncated"] = true
 	out["omitted_chars"] = original_len - head.length()
-	# content[].text 同步: 官方 SDK 客户端读的是 content[], 不同步的话它们看到的是**未截断**
+	# content[].text 同步: 官方 SDK 客户端读的是 content[], 不同步则它们看到未截断的全文。
 	if out.get("content") is Array and not out["content"].is_empty() and out["content"][0] is Dictionary:
 		out["content"][0]["text"] = new_text
-	# structuredContent: 成功响应带, 错误响应也带(MCPResult.err 现在会填, 见其说明),
-	# 必须**同时缩减 structuredContent 里的长字符串**, 否则截断是假的: 实测 get_scene_tree
-	# node_count / pruned_nodes 这类标量元信息(它们很小, 且是判断"要不要续读"的关键)。
+	# structuredContent: 成功与错误响应都带(MCPResult.err 会填), 必须**同时缩减其中的长字符串**,
+	# 否则截断是假的。保留 node_count / pruned_nodes 这类小标量 —— 它们是判断续读的关键。
 	var sc: Variant = out.get("structuredContent", null)
 	if sc is Dictionary and not bool(out.get("is_error", false)):
 		var merged: Dictionary = sc
@@ -75,8 +74,8 @@ static func enforce_output_cap(tool_name: String, result: Dictionary, cap: int) 
 
 
 ## 递归把 payload 里超过 limit 的长字符串换成占位说明。阈值取 cap/2, 给多字段叠加留余量。
-## 只动字符串: 数字与数组长度是"漏了多少"的唯一线索, 砍掉它们等于让调用方无从判断要不要续读。
-## 必须**返回**结果而非原地赋值: Dictionary/Array 是引用类型可就地改, 但 String 是值类型,
+## 只动字符串: 数字与数组长度是"漏了多少"的唯一线索。
+## 必须**返回**结果而非原地赋值: Dictionary/Array 是引用类型可就地改, String 是值类型。
 static func _shrink_payload(node: Variant, limit: int) -> Variant:
 	if node is Dictionary:
 		var d: Dictionary = node
@@ -94,7 +93,7 @@ static func _shrink_payload(node: Variant, limit: int) -> Variant:
 
 
 ## 构造截断说明文本(计入输出上限之内)。用字符串拼接而非 % 格式化。
-## **每条续读建议都必须是该工具真实存在的参数** —— 指向不存在参数的指引比不给指引更糟: 调用方
+## **每条续读建议都必须是该工具真实存在的参数**: 指向不存在的参数比不给指引更糟。
 static func _truncation_notice(tool_name: String, original_len: int, cap: int) -> String:
 	return ("\n\n[已截断] 工具 " + tool_name + " 共 " + str(original_len) + " 字符, 超出输出上限 " + str(cap) +
 		", 以上为开头部分, 后续内容未发送。\n续读: 缩小范围重试 —— read_file 传 offset=上次返回的 next_char_offset 并调小 limit"

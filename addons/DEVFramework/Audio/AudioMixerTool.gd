@@ -144,7 +144,7 @@ static func save_layout(layout: AudioBusLayout) -> Error:
 	return OK
 
 
-## 布局落盘路径: 取项目设置 audio/buses/default_bus_layout, uid:// 解析成实际路径;
+## 布局落盘路径: 取项目设置 audio/buses/default_bus_layout, uid:// 解析成实际路径。
 static func layout_path() -> String:
 	var raw := str(ProjectSettings.get_setting(LAYOUT_SETTING, "")).strip_edges()
 	if raw.begins_with("uid://"):

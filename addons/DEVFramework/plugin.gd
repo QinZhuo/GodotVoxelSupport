@@ -36,7 +36,7 @@ func _enter_tree() -> void:
 	_register("dev_framework/lightmap/scan_dir", TYPE_STRING, "res://Scenes")
 	_register("dev_framework/mcp/enabled", TYPE_BOOL, true)
 	_register("dev_framework/test/freshness", TYPE_STRING, "strict")
-	# 旧的项目级端口。**多实例中枢默认开启时它不被使用**(中枢走 mcp/hub_port);
+	# 旧的项目级端口。**多实例中枢默认开启时它不被使用**(中枢走 mcp/hub_port)。
 	_register("dev_framework/mcp/port", TYPE_INT, 8931)
 	_register("dev_framework/mcp/token", TYPE_STRING, "")
 	_register("dev_framework/mcp/max_output_chars", TYPE_INT, MCPDevServer.DEFAULT_MAX_OUTPUT_CHARS)
@@ -51,13 +51,13 @@ func _enter_tree() -> void:
 	_register("dev_framework/mcp/runtime_enabled", TYPE_BOOL, false)
 	# 项目侧 provider: 列出项目自定义 MCP 工具域的 .gd 路径(每个提供 static register(add_tool))。
 	_register("dev_framework/mcp/providers", TYPE_PACKED_STRING_ARRAY, PackedStringArray())
-	# 多实例中枢: 同时打开多个装了本框架的编辑器时, 只有一个能占住 hub_port 并成为"中枢",
+	# 多实例中枢: 同时打开多个装了本框架的编辑器时, 只有一个能占住 hub_port 并成为"中枢"。
 	_register("dev_framework/mcp/hub", TYPE_BOOL, true)
 	# 中枢端口:**全机器唯一的通用端口**, 所有项目一律不写、统一走这个默认值。
 	_register("dev_framework/mcp/hub_port", TYPE_INT, MCPDevServer.DEFAULT_HUB_PORT)
 	# 先开启 MCP 调试服务器, 避免后续初始化(工具菜单/DefTable)出错时阻断调试链路
 	_set_mcp_enabled(true)
-	# 导出过滤: 未勾选 runtime_enabled 时, 正式包剔除 DevMCP autoload(零 MCP 入口);
+	# 导出过滤: 未勾选 runtime_enabled 时, 正式包剔除 DevMCP autoload(零 MCP 入口)。
 	_pack_mcp_filter = _PackMcpFilter.new(EXPORT_AUTOLOAD_KEY, "dev_framework/mcp/runtime_enabled")
 	add_export_plugin(_pack_mcp_filter)
 	# 所有编辑器工具统一由 Tool 目录下 extends EditorScript 的脚本自动注册

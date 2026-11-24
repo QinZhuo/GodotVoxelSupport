@@ -19,7 +19,7 @@ func _to_string():
 	return effects_str
 
 func get_desc(data) -> String:
-	## 用单空格 join（跳过空描述）：
+	## 用单空格 join（跳过空描述）。
 	var parts: PackedStringArray = []
 	for effect in effects:
 		if effect == null:

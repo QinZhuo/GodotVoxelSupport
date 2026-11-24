@@ -20,7 +20,7 @@ func find_effect(condition: Callable) -> EffectDef:
 	return found[0] if not found.is_empty() else null
 
 ## 沿效果链收集**全部**命中 condition 的效果（鸭子类型遍历：`effect` / `effects` 字段，
-## ⚠️ 遍历不进入条件分支（`true_effect` / `false_effect`）：静态遍历无法求值条件，
+## ⚠️ 遍历不进入条件分支（`true_effect` / `false_effect`）：静态遍历无法求值条件。
 func find_effects(condition: Callable) -> Array[EffectDef]:
 	var out: Array[EffectDef] = []
 	if condition.call(self):

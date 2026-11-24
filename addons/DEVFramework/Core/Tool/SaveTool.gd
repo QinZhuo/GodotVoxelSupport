@@ -184,7 +184,13 @@ static func save_data(path: String, data, mode: Mode = Mode.JSON, keep_backup :=
 	if mode == Mode.JSON:
 		err = _atomic_write(actual_path, JSON.stringify(data).to_utf8_buffer(), keep_backup)
 	elif mode == Mode.BYTES:
-		err = _atomic_write(actual_path, data if data is PackedByteArray else PackedByteArray(), keep_backup)
+		## BYTES 只接受已编码好的字节: 传别的东西进来会写成 0 字节, 而且 _atomic_write 会先把主档轮转成 .bak,
+		## 等于静默毁档, 所以在写之前就拒掉。
+		if not (data is PackedByteArray):
+			LogTool.error("存档", "Mode.BYTES 需要 PackedByteArray: %s" % path)
+			_t.stop()
+			return ERR_INVALID_PARAMETER
+		err = _atomic_write(actual_path, data, keep_backup)
 	else:
 		err = _atomic_write(actual_path, gzip_encode(data), keep_backup)
 
@@ -228,7 +234,11 @@ static func save_async(path: String, data, mode: Mode = Mode.JSON) -> Error:
 	var bytes: PackedByteArray = PackedByteArray()
 	if mode == Mode.BYTES:
 		# BYTES: 调用方自带编码, 原样落盘(与同步 save_data 一致, 不做 gzip)
-		bytes = snapshot if snapshot is PackedByteArray else PackedByteArray()
+		if not (snapshot is PackedByteArray):
+			LogTool.error("存档", "Mode.BYTES 需要 PackedByteArray: %s" % path)
+			_t.stop()
+			return await _flush_pending(path, ERR_INVALID_PARAMETER)
+		bytes = snapshot
 	else:
 		var enc = await AsyncTool.thread_call(func(): return gzip_encode(snapshot))
 		if enc == null:
@@ -377,11 +387,16 @@ static func _atomic_write(actual_path: String, bytes: PackedByteArray, keep_back
 
 
 ## 备份轮转：主档 → .bak（只保留上一份成功内容；旧备份直接丢弃）
+## 先改名到 .bak.tmp 再替换: 若先删旧备份再改名, 中途失败就一份备份都不剩了。
 static func _rotate_backup(actual_path: String) -> void:
 	var bak_path := actual_path + BACKUP_SUFFIX
-	if FileAccess.file_exists(bak_path):
-		DirAccess.remove_absolute(bak_path)
-	DirAccess.rename_absolute(actual_path, bak_path)
+	var tmp := bak_path + ".tmp"
+	DirAccess.remove_absolute(tmp)
+	if DirAccess.rename_absolute(actual_path, tmp) != OK:
+		return  # 主档还在, 只是这轮没备份
+	DirAccess.remove_absolute(bak_path)
+	if DirAccess.rename_absolute(tmp, bak_path) != OK:
+		DirAccess.rename_absolute(tmp, actual_path)  # 回滚: 宁可没备份, 也不能没主档
 
 
 ## 检查文件是否存在

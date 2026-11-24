@@ -29,6 +29,9 @@ var drag_start_global_pos: Vector3 = Vector3.ZERO
 var drag_plane: Plane
 ## 拖拽容器（SlotArrayView3D 及其子类）用于排序时重新排列数据
 var drag_container: SlotArrayView3D = null
+## 起手/归位动画: 连点或快速连拖时不杀旧 tween, 两个动画会互相拉扯到各自终点
+var _pos_tween: Tween
+var _scale_tween: Tween
 
 ## ---------------------------------------------------- 输入事件衔接
 
@@ -58,6 +61,8 @@ func _unhandled_input(event: InputEvent):
 func _start_drag():
 	if not _can_drag():
 		return
+	if get_viewport().get_camera_3d() == null:
+		return   # 没有相机就投影不出拖拽平面; 提前返回, 不要留下"已登记 dragging"的半状态
 	PointerTool.begin_drag(self)
 	drag_start_global_pos = global_position
 
@@ -89,6 +94,8 @@ func _drag(_event: InputEventMouseMotion):
 		return
 
 	var camera: Camera3D = get_viewport().get_camera_3d()
+	if camera == null:
+		return
 	var mouse_pos: Vector2 = get_viewport().get_mouse_position()
 
 	var ray_origin: Vector3 = camera.project_ray_origin(mouse_pos)
@@ -117,13 +124,14 @@ func _end_drag():
 
 	_on_drag_ended()
 
-	# 子类可能已通过 _cleanup_drag_state() 标记跳过清理（如拖出容器后节点即将移除）
-	if not is_dragging or not is_instance_valid(self):
+	if not is_instance_valid(self):
 		return
-
-	_restore_position()
-	_restore_scale()
-	_cleanup_drag_state()
+	# 子类可能已通过 _cleanup_drag_state() 标记跳过清理（如拖出容器后节点即将移除）;
+	# 但 drag_ended 必须照发 —— 外部靠它判定换位结果, 少一次就永远等不到。
+	if is_dragging:
+		_restore_position()
+		_restore_scale()
+		_cleanup_drag_state()
 	drag_ended.emit()
 
 ## 取消拖拽（右键）：回到起始位置并归位
@@ -133,13 +141,13 @@ func _cancel_drag():
 
 	_on_drag_cancelled()
 
-	if not is_dragging or not is_instance_valid(self):
+	if not is_instance_valid(self):
 		return
-
-	global_position = drag_start_global_pos
-	_restore_position()
-	_restore_scale()
-	_cleanup_drag_state()
+	if is_dragging:
+		global_position = drag_start_global_pos
+		_restore_position()
+		_restore_scale()
+		_cleanup_drag_state()
 	drag_cancelled.emit()
 
 ## ---------------------------------------------------- 工具方法
@@ -149,24 +157,30 @@ func _play_pickup_animation():
 	var target: Node3D = _get_drag_visual_node()
 	if not target or is_zero_approx(drag_pickup_scale - 1.0):
 		return
-	var t: Tween = create_tween()
-	t.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
-	t.tween_property(target, "scale", Vector3.ONE * drag_pickup_scale, drag_return_duration * 0.75)
+	if _scale_tween != null and _scale_tween.is_valid():
+		_scale_tween.kill()
+	_scale_tween = create_tween()
+	_scale_tween.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+	_scale_tween.tween_property(target, "scale", Vector3.ONE * drag_pickup_scale, drag_return_duration * 0.75)
 
 ## 播放归位位置动画（回到插槽本地原点）
 func _restore_position():
-	var t: Tween = create_tween()
-	t.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
-	t.tween_property(self, "position", _get_rest_position(), drag_return_duration)
+	if _pos_tween != null and _pos_tween.is_valid():
+		_pos_tween.kill()
+	_pos_tween = create_tween()
+	_pos_tween.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+	_pos_tween.tween_property(self, "position", _get_rest_position(), drag_return_duration)
 
 ## 播放恢复缩放动画
 func _restore_scale():
 	var target: Node3D = _get_drag_visual_node()
 	if not target:
 		return
-	var t: Tween = create_tween()
-	t.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
-	t.tween_property(target, "scale", Vector3.ONE, drag_return_duration * 0.75)
+	if _scale_tween != null and _scale_tween.is_valid():
+		_scale_tween.kill()
+	_scale_tween = create_tween()
+	_scale_tween.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+	_scale_tween.tween_property(target, "scale", Vector3.ONE, drag_return_duration * 0.75)
 
 ## 统一重置拖拽状态（子类处理完自身逻辑后可主动调用以跳过基类清理）
 func _cleanup_drag_state():

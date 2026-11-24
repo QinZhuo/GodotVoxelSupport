@@ -2,29 +2,31 @@
 extends RefCounted
 
 ## 工具契约自检: 校验"工具注册表(定义)"与"handler 实现"两侧是否自洽。
-## `MCPToolAudit` 引用。**必须带 @tool 且不声明 class_name**, 理由同那几个文件: 一旦
+## 由 MCPDevServer 以 preload 常量 `MCPToolAudit` 引用。**必须带 @tool 且不声明 class_name**。
 const MCPToolMeta := preload("res://addons/DEVFramework/MCP/MCPToolMeta.gd")
 
 ## 本轮自检读到的源码缓存: 脚本路径 -> 源码文本。仅供入参一致性自检切片用, 每次自检重读一遍。
 static var _source_cache := {}
 
-## 本轮源码是否可读。false = 读不到(导出包脚本是二进制 token, get_file_as_string 返回空) ——
-## 误报成"切不出函数体"(实测导出运行时会刷出 20 条虚假告警)。那是"查不到", 不是"有问题"。
+## 本轮源码是否可读。false = 读不到(导出包脚本是二进制 token, get_file_as_string 返回空),
+## 此时跳过源码检查 —— 那是"查不到", 不是"有问题", 不能误报成"切不出函数体"。
 static var _sources_ok := true
 
 
-## ======= 扫描范围: 为什么是整个目录, 而不是调用方给的一份名单 =======
-## 判断"handler 究竟读了哪些入参"必须切出 handler 的函数体, 而 handler 分散在多个域文件里
+## ======= 扫描范围: 整个目录, 而不是调用方给的一份名单 =======
+## 判断"handler 读了哪些入参"必须切出函数体, 而 handler 分散在多个域文件里,
+## 漏一个就少校验一项, 故按目录全扫。
 
 ## 自检入口: 返回发现的问题列表(空 = 通过)。
-##   本文件**不能**用 get_script().resource_path —— 那读到的是本文件自己, 一个 handler
+## 锚点路径由调用方传入, 不能用 get_script().resource_path —— 那读到的是本文件自己。
 static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_script_path: String, audit_handlers: Dictionary = {}, registry_is_full: bool = true, extra_scripts: Array = []) -> Array[String]:
 	var issues: Array[String] = []
-	# 源码缓存必须每次自检重新读: 缓存的意义只是"一次自检内读一次"(几十个工具共用一份切片),
+	# 源码缓存必须每次自检重新读: 缓存的意义只是"一次自检内读一次"(几十个工具共用一份切片)。
 	_load_sources(anchor_script_path, extra_scripts)
 	issues.append_array(MCPToolMeta.audit())
 	issues.append_array(audit_tool_name_duplicates(tool_defs))
-	# 源码相关检查只在**能读到源码**时执行(见 _sources_ok): 导出包读不到源码, 子句若照跑会把每个
+	# 源码相关检查只在**能读到源码**时执行(见 _sources_ok): 导出包读不到源码,
+	# 跨域调用若照查会把每一处都报成不存在。
 	if _sources_ok:
 		issues.append_array(audit_cross_domain_calls())
 	var registered := {}
@@ -33,13 +35,14 @@ static func audit_tools(tool_defs: Array, tool_handlers: Dictionary, anchor_scri
 		registered[tname] = true
 		if str(def.get("description", "")).is_empty():
 			issues.append("工具 '%s' 缺少 description" % tname)
-		# handler 缺失: 注册了却调不通, 会在 tools/call 时才暴露为 Unknown tool
+		# handler 缺失: 注册了却调不通, 会在 tools/call 时才暴露为 Unknown tool。
 		if not tool_handlers.has(tname):
 			issues.append("工具 '%s' 已进注册表但无对应 handler" % tname)
 		issues.append_array(audit_input_schema(tname, def.get("inputSchema", {})))
 		if tool_handlers.has(tname) and _sources_ok:
 			issues.append_array(audit_handler_params(tname, def.get("inputSchema", {}), audit_handlers.get(tname, tool_handlers[tname])))
-	# 反向核对, 两项各自独立: 一项拿元数据名单查(名单写了却没注册), 一项拿源码查
+	# 反向核对, 两项各自独立: 一项拿元数据名单查(名单写了却没注册),
+	# 一项拿源码查(源码里注册了却没进名单)。
 	if registry_is_full:
 		issues.append_array(MCPToolMeta.audit_against(registered))
 		if _sources_ok:
@@ -53,7 +56,7 @@ static func _load_sources(anchor_script_path: String, extra_scripts: Array = [])
 	var dir_path := anchor_script_path.get_base_dir()
 	var dir := DirAccess.open(dir_path)
 	if dir == null:
-		# 目录都打不开(锚点路径写错/目录被移走): 什么都不扫 = 静默全通过, 是最坏结果,
+		# 目录都打不开(锚点路径写错/目录被移走): 什么都不扫 = 静默全通过, 是最坏结果。
 		_source_cache[anchor_script_path] = ""
 		_sources_ok = false
 		return
@@ -65,7 +68,8 @@ static func _load_sources(anchor_script_path: String, extra_scripts: Array = [])
 			names.append(n)
 		n = dir.get_next()
 	dir.list_dir_end()
-	# 排序: DirAccess 的遍历顺序不保证稳定, 而 func_body 取"第一个命中的文件"。不排序时
+	# 排序: DirAccess 的遍历顺序不保证稳定, 而 func_body 取"第一个命中的文件"。
+	 # 不排序时命中哪个文件全看文件系统顺序, 结论会飘。
 	names.sort()
 	for name in names:
 		_source_cache[dir_path.path_join(name)] = FileAccess.get_file_as_string(dir_path.path_join(name))
@@ -74,7 +78,7 @@ static func _load_sources(anchor_script_path: String, extra_scripts: Array = [])
 		var path := str(p)
 		if not path.is_empty() and not _source_cache.has(path):
 			_source_cache[path] = FileAccess.get_file_as_string(path)
-	# 判定源码可读性: 锚点(主文件)内容为空即视为读不到 —— 导出包脚本是二进制 token,
+	# 判定源码可读性: 锚点(主文件)内容为空即视为读不到 —— 导出包脚本是二进制 token。
 	_sources_ok = not str(_source_cache.get(anchor_script_path, "")).is_empty()
 
 
@@ -94,13 +98,14 @@ static func audit_tool_name_duplicates(tool_defs: Array) -> Array[String]:
 
 
 ## ======= 检查 E: 源码里声明注册了, 就必须真的进了注册表(漏注册检测) =======
-## 两条边界, 必须留在注释里防止后来人把它当成更强的检查:
+## 两条边界必须写明, 防止后来人把它当成更强的检查。
 static func audit_declared_registrations(registered: Dictionary) -> Array[String]:
 	var issues: Array[String] = []
-	# 注册调用的三种书写形态(实测, 见 MCPDevServer 顶部"工具域文件"一段):
+	# 注册调用的三种书写形态(见 MCPDevServer 顶部"工具域文件"一段)。
 	var re := RegEx.create_from_string("\\b(?:_add_tool|_register_game_play_tool|add_tool\\.call)\\(\\s*\"(\\w+)\"")
 	for path in _source_cache:
 		# 必须剥注释: MCPValidateTools 顶部就在注释里列着 `_add_tool("validate", ...)` 这种
+		 # 字面量, 不剥掉就会被当成注册声明。
 		var src := strip_comments(str(_source_cache[path]))
 		for m in re.search_all(src):
 			var tname := m.get_string(1)
@@ -110,10 +115,9 @@ static func audit_declared_registrations(registered: Dictionary) -> Array[String
 
 
 ## ======= 检查 D: 跨域静态调用的目标必须存在 =======
-## 本项是四类检查里**唯一**能抓到"改名做了一半"的: 那种故障的形态是主文件按新接口名写了
-##   · read_lints / get_script_method_list 全部零诊断 —— 被调用的类名解析正常, 只是它没有
-##   · 只在 tools/call 真正执行到那一行时才炸 "Function not found", 表现为某一个工具
-## 两条边界, 必须写在这里防止后来人把它当成更强的检查:
+## 本项是**唯一**能抓到"改名做了一半"的: read_lints / get_script_method_list 全部零诊断
+## (类名能解析, 只是没那个成员), 故障只在 tools/call 执行到那一行时爆 "Function not found"。
+## 两条边界必须写明, 防止后来人把它当成更强的检查。
 static func audit_cross_domain_calls() -> Array[String]:
 	var issues: Array[String] = []
 	# 类名(= 文件 basename) -> 该文件的顶层成员表。只有本目录里存在的才算域。
@@ -143,6 +147,7 @@ const _ENGINE_MEMBERS := ["new", "free"]
 
 ## 取某个脚本源码里的顶层成员名: func / const / var。
 ## const/var 也必须收: `MCPResult.for_protocol(...)` 这类引用若只查 func 就会被误报成
+## 缺失的跨域调用。
 static func _top_level_members(src: String) -> Array[String]:
 	var out: Array[String] = []
 	var re := RegEx.create_from_string("^(static\\s+)?(func|const|var)\\s+(\\w+)")
@@ -159,6 +164,7 @@ static func _line_of(src: String, at: int) -> int:
 
 
 ## 剥掉注释, 只留代码。**不是**简单按 '#' 截断 —— 字符串里可以合法含 '#'("res://a#b" 这类
+## 路径), 只能按引号状态逐字符走。
 static func strip_comments(src: String) -> String:
 	var out := PackedStringArray()
 	var quote := ""
@@ -214,7 +220,7 @@ static func audit_handler_params(tname: String, schema: Variant, handler: Callab
 	if not props is Dictionary:
 		return issues
 	# 定位不到函数体 = 本项自检对这次注册**没有执行**。这里必须报出来, 不能静默返回空列表:
-	# 两个判据缺一不可, 且都实测过:
+	# 两个判据缺一不可, 各自对应一种"没查"的情形:
 	#   · lambda: get_method() 返回的是**字面量字符串 "<anonymous lambda>"**, 不是空串。所以
 	#   · 具名但切不出: 函数存在却在已加载源码里找不到(被删/改名/未落盘), 同样等于没查。
 	var method := String(handler.get_method())
@@ -251,6 +257,7 @@ static func _func_body_in(src: String, method: String) -> String:
 		return rest.substr(0, end) if end >= 0 else rest
 	# 目标函数是文件里的第一个函数(声明前没有换行, 上面两轮都匹配不到)。
 	# 注意必须仍然切到**下一个**函数为止, 不能直接返回整个文件: 整个文件交给入参扫描会把
+	# 其它函数的入参键也扫进来, 造成误报。
 	for decl in ["static func %s(", "func %s("]:
 		if src.begins_with(decl % method):
 			var end := _next_func_line(src)
@@ -271,7 +278,7 @@ static func _next_func_line(body: String) -> int:
 
 ## 扫出函数体里读取的所有入参键。覆盖统一入口 VariantTool.get_*(args, "k") 与遗留的
 ## 第一条模式**不能**加 `(?<![\w.])` 否定环视: 调用形态已变成 `VariantTool.get_string(`,
-## 而后两条的 `args` 前必须加否定环视: 局部字典若恰好以 `args` 结尾(如 `verify_args["k"]`),
+## 而后两条的 `args` 前必须加否定环视: 局部字典若恰好以 `args` 结尾(如 `verify_args["k"]`)。
 static func scan_arg_keys(body: String) -> Array[String]:
 	var out: Array[String] = []
 	for pattern in [

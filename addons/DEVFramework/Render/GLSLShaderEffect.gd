@@ -96,6 +96,16 @@ func _check_shader() -> bool:
 	return pipeline.is_valid()
 
 
+## "normal_roughness" 所在的缓冲上下文(按渲染器命名), 都没有则返回空 = 本渲染器不支持该特效。
+const _NR_CONTEXTS: Array[StringName] = [&"forward_clustered", &"mobile", &"gl_compatibility"]
+
+static func _normal_roughness_context(buffers: RenderSceneBuffersRD) -> StringName:
+	for c in _NR_CONTEXTS:
+		if buffers.has_texture(c, &"normal_roughness"):
+			return c
+	return &""
+
+
 # 每帧由渲染线程调用。
 func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data: RenderData) -> void:
 	if rd and p_effect_callback_type == effect_callback_type and _check_shader():
@@ -106,7 +116,7 @@ func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data:
 		if render_scene_buffers and scene_data:
 			# 获取我们的渲染尺寸，这是 3D 渲染分辨率！
 			var size: Vector2i = render_scene_buffers.get_internal_size()
-			if size.x == 0 and size.y == 0:
+			if size.x == 0 or size.y == 0:
 				return
 
 			# 我们可以在这里使用计算着色器。
@@ -144,7 +154,11 @@ func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data:
 				# 获取我们深度图像的 RID，我们将从中读取。
 				var depth_image: RID = render_scene_buffers.get_depth_layer(view)
 
-				var normal_roughness_image: RID = render_scene_buffers.get_texture("forward_clustered", "normal_roughness")
+				# 上下文名随渲染方法变化(Forward+ = forward_clustered, Mobile = mobile), 硬编一个会静默失效
+				var nr_context := _normal_roughness_context(render_scene_buffers)
+				if nr_context == &"":
+					return
+				var normal_roughness_image: RID = render_scene_buffers.get_texture(nr_context, &"normal_roughness")
 
 				# 创建一个统一集合，这将被缓存，如果我们的视口配置发生更改，缓存将被清除。
 				var scene_data_uniform := RDUniform.new()

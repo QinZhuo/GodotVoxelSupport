@@ -62,8 +62,8 @@ static func describe(stale: Array) -> String:
 # —— 内部 ——
 
 static func _file_hash(path: String) -> int:
-	var text := FileAccess.get_file_as_string(path)
-	return text.hash() if not text.is_empty() else 0
+	## 空文件也要按空串哈希（与 source_code 一致），否则占位空脚本会被误判成 changed
+	return FileAccess.get_file_as_string(path).hash()
 
 
 static func _collect_gd(dir_path: String, out: Array) -> void:

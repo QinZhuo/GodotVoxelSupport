@@ -5,7 +5,7 @@ extends RefCounted
 ## 原生工程骨架自动生成 —— 目标是"项目里只要有 gdextension/src/*.cpp, 构建脚本就能跑起来"。
 ##
 ## 自动补齐四样东西(缺什么补什么, 从不覆盖用户已有文件):
-##   1. godot-cpp          : 优先 git submodule, 退化浅克隆
+##   1. godot-cpp          : 浅克隆到 gdextension/godot-cpp(.gitignore 忽略, 不入库)
 ##   2. CMakeLists.txt     : 与官方模板同款的 add_subdirectory + add_library
 ##   3. generated/*        : sources.cmake(源文件清单) + register_types.cpp(扫描 GDCLASS 自动注册)
 ##   4. *.gdextension      : [libraries] 按平台/架构写好, entry_symbol 指向生成的入口
@@ -384,24 +384,17 @@ static func _write_if_changed(path: String, text: String) -> bool:
 	return true
 
 
-## godot-cpp 获取: 先试 submodule(不动用户工作树), 退化浅克隆(需要 git + 网络)
+## godot-cpp 获取: 浅克隆到 gdextension/godot-cpp(不入库, 已在 .gitignore 里)。
+## 不再走 submodule —— 父仓库曾以 gitlink(160000) 记录它, 各机器 clone 深度不同会让指针
+## 无端从 2a4c066 漂到 24b9df7, git 每次启动都提示"有更改"却永远合不掉。
 static func _fetch_godot_cpp(root_abs: String, log_fn: Callable) -> bool:
 	var gcpp := root_abs.path_join("godot-cpp")
 	var out: Array = []
-	_note(log_fn, "godot-cpp 未就绪, 尝试 git submodule …")
-	# 子模块路径要相对**项目根**(git 的 cwd), 不是相对 gdextension 目录
-	var proj_root := ProjectSettings.globalize_path("res://").simplify_path()
-	var rel := root_abs.simplify_path().replace(proj_root, "").trim_prefix("/").path_join("godot-cpp")
-	if OS.execute("git", ["-C", proj_root, "submodule", "update",
-			"--init", "--recursive", rel], out) == 0 \
-			and FileAccess.file_exists(gcpp.path_join("SConstruct")):
-		_note(log_fn, "已通过 git submodule 获取 godot-cpp。")
-		return true
 	if DirAccess.dir_exists_absolute(gcpp) and DirAccess.open(gcpp) != null and DirAccess.open(gcpp).get_files().is_empty():
 		DirAccess.remove_absolute(gcpp)   # 空目录挡路: 清掉再克隆
-	_note(log_fn, "回退为浅克隆 godot-cpp(需要网络)…")
+	_note(log_fn, "godot-cpp 未就绪, 浅克隆中(需要网络)…")
 	if OS.execute("git", ["clone", "--depth", "1", "https://github.com/godotengine/godot-cpp", gcpp], out) != 0:
-		_note(log_fn, "自动获取失败: 请手动 `git submodule add https://github.com/godotengine/godot-cpp gdextension/godot-cpp`。")
+		_note(log_fn, "自动获取失败: 请手动执行 `git clone --depth 1 https://github.com/godotengine/godot-cpp gdextension/godot-cpp`。")
 		for line in out:
 			_note(log_fn, String(line))
 		return false

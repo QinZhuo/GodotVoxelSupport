@@ -2,14 +2,14 @@
 extends RefCounted
 
 ## ======= 开发辅助域 =======
-## 从 MCPDevServer 拆出的工具域, 收录"在宿主进程里就地执行开发动作"的能力。**本文件必须导出安全**
-##   · 只留 eval_code(唯一运行时可用的开发辅助工具);
-##   · restart_editor / script_status 依赖 EditorInterface / MCPScriptSync, 已拆到 MCPDevToolsEditor。
-##   - MCPResult      响应封装
+## 收录"在宿主进程里就地执行开发动作"的能力。**本文件必须导出安全**(运行时服务器也要注册它):
+##   · 本域只留 eval_code —— 唯一运行时可用的开发辅助工具;
+##   · restart_editor / script_status 依赖 EditorInterface / MCPScriptSync, 在 MCPDevToolsEditor。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const MCPToolSchema := preload("res://addons/DEVFramework/MCP/MCPToolSchema.gd")
+const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 
 ## 模式标识。**本文件必须导出安全**(运行时服务器要注册 eval_code), 故不能 preload 含编辑器引用的
+## 域脚本。
 const MODE_EDITOR := "editor"
 const MODE_RUNTIME := "runtime"
 
@@ -17,9 +17,9 @@ const MODE_RUNTIME := "runtime"
 static var _eval_ctx_provider: Callable = Callable()
 
 
-## 注入 eval 运行上下文的提供器(无参 Callable, 返回上面那三个键, 见 EVAL_CTX_KEYS)。
-## 服务器须在**编辑器与游戏两个进程分支都调一次**, 不能只依赖 register():
-## 判据是"接缝可以存在, 但漏调必须可见" —— 漏调最隐蔽的代价是守卫静默失效后症状变成
+## 注入 eval 运行上下文的提供器(无参 Callable, 返回见 EVAL_CTX_KEYS 的三个键)。
+## 服务器须在**编辑器与游戏两个进程分支都调一次**, 不能只依赖 register(): 漏调会让
+## 新鲜度守卫静默失效, 症状退化成"查不出问题"。
 static func set_eval_ctx_provider(provider: Callable) -> void:
 	_eval_ctx_provider = provider
 
@@ -34,7 +34,7 @@ static func _tree() -> SceneTree:
 	return Engine.get_main_loop() as SceneTree
 
 
-## resolve_eval_ctx 必须拿到**真值**的三个键。列成常量而非散在各处写字符串,
+## resolve_eval_ctx 必须拿到**真值**的三个键。列成常量而非散在各处写字符串。
 const EVAL_CTX_KEYS := ["mode", "game_started_at", "logger"]
 
 ## 降级文案里的"后果说明": 让看到告警的人立刻知道漏了这一项会怎样, 而不只是"少了这一项"。
@@ -42,15 +42,14 @@ const EVAL_CTX_DEGRADED_HINT := "后果: game_started_at 缺失使新鲜度守�
 
 
 ## 取本次 eval 用的运行上下文: provider 现取现用, [param override] 非空时按键覆盖。
-## ## 为什么这里必须有接缝
-## 域内自建物理上不存在, 只能注入。判据"接缝可以存在, 但漏调必须可见; 漏调会静默失效的
+## 域内自建物理上不存在(都是实例状态), 只能注入 —— 故漏调必须可见, 见 _degraded_warning。
 static func resolve_eval_ctx(override: Dictionary = {}) -> Dictionary:
 	var out := {
 		"mode": MODE_EDITOR if Engine.is_editor_hint() else MODE_RUNTIME,
 		"game_started_at": 0,
 		"logger": null,
 	}
-	# 来源记账: out 的初值是"推导值"而非真值。降级判定必须按"哪些键拿到了真值"来算 ——
+	# 来源记账: out 的初值是"推导值"而非真值。降级判定必须按"哪些键拿到了真值"来算。
 	var from_source := PackedStringArray()
 	if _eval_ctx_provider.is_valid():
 		var provided: Variant = _eval_ctx_provider.call()
@@ -76,6 +75,7 @@ static func resolve_eval_ctx(override: Dictionary = {}) -> Dictionary:
 
 ## 在宿主进程执行一段 GDScript。
 ## 另注: 主文件那份 _call_eval_code 必须删干净 —— 同名会让自检按字典序切到
+## 主文件的那份。
 static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionary:
 	var code: String = VariantTool.get_string(args, "code")
 	if code.is_empty():
@@ -84,13 +84,11 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 	var mode := str(context.get("mode", MODE_EDITOR))
 	var game_started_at := int(context.get("game_started_at", 0))
 	var logger: Object = context.get("logger", null)
-	# 降级告警在**每一条**返回路径上都要带上(含错误路径): 守卫误判时 eval 是失败的,
+	# 降级告警在**每一条**返回路径上都要带上(含错误路径): 守卫误判时 eval 是失败的。
 	var warn := _degraded_warning(mode, game_started_at, context)
 	var tree := _tree()
-	# 顺序: 新鲜度守卫排在预检**之前**, 让预检基于已同步的缓存判断, 免得为一个
-	# 注意这**不是**全局类能热切换的原因 —— 实测调整顺序无效: 缓存确实换新了,
-	# (原因与实测过程见 MCPScriptSync._guard_runtime)。
-	# 含编辑器引用不能 preload。故按特征标签分流 —— 非编辑器构建直接跳过守卫(ok=true)。
+	# 顺序: 新鲜度守卫排在预检**之前**, 让预检基于已同步的缓存判断。
+	# MCPScriptSync 含编辑器引用不能 preload, 故运行时按特征标签分流: 非编辑器构建直接放行。
 	var guard := {"ok": true}
 	var allow_stale := bool(args.get("allow_stale", false))
 	if not allow_stale and (Engine.is_editor_hint() or OS.has_feature("editor")):
@@ -101,7 +99,7 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 		# category 由守卫按失败原因判定(编辑器侧=磁盘脚本语法错, 游戏侧=跑的是旧代码)。
 		return _attach_warning(MCPResult.err(str(guard.get("message", "")), str(guard.get("category", MCPResult.CAT_STALE_CODE)),
 			bool(guard.get("retryable", false)), str(guard.get("recovery", ""))), warn)
-	# 预处理(长度/安全扫描/语法编译)**只做一次**, 并把编译好的脚本返回来直接执行 ——
+	# 预处理(长度/安全扫描/语法编译)**只做一次**, 并把编译好的脚本返回来直接执行。
 	var prep := _prepare_eval(code, logger)
 	if not bool(prep.get("ok", false)):
 		return _attach_warning(MCPResult.err_validation(str(prep.get("error", "")),
@@ -151,7 +149,7 @@ static func _call_eval_code(args: Dictionary, ctx: Dictionary = {}) -> Dictionar
 			var e: Dictionary = merged[i]
 			var count := int(e.get("count", 1))
 			msgs.append("%s@%s:%s" % [e.get("message", ""), e.get("file", "?"), e.get("line", "?")] + ("" if count <= 1 else " (x%d)" % count))
-		# 用 err_validation(is_retryable=false) 而非裸 err + true:
+		# 用 err_validation(is_retryable=false) 而非裸 err + true。
 		return _attach_warning(MCPResult.err_validation(
 					"eval 执行返回: %s\n执行中捕获 %d 条运行期错误(合并后 %d 类, 前 %d 类):\n%s\n\n提示: get_node() 相对路径基于 eval 脚本实例, 找不到节点常因路径写错, 建议用绝对路径(/root/场景名/...) 或 get_tree().current_scene.get_node(...)。完整错误列表可用 %s; 重复噪音可在项目设置 dev_framework/mcp/ignored_error_patterns 配置子串忽略。" %
 			# 上面这些错误取自**本进程**的 logger 游标, 故按模式指向对应进程的日志。
@@ -230,7 +228,7 @@ const _EVAL_FORBIDDEN := [
 const MAX_EVAL_LENGTH := 8192
 
 
-## 判断是否为"空标识符"字符(数字开头等非法用途, 防止 `123execute` 之类绕过)
+## 判断是否为"空标识符"字符(数字开头等非法用途, 防止 `123execute` 之类绕过)。
 static func _is_eval_id_char(c: String) -> bool:
 	return c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
 
@@ -308,10 +306,8 @@ static func _eval_forbidden_scan(code: String) -> String:
 	return ""
 
 
-## 把用户 eval_code 规范成方法体缩进
-##
-## 与 precheck_eval_code 同源(它内部就调本函数), 故黑名单扫描与实际执行的文本必然一致 ——
-## 分成两处实现时, "预检编译过的代码"与"真正跑的代码"可能不是同一份文本。
+## 把用户 eval_code 规范成方法体缩进。
+## 与 precheck_eval_code 同源(它内部就调本函数), 保证"预检编译的代码"就是"真正跑的代码"。
 static func indent_method_body(code: String) -> String:
 	var lines := code.split("\n")
 	var out := PackedStringArray()
@@ -341,21 +337,13 @@ static func _normalize_indent(line: String, tab_w: int) -> String:
 
 
 ## ======= eval 接缝的可观测性 =======
-##
-## 判据(全仓库统一): **接缝可以存在, 但漏调必须可见; 漏调会静默失效的场合一律不许用接缝。**
-## 本域属"注入 + 自带告警"那一档 —— mode/game_started_at/logger 是实例状态且不可推导,
-## 没有自建选项; 那就只剩"让漏调看得见"这一条路。对照: log 域漏调返回"未就绪"是显式报错,
-## validate 域因漏调会静默恒真而直接否决接缝。三种落法都对, 别为了统一而改。
+## 判据: **接缝可以存在, 但漏调必须可见**。mode/game_started_at/logger 是实例状态且不可推导,
+## 没有自建选项, 只剩"让漏调看得见"这一条路。
 
 ## 把告警挂到响应上: 顶层 text 加前缀 + warnings 数组 + (有 structuredContent 时)结构化字段。
-##
-## 为什么要写三处而不是只写顶层: MCP 协议客户端读的是 content[], 顶层字段只有进程内逻辑
-## 看得见(同 MCPResult.err 把元信息塞进 content[].text 的理由)。只平铺顶层等于
-## "日志里有、用户看不见", 那正是本判据要消灭的形态。
-##
-## 唯一例外: 有 structuredContent 时 content[0].text 承载的是 JSON 载荷, 前面加一行文本
-## 会破坏客户端对它的解析, 故那条路径改在 structuredContent 里加 warnings 字段 ——
-## 声明了 outputSchema 的客户端读 structuredContent, 一样看得到。
+## 协议客户端读的是 content[], 只平铺顶层等于"日志里有、用户看不见"。
+## 例外: content[0].text 承载 JSON 载荷时前面加文本会破坏解析, 该路径改在
+## structuredContent 里加 warnings 字段。
 static func _attach_warning(result: Dictionary, warning: String) -> Dictionary:
 	if warning.is_empty():
 		return result
@@ -380,13 +368,9 @@ static func _attach_warning(result: Dictionary, warning: String) -> Dictionary:
 
 
 ## 组装降级告警文案: "接缝降级"与"游戏侧守卫未生效"两条合并成可辨识的告警。
-##
-## 第二条不靠 ctx 而靠本地判据: MCPScriptSync._guard_runtime 在 baseline<=0 时直接
-## _pass([])(全部放行), 而这种"通过"长得和真通过一模一样 —— 只有把"这次通过是无基准的放行"
-## 写出来, 症状(问题查不出来)才有指向根因的线索。
-##
-## 不去改 MCPScriptSync: 它是多个域共用的判据模块, 给它加"降级感知"参数会把本域的接线问题
-## 泄进公共层; 本域自己同时握着 mode 与 baseline, 自己判更准也更省。
+## 第二条不靠 ctx 而靠本地判据: 守卫在 baseline<=0 时直接全部放行, 这种"通过"与真通过
+## 长得一模一样 —— 只有把"这次是无基准放行"写出来, 症状才有指向根因的线索。
+## 判定留在本域: MCPScriptSync 是多个域共用的判据模块, 不该为接线问题加降级参数。
 static func _degraded_warning(mode: String, game_started_at: int, context: Dictionary) -> String:
 	var reasons := PackedStringArray()
 	if bool(context.get("degraded", false)):
@@ -411,12 +395,9 @@ static func _reap_later(fs: Object, inst: Node) -> void:
 
 
 ## ======= eval 附带错误降噪 =======
-##
-## 整簇搬进本域的理由: 忽略模式有**两条**上报路径共用(eval 的附带错误、通用 handler 的
-## 诊断附加), 而"明明配了却仍然冒出来"正是过滤规则只生效在一条路径上的典型症状。拆散
-## 就会重新制造那个坑。
-##
-## 内置噪音过滤模式, 在项目设置之外始终生效。
+## 忽略模式被**两条**上报路径共用(eval 的附带错误、通用 handler 的诊断附加), 拆散就会
+## 制造"明明配了却仍然冒出来"这类难查问题, 故整簇收在本域。
+## 下面的内置模式在项目设置之外始终生效。
 ## Unrecognized UID + get_id_path 只在 UID 缓存未就绪/重建的那一瞬出现, 是 fs.scan() 的
 ## 已知副作用: 资源本身存在(否则 reload 会报资源缺失), 紧接着的重试就会成功。功能问题
 ## 已由 MCPScriptSync.resolve_scene_path 的重扫兜住, 这里只消掉噪音 —— 否则每次编辑器
@@ -425,21 +406,19 @@ const BUILTIN_IGNORED_ERROR_PATTERNS := ["Unrecognized UID", "get_id_path"]
 
 
 ## 取生效的忽略模式: 内置默认 + 项目设置 dev_framework/mcp/ignored_error_patterns。
-## 两条错误上报路径(eval 的附带错误、通用 handler 的诊断)共用它 —— 过滤规则只在一条
-## 路径上生效的话, "明明配了却仍然冒出来"会变成极难排查的问题。
+## 两条错误上报路径共用它, 规则只在一条路径生效会变成极难排查的问题。
 static func get_ignored_error_patterns() -> Array:
 	var ignored: Array = BUILTIN_IGNORED_ERROR_PATTERNS.duplicate()
-	# 设置项可能是真数组 / PackedStringArray / JSON 数组文本 / 逗号分隔文本(历史上两种坏值都存在),
-	# as_string_array 一次覆盖这四种来源, 故这里不再逐形态分支。
+	# 设置项可能是真数组 / PackedStringArray / JSON 数组文本 / 逗号分隔文本,
+	# as_string_array 一次覆盖这四种来源, 故不再逐形态分支。
 	ignored.append_array(VariantTool.as_string_array(
 		ProjectSettings.get_setting("dev_framework/mcp/ignored_error_patterns", null)))
 	return ignored
 
 
 ## 判断一段诊断文本是否**全部**由被忽略的模式构成(供通用 handler 的诊断附加用)。
-##
-## 判据是"全部"而非"含": 只要混进任何其他错误就必须照常上报, 否则真错误会被一并吞掉 ——
-## 那比多报一条噪音危险得多。空文本返回 false: 无内容不该被当成"已全部过滤"。
+## 判据是"全部"而非"含": 混进任何其他错误都必须照常上报, 否则真错误会被一并吞掉。
+## 空文本返回 false —— 无内容不算"已全部过滤"。
 static func is_all_ignored(outcome: String, ignored: Array) -> bool:
 	var has_line := false
 	for line in outcome.split("\n"):

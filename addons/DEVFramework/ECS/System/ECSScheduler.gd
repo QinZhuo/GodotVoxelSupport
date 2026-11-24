@@ -3,6 +3,9 @@ extends RefCounted
 
 ## 系统调度器：注册表 + 拓扑排序 + 频率节流 + 串行/并行执行 + 耗时统计。
 
+## 暂停前的 enabled 快照(system -> bool); 空 = 未暂停。
+var _paused_states := {}
+
 var world: ECSWorld
 
 # ---------------- 系统注册表 ----------------
@@ -112,10 +115,21 @@ func get_priority(system: ECSSystem) -> int:
 	return _system_priorities[i] if i >= 0 else 0
 
 
-## 暂停/恢复全部系统。⚠️ 会覆盖各系统自己的 enabled(恢复时一律置 true)。
+## 暂停/恢复全部系统。恢复时回到各自暂停前的 enabled, 不覆盖系统自己的开关。
 func set_paused(paused: bool) -> void:
-	for s in _systems:
-		s.enabled = not paused
+	if paused:
+		if not _paused_states.is_empty():
+			return   # 已暂停: 保留首次快照, 重复暂停不覆盖
+		for s in _systems:
+			_paused_states[s] = s.enabled
+			s.enabled = false
+		return
+	if _paused_states.is_empty():
+		return
+	for s in _paused_states:
+		if is_instance_valid(s):
+			s.enabled = _paused_states[s]
+	_paused_states.clear()
 
 
 # ============================================================

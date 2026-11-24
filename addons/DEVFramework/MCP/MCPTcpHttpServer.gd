@@ -1,21 +1,21 @@
 @tool
-## MCP 内置 HTTP 服务器 — 基于 TCPServer 的最小 HTTP/1.1 实现
-## 唯一例外是 GET 打开的 SSE 流 —— 它**必须**保持长连接, 客户端重连后靠它判定通道存活。
+## MCP 内置 HTTP 服务器 — 基于 TCPServer 的最小 HTTP/1.1 实现。
+## 请求/响应默认是短连接, 唯一例外是 GET 打开的 SSE 流: 它**必须**长连接, 客户端靠它判定通道存活。
 class_name MCPTcpHttpServer extends RefCounted
 
-## 完成一个完整 HTTP 请求时触发
-##               sessionId 放在 query 上, 故必须原样交给处理器, 否则认不出 POST 属于哪条 SSE 流
+## 完成一个完整 HTTP 请求时触发。query 原样交出: 旧式 SSE 传输把 sessionId 放在 query 上,
+## 处理器要靠它认出这个 POST 属于哪条 SSE 流。
 signal request_received(method: String, path: String, query: String, headers: Dictionary, body: PackedByteArray, stream: StreamPeerTCP)
 
 var _server: TCPServer
 var _conns: Array = []          # 进行中的连接(字典数组)
 ## 旧式 HTTP+SSE 传输的 sessionId → 该会话的 SSE 连接 socket。
-## GET 拿到 endpoint 事件后会改用 POST 投递请求, 而**响应必须回写到它开的那条 SSE 流上**
+## GET 拿到 endpoint 事件后客户端改用 POST 投递请求, 而**响应必须回写到它开的那条 SSE 流上**。
 var _sse_sessions := {}
 ## 每条 SSE 流是否已经有请求落到它上面(sid -> bool)。
-## 旧式传输里客户端 GET 拿到 endpoint 事件后**必须**立刻用该 sessionId POST initialize
-## —— 那正是这条流的唯一用途。所以"开了流却迟迟没有任何请求落到它上面"就等于废弃流:
-## 实测有客户端只把 SSE 当保活长连接, 把全部请求都发在别的连接上(sessionId 恒为空)。
+## 旧式传输里客户端 GET 拿到 endpoint 事件后**必须**立刻用该 sessionId POST initialize ——
+## 那正是这条流的唯一用途, 故"开了流却迟迟没有请求落到上面"就等于废弃流。
+## 有客户端只把 SSE 当保活长连接, 请求全发在别的连接上(sessionId 恒为空)。
 var _sse_used := {}
 var _sse_seq := 0                ## 旧式 SSE 会话 id 的自增计数(仅用于让 id 互不相同)
 const MAX_BODY_SIZE := 16 * 1024 * 1024   # 16MB 上限
@@ -25,7 +25,6 @@ const SSE_HANDSHAKE_MS := 10000            ## 开了 SSE 流却一直没请求�
 ## 诊断开关: 把客户端发来的原始字节写进 MCP 日志。
 static var TRACE_WIRE := false
 const MAX_SSE_CONNS := 4                   ## SSE 流并发上限: 客户端重连时旧流不会立刻消失, 不设上限会无界堆积
-##
 const MAX_IDLE_CONNS := 64                ## 普通连接并发上限(正常客户端一次只占一条短连接)
 const IDLE_TIMEOUT_MS := 30000            ## 普通连接空闲多久后回收(远大于任何一次正常往返)
 
@@ -73,6 +72,7 @@ func poll() -> void:
 		var stream: StreamPeerTCP = _server.take_connection()
 		_conns.append({"stream": stream, "buffer": PackedByteArray(), "headers_done": false, "content_length": -1, "_sse": false, "_sse_tick": 0, "_sse_sent": 0, "_sse_session": "", "_touched": now})
 		# 顶到上限直接拒接。正常客户端一次只占一条短连接, 能堆到 64 说明几乎全是
+		# 没关的旧连接。
 		if _conns.size() > MAX_IDLE_CONNS:
 			LogTool.log("MCP", "连接数超上限 %d, 拒绝新连接(残留未收完的请求?)" % MAX_IDLE_CONNS)
 			stream.disconnect_from_host()
@@ -81,7 +81,7 @@ func poll() -> void:
 		if TRACE_WIRE:
 			LogTool.log("MCP", "[wire] 新连接接入, 连接数=%d" % _conns.size())
 
-	# 脚本热重载不跑初始化代码, 实例成员变量会被重置成默认值, 这两个表就成了 null,
+	# 脚本热重载不跑初始化代码, 实例成员变量会被重置成默认值, 这两个表就成了 null。
 	if _sse_sessions == null:
 		_sse_sessions = {}
 	if _sse_used == null:
@@ -94,7 +94,7 @@ func poll() -> void:
 		var status := stream.get_status()
 		if status == StreamPeerTCP.STATUS_CONNECTED or status == StreamPeerTCP.STATUS_CONNECTING:
 			if c.get("_sse", false):
-				# SSE 流只维持存活, 不再解析请求: 客户端不会在一条已开流的连接上再发请求,
+				# SSE 流只维持存活, 不再解析请求: 客户端不会在一条已开流的连接上再发请求。
 				if _poll_sse(c, now):
 					finished.append(i)
 			else:
@@ -197,7 +197,7 @@ func _process_buffer(c: Dictionary, finished: Array, conn_index: int) -> void:
 		c.content_length = cl
 		c.headers_done = true
 		c._body_start = body_start
-		# 每条新请求都要能再发一次 100 Continue, 故在这里清标志(连接是 keep-alive 的,
+		# 每条新请求都要能再发一次 100 Continue, 故在这里清标志(连接是 keep-alive 的)。
 		c["_sent_continue"] = false
 		if c.content_length < 0 or c.content_length > MAX_BODY_SIZE:
 			_send_simple(c.stream, 411, {}, "Length Required")
@@ -208,7 +208,7 @@ func _process_buffer(c: Dictionary, finished: Array, conn_index: int) -> void:
 	var body_start: int = c.get("_body_start", 0)
 	var needed: int = c.content_length
 	# Expect: 100-continue(RFC 9110 §10.1.1): 客户端发完头部后会**主动停下**等 100
-	# wire 追踪实测(CodeBuddy 4.12): 761339 收到 203 字节头部, 761745 才继续, 白等 406ms。
+	# 不回 100 时客户端会一直等到超时(白等数百毫秒)。
 	# 注意只在 body 确实没到齐时回, 且每条请求只回一次: 重复 100 会被严格客户端判为非法。
 	if buf.size() - body_start < needed and not c.get("_sent_continue", false):
 		if str(c.headers.get("expect", "")).to_lower() == "100-continue":
@@ -285,12 +285,12 @@ func send_response(stream: StreamPeerTCP, status: int, headers: Dictionary, body
 
 
 ## 开启一条 SSE 流: 只写响应头且**不**关闭连接, 之后由 _poll_sse 发帧维持。
-## 与 send_response 的区别正是"流式 vs 一次性", 故单列接口。流长未知所以不能给
-## Content-Length, 但**必须**改用 Transfer-Encoding: chunked: 两者都不给的话,
-## 严格 HTTP 客户端无法界定消息边界, 会把这整个响应判为非法 —— 实测客户端直接报
-##   仅旧式传输该开: 那条流的唯一用途就是接 initialize 响应, 不用就是废弃流。
+## 与 send_response 的区别正是"流式 vs 一次性", 故单列接口。流长未知不能给 Content-Length,
+## 但**必须**用 Transfer-Encoding: chunked: 两者都不给时严格客户端无法界定消息边界,
+## 会把整个响应判为非法。
+## recycle_if_unused=true 只给旧式传输用: 那条流的唯一用途就是接 initialize 响应。
 func begin_sse(stream: StreamPeerTCP, headers: Dictionary, session_id: String = "", recycle_if_unused := true) -> bool:
-	# 先数已有流: 客户端重连时旧流不会立刻消失, 不设上限连接会无界堆积(实测 13 条)。
+	# 先数已有流: 客户端重连时旧流不会立刻消失, 不设上限连接会无界堆积。
 	var live := 0
 	for k in _conns:
 		if k.get("_sse", false):
@@ -326,10 +326,11 @@ func begin_sse(stream: StreamPeerTCP, headers: Dictionary, session_id: String = 
 	return false
 
 
-## 维持一条已开启的 SSE 连接: 按间隔发注释帧(SSE 里以 ":" 开头的行是注释, 客户端会忽略,
+## 维持一条已开启的 SSE 连接: 按间隔发注释帧(SSE 里以 ":" 开头的行是注释, 客户端会忽略)。
 func _poll_sse(c: Dictionary, now: int) -> bool:
 	var stream: StreamPeerTCP = c.stream
 	# SSE 流不承载请求, 但仍要把客户端可能发来的字节读走: 堆在接收缓冲里不读会让
+	# 对端的写阻塞, 它的帧也就发不出来。
 	var avail := stream.get_available_bytes()
 	if avail > 0:
 		var chunk := stream.get_data(avail)
@@ -364,7 +365,7 @@ func _sse_write(stream: StreamPeerTCP, text: String) -> bool:
 	return stream.get_status() == StreamPeerTCP.STATUS_CONNECTED
 
 
-## 结束 chunked 响应体: 补一个长度为 0 的终止块, 客户端才认为这条流是正常收尾,
+## 结束 chunked 响应体: 补一个长度为 0 的终止块, 客户端才认为这条流是正常收尾。
 func _sse_end(stream: StreamPeerTCP) -> void:
 	stream.put_data("0\r\n\r\n".to_utf8_buffer())
 
@@ -374,7 +375,8 @@ func _send_simple(stream: StreamPeerTCP, status: int, headers: Dictionary, msg: 
 
 
 ## ======= 旧式 HTTP+SSE 传输(protocol 2024-11-05) =======
-##   1. GET  → 200 text/event-stream, 服务端**必须**先发一条 `event: endpoint` 事件,
+## 流程: GET → 200 text/event-stream, 服务端**必须**先发一条 `event: endpoint` 事件告知
+## POST 地址; 之后客户端把请求 POST 到该地址, 响应回写到这条流上。
 
 ## 开启一条旧式 SSE 会话: 建流 + 发 endpoint 握手事件, 返回 sessionId。
 func open_legacy_sse(stream: StreamPeerTCP, headers: Dictionary, endpoint_path: String, recycle_if_unused := true) -> String:
@@ -409,7 +411,7 @@ func send_sse_message(session_id: String, message: String) -> bool:
 
 
 func _gen_session_id() -> String:
-	# 旧式握手只要求"不透明且唯一", 无需密码学强度; 用时间戳+计数器+随机数足够,
+	# 旧式握手只要求"不透明且唯一", 无需密码学强度; 用时间戳+计数器+随机数足够。
 	_sse_seq += 1
 	return "%x-%x-%04x" % [Time.get_ticks_msec(), randi(), _sse_seq & 0xFFFF]
 

@@ -54,7 +54,7 @@ enum TimeBase {
 ## poll done() 直到返回 true；带超时检测，超时后强制继续并打印警告日志。
 ##   · PHYSICS_TICK（默认）—— 按**物理 tick**（physics_ticks_per_second 的固定步长）计，
 ##     恢复点落在固定 tick 边界上，否则"这一步何时算结束"会随帧率与帧抖动漂移;
-##   · REAL_TIME —— 按 `Time.get_ticks_msec()` 计，用于必须与真实时间一致的场景（退出、超时兜底）：
+##   · REAL_TIME —— 按 `Time.get_ticks_msec()` 计，用于必须与真实时间一致的场景（退出、超时兜底）。
 static func await_until(done: Callable, timeout_ms: int = -1, log_name: String = "", base: TimeBase = TimeBase.PHYSICS_TICK) -> bool:
 	var use_ticks := base == TimeBase.PHYSICS_TICK
 	var tick_ms := 1000.0 / float(Engine.physics_ticks_per_second)
@@ -175,7 +175,7 @@ static func await_emit(s: Signal, ...args) -> void:
 	timer.stop()
 
 ## 是否为**协程句柄** —— 含 `await` 的函数在让出控制权前返回的 `GDScriptFunctionState`。
-## 引擎**未把该类型暴露给脚本类型系统**(不能用 `is GDScriptFunctionState`), 只能按类名判定 ——
+## 引擎**未把该类型暴露给脚本类型系统**(不能用 `is GDScriptFunctionState`), 只能按类名判定。
 static func is_coroutine(v: Variant) -> bool:
 	return v != null and v is Object and v.get_class() == "GDScriptFunctionState"
 

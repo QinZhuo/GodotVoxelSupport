@@ -132,12 +132,12 @@ func clamp_where(field: StringName, min_comp, min_field: StringName,
 
 # ---------- Callback 动作(手写层, GDScript 执行) ----------
 
-## 声明要遍历的锚组件字段(数组), 配合 .process(cb) 使用 —— 推荐写法:
+## 声明要遍历的锚组件字段(数组), 配合 .process(cb) 使用。
 func with(fields: Array) -> ECSQuery:
 	_with_fields = fields
 	return self
 
-## 动作: 用 GDScript Callback 自定义遍历逻辑。三种用法:
+## 动作: 用 GDScript Callback 自定义遍历逻辑。三种用法见下。
 func process(cb: Callable, fields = {}) -> ECSQuery:
 	if not _with_fields.is_empty():
 		# A 模式: with(字段...) 声明 → 回调直接收列参数
@@ -151,7 +151,7 @@ func process(cb: Callable, fields = {}) -> ECSQuery:
 	return self
 
 
-## 执行查询(返回处理实体数)。通常无需手动调用 —— 系统 _run 结束后框架自动执行本系统未 execute 的查询;
+## 执行查询(返回处理实体数)。通常无需手动调用 —— 系统 _run 结束后框架自动执行本系统未 execute 的查询。
 func execute() -> int:
 	if _executed:
 		return _last_count
@@ -183,6 +183,9 @@ func _apply_rows(rows: PackedInt32Array) -> int:
 			"mul":
 				acts.append({"t": 1, "of": str(act.field), "op": 1, "f": float(act.factor), "v": 0.0})
 			"div":
+				## 除数为 0 时乘法路径会算出 INF 铺满整列; 原生 COL_DIV 是静默跳过, 这里与之保持一致
+				if is_zero_approx(float(act.divisor)):
+					continue
 				acts.append({"t": 1, "of": str(act.field), "op": 1, "f": 1.0 / float(act.divisor), "v": 0.0})
 			"set":
 				acts.append({"t": 1, "of": str(act.field), "op": 2, "f": 0.0, "v": float(act.value)})
@@ -196,7 +199,7 @@ func _apply_rows(rows: PackedInt32Array) -> int:
 
 
 func _comp_name(c) -> StringName:
-	# 统一走 ECSWorld 的解析器(全框架唯一实现): 避免此处回退成脚本资源字符串,
+	# 统一走 ECSWorld 的解析器(全框架唯一实现): 避免此处回退成脚本资源字符串。
 	if world == null:
 		return StringName(str(c))
 	return world.resolve_component_name(c)
@@ -218,6 +221,9 @@ func _run() -> int:
 				total += world.batch_apply_where(anchor, must, anchor, act.field,
 						ECSWorld.BatchOp.MULTIPLY_ADD, float(act.factor), 0.0, conditions)
 			"div":
+				## 同批量下发路径: 除数为 0 直接跳过, 不写 INF
+				if is_zero_approx(float(act.divisor)):
+					continue
 				total += world.batch_apply_where(anchor, must, anchor, act.field,
 						ECSWorld.BatchOp.MULTIPLY_ADD, 1.0 / float(act.divisor), 0.0, conditions)
 			"set":
@@ -238,7 +244,9 @@ func _run() -> int:
 				if rows.is_empty():
 					continue
 				var comp_rows := {}
-				for i in act.comps.size():
+				# 原生只返回它真匹配到的组件结果, 少一个就少一个, 不能按下标硬取越界
+				var got: int = mini(act.comps.size(), aligned.size() - 1)
+				for i in got:
 					comp_rows[_comp_name(act.comps[i])] = aligned[i + 1]
 				total += rows.size()
 				act.callable.call(rows, comp_rows, world)

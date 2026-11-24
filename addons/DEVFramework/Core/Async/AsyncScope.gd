@@ -21,7 +21,7 @@ class _Task extends RefCounted:
 		_callback = callback
 		_run(sec)
 
-	## 按物理 tick 计时（process_in_physics=true）：与项目主流延时一致，
+	## 按物理 tick 计时（process_in_physics=true）：与项目主流延时同一套时钟。
 	func _run(sec: float) -> void:
 		await Engine.get_main_loop().create_timer(sec, true, true).timeout
 		_finish(true)
@@ -34,7 +34,7 @@ class _Task extends RefCounted:
 		if _settled:
 			return
 		_settled = true
-		## 先把自己摘除，再通知与执行：回调可能重入（cancel_all / 再登记任务），
+		## 先把自己摘除，再通知与执行：回调可能重入（cancel_all / 再登记任务）。
 		scope._forget(self)
 		done.emit(completed)
 		## 宿主已被销毁时不回调：调用方的闭包几乎都要直接访问宿主状态
@@ -46,7 +46,7 @@ class _Task extends RefCounted:
 var _tasks: Array[_Task] = []
 ## 宿主弱引用。**必须用弱引用**：强引用会让 Node 永远得不到释放
 var _host: WeakRef
-## 本作用域的世代。[method cancel_all] 换代后，外部持有的旧快照一律失效；
+## 本作用域的世代。[method cancel_all] 换代后，外部持有的旧快照一律失效。
 var generation := Generation.new()
 
 
@@ -79,7 +79,7 @@ func call_after(sec: float, callback: Callable) -> void:
 	_tasks.append(_Task.new(self, sec, callback))
 
 
-## 换代并撤销本作用域内所有尚未结算的任务：等待中的 [method delay] 立即恢复为 false，
+## 换代并撤销本作用域内所有尚未结算的任务：等待中的 [method delay] 立即恢复为 false。
 func cancel_all() -> void:
 	## 只换代，撤销经信号回流到 _on_generation_advanced —— 这样外部直接
 	generation.next()
@@ -87,7 +87,7 @@ func cancel_all() -> void:
 
 ## 世代换代：撤销登记表里的全部任务
 func _on_generation_advanced(_gen: int) -> void:
-	## 先复制并清空集合，再逐个撤销：cancel() 会**同步**唤醒等待中的 delay()，
+	## 先复制并清空集合，再逐个撤销：cancel() 会**同步**唤醒等待中的 delay()。
 	var pending := _tasks.duplicate()
 	_tasks.clear()
 	for t in pending:

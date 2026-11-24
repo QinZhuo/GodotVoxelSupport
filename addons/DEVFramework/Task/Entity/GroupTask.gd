@@ -3,7 +3,7 @@ class_name GroupTask extends Task
 
 ## 某个子任务完成(index 为其在 tasks 中的下标, child 为子任务实体) —— 供任务日志/埋点
 signal child_completed(index: int, child: Task)
-## 进入某个子步骤(游标所指; SEQUENTIAL 下每步一次) —— 供"分步驱动 UI"(教程/日志/进度条)直接订阅,
+## 进入某个子步骤(游标所指; SEQUENTIAL 下每步一次) —— 供"分步驱动 UI"(教程/日志/进度条)直接订阅。
 signal step_entered(step: Task)
 
 var _child_entities: Array[Task] = []

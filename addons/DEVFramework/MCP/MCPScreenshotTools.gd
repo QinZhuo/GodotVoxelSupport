@@ -4,7 +4,7 @@ extends RefCounted
 ## ======= 截图域: 请求形状(与进程无关的安全部分) =======
 ## **本文件必须导出安全**(零编辑器标识符): 运行时服务器要在导出包里注册 take_screenshot,
 
-## 不 preload MCPToolSchema: 本工具的 schema 是带 enum 的自定义字典, 那里没有对应工厂。
+## 不 preload MCPToolContract: 本工具的 schema 是带 enum 的自定义字典, 那里没有对应工厂。
 
 
 ## ======= 请求形状(spec) =======
@@ -15,8 +15,7 @@ static func spec() -> Dictionary:
 		"schema": {"type": "object", "properties": {
 			"capture_type": {"type": "string", "enum": ["game", "editor", "scene"], "description": "模式: game=真实游戏截图(默认, 需游戏运行; 导出运行时=本进程), editor=编辑器视口截图, scene=当前场景缩略图。传错值会直接报错而非静默回落"},
 			"max_width": {"type": "integer", "description": "最大宽度, 超过则等比缩小。默认 1280, 传 0 或更大值可保留原始分辨率"},
-			"color_mode": {"type": "string", "enum": ["auto", "srgb", "raw"], "description": "颜色处理模式, 默认 auto(按渲染缓冲的实际数据格式自动判定, 出图即所见)。srgb=强制补一次 linear→sRGB 编码(认定读回的是线性光值), raw=强制不转换(认定读回的已是显示值)。只有确认出图偏色时才需要手动指定"},
-			"srgb": {"type": "boolean", "description": "[已废弃, 请用 color_mode] 旧的强制开关, 等价 color_mode=srgb(true)/raw(false); 与 color_mode 同时传时以 color_mode 为准。不传则走 auto"}
+			"color_mode": {"type": "string", "enum": ["auto", "srgb", "raw"], "description": "颜色处理模式, 默认 auto(按渲染缓冲的实际数据格式自动判定, 出图即所见)。srgb=强制补一次 linear→sRGB 编码(认定读回的是线性光值), raw=强制不转换(认定读回的已是显示值)。只有确认出图偏色时才需要手动指定"}
 		}},
 	}
 
@@ -27,8 +26,6 @@ static func color_opts(args: Dictionary) -> Dictionary:
 	var out := {}
 	if args.has("color_mode"):
 		out["color_mode"] = VariantTool.get_string(args, "color_mode", ScreenshotTool.COLOR_AUTO)
-	if args.has("srgb"):
-		out["srgb"] = VariantTool.get_bool(args, "srgb", true)
 	return out
 
 

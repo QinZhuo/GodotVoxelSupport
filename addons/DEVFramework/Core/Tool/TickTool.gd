@@ -28,7 +28,7 @@ static func tick() -> void:
 	_backlog_warned = false
 	var due := _queue
 	_queue = []
-	## 序号**每 tick 归零**：排序只在同一 tick 内有意义。不归零它会跨场累加，
+	## 序号**每 tick 归零**：排序只在同一 tick 内有意义。不归零它会跨场累加。
 	_seq = 0
 	due.sort_custom(func(a, b):
 		return int(a[0]) < int(b[0]) if int(a[0]) != int(b[0]) else int(a[1]) < int(b[1]))

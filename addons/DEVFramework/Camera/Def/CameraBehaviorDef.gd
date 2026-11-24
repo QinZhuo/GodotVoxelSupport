@@ -10,7 +10,7 @@ func apply(vcam: VirtualCamera3D, delta: float, instant: bool = false) -> void:
 	pass
 
 
-## 在机位基础姿态之上叠加偏移并返回新姿态, [b]不写回节点[/b]。用于手持抖动这类"只影响画面、
+## 在机位基础姿态之上叠加偏移并返回新姿态, [b]不写回节点[/b]。用于手持抖动这类"只影响画面、不影响逻辑"的偏移。
 func apply_offset(vcam: VirtualCamera3D, pose: Transform3D) -> Transform3D:
 	return pose
 

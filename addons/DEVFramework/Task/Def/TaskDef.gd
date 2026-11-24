@@ -15,10 +15,10 @@ enum Status {
 ## 创建对应的任务实体
 @abstract func create_entity() -> Task
 
-## 前置条件: 非空时, activate() 仅在条件满足后才真正激活;
+## 前置条件: 非空时, activate() 仅在条件满足后才真正激活。
 @export var prerequisite: ConditionDef
 
-## 跳过条件(门控): 激活时条件已满足则视为"已达成"直接完成并推进 —— 教程"老玩家跳过前几步"、
+## 跳过条件(门控): 激活时条件已满足则视为"已达成", 直接完成并推进(教程的"老玩家跳过前几步")。
 @export var skip_if: ConditionDef
 
 ## 任务完成后执行的操作(单个, 也可以是任务奖励): complete() 时 apply(context)。

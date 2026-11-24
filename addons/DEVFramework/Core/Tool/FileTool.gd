@@ -157,10 +157,21 @@ static func atomic_write_bytes(path: String, bytes: PackedByteArray) -> Error:
 
 	var err := DirAccess.rename_absolute(tmp_path, path)
 	if err != OK and FileAccess.file_exists(path):
-		# 平台 rename 不覆盖已存在目标 → 退化为"删目标再 rename"
-		DirAccess.remove_absolute(path)
-		err = DirAccess.rename_absolute(tmp_path, path)
+		## 平台 rename 不覆盖已存在目标 → 先把旧档挪成 .old, 换成功再删掉。
+		## 不能"先删目标再 rename": 第二步失败会把新旧两份一起丢掉(存档/配置/基线都走这里)。
+		var old_path := path + ".old"
+		DirAccess.remove_absolute(old_path)
+		var move_err := DirAccess.rename_absolute(path, old_path)
+		if move_err != OK:
+			err = move_err
+		else:
+			err = DirAccess.rename_absolute(tmp_path, path)
+			if err == OK:
+				DirAccess.remove_absolute(old_path)
+			else:
+				## 换档失败就把旧档挪回去, 至少保持原状态可用
+				DirAccess.rename_absolute(old_path, path)
 	if err != OK:
 		LogTool.error("文件", "原子写入失败: %s (错误: %d)" % [path, err])
-		DirAccess.remove_absolute(tmp_path)
+		## 失败时保留 .tmp: 它至少是完整的新数据, 删掉就彻底没有了
 	return err

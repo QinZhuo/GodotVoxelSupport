@@ -173,5 +173,8 @@ static func tick(world: ECSWorld, delta: float) -> int:
 		world.set_columns_of(TimerComponent, {&"left": new_left, &"repeat_count": new_rep})
 	if not to_destroy.is_empty():
 		world.cmd_destroy_many(to_destroy)
-		world.cmd_flush()
+		# tick 内(调度器驱动)交给帧末统一 flush, 免得结构变更打断本帧其余系统;
+		# 独立调用(测试/手动驱动)必须当场 flush, 否则紧接着的断言读到的是旧行集。
+		if not world.is_ticking():
+			world.cmd_flush()
 	return due_rows.size()

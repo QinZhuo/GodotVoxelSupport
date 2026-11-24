@@ -30,7 +30,7 @@ func _setup_session(session_id: int) -> void:
 		if server:
 			server._on_session_stopped(session_id)
 	)
-	# 游戏因脚本错误/断点进入断点暂停(break state)时, 调试线仍在但主循环不执行,
+	# 游戏因脚本错误/断点进入断点暂停(break state)时, 调试线仍在但主循环不执行。
 	session.breaked.connect(func(can_debug: bool) -> void:
 		if server:
 			server._on_session_breaked(session_id, can_debug)
@@ -57,7 +57,7 @@ func debug_continue() -> bool:
 	var session := first_active_session()
 	if session == null or not session.is_breaked():
 		return false
-	# 游戏侧断点循环(RemoteDebugger::debug)监听 "continue" 指令并恢复执行;
+	# 游戏侧断点循环(RemoteDebugger::debug)监听 "continue" 指令并恢复执行。
 	session.send_message("continue", [])
 	return true
 
