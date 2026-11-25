@@ -1,8 +1,8 @@
 [gd_scene format=3 uid="uid://cvk8vskr7pvxh"]
 
 [ext_resource type="Script" uid="uid://cydvm8ccede7y" path="res://demo/destruction_demo.gd" id="1_destruction"]
-[ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Dynamic/VoxelRenderer.gd" id="2_renderer"]
-[ext_resource type="Script" uid="uid://btk6140iqqwmg" path="res://addons/VoxelSupport/Dynamic/VoxelDestructible.gd" id="3_destructible"]
+[ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="2_renderer"]
+[ext_resource type="Script" uid="uid://btk6140iqqwmg" path="res://addons/VoxelSupport/Runtime/VoxelDestructible.gd" id="3_destructible"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
 sky_top_color = Color(0.15, 0.2, 0.3, 1)

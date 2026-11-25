@@ -112,12 +112,74 @@ func test_seed_is_stable_per_voxel() -> void:
 
 func test_downsample_respects_limit_and_is_deterministic() -> void:
 	var src := _src()
+	# 先取"无上限"的全量候选数（max_points 极大 → stride=1 → 全取），才能判断是否真的超上限
+	var total := src.build_particle_points(0.1, 2000000000, true).size() / QVoxelSource.PARTICLE_STRIDE
 	var d1 := src.build_particle_points(0.1, 5000, true)
 	var d2 := src.build_particle_points(0.1, 5000, true)
 	var n := d1.size() / QVoxelSource.PARTICLE_STRIDE
 	assert_true(n <= 5000, "抽样后点数不能超过上限（实际 %d）" % n)
 	assert_true(n > 0, "抽样后不应为空")
 	assert_eq(d1, d2, "抽样必须确定性（两次结果一致）")
+	# 语义只有一条：stride = ceil(total/max)（未超上限则 stride=1），点数 = ceil(total/stride)。
+	# 注意整数步长的粒度：total=5001 时 stride=2 → 2501 点，这是该语义的必然结果，
+	# 故断言钉的是"按这条公式算出的数"，而不是"必须接近 5000"。
+	var stride := 1 if total <= 5000 else int(ceil(float(total) / 5000.0))
+	var expect := int(ceil(float(total) / float(stride)))
+	assert_eq(n, expect,
+			"抽样点数应为 ceil(total/stride)（total=%d stride=%d 期望 %d）" % [total, stride, expect])
+	if total > 5000:
+		# 旧实现（判定恒假 → 退化成"取前 max 个"）只在未超上限时与真值一致 |
+		# 超上限时它给出恰好等于"靠前若干整块之和"的偏小值 —— 那两个数一般对不上。
+		assert_true(n > 5000 / 2, "超上限时不应退化成截断（actual=%d）" % n)
+
+
+## 40×16×16 = 10240 体素，横跨 x 方向 2 个 chunk（x 0..31 与 32..39）。
+## [param reverse_order] 用倒序灌入同样的体素集合 → _chunk_buffers 的插入序相反。
+func _make_slab(reverse_order: bool) -> QVoxelSource:
+	var d := QVoxelSource.new()
+	var mats: Array[VoxelMaterial] = []
+	mats.resize(2)
+	var mat := VoxelMaterial.new()
+	mat.id = 1
+	mats[1] = mat
+	d.materials = mats
+	var positions: Array = []
+	for x in 40:
+		for y in 16:
+			for z in 16:
+				positions.append(Vector3i(x, y, z))
+	if reverse_order:
+		positions.reverse()
+	d.set_voxels(positions, 1, false)
+	return d
+
+
+func test_downsample_is_uniform_and_order_independent() -> void:
+	# 10240 候选、上限 1000 → stride = ceil(10240/1000) = 11 → 点数 = ceil(10240/11) = 931。
+	# 钉住 stride 的**具体语义**（点数而非"前 N 个"）：换实现方式时这个数字会立刻变化。
+	var a := _make_slab(false)
+	var b := _make_slab(true)
+	var d1 := a.build_particle_points(0.1, 1000, false)
+	var d2 := b.build_particle_points(0.1, 1000, false)
+	var n := d1.size() / QVoxelSource.PARTICLE_STRIDE
+	assert_eq(n, 931, "10240 候选 / 上限 1000 应得 ceil(10240/11)=931 点")
+	# 与 chunk 插入序无关：同一份体素、不同灌入顺序必须给出完全相同的结果
+	# （旧实现按字典插入序编号，倒序灌入会得到另一份点云 → 回放/烘焙不可复现）。
+	assert_eq(d1, d2, "下采样结果必须与 chunk 插入序无关（同输入同输出）")
+	# 均匀性：截断式下采样会把后加载的 chunk **整块丢掉**（上限 < 首块点数时该块 0 点）。
+	# 这里两个 chunk 都必须有点，且抽样量与其体素数之比（8192:2048 = 4:1）成比例。
+	var per := {}
+	for i in n:
+		var vx := roundi(d1[i * QVoxelSource.PARTICLE_STRIDE] / 0.1)
+		var key := vx / 32
+		per[key] = int(per.get(key, 0)) + 1
+	assert_eq(per.size(), 2, "两个 chunk 都应被抽样覆盖（截断式会整块丢掉后加载的 chunk）")
+	var c0 := int(per.get(0, 0))
+	var c1 := int(per.get(1, 0))
+	assert_true(c0 > 0 and c1 > 0, "两个 chunk 的抽样点数都应 > 0（实际 %d / %d）" % [c0, c1])
+	var ratio := float(c0) / float(maxi(c1, 1))
+	assert_true(absf(ratio - 4.0) < 0.5,
+			"各 chunk 抽样量应与其体素数成比例（期望约 4:1，实际 %d:%d）" % [c0, c1])
 
 
 # ---------------------------------------------------------------- 纹理契约

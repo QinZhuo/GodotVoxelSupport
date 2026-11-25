@@ -13,7 +13,7 @@ extends Resource
 ## 于是"组"的内存成本为零（不存体素、也没有自己的画布尺寸，见 QVoxelEvalEngine 的紧致盒）。
 ## 【为什么不存 parent 指针】父 → 子只朝一个方向（QVoxelGroup.child_nodes），于是引用图是 DAG、
 ## 没有环。Resource 是 RefCounted：存反向指针就造出环，环永远不会被释放（静默泄漏）。
-## 需要"我在谁下面"时由 QVoxelWorld 从根往下找（find_parent / siblings_of），成本可忽略。
+## 需要"我在谁下面"时由 QVoxelWorld 从根往下找（find_parent / index_of），成本可忽略。
 
 ## 落盘判别键（NODE 的 nodes[] 里每项的 kind）。
 const KIND_GROUP := "group"
@@ -92,10 +92,3 @@ func display_name() -> String:
 	if not node_name.is_empty():
 		return node_name
 	return "未命名组" if is_group() else "未命名模型"
-
-
-## 本节点（含子树）在世界里的绝对偏移：逐层累加 offset。
-## 渲染 / 求值据此把子树内容摆到父画布的对应位置。
-func absolute_offset() -> Vector3i:
-	return offset
-

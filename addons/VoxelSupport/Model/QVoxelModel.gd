@@ -168,12 +168,6 @@ func move_frame(from: int, to: int) -> bool:
 
 # 体素存取
 
-## grid_size 对应的元素总数（非法尺寸返回 0）。**仅供参考/UI**：稀疏存储不按它分配内存。
-func volume_size() -> int:
-	if grid_size.x <= 0 or grid_size.y <= 0 or grid_size.z <= 0:
-		return 0
-	return grid_size.x * grid_size.y * grid_size.z
-
 
 ## 已分配的块数（当前体素源）。
 func block_count() -> int:
@@ -247,16 +241,6 @@ func read_box(lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 	return _read_box_table(source_blocks(), lo, dims)
 
 
-## 指定帧的整块密集体积（导出逐帧 / 快照用）。静态模型恒等于 `to_volume()`。
-func frame_volume(frame: int) -> PackedInt32Array:
-	if frames.is_empty():
-		return to_volume()
-	var f := frame_at(frame)
-	if f == null:
-		return PackedInt32Array()
-	return _read_box_table(f.blocks, Vector3i.ZERO, grid_size)
-
-
 func _read_box_table(src_blocks: Dictionary, lo: Vector3i, dims: Vector3i) -> PackedInt32Array:
 	var out := PackedInt32Array()
 	if dims.x <= 0 or dims.y <= 0 or dims.z <= 0:
@@ -298,10 +282,9 @@ func _read_box_table(src_blocks: Dictionary, lo: Vector3i, dims: Vector3i) -> Pa
 ## read_box 在整块范围上的特例，故与它共用一份实现。
 ## 【空对象返回 size 0，而不是一整块零】求值引擎用"空数组"表示"还没有既有体积"，
 ## 于是"手绘为空"这个情形不必特判，也省掉一次无谓的全量分配 + 扫描（512³ = 537 MB）。
-## 【但它不代表"链首没有左操作数"】链首那条的 combine 仍要作用在**手绘体素**上（见引擎文件头），
-## 故引擎在合并前会显式取一次本函数的结果当左操作数（QVoxelEvalEngine._current）：若把
-## "空数组"直接当左操作数，UNION 会退化成 REPLACE（手绘石料凭空消失）、SUBTRACT 会退化成
-## "挖不动"—— 恰恰是"手绘 + 程序化混着用"的两种用法。
+## 【空数组就是最终答案，不是"缺一个左操作数"】去链之后模型没有上游算子：手绘体素本身就是
+## 求值结果，引擎拿到空数组即当"这个模型/子树没有任何可见体素"处理，再与兄弟并进紧致盒。
+## 程序化生成走"生成工具一次性烘焙进 blocks"（见 QVoxelGenerate），不会在求值期往回填。
 func to_volume() -> PackedInt32Array:
 	if source_blocks().is_empty():
 		return PackedInt32Array()
@@ -315,14 +298,6 @@ func to_volume() -> PackedInt32Array:
 ## 缓存），必须先 `duplicate()` —— 否则那一笔之后的任何编辑都会悄悄改写你留存的"点时刻的值"。
 func get_block(block_key: Vector3i) -> PackedInt32Array:
 	return get_frame_block(-1, block_key)
-
-
-## 整体替换一块（长度必须为 B³）。**空缓冲 = 删除该块**。
-## 供加载与撤销命令整块搬运（撤销不必逐格 set_voxel 再走一遍"建块/回收"分支）。
-## 【接管传入的缓冲，不拷贝】调用方若还要留着这份数据（撤销栈要留着，供下次 redo），
-## 必须自己传 `duplicate()` —— 否则对象随后的就地编辑会改到你手上这一份。
-func set_block(block_key: Vector3i, buf: PackedInt32Array) -> void:
-	set_frame_block(-1, block_key, buf)
 
 
 ## 读取**指定帧**的整块（frame < 0 = 静态源）。活视图语义同 get_block。
@@ -411,11 +386,6 @@ func resize_grid(new_size: Vector3i) -> void:
 ## —— 与 `_write_box` 的"逐块推进"同一思路，只是盒换成了任意点集。
 func paint_cells(cells: Array[Vector3i], material_id: int) -> int:
 	return _paint_cells_table(source_blocks(), cells, material_id)
-
-
-## 同 paint_cells，写到指定帧（`frame < 0` = 静态源）。
-func paint_frame_cells(frame: int, cells: Array[Vector3i], material_id: int) -> int:
-	return _paint_cells_table(blocks_for(frame), cells, material_id)
 
 
 # 内部：盒写入（唯一的体素写入路径，fill/set/apply/undo 全走它）
@@ -522,13 +492,12 @@ func _block_of_table(target: Dictionary, bk: Vector3i) -> PackedInt32Array:
 	return b if b is PackedInt32Array else PackedInt32Array()
 
 
+## 单块是否全空。**判空只有一处实现**（QVoxelBlockCodec.is_empty_block，走原生 count(0)）：
+## 逐体素 GDScript 扫描是保存世界的必经路径，实测秒级。
 func _is_block_empty(b: Variant) -> bool:
 	if not (b is PackedInt32Array):
 		return true
-	for m in (b as PackedInt32Array):
-		if m != 0:
-			return false
-	return true
+	return QVoxelBlockCodec.is_empty_block(b as PackedInt32Array)
 
 
 ## 全零块回收（按表）。compact() 的实现在此，静态源与帧共用。
@@ -542,18 +511,10 @@ func _compact_table(target: Dictionary) -> int:
 	return empty.size()
 
 
-## 排序块键（按表）。
+## 排序块键（按表）。**键序只有一处实现**（QVoxelBlockCodec.key_less，x → y → z）：
+## 落盘字节与回归测试的逐字节哈希都押在"所有实现完全一致"上，漂移不报错、只写出顺序不同的文件。
 func _sorted_keys(target: Dictionary) -> Array[Vector3i]:
-	var keys: Array[Vector3i] = []
-	for k in target:
-		keys.append(k)
-	keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
-		if a.x != b.x:
-			return a.x < b.x
-		if a.y != b.y:
-			return a.y < b.y
-		return a.z < b.z)
-	return keys
+	return QVoxelBlockCodec.sorted_keys(target)
 
 
 func _count_solid(target: Dictionary) -> int:

@@ -40,10 +40,26 @@ func test_all_uniforms_present() -> void:
 		VoxelParticleShader.U_SRC_POS, VoxelParticleShader.U_DST_POS,
 		VoxelParticleShader.U_COLORS, VoxelParticleShader.U_PROPS,
 		VoxelParticleShader.U_GRID_WIDTH, VoxelParticleShader.U_PROGRESS,
-		VoxelParticleShader.U_ALPHA,
 	]
 	for key in required:
 		assert_true(names.has(key), "粒子着色器缺少 uniform：%s" % key)
+
+
+## 【回归：粒子更新着色器不该有 alpha / scatter_radius】
+## 这两个 uniform 曾经"声明了但没有任何代码读"：alpha 被 VoxelParticleView 每帧写、
+## scatter_radius 只有常量没有 uniform —— 都是**永远不会生效的接口**，比没有更糟
+## （调用方以为自己在调淡出/散开，画面却纹丝不动）。
+## 透明度归绘制材质（DRAW_SHADER 硬阈值 / DRAW_TRANS_SHADER 乘入 ALPHA），
+## 散开归 process() 的 arc（二次贝塞尔）与 drift（三轴正弦）。
+func test_process_shader_has_no_dead_uniforms() -> void:
+	var mat := VoxelParticleShader.make_process_material()
+	var names := {}
+	for u in mat.shader.get_shader_uniform_list():
+		names[String(u["name"])] = true
+	assert_false(names.has(VoxelParticleShader.U_ALPHA),
+			"粒子更新着色器不该声明 alpha —— 没有任何代码读它，写进去不会改变画面")
+	assert_false(names.has("scatter_radius"),
+			"粒子更新着色器不该声明 scatter_radius —— 散开由 arc/drift 实现，没有第三个机制")
 
 
 ## 【回归：不透明通道绝对不能写 ALPHA】
@@ -146,20 +162,6 @@ func test_display_mode_switches_visibility() -> void:
 	r.queue_free()
 
 
-## 【兼容别名】particle_mode 读写都应同步 display_mode。
-## 保留它是因为早期版本用它；枚举是新的正式接口。
-func test_particle_mode_alias_keeps_enum_in_sync() -> void:
-	var r := _renderer_with_data()
-	r.particle_mode = true
-	assert_eq(r.display_mode, VoxelRenderer.DisplayMode.PARTICLES,
-			"写 particle_mode=true 应同步到枚举")
-	assert_true(r.particle_mode, "读 particle_mode 应等价于枚举比较")
-	r.particle_mode = false
-	assert_eq(r.display_mode, VoxelRenderer.DisplayMode.MESH,
-			"写 particle_mode=false 应同步到枚举")
-	r.queue_free()
-
-
 ## 【形状】立方体与球都要能切换，且切换不重建粒子节点。
 ## 网格路径早就有 cube/sphere 两种形状；粒子若只能方块，"小球粒子"类效果就得项目自己做 mesh。
 func test_particle_shape_switches() -> void:
@@ -174,8 +176,6 @@ func test_particle_shape_switches() -> void:
 	r.voxel_shape = VoxelRenderer.VoxelShape.SPHERE
 	var sphere := r.particle_node.get_draw_pass_mesh(0)
 	assert_true(sphere is SphereMesh, "SPHERE 形状应使用 SphereMesh")
-	# 兼容别名读写同一属性
-	assert_eq(r.particle_shape, VoxelRenderer.VoxelShape.SPHERE, "particle_shape 应是 voxel_shape 的别名")
 	# 切换到球后，两个通道（不透明/透明）都应是球
 	assert_true(r.particle_node.get_draw_pass_mesh(1) is SphereMesh,
 			"透明通道也要跟着换形状，否则一块玻璃是球、另一块是方块")
@@ -202,7 +202,7 @@ func test_sphere_radius_fits_voxel() -> void:
 func test_surface_only_reduces_points() -> void:
 	var r := _renderer_with_data()
 	r.particle_surface_only = false
-	r.show_as_particles(true)
+	r.display_mode = VoxelRenderer.DisplayMode.PARTICLES
 	var full := r.particle_points.size()
 	r.particle_surface_only = true
 	r.rebuild_particles()

@@ -1,3 +1,8 @@
+; VoxelSupport 原生核心的加载声明。
+; 【注释语法】本文件由 Godot 的 ConfigFile 解析，注释必须用行首分号 ';'。
+; 用 '#' 会让紧随其后的键整条丢失（实测：compatibility_minimum 会被读成 missing），
+; 所以本文件里不要出现井号注释。
+
 [configuration]
 
 entry_symbol = "voxelsupport_library_init"
@@ -5,9 +10,21 @@ compatibility_minimum = "4.3"
 
 [libraries]
 
+; macos：仓库只提供一份 **release 的 universal 库**（arm64 + x86_64 合一），
+; 没有单独的 debug 或分架构产物，因此 debug/release 两条都指向它。
+; 注意 universal 二进制里必须同时含 arm64 与 x86_64 两个 slice，
+; 否则 Intel Mac 上加载会失败。
 macos.debug = "res://addons/VoxelSupport/Native/libvoxelsupport.macos.release.universal.dylib"
 macos.release = "res://addons/VoxelSupport/Native/libvoxelsupport.macos.release.universal.dylib"
+
+; windows：同样只有 release 产物，debug 条目复用之（Godot 允许 debug 跑 release 库）。
+; 文件名由构建脚本 (DEVFramework 的 GDExtensionDeployTool) 从 CMake 默认名
+; libvoxelsupport.dll 规范化为 libvoxelsupport.<os>.<release|debug>.<arch>.<ext>，与下面逐字一致。
 windows.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.windows.release.x86_64.dll"
 windows.release.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.windows.release.x86_64.dll"
+
+; linux：**仓库里没有预编译 .so**（没人构建过，也没有 CI 产出）。这两条保留是为了
+; 让"自行在 Linux 上构建的人"放好产物即可直接加载，不必再改本文件；在 Windows / macOS
+; 上它们不会被读取。若你手上没有 libvoxelsupport.linux.*.x86_64.so，属正常情况，忽略即可。
 linux.debug.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.linux.debug.x86_64.so"
 linux.release.x86_64 = "res://addons/VoxelSupport/Native/libvoxelsupport.linux.release.x86_64.so"

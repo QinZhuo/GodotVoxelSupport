@@ -10,7 +10,7 @@ extends TestCase
 
 const MCPResourceDocs := preload("res://addons/DEVFramework/MCP/MCPResourceDocs.gd")
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
-const QVoxelMCPTools := preload("res://addons/VoxelSupport/Dynamic/QVoxelMCPTools.gd")
+const QVoxelMCPTools := preload("res://addons/VoxelSupport/Tools/QVoxelMCPTools.gd")
 
 
 func test_resource_docs_register_and_list() -> void:

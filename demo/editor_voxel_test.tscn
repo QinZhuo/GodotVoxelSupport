@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="1_renderer"]
 [ext_resource type="Resource" uid="uid://dwlsmke33vkb6" path="res://demo/deer_data.vox" id="2_deer"]
-[ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Runtime/VoxelMaterial.gd" id="4_rgb08"]
+[ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Core/VoxelMaterial.gd" id="4_rgb08"]
 [ext_resource type="Script" path="res://demo/procedural_terrain_source.gd" id="6_vmvxb"]
 
 [sub_resource type="Resource" id="Resource_w68vc"]

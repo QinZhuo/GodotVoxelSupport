@@ -21,6 +21,39 @@
 
 ### 架构
 
+### 目录分层
+
+目录是**层，不是主题**。一个文件只会引用自己这一层或更底层的类，所以依赖图天然无环
+（靠静态分析验证，不靠纪律维持）：
+
+```
+addons/VoxelSupport/
+  plugin.gd            编辑器插件入口（注册四个导入器）
+  Core/       (23)     无层依赖的叶子类型：VoxelChunk / VoxelVolume / VoxelMaterial /
+                       VoxelSpec / QVoxelMate / QVoxelBlockCodec / NativeLoader /
+                       VoxelStream / VoxelMemoryStream / VoxelDirtyLedger / VoxelLodGrid …
+  Format/     ( 7)     .qvx / .vox 字节布局：QVoxelFile / QVoxelBlockStream / QVoxelAsset /
+                       VoxAsset / VoxAccess / VoxSpace / QVoxelFrame
+  Model/      (10)     内存里的工程真值：QVoxelWorld / QVoxelModel / QVoxelNode /
+                       QVoxelEvalEngine / QVoxelFileIO / VoxWriter / VoxAssetWorld / MeshVoxelWorld
+  Mesh/       ( 4)     体素 → 几何：VoxelMeshGenerator / VoxelChunkGenerator /
+                       VoxelMaterialCache / MeshAccess（外部网格 → 快照）
+  Data/       ( 8)     运行时体素数据与持久化：QVoxelSource / QVoxelStream /
+                       VoxelPersistence / VoxelAsyncLoader / VoxelEditKernel / VoxelRay /
+                       VoxelPointCloudExporter / ProceduralVoxelSource
+  Runtime/    ( 9)     所有"画出来"的东西：VoxelRenderer / VoxelViewLayer / VoxelCollision /
+                       VoxelParticleView / VoxelMesher / VoxelMeshBatch / VoxelDestructible /
+                       VoxelDestructionPresenter / VoxelAnimator
+  Tools/      ( 5)     脚本 / 导出 / 预览 / MCP：QVoxelScript / QVoxelBuilder /
+                       QVoxelMeshExport / QVoxelPreview / QVoxelMCPTools
+  Importer/   ( 5)     编辑器导入插件：网格 / MeshLibrary / .qvx 数据源 / noop
+  Native/              GDExtension 源码与预编译库
+```
+
+`Core → Format → Model → Mesh → Data → Runtime → Tools`（`Importer` 与 `Tools` 同级）：
+左边的层永不引用右边层的类。
+
+
 ```
 QVoxelSource                    — 体素数据存储与修改（材质、chunk 缓冲）
   ├─ VoxelStream (@abstract)     — 存储：chunk 级持久化 API（全部方法 @abstract）
@@ -28,14 +61,46 @@ QVoxelSource                    — 体素数据存储与修改（材质、chunk
   │    └─ VoxelMemoryStream      — 纯内存（不落盘；程序化世界的编辑落脚处）
   └─ node: QVoxelNode            — 生成：数据层的唯一求值来源
        └─ QVoxelModel            — 有界盒 + 修改器链（由 QVoxelEvalEngine 求值）
-VoxelRenderer              — 异步网格生成、LOD、流式加载、碰撞
-VoxelDestructible          — 继承 VoxelRenderer：破坏、崩塌、掉落碎片
+
+VoxelMesher                     — 网格化层：体素 → 几何 → ArrayMesh（无状态，两种绘制模式共用）
+VoxelRenderer                   — 绘制核心：数据 → 可见几何
+  └─ DrawMode.STATIC / DYNAMIC
+     STATIC  : 整份模型 → 1 个 mesh（≤2 surface），多实例共享同一资源 → 自动合批
+     DYNAMIC : per-chunk（或 per-group）MeshInstance3D，增量重建
+
+可选能力组件（都是 VoxelRenderer 的普通子节点）：
+  VoxelViewLayer                — 流式加载/卸载、LOD 分带、视锥剔除、原点漂移
+  VoxelCollision                — 每 chunk 的 StaticBody3D + ConcavePolygonShape3D
+  VoxelParticleView             — 点云 → GPUParticles3D
+  VoxelDestructible             — 破坏、崩塌、掉落碎片（编辑经 VoxelEditKernel）
 ```
 
-**"存"与"造"是两个并列的部件**：`stream` 负责存（磁盘 / 内存），`node` 负责造
-（程序化地形经由它的修改器链）。二者可以同时存在（程序化世界 + 破坏存档），取数优先级恒为
-**流 > 节点**——存过的必须权威，不能被重新生成覆盖。
-登记 / 去重 / 后台派发 / 回填集中在 `VoxelAsyncLoader` 一处，两个数据源都只回答
+**分层规则（单向依赖，箭头只向下）：**
+
+1. **`VoxelRenderer` 只管画，不管视点策略。** 它只保留两件躲不掉的事：`current_camera()`
+   （判定异步结果是否过期——那个 chunk 已经出了卸载距离）与 `view_distance` /
+   `unload_distance` / `lod_count` 三个旋钮（视点层反过来读它们）。其余全部——流式、LOD
+   分带、视锥剔除、原点漂移、破坏、粒子——都在 `Runtime/` 的组件里，组件只读渲染器公开面、
+   只订阅它的信号。
+2. **最简路径必须真的是最简的。** `DrawMode.STATIC` 且不挂任何组件时，帧循环里没有一行
+   LOD/流式代码在跑。
+3. **两种绘制模式是刻意的权衡，不是"优化开关"：**
+
+   | | 绘制调用数（N 个实例） | 编辑一个体素的代价 |
+   |---|---|---|
+   | `STATIC`（默认） | ~N（自动合批） | 重建**整份**模型（deer 1.6–3.1 ms / teapot1 85 ms） |
+   | `DYNAMIC` | N × chunk 数 | 只重建受影响的那一个 chunk（0.4–2 ms） |
+
+   静态道具 / 建筑 / 展示模型用 `STATIC`；任何要逐体素破坏或编辑的东西用 `DYNAMIC`
+   （破坏系统**必须**用 `DYNAMIC`）。`STATIC` 与导入 ArrayMesh 的实测对等性及推导过程见
+   `docs/渲染性能对比_QVX_vs_ArrayMesh.md`。
+2026-11 这轮重构改了什么（分层拆分、删了什么以及为什么、验收数据）：`docs/重构实施记录_2026-11-25.md`。
+
+### 存与造：两个并列的部件
+
+`stream` 负责存（磁盘 / 内存），`node` 负责造（程序化地形经由它的修改器链）。二者可以同时
+存在（程序化世界 + 破坏存档），取数优先级恒为 **流 > 节点**——存过的必须权威，不能被重新生成
+覆盖。登记 / 去重 / 后台派发 / 回填集中在 `VoxelAsyncLoader` 一处，两个数据源都只回答
 "存了吗"与"能造吗"两个同步问题（后者是虚函数 `can_generate_chunk()`，无限世界扩展覆写它）。
 
 **数据访问顺序**（每 chunk）：内存缓冲 → 流 → 节点。
@@ -51,7 +116,7 @@ var stream := QVoxelStream.new()
 stream.file_path = "user://my_world/world.qvx"
 data.stream = stream
 
-var renderer := VoxelDestructible.new()
+var renderer := VoxelRenderer.new()
 renderer.data = data
 renderer.voxel_scale = 0.2
 renderer.visibility_mode = VoxelRenderer.VisibilityMode.STREAMING
@@ -100,7 +165,16 @@ data.stream.file_path = "user://world_edits/world.qvx"
 ### 破坏与崩塌
 
 ```gdscript
-var target := renderer as VoxelDestructible
+# 破坏是**组件**，不是子类：VoxelRenderer（负责绘制）+ VoxelDestructible（负责编辑，挂成子节点）
+var renderer := VoxelRenderer.new()
+renderer.data = data
+renderer.draw_mode = VoxelRenderer.DrawMode.DYNAMIC   # 必须：STATIC 每次编辑都重建整份模型
+add_child(renderer)
+
+var target := VoxelDestructible.new()
+renderer.add_child(target)
+target.configure(renderer)
+
 target.damage_sphere(center, radius)
 target.damage_voxel(pos)
 target.damage_ray(origin, direction, max_distance)
@@ -117,8 +191,6 @@ target.damage_ray(origin, direction, max_distance)
 | 属性 | 生效条件 | 隐藏条件 |
 |---|---|---|
 | `view_distance` / `unload_distance` / `lod_count` | visibility_mode ≠ FULL | visibility_mode = FULL |
-| `_stream_load_per_frame` / `_stream_unload_per_frame` | visibility_mode = STREAMING | 其他 |
-| `_lod1_build_per_frame` / `_lod1_build_budget_ms` | lod_count > 1 | lod_count = 1 |
 | `_collision_rebuild_per_frame` | generate_collision = true | generate_collision = false |
 | `max_debris_per_hit` / `debris_*` | spawn_debris_on_damage = true | spawn_debris_on_damage = false |
 
@@ -148,8 +220,9 @@ target.damage_ray(origin, direction, max_distance)
 
 ### 流式 demo
 
-`res://demo/streaming_demo.tscn` — 按键 **0** 在 磁盘文件流 与 程序化无限世界 间切换。
-操作：WASD 移动、Q/E 升降、空格加速、1 流式开关、2 视锥剔除开关。
+`res://demo/test_world_demo.tscn` —— 大型建筑群场景：按键 **1** 循环 `FULL` / `FRUSTUM` / `STREAMING`，
+按键 **2** 循环 `group_shift`，按键 **5** 环绕相机自动测 FPS。
+操作：WASD 移动、Q/E 升降、空格加速、左键球形破坏、空格射线破坏。
 
 ## 体素粒子（底层接口）
 
@@ -158,7 +231,7 @@ target.damage_ray(origin, direction, max_distance)
 
 ```gdscript
 $VoxelRenderer.display_mode = VoxelRenderer.DisplayMode.PARTICLES   # 切到粒子（自动隐藏网格）
-$VoxelRenderer.particle_shape = VoxelRenderer.ParticleShape.SPHERE  # 方块 / 球
+$VoxelRenderer.voxel_shape = VoxelRenderer.VoxelShape.SPHERE      # 方块 / 球
 var node := $VoxelRenderer.particle_node    # 一个已填好点云的 GPUParticles3D
 node.process_material = my_particles_shader # 换掉它，自己决定粒子怎么动
 $VoxelRenderer.particle_points              # 点数据（PackedFloat32Array）
@@ -172,13 +245,13 @@ $VoxelRenderer.particle_points              # 点数据（PackedFloat32Array）
 | 枚举 | 取值 | 说明 |
 |---|---|---|
 | `DisplayMode` | `MESH` / `PARTICLES` | 网格（合并面片，默认）还是粒子（每体素一个方块） |
-| `ParticleShape` | `CUBE` / `SPHERE` | 粒子画成方块还是球；换形状**不重建粒子节点**，只换 draw pass 的网格 |
+| `VoxelShape` | `CUBE` / `SPHERE` | 粒子画成方块还是球；换形状**不重建粒子节点**，只换 draw pass 的网格 |
 
-球的几何也在插件侧生成（`SphereMesh`，按 `particle_sphere_subdivisions` 分 6/10/18 环三档），
-`particle_sphere_scale` 控制相对体素边长的半径。它与网格路径的 `mesh/shape = sphere` 是同一个观感目标，
+球的几何也在插件侧生成（`SphereMesh`，按 `sphere_subdivisions` 分 6/10/18 环三档），
+`sphere_scale` 控制相对体素边长的半径 —— 与网格路径用的是同两个属性，所以两条路径观感一致；
 只是网格那边是导入期烘焙、粒子这边是运行时换 draw mesh。
 
-`particle_mode` 布尔保留为**兼容别名**（读写都同步到 `display_mode`），新代码请用枚举。
+只有这两个枚举是开关：早期的布尔/方法别名（`particle_mode`、`particle_shape`、`show_as_particles()`）已删除 —— 一个语义只留一个入口。
 
 ### 数据从哪来：`QVoxelSource.build_particle_points()`
 

@@ -23,6 +23,40 @@ You can see the rendering effects of voxel models imported using this plugin in 
 
 ### Architecture
 
+### Directory layout
+
+Directories are **layers, not topics**. A file only ever imports from its own layer or one below
+it, so the dependency graph is acyclic by construction (enforced by static analysis, not by
+discipline):
+
+```
+addons/VoxelSupport/
+  plugin.gd            editor plugin entry (registers the four importers)
+  Core/       (23)     leaf types with no layer dependency: VoxelChunk, VoxelVolume,
+                       VoxelMaterial, VoxelSpec, QVoxelMate, QVoxelBlockCodec, NativeLoader,
+                       VoxelStream / VoxelMemoryStream, VoxelDirtyLedger, VoxelLodGrid, ...
+  Format/     ( 7)     .qvx / .vox byte layout: QVoxelFile, QVoxelBlockStream, QVoxelAsset,
+                       VoxAsset, VoxAccess, VoxSpace, QVoxelFrame
+  Model/      (10)     the in-memory project truth: QVoxelWorld, QVoxelModel, QVoxelNode,
+                       QVoxelEvalEngine, QVoxelFileIO, VoxWriter, VoxAssetWorld, MeshVoxelWorld
+  Mesh/       ( 4)     voxels -> geometry: VoxelMeshGenerator, VoxelChunkGenerator,
+                       VoxelMaterialCache, MeshAccess (external mesh -> snapshot)
+  Data/       ( 8)     runtime voxel data + persistence: QVoxelSource, QVoxelStream,
+                       VoxelPersistence, VoxelAsyncLoader, VoxelEditKernel, VoxelRay,
+                       VoxelPointCloudExporter, ProceduralVoxelSource
+  Runtime/    ( 9)     everything that draws: VoxelRenderer, VoxelViewLayer, VoxelCollision,
+                       VoxelParticleView, VoxelMesher, VoxelMeshBatch, VoxelDestructible,
+                       VoxelDestructionPresenter, VoxelAnimator
+  Tools/      ( 5)     scripting / export / preview / MCP: QVoxelScript, QVoxelBuilder,
+                       QVoxelMeshExport, QVoxelPreview, QVoxelMCPTools
+  Importer/   ( 5)     editor import plugins: mesh, MeshLibrary, .qvx source, noop
+  Native/              GDExtension sources + prebuilt libraries
+```
+
+`Core → Format → Model → Mesh → Data → Runtime → Tools`, with `Importer` alongside `Tools`:
+nothing below ever names a class from a directory to its right.
+
+
 ```
 QVoxelSource                    — voxel storage & editing (materials, chunk buffers)
   ├─ VoxelStream (@abstract)     — STORAGE: chunk-level persistence API (all @abstract)
@@ -39,7 +73,7 @@ VoxelRenderer                   — DRAWING CORE: data → visible geometry
 	 DYNAMIC : per-chunk (or per-group) MeshInstance3D, incremental rebuild
 
 Optional capability components (plain child nodes of VoxelRenderer):
-  VoxelPagedLayer               — streaming load/unload, LOD bands, frustum culling, origin shift
+  VoxelViewLayer                — streaming load/unload, LOD bands, frustum culling, origin shift
   VoxelCollision                — StaticBody3D + ConcavePolygonShape3D per chunk
   VoxelParticleView             — point cloud → GPUParticles3D
   VoxelDestructible             — destruction, collapse, falling debris (edited via VoxelEditKernel)
@@ -47,9 +81,12 @@ Optional capability components (plain child nodes of VoxelRenderer):
 
 **Layer rules (one-way dependency, arrows point down only):**
 
-1. **`VoxelRenderer` doesn't know about cameras, LOD, streaming, destruction or particles.**
-   It only knows "data → geometry → draw units". Everything viewpoint-related lives in the
-   optional components, which read the renderer's public surface and subscribe to its signals.
+1. **`VoxelRenderer` owns drawing, not viewpoint policy.** It keeps exactly two things it
+   cannot avoid: `current_camera()` (used to drop a stale async result whose chunk has since
+   moved out of range) and the `view_distance` / `unload_distance` / `lod_count` knobs, which
+   the view layer reads back. Everything else — streaming, LOD banding, frustum culling,
+   origin shift, destruction, particles — lives in `Runtime/` components that read the
+   renderer's public surface and subscribe to its signals.
 2. **The simplest path must really be the simplest.** With `DrawMode.STATIC` and no components
    attached, no LOD/streaming code runs in the frame loop at all.
 3. **Two draw modes are a deliberate tradeoff, not an optimisation switch:**
@@ -62,7 +99,8 @@ Optional capability components (plain child nodes of VoxelRenderer):
    Use `STATIC` for static props / buildings / display models, `DYNAMIC` for anything you
    destroy or edit per-voxel (a destruction system **must** use `DYNAMIC`).
    Measured parity with imported ArrayMesh in `STATIC` mode, plus the reasoning, are in
-   `docs/渲染性能对比_QVX_vs_ArrayMesh.md`.
+   `docs/渲染性能对比_QVX_vs_ArrayMesh.md`. What was changed in the 2026-11 refactor (layer
+split, what got deleted and why, verification numbers): `docs/重构实施记录_2026-11-25.md`.
 
 **Storage and generation are two parallel parts**: `stream` stores (disk or memory), the
 `node` describes what to generate (a bounded `QVoxelModel` whose modifier chain the eval
@@ -163,8 +201,6 @@ Related properties are **hidden in the Inspector automatically** when they have 
 | Property | Effective when | Hidden when |
 |---|---|---|
 | `view_distance` / `unload_distance` / `lod_count` | visibility_mode ≠ FULL | visibility_mode = FULL |
-| `_stream_load_per_frame` / `_stream_unload_per_frame` | visibility_mode = STREAMING | otherwise |
-| `_lod_build_per_frame` / `_lod_preload_blocks` | lod_count > 1 | lod_count = 1 |
 | `_collision_rebuild_per_frame` / `collision_rebuild_budget_ms` | generate_collision = true | generate_collision = false |
 | `group_shift` | draw_mode = DYNAMIC | draw_mode = STATIC |
 | `max_debris_per_hit` / `debris_*` | spawn_debris_on_damage = true | spawn_debris_on_damage = false |
@@ -207,8 +243,9 @@ Related properties are **hidden in the Inspector automatically** when they have 
 
 ### Streaming demo
 
-`res://demo/streaming_demo.tscn` — **key 0** switches between disk-file stream and procedural infinite world.
-Controls: WASD move, Q/E up/down, Space fast, 1 streaming on/off, 2 frustum culling on/off.
+`res://demo/test_world_demo.tscn` — **key 1** cycles `FULL` / `FRUSTUM` / `STREAMING` on a large building
+block world; **key 2** cycles `group_shift`, **key 5** orbits the camera for an automatic FPS sweep.
+Controls: WASD move, Q/E up/down, Space fast, left click destroys a sphere, Space casts a destruction ray.
 
 ## Voxel particles (low-level interface)
 
@@ -235,12 +272,12 @@ It shows **two ways to customise**: tweak a uniform (float), or replace the whol
 | `VoxelShape` | `CUBE` / `SPHERE` | draw each particle as a cube or a sphere; switching **does not** rebuild the particle node, it only swaps the draw-pass meshes |
 
 The sphere geometry is generated by the plugin too (`SphereMesh`, three tiers of 6/10/18 rings via
-`particle_sphere_subdivisions`), with `particle_sphere_scale` as the radius relative to the voxel edge.
-It targets the same look as the mesh path's `mesh/shape = sphere` — the mesh path bakes it at import time,
+`sphere_subdivisions`), with `sphere_scale` as the radius relative to the voxel edge — the same two
+properties the mesh path uses, so both paths reach the same look; the mesh path bakes it at import time,
 the particle path swaps the draw mesh at runtime.
 
-The `particle_mode` bool remains as a **compatibility alias** (reads and writes stay in sync with
-`display_mode`); new code should use the enum.
+These two enums are the only switches: the early boolean/method aliases (`particle_mode`,
+`particle_shape`, `show_as_particles()`) are gone — one meaning, one entry point.
 
 ### Where the data comes from: `QVoxelSource.build_particle_points()`
 

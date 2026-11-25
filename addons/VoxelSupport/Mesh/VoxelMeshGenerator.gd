@@ -578,15 +578,38 @@ func wait_finished(gen_uv2: bool, uv2_texel_size: float) -> ArrayMesh:
 func _append_native_surfaces() -> void:
 	if _native_arrays.is_empty():
 		return
+	append_arrays_to_mesh(mesh, _native_arrays, materials)
+	_native_arrays = {}
+
+
+## 几何数组字典 → ArrayMesh 的 surface（0=实体、1=透明），按需绑定材质。
+## 返回**是否加过 surface**（false = 两个桶都空，调用方据此决定返回 null / 隐藏节点）。
+##
+## 【为什么这段必须是全仓唯一实现】"两桶 arrays → add_surface_from_arrays → 绑材质"曾在
+## 四处各写一份（本函数 / VoxelMesher.to_mesh / VoxelChunkGenerator._merge_meshes /
+## QVoxelMeshExport.build_mesh）。真正的风险不是行数，而是**语义漂移**：空桶要不要跳过、
+## 材质绑到"桶序号"还是"实际 surface 序号"、空几何返回 null 还是空 mesh —— 任一处写歪
+## 都只是"某个桶没材质"或"少画一层"，**不报错**，只能靠眼睛看出来。
+## 【为什么真值留在 Mesh/ 层】这里会被 Runtime/VoxelMesher / Mesh/VoxelChunkGenerator 调用。
+## 反过来让基础层（导入器）依赖 Runtime/VoxelMesher 会形成反向依赖 ——
+## "只导入静态网格"的游戏就得拖着整个运行时数据层（同 VoxelWorldUtil 的 OriginMode 注释）。
+static func append_arrays_to_mesh(mesh: ArrayMesh, arrays: Dictionary, materials: Array = []) -> bool:
+	if mesh == null or arrays.is_empty():
+		return false
+	var any := false
 	for i in 2:
 		var prefix := "solid" if i == 0 else "trans"
-		var arrays := _surface_arrays(_native_arrays, prefix)
-		if arrays.is_empty():
+		# 空桶必须跳过：add_surface_from_arrays 拿到空索引会报 ERR_INVALID_DATA
+		var sa := _surface_arrays(arrays, prefix)
+		if sa.is_empty():
 			continue
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-		# 空桶已跳过，材质须绑定到实际 surface 序号
-		mesh.surface_set_material(mesh.get_surface_count() - 1, materials[i])
-	_native_arrays = {}
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sa)
+		# 材质绑到**实际** surface 序号（空桶跳过会让序号与桶错位）；
+		# 材质数组可能短于 2，也可能某项为 null（无材质通道）—— 都直接跳过。
+		if i < materials.size() and materials[i] != null:
+			mesh.surface_set_material(mesh.get_surface_count() - 1, materials[i])
+		any = true
+	return any
 
 
 ## 从原生 arrays 中提取单个桶(实体/透明)的 surface 数组，无三角形时返回空数组

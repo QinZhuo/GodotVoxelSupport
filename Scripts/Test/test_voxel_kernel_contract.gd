@@ -35,17 +35,16 @@ const KERNEL_PUBLIC_API: Array[String] = [
 	"mark_dirty", "force_update", "regenerate_materials",
 	"set_voxel", "remove_voxel", "get_voxel",
 	# F. 粒子渲染（机制，不含效果）
-	"show_as_particles", "rebuild_particles", "particle_voxel_size",
-	# G. 视点层接管（VoxelPagedLayer 装配用）
-	#   【为什么它也进内核契约】接管点是 renderer 上的一个可空引用 + 一个判据，
-	#   装配方必须能读/写这两样；组件侧依然只读本类公开面，反向调用面**没有扩大**
-	#   —— 仍然是"renderer 问可见性 / 转发调度"两件事（见 VoxelRenderer.paged_layer 注释）。
-	"uses_paged_layer",
+	"rebuild_particles", "particle_voxel_size",
+	# G. 视点层装配
+	#   【为什么 var 不进契约】`view_layer` 是普通属性：get_script_method_list() 里它的
+	#   读写器是 `@view_layer` 前缀（已被过滤），故不在此表。装配面（`view_layer` 可空引用
+	#   + `VoxelViewLayer.attach`）由 test_voxel_view_layer.gd 覆盖，本表只钉方法名。
 ]
 
 
 func test_kernel_public_api_matches_contract() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Dynamic/VoxelRenderer.gd")
+	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelRenderer.gd")
 	assert_true(script != null, "内核脚本应能加载")
 	var actual: Array[String] = []
 	for m in script.get_script_method_list():
@@ -118,7 +117,7 @@ const EDIT_KERNEL_PUBLIC_API: Array[String] = [
 
 ## 编辑内核的"无节点"性质：不是 Node、不实现任何帧回调、公开面固定。
 func test_edit_kernel_is_headless_node_free() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Dynamic/VoxelEditKernel.gd")
+	var script: Script = load("res://addons/VoxelSupport/Data/VoxelEditKernel.gd")
 	assert_true(script != null, "编辑内核脚本应能加载")
 	var probe = script.new()
 	# ① 不是 Node：一旦是 Node 就意味着它能被挂进场景树、被引擎每帧驱动
@@ -315,6 +314,8 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"apply_block_table",
 	# 粒子点导出（派生查询：可随时重算、不落盘，故归【公开】）
 	"build_particle_points", "build_particle_textures",
+	# 破坏组件用的批量材质读取（不让内核外组件碰内部缓冲字典）
+	"collect_materials_at",
 ]
 
 
@@ -330,7 +331,7 @@ const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	"apply_ready_results", "is_chunk_pending", "get_unready_chunk_keys",
 	# 只读快照
 	"begin_readonly_snapshot", "end_readonly_snapshot",
-	# 粗层快照的公开面（供 VoxelPagedLayer 的 LOD 调度：主线程造快照 → 交 worker 只读）
+	# 粗层快照的公开面（供 VoxelViewLayer 的 LOD 调度：主线程造快照 → 交 worker 只读）
 	"read_lod_block_data_snapshot", "read_lod_block_chunk_snapshot",
 	"can_mesh_lod_block_standalone",
 	# 粗层 LOD
@@ -358,7 +359,7 @@ const VOXEL_DATA_INTERNAL_PROTOCOLS: Array[String] = [
 
 
 func test_data_layer_api_tiers_match_contract() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Dynamic/QVoxelSource.gd")
+	var script: Script = load("res://addons/VoxelSupport/Data/QVoxelSource.gd")
 	assert_true(script != null, "数据层脚本应能加载")
 	var actual: Array[String] = []
 	for m in script.get_script_method_list():
@@ -385,7 +386,7 @@ func test_data_layer_api_tiers_match_contract() -> void:
 
 
 func test_data_internal_protocols_are_underscored() -> void:
-	var script: Script = load("res://addons/VoxelSupport/Dynamic/QVoxelSource.gd")
+	var script: Script = load("res://addons/VoxelSupport/Data/QVoxelSource.gd")
 	var names: Array[String] = []
 	for m in script.get_script_method_list():
 		names.append(m["name"])
@@ -394,7 +395,7 @@ func test_data_internal_protocols_are_underscored() -> void:
 		assert_true(names.has(n), "内部协议 %s 应存在" % n)
 		assert_true(n.begins_with("_"), "内部协议必须以 `_` 前缀（内核外不可见）: %s" % n)
 	# ② 它们绝不能再以"公开"旧名出现（P4-4 前的名字）
-	# 【例外：三个粗层快照方法】`VoxelPagedLayer` 是内核外的独立组件，它要在主线程造粗层
+	# 【例外：三个粗层快照方法】`VoxelViewLayer` 是内核外的独立组件，它要在主线程造粗层
 	# 快照再交 worker 只读 —— 这件事只能由数据层内部做（要摸 `_chunk_buffers`/`_coarse_buffers`）。
 	# 为了不逼组件去读私有成员，数据层开了**同义公开薄壳**（`read_lod_block_*_snapshot` /
 	# `can_mesh_lod_block_standalone`），原 `_` 版本保留给内部与测试 oracle。

@@ -133,7 +133,7 @@ static func _placements_from_scene(doc: QVoxelFile.QVoxelDocument, model_ids: Ar
 		known[mid] = true
 		pending[mid] = true
 	var out: Array = []
-	var scene: QVoxelFile.QVoxelSceneGraph = doc.scene
+	var scene := QVoxelFile.scene_of(doc)
 	if scene != null:
 		_walk_nodes(scene.nodes, Transform3D.IDENTITY, known, pending, out)
 	for mid in pending:
@@ -155,7 +155,7 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
 			continue
 		var node: Dictionary = item
 		var world := parent_xf * _node_transform(node)
-		if String(node.get("kind", "")) == "model":
+		if String(node.get("kind", "")) == QVoxelSpec.NODE_KIND_MODEL:
 			var mid := int(node.get("model_id", -1))
 			if known.has(mid):
 				out.append({
@@ -396,6 +396,3 @@ static func bounds_for_blocks(blocks: Dictionary) -> Dictionary:
 					hi = Vector3i(maxi(hi.x, p.x), maxi(hi.y, p.y), maxi(hi.z, p.z))
 					found = true
 	return {"min": lo, "max": hi} if found else {}
-
-
-

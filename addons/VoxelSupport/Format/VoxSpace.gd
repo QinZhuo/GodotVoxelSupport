@@ -28,13 +28,18 @@ static func to_vox_pos(v: Vector3i) -> Vector3i:
 	return Vector3i(v.x, -v.z, v.y)
 
 
-## 尺寸的轴交换是**对合**（交换 y/z），正逆同式。
+# 尺寸的两向换算
+
+## 尺寸的轴交换是**对合**（交换 y/z）：正逆同式，因此两个方向**共用这一份实现**，
+## `to_vox_size` 只是转发。曾各写一遍字面量 —— 两处等价但没人保证它们一直等价，
+## 某一向被打错时症状是"模型在一个轴上被压扁"，且读写各自看起来都正常。
 static func to_godot_size(v: Vector3i) -> Vector3i:
 	return Vector3i(v.x, v.z, v.y)
 
 
+## 见 `to_godot_size`：对合，故就是它。
 static func to_vox_size(v: Vector3i) -> Vector3i:
-	return Vector3i(v.x, v.z, v.y)
+	return to_godot_size(v)
 
 
 ## nTRN 的 `_t` 用同一套轴换算，但它是浮点三元组。
@@ -48,10 +53,14 @@ static func to_vox_vec3(v: Vector3) -> Vector3:
 
 ## 模型居中偏移：MagicaVoxel 的模型以**自己的中心**为原点，读取端据此把体素搬到世界。
 ## 写端必须把同一个偏移从 nTRN 的 `_t` 里补偿掉，否则所有模型会整体偏半个尺寸。
-## 公式与 `VoxAsset.VoxelModel.offset` 逐字一致（那个 setter 是唯一真值来源）。
+## 【"居中"的算术只有一份】委托给基础层的 `VoxelWorldUtil.origin_offset`（CONTENT_CENTER 口径），
+## 本函数只负责 `.vox` 特有的那一步：源格式 Z-up → Godot Y-up 使 **Z 的符号要翻**
+## （与 `to_godot_pos` 的 y/z 换轴同源）。两处各写一遍居中公式时，改一处忘另一处
+## 会让 `.vox` 与 `.qvx` 两条路径的模型错开半个尺寸 —— 静默的。
 static func origin_offset(size_godot: Vector3i) -> Vector3i:
-	var half := (Vector3(size_godot) / 2.0).floor()
-	return Vector3i(-half.x, -half.y, half.z)
+	var bounds := {"min": Vector3i.ZERO, "max": size_godot - Vector3i.ONE}
+	var o := VoxelWorldUtil.origin_offset(bounds, VoxelWorldUtil.OriginMode.CONTENT_CENTER)
+	return Vector3i(roundi(o.x), roundi(o.y), -roundi(o.z))
 
 
 # 调色板

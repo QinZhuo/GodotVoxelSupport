@@ -2,12 +2,12 @@
 
 [ext_resource type="Script" uid="uid://phvitanh8c4v" path="res://QVoxelier/View/QVoxelierApp.gd" id="1_app"]
 [ext_resource type="Script" uid="uid://b16tme2krsekj" path="res://addons/VoxelSupport/Runtime/VoxelRenderer.gd" id="2_renderer"]
-[ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Runtime/VoxelMaterial.gd" id="3_dgjb5"]
+[ext_resource type="Script" uid="uid://rljv8oe33f2a" path="res://addons/VoxelSupport/Core/VoxelMaterial.gd" id="3_dgjb5"]
 [ext_resource type="Script" uid="uid://cno2veyfhcs7q" path="res://QVoxelier/View/QVoxelGridFloor.gd" id="3_floor"]
 [ext_resource type="Script" uid="uid://burtnbyvql7d5" path="res://QVoxelier/View/QVoxelViewCamera.gd" id="4_camera"]
 [ext_resource type="Script" uid="uid://elaahhighr38" path="res://QVoxelier/View/QVoxelierHud.gd" id="5_hud"]
-[ext_resource type="Script" uid="uid://dku3ijpa354n" path="res://addons/VoxelSupport/Modifier/QVoxelModel.gd" id="5_vhrsv"]
-[ext_resource type="Script" uid="uid://clnfkmvkg10qe" path="res://addons/VoxelSupport/Runtime/QVoxelSource.gd" id="6_nsjr8"]
+[ext_resource type="Script" uid="uid://dku3ijpa354n" path="res://addons/VoxelSupport/Model/QVoxelModel.gd" id="5_vhrsv"]
+[ext_resource type="Script" uid="uid://clnfkmvkg10qe" path="res://addons/VoxelSupport/Data/QVoxelSource.gd" id="6_nsjr8"]
 [ext_resource type="Shader" uid="uid://sq7pmbx6p2p6" path="res://QVoxelier/View/QVoxelGridFloor.gdshader" id="7_hm71k"]
 
 [sub_resource type="Resource" id="Resource_b4klp"]

@@ -1,4 +1,4 @@
-extends "res://addons/VoxelSupport/Dynamic/ProceduralVoxelSource.gd"
+extends "res://addons/VoxelSupport/Data/ProceduralVoxelSource.gd"
 
 ## 测试夹具：只实现 generate，验证 ProceduralVoxelSource 已经替它补齐其余三个判定。
 

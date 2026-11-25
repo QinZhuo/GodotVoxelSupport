@@ -1,6 +1,9 @@
 #include "voxel_native.h"
 
-#include <godot_cpp/variant/utility_functions.hpp>
+// 注意：这里**不包含** <godot_cpp/variant/utility_functions.hpp>，也不需要任何 Godot 侧
+// 有副作用的 API（print / 日志 / 引擎单例）。本文件全体函数都由 worker 线程直接调用，
+// 一旦引入这类调用就等于在非主线程碰 Godot 状态。此前为了 generate_spheres_native 里
+// 一句调试 print 而引入过该头，已随那句 print 一起删除。
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <algorithm>
 #include <array>
@@ -14,68 +17,18 @@
 using namespace godot;
 
 // ----------------------------------------------------------------------------
-// 贪婪网格合并
+// 公开 API 版本握手
 // ----------------------------------------------------------------------------
+// 实现见 voxel_native.h 顶部 VOXEL_NATIVE_API_VERSION 的注释：这两行把"源码指纹"暴露给
+// GDScript，让 NativeLoader 能识别"改了 C++ 却没重新构建"这种没有任何其他线索的故障。
+// 返回 int 而非 String 做比对（String 要跨语言构造，且比对只看数值更不容易写错）。
 
-Dictionary VoxelSupportNative::greedy_merge_dense(PackedInt32Array p_grid, int width, int height) {
-	PackedInt32Array pos_arr;
-	PackedInt32Array size_arr;
-	PackedInt32Array val_arr;
+int VoxelSupportNative::api_version() {
+	return VOXEL_NATIVE_API_VERSION;
+}
 
-	if (p_grid.size() < width * height) {
-		Dictionary result;
-		result["pos"] = pos_arr;
-		result["size"] = size_arr;
-		result["val"] = val_arr;
-		return result;
-	}
-	int32_t *grid = p_grid.ptrw();
-
-	for (int v = 0; v < height; ++v) {
-		int u = 0;
-		while (u < width) {
-			int c = grid[u + v * width];
-			if (c <= 0) {
-				u += 1;
-				continue;
-			}
-			int w = 1;
-			while (u + w < width && grid[u + w + v * width] == c) {
-				w += 1;
-			}
-			int h = 1;
-			bool extend = true;
-			while (extend && v + h < height) {
-				for (int k = 0; k < w; ++k) {
-					if (grid[(u + k) + (v + h) * width] != c) {
-						extend = false;
-						break;
-					}
-				}
-				if (extend) {
-					h += 1;
-				}
-			}
-			pos_arr.append(u);
-			pos_arr.append(v);
-			size_arr.append(w);
-			size_arr.append(h);
-			val_arr.append(c);
-			for (int y = 0; y < h; ++y) {
-				int base = u + (v + y) * width;
-				for (int x = 0; x < w; ++x) {
-					grid[base + x] = 0;
-				}
-			}
-			u += w;
-		}
-	}
-
-	Dictionary result;
-	result["pos"] = pos_arr;
-	result["size"] = size_arr;
-	result["val"] = val_arr;
-	return result;
+String VoxelSupportNative::build_id() {
+	return String(VOXEL_NATIVE_BUILD_ID);
 }
 
 // ----------------------------------------------------------------------------
@@ -186,7 +139,9 @@ inline void set_axis(int &x, int &y, int &z, int axis, int val) {
 	else z = val;
 }
 
-// 单 slice 贪婪合并：输出矩形列表（复用 greedy_merge_dense 逻辑）
+// 单 slice 贪婪合并：在 2D 切片上把同材质格并成矩形，输出矩形列表
+// （pos/size/val 三个扁平数组，pos[i*2]=u、pos[i*2+1]=v 等）。这是 3D dense 生成
+// 的内部步骤，只在本文件内使用；对外不再单独暴露 2D 合并接口。
 void merge_slice(PackedInt32Array &grid, int width, int height,
 		std::vector<int> &out_pos, std::vector<int> &out_size, std::vector<int> &out_val) {
 	int32_t *g = grid.ptrw();
@@ -220,7 +175,9 @@ void merge_slice(PackedInt32Array &grid, int width, int height,
 }
 
 // Generic dense volume mesh generation: size = edge length (grid units),
-// halo = (size+2)^3 (center + 1 shell). LOD0 (16) and LOD1 big-block (32) share this core.
+// halo = (size+2)^3 (center + 1 shell). LOD0 chunk (CHUNK_SIZE=32, halo 34) and LOD1
+// big-block (32, halo 34) currently share this core with the same size —— 参数化保留是
+// 因为这层只是"边长无关"的生成器，历史注释误写成 LOD0 (16)，与真实 HALO_SIZE=34 不符。
 Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 		float scale, const Vector3i &chunk_origin, bool use_local_space, const Vector3 &offset, int size) {
 	PackedVector3Array solid_verts, solid_normals, trans_verts, trans_normals;
@@ -371,7 +328,8 @@ Dictionary generate_dense_impl(const PackedInt32Array &halo, const PackedByteArr
 
 Dictionary VoxelSupportNative::generate_chunk_dense(const PackedInt32Array &halo, const PackedByteArray &trans_flags,
 		float scale, const Vector3i &chunk, bool use_local_space, const Vector3 &offset) {
-	// LOD0: 16x16x16, reuse generic dense generator
+	// LOD0：每 chunk 是 32³ 体素（CHUNK_SIZE=32），halo 是 34³（中心 32³ + 1 格外缘，
+	// 见 HALO_SIZE）。与 generate_lod1_block_dense 共用同一个 dense 生成器，只差尺寸与坐标系。
 	return generate_dense_impl(halo, trans_flags, scale, chunk * CHUNK_SIZE, use_local_space, offset, CHUNK_SIZE);
 }
 
@@ -589,8 +547,9 @@ inline int grid_floor_div(int v, int d) {
 // generate_chunk_dense / 逐元素索引偏移），QVX 大资产（整资产或 MeshLibrary 分项）导入时是主要
 // 等待时间。此处循环与拼接全在 C++，索引偏移复用 append_arrays_native，不再产生中间数组。
 //
-// 【与 GDScript 版的关系】VoxelMeshGenerator.generate_arrays_from_chunks 保留为**测试 oracle**
-// （test_voxel_snapshot_baseline 用它对照本函数产物逐位一致），故**两处必须同步修改**。
+// 【与 GDScript 版的关系】本函数是该路径的**唯一实现**：GDScript 侧的对应函数已随原生化
+// 删除，仓库内没有第二份同语义实现，也就不存在"两份实现必须同步修改"的约束。行为契约
+// 由本注释 + voxel_native.h 的声明描述，读方以此为准。
 // 结构上与 generate_arrays_native 同构（同一个 append_arrays_native 拼接器）。
 //
 // 坐标约定：use_local_space=false → 顶点 = (体素坐标 + offset) × scale，即**绝对世界坐标**，
@@ -618,8 +577,9 @@ Dictionary VoxelSupportNative::generate_arrays_from_chunks_native(const Dictiona
 		solid_base = sv.size();
 		trans_base = tv.size();
 	}
-	// 总是返回 8 个键（与 GDScript oracle 逐位一致，即使全空）——不学 generate_arrays_native 的
-	// "全空则返回空字典"，因为那条约定属于 .vox 路径，会让 oracle 比较出现键集差异。
+	// 总是返回 8 个键（即使全空）——不学 generate_arrays_native 的"全空则返回空字典"，
+	// 因为那条约定属于 .vox 路径。调用方（VoxelMeshGenerator）按定长键集读，键缺失会让
+	// 它拿到 Variant 的 nil 而不是空数组，进而把"空网格"和"没生成"混为一谈。
 	Dictionary result;
 	result["solid_verts"] = sv;
 	result["solid_normals"] = sn;
@@ -738,10 +698,11 @@ Dictionary VoxelSupportNative::generate_spheres_native(const Dictionary &voxels,
 		step *= 2;
 		picked = select_cells(step);
 	}
-	if (step > 1) {
-		UtilityFunctions::print("voxel sphere: auto step ", step, " (spheres=", (int)picked.size(),
-				", budget=", vertex_budget, " verts)");
-	}
+	// 【不要再在这里 print】本函数由导入 worker 线程直接调用（见 generate_arrays_from_chunks_native
+	// 的注释：全流程在 C++ 内完成以避免跨语言往返）。此前这里有一句 UtilityFunctions::print
+	// 汇报自动降采样的 step，它是整个文件里**唯一**的 Godot 侧副作用，打破了"worker 线程可安全
+	// 调用"这一性质（print 会碰引擎的日志状态）。降采样幅度已经通过返回值 step 交给调用方，
+	// 需要日志就在主线程侧打印。
 
 	// 4. 展开球体：每格子一颗小球，按 实体/透明 分桶
 	const float step_f = float(step);
@@ -1901,7 +1862,7 @@ Dictionary VoxelSupportNative::flood_fill_positions(const Array &seeds, const Di
 //   它会经 stream 访问**仅存在于磁盘、尚未载入内存**的 chunk。若这里只看传入的 buffers，
 //   那些块会被当成空气 → 其体素全被误判悬空 → 整个世界崩塌（数据级事故）。
 //   故只收**已枚举好的位置集合**：调用方用 get_positions()，它已把"内存 + 仅磁盘"统一枚举。
-// 返回未与地面连通的体素位置（与 GDScript 版同语义）。
+// 返回未与地面连通的体素位置：判据是"6 方向连通到 y==0"的体素为稳定，其余即悬空。
 Array VoxelSupportNative::find_unsupported_positions(const Array &positions) {
 	Array result;
 	if (positions.is_empty()) {
@@ -1976,22 +1937,30 @@ Dictionary VoxelSupportNative::snapshot_chunks_halo(const Dictionary &buffers, c
 // 与 zlib 口径一致：初值 0xFFFFFFFF，终值异或 0xFFFFFFFF。
 // GDScript 逐字节查表算 1.4MB 要 ~84ms；同一算法在 C++ 下 ~0.5ms（约 170x），
 // 故 GDScript 侧不再保留兜底实现，QVX 读写校验与子块索引统一调这里。
-// 表用函数内 static const 惰性构造一次，线程安全（C++11 magic static）。
+// 查表用函数内 static const 数组（C++11 magic static）惰性构造一次，多 worker 并发安全；
+// 详见下方 qvox_crc32_table() 里的实现说明。
 
 static const uint32_t *qvox_crc32_table() {
-	static uint32_t table[256];
-	static bool built = false;
-	if (!built) {
+	// 函数内 static **const** 数组的初始化是 C++11 的 magic static：编译器保证
+	// "恰好初始化一次 + 初始化完成前其他线程阻塞"，天然线程安全。
+	// 此前写成 static 数组 + 手写 static bool built 判断，注释却声称线程安全：
+	// bool 没有任何同步，两个 worker 可能同时进入循环，一个线程可能读到"built 已置位但表
+	// 还没写完"的中间态，算出错误的 CRC32（进而写出校验和对不上的 QVX 文件）。
+	// 现在把初始化搬进 static const 的初始化表达式里，判断与写入被同一把语言级锁覆盖。
+	// 注意：lambda 立即调用是必需的——数组元素值在编译期算不了（0xEDB88320 的迭代不是
+	// constexpr 友好的递归），但初始化表达式仍是"一次性的"，线程安全保证不变。
+	static const std::array<uint32_t, 256> table = [] {
+		std::array<uint32_t, 256> t{};
 		for (uint32_t i = 0; i < 256; ++i) {
 			uint32_t c = i;
 			for (int j = 0; j < 8; ++j) {
 				c = (c & 1u) ? ((c >> 1) ^ 0xEDB88320u) : (c >> 1);
 			}
-			table[i] = c;
+			t[i] = c;
 		}
-		built = true;
-	}
-	return table;
+		return t;
+	}();
+	return table.data();
 }
 
 // 对一段连续字节算 CRC32；start/length 可传 -1（start<0 → 0；length<0 → 到末尾）
@@ -2166,7 +2135,7 @@ PackedByteArray qvox_pack_dense(const int32_t *p, int n) {
 }
 
 PackedByteArray qvox_pack_indexed(const int32_t *p, int n) {
-	// 值表按"首次出现顺序"（与 GDScript 版一致，保证常见块逐字节相同）
+	// 值表按"首次出现顺序"（保证同一块每次打包逐字节相同，且常见块前缀稳定）
 	std::vector<int32_t> table;
 	std::unordered_map<int32_t, int> index_of;
 	table.reserve(256);
@@ -2177,6 +2146,15 @@ PackedByteArray qvox_pack_indexed(const int32_t *p, int n) {
 			index_of.emplace(v, (int)table.size());
 			table.push_back(v);
 		}
+	}
+	// 【为什么是 255 而不是 256】INDEXED 负载第 0 字节是调色板长度，按 u8 存储；
+	// 256 个不同值需要写 256，而 u8 只能表示 0..255 —— 256 会被截断成 0，解包侧把
+	// count==0 解释成"整块全空"，于是整块数据静默消失（既没报错也没长度异常）。
+	// 所以本格式的硬上限是 **255 个不同值**，不是 256。这里做防御性返回：正常路径由
+	// choose_and_pack / pack_with_codec 保证不会走到这里，但 qvox_pack_indexed 是
+	// 内部直接可调的，必须自己也不产出"能写不能读"的负载。
+	if ((int)table.size() > QVOX_U8_MAX) {
+		return PackedByteArray();
 	}
 	const int bits = qvox_bits_for((int)table.size());
 	const int64_t table_bytes = 1 + (int64_t)table.size() * QVOX_CHANNEL_BYTES;
@@ -2250,6 +2228,24 @@ PackedByteArray VoxelSupportNative::pack_with_codec(int codec, const PackedInt32
 	}
 	if (n <= 0 || codec == QVOX_CODEC_EMPTY) {
 		return PackedByteArray();
+	}
+	// 【INDEXED 的不同值个数上限是 255，不是 256】负载第 0 字节是调色板长度，按 u8 存：
+	// 写 256 会被截断成 0，解包侧把 count==0 当"全空块"，整块数据静默归零。
+	// choose_and_pack 早就有等价的双重守卫（vmax-vmin<=255 且 distinct<=255），但它选中
+	// INDEXED 后直接调 qvox_pack_any，绕过了这里；而 pack_with_codec 是**公开方法**
+	// （bind 给 GDScript，NativeLoader.pack_with_codec / QVoxelBlockCodec.pack 都能直接调），
+	// 之前完全没有守卫 —— 传一个 256 种材质的块进来就能产出写进去读不回来的文件。
+	// 这里与 choose_and_pack 保持同口径：超限返回空（调用方应退回 DENSE 或报错）。
+	if (codec == QVOX_CODEC_INDEXED) {
+		const int32_t *p = buf.ptr();
+		std::unordered_set<int32_t> distinct;
+		distinct.reserve(1024);
+		for (int i = 0; i < n; ++i) {
+			distinct.insert(p[i]);
+			if ((int)distinct.size() > QVOX_U8_MAX) {
+				return PackedByteArray();
+			}
+		}
 	}
 	return qvox_pack_any(codec, buf.ptr(), n);
 }
@@ -2545,8 +2541,9 @@ Array VoxelSupportNative::collect_sphere_positions(const Dictionary &buffers, co
 	if (radius < 0.0f) {
 		return out;
 	}
-	// 与 GDScript 版同口径：cxi = floori(center.x)，r_i = ceili(radius)，
-	// 判定 float(dx²+dy²+dz²) <= radius²（用未取整的 radius²，保证边界一致）。
+	// 口径（本函数是该路径的唯一实现，规则由这里定义）：cxi = floor(center.x)，
+	// r_i = ceil(radius)，判定 float(dx²+dy²+dz²) <= radius²（用未取整的 radius²）。
+	// 边界语义一旦改动，破坏半径会随之漂移，勿随手调整取整方向。
 	const int cxi = (int)std::floor((double)center.x);
 	const int cyi = (int)std::floor((double)center.y);
 	const int czi = (int)std::floor((double)center.z);
@@ -2923,6 +2920,12 @@ Dictionary VoxelSupportNative::voxelize_mesh(const PackedVector3Array &verts, co
 	const float alpha_cutoff = opts.get("alpha_cutoff", 0.1f);
 	const int palette_max = std::max(1, (int)opts.get("palette_max", 255));
 
+	// slots 可能为空（调用方只给 tri_slots / 都不给 = 无材质信息）。此时下面按 slot 索引
+	// tex 会越界，故预置一个默认槽并把"有效槽数"单独拿出来做钳制，绝不再用
+	// tex.size()-1 这种写法（空 vector 减 1 得到 -1，紧接着 max(0,...) 又把它变回 0，
+	// 于是恰好去索引一个不存在的元素 —— 之前就是这样踩到 UB 的）。
+	VoxSlot default_slot;
+	default_slot.base = Color(1, 1, 1, 1);
 	std::vector<VoxSlot> tex(slots.size());
 	for (int i = 0; i < slots.size(); ++i) {
 		const Dictionary d = slots[i];
@@ -2970,8 +2973,12 @@ Dictionary VoxelSupportNative::voxelize_mesh(const PackedVector3Array &verts, co
 		if ((b - a).cross(c - a).length_squared() < 1e-20f) {
 			continue;
 		}
+		// tri_slots 缺省 / 越界 → 落到槽 0；但 slots 为空时**没有槽 0**，
+		// 必须退回默认白槽，否则 tex[0] 是空 vector 的越界读（UB，实测会读到垃圾基色）。
 		const int slot = t < tri_slots.size() ? tri_slots[t] : 0;
-		const VoxSlot &s = tex[(size_t)std::max(0, std::min(slot, (int)tex.size() - 1))];
+		const VoxSlot &s = tex.empty()
+				? default_slot
+				: tex[(size_t)std::clamp(slot, 0, (int)tex.size() - 1)];
 
 		const float mnx = std::min(a.x, std::min(b.x, c.x));
 		const float mxx = std::max(a.x, std::max(b.x, c.x));
@@ -3171,6 +3178,10 @@ Dictionary VoxelSupportNative::voxelize_mesh(const PackedVector3Array &verts, co
 }
 
 void VoxelSupportNative::_bind_methods() {
+	// 版本握手：NativeLoader 启动时先调 api_version() 与自己的 EXPECTED_API_VERSION 比对，
+	// 不一致就报"原生库与 GDScript 版本不匹配，请重新构建"（见 voxel_native.h 顶部宏说明）。
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("api_version"), &VoxelSupportNative::api_version);
+	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("build_id"), &VoxelSupportNative::build_id);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("choose_and_pack", "buf", "n"), &VoxelSupportNative::choose_and_pack);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("pack_with_codec", "codec", "buf", "n"), &VoxelSupportNative::pack_with_codec);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("unpack_block", "codec", "payload", "n"), &VoxelSupportNative::unpack_block);
@@ -3180,7 +3191,6 @@ void VoxelSupportNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_bounds", "buffers"), &VoxelSupportNative::collect_bounds);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_sphere_positions", "buffers", "center", "radius"), &VoxelSupportNative::collect_sphere_positions);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_box_positions", "buffers", "min_p", "max_p"), &VoxelSupportNative::collect_box_positions);
-	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("greedy_merge_dense", "grid", "width", "height"), &VoxelSupportNative::greedy_merge_dense);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelSupportNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelSupportNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelSupportNative::build_halo_from_buffers);

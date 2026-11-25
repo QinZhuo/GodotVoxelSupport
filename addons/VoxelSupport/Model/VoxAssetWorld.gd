@@ -326,12 +326,8 @@ static func _world_materials(vox: VoxAsset) -> Array:
 	return out
 
 
-## VoxelMaterial → MATE 条目（含 QVoxelWorld._color_of 需要的 r/g/b/a 视图）。
+## VoxelMaterial → MATE 条目（12 键：rgba 权威值 + r/g/b/a 展开视图，全仓统一形状）。
+## 【为什么走 QVoxelMate.with_color】位域展开只该有一份实现；就地手抄通道会与格式层漂移。
 static func _mate_entry(mat: VoxelMaterial) -> Dictionary:
 	var e := VoxelMaterial.to_mate(mat)
-	var rgba := int(e.get("rgba", 0))
-	e["r"] = (rgba >> 24) & 0xFF
-	e["g"] = (rgba >> 16) & 0xFF
-	e["b"] = (rgba >> 8) & 0xFF
-	e["a"] = rgba & 0xFF
-	return e
+	return QVoxelMate.with_color(e, QVoxelMate.color(e))

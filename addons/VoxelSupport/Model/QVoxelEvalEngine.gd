@@ -7,37 +7,44 @@ extends RefCounted
 ##   QVoxelGroup: 把可见子节点按各自 origin（= 子节点 offset）并成**紧致盒**，再整体偏移本组 offset。
 ## 程序化生成不再是一条随时生效的修改器链，而是"生成工具"一次性烘焙进 blocks（见 QVoxelGenerate）。
 ## 于是求值不再有域降级 / 检查点 / 增量复用 —— 那些复杂度随链一起消失。
+## 【唯一的"外部打断"能力：取消】合成 / 旋转是 512³ 级别的逐格循环，编辑器里换参数时
+## 上一次求值可能还在跑。于是热循环里按行轮询 `ctx.cancelled()`（见 _cancelled），命中就
+## 立刻放弃，并把结果标成 `QVoxelEvalResult.cancelled = true`（体积同时留空 —— 但**不要**
+## 把"空体积"直接读成"被取消"，两者语义不同）。`ctx.report()` 在每合成一个子节点后报一次
+## 进度。两者无回调时都是零开销（Callable 不 valid 直接返回）。
 ## 【为什么组仍用紧致盒】组不存体素：它的中间体积取子树内容的并集包围盒，内存成本与内容成正比，
 ## 而不是与"世界画布"成正比（512³ 一次分配就是 537 MB）。
 
 
-## 单模型求值（对外入口，等价于 evaluate_node；保留给只关心模型的调用方）。
-static func evaluate(obj: QVoxelModel, ctx: QVoxelEvalContext,
-		previous: QVoxelEvalResult = null) -> QVoxelEvalResult:
-	return evaluate_node(obj, ctx, previous)
-
-
 ## 节点求值：模型 → 自身体素；组 → 按偏移合成子树（紧致盒）。
-static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext,
-		_previous: QVoxelEvalResult = null, _cache = null) -> QVoxelEvalResult:
+## 【什么时候会拿到空结果】**两种**：节点确实没有可见体素（`has_volume()` 为 false 且
+## `cancelled` 为 false），或本次求值被取消（`cancelled` 为 true、体积同样留空）。
+## 判据永远是旗标，不是体积是否为空。
+static func evaluate_node(node: QVoxelNode, ctx: QVoxelEvalContext) -> QVoxelEvalResult:
 	var res := QVoxelEvalResult.new()
 	if node == null or not node.visible:
 		return res
 	res.epoch = ctx.epoch if ctx != null else 0
+	if _cancelled(ctx):
+		res.cancelled = true
+		return res
 	if node.is_model():
 		var m := node as QVoxelModel
 		res.volume = m.to_volume()
 		res.grid_size = m.grid_size
-		_place(res, Vector3i.ZERO, m.local_transform)
+		_place(res, Vector3i.ZERO, m.local_transform, ctx)
 		res.input_signature = "%d|%d|%d,%d,%d|%d" % [
 				m.get_instance_id(), m.base_revision,
 				m.grid_size.x, m.grid_size.y, m.grid_size.z, m.active_frame]
 		return res
 	var g := node as QVoxelGroup
 	var comp := _composite(g.child_nodes, ctx)
+	if comp.get("cancelled", false):
+		res.cancelled = true
+		return res
 	res.volume = comp["volume"]
 	res.grid_size = comp["size"]
-	_place(res, comp["lo"], g.local_transform)
+	_place(res, comp["lo"], g.local_transform, ctx)
 	res.input_signature = comp["key"]
 	return res
 
@@ -50,6 +57,9 @@ static func evaluate_local(node: QVoxelNode, ctx: QVoxelEvalContext) -> QVoxelEv
 	if node == null or not node.visible:
 		return res
 	res.epoch = ctx.epoch if ctx != null else 0
+	if _cancelled(ctx):
+		res.cancelled = true
+		return res
 	if node.is_model():
 		var m := node as QVoxelModel
 		res.volume = m.to_volume()
@@ -61,6 +71,9 @@ static func evaluate_local(node: QVoxelNode, ctx: QVoxelEvalContext) -> QVoxelEv
 		return res
 	var g := node as QVoxelGroup
 	var comp := _composite(g.child_nodes, ctx)
+	if comp.get("cancelled", false):
+		res.cancelled = true
+		return res
 	res.volume = comp["volume"]
 	res.grid_size = comp["size"]
 	res.origin = comp["lo"]
@@ -69,17 +82,22 @@ static func evaluate_local(node: QVoxelNode, ctx: QVoxelEvalContext) -> QVoxelEv
 
 
 ## 世界级求值：把所有顶层节点按 origin 合成进一个紧致盒。
-static func evaluate_world(world: QVoxelWorld, ctx: QVoxelEvalContext,
-		_cache = null) -> QVoxelEvalResult:
+static func evaluate_world(world: QVoxelWorld, ctx: QVoxelEvalContext) -> QVoxelEvalResult:
 	var res := QVoxelEvalResult.new()
 	if world == null:
 		return res
+	res.epoch = ctx.epoch if ctx != null else 0
+	if _cancelled(ctx):
+		res.cancelled = true
+		return res
 	var comp := _composite(world.nodes, ctx)
+	if comp.get("cancelled", false):
+		res.cancelled = true
+		return res
 	res.volume = comp["volume"]
 	res.grid_size = comp["size"]
 	res.origin = comp["lo"]
 	res.input_signature = comp["key"]
-	res.epoch = ctx.epoch if ctx != null else 0
 	return res
 
 
@@ -105,12 +123,35 @@ static func local_box(node: QVoxelNode) -> AABB:
 	return box
 
 
+# 取消 / 进度（热循环里唯一的对外回调点）
+
+## 每隔多少**行**（y 层）查一次取消回调。逐格查 GDScript Callable 会拖垮热循环；
+## 64 行在 512³ 下约 1.6 万格一次，足以让交互取消在几十毫秒内生效。
+const CANCEL_POLL_ROWS := 64
+
+
+## 该放弃了吗（无回调 / 无 ctx 时恒 false）。
+static func _cancelled(ctx: QVoxelEvalContext) -> bool:
+	return ctx != null and ctx.cancelled()
+
+
+## 被取消时的合成结果：`cancelled` 旗标 + 空体积。
+## 【为什么旗标要一路带出去】只有旗标能让 evaluate_node / evaluate_world 把「子树被丢弃」
+## 与「子树本来就空」区分开 —— 前者若被当成后者，导出器会安静地存下一个空世界。
+static func _empty_comp() -> Dictionary:
+	return {"volume": PackedInt32Array(), "lo": Vector3i.ZERO, "size": Vector3i.ZERO,
+			"key": "", "cancelled": true}
+
+
 # 节点摆放（位置 + 旋转）的唯一应用点
 
 ## 把一块"位于自身局部盒 [lo, lo+size) 的体积"按节点变换摆进父画布：
 ## 先绕局部原点做轴对齐旋转，再平移 xf.origin。旋转保整数 ⇒ 结果 origin 仍是整数。
 ## 非轴对齐旋转 / 缩放（.qvx 世界不支持）按"不旋转"处理并告警 —— 宁可少给，不可给错。
-static func _place(res: QVoxelEvalResult, lo: Vector3i, xf: Transform3D) -> void:
+## 【取消】旋转出自 _rotate_box 的一半结果**必须整块丢掉**（旋转出一半的盒子比没有更危险），
+## 故命中时清空体积与盒、置 res.cancelled，而不是把半成品当成"小一点的模型"返回。
+static func _place(res: QVoxelEvalResult, lo: Vector3i, xf: Transform3D,
+		ctx: QVoxelEvalContext = null) -> void:
 	var t := Vector3i(roundi(xf.origin.x), roundi(xf.origin.y), roundi(xf.origin.z))
 	var basis := xf.basis.orthonormalized()
 	if res.volume.is_empty() or basis.is_equal_approx(Basis.IDENTITY):
@@ -120,7 +161,13 @@ static func _place(res: QVoxelEvalResult, lo: Vector3i, xf: Transform3D) -> void
 		push_warning("[QVX] 节点摆放含非轴对齐旋转/缩放，求值按不旋转处理（.qvx 世界仅支持 90° 倍数）")
 		res.origin = t + lo
 		return
-	var r := _rotate_box(res.volume, res.grid_size, lo, basis)
+	var r := _rotate_box(res.volume, res.grid_size, lo, basis, ctx)
+	if r.get("cancelled", false):
+		res.volume = PackedInt32Array()
+		res.grid_size = Vector3i.ZERO
+		res.origin = Vector3i.ZERO
+		res.cancelled = true
+		return
 	res.volume = r["volume"]
 	res.grid_size = r["size"]
 	res.origin = t + r["lo"]
@@ -138,7 +185,10 @@ static func _is_axis_aligned(basis: Basis) -> bool:
 ## 旋转后包围盒重算，逐父坐标反查源坐标取值（basis 正交 ⇒ 逆 = 转置，整数保持）。
 ## 【为什么角点用 lo+size-1 而不是 lo+size】体素盒是**离散**的 [lo, lo+size)，反射（如 x→−x）下
 ## 末格落在 −(size−1) 而非 −size；用连续边算包围盒会整体错开一格、把边界那一层丢掉。
-static func _rotate_box(vol: PackedInt32Array, size: Vector3i, lo: Vector3i, basis: Basis) -> Dictionary:
+## `ctx` 只是取消通道（可为 null）：逐行轮询，命中即返回 `{"cancelled": true}`，
+## 由 _place 把结果清空 —— 旋转出一半的盒子比没有更危险。
+static func _rotate_box(vol: PackedInt32Array, size: Vector3i, lo: Vector3i, basis: Basis,
+		ctx: QVoxelEvalContext = null) -> Dictionary:
 	var inv := basis.transposed()
 	var hi := lo + size - Vector3i.ONE
 	var mn := Vector3i(2147483647, 2147483647, 2147483647)
@@ -155,6 +205,8 @@ static func _rotate_box(vol: PackedInt32Array, size: Vector3i, lo: Vector3i, bas
 	var dx := nsize.x
 	var dxy := dx * nsize.y
 	for z in nsize.z:
+		if z % CANCEL_POLL_ROWS == 0 and _cancelled(ctx):
+			return {"cancelled": true}
 		for y in nsize.y:
 			var row := y * dx + z * dxy
 			for x in nsize.x:
@@ -174,31 +226,49 @@ static func _round3(v: Vector3) -> Vector3i:
 
 # 树形合成
 
-## 把一组节点按各自 origin 合成成一块**紧致**体积。返回 {"volume","lo","size","key"}。
+## 把一组节点按各自 origin 合成成一块**紧致**体积。返回
+## {"volume","lo","size","key"}（正常）或 {"cancelled": true}（被打断，见 _empty_comp）。
+## 【取消】每合成完一个子节点查一次；命中就丢掉已合成的东西、返回取消结果。
+## 子节点自己的求值也会查（evaluate_node / _place / _rotate_box），所以嵌套组同样能被打断。
 static func _composite(nodes: Array, ctx: QVoxelEvalContext) -> Dictionary:
 	var acc := PackedInt32Array()
 	var lo := Vector3i.ZERO
 	var size := Vector3i.ZERO
 	var parts := PackedStringArray()
-	for item in nodes:
+	var total := nodes.size()
+	for i in total:
+		if _cancelled(ctx):
+			return _empty_comp()
+		var item: Variant = nodes[i]
 		var c := item as QVoxelNode
 		if c == null or not c.visible:
 			continue
 		var cr := evaluate_node(c, ctx)
+		if _cancelled(ctx):
+			return _empty_comp()
 		parts.append(cr.input_signature)
 		if cr.volume.is_empty() or cr.grid_size.x <= 0:
+			if total > 1:
+				ctx.report(float(i + 1) / float(total))
 			continue
-		var merged := _merge(acc, lo, size, cr.volume, cr.origin, cr.grid_size)
+		var merged := _merge(acc, lo, size, cr.volume, cr.origin, cr.grid_size, ctx)
+		if merged.get("cancelled", false):
+			return _empty_comp()
 		acc = merged["volume"]
 		lo = merged["lo"]
 		size = merged["size"]
+		if total > 1:
+			ctx.report(float(i + 1) / float(total))
 	return {"volume": acc, "lo": lo, "size": size, "key": "|".join(parts)}
 
 
 ## 把一个子体积**并**进累积盒（盒可能因此扩大）。
 ## 只写非零格：并集下"对方是空"不该抹掉已有的实心格。
+## 【取消】两次 _blit_union 之间各查一次；命中返回 {"cancelled": true}，此时累积盒是半成品，
+## 调用方必须丢弃而不是继续用。
 static func _merge(a: PackedInt32Array, a_lo: Vector3i, a_size: Vector3i,
-		b: PackedInt32Array, b_lo: Vector3i, b_size: Vector3i) -> Dictionary:
+		b: PackedInt32Array, b_lo: Vector3i, b_size: Vector3i,
+		ctx: QVoxelEvalContext = null) -> Dictionary:
 	if b.is_empty() or b_size.x <= 0 or b_size.y <= 0 or b_size.z <= 0:
 		return {"volume": a, "lo": a_lo, "size": a_size}
 	if a.is_empty() or a_size.x <= 0 or a_size.y <= 0 or a_size.z <= 0:
@@ -210,16 +280,23 @@ static func _merge(a: PackedInt32Array, a_lo: Vector3i, a_size: Vector3i,
 	var size := hi - lo
 	var out := PackedInt32Array()
 	out.resize(size.x * size.y * size.z)
-	_blit_union(out, size, lo, a, a_lo, a_size)
-	_blit_union(out, size, lo, b, b_lo, b_size)
+	_blit_union(out, size, lo, a, a_lo, a_size, ctx)
+	if _cancelled(ctx):
+		return {"cancelled": true}
+	_blit_union(out, size, lo, b, b_lo, b_size, ctx)
+	if _cancelled(ctx):
+		return {"cancelled": true}
 	return {"volume": out, "lo": lo, "size": size}
 
 
 ## 把 src 并进 dst（dst 的 (0,0,0) 对应父画布坐标 dst_lo）。跳过 0 格。
 static func _blit_union(dst: PackedInt32Array, dst_size: Vector3i, dst_lo: Vector3i,
-		src: PackedInt32Array, src_lo: Vector3i, src_size: Vector3i) -> void:
+		src: PackedInt32Array, src_lo: Vector3i, src_size: Vector3i,
+		ctx: QVoxelEvalContext = null) -> void:
 	var off := src_lo - dst_lo
 	for z in src_size.z:
+		if z % CANCEL_POLL_ROWS == 0 and _cancelled(ctx):
+			return
 		var dz := off.z + z
 		for y in src_size.y:
 			var dy := off.y + y

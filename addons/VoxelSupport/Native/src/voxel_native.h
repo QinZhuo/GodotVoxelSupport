@@ -15,12 +15,29 @@
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/vector2.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
+#include <godot_cpp/variant/string.hpp>
+
+// ----------------------------------------------------------------------------
+// 版本握手（原生库 ↔ GDScript）
+// ----------------------------------------------------------------------------
+// 【为什么需要】.gdextension 里只有 compatibility_minimum="4.3" 这种引擎兼容性声明，
+// 它管的是"引擎版本够不够新"，完全不关心"这个 dll 是哪天的源码编出来的"。于是
+// "改了 C++ 忘记重新构建" 会加载上一版 dll，而 NativeLoader 的方法存在性校验照样全过，
+// 表现为"代码看着是对的、行为却还是旧的"，且没有任何报错线索。
+//
+// 因此这里放一个**源码指纹**：改动 voxel_native.h / voxel_native.cpp 的对外契约
+// （增删方法、改方法签名、改字节布局、改判定语义）时必须 +1，并同步修改
+// addons/VoxelSupport/Format/NativeLoader.gd 里的 EXPECTED_API_VERSION
+// （两端各写一份常量，无法共享，只能靠注释提醒）。
+//
+// VOXEL_NATIVE_BUILD_ID 只用于报错信息里显示"这库是哪次改的"，不做比对。
+#define VOXEL_NATIVE_API_VERSION 2
+#define VOXEL_NATIVE_BUILD_ID "2026-11-25-refactor"
 
 namespace godot {
 
 // 体素插件原生核心（GDExtension C++）——插件的**硬依赖**：全部热路径都在这里，
 // GDScript 侧只做编排（NativeLoader 一次性校验必需方法，缺失即报错，不做 GDScript 兜底）。
-//   - greedy_merge_dense:     贪婪网格合并（2D 同材质矩形合并）
 //   - generate_chunk_dense:   chunk 网格生成主循环（32³ 体素 × 6 方向可见性 + 贪婪合并）
 //   - find_unsupported_around: 支撑失稳检测（列支撑判定，运行期唯一实现）
 //   - remove_voxels_bulk:     批量移除体素（大崩塌主线程提速）
@@ -32,13 +49,13 @@ protected:
 	static void _bind_methods();
 
 public:
-	// 贪婪网格合并：对 2D 密集网格做同材质矩形合并
-	// grid: 行优先 PackedInt32Array，0=空，否则=材质ID
-	// width/height: 网格宽高
-	// 返回 Dictionary：{pos: PackedInt32Array, size: PackedInt32Array, val: PackedInt32Array}
-	//   pos[i*2]=u, pos[i*2+1]=v; size[i*2]=w, size[i*2+1]=h; val[i]=材质ID
-	// 注意：会就地清零 grid 已合并的格子
-	static Dictionary greedy_merge_dense(PackedInt32Array grid, int width, int height);
+	// ---- 版本握手（NativeLoader 启动校验用）----
+	// api_version(): 源码指纹，见文件顶部 VOXEL_NATIVE_API_VERSION 的注释。
+	//   与 GDScript 侧 NativeLoader.EXPECTED_API_VERSION 不一致 → 判定"改了源码没重建"，
+	//   NativeLoader 会明确报"原生库与 GDScript 版本不匹配，请重新构建"。
+	// build_id():    给人看的构建标识（如 "2026-11-25-refactor"），只出现在报错信息里。
+	static int api_version();
+	static String build_id();
 
 	// 生成单个 chunk 的网格数据（性能关键路径）
 	// halo: 34³ 密集光环缓冲（PackedInt32Array，值=材质ID，0=空）
@@ -67,7 +84,8 @@ public:
 			float scale, const Vector3 &offset);
 
 	// 块缓冲字典 → 网格 arrays（QVX 块级导入路径：逐 chunk halo + dense 生成 + 合并 + 索引偏移，全 C++）。
-	// 与 GDScript 侧 VoxelMeshGenerator.generate_arrays_from_chunks 逐位等价（后者保留为测试 oracle）。
+	// 这是该路径的**唯一实现**：GDScript 侧的对应函数已随原生化删除，仓库内不存在第二份
+	// 同语义实现可供逐位对照，故不存在"两份实现必须同步修改"的约束。
 	static Dictionary generate_arrays_from_chunks_native(const Dictionary &chunks, const PackedByteArray &trans_flags,
 			float scale, const Vector3 &offset);
 
@@ -160,12 +178,15 @@ public:
 	static Dictionary snapshot_chunks_halo(const Dictionary &buffers, const Array &chunks);
 
 	// ---- QVX 块级编解码（原生）----
-	// GDScript 版 pick+pack 是逐元素扫描（混合值块约 15ms/块），原生化后约 0.2ms。
+	// 原 GDScript 实现（已随下沉删除）是逐元素扫描：混合值块约 15ms/块，原生化后约 0.2ms。
 	// 选择规则与字节布局以 QVoxelSpec / docs/QVX_FORMAT.md 为准。
 	// 返回 {codec:int, payload:PackedByteArray}；EMPTY 时 codec=0、payload 空。
 	static Dictionary choose_and_pack(const PackedInt32Array &buf, int n);
 
 	// 按指定 codec 打包（供"codec 已知"的路径与测试使用）。EMPTY / 非法 codec 返回空。
+	// INDEXED 要求不同值个数 <= 255：格式里调色板长度是 **u8**，写 256 会截断成 0，
+	// 解包侧把 count==0 当"全空块"，整块数据静默归零。故这里与 choose_and_pack 同口径，
+	// 超限直接返回空（由调用方退回 DENSE / 报错），绝不产出"能写不能读"的负载。
 	static PackedByteArray pack_with_codec(int codec, const PackedInt32Array &buf, int n);
 
 	// 一块密集缓冲的值域 (min, max)；空缓冲返回 (0, 0)。
@@ -173,8 +194,8 @@ public:
 	static Vector2i voxel_value_range(const PackedInt32Array &buf);
 
 	// 按 codec 解包负载，返回长度 n 的缓冲；负载损坏（长度不符 / 游程和 ≠ n / 索引越界）返回空。
-	// 与 pack_with_codec 对称。GDScript 版是逐元素循环：实测 196 块（1MB）要 1047ms，
-	// 原生化后是毫秒级——这是"打开大存档"的主要耗时。
+	// 与 pack_with_codec 对称。原 GDScript 实现（已随下沉删除）是逐元素循环：实测 196 块
+	//（1MB）要 1047ms，原生化后是毫秒级——这是"打开大存档"的主要耗时。
 	static PackedInt32Array unpack_block(int codec, const PackedByteArray &payload, int n);
 
 	// ---- 体素枚举（原生批量：替代 GDScript 逐体素循环 + 逐体素 Callable / Variant 装箱）----
@@ -187,7 +208,7 @@ public:
 	static PackedInt32Array collect_all_flat(const Dictionary &buffers);
 	// 内容包围盒，返回 [min:Vector3i, max:Vector3i]；无体素返回空 Array。
 	static Array collect_bounds(const Dictionary &buffers);
-	// 球内体素位置（判定与 GDScript 版一致：dx²+dy²+dz² <= radius²，float 比较；
+	// 球内体素位置（判据：dx²+dy²+dz² <= radius²，float 比较，已无 GDScript 对应实现；
 	// 候选只扫"球 AABB ∩ chunk"的格子）。
 	static Array collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius);
 	// 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。

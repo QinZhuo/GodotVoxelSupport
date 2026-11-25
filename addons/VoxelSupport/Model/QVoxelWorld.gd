@@ -23,7 +23,7 @@ extends Resource
 ## HEAD JSON（qvx / channels 为必填键）。
 @export var head: Dictionary = {}
 
-## MATE：材质条目（每项 12 字节的语义结构 Dictionary，见 QVoxelFile._parse_mate）。
+## MATE：材质条目（每项 12 字节的语义结构 Dictionary，见 QVoxelMate.decode）。
 ## 索引即材质 ID，[0] 恒为空气。**这就是调色板本身**，不再另存一份"ID → Color"的映射。
 @export var materials: Array = []
 
@@ -47,6 +47,13 @@ static var _uid_seq := 1
 ## 每次"影响文件内容"的改动自增。UI 据此判断"是否需要提示保存"。
 var revision := 0
 
+## 上一次 from_document 时，格式层因类型未知 / 非对象而丢弃的节点数（**含子树**）。0 = 干净读取。
+## 【为什么这个数要留在世界上】场景树的清洗**只发生在格式层**（QVoxelFile._build_scene），
+## 它把丢弃数记进 QVoxelReport.warnings；但加载路径拿到的只是一个 doc，report 的那句话没人看。
+## 于是"打开的文件少了几个对象"在编辑器里毫无解释，用户继续编辑并保存时还会把丢掉的部分
+## 永久覆盖掉。这个字段让加载路径至少能 push_warning，UI 也能提示"这份文件有节点读不懂"。
+var dropped_nodes := 0
+
 signal content_changed
 
 
@@ -65,7 +72,7 @@ static func create_empty() -> QVoxelWorld:
 		# 世界设置集中在 world 键下：HEAD 的其余键留给格式本身（§3）
 		"world": {"name": "Untitled", "voxel_size": 0.1},
 	}
-	w.materials = [_air_entry()]
+	w.materials = [QVoxelMate.air_entry()]
 	return w
 
 
@@ -82,12 +89,20 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 	w.cach = doc.cach
 
 	var bs := doc.get_block_size()
-	var raw: Variant = doc.node.get("nodes")
-	if raw is Array:
-		for e in (raw as Array):
+	# 【唯一解析点在格式层】树在 QVoxelFile.parse 里就已经清洗完毕（doc.scene），这里**只做类型转换**：
+	# 把已校验的 JSON 条目构造成 QVoxelNode 实例。再自己解析一遍 doc.node 会有两套 kind 白名单
+	# 与两套丢弃规则，而格式层那份丢弃诊断（rep.warnings / scene.dropped_nodes）对本类**完全无效** ——
+	# 表现为"打开时少了几个对象，保存时把丢失的书回原文件"，全程不报错。
+	var scene := QVoxelFile.scene_of(doc)
+	if scene != null:
+		w.dropped_nodes = scene.dropped_nodes
+		for e in scene.nodes:
 			var n := _node_from_entry(e, doc, bs)
 			if n != null:
 				w.nodes.append(n)
+		if w.dropped_nodes > 0:
+			push_warning("[QVoxelWorld] 载入的 NODE 里有 %d 个节点因类型未知/非对象被丢弃（含子树）；" % w.dropped_nodes
+					+ "继续编辑并保存会把它们永久移除。")
 	# 【纯体素文件 / NODE 未引用】没有 NODE 块（或 NODE 里没引用某些 VXEL/FRAM）时，为每个
 	# "没被摆放的"体素源补一个顶层模型 —— 否则像 `demo/samples/*.qvx` 这种只有 VXEL 的文件
 	# 会导入成空世界（编辑器打不开）。与 `VoxAsset.check_nodes` 对 `.vox` 的处置同一思路。
@@ -118,9 +133,12 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 	return w
 
 
-## 节点条目 → 节点对象（递归）。
-## 【认不出来就丢弃，不造空壳】未知 kind 意味着这份文件来自更新的版本或别的工具。
+## 已校验的节点条目 → 节点对象（递归）。**纯构造，不清洗、不校验、不丢弃**：
+## 条目来自 doc.scene（QVoxelFile._build_scene 的产物）—— 非对象项与未知 kind 在那边就已经
+## 连同子树剔除了，且计数记在 scene.dropped_nodes 上。这里只按 kind 选子类、灌字段、递归子节点。
+## 【认不出来就返回 null，不造空壳】未知 kind 意味着这份文件来自更新的版本或别的工具。
 ## 凭猜补一个空节点出来，用户会以为数据还在（然后在保存时把真正的数据覆盖掉）。
+## 正常情况下走不到这一支（格式层已白名单过滤），留着是为了不让一份手改过的 doc 把加载带崩。
 static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int) -> QVoxelNode:
 	if not (e is Dictionary):
 		return null
@@ -289,40 +307,29 @@ func voxel_size() -> float:
 	return float(_settings().get("voxel_size", 0.1))
 
 
-## 【为什么改它要 _touch()】它一变，所有对象的实际尺寸跟着变 → 视口必须重排。
-func set_voxel_size(value: float) -> void:
-	_write_settings(_patched_settings("voxel_size", value))
-
-
 # 材质（MATE 就是调色板本身）
 
 ## 材质颜色。ID 越界或条目缺失返回洋红（可见的错误色，而不是悄悄变黑）。
 func material_color(material_id: int) -> Color:
 	if material_id <= 0 or material_id >= materials.size():
 		return Color.MAGENTA
-	return _color_of(materials[material_id])
+	return QVoxelMate.color(materials[material_id])
 
 
 func set_material_color(material_id: int, color: Color) -> void:
 	while materials.size() <= material_id:
-		materials.append(_air_entry())
-	var rgba := _rgba_of(color)
+		materials.append(QVoxelMate.air_entry())
 	# 换掉**整个条目**而不是就地改它的键：撤销走 QVoxelPropertyCommand(world, &"materials") 时，
 	# 快照只浅拷数组，就地改会让"改前值"一起变（见类头铁律）。
-	var e: Dictionary = (materials[material_id] as Dictionary).duplicate()
-	e["rgba"] = rgba
-	e["r"] = (rgba >> 24) & 0xFF
-	e["g"] = (rgba >> 16) & 0xFF
-	e["b"] = (rgba >> 8) & 0xFF
-	e["a"] = rgba & 0xFF
-	materials[material_id] = e
+	# 覆盖色交给 QVoxelMate.with_color：rgba 是权威值，r/g/b/a 由它一次展开，别再手抄一遍。
+	materials[material_id] = QVoxelMate.with_color(materials[material_id], color)
 	_touch()
 
 
 ## 追加一个新材质，返回其 ID。
 func add_material(color: Color) -> int:
 	var id := materials.size()
-	materials.append(_air_entry())
+	materials.append(QVoxelMate.air_entry())
 	set_material_color(id, color)
 	return id
 
@@ -359,15 +366,15 @@ func material_scalar(material_id: int, key: StringName) -> float:
 ## `set_material_color`，理由见类头铁律：浅快照与活数据共享嵌套容器）。
 func set_material_scalar(material_id: int, key: StringName, value: float) -> void:
 	while materials.size() <= material_id:
-		materials.append(_air_entry())
+		materials.append(QVoxelMate.air_entry())
 	var e: Dictionary = (materials[material_id] as Dictionary).duplicate()
 	match key:
 		&"metal":
-			e["metal"] = _byte(value)
+			e["metal"] = QVoxelMate.byte_of(value)
 		&"rough":
-			e["rough"] = _byte(value)
+			e["rough"] = QVoxelMate.byte_of(value)
 		&"emission":
-			var color := _color_of(e)
+			var color := QVoxelMate.color(e)
 			var hi := maxf(maxf(color.r, color.g), color.b)
 			var scale := 0.0 if hi <= 0.0 else value * 255.0 / hi
 			e["e_r"] = clampi(int(round(color.r * scale)), 0, 255)
@@ -492,7 +499,7 @@ func merge_from(other: QVoxelWorld) -> Array[QVoxelModel]:
 	for s in slots:
 		need = maxi(need, int(s) + 1)
 	while materials.size() < need:
-		materials.append(VoxelMaterial.air_mate())
+		materials.append(QVoxelMate.air_entry())
 	var remap := {}
 	for k in src_ids.size():
 		var sid := int(src_ids[k])
@@ -579,11 +586,6 @@ func find_model(model_id: int) -> QVoxelModel:
 	return null
 
 
-## 深度优先遍历整棵树（先父后子，按树上的顺序）。
-func walk(visitor: Callable) -> void:
-	_walk_list(nodes, visitor)
-
-
 ## 全部节点（深度优先）。
 func all_nodes() -> Array[QVoxelNode]:
 	var out: Array[QVoxelNode] = []
@@ -648,25 +650,9 @@ func _path_to(list: Array[QVoxelNode], target: QVoxelNode, path: Array[QVoxelNod
 	return false
 
 
-## target 的同级列表（顶层节点的同级 = 顶层数组）。
-func siblings_of(target: QVoxelNode) -> Array[QVoxelNode]:
-	var lst := _list_holding(target)
-	return lst if not lst.is_empty() else nodes
-
-
 ## target 在同级里的下标（不在树上返回 -1）。
 func node_index(target: QVoxelNode) -> int:
 	return _list_holding(target).find(target)
-
-
-## 从树上摘下来（不删数据，节点对象仍被调用方持有）。**递归删除请用 remove_node**。
-func detach_node(target: QVoxelNode) -> bool:
-	var lst := _list_holding(target)
-	if lst.is_empty():
-		return false
-	lst.erase(target)
-	_touch()
-	return true
 
 
 ## 把已有节点挂到 parent 下的 index 位置（index < 0 = 末尾）。会先把它从原位置摘下来。
@@ -713,15 +699,6 @@ func _is_ancestor(anc: QVoxelNode, node: QVoxelNode) -> bool:
 		if c == node or _is_ancestor(c, node):
 			return true
 	return false
-
-
-func _walk_list(list: Array[QVoxelNode], visitor: Callable) -> void:
-	for n in list:
-		if n == null:
-			continue
-		visitor.call(n)
-		if n.is_group():
-			_walk_list((n as QVoxelGroup).child_nodes, visitor)
 
 
 func _collect_nodes(list: Array[QVoxelNode], out: Array[QVoxelNode]) -> void:
@@ -842,12 +819,8 @@ func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 		var buf := o.get_block(k)
 		if buf.size() != QVoxelSpec.block_volume(bs):
 			continue
-		var solid := false
-		for m in buf:
-			if m != 0:
-				solid = true
-				break
-		if solid:
+		# 判空走原生 count(0)：这是保存世界的必经路径，逐体素 GDScript 扫描是秒级开销。
+		if not QVoxelBlockCodec.is_empty_block(buf):
 			out[k] = buf
 	return out
 
@@ -924,31 +897,3 @@ static func _infer_grid(blocks: Dictionary, bs: int) -> Vector3i:
 		mx.y = maxi(mx.y, (k.y + 1) * bs)
 		mx.z = maxi(mx.z, (k.z + 1) * bs)
 	return mx
-
-
-static func _color_of(entry: Variant) -> Color:
-	if not (entry is Dictionary):
-		return Color.MAGENTA
-	var e: Dictionary = entry
-	return Color8(int(e.get("r", 255)), int(e.get("g", 0)), int(e.get("b", 255)),
-			int(e.get("a", 255)))
-
-
-## 0–1 浮点 → 0–255 字节（PBR 标量的 MATE 存储量纲）。
-static func _byte(value: float) -> int:
-	return clampi(int(round(value * 255.0)), 0, 255)
-
-
-static func _rgba_of(c: Color) -> int:
-	var r := int(round(c.r * 255.0)) & 0xFF
-	var g := int(round(c.g * 255.0)) & 0xFF
-	var b := int(round(c.b * 255.0)) & 0xFF
-	var a := int(round(c.a * 255.0)) & 0xFF
-	return (r << 24) | (g << 16) | (b << 8) | a
-
-
-## 空气条目（ID 0）。材质 ID 0 = 空，必须全零，否则 QVoxelFile 会把它当实体材质。
-static func _air_entry() -> Dictionary:
-	return {"rgba": 0, "r": 0, "g": 0, "b": 0, "a": 0,
-			"metal": 0, "rough": 0, "hardness": 0, "mass": 0,
-			"e_r": 0, "e_g": 0, "e_b": 0}

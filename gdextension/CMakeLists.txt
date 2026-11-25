@@ -12,10 +12,16 @@ endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
-# 性能: 本机构建开 -march=native(允许自动向量化); fp 融合关掉, 保证与 GDScript 结果 bit 级一致
+# 性能: 仅本机架构开 -march=native(允许自动向量化); fp 融合关掉, 保证与 GDScript 结果 bit 级一致
+# 交叉/多架构必须禁用: native 按**主机** CPU 展开(arm64 主机 → -march=apple-m1), 目标却是
+# x86_64 时 clang 直接 unknown target CPU 'apple-m1'。
 if(NOT MSVC)
 	add_compile_options(-ffp-contract=off)
-	if(NOT CMAKE_OSX_ARCHITECTURES MATCHES ";")
+	set(_dev_archs "${CMAKE_OSX_ARCHITECTURES}")
+	if(NOT _dev_archs)
+		set(_dev_archs "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+	endif()
+	if(NOT _dev_archs MATCHES ";" AND _dev_archs STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
 		add_compile_options(-march=native)
 	endif()
 endif()

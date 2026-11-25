@@ -12,9 +12,13 @@ extends TestCase
 ##     ② **拼接正确性**：`append_arrays` 的索引偏移。索引不加偏移时三角形不会消失，
 ##        而是退化到别的顶点上 —— 这是"拼接"最容易漏、也最难肉眼发现的一处；
 ##     ③ **to_mesh 形状**：surface 数（0/1/2）与"三角形数守恒"，即几何数组到 mesh 这条路上不丢面。
-##   再加一条**端到端等价性**（本文件最重要）：同一个模型"逐组 build_group 再拼接"的三角形总数
-##   必须等于"一次 build_all 整份生成"。它同时覆盖分组、halo、拼接索引偏移、材质分桶四件事，
-##   是"分组拼装与整份生成几何等价"这个架构承诺的唯一可观测证据。
+##   再加一条**端到端等价性**（本文件最重要）：同一个模型"逐组自行按 34³ 光环算每 chunk 几何、
+##   再按组原点平移拼接"的三角形总数必须等于"一次 build_all 整份生成"。它同时覆盖分组、halo、
+##   拼接索引偏移、材质分桶四件事，是"分段拼装与整份生成几何等价"这个架构承诺的唯一可观测证据。
+##   【拼装代码为什么内联在用例里】它原本是 `VoxelMesher.build_group`：生产路径（worker 子线程
+##   按光环算好每 chunk 几何 + 帧尾纯拼接）根本不走它，全仓只剩这条测试在调用 —— 于是"留着它
+##   当证据"实为养老代码。删掉后把那段拼装逐行内联到这里：**承诺本身不变**（仍是分段 ≡ 整份），
+##   但不再有一个只为测试存在的生产 API。
 ##   期望值里 deer.vox 的 1344 是**实测确认**的导入 mesh 精确值（与 `test_voxel_mesh_kernel.gd`
 ##   的基线一致）；若采样资产被重烘导致它合法地变化，须同期改这个常量并说明原因。
 
@@ -305,7 +309,7 @@ func test_to_mesh_conserves_triangle_count() -> void:
 			"to_mesh 后 get_faces().size()/3 应等于 triangle_count(%d)：两桶三角形都必须进 surface" % want)
 
 
-# ──────────── D. build_all / build_group 的等价性（需要真实模型） ────────────
+# ──────────── D. build_all / 逐组拼装的等价性（需要真实模型） ────────────
 
 ## `build_all` 对 deer.vox 的三角形数基线：1344（实测确认，等于导入 mesh 的精确值）。
 ## 这是"活体素渲染与导入 mesh 几何一致"的最低成本守卫：内核面可见性规则、贪婪合并粒度、
@@ -327,16 +331,21 @@ func test_build_all_deer_baseline() -> void:
 			"索引数组长度必须是 3 的整数倍（否则说明三角形被写坏）")
 
 
-## 【本文件最重要的一条】分组拼装 ≡ 整份生成。
+## 【本文件最重要的一条】逐组分段拼装 ≡ 整份生成。
 ##
-## DYNAMIC 模式把模型按 group 切成若干次 `build_group` 调用再拼接，而 STATIC 模式一次
+## DYNAMIC 模式把模型按 group 切成若干份、各自出几何再拼接，而 STATIC 模式一次
 ## `build_all`。两者几何必须**完全相同**，否则同一份体素在两种绘制模式下长得不一样。
 ## 这条断言同时覆盖四件事，任一处写错都会让它红：
 ##   ① `group_of` 分组正确（漏组/重组的 chunk 会少画或多画）；
 ##   ② group 外一圈邻居参与了面剔除（halo 缺数据 → 边界面被多画 → 三角数偏大）；
 ##   ③ `append_arrays` 的索引偏移正确（不加偏移会串形，但三角数不变 —— 由 B 段单独守）；
 ##   ④ 材质分桶在两条路径上一致（透明面被算进实体桶会改变桶内三角数）。
-func test_build_group_totals_match_build_all() -> void:
+##
+## 【为什么不调生产 API 而是自己拼】生产路径没有"逐组出网格"这个入口了：worker 在子线程
+## 按 34³ 光环算好**每个 chunk**的几何，主线程帧尾只做纯拼接（见 VoxelRenderer._apply_built_chunk）。
+## 原先调用的 `VoxelMesher.build_group` 因此全仓零生产调用，删掉后这段拼装内联在此 —— 
+## 承诺不变，但被验证的东西从"一个测试专用 API"变成了"生产实际使用的 halo + 拼接组合"。
+func test_group_assembly_totals_match_build_all() -> void:
 	var d := _deer()
 	if d.is_empty():
 		return
@@ -357,19 +366,33 @@ func test_build_group_totals_match_build_all() -> void:
 			groups[gk] = []
 		(groups[gk] as Array).append(ck)
 
+	var aligned := VoxelMaterial.align_by_id(materials)
+	var trans_flags := VoxelMaterial.build_trans_flags(aligned)
 	var assembled: Dictionary = VoxelMesher._new_arrays()
 	var group_tris := 0
 	for gk: Vector3i in groups.keys():
 		var chunk_keys: Array = groups[gk]
-		var part: Dictionary = VoxelMesher.build_group(
-				buffers, gk, 1, chunk_keys, materials, SCALE, Vector3.ZERO)
+		var part: Dictionary = VoxelMesher._new_arrays()
+		var group_origin: Vector3i = VoxelMesher.group_origin_chunk(gk, 1)
+		for ck: Vector3i in chunk_keys:
+			var halo := VoxelChunkGenerator.build_halo_from_buffers(buffers, ck)
+			if halo.is_empty():
+				continue
+			# 顶点按"相对组原点"的体素偏移平移（单位=体素，原生内部乘 scale），
+			# 与生产路径把组挂成一个节点时的定位方式一致。
+			var rel_voxels := Vector3(ck - group_origin) * float(VoxelChunk.CHUNK_SIZE)
+			var arr := VoxelChunkGenerator.generate_single_chunk_dense(
+					halo, aligned, SCALE, ck, rel_voxels, trans_flags)
+			if arr.is_empty():
+				continue
+			VoxelMesher.append_arrays(part, arr)
 		group_tris += VoxelMesher.triangle_count(part)
 		VoxelMesher.append_arrays(assembled, part)
 
 	assert_eq(group_tris, total,
-			"各组 build_group 的三角形数之和必须等于 build_all 的整份三角形数（%d）" % total)
+			"各组分段拼装的三角形数之和必须等于 build_all 的整份三角形数（%d）" % total)
 	assert_eq(VoxelMesher.triangle_count(assembled), total,
-			"逐组 build_group 再 append_arrays 拼接后的三角形总数必须等于 build_all；"
+			"逐组拼装再 append_arrays 拼接后的三角形总数必须等于 build_all；"
 			+ "不等说明分段拼装与整份生成不等价（常见原因：halo 缺邻居导致边界面多画，或 group 映射错位）")
 
 	# 再走一次 to_mesh：分组拼装结果转 mesh 后不应丢面（mesh 层守恒）

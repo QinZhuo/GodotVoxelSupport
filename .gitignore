@@ -24,9 +24,14 @@ gdextension/build*/
 # （用户下载插件文件夹后直接可用，无需自己编译）
 # 注意：CMake 产物会直接输出到 addons/VoxelSupport/Native/，其中无平台后缀的
 # 原始产物可忽略；带平台后缀的重命名版（如 .macos.debug.arm64）必须提交
+# 【命名】库名从 libvoxelnative 改为 libvoxelsupport（与 CMake add_library(voxelsupport)
+# 及 voxelsupport.gdextension 的 entry 名一致），故新旧两套名字都要忽略无后缀原始产物。
 addons/VoxelSupport/Native/libvoxelnative.dylib
 addons/VoxelSupport/Native/libvoxelnative.so
 addons/VoxelSupport/Native/libvoxelnative.dll
+addons/VoxelSupport/Native/libvoxelsupport.dylib
+addons/VoxelSupport/Native/libvoxelsupport.so
+addons/VoxelSupport/Native/libvoxelsupport.dll
 # MinGW 本地构建的中间产物（带 lib 前缀 + .dll.a 导入库），不入库
 addons/VoxelSupport/Native/libvoxelnative.windows.*
 addons/VoxelSupport/Native/*.dll.a
