@@ -250,10 +250,10 @@ const ANIM_MODEL_HEADER_SIZE := 8
 const ANIM_FRAME_HEADER_SIZE := 6
 
 ## 动画时序的两个缺省值 —— **全仓唯一真值**。
-## 【为什么必须收在这里】此前编辑模型缺省 4 fps、而读写判据/运行时缺省全是 12：
-## 新建的动画模型 anim_fps=4，判据「!= 12 才写」于是每份文件都多背一个 "fps":4；
-## 而没写 fps 键的历史文件读回来是 12 —— 同一份动画存读一轮，帧率差 3 倍，播放速度跟着变。
-## 用户定为 4（逐帧作画的手感偏慢）。全仓不得再出现裸 4 / 裸 12 作为动画 fps 缺省。
+## 【为什么必须收在这里】缺省值一旦分裂就会互相打架：编辑模型缺省 4 fps、读写判据与运行时
+## 缺省 12 时，新建的动画模型 anim_fps=4，判据「!= 12 才写」于是每份文件都多背一个 "fps":4；
+## 而没写 fps 键的文件读回来是 12 —— 同一份动画存读一轮，帧率差 3 倍，播放速度跟着变。
+## 取值定为 4（逐帧作画的手感偏慢）。全仓不得再出现裸 4 / 裸 12 作为动画 fps 缺省。
 const ANIM_FPS_DEFAULT := 4
 const ANIM_LOOP_DEFAULT := true
 
@@ -279,8 +279,8 @@ const NODE_CAMERAS_KEY := "cameras"
 ## 节点条的 `kind` 白名单（§7）。**唯一真值在这里，不在 Model/QVoxelNode**：清洗节点树的
 ## 是格式层（QVoxelFile._build_scene），它不能反向引用编辑层的类；而 QVoxelNode.KIND_* 反过来
 ## 引用本常量，依赖方向因此始终是 Model → Format。
-## 【踩过的坑】这两条原先是 QVoxelFile 里的字面量 "group"/"model"，而 QVoxelNode 里另有一对
-## 同名常量 —— 两处字面量各写一遍，改一处忘另一处时没有任何报错，只有"整棵子树被静默丢弃"。
+## 【不要写字面量】"group"/"model" 一旦在 QVoxelFile 与 QVoxelNode 各写一遍，改一处忘另一处时
+## 没有任何报错，只有"整棵子树被静默丢弃"。
 const NODE_KIND_GROUP := "group"
 const NODE_KIND_MODEL := "model"
 

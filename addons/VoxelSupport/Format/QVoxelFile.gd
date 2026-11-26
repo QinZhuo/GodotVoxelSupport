@@ -74,7 +74,7 @@ class QVoxelDocument extends RefCounted:
 
 	## 全部 model_id（统一为 int，升序）。
 	## 【为什么要有这个访问器】`models` 的键可能是 int（解析端产出）也可能是 str（调用方手写），
-	## 而 Godot 里 `0` 与 `"0"` 是不同的键 —— 混用会让 has()/取值静默落空，历史上正是它让增量写
+	## 而 Godot 里 `0` 与 `"0"` 是不同的键 —— 混用会让 has()/取值静默落空，让增量写
 	## 无声退化成全量。读写两侧一律经 model_ids()/model_blocks() 访问即可不踩坑。
 	func model_ids() -> Array[int]:
 		var out: Array[int] = []
@@ -132,7 +132,7 @@ class QVoxelSceneGraph extends RefCounted:
 
 
 ## 【解析期诊断收集器】把"非致命但需报告"的事件按 drop 两档归类累积。
-## 取代原先裸的 Array（只能存文本，无法区分"丢了模型"还是"丢了块"，于是三档退化成两档）；
+## 裸的 Array 只能存文本，无法区分"丢了模型"还是"丢了块"（于是三档退化成两档）；
 ## 本类让每一档都有独立计数，解析结束一次性并入 QVoxelReport。
 class QVoxelNotes extends RefCounted:
 	var texts: Array = []          ## 人类可读描述（并入 rep.warnings）
@@ -295,8 +295,8 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxelR
 			return null
 
 		# CRC 覆盖 length 的 4 字节 ‖ type 的 4 字节 ‖ 负载的 length 个字节（含尾部填充）。
-		# 【关键】必须与写入端用同一段字节（写入端先补零填充再算 CRC）：若一边不含填充、
-		# 另一边含填充，只要填充 ≥ 1 字节就会全部块 CRC 失败（曾经的 bug）。
+		# 【关键】必须与写入端用同一段字节（写入端先补零填充再算 CRC）：一边不含填充、
+		# 另一边含填充时，只要填充 ≥ 1 字节就会全部块 CRC 失败。
 		var payload := bytes.slice(payload_start, payload_start + length)
 		# 【CRC=0 约定：写入方声明"本块无校验值"】写入端 include_crc=false 时把 crc 字段填 0，
 		# 读取端据此跳过校验，使"无 CRC 文件"成为一条真实可用的路径。真 CRC 恰为 0 的概率是
@@ -525,8 +525,8 @@ static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 		rep.warnings.append("有 %d 个块引用了不存在的材质索引（>= entry_count=%d），已丢弃" % [mate_violations, mate_count])
 
 	# 场景图（NODE + CAMR）。**无条件**建：CAMR 相机是独立于 NODE 的顶层块，
-	# 曾经用 `if not doc.node.is_empty()` 守卫，于是「只有相机、还没有对象」的新建工程
-	# 一存一读就把相机丢了（_build_scene 自己已经处理好「nodes 键缺失 = 空世界」）。
+	# 用 `if not doc.node.is_empty()` 守卫会让「只有相机、还没有对象」的新建工程
+	# 一存一读就把相机丢掉（_build_scene 自己已经处理好「nodes 键缺失 = 空世界」）。
 	doc.scene = _build_scene(doc, rep)
 
 
@@ -557,9 +557,9 @@ static func _validate_blocks(blocks: Dictionary, n: int, B: int, has_bounds: boo
 				bad_keys.append(k)
 				continue
 		# MATE 索引越界（块内材质值必须 < entry_count）。
-		# 【必须无条件检查】曾有 `if mate_count > 0` 闸门，理由是"mate_count==0 时无从越界"，
-		# 但那是错的：mate_count==0 意味着**没有 MATE 块**，此时任何非零材质值都引用了不存在
-		# 的材质，恰是最该查出的情形 —— 闸门让"无 MATE 的文件带材质数据"完全逃过校验。
+		# 【必须无条件检查】不能用 `if mate_count > 0` 闸门：mate_count==0 意味着**没有 MATE
+		# 块**，此时任何非零材质值都引用了不存在的材质，恰是最该查出的情形 —— 闸门会让
+		# "无 MATE 的文件带材质数据"完全逃过校验。
 		# 【性能】用原生 voxel_value_range 一次扫描代替 32768 次 GDScript 循环
 		# （实测 196 块 247ms → 约 3ms）。
 		var rng := NativeLoader.voxel_value_range(buf as PackedInt32Array)
@@ -1214,7 +1214,7 @@ static func index_vxel_blocks(payload: PackedByteArray) -> Dictionary:
 
 ## 【子块级增量编码】由旧负载索引 + **变更内容覆盖层** + 删除集重建 VXEL 负载。
 ##
-## 与旧实现的根本差别：旧版要求传入"完整的新块字典"（全世界都得在内存里），本版只传**变了
+## 关键差别：要求传入"完整的新块字典"（全世界都得在内存里）的做法做不到增量，本版只传**变了
 ## 的那几块** —— 因为存储层已不再常驻全世界的解码镜像。未变子块在旧、新负载里偏移完全相同，
 ## 故把**连续的未变段**合并成一次 slice + append_array（原生 memcpy，1.7MB 约 1.5ms）；
 ## 脏块通常只有一两个 → 大段拷贝从 144 次降到 2~4 次。

@@ -5,8 +5,8 @@ extends RefCounted
 ## 粒子点云导出器：把体素 chunk 缓冲导出成 GPU 可直接消费的点云（定长 float 数组 + 三张纹理）。
 ##
 ## 【为什么是独立类，而不是数据层的一个方法段】点云导出是**纯派生计算**（输入块表 + 材质表，
-##   输出点云），与 QVoxelSource 的存储不变式（计数账 / 脏账 / 快照 / 流式）毫无关系；它此前
-##   在 QVoxelSource 里占了约 240 行，是那份"什么角色都干"的清单里最大的一块可搬走内容。
+##   输出点云），与 QVoxelSource 的存储不变式（计数账 / 脏账 / 快照 / 流式）毫无关系；
+##   写进数据层会让那份"什么角色都干"的清单再涨约 240 行。
 ##
 ## 【为什么不复用 VoxelParticleView】后者是 Node3D（需要场景树、要建 GPUParticles3D）；
 ##   而烘焙 / MCP 工具 / 无场景上下文的调用（@tool 脚本、命令行烘焙）根本没有树。
@@ -76,7 +76,7 @@ static func as_context(buffers: Dictionary, mats: Array, center: Vector3,
 ##   [b]注意不是"前 N 个"[/b]：上限处处等步长丢弃，覆盖整份数据，不偏向先遇到（先加载）的块。
 ## [param surface_only] 只留表面体素。**透明体素永远保留**（玻璃被包住也能看见后面）。
 ##
-## 【下采样为什么必须两遍扫】旧实现用"边收集边翻倍步长"的近似（reservoir 式），且判定条件
+## 【下采样为什么必须两遍扫】"边收集边翻倍步长"的近似（reservoir 式）不要用：判定条件
 ##   `seen < next_take` 里两者同步递增 → **恒假**，退化成"按字典插入序取前 max_points 个点"：
 ##   超过上限时后加载的 chunk 整块被丢弃（是**截断**，不是降采样），且结果依赖
 ##   `_chunk_buffers` 的插入序（同一份数据、不同加载顺序 → 不同点云）。
@@ -114,8 +114,8 @@ func build_particle_points(ctx: Dictionary, scale: float = -1.0,
 ##   bounds      内容包围盒（世界单位）
 ##   stride      每点 float 数
 ##
-## 【为什么像素先填进 PackedByteArray 再一次 create_from_data】旧实现每点 set_pixel 三次
-##   （位置 / 颜色 / 属性各一次），20 万点就是 60 万次逐像素调用 + 每次一次 Color 装箱；
+## 【为什么像素先填进 PackedByteArray 再一次 create_from_data】逐点 set_pixel 三次
+##   （位置 / 颜色 / 属性各一次）在 20 万点上就是 60 万次逐像素调用 + 每次一次 Color 装箱；
 ##   直接按 RGBAF 的字节布局写 float（每像素 16 字节）后一次建图，省掉全部逐像素调用。
 ##
 ## 【为什么颜色要转线性】FORMAT_RGBAF 是线性纹理，引擎不做 sRGB→linear 转换；
@@ -204,7 +204,7 @@ static func textures_from_points(pts: PackedFloat32Array) -> Dictionary:
 ##
 ## 【为什么要预计算成扁平数组】逐体素去查 materials 数组要几十毫秒（20 万点量级），
 ## 而且每次都要判断"是 VoxelMaterial 还是磁盘读回的 MATE Dictionary"。
-## 一张表**每次导出只算一次**（旧实现里 build_particle_textures 每点还会 new 一个 VoxelMaterial）。
+## 一张表**每次导出只算一次**（否则 build_particle_textures 还会逐点 new 一个 VoxelMaterial）。
 static func mat_table(mats: Array) -> PackedFloat32Array:
 	var n := maxi(mats.size(), 256)
 	var tbl := PackedFloat32Array()

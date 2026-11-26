@@ -99,8 +99,7 @@ Optional capability components (plain child nodes of VoxelRenderer):
    Use `STATIC` for static props / buildings / display models, `DYNAMIC` for anything you
    destroy or edit per-voxel (a destruction system **must** use `DYNAMIC`).
    Measured parity with imported ArrayMesh in `STATIC` mode, plus the reasoning, are in
-   `docs/渲染性能对比_QVX_vs_ArrayMesh.md`. What was changed in the 2026-11 refactor (layer
-split, what got deleted and why, verification numbers): `docs/重构实施记录_2026-11-25.md`.
+   `docs/渲染性能对比_QVX_vs_ArrayMesh.md`.
 
 **Storage and generation are two parallel parts**: `stream` stores (disk or memory), the
 `node` describes what to generate (a bounded `QVoxelModel` whose modifier chain the eval

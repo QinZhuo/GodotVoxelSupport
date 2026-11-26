@@ -43,11 +43,11 @@ static func generate_arrays_runtime(
 
 ## 将 generate_arrays_runtime 生成的字典数据组装为 ArrayMesh（必须在主线程调用）
 ## 【实现已收敛】"两桶数组 → surface"全仓只有一份真值：VoxelMeshGenerator.append_arrays_to_mesh。
-## 这里曾有一份逐行重复的 _merge_meshes + _make_arrays（与 VoxelMesher.to_mesh、
-## Mesh/VoxelMeshGenerator、QVoxelMeshExport 共四份），差异只藏在不报错的细节里
-## （空桶是否跳过、材质绑桶序号还是 surface 序号），故一并删除改为委托。
-## 【materials 必须从这里传下去，不能事后按桶序号补绑】曾有一版调用方先建出 mesh、再由
-## VoxelRenderer._apply_materials 按 get_surface_count() 的桶序号补绑 mats[0]/mats[1]：只要某个
+## 不要在本文件里再写 _merge_meshes + _make_arrays：与 VoxelMesher.to_mesh、
+## Mesh/VoxelMeshGenerator、QVoxelMeshExport 会变成四份重复实现，差异只藏在不报错的细节里
+## （空桶是否跳过、材质绑桶序号还是 surface 序号）。
+## 【materials 必须从这里传下去，不能事后按桶序号补绑】先建出 mesh、再由
+## VoxelRenderer._apply_materials 按 get_surface_count() 的桶序号补绑 mats[0]/mats[1] 是错的：只要某个
 ## chunk 或粗层大块**只有透明体素**（玻璃、水面），空桶被跳过后唯一的 surface 是 trans，却被绑成
 ## 实心材质 —— 玻璃/水面变不透光，且不报任何错。材质随 arrays 一起进 append_arrays_to_mesh，
 ## 由它按"实际 surface 序号"绑：这条不变式全仓只有一处维护。
@@ -91,9 +91,9 @@ static func generate_single_chunk_dense(
 
 ## 从"光环缓冲"生成单个 chunk 的**球体**网格数据（每体素一颗小球）。
 ##
-## 【为什么需要它】球体形状此前只有**导入路径**（VoxelMeshGenerator → generate_spheres_native）
+## 【为什么需要它】球体形状只在**导入路径**（VoxelMeshGenerator → generate_spheres_native）
 ## 支持，而运行时渲染走的是 generate_chunk_dense（只有方块面）。
-## 于是"模型能导成球、运行时却只能显示方块"—— 同一份数据在两条路径上长得不一样。
+## 缺了它就会"模型能导成球、运行时却只能显示方块"—— 同一份数据在两条路径上长得不一样。
 ## 本函数把球体能力补进运行时路径，两条路径共用同一原生内核。
 ##
 ## [param halo] 34³ 稠密光环（值 = 材质 ID，0 = 空）。用 halo 而不是 chunk 本体，
@@ -145,15 +145,15 @@ const HALO_INSET := 1
 const SPHERE_VERTEX_BUDGET := 200000
 
 
-# 【已移除：顶点色 AO（逐顶点环境光遮蔽烘进 Mesh.ARRAY_COLOR）】
-# 曾在本函数下方实现"按面外侧 3×3 九格数遮挡 → 灰度顶点色 → 材质侧
+# 【不做顶点色 AO（逐顶点环境光遮蔽烘进 Mesh.ARRAY_COLOR）】
+# 不要在下方的网格生成里做"按面外侧 3×3 九格数遮挡 → 灰度顶点色 → 材质侧
 # vertex_color_use_as_albedo 乘进 albedo"，实测**观感更差**：体素表面本来就靠
 # 硬边直角与方向光/投影读体积，AO 在每个凹角再压一层暗，结果是
 # ① 大面出现不该有的亮度渐变（"面是平面"这条信息被抹掉）；
 # ② 转角/缝隙糊成一团黑，体素颗粒反而看不清；③ 网格生成耗时涨 1.5~2 倍。
 # 结论：本渲染器不提供几何级 AO。需要"凹处更暗"的场合请用**材质分档**
 #（PcgSurfaceTint 那套：把凹处换成同色系更暗的一档体素）—— 那才是体素画法。
-# 同时 VoxelMeshGenerator._configure_*_material 也不再开 vertex_color_use_as_albedo。
+# 同时 VoxelMeshGenerator._configure_*_material 不要开 vertex_color_use_as_albedo。
 
 
 

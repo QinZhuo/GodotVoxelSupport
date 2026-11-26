@@ -24,13 +24,13 @@ extends Node3D
 ##     / lod_mesh / has_lod_mesh / lod_mesh_keys / mount_lod_mesh / clear_lod_mesh
 ##     / mark_lod_block_empty / lod_materials / lod_level_count / set_lod_level_count / shift_render
 ##   · 数据层只用 QVoxelSource 公开方法（含为本层开放的三个粗层快照壳）。
-##   **绝不读写内核的 `_` 前缀成员** —— 那正是旧实现双向耦合的症结。
+##   **绝不读写内核的 `_` 前缀成员** —— 否则就是双向耦合。
 ## 反向只有两件事，都是查询/转发而非依赖：内核问"这些 chunk 可见吗"（filter_chunks），
 ## 内核转发"该调度了"（process_streaming / process_deferred_chunks / process_lod）。
 ##
-## 【取代了什么】旧实现同时存在 VoxelInfiniteLayer（RefCounted，反向读宿主 7 个私有 @export）
-## 与 VoxelPagedLayer（Node3D，逐行复制的继任者）：共 2655 行、44 个同名函数、500~800 行
-## 逐字重复，且默认跑旧层、新层躺在代码里没人装配。本类是二者合并后的**唯一**实现。
+## 【只有这一层】视点调度（流式卸载 / LOD 分带 / 延迟构建）全部归本类，**没有第二个平行实现**：
+## 两个各写一半的视点层会带来 2655 行 / 44 个同名函数 / 500~800 行逐字重复，
+## 而"默认跑哪一个"永远说不清。
 ##
 ## 【配置为什么一半在这里、一半在渲染器】距离/层数/模式旋钮（view_distance /
 ## unload_distance / lod_count / visibility_mode / visibility_check_interval）已被场景文件引用，
@@ -164,10 +164,9 @@ var _lod_outer: Array[float] = []
 ## 块级调度账本，按 LOD 层级平行；index 0 = LOD0（chunk 层不记账），>=1 才有内容。
 ## `_levels[level][block_key] = {gen:int, pending:bool, rebuild:bool, retry:int}`
 ##
-## 【为什么一张表而不是四张】旧实现是 _lod_pending_tasks / _lod_rebuild /
-## _lod_null_retries / _lod_block_gen 四张平行表，每个 block 的状态散在四处，
-## clear/erase 要记得四张都清（漏一张就随探索范围无界增长），shift 要平移四次。
-## 合并成一条记录后，这些操作全部退化为"一次 erase / 一次遍历"。
+## 【一张表而不是四张】pending / rebuild / null-retry / gen 若各用一张平行表，每个 block 的
+## 状态就散在四处：clear/erase 要记得四张都清（漏一张就随探索范围无界增长），shift 要平移
+## 四次。合并成一条记录后，这些操作全部退化为"一次 erase / 一次遍历"。
 var _levels: Array[Dictionary] = []
 
 ## 数据 chunk 范围（needed 枚举剪枝：球体全高大部分是空气层，跳过空 block 的降采样派发 ——
@@ -699,8 +698,8 @@ func _process_coarse_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir:
 					needed[bk] = dsq
 
 	# 1b. 移除 / 可见性（一趟）：遍历"已有 mesh 的 block"，同时决定"删不删"与"显不显"。
-	# 【为什么合并】旧实现是两趟 —— 先收集移除、再做可见性 —— 且两趟各用 block_dist
-	# 重算一次开方距离（本层每帧上千个 block × 两次 sqrt）。距离直接复用 1a 缓存的平方值，
+	# 【为什么合并】拆成两趟（先收集移除、再做可见性）会用 block_dist 重算一次开方距离
+	# （本层每帧上千个 block × 两次 sqrt）。距离直接复用 1a 缓存的平方值，
 	# 只有不在 needed 里的预加载常驻块才现算一次，全程不开方。
 	# 移除条件：>unload 卸载；<inner-margin 进入内层带（内层就绪才移除）；
 	# >upper+preload 且更粗层已就绪（预生成范围外不再常驻）。
@@ -846,7 +845,7 @@ func filter_chunks(chunks: Array[Vector3i]) -> Array[Vector3i]:
 ## 延迟队列晋升：视锥外的 chunk 在相机转向或走近后补建。
 ## 【限量】每轮最多晋升 stream_load_per_frame 个：走近时一次唤醒上千个待建 chunk 会让
 ## 主线程快照 + 生成 + GPU 上传同时爆发（实测 25 个渲染器 308ms/帧），必须摊平。
-## 【先收集后修改】字典迭代期间增删会漏元素（旧实现在循环体里直接 erase）。
+## 【先收集后修改】字典迭代期间增删会漏元素（别在循环体里直接 erase）。
 ## 【FULL 下直接返回】FULL 语义是全量构建，延迟队列不该有内容（on_visibility_mode_changed 已清）。
 func process_deferred_chunks() -> void:
 	var r := renderer
@@ -1045,10 +1044,10 @@ func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	var standalone := data.can_mesh_lod_block_standalone(level, bk)
 	var snapshot := data.read_lod_block_data_snapshot(bk, level) if standalone \
 			else data.read_lod_block_chunk_snapshot(bk, level, true)
-	# 【材质数组不拷贝】原先这里是 renderer.lod_materials(level).duplicate()：一轮可派 200 个
-	# 粗层任务，就是 200 份整数组拷贝，只为让 worker 读到"派发那一刻的值"。而副本能提供的
-	# 保证（在途期间内容不被改写）已由 VoxelMaterialCache 的"重建即换数组对象"提供
-	# （见 aligned_shared 的契约）。故直接传共享引用：worker 只读，零分配。
+	# 【材质数组不拷贝】duplicate() 一轮可派 200 个粗层任务，就是 200 份整数组拷贝，只为让
+	# worker 读到"派发那一刻的值"。而副本能提供的保证（在途期间内容不被改写）已由
+	# VoxelMaterialCache 的"重建即换数组对象"提供（见 aligned_shared 的契约）。
+	# 故直接传共享引用：worker 只读，零分配。
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_build.bind(
 		snapshot, standalone, bk, level, int(rec.get(_K_GEN, 0)), renderer.voxel_scale,
 		data.center_offset, renderer.lod_materials(level), renderer.surface_materials(), handle)))
@@ -1313,8 +1312,8 @@ func remove_lod_block(level: int, bk: Vector3i) -> void:
 	_clear_block_state(level, bk)
 
 
-## 清除某层 block 的调度账本。合并成一张表后清账只需一次 erase ——
-## 旧实现是四张平行表，漏清一张就随探索范围无界增长。
+## 清除某层 block 的调度账本。一张表下清账只需一次 erase ——
+## 四张平行表时漏清一张就随探索范围无界增长。
 func _clear_block_state(level: int, bk: Vector3i) -> void:
 	if level < 1 or level >= _levels.size():
 		return

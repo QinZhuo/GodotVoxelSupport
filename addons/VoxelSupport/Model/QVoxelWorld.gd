@@ -620,7 +620,7 @@ func find_parent(target: QVoxelNode) -> QVoxelGroup:
 
 
 ## 节点在父列表里的下标（不在树上返回 -1）。与 `find_parent` 配对，用于记录"撤销要挂回哪儿"。
-## **唯一实现**：`node_index` 只是它的转发别名（历史上有两个同义方法，各写一遍判空）。
+## **唯一实现**：`node_index` 只是它的转发别名，不要再写第二个同义方法各判一遍空。
 func index_of(target: QVoxelNode) -> int:
 	# Array.find() 对空数组返回 -1，故不必再判 _list_holding 是否为空（那层分支是冗余的）。
 	return _list_holding(target).find(target)
@@ -832,9 +832,9 @@ func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 ## NODE JSON：把场景树写进 nodes，其余键**原样保留**。
 ## 【为什么是"打补丁"而不是"重新生成"】NODE 里还有相机、动画、我们的未知键。
 ## 重新生成会静默丢掉它们；打补丁则只碰自己拥有的键（§7：格式不解释未知键）。
-## 【为什么显式 erase("layers")】按 id 索引的分组表已被树取代（qvx 3）。node 里若还留着
-## 旧的 layers 键，写回去就等于"存盘时复活了一个已经删掉的概念"，下次读盘还会被当成有效数据。
-## 【为什么也要 erase("animations")】旧动画键按"节点下标"寻址，与 v3 的嵌套树对不上号
+## 【为什么显式 erase("layers")】按 id 索引的分组表已由树取代（qvx 3）。node 里留着
+## layers 键再写回去，就等于"存盘时复活一个已废弃的概念"，下次读盘还会被当成有效数据。
+## 【为什么也要 erase("animations")】按"节点下标"寻址的动画键与 v3 的嵌套树对不上号
 ## （§12.4：动画时序 v4 起在 ANIM 块的 meta 里，按 model_id 寻址）。留着它 → 下次读盘拿到一份
 ## 指向错误节点的动画元数据，且与 ANIM 的 meta 并存时谁生效取决于读取顺序（"两处真值"正是要消掉的）。
 func _node_json() -> Dictionary:

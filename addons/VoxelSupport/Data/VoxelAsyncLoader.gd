@@ -116,8 +116,8 @@ func get_unready_keys(lod: int = 0) -> Array:
 
 
 ## 撤销某个 key 的在途 / 就绪登记（流式卸载：超出范围的请求不再需要结果）。
-## 后台任务无法真正中止，但其回填会因"登记已撤销"而被丢弃（见 _resolve）——这正是
-## 旧实现"结果回来由卸载逻辑丢弃"想要的效果，只是现在由编排器一次做对。
+## 后台任务无法真正中止，但其回填会因"登记已撤销"而被丢弃（见 _resolve）——
+## 结果由编排器在这里一次丢弃，不要依赖下游卸载逻辑去兜。
 func cancel(chunk_key: Vector3i, lod: int = 0) -> void:
 	_mutex.lock()
 	if lod < _pending.size():

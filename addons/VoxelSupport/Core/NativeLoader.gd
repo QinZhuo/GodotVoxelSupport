@@ -55,7 +55,7 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_all_flat",
 	&"collect_bounds",
 	&"install_flat_voxels",
-	# 破坏内核：VoxelDestructible 的硬依赖。此前漏列，导致"库方法不全"这类版本不匹配
+	# 破坏内核：VoxelDestructible 的硬依赖。漏列会让"库方法不全"这类版本不匹配
 	# 在校验阶段被放过，直到实际调破坏时才炸。
 	&"damage_shape",
 	# 网格体素化（外部模型导入）

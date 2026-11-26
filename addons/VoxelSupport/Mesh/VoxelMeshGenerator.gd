@@ -17,7 +17,7 @@ static func generate_mesh(voxel: VoxAsset, options: Dictionary, path: String = "
 	if not gen.mesh or gen.mesh.get_surface_count() == 0:
 		return null
 	# 球体路径的 UV2 只在单网格入口展开（wait_finished 刻意跳过），且只展开这一次 ——
-	# 此前这里对 cube 又展开一遍，同一张网格白跑两次昂贵的 unwrap。
+	# 不要在这里对 cube 也展开一遍：同一张网格会白跑两次昂贵的 unwrap。
 	if unwrap and gen.shape == VoxelImportOptions.Shape.sphere:
 		gen.mesh.lightmap_unwrap(Transform3D.IDENTITY, options[VoxelImportOptions.UV2_TEXEL_SIZE])
 	print_verbose("generate_mesh mesh: ", (Time.get_ticks_usec() - time) / 1000.0, "ms", gen.mesh.get_faces().size() / 6, "face")
@@ -33,8 +33,8 @@ const MATERIAL_REFRACTION_SCALE := 0.01
 
 
 ## 统一配置实心材质（编辑器/运行时共用）
-## 【不开 vertex_color_use_as_albedo】本渲染器不提供几何级顶点色 AO（曾实现过，
-## 实测观感更差，原因记录在 VoxelChunkGenerator 的"已移除：顶点色 AO"那段）。
+## 【不开 vertex_color_use_as_albedo】本渲染器不提供几何级顶点色 AO（实测观感更差，
+## 原因记录在 VoxelChunkGenerator 的「不做顶点色 AO」那段）。
 ## 凹处的层次改为用**材质分档**表达（同色系更暗的一档体素），那才是体素画法。
 static func _configure_solid_material(m: StandardMaterial3D) -> void:
 	m.emission_enabled = true
@@ -217,9 +217,9 @@ static func _unique_name(used: Dictionary, wanted: String) -> String:
 
 
 ## 分项网格的落盘目录 = 源资产去掉扩展名的同名目录（`cars.vox` → `cars/`）。
-## 【不要加扩展名后缀】曾一度返回 `<stem>_<ext>`（`cars.vox` → `cars_vox/`）以避免同名情况下
-## `.vox` 与 `.qvx` 的分项互相覆盖，但那让所有既有项目的产物目录集体改名、留下一地孤儿目录，
-## 代价远大于收益。目录名保持与历史版本一致，是**对外契约**，别再改。
+## 【不要加扩展名后缀】返回 `<stem>_<ext>`（`cars.vox` → `cars_vox/`）能让同名 `.vox` 与
+## `.qvx` 的分项互不覆盖，但会让所有既有项目的产物目录集体改名、留下一地孤儿目录，
+## 代价远大于收益。目录名是**对外契约**，别再改。
 static func _item_dir(path: String) -> String:
 	return path.get_basename()
 
@@ -233,8 +233,8 @@ static func _get_mesh(name: String, path: String, options: Dictionary) -> ArrayM
 	DirAccess.make_dir_absolute(_item_dir(path))
 	# 项名可能来自用户写的节点名（`/`、`:` 等是非法路径字符）：落盘前先净化，否则保存失败。
 	var child_path := _item_dir(path) + "/" + _safe_file_name(name) + ".res"
-	# 存在性检查必须针对**要加载的那个文件**（child_path）。此前检查的是源资产 path，
-	# 于是"缓存的 .res 存在但源资产不在"时会漏加载，反之也会误走加载分支。
+	# 存在性检查必须针对**要加载的那个文件**（child_path）。查源资产 path 会在
+	# "缓存的 .res 存在但源资产不在"时漏加载，反之也会误走加载分支。
 	var mesh := ResourceLoader.load(child_path) as ArrayMesh if FileAccess.file_exists(child_path) else null
 	if not mesh:
 		mesh = ArrayMesh.new()
@@ -252,7 +252,7 @@ static func _safe_file_name(name: String) -> String:
 
 
 ## 材质通道图（albedo/metal/rough/emission）——一次导入只构建一次。
-## 此前每张纹理都重新构建全部 4 张图（4 材质 × 4 纹理 = 16 次），纯浪费。
+## 每张纹理都重新构建全部 4 张图是 4 材质 × 4 纹理 = 16 次，纯浪费。
 func _get_channel_images() -> Dictionary:
 	if _channel_images.is_empty():
 		_channel_images = _build_channel_images(_materials_src())
@@ -510,8 +510,8 @@ func start_generate_mesh(voxels: Dictionary[Vector3i, int]) -> void:
 
 ## 由块缓冲生成网格（QVX 路径的实例入口：整资产 / MeshLibrary 分项共用）。
 ## layout_offset 为体素单位的原点偏移（见 VoxelWorldUtil.origin_offset）。
-## 与体素路径同一套逐项缓存：命中就不跑内核 —— `.qvx` 分项此前无条件重建，
-## 改一个模型时其余项全量重算，正是"分项缓存只覆盖 .vox"这个缺口的来源。
+## 与体素路径同一套逐项缓存：命中就不跑内核 —— 少了这层，改一个模型时其余
+## `.qvx` 分项会全量重算（"分项缓存只覆盖 .vox"的缺口）。
 func start_generate_mesh_from_chunks(chunks: Dictionary, layout_offset: Vector3) -> void:
 	var trans_flags := VoxelMaterial.build_trans_flags(_materials_src())
 	# 块表 hash 的代价是扫一遍 PackedInt32Array，远小于重跑一次原生内核。

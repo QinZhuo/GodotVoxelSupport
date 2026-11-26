@@ -5,7 +5,7 @@ extends RefCounted
 ## 【为什么不复用 VoxAsset】VoxAsset 的形状是 MagicaVoxel 专属的：`nTRN/nGRP/nSHP` 场景图、
 ## `frames` 动画帧、`LAYR` 可见性、Z-up、以及 `VoxelModel.size` 的"按尺寸居中 + Z 翻转"约定。
 ## QVX 的对应概念完全不同——**一个 `model_id` 就是一个 `VXEL`，摆放由 `NODE` 的 transform 决定**。
-## 把 QVX 塞进 VoxAsset 会有三处失真（此前实测）：
+## 把 QVX 塞进 VoxAsset 会有三处失真（实测）：
 ##   1. `check_nodes()` 伪造成"每模型一个 frame"，而 `VoxelFrame` 合并分支在 index==0 时短路
 ##      → **多模型只导入第一个，其余静默丢失**；
 ##   2. `NODE` 场景图完全不参与 → **各模型的位置/旋转丢失**；
@@ -100,7 +100,7 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 		if blocks is Dictionary and not (blocks as Dictionary).is_empty():
 			out.models[int(mid)] = (blocks as Dictionary).duplicate()
 	# 帧动画（§12）：格式层已把块级增量还原成每帧的**完整块表**，这里只需键类型归一 + 补元数据。
-	# 时序 meta 直接取 doc.anim_meta（v4 起时序就在 ANIM 块里，原先那层转发函数已无内容）。
+	# 时序 meta 直接取 doc.anim_meta（v4 起时序就在 ANIM 块里，不经任何转发层）。
 	var anim_meta: Dictionary = doc.anim_meta
 	for mid in doc.frames:
 		var frames: Variant = doc.frames[mid]

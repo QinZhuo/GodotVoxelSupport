@@ -2,9 +2,9 @@ class_name VoxelConnectivity
 extends RefCounted
 
 ## 6 方向连通性内核：泛洪、连通分组、支撑（悬空）判定。
-## 【为什么单独成类】这些算法原先长在 `QVoxelSource`（2200+ 行的 God 类）里，但它们与
-## "体素怎么存"无关 —— 只依赖"某位置是不是实体素"这一个判据。抽成纯函数库后，
-## 存储/序列化不再被连通性代码挤占，连通性也能脱离 `QVoxelSource` 单测（传个 lambda 当判据即可）。
+## 【为什么单独成类】这些算法与"体素怎么存"无关 —— 只依赖"某位置是不是实体素"这一个判据。
+## 放回 `QVoxelSource` 会让那份 2200+ 行的 God 类再涨一截、存储/序列化被连通性代码挤占，
+## 连通性也没法脱离 `QVoxelSource` 单测（传个 lambda 当判据即可）。
 ## 【依赖方向】本类**不引用** `QVoxelSource`（无反向依赖），判据由调用方以参数传入：
 ##   `is_solid: Callable(pos: Vector3i) -> bool`  实体素判据
 ##   `all_positions: Callable() -> Array`         全量位置枚举（只在确实需要全量时才会被调用）
@@ -80,9 +80,9 @@ static func partition_connected(positions: Array) -> Array:
 ## 找出"悬空"体素：与贴地(y==0)体素 6 方向连通判定，完全断开的返回
 ## 这是崩塌检测的底座：全量判定哪些与地面断开
 ## voxels_set 提供时只在该集合内判定（子集场景）；否则基于全部实体素
-## 【全量路径已下沉原生】旧实现要跑**两趟** all_positions()（每趟都含一次 stream 合并，
-## 并把百万级位置装箱成 Array）再在其上做 GDScript 字典 flood fill —— 大世界是秒级
-## 主线程阻塞。现在只枚举一趟，flood fill 交给原生（见 NativeLoader.find_unsupported_positions）。
+## 【全量路径必须走原生】在 GDScript 里跑 all_positions() 再在其上做字典 flood fill 是秒级
+## 主线程阻塞（每趟含一次 stream 合并 + 百万级位置装箱）。这里只枚举一趟，flood fill 交给
+## 原生（见 NativeLoader.find_unsupported_positions）。
 ## 【必须传"位置集合"而非 chunk 缓冲】判据经 is_solid 会访问**仅存在于磁盘**的 chunk，
 ## 只读内存缓冲会把那些体素误判成悬空。
 static func find_unsupported(voxels_set: Dictionary, all_positions: Callable, is_solid: Callable) -> Dictionary:

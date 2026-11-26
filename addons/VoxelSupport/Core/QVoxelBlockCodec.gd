@@ -41,10 +41,10 @@ static func unpack(codec: int, payload: PackedByteArray, n: int) -> PackedInt32A
 
 
 # 块**表**（Dictionary[Vector3i, PackedInt32Array]）的通用工具
-# 【为什么这些也放这里】判空与键序原先在 QVoxelFile / QVoxelModel / QVoxelFrame / QVoxelWorld
-# 各写了一遍（判空 5 份，其中 2 份是 GDScript 逐体素循环）。它们看起来各只三五行，但落盘字节
-# 的确定性、空块回收的正确性全押在"所有实现完全一致"上 —— 任何一处漂移都不报错，只写出
-# 顺序不同/空块残留的文件。故收敛成本类（Model→Format 是正向依赖）。
+# 【为什么这些也放这里】判空与键序若在 QVoxelFile / QVoxelModel / QVoxelFrame / QVoxelWorld
+# 各写一遍（判空 5 份，其中 2 份是 GDScript 逐体素循环），虽然各只三五行，但落盘字节的确定性、
+# 空块回收的正确性全押在"所有实现完全一致"上 —— 任何一处漂移都不报错，只写出顺序不同/
+# 空块残留的文件。故收敛成本类（Model→Format 是正向依赖）。
 
 ## 单块是否全空。**必须用原生 count(0)**：逐体素 GDScript 扫描在写盘路径上是秒级开销
 ## （实测 B=32 的世界级联判空从秒级降到毫秒级）。

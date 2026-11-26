@@ -76,9 +76,9 @@ var _write_result: Array = []
 var _inflight: Dictionary = {}
 
 # 内存状态：只留"未落盘的改动"，不留全世界的解码镜像
-# 【为什么不再常驻全世界】旧实现用 _models 把文件里每个 chunk 都解码后长期留在内存，
-# 内存随探索范围**无界增长**。但"已落盘的干净数据"本就由磁盘 + 数据层 QVoxelSource 的流式
-# 缓存（受流式半径界定）共同持有，存储层再存一份纯属重复。于是这里只留尚未落盘的部分：
+# 【不要常驻全世界】把文件里每个 chunk 都解码后长期留在内存会让内存随探索范围**无界增长**。
+# "已落盘的干净数据"本就由磁盘 + 数据层 QVoxelSource 的流式缓存（受流式半径界定）共同持有，
+# 存储层再存一份纯属重复。于是这里只留尚未落盘的部分：
 #   _dirty_buffers  写入覆盖层（save_chunk 的产物）
 #   _deleted        删除墓碑（否则已删的块会被块索引"复活"）
 # 越过它们之后取值路径只有一条：**按块索引 seek 并从文件读那一块**（见 _read_clean_chunk）。
@@ -86,9 +86,9 @@ var _inflight: Dictionary = {}
 
 ## 写入覆盖层：chunk_key(Vector3i) → PackedInt32Array。
 ## 只装"改了但还没写进文件"的块；落盘成功即整体换出丢弃，条数受 auto_flush_dirty 上界约束。
-## 【为什么不按 model_id 嵌套】QVX 一个文件可装多个 model，但本流只承载"世界层"
-## 一个 model（恒定 LOD0_MODEL_ID，见类注释）。旧实现照格式层的形状套了
-## model_id → {chunk_key: buf} 一层，于是 LOD0_MODEL_ID 出现在 20 处取值前、
+## 【不按 model_id 嵌套】QVX 一个文件可装多个 model，但本流只承载"世界层"
+## 一个 model（恒定 LOD0_MODEL_ID，见类注释）。照格式层的形状套
+## model_id → {chunk_key: buf} 一层，会让 LOD0_MODEL_ID 出现在 20 处取值前、
 ## _restore_inflight 与 _count_pending 多出只为 model 1..N 服务的循环 —— 而那些 model
 ## 本流从不写（磁盘上若有多 model 的 VXEL，原样搬运）。model 维度只在交给格式层的
 ## 边界上临时还原（见 _write_file）。
@@ -137,9 +137,9 @@ var _dirty_global := false
 
 ## 【增量写】上次解析出的块字节索引（doc.block_index 的副本）。
 ## 用于搬运未变块的原始字节；落盘失败或索引异常时置空 → 下次退化为全量写（安全）。
-## 【为什么不再常驻"原始文件字节"】此前与它配对还留了一份 `_raw_bytes` = 整份文件的
-## 字节副本，等于在解码后的世界之外又常驻一份编码后的世界（内存翻倍）。
-## 现在增量写的基准字节**按需从磁盘读一次**（见 _read_base_bytes）：读盘是 memcpy 级 I/O，
+## 【不要常驻"原始文件字节"】另留一份 `_raw_bytes` = 整份文件的字节副本，等于在解码后的
+## 世界之外又常驻一份编码后的世界（内存翻倍）。增量写的基准字节**按需从磁盘读一次**
+## （见 _read_base_bytes）：读盘是 memcpy 级 I/O，
 ## 相比"重编码全世界"（CPU 密集）代价极小，而写盘的主要 I/O 本就在后台线程承担。
 var _block_index: Array = []
 
@@ -389,7 +389,7 @@ func _wait_pending_write() -> void:
 	_on_write_done(_write_serial, _write_result)
 
 
-## 是否可走增量路径：必须有上次的块索引（即此前已 load 或写过一次）且磁盘上有基准文件。
+## 是否可走增量路径：必须有上次的块索引（即已 load 或写过一次）且磁盘上有基准文件。
 func _can_write_incremental() -> bool:
 	return not _block_index.is_empty() and FileAccess.file_exists(file_path)
 
@@ -518,7 +518,7 @@ func _materials_to_qvx() -> Array:
 
 ## 未落盘的写入（_dirty_buffers）→ QVX doc.models（**只含脏块**，不是全世界）。
 ## 统一输出 int 键；QVoxelDocument 的 model_ids()/model_blocks() 会兼容两种键，
-## 故读取方无需关心键类型（历史上 int/str 混用曾让增量写无声退化成全量）。
+## 故读取方无需关心键类型（int/str 混用会让增量写无声退化成全量）。
 ## 这里不做"空块剪除"——save_chunk 早已把全空块转成 erase_chunk（见那里的注释）。
 func _overlay_doc_models() -> Dictionary:
 	if _dirty_buffers.is_empty():
@@ -646,7 +646,7 @@ func _collect_cach_offsets(lod: int, keys: Array, out: Dictionary) -> void:
 func _pack_lod_block(lod: int, key: Vector3i, buf: PackedInt32Array) -> PackedByteArray:
 	if buf.size() != CHUNK_VOLUME:
 		return PackedByteArray()
-	# 一次完成"选 codec + 出字节"（原生）。此前 pick + pack 是两趟 GDScript 逐元素扫描，
+	# 一次完成"选 codec + 出字节"（原生）。pick + pack 分成两趟 GDScript 逐元素扫描是
 	# 实测约 15ms/块（CACH 重写一次可能带几百个粗层块）。
 	var picked := QVoxelBlockCodec.choose_and_pack(buf, CHUNK_VOLUME)
 	var codec: int = picked.get("codec", QVoxelSpec.CODEC_EMPTY)
@@ -789,8 +789,8 @@ func _count_pending() -> int:
 ## lod=0 → 写入覆盖层（落盘时才进 VXEL model 0）；lod>=1 → CACH 派生缓存（见类注释）。
 func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> void:
 	_ensure_loaded()
-	# 空块 = 不存在（P2）：全零与空数组一律当"删除"处理（save_chunk 的旧实现在写盘时才剪
-	# 全零块，于是内存里会留一个永远不落盘的幽灵块，has_chunk 与磁盘分叉）。判空用原生 count(0)。
+	# 空块 = 不存在（P2）：全零与空数组一律当"删除"处理（等写盘时才剪全零块，会让内存里
+	# 留一个永远不落盘的幽灵块，has_chunk 与磁盘分叉）。判空用原生 count(0)。
 	if buffer.is_empty() or buffer.count(0) == buffer.size():
 		erase_chunk(chunk_key, lod)
 		return
@@ -875,7 +875,7 @@ func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
 	for k in order:
 		if not _deleted.has(k):
 			out.append(k)
-	# 覆盖层里"磁盘上还没有"的新块（本轮的净新增）
+	# 覆盖层里"磁盘上还没有"的新块
 	for k in _dirty_buffers:
 		if not subs.has(k):
 			out.append(k)

@@ -4,11 +4,11 @@ extends RefCounted
 
 ## MATE 条目（材质表项）的**唯一**语义实现：12 字节 ↔ Dictionary。
 ##
-## 【为什么单独一个类】MATE 的键形状原先有**两种**：读盘路径（本类的 decode）产出
-## 12 键（含 r/g/b/a），而 QVoxelWorld 建空气条目时借的是 `VoxelMaterial.air_mate()` —— 它只有
-## 8 键、**没有 r/g/b/a**。于是 `material_color()` 读那种条目时按"缺键 → 缺省 r=255,g=0,b=255"
-## 算，返回**洋红**，并由 Mesh/QVoxelScript 原样导给用户脚本。洋红在本工程里是"错误色"的约定，
-## 用户看到的是一个没有任何报错的错色。收敛到本类后，"空气条目"与"入文件条目"是同一个形状。
+## 【为什么单独一个类】MATE 的键形状必须**唯一**：读盘路径（本类的 decode）产出 12 键
+## （含 r/g/b/a），而 `VoxelMaterial.air_mate()` 只有 8 键、**没有 r/g/b/a**。两种形状并存时
+## `material_color()` 读后一种会按"缺键 → 缺省 r=255,g=0,b=255"算，返回**洋红**，并由
+## Mesh/QVoxelScript 原样导给用户脚本。洋红在本工程里是"错误色"的约定，用户看到的是一
+## 个没有任何报错的错色。收敛到本类后，"空气条目"与"入文件条目"是同一个形状。
 ##
 ## 【canonical 形状 = 12 键】rgba / r / g / b / a / metal / rough / hardness / mass / e_r / e_g / e_b。
 ## r/g/b/a 是 rgba 的冗余展开（面板与 VoxelMaterial 都爱按通道读），**权威值是 rgba**：
@@ -110,7 +110,7 @@ static func encode(entries: Array) -> PackedByteArray:
 
 
 ## 条目 → 颜色。**只认 rgba**（权威值）；条目不是 Dictionary 时返回洋红（可见的错误色）。
-## 【为什么不读 r/g/b/a】那四个键是展开值，历史上恰恰因为"某些条目没有它们"而产生洋红。
+## 【为什么不读 r/g/b/a】那四个键是展开值，并非每条都带 —— 缺键时算出来的就是洋红。
 static func color(entry: Variant) -> Color:
 	if not (entry is Dictionary):
 		return Color.MAGENTA

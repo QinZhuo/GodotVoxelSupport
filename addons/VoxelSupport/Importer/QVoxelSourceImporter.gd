@@ -14,8 +14,8 @@ extends EditorImportPlugin
 ## 选项名统一取自 VoxAsset 单一出处（与 VoxelMeshImporter 共用，避免同值重复定义）
 const frame_index := VoxelImportOptions.FRAME_INDEX
 const scale := VoxelImportOptions.SCALE
-## 资产原点：与 VoxelMeshImporter 同名同义（原先是本类独有的 `mesh/center` 布尔，
-## 只表达"居中/不居中"两态，无法表达"内容居中"与"保留作者摆放"——统一成三态枚举）。
+## 资产原点：与 VoxelMeshImporter 同名同义（不用一个 `mesh/center` 布尔：它只表达
+## "居中/不居中"两态，无法表达"内容居中"与"保留作者摆放"——故统一成三态枚举）。
 const origin := VoxelImportOptions.ORIGIN
 
 

@@ -14,7 +14,7 @@ extends RefCounted
 ## 这正是本工具存在的理由。
 
 const MCP_DIR := "res://addons/DEVFramework/MCP/"
-## 契约工厂文件名: 新框架把 schema 工厂合进了 MCPToolContract.gd(老版本是单独一个 MCPToolSchema.gd)。
+## 契约工厂文件名: schema 工厂在 MCPToolContract.gd（旧布局是单独一个 MCPToolSchema.gd）。
 ## 按路径载入时必须两个都认 —— 认不出来不报错, 只是整个 provider 静默不注册, 工具从 tools/list 安静消失。
 const CONTRACT_FILES := ["MCPToolContract.gd", "MCPToolSchema.gd"]
 

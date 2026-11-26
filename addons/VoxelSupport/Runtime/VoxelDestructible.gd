@@ -36,13 +36,12 @@ extends Node3D
 ## 支持球形/盒形/单体素/射线破坏 + 逐体素健康度 + 悬空崩塌 + 粒子碎片
 ## 碎片使用 GPU 粒子系统，无物理碰撞体，高性能
 ##
-## 【已移除的两套机制】（统一破坏管道时清理，勿再加回）
-##   · **整体健康度**（`health` 字段 + `repair()`）：它是与"逐体素健康度"平行的第二套耐久
-##     模型（每移除 1 个体素扣 0.5，扣到 0 就 destroy_all），全仓零读取方、零监听。逐体素
-##     健康度由 `_edit`（VoxelEditKernel）负责 —— 那才是唯一的一份。
-##   · **`mesh_updated` 转发**：曾把宿主渲染器的同名信号在本组件上重播一次，以兼容继承形态
-##     的存量调用方；实测所有监听方（demo）连的都是**渲染器自己的**信号，本组件这份转发只是
-##     每宿主多一条无用连接，故连同 _bind/_unbind/_on_host_mesh_updated 一并删除。
+## 【不要加回这两套机制】
+##   · **整体健康度**（`health` 字段 + `repair()`）：它与"逐体素健康度"是平行的第二套耐久
+##     模型（每移除 1 个体素扣 0.5，扣到 0 就 destroy_all）。耐久只有一份，归 `_edit`
+##     （VoxelEditKernel）。
+##   · **`mesh_updated` 转发**：把宿主渲染器的同名信号在本组件上重播一遍。监听方（demo）
+##     连的都是**渲染器自己的**信号，这份转发只是每宿主多一条无用连接。
 
 ## 破坏反馈信号：具体表现（粒子/音效/震动）由游戏自行连接实现
 signal voxel_damaged(positions: Array, spawn_debris: bool)      ## 体素被移除时 (含崩塌)
@@ -83,11 +82,10 @@ func configure(host_ref: VoxelRenderer) -> void:
 # 早期本类继承 VoxelRenderer，调用方直接设 `.data` / `.voxel_scale` 等；改成组件后真值只有
 # 宿主那一份。现在**只保留本类内部真正读的两个**做只读镜像：写入一律走 `host.xxx`。
 #
-# 【为什么不再转发写】曾有一层"写转发 + 未绑定时暂存(`_pending_*`)、`configure()` 时补写宿主"
-# 的兼容壳（约 140 行），目的是让 `destructible.data = x` 这种继承时代的写法继续可用。
-# 但全仓没有任何一处这样写：所有调用方（demo ×2、契约测试 ×4）都是先 `configure(host)` 再写
-# 宿主本身。转发壳不但没被用到，还引入了一类真实的时序 bug（残留暂存覆盖宿主新值）。故删除：
-# 现在是**只读属性**，误写会立刻报 "property has no setter"，而不是静默改到宿主或静默丢失。
+# 【为什么不做写转发】"写转发 + 未绑定时暂存(`_pending_*`)、`configure()` 时补写宿主"的兼容壳
+# 约 140 行，只为让 `destructible.data = x` 这种继承时代的写法继续可用。所有调用方都是先
+# `configure(host)` 再写宿主本身，转发壳不但用不上，还会引入时序 bug（残留暂存覆盖宿主新值）。
+# 故这里是**只读属性**，误写会立刻报 "property has no setter"，而不是静默改到宿主或静默丢失。
 #
 # 【为什么不给全部 7 个宿主旋钮都留镜像】voxel_scale / generate_collision / lod_count /
 # view_distance / visibility_mode 本类一行都没读过（都经 host 传参或 presenter 自己读宿主），
@@ -203,10 +201,9 @@ func _validate_property(property: Dictionary) -> void:
 ## 最终重力 = 基准重力 * mass ，重物受重力影响更大
 @export var debris_gravity_scale: float = 1.0
 
-## 【整体健康度已移除】曾有 `@export var health`（-1 = 不启用），它是与逐体素健康度平行的
-## 第二套耐久模型：`_after_removal` 里每移除 1 个体素扣 0.5，扣到 0 就 destroy_all()。
-## 全仓没有任何读取方（demo 用的 `use_voxel_health` 是逐体素健康度开关，与本字段无关），
-## 也不构成对外能力，故连同 `repair()` 与那两行扣减一起删除。逐体素健康度归 _edit 内核。
+## 【不要加整体健康度】`@export var health`（-1 = 不启用）会是第二套耐久模型：每移除
+## 1 个体素扣 0.5，扣到 0 就 destroy_all()。demo 用的 `use_voxel_health` 是逐体素健康度
+## 开关，与它无关。耐久只有一份，归 _edit 内核。
 
 ## 应力传播（裂纹扩散）距离（步数），即裂纹最多扩散多少层
 ## 破坏体素时，应力向邻居传播，当应力超过材质的 connection_strength 时，邻居也会断裂
@@ -410,7 +407,7 @@ func damage_ray(origin: Vector3, direction: Vector3, max_distance: float = 100.0
 
 ## 射线检测体素（DDA）。委托 [VoxelRay] —— 走格实现全项目只此一份，
 ## 编辑器的拾取（还要入射面法线）与这里的破坏因此不会各走一套。
-## 注：direction 为零向量时返回 MIN（旧实现会沿 -z 一直推进，属退化输入的修复）。
+## 注：direction 为零向量时返回 MIN（不做退化方向的推进）。
 func raycast_voxel(origin: Vector3, direction: Vector3, max_distance: float = 100.0) -> Vector3i:
 	return VoxelRay.hit_voxel(data, origin, direction, max_distance)
 
@@ -596,12 +593,9 @@ func _propagate_stress(removed: Array) -> Array:
 ## 级联崩塌：崩塌掉落的体素也是"被移除"，会再次触发局部检测，连锁反应直到无更多失稳
 ## 每次调用只处理一个级联层级，剩余工作由 _process 在后续帧继续处理
 ##
-## 【为什么空数组直接 return】这里曾有一个 _process_full_cascade() 分支（同步跑完全部级联
-## 层级）。它不可达：唯一调用点 _after_removal(removed) 传进来的 removed，已在
-## _process_destruction_pipeline 里被"removed.is_empty() → return"拦过。而且它即使可达也
-## 不该留下 —— 级联由 _process_cascade_level **单轮**完成（内核 find_unsupported_around 已
-## 沿支撑链把连锁失稳传播到终结），再并一条"同步全量"的实现，只会让"一次破坏到底掉多少"
-## 取决于走了哪条分支。故整条不可达路径一并删除。
+## 【为什么空数组直接 return】级联由 _process_cascade_level **单轮**完成（内核
+## find_unsupported_around 已沿支撑链把连锁失稳传播到终结）。再并一条"同步跑完全部级联"
+## 的实现，只会让"一次破坏到底掉多少"取决于走了哪条分支。
 func _trigger_collapse(around_positions: Array = []) -> void:
 	if collapse_mode == CollapseMode.COLLAPSE_NONE or not data:
 		return
@@ -625,8 +619,8 @@ func _trigger_collapse(around_positions: Array = []) -> void:
 
 ## 处理级联崩塌（分帧处理，大面积崩塌时把主线程阻塞摊平到多帧）
 ## 从 _cascade_check_positions 出发，单轮找出级联失稳体素并统一移除
-## 性能优化（合并级联层级 + 分帧切块）：
-##   - 旧实现每帧只处理一个级联层级，BFS 多轮重复扫描（每轮 10-13ms），
+## 性能（合并级联层级 + 分帧切块）：
+##   - 每帧只处理一个级联层级会让 BFS 多轮重复扫描（每轮 10-13ms），
 ##     5 级级联 = 50-65ms 链式阻塞。find_unsupported_around() 内部已用支撑图
 ##     把连锁失稳"单轮递归传播"到终结，一次调用获得全部失稳体素。
 ##   - 超大崩塌（数万体素）时单帧全处理仍会主线程卡顿数百 ms（检测+分组+

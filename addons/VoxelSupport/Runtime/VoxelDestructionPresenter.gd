@@ -148,7 +148,7 @@ func ensure_debris_root() -> void:
 ##   · 是否按 max_debris_per_hit 截断（整块碎裂不截断，否则大块只剩几个粒子）
 ##   · 粒子从"块包围盒范围"发出（整块碎裂散开）还是"发射集质心一点"发出（破坏喷发）
 ##   · is_collapse 的取值（向下坠落 / 向上喷发）
-## 此前是两个几乎逐行相同的函数，改一处漏一处就会让"崩塌的碎屑"和"破坏的碎屑"表现漂移。
+## 若是两个几乎逐行相同的函数，改一处漏一处就会让"崩塌的碎屑"和"破坏的碎屑"表现漂移。
 ##
 ## 参数：
 ##   max_particles: >0 时只取前 max_particles 个体素（按材质分组的顺序与截断一致）；0 = 不截断
@@ -198,7 +198,7 @@ func _emit_debris(positions: Array, mat_map: Dictionary, is_collapse: bool,
 ##   · 上限：破坏碎屑按 max_debris_per_hit 截断，整块碎裂按 600/材质 封顶
 ##   · 发射范围：盒子范围（整块碎裂散开）还是质心一点（破坏喷发）
 ##   · is_collapse：向下坠落 / 向上喷发
-## 此前两处各写一遍"建 by_mat → 逐组发射"，改一处漏一处就表现为
+## 若两处各写一遍"建 by_mat → 逐组发射"，改一处漏一处就表现为
 ## "崩塌的碎屑"与"破坏的碎屑"手感漂移，且不报错。
 ## 参数：
 ##   source:    体素位置集合（Array，或键为位置的 Dictionary —— for 循环遍历的就是键）
@@ -497,8 +497,8 @@ func spawn_chunk_break_at_body(body: RigidBody3D) -> void:
 
 ## 压缩在途掉落块 mesh 任务表：丢弃已完成任务的 ID。
 ## 【为什么必须有】这些任务在结束时没有回调能摘除自己的 ID（结果回主线程时只带 body，
-## 不带 tid），此前**只增不减**（仅 _exit_tree 清空）→ 长玩内存单调增长，退出时还要把
-## 全部历史任务集体 wait。派发前做一次压缩，规模收敛到"真正在途"的数量。
+## 不带 tid），不压缩就会**只增不减**（仅 _exit_tree 清空）→ 长玩内存单调增长，退出时
+## 还要把全部历史任务集体 wait。派发前做一次压缩，规模收敛到"真正在途"的数量。
 func _prune_falling_mesh_tasks() -> void:
 	if _falling_mesh_tasks.size() <= _FALLING_TASK_COMPACT_MIN:
 		return
@@ -861,7 +861,7 @@ func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxe
 	if local_voxels.size() > AUTO_BOX_VOXELS:
 		# 【凸包后台化】碰撞外壳点集由后台线程预计算（_compute_hull_points，O(1)），
 		# 此处 set_points 秒完成——替代 create_convex_shape（4096体素块实测69ms主线程卡顿）。
-		# hull_points 为空（旧路径/兼容）时回退 create_convex_shape。
+		# hull_points 为空（后台结果未回填或已被丢弃）时回退 create_convex_shape。
 		if hull_points.is_empty():
 			var shape := mesh.create_convex_shape(true, true)
 			if shape:
@@ -899,8 +899,8 @@ func _add_box_collision(body: RigidBody3D, local_voxels: Dictionary) -> void:
 	col.name = "CollisionShape3D"
 	col.shape = shape
 	# 体素格 p 在体素坐标里占 [p-0.5, p+0.5]，故 min_p..max_p 这段的盒心是 (min_p+max_p)/2。
-	# 此前写成 min_p + size*0.5 = (min_p+max_p+1)/2，比正确位置多出半格，
-	# 与 _compute_hull_points 给出的凸包（那一条是对的）错开半个体素 → 碰撞与视觉不符。
+	# 不能写成 min_p + size*0.5 = (min_p+max_p+1)/2 —— 那比正确位置多出半格，
+	# 与 _compute_hull_points 给出的凸包错开半个体素 → 碰撞与视觉不符。
 	col.position = (Vector3(min_p) + Vector3(max_p)) * 0.5 * scale
 	body.add_child(col)
 	col.owner = body

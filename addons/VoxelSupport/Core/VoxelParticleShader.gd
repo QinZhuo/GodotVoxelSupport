@@ -36,8 +36,8 @@ const U_VOXEL_SIZE := "voxel_size"
 const U_EMISSION_ENERGY := "emission_energy"
 const U_SEED_SALT := "seed_salt"
 ## 整体不透明度。**只写进两个绘制材质**（不透明通道靠它做硬阈值 discard，透明通道乘进 ALPHA）。
-## 粒子更新着色器（shader_type particles）里曾经也有一份同名 uniform 被 VoxelParticleView 写入，
-## 但 start()/process() 从头到尾都不读它 —— 写进去等于什么都不发生。已删除，见 PARTICLE_SHADER 头部说明。
+## 不要给粒子更新着色器（shader_type particles）也加这份 uniform：它的 start()/process()
+## 从头到尾都不读 alpha —— 写进去等于什么都不发生。见 PARTICLE_SHADER 头部说明。
 const U_ALPHA := "alpha"
 
 ## 粒子更新着色器（`shader_type particles`）。
@@ -152,8 +152,8 @@ void process() {
 	}
 
 	// 【绝对不要写 COLOR.a】颜色纹理的 A 通道承载**自发光强度**，
-	// 而 COLOR 正是从那张纹理采样来的。旧版这里写了 `COLOR.a = alpha`，
-	// 把每颗粒子的 emission 全冲成 1.0 —— 于是**所有粒子都在满强度自发光**，
+	// 而 COLOR 正是从那张纹理采样来的。写 `COLOR.a = alpha` 会把每颗粒子的 emission
+	// 全冲成 1.0 —— 于是**所有粒子都在满强度自发光**，
 	// 白色车身直接过曝成纯白（实测：网格 0 个纯白像素，粒子 3302 个）。
 	// 整体透明度由绘制着色器自己的 alpha uniform 负责，与这里无关。
 }

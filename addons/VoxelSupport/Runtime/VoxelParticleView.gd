@@ -142,8 +142,8 @@ func clear() -> void:
 ##   生效就等于每帧重导 20 万点 —— 那是致命的。
 ## 【为什么这里不碰 _process_mat】透明度是**绘制期**的事：不透明通道把它当硬阈值 discard、
 ##   透明通道把它乘进 ALPHA。粒子更新着色器（shader_type particles）只写 TRANSFORM/COLOR/CUSTOM，
-##   既不读 alpha、也不可能改绘制期的透明度 —— 早先那句
-##   `_process_mat.set_shader_parameter(U_ALPHA, alpha)` 写了但从来没有任何效果，已删。
+##   既不读 alpha、也不可能改绘制期的透明度 —— 所以别写
+##   `_process_mat.set_shader_parameter(U_ALPHA, alpha)`：写了也没有任何效果。
 func apply_material_params() -> void:
 	var vs := voxel_size()
 	for mat in [_draw_mat, _draw_trans_mat]:

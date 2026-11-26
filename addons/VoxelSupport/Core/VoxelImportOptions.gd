@@ -3,7 +3,7 @@ class_name VoxelImportOptions
 extends RefCounted
 
 ## 导入选项的**单一出处**：选项名、枚举、各导入器的选项描述表、默认值。
-## 【为什么独立成类】此前选项名一半在 `VoxAsset.OPT_*`、一半散在各插件里，枚举（Shape/MeshMode）
+## 【为什么独立成类】选项名一半在 `VoxAsset.OPT_*`、一半散在各插件里，枚举（Shape/MeshMode）
 ## 又在插件里；且 `default_options()` 必须逐子类重写（GDScript 静态派发不继承，见基类注释）。
 ## 集中到这里后：名字一份、表一份、默认值一份，且 headless（拿不到 `EditorImportPlugin` 实例）也能用。
 ## 【选项名是稳定键】它们落进每个 `.import` 文件，改名会让既有资产全部重导 —— 故只增不改。

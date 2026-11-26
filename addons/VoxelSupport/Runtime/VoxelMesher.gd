@@ -3,7 +3,7 @@ extends RefCounted
 
 ## 网格化层：**纯静态、无状态、无节点**。输入体素，输出几何。
 ##
-## 【为什么独立成类】此前这一步散在三处：`VoxelChunkGenerator`（单 chunk 组装 +
+## 【为什么独立成类】这一步若散在三处：`VoxelChunkGenerator`（单 chunk 组装 +
 ## `_merge_meshes`）、`VoxelRenderer._generate_chunk_worker`（拼装调用）、
 ## `VoxelMeshGenerator`（导入路径）。三处各自持有"顶点数组长什么样"的知识，
 ## 于是加一个属性（比如顶点色）要同时改三处。
@@ -21,10 +21,10 @@ extends RefCounted
 ## 整份模型 → 几何数组（一次原生调用：分 chunk + 光环 + 面生成 + 合并 + 索引偏移，全在 C++）。
 ## [param buffers] chunk_key → 32³ 密集缓冲。**可以只含一部分 chunk**，但边界处的面会被多画
 ##   （原生按"传入集合"判邻居）—— 需要正确剔除边界就传全量。
-## 【删掉的 build_group】曾有一个"只让 group 内出网格"的 GDScript 版拼接入口：逐 chunk 自己补
-##   光环再 append_arrays。它被更早的 DYNAMIC 实现用过后就彻底退场了（现行路径是 worker 在
-##   子线程按 34³ 光环算好每 chunk 几何、帧尾**纯拼接**，见 VoxelRenderer._apply_built_chunk），
-##   全仓生产代码零调用，只有一条测试在给它当"等价性证据"—— 那是测试在养老代码，一并删掉。
+## 【不要加 build_group 这类 GDScript 拼接入口】它要逐 chunk 自己补光环再 append_arrays，
+##   而现行路径是 worker 在子线程按 34³ 光环算好每 chunk 几何、帧尾**纯拼接**
+##   （见 VoxelRenderer._apply_built_chunk）。生产代码用不到它，留着只会让测试去养一份
+##   与主路径等价的第二实现。
 ## 返回 {solid_verts, solid_normals, solid_uvs, solid_idxs, trans_*, ...}；空模型返回 {}。
 static func build_all(buffers: Dictionary, materials: Array, scale: float,
 		offset: Vector3 = Vector3.ZERO) -> Dictionary:

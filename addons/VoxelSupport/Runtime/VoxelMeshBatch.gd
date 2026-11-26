@@ -2,11 +2,10 @@ class_name VoxelMeshBatch
 extends RefCounted
 
 ## 一次"渲染扇出"的**所有权对象**：同时持有本批次的**任务计数**与**只读快照句柄**。
-## 【要解决什么】旧实现把这三样东西散在渲染器里各写一遍：
-##     `_pending_task_count`（任务计数）、`_batch_snapshot_active`（快照是否已登记）、
-##     `_generation_id`（过期判定）。
-## 于是"递减"这个动作出现在多个地方：结果处理函数里既有正常路径的递减，
-## 又有两条早退路径各自的递减 —— 一个被丢弃的结果会被减 2 次，计数提前归零，
+## 【要解决什么】这三样东西（`_pending_task_count` 任务计数、`_batch_snapshot_active`
+## 快照是否已登记、`_generation_id` 过期判定）散在渲染器里各写一遍时，"递减"这个动作会
+## 出现在多个地方：结果处理函数里既有正常路径的递减，又有两条早退路径各自的递减 ——
+## 一个被丢弃的结果会被减 2 次，计数提前归零，
 ## 批次被判"完成"→ 快照在 worker 仍在读共享缓冲时被释放 → COW 写保护被击穿。
 ## 【本类的做法：结算点唯一】计数只在 [method _on_done] 一处递减，而 [method _wrap]
 ## 保证"无论 worker 怎么提前 return，_on_done 必然被调用一次"。
@@ -67,7 +66,7 @@ func attach_snapshot(snapshot: QVoxelSource.ReadonlySnapshot) -> void:
 
 
 ## 是否真的派发过任务。调用方据此区分"有过工作"与"空批次"，
-## 前者才需要做收尾（emit 更新信号等），后者等同于旧实现的裸计数 0。
+## 前者才需要做收尾（emit 更新信号等），后者等同于裸计数 0。
 func has_dispatched() -> bool:
 	return _dispatched
 

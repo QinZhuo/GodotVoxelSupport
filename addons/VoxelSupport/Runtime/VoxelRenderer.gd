@@ -86,9 +86,9 @@ enum DisplayMode {
 ##
 ## 【为什么形状该是渲染器的属性，而不是粒子专属】
 ## 导入路径早就有 cube/sphere 两种形状（导入选项 mesh/shape），但那是**烘焙期**的选择：
-## 运行时换形状就得重新导入。而运行时路径（generate_chunk_dense）此前只有方块面 ——
-## 于是"导成球的模型在运行时显示成方块"，同一份数据两条路径长得不一样。
-## 现在两条路径都支持，且由同一个属性控制：
+## 运行时换形状就得重新导入。运行时路径（generate_chunk_dense）只做方块面的话，
+## "导成球的模型在运行时显示成方块" —— 同一份数据两条路径长得不一样。
+## 因此两条路径都支持，且由同一个属性控制：
 ##   · MESH 模式：chunk 网格按球体重建（原生 generate_spheres_native）
 ##   · PARTICLES 模式：draw mesh 换成 SphereMesh（不重建粒子节点）
 enum VoxelShape {
@@ -165,8 +165,8 @@ func _rebuild_for_shape_change() -> void:
 ## 【依赖方向】内核只回答"按 chunk 建 / 删网格"，视点决策全部委托给它（详见 VoxelViewLayer）。
 ## 【怎么装配】作为本节点的子节点挂上即可（代码里也可直接 `renderer.view_layer = VoxelViewLayer.new()`
 ## 再 `add_child`）；不挂时本类退化为"无剔除、无流式、无 LOD"的最简渲染器，行为可预期。
-## 【为什么不再惰性 new】旧版用 getter 惰性创建 `VoxelInfiniteLayer`，结果是"永远存在、永远被调"，
-## 两个视点层谁也删不掉。改成可空引用后，`view_layer == null` 是一条真实可走的最简路径。
+## 【不要惰性 new】getter 里惰性创建会让视点层"永远存在、永远被调"，于是再也删不掉。
+## 可空引用下，`view_layer == null` 是一条真实可走的最简路径。
 var view_layer: VoxelViewLayer = null:
 	set(v):
 		if view_layer == v:
@@ -227,8 +227,8 @@ enum DrawMode {
 
 ## DYNAMIC 模式的分组粒度（= 每组 2^group_shift 个 chunk 的边长）。
 ##
-## 【默认 0 = 每 chunk 一个绘制单元，与重构前**字节等价**】这是回归安全的第一原则：
-## DYNAMIC 是"可编辑/可破坏/流式"路径，它的默认行为必须和改造前完全一致，
+## 【默认 0 = 每 chunk 一个绘制单元】这是回归安全的第一原则：
+## DYNAMIC 是"可编辑/可破坏/流式"路径，默认行为必须与"每 chunk 一个单元"完全一致，
 ## 否则所有存量场景（destruction_demo / water_sim / 各测试）都会在没人要求的情况下改变行为。
 ##
 ## 【那 1/2 什么时候用】分组能大幅减少 draw call（实测 teapot1：158 → 35 → 8），
@@ -237,9 +237,9 @@ enum DrawMode {
 ##   ② 模型 chunk 密集（≥32 chunk）且编辑不频繁。
 ## 单实例 + 逐帧编辑（水模拟）应该留在 0：单次重建要尽可能小。
 ##
-## 【为什么默认不是 1】第一版把默认设成 1，结果 destruction_demo（196 chunk / 32 组）
-## 模型长期显示不全、water_sim 随机事件掉帧 —— 分组路径的整组重建在**主线程**，
-## 每帧预算只有 8ms，组多时追不上连续破坏产生的脏组。详见 docs/重构实施记录.md §5.6。
+## 【默认不能是 1】分组路径的整组重建在**主线程**，每帧预算只有 8ms，组多时追不上
+## 连续破坏产生的脏组（destruction_demo 196 chunk / 32 组会模型显示不全，
+## water_sim 随机事件掉帧）。
 @export_range(0, 2, 1) var group_shift: int = 0:
 	set(v):
 		group_shift = clampi(v, 0, 2)
@@ -340,7 +340,7 @@ func _validate_property(property: Dictionary) -> void:
 @export var unload_distance: float = 0.0
 
 # [INF] 视点相关
-## LOD 层级数（含 LOD0）：1=仅全精度（默认，等价旧版 lod0_distance=0 关闭 LOD）；
+## LOD 层级数（含 LOD0）：1=仅全精度（默认，即关闭 LOD）；
 ## 2=LOD0+LOD1(2×)；3=+LOD2(4×)；4=+LOD3(8×)…
 ## 各层自动按 view_distance 等比（×2）分带：LOD_i 外半径 = view_distance / 2^(lod_count-1-i)。
 @export_range(1, 8, 1) var lod_count: int = 1:
@@ -379,10 +379,9 @@ func _lod_block_edge_world(level: int) -> float:
 	return VoxelLodGrid.block_edge_world(level, voxel_scale)
 
 
-# 【LOD 调度旋钮已搬进 VoxelViewLayer】旧版这里曾有 4 个 `_lod_*` 私有 @export
-# （build_per_frame / preload_blocks / build_budget_ms / submit_per_frame）并靠注释解释
-# "为什么配置留节点、逻辑归应用层"。它们全仓 0 场景引用、也没有 setter 同步，
-# 是纯粹的镜像失效来源（`_lod_build_budget_ms` 更是从未被读过）。现在旋钮与用它的人同居。
+# 【LOD 调度旋钮不在这里】build_per_frame / preload_blocks / build_budget_ms /
+# submit_per_frame 归 VoxelViewLayer：旋钮必须与用它的人同居。节点上的镜像副本全仓
+# 0 场景引用、也没有 setter 同步，只会成为失效镜像。
 ## 重新计算 LOD 分带并调整各层存储（lod_count/view_distance 变化时调用）。
 ## LOD_i 外半径 = view_distance / 2^(lod_count-1-i)（等比 ×2，对齐 Voxel Tools 标准做法）。
 func _configure_lod() -> void:
@@ -482,8 +481,8 @@ var _update_counter: int = 0
 # 统一流式异步请求的在途状态不再本地留存：账本唯一在 VoxelAsyncLoader。
 # 查询走 QVoxelSource.is_chunk_pending() / 列举 get_unready_chunk_keys() / 取消 cancel_chunk_request()。
 # 当前渲染扇出批次：同时持有"任务计数"与"只读快照句柄"，结算点唯一（见 VoxelMeshBatch）。
-# 任务计数与快照不再各自散落维护——旧实现里结果处理的两条早退路径各减一次计数，
-# 导致计数提前归零、快照在 worker 仍在读时被释放，COW 写保护被击穿。
+# 任务计数与快照不各自散落维护 —— 结果处理的两条早退路径若各减一次计数，
+# 计数会提前归零、快照在 worker 仍在读时被释放，COW 写保护被击穿。
 var _batch: VoxelMeshBatch = null
 var _exiting := false                    # 退出中：worker 结果回调据此直接丢弃，避免访问已清理数据
 # 异步任务运行期间收到新变更时置位，任务完成后重新触发更新（保证数据始终最新且不并发）
@@ -515,7 +514,7 @@ var _mesh_build_queue: Dictionary = {}
 # 每帧最多构建的 chunk 数（GPU 上传限流）
 # 流式补建直接入此队列，单 chunk 构建成本低（~1ms），提高后补建更流畅；
 # 配合 3ms 时间预算（_MESH_BUILD_BUDGET_MS）兜底防 Metal fence 超时。
-# 【不要在这里写"GPU 忙检测"】本项目从未实现该机制（相关死字段 _last_frame_delta 已删）。
+# 【不要在这里写"GPU 忙检测"】没有这个机制。
 # 真正起作用的限流只有两个：每帧条数 + 每帧毫秒预算。
 @export_range(1, 100, 1) var _mesh_build_per_frame: int = 12
 # 增量重建每帧最多处理的 dirty chunk 数：超出放回下帧续建（防回原点/大崩塌单帧
@@ -532,21 +531,19 @@ var _mesh_build_scheduled: bool = false
 var last_mesh_gen_time_ms: float = 0.0
 
 ## 性能追踪：上次生成的顶点数/三角形数
-## 【为什么没有 last_trans_vertices】曾有，但全仓只写不读（trans 的三角形数已由
-## last_trans_triangles 提供），属纯死字段，已删。_set_last_vertex_stats 的 trans_vertices
-## 形参保留 —— 它是算 last_trans_triangles 的输入。
+## 【没有 last_trans_vertices】全仓只写不读（trans 的三角形数已由 last_trans_triangles
+## 提供）。_set_last_vertex_stats 的 trans_vertices 形参保留 —— 它是算
+## last_trans_triangles 的输入。
 var last_solid_vertices: int = 0
 var last_solid_triangles: int = 0
 var last_trans_triangles: int = 0
 var last_total_chunks: int = 0
 
 ## 性能追踪：最近一次重建的 chunk 数量与耗时明细
-## 【语义】统计的是"当前这一批异步结果"，不是单个结果：此前它在 _apply_single_chunk_result
-## 里被写死成 1，一批 N 个结果也只报 1，demo 拿它算"平均每 chunk 生成耗时"会直接错 N 倍。
-## 现在按批累加，累加器是 _batch_rebuilt_chunks。
-## 【为什么没有"受影响数"】曾有个恒等于本字段的 last_rebuild_affected_count（它的源码是
-## `+= result.get("affected_count", 1)`，而结果字典里从来没有那个键 → 恒 +1 = 本字段）。
-## 两个恒等的字段放在一起只会让人以为其中一个是独立算出来的。已删。
+## 【语义】统计的是"当前这一批异步结果"，不是单个结果：一批 N 个结果只报 1 的话，
+## demo 拿它算"平均每 chunk 生成耗时"会直接错 N 倍。按批累加，累加器是 _batch_rebuilt_chunks。
+## 【没有"受影响数"】它与本字段恒等（结果字典里从来没有 affected_count 键）。
+## 两个恒等的字段放在一起只会让人以为其中一个是独立算出来的。
 var last_rebuild_chunk_count: int = 0
 var last_mesh_gen_time_slice_ms: float = 0.0  ## 生成阶段耗时（不含 apply）
 var last_apply_time_ms: float = 0.0        ## 应用到场景的耗时 (ms)
@@ -557,9 +554,8 @@ var _batch_rebuilt_chunks: int = 0
 func _ready() -> void:
 	_configure_lod()
 	request_update()
-	# 【不要在这里加"GPU 忙检测"】这里曾有一个 _last_frame_delta 字段，注释说是给帧尾构建
-	# 限流做 GPU 忙检测用 —— 实际只写不读，纯死字段（已删）。若将来真要做，判据必须是
-	# "上一帧实际耗时"而不是 Engine.get_frames_per_second()（后者在低帧率下量化很粗）。
+	# 【不要在这里加"GPU 忙检测"】若真要做，判据必须是"上一帧实际耗时"而不是
+	# Engine.get_frames_per_second()（后者在低帧率下量化很粗）。
 	# 视点层若在 _ready 之后才挂上，它自己的 _ready 会重新认父并对齐分带；此处只处理
 	# "场景里已经挂好"的常见情形。
 	if view_layer != null:
@@ -570,8 +566,8 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# 【STATIC = 真的最简：整段视点调度直接跳过】
 	# STATIC 下几何是"整份重建一次挂在自己身上"，没有任何 chunk 级调度、没有流式、
-	# 没有 LOD 分带。此前这里无差别跑 process_lod / process_streaming，结果是
-	# STATIC 的实例每帧仍付一遍视点扫描（实测 deer×1000 多花 1.1ms/帧），而它们根本用不到。
+	# 没有 LOD 分带。无差别跑 process_lod / process_streaming 会让 STATIC 实例每帧仍付
+	# 一遍视点扫描（实测 deer×1000 多花 1.1ms/帧），而它们根本用不到。
 	# 这是"最简路径必须真的最简"这条规则在代码里的落点。
 	if draw_mode == DrawMode.STATIC:
 		_drive_static()
@@ -612,7 +608,7 @@ func _process_dynamic_body() -> void:
 	# GPU 上传限流：帧尾批量构建队列中的 chunk mesh（避免与渲染/崩塌竞争 GPU）
 	# call_deferred 确保在帧末尾执行（本帧渲染已提交），且队列处理不阻塞主循环
 	# 【DYNAMIC 分组模式】绘制单元是 group 而不是 chunk，结果全部进 _group_dirty；
-	# 这里必须一并排期，否则整组重建永远不会发生（曾经的 bug：只有 _mesh_build_queue 判空）。
+	# 这里必须一并排期，否则整组重建永远不会发生（只判 _mesh_build_queue 是否为空不够）。
 	if (not _mesh_build_queue.is_empty() or not _group_dirty.is_empty()) and not _mesh_build_scheduled:
 		_mesh_build_scheduled = true
 		call_deferred("_process_mesh_build_queue")
@@ -653,8 +649,8 @@ func _process_dynamic_body() -> void:
 # ── 粒子渲染：公开接口（实现已下沉到 VoxelParticleView 组件）──────────────
 #
 # `display_mode` / `voxel_shape` / `particle_*` 旋钮与 `particle_node` / `particle_points` /
-# `rebuild_particles()` / `particle_voxel_size()` 是本类的公开面。早期的布尔/方法别名
-# （`particle_mode` / `particle_shape` / `show_as_particles()`）已删除 —— 一个语义只留一个入口。
+# `rebuild_particles()` / `particle_voxel_size()` 是本类的公开面。一个语义只留一个入口：
+# 不要加 `particle_mode` / `particle_shape` / `show_as_particles()` 这类别名。
 # 真正的点云导出 / 纹理上传 / 粒子节点生命周期在 `VoxelParticleView` 里。
 
 ## 粒子视图组件（懒创建的子节点）。
@@ -907,7 +903,7 @@ func _update_mesh() -> void:
 	# 快照只在作废后深拷贝一次，供异步子线程安全读取，体素变化不触发大对象拷贝。
 	_materials.surfaces(data.materials)
 	_materials.snapshot(data.materials)
-	# 统一走异步生成（CHUNK_ASYNC 为唯一路径；同步渲染路径已移除简化）
+	# 统一走异步生成（CHUNK_ASYNC 为唯一路径，不要加回同步路径）
 	_update_mesh_async()
 
 
@@ -950,16 +946,16 @@ func _rebuild_static() -> void:
 		# chunk_count() 是 O(1) 的"内存块 + 流中未加载块"计数，语义与此处诊断字段一致。
 		_set_last_vertex_stats(solid_v, trans_v, data.chunk_count())
 	# 【STATIC 也要碰撞】整份模型是**一个**绘制单元，交给碰撞组件按单元重建（它自己限量）。
-	# 从前这里完全不通知碰撞组件，而 VoxelCollision 又只认 chunk 单元 → 默认 draw_mode=STATIC
-	# 下永远没有碰撞体（且不报错）。单元换算在组件内部，这里只报"整份模型存不存在网格"。
+	# 不通知碰撞组件、而组件又只认 chunk 单元，则默认 draw_mode=STATIC 下永远没有碰撞体
+	# （且不报错）。单元换算在组件内部，这里只报"整份模型存不存在网格"。
 	collision.enqueue(Vector3i.ZERO, mesh != null)
 	mesh_updated.emit()
 
 
 
 ## 相机到 chunk 中心的距离（统一实现见 VoxelWorldUtil）。
-## 【为什么只留这一个转发】另外 4 个同族壳（_chunk_world_aabb / _aabb_has_vertex_in_frustum
-## / _chunk_from_world）在本类已无调用者 —— 视点逻辑整体搬走后它们就是纯转发噪音，已删。
+## 【只留这一个转发】另外 4 个同族壳（_chunk_world_aabb / _aabb_has_vertex_in_frustum
+## / _chunk_from_world）已无调用者 —— 视点逻辑归视点层后它们就是纯转发噪音，不要加回。
 ## 这个保留是因为下面的带外校验还要用，且它是"本类唯一还在用的距离口径"。
 static func _chunk_center_dist(ck: Vector3i, cam_pos: Vector3, chunk_size_world: float, world_offset: Vector3) -> float:
 	return VoxelWorldUtil.chunk_center_dist(ck, cam_pos, chunk_size_world, world_offset)
@@ -1059,10 +1055,10 @@ func mark_lod_block_empty(level: int, bk: Vector3i) -> void:
 ## 主线程挂载粗 LOD 大块网格（mesh 已由工作线程构建，此处仅建节点 + 挂载，很轻）
 ## 失效重建时复用已有节点（直接替换 mesh，避免节点销毁/重建造成闪烁）
 ##
-## 【材质不在挂载时补绑】曾经这里调 _apply_materials(mesh) 按"桶序号"（surface 0=实心、
-## surface 1=透明）补绑材质 —— 而 worker 侧的 append_arrays_to_mesh 会**跳过空桶**，于是
+## 【材质不在挂载时补绑】不要在这里调 _apply_materials(mesh) 按"桶序号"（surface 0=实心、
+## surface 1=透明）补绑材质 —— worker 侧的 append_arrays_to_mesh 会**跳过空桶**，于是
 ## 只含透明体素的大块（玻璃/水面）唯一 surface 是 trans，却被绑成实心材质：整块不透光、
-## 运行期不报错、只能靠眼睛看出来。材质现在随 arrays 在 worker 里一起绑（按实际 surface
+## 运行期不报错、只能靠眼睛看出来。材质随 arrays 在 worker 里一起绑（按实际 surface
 ## 序号），挂载点只负责挂。
 func mount_lod_mesh(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 	if level < 0 or level >= _lod_meshes.size():
@@ -1263,8 +1259,8 @@ func _update_mesh_async() -> void:
 		request_update()
 		visible.resize(taken)
 	# 【为什么先捕获成局部】worker 在子线程执行，约定是"只读参数、不碰节点属性"。
-	# voxel_scale / render_offset / diag_enabled 原先是在 lambda 里直接读节点属性，
-	# 属于违反约定（虽然读一个 float 实际不会崩，但会被后续改动踩成真竞态）。
+	# voxel_scale / render_offset / diag_enabled 在 lambda 里直接读节点属性违反约定
+	# （虽然读一个 float 实际不会崩，但会被后续改动踩成真竞态）。
 	# lambda 按值捕获局部变量，跨线程安全。
 	var w_scale := voxel_scale
 	var w_offset := render_offset
@@ -1276,14 +1272,14 @@ func _update_mesh_async() -> void:
 	for ck in visible:
 		# 【必须用 lambda 显式绑定 out 的位置】Godot 4 的 Callable.bind() 把绑定实参放在
 		# call() 实参**之后**，所以 `_generate_chunk_worker.bind(args...).call(out)` 会让 out
-		# 落到第 1 个形参上、其余参数整体错位（曾因此报 "Cannot convert argument 2 from
-		# Dictionary to Array"）。旧代码用 add_task(bind(...)) 时没有额外实参，故掩盖了这一点。
+		# 落到第 1 个形参上、其余参数整体错位（报 "Cannot convert argument 2 from
+		# Dictionary to Array"）。
 		# 下面的 lambda 只有一个自由形参 out，与 VoxelMeshBatch._wrap 的调用方式严格对应。
 		batch.spawn(func(out: Dictionary) -> void:
 			_generate_chunk_worker(snapshot, aligned_materials, trans_flags, ck,
 				w_scale, w_offset, w_diag, out, w_shape, w_subdiv, w_sphere_scale))
 	# 一个任务都没派发出去时必须立即结算：否则 _batch 永远"在途"，会挡住后续所有更新
-	# （旧实现用裸计数 0 天然表示"无在途"，换成对象后要显式结清）。
+	# （批次对象不像裸计数 0 那样天然表示"无在途"，必须显式结清）。
 	batch.settle_if_idle()
 
 
@@ -1316,9 +1312,8 @@ func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
 ## 都通过 _make_result 构建结果，消费方 _apply_single_chunk_result 统一按键读取。
 ## chunk_key 缺省为 (-999,-999,-999) 表示"非单chunk结果"（全量结果）。
 ## 不含 gen_id：过期判定已由 VoxelMeshBatch 的对象身份承担（取消即不再发射结果）。
-## 【为什么没有 affected_count】曾有个恒传 1 的形参，全仓只在这里写进字典、
-## 从没人按这个键读（唯一的消费者是 last_rebuild_affected_count，它原来也被写死 1）。
-## 一个恒假的入参比没有更糟：读代码的人会以为"受影响数"真的被算过。已删。
+## 【没有 affected_count】全仓没人按这个键读，恒传 1 的形参比没有更糟：
+## 读代码的人会以为"受影响数"真的被算过。
 static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: int,
 		trans_vertices: int, total_chunks: int,
 		chunk_key: Vector3i = Vector3i(-999, -999, -999)) -> Dictionary:
@@ -1400,16 +1395,16 @@ func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: 
 		arrays[chunk_key] = arr
 	# 结果写进 out（由 VoxelMeshBatch 传入）：回传与计数结算都由批次负责。
 	# 本函数不再自己 call_deferred —— 那会让"结果回传"与"计数递减"分处两地，
-	# 正是旧实现计数失衡的来源。
+	# 于是计数失衡。
 	out.merge(_make_result(arrays, gen_time_ms, sv, tv, 1 if has_data else 0, chunk_key))
 
 
 ## 主线程结果处理入口（由 VoxelMeshBatch 在主线程发射）。
 ## **本函数不碰计数**：结算在批次内部唯一一处完成，故这里的任何提前 return
-## 都不可能让批次失衡（旧实现正是在这里与两条早退路径各减一次 → 双重递减）。
+## 都不可能让批次失衡（这里与两条早退路径各减一次就是双重递减）。
 ## batch 由信号 bind 传入：batch != _batch 即说明已被换批 / 取消，结果过期。
 ## 收尾仍延迟到下一帧（_on_batch_finished 置 _batch_complete_pending），
-## 避免"最后一个任务完成"瞬间在主线程做重活造成帧尖峰（曾观测到 83ms）。
+## 避免"最后一个任务完成"瞬间在主线程做重活造成帧尖峰（实测可达 83ms）。
 func _on_batch_result(result: Dictionary, batch: VoxelMeshBatch) -> void:
 	if batch != _batch or _exiting:
 		return
@@ -1425,7 +1420,7 @@ func _on_batch_result(result: Dictionary, batch: VoxelMeshBatch) -> void:
 
 
 ## 批次结算（全部完成 / 被取消）：只读快照已由批次释放。
-## 仅"真的派发过任务"的批次才置收尾标志 —— 空批次等价于旧实现的裸计数 0，不做任何收尾。
+## 仅"真的派发过任务"的批次才置收尾标志 —— 空批次等价于裸计数 0，不做任何收尾。
 func _on_batch_finished(batch: VoxelMeshBatch) -> void:
 	if batch != _batch:
 		return
@@ -1445,9 +1440,9 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 
 	# 更新统计信息（统一契约 _apply_stats_from_result）
 	_apply_stats_from_result(result)
-	# 【按批累加，不再写死 1】一个结果 = 一个 chunk 的重建量。原先这里两个字段都写死 1，
-	# 而一批可能应用几十个结果，demo 拿 last_rebuild_chunk_count 算"平均每 chunk 生成耗时"
-	# （mgt / rebuild_chunks）会算出 60 倍偏小的假数。累加器在 _update_mesh_async 里清零。
+	# 【按批累加】一个结果 = 一个 chunk 的重建量。写死 1 而一批可能应用几十个结果，
+	# demo 拿 last_rebuild_chunk_count 算"平均每 chunk 生成耗时"（mgt / rebuild_chunks）
+	# 会算出 60 倍偏小的假数。累加器在 _update_mesh_async 里清零。
 	_batch_rebuilt_chunks += 1
 	last_rebuild_chunk_count = _batch_rebuilt_chunks
 
@@ -1582,8 +1577,8 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	# LOD0 细网格"闪现"后被移除 → 与粗层交替闪烁）。粗层区破坏由粗层 mesh 反映，
 	# LOD0 chunk 只挂载带内；此处与 _process_chunk_level 的移除判定保持一致。
 	#
-	# 【必须跳过 FULL】FULL 的语义是"全量生成所有 chunk"。此前这里没有 FULL 判断，
-	# 于是 lod_outer[0]（= view_distance，默认 40）之外的 chunk 会被**静默丢弃**：
+	# 【必须跳过 FULL】FULL 的语义是"全量生成所有 chunk"。不判 FULL 时
+	# lod_outer[0]（= view_distance，默认 40）之外的 chunk 会被**静默丢弃**：
 	# 不挂载、不报错、不告警。实测 deer×400 在 FULL 下只挂上 418/1600 个 chunk，
 	# 而调用方等网格就绪会一直等到超时。这是"最简路径被 LOD 机器咬了一口"的典型。
 	# DYNAMIC 之外的 STATIC 也不可能走到这里（STATIC 不走异步批次），但一并早退最稳。
@@ -1608,9 +1603,9 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	# 包括跨 chunk 边界的面可见性。所以这里**不重新生成**，只把它缓存下来，
 	# 再把所属 group 标脏；帧尾的 _rebuild_group_meshes 只做纯拼接（顶点平移 + 索引偏移）。
 	#
-	# 【踩过的坑】第一版在这里丢掉 arr 只标脏，帧尾用 VoxelMesher.build_group 从头从体素
-	# 重新生成整个组 → 几何算两遍 + 第二遍在主线程 → destruction_demo（196 chunk / 32 组）
-	# 模型长期显示不全，water_sim 一旦有随机事件就掉帧。这条注释存在的意义就是防止那样写。
+	# 【不要在这里丢掉 arr 只标脏】那样帧尾得从头从体素重新生成整个组 → 几何算两遍 +
+	# 第二遍在主线程 → destruction_demo（196 chunk / 32 组）模型长期显示不全，
+	# water_sim 一旦有随机事件就掉帧。
 	if draw_mode == DrawMode.DYNAMIC and group_shift > 0:
 		if has_voxels_in_data and not arr.is_empty():
 			_chunk_arrays[chunk_key] = arr

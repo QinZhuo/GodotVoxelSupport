@@ -109,8 +109,8 @@ var _volume_mutex := Mutex.new()
 
 
 ## 求值体积缓存的重置（**唯一收口**）：所有换掉 _volume 的地方都从这里开始。
-## 【为什么必须收口】此前是在注释里承诺"三处都要记得把计数置回 -1"，而同一份清单里还躺着
-## origin / grid_size / built 三个字段 —— 谁新增一个缓存字段、谁改一处赋值，就多一个没人
+## 【为什么必须收口】分散在注释里承诺"三处都要记得把计数置回 -1"是守不住的：同一份清单里还
+## 躺着 origin / grid_size / built 三个字段 —— 谁新增一个缓存字段、谁改一处赋值，就多一个没人
 ## 检查的漂移点（只重置一半的后果是切片按下标读旧布局的数据，静默错格）。收成一个函数后，
 ## 漏字段在结构上就不可能发生。
 func _reset_volume_cache() -> void:
@@ -376,8 +376,8 @@ func get_dirty_mesh_chunk_count() -> int:
 ## chunk 数据就绪 → 标记依赖其 halo 的 6 个相邻 chunk 重建（边界 mesh 缝合）。
 ## 否则该 chunk 就绪后不触发邻居重建 → 边界外侧面缺失，横/竖/块状空洞固定存在。
 func _mark_neighbors_dirty(chunk_key: Vector3i) -> void:
-	# 方向表只从 NEIGHBORS_6（VoxelConnectivity 的真值）来 —— 此前这里每次调用现造一个
-	# 6 元素字面量数组（顺便还和真值表的方向顺序不一致，改真值就会静默漏标邻居）。
+	# 方向表只从 NEIGHBORS_6（VoxelConnectivity 的真值）来 —— 别在这里现造 6 元素字面量数组：
+	# 它会与真值表的方向顺序脱节，改真值就会静默漏标邻居。
 	for dir: Vector3i in NEIGHBORS_6:
 		var nb: Vector3i = chunk_key + dir
 		if _chunk_buffers.has(nb) and not _dirty.has(0, nb, VoxelDirtyLedger.MESH):
@@ -539,7 +539,7 @@ var _live_snapshots: Dictionary = {}
 ## 它替代了"归零后扫 4096 格"的判定，消除破坏 / 崩塌热路径的 32³ 循环。
 var _chunk_voxel_counts: Dictionary = {}
 
-## 全场体素总数的**增量镜像**（get_voxel_count 变 O(1)，此前每次调用要对上面整张表求和）。
+## 全场体素总数的**增量镜像**（get_voxel_count 因此 O(1)，不必对上面整张表求和）。
 ## 不变式：恒等于 _chunk_voxel_counts 全部值之和。改这块表的每条路径都必须经
 ## _count_delta / _count_set **或** _count_erase / _count_clear 同步它 —— 直接
 ## `_chunk_voxel_counts.erase()` 会在下一次 get_voxel_count 时把旧数字留在总数里（只增不减）。
@@ -560,9 +560,9 @@ const NEIGHBORS_6: Array[Vector3i] = VoxelConnectivity.NEIGHBORS_6
 
 
 # 资产原点（导入选项 mesh/origin）—— `.vox`/`.qvx` × mesh/data 四条链路共用的唯一约定。
-## 【为什么必须统一】同一个模型经 mesh 与 data 两条路径进场景必须落在同一位置：此前 mesh 路径
-## 保留 MagicaVoxel 的作者摆放、data 路径把内容 AABB 角点当原点（贴地），实测同一模型两侧底面
-## 差 0.35~0.50（模型边长 2.2），看着像"位置差很多"，而体素数据其实完全一致。
+## 【为什么必须统一】同一个模型经 mesh 与 data 两条路径进场景必须落在同一位置：mesh 路径若
+## 保留 MagicaVoxel 的作者摆放、data 路径若把内容 AABB 角点当原点（贴地），同一模型两侧底面
+## 会差 0.35~0.50（模型边长 2.2），看着像"位置差很多"，而体素数据其实完全一致。
 ## 【为什么默认 WORLD_ORIGIN】导入器不该在没被要求时移动顶点几何：这一档原样保留文件坐标，
 ## 也是本插件网格导入一直以来的行为（默认沿用它，已有资产不会因升级挪位），且多模型装配的
 ## 相对位置只有它保得住（其余两档会把每个模型各自归位）。需要"贴地居中"（角色 / 道具原点在
@@ -589,17 +589,17 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
 		var max_pos: Vector3i = bounds["max"]
 		var base := Vector3i.ZERO if origin_mode == OriginMode.WORLD_ORIGIN else min_pos
 
-		# 【按块聚合，不逐体素走写入原语】旧实现每一格调一次 _write_buffer_impl（_chunk_of +
-		# 字典查 + 标待写盘 + 清伤害账 + 下标计算，约 4~5 次哈希）。同仓 .qvx 导入路径走的是
+		# 【按块聚合，不逐体素走写入原语】每格调一次 _write_buffer_impl 要付 _chunk_of +
+		# 字典查 + 标待写盘 + 清伤害账 + 下标计算，约 4~5 次哈希。.qvx 导入路径走的是
 		# _install_block_buffer（**每块一次**），同一个模型两条导入路径成本差一个数量级。
 		# 这里先按 chunk 归类局部下标与材质，再每块一次装满：逐体素成本降到一次字典取 + 一次 append。
 		# 【为什么用 Array 归类比"就地往块缓冲里写"快】PackedInt32Array 是值语义（CoW）：
-		# 字典里还持有它时写一格会触发整块 32³ 拷贝，那正是旧实现慢的真正原因。
+		# 字典里还持有它时写一格会触发整块 32³ 拷贝 —— 这才是慢的真正原因。
 		var per_chunk: Dictionary = {}
 		for pos_key in raw_voxels.keys():
 			var mat_id: int = int(raw_voxels[pos_key])
 			if mat_id <= 0:
-				continue  # 0 = 空，不该落进缓冲（旧路径由 _write_buffer_impl 的 mat_id <= 0 分支跳过）
+				continue  # 0 = 空，不该落进缓冲（与 _write_buffer_impl 的 mat_id <= 0 分支同语义）
 			var pos: Vector3i = (pos_key as Vector3i) - base
 			var ck := _chunk_of(pos)
 			var bucket: Array = per_chunk.get(ck, [])
@@ -613,7 +613,7 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
 			for i in range(0, bucket.size(), 2):
 				buf[int(bucket[i])] = int(bucket[i + 1])
 			res._install_block_buffer(ck, buf)
-			# 旧路径靠 _write_buffer_impl 标待写盘；资源载荷的取舍（有生成器时只存改过的块）依赖它。
+			# 与 _write_buffer_impl 一致地标待写盘；资源载荷的取舍（有生成器时只存改过的块）依赖它。
 			res._dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
 
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
@@ -663,10 +663,10 @@ static func _local_from_index(i: int) -> Vector3i:
 ## 写入体素缓冲（核心原语）：不标记脏 chunk / 不触发信号，由调用方处理。
 ## check_empty=true 时，若写入后该 chunk 缓冲全空则移除 chunk 键（回收内存）。
 ## 【绝不预建空缓冲】写入的语义是"这一格归零 / 归一"，不是"这个 chunk 从此存在"。
-## 从前无条件先建一块 4096 个 0 的缓冲再写，于是"往空格子里写 0 / 删一个不存在的体素"
-## 会留下一块全零缓冲：`is_empty()`（见 :525 的不变式）与 `has_chunk()` 双双撒谎，
-## flush 还会把这块空气写进磁盘；而 check_empty=false 的四个调用点（读档 / 旧格式反序列化 /
-## .qvx 融合体素 / 单点 set）恰好都不做回收。故先读当前值：真的什么都不用变就直接返回。
+## 无条件先建一块 4096 个 0 的缓冲再写，会让"往空格子里写 0 / 删一个不存在的体素"
+## 留下一块全零缓冲：`is_empty()` 与 `has_chunk()` 双双撒谎，flush 还会把这块空气写进磁盘；
+## 而 check_empty=false 的几个调用点（读档 / 旧格式反序列化 / .qvx 融合体素 / 单点 set）
+## 恰好都不做回收。故先读当前值：真的什么都不用变就直接返回。
 func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
@@ -1444,9 +1444,9 @@ func set_lod_block(level: int, key: Vector3i, buf: PackedInt32Array) -> void:
 
 
 ## 粗层降采样结果落地（**唯一入口**）：写入内存权威 + 按需持久化。
-## 【为什么归数据层】"下来源是否支持 LOD 层 / 何时该落盘"这条规则此前散在三处（本类的降采样
-## 回填 + 渲染器的两个结果回调），且渲染器为了落盘直接伸手拿 `data.stream` 绕过数据层。
-## 现在渲染器只报告"降采样结果就绪"，落盘判断与写入统一由本层负责。
+## 【为什么归数据层】"下来源是否支持 LOD 层 / 何时该落盘"若散在多处（本类的降采样回填 +
+## 渲染器的结果回调），渲染器为了落盘就会直接伸手拿 `data.stream` 绕过数据层。
+## 渲染器只报告"降采样结果就绪"，落盘判断与写入统一由本层负责。
 func store_lod_block(level: int, block_key: Vector3i, buf: PackedInt32Array) -> void:
 	if buf.is_empty():
 		return
@@ -1806,7 +1806,7 @@ func get_positions() -> Array:
 ## 热路径判空请用 is_empty()（等价且 O(1)）。
 func get_voxel_count() -> int:
 	# O(1)：增量镜像由 _count_delta / _count_set / _count_erase / _count_clear 共同维护
-	# （此前每帧对整张 _chunk_voxel_counts 求和，调用点 demo/water_sim.gd 每帧一次）。
+	# （对整张 _chunk_voxel_counts 求和是逐帧成本，调用点 demo/water_sim.gd 每帧一次）。
 	return _voxel_count_total
 
 
@@ -2173,7 +2173,7 @@ func has_chunk(chunk_key: Vector3i) -> bool:
 
 ## 批量收集一组世界坐标处的体素材质 ID，返回 {Vector3i: int}（无体素 / 未加载 → -1）。
 ## 【为什么需要这个公开薄壳】破坏组件要一次读回成百上千个位置的材质（大崩塌时是数万次
-## 逐体素 get_voxel 哈希，全在主线程），而它此前直接调内部协议 _chunk_buffers_view()
+## 逐体素 get_voxel 哈希，全在主线程），而它不该直接调内部协议 _chunk_buffers_view()
 ## 把内部字典交给原生接口 —— 内核外组件不得触碰存储布局（见 test_voxel_kernel_contract
 ## 的 VOXEL_DATA_INTERNAL_PROTOCOLS）。这里把"取缓冲 → 批量读"封成一个动作：
 ## 既保住单次原生调用，也不再泄漏存储布局。
