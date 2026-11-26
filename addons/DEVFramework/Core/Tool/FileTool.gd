@@ -7,7 +7,11 @@ class_name FileTool
 
 
 ## 递归收集目录下的文件, 按扩展名过滤(需带点, 如 [code][".tres"][/code]; 空则不过滤)。
-static func list_files(dir_path: String, extensions: PackedStringArray = PackedStringArray(), recursive := true) -> PackedStringArray:
+## [param include_hidden] 为 true 时连"带隐藏属性"的条目一起收。
+## 【为什么需要这个开关】DirAccess 默认跳过隐藏条目, 而原生库产物经常被外部工具打上隐藏位;
+## 结果是"目录里明明有 libxxx.dll, 枚举结果里却没有", 构建新鲜度判定于是永远认为产物缺失。
+## 一个属性位不该决定"文件存不存在" —— 要不要这个文件由扩展名决定。
+static func list_files(dir_path: String, extensions: PackedStringArray = PackedStringArray(), recursive := true, include_hidden := false) -> PackedStringArray:
 	var out := PackedStringArray()
 	var stack: Array[String] = [dir_path]
 	while not stack.is_empty():
@@ -15,6 +19,7 @@ static func list_files(dir_path: String, extensions: PackedStringArray = PackedS
 		var dir := DirAccess.open(cur)
 		if dir == null:
 			continue
+		dir.include_hidden = include_hidden
 		dir.list_dir_begin()
 		var entry := dir.get_next()
 		while entry != "":

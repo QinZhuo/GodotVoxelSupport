@@ -208,34 +208,51 @@ static func build_now(restart := false, plugin := "all") -> Dictionary:
 
 ## 原生源码是否比已部署的库新 —— "改了 C++ 却没重编"的检测点(测试与 MCP 共用)。
 ## 只比时间戳: 源码树与产物足以判定, 不需要额外的指纹文件。
+##
+## 【库产物必须按"本 target + 本平台"筛, 不能扫目录取最大 mtime】同目录里还躺着别的平台产物
+## (mac 上编过的 .dylib)、引擎运行期的 `~<名>` 加载副本、以及被占用时旁置的旧库; 取最大值会让
+## "判据是哪个文件"随机漂移 —— 实测因此把 windows 项目判成"库比源码旧", 而最新那个文件其实是 mac dylib。
+## 【也不再单独扫某一个插件目录】那等于把插件名写死在框架里; 全局值由各 target 汇总得出。
 static func native_status() -> Dictionary:
-	var src_ms := GDExtensionProbeTool._native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp"]))
-	var lib_ms := 0
-	var lib := ""
-	for f in FileTool.list_files("res://addons/DEVFramework/Native", PackedStringArray([".dll", ".so", ".dylib"])):
-		var ms := int(FileAccess.get_modified_time(f))
-		if ms > lib_ms:
-			lib_ms = ms
-			lib = f
-	# 逐插件新鲜度: 多插件时"哪个插件旧了"比一个全局布尔有用得多
+	var probe := GDExtensionProbeTool.new()
+	# 平台扩展名从规范命名规则反推 —— 构建/部署/清理与本处必须认同一套命名(唯一真值在 probe)。
+	var ext := probe._canonical_file("probe", probe._build_type(), probe._arch()).get_extension()
 	var per_target: Array = []
 	var scaf: GDScript = load(GDExtensionProbeTool.SCAFFOLD_PATH) as GDScript
-	if scaf != null:
-		var root := ProjectSettings.globalize_path("res://").simplify_path()
-		for p in scaf.discover_plugins(root):
-			var src_abs := String(p["src_abs"])
-			var nat_abs := String(p["native_abs"])
+	if scaf != null and ext != "":
+		for p in scaf.discover_plugins(ProjectSettings.globalize_path("res://").simplify_path()):
+			var tgt := String(p["target"])
 			var s_ms := 0
-			for f in FileTool.list_files(src_abs, PackedStringArray([".cpp", ".h", ".hpp", ".c"])):
+			for f in FileTool.list_files(String(p["src_abs"]), PackedStringArray([".cpp", ".h", ".hpp", ".c"])):
 				s_ms = maxi(s_ms, int(FileAccess.get_modified_time(f)))
 			var l_ms := 0
-			for f in FileTool.list_files(nat_abs, PackedStringArray([".dll", ".so", ".dylib"])):
-				l_ms = maxi(l_ms, int(FileAccess.get_modified_time(f)))
+			var l_file := ""
+			var prefix := "lib%s." % tgt
+			# include_hidden: 库文件可能被外部工具打上隐藏属性, 默认枚举会"看不见已存在的库"。
+			for f in FileTool.list_files(String(p["native_abs"]), PackedStringArray(["." + ext]), false, true):
+				var base := f.get_file()
+				if base.begins_with("~") or not base.begins_with(prefix):
+					continue
+				var ms := int(FileAccess.get_modified_time(f))
+				if ms > l_ms:
+					l_ms = ms
+					l_file = f
 			per_target.append({
-				"target": String(p["target"]), "plugin": String(p["plugin"]),
+				"target": tgt, "plugin": String(p["plugin"]),
 				"stale": s_ms > 0 and l_ms > 0 and s_ms > l_ms,
-				"source_ms": s_ms, "lib_ms": l_ms,
+				"source_ms": s_ms, "lib_ms": l_ms, "lib": l_file,
 			})
+	# 全局值 = 各 target 的汇总; "需要重编"= 有任一个 target 旧了(不是拿全局最大源码去比全局最小产物)。
+	var src_ms := 0
+	var lib_ms := 0
+	var lib := ""
+	var any_stale := false
+	for t in per_target:
+		src_ms = maxi(src_ms, int(t["source_ms"]))
+		any_stale = any_stale or bool(t["stale"])
+		if int(t["lib_ms"]) > lib_ms:
+			lib_ms = int(t["lib_ms"])
+			lib = String(t["lib"])
 	return {
 		"targets": per_target,
 		"source_ms": src_ms,
@@ -243,7 +260,7 @@ static func native_status() -> Dictionary:
 		"lib": lib,
 		"has_native": src_ms > 0,
 		# 没有原生源码(纯 GDScript 项目)或还没编过产物时不算 stale, 免得误报
-		"stale": src_ms > 0 and lib_ms > 0 and src_ms > lib_ms,
+		"stale": any_stale,
 	}
 
 
