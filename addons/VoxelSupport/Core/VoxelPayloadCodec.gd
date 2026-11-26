@@ -41,7 +41,8 @@ static func decode(value: String) -> Variant:
 	var raw := Marshalls.base64_to_raw(value)
 	# 魔数已在 base64 之前写入，故解出来必以 "GZ" 开头（校验它能挡住"非本格式的字符串"）。
 	if raw.size() < 4 or raw[0] != 0x47 or raw[1] != 0x5A:  # "GZ"
-		push_error("[VoxelPayloadCodec] 载荷缺少 GZIP 压缩头，载荷无效")
+		# 载荷不是本格式（外部数据/旧资源）→ 按约定返回 null，属预期路径，不是程序错。
+		push_warning("[VoxelPayloadCodec] 载荷缺少 GZIP 压缩头，载荷无效")
 		return null
 	var decompressed := raw.slice(4).decompress_dynamic(-1, FileAccess.COMPRESSION_GZIP)
 	if decompressed.is_empty():
@@ -50,7 +51,8 @@ static func decode(value: String) -> Variant:
 	if not (data is Dictionary):
 		return null
 	if int((data as Dictionary).get("v", 0)) != VERSION:
-		push_error("[VoxelPayloadCodec] 载荷版本 %s 不受支持（本版仅 %d），请重新导入/保存"
+		# 版本比本版新（旧编辑器存的文件被新代码读，或反之）→ 同样是预期拒绝路径。
+		push_warning("[VoxelPayloadCodec] 载荷版本 %s 不受支持（本版仅 %d），请重新导入/保存"
 				% [(data as Dictionary).get("v"), VERSION])
 		return null
 	return data

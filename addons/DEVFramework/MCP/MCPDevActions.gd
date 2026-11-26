@@ -44,13 +44,18 @@ static func tools() -> Array:
 			"handler": _handle_refresh_tools,
 		},
 		{
-			# 原生库不重编不会报任何错: 游戏与测试照跑, 只是跑的是旧 dll。故必须有可调用的构建入口。
+			# 原生库不重编不会报任何错: 游戏与测试照跑, 只是跑的是旧 dll。故必须有可调用的构建入口。action=build **必须指定 plugin**(要全部就显式传 all): 全部构建会把没改的插件也重链, 产物时间戳随之变化。
 			"name": "build_native",
 			"desc": "构建 GDExtension 原生扩展(gdextension/ → addons/DEVFramework/Native)。**改过 gdextension/src/ 之后必须调用**, 否则游戏与测试跑的是旧库且不报任何错。status=只比时间戳(零等待, 改完先查); build=完整构建(CMake→增量编译→部署), 长任务, 超时返回 job_id 用 job_wait 轮询。restart=true 时构建完自动重载编辑器(Windows 上运行中的编辑器锁 dll, 需要重载才生效)。",
 			"schema": {"type": "object", "properties": {
 				"action": {"type": "string", "enum": ["status", "build"], "description": "status=检查是否需要重编(不编译); build=执行构建"},
 				"restart": {"type": "boolean", "description": "action=build 时: 完成后是否自动重载编辑器(默认 false, 由调用方决定何时重启)"},
-				"plugin": {"type": "string", "description": "action=build 时: 只构建某个原生目标(插件的 target 名, 如 dev); 默认 all 构建全部。多插件工程改一个插件时用它省掉其它插件的编译"},
+				# action=build 时必填(由 handler 强制): 不指定就只能"全部构建", 而全部构建会把没改的
+				# 插件也重链一遍 —— 链接器每次写入新的 PE TimeDateStamp, 于是"代码一行没改, 产物却变了"。
+				# 需要全部构建时显式传 "all"。action=status 不需要它。
+				# 【为什么不写进 required】JSON Schema 的 required 是整条工具的, 无法按 action 分档;
+				# 写进去会让 status 也变成必须带 plugin。故由 MCPRuntime 在 build 分支强制并给出可选值清单。
+				"plugin": {"type": "string", "description": "action=build 时**必填**: 要构建的原生目标(插件的 target 名, 如 dev / voxelsupport); 确实要全部时显式传 \"all\"。action=status 可省略"},
 			}, "required": ["action"]},
 			"handler": _handle_build_native,
 		},

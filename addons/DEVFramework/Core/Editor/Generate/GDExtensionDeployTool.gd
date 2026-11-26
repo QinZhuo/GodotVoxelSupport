@@ -74,8 +74,10 @@ func _up_to_date(target_res: String, out_dir: String, tgt: String) -> bool:
 	if not FileAccess.file_exists(_host._abs(target_res)):
 		return false
 	var deployed: int = int(FileAccess.get_modified_time(_host._abs(target_res)))
-	# 源码(含 .h)比产物新 → 必须重编
-	if GDExtensionProbeTool._native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"])) > deployed:
+	# 源码(含 .h)比产物新 → 必须重编。只算**本 target 自己**的源码目录:
+	# 多插件共用一个 CMake 工程时, 拿全局最新 mtime 会把别家插件的改动算到自己头上,
+	# 于是没改的插件也被重编重链, 链接器写入新时间戳, 产物字节随之变化。
+	if GDExtensionProbeTool._native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"]), tgt) > deployed:
 		return false
 	# 生成的 CMakeLists 变过(换模板/加插件/改参数) → 也要重配+重编
 	for cfg in ["res://gdextension/CMakeLists.txt"]:
@@ -98,7 +100,8 @@ func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: S
 	var deployed_ms := 0
 	if FileAccess.file_exists(_host._abs(target_res)):
 		deployed_ms = int(FileAccess.get_modified_time(_host._abs(target_res)))
-	var src_ms := GDExtensionProbeTool._native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"]))
+	# 同上: 只看本 target 的源码, 否则别的插件改一行就会让这里误判"产物过期"。
+	var src_ms := GDExtensionProbeTool._native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"]), tgt)
 	var best := 0
 	for cand in [_probe._default_out_file(target), _probe._canonical_file(target, type, arch)]:
 		if cand == "":

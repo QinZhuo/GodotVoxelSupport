@@ -16,7 +16,8 @@ const VOX_EXTENSION := "vox"
 ## 按扩展名把资产文件解析为 VoxAsset；不支持的格式或解析失败返回 null。
 static func from_asset(path: String) -> VoxAsset:
 	if QVoxelAsset.handles(path):
-		push_error("[VoxAsset] %s 是 .qvx：请改用 QVoxelAsset.from_file()。"
+		# 传错适配器是调用方输入问题（预期路径，返回 null），不是程序错 —— 见 QVoxelFile._flush_fatal 的判据。
+		push_warning("[VoxAsset] %s 是 .qvx：请改用 QVoxelAsset.from_file()。"
 				% path + "（VoxAsset 是 MagicaVoxel 专用适配器，硬塞会丢 NODE 与多模型信息）")
 		return null
 	var access := VoxAccess.Open(path)

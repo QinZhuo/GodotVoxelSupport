@@ -72,7 +72,9 @@ static func save(world: QVoxelWorld, path: String) -> bool:
 		return false
 	var bytes := encode(world, path)
 	if bytes.is_empty():
-		push_error("[QVX] %s 未写入：%s" % [path, _failure_reason(world, path)])
+		# 世界本身不合规（超 .vox 上限、非整数平移…）→ 按约定拒绝落盘，属预期路径；
+		# 下面那条「打不开文件」才是环境/权限问题，保持 error。
+		push_warning("[QVX] %s 未写入：%s" % [path, _failure_reason(world, path)])
 		return false
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:

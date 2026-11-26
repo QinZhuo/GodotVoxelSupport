@@ -13,3 +13,9 @@
 # 体素二进制资产统一走 Git LFS（.qvx 与 .vox 同级，均为模型源文件）。
 *.vox  filter=lfs diff=lfs merge=lfs -text
 *.qvx filter=lfs diff=lfs merge=lfs -text
+
+# 原生扩展产物同样走 LFS：它们必须被版本跟踪（插件开箱即用，不能要求用户自己装编译器），
+# 但每份都有 0.8~1.8 MB 且每次重链都会变 —— 直接进主仓会让历史迅速膨胀。
+*.dll   filter=lfs diff=lfs merge=lfs -text
+*.dylib filter=lfs diff=lfs merge=lfs -text
+*.so    filter=lfs diff=lfs merge=lfs -text

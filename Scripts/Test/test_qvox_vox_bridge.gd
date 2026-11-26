@@ -324,10 +324,17 @@ func _two_layer_asset(a_visible := true, b_visible := false) -> VoxAsset:
 	l1.isVisible = b_visible
 	vox.layers[1] = l1
 
-	# 场景图：node0 nTRN(根) → node1 nGRP → { node2 nTRN(layer0) → node3 nSHP(model0),
+	# 场景图：node0 nTRN(根) → node1 nGRP → { node6 nGRP(layer0) → node2 nTRN → node3 nSHP(model0),
 	#                                            node4 nTRN(layer1) → node5 nSHP(model1) }
+	# 【为什么 layer0 外面还要套一层 nGRP】世界化把「一个变换节点 + 一个形状节点」折叠成单个模型
+	# （见 VoxAssetWorld._build_world_node 的折叠分支：MagicaVoxel 的对象本来就是 nTRN+nSHP，再包一层组
+	# 只会让每次往返多出一批空组）。所以要让「图层 ↔ 组」真的可测，夹具里必须存在一个**属于该图层的容器节点**；
+	# 否则该图层的对象会直接以一个模型的身份出现在世界顶层，压根没有组。
 	vox.nodes[0] = _trn(0, 1, -1, Vector3.ZERO)
-	vox.nodes[1] = _grp(1, [2, 4])
+	vox.nodes[1] = _grp(1, [6, 4])
+	var wrap := _grp(6, [2])
+	wrap.layerId = 0   # 属图层 ⇒ 不是结构壳，会保留成组(组名回落为图层名)
+	vox.nodes[6] = wrap
 	vox.nodes[2] = _trn(2, 3, 0, Vector3(1, 2, 3))
 	vox.nodes[3] = _shp(3, 0)
 	vox.nodes[4] = _trn(4, 5, 1, Vector3(0, 5, 0))

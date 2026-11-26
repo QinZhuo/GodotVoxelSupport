@@ -245,8 +245,14 @@ static func scan_block_index(bytes: PackedByteArray) -> Array:
 
 
 ## 致命错误统一出口：写入 report（有则复用）并带出已累积的非致命诊断，避免 return null 丢诊断。
+## 【为什么是 push_warning 而不是 push_error】这里全部是「输入数据不合法，已优雅拒绝」——
+## 返回 null + rep.errors 是**约定好的 API 行为**，不是程序出错。日志级别的判据：
+##   error   = 程序自己的错或环境破损（原生库缺失、写盘失败、缓冲长度不符）；
+##   warning = 外部数据不好，但我们已经处理好了。
+## 现实影响：run_tests 会把「用例执行期间出现的 error」整条算失败，于是「构造坏文件 → 断言被拒」
+## 这类守门用例天生红，红得没有信息量；warning 既能留在 get_logs(kind=warning) 里被看见，又不误伤用例。
 static func _flush_fatal(report: QVoxelReport, message: String, notes: Variant = null, push_msg: String = "") -> void:
-	push_error("[QVX] " + (push_msg if push_msg != "" else message))
+	push_warning("[QVX] " + (push_msg if push_msg != "" else message))
 	var rep := report if report != null else QVoxelReport.new()
 	rep.errors.append(message)
 	if notes is QVoxelNotes:
@@ -396,10 +402,7 @@ static func _parse_impl(bytes: PackedByteArray, check_crc: bool, report: QVoxelR
 	if validate:
 		_validate(doc, rep)
 	if report == null:
-		for w in rep.warnings:
-			push_warning("[QVX] %s" % w)
-		for e in rep.errors:
-			push_error("[QVX] %s" % e)
+		_flush_report_to_log(rep)
 	return doc
 
 
@@ -411,11 +414,18 @@ static func validate(doc: QVoxelDocument, report: QVoxelReport = null) -> QVoxel
 		return rep
 	_validate(doc, rep)
 	if report == null:
-		for w in rep.warnings:
-			push_warning("[QVX] %s" % w)
-		for e in rep.errors:
-			push_error("[QVX] %s" % e)
+		_flush_report_to_log(rep)
 	return rep
+
+
+## 调用方没要 report 时的日志回显。**全部走 warning** —— rep.errors 里的每一条都是
+## 「数据不合法，已按约定拒绝并返回 null」，属预期路径（理由见 _flush_fatal）。
+## 真正需要 error 级别的是程序自身的错，那类问题在各处就地 push_error，不经过这里。
+static func _flush_report_to_log(rep: QVoxelReport) -> void:
+	for w in rep.warnings:
+		push_warning("[QVX] %s" % w)
+	for e in rep.errors:
+		push_warning("[QVX] %s" % e)
 
 
 static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
@@ -514,9 +524,10 @@ static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 	if mate_violations > 0:
 		rep.warnings.append("有 %d 个块引用了不存在的材质索引（>= entry_count=%d），已丢弃" % [mate_violations, mate_count])
 
-	# NODE 场景图。
-	if not doc.node.is_empty():
-		doc.scene = _build_scene(doc, rep)
+	# 场景图（NODE + CAMR）。**无条件**建：CAMR 相机是独立于 NODE 的顶层块，
+	# 曾经用 `if not doc.node.is_empty()` 守卫，于是「只有相机、还没有对象」的新建工程
+	# 一存一读就把相机丢了（_build_scene 自己已经处理好「nodes 键缺失 = 空世界」）。
+	doc.scene = _build_scene(doc, rep)
 
 
 ## 校验一份块表：块键类型、B³ 长度、bounds 越界、材质索引范围。就地剔除坏块；
@@ -580,7 +591,8 @@ static func _parse_head(payload: PackedByteArray, err: Array = []) -> Dictionary
 	elif int(d["qvox"]) != QVoxelSpec.VERSION:
 		reason = "不支持的 qvox 版本 %d（本实现仅支持 %d）" % [int(d["qvox"]), QVoxelSpec.VERSION]
 	if reason != "":
-		push_error("[QVX] HEAD 不合法：" + reason)
+		# 坏输入（调用方给了不合法的 HEAD），不是程序错 —— 见 _flush_fatal 的级别判据。
+		push_warning("[QVX] HEAD 不合法：" + reason)
 		if not err.is_empty():
 			err[0] = reason
 		return {}

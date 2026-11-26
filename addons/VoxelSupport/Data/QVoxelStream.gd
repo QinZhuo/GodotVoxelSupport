@@ -194,13 +194,15 @@ func _ensure_loaded() -> void:
 	f.close()
 	var doc: QVoxelFile.QVoxelDocument = QVoxelFile.parse_with_index(bytes)
 	if doc == null:
-		push_error("[QVoxelStream] %s 解析失败，按空世界处理" % file_path)
+		# 磁盘上的文件损坏 = 外部数据不合法，已按约定降级为空世界 → warning（上面「打不开文件」才是环境问题，保持 error）。
+		push_warning("[QVoxelStream] %s 解析失败，按空世界处理" % file_path)
 		return
 	# 【不变量校验】本流的全部坐标换算都建立在"块坐标 == chunk 坐标"之上，
 	# 即要求 HEAD.block_size == CHUNK_SIZE。block_size=16 的合法 .qvx 若照单全收，
 	# 每个 chunk 都会被按 16³ 解码 → 静默读出错误体素（接受却误读）。故 fail-fast 拒绝。
 	if doc.get_block_size() != CHUNK_SIZE:
-		push_error("[QVoxelStream] %s 的 block_size=%d 与本流不兼容（本流要求 %d）"
+		# 合法但与本流约定不符的旧文件 → 同样是「输入不合法，已拒绝」，warning。
+		push_warning("[QVoxelStream] %s 的 block_size=%d 与本流不兼容（本流要求 %d）"
 				% [file_path, doc.get_block_size(), CHUNK_SIZE])
 		return
 	# 【不加载模型内容】只有块索引进内存：体素数据留在磁盘上，按块读（见 _read_clean_chunk）。

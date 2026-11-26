@@ -35,8 +35,32 @@ static func native_source_dirs() -> Array[String]:
 	return out
 
 
-static func _native_src_mtime(exts: PackedStringArray) -> int:
+## 某个 target 自己的源码目录(绝对路径); 找不到返回空串。
+## 【为什么需要它】多插件共用一个 CMake 工程时, "全局最新源码 mtime" 会把 A 插件的改动算到 B 头上,
+## 于是 B 也被重编重链 —— 链接器每次写入新的 PE TimeDateStamp, 产物字节就变了。
+## 判新鲜度必须只算"这个 target 自己的 src"。
+static func _native_src_dir_of(tgt: String) -> String:
+	if tgt.is_empty():
+		return ""
+	var scaf: GDScript = load(SCAFFOLD_PATH) as GDScript
+	if scaf == null:
+		return ""
+	var root := ProjectSettings.globalize_path("res://").simplify_path()
+	for p in scaf.discover_plugins(root):
+		if String(p["target"]) == tgt:
+			return String(p["src_abs"])
+	return ""
+
+
+## 源码最新 mtime。[param tgt] 非空时只算该 target 自己的源码目录;
+## 为空(或该 target 定位不到)时退回"所有插件"的全局值 —— 宁可多编一次, 不能漏编。
+static func _native_src_mtime(exts: PackedStringArray, tgt := "") -> int:
 	var ms := 0
+	var own := _native_src_dir_of(tgt)
+	if own != "":
+		for f in FileTool.list_files(own, exts):
+			ms = maxi(ms, int(FileAccess.get_modified_time(f)))
+		return ms
 	for d in native_source_dirs():
 		for f in FileTool.list_files(d, exts):
 			ms = maxi(ms, int(FileAccess.get_modified_time(f)))

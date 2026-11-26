@@ -391,6 +391,17 @@ func call_perf_routed(args: Dictionary) -> Dictionary:
 	return server._fail("process 必须是 editor / game, 收到: '%s'" % process)
 
 
+## 可构建的原生 target 名(供 build_native 报错时列选项)。
+func _native_target_names() -> Array[String]:
+	var out: Array[String] = []
+	var st: Dictionary = GDExtensionRebuild.native_status()
+	for t in st.get("targets", []):
+		var name := String((t as Dictionary).get("target", ""))
+		if name != "" and not out.has(name):
+			out.append(name)
+	return out
+
+
 ## ------- build_native: 原生扩展构建 -------
 ## 构建流程**只存在于 GDExtensionRebuild**(菜单与 MCP 共用同一份), 这里只做 action 分发 + job 包装。
 
@@ -401,7 +412,12 @@ func call_build_native_local(args: Dictionary) -> Dictionary:
 			return server._ok_json(GDExtensionRebuild.native_status())
 		"build":
 			var restart := bool(args.get("restart", false))
-			var plugin := VariantTool.get_string(args, "plugin", "all")
+			# 必须显式指定插件: 全部构建会把没改的插件也重链一遍, 产物时间戳因此变化。
+			# schema 已把 plugin 标为必填(见 MCPDevActions), 这里再兜一层并给出可选项。
+			var plugin := VariantTool.get_string(args, "plugin").strip_edges()
+			if plugin == "":
+				return server._fail("build 必须指定 plugin(要全部构建请显式传 \"all\")。可选: %s"
+						% ", ".join(PackedStringArray(_native_target_names())))
 			return await _run_as_job("build_native",
 				func() -> Dictionary: return await GDExtensionRebuild.build_now(restart, plugin))
 	return server._fail("action 必须是 status / build, 收到: '%s'" % action)
