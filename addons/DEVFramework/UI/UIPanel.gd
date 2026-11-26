@@ -1,8 +1,6 @@
 ## 2D UI 面板基类
 class_name UIPanel extends Control
 
-# ============================================================
-
 ## 进入/离开动画，为空则直接切换显隐
 @export var show_tween: TweenAnimation
 
@@ -13,16 +11,11 @@ class_name UIPanel extends Control
 @export var back_tip: StringName
 
 ## 点击面板外的空白是否退一层（查看类面板用；操作型面板保持关闭，避免误触）。
-## 由 [UITool.dismiss_on_blank_click] 按属性名探测，2D / 3D 面板一致。
 @export var dismiss_on_blank_click: bool = false
-
-# ============================================================
 
 var is_open: bool = false
 ## 每次 open() 自增，用于 await_closed() 检测版本是否过期
 var _open_version := 0
-
-# ============================================================
 
 ## 打开动画开始前触发
 signal on_open()
@@ -33,16 +26,13 @@ signal on_close()
 ## 关闭动画完成后触发
 signal on_closed()
 
-
-# ============================================================
-
-## 打开面板。完整流程见 [UIPanelTool.open]。
+## 打开面板。
 func open() -> void:
 	await UIPanelTool.open(self)
 	if back_tip != &"" and is_open:
 		TipTool.show_tip([[[&"menu"], back_tip]], self, 0)
 
-## 关闭面板。完整流程见 [UIPanelTool.close]。
+## 关闭面板。
 func close() -> void:
 	TipTool.hide_tip(self)
 	await UIPanelTool.close(self)
@@ -64,7 +54,6 @@ func await_closed() -> bool:
 	return await UIPanelTool.await_closed(self)
 
 ## 本轮打开版本号：调用方如果在 `open()` 之后还有别的等待（如淡入 / 其它协程），
-## 先记下它再等关闭 —— 否则 `await_closed()` 迟发，会错过早已发生的 `on_closed` 而永久挂起。
 func open_version() -> int:
 	return _open_version
 
@@ -72,20 +61,20 @@ func open_version() -> int:
 func await_closed_since(version: int) -> bool:
 	return await UIPanelTool.await_closed_since(self, version)
 
-## 返回键处理，由 [method UITool.back] 调用。默认关闭面板并返回 true（已消费）。
+## 返回键处理，由 [method UITool.back] 调用。
 func _back() -> bool:
 	close()
 	return true
 
-## 获取焦点时由 UITool 调用。子类可重写以注册导航按键。
+## 获取焦点时由 UITool 调用。
 func _focus_enter() -> void:
 	pass
 
-## 失去焦点时由 UITool 调用。子类需自行清空导航。
+## 失去焦点时由 UITool 调用。
 func _focus_exit() -> void:
 	pass
 
-## 应用面板显隐（[UIPanelTool.open] / [UIPanelTool.close] 调用）。默认切换自身 [member visible]。
+## 应用面板显隐（[UIPanelTool.open] / [UIPanelTool.close] 调用）。
 func apply_visibility(shown: bool) -> void:
 	visible = shown
 

@@ -63,7 +63,7 @@ func _mouse_exit():
 	if press_tween:
 		press_tween.playback()
 
-## 返回文案 key，或 [[按键, key], ...] 条目；返回空则不提示。随状态变化时重写这里
+## 返回文案 key，或 [[按键, key], ...] 条目；返回空则不提示。
 func get_click_tip() -> Variant:
 	return click_tip
 

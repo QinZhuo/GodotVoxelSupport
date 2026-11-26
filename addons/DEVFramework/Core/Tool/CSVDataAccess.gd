@@ -34,7 +34,6 @@ static func load_csv_data(path: String) -> Dictionary[String, Dictionary]:
 	file.close()
 	return data
 
-
 ## Save dictionary to CSV file.
 static func save_csv_data(path: String, data: Dictionary[String, Dictionary]) -> void:
 	if !path.ends_with(".csv"):
@@ -162,7 +161,6 @@ static func _locale_to_column(path: String, locale: String) -> String:
 			best_score = score
 			best = col
 	## 表头里还没有这个语种(一个都不匹配)时拿 locale 当新列名: 否则会落到第一列, 把那里的译文覆盖掉。
-	## 新列由 save_csv_data 的"补数据里出现的新列"逻辑落盘。
 	if best_score <= 0:
 		return locale
 	return best

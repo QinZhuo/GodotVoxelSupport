@@ -1,26 +1,11 @@
 extends TestCase
 
 ## MeshLibrary 分项**重复导入**时的重用边界：改 `.vox` 里一个模型，另外 N-1 个模型会不会跟着重建。
-## 三层结论（本文件逐层钉死）：
-##   ① 引擎层：一个 `.vox` = 一个导入产物，文件一改就整体重导 —— 这一层无法绕过，也不该绕；
-##   ② 几何层：开关只有 `mesh/import_meshes` 一个 bool。开 → 分项落盘，未改动的项 hash 一致、
-##      不跑原生内核、不重写文件；关 → 每项都是新建的 ArrayMesh，缓存无从命中，全部重建；
-##   ③ 落盘层：缓存命中的项内容与磁盘完全一致，重写它只会白刷 mtime 并让引擎丢弃资源缓存 ——
-##      故 `_commit_mesh_library` 只保存本次真的重建过的项；产物一律登记进 `gen_files`，
-##      由引擎纳入依赖与清理（否则项名/分项方式一变就留下孤儿文件）。
-##
-## 判据用**篡改哨兵**：把某一项的分项文件换成 1 个三角（3 顶点）。若该项重导后仍是 3 顶点，
-## 说明它连内核都没进（缓存命中）；这是唯一能区分"重建了但结果相同"与"根本没重建"的观测手段。
-##
-## 另：`split_by_frame` 的每一项都是**整个资产**在某一帧的样子，改一个模型本就该让每一帧都变，
-## 不存在"只重建一帧"的语义，故这里不对该模式做逐项缓存的断言。
 
 const DIR := "user://mesh_library_reimport"
 
-
 func cleanup() -> void:
 	_remove_dir(DIR)
-
 
 ## split_by_node：改一个模型 → 只有那一项重建+落盘，其余项命中缓存（连内核都没进）。
 func test_only_changed_item_is_rebuilt() -> void:
@@ -33,7 +18,7 @@ func test_only_changed_item_is_rebuilt() -> void:
 	assert_eq(_names(lib1), ["A", "B", "C"], "夹具应是三个独立顶级对象")
 	var verts_before := _verts_of(lib1)
 
-	# 篡改 C 的分项文件：清空后塞一个三角。缓存命中时它必须原样活到下一轮。
+	# 篡改 C 的分项文件：清空后塞一个三角。
 	_tamper(_child(dir, "C"))
 	# mtime 只到秒，睡过一整秒才能把"重写"与"没重写"区分开。
 	var mtimes_before := _mtimes(dir, ["A", "B", "C"])
@@ -52,7 +37,6 @@ func test_only_changed_item_is_rebuilt() -> void:
 	assert_ne(mtimes_after["A"], mtimes_before["A"], "被改动的项应重新落盘")
 	assert_eq(mtimes_after["B"], mtimes_before["B"], "未改动的项不应被重写（mtime 会被白刷）")
 	assert_eq(mtimes_after["C"], mtimes_before["C"], "缓存命中的项同样不应被重写")
-
 
 ## split_by_model：同一套逐项缓存（按模型分项时每项就是单个模型，边界最清楚）。
 func test_split_by_model_reuses_unchanged_items() -> void:
@@ -74,9 +58,7 @@ func test_split_by_model_reuses_unchanged_items() -> void:
 	assert_eq(verts_after["model_1"], 3, "未改动的项应命中缓存")
 	assert_eq(verts_after["model_2"], verts_before["model_2"], "其余项内容不变")
 
-
-## hash 必须含全部几何输入。透明标志决定体素进 solid 还是 trans 桶 ——
-## 它曾不在 hash 里：只改材质透明度（体素一个没动）会命中缓存、保留旧的单桶网格。
+## hash 必须含全部几何输入。
 func test_material_transparency_invalidates_cache() -> void:
 	var dir := _fresh_dir("trans")
 	var vox := _asset_multi_material()
@@ -91,9 +73,7 @@ func test_material_transparency_invalidates_cache() -> void:
 	assert_eq(lib2.get_item_mesh(0).get_surface_count(), 2,
 			"材质改透明后必须重建（旧 hash 会短路、留下单桶网格）")
 
-
 ## 关掉开关：不落盘 → 没有可命中的缓存，改一个模型时所有项全部重建。
-## 这就是"改一个模型全量重建"这个现象的根因（也是默认配置下的行为）。
 func test_disabled_rebuilds_every_item() -> void:
 	var dir := _fresh_dir("disabled")
 	var vox := _asset([1, 2])
@@ -113,9 +93,7 @@ func test_disabled_rebuilds_every_item() -> void:
 		assert_false(ids_before.has(lib2.get_item_mesh(i).get_instance_id()),
 				"关闭时项网格不可能被复用（每项都是新建的）")
 
-
 ## 分项网格是导入产物，**必须**登记进 gen_files：否则引擎不知道它们依赖源文件，
-## 项名/分项方式一变就留下没人回收的孤儿。
 func test_generated_items_are_registered() -> void:
 	var dir := _fresh_dir("gen_files")
 	var vox := _asset([1, 2])
@@ -136,10 +114,7 @@ func test_generated_items_are_registered() -> void:
 			dir + "/quiet.vox", quiet)
 	assert_true(quiet.is_empty(), "关闭时不应登记产物（实得 %s）" % str(quiet))
 
-
 ## 【回归】分项目录名 = 源资产去掉扩展名的同名目录（`cars.vox` → `cars/`），与历史版本一致。
-## 曾经改成 `<stem>_<ext>/`（`cars_vox/`）以躲"同 stem 的 .vox 与 .qvx 撞目录"，结果所有既有
-## 项目的产物目录集体改名、旧目录变成没人回收的孤儿。这条断言把目录名钉成对外契约。
 func test_item_dir_has_no_extension_suffix() -> void:
 	var dir := _fresh_dir("item_dir")
 	var vox := _asset([1, 2])
@@ -153,9 +128,7 @@ func test_item_dir_has_no_extension_suffix() -> void:
 			assert_eq(p.get_base_dir().get_file(), "asset",
 					"分项目录名应等于源资产的 stem（不得带 _vox/_qvx 后缀），实得 %s" % p)
 
-
 ## `.qvx` 的分项走块级入口，但用的是同一套逐项缓存（块表 hash + 选项 + 原点偏移）。
-## 修复前这里无条件重建：改一个模型，其余项全量重算。
 func test_qvx_items_reuse_unchanged_items() -> void:
 	const SAMPLE := "res://demo/samples/cars.qvx"
 	if not FileAccess.file_exists(SAMPLE):
@@ -180,7 +153,6 @@ func test_qvx_items_reuse_unchanged_items() -> void:
 	assert_eq(_verts_of(lib2)[target], 3,
 			"未改动的项应命中缓存（篡改哨兵原样保留）")
 
-
 # 辅助：被测入口
 
 func _opts(mode: int, import_meshes: bool) -> Dictionary:
@@ -189,17 +161,14 @@ func _opts(mode: int, import_meshes: bool) -> Dictionary:
 	opts[VoxelImportOptions.IMPORT_MESHES] = import_meshes
 	return opts
 
-
 ## 分项目录（与 VoxelMeshGenerator._item_dir 同一规则：源资产去掉扩展名的同名目录）。
 func _item_dir(dir: String) -> String:
 	return dir + "/asset"
 
-
 func _child(dir: String, name: String) -> String:
 	return _item_dir(dir) + "/" + name + ".res"
 
-
-## 项名 → 首 surface 的顶点数。空网格记 0。
+## 项名 → 首 surface 的顶点数。
 func _verts_of(lib: MeshLibrary) -> Dictionary:
 	var out := {}
 	for i in lib.get_item_list():
@@ -207,13 +176,11 @@ func _verts_of(lib: MeshLibrary) -> Dictionary:
 		out[lib.get_item_name(i)] = mesh.surface_get_array_len(0) if mesh.get_surface_count() > 0 else 0
 	return out
 
-
 func _names(lib: MeshLibrary) -> Array:
 	var out: Array = []
 	for i in lib.get_item_list():
 		out.append(lib.get_item_name(i))
 	return out
-
 
 ## 项网格实例 id 集合：用来判定"这一项是不是上一轮那个对象"（复用 = 走了磁盘缓存）。
 func _instance_ids(lib: MeshLibrary) -> Dictionary:
@@ -221,7 +188,6 @@ func _instance_ids(lib: MeshLibrary) -> Dictionary:
 	for i in lib.get_item_list():
 		out[lib.get_item_mesh(i).get_instance_id()] = true
 	return out
-
 
 ## 把分项网格换成"1 个三角"的哨兵：重建过的项不可能还是 3 顶点。
 func _tamper(child_path: String) -> void:
@@ -239,20 +205,17 @@ func _tamper(child_path: String) -> void:
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	ResourceSaver.save(mesh, child_path)
 
-
 func _mtimes(dir: String, names: Array) -> Dictionary:
 	var out := {}
 	for n in names:
 		out[n] = FileAccess.get_modified_time(_child(dir, n))
 	return out
 
-
 func _fresh_dir(name: String) -> String:
 	var dir := DIR + "/" + name
 	_remove_dir(dir)
 	DirAccess.make_dir_recursive_absolute(dir)
 	return dir
-
 
 func _remove_dir(dir_path: String) -> void:
 	var dir := DirAccess.open(dir_path)
@@ -269,7 +232,6 @@ func _remove_dir(dir_path: String) -> void:
 		name = dir.get_next()
 	dir.list_dir_end()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(dir_path))
-
 
 # 辅助：夹具（每个模型一个顶级对象，名字 A/B/C；counts 决定各自的体素数）
 
@@ -299,7 +261,6 @@ func _asset(counts: Array) -> VoxAsset:
 		vox.nodes[1].child_nodes.append(trn_id)
 	return vox
 
-
 ## 单模型两格、两种材质（不相邻 → 不参与合并），用于验证"只改透明度"必须让缓存失效。
 func _asset_multi_material() -> VoxAsset:
 	var vox := VoxAsset.new()
@@ -319,13 +280,11 @@ func _asset_multi_material() -> VoxAsset:
 	vox.models.append(model)
 	return vox
 
-
 func _mat(id: int) -> VoxelMaterial:
 	var m := VoxelMaterial.new()
 	m.id = id
 	m.color = Color8(40 * id, 200 - 20 * id, 60, 255)
 	return m
-
 
 func _trn(id: int, child: int) -> VoxAsset.VoxelNode:
 	var n := VoxAsset.VoxelNode.new()
@@ -334,7 +293,6 @@ func _trn(id: int, child: int) -> VoxAsset.VoxelNode:
 	n.child_nodes.append(child)
 	n.frames[0] = VoxAsset.VoxelFrame.new()
 	return n
-
 
 func _grp(id: int, children: Array) -> VoxAsset.VoxelNode:
 	var n := VoxAsset.VoxelNode.new()

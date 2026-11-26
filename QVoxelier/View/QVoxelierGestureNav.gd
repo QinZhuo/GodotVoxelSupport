@@ -2,20 +2,13 @@
 class_name QVoxelierGestureNav
 extends RefCounted
 ## 触摸 / 触摸板手势 → 相机导航增量。
-## 【输入输出】feed() 收 ScreenTouch/ScreenDrag（多指跟踪）与 Magnify/PanGesture（引擎派发的
-## 系统手势），把结果累积成 pan（像素位移）与 zoom（比例）两份量；App 每次 feed 后取走应用。
-## 状态解析与相机动作分离 —— 这里不认识相机，也不认识界面。
-## 【平台差异】Windows 不派发 Magnify/PanGesture（Godot 仅 Android/macOS/Linux 派发），
-## 于是触摸板走"滚轮事件"那条路（App 的滚轮分支：垂直=俯仰、水平=偏航），
-## 触摸屏走多指跟踪这条；macOS/Android 的系统手势直接进 feed。
-## 双指语义：双指拖动 = **平移画面**（与 PS / 多数工具一致的手感），捏合 = 缩放。
 
 ## 双指中心位移 → 平移的像素增益（1.0 = 中心挪多少像素就平移多少像素）。
 const DRAG_GAIN := 1.0
 ## 捏合起步阈值：指距变化在 ±5% 内不算捏合，防止双指刚落下时的抖动触发缩放。
 const PINCH_EPS := 1.05
 
-## 当前是否处于多指手势（>= 2 指）。App 据此打断进行中的笔画。
+## 当前是否处于多指手势（>= 2 指）。
 var active := false
 ## 累积的平移位移（App 消费后应调 take() 清零）。
 var pan_pending := Vector2.ZERO
@@ -26,9 +19,7 @@ var _touches := {}            # finger index → 位置（viewport 坐标）
 var _center := Vector2.ZERO   # 手势基线：双指中心
 var _span := 0.0              # 手势基线：双指距离
 
-
-## 把一个输入事件喂给手势层。返回 true = 该事件属于手势（App 不再走笔画 / 其它分支）。
-## 单指事件永远不消费 —— 那是绘图指针，emulate_mouse 出来的鼠标事件才是它的归宿。
+## 把一个输入事件喂给手势层。
 func feed(e: InputEvent) -> bool:
 	if e is InputEventMagnifyGesture:
 		zoom_pending *= e.factor
@@ -51,7 +42,7 @@ func feed(e: InputEvent) -> bool:
 			_touches[e.index] = e.position
 		if not active:
 			return false
-		# 双指拖：跟手平移（中心位移）；捏合：指距比例缩放。两者同时发生也各算各的。
+		# 双指拖：跟手平移（中心位移）；捏合：指距比例缩放。
 		var c := _center_of()
 		pan_pending += (c - _center) * DRAG_GAIN
 		var s := _span_of()
@@ -64,15 +55,12 @@ func feed(e: InputEvent) -> bool:
 		return true
 	return false
 
-
 ## 取走累积量并清零（App 每次 feed 后调用）。
 func take() -> void:
 	pan_pending = Vector2.ZERO
 	zoom_pending = 1.0
 
-
-## 触点数落到 2 以下 → 手势结束、基线清掉。留下的单指继续被当鼠标（画 / 擦）——
-## 但笔画已在手势开始时被 App 取消，必须重新按下才落笔，不会"凭空续上一笔"。
+## 触点数落到 2 以下 → 手势结束、基线清掉。
 func _sync_baseline() -> void:
 	if _touches.size() >= 2:
 		if not active:
@@ -82,13 +70,11 @@ func _sync_baseline() -> void:
 	else:
 		active = false
 
-
 func _center_of() -> Vector2:
 	var c := Vector2.ZERO
 	for p: Vector2 in _touches.values():
 		c += p
 	return c / float(_touches.size())
-
 
 func _span_of() -> float:
 	var pts := _touches.values()

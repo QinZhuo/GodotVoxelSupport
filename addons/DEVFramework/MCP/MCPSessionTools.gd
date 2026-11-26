@@ -2,29 +2,20 @@
 extends RefCounted
 
 ## ======= 会话域: 长任务 / 性能 / 日志 (进程无关) =======
-## 这些工具在编辑器进程与游戏进程里都注册, 但同一个工具在两个进程里的"该谁干"不同:
-##   · 编辑器进程 → *_routed: 编辑器侧就地执行或经调试线转发到游戏;
-##   · 游戏进程   → *_local : 本进程即目标, 不再转发。
-## 判据只有 Engine.is_editor_hint() 一条, 收在 _handlers 里, 于是注册时不必再区分两套 handler。
-## 具体实现在 MCPRuntime(由宿主经 bind 注入), 本域只提供工具面。
-## **必须带 @tool 且不声明 class_name**, 理由见 MCPDevServer 顶部"工具域文件"一段。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 
 ## 无参 Callable, 返回 MCPRuntime 实例(宿主懒创建, 回指宿主)。
 static var _runtime_provider: Callable = Callable()
 
-
 static func bind(runtime: Callable) -> void:
 	_runtime_provider = runtime
-
 
 ## 宿主未 bind(域脚本被单独重编译/加载)时给出明确错误, 而不是在空 Callable 上崩。
 static func _rt() -> Variant:
 	if not _runtime_provider.is_valid():
 		return null
 	return _runtime_provider.call()
-
 
 static func tools() -> Array:
 	# 日志 schema 的 process 参数走统一工厂, 免得与 get_logs 的描述各写一份而漂移。
@@ -93,11 +84,9 @@ static func tools() -> Array:
 		},
 	]
 
-
 ## ======= 双进程分发 =======
 
 ## 编辑器进程: 目标可能是它自己, 也可能是它拉起的游戏 → 走 routed(内部按 process 决定)。
-## 游戏进程(含导出运行时): 本进程就是目标 → 走 local, 不再转发。
 static func _handle_run_tests(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()
 	if rt == null:
@@ -105,7 +94,6 @@ static func _handle_run_tests(args: Dictionary) -> Dictionary:
 	if Engine.is_editor_hint():
 		return await rt.call_run_tests_routed(args)
 	return await rt.call_run_tests_local(args)
-
 
 static func _handle_job_wait(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()
@@ -115,7 +103,6 @@ static func _handle_job_wait(args: Dictionary) -> Dictionary:
 		return await rt.call_job_wait_routed(args)
 	return await rt.call_job_wait_local(args)
 
-
 static func _handle_job_list(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()
 	if rt == null:
@@ -123,7 +110,6 @@ static func _handle_job_list(args: Dictionary) -> Dictionary:
 	if Engine.is_editor_hint():
 		return await rt.call_job_list_routed(args)
 	return await rt.call_job_list_local(args)
-
 
 static func _handle_job_cancel(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()
@@ -133,7 +119,6 @@ static func _handle_job_cancel(args: Dictionary) -> Dictionary:
 		return await rt.call_job_cancel_routed(args)
 	return await rt.call_job_cancel_local(args)
 
-
 static func _handle_perf(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()
 	if rt == null:
@@ -142,7 +127,6 @@ static func _handle_perf(args: Dictionary) -> Dictionary:
 		return await rt.call_perf_routed(args)
 	return await rt.call_perf_local(args)
 
-
 static func _handle_get_logs(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()
 	if rt == null:
@@ -150,7 +134,6 @@ static func _handle_get_logs(args: Dictionary) -> Dictionary:
 	if Engine.is_editor_hint():
 		return await rt.call_get_logs_routed(args)
 	return await rt.call_get_logs_local(args)
-
 
 static func _handle_clear_logs(args: Dictionary) -> Dictionary:
 	var rt: Variant = _rt()

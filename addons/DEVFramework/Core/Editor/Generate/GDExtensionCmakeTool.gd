@@ -3,27 +3,21 @@ class_name GDExtensionCmakeTool
 extends RefCounted
 
 ## GDExtension 构建的"CMake/工具链"切片: 工具链探测与环境注入、构建缓存读写、godot-cpp 同步、
-## CMake 配置阶段(configure)。只是 GDExtensionRebuild 的实现细节, 不对外提供 API。
 
-## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends EditorScript 的脚本当菜单工具列出。
-## 约束 2: _host 不加类型注解 —— 双向类型注解会形成 class_name 环。
-## 约束 3: 实例状态(日志缓冲/构建游标)全部留在 GDExtensionRebuild, 这里只读写 _host.*。
+## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends…
 
 var _host   # GDExtensionRebuild 实例
 var _probe: GDExtensionProbeTool   # 目标名/架构/规范名等只读解析
 
-## godot-cpp 自动同步用: 已探测到的 git 可执行文件缓存(""=未探测)。机器事实, 跨场景不变。
+## godot-cpp 自动同步用: 已探测到的 git 可执行文件缓存(""=未探测)。
 ## Reset: 进程级
 static var _git_path := ""
-
 
 func _which(prog: String) -> bool:
 	var out: Array = []
 	return OS.execute(prog, ["--version"], out) == 0
 
-
 ## Windows: 确保 MinGW 工具链在本次构建的 PATH 中。
-## 必须注入工具链 bin 目录; 只看 g++ 会漏掉"有 g++ 无 make"的机器(w64devkit 同目录两者皆有)。
 func _ensure_toolchain_env() -> void:
 	if OS.get_name() != "Windows":
 		return
@@ -41,7 +35,6 @@ func _ensure_toolchain_env() -> void:
 		OS.set_environment("PATH", "%s;%s" % [bin_dir, OS.get_environment("PATH")])
 		_host._log("已把 MinGW 加入本次构建 PATH: ", bin_dir)
 
-
 ## 构建期必需的可执行文件 —— MinGW Makefiles 下 make 与编译器同等必需
 func _missing_toolchain_bins() -> Array[String]:
 	var missing: Array[String] = []
@@ -51,7 +44,6 @@ func _missing_toolchain_bins() -> Array[String]:
 		missing.append("make")
 	return missing
 
-
 ## 工具链 bin 目录 —— 构建目录 CMakeCache 记录的编译器/构建器绝对路径最权威, 无缓存时按约定扫描
 func _toolchain_bin_dir() -> String:
 	for cache in _cache_files():
@@ -60,7 +52,6 @@ func _toolchain_bin_dir() -> String:
 			if dir != "":
 				return dir
 	return GDExtensionProbeTool._find_exe_dir("g++.exe")
-
 
 ## 构建根目录下全部 CMakeCache.txt —— 缓存里的绝对路径是工具链最权威的线索
 func _cache_files() -> Array[String]:
@@ -83,10 +74,7 @@ func _cache_files() -> Array[String]:
 		d.list_dir_end()
 	return out
 
-
 ## 从 CMakeCache.txt 读某个路径项(前缀匹配 "<key>:<TYPE>=", 覆盖 FILEPATH/INTERNAL 等)。
-## 行格式是 `<KEY>:<TYPE>=<VALUE>`, 必须再切掉 `=<TYPE>` 段才能拿到值 ——
-## 少了这一步, 拿到的是 "FILEPATH=C:/..." 这种串, 调用方会把它当成"不存在的路径"。
 func _cache_value(cache: String, key: String) -> String:
 	var f := FileAccess.open(cache, FileAccess.READ)
 	if f == null:
@@ -105,7 +93,6 @@ func _cache_value(cache: String, key: String) -> String:
 		return val
 	return ""
 
-
 ## 从 CMakeCache.txt 读某个路径项, 返回确实含工具链可执行文件的 bin 目录
 func _cache_toolchain_dir(cache: String, key: String) -> String:
 	var val := _cache_value(cache, key)
@@ -117,12 +104,7 @@ func _cache_toolchain_dir(cache: String, key: String) -> String:
 			return dir
 	return ""
 
-
 ## 校验缓存里记录的工具链**绝对路径**是否仍指向真实存在的文件 —— 换机器 / 换工具链安装位置后
-## 这些路径会失效(缓存随文件夹一起被拷走时尤其典型), 此时必须作废重配。
-## ⚠ CMake 若在 PATH 中找到工具, cache 里存的是**裸程序名**(cmake.exe / c++.exe / mingw32-make.exe),
-## 那不是"失效路径", 而是交给 PATH 解析的引用。把它当失效会让每一轮构建都 wipe 重建缓存:
-## 缓存一重建, godot-cpp 的绑定就重新生成, 1000+ 目标全部重编 —— 表现就是"永远不增量"(实测踩过)。
 func _dead_toolchain_paths(build_dir: String) -> Array[String]:
 	var cache := build_dir.path_join("CMakeCache.txt")
 	var dead: Array[String] = []
@@ -134,13 +116,9 @@ func _dead_toolchain_paths(build_dir: String) -> Array[String]:
 			dead.append("%s=%s" % [key, v.get_file()])
 	return dead
 
-
 ## 零配置骨架: 只要 res://gdextension/src 下有 .cpp, 就把构建需要的一切补齐。
-## 只补缺失项(见 NativeScaffold): 手写 CMakeLists 的工程完全不受影响。
 func _ensure_scaffold() -> void:
 	# 多插件: 每个 addons/<Plugin>/Native/src 有 .cpp 就算一个插件, 各编一个库(共用 godot-cpp)。
-	# 用 load 而不是全局类名: 新增的 class_name 要等编辑器重载脚本缓存才可见,
-	# 而构建工具经常在"刚加完文件"的状态下被调用(与 ECSNative.instantiate_script 同一个理由)。
 	var scaf: GDScript = load(GDExtensionProbeTool.SCAFFOLD_PATH) as GDScript
 	if scaf == null:
 		_host._log("警告: NativeScaffold 脚本缺失, 跳过骨架生成。")
@@ -164,7 +142,6 @@ func _ensure_scaffold() -> void:
 		_host._log("错误: 类名 %s 同时出现在插件 %s —— 同进程注册同名类会冲突, 请改名。" % [
 			String(c["name"]), ", ".join(c["targets"])])
 
-
 func _precheck(source_dir: String) -> bool:
 	var abs: String = _host._abs(source_dir)
 	if not FileAccess.file_exists(abs.path_join("CMakeLists.txt")):
@@ -182,8 +159,7 @@ func _precheck(source_dir: String) -> bool:
 	_host._log("cmake: ", ver)
 	return true
 
-
-## 定位 git: PATH 未必有 → 走通用探测(_find_exe_dir), 仍无则按 PATH 名兜底。静态(供解析器复用)
+## 定位 git: PATH 未必有 → 走通用探测(_find_exe_dir), 仍无则按 PATH 名兜底。
 static func _git_exe() -> String:
 	if _git_path == "":
 		var dir := GDExtensionProbeTool._find_exe_dir("git.exe")
@@ -199,7 +175,6 @@ static func _git_exe() -> String:
 				return c
 		_git_path = "git"   # 兜底按 PATH 名, 失败由调用方告警处理
 	return _git_path
-
 
 func _sync_godot_cpp(source_dir: String) -> void:
 	var vi: Dictionary = Engine.get_version_info()
@@ -249,7 +224,6 @@ func _sync_godot_cpp(source_dir: String) -> void:
 	else:
 		_host._log("checkout 失败, 沿用当前 submodule。")
 
-
 ## 解析 godot-cpp 应检出的引用(静态可测, 只 ls-remote, 不改动工作树)。
 static func _resolve_godot_cpp_ref(godot_cpp_abs: String, engine_version: String) -> Dictionary:
 	var tags: Array = []
@@ -298,7 +272,6 @@ static func _resolve_godot_cpp_ref(godot_cpp_abs: String, engine_version: String
 		return {}
 	return {name = "origin/" + branch, sha = sha, kind = "branch"}
 
-
 ## 递归清空目录(作废缓存用)
 func _wipe_dir(dir_path: String) -> void:
 	var d := DirAccess.open(dir_path)
@@ -316,7 +289,6 @@ func _wipe_dir(dir_path: String) -> void:
 		entry = d.get_next()
 	d.list_dir_end()
 
-
 ## 构建缓存统一放 res://.godot/gdextension_build/(引擎自带全局忽略, 不入库、不污染工程)。
 func _pick_build_dir(source_dir: String, type: String, arch: String) -> String:
 	var cache_root: String = _host._abs("res://.godot/gdextension_build")
@@ -324,7 +296,6 @@ func _pick_build_dir(source_dir: String, type: String, arch: String) -> String:
 	if not FileAccess.file_exists(dir.path_join("CMakeCache.txt")):
 		_host._log("未发现(%s.%s)已配置构建缓存, 将新建: " % [type, arch], dir)
 	return dir
-
 
 func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, type: String, arch: String) -> bool:
 	if _host._cache_dirty and FileAccess.file_exists(build_dir.path_join("CMakeCache.txt")):
@@ -359,13 +330,11 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, t
 	# 只用 CMake 原生后端: Windows MinGW Makefiles / 其余 Unix Makefiles
 	args.append_array(["-G", "MinGW Makefiles" if OS.get_name() == "Windows" else "Unix Makefiles"])
 	# API 版本: CMakeLists 默认值对应的绑定快照存在则尊重(不传 -D);
-	# 否则在 godot-cpp 本地快照里选"≤ 引擎版本"的最新可用(避免默认 4.7 但无 4-7 快照导致失败)
 	var api := _api_version_to_pass(source_dir, String(info.get("api_default", "")))
 	if api != "":
 		args.append("-DGODOTCPP_API_VERSION=%s" % api)
 	args.append("-DCMAKE_BUILD_TYPE=%s" % type.capitalize())
 	# ccache: godot-cpp 的绑定生成器是 custom target(每次都重写 gen/*, 内容通常不变),
-	# 没有编译缓存时"改一个 .cpp"会连带重编 1000+ 个 gen 目标; 有 ccache 则整批命中。
 	var cc := _ccache_exe()
 	if cc != "":
 		args.append("-DCMAKE_CXX_COMPILER_LAUNCHER=%s" % cc)
@@ -382,11 +351,7 @@ func _ready_build_dir(build_dir: String, source_dir: String, info: Dictionary, t
 		return false
 	return true
 
-
 ## 决定 GODOTCPP_API_VERSION 是否传 -D 及传什么:
-##   - CMakeLists 默认值对应的绑定快照存在 → ""(不传, 尊重工程钉版)
-##   - 否则在 godot-cpp 本地 extension_api-*.json 快照里, 取主次版本 ≤ 引擎 的最新可用
-##   - 本地全无 → ""(交给 cmake, 会给出缺文件报错)
 func _api_version_to_pass(source_dir: String, api_default: String) -> String:
 	var gext_dir: String = _host._abs(source_dir).path_join("godot-cpp/gdextension")
 	if api_default != "" and FileAccess.file_exists(_api_file(gext_dir, api_default)):
@@ -414,10 +379,8 @@ func _api_version_to_pass(source_dir: String, api_default: String) -> String:
 		dir.list_dir_end()
 	return best
 
-
 func _api_file(gext_dir: String, api: String) -> String:
 	return gext_dir.path_join("extension_api-%s.json" % api.replace(".", "-"))
-
 
 ## CMakeLists 里钉的 GODOTCPP_API_VERSION 默认值(无则 "")
 func _cmake_api_default(source_dir: String) -> String:
@@ -431,24 +394,18 @@ func _cmake_api_default(source_dir: String) -> String:
 		return ""
 	return m.get_string(1) if m.get_string(1) != "" else m.get_string(2)
 
-
 ## godot-cpp 本地是否已有某 API 版本的绑定快照
 func _has_snapshot(source_dir: String, api: String) -> bool:
 	if api == "":
 		return false
 	return FileAccess.file_exists(_api_file(_host._abs(source_dir).path_join("godot-cpp/gdextension"), api))
 
-
 ## 编译缓存工具(ccache): 存在即用, 不存在就静默跳过 —— 纯加速选项, 不改变构建结果。
-## 为什么要它: godot-cpp 的绑定生成器是 custom target, 每次都重写 gen/*(内容通常不变),
-## 于是"改一个 .cpp"会连带重编 1000+ 个 gen 目标; ccache 按预处理内容哈希命中, 整批跳过。
 static func _ccache_exe() -> String:
 	var out: Array = []
 	return "ccache" if OS.execute("ccache", ["--version"], out) == 0 else ""
 
-
 ## 老缓存里没有 launcher 时补一条(只改缓存, 不重新配置整棵树):
-## 否则"复用构建目录"会让 ccache 永远不生效, 增量也就永远不成立。
 func _ensure_ccache(build_dir: String) -> void:
 	var cc := _ccache_exe()
 	if cc == "":
@@ -461,7 +418,6 @@ func _ensure_ccache(build_dir: String) -> void:
 	else:
 		_host._print_out(out)
 
-
 static func _cache_has_launcher(build_dir: String) -> bool:
 	var f := FileAccess.open(build_dir.path_join("CMakeCache.txt"), FileAccess.READ)
 	if f == null:
@@ -473,7 +429,6 @@ static func _cache_has_launcher(build_dir: String) -> bool:
 			return true
 	f.close()
 	return false
-
 
 ## 读取 CMakeCache 确认生成器是否为 Makefiles(后端一致性检查)
 func _cache_is_makefiles(build_dir: String) -> bool:
@@ -488,7 +443,6 @@ func _cache_is_makefiles(build_dir: String) -> bool:
 	f.close()
 	return false
 
-
 ## 读取 CMakeCache 的 CMAKE_BUILD_TYPE(单配置生成器实际生效的构建类型); 无设置返回 ""
 func _cache_build_type(build_dir: String) -> String:
 	var f := FileAccess.open(build_dir.path_join("CMakeCache.txt"), FileAccess.READ)
@@ -501,7 +455,6 @@ func _cache_build_type(build_dir: String) -> String:
 			return line.substr("CMAKE_BUILD_TYPE:STRING=".length()).to_lower()
 	f.close()
 	return ""
-
 
 ## 读取 CMakeCache 的 CMAKE_OSX_ARCHITECTURES(macOS 交叉构建一致性); 未设置返回 ""
 func _cache_osx_archs(build_dir: String) -> String:

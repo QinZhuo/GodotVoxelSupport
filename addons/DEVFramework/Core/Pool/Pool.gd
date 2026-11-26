@@ -1,5 +1,4 @@
 ## 通用节点池：只负责实例复用，实例怎么造由 [member factory] 决定。
-## ⚠️ 别想用 _notification 收尾：RefCounted 进 PREDELETE 时脚本成员已经清空了，那里读不到东西。
 class_name Pool extends RefCounted
 
 ## 池空时创建新实例；返回 null 视为无法创建（pool_get 返回 null）
@@ -8,7 +7,7 @@ var factory: Callable
 ## 空闲实例的父节点（由 PoolTool 注入）
 var idle_parent: Node
 
-## 空闲上限（0 = 不限）。超出上限的归还直接销毁，避免池无限膨胀
+## 空闲上限（0 = 不限）。
 var max_idle: int = 0
 
 ## 池空导致的现场创建数（= 没有命中复用）
@@ -25,7 +24,7 @@ var _in_use: Dictionary = {}
 const PRUNE_EVERY := 64
 var _since_prune: int = 0
 
-## 取一个实例：优先复用空闲的，池空则调 factory 新建。返回的实例无父节点
+## 取一个实例：优先复用空闲的，池空则调 factory 新建。
 func pool_get() -> Node:
 	_maybe_prune()
 	var item := _pop_idle()
@@ -44,7 +43,7 @@ func pool_get() -> Node:
 		item.call(&"on_pool_get")
 	return item
 
-## 归还实例。重复归还、已失效、非本池取出的一律忽略（不是本池的东西本池不负责销毁）
+## 归还实例。
 func pool_return(item: Node) -> void:
 	if not is_instance_valid(item):
 		return
@@ -97,8 +96,6 @@ func _maybe_prune() -> void:
 func _pop_idle() -> Node:
 	while not _idle.is_empty():
 		# 必须先用**无类型**变量接住: 空闲队列里可能残留已被外部释放的节点,
-		# 直接 `var item: Node = _idle.pop_back()` 会在赋值时抛
-		# "Trying to assign invalid previously freed instance"(类型化赋值要校验实例).
 		var raw: Variant = _idle.pop_back()
 		if not is_instance_valid(raw):
 			continue

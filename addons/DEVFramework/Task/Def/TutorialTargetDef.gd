@@ -1,11 +1,9 @@
 @tool
-## 教程目标 — 相对引导宿主 root 的节点路径。2D 控件 / Node2D 精灵 / 3D 模型通用,
-## 屏幕区域换算由 Spotlight 统一负责。
+## 教程目标 — 相对引导宿主 root 的节点路径。
 class_name TutorialTargetDef extends Def
 
 ## 目标节点路径(相对引导宿主)
 @export var node_path: NodePath
-
 
 ## 解析目标节点(宿主为空或节点缺失返回 null)
 func resolve(root: Node) -> Node:

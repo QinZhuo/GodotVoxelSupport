@@ -1,32 +1,25 @@
 @tool
 class_name OutlineEffect extends CompositorEffect
 ## 物体描边后处理（单一颜色，屏幕空间膨胀）
-##   · OutlineEffect.set_outlined(on, ...meshes)  静态快捷方式，固定走槽位 0
-##   · 实例.set_marked(on, ...meshes)             项目侧引用实例资源后直接调用
-##   · outline_color / outline_width / outline_alpha / marker_slot
 
+# region 常量
 
-#region 常量
-
-## 各槽位的标记 alpha。相邻槽位需满足 m[i+1] >= m[i]² + 2（见文件头"槽位"说明），
-## 受 rgba16f 上限约束最多 3 个。背景 alpha（不透明处为 1.0）必须小于首槽位值。
+## 各槽位的标记 alpha。
 const MARKER_ALPHAS: Array[float] = [2.0, 6.0, 38.0]
 
-## push constant 字节数：4 个 float 标量 + vec4 颜色 + vec4 附加参数（std430 下 vec4 需 16 字节对齐）
+## push constant 字节数：4 个 float 标量 + vec4 颜色 + vec4 附加参数（std430 下 vec4 需…
 const PUSH_CONSTANT_SIZE := 48
 
 ## 标记材质的绘制顺序：放到透明队列最后，保证标记 alpha 在所有透明绘制之后才写入。
-## 否则后绘制的半透明面（典型：开了 refraction 的玻璃面）会按自己的 alpha 把标记值
 const MARKER_RENDER_PRIORITY := 127
 
 ## 计算着色器的两种模式（push constant extra.x）
 const MODE_DILATE := 0.0
 const MODE_RESTORE := 1.0
 
-#endregion
+# endregion
 
-
-#region 导出属性
+# region 导出属性
 
 @export_group("Outline", "outline_")
 ## 描边颜色（运行时可逐帧修改实现动画，如项目侧的彩虹循环）
@@ -60,20 +53,17 @@ const MODE_RESTORE := 1.0
 		marker_slot = v
 		_pc_dirty = true
 
-#endregion
+# endregion
 
-
-#region 公共接口
+# region 公共接口
 
 ## 本实例的槽位对应的标记 alpha（供外部查询/调试）
 func marker_alpha() -> float:
 	return MARKER_ALPHAS[clampi(marker_slot, 0, MARKER_ALPHAS.size() - 1)]
 
-
 ## 开关本实例的描边。
 func set_marked(on: bool, ...meshes: Array) -> void:
 	_apply(on, meshes)
-
 
 ## 槽位 0 描边的静态快捷方式，供框架内部按钮悬停等通用场景使用。
 static func set_outlined(on: bool, ...meshes: Array) -> void:
@@ -83,16 +73,14 @@ static func set_outlined(on: bool, ...meshes: Array) -> void:
 			return
 	push_error("[OutlineEffect] 未找到槽位 0 的描边实例，请检查 Compositor 配置")
 
-#endregion
+# endregion
 
-
-#region 实例管理
+# region 实例管理
 
 ## 已创建的实例，按创建顺序排列（_init 登记，析构移除）
 static var _instances: Array[OutlineEffect] = []
 
 ## 本实例当前处于标记状态的网格集合。
-## ⚠️ 计数以集合为准，而不是"开/关调用次数±1"：调用方常常对"没标过的网格"也发关闭
 var _marked := {}
 
 ## 兼容旧字段：标记中的网格数量
@@ -115,12 +103,10 @@ var _pc_dirty := true
 ## 本效果实际运行过的视口尺寸（RenderSceneBuffersRD 的 internal size）。
 var _active_sizes := {}
 
-
 func _init() -> void:
 	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
 	rd = RenderingServer.get_rendering_device()
 	_instances.append(self)
-
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
@@ -128,10 +114,9 @@ func _notification(what: int) -> void:
 		if shader.is_valid():
 			RenderingServer.free_rid(shader)
 
-#endregion
+# endregion
 
-
-#region 标记
+# region 标记
 
 func _apply(on: bool, meshes: Array) -> void:
 	for mi in meshes:
@@ -142,7 +127,6 @@ func _apply(on: bool, meshes: Array) -> void:
 		else:
 			_mark_off(mi)
 
-
 func _mark_on(mesh: GeometryInstance3D) -> void:
 	# 该网格所在的视口不跑本效果 ⇒ 打标记画不出环，只会把标记写进那个视口的 alpha
 	if not _viewport_runs_here(mesh):
@@ -151,17 +135,13 @@ func _mark_on(mesh: GeometryInstance3D) -> void:
 	_marked[mesh] = true
 	mesh.material_overlay = _get_material()
 
-
 func _mark_off(mesh: GeometryInstance3D) -> void:
 	_marked.erase(mesh)
 	# 只清自己的标记材质，不碰别的实例（悬停等）挂上去的
 	if _material and mesh.material_overlay == _material:
 		mesh.material_overlay = null
 
-
 ## 每帧补齐标记材质：
-## · 标记时还没进场景树的网格（节点先被标记、后 add_child），进树后在这里补上；
-## · 已失效的引用顺手清理。
 func _refresh_marks() -> void:
 	if _marked.is_empty():
 		return
@@ -174,7 +154,6 @@ func _refresh_marks() -> void:
 		if mesh.material_overlay != null:
 			continue
 		mesh.material_overlay = _get_material()
-
 
 ## 该网格所在的视口会不会跑本效果？
 func _viewport_runs_here(mesh: GeometryInstance3D) -> bool:
@@ -195,7 +174,6 @@ func _viewport_runs_here(mesh: GeometryInstance3D) -> bool:
 	# 完全没头绪（例如还没渲染过任何一帧）：放行，避免误伤
 	return _active_sizes.is_empty()
 
-
 func _compositor_has_self(comp: Compositor) -> bool:
 	if comp == null:
 		return false
@@ -205,7 +183,6 @@ func _compositor_has_self(comp: Compositor) -> bool:
 			if e == self:
 				return true
 	return false
-
 
 func _get_material() -> ShaderMaterial:
 	var marker := marker_alpha()
@@ -218,7 +195,6 @@ func _get_material() -> ShaderMaterial:
 	_material_marker = marker
 	return _material
 
-
 static func _make_marker_shader(marker: float) -> Shader:
 	var s := Shader.new()
 	# depth_test_enabled（默认）→ 被挡像素不写入，自然避免透视
@@ -230,10 +206,9 @@ void fragment() {
 }" % marker
 	return s
 
-#endregion
+# endregion
 
-
-#region 渲染管线
+# region 渲染管线
 
 func _ensure_shader() -> bool:
 	if _compiled:
@@ -259,18 +234,14 @@ func _ensure_shader() -> bool:
 	_compiled = true
 	return pipeline.is_valid()
 
-
 func _rebuild_push_constant() -> void:
 	_pc_dilate = _pack(MODE_DILATE)
 	_pc_restore = _pack(MODE_RESTORE)
 	_pc_dirty = false
 
-
 func _pack(mode: float) -> PackedByteArray:
 	var marker := marker_alpha()
 	# 判定区间 [marker, marker² + 2)：
-	# · 单层实际值是 1 + marker（blend_add 对 alpha 线性相加，实测）；
-	# · 同一像素上多层被标记网格重叠时会累加（1 + marker·k）。
 	var marker_lo := marker
 	var marker_hi := marker * marker + 2.0
 	var params := PackedFloat32Array([
@@ -280,11 +251,9 @@ func _pack(mode: float) -> PackedByteArray:
 	])
 	return params.to_byte_array()
 
-
 ## 细缝判定半径（像素）：两侧各扫到这么远都有标记 ⇒ 判定为"被标记区域内部的窄缝"。
 func _gap_reach() -> int:
 	return int(outline_width) + 2
-
 
 func _render_callback(p_type: EffectCallbackType, p_data: RenderData) -> void:
 	if _marked_count <= 0 or outline_width <= 0.0:
@@ -325,7 +294,6 @@ func _render_callback(p_type: EffectCallbackType, p_data: RenderData) -> void:
 			rd.compute_list_dispatch(cl, gx, gy, 1)
 			rd.compute_list_end()
 
-
 static func _bind_image(bind: int, rid: RID) -> RDUniform:
 	var u := RDUniform.new()
 	u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
@@ -333,10 +301,9 @@ static func _bind_image(bind: int, rid: RID) -> RDUniform:
 	u.add_id(rid)
 	return u
 
-#endregion
+# endregion
 
-
-#region 计算着色器
+# region 计算着色器
 
 const COMPUTE_SHADER := """#version 450
 
@@ -443,4 +410,4 @@ void main() {
 	imageStore(color_image, uv, color);
 }"""
 
-#endregion
+# endregion

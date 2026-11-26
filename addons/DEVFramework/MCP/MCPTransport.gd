@@ -2,8 +2,6 @@
 extends RefCounted
 
 ## ======= HTTP / SSE 传输层 =======
-## 由 MCPDevServer 以 preload 常量 `MCPTransport` 引用。**必须 @tool 且不声明 class_name**,
-## 否则导出包解析图会带上编辑器类。同时承载旧式 HTTP+SSE 与 Streamable HTTP 两种形态。
 
 const MCPFormat := preload("res://addons/DEVFramework/MCP/MCPFormat.gd")
 
@@ -24,10 +22,8 @@ const ERR_UNSUPPORTED_VERSION := -32022
 ## MCPDevServer（Variant：跨编译代次不信任类型标注）
 var server = null
 
-
 func _init(owner) -> void:
 	server = owner
-
 
 ## HTTP 入口：所有请求（POST / GET / OPTIONS / /hub/*）都从这里进。
 func on_request(method: String, path: String, query: String, headers: Dictionary, body: PackedByteArray, stream) -> void:
@@ -64,7 +60,7 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 		server._send_rpc_error(stream, 400, headers, null, ERR_PARSE, "Parse error")
 		return
 	var req: Dictionary = parsed
-	# 协议版本协商(2026-07-28 起逐请求声明)。两处都缺省才回落 PROTOCOL_VERSION。
+	# 协议版本协商(2026-07-28 起逐请求声明)。
 	var proto := str(headers.get(HEADER_VERSION, ""))
 	var meta_version := ""
 	var rparams: Variant = req.get("params", null)
@@ -81,7 +77,6 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 			{"supported": SUPPORTED_PROTOCOL_VERSIONS, "header": proto, "meta": meta_version})
 		return
 	# declared 与 effective 必须分开: declared = 客户端实际声明了什么(用于一致性判定);
-	# effective = 实际按哪个版本解析(降级后可能与 declared 不同)。
 	var declared := proto if not proto.is_empty() else meta_version
 	var rpc_method := str(req.get("method", ""))
 	var effective := declared
@@ -92,14 +87,12 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 			LogTool.log("MCP", "%s 请求的协议版本 %s 不受支持, 协商降级为 %s (支持: %s)" % [rpc_method, declared, effective, str(SUPPORTED_PROTOCOL_VERSIONS)])
 		else:
 			# 协商完成后仍发陌生版本: 说明它跳过了握手或中途换了版本, 按猜测的版本解析只会错。
-			# 这里必须打日志 —— 否则客户端界面报错而服务端日志里既没有这条也没有 POST 记录。
 			LogTool.log("MCP", "拒绝 %s: 协议版本 %s 不受支持 (支持: %s)" % [rpc_method, declared, str(SUPPORTED_PROTOCOL_VERSIONS)])
 			server._send_rpc_error(stream, 400, headers, req.get("id", null), ERR_UNSUPPORTED_VERSION,
 				"Unsupported protocol version",
 				{"supported": SUPPORTED_PROTOCOL_VERSIONS, "requested": declared})
 			return
 	# 2026-07-28 起: 声明了该版本的请求, 其 _meta 必须**同时**带 protocolVersion 与
-	# clientCapabilities, 缺一个就 400(否则后续按能力分派没有依据)。
 	if declared == META_REQUIRED_SINCE and rpc_method != "initialize":
 		var missing: Array[String] = []
 		if meta_version.is_empty():
@@ -117,7 +110,6 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 	# 提前取 sessionId: 旧式 SSE 会话投递的请求要把响应改走 SSE 流, 且日志需与会话对应
 	var sid := query_param(query, "sessionId")
 	# 默认只记**首次**版本协商那一条; 全量开关打开时才记其余请求。
-	# **initialize 必须用 _version_negotiated 收窄**: 客户端每次重连都会重发 initialize。
 	if bool(server._log_rpc) or (rpc_method == "initialize" and not bool(server._version_negotiated)):
 		LogTool.log("MCP", "POST %s | 版本 %s | 会话 %s" % [rpc_method, effective, sid if not sid.is_empty() else "-"])
 	var response: Dictionary = await server._handle_jsonrpc(req, effective)
@@ -136,10 +128,7 @@ func on_request(method: String, path: String, query: String, headers: Dictionary
 		LogTool.log("MCP", "旧式 SSE 会话 %s 已失效, 降级为 Streamable HTTP 直回" % sid)
 	server._http.send_response(stream, 200, _cors_headers(headers), json)
 
-
 ## GET /mcp → 开启旧式 HTTP+SSE 会话。
-## 旧式客户端在收到 endpoint 事件前不会发任何 POST, 所以这里必须真把流开出来,
-## 否则界面永远停在"连接中"。
 func _serve_sse(stream, headers: Dictionary) -> void:
 	var endpoint := _endpoint_url()
 	# 已完成握手的客户端走 Streamable HTTP, 它此刻开的流只是通知/保活通道, 永不承载请求。
@@ -152,9 +141,7 @@ func _serve_sse(stream, headers: Dictionary) -> void:
 	if bool(server._log_rpc):
 		LogTool.log("MCP", "GET /mcp 通告 endpoint=%s, 会话 %s" % [endpoint, sid.substr(0, 8)])
 
-
-## SSE 响应头。刻意不复用 _cors_headers: 那边的 Content-Type 是 application/json 且带
-## Mcp-Session-Id, 都不适用于事件流。
+## SSE 响应头。
 func _sse_headers(headers: Dictionary) -> Dictionary:
 	var h := {
 		"Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -165,21 +152,17 @@ func _sse_headers(headers: Dictionary) -> Dictionary:
 		h["Access-Control-Allow-Origin"] = origin
 	return h
 
-
-## 通告给旧式客户端的 POST 地址。必须绝对 URL: 部分旧客户端原样使用它, 相对路径会被当成不可用。
+## 通告给旧式客户端的 POST 地址。
 func _endpoint_url() -> String:
 	return "http://127.0.0.1:%d/mcp" % server._http.get_port()
 
-
-## 从 query 串取参数值(键名大小写不敏感)。旧式 SSE 传输把 sessionId 放在 query 上。
-## 找不到返回空串。
+## 从 query 串取参数值(键名大小写不敏感)。
 static func query_param(query: String, key: String) -> String:
 	for pair in query.split("&", false):
 		var kv := pair.split("=", true, 1)
 		if kv.size() == 2 and kv[0].strip_edges().to_lower() == key.to_lower():
 			return kv[1].uri_decode()
 	return ""
-
 
 ## CORS 响应头: 供浏览器内的 web 客户端与其它源的页面直接调本服务器。
 func _cors_headers(headers: Dictionary) -> Dictionary:
@@ -193,7 +176,6 @@ func _cors_headers(headers: Dictionary) -> Dictionary:
 	if not origin.is_empty():
 		h["Access-Control-Allow-Origin"] = origin
 	return h
-
 
 func _make_session_id(headers: Dictionary) -> String:
 	return headers.get("mcp-session-id", "dev-framework-default-session")

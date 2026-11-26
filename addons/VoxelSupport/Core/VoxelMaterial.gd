@@ -19,50 +19,25 @@ extends Resource
 @export var emission: float = 0
 
 ## 硬度：破坏该材质的单个体素所需的总伤害 (>=0)
-## 体素健康度系统使用，伤害累积达到 hardness 才真正移除该体素
-## 值越大越难破坏 (0 表示一击即碎，如玻璃/泡沫)
 @export var hardness: float = 1.0
 
 ## 质量：单个体素的质量 (>=0)
-## 悬空崩塌时，整块刚体的质量 = 块内体素质量之和；材质越重，越需要更多支撑
 @export var mass: float = 1.0
 
 ## 连接强度：体素与相邻体素之间的连接强度（受力传导能力）
-## 应力传播（裂纹扩散）系统使用：每次破坏产生应力，向邻居传播
-## 当应力 > 材质的 connection_strength 时，该体素也会断裂（裂纹扩散）
-## 值越大，该材质越不容易被"震裂"（如钢铁 > 玻璃 > 泡沫）
-## 默认值 10.0，对应应力传播系统默认的 stress_force=15.0
 @export var connection_strength: float = 10.0
 
-
 # QVX MATE 条目互转（唯一实现：QVoxelStream 写盘、QVoxelAsset 导入共用）
-# MATE 条目 = 12 字节定长语义结构：rgba / metal / rough / hardness / mass / e_r / e_g / e_b (+reserved)。
-# 【为什么必须收敛到一处】"材质 → MATE"若在 QVoxelStream（写盘）与 VoxAsset（导入）各写一份，
-# 两侧字段与量纲各自手抄 —— 漏一个字段就会静默丢数据（connection_strength 就是这样丢的）。
-# 【量纲约定】metal / rough：0–1 浮点 ↔ 0–255；hardness / mass：直接存整数（材质侧本就是
-# 0–255 量级的整数语义）；emission：QVX 存 RGB 三通道，材质只有单通道强度 → 取三通道最大值。
-# 【已知格式缺口】MATE 只有一个物理量 hardness，而 VoxelMaterial 有 hardness + connection_strength
-# 两个独立旋钮：往返时 connection_strength 只能取默认值。要保住它需扩展 MATE（12 字节里的
-# reserved 可承载，但会让旧文件的语义发生变化），留待格式版本升级时处理。
 
-## 空气条目（MATE 条目 0 的规范形态）。每次返回新字典，避免调用方彼此共享引用。
-## 【实现转发到 QVoxelMate.air_entry】**形状的唯一真值在格式层**：本方法曾自己抄一份 8 键
-## （缺 r/g/b/a），于是 `QVoxelWorld.material_color()` 读到这种条目时按"缺键 → 洋红"算，
-## 把错误色原样导给用户脚本。现在空气条目只有一种形状（12 键，含 r/g/b/a）。
+## 空气条目（MATE 条目 0 的规范形态）。
 static func air_mate() -> Dictionary:
 	return QVoxelMate.air_entry()
 
-
 ## 这是不是"空条目"（没有颜色、没有金属度、没有自发光）。
-## 【为什么要这个判据】读端给未使用的调色板槽建出来的条目是 `rgba=0` 配 rough/hardness
-## 的默认值 —— 若把 rough 也算进来，空槽会被当成真材质（`.qvx ↔ .vox` 往返会写出 255 个空槽，
-## 合并世界时也会把空槽算进容量而误判"装不下"）。
-## 【实现转发到 QVoxelMate.is_air_entry】判据（哪些键参与比较）同样是格式层的事，全仓只留一份。
 static func is_air_entry(entry: Dictionary) -> bool:
 	return QVoxelMate.is_air_entry(entry)
 
-
-## MATE 条目 → 材质。id 为条目下标，即材质ID。
+## MATE 条目 → 材质。
 static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
 	var rgba := int(entry.get("rgba", 0)) & 0xFFFFFFFF
 	var a := float(rgba & 0xFF) / 255.0
@@ -83,10 +58,7 @@ static func from_mate(entry: Dictionary, id: int = 0) -> VoxelMaterial:
 	mat.emission = maxf(er, maxf(eg, eb))
 	return mat
 
-
-## 材质 → MATE 条目。输入可为 VoxelMaterial、已是 MATE 形状的 Dictionary（幂等归一化）、或 null（空气）。
-## 幂等性很关键：QVoxelStream 的材质表既可能是上层注入的 VoxelMaterial，也可能是从磁盘加载的
-## MATE Dictionary —— 后者若按前者解释会写出全白材质。
+## 材质 → MATE 条目。
 static func to_mate(m: Variant) -> Dictionary:
 	if m == null:
 		return air_mate()
@@ -116,25 +88,14 @@ static func to_mate(m: Variant) -> Dictionary:
 		"hardness": clampi(int(round(float(m.hardness))), 0, 255) if ("hardness" in m) else 1,
 		"mass": clampi(int(round(float(m.mass))), 0, 255) if ("mass" in m) else 1,
 		# 【灰度，不乘基色】`e_*` 只承载**强度**：读端（`from_mate`）取三通道最大值还原。
-		# 若按 `color × 强度` 写，读回会再乘一遍基色亮度（深色材质更狠）—— 实测 .vox 往返
-		# 每次衰减一档（0.681→0.545→0.435）。自发光颜色由渲染侧的 `color × emission` 提供，
-		# 不需要在这里重复表达。
 		"e_r": clampi(int(round(em * 255.0)), 0, 255),
 		"e_g": clampi(int(round(em * 255.0)), 0, 255),
 		"e_b": clampi(int(round(em * 255.0)), 0, 255),
 	}
 
-
 # 材质数组对齐：确保"数组索引 == 材质ID"，体素中存的材质ID可直接作数组索引
-# 供 VoxelMeshGenerator / VoxelChunkGenerator 等所有网格生成器统一使用
-# 统一材质契约（全项目唯一权威）：
-#   - 材质ID 0 保留为空/空气：既没有体素也没有材质
-#   - 体素存储值 == 材质ID（0 = 空），不存在任何 +1/-1 编码偏移
-#   - 对齐后数组索引 == 材质ID，索引 0 恒为 null（空占位）
 
 ## 将任意材质数组转换为"索引 == 材质ID"的对齐数组
-## 非 null 材质按其 id 放入对应索引，未填充的位置为 null
-## 材质 id <= 0（空）被跳过，保证索引 0 恒为 null = 空占位
 static func align_by_id(materials: Array) -> Array:
 	var aligned: Array = []
 	for mat in materials:
@@ -146,11 +107,7 @@ static func align_by_id(materials: Array) -> Array:
 		aligned[mat_id] = mat
 	return aligned
 
-
-
 ## 材质数组 → 透明标志表（PackedByteArray，索引 = 材质ID，1 = 透明），供原生几何内核
-## 判定面可见性并分桶。之所以预计算传入：C++ 跨语言逐个读 VoxelMaterial 属性太慢。
-## 防御：worker 线程读材质数组时主线程可能正在对齐（COW/竞态），每次访问前校验边界防越界崩溃。
 static func build_trans_flags(materials: Array) -> PackedByteArray:
 	var n := materials.size()
 	var flags := PackedByteArray()
@@ -160,40 +117,30 @@ static func build_trans_flags(materials: Array) -> PackedByteArray:
 		flags[i] = 1 if (m != null and m.trans > 0) else 0
 	return flags
 
-
 # 材质→各通道颜色：所有纹理生成（编辑器文件纹理 / 运行时内存纹理）统一采样公式
-# 避免编辑器导入与运行时渲染两套实现漂移
 
 ## 反照率颜色 (透明材质：用 1-trans 作为 alpha)
-## 设计为静态方法：可对 placeholder 实例(编辑器导入的资源)也安全调用
 static func albedo_color(m: VoxelMaterial) -> Color:
 	if m.trans <= 0:
 		return m.color
 	return Color(m.color.r, m.color.g, m.color.b, 1 - m.trans)
 
-
 ## 金属度灰度
 static func metal_color(m: VoxelMaterial) -> Color:
 	return Color.from_hsv(0, 0, m.metal)
-
 
 ## 粗糙度灰度
 static func rough_color(m: VoxelMaterial) -> Color:
 	return Color.from_hsv(0, 0, m.rough)
 
-
 ## 自发光颜色
 static func emission_color(m: VoxelMaterial) -> Color:
 	return m.color * m.emission
 
-
 # 材质ID 上限
 
 ## 纹理调色板宽度（材质纹理是 256×1），也是"按材质ID 索引的查表类缓冲"
-## （硬度表 / 连接强度表 / 透明标志表）的长度下界 —— 原生内核按 ID 直读这些表，
-## 表短于最大 ID 会越界读。UV 不在这里算：顶点 UV 由原生网格内核直接写出。
 const MAX_MATERIAL_ID := 256
-
 
 # 存档 / 重建
 
@@ -211,9 +158,7 @@ func save_data() -> Dictionary:
 		"connection_strength": connection_strength,
 	}
 
-
 ## 从序列化数据重建材质属性（静态：需新建材质实例）
-## 返回新的 VoxelMaterial，数据无效时返回 null
 static func load_data(data: Variant) -> VoxelMaterial:
 	if data == null or not data is Dictionary:
 		return null

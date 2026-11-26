@@ -2,28 +2,11 @@
 class_name QVoxelierApp
 extends Node3D
 ## 建模视口的应用壳：**装配 + 输入翻译 + 快捷键**，不含任何算法。
-## 【它只做三件事】
-##   ① 装配：新建世界/对象 → 建会话 → 把显示层交给渲染器、把网格交给地板、把会话交给状态栏；
-##   ② 翻译：鼠标事件 → 相机射线 → 网格拾取 → `QVoxelEditSession` 的手势（begin/drag/release）；
-##   ③ 快捷键：工具表里的热键切笔、[ ] 改笔刷、Ctrl+Z / Ctrl+Shift+Z 撤销重做、Esc 取消、Home 取景；
-##      工程文件 Ctrl+S / Ctrl+Shift+S / Ctrl+O（`.qvx` 也能直接拖进窗口）。
-## 【快捷键是加速器，不是入口】本应用要同时跑在平板（无键盘 / 无中键 / 无滚轮 / 无右键）与桌面，
-## 于是每个动作都先在界面上有一个按钮，键盘只让熟练用户少点两下 —— 按钮与快捷键改的是**同一份状态**
-## （工具 / 笔刷 / 材质 / 导航模式），不存在"只有键盘才够得着"的功能。
-## 触摸屏上必须由界面补位的两处：滚轮缩放 →「− / +」，右键擦除 → 顶部选项条的「添加 / 移除 / 上色」三态（E 键同义）。
-## 本类因此也是这些状态的**唯一持有者**（`_install` / `_set_*` 都往界面上回写），界面自己不留副本。
-## 【为什么"翻译"值得单独一层】会话刻意不认识鼠标：它要的是"这一次落笔打在哪"（Pick）。
-## 视口是唯一知道屏幕坐标、相机与渲染节点的地方 —— 于是换算只在这里发生一次，
-## 会话与工具因此都能无头测试（换成 Dock 内嵌视口时，本类只换相机与渲染节点两行）。
-## 【坐标换算】渲染器的局部空间是"体素单位 × voxel_scale"（网格顶点按 voxel_scale 放大），
-## 故世界射线先 to_local、再除一次 voxel_scale，才落进 QVoxelSource 的体素坐标里。
-## 这条换算只此一处 —— 拾取、地板、网格尺寸三处用的都是同一套单位。
 
 ## 新建模型的网格尺寸（MagicaVoxel 的默认有界网格就是 32³）。
 @export var grid_size := Vector3i(32, 32, 32)
 
 ## 新建模型时预置的调色板（ID 从 1 开始；0 是空气）。
-## 不给颜色就没法验证"画上去的是什么颜色"，所以新建即带一套可用色板。
 @export var default_palette: Array[Color] = [
 	Color(0.87, 0.27, 0.25), Color(0.95, 0.64, 0.19), Color(0.94, 0.89, 0.35),
 	Color(0.36, 0.78, 0.40), Color(0.26, 0.64, 0.94), Color(0.61, 0.42, 0.90),
@@ -33,13 +16,10 @@ extends Node3D
 ## 笔刷上限（体素笔/盒笔/线笔的笔头边长，与 MagicaVoxel 的 size 同义；可取偶数）。
 @export var max_brush_size := 16
 
-## 导入模型时的体素分辨率 = 模型最长边的体素数（其余轴按比例）。越大越精细、也越吃内存。
+## 导入模型时的体素分辨率 = 模型最长边的体素数（其余轴按比例）。
 @export var import_resolution := 96
 
 # 3D 内容全部住在 `ViewHost/View/ViewRoot` 里：中间的编辑区是一个 SubViewport，
-## 铺在左右两栏之间（见 `_layout_view`）。
-## 【结构必须写在 .tscn 里】SubViewport 的场景要入树后才注册，运行时 `reparent` 3D 节点进来，
-## 引擎会在"从旧视口摘可见性掩码"那一步拿到 null scenario。
 @onready var _view_container: SubViewportContainer = $ViewHost
 @onready var _view_root: Node3D = $ViewHost/View/ViewRoot
 @onready var model: VoxelRenderer = $ViewHost/View/ViewRoot/Model
@@ -49,10 +29,8 @@ extends Node3D
 ## 灯组由配方按 RIG 现建（数量/颜色/方位只写一份），不在 .tscn 里摆第二份数值。
 var _lights: Array = []
 ## 自发光照明：只有 GI 能把 emission 照到周围（见 QVoxelRenderPreset 的 GI 段）。
-## 只在布局层级持有数据，编辑层级清空 `data`（等于关掉），不白养一份探针。
 var _gi: VoxelGI
-## 棚拍地面：布局层才显示的一块纯色接影地板。没有它，方向光的投影无处可落，
-## 模型就像贴纸浮在底上 —— 对比渲染图差的最大一块就是它。
+## 棚拍地面：布局层才显示的一块纯色接影地板。
 var _ground: MeshInstance3D
 ## 上次同步阴影纵深时的视距（见 _sync_shadow_reach）。
 var _shadow_reach_d := -1.0
@@ -60,12 +38,9 @@ var _shadow_reach_d := -1.0
 var _gi_dirty := false
 var _gi_waiting := false
 ## 环境光挂在视口自己的世界里（它靠 "enter world" 注册，跟着 3D 走才生效）。
-## `_setup_sky` / `_apply_quality` 改的是它的 `environment`，即 3D 正在用的那一份。
 @onready var _env_node: WorldEnvironment = $ViewHost/View/ViewRoot/WorldEnvironment
 
 ## 应用栏 / 工具坞 / 调色板：**在代码里建**而不是摆进 .tscn —— 它们的内容完全由运行时数据决定
-## （工具表、世界的材质表），在场景里预摆只会得到一份立刻被推翻的空壳；
-## 状态栏（Hud）留在场景里，因为它是静态骨架、且视口脚本要按路径引用它。
 var _toolbar: QVoxelierToolbar
 var _tools: QVoxelierTools
 var _context: QVoxelierContextBar
@@ -78,52 +53,40 @@ var _object_section: QVoxelierObjectSection
 ## 底部动画帧条（常驻一行，只显示当前模型的帧）。
 var _timeline: QVoxelierTimeline
 ## 右栏的宽度拖动条：拖它调栏宽，松手把宽度写进偏好。
-## 【左栏故意没有】左列全是透明图标按钮，宽度由内容定死就行 —— 给它一条可拖的边，
-## 用户反而要猜"拖宽了能多出什么"，答案是什么也没有。
 var _right_handle: QVoxelierResizeHandle
 ## 长操作（体素化）进行中：Esc 置 `_import_cancel`，操作在下一帧边界收手。
-## 长操作（体素化）进行中：Esc 置 `_import_cancel`，操作在下一帧边界收手。
-## 多帧模型可能跑几十秒，没有这条通道时用户只能等（或强杀进程丢掉未存的改动）。
 var _importing := false
 var _import_cancel := false
-## 快照分组（F5）：离屏渲一张 PNG。它只读世界，故本类只把世界推给它、再管一次落盘对话框
-## （参数与预览是分组自己的状态，见 QVoxelierSnapshotSection）。
+## 快照分组（F5）：离屏渲一张 PNG。
 var _snapshot_section: QVoxelierSnapshotSection
 var _snapshot_popup: PopupPanel
 var _confirm: ConfirmationDialog
 
-## 工具类别：笔刷 / 自定义笔刷（拿一个模型当图章盖）。与 QVoxelierContextBar.KIND_* 对应。
+## 工具类别：笔刷 / 自定义笔刷（拿一个模型当图章盖）。
 enum ToolKind { BRUSH, CUSTOM }
 var _tool_kind := ToolKind.BRUSH
 ## 层级里当前选中的节点（对象属性页据此显示"它是什么"）。
 var _selected_node: QVoxelNode
 
 ## 非活动对象的渲染节点容器：多对象世界里只有"当前对象"用 model，其余挂在这里。
-## （见 _rebuild_view —— 切换活动对象只换 model.data，其余渲染器复用。）
 var _extra_root: Node3D
 ## 布局模式的叠加层：每个模型的不透明包围盒线框 + 世界中心十字（仅布局模式可见）。
 var _layout_overlay: Node3D
-## 选区线框（挂在 model 下，与体素网格同一套坐标换算）。看不见的选区等于没有选区 ——
-## 用户按了"复制"却不知道复制了什么，故它随 _refresh_hud 一起重画。
+## 选区线框（挂在 model 下，与体素网格同一套坐标换算）。
 var _selection_box: QVoxelSelectionBox
 ## 移动坐标轴 gizmo（选区中心，点轴端挪一格）。
 var _move_gizmo: QVoxelierMoveGizmo
-## 笔刷悬停预览（半透明实体标出"按下 / 拖到这里会改成什么"）。与选区框同挂 model 下 ——
-## 同一套坐标换算，两者天然对齐；色与线框形态按操作三态（添加 = 实体材质色，移除 = 红线框，上色 = 材质色线框）。
+## 笔刷悬停预览（半透明实体标出"按下 / 拖到这里会改成什么"）。
 var _ghost: QVoxelPreviewMesh
-## 光标处最近一次的落笔点。粘贴要落在"用户正指着的地方"，而光标只在移动事件里出现 ——
-## 于是把它记下来，按钮 / 快捷键按下时才有得用（没有它，粘贴只能贴回原地）。
+## 光标处最近一次的落笔点。
 var _hover_pick: QVoxelBrushTool.Pick
 ## 非活动对象的渲染器：model_id → VoxelRenderer。
 var _display: Dictionary = {}
 
 ## 应用会话：世界 + 每对象一条编辑会话 + 工程状态 + 应用能力（见 QVoxelierSession）。
-## 视口脚本只做装配 / 翻译 / 刷新，故这里**只读**地投影出最常用的两份数据。
 var _sess: QVoxelierSession
 
 ## 当前世界与当前活动编辑会话 —— 是 `_sess` 的**只读投影**，不是第二份真相。
-## 【为什么是只读属性而不是各自的字段】换世界与切对象必须走 install / activate 两条路径
-## （它们才会把显示层一起换掉）；只读属性把"绕过会话直接赋值"这件事变成编译期错误。
 var world: QVoxelWorld:
 	get:
 		return _sess.world if _sess != null else null
@@ -134,14 +97,13 @@ var session: QVoxelEditSession:
 
 var _material_id := 1
 var _stroke := false
-## 当前操作模式（添加 / 移除 / 上色）。顶部选项条与 E 键改的是这一份。
+## 当前操作模式（添加 / 移除 / 上色）。
 var _op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
 ## 进行中手势的模式：落笔那一刻定死，拖动与预览都按它走（与 _op 可不同，右键 / Shift 会临时覆盖）。
 var _stroke_op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
 ## 悬停预览用的模式：按 Shift 时临时切到移除，于是**松手前**的预览就能反映"这一下是移除"。
 var _hover_op: QVoxelBrushTool.Op = QVoxelBrushTool.Op.ADD
-## 对称轴掩码。是**App 级设置**而非笔刷级：每个对象各有自己的笔刷实例，
-## 若把它存在笔刷里，切一次对象就会被新笔刷的默认值抹掉（见 _apply_symmetry）。
+## 对称轴掩码。
 var _symmetry := Vector3i.ZERO
 ## 快速选区判据（App 级设置，切对象时压回当前会话）：true = 同色相连。
 var _select_by_color := true
@@ -151,13 +113,12 @@ var _pan := false
 var _gizmo_active := false
 var _gizmo_axis := -1
 ## gizmo 拖拽模式：0 = 移动选区（坐标轴），1 = 旋转选区（旋转环），
-## 2 = 布局模式移动节点，3 = 布局模式旋转节点。
 var _gizmo_mode := 0
 var _gizmo_rot_angle := 0.0
 ## 旋转预览当前吸附到的 90° 倍数（避免每移动一像素都重画 ghost）。
 var _gizmo_rot_quarters := 0
 var _gizmo_t0 := 0.0
-## 编辑层级：0 = 模型内部（编辑体素），1 = 布局（编辑模型整体变换）。Tab 切换（类似 Blender）。
+## 编辑层级：0 = 模型内部（编辑体素），1 = 布局（编辑模型整体变换）。
 var _edit_mode := 0
 ## 布局拖拽的**固定参考**（拖拽期间模型会动，参考必须钉在按下那一刻，否则参数自漂移）。
 var _layout_center := Vector3.ZERO
@@ -182,21 +143,19 @@ var _gizmo_delta := 0
 var _gizmo_clip: QVoxelClipboard = null
 var _gizmo_base_lo := Vector3i.ZERO
 ## 导航拖拽由谁启动（&"" / &"left" / &"middle"）—— 释放时只关自己启动的那一路，
-## 免得左键松开把还按着的中键视角拖拽一并关掉。
 var _nav_key := &""
-## 触摸 / 触摸板手势解析（双指拖 = 旋转、捏合 = 缩放）。解析与相机动作分离，见 QVoxelierGestureNav。
+## 触摸 / 触摸板手势解析（双指拖 = 旋转、捏合 = 缩放）。
 var _gesture := QVoxelierGestureNav.new()
-## 左右两条侧栏的宽度（调色板列 / 抽屉列）。3D 视口的左右边界按它让位。
+## 左右两条侧栏的宽度（调色板列 / 抽屉列）。
 var _left_panel_w := 0.0
 var _right_panel_w := 0.0
 ## 浮层（上下文条、状态栏、坐标轴）要绕开的宽度：栏宽再各留一道缝；
-## 左侧还多算上浮在画布上的工具列。
 var _left_inset := 0.0
 var _right_inset := 0.0
 
 ## 取色器：开启后下一次左键点击改为"吸取该处体素的材质"，而不落笔。
 var _eyedropper := false
-## 正在进行的"改材质"手势（颜色或 PBR）对应的属性命令（松手时封口入栈；见 QVoxelierColorSection 的"手势即命令"）。
+## 正在进行的"改材质"手势（颜色或 PBR）对应的属性命令（松手时封口入栈；见 QVoxelierColorSection…
 var _material_cmd: QVoxelPropertyCommand
 ## 正在进行的"改帧时长"手势对应的属性命令（同上，目标是那一帧 QVoxelFrame 的 duration_ms）。
 var _frame_dur_cmd: QVoxelPropertyCommand
@@ -215,13 +174,13 @@ var _pending_import_path := ""
 var _import_opts: Dictionary = {}
 var _palette_import_dialog: FileDialog
 var _palette_export_dialog: FileDialog
-## 快照落盘对话框（*.png）。与调色板导出同走自绘那套 —— 默认文件名由分组按视图名给出。
+## 快照落盘对话框（*.png）。
 var _snapshot_dialog: FileDialog
 
 ## 滚轮 / 双指滑一格对应的平移像素量。
 const WHEEL_PAN_STEP := 48.0
 
-## 应用偏好（目前只有"上次待过的目录"）。用引擎自带的 ConfigFile，不另造配置格式。
+## 应用偏好（目前只有"上次待过的目录"）。
 const PREFS_PATH := "user://qvoxelier.cfg"
 const PREFS_SECTION := "files"
 
@@ -240,12 +199,10 @@ const ACTION_CUT := &"qvoxelier_cut"
 const ACTION_PASTE := &"qvoxelier_paste"
 const ACTION_CLEAR := &"qvoxelier_clear"
 
-
 # 装配
 
 func _ready() -> void:
 	# 窗口下限：再窄下去顶栏按钮会被裁掉、左右两列会互相压住 —— 布局是按内容算宽度的，
-	# 没有断点式重排，所以只能给一个"再小就没法用"的下限。编辑器里不设，免得改到编辑器窗口。
 	if not Engine.is_editor_hint():
 		var win := get_window()
 		if win != null:
@@ -278,9 +235,7 @@ func _ready() -> void:
 	# 帧条贴在状态栏上方占底部一条：等布局稳一帧再让左列 / 右列 / 坐标系让位。
 	_reserve_strip.call_deferred()
 
-
 ## 关闭界面控件的**焦点导航**：Tab / 方向键不再在控件之间跳焦点（Tab 留给"模型 / 布局"切换）。
-## 文本框（LineEdit / TextEdit / SpinBox）除外 —— 它们要能聚焦输入；对话框窗口整棵跳过（自带焦点）。
 func _disable_focus(node: Node) -> void:
 	if node is Window:
 		return
@@ -291,10 +246,7 @@ func _disable_focus(node: Node) -> void:
 	for ch in node.get_children():
 		_disable_focus(ch)
 
-
 ## 3D 视口让开左右两条栏 —— 它们都是实心面板，画到它底下的东西看不见也点不到，等于白画。
-## 顶栏 / 时间轴 / 状态栏同理，故纵向也让。
-## 【左边只让调色板那一栏】工具列是浮在画布上的透明图标（见 `_tools`），让位等于把它挪进面板里。
 func _layout_view() -> void:
 	if _view_container == null:
 		return
@@ -307,30 +259,23 @@ func _layout_view() -> void:
 	_view_container.offset_top = QVoxelUi.bar_height()
 	_view_container.offset_bottom = -(QVoxelUi.status_height() + float(QVoxelUi.strip_height()))
 
-
 ## 屏幕坐标 → 3D 视口坐标：差的只是容器左上角那一点位移。
-## 所有"投影 / 反投影"都必须吃视口坐标，否则射线会整体偏掉一个左栏的宽度。
 func _to_view(screen: Vector2) -> Vector2:
 	if _view_container == null:
 		return screen
 	return screen - _view_container.get_global_rect().position
 
-
-## 视口坐标 → 屏幕坐标。框选矩形画在 UI 层（主视口坐标），投影结果要先换回来才比得了。
+## 视口坐标 → 屏幕坐标。
 func _to_screen(view_point: Vector2) -> Vector2:
 	if _view_container == null:
 		return view_point
 	return view_point + _view_container.get_global_rect().position
 
-
 ## 这一下点/滚轮是不是落在 3D 画布内（两侧栏、顶栏、状态栏底下都算外）。
 func _in_view(screen: Vector2) -> bool:
 	return _view_container != null and _view_container.get_global_rect().has_point(screen)
 
-
-## 装配三个界面面板并接线。面板只发"用户想干什么"的信号，**不收会话**：
-## 于是界面层永远不碰编辑逻辑，换视口（独立窗口 → Dock 内嵌）时面板一行都不用改。
-## （状态栏是例外：它要读会话才能显示工具与撤销栈，所以在 _install 里注入 session。）
+## 装配三个界面面板并接线。
 func _build_ui() -> void:
 	_toolbar = QVoxelierToolbar.new()
 	_toolbar.name = "Toolbar"
@@ -352,7 +297,6 @@ func _build_ui() -> void:
 		_set_lens(QVoxelViewCamera.Lens.ORTHO if ortho else QVoxelViewCamera.Lens.PERSPECTIVE))
 	_toolbar.grid_lines_toggled.connect(_set_grid_lines)
 	# 两块浮层都锚在右上角，开一块就关另一块 —— 互斥与按钮回弹都收在 _set_*_visible 里，
-	# 免得"界面开着日志、按钮却显示说明"这类不一致散落在两个 connect 里。
 	_toolbar.help_toggled.connect(_set_legend_visible)
 	_toolbar.log_toggled.connect(_set_log_visible)
 
@@ -364,7 +308,6 @@ func _build_ui() -> void:
 	_tools.tool_selected.connect(_set_tool)
 
 	# 上下文选项条：只显示当前工具用得到的选项（笔刷 / 形态 / 对称 / 选区动作）。
-	# 与左列工具条分工 —— 左列选工具，本条随工具给出操作三态与参数。
 	_context = QVoxelierContextBar.new()
 	_context.name = "ContextBar"
 	add_child(_context)
@@ -470,7 +413,6 @@ func _build_ui() -> void:
 	_snapshot_popup.add_child(_snapshot_section)
 
 	# 选区线框：与网格地板同挂 model 下（同一套"体素单位 × voxel_scale"换算），故两者天然对齐。
-	# 它是纯显示物，不参与拾取（拾取只看体素与地板），故没有碰撞体。
 	_selection_box = QVoxelSelectionBox.new()
 	_selection_box.name = "Selection"
 	model.add_child(_selection_box)
@@ -484,14 +426,9 @@ func _build_ui() -> void:
 	model.add_child(_ghost)
 
 	# 状态栏与两块浮层都归 Hud 所有，而 Hud 是场景里预摆的（排在子节点最前 = 画在最底下），
-	# 后建的右列抽屉会整条压住浮层 —— 实测「操作说明」右半边被「颜色」面板盖掉。
-	# 把它挪到最后一个子节点位置，浮层与提示才浮得住（左右两条侧栏的高度都已避开状态栏，
-	# 不会反过来被它遮住）。
 	move_child(hud, -1)
 
 	# 右列：抽屉宽度随内容变，视口里的浮层（HUD 的说明 / 日志、朝向指示器）都要让出它。
-	# 目标值都是**布局算出来的**（不是常量），故挂信号 + 装配末尾补一次初值：
-	# 邻面板的矩形一般要到下一帧最小尺寸结算完才定下来。
 	var sync_right := func() -> void:
 		_sync_insets()
 		# 三者共用一个宽度而不是各算各的 —— 状态栏"避开右列"与坐标轴"避开状态栏"从此是一个数。
@@ -503,28 +440,19 @@ func _build_ui() -> void:
 	_load_layout()
 	sync_right.call_deferred()
 
-
 ## 新建一个空模型（grid 为 ZERO 时用导出的 grid_size）：建世界 → 建对象 → 装配。
-## 尺寸与色板是视口的 @export（场景里可调），故由这里喂给会话 —— 会话只认"多大、哪些色"。
 func new_model(grid := Vector3i.ZERO) -> void:
 	_reset_edit_state()
 	_sess.new_model(grid, grid_size, default_palette)
 	frame_view()
 
-
 ## 装配：世界 + 待编辑对象 → 会话 / 渲染器 / 地板 / 状态栏。
-## **新建与打开共用这一条路径** —— 两套初始化迟早会分叉出"新建能画、打开画不了"这类怪病。
-## 【分工】世界与"每对象一条会话"由 `_sess` 装配（应用层）；这里只做显示层那一半。
-## 刷新时机也不在这里：会话装完会发 `changed`，_on_session_changed 会把显示层重挂一遍。
 func _install(w: QVoxelWorld, obj: QVoxelModel) -> void:
 	_reset_edit_state()
 	_sess.install(w, obj)
 	frame_view()
 
-
-## 换世界后作废的"手势 / 工具"级界面状态。新建与打开两个入口共用这一份 ——
-## 【为什么必须共用】新建若漏掉它，新工程一进来材质还指着旧编号；启动首屏也是这条路径，
-## 于是"打开工程取过景、新建 / 首屏却停在默认机位"这种分叉就会一直存在。
+## 换世界后作废的"手势 / 工具"级界面状态。
 func _reset_edit_state() -> void:
 	if _timeline != null:
 		_timeline.stop_playback()
@@ -539,15 +467,8 @@ func _reset_edit_state() -> void:
 	_material_cmd = null
 	model.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	# 调色板不必在这里喂：它挂在唯一刷新路径上，install 发出的 changed 会把世界带过去
-	# （色板取的是**世界的材质表**而不是 default_palette，打开别人的 256 色工程也照显）。
 
-
-## 切换"当前编辑对象"。三条入口共用这一条路径：对象列表点击、新建对象、打开工程挑初始对象。
-## 【为什么不重建会话】非活动对象也早就有一条展示会话（见 _install），切换只是把活动引用换掉。
-## 于是撤销栈按对象各自保留 —— 切走再切回来，那一个对象的撤销历史还在，
-## 不会因为"看了一眼别的对象"就清空。
-## 【为什么刷新的活不在这里】换活动对象是"数据变了"的一种，由会话发 `changed` 带出刷新；
-## 这里只处理两件**界面专有**的事：停播放预览、收掉正按着的那一笔。
+## 切换"当前编辑对象"。
 func _activate(model_id: int, flash := true) -> void:
 	if world == null:
 		return
@@ -566,13 +487,7 @@ func _activate(model_id: int, flash := true) -> void:
 	if flash:
 		hud.flash("已切换到 %s" % o.node_name)
 
-
 ## 把"当前活动对象"附着到显示层：model 渲染活动对象，地板与线框跟着它的输出盒。
-## 【为什么每条都要比一遍再赋】本函数在**每次数据变化**时都会被调到（改名、拖层级也算），
-## 而这几个 setter 都是**无条件重建网格**的：`VoxelRenderer.data` 会断开重连信号、清掉 LOD
-## 并排一次更新；`QVoxelGridFloor` 的 grid_size / voxel_scale 会重建整块地板网格。
-## 不比一遍就等于"改个名字重铺一次场景"，白白吃掉一帧。
-## （线框的 voxel_scale 只改 scale、HUD 的 session 是普通字段，都无需比。）
 func _attach_active() -> void:
 	if session == null or world == null:
 		return
@@ -593,44 +508,30 @@ func _attach_active() -> void:
 	_move_gizmo.origin = session.data.center_offset if session.data != null else Vector3.ZERO
 	# 预览与显示层同一份偏移（导入资产的 center_offset）：否则预览与体素错开。
 	_ghost.origin = session.data.center_offset if session.data != null else Vector3.ZERO
-	# 摆放：体素在数据层是**本地**坐标，节点变换（含祖先）由渲染器承载。model 的子树（地板 /
-	# 选区 / gizmo / 预览）都跟着它走，故只在 model 上设一次变换即可整体归位。
+	# 摆放：体素在数据层是**本地**坐标，节点变换（含祖先）由渲染器承载。
 	var xf := _display_transform(session.object, model.voxel_scale)
 	if not model.transform.is_equal_approx(xf):
 		model.transform = xf
 	_rebuild_layout_overlay()
 	hud.session = session
 
-
 ## 节点的世界摆放 → 渲染器变换：位置换算到世界单位（× voxel_scale），旋转直接沿用。
-## 体素几何本身已按 voxel_scale 生成，故这里只承载"平移到哪、转到什么朝向"。
 func _display_transform(node: QVoxelNode, scale: float) -> Transform3D:
 	if world == null or node == null:
 		return Transform3D.IDENTITY
 	var xf := world.world_transform(node)
 	return Transform3D(xf.basis, xf.origin * scale)
 
-
 ## 会话数据变了 → 重挂显示层 + 重建视口 + 一处刷新界面。
-## 【为什么这是唯一的刷新出口】改世界、切对象、撤销 / 重做、改材质、改帧都会发这条信号。
-## 分散写"谁该刷什么"迟早漏一处 —— 表现为"按钮高亮着、提示还写着上一个工具"。
-## `_refresh_hud` 自己会带上右列三组（见 _refresh_panels），故这里不再逐个面板点名。
 func _on_session_changed() -> void:
 	_attach_active()
 	_rebuild_view()
 	_refresh_hud()
 
-
 func _on_dirty_changed(_on: bool) -> void:
 	_update_title()
 
-
 ## 让"世界的全部对象"都显示出来：活动对象用 model，其余各挂一个渲染器到 _extra_root。
-## 【幂等 + 复用】本函数在切对象、图层可见性变化、撤销图层命令后都会被调到，所以它必须
-## "算出现状"，而不是"推倒重来"：已有且仍该显示的渲染器原地复用（只改 visible），
-## 该消失的回收，该新增的才建。若每次都重建，多对象场景每落一笔就重建一遍网格，会闪。
-## 【为什么活动对象固定用 model】视口脚本按场景路径引着它（`ViewHost/View/ViewRoot/Model`），重指代价大；
-## 于是约定"model 永远渲染当前活动对象"，其余对象才走 _extra_root。切换只是换 model.data。
 func _rebuild_view() -> void:
 	if world == null or session == null:
 		return
@@ -642,8 +543,6 @@ func _rebuild_view() -> void:
 
 	var active_id: int = session.object.model_id
 	# 活动对象由 model 渲染，其唤醒回调必须指回 model.request_update。
-	# 【曾经的 bug】对象先当非活动（回调指向它的临时渲染器）、再切回活动时，回调仍指向那个
-	# 已释放的临时渲染器 → 撤销后 _wake_renderer 打到野对象 → 网格不重建（画面看着没撤销）。
 	session.request_render_update = model.request_update
 
 	# 回收：不再属于世界、或已变成活动对象（该由 model 渲染）的旧渲染器。
@@ -656,8 +555,7 @@ func _rebuild_view() -> void:
 			old.queue_free()
 		_display.erase(id)
 
-	# 非活动对象：一条会话一个渲染器。数据源是那条会话自己的 QVoxelSource（它自己会重建），
-	# 唤醒回调改指向**它对应的渲染器** —— 会话不认识渲染器，只认这个 Callable（见类文档）。
+	# 非活动对象：一条会话一个渲染器。
 	for s in _sess.all_sessions():
 		var id: int = s.object.model_id
 		if world.find_model(id) == null or id == active_id:
@@ -681,20 +579,15 @@ func _rebuild_view() -> void:
 	if _edit_mode == 1:
 		_request_gi_bake()
 
-
 ## 取景：把"有东西可落笔"的范围落进画面（新建 / 打开 / Home 键）。
-## 空图时唯一能落笔的是网格底面（`QVoxelGridPick` 的落笔面），所以对准底面 —— 若照搬"框住整块
-## 32³ 网格"，默认 25° 视角下屏幕上半尽是空体积，点正中只会换来一句"这儿落不了笔"。
 func frame_view() -> void:
 	if session == null:
 		return
 	var g := Vector3(session.output_size()) * model.voxel_scale
 	# 取景对准**整块网格盒的中心**（而不是地板中心）—— 背景面有地板也有侧墙，盒子中心才是视觉中心。
-	# 视口边界就是可见区，这个中心落下去就是屏幕中心，不需要再补侧栏差额。
 	camera.frame_aabb(model.global_transform * AABB(Vector3.ZERO, g), true)
 
-
-## 取景整个世界：所有模型（按各自摆放）联合包围盒的中心。布局模式的聚焦用。
+## 取景整个世界：所有模型（按各自摆放）联合包围盒的中心。
 func frame_world() -> void:
 	if world == null:
 		return
@@ -704,16 +597,13 @@ func frame_world() -> void:
 		return
 	camera.frame_aabb(box, true)
 
-
 ## 模型在世界里的包围盒（体素单位）：本地内容盒 × 世界摆放。
-## 尺寸来自 `local_box`（不含旋转），旋转只由 `world_transform` 施加一次 —— 两步分开才不会转两遍。
 func _model_box(m: QVoxelModel) -> AABB:
 	if world == null or m == null:
 		return AABB()
 	return world.world_transform(m) * QVoxelEvalEngine.local_box(m)
 
-
-## 所有模型按各自摆放合起来的世界包围盒（**世界单位**）。取景与 GI 盒共用同一份。
+## 所有模型按各自摆放合起来的世界包围盒（**世界单位**）。
 func _world_bounds() -> AABB:
 	if world == null:
 		return AABB()
@@ -728,8 +618,7 @@ func _world_bounds() -> AABB:
 	var vs := world.voxel_size()
 	return AABB(box.position * vs, box.size * vs)
 
-
-## 棚拍地面：布局层的一块纯色接影地板。无高光、不投影，只负责把太阳的投影接住。
+## 棚拍地面：布局层的一块纯色接影地板。
 func _build_ground() -> void:
 	_ground = MeshInstance3D.new()
 	_ground.name = "StudioGround"
@@ -743,9 +632,7 @@ func _build_ground() -> void:
 	_ground.visible = false
 	_view_root.add_child(_ground)
 
-
 ## 铺在**所有模型的最低处**（不是 y=0：模型摆到半空时也该有东西接着投影），
-## 边长取世界包围盒水平尺寸的数倍 —— 大到一个投影都出不了边界。
 func _fit_ground() -> void:
 	if _ground == null:
 		return
@@ -761,8 +648,7 @@ func _fit_ground() -> void:
 	if not _ground.position.is_equal_approx(pos):
 		_ground.position = pos
 
-
-## 布局叠加层：每个模型的不透明包围盒线框 + 世界中心十字。仅布局模式可见，随数据变化重画。
+## 布局叠加层：每个模型的不透明包围盒线框 + 世界中心十字。
 func _rebuild_layout_overlay() -> void:
 	_fit_ground()
 	if _layout_overlay == null:
@@ -789,13 +675,11 @@ func _rebuild_layout_overlay() -> void:
 		if _layout_sel.has(m.model_id) or (session != null and m == session.object):
 			col = Color(QVoxelUi.ACCENT, 0.95)
 		# 画的是**有向盒**：本地盒过该模型的摆放变换，框因此贴着模型一起转
-		# （与 Blender / Unity 的选中框同一套观感）；世界 AABB 只用于取景与点选这类粗筛。
 		_layout_overlay.add_child(_line_box(lb, col, _display_transform(m, vs)))
 	# 世界中心十字（表示原点位置）。
 	_layout_overlay.add_child(_cross_lines(maxf(vs * 4.0, 0.4), Color(0.95, 0.8, 0.3)))
 
-
-## 布局模式：射线点选模型（对每个模型的包围盒做射线求交，取最近的）。无命中返回 null。
+## 布局模式：射线点选模型（对每个模型的包围盒做射线求交，取最近的）。
 func _pick_layout_model(screen: Vector2) -> QVoxelModel:
 	if world == null:
 		return null
@@ -813,7 +697,6 @@ func _pick_layout_model(screen: Vector2) -> QVoxelModel:
 			best_t = t
 			best = m
 	return best
-
 
 ## 射线 × 轴对齐盒（slab 法）：返回进入参数 t（>=0），无交返回 -1。
 func _ray_aabb(ro: Vector3, rd: Vector3, bb: AABB) -> float:
@@ -838,9 +721,7 @@ func _ray_aabb(ro: Vector3, rd: Vector3, bb: AABB) -> float:
 				return -1.0
 	return tmin
 
-
 ## 一个盒的 12 条棱（线段，与编辑模式的选区线框同一套观感）。
-## `xf` 用来摆**有向盒**（本地盒过模型摆放，框贴着模型转）；缺省即轴对齐盒。
 func _line_box(bb: AABB, col: Color, xf := Transform3D.IDENTITY) -> MeshInstance3D:
 	var c := []
 	for i in 8:
@@ -861,7 +742,6 @@ func _line_box(bb: AABB, col: Color, xf := Transform3D.IDENTITY) -> MeshInstance
 	mi.material_override = _line_material(col)
 	return mi
 
-
 ## 世界中心十字：三根过原点的短轴（线段）。
 func _cross_lines(r: float, col: Color) -> MeshInstance3D:
 	var im := ImmediateMesh.new()
@@ -875,7 +755,6 @@ func _cross_lines(r: float, col: Color) -> MeshInstance3D:
 	mi.material_override = _line_material(col)
 	return mi
 
-
 ## 线材质：不受光、可透明、不裁剪、不做深度测试 —— 与编辑模式选区线框同一套。
 func _line_material(col: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -885,7 +764,6 @@ func _line_material(col: Color) -> StandardMaterial3D:
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
 	m.no_depth_test = true
 	return m
-
 
 # 布局多选 / 框选
 
@@ -903,13 +781,11 @@ func _layout_models() -> Array[QVoxelModel]:
 			out.append(m)
 	return out
 
-
 func _layout_capture_offsets() -> Dictionary:
 	var d := {}
 	for m in _layout_models():
 		d[m.model_id] = m.offset
 	return d
-
 
 func _layout_capture_xfs() -> Dictionary:
 	var d := {}
@@ -917,14 +793,12 @@ func _layout_capture_xfs() -> Dictionary:
 		d[m.model_id] = m.local_transform
 	return d
 
-
 ## 模型父组的**世界变换**（顶层模型的父为世界 → 恒等）。
 func _parent_world(m: QVoxelModel) -> Transform3D:
 	if world == null:
 		return Transform3D.IDENTITY
 	var p := world.find_parent(m)
 	return world.world_transform(p) if p != null else Transform3D.IDENTITY
-
 
 ## 布局选区的**共同中心**（世界体素坐标）—— 按给定的改前变换算，旋转绕它整体转。
 func _layout_pivot_from(xfs: Dictionary) -> Vector3:
@@ -936,10 +810,8 @@ func _layout_pivot_from(xfs: Dictionary) -> Vector3:
 		n += 1
 	return sum / float(maxi(n, 1))
 
-
 func _layout_pivot_world() -> Vector3:
 	return _layout_pivot_from(_layout_capture_xfs())
-
 
 ## 共同中心在**活动模型本地**体素坐标（gizmo 是 model 的子节点，位置要用这个）。
 func _layout_gizmo_center() -> Vector3:
@@ -948,7 +820,6 @@ func _layout_gizmo_center() -> Vector3:
 	var p := _layout_pivot_world() * model.voxel_scale
 	var local := model.global_transform.affine_inverse() * p
 	return local / maxf(model.voxel_scale, 1e-6)
-
 
 ## 布局拖拽期间实时更新被选中模型的渲染器变换（活动对象用 model，其余用 _display）。
 func _update_layout_renderers() -> void:
@@ -961,7 +832,6 @@ func _update_layout_renderers() -> void:
 		if r != null:
 			r.transform = _display_transform(m, model.voxel_scale)
 	_rebuild_layout_overlay()
-
 
 ## 布局点选：replace / Shift 加选 / Ctrl 减选。
 func _layout_select(m: QVoxelModel, add: bool, remove: bool) -> void:
@@ -977,7 +847,6 @@ func _layout_select(m: QVoxelModel, add: bool, remove: bool) -> void:
 	_rebuild_layout_overlay()
 	_refresh_hud()
 
-
 func _box_panel_node() -> Panel:
 	if _box_panel == null:
 		_box_panel = Panel.new()
@@ -990,11 +859,9 @@ func _box_panel_node() -> Panel:
 		add_child(_box_panel)
 	return _box_panel
 
-
 func _show_box_rect() -> void:
 	_box_panel_node().visible = true
 	_update_box_rect()
-
 
 func _update_box_rect() -> void:
 	var p := _box_panel_node()
@@ -1002,11 +869,9 @@ func _update_box_rect() -> void:
 	p.position = r.position
 	p.size = r.size
 
-
 func _hide_box_rect() -> void:
 	if _box_panel != null:
 		_box_panel.visible = false
-
 
 ## 结束框选：把投影中心落在矩形内的模型纳入选区（`add` = Shift 加选，否则替换）。
 func _end_box_select(add := false) -> void:
@@ -1028,17 +893,13 @@ func _end_box_select(add := false) -> void:
 	_rebuild_layout_overlay()
 	_refresh_hud()
 
-
 func _process(_delta: float) -> void:
 	_update_gizmo_size()
 	_sync_shadow_reach()
 
-
-## 阴影纵深 = 视距 + 场景半径（Godot 从**相机**量起）。拉远后不跟着放大，模型就会整片掉出
-## 阴影范围 —— 表现不是影子变淡，而是**投影完全消失**，看起来像贴纸。
+## 阴影纵深 = 视距 + 场景半径（Godot 从**相机**量起）。
 func _shadow_reach() -> float:
 	return maxf(camera.distance + _world_bounds().get_longest_axis_size(), 5.0)
-
 
 func _sync_shadow_reach() -> void:
 	if _lights.is_empty() or is_equal_approx(camera.distance, _shadow_reach_d):
@@ -1046,14 +907,10 @@ func _sync_shadow_reach() -> void:
 	_shadow_reach_d = camera.distance
 	(_lights[0] as DirectionalLight3D).directional_shadow_max_distance = _shadow_reach()
 
-
 ## gizmo 手柄**屏幕大小恒定**：旋转环半径占视口短边的比例（轴臂同理，见 gizmo 的 ARM/RING_R）。
 const GIZMO_RING_RATIO := 0.085
 
-
 ## 按"中心处每世界单位多少像素"反推几何缩放。
-## 【为什么不用相机距离】透视下世界尺寸 ∝ 距离，正交下两者无关 —— 按距离折算会让正交视图
-## 缩放一点点就把手柄撑满屏幕。投影换算对两种镜头同一套公式。
 func _update_gizmo_size() -> void:
 	if _move_gizmo == null or not _move_gizmo.visible or session == null or camera == null:
 		return
@@ -1066,15 +923,12 @@ func _update_gizmo_size() -> void:
 	var want_px := minf(view.x, view.y) * GIZMO_RING_RATIO
 	_move_gizmo.set_size_factor(want_px / (px * unit * QVoxelierMoveGizmo.RING_R))
 
-
 ## 某点处一个世界单位有多少屏幕像素：沿相机右轴量一单位再投影（透视 / 正交通用）。
 func _px_per_unit(at: Vector3) -> float:
 	return camera.unproject_position(at).distance_to(
 			camera.unproject_position(at + camera.global_transform.basis.x))
 
-
 ## 造一条栏宽拖动条：纵向贴满可用高度（顶栏下缘 → 状态栏上缘），横向位置由 `_sync_insets` 算。
-## `anchor_x.x` = 0 表示贴左栏右缘，1 表示贴右栏左缘。
 func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
 	var h := QVoxelierResizeHandle.new()
 	h.anchor_top = 0.0
@@ -1092,9 +946,7 @@ func _make_resize_handle(anchor_x: Vector2) -> QVoxelierResizeHandle:
 	add_child(h)
 	return h
 
-
 ## 两侧栏宽随邻居实际矩形更新 —— 视口让位、状态栏让位、坐标轴让位、上下文条让位、
-## 拖动条位置共用同一组数。
 func _sync_insets() -> void:
 	# 左栏只有调色板那一列（工具列是浮在画布上的，不算进栏宽）。
 	_left_panel_w = QVoxelUi.palette_width()
@@ -1113,9 +965,7 @@ func _sync_insets() -> void:
 	# 栏宽变了 = 3D 视口的边界也变了，跟着重排。
 	_layout_view()
 
-
 ## 拖右栏左缘：向左拖（delta < 0）= 右栏变宽。
-## 宽度写进 `QVoxelUi` 再由 Dock 重排 —— "目标宽度"只有一处，拖动与偏好都作用在它上面。
 func _on_dock_resize(delta: float) -> void:
 	QVoxelUi.set_dock_width(QVoxelUi.dock_width() - delta, _dock_cap())
 	_dock.refit()
@@ -1123,13 +973,11 @@ func _on_dock_resize(delta: float) -> void:
 	hud.set_right_inset(_right_inset)
 	_gizmo.right_inset = _right_inset
 
-
 ## 右栏能拖多宽：最多占一半，剩下一半永远留给画布。
 func _dock_cap() -> float:
 	return get_viewport().get_visible_rect().size.x * 0.5
 
-
-## 恢复上次拖出来的栏宽（没有记录就用默认档）。与"上次目录"共用同一个 cfg。
+## 恢复上次拖出来的栏宽（没有记录就用默认档）。
 func _load_layout() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(PREFS_PATH) != OK:
@@ -1137,7 +985,6 @@ func _load_layout() -> void:
 	var dw := int(cfg.get_value(PREFS_SECTION, "dock_w", 0))
 	if dw > 0:
 		QVoxelUi.set_dock_width(dw, _dock_cap())
-
 
 func _save_layout() -> void:
 	if _dock == null:
@@ -1147,18 +994,15 @@ func _save_layout() -> void:
 	cfg.set_value(PREFS_SECTION, "dock_w", QVoxelUi.dock_width())
 	cfg.save(PREFS_PATH)
 
-
 # 输入翻译
 
 ## 在 GUI 之前截获 Tab：**先于**控件的焦点导航（`ui_focus_next`）消费掉它，
-## 于是 Tab 只用于"模型编辑 / 布局"层级切换，不会在界面控件之间乱跳焦点。
 func _input(event: InputEvent) -> void:
 	if Engine.is_editor_hint() or session == null:
 		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_TAB:
 		_set_edit_mode(1 - _edit_mode)
 		get_viewport().set_input_as_handled()
-
 
 func _unhandled_input(event: InputEvent) -> void:
 	if Engine.is_editor_hint() or session == null:
@@ -1176,23 +1020,19 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed and not event.echo:
 		_on_key(event)
 
-
 func _on_mouse_button(e: InputEventMouseButton) -> void:
 	# 3D 判定一律走**视口坐标**（`vp`）；框选矩形画在 UI 层，仍用主视口的 `e.position`。
 	var vp := _to_view(e.position)
 	# 按在画布外不算操作：那底下是两侧栏 / 顶栏 / 状态栏，落到那里的射线只会画在看不见的地方。
-	# 松手**不拦** —— 笔拖到栏外再松开，仍要能正常收笔。
 	if e.pressed and not _in_view(e.position):
 		return
 	match e.button_index:
 		MOUSE_BUTTON_LEFT:
 			# 取色器优先于一切：开启时左键点击用来"吸取"，不该顺带落一笔。
-			# 拖拽（含导航 / 平移）时若不放开手会一直吸，故只在**按下那一拍**取一次。
 			if _eyedropper and e.pressed:
 				_pick_material_at(vp)
 				return
 			# 触摸屏没有中键：单指拖动画/擦，单指拖动**空白处**即转视角，双指拖动即平移。
-			# 平板上的单指拖动经过 emulate_mouse_from_touch 就是这里的 LEFT，不需要另写触摸分支。
 			if e.pressed:
 				if e.alt_pressed:
 					# Alt+拖 = 旋转：老肌肉记忆的一条加速器，与空白处拖动同一条路径。
@@ -1200,11 +1040,8 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					_orbit = true
 				else:
 					# 移动**只经坐标轴**：先试着按住轴拖拽；没点中轴就转视角（不会误移）。
-					# 其余工具：命中可落笔处 → 落笔；落在空白处 → 拖动即旋转视角。
-					# 自定义笔刷是"点一下"的工具（不拖拽），走 _stamp_at 而不是笔画手势。
 					if _edit_mode == 1:
 						# 布局：先试 gizmo；否则**点中模型即选中**（任何工具下都行，Shift 加 / Ctrl 减）；
-						# 空处：只有「选择」工具才框选，其它工具（默认「移动」）拖动即转视角。
 						if _gizmo_begin(vp):
 							pass
 						else:
@@ -1252,8 +1089,7 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			else:
 				_end_stroke()
 		MOUSE_BUTTON_MIDDLE:
-			# 中键拖动 = 任意位置旋转；Shift+中键 = 平移。与左右键（画 / 擦 / 空白处旋转）
-			# 互不干扰，于是"边画边转着看"不需要先切模式 —— 建模里这一步每天都在用。
+			# 中键拖动 = 任意位置旋转；Shift+中键 = 平移。
 			if e.pressed:
 				_nav_key = &"middle"
 				_pan = e.shift_pressed
@@ -1264,7 +1100,6 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 				_pan = false
 		MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
 			# 裸滚轮 = 缩放（与绝大多数三维软件一致）；Ctrl+滚轮保留为等价写法。
-			# 俯仰仍只认 Alt+滚轮与中键/空白拖拽 —— 它是"改变构图"的动作，不该由随手一滑触发。
 			var up := e.button_index == MOUSE_BUTTON_WHEEL_UP
 			if e.alt_pressed:
 				camera.pitch_by_degrees(-4.0 if up else 4.0)
@@ -1274,11 +1109,9 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			# 水平滚轮同样忽略（触摸板双指左右滑）。
 			pass
 
-
 ## 把手势层累积的导航量接到相机上（每喂完一个手势事件调用一次）。
 func _flush_gesture() -> void:
 	# 第二指落下即打断进行中的笔画 —— 双指是导航，不该顺带画一笔。
-	# 只在笔画中途取消；非笔画时不动 _cancel，它还有"退出选区"的语义。
 	if _gesture.active and _stroke:
 		_cancel()
 	if _gesture.pan_pending != Vector2.ZERO:
@@ -1286,7 +1119,6 @@ func _flush_gesture() -> void:
 	if not is_equal_approx(_gesture.zoom_pending, 1.0):
 		camera.zoom_by_ratio(_gesture.zoom_pending)
 	_gesture.take()
-
 
 func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 	if _box_select:
@@ -1310,10 +1142,8 @@ func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 		_update_gizmo_hover(vp)
 		_refresh_cursor(vp)
 
-
 func _on_key(e: InputEventKey) -> void:
 	# 撤销 / 重做 / 存开走框架 InputTool（key_event 管修饰键，动作名可被重映射）。
-	# 模式热键直接查工具表 —— 表即配置，不需要修饰键语义，也就没必要再声明一遍动作名。
 	if _pressed(e, ACTION_UNDO):
 		_undo()
 	elif _pressed(e, ACTION_REDO):
@@ -1364,13 +1194,9 @@ func _on_key(e: InputEventKey) -> void:
 		# 数字键 1..7 切工具（调色板不再占用数字键）。
 		_switch_by_hotkey(e.keycode)
 
-
 ## 动作命中判定：**必须精确比对修饰键**（第 3 个参数 exact_match）。
-## `is_action_pressed` 默认只比键码、不比修饰键 —— 于是 Ctrl+Shift+Z 会连"撤销"一起命中、
-## Ctrl+Shift+S 会连"保存"一起命中，谁先判谁赢、另一个永远轮不到（"重做"就是这么坏的）。
 func _pressed(e: InputEventKey, action: StringName) -> bool:
 	return e.is_action_pressed(action, false, true)
-
 
 ## 热键切笔：与点工具坞走同一条 `_set_tool`，于是按钮高亮与提示文案不可能与实况不一致。
 func _switch_by_hotkey(key: Key) -> void:
@@ -1378,7 +1204,6 @@ func _switch_by_hotkey(key: Key) -> void:
 		if row.hotkey == key:
 			_set_tool(row.mode)
 			return
-
 
 ## 把屏幕坐标解成"这一次落笔打在哪"：相机射线 → 体素空间 → 网格拾取（含空图落在地板上）。
 func _pick_at(screen: Vector2, op: int) -> QVoxelBrushTool.Pick:
@@ -1390,7 +1215,6 @@ func _pick_at(screen: Vector2, op: int) -> QVoxelBrushTool.Pick:
 			grid_floor.visible_faces())
 	return session.pick_from_hit(info, op, _material_id)
 
-
 # 手势
 
 func _begin_stroke(screen: Vector2, op: int) -> void:
@@ -1398,7 +1222,6 @@ func _begin_stroke(screen: Vector2, op: int) -> void:
 		hud.flash("这一层已锁定：先在右侧「图层」里解锁")
 		return
 	# 预览中落笔 = 这一笔会画在"播放头正好停住的那一帧"上，而播放头还在动 —— 用户根本
-	# 说不清自己画到了第几帧。先停下播放再落笔（停在哪一帧就是哪一帧，看得见）。
 	_timeline.stop_playback()
 	_stroke_op = op
 	if not session.begin(_pick_at(screen, op)):
@@ -1406,7 +1229,6 @@ func _begin_stroke(screen: Vector2, op: int) -> void:
 		return
 	_stroke = true
 	_refresh_cursor(screen)
-
 
 func _end_stroke() -> void:
 	if not _stroke:
@@ -1417,14 +1239,11 @@ func _end_stroke() -> void:
 		hud.flash(_no_change_hint(picking))
 	_refresh_hud()
 
-
 ## "这一笔没改动"的原因随工具而不同：画笔是网格外 / 同色覆盖，选区是"没框到网格内的格子"。
-## 提示词照抄画笔那套会让用户以为选区坏了（其实只是原地没动）。
 func _no_change_hint(picking: bool) -> String:
 	if picking:
 		return "选区没变（没框到网格内的格子）"
 	return "这一笔没有改动（网格外 / 同色覆盖 / 没东西可擦）"
-
 
 func _cancel() -> void:
 	_gizmo_active = false
@@ -1439,7 +1258,6 @@ func _cancel() -> void:
 		hud.flash("已取消这一笔")
 		return
 	# 不在手势中时，Esc 退掉选区：选区是"模式之外的临时状态"，用户需要一个不碰数据的退出键。
-	# 退选区**不记撤销** —— 它没改任何体素，进撤销栈只会让 Ctrl+Z 多按一次才回到真正的改动。
 	if session != null and session.deselect():
 		hud.flash("已取消选区")
 		_refresh_hud()
@@ -1450,13 +1268,11 @@ func _cancel() -> void:
 	else:
 		hud.flash("没有进行中的手势")
 
-
 ## 失焦时作废手势：否则"切出去松手"的那一拍会把笔卡在按下状态。
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT and _stroke and session != null:
 		session.cancel()
 		_stroke = false
-
 
 func _undo() -> void:
 	if _stroke:
@@ -1467,7 +1283,6 @@ func _undo() -> void:
 	else:
 		hud.flash("没有可撤销的")
 
-
 func _redo() -> void:
 	if _stroke:
 		return
@@ -1477,9 +1292,7 @@ func _redo() -> void:
 	else:
 		hud.flash("没有可重做的")
 
-
-## 说明浮层（应用栏「?」）。两块浮层同锚右上角，同时开会叠在一起 —— 开一块就顺手关另一块，
-## 并把两个按钮的按下态一起校准：按钮是浮层的投影，不能各自为政。
+## 说明浮层（应用栏「?」）。
 func _set_legend_visible(on: bool) -> void:
 	hud.set_legend_visible(on)
 	_toolbar.set_help(on)
@@ -1487,8 +1300,7 @@ func _set_legend_visible(on: bool) -> void:
 		hud.set_log_visible(false)
 		_toolbar.set_log(false)
 
-
-## 日志浮层（应用栏「日志」）。与 _set_legend_visible 对称。
+## 日志浮层（应用栏「日志」）。
 func _set_log_visible(on: bool) -> void:
 	hud.set_log_visible(on)
 	_toolbar.set_log(on)
@@ -1496,9 +1308,7 @@ func _set_log_visible(on: bool) -> void:
 		hud.set_legend_visible(false)
 		_toolbar.set_help(false)
 
-
 ## 切工具：工具坞的按钮与热键共用这一处 —— 于是"按钮高亮"永远是实况的投影，而不是第二份状态。
-## 自定义笔刷是"工具"而非笔刷模式，故只切 _tool_kind（笔刷模式才写回 session.tool）。
 func _set_tool(mode: int) -> void:
 	if mode == QVoxelierTools.TOOL_CUSTOM:
 		_tool_kind = ToolKind.CUSTOM
@@ -1510,32 +1320,24 @@ func _set_tool(mode: int) -> void:
 	hud.flash("工具：" + session.tool.label())
 	_refresh_hud()
 
-
 ## 当前工具的 id（供工具坞高亮）：笔刷模式或其枚举值，自定义笔刷用 TOOL_CUSTOM。
 func _current_tool_id() -> int:
 	return QVoxelierTools.TOOL_CUSTOM if _tool_kind == ToolKind.CUSTOM else session.tool.mode
 
-
-## 笔刷加减（工具坞的 [−]/[+] 与 [ ] 键共用）。面板只报"想加还是想减"（相对量），
-## 钳制与语义留在这一层 —— 界面不必知道上限，也就不可能在两处写出不同的上限。
+## 笔刷加减（工具坞的 [−]/[+] 与 [ ] 键共用）。
 func _step_brush(delta: int) -> void:
 	_set_brush(session.tool.brush_size + delta)
 
-
 ## 笔刷乘除（工具坞的 2X / 1÷2）：1 → 2 → 4 → 8 → 16，正是 MagicaVoxel 的偶数档位。
-## ÷2 向下取整并兜底到 1 —— 与细调同一条底线：笔刷永远至少一格。
 func _scale_brush(up: bool) -> void:
 	var s: int = session.tool.brush_size
 	_set_brush(s * 2 if up else maxi(1, s >> 1))
 
-
-## 切笔刷形态。与 _set_tool 同构：只改一处状态 + 刷新，按钮高亮由 _refresh_hud 投影出来
-## （面板自己 set_pressed_no_signal，故不存在"界面又通知 App"的回环）。
+## 切笔刷形态。
 func _set_brush_shape(shape: int) -> void:
 	session.tool.set_shape(shape)
 	hud.flash("笔刷形态：%s" % QVoxelBrushTool.SHAPES[shape].text)
 	_refresh_hud()
-
 
 func _set_brush(size: int) -> void:
 	var n := clampi(size, 1, max_brush_size)
@@ -1545,7 +1347,6 @@ func _set_brush(size: int) -> void:
 	session.tool.brush_size = n
 	hud.flash("笔刷 %d" % n)
 	_refresh_hud()
-
 
 func _set_material(id: int) -> void:
 	if id >= world.materials.size():
@@ -1558,8 +1359,7 @@ func _set_material(id: int) -> void:
 		_dock.show_property_by_title("颜色")
 	_refresh_hud()
 
-
-## 切换操作三态（顶部选项条与 E 键共用）。按钮高亮由 _refresh_hud 投影，界面不留副本。
+## 切换操作三态（顶部选项条与 E 键共用）。
 func _set_op(op: int) -> void:
 	if _op == op:
 		return
@@ -1568,7 +1368,6 @@ func _set_op(op: int) -> void:
 	hud.flash("操作：%s" % QVoxelBrushTool.OPS[op].text)
 	_refresh_hud()
 
-
 ## 切快速选区判据（顶部选项条：同色 / 相连）。
 func _set_select_criterion(by_color: bool) -> void:
 	_select_by_color = by_color
@@ -1576,8 +1375,7 @@ func _set_select_criterion(by_color: bool) -> void:
 		session.select_by_color = by_color
 	hud.flash("快速选区：%s" % ("同色相连" if by_color else "几何相连"))
 
-
-## 对称轴开关（左侧「对称」三个按钮共用）。状态留在 App 这一层，再压进当前笔刷。
+## 对称轴开关（左侧「对称」三个按钮共用）。
 func _set_symmetry_axis(axis: int, on: bool) -> void:
 	var axes := [_symmetry.x, _symmetry.y, _symmetry.z]
 	axes[axis] = 1 if on else 0
@@ -1585,30 +1383,24 @@ func _set_symmetry_axis(axis: int, on: bool) -> void:
 	_apply_symmetry()
 	hud.flash("对称：X%s Y%s Z%s" % [_axis_mark(_symmetry.x), _axis_mark(_symmetry.y), _axis_mark(_symmetry.z)])
 
-
 func _axis_mark(on: int) -> String:
 	return "●" if on != 0 else "○"
 
-
-## 把 App 级的笔刷设置压进**当前活动对象**的笔刷实例。切对象后必须再调一次 ——
-## 新活动对象有它自己的工具实例，不压就退回默认（对称"莫名其妙自己关了"的根因）。
+## 把 App 级的笔刷设置压进**当前活动对象**的笔刷实例。
 func _apply_symmetry() -> void:
 	if session != null and session.tool != null:
 		session.tool.symmetry = _symmetry
 
-
 # 自定义笔刷（右侧抽屉·「笔刷」面板）
-# 拿一个做好的模型当图章：抓成图案 → 在视口里**点哪盖哪**，一次点击 = 一条可撤销命令。
-# 合并方式由操作三态（添加 / 移除 / 上色）决定。
 
-## 在点击处盖一次自定义笔刷（图章），图案取自剪贴板。center = 命中格（无入射面时退回落笔格）。
+## 在点击处盖一次自定义笔刷（图章），图案取自剪贴板。
 func _stamp_at(screen: Vector2) -> void:
 	if world == null or session == null:
 		return
 	if _sess.node_locked(session.object):
 		hud.flash("这一层已锁定：先在右侧「层级」里解锁")
 		return
-	# 自定义笔刷 = 剪贴板里的体素（复制 = 把它做成笔刷）。不需要额外的"抓取"操作。
+	# 自定义笔刷 = 剪贴板里的体素（复制 = 把它做成笔刷）。
 	var clip := session.clipboard
 	if clip.is_empty():
 		hud.flash("先框选并复制一块体素（复制出来的那块就是笔刷）")
@@ -1634,35 +1426,26 @@ func _stamp_at(screen: Vector2) -> void:
 	_refresh_hud()
 	hud.flash("已盖 %d 个体素" % n)
 
-
 # 视图（镜头 / 标准视角 / 网格线）
 
-## 切镜头（视图栏「透视 / 正交」与小键盘 5 共用）。正交不是"另一种画风"：
-## 没有近大远小才量得准比例、才对得齐体素 —— 体素建模里它是刚需而不是可选项。
+## 切镜头（视图栏「透视 / 正交」与小键盘 5 共用）。
 func _set_lens(mode: int) -> void:
 	camera.set_lens(mode)
 	_toolbar.set_lens(mode == QVoxelViewCamera.Lens.ORTHO)
 	hud.flash("镜头：%s" % QVoxelViewCamera.LENS_NAMES[mode])
 
-
-## 切标准视角。**三个入口共用这一条路径**：朝向指示器点轴、小键盘、视图模式 ——
-## 回显由坐标系自身按相机基呈现，故这里不必再维护一处"当前预设"。
+## 切标准视角。
 func _apply_view(view: int) -> void:
 	camera.apply_view(view)
 	hud.flash("%s视图" % QVoxelViewCamera.VIEW_NAMES[view])
 
-
-## 网格线显隐（顶栏开关）。只摘格线、保留外框 —— 外框是"合法范围"的告知，见 QVoxelGridFloor。
+## 网格线显隐（顶栏开关）。
 func _set_grid_lines(on: bool) -> void:
 	grid_floor.set_grid_lines_visible(on)
 	_toolbar.set_grid_lines(on)
 	hud.flash("网格线：%s" % ("开" if on else "关"))
 
-
 ## 小键盘切视角 —— 沿用 Blender 的约定（1 前 / 3 右 / 7 顶 / 5 切投影）。
-## 【为什么照抄这套】建模用户的视角肌肉记忆大多来自 Blender，白捡的学习成本不捡白不捡。
-## 小键盘在本应用没有任何既有用途，不会与工具热键（字母）或材质键（主键盘 1..8）相撞。
-## 返回是否命中，供 _on_key 的 elif 链判断。
 func _numpad_view(key: Key) -> bool:
 	match key:
 		KEY_KP_1: _apply_view(QVoxelViewCamera.View.FRONT)
@@ -1679,26 +1462,21 @@ func _numpad_view(key: Key) -> bool:
 			return false
 	return true
 
-
 # 工程文件（.qvx）
 
 ## 新建 / 打开都会**整体换掉**当前世界，故先过一道"未保存的改动"确认。
-## 这层保护是必须的：平板上没有 Ctrl+S 的肌肉记忆，误触一次「新建」丢掉一下午是常事。
 func request_new() -> void:
 	_confirm_discard("新建", new_model)
-
 
 ## 打开工程（path 为空 = 弹文件对话框让用户选）。
 func request_open(path := "") -> void:
 	_confirm_discard("打开工程", _open_now.bind(path))
-
 
 func _open_now(path: String) -> void:
 	if path.is_empty():
 		_open_dialog.popup_centered_ratio(0.7)
 	else:
 		open_project(path)
-
 
 ## 有未落盘改动时先问一句；没有就直接执行 —— 绝大多数情况下不该多出这一步。
 func _confirm_discard(action: String, cb: Callable) -> void:
@@ -1709,14 +1487,12 @@ func _confirm_discard(action: String, cb: Callable) -> void:
 	_confirm.get_ok_button().text = "放弃改动并继续"
 	_confirm.get_cancel_button().text = "返回"
 	# 取消不触发 confirmed，于是连接会留着；下一次再来同一个动作就会重复连接而报错。
-	# 这里先断再连，把它变成"最近一次请求说了算"。
 	if _confirm.confirmed.is_connected(cb):
 		_confirm.confirmed.disconnect(cb)
 	_confirm.confirmed.connect(cb, CONNECT_ONE_SHOT)
 	_confirm.popup_centered()
 
-
-## 打开工程：读盘 → 接管世界 → 重建会话。**失败时视口保持原样**（绝不半途换掉用户正编辑的东西）。
+## 打开工程：读盘 → 接管世界 → 重建会话。
 func open_project(path: String) -> bool:
 	var loaded := QVoxelProject.load_world(path)
 	if loaded == null:
@@ -1731,10 +1507,7 @@ func open_project(path: String) -> bool:
 			"（共 %d 个模型，可在右侧「层级」里切换）" % total if total > 1 else ""])
 	return true
 
-
-## 接管一份世界：取消进行中的手势 → 选可编辑对象 → 装配 → 记工程状态。返回活动对象（失败 null）。
-## 【为什么只留一条】打开工程 / 导入模型 / 将来的合并都会换掉整个世界，尾部这几步必须完全一致 ——
-## 各抄一份迟早漏掉"取消手势"或"标脏"。提示文案归调用方：三种来源各有各的说法。
+## 接管一份世界：取消进行中的手势 → 选可编辑对象 → 装配 → 记工程状态。
 func _adopt_world(w: QVoxelWorld, path: String, dirty: bool) -> QVoxelModel:
 	if w == null:
 		return null
@@ -1753,9 +1526,7 @@ func _adopt_world(w: QVoxelWorld, path: String, dirty: bool) -> QVoxelModel:
 	_update_title()
 	return obj
 
-
 ## 保存到当前文件：`.qvx` 工程或 `.vox` 模型，由**当前路径的扩展名**决定格式；
-## 还没存过盘就转"另存为"。
 func save_project() -> void:
 	if _stroke:
 		session.cancel()
@@ -1765,7 +1536,6 @@ func save_project() -> void:
 		return
 	_write_project(_sess.project_path)
 
-
 ## 另存为：弹文件对话框，默认扩展名跟随当前文件类型（打开的是 .vox 就默认存回 .vox）。
 func save_project_as() -> void:
 	var ext := VoxAsset.VOX_EXTENSION if QVoxelProject.is_vox_path(_sess.project_path) \
@@ -1773,10 +1543,8 @@ func save_project_as() -> void:
 	_save_dialog.current_file = "%s.%s" % [world.world_name(), ext]
 	_save_dialog.popup_centered_ratio(0.7)
 
-
 func _write_project(path: String) -> bool:
 	# `.vox` 有几条绕不过去的硬约束（≤256、24 种朝向、整数平移）：先在写盘前把原因说清楚，
-	# 而不是产出一个 MagicaVoxel 打不开、或"看着对了其实整体偏移"的文件。
 	var warnings := PackedStringArray()
 	if QVoxelProject.is_vox_path(path):
 		var report := VoxWriter.check(world)
@@ -1796,19 +1564,12 @@ func _write_project(path: String) -> bool:
 	hud.flash("已保存 %s%s" % [path.get_file(), note])
 	return true
 
-
 func _on_save_path_selected(path: String) -> void:
 	_write_project(QVoxelProject.ensure_extension(path))
 
-
 # ======= 脚本接口(QVoxelScript 的实时分支) =======
-##
-## 由 `QVoxelScript` 按**字符串方法名**调用(`app.call("script_xxx", ...)`), 于是脚本层在编译期
-## **不需要认识 QVoxelierApp**。`QVoxelScript` 里每个方法都有同名的 `script_xxx`, 参数一致。
-## 【铁律：只翻译，不另开门】一律转调应用内已有的那条路径(命令 / 时间线 / 落盘 / 会话),
-## 不新开第二条写入通道 —— 否则脚本改的和界面改的会落在两套撤销栈与两套刷新上。
 
-## 新增材质(颜色 + PBR), 返回材质 ID。与色板"新增材质"按钮同一条命令(可撤销) + 同一次纹理刷新。
+## 新增材质(颜色 + PBR), 返回材质 ID。
 func script_add_material(color: Color, metal := 0.0, rough := 0.8, emission := 0.0) -> int:
 	if world == null or session == null:
 		return -1
@@ -1824,8 +1585,7 @@ func script_add_material(color: Color, metal := 0.0, rough := 0.8, emission := 0
 	_set_material(id)
 	return id
 
-
-## 存到指定路径(.qvx)。复用 _write_project(脏标记/标题/flash 一致), 并在存盘前收尾进行中的笔画。
+## 存到指定路径(.qvx)。
 func script_save(path: String) -> bool:
 	if world == null:
 		return false
@@ -1833,7 +1593,6 @@ func script_save(path: String) -> bool:
 		session.cancel()
 		_stroke = false
 	return _write_project(QVoxelProject.ensure_extension(path))
-
 
 ## 当前模型统计。
 func script_stats() -> Dictionary:
@@ -1847,16 +1606,12 @@ func script_stats() -> Dictionary:
 		"objects": _sess.all_sessions().size(),
 	}
 
-
 ## 新建空模型(MCP / 脚本入口)：**整体替换**当前世界（网格 grid；ZERO 用场景默认）。
-## 与界面"新建"同一条 `new_model` 路径，只是省掉了未保存确认对话框（脚本调用）。
 func script_new(grid := Vector3i.ZERO) -> bool:
 	new_model(grid)
 	return session != null
 
-
-## 改分辨率(输出盒尺寸)。保留新旧交集内的体素, 超出部分丢弃 —— 与对象属性面板的"尺寸"
-## 走同一条可撤销命令(_resize_model → QVoxelResizeCommand)。`id < 0` = 当前模型。
+## 改分辨率(输出盒尺寸)。
 func script_resize(size: Vector3i, id := -1) -> bool:
 	var m := _target_model(id)
 	if m == null or size.x <= 0 or size.y <= 0 or size.z <= 0 or size == m.grid_size:
@@ -1864,16 +1619,13 @@ func script_resize(size: Vector3i, id := -1) -> bool:
 	_resize_model(m, size)
 	return true
 
-
 ## 打开文件(`.qvx` / `.vox`)：与"打开"按钮同一条装载路径, 只是省掉未保存确认。
 func script_open(path: String) -> bool:
 	return open_project(path)
 
-
 ## 导入外部内容(网格 → 体素化), 与拖放 / 导入菜单共用 import_source。
 func script_import(path: String, opts := {}) -> bool:
 	return await import_source(path, opts)
-
 
 ## 导出网格到指定路径：与"导出"按钮同一条烘制路径(QVoxelMeshExport)。
 func script_export_mesh(path: String) -> bool:
@@ -1888,15 +1640,13 @@ func script_export_mesh(path: String) -> bool:
 	hud.flash("已导出网格 %s" % p.get_file())
 	return true
 
-
-## 读 / 设活动模型(id > 0 才切换)。返回切换后的 model_id。
+## 读 / 设活动模型(id > 0 才切换)。
 func script_active(id := -1) -> int:
 	if session == null or session.object == null:
 		return 0
 	if id > 0 and world != null and world.find_model(id) != null and id != session.object.model_id:
 		_activate(id)
 	return session.object.model_id if session.object != null else 0
-
 
 ## 全部模型(与脚本侧同一套字段)。
 func script_models() -> Array:
@@ -1915,7 +1665,6 @@ func script_models() -> Array:
 		})
 	return out
 
-
 ## 全部节点(含组)。
 func script_nodes() -> Array:
 	if world == null:
@@ -1933,7 +1682,6 @@ func script_nodes() -> Array:
 		})
 	return out
 
-
 func script_add_model(node_name := "", grid := Vector3i.ZERO, parent_id := 0) -> int:
 	if world == null:
 		return 0
@@ -1946,7 +1694,6 @@ func script_add_model(node_name := "", grid := Vector3i.ZERO, parent_id := 0) ->
 		_resize_model(m, grid)
 	return m.model_id
 
-
 func script_add_group(node_name := "Group", parent_id := 0) -> int:
 	if world == null:
 		return 0
@@ -1957,14 +1704,12 @@ func script_add_group(node_name := "Group", parent_id := 0) -> int:
 		_sess.rename_node(g, node_name)
 	return world.node_id(g)
 
-
 func script_remove_node(id: int) -> bool:
 	var n := _find_node(id)
 	if n == null or (n.is_model() and world.all_models().size() <= 1):
 		return false
 	_sess.remove_node(n)
 	return true
-
 
 func script_rename_node(id: int, node_name: String) -> bool:
 	var n := _find_node(id)
@@ -1973,14 +1718,12 @@ func script_rename_node(id: int, node_name: String) -> bool:
 	_sess.rename_node(n, node_name)
 	return true
 
-
 func script_move_node(id: int, parent_id: int, index := -1) -> bool:
 	var n := _find_node(id)
 	if n == null:
 		return false
 	_sess.move_node(n, _find_node(parent_id) as QVoxelGroup, index)
 	return true
-
 
 func script_set_offset(id: int, offset: Vector3i) -> bool:
 	var n := _find_node(id)
@@ -1989,7 +1732,6 @@ func script_set_offset(id: int, offset: Vector3i) -> bool:
 	_set_node_offset(n, offset)
 	return true
 
-
 func script_set_rotation(id: int, degrees: Vector3) -> bool:
 	var n := _find_node(id)
 	if n == null:
@@ -1997,14 +1739,12 @@ func script_set_rotation(id: int, degrees: Vector3) -> bool:
 	_set_node_rotation(n, degrees)
 	return true
 
-
 func script_set_visible(id: int, on: bool) -> bool:
 	var n := _find_node(id)
 	if n == null:
 		return false
 	_sess.set_node_visible(n, on)
 	return true
-
 
 ## 改材质颜色(与色板同一条可撤销命令 + 同一次纹理刷新)。
 func script_set_material_color(id: int, color: Color) -> bool:
@@ -2017,7 +1757,6 @@ func script_set_material_color(id: int, color: Color) -> bool:
 	_sync_material(id)
 	_set_material(id)
 	return true
-
 
 ## 改 PBR 通道(负数 = 该项不动)。
 func script_set_material_pbr(id: int, metal := -1.0, rough := -1.0, emission := -1.0) -> bool:
@@ -2036,7 +1775,6 @@ func script_set_material_pbr(id: int, metal := -1.0, rough := -1.0, emission := 
 	_set_material(id)
 	return true
 
-
 ## 调色板(不含 0 号空气槽)。
 func script_materials() -> Array:
 	if world == null:
@@ -2052,23 +1790,19 @@ func script_materials() -> Array:
 		})
 	return out
 
-
-## 程序化写格：与粘贴/清空同一条 apply_cells 时间线(可撤销)。返回改动格数。
+## 程序化写格：与粘贴/清空同一条 apply_cells 时间线(可撤销)。
 func script_paint(cells: Array[Vector3i], material := 1) -> int:
 	if session == null or cells.is_empty():
 		return 0
 	return session.apply_cells(cells, maxi(material, 0))
 
-
 func script_get_voxel(pos: Vector3i, id := -1) -> int:
 	var m := _target_model(id)
 	return m.get_voxel(pos.x, pos.y, pos.z) if m != null else 0
 
-
 func script_count_solid(id := -1) -> int:
 	var m := _target_model(id)
 	return m.count_solid() if m != null else 0
-
 
 func script_frames(id := -1) -> Dictionary:
 	var m := _target_model(id)
@@ -2085,14 +1819,12 @@ func script_frames(id := -1) -> Dictionary:
 		"durations": durs,
 	}
 
-
-## 在当前帧之后插一帧(`duplicate` = 复制当前帧)。返回新帧索引。
+## 在当前帧之后插一帧(`duplicate` = 复制当前帧)。
 func script_add_frame(duplicate := false, id := -1) -> int:
 	if not _focus_model(id):
 		return -1
 	_insert_frame(duplicate)
 	return session.object.active_frame
-
 
 func script_remove_frame(index: int, id := -1) -> bool:
 	if not _focus_model(id):
@@ -2102,7 +1834,6 @@ func script_remove_frame(index: int, id := -1) -> bool:
 		return false
 	_remove_frame(index)
 	return true
-
 
 func script_move_frame(from: int, to: int, id := -1) -> bool:
 	if not _focus_model(id) or world == null:
@@ -2115,7 +1846,6 @@ func script_move_frame(from: int, to: int, id := -1) -> bool:
 	_move_frame(from, to)
 	return true
 
-
 func script_set_frame(index: int, id := -1) -> bool:
 	var m := _target_model(id)
 	if m == null or not m.is_animated() or index < 0 or index >= m.frame_count():
@@ -2124,7 +1854,6 @@ func script_set_frame(index: int, id := -1) -> bool:
 		return false
 	_select_frame(index)
 	return true
-
 
 func script_set_frame_duration(index: int, ms: int, id := -1) -> bool:
 	if not _focus_model(id):
@@ -2139,7 +1868,6 @@ func script_set_frame_duration(index: int, ms: int, id := -1) -> bool:
 			f2.duration_ms = maxi(0, ms))
 	return true
 
-
 func script_set_anim(fps := QVoxelSpec.ANIM_FPS_DEFAULT, loop := QVoxelSpec.ANIM_LOOP_DEFAULT, id := -1) -> bool:
 	if not _focus_model(id):
 		return false
@@ -2147,10 +1875,8 @@ func script_set_anim(fps := QVoxelSpec.ANIM_FPS_DEFAULT, loop := QVoxelSpec.ANIM
 	_set_anim_meta(&"anim_loop", loop, "改循环")
 	return true
 
-
 func script_cameras() -> Array:
 	return world.cameras().duplicate(true) if world != null else []
-
 
 func script_add_camera(node_name := "camera") -> int:
 	if world == null:
@@ -2159,13 +1885,11 @@ func script_add_camera(node_name := "camera") -> int:
 	_sess.mark_dirty()
 	return i
 
-
 func script_remove_camera(index: int) -> bool:
 	if world == null or not world.remove_camera(index):
 		return false
 	_sess.mark_dirty()
 	return true
-
 
 func script_set_camera(index: int, key: String, value: Variant) -> bool:
 	if world == null or not world.set_camera_field(index, key, value):
@@ -2173,19 +1897,16 @@ func script_set_camera(index: int, key: String, value: Variant) -> bool:
 	_sess.mark_dirty()
 	return true
 
-
 # --- script_* 的寻址助手(组用负 id, 见 QVoxelWorld.node_id) ---
 
 func script_world() -> QVoxelWorld:
 	return world
-
 
 func script_model(id := -1) -> QVoxelModel:
 	return _target_model(id)
 
 func _find_node(id: int) -> QVoxelNode:
 	return world.find_node(id) if world != null else null
-
 
 func _target_model(id: int) -> QVoxelModel:
 	if world == null:
@@ -2194,8 +1915,7 @@ func _target_model(id: int) -> QVoxelModel:
 		return world.find_model(id)
 	return session.object if session != null else null
 
-
-## 把 `id` 指定的模型切成活动对象(帧操作要进它的撤销栈)。`id < 0` = 当前。
+## 把 `id` 指定的模型切成活动对象(帧操作要进它的撤销栈)。
 func _focus_model(id: int) -> bool:
 	if _target_model(id) == null:
 		return false
@@ -2203,13 +1923,10 @@ func _focus_model(id: int) -> bool:
 		_activate(id)
 	return session != null and session.object != null
 
-
 ## 导出网格：把当前世界烘成三角网格，写成 glTF 2.0（`.glb`/`.gltf` 由扩展名决定）。
-## 与"保存（.qvx）"分开：保存留的是"下次还能接着编辑"的全套，导出只留**烘出来的几何与颜色**。
 func export_mesh() -> void:
 	_mesh_dialog.current_file = "%s.glb" % world.world_name()
 	_mesh_dialog.popup_centered_ratio(0.7)
-
 
 func _on_mesh_path_selected(path: String) -> void:
 	path = _ensure_mesh_ext(path)
@@ -2220,12 +1937,8 @@ func _on_mesh_path_selected(path: String) -> void:
 	_remember_dir(path)
 	hud.flash("已导出网格 %s" % path.get_file())
 
-
 ## 一份外部内容的来源。
-## 【为什么集中在一处】"什么文件、怎么进来"原先散在三处（`is_openable` / `MeshAccess.handles`
-## / 拖放的两段 if），加一种格式要改三遍，漏一处就表现为"拖进去没反应"。
 enum SrcKind { NONE, PROJECT, WORLD, MESH }
-
 
 static func source_kind(path: String) -> SrcKind:
 	if QVoxelProject.is_project_path(path):
@@ -2236,10 +1949,7 @@ static func source_kind(path: String) -> SrcKind:
 		return SrcKind.MESH
 	return SrcKind.NONE
 
-
 ## 导入（path 为空 = 先问参数再选文件；非空 = 拖放进来的，只问参数）。
-## 【为什么先参数后文件】分辨率决定内存（256³ 是 67MB），追加还是替换决定当前工程存亡 ——
-## 两者都必须在动手前定，选完文件再问等于让人重来。
 func request_import(path := "") -> void:
 	_pending_import_path = path
 	_import_opts = {}
@@ -2247,7 +1957,6 @@ func request_import(path := "") -> void:
 	_import_dialog.set_world_only(not path.is_empty() and source_kind(path) == SrcKind.WORLD)
 	_import_dialog.set_defaults(import_resolution, false, true, path.is_empty())
 	_import_dialog.popup_centered()
-
 
 ## 参数框确认：还有文件要选就弹选择框；拖放进来的直接进未保存确认。
 func _on_import_options() -> void:
@@ -2259,19 +1968,13 @@ func _on_import_options() -> void:
 	else:
 		_confirm_discard("导入", _import_now.bind(path))
 
-
 func _on_model_path_selected(path: String) -> void:
 	_confirm_discard("导入", _import_now.bind(path))
-
 
 func _import_now(path: String) -> void:
 	import_source(path, _import_opts)
 
-
 ## 一份外部文件 → 当前工程。
-## `.qvx` 等同"打开"（工程替换、路径跟着换）；`.vox` 与三角网格则**可选追加** ——
-## 追加时当前工程原地长大、工程路径不变。三条路共用 `_adopt_world` 的接管尾部。
-## 【协程】网格路径要加载 + 逐帧体素化，都会让出帧，界面不冻。
 func import_source(path: String, opts := {}) -> bool:
 	match source_kind(path):
 		SrcKind.PROJECT:
@@ -2296,13 +1999,11 @@ func import_source(path: String, opts := {}) -> bool:
 	hud.flash("不认得的文件：%s" % path.get_file())
 	return false
 
-
-## 兼容旧调用点（网格专用）。新代码请用 `import_source`。
+## 兼容旧调用点（网格专用）。
 func import_model(path: String, opts := {}) -> bool:
 	return await _import_mesh(path, opts)
 
-
-## 三角网格 → 体素 → 当前工程。`opts`：{resolution, append, fill}。
+## 三角网格 → 体素 → 当前工程。
 func _import_mesh(path: String, opts: Dictionary) -> bool:
 	var resolution := int(opts.get("resolution", import_resolution))
 	var scene: Dictionary = await MeshAccess.load_scene(path, self)
@@ -2334,9 +2035,7 @@ func _import_mesh(path: String, opts: Dictionary) -> bool:
 			resolution, anim])
 	return true
 
-
 ## 追加：把一份现成世界的模型与材质并进**当前世界**（不换掉它），工程路径保持不变。
-## `.vox` 与三角网格共用这一条 —— 素材从哪来，与"并进去"这件事无关。
 func _append_world(src: QVoxelWorld, label: String, suffix := "") -> bool:
 	var added: Array[QVoxelModel] = world.merge_from(src)
 	if added.is_empty():
@@ -2349,24 +2048,20 @@ func _append_world(src: QVoxelWorld, label: String, suffix := "") -> bool:
 	hud.flash("已追加 %s → %s%s%s" % [label, str(added[0].grid_size), suffix, anim])
 	return true
 
-
-## 文件对话框：一个"打开"、一个"另存为"。走系统文件系统 —— `res://` 是只读的导入资源，
-## 工程文件本就该落在用户自己的目录里（导出打包后 `res://` 更是读不到的）。
+## 文件对话框：一个"打开"、一个"另存为"。
 func _build_dialogs() -> void:
 	_open_dialog = _make_dialog(FileDialog.FILE_MODE_OPEN_FILE)
 	_open_dialog.file_selected.connect(open_project)
 	_save_dialog = _make_dialog(FileDialog.FILE_MODE_SAVE_FILE)
 	_save_dialog.file_selected.connect(_on_save_path_selected)
 
-	# 导出网格：glTF 2.0。两个扩展名各一个过滤器（*.glb 二进制 / *.gltf 文本），
-	# 写出格式随扩展名（见 QVoxelMeshExport）。
+	# 导出网格：glTF 2.0。
 	_mesh_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.glb",
 			"glTF 二进制（.glb）", "导出网格")
 	_mesh_dialog.add_filter("*.gltf", "glTF 文本（.gltf）")
 	_mesh_dialog.file_selected.connect(_on_mesh_path_selected)
 
 	# 导入：体素文件与三角网格都能进（`.vox` 可追加），过滤项由 MeshAccess 生成 ——
-	# 格式事实只有一处，加 `.ply` 时不用改这里。
 	_model_dialog = _make_fs_dialog(FileDialog.FILE_MODE_OPEN_FILE, "导入")
 	_model_dialog.add_filter("*.%s" % VoxAsset.VOX_EXTENSION, "MagicaVoxel 体素（.vox）")
 	for spec: Array in MeshAccess.filter_specs():
@@ -2384,7 +2079,6 @@ func _build_dialogs() -> void:
 	_palette_export_dialog.file_selected.connect(_export_palette)
 
 	# 快照落盘：与调色板导出同是 "*.png" 另存，但默认文件名由分组按当前视图给出（见
-	# _request_snapshot_save）—— 于是"同一个世界出七个角度"不会七张互相覆盖。
 	_snapshot_dialog = _make_format_dialog(FileDialog.FILE_MODE_SAVE_FILE, "*.png",
 			"PNG 图片", "保存快照")
 	_snapshot_dialog.file_selected.connect(_on_snapshot_path_selected)
@@ -2393,32 +2087,20 @@ func _build_dialogs() -> void:
 	_confirm.title = "未保存的改动"
 	_confirm.cancel_button_text = "返回"
 	# 对话框是独立的 Window，不会从 Node3D 父链上继承主题，得手挂一份 —— 否则它会顶着一套
-	# 与全应用无关的默认皮，风格统一在这里破功。
 	_confirm.theme = QVoxelUi.theme()
 	# AcceptDialog 弹出时会把键盘焦点给"确认"那颗 —— 也就是这里最危险的一颗（"放弃改动并继续"）。
-	# 主题里 focus 框是强调色描边，于是它一弹出来就被画成主操作（实测 has_focus = true），
-	# 回车 / 空格还会当场把它按下去。把焦点交给安全项（"返回"）：强调色回到"当前该按的那个"，
-	# 回车落到安全项上，Esc 照旧关闭（Esc 走 Window 的取消路径，与焦点无关）。
 	_confirm.visibility_changed.connect(func():
 		if _confirm.visible:
 			_confirm.get_cancel_button().grab_focus())
 	add_child(_confirm)
 
-
 ## 系统文件对话框的公共装配：**"选什么、叫什么、筛什么"是唯一随用途变的东西**，其余
-##（系统文件系统、主题、首路径、按钮文案）各处一字不差 —— 复制成几份，迟早有一份忘了改。
-## 【一律走系统原生对话框】`use_native_dialog = true`：每个平台都用**它自己的**文件对话框
-##（Windows 用系统对话框、macOS / Linux 同理；没有原生实现的平台 Godot 自动回退到自绘那套）。
-## 于是"打开 / 另存 / 导入 / 导出"四处行为一致 —— 不会一会儿弹系统框、一会儿弹引擎自绘框。
-## 【过滤与扩展名】原生对话框同样吃 `add_filter`（Windows 只认扩展名，macOS/Linux 还认 MIME），
-## 但它**不替你补扩展名**，所以每个保存出口都要自己补（见 _ensure_png_ext / _ensure_mesh_ext）。
 func _make_fs_dialog(mode: FileDialog.FileMode, title: String) -> FileDialog:
 	var d := FileDialog.new()
 	d.file_mode = mode
 	d.access = FileDialog.ACCESS_FILESYSTEM
 	d.current_dir = _default_dir()
 	# 原生对话框忽略 theme / ok_button_text 等自绘属性（系统自己那套更地道）；这里仍设一遍，
-	# 是为了**没有原生实现的平台**回退到自绘那套时，外观与文案不至于跟界面脱节。
 	d.theme = QVoxelUi.theme()
 	d.title = title
 	d.ok_button_text = "打开" if mode == FileDialog.FILE_MODE_OPEN_FILE else "保存"
@@ -2426,7 +2108,6 @@ func _make_fs_dialog(mode: FileDialog.FileMode, title: String) -> FileDialog:
 	d.use_native_dialog = true
 	add_child(d)
 	return d
-
 
 func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	var d := _make_fs_dialog(mode,
@@ -2436,22 +2117,14 @@ func _make_dialog(mode: FileDialog.FileMode) -> FileDialog:
 	d.add_filter("*.%s" % VoxAsset.VOX_EXTENSION, "MagicaVoxel 体素")
 	return d
 
-
 ## 带格式过滤的文件对话框（调色板 / 快照 / 导出网格共用）。
-## 为什么调色板走 PNG 而不是自定义格式：MagicaVoxel 的调色板就是 256×1 的 PNG，沿用它就能与
-## 其它体素工具互相倒色板，也不用再定义一套只有本程序认得的格式。
 func _make_format_dialog(mode: FileDialog.FileMode, filter: String, filter_name: String,
 		title: String) -> FileDialog:
 	var d := _make_fs_dialog(mode, title)
 	d.add_filter(filter, filter_name)
 	return d
 
-
-## 文件对话框的首选落地目录。**两个平台的"用户自己的目录"不是同一个地方**：
-##   桌面：系统的「文档」—— 存完还能在资源管理器/访达里找回来（`user://` 在桌面上是
-##         隐藏的 AppData/Godot/app_userdata/<项目>，用户绝不会去那儿翻自己的模型）。
-##   移动 / Web：`user://` —— 那是唯一保证可写的沙箱，Android 的分区存储下写系统目录会被拒。
-## 取不到系统目录（精简系统 / 权限受限）时一律退回 `user://`，绝不留下一个点不进去的首路径。
+## 文件对话框的首选落地目录。
 static func _default_dir() -> String:
 	# 先用上次待过的目录：模型一多，"每次从文档根目录点三层"就成了每小时的重复劳动。
 	var cfg := ConfigFile.new()
@@ -2465,8 +2138,7 @@ static func _default_dir() -> String:
 			return docs
 	return ProjectSettings.globalize_path("user://")
 
-
-## 记住这次用到的目录（供下次文件对话框起步）。失败静默 —— 记不住路径不该打断保存。
+## 记住这次用到的目录（供下次文件对话框起步）。
 static func _remember_dir(path: String) -> void:
 	var dir := path.get_base_dir()
 	if dir.is_empty():
@@ -2475,7 +2147,6 @@ static func _remember_dir(path: String) -> void:
 	cfg.load(PREFS_PATH)
 	cfg.set_value(PREFS_SECTION, "last_dir", dir)
 	cfg.save(PREFS_PATH)
-
 
 ## 把 `.qvx` / `.vox` / 外部模型拖进窗口即打开（建模时最顺手的一步）；其它文件一律忽略。
 func _on_files_dropped(files: PackedStringArray) -> void:
@@ -2491,24 +2162,17 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 	hud.flash("只认得 .%s 工程 / .%s 体素文件，以及 %s 模型"
 			% [QVoxelProject.EXTENSION, VoxAsset.VOX_EXTENSION, MeshAccess.describe()])
 
-
 func _update_title() -> void:
 	var name := _sess.project_path.get_file() if not _sess.project_path.is_empty() else "未命名"
 	_toolbar.set_project(name, _sess.dirty)
 	if not Engine.is_editor_hint() and get_window() != null:
 		get_window().title = "QVoxelier — %s%s" % [name, " *" if _sess.dirty else ""]
 
-
 # 状态栏
 
 # 撤销 / 重做、结构增删、材质与帧的改动都不在这里逐个接管了：它们统一由应用会话发 `changed`，
-# 由 _on_session_changed 一处处理（其中"链上重排改了分辨率 → 地面网格框要跟着换"那条，
-# 落在 _attach_active 里，因为它是"按输出盒画地板"这件事的一部分）。
-
 
 ## 界面刷新的**唯一入口**：一处改状态（工具 / 笔刷 / 材质 / 撤销栈），所有界面跟着走。
-## 不做增量 diff —— 状态栏与工具坞加起来不过几十个 Label，而"每个状态变更是谁负责刷新哪块"
-## 才是真会出错的地方（漏一处就出现"按钮高亮着、提示还写着上一个工具"）。
 func _refresh_hud() -> void:
 	if hud.session == session:
 		hud.refresh()
@@ -2535,8 +2199,6 @@ func _refresh_hud() -> void:
 	else:
 		_selection_box.set_box(session.selection.lo(), session.selection.size())
 	# 移动坐标轴 / 旋转环：
-	#   布局模式 → 摆在**节点原点**，拖动改模型整体变换；
-	#   模型内部 + 「移动」工具 → 摆在选区中心（没有选区时按"整体"摆在网格中心）。
 	if _move_gizmo != null:
 		if _edit_mode == 1:
 			# 布局：gizmo 摆在**选区共同中心**（多选时绕它整体旋转）。
@@ -2549,10 +2211,6 @@ func _refresh_hud() -> void:
 		else:
 			_move_gizmo.visible = false
 	# 状态栏里的选区 / 剪贴板读数由 HUD 自己按会话算（见 QVoxelierHud._selection_readout），
-	# 不在这里再喂一份字符串 —— 同一事实两处拼装迟早会各说各话。
-	# 色板取世界的材质表（增删材质 / 导入 / 改色都可能换掉它）。挂在这条唯一刷新路径上，
-	# set_palette 自己按指纹判重 —— 状态变更就不再需要各自记得去喂色板了（此前只有"打开工程"
-	# 那条路喂过，于是新建之后整条色板是空的，只剩一个"材质 1"的标签）。
 	if world != null:
 		_palette.set_palette(_material_colors(world))
 	_palette.set_current(_material_id)
@@ -2560,8 +2218,7 @@ func _refresh_hud() -> void:
 	# 面板会动态新建控件（色板 / 层级 / 帧条…），刷新收尾再关一遍焦点，杜绝 Tab/方向键乱跳。
 	_disable_focus(self)
 
-
-## 右列三组的刷新。与 _refresh_hud 同一入口，于是"改状态 → 全界面跟上"仍只有一条路径。
+## 右列三组的刷新。
 func _refresh_panels() -> void:
 	if _color_section == null or world == null or session == null:
 		return
@@ -2578,23 +2235,16 @@ func _refresh_panels() -> void:
 	if _object_section != null:
 		_object_section.bind(_selected_node)
 	# 时间轴绑的是**当前对象**（帧是模型自己的属性，不像材质那样属于世界）。
-	# 它内部只在帧数变了时才重建帧条（见 QVoxelierTimeline.bind），播放期间不重建控件。
-	# 快照只读世界，且 set_world 幂等（同一个世界直接返回），故挂在这条唯一刷新路径上 ——
-	# 新建 / 打开换世界时它自然会收到新世界并把旧预览作废（见 QVoxelierSnapshotSection.set_world）。
 	_snapshot_section.set_world(world)
 
-
 ## 世界的材质表 → 调色板用的颜色数组：**下标即材质 ID**，0 位留空气占位。
-## 不直接用 default_palette，是因为打开别人的工程时色板得跟着工程走。
 func _material_colors(w: QVoxelWorld) -> Array[Color]:
 	var colors: Array[Color] = [Color(0, 0, 0, 0)]
 	for id in range(1, w.materials.size()):
 		colors.append(w.material_color(id))
 	return colors
 
-
 ## 光标格：按 Pick 已经算好的 place 显示（添加 = 外侧那格，移除 / 上色 = 命中格本身）。
-## 屏幕坐标由调用方传入（鼠标事件里有，不必再问视口要一次 —— 内嵌视口时那个答案还是错的）。
 func _refresh_cursor(screen: Vector2) -> void:
 	var pick := _pick_at(screen, _stroke_op if _stroke else _hover_op)
 	_hover_pick = pick if pick.valid() else null
@@ -2605,10 +2255,7 @@ func _refresh_cursor(screen: Vector2) -> void:
 	_refresh_ghost(pick)
 	_refresh_selection_preview()
 
-
 ## 悬停预览：格子来自会话的 hover()（与真正落笔同一条形状分派，所见即所画）。
-## 三态各有一种读法：添加 = 材质色半透明实体；移除 = 警示红线框；上色 = 材质色线框
-## （线框表示"改的是已有体素"，色调表示"改成什么色"）。
 func _refresh_ghost(pick: QVoxelBrushTool.Pick) -> void:
 	# 自定义笔刷：预览"贴上去的整块图案"（与真正盖章同一套定位，所见即所盖）。
 	if _tool_kind == ToolKind.CUSTOM:
@@ -2622,9 +2269,7 @@ func _refresh_ghost(pick: QVoxelBrushTool.Pick) -> void:
 	_ghost.set_cells(session.preview_cells(pick),
 			QVoxelUi.WARN if remove else _material_color(), pick.op != QVoxelBrushTool.Op.ADD)
 
-
 ## 自定义笔刷的悬停预览：把剪贴板图案按盖章位置铺出来。
-## 与真正盖章**共用同一定位公式**、同样夹进网格 —— 否则预览会多出越界的那半块，看着"盖歪了"。
 func _refresh_brush_ghost(pick: QVoxelBrushTool.Pick) -> void:
 	var clip := session.clipboard if session != null else null
 	if clip == null or clip.is_empty() or not pick.valid():
@@ -2646,10 +2291,7 @@ func _refresh_brush_ghost(pick: QVoxelBrushTool.Pick) -> void:
 	var remove := pick.op == QVoxelBrushTool.Op.REMOVE
 	_ghost.set_cells(cells, QVoxelUi.WARN if remove else _material_color(), pick.op != QVoxelBrushTool.Op.ADD)
 
-
 ## 选择 / 移动手势中的**实时线框预览**（松手前就看得见框多大 / 会挪到哪）。
-## 【为什么必须预览】选区是纯数据，拖动中不给反馈就是"盲拖"；而松手才显示太晚，用户不知道
-## 自己框到了什么 / 搬去了哪。生成最终选区的是会话（release），这里只画"如果现在松手会怎样"。
 func _refresh_selection_preview() -> void:
 	if session == null or not session.tool.selection_mode() or not session.tool.active():
 		return
@@ -2663,7 +2305,6 @@ func _refresh_selection_preview() -> void:
 	else:
 		_set_preview_box(QVoxelSelection.from_corners(corners[0], corners[1]))
 
-
 ## 把预览框夹进网格后画出来（与 QVoxelEditSession._set_box_selection 的夹取一致）。
 func _set_preview_box(sel: QVoxelSelection) -> void:
 	if sel.is_empty() or session == null or session.object == null:
@@ -2675,18 +2316,13 @@ func _set_preview_box(sel: QVoxelSelection) -> void:
 		return
 	_selection_box.set_box(lo, hi - lo + Vector3i.ONE)
 
-
 ## 天空按配方上色：它同时是环境光与反射的来源，颜色亮度直接决定画面通透度。
-## （太阳盘不再整个藏掉 —— 之前会反射成光球是因为默认 30° 视直径，收到 2° 就是正常的一颗太阳。）
 func _setup_sky() -> void:
 	if _env_node == null or _env_node.environment == null:
 		return
 	QVoxelRenderPreset.apply_sky(_env_node.environment.sky)
 
-
 ## 按编辑层级套渲染设置（数值全在 QVoxelRenderPreset，视口与快照共用同一份）：
-##   模型编辑 → 只留太阳的明暗，关阴影 / 屏幕空间 / 后期（它们会干扰"看体素判断形状"）；
-##   布局（世界）→ 全开，逼近渲染图。
 func _apply_render_mode() -> void:
 	var rich := _edit_mode == 1
 	_fit_ground()
@@ -2700,7 +2336,6 @@ func _apply_render_mode() -> void:
 			_request_gi_bake()
 		else:
 			_gi.data = null
-
 
 ## 排队重烘：世界一变就调，但只在**最后一次**变化后烘一次（连续拖动不该每帧烘）。
 func _request_gi_bake() -> void:
@@ -2721,7 +2356,6 @@ func _request_gi_bake() -> void:
 		return
 	hud.set_busy("烘焙间接光…")
 	# 烘焙是同步的（几百毫秒），会把整帧堵住 —— 先等这一帧**画完**，
-	# 状态栏才真的出现在屏幕上；否则用户看到的只是一次没有解释的停顿。
 	await RenderingServer.frame_post_draw
 	if _gi == null or _edit_mode != 1 or not is_inside_tree():
 		hud.set_busy("")
@@ -2729,9 +2363,7 @@ func _request_gi_bake() -> void:
 	_bake_gi()
 	hud.set_busy("")
 
-
-## 真正的那一次烘焙（同步，几百毫秒）。只让体素模型进 GI ——
-## 地板网格 / 选区线框 / gizmo / 预览块都是辅助物，进了 GI 就变成挡光或反光的假几何。
+## 真正的那一次烘焙（同步，几百毫秒）。
 func _bake_gi() -> void:
 	if _gi == null:
 		return
@@ -2748,14 +2380,12 @@ func _bake_gi() -> void:
 		return
 	_gi.bake(_view_root, false)
 
-
 ## 世界里有没有**在用的**自发光材质（调色板里有、但没摆出来的不算）。
 func _has_emissive() -> bool:
 	for id in world.used_materials():
 		if world.material_scalar(int(id), &"emission") > 0.0:
 			return true
 	return false
-
 
 func _in_voxel_renderer(n: Node) -> bool:
 	var p := n.get_parent()
@@ -2765,14 +2395,11 @@ func _in_voxel_renderer(n: Node) -> bool:
 		p = p.get_parent()
 	return false
 
-
 ## 视角一变就摆灯（只改朝向，能量与阴影不动）—— 这是"任何角度都好看"的唯一实现处。
 func _on_view_changed() -> void:
 	QVoxelRenderPreset.aim_rig(_lights, camera.global_transform.basis)
 
-
 ## 切换编辑层级（Tab）：模型内部 ⇄ 布局（类似 Blender 的模式切换）。
-## 布局下：只留「移动」工具可用、隐藏上下文条（绘制参数无关）、gizmo 改**模型整体变换**。
 func _set_edit_mode(m: int) -> void:
 	m = clampi(m, 0, 1)
 	if m == _edit_mode:
@@ -2805,8 +2432,7 @@ func _set_edit_mode(m: int) -> void:
 	hud.flash("布局模式：拖动 gizmo 移动 / 旋转整个模型（Tab 切回模型编辑）" if _edit_mode == 1
 			else "模型编辑模式（Tab 切到布局）")
 
-
-## 按下：布局模式 → 移动 / 旋转**整个模型**；模型内部 → 移动 / 旋转**选区**。返回是否命中。
+## 按下：布局模式 → 移动 / 旋转**整个模型**；模型内部 → 移动 / 旋转**选区**。
 func _gizmo_begin(screen: Vector2) -> bool:
 	if _move_gizmo == null or not _move_gizmo.visible:
 		return false
@@ -2817,7 +2443,7 @@ func _gizmo_begin(screen: Vector2) -> bool:
 		_gizmo_delta = 0
 		_gizmo_per_voxel = maxf(_move_gizmo.axis_world(a).length(), 1e-6)
 		if _edit_mode == 1:
-			# 布局：沿轴移动整个模型。参考钉在按下那一刻（模型随后会动，否则参数自漂移）。
+			# 布局：沿轴移动整个模型。
 			_gizmo_mode = 2
 			_layout_center = _move_gizmo.center_global()
 			_layout_axis_u = _move_gizmo.axis_world(a).normalized()
@@ -2852,7 +2478,6 @@ func _gizmo_begin(screen: Vector2) -> bool:
 			_gizmo_t0 = _move_gizmo.ring_angle(screen, camera, r)
 		return true
 	return false
-
 
 ## 拖动：布局模式实时移动 / 旋转模型整体；模型内部累积位移 / 夹角并预览。
 func _gizmo_update(screen: Vector2) -> void:
@@ -2911,7 +2536,6 @@ func _gizmo_update(screen: Vector2) -> void:
 		for c in _gizmo_clip.cells():
 			cells.append(target + c)
 		_ghost.set_cells(cells, QVoxelUi.ACCENT, false)
-
 
 ## 松手：布局模式把整体位移 / 旋转提交成一条可撤销命令；模型内部提交移动 / 旋转选区命令。
 func _gizmo_end() -> void:
@@ -2992,7 +2616,6 @@ func _gizmo_end() -> void:
 		hud.flash("移动 %d 体素" % n if n > 0 else "移不动（越界 / 没有体素）")
 	_refresh_hud()
 
-
 ## 悬停反馈：把命中的轴 / 环告诉 gizmo（高亮），命中与否一眼可见。
 func _update_gizmo_hover(screen: Vector2) -> void:
 	if _move_gizmo == null or not _move_gizmo.visible:
@@ -3006,12 +2629,10 @@ func _update_gizmo_hover(screen: Vector2) -> void:
 			seg = _move_gizmo.last_ring_seg()
 	_move_gizmo.set_hover(a, r, seg)
 
-
 ## 角度 → 环段下标（分段高亮用）。
 func _ring_seg_for(angle: float) -> int:
 	var seg := float(QVoxelierMoveGizmo.RING_SEG)
 	return posmod(int(round(angle / (TAU / seg))), int(seg))
-
 
 ## 单轴整数位移（axis 下标 + 步数 → Vector3i）。
 func _axis_delta(axis: int, d: int) -> Vector3i:
@@ -3025,10 +2646,8 @@ func _axis_delta(axis: int, d: int) -> Vector3i:
 			out.z = d
 	return out
 
-
 func _gizmo_dir() -> Vector3i:
 	return _axis_delta(_gizmo_axis, _gizmo_delta)
-
 
 ## 光标射线与所选轴直线的最近点参数（世界单位）。
 func _gizmo_param(screen: Vector2) -> float:
@@ -3045,7 +2664,6 @@ func _gizmo_param(screen: Vector2) -> float:
 		return 0.0
 	return (b * e - d) / den
 
-
 ## 布局拖拽的轴参数：用**固定**的 center / axis（按下时抓的那份），因为模型随后会跟着动。
 func _layout_param(screen: Vector2) -> float:
 	var u := _layout_axis_u
@@ -3060,13 +2678,11 @@ func _layout_param(screen: Vector2) -> float:
 		return 0.0
 	return (b * e - d) / den
 
-
 ## 当前材质的基色（越界 / 世界未就绪时退回白色，预览不因为一次边界态而画不出来）。
 func _material_color() -> Color:
 	if world == null or _material_id <= 0 or _material_id >= world.materials.size():
 		return Color(1, 1, 1)
 	return world.material_color(_material_id)
-
 
 func _bind_actions() -> void:
 	InputTool.register_action(ACTION_UNDO, [InputTool.key_event(KEY_Z, true)])
@@ -3085,7 +2701,6 @@ func _bind_actions() -> void:
 	InputTool.register_action(ACTION_OPEN, [InputTool.key_event(KEY_O, true)])
 	InputTool.register_action(ACTION_EXPORT, [InputTool.key_event(KEY_E, true)])
 	# 选区 / 剪贴板：与"存 / 开"同属"带修饰键的操作"，故一律走 InputTool 注册的动作，
-	# 而不是在 _on_key 里手写 ctrl 判断 —— 键位因此能在项目设置里改。
 	InputTool.register_action(ACTION_SELECT_ALL, [InputTool.key_event(KEY_A, true)])
 	InputTool.register_action(ACTION_COPY, [InputTool.key_event(KEY_C, true)])
 	InputTool.register_action(ACTION_CUT, [InputTool.key_event(KEY_X, true)])
@@ -3094,11 +2709,7 @@ func _bind_actions() -> void:
 		InputTool.key_event(KEY_DELETE), InputTool.key_event(KEY_BACKSPACE),
 	])
 
-
 # 选区与剪贴板
-# 本段只做三件事：把界面意图翻成会话调用、把结果说给用户听（flash）、刷新界面。
-# 选区盒与剪贴板**住在会话里**（它们是"编辑操作的输入"），本类不持有第二份真相 ——
-# 否则线框、按钮可用性、状态栏读数会各读各的，迟早对不上。
 
 ## 选区面板的五个按钮共用这一条入口（面板发 id，这里分派）：加动作时只改这一处。
 func _on_selection_action(action: StringName) -> void:
@@ -3114,7 +2725,6 @@ func _on_selection_action(action: StringName) -> void:
 		&"clear":
 			_clear_selection()
 
-
 func _select_all() -> void:
 	if session == null or session.object == null:
 		return
@@ -3124,7 +2734,6 @@ func _select_all() -> void:
 	else:
 		hud.flash("已经是全选了")
 
-
 func _copy_selection() -> void:
 	if session == null:
 		return
@@ -3132,7 +2741,6 @@ func _copy_selection() -> void:
 		hud.flash("先框一块再复制")
 		return
 	_report_edit(session.copy_selection(), "已复制 %d 个体素", "选区里没有体素")
-
 
 func _cut_selection() -> void:
 	if session == null:
@@ -3142,7 +2750,6 @@ func _cut_selection() -> void:
 		return
 	_report_edit(session.cut_selection(), "已剪切 %d 个体素", "选区里没有体素")
 
-
 func _clear_selection() -> void:
 	if session == null:
 		return
@@ -3151,11 +2758,7 @@ func _clear_selection() -> void:
 		return
 	_report_edit(session.clear_selection(), "已清空 %d 个体素", "选区里没有体素")
 
-
 ## 粘贴落点：优先落在**光标指着的地方**（所见即所得），光标不在网格上时退回选区下角，
-## 再不行才退回原点。
-## 【为什么不一律贴回选区原处】"复制一块、贴到另一处"是这套功能的全部意义；贴回原处等于什么
-## 都没做，用户还得再按一次「移动」把它挪走 —— 那一步本来可以省掉。
 func _paste_clipboard() -> void:
 	if session == null:
 		return
@@ -3169,10 +2772,7 @@ func _paste_clipboard() -> void:
 		at = session.selection.lo()
 	_report_edit(session.paste(at), "已粘贴 %d 个体素", "这儿贴不下（越界或已被同色占满）")
 
-
-## 一次性选区操作的统一收尾：报数 + 刷新界面。五个动作的差异只在"调谁、说什么"。
-## 【为什么成功与失败要分开措辞】"已复制 0 个体素"读起来像成功了但没东西，用户会以为复制坏了；
-## 明说"选区里没有体素"才能把他指向真正的原因（框了一片空气）。
+## 一次性选区操作的统一收尾：报数 + 刷新界面。
 func _report_edit(n: int, ok_text: String, empty_text: String) -> void:
 	if n > 0:
 		hud.flash(ok_text % n)
@@ -3180,15 +2780,9 @@ func _report_edit(n: int, ok_text: String, empty_text: String) -> void:
 		hud.flash(empty_text)
 	_refresh_hud()
 
-
 # 层级树（右侧抽屉·层级组）
-# 本段只做一件事：把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"。
-# 树视图本身是 QVoxelWorld.nodes 的**纯投影**（见 QVoxelierTreeSection）。
 
 ## 点树上的行：模型就切过去编辑；组只是容器，不改变当前编辑对象。
-## 【为什么要顺手清掉参数组】选中的是"节点"，而参数组显示的是"链上某一条修改器"。
-## 换了节点还留着上一条的参数，滑一下就把改动写进了另一个对象的链里（且看不出来）。
-## 让底部三块（左列 / 右列 / 坐标系）给常驻的动画帧条让出一条高度（它贴在状态栏上方）。
 func _reserve_strip() -> void:
 	var h := float(QVoxelUi.strip_height())
 	if _dock != null:
@@ -3200,8 +2794,7 @@ func _reserve_strip() -> void:
 	# 底部让出一条给帧条之后，可见区变矮了 —— 3D 视口照它重排。
 	_layout_view()
 
-
-## 空格：播放 / 暂停当前模型的帧动画。与时间轴上的 ▶ 是同一份状态，不另存一份。
+## 空格：播放 / 暂停当前模型的帧动画。
 func _toggle_playback() -> void:
 	if _timeline == null or session == null or session.object == null:
 		return
@@ -3210,7 +2803,6 @@ func _toggle_playback() -> void:
 		return
 	_timeline.play(not _timeline.is_playing())
 
-
 ## 逐帧步进（帧条的 ◀ / ▶）。
 func _step_frame(delta: int) -> void:
 	if session == null or session.object == null or not session.object.is_animated():
@@ -3218,10 +2810,7 @@ func _step_frame(delta: int) -> void:
 	var n := session.object.frame_count()
 	_select_frame(clampi(session.object.active_frame + delta, 0, n - 1))
 
-
-## 改节点位置（对象属性面板的三个轴）。走一条可撤销命令。
-## 【为什么不再重算数据】去摆放本地化之后，位置只影响渲染器的 transform（摆放由渲染器承载），
-## 体素数据一个字节都不用动 —— 只重挂变换即可（比旧实现少一次整对象重取数）。
+## 改节点位置（对象属性面板的三个轴）。
 func _set_node_offset(node: QVoxelNode, value: Vector3i) -> void:
 	if session == null or node == null or node.offset == value:
 		return
@@ -3234,8 +2823,7 @@ func _set_node_offset(node: QVoxelNode, value: Vector3i) -> void:
 	_rebuild_view()
 	_refresh_hud()
 
-
-## 改模型分辨率（对象属性面板的"尺寸"）。结构级操作 → 可撤销命令 + 整对象重算。
+## 改模型分辨率（对象属性面板的"尺寸"）。
 func _resize_model(node: QVoxelNode, value: Vector3i) -> void:
 	if session == null or node == null or not node.is_model():
 		return
@@ -3249,8 +2837,7 @@ func _resize_model(node: QVoxelNode, value: Vector3i) -> void:
 	_rebuild_view()
 	_refresh_hud()
 
-
-## 世界级：设置节点的旋转（对象属性面板的欧拉角，度）。轴对齐吸附由面板的 90° 步进保证。
+## 世界级：设置节点的旋转（对象属性面板的欧拉角，度）。
 func _set_node_rotation(node: QVoxelNode, degrees: Vector3) -> void:
 	if session == null or node == null:
 		return
@@ -3269,23 +2856,19 @@ func _set_node_rotation(node: QVoxelNode, degrees: Vector3) -> void:
 	_rebuild_view()
 	_refresh_hud()
 
-
 ## 节点盒中心（体素单位，节点本地坐标系）—— 旋转绕它，与 .vox 的"模型居中后再转"一致。
 func _node_center_voxel(node: QVoxelNode) -> Vector3:
 	return QVoxelEvalEngine.local_box(node).get_center()
 
-
 ## 把 base 的旋转换成 b，同时**保持盒中心 C 不动**（new*C == base*C）→ 原地自转，不甩到别处。
 func _center_preserving(base: Transform3D, b: Basis, c: Vector3) -> Transform3D:
 	return Transform3D(b, base.origin + base.basis * c - b * c)
-
 
 ## 双击层级行：切到该节点（顺带显示「对象」页）并聚焦名字输入框开始改名。
 func _begin_rename(node: QVoxelNode) -> void:
 	_on_tree_selected(node)
 	if _object_section != null:
 		_object_section.begin_rename(node)
-
 
 func _on_tree_selected(node: QVoxelNode) -> void:
 	if node != null and node.is_model():
@@ -3297,22 +2880,15 @@ func _on_tree_selected(node: QVoxelNode) -> void:
 	if _dock != null:
 		_dock.show_property_by_title("对象")
 
-
 # 层级的增 / 删 / 移 / 改字段全在 QVoxelierSession（应用能力），本层只做两件事：
-# 把面板信号接过去（见 _build_ui），以及"点了树上的行就切过去编辑"这一个界面动作。
-
-
 
 # 材质（右侧抽屉·颜色组）
 
 ## 改材质的手势三段：开始（抓改前值）→ 连续写（不入栈）→ 结束（封口入栈）。
-## 颜色与 PBR 共用同一条时间线与同一条命令（目标都是 `world.materials`）。
-## 与体素笔同一时间线（见 QVoxelierColorSection 的"手势即命令"注释）。
 func _begin_material_edit() -> void:
 	if world == null or _material_id <= 0 or _material_id >= world.materials.size():
 		return
 	_material_cmd = QVoxelPropertyCommand.begin(world, &"materials", null, "修改材质")
-
 
 func _live_color(c: Color) -> void:
 	if world == null or _material_id <= 0:
@@ -3322,13 +2898,11 @@ func _live_color(c: Color) -> void:
 	_palette.set_color(_material_id, c)
 	_sync_material(_material_id)
 
-
 func _live_pbr(field: StringName, value: float) -> void:
 	if world == null or _material_id <= 0:
 		return
 	world.set_material_scalar(_material_id, field, value)
 	_sync_material(_material_id)
-
 
 func _end_material_edit() -> void:
 	if _material_cmd != null and _material_cmd.commit():
@@ -3336,10 +2910,7 @@ func _end_material_edit() -> void:
 	_material_cmd = null
 	_refresh_hud()
 
-
 ## 把世界上某个材质刷进所有会话的 QVoxelSource（渲染器读的是那份），再重生成材质纹理。
-## 【为什么每个会话都要刷】非活动对象也显示着，各自的 QVoxelSource 里也存着一份材质 ——
-## 只刷活动对象的话，换个色会看到"当前对象变了、旁边的对象还是旧色"。
 func _sync_material(id: int) -> void:
 	if world == null or id <= 0 or id >= world.materials.size():
 		return
@@ -3348,14 +2919,12 @@ func _sync_material(id: int) -> void:
 		s.data.add_material(mat)
 	_rerender_materials()
 
-
 func _rerender_materials() -> void:
 	if model != null:
 		model.regenerate_materials()
 	for r in _display.values():
 		if is_instance_valid(r):
 			r.regenerate_materials()
-
 
 func _add_material() -> void:
 	if world == null or session == null:
@@ -3369,14 +2938,12 @@ func _add_material() -> void:
 	_set_material(id)
 	hud.flash("已新增材质 %d" % id)
 
-
 # 取色器
 
 func _set_eyedropper(on: bool) -> void:
 	_eyedropper = on
 	_color_section.set_eyedropper(on)
 	hud.flash("取色器：%s" % ("开 —— 点视口里的体素吸取其材质色" if on else "关"))
-
 
 ## 吸取某屏幕位置下体素的材质，并把当前材质切过去。
 func _pick_material_at(screen: Vector2) -> void:
@@ -3392,7 +2959,6 @@ func _pick_material_at(screen: Vector2) -> void:
 		return
 	_set_material(id)
 	hud.flash("已吸取材质 %d" % id)
-
 
 # 调色板导入 / 导出（256×1 的 PNG，索引即材质 ID —— 与 MagicaVoxel 互通）
 
@@ -3417,7 +2983,6 @@ func _import_palette(path: String) -> void:
 	_refresh_hud()
 	hud.flash("已导入调色板（%d 色）" % (mini(width, 256) - 1))
 
-
 func _export_palette(path: String) -> void:
 	if world == null:
 		return
@@ -3434,7 +2999,6 @@ func _export_palette(path: String) -> void:
 		return
 	hud.flash("已导出调色板：%s" % path.get_file())
 
-
 ## 把整张材质表刷进每一条会话的 QVoxelSource（导入后一次性对齐，比逐色 _sync_material 省事）。
 func _push_palette_into_all() -> void:
 	if world == null:
@@ -3445,11 +3009,7 @@ func _push_palette_into_all() -> void:
 			data.add_material(VoxelMaterial.from_mate(world.materials[id], id))
 	_rerender_materials()
 
-
 # 快照（右侧抽屉·快照组，F5）
-# 分组自己摆离屏舞台、自己按快门（见 QVoxelierSnapshotSection 的"为什么按下渲染不经过应用层"）。
-# 本段只做两件分组做不了的事：弹落盘对话框（对话框的公共装配在 _build_dialogs 一处），
-# 以及把落盘结果说给用户听。世界的推送见 _refresh_panels。
 
 ## 顶栏「渲染」按钮：弹出 / 收起离屏渲染浮层（原「快照」分组）。
 func _toggle_render_popup() -> void:
@@ -3460,38 +3020,26 @@ func _toggle_render_popup() -> void:
 	else:
 		_snapshot_popup.popup_centered()
 
-
 ## 分组点了「保存…」：用它的默认名（带视图名）弹对话框 —— 覆盖是可预期的，
-## 而不是"七张角度悄悄互相覆盖、用户以为存了七张"。
 func _request_snapshot_save() -> void:
 	_snapshot_dialog.current_file = _snapshot_section.suggested_file_name()
 	_snapshot_dialog.popup_centered_ratio(0.7)
 
-
 func _on_snapshot_path_selected(path: String) -> void:
 	hud.flash(_snapshot_section.save_png(_ensure_png_ext(path)))
 
-
 ## 补上 .png 扩展名（两个 PNG 出口共用：调色板导出与快照落盘）。
-## 用 to_lower 判：Windows 上 "X.PNG" 同样是 PNG，不认它就会存出一个 "X.PNG.png"。
 func _ensure_png_ext(path: String) -> String:
 	return path if path.to_lower().ends_with(".png") else path + ".png"
-
 
 ## 补上网格扩展名（原生对话框不替我们补）：已带 .glb / .gltf 就原样，否则按默认 .glb 补。
 func _ensure_mesh_ext(path: String) -> String:
 	return path if path.get_extension().to_lower() in QVoxelMeshExport.EXTENSIONS \
 			else path + "." + QVoxelMeshExport.EXTENSIONS[0]
 
-
 # 时间轴（右侧抽屉·时间轴组，QVoxelSpec §12.6）
-# 与层级树那一段同构：本段只做一件事 —— 把面板报告的用户意图翻译成"改哪个属性 + 记成哪条命令"。
-# 帧的结构改动走 QVoxelPropertyCommand（`frames` 就是属性），而切帧 / 播放**不入栈**：
-# 模型 active_frame 是"正在看第几帧"，是游标不是数据（§12.6）。
 
-## 切帧：改游标 → 重算 → 刷界面。**不标脏、不入栈**。
-## 【为什么不记进历史】"我看了第 3 帧"不是一次内容改动。若它也占一格，用户画一笔再翻十帧，
-## 想撤掉那一笔就得连按十一次 —— 撤销栈会被浏览动作灌满，而里面 90% 是空操作。
+## 切帧：改游标 → 重算 → 刷界面。
 func _select_frame(index: int) -> void:
 	if session == null or not session.object.is_animated():
 		return
@@ -3501,20 +3049,14 @@ func _select_frame(index: int) -> void:
 	_rebuild_view()
 	_refresh_hud()
 
-
 ## 帧结构 / 元数据改动后的统一收尾：重算 + 刷界面（标脏由撤销栈的 changed 信号带出来，
-## 见 QVoxelierSession._on_history_changed —— 帧操作都入栈，故不在这里重复标）。
 func _after_frame_change() -> void:
 	if session == null:
 		return
 	session.rebuild()
 	_refresh_hud()
 
-
 ## 把一次"帧结构编辑"夹成一条属性命令：`mutate` 里做真正的改动（begin 之后、commit 之前）。
-## 【为什么是"传一个闭包"而不是每种操作各写一遍】§12.6 的增 / 删 / 重排走的是同一条包裹：
-## begin（抓旧值）→ 改 → commit → push → 刷界面，差异只有中间那两行。复制三遍就等着某一遍
-## 忘了 also_write(blocks) —— 而漏掉它的那次撤销会把模型的体素源整个丢掉（见下）。
 func _run_frame_edit(label: String, mutate: Callable) -> void:
 	if session == null or world == null:
 		return
@@ -3522,18 +3064,14 @@ func _run_frame_edit(label: String, mutate: Callable) -> void:
 		_timeline.stop_playback()
 	var m := session.object
 	var cmd := QVoxelPropertyCommand.begin(m, &"frames", m, label)
-	# §12.2：动画生效即静态源让位。`blocks` 因此必须进**同一条**命令的撤销范围 ——
-	# 否则撤销"做成动画"会只把 frames 清空，而 blocks 早在转换时就被搬进第 0 帧了，内容凭空消失。
-	# 对已经是动画的模型，blocks 恒为空字典、前后相同，这一行等于零开销（commit 会忽略未变项）。
+	# §12.2：动画生效即静态源让位。
 	cmd.also_write(m, &"blocks")
 	mutate.call(m)
 	if cmd.commit():
 		session.history.push(cmd)
 	_after_frame_change()
 
-
-## 末尾新建一帧（复制最后一帧）；静态模型先转成动画。帧条末尾的 ＋ 走这条。
-## 【为什么复制最后一帧而不是空帧】逐帧作画大多是在上一帧基础上改；从空帧开始几乎没人用。
+## 末尾新建一帧（复制最后一帧）；静态模型先转成动画。
 func _append_frame() -> void:
 	if session == null or world == null:
 		return
@@ -3545,11 +3083,7 @@ func _append_frame() -> void:
 		m.add_frame(f, m.frame_count())
 		m.active_frame = m.frame_count() - 1)
 
-
 ## 在当前帧之后插入一帧（`duplicate` = 复制当前帧，否则空帧）。
-## 【静态模型上插入为什么要先 make_animated】静态模型的体素住在 `blocks` 里，而帧动画的
-## 体素住在 `frames[i].blocks`（§12.2 一个 model_id 只能有一个源）。做成动画不是"多一个空帧"，
-## 而是把现有内容搬进第 0 帧 —— 否则用户点一下「＋」就会看见模型整个消失。
 func _insert_frame(duplicate: bool) -> void:
 	_run_frame_edit("复制帧" if duplicate else "新增帧", func(m: QVoxelModel) -> void:
 		if not m.is_animated():
@@ -3560,12 +3094,10 @@ func _insert_frame(duplicate: bool) -> void:
 		m.active_frame = at   # 新帧就是接下来要画的那一帧（否则用户得再点一下帧条）
 	)
 
-
 func _remove_frame(index: int) -> void:
 	_run_frame_edit("删除帧", func(m: QVoxelModel) -> void:
 		m.remove_frame(index)
 	)
-
 
 func _move_frame(from: int, to: int) -> void:
 	_run_frame_edit("移动帧", func(m: QVoxelModel) -> void:
@@ -3574,16 +3106,12 @@ func _move_frame(from: int, to: int) -> void:
 			m.active_frame = to
 	)
 
-
 ## 改帧时长的三段手势（与改色 / 改参数同一时间线：见 QVoxelPropertyCommand 的"手势即命令"）。
-## 目标是**那一帧对象本身**的 duration_ms，而不是模型的 frames 数组 —— 后者是"整数组替换"的
-## 属性命令，就地改一帧的时长不会让数组前后不同（元素是同一个 QVoxelFrame），commit 会当成没改。
 func _begin_frame_duration(index: int) -> void:
 	if session == null or index < 0 or index >= session.object.frame_count():
 		return
 	_frame_dur_cmd = QVoxelPropertyCommand.begin(session.object.frame_at(index), &"duration_ms",
 			session.object, "改帧时长")
-
 
 func _live_frame_duration(index: int, ms: int) -> void:
 	if _frame_dur_cmd == null or session == null:
@@ -3593,8 +3121,6 @@ func _live_frame_duration(index: int, ms: int) -> void:
 		return
 	m.frame_at(index).duration_ms = ms
 	# 实时预览只重刷面板（播放头读数要跟着变），**不重建渲染** —— 时长不改变任何体素，
-	# 而且重建会把正在拖的那根滑条销毁、手势当场断掉（与改色同理）。
-
 
 func _end_frame_duration(_index: int) -> void:
 	var cmd := _frame_dur_cmd
@@ -3602,7 +3128,6 @@ func _end_frame_duration(_index: int) -> void:
 	if cmd != null and cmd.commit():
 		session.history.push(cmd)
 	_after_frame_change()
-
 
 ## 时间轴元数据（loop / fps / tags，落进 NODE 条目的 `anim` 键 —— §12.3）。
 func _set_anim_meta(prop: StringName, value: Variant, label: String) -> void:

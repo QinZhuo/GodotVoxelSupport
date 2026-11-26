@@ -15,7 +15,6 @@ class_name CameraBlendDef extends Resource
 ## 位置混合轨迹(枚举归属 [CameraTool])
 @export var style: CameraTool.BlendStyle = CameraTool.BlendStyle.SPHERICAL
 
-
 ## 与本次切换的匹配度: -1 不命中, 数值越大越精确(含义见类注释的优先级表)
 func match_score(from_name: StringName, to_name: StringName) -> int:
 	if from != &"" and from != from_name:

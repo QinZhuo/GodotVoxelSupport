@@ -1,19 +1,14 @@
 extends TestCase
 
 ## 脚本层（QVoxelScript / QVoxelFileIO）的无头行为。
-## 覆盖：新建 / 材质 / 写格 / 擦除 / 对象树 / 帧动画 / 相机 / 文件往返(.qvx + .vox) / 格式判定。
-## 【为什么在 TestCase 里跑就是无头】`_app()` 认的是"运行时场景带 script_stats"，
-## 测试进程没有 QVoxelier，天然落到内存世界 —— 这正是 MCP 在编辑器进程看到的分支。
 
 const TMP_QVX := "user://_test_script.qvx"
 const TMP_VOX := "user://_test_script.vox"
-
 
 func _cleanup() -> void:
 	for p in [TMP_QVX, TMP_VOX]:
 		if FileAccess.file_exists(p):
 			DirAccess.remove_absolute(ProjectSettings.globalize_path(p))
-
 
 func test_new_model_material_paint() -> void:
 	QVoxelScript.new_model(Vector3i(16, 16, 16))
@@ -27,12 +22,10 @@ func test_new_model_material_paint() -> void:
 	assert_eq(QVoxelScript.paint([Vector3i(2, 2, 2)], skin), 0, "同值重写不算改动")
 	assert_eq(QVoxelScript.erase([Vector3i(2, 2, 2), Vector3i(4, 4, 4)]), 1, "只有 1 格原本是实心")
 
-
 func test_out_of_bounds_cells_dropped() -> void:
 	QVoxelScript.new_model(Vector3i(8, 8, 8))
 	var mat := QVoxelScript.material()
 	assert_eq(QVoxelScript.paint([Vector3i(-1, 0, 0), Vector3i(8, 0, 0), Vector3i(0, 0, 0)], mat), 1)
-
 
 func test_object_tree() -> void:
 	QVoxelScript.new_model(Vector3i(8, 8, 8))
@@ -49,7 +42,6 @@ func test_object_tree() -> void:
 	assert_true(QVoxelScript.set_visible(mid, false))
 	assert_true(QVoxelScript.remove_node(mid), "删掉子模型")
 	assert_false(QVoxelScript.remove_node(0), "最后一个模型不能删")
-
 
 func test_frames() -> void:
 	QVoxelScript.new_model(Vector3i(8, 8, 8))
@@ -69,7 +61,6 @@ func test_frames() -> void:
 	assert_true(QVoxelScript.remove_frame(2))
 	assert_eq(QVoxelScript.frames()["count"], 2)
 
-
 func test_cameras() -> void:
 	QVoxelScript.new_model()
 	var i := QVoxelScript.add_camera("front")
@@ -78,7 +69,6 @@ func test_cameras() -> void:
 	assert_eq(QVoxelScript.cameras()[0]["fov"], 60.0)
 	assert_true(QVoxelScript.remove_camera(0))
 	assert_eq(QVoxelScript.cameras().size(), 0)
-
 
 func test_roundtrip_qvx() -> void:
 	_cleanup()
@@ -97,7 +87,6 @@ func test_roundtrip_qvx() -> void:
 	assert_true(QVoxelScript.nodes()[1]["id"] < 0, "组的 id 从文件重建后仍为负")
 	_cleanup()
 
-
 func test_save_and_open_vox() -> void:
 	_cleanup()
 	QVoxelScript.new_model(Vector3i(12, 12, 12))
@@ -108,7 +97,6 @@ func test_save_and_open_vox() -> void:
 	assert_eq(QVoxelScript.count_solid(), 64, "体素原样读回")
 	_cleanup()
 
-
 func test_vox_rejects_oversize() -> void:
 	_cleanup()
 	QVoxelScript.new_model(Vector3i(300, 8, 8))
@@ -117,7 +105,6 @@ func test_vox_rejects_oversize() -> void:
 	assert_false(QVoxelScript.save(TMP_VOX), "超尺寸模型拒绝写出 .vox")
 	assert_false(FileAccess.file_exists(TMP_VOX), "失败时不留下半成品")
 	_cleanup()
-
 
 func test_file_io_extensions() -> void:
 	assert_true(QVoxelFileIO.is_project_path("a/b.qvx"))

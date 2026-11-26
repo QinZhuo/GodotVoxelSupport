@@ -1,11 +1,9 @@
 class_name TaskTool
 
 ## 任务跟踪表(可选基建): 显式注册任务, 提供"活动列表 / 按 Def 查找 / 聚合存读档"。
-## 注意: 静态表持有任务强引用, 场景销毁时请 untrack(或整表 clear), 否则任务不会被释放。
 
 static var _active: Array[Task] = []
 static var _finished: Array[Task] = []
-
 
 ## 注册任务(重复注册忽略; 终态时自动转入 finished)
 static func track(task: Task) -> void:
@@ -16,14 +14,12 @@ static func track(task: Task) -> void:
 	task.failed.connect(_on_terminal.bind(task))
 	task.cancelled.connect(_on_terminal.bind(task))
 
-
 ## 注销任务(场景销毁/不再关心时调用, 释放强引用)
 static func untrack(task: Task) -> void:
 	if task == null:
 		return
 	_active.erase(task)
 	_finished.erase(task)
-
 
 ## 活动中任务(含前置被拒而未激活的)
 static func get_active() -> Array[Task]:
@@ -33,7 +29,6 @@ static func get_active() -> Array[Task]:
 static func get_finished() -> Array[Task]:
 	return _finished
 
-
 ## 按 Def 查找(先活动表后已结束表; key 为 Def 相对路径, 内置 Def 退化为 resource_name)
 static func find(def_key: String) -> Task:
 	for t in _all():
@@ -41,8 +36,7 @@ static func find(def_key: String) -> Task:
 			return t
 	return null
 
-
-## 聚合存档: {def_key: save_data}。无 Def 路径的内置任务无法还原, 跳过并告警。
+## 聚合存档: {def_key: save_data}。
 static func save_all() -> Dictionary:
 	var out := {}
 	for t in _all():
@@ -51,7 +45,6 @@ static func save_all() -> Dictionary:
 			continue
 		out[key] = t.save_data()
 	return out
-
 
 ## 聚合读档: 按存档逐条 Task.restore 并注册, 返回还原出的任务列表。
 static func load_all(saved: Dictionary, data = null) -> Array[Task]:
@@ -64,17 +57,14 @@ static func load_all(saved: Dictionary, data = null) -> Array[Task]:
 		out.append(task)
 	return out
 
-
 ## 会话级复位：清空跟踪表
 static func reset() -> void:
 	clear()
-
 
 ## 清空跟踪表(不 touch 任务本身)
 static func clear() -> void:
 	_active.clear()
 	_finished.clear()
-
 
 static func _all() -> Array:
 	var out: Array = []

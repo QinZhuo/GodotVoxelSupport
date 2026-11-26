@@ -2,10 +2,8 @@
 extends RefCounted
 
 ## ======= 截图域: 请求形状(与进程无关的安全部分) =======
-## **本文件必须导出安全**(零编辑器标识符): 运行时服务器要在导出包里注册 take_screenshot,
 
 ## 不 preload MCPToolContract: 本工具的 schema 是带 enum 的自定义字典, 那里没有对应工厂。
-
 
 ## ======= 请求形状(spec) =======
 static func spec() -> Dictionary:
@@ -19,14 +17,11 @@ static func spec() -> Dictionary:
 		}},
 	}
 
-
 ## 从 MCP 入参里挑出**调用方显式指定**的颜色处理项, 交给 ScreenshotTool 的 opts。
-## ⚠️ 刻意只透传"传了什么": 不传就一个键都不放, 让 ScreenshotTool 走 auto 自己判。
 static func color_opts(args: Dictionary) -> Dictionary:
 	var out := {}
 	if args.has("color_mode"):
 		out["color_mode"] = VariantTool.get_string(args, "color_mode", ScreenshotTool.COLOR_AUTO)
 	return out
-
 
 ## ======= 截断收口在哪 =======

@@ -2,14 +2,8 @@
 extends RefCounted
 
 ## ======= 工具元数据(annotations / outputSchema) =======
-## 与 MCPResult(响应契约)、MCPToolContract(请求契约)同级。**必须带 @tool 且不声明 class_name**。
 
 ## ======= 三张分类名单: 每个工具必须恰好落进一张 =======
-## 划分标准只有一条: **重放一次会不会造成不可挽回的后果**。名单名与注解一一对应:
-##   READ_ONLY       → readOnlyHint=true       不产生任何持久化改动。
-##   NON_DESTRUCTIVE → destructiveHint=false   会改状态, 但可撤(UndoRedo)或可重建。
-##   DESTRUCTIVE     → destructiveHint=true    不可撤销, 或动工程配置/文件/进程, 或执行任意代码。
-## destructiveHint 是客户端决定是否弹确认框的唯一依据, 故宁可多标 —— 见 build() 的兜底。
 
 ## ---------------------------------------------------------------- 只读工具
 const READ_ONLY := [
@@ -34,8 +28,6 @@ const READ_ONLY := [
 ]
 
 ## ------------------------------------- 有副作用但不破坏的工具(NON_DESTRUCTIVE)
-## 判据: 改动可由 Ctrl+Z 撤回, 或产物可重建/可丢弃 = destructiveHint:false。
-## 不在这张名单里的写工具一律按破坏性处理(见 build() 兜底)。
 const NON_DESTRUCTIVE := [
 	# -- 产物落盘(新文件, 不覆盖; 删除即回退) --
 	"take_screenshot", "resource_inspect", # resource_inspect 的 thumbnail/render 只新增产物文件; tree 纯只读
@@ -46,7 +38,6 @@ const NON_DESTRUCTIVE := [
 	# -- 编辑器/进程内状态(不影响工程文件) --
 	"open_scene", "use_instance", "clear_logs", "refresh_tools", "perf", "job_cancel",
 	# -- 运行中输入注入: 只驱动运行时状态, 不动工程; 重放会重复触发业务逻辑, 故不进幂等名单。
-	#    与 call_node_method 的区别: 那个能调用任意方法(含存档/删档)。
 	"simulate_click", "simulate_drag", "simulate_key", "simulate_text", "simulate_scroll",
 	# -- 起游戏进程跑测试: 进程可停、结果可重跑 --
 	"run_tests",
@@ -91,18 +82,10 @@ const IDEMPOTENT := [
 	# use_instance: 只改"默认目标编辑器"这一项设置(会落盘, 但同参数重放结果相同, 不碰工程文件)。
 	"use_instance",
 	# -- 刻意不列 --
-	# add_node: 重放会多出一个节点, 不幂等
-	# apply_scene_edits: 内含 add_node/duplicate_node, 同一批 ops 重放会翻倍
-	# resource_inspect(thumbnail|render) / take_screenshot: 每次新增一个产物文件
-	# simulate_*: 重放会把业务逻辑再触发一遍
 ]
 
 ## 未列入任何名单的工具 = **破坏性**(保守兜底): 漏标的代价是多弹一次确认, 而不是
-## 静默当安全操作执行。漏标由 audit_against() 在启动自检里报出来。
-## 项目侧 provider 的工具不在上面三张名单里(它们在项目里, 框架没法穷举), 由 provider 在
-## add_tool 的第 5 个参数自报分类 —— 见 MCPDevServer._add_tool。
 const KINDS := ["read_only", "non_destructive", "destructive"]
-
 
 ## ======= 入口: 供 MCPDevServer._add_tool 统一调用 =======
 
@@ -113,7 +96,6 @@ static func build(name: String, desc: String, input_schema: Dictionary, kind := 
 	var read_only := k == "read_only" or (k.is_empty() and READ_ONLY.has(name))
 	var non_destructive := k == "non_destructive" or (k.is_empty() and NON_DESTRUCTIVE.has(name))
 	# 三张名单之外 = **破坏性**: 漏标只多弹一次确认, 不会静默当安全操作执行。
-	# 显式登记进 NON_DESTRUCTIVE 才降级为"非破坏性"。
 	var destructive := not read_only and not non_destructive
 	var def := {
 		"name": name,
@@ -124,7 +106,7 @@ static func build(name: String, desc: String, input_schema: Dictionary, kind := 
 			"destructiveHint": destructive,
 			# 只读天然幂等, 无需在 IDEMPOTENT 重复列举。
 			"idempotentHint": read_only or IDEMPOTENT.has(name),
-			# 显式标 false 表示无外部影响。不可省: 规范默认是 true。
+			# 显式标 false 表示无外部影响。
 			"openWorldHint": false,
 		},
 		# 只声明 type: 各工具 structuredContent 形状差异极大(日志是数组、classdb 是成员树…)。
@@ -132,10 +114,7 @@ static func build(name: String, desc: String, input_schema: Dictionary, kind := 
 	}
 	return def
 
-
 ## ======= 不生成 title =======
-## 对模型零增益, 却让常驻的 tools/list 明显变长。
-
 
 ## ======= 契约自检 =======
 
@@ -161,8 +140,7 @@ static func audit_against(registered: Dictionary, kinds: Dictionary = {}) -> Arr
 			issues.append("工具 '%s' 未归入任何分类名单 —— 已按破坏性兜底, 请显式登记进 READ_ONLY / NON_DESTRUCTIVE / DESTRUCTIVE" % tool_name)
 	return issues
 
-
-## 校验四张名单的一致性。返回问题描述数组(空 = 通过), 由调用方决定如何报告。
+## 校验四张名单的一致性。
 static func audit() -> Array[String]:
 	var issues: Array[String] = []
 	issues.append_array(_audit_overlap("READ_ONLY", READ_ONLY, "DESTRUCTIVE", DESTRUCTIVE))
@@ -174,7 +152,6 @@ static func audit() -> Array[String]:
 	issues.append_array(_audit_dupes("IDEMPOTENT", IDEMPOTENT))
 	return issues
 
-
 ## NON_DESTRUCTIVE 与另两张名单的交集(文案不同, 故不复用 _audit_overlap)。
 static func _audit_non_destructive_overlap() -> Array[String]:
 	var out: Array[String] = []
@@ -185,13 +162,7 @@ static func _audit_non_destructive_overlap() -> Array[String]:
 			out.append("NON_DESTRUCTIVE 与 DESTRUCTIVE 同时包含 '%s' —— '有副作用但不破坏'与'破坏性'互斥, build() 会按非破坏性处理, 两处需对齐成一种" % n)
 	return out
 
-
 ## IDEMPOTENT 的一致性检查。
-## 分类(有无副作用)与幂等是两条**正交**属性: save 写当前内存态、set_node_property 同参数
-## 重放结果相同、connect_signal 已去重 —— 既非只读也无害。故只报两种真问题:
-##   1. 只读工具重复列进 IDEMPOTENT(build() 已由 readOnlyHint 推导, 纯冗余);
-##   2. IDEMPOTENT 里的名字没落进任何分类名单(漏分类会导致破坏性兜底误判)。
-## "把产物落盘类写进幂等"这类误标靠名单维护兜住, 不由本检查负责。
 static func _audit_redundant_idempotent() -> Array[String]:
 	var out: Array[String] = []
 	for n in IDEMPOTENT:
@@ -201,14 +172,12 @@ static func _audit_redundant_idempotent() -> Array[String]:
 			out.append("IDEMPOTENT 列出未分类的工具 '%s' —— 先登记进 READ_ONLY/NON_DESTRUCTIVE/DESTRUCTIVE, 否则 build() 会把它判成破坏性" % n)
 	return out
 
-
 static func _audit_overlap(a_name: String, a: Array, b_name: String, b: Array) -> Array[String]:
 	var out: Array[String] = []
 	for n in a:
 		if b.has(n):
 			out.append("%s 与 %s 同时包含 '%s' —— 只读工具不应有破坏性副作用" % [a_name, b_name, n])
 	return out
-
 
 static func _audit_dupes(list_name: String, list: Array) -> Array[String]:
 	var out: Array[String] = []

@@ -2,10 +2,6 @@ extends RefCounted
 class_name StateMachine
 
 # 通用有限状态机，用于流程/场景级状态管理（不做小对象级状态）。
-# 注意:
-#   - transition() 是异步函数（内部可能 await 回调），需要时请 await。
-#   - 不要用它替换大量短生命周期对象的状态（如每个子弹/粒子），适合管理流程类。
-#   - 回调返回 GDScriptFunctionState 时会自动 await 完成。
 
 signal state_changed(from, to)
 

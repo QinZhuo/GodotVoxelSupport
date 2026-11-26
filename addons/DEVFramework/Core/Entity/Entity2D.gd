@@ -1,6 +1,6 @@
 class_name Entity2D extends Node2D
 
-## 2D 节点实体 —— ECS 实体 + Node2D 场景表现。定位: **ECS ↔ Node 桥接**。
+## 2D 节点实体 —— ECS 实体 + Node2D 场景表现。
 
 ## ECS 桥接(数据在 ECS 列, 懒创建 —— 只有用到 ecs 时才实例化)
 var _ecs: ECSLink = null
@@ -12,8 +12,7 @@ var ecs: ECSLink:
 	set(v):
 		_ecs = v
 
-## 便捷访问（ECS 世界）。刻意不叫 world：world 是项目最常见的世界对象字段名，
-## 框架占用它会让每个项目都被迫改名（本项目实际踩过 "member already exists"）。
+## 便捷访问（ECS 世界）。
 var ecs_world: ECSWorld:
 	get:
 		return ecs.world
@@ -26,42 +25,33 @@ var entity_id: int:
 	set(v):
 		ecs.entity_id = v
 
-
 func _exit_tree() -> void:
 	ecs.destroy()
 
-
-## 节点入树后刷新 NodeLink.node_path(路径此时有效)。仅当用过 ECS(懒加载保持)。
+## 节点入树后刷新 NodeLink.node_path(路径此时有效)。
 func _ready() -> void:
 	if _ecs != null:
 		_ecs.refresh_node_link()
-
 
 ## —— ECS 实体门面(便捷) ——
 
 func add_component(comp, values: Dictionary = {}) -> bool:
 	return ecs.add_component(comp, values)
 
-
 func has_component(comp) -> bool:
 	return ecs.has_component(comp)
-
 
 func get_field(comp, field: StringName):
 	return ecs.get_field(comp, field)
 
-
 func set_field(comp, field: StringName, value) -> void:
 	ecs.set_field(comp, field, value)
-
 
 func is_bound() -> bool:
 	return ecs.is_bound()
 
-
 func destroy() -> void:
 	ecs.destroy()
-
 
 ## —— ECS↔Node 桥接: 注册 + 便捷字段同步 ——
 
@@ -72,11 +62,9 @@ func register_to_ecs() -> bool:
 		return false
 	return ecs.add_component(self)
 
-
 ## 便捷: 从实体 ECS 同步指定字段到本节点属性(组件 = 本节点脚本)。
 func sync_from_ecs(field: StringName, node_prop: StringName = field) -> void:
 	ecs.sync_from(field, node_prop)
-
 
 ## 便捷: 从本节点属性同步到实体 ECS 指定字段(组件 = 本节点脚本)。
 func sync_to_ecs(field: StringName, node_prop: StringName = field) -> void:

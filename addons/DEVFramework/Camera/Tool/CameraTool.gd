@@ -11,7 +11,7 @@ const IMPULSE_OSCILLATIONS := 2.5
 ## 冲击传播速度(米/秒): 越远越晚被"震到", 制造冲击波掠过的层次感
 const IMPULSE_SPEED := 40.0
 
-## 进行中的冲击; 每项为 Dictionary{origin, strength, radius, duration, start, seed}
+## 进行中的冲击; 每项为 Dictionary{origin, strength, radius, duration, start…
 static var _impulses: Array[Dictionary] = []
 ## 无方向震屏(origin 为 null)
 static var _shake: Dictionary = {}
@@ -23,7 +23,6 @@ static var _rr_active: VirtualCamera3D = null
 ## 相机所在视口: 3D 画面被包进 SubViewport 时由业务注册, 缺省为主窗口
 static var viewport: Viewport
 
-
 ## 会话级复位：清空冲击与轮转游标（`viewport` 属注入配置，不清）
 static func reset() -> void:
 	_impulses.clear()
@@ -31,14 +30,12 @@ static func reset() -> void:
 	_rr_index = 0
 	_rr_active = null
 
-
 # ── 查询 ──
 
 ## 当前场景的相机大脑(不在场景树中时返回 null)
 static func get_brain() -> CameraBrain3D:
 	var brain := CameraBrain3D.main
 	return brain if is_instance_valid(brain) else null
-
 
 ## 真实渲染相机: 优先 Brain, 否则相机所在视口的当前相机
 static func get_camera() -> Camera3D:
@@ -50,11 +47,9 @@ static func get_camera() -> Camera3D:
 		vp = (Engine.get_main_loop() as SceneTree).root
 	return vp.get_camera_3d()
 
-
 ## 当前生效机位
 static func get_current() -> VirtualCamera3D:
 	return VirtualCamera3D.current
-
 
 # ── 机位切换 ──
 
@@ -64,13 +59,11 @@ static func activate(vcam: VirtualCamera3D, blend: float = -1.0) -> void:
 		return
 	vcam.activate(blend)
 
-
 ## 退出指定机位(自动回落到上一个仍激活的机位)
 static func deactivate(vcam: VirtualCamera3D) -> void:
 	if vcam == null or not is_instance_valid(vcam):
 		return
 	vcam.deactivate()
-
 
 ## 按节点名在子树中查找机位(便于代码侧无需持有引用)
 static func find(root: Node, camera_name: StringName) -> VirtualCamera3D:
@@ -78,13 +71,11 @@ static func find(root: Node, camera_name: StringName) -> VirtualCamera3D:
 		return null
 	return root.find_child(String(camera_name), true, false) as VirtualCamera3D
 
-
 ## 立即对齐当前机位(无过渡), 用于传送 / 场景切换后消除拖影
 static func snap() -> void:
 	var brain := get_brain()
 	if brain != null:
 		brain.snap_to_current()
-
 
 # ── 冲击 / 震屏 ──
 
@@ -101,21 +92,18 @@ static func impulse(origin: Vector3, strength: float = 1.0, radius: float = 25.0
 		seed = randi() % 100000,
 	})
 
-
 ## 无方向震屏(全屏抖动), 用于爆炸在画面外 / 纯 UI 反馈等没有爆点的场合。
 static func shake(strength: float = 1.0, duration: float = 0.4, direction: Vector3 = Vector3.ZERO) -> void:
 	if strength <= 0.0 or duration <= 0.0:
 		return
 	_shake = {strength = strength, duration = duration, start = _now(), direction = direction}
 
-
 ## 清空所有进行中的冲击与震屏
 static func clear_impulses() -> void:
 	_impulses.clear()
 	_shake = {}
 
-
-## 采样冲击对指定位置的贡献, 返回 {position: Vector3(世界空间), rotation: Vector3(世界空间, 弧度)}
+## 采样冲击对指定位置的贡献, 返回 {position: Vector3(世界空间), rotation: Vector3(世界空间…
 static func sample_impulse(cam_position: Vector3) -> Dictionary:
 	var pos := Vector3.ZERO
 	var rot := Vector3.ZERO
@@ -147,7 +135,6 @@ static func sample_impulse(cam_position: Vector3) -> Dictionary:
 			_shake = {}
 	return {position = pos, rotation = rot}
 
-
 ## 冲击包络: 传播延迟 × 距离衰减 × 时间衰减; 0 表示此刻无贡献
 static func _impulse_amplitude(imp: Dictionary, cam_position: Vector3, now: float, directional: bool) -> float:
 	var elapsed: float = now - float(imp.get("start", 0.0))
@@ -166,7 +153,6 @@ static func _impulse_amplitude(imp: Dictionary, cam_position: Vector3, now: floa
 	var falloff := 1.0 - p * p                      # 前段强、尾段快速收敛
 	return float(imp.get("strength", 0.0)) * atten * falloff
 
-
 ## 衰减正弦波形, 取值 [-1, 1]; 相位从 0 起振(冲击由弱渐强), seed 只用于各轴的相位扰动
 static func _impulse_wave(imp: Dictionary, cam_position: Vector3, now: float) -> float:
 	var elapsed: float = now - float(imp.get("start", 0.0))
@@ -176,10 +162,8 @@ static func _impulse_wave(imp: Dictionary, cam_position: Vector3, now: float) ->
 	var t: float = elapsed - delay
 	return sin(t / maxf(float(imp.get("duration", 0.0)), 0.0001) * TAU * IMPULSE_OSCILLATIONS)
 
-
 static func _now() -> float:
 	return Time.get_ticks_msec() * 0.001
-
 
 # ── 共享数学 ──
 
@@ -189,7 +173,6 @@ static func damp_weight(damping: float, delta: float) -> float:
 		return 1.0
 	return 1.0 - exp(-delta / damping)
 
-
 ## [method damp_weight] 的分轴版本, 用于按轴独立阻尼
 static func damp_weight3(damping: Vector3, delta: float) -> Vector3:
 	return Vector3(
@@ -197,7 +180,6 @@ static func damp_weight3(damping: Vector3, delta: float) -> Vector3:
 		damp_weight(damping.y, delta),
 		damp_weight(damping.z, delta),
 	)
-
 
 ## 位置混合轨迹
 enum BlendStyle {
@@ -233,7 +215,6 @@ static func interpolate_transform(from: Transform3D, to: Transform3D, pivot: Var
 			dir = dir_a.slerp(dir_b, weight)
 		origin = p + dir * lerpf(ra, rb, weight)
 	return Transform3D(from.basis.slerp(to.basis, weight), origin)
-
 
 # ── 内部: 未生效机位的轮转调度 ──
 

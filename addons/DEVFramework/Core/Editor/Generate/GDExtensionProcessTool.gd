@@ -3,11 +3,8 @@ class_name GDExtensionProcessTool
 extends RefCounted
 
 ## GDExtension 构建的"子进程与等待"切片: 起 CMake --build 子进程、读日志、磁盘/心跳进度、
-## 卡死与硬超时判定、终止进程树、编辑器重载。只是 GDExtensionRebuild 的实现细节。
 
-## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends EditorScript 的脚本当菜单工具列出。
-## 约束 2: _host 不加类型注解 —— 双向类型注解会形成 class_name 环。
-## 约束 3: 实例状态(日志缓冲/构建游标)全部留在 GDExtensionRebuild, 这里只读写 _host.*。
+## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends…
 
 var _host   # GDExtensionRebuild 实例
 
@@ -19,15 +16,13 @@ const HEARTBEAT_INTERVAL_SEC := 10                            # 输出静默后�
 const DISK_REPORT_TICKS := DISK_REPORT_SEC * TICKS_PER_SEC     # 10 拍
 const HEARTBEAT_SILENT_TICKS := HEARTBEAT_INTERVAL_SEC * TICKS_PER_SEC   # 50 拍
 const STALL_TIMEOUT_SEC := 500                                # 无新目标累计 500s 且无编译器进程 → 判卡死
-## 兜底硬超时: 不看进程表, 只要这么久零新目标就判死并终止。正常编译再慢也会推进,
-## 零推进只可能是被挂住的进程句柄/杀软锁文件 —— 这条兜底专治"进程已死但 is_process_running 仍为 true"。
+## 兜底硬超时: 不看进程表, 只要这么久零新目标就判死并终止。
 const HARD_TIMEOUT_SEC := 600
 const MIN_JOBS := 2                                           # 自动并行度下限
 const MAX_JOBS := 16                                          # 自动并行度上限
 const KEY_STALL_KILL := "dev_framework/gdextension_build/stall_auto_kill"   # 检测到卡死(无新目标且无编译器进程)时自动终止进程树
 const KEY_HARD_TIMEOUT := "dev_framework/gdextension_build/hard_timeout_sec"  # 零推进多久判死(秒, 0=关闭)
 const KEY_JOBS := "dev_framework/gdextension_build/build_jobs"        # 并行度, 0=自动(默认16; 设小可降并发防卡)
-
 
 func _restart_editor() -> void:
 	await (Engine.get_main_loop() as SceneTree).create_timer(2.0).timeout
@@ -37,10 +32,8 @@ func _restart_editor() -> void:
 	if ei != null:
 		ei.restart_editor(true)
 
-
 func _stall_kill_enabled() -> bool:
 	return bool(ProjectSettings.get_setting(KEY_STALL_KILL, true))
-
 
 ## 存活编译器子进程数(cc1plus/g++/clang/python); 查询失败返回 -1
 func _active_compile_procs() -> int:
@@ -63,7 +56,6 @@ func _active_compile_procs() -> int:
 		return n
 	return -1
 
-
 ## 终止进程树(cmake→make→g++)
 func _kill_build_tree(pid: int) -> void:
 	if OS.get_name() == "Windows":
@@ -71,7 +63,6 @@ func _kill_build_tree(pid: int) -> void:
 				PackedStringArray(["/PID", str(pid), "/T", "/F"]), [], true)
 	else:
 		OS.execute("kill", PackedStringArray(["-KILL", str(pid)]), [], true)
-
 
 ## 按插件/目标名过滤构建目标(纯函数, 便于测试): "all"/"" = 全部; 否则大小写不敏感匹配 target 名。
 static func filter_targets(targets: Array, plugin: String) -> Array:
@@ -83,7 +74,6 @@ static func filter_targets(targets: Array, plugin: String) -> Array:
 		if String(tg.get("target", "")).to_lower() == want:
 			out.append(tg)
 	return out
-
 
 func _build(build_dir: String, type: String, tgt := "") -> bool:
 	_host._log("开始编译 (%s%s)…… 编辑器保持可用, 输出实时回显。" % [type, "" if tgt == "" else ", " + tgt])
@@ -135,7 +125,6 @@ func _build(build_dir: String, type: String, tgt := "") -> bool:
 	var exit_code := -1
 	while true:
 		# 结束判定必须多信号: 只靠 is_process_running 会因 pid 残留(cmd.exe 退出但句柄未回收)死等,
-		# 表现就是"没有编译器进程、日志不再更新、state 卡在编译中"—— 实测踩过一次。
 		exit_code = OS.get_process_exit_code(pid)
 		if exit_code != -1:
 			break
@@ -164,7 +153,6 @@ func _build(build_dir: String, type: String, tgt := "") -> bool:
 				_host._no_advance = 0
 				_host._prev_done_count = d
 			# 兜底硬超时: 无论进程表怎么说, 只要这么久一个目标都没新增就判死 ——
-			# 正常编译再慢也会推进, 零推进只能是被挂住的进程句柄/杀软锁文件。
 			if hard_sec > 0 and _host._no_advance >= hard_sec and not _host._stall_killed:
 				_host._stall_checked = true
 				_host._log_raw("硬超时: %d 秒内没有任何新目标, 判定构建卡死。" % _host._no_advance)
@@ -208,11 +196,9 @@ func _build(build_dir: String, type: String, tgt := "") -> bool:
 	_host._state_write("编译完成: %s" % type)
 	return true
 
-
 ## 子进程原始输出落点(每次构建覆盖)
 func _raw_log_path() -> String:
 	return _host._abs("res://.godot/gdextension_build/raw_build.log")
-
 
 ## 定期把磁盘真实进度写入 state/日志(每 ~2s; 每前进 ≥30 个目标才刷一行日志, 避免刷屏)
 func _report_disk_progress(build_dir: String) -> void:
@@ -228,7 +214,6 @@ func _report_disk_progress(build_dir: String) -> void:
 			_host._log_raw("编译进度: %d/%d 目标" % [done, total])
 		else:
 			_host._log_raw("编译进度: 已生成 %d 个目标" % done)
-
 
 ## 构建目录里已生成的编译单元(.o/.obj)数量 —— 独立于输出管道的真实进度
 func _count_build_objects(build_dir: String) -> int:
@@ -252,7 +237,6 @@ func _count_build_objects(build_dir: String) -> int:
 			e = dir.get_next()
 		dir.list_dir_end()
 	return count
-
 
 ## 编译目标总数: 统计整个构建树所有 build.make 里的"对象编译目标"(去重)。
 func _total_compile_units(build_dir: String) -> int:
@@ -283,7 +267,6 @@ func _total_compile_units(build_dir: String) -> int:
 			e = dir.get_next()
 		dir.list_dir_end()
 	return _host._total_targets
-
 
 ## 读取原始构建日志自上次位置起的新内容, 逐行回显到 Output/镜像日志; 返回是否有新行
 func _drain_log(raw_path: String) -> bool:

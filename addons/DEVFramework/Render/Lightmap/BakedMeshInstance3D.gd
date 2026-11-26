@@ -39,7 +39,7 @@ static func set_all_visible(value: bool) -> void:
 	all_visible = value
 	AssetLightmapBinder.refresh_all()
 
-## 全局亮度：0 等于没有烘焙光，1.0 ≈ 与烘焙场景里引擎 LightmapGI 的观感一致。不必重烘
+## 全局亮度：0 等于没有烘焙光，1.0 ≈ 与烘焙场景里引擎 LightmapGI 的观感一致。
 static func set_strength(value: float) -> void:
 	AssetLightmapBinder.set_strength(value)
 

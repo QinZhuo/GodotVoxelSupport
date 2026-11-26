@@ -2,7 +2,6 @@
 extends RefCounted
 
 ## 用新的 `QVoxelBuilder`（图元 + 调色板 + 落盘）程序化生成一座中世纪半木结构小屋。
-## 坐标系：y 上，正面（门窗）朝 +z。
 
 const PATH := "res://demo/samples/cottage.qvx"
 
@@ -16,13 +15,11 @@ const RIDGE_Z := 6
 const RIDGE_Y := 15
 const EAVE_Y := 11
 
-
 static func save() -> void:
 	var b := build()
 	b.save(PATH)
 	var v := b.voxels()
 	print("[Cottage] %s  %d voxels" % [PATH, v.size()])
-
 
 static func build() -> QVoxelBuilder:
 	var b := QVoxelBuilder.new()
@@ -48,7 +45,6 @@ static func build() -> QVoxelBuilder:
 	_lantern(b, beam, iron, glass)
 	return b
 
-
 ## 石砌地基（比墙外扩一圈），顶面掺深色石块。
 static func _foundation(b: QVoxelBuilder, stone: int, stone_dk: int) -> void:
 	b.box(Vector3i(X0 - 1, 0, Z0 - 1), Vector3i(X1 + 1, 2, Z1 + 1), stone)
@@ -56,7 +52,6 @@ static func _foundation(b: QVoxelBuilder, stone: int, stone_dk: int) -> void:
 		for z in range(Z0 - 1, Z1 + 2):
 			if (x * 3 + z * 5) % 4 == 0:
 				b.put(Vector3i(x, 2, z), stone_dk)
-
 
 ## 四面灰泥墙（空心壳，一圈一厚）。
 static func _walls(b: QVoxelBuilder, plaster: int, beam: int) -> void:
@@ -70,7 +65,6 @@ static func _walls(b: QVoxelBuilder, plaster: int, beam: int) -> void:
 		b.box(Vector3i(X0, y, Z1), Vector3i(X1, y, Z1), beam)
 		b.box(Vector3i(X0, y, Z0), Vector3i(X0, y, Z1), beam)
 		b.box(Vector3i(X1, y, Z0), Vector3i(X1, y, Z1), beam)
-
 
 ## 半木结构：四角立柱 + 立枋 + 窗下斜撑。
 static func _timber(b: QVoxelBuilder, beam: int) -> void:
@@ -90,7 +84,6 @@ static func _timber(b: QVoxelBuilder, beam: int) -> void:
 	b.line(Vector3i(X0, WY0, 11), Vector3i(X0, WY0 + 4, 8), beam)
 	b.line(Vector3i(X1, WY0, 11), Vector3i(X1, WY0 + 4, 8), beam)
 
-
 static func _door(b: QVoxelBuilder, beam: int, door: int, iron: int, stone: int) -> void:
 	b.box(Vector3i(7, WY0, Z1), Vector3i(9, 7, Z1), door)
 	b.line(Vector3i(6, WY0, Z1), Vector3i(6, 8, Z1), beam)
@@ -101,15 +94,13 @@ static func _door(b: QVoxelBuilder, beam: int, door: int, iron: int, stone: int)
 	b.put(Vector3i(9, 5, Z1), iron)
 	b.box(Vector3i(6, 2, Z1 + 1), Vector3i(10, 2, Z1 + 2), stone)
 
-
 static func _windows(b: QVoxelBuilder, beam: int, glass: int) -> void:
 	_window_face(b, Vector3i(2, 6, Z1), Vector3i(5, 9, Z1), beam, glass, Vector3i(0, 0, 1))
 	_window_face(b, Vector3i(11, 6, Z1), Vector3i(14, 9, Z1), beam, glass, Vector3i(0, 0, 1))
 	_window_face(b, Vector3i(X1, 6, 3), Vector3i(X1, 9, 6), beam, glass, Vector3i(1, 0, 0))
 	_window_face(b, Vector3i(X1, 6, 7), Vector3i(X1, 9, 10), beam, glass, Vector3i(1, 0, 0))
 
-
-## 一扇窗：外框 beam + 内部玻璃 + 十字窗棂。normal 为墙面外法线方向（决定面内两轴）。
+## 一扇窗：外框 beam + 内部玻璃 + 十字窗棂。
 static func _window_face(b: QVoxelBuilder, a: Vector3i, c: Vector3i, beam: int, glass: int, normal: Vector3i) -> void:
 	var lo := Vector3i(mini(a.x, c.x), mini(a.y, c.y), mini(a.z, c.z))
 	var hi := Vector3i(maxi(a.x, c.x), maxi(a.y, c.y), maxi(a.z, c.z))
@@ -124,7 +115,6 @@ static func _window_face(b: QVoxelBuilder, a: Vector3i, c: Vector3i, beam: int, 
 			edge = cell.x == lo.x or cell.x == hi.x or cell.y == lo.y or cell.y == hi.y
 		var mullion := cell.y == my or (cell.x == mid if x_normal else cell.z == mid)
 		b.put(cell, beam if (edge or mullion) else glass)
-
 
 ## 人字屋顶（脊沿 x），出檐 + 山墙封闭 + 脊檩。
 static func _roof(b: QVoxelBuilder, roof: int, roof_dk: int, plaster: int, beam: int) -> void:
@@ -148,12 +138,10 @@ static func _roof(b: QVoxelBuilder, roof: int, roof_dk: int, plaster: int, beam:
 	b.box(Vector3i(X0 - 1, EAVE_Y, -2), Vector3i(X1 + 1, EAVE_Y, -2), beam)
 	b.box(Vector3i(X0 - 1, EAVE_Y, 14), Vector3i(X1 + 1, EAVE_Y, 14), beam)
 
-
 static func _chimney(b: QVoxelBuilder, brick: int, iron: int) -> void:
 	b.box(Vector3i(12, WY0, Z0 - 1), Vector3i(13, 18, Z0), brick)
 	b.box(Vector3i(11, 18, Z0 - 2), Vector3i(14, 18, Z0 + 1), brick)
 	b.box(Vector3i(12, 18, Z0 - 1), Vector3i(13, 18, Z0), iron)
-
 
 static func _lantern(b: QVoxelBuilder, beam: int, iron: int, glass: int) -> void:
 	b.line(Vector3i(10, 7, Z1), Vector3i(11, 8, Z1 + 1), beam)

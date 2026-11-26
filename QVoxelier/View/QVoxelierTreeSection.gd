@@ -2,13 +2,6 @@
 class_name QVoxelierTreeSection
 extends QVoxelierSection
 ## 统一层级树 —— **唯一的层级入口**（纯 Outliner，不含动画轴）。
-## 【为什么只有一个面板】组 / 模型是同一棵树上的两种行，一切关系一眼可见、随手可改。
-## 【树视图是模型的纯投影】落位只改 QVoxelWorld.nodes，然后整棵重建。行控件是"投影出来的像素"。
-## 【为什么自绘而不是 Godot 的 Tree】Tree 自带整套滚选 / 焦点语义，行内只能放"单元格 + 图标 + 按钮"，
-## 且触摸命中区不达标；自绘则每行都是**整行按钮**，行内可放任意控件。
-## 【为什么本面板只发信号、不直接改数据】改动要能撤销，而撤销命令属于应用层
-## （QVoxelPropertyCommand）。面板只报告"用户想做什么"，由 App 决定怎么记。
-## 【动画帧编辑不在这里】最下方另有一条独立的「动画帧条」（QVoxelierTimeline）只显示当前模型的体素帧。
 
 ## 选中某个节点（模型用于切换当前编辑对象；组用于后续"整组操作"）。
 signal node_selected(node: QVoxelNode)
@@ -32,10 +25,8 @@ var _del: Button
 var _selected: QVoxelNode
 var _filter := ""
 
-
 func section_title() -> String:
 	return "层级"
-
 
 func _build_body(body: VBoxContainer) -> void:
 	var tools := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
@@ -65,7 +56,6 @@ func _build_body(body: VBoxContainer) -> void:
 	_rows = QVoxelUi.vbox(QVoxelUi.SPACE_XS)
 	body.add_child(_rows)
 
-
 ## "＋" 菜单：新建组 / 新建模型。
 func _popup_add(anchor: Control) -> void:
 	var menu := PopupMenu.new()
@@ -76,14 +66,12 @@ func _popup_add(anchor: Control) -> void:
 	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(anchor.global_position), Vector2i(anchor.size)))
 
-
 func _on_add_menu(id: int, _anchor: Control) -> void:
 	match id:
 		0:
 			group_add_requested.emit(_target_parent())
 		1:
 			model_add_requested.emit(_target_parent())
-
 
 ## 行右键菜单：删除节点（改名在右侧「对象」属性页里做）。
 func _row_context(node: QVoxelNode) -> void:
@@ -96,7 +84,6 @@ func _row_context(node: QVoxelNode) -> void:
 	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(DisplayServer.mouse_get_position(), Vector2i.ZERO))
 
-
 func set_world(world: QVoxelWorld, active_id := -1) -> void:
 	# 只在**换了世界**时清选中；同一世界的刷新（改名 / 移动 / 撤销）要保住选中高亮。
 	if world != _world:
@@ -105,15 +92,12 @@ func set_world(world: QVoxelWorld, active_id := -1) -> void:
 	_active_id = active_id
 	_rebuild()
 
-
 func set_active(active_id: int) -> void:
 	_active_id = active_id
 	_rebuild()
 
-
 func refresh() -> void:
 	_rebuild()
-
 
 # 投影
 
@@ -135,7 +119,6 @@ func _rebuild() -> void:
 			_add_rows(n, 0)
 	_measure()
 
-
 ## 搜索过滤：名字命中即显示；组还看子树。
 func _visible_in_filter(node: QVoxelNode) -> bool:
 	if _filter.is_empty():
@@ -148,7 +131,6 @@ func _visible_in_filter(node: QVoxelNode) -> bool:
 				return true
 	return false
 
-
 func _add_rows(node: QVoxelNode, depth: int) -> void:
 	_rows.add_child(_make_row(node, depth))
 	if node.is_group() and not node.expanded_in_tree:
@@ -157,7 +139,6 @@ func _add_rows(node: QVoxelNode, depth: int) -> void:
 		for c in (node as QVoxelGroup).child_nodes:
 			if c != null:
 				_add_rows(c, depth + 1)
-
 
 func _make_row(node: QVoxelNode, depth: int) -> Control:
 	var is_active := _is_active(node)
@@ -212,7 +193,7 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 		node_locked_changed.emit(node, v))
 	box.add_child(lock)
 
-	# 名字用 Label（点整行 = 选中；改名在右侧「对象」属性页里做）。活动 / 选中行名字用强调色。
+	# 名字用 Label（点整行 = 选中；改名在右侧「对象」属性页里做）。
 	var name_label := QVoxelUi.label(node.display_name(), QVoxelUi.FONT_M,
 			QVoxelUi.ACCENT if (is_active or is_sel) else QVoxelUi.TEXT)
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -238,12 +219,10 @@ func _make_row(node: QVoxelNode, depth: int) -> Control:
 
 	return row
 
-
 func _badge_of(node: QVoxelNode) -> String:
 	if node.is_model():
 		return "%d 体素" % (node as QVoxelModel).count_solid()
 	return "%d 模型" % (node as QVoxelGroup).count_models()
-
 
 func _row_tooltip(node: QVoxelNode) -> String:
 	var lines := PackedStringArray()
@@ -256,14 +235,11 @@ func _row_tooltip(node: QVoxelNode) -> String:
 	lines.append("位置 %d, %d, %d" % [node.offset.x, node.offset.y, node.offset.z])
 	return "\n".join(lines)
 
-
 func _errors_of(_node: QVoxelNode) -> int:
 	return 0
 
-
 func _is_active(node: QVoxelNode) -> bool:
 	return node.is_model() and (node as QVoxelModel).model_id == _active_id
-
 
 ## 选中 / 活动行的强调底。
 func _row_style() -> StyleBoxFlat:
@@ -272,12 +248,10 @@ func _row_style() -> StyleBoxFlat:
 	sb.set_corner_radius_all(4)
 	return sb
 
-
 func _target_parent() -> QVoxelGroup:
 	if _selected != null and _selected.is_group():
 		return _selected as QVoxelGroup
 	return null
-
 
 # 拖拽落位
 
@@ -298,8 +272,7 @@ func _drop_target(dragged: QVoxelNode, hovered: QVoxelNode, at: Vector2) -> Vari
 		return null
 	return [parent, idx + (1 if at.y > h / 2.0 else 0)]
 
-
-## 一行。继承 Button 是为了拿到拖拽三个虚方法；右键弹行菜单。
+## 一行。
 class TreeRow extends Button:
 	var node: QVoxelNode
 	var section: QVoxelierTreeSection

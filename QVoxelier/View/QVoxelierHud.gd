@@ -2,17 +2,6 @@
 class_name QVoxelierHud
 extends QVoxelierPanel
 ## 状态栏 + 瞬时提示 + 操作说明 —— 视口的全部"回话"都在这里。
-## 【为什么值得单独一类】视口的手感有一半来自反馈：用户必须能当场看到"我在哪个格上"
-## "这一笔写下去是几号材质""刚才那笔撤得掉吗"。把这些塞进视口脚本，会让一个本该只翻译
-## 输入的角色长出界面细节；而它们又必须与工具表（[QVoxelBrushTool.MODES]）保持一致 ——
-## 提示文案与按钮同源，才不会出现"工具栏写着线笔、提示却还在讲盒笔"。
-## 【形态无关】只依赖会话（Editing 层），不认识相机与渲染器：换成 Dock 内嵌视口时一行都不用改。
-## 【不抢输入】状态栏整条 mouse_filter = IGNORE：它压在视口底边上，但绝不吞鼠标事件
-## （否则底部会多出一条"点不进去"的死区）。唯一吃事件的只有「?」打开的那块说明面板，
-## 因为那块是**浮层**——盖住视口时本就该拦住点击。
-## 【为什么要有一份操作说明】同一套界面要喂给"鼠标 + 键盘"和"单根手指"两种操作形态，
-## 两者的动作名字完全不同（右键 = 移除模式，中键 = 导航模式）。说明面板把两套对照着列出来，
-## 用户不必猜"平板上的右键在哪"。
 
 ## 会话（由视口装配后设进来；为空时只显示静态文案）。
 var session: QVoxelEditSession = null
@@ -22,10 +11,9 @@ var _hint: Label
 var _cursor: RichTextLabel
 var _selection: Label
 var _toast: Label
-## 悬停提示（按钮/控件的 tooltip 首行）。非空时状态栏显示它，否则显示当前工具提示。
+## 悬停提示（按钮/控件的 tooltip 首行）。
 var _hover_hint := ""
-## 后台任务（烘焙间接光、体素化…）。非空时压过工具提示显示，**带转圈** ——
-## 这些活会阻塞整帧，没有可见状态的话用户只会觉得界面卡死了。
+## 后台任务（烘焙间接光、体素化…）。
 var _busy_text := ""
 var _busy_frame := 0
 var _busy_t := 0.0
@@ -35,8 +23,7 @@ var _log_scroll: ScrollContainer
 var _log_list: VBoxContainer
 var _log_empty: Label
 var _toast_left := 0.0
-## 两块浮层右侧要让开的宽度。装配时由 App 报进来（抽屉的实际宽度随内容变，见
-## QVoxelierDock._fit），默认退回设计宽度 —— HUD 单独跑时也摆得对。
+## 两块浮层右侧要让开的宽度。
 var _right_inset := QVoxelUi.dock_width() + QVoxelUi.space_s()
 
 const TOAST_SECONDS := 2.5
@@ -48,9 +35,8 @@ const LOG_MAX := 200
 
 ## 后台任务指示：四个方向依次转，比"..."更能让人看出"它还在动"。
 const SPINNER := ["◐", "◓", "◑", "◒"]
-## 转圈帧间隔（秒）。再快就像闪烁了。
+## 转圈帧间隔（秒）。
 const SPIN_INTERVAL := 0.12
-
 
 func _process(delta: float) -> void:
 	if not _busy_text.is_empty():
@@ -65,10 +51,9 @@ func _process(delta: float) -> void:
 	if _toast_left <= 0.0:
 		_toast.text = ""
 
-
 # 对外：刷新 / 提示
 
-## 按会话现状刷新状态栏（工具 + 提示）。读数只留光标与选区；模型尺寸/体素与撤销栈已在别处可见，删掉。
+## 按会话现状刷新状态栏（工具 + 提示）。
 func refresh() -> void:
 	if session == null:
 		return
@@ -79,15 +64,12 @@ func refresh() -> void:
 	_selection.add_theme_color_override("font_color",
 			QVoxelUi.ACCENT if not session.selection.is_empty() else QVoxelUi.TEXT_FAINT)
 
-
 ## 悬停某个按钮 / 控件时把它的提示送到状态栏（空串 = 恢复默认的工具提示）。
 func show_hover_hint(text: String) -> void:
 	_hover_hint = text
 	_apply_hint()
 
-
-## 设 / 清后台任务状态（空串 = 结束）。**不进日志**：它是"正在进行"，不是"刚发生了什么"；
-## 烘一次间接光就记一条，日志会被自动行为灌满。
+## 设 / 清后台任务状态（空串 = 结束）。
 func set_busy(text: String) -> void:
 	if text == _busy_text:
 		return
@@ -96,10 +78,8 @@ func set_busy(text: String) -> void:
 	_busy_t = 0.0
 	_apply_hint()
 
-
 func is_busy() -> bool:
 	return not _busy_text.is_empty()
-
 
 ## 状态栏中间那一格：后台任务 > 悬停提示 > 当前工具的用法。
 func _apply_hint() -> void:
@@ -113,8 +93,7 @@ func _apply_hint() -> void:
 	_hint.text = _hover_hint if not _hover_hint.is_empty() else (
 			session.tool.hint() if session != null else "")
 
-
-## 光标所在格（Vector3i.MIN = 没指到网格上）。轴名用与坐标轴 gizmo 同一套红绿蓝。
+## 光标所在格（Vector3i.MIN = 没指到网格上）。
 func set_cursor(cell: Vector3i) -> void:
 	if cell == Vector3i.MIN:
 		_cursor.text = "[color=#%s]X[/color] —   [color=#%s]Y[/color] —   [color=#%s]Z[/color] —" % [
@@ -123,20 +102,10 @@ func set_cursor(cell: Vector3i) -> void:
 		_cursor.text = "[color=#%s]X[/color] %d   [color=#%s]Y[/color] %d   [color=#%s]Z[/color] %d" % [
 				_axis_hex(0), cell.x, _axis_hex(1), cell.y, _axis_hex(2), cell.z]
 
-
 static func _axis_hex(i: int) -> String:
 	return (QVoxelierGizmo.AXIS_COLORS[i] as Color).to_html(false)
 
-
 ## 模型读数：**链作用后**的盒尺寸 + 屏幕上真实存在的体素数。
-## 【为什么两个数都取自显示层，而不是手绘种子】用户看的是求值输出：链里有镜像 / 平铺时
-## `object.grid_size` 与看到的盒尺寸不同；程序化修改器产出的体素也不在手绘种子里。
-## 报种子数会变成"屏幕上有 8000 个体素，读数说 0"。
-## 【为什么尺寸报 output_size 而体素数报 data】尺寸是**声明**（盒多大），体素数是**事实**
-## （现在有多少个非空格）。前者由链的结构决定，后者只有数据层知道 —— 两处各取权威来源。
-## 【为什么是 evaluated_voxel_count 而不是 get_voxel_count】后者数的是 chunk 缓冲，而落笔封口时
-## 受影响的块**刚被作废丢弃**（等渲染器重新取数）→ 读出来恰好缺了刚画的那几块，表现为
-## "画完却还是 0 体素"。前者数的是求值输出本身，与屏幕上那份几何同源，且不依赖谁先跑。
 func _model_readout() -> String:
 	if session == null or session.object == null:
 		return "模型 —"
@@ -144,10 +113,7 @@ func _model_readout() -> String:
 	var n := session.data.evaluated_voxel_count() if session.data != null else 0
 	return "模型 %d×%d×%d · %d 体素" % [g.x, g.y, g.z, n]
 
-
 ## 选区 / 剪贴板读数。
-## 【为什么剪贴板空时不显示】"剪贴板空"常驻在状态栏上是纯噪音 —— 它只在用户按过复制之后
-## 才有意义。空选区则必须显示（"无选区"），因为它是"按了复制却没反应"的唯一解释。
 func _selection_readout() -> String:
 	if session == null:
 		return "无选区"
@@ -156,28 +122,20 @@ func _selection_readout() -> String:
 		s += " · " + session.clipboard.describe()
 	return s
 
-
 ## 一行短提示（2.5 秒后自动消失）：越界、无可撤销、模式已切换这类"刚发生的事"。
-## 【为什么顺带记进日志】提示一闪即过，而"我刚做了什么才变成这样"的上下文只在日志里留得住 ——
-## 导入 / 导出 / 求值失败的原因全都走这条路。让 flash 一处同时做两件事：几十个调用点一行不改，
-## 也不会有人新增提示时忘了记。
 func flash(text: String) -> void:
 	_toast.text = text
 	_toast_left = TOAST_SECONDS
 	_append_log(text)
 
-
-## 操作说明浮层（由应用栏的「?」开关）。两块浮层都锚在右上角，同时开会叠在一起 ——
-## 开一块就关另一块（应用栏那个按钮由 App 负责弹起，见 QVoxelierApp._set_legend_visible）。
+## 操作说明浮层（由应用栏的「?」开关）。
 func set_legend_visible(on: bool) -> void:
 	_legend.visible = on
 	if on:
 		_log.visible = false
 
-
 func legend_visible() -> bool:
 	return _legend.visible
-
 
 ## 日志浮层（由应用栏的「日志」开关）：刚才发生了什么，按时间从上往下排。
 func set_log_visible(on: bool) -> void:
@@ -187,10 +145,8 @@ func set_log_visible(on: bool) -> void:
 		# 打开即滚到底：点它多半是想看"最近这一下"，而不是从头读起。
 		_scroll_to_bottom.call_deferred()
 
-
 func log_visible() -> bool:
 	return _log.visible
-
 
 ## 清空日志（浮层标题栏的按钮）。
 func clear_log() -> void:
@@ -199,14 +155,12 @@ func clear_log() -> void:
 		c.queue_free()
 	_refresh_log_empty()
 
-
-## 日志内容（只读，按时间从旧到新）。给"复制日志"这类导出用，也让测试不必伸手掏私有字段。
+## 日志内容（只读，按时间从旧到新）。
 func log_lines() -> PackedStringArray:
 	var out := PackedStringArray()
 	for c in _log_list.get_children():
 		out.append((c as Label).text)
 	return out
-
 
 # 界面
 
@@ -217,9 +171,7 @@ func _build() -> void:
 	_build_legend()
 	_build_log()
 
-
 ## 底部状态栏：左起工具名（强调色，一眼定位），中间是当前工具的用法提示（可伸缩，
-## 窄屏时先压缩它），右侧是光标 / 笔刷 / 材质 / 撤销栈这些随操作跳动的读数。
 func _build_status() -> void:
 	var bar := PanelContainer.new()
 	bar.add_theme_stylebox_override("panel",
@@ -247,7 +199,6 @@ func _build_status() -> void:
 	_cursor = RichTextLabel.new()
 	_cursor.fit_content = true
 	# 关掉自动换行是必须的：fit_content 的"最小宽度 = 内容宽度"与换行互相喂招 ——
-	# 宽度先被压成 1px、文本折成好几行、高度反被撑到 144px（整条状态栏跟着变形）。
 	_cursor.autowrap_mode = TextServer.AUTOWRAP_OFF
 	_cursor.bbcode_enabled = true
 	_cursor.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -257,7 +208,6 @@ func _build_status() -> void:
 	_cursor.add_theme_constant_override("outline_size", 4)
 	row.add_child(_cursor)
 	# 模型尺寸/体素数、撤销/重做计数已删：前者在层级里可见，后者顶栏的撤销/重做按钮已表达。
-
 
 ## 提示条压在调色板上方（调色板占着底边），避免被盖住。
 func _build_toast() -> void:
@@ -270,9 +220,7 @@ func _build_toast() -> void:
 	_toast.offset_bottom = -float(bottom)
 	add_child(_toast)
 
-
-## 操作说明浮层：鼠标与触摸两套并列。默认隐藏（视口第一印象要干净），
-## 由应用栏的「?」开关 —— 说明是查得到的东西，不该常驻占地方。
+## 操作说明浮层：鼠标与触摸两套并列。
 func _build_legend() -> void:
 	_legend = QVoxelUi.panel(QVoxelUi.space_m(), QVoxelUi.SURFACE_SOLID)
 	_legend.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
@@ -295,11 +243,7 @@ func _build_legend() -> void:
 		for line in block[1]:
 			col.add_child(QVoxelUi.label(line, QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM))
 
-
 ## 日志浮层：与说明浮层并列（同样锚右上、同样默认隐藏），区别是**内容会增长**，故带滚动与清空。
-## 【为什么不塞进右侧抽屉当第六组】抽屉里的组是"对工程做什么"（颜色 / 层级 / 修改器 / 时间轴），
-## 而日志是"刚才发生了什么"—— 它与瞬时提示、操作说明同属"视口的回话"，放在视口这一层才连贯；
-## 而且它多半在出错之后才被打开，那时用户的眼睛本来就在视口上。
 func _build_log() -> void:
 	_log = QVoxelUi.panel(QVoxelUi.space_m(), QVoxelUi.SURFACE_SOLID)
 	_log.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
@@ -332,7 +276,6 @@ func _build_log() -> void:
 	_log_scroll.add_child(_log_list)
 
 	# 空态：日志是"回看刚才发生了什么"，一条都没有时得给句话 —— 否则用户对着空面板分不清
-	# 是自己还没操作，还是面板没打开/坏了。与滚动区互斥可见，所以占同一个位置。
 	_log_empty = QVoxelUi.label("还没有操作记录 —— 画一笔、切个工具，都会记在这里",
 			QVoxelUi.FONT_S, QVoxelUi.TEXT_FAINT)
 	_log_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -340,10 +283,7 @@ func _build_log() -> void:
 	col.add_child(_log_empty)
 	_refresh_log_empty()
 
-
 ## 追加一行：新行在底部（时间从上往下读），并**有界**（只留最近 LOG_MAX 行）。
-## 【为什么在 Label 上开自动换行】浮层宽固定（长消息不该把面板撑到半个屏幕），
-## 若改成截断，则"失败原因"最关键的尾巴会被吃掉 —— 日志的价值恰恰在那后半句。
 func _append_log(text: String) -> void:
 	if _log_list == null:
 		return
@@ -357,7 +297,6 @@ func _append_log(text: String) -> void:
 	_refresh_log_empty()
 	_scroll_to_bottom.call_deferred()
 
-
 ## 空态与列表互斥可见：一条记录都没有时给提示，否则给滚动区。
 func _refresh_log_empty() -> void:
 	if _log_empty == null or _log_scroll == null:
@@ -366,18 +305,11 @@ func _refresh_log_empty() -> void:
 	_log_empty.visible = empty
 	_log_scroll.visible = not empty
 
-
 ## 两块浮层右侧要让开的宽度：右侧栏（`dock_width`）再加一条缝。
-## 【为什么不能让浮层贴屏幕右缘】说明与日志和右列抽屉锚在同一个角上（PRESET_TOP_RIGHT），
-## 贴右缘就会被抽屉整条压住 —— 实测「操作说明」右半边被「颜色」面板盖掉，
-## "Ctrl+O 打开""无需键盘即可完成全部操作"这几行直接读不到。
 func _float_inset() -> float:
 	return _right_inset
 
-
 ## 报告右列占掉的宽度（App 装配时喂入抽屉的实际宽度 + 一条缝），变了就把浮层挪过去。
-## 【为什么要喂而不是自己算】抽屉宽度是**内容驱动**的（同工具坞），HUD 既看不见抽屉的内容、
-## 也不该去认识兄弟节点；"谁给谁让位"统一在装配处说清（见 QVoxelierApp._build_ui）。
 func set_right_inset(w: float) -> void:
 	if is_equal_approx(w, _right_inset):
 		return
@@ -389,17 +321,13 @@ func set_right_inset(w: float) -> void:
 		_log.offset_right = -w
 		_log.offset_left = -LOG_WIDTH - w
 
-
-## 滚到底。**延到帧末**：刚 add_child 的行还没参与布局，当场写 scroll_vertical 会被随后的
-## 布局改回去（表现为"新行在下面看不见"）。
+## 滚到底。
 func _scroll_to_bottom() -> void:
 	if _log_scroll == null:
 		return
 	_log_scroll.scroll_vertical = int(_log_scroll.get_v_scroll_bar().max_value)
 
-
 ## 说明文案：**两套操作形态并列**，因为同一套界面上平板与鼠标的动作名字不同。
-## 改输入约定时改这里一处（工具级的提示在 QVoxelBrushTool.MODES 里，两处各管一层）。
 const _LEGEND := [
 	["鼠标 + 键盘", [
 		"左键拖动 按当前操作落笔 （顶栏选项条选 添加 / 移除 / 上色）",
@@ -420,7 +348,6 @@ const _LEGEND := [
 		"色块与按钮都按手指尺寸留足命中区，无需键盘即可完成全部操作",
 	]],
 ]
-
 
 func _readout(font_size: int, color: Color) -> Label:
 	# 压在 3D 画面上，故一律带暗描边（见 QVoxelUi.label 的 outlined）。

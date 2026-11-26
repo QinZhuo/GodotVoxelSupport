@@ -1,14 +1,12 @@
 @tool
 ## 日志/错误捕获器 — 继承 Godot 的 Logger, 环形缓冲 print 与 push_error/脚本错误(含栈追踪)。
-## 为什么放在 Core: 只有引擎依赖, MCP 与 headless 测试两侧都要用; 留在 MCP 会让 Test 反向依赖 MCP。
-## Reset: 进程级（error_sink 是宿主注入的回调, 重载后由宿主重新绑定, 不进 ResetTool）
+## Reset: 进程级（error_sink 是宿主注入的回调，重载后由宿主重新绑定，不进 ResetTool）
 class_name LogCaptureTool extends Logger
 
 const CAPACITY := 2000        # 环形缓冲容量(日志条目数)
 const ERROR_CAPACITY := 500   # 错误条目容量(含栈追踪, 占空间)
 
 ## 错误旁路: 宿主(如 MCP)注入后, 每条错误额外实时推给另一个进程。
-## 断点暂停时主循环停摆, 对端发来的查询根本不会被执行, 只有这份先推出去的副本能说出真实错误。
 static var error_sink: Callable
 
 ## 日志条目结构: {"time":int毫秒, "message":String, "is_error":bool}
@@ -18,10 +16,8 @@ var _base_index := 0          # 已从 _messages 头部丢弃的逻辑消息数
 var _err_base_index := 0      # 已从 _errors 头部丢弃的逻辑错误数
 var _mutex := Mutex.new()
 
-
 func _init() -> void:
 	pass
-
 
 ## 由 _log_message 调用 — 捕获普通 print / printerr(text流)
 func _log_message(message: String, error: bool) -> void:
@@ -41,7 +37,6 @@ func _log_message(message: String, error: bool) -> void:
 		_messages.pop_front()
 		_base_index += 1
 	_mutex.unlock()
-
 
 ## 由 _log_error 调用(捕获 push_error/脚本错误/assert 等, 含栈追踪)
 func _log_error(
@@ -80,7 +75,6 @@ func _log_error(
 	if error_sink.is_valid():
 		error_sink.call(entry)
 
-
 func _error_type_name(t: int) -> String:
 	match t:
 		Logger.ErrorType.ERROR_TYPE_WARNING: return "warning"
@@ -88,15 +82,13 @@ func _error_type_name(t: int) -> String:
 		Logger.ErrorType.ERROR_TYPE_SHADER: return "shader_error"
 	return "error"
 
-
 func _push_error(entry: Dictionary) -> void:
 	_errors.append(entry)
 	if _errors.size() > ERROR_CAPACITY:
 		_errors.pop_front()
 		_err_base_index += 1
 
-
-## 剥离 ANSI 转义序列(颜色码等)。这些控制字符会被 JSON.stringify 原样输出, 污染客户端解析。
+## 剥离 ANSI 转义序列(颜色码等)。
 func _strip_ansi(text: String) -> String:
 	if not text.contains(String.chr(27)):
 		return text
@@ -121,7 +113,6 @@ func _strip_ansi(text: String) -> String:
 		out += String.chr(c)
 		i += 1
 	return out
-
 
 ## 合并连续重复的条目为一条, 减少 JSON 体积节省 token。
 func merge_duplicates(entries: Array) -> Array:
@@ -150,7 +141,6 @@ func merge_duplicates(entries: Array) -> Array:
 		i = j
 	return out
 
-
 ## 条目合并签名: 日志只有 message; 错误叠加 type/file/line/code(栈帧差异不计入, 保证同位置错误可合并)
 func _entry_key(e: Dictionary) -> String:
 	var key := str(e.get("message", ""))
@@ -164,7 +154,6 @@ func _entry_key(e: Dictionary) -> String:
 			key += "\n" + code
 	return key
 
-
 ## 获取新增日志(自 last_index 起), 返回 [entries, new_index]
 func take_logs_since(last_index: int) -> Dictionary:
 	_mutex.lock()
@@ -175,7 +164,6 @@ func take_logs_since(last_index: int) -> Dictionary:
 	var result := {"entries": new_entries, "next": _base_index + _messages.size()}
 	_mutex.unlock()
 	return result
-
 
 ## 获取新增错误(自 last_index 起的逻辑序号)
 func take_errors_since(last_index: int) -> Dictionary:
@@ -188,15 +176,12 @@ func take_errors_since(last_index: int) -> Dictionary:
 	_mutex.unlock()
 	return result
 
-
 ## 当前错误逻辑游标(应在执行序列前快照, 作为 take_errors_since 的 since)。
-## 依赖"执行前后新增错误"的工具(validate_script/eval_code 的诊断)必须用游标而非数组大小。
 func get_error_cursor() -> int:
 	_mutex.lock()
 	var c := _err_base_index + _errors.size()
 	_mutex.unlock()
 	return c
-
 
 ## 把"自 cursor 起新增的引擎报错"格式化成可读详情(每条带行号, 最多 5 条)。
 func describe_errors_since(cursor: int) -> String:
@@ -217,7 +202,6 @@ func describe_errors_since(cursor: int) -> String:
 			break
 	return "(引擎未提供详细解析错)" if lines.is_empty() else "具体:\n" + "\n".join(lines)
 
-
 ## 清空错误缓冲区(调试复位用)
 func clear_errors() -> void:
 	_mutex.lock()
@@ -225,13 +209,11 @@ func clear_errors() -> void:
 	_err_base_index = 0
 	_mutex.unlock()
 
-
 func clear_messages() -> void:
 	_mutex.lock()
 	_messages.clear()
 	_base_index = 0
 	_mutex.unlock()
-
 
 ## 供运行游戏日志合并(带来源前缀), 线程安全
 func append_external(message: String, prefix: String = "[运行] ") -> void:
@@ -242,20 +224,17 @@ func append_external(message: String, prefix: String = "[运行] ") -> void:
 		_base_index += 1
 	_mutex.unlock()
 
-
 func get_message_count() -> int:
 	_mutex.lock()
 	var n := _messages.size()
 	_mutex.unlock()
 	return n
 
-
 func get_error_count() -> int:
 	_mutex.lock()
 	var n := _errors.size()
 	_mutex.unlock()
 	return n
-
 
 ## 公开清洗接口: 供 MCP 工具在输出 JSON 前兜底剥离控制字符
 func sanitize(message: String) -> String:

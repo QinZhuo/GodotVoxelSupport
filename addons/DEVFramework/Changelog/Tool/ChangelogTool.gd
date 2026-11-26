@@ -16,9 +16,6 @@ static var _seen_version := ""
 static func is_debug_mode() -> bool:
 	return DebugTool.is_debug_mode()
 
-
-# ============================================================
-
 ## 当前项目版本：读内置项目设置；未配置时回退到日志 Def 中的最高版本；都为空返回 ""
 static func get_current_version() -> String:
 	var v: String = ProjectSettings.get_setting(SETTING_VERSION, "")
@@ -56,9 +53,6 @@ static func get_pending_entries() -> Array[ChangelogEntryDef]:
 	result.sort_custom(func(a, b): return SaveTool.is_version_newer(a.version, b.version))
 	return result
 
-
-# ============================================================
-
 ## 记录已展示到的版本（默认记录当前版本；可传 version 覆盖，便于模拟旧已见版本）
 static func mark_seen(version := "") -> void:
 	var v := version if not version.is_empty() else get_current_version()
@@ -66,16 +60,12 @@ static func mark_seen(version := "") -> void:
 		_seen_version = v
 
 ## 重置已见版本（便于测试 / 重置玩家记录）
-## 注意：不要命名为 reset_state —— Resource 基类已有同名核心方法，类级静态调用会被其抢占。
 static func reset_seen_version() -> void:
 	_seen_version = ""
 
 ## 从存档恢复已见版本（先于 [method has_update] 调用）
 static func load_seen_version(seen: Variant) -> void:
 	_seen_version = str(seen) if seen is String or seen is int or seen is float else ""
-
-
-# ============================================================
 
 ## 收集全部日志 Def 的条目（按 Def 内声明顺序）
 static func _collect_entries() -> Array[ChangelogEntryDef]:

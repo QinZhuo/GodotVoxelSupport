@@ -2,10 +2,6 @@ class_name FrameworkNative
 extends RefCounted
 
 ## 框架级统一 GDExtension 原生桥接。
-## 整个 DEVFramework 的 C++ 原生能力集中在**唯一一个共享扩展**：
-##   - 懒加载共享原生库（所有模块第一次访问时统一加载，避免各自重复检测）
-##   - 按类名/方法名做存在性校验（缺库/版本不符时明确 push_error，无静默回退）
-##   - 提供稳定的类实例化（ClassDB 派发 + 脚本 resource_path 加载两条路径）
 
 ## 共享原生库配置路径（相对 res://）
 const NATIVE_EXTENSION_PATH := "res://addons/DEVFramework/Native/devframework.gdextension"
@@ -16,11 +12,9 @@ static var _cache: Dictionary = {}
 ## 已确认可用的类名集合（避免重复检测）
 static var _checked: Dictionary = {}
 
-
 ## 原生库是否已加载（ClassDB 里能看到该扩展注册的类即视为已加载）
 static func is_extension_loaded(native_class: StringName) -> bool:
 	return ClassDB.class_exists(native_class)
-
 
 ## 获取某个原生类的共享实例（懒加载 + 方法校验）。
 static func get_native(native_class: StringName, required_methods: Array[StringName] = []) -> Object:
@@ -43,18 +37,15 @@ static func get_native(native_class: StringName, required_methods: Array[StringN
 	_checked[native_class] = true
 	return inst
 
-
 ## 强制重新加载某原生类（清缓存；用于库热重载/测试）
 static func refresh(native_class: StringName) -> void:
 	_cache.erase(native_class)
 	_checked.erase(native_class)
 
-
 ## 清空全部原生缓存
 static func refresh_all() -> void:
 	_cache.clear()
 	_checked.clear()
-
 
 ## 稳定实例化脚本: 通过 resource_path 加载并 new, 规避全局类注册时序问题。
 static func instantiate_script(script: Script) -> Variant:

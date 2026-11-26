@@ -10,7 +10,6 @@ var _child_entities: Array[Task] = []
 var _active_child_index: int = 0
 var _completed_count: int = 0
 
-
 func activate(data) -> void:
 	super(data)
 	if not is_active:
@@ -31,8 +30,6 @@ func get_progress() -> Vector2i:
 	return Vector2i(_completed_count, _child_entities.size())
 
 ## 当前活跃子任务的 def
-## 注意: 仅 SEQUENTIAL 下"活跃"唯一; ANY_ORDER / COMPLETE_ANY 可能多步并发,
-## 此 getter 仅返回"游标(最早切换到的)所指"步骤, 不代表"唯一进行中"。教程用 SEQUENTIAL 无碍。
 var active_child_def: TaskDef:
 	get:
 		var group := def as GroupTaskDef
@@ -41,8 +38,6 @@ var active_child_def: TaskDef:
 		return group.tasks[_active_child_index]
 
 ## 当前活跃子任务实体
-## 注意: 仅 SEQUENTIAL 下"活跃"唯一; ANY_ORDER / COMPLETE_ANY 多步并发时,
-## 此 getter 返回"游标所指"的那个, 语义为"当前指向的步骤", 而非"唯一的进行中步骤"。
 var active_child_entity: Task:
 	get:
 		if _active_child_index >= _child_entities.size():
@@ -55,7 +50,6 @@ func reset() -> void:
 		child.reset()
 	_recompute_progress()
 	super()
-
 
 func _activate_children(data) -> void:
 	var group := def as GroupTaskDef
@@ -134,7 +128,6 @@ func _on_child_completed(child_index: int) -> void:
 	entity_changed.emit()
 	progress_changed.emit()
 
-
 ## 发出"进入当前步骤"信号(游标所指且未完成才发; 整组完成/被跳过的步骤不发)
 func _emit_step_entered() -> void:
 	var step := active_child_entity
@@ -162,7 +155,6 @@ func load_data(dict: Dictionary, data = null) -> void:
 			_child_entities[i].load_data(children[i])
 	_recompute_progress()
 	super(dict, data)                       # 还原状态 + _resume_from_save()
-
 
 ## 按 def 建立缺失的子实体(已存在则复用, 保证 activate/load_data 可重复调用)
 func _ensure_children() -> void:

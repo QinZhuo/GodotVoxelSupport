@@ -2,34 +2,15 @@
 class_name VoxelRay
 extends RefCounted
 ## 体素射线（Amanatides & Woo 的 DDA 走格）。
-## 【为什么单独一个类，而不是长进 QVoxelSource】射线查询是"按 chunk 查"之上的**派生查询**：
-## 它只需要 has_voxel / get_voxel 两个公开面，不该扩内核契约（QVoxelSource 的公开 API 由
-## test_voxel_kernel_contract 逐条钉死）。放在这里，编辑器的拾取与运行时的破坏
-## （VoxelDestructible）共用同一份实现 —— 这段 DDA 过去只存在于 VoxelDestructible 里，
-## 编辑器要拾取就得抄第二份，正是 P4「统一接口」要消掉的东西。
-## 【为什么必须返回入射面法线】**朝外**（指向射线来的一侧）：画笔的"落笔格" = 命中格 + 法线
-## （往空的那一侧长）；面笔/盒笔/填充也要靠它判断朝向。法线由"进入命中格之前的那一格"得出：
-## DDA 每步只推进一个轴，故 prev - hit 恰好是单轴 ±1（**朝外**，即朝向射线来源）—— 不必另算
-## 浮点交点，也不会在斜射时抖成斜向量。
-## 【为什么是 prev - hit 而不是 hit - prev】后者是"行走方向"（朝命中格内部），拿它做落笔会落到
-## 命中格的**里侧/背面**：从上方点一个体素的顶面却把新格画在它下面，永远叠不上去。
 
 ## 命中结果字典的键（未命中返回空字典）：
-##   hit      Vector3i  命中的体素（**体素坐标**，与 QVoxelSource.has_voxel 同一套）
-##   prev     Vector3i  进入 hit 之前的那一格（起点就在实心格内时 == hit）
-##   normal   Vector3i  入射面法线（朝外，单轴 ±1）；起点在实心格内时为 ZERO（没有入射面）
-##   distance float     沿射线走到命中格的距离（体素单位）
-##   material int       命中格的材质（get_voxel；取不到时 0）
 const KEY_HIT := &"hit"
 const KEY_PREV := &"prev"
 const KEY_NORMAL := &"normal"
 const KEY_DISTANCE := &"distance"
 const KEY_MATERIAL := &"material"
 
-
 ## 投射一条射线，返回首个实心格的完整命中信息（未命中 → 空字典）。
-## 【起点落在实心格内】直接命中该格，normal = ZERO（"没有入射面"比"编一个法线"诚实：
-## 调用方要么拒绝对这种命中落笔，要么按自己的规则处理）。
 static func cast(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		max_distance: float = 100.0) -> Dictionary:
 	if data == null:
@@ -44,7 +25,6 @@ static func cast(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		1 if dir.y > 0.0 else -1,
 		1 if dir.z > 0.0 else -1)
 	# t_delta：跨过一整格所需的参数增量；t_max：到下一个格边界的参数值。
-	# 某轴分量为 0 时该轴永不推进（INF 让它永远输给另两轴）。
 	var t_delta := Vector3(
 		absf(1.0 / dir.x) if dir.x != 0.0 else INF,
 		absf(1.0 / dir.y) if dir.y != 0.0 else INF,
@@ -72,21 +52,17 @@ static func cast(data: QVoxelSource, origin: Vector3, direction: Vector3,
 			t_max.z += t_delta.z
 	return {}
 
-
-## 只要命中格坐标（未命中 → Vector3i.MIN）。破坏类接口的既有形状，避免调用方解字典。
+## 只要命中格坐标（未命中 → Vector3i.MIN）。
 static func hit_voxel(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		max_distance: float = 100.0) -> Vector3i:
 	var r := cast(data, origin, direction, max_distance)
 	return r[KEY_HIT] if r.has(KEY_HIT) else Vector3i.MIN
 
-
 ## 命中格 + 法线 → 落笔格（往法线方向的空格长一格）。
-## 没有入射面（起点在实心格内）时返回 Vector3i.MIN —— 这种命中无处落笔。
 static func placement_of(hit: Vector3i, normal: Vector3i) -> Vector3i:
 	if hit == Vector3i.MIN or normal == Vector3i.ZERO:
 		return Vector3i.MIN
 	return hit + normal
-
 
 static func _result(data: QVoxelSource, hit: Vector3i, prev: Vector3i, distance: float) -> Dictionary:
 	var normal := Vector3i.ZERO

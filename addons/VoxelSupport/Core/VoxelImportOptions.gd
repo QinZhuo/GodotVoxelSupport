@@ -3,10 +3,6 @@ class_name VoxelImportOptions
 extends RefCounted
 
 ## 导入选项的**单一出处**：选项名、枚举、各导入器的选项描述表、默认值。
-## 【为什么独立成类】选项名一半在 `VoxAsset.OPT_*`、一半散在各插件里，枚举（Shape/MeshMode）
-## 又在插件里；且 `default_options()` 必须逐子类重写（GDScript 静态派发不继承，见基类注释）。
-## 集中到这里后：名字一份、表一份、默认值一份，且 headless（拿不到 `EditorImportPlugin` 实例）也能用。
-## 【选项名是稳定键】它们落进每个 `.import` 文件，改名会让既有资产全部重导 —— 故只增不改。
 
 ## 体素网格形状。
 enum Shape { cube, sphere }
@@ -25,13 +21,9 @@ const UV2_TEXEL_SIZE := "mesh/uv2_texel_size"
 const IMPORT_MATERIALS_TEXTURES := "material/import_materials_textures"
 const MESH_MODE := "mesh/mode"
 ## 分项网格是否落盘为独立 `.res`。
-## 【它就是"逐项缓存"的开关】不落盘 → 每项都是新建的 ArrayMesh，改一个模型全部重建；
-## 落盘 → 未改动的项从磁盘取回（带 hash meta）直接复用，只有改动的项重跑内核。
 const IMPORT_MESHES := "mesh/import_meshes"
 
-
 ## 网格导入器的选项表（VoxelMeshImporter 用）。
-## 静态，故 headless/CI 也能读到与编辑器同一份定义。
 static func mesh_specs() -> Array[Dictionary]:
 	return [
 		{
@@ -40,7 +32,6 @@ static func mesh_specs() -> Array[Dictionary]:
 		},
 		{
 			# 资产原点：默认 world_origin = 原样保留文件坐标（升级不挪位）；要"X/Z 居中 + Y 贴底"
-			# 这种游戏资产惯例，再显式选 bottom_center。与 QVoxelSourceImporter 同名同义。
 			name = ORIGIN,
 			default_value = VoxelWorldUtil.OriginMode.WORLD_ORIGIN,
 			property_hint = PropertyHint.PROPERTY_HINT_ENUM,
@@ -86,7 +77,6 @@ static func mesh_specs() -> Array[Dictionary]:
 		},
 	]
 
-
 ## MeshLibrary 导入器 = 网格选项 + 两项专属。
 static func mesh_library_specs() -> Array[Dictionary]:
 	var options := mesh_specs()
@@ -98,13 +88,12 @@ static func mesh_library_specs() -> Array[Dictionary]:
 			hint_string = "split_by_model,split_by_node,split_by_frame",
 		},
 		{
-			# 默认关闭：不产生散文件，代价是每次导入全部重建。要逐项缓存就打开它。
+			# 默认关闭：不产生散文件，代价是每次导入全部重建。
 			name = IMPORT_MESHES,
 			default_value = false,
 		},
 	])
 	return options
-
 
 ## 选项表 → {名: 默认值}（给拿不到插件实例的调用方：headless 测试 / 工具脚本）。
 static func defaults(specs: Array[Dictionary]) -> Dictionary:

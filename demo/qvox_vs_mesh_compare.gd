@@ -1,39 +1,6 @@
 extends Node3D
 
 ## QVX ⇄ Mesh 对比验证场 —— 以「.vox 直接导入成 mesh」为正确基准。
-##
-## 每个模型渲染**两份**，左右紧邻：
-##   左：MESH 路径（正确基准）
-##        .vox → VoxAccess.voxel → VoxelMeshGenerator.generate_mesh()
-##        → ArrayMesh + VoxelMeshGenerator.generate_textured_materials_runtime(materials)
-##        这条路径就是 demo.tscn 里 deer.vox 作为 ArrayMesh 使用的路径，
-##        用户确认「导入 mesh 显示的 mesh 是正确的」。
-##   右：QVX 路径（待验证）
-##        .vox → QVoxelSource → .qvx (QVoxelStream.save_chunk) → 回读 → VoxelRenderer
-##
-## 两侧都用同一套 256×1 材质纹理（VoxelMaterial.albedo_color 采样），
-## 因此**颜色差异只能来自 UV 或网格几何**。
-##
-## 关键已知差异（本场景要暴露的）：
-##   MESH 路径 UV: (u, 0.5)          —— GDScript _generate_size_dir_face
-##   QVX 路径 UV: (u, 0.0)          —— 原生 generate_dense_impl (voxel_native.cpp:301/316)
-##   两者 u 相同、v 不同。若纹理被按 clamp/mipmap/双线性处理，v=0.0 可能采到边界，
-##   在 1 像素高的纹理上产生条纹/串色。
-##
-## 除肉眼对比，本场景还做**逐体素数值比对**（QVX 往返 vs 原始 chunk 缓冲），
-## 并在 HUD 打出 PASS / FAIL。
-##
-## 操作：
-##   1..9  : 只显示第 N 组（左 mesh / 右 qvx）
-##   0     : 显示全部
-##   M     : 单独切换 mesh 侧显示
-##   Q     : 单独切换 qvx 侧显示
-##   V     : 把 QVX 侧的 UV 从 v=0.0 改成 v=0.5 复测（验证 v 的影响）
-##   W     : 线框
-##   R     : 自动旋转
-##   F     : 强制重新烘焙 .qvx 后再比对
-##   左键拖拽 / 滚轮 : 旋转 / 缩放
-##   Esc   : 退出
 
 @export var models: Array[String] = [
 	"res://demo/deer.vox",
@@ -44,17 +11,10 @@ extends Node3D
 @export var pair_gap: float = 2.6
 @export var group_gap: float = 6.2
 @export var target_extent: float = 2.2
-## 烘焙缓存目录。**本场景独占，不与其它 demo 共用**：
-## 【踩过的坑】它原先是 `user://qvx_viewer`（与 qvox_model_viewer 同一个目录、同一批文件名），
-## 而 viewer 按 world_origin（负坐标）烘、本场景按 bottom_center（重映射到 0 起）烘——
-## 谁后跑谁把对方的缓存覆盖掉，表现是**逐体素比对莫名 FAIL**（差异成千上万格，但两侧位置仍对齐）。
-## 缓存键必须包含"写入时的语义"，否则缓存会跨语义串味。
+## 烘焙缓存目录。
 @export var bake_dir: String = "user://qvox_vs_mesh"
 @export var force_rebake: bool = false
 ## 覆盖 QVX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
-## 两侧**显式同取**的原点模式（见 `_build_group` / `_build_reference_mesh`）。
-## 抽成常量是为了让"烘焙文件名 + 数据构造 + mesh 选项"三处不可能各写一个值——
-## 这三处一旦不一致，表现就是逐体素比对 FAIL 而位置看着还对（最难查的那类 bug）。
 const ORIGIN_MODE := QVoxelSource.OriginMode.BOTTOM_CENTER
 
 ## 覆盖 QVX 侧 UV 的 v 分量（-1 = 不改，保持原生 v=0.0）
@@ -79,7 +39,6 @@ var _focus_group := -1
 var _row_min := Vector3.ZERO
 var _row_max := Vector3.ZERO
 
-
 func _ready() -> void:
 	_setup_camera()
 	_setup_hud()
@@ -87,24 +46,13 @@ func _ready() -> void:
 	_build_all(force_rebake)
 	print("[QvxMeshCmp] 初始化完成，组数=%d" % _groups.size())
 
-
 ## 原生哈希键碰撞探针（回归守卫，纯逻辑、无需模型文件）。
-##
-## 背景：`voxel_native.cpp` 的 `vkey` / `grid_vkey` 把 (x,y,z) 打包成 uint64 做哈希键，
-## 曾因位段重叠（x 占 bit42..63、y 占 bit21..52 重叠 11 位）导致**负坐标大面积撞键**，
-## 使 chunks / mat_map / chunk_bufs / by_chunk / removed_set 等把不同 chunk 或体素
-## 当成同一个 → 网格错乱、材质串味、破坏操作丢体素。
-##
-## 本探针用原生暴露的 API 间接验证：对一组**互不相同**的体素位置调用
-## `collect_chunks`（内部用 chunk_of + vkey 分组去重），若返回的 chunk 数少于
-## 实际应有的不同 chunk 数，即说明键发生碰撞。探针在正/负坐标域各跑一遍。
 func _run_vkey_collision_probe() -> void:
 	if not NativeLoader.is_available():
 		print("[QvxMeshCmp][VKeyProbe] 原生库不可用，跳过")
 		return
 	var bad := 0
 	# 取一批落在不同 chunk 的坐标（含负 chunk），每个坐标单点成数组。
-	# chunk_of(p) = p >> 5。这里每 32 步取一个点 → 每点独占一个 chunk。
 	var positions: Array = []
 	var expect := {}
 	var coords := [
@@ -139,7 +87,6 @@ func _run_vkey_collision_probe() -> void:
 	if bad == 0:
 		print("[QvxMeshCmp][VKeyProbe] 原生哈希键无碰撞")
 
-
 func _setup_camera() -> void:
 	_camera = get_node_or_null("Camera3D") as Camera3D
 	if _camera == null:
@@ -149,7 +96,6 @@ func _setup_camera() -> void:
 	_camera.current = true
 	_camera.fov = 60.0
 	_camera.far = 800.0
-
 
 func _setup_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -175,7 +121,6 @@ func _setup_hud() -> void:
 	_info.add_theme_color_override("font_outline_color", Color(1, 1, 1, 0.9))
 	_info.add_theme_constant_override("outline_size", 5)
 	layer.add_child(_info)
-
 
 func _build_all(rebake: bool) -> void:
 	if _root != null and is_instance_valid(_root):
@@ -205,7 +150,6 @@ func _build_all(rebake: bool) -> void:
 	_apply_visibility()
 	_update_hud()
 
-
 ## 构建一组：左 = mesh 路径（正确基准），右 = .qvx 往返
 func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictionary:
 	var name := src.get_file().get_basename()
@@ -224,10 +168,6 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	_root.add_child(mesh_inst)
 
 	# ---------- B. QVX 路径 ----------
-	# 两侧**显式取同一个原点模式**：导入器默认值现在是 world_origin（原样保留文件里的坐标），
-	# 而本场景的排布与取景是按"模型贴地"设计的（world_origin 下 teapot1 会悬空 5.8 单位、出画）。
-	# 默认值本身的一致性由 test_qvox_import.gd 的 test_mesh_and_data_origin_agree 守着，
-	# 不靠本场景。
 	var data := QVoxelSource.from_voxel_data(vox.voxel, 0, ORIGIN_MODE)
 	if data == null:
 		push_error("[QvxMeshCmp] from_voxel_data 失败: %s" % src)
@@ -235,7 +175,6 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	var chunks_vox := _extract_chunks(data)
 
 	# 文件名带回原点模式：缓存键必须包含"写入时的语义"，否则改了模式就会读到上一次的坐标
-	# （目录已独占，这层是第二道保险，也让缓存文件自解释）。
 	var qpath := bake_dir.path_join("%s_%d.qvx" % [name, ORIGIN_MODE])
 	if rebake or not FileAccess.file_exists(qpath):
 		_bake_qvox(qpath, data, chunks_vox)
@@ -273,10 +212,6 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 			extra += 1
 
 	# ---------- C2. 原生几何完整性（回归守卫）----------
-	# 逐三角形检查：同一三角形的 3 个顶点必须 UV 一致、法线一致。
-	# 这是「原生顶点去重键碰撞」这一类 bug 的直接探针：
-	# 若去重键（点+面+材质）发生碰撞，一个顶点会被另一材质/另一面的三角形复用，
-	# 于是同一三角形上出现不同 UV（u 在两 texel 间插值 → 彩虹条纹）或不同法线。
 	var geo_bad_uv := 0
 	var geo_bad_normal := 0
 	var geo_tris := 0
@@ -308,9 +243,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 	# ---------- D. QVX 渲染器 ----------
 	var rdata := QVoxelSource.new()
 	rdata.stream = reader
-	# 【关键】渲染顶点 = (体素坐标 + data.center_offset) * voxel_scale，故这个新 QVoxelSource 必须
-	# 继承同一份原点偏移——否则右侧会按"内容角点即原点"渲染，与左侧 mesh 差出一截
-	# （这正是本场景此前"基础位置差很多"的第二半原因：脚本新建 rdata 时漏了 center_offset）。
+	# 【关键】渲染顶点 = (体素坐标 + data.center_offset) * voxel_scale，故这个新…
 	rdata.center_offset = data.center_offset
 	for m in data.materials:
 		if m != null:
@@ -347,10 +280,7 @@ func _build_group(src: String, index: int, total: int, rebake: bool) -> Dictiona
 		"ok": ok,
 	}
 
-
 ## 用与 VoxelMeshImporter 完全相同的选项构建参考 mesh。
-## demo/deer.vox.import 的参数：scale=0.1, shape=1(cube), frame_index=0,
-## import_materials_textures=false, material_path=""
 func _build_reference_mesh(voxel: VoxAsset) -> ArrayMesh:
 	var opts := {
 		VoxelMeshImporter.scale: 0.1,
@@ -366,10 +296,8 @@ func _build_reference_mesh(voxel: VoxAsset) -> ArrayMesh:
 	}
 	return VoxelMeshGenerator.generate_mesh(voxel, opts)
 
-
 func _mesh_aabb(mesh: ArrayMesh) -> AABB:
 	return mesh.get_aabb()
-
 
 func _bake_qvox(qpath: String, data: QVoxelSource, chunks: Dictionary) -> void:
 	var stream := QVoxelStream.new()
@@ -383,7 +311,6 @@ func _bake_qvox(qpath: String, data: QVoxelSource, chunks: Dictionary) -> void:
 		stream.save_chunk(ck, chunks[ck], 0)
 	stream.flush()
 
-
 func _extract_chunks(data: QVoxelSource) -> Dictionary:
 	var out: Dictionary = {}
 	var raw: Dictionary = data.get("_chunk_buffers")
@@ -392,7 +319,6 @@ func _extract_chunks(data: QVoxelSource) -> Dictionary:
 		if buf.size() > 0:
 			out[ck] = buf
 	return out
-
 
 func _chunk_extent(chunks: Dictionary) -> AABB:
 	if chunks.is_empty():
@@ -420,7 +346,6 @@ func _chunk_extent(chunks: Dictionary) -> AABB:
 		return AABB()
 	return AABB(Vector3(mn), Vector3(mx - mn + Vector3i.ONE))
 
-
 static func _local_from_index(i: int) -> Vector3i:
 	var lz := i / VoxelChunk.CHUNK_SLICE
 	var rem := i % VoxelChunk.CHUNK_SLICE
@@ -428,13 +353,7 @@ static func _local_from_index(i: int) -> Vector3i:
 	var lx := rem % VoxelChunk.CHUNK_SIZE
 	return Vector3i(lx, ly, lz)
 
-
 ## 排布：左侧 mesh（正确基准），右侧 qvx，各自直接摆到槽位，**不做任何位置补偿**。
-##
-## 【为什么不再需要补偿】两条路径现在共用同一套原点语义（`QVoxelSource.OriginMode`，
-## 默认 bottom_center = 内容 X/Z 居中 + Y 贴底）。历史上这里两边的原点不同——mesh 走 .vox 的
-## SIZE 盒中心（模型可能悬空/下沉）、data 走内容角点（贴地）——实测差 0.35~0.50（模型边长 2.2），
-## 当时靠"各自按 AABB 底面对齐"来掩盖。统一约定之后，那种补偿只会掩盖回归，故改为**校验并报告**。
 func _layout() -> void:
 	var count := _groups.size()
 	if count == 0:
@@ -448,8 +367,6 @@ func _layout() -> void:
 		var qvox_r: VoxelRenderer = g["qvox_r"]
 
 		# qvx 侧体素 AABB
-		# 注意：qvox_r.data 是由 reader 支撑的 QVoxelSource（只含 stream，无 _chunk_buffers），
-		# 因此必须用最初 from_voxel_data 得到的 data 来算体素范围。
 		var va: AABB = _chunk_extent(g["chunks_raw"])
 		if va.size.length() < 0.0001 or ma.size.length() < 0.0001:
 			print("[QvxMeshCmp] 布局跳过 %s: mesh_ext=%.3f vox_ext=%.3f"
@@ -457,7 +374,6 @@ func _layout() -> void:
 			continue
 
 		# 两条路径都要缩放到 target_extent：mesh 顶点已含 scale=0.1，
-		# qvx 通过 voxel_scale 控制。
 		var mesh_extent := maxf(maxf(ma.size.x, ma.size.y), ma.size.z)
 		var vox_extent := maxf(maxf(va.size.x, va.size.y), va.size.z)
 		var mesh_scale := target_extent / mesh_extent
@@ -467,16 +383,13 @@ func _layout() -> void:
 		qvox_r.voxel_scale = vs
 
 		# 两侧原点已统一（QVoxelSource.OriginMode.BOTTOM_CENTER）：X/Z 在内容中心、Y 在底面，
-		# 因此各自直接摆到槽位即可，**不需要任何位置补偿**。
 		var group_x := (i - (count - 1) * 0.5) * group_gap
 		var left_x := group_x - pair_gap * 0.5
 		var right_x := group_x + pair_gap * 0.5
 		mesh_inst.position = Vector3(left_x, 0.0, 0.0)
 		qvox_r.position = Vector3(right_x, 0.0, 0.0)
 
-		# 【复核】两侧世界包围盒必须重合（同一 scale 下）。若哪天有人改坏了原点统一——比如又漏给
-		# rdata 设 center_offset、或 mesh 路径退回"作者摆放"——这里会当场报出来，而不是像以前
-		# 那样被一段位置补偿代码悄悄掩盖掉。
+		# 【复核】两侧世界包围盒必须重合（同一 scale 下）。
 		var q_off: Vector3 = qvox_r.data.center_offset if qvox_r.data != null else Vector3.ZERO
 		var m_min := ma.position * mesh_scale
 		var q_min := (va.position + q_off) * vs
@@ -493,7 +406,6 @@ func _layout() -> void:
 		print("[QvxMeshCmp] 布局 %s: mesh_ext=%.1f(vox=%dface) vox_ext=%.1f qscale=%.4f"
 				% [g["name"], mesh_extent, (mesh_inst.mesh as ArrayMesh).get_faces().size() / 3,
 				   vox_extent, vs])
-
 
 func _auto_frame() -> void:
 	var count := _groups.size()
@@ -529,7 +441,6 @@ func _auto_frame() -> void:
 	_focus_group = -1
 	print("[QvxMeshCmp] 取景: 排宽=%.2f 高=%.2f dist=%.2f" % [row_w, row_h, _dist])
 
-
 func _process(delta: float) -> void:
 	if _auto_rotate and not _dragging:
 		_yaw += delta * 0.4
@@ -540,7 +451,6 @@ func _process(delta: float) -> void:
 	_camera.global_position = Vector3(px, py, pz)
 	_camera.look_at(target, Vector3.UP)
 	_update_hud()
-
 
 func _apply_visibility() -> void:
 	for g in _groups:
@@ -592,9 +502,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					_dist = target_extent * 3.4
 					_auto_rotate = false
 
-
 ## 诊断开关：把 qvx 侧已生成 chunk mesh 的 UV.v 从 0.0 改成 0.5，复测颜色是否恢复。
-## 这是「mesh 路径用 v=0.5 / 原生 chunk 路径用 v=0.0」这一差异的直接验证。
 func _patch_qvox_uv_v() -> void:
 	var v := 0.5 if qvox_uv_v_override < 0.0 else qvox_uv_v_override
 	qvox_uv_v_override = v
@@ -618,7 +526,6 @@ func _patch_qvox_uv_v() -> void:
 				src_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 				patched += 1
 	print("[QvxMeshCmp] UV.v 覆写为 %.1f，patch surface 数=%d" % [v, patched])
-
 
 func _update_hud() -> void:
 	var fps := Engine.get_frames_per_second()

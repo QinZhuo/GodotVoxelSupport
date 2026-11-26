@@ -2,41 +2,31 @@
 extends RefCounted
 
 ## ======= 脚本新鲜度: 让 eval 一定跑在最新代码上 =======
-## 引擎不热重载已在运行的脚本, 改完 .gd 再 eval 拿到的仍是旧代码。本模块是编辑器进程与
-## 游戏进程两个 eval 入口共用的唯一判定点。
-## 编辑器侧靠 CACHE_MODE_REPLACE 换掉脚本缓存(GDScript 缓存不随文件系统扫描失效), scan 只是补充。
-## **必须带 @tool 且不声明 class_name** —— 导出安全, 理由见 MCPDevServer 顶部。
 
 ## 模式标识(与 MCPDevServer.MODE_* 对齐; 放在本模块以避免反向依赖)
 const MODE_EDITOR := "editor"
 const MODE_RUNTIME := "runtime"
 
-## 编辑器侧 mtime 初筛基准(上次同步时刻)。避免每次 eval 都对目录下全部 .gd 算哈希。
+## 编辑器侧 mtime 初筛基准(上次同步时刻)。
 static var _editor_baseline: int = 0
 
-
-## eval 执行前的新鲜度守卫。两个 eval 入口都先过这里, 这是唯一的判定点。
-## 本函数是协程(内部 await 重扫), 调用方必须 await, 否则拿到的是未完成的结果。
+## eval 执行前的新鲜度守卫。
 static func guard_eval(mode: String, baseline: int, tree: SceneTree = null) -> Dictionary:
 	if mode == MODE_EDITOR:
 		return await _guard_editor()
 	return _guard_runtime(baseline, tree)
 
-
 ## ======= 不可热重载的脚本: 重载它等于关掉自己 =======
 static var _unreloadable := {}
-
 
 ## 登记一个不能被热重载的脚本; 同一路径重复登记以最后一次为准。
 static func register_unreloadable(path: String, reason: String) -> void:
 	if not path.is_empty():
 		_unreloadable[path] = reason
 
-
 ## 该脚本是否被登记为不可重载: 是则返回原因, 否则返回空串。
 static func unreloadable_reason(path: String) -> String:
 	return str(_unreloadable.get(path, ""))
-
 
 ## ----- 编辑器进程 -----
 static func _guard_editor() -> Dictionary:
@@ -62,8 +52,7 @@ static func _guard_editor() -> Dictionary:
 			"recovery": "调用 restart_editor 重启编辑器(插件自启会自动恢复 MCP 连接); 或在插件面板禁用再启用 DEVFramework。",
 			"reloaded": [] as Array[String],
 		}
-	# 丢弃缓存并从磁盘重新加载。加载失败通常意味着磁盘版本有语法错误,
-	# 此时不该执行 —— 否则会拿到一份半坏的脚本, 报错信息还指向 eval 内部。
+	# 丢弃缓存并从磁盘重新加载。
 	var failed: Array[String] = []
 	for p in stale:
 		if not (ResourceLoader.load(p, "", ResourceLoader.CACHE_MODE_REPLACE) is GDScript):
@@ -83,9 +72,7 @@ static func _guard_editor() -> Dictionary:
 		"reloaded": [] as Array[String],
 	}
 
-
 ## ----- 游戏进程 -----
-## 判据基准是游戏启动时刻: 早于它的脚本已被加载, 之后改的必是旧代码。
 static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 	# 游戏未就绪时无判据可用(也不该有 eval 请求到达)
 	if baseline <= 0:
@@ -93,7 +80,7 @@ static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 	var changed := changed_by_mtime(baseline)
 	if changed.is_empty():
 		return _pass([])
-	# 关键顺序: 先抓住"旧脚本对象"再重载。重载后 ResourceLoader 里已是新版。
+	# 关键顺序: 先抓住"旧脚本对象"再重载。
 	var old_scripts: Dictionary = {}  # path -> 旧脚本对象
 	for p in changed:
 		if ResourceLoader.has_cached(p):
@@ -105,7 +92,6 @@ static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 	# 第 2 级判据: 按脚本对象比对(而非 class_name), 这样没有 class_name 的脚本也能查。
 	var live := live_instances(tree, old_scripts)
 	# 第 3 级: 全局类(class_name)的引用切不过来, 必须单独判。
-	# 两级都必须实测判定而非假设: 把"没修好"当"已修复"放行, 闸门就退化成静默的旧代码执行。
 	var stuck := stuck_globals(changed)
 	if live.is_empty() and stuck.is_empty():
 		return _pass(changed)
@@ -117,7 +103,6 @@ static func _guard_runtime(baseline: int, tree: SceneTree) -> Dictionary:
 		"recovery": "调用 game_control(action=start) 重启游戏(会自动停止旧实例)后重试。",
 		"reloaded": [] as Array[String],
 	}
-
 
 ## 改动过的脚本里, 属于全局类(class_name)的那些 —— 它们在游戏进程内无法热替换。
 static func stuck_globals(changed: Array[String]) -> Array[String]:
@@ -132,13 +117,12 @@ static func stuck_globals(changed: Array[String]) -> Array[String]:
 			out.append(p)
 	return out
 
-
 ## 找出 scripts 中每个脚本在场景树里仍存活的实例(热重载后即"旧代码"实例)。
 static func live_instances(tree: SceneTree, scripts: Dictionary) -> Dictionary:
 	var out: Dictionary = {}
 	if tree == null or tree.root == null or scripts.is_empty():
 		return out
-	# 反查表: 脚本对象 -> 路径。避免每个脚本各遍历一次场景树(节点常有数千个)
+	# 反查表: 脚本对象 -> 路径。
 	var by_object: Dictionary = {}
 	for p in scripts:
 		by_object[scripts[p]] = p
@@ -153,7 +137,6 @@ static func live_instances(tree: SceneTree, scripts: Dictionary) -> Dictionary:
 			out[owner_path] = [] as Array[String]
 		out[owner_path].append("/root/" + str(tree.root.get_path_to(n)))
 	return out
-
 
 ## 阻塞原因分两类, 分开陈述才能让人知道"该重启"还是"该改代码"。
 static func _describe_block(live: Dictionary, stuck: Array[String]) -> String:
@@ -176,20 +159,17 @@ static func _describe_block(live: Dictionary, stuck: Array[String]) -> String:
 			% "\n".join(lines))
 	return "已尝试热重载, 但以下改动在运行中的游戏内无法生效, 已阻止执行:\n%s" % "\n\n".join(parts)
 
-
 static func _global_class_name(path: String) -> String:
 	for c in ProjectSettings.get_global_class_list():
 		if str(c.get("path", "")) == path:
 			return str(c.get("class", ""))
 	return "?"
 
-
 static func _pass(reloaded: Array) -> Dictionary:
 	return {
 		"ok": true, "message": "", "retryable": false, "recovery": "",
 		"reloaded": reloaded,
 	}
-
 
 ## ----- 判据: 磁盘内容 vs 已加载内容(编辑器侧) -----
 static func changed_by_content() -> Array[String]:
@@ -202,12 +182,11 @@ static func changed_by_content() -> Array[String]:
 	_editor_baseline = int(Time.get_unix_time_from_system())
 	return out
 
-
-## 单个脚本的加载状态。script_status 工具的判据也走这里, 保证只有一处实现。
+## 单个脚本的加载状态。
 static func script_status_of(path: String) -> Dictionary:
 	if not ResourceLoader.exists(path) and not FileAccess.file_exists(path):
 		return {"state": "missing", "path": path}
-	# 磁盘侧哈希: 读原始文本。已加载侧取 GDScript.source_code, 与磁盘同源可比。
+	# 磁盘侧哈希: 读原始文本。
 	var disk := FileAccess.get_file_as_string(path)
 	var disk_hash := int(disk.hash())
 	if not ResourceLoader.has_cached(path):
@@ -223,9 +202,7 @@ static func script_status_of(path: String) -> Dictionary:
 		"loaded_hash": loaded_hash,
 	}
 
-
 ## 把 uid:// 或裸路径统一解析为可直接使用的 res:// 路径; 解析不出来返回空串。
-## 手动 fs.scan() 后即恢复, 故这里按需补一次重扫并重试(复用本模块同一入口)。
 static func resolve_scene_path(ref: String) -> String:
 	var s := ref.strip_edges()
 	if s.is_empty():
@@ -239,7 +216,6 @@ static func resolve_scene_path(ref: String) -> String:
 		resolved = ResourceUID.uid_to_path(s)
 	return resolved if resolved.begins_with("res://") else ""
 
-
 ## ----- 判据: 磁盘 mtime(游戏侧) -----
 static func changed_by_mtime(since: int) -> Array[String]:
 	var out: Array[String] = []
@@ -247,7 +223,6 @@ static func changed_by_mtime(since: int) -> Array[String]:
 		return out
 	_collect_gd("res://", out, since)
 	return out
-
 
 ## 递归收集 mtime 晚于 since 的 .gd
 static func _collect_gd(dir_path: String, out: Array[String], since: int) -> void:
@@ -267,8 +242,7 @@ static func _collect_gd(dir_path: String, out: Array[String], since: int) -> voi
 		entry = dir.get_next()
 	dir.list_dir_end()
 
-
-## 触发编辑器资源重扫并等待完成(最多 5s)。让文件系统补齐全局类缓存。
+## 触发编辑器资源重扫并等待完成(最多 5s)。
 static func _rescan_fs() -> void:
 	var fs := EditorInterface.get_resource_filesystem()
 	if fs == null:

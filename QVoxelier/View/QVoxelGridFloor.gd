@@ -2,12 +2,6 @@
 class_name QVoxelGridFloor
 extends MeshInstance3D
 ## 网格背景面：给"当前可作为落笔面的那些面"描边框，并**按角度渐变**（越正对背景越完整）。
-## 【谁是背景面】面的外法线与"该面指向相机"的方向夹角越大 = 越背离镜头 = 越适合作为落笔背景：
-##    · 底面阈值 90°（相机在上方即可，优先级最高）；
-##    · 其余面（含顶面）阈值 145°。
-## 边框的**显示长度与透明度随角度渐变**：刚好达标 ~ 完整；偏离时只露出一小段并半透明 ——
-## 于是"背景面"随视角平滑过渡，而不是突然出现 / 消失。底面在相机转到下方时也会随之退场。
-## 【坐标约定】顶点用**体素单位**，节点 scale = voxel_scale。
 
 @export var grid_size := Vector3i(32, 32, 32):
 	set(v):
@@ -39,7 +33,7 @@ const MIN_FACTOR := 0.5
 		borders_visible = v
 		rebuild()
 
-## 6 个面：外法线。顺序：0 底面 / 1 顶面 / 2 -X / 3 +X / 4 -Z / 5 +Z。
+## 6 个面：外法线。
 const _FACES := [
 	Vector3(0, -1, 0), Vector3(0, 1, 0),
 	Vector3(-1, 0, 0), Vector3(1, 0, 0),
@@ -61,8 +55,7 @@ const _CAGE_EDGE_FACES := [
 var _line_mat: StandardMaterial3D
 var _last_cam := Vector3.INF
 
-
-## 面 i 的背景程度 0~1（按角度渐变）。0 = 不作背景面。
+## 面 i 的背景程度 0~1（按角度渐变）。
 func face_factor(i: int) -> float:
 	if camera == null:
 		return 1.0 if i == 0 else 0.0
@@ -72,18 +65,13 @@ func face_factor(i: int) -> float:
 	var thr := FLOOR_ANGLE if i == 0 else OTHER_ANGLE
 	return smoothstep(thr - FADE_BAND, thr, ang)
 
-
 ## 当前可作落笔面的面 —— 供网格拾取对齐，保证"落笔落在地面、而不是半空中"。
-## 判据只有**角度因子**（该面此刻够不够背离镜头），**与 `borders_visible` 无关**：
-## 顶栏「网格线」关掉的是**边框的画**，不是"能不能在地面上画"。两者分开是对的 ——
-## 关网格线通常只为看清模型，若连落笔一起禁掉，用户得先开回来才能继续建模。
 func visible_faces() -> PackedInt32Array:
 	var out := PackedInt32Array()
 	for i in _FACES.size():
 		if face_factor(i) > MIN_FACTOR:
 			out.append(i)
 	return out
-
 
 func rebuild() -> void:
 	if grid_size.x <= 0 or grid_size.y <= 0 or grid_size.z <= 0:
@@ -95,8 +83,6 @@ func rebuild() -> void:
 	if borders_visible:
 		_build_cage(verts, colors)
 	# 【空顶点必须直接收工】`add_surface_from_arrays` 拿到空数组会报 ERR_INVALID_DATA，
-	# 紧接着 `set_surface_override_material(0, …)` 又会因为"没有 surface 0"越界。
-	# 两种情形都会走到这里：关掉网格线（顶栏开关）、以及视角把每条棱都判成"不作背景面"。
 	if verts.is_empty():
 		mesh = null
 		return
@@ -109,10 +95,7 @@ func rebuild() -> void:
 	mesh = m
 	set_surface_override_material(0, _line_material())
 
-
 ## 整块网格的 12 条棱：**长度恒定**，透明度**按棱**判定 ——
-## 一条棱只要属于某个背景面（= 它两侧的面里有一个当前是背景面）就不透明，否则**全透明**。
-## 于是只有"背景面的边框"看得见，其余（含前面那些非背景面的棱）完全不画；接近阈值的角度半透明。
 func _build_cage(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	var s := Vector3(grid_size)
 	var corners := [
@@ -126,7 +109,6 @@ func _build_cage(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 		if f <= 0.01:
 			continue  # 不属于任何背景面 → 全透明（不画）
 		_line(verts, colors, corners[e[0]], corners[e[1]], Color(border_color, border_color.a * f))
-
 
 func _face_center(i: int) -> Vector3:
 	var s := Vector3(grid_size)
@@ -142,7 +124,6 @@ func _face_center(i: int) -> Vector3:
 		4:
 			return Vector3(s.x * 0.5, s.y * 0.5, 0.0)
 	return Vector3(s.x * 0.5, s.y * 0.5, s.z)
-
 
 ## 某个面的 4 个角（顺序成环），体素单位。
 func _face_corners(i: int) -> Array:
@@ -160,13 +141,11 @@ func _face_corners(i: int) -> Array:
 			return [Vector3(0, 0, 0), Vector3(s.x, 0, 0), Vector3(s.x, s.y, 0), Vector3(0, s.y, 0)]
 	return [Vector3(0, 0, s.z), Vector3(s.x, 0, s.z), Vector3(s.x, s.y, s.z), Vector3(0, s.y, s.z)]
 
-
 func _line(verts: PackedVector3Array, colors: PackedColorArray, a: Vector3, b: Vector3, c: Color) -> void:
 	verts.push_back(a)
 	verts.push_back(b)
 	colors.push_back(c)
 	colors.push_back(c)
-
 
 ## 带渐变透明度的一段线（两端给不同 alpha，插值自然过渡）。
 func _line_grad(verts: PackedVector3Array, colors: PackedColorArray,
@@ -176,10 +155,8 @@ func _line_grad(verts: PackedVector3Array, colors: PackedColorArray,
 	colors.push_back(ca)
 	colors.push_back(cb)
 
-
 func set_grid_lines_visible(on: bool) -> void:
 	borders_visible = on
-
 
 func _line_material() -> StandardMaterial3D:
 	if _line_mat == null:
@@ -191,7 +168,6 @@ func _line_material() -> StandardMaterial3D:
 		_line_mat = m
 	return _line_mat
 
-
 ## 相机移动 → 渐变边框要跟着重画（边框随角度平滑变化）。
 func _process(_delta: float) -> void:
 	if camera == null or grid_size.x <= 0:
@@ -201,7 +177,6 @@ func _process(_delta: float) -> void:
 		return
 	_last_cam = p
 	rebuild()
-
 
 func _ready() -> void:
 	if camera != null:

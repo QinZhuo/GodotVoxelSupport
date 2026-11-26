@@ -1,10 +1,9 @@
 @tool
-## 音频资产烘焙(仅编辑器) —— 经效果链实时录音 + 写标准 WAV。游戏运行时不调用。
+## 音频资产烘焙(仅编辑器) —— 经效果链实时录音 + 写标准 WAV。
 class_name AudioBakeTool
 
 ## 效果尾音余量(秒): 混响/延迟会延长尾音, 按此额外录一段
 const TAIL_SEC := 0.8
-
 
 ## 把音频经效果链真实播放一遍并用 AudioEffectRecord 录回, 返回带效果的流。
 static func bake_with_fx(stream: AudioStreamWAV, fx_chain: Array[AudioEffect]) -> AudioStreamWAV:
@@ -38,9 +37,7 @@ static func bake_with_fx(stream: AudioStreamWAV, fx_chain: Array[AudioEffect]) -
 	AudioServer.remove_bus(idx)
 	return recorded
 
-
 ## 写标准 44 字节 PCM WAV(按流的声道/位深推导头部; 蒙版/压缩格式返回错误)。
-## 注意: 内置 AudioStreamWAV.save_to_wav 会把 16bit 立体声写成 mono 头, 故这里自行写头。
 static func save_wav(stream: AudioStreamWAV, path: String) -> Error:
 	if stream == null or stream.data.is_empty():
 		return ERR_INVALID_DATA

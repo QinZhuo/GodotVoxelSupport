@@ -2,7 +2,6 @@
 class_name GoapActionDef extends EntityDef
 
 ## GOAP 行动定义 — 静态配置，用 .tres 或代码创建。
-## preconditions：执行前世界状态必须满足的条件（键值对）
 
 @export var preconditions: Dictionary = {}
 @export var effects: Dictionary = {}
@@ -19,7 +18,6 @@ func get_desc(_data) -> String:
 	if not effects.is_empty():
 		s += "\n效果: " + str(effects)
 	return s
-
 
 func create_entity() -> GoapAction:
 	return GoapAction.new(self)

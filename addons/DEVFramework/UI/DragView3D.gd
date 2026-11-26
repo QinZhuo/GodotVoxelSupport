@@ -127,7 +127,6 @@ func _end_drag():
 	if not is_instance_valid(self):
 		return
 	# 子类可能已通过 _cleanup_drag_state() 标记跳过清理（如拖出容器后节点即将移除）;
-	# 但 drag_ended 必须照发 —— 外部靠它判定换位结果, 少一次就永远等不到。
 	if is_dragging:
 		_restore_position()
 		_restore_scale()
@@ -217,7 +216,6 @@ func _on_drag_move():
 	pass
 
 ## 拖拽结束回调 —— 默认执行 OffsetArrayView3D 排序逻辑
-## [br]子类重写时应先判断是否自行处理（如拖出后移除），否则调用 super
 func _on_drag_ended():
 	if not drag_container:
 		return
@@ -229,7 +227,7 @@ func _on_drag_ended():
 func _on_drag_cancelled():
 	pass
 
-## ---------------------------------------------------- 排序逻辑（OffsetArrayView3D 专用）
+## ----------------------------------------------------…
 
 ## 计算拖拽后的排序索引，返回 -1 表示位置未变化
 func _calculate_sort_index() -> int:

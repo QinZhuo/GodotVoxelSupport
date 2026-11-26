@@ -4,7 +4,6 @@ class_name DefTableGrid
 extends Container
 
 ## 行高下限(全表唯一来源): set_row_heights 统一钳制, 偏移/渲染共用同一份 row_heights,
-## DefTableView 的兜底行高与 DefTableCell 的初始高度都引用本常量, 不要再写第二份字面量。
 const MIN_ROW_HEIGHT := 32.0
 
 ## 每列宽度
@@ -30,13 +29,11 @@ var hover_row: int = -1:
 
 var _cached_minimum_size := Vector2.ZERO
 
-
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_SORT_CHILDREN:
 		sort_children()
 	elif what == NOTIFICATION_DRAW:
 		_draw_hover()
-
 
 func _draw_hover() -> void:
 	if hover_row < 0 or hover_row >= row_heights.size():
@@ -48,18 +45,15 @@ func _draw_hover() -> void:
 		w += cw
 	draw_rect(Rect2(0.0, y, maxf(w, size.x), h), Color(1.0, 1.0, 1.0, 0.055))
 
-
 func _get_minimum_size() -> Vector2:
 	return _cached_minimum_size
 
-
-## 设置列宽与总行数。row_heights 需由 set_row_heights 提供。
+## 设置列宽与总行数。
 func configure(widths: Array[float], rows_total: int) -> void:
 	column_widths = widths.duplicate()
 	total_rows = rows_total
 	_recompute_offsets()
 	queue_sort()
-
 
 ## 传入预计算的行高, 刷新偏移与滚动范围。
 func set_row_heights(heights: Array[float]) -> void:
@@ -69,7 +63,6 @@ func set_row_heights(heights: Array[float]) -> void:
 			row_heights[i] = MIN_ROW_HEIGHT
 	_recompute_offsets()
 	queue_sort()
-
 
 func _recompute_offsets() -> void:
 	column_offsets.clear()
@@ -86,7 +79,6 @@ func _recompute_offsets() -> void:
 		cy += h
 	row_offsets.append(cy)
 
-
 ## 行 y 坐标 -> 行索引 (变高行二分查找)
 func row_index_at(y: float) -> int:
 	if row_offsets.size() == 0 or y < 0.0:
@@ -102,7 +94,6 @@ func row_index_at(y: float) -> int:
 		else:
 			hi = mid - 1
 	return lo
-
 
 ## 由 Container 在布局时调用。
 func sort_children() -> void:

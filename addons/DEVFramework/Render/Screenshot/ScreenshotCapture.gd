@@ -1,7 +1,6 @@
 class_name ScreenshotCapture extends Node
 
 ## 截图触发节点: 窗口就绪后延迟若干秒自动截图保存(时机见 auto_capture_delay)。
-## 取图 / 颜色处理 / 落盘全部走 ScreenshotTool(唯一的画面捕获管线), 与 MCP take_screenshot /
 
 @export_file_path("*.png") var save_path: String = "res://screenshot.png"
 @export var custom_resolution: Vector2i = Vector2i(256, 256)
@@ -23,7 +22,6 @@ func _ready() -> void:
 		_apply_resolution(custom_resolution)
 	await _auto_capture()
 
-
 ## 把窗口调整到出图分辨率, 并按**长宽比差异自动挑选内容的取景/缩放基准轴**。
 func _apply_resolution(res: Vector2i) -> void:
 	var window := get_window()
@@ -37,7 +35,6 @@ func _apply_resolution(res: Vector2i) -> void:
 		"" if cam else "(场景无 3D 相机, 仅调整 UI)",
 	])
 
-
 ## 延迟自动截图: 等画面稳定后自动截一张并保存到 save_path。
 func _auto_capture() -> void:
 	if auto_capture_delay <= 0.0:
@@ -45,7 +42,6 @@ func _auto_capture() -> void:
 	LogTool.log("截图", "%.1f 秒后自动截图" % auto_capture_delay)
 	await get_tree().create_timer(auto_capture_delay).timeout
 	await _take_screenshot()
-
 
 ## 取一帧并保存: 整条管线(取图 / 精确缩放 / 颜色处理 / 落盘)交给 ScreenshotTool.capture。
 func _take_screenshot() -> void:

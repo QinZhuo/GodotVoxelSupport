@@ -1,20 +1,12 @@
 extends TestCase
 
 ## QVX 导入链路测试：`.qvx` → QVoxelAsset → QVoxelSource / 网格 / 材质。
-## 钉死的是"QVX 的语义不能被中间表示压缩"这件事。此前 `.qvx` 走 VoxAsset
-## （MagicaVoxel 场景图形状的适配器）导致三处**静默**失真，本文件逐条覆盖：
-##   ① 多模型只导入第一个（VoxelFrame 的合并分支在 index==0 时短路）；
-##   ② NODE 场景图完全不参与 → 各模型的位置/旋转丢失；
-##   ③ 体素被摊平成逐体素稀疏字典再重映射回块 → 大模型多趟全量字典操作 + 内存峰值。
-## 另有两条守门用例：块级与融合结果一致、材质 MATE 互转幂等。
 
 const TEST_DIR := "user://qvx_import_test"
 const SAMPLES_DIR := "res://demo/samples"
 
-
 func cleanup() -> void:
 	_remove_dir(TEST_DIR)
-
 
 # ① 多模型 + NODE 摆放：一个都不能丢，位置按 NODE 变换融合
 
@@ -34,13 +26,10 @@ func test_multi_model_with_node_placement() -> void:
 	if data == null:
 		return
 	# 组 root 位移 (0,32,0)（**组变换要累积给子节点**），再叠加各自节点的 transform：
-	#   模型 0：块 (0,0,0) 内 (1,1,1) → (1,1,1) + (0,32,0) = (1,33,1)
-	#   模型 1：块 (5,0,0) 内 (1,1,1) → (161,1,1) + (0,32,0) + (0,64,0) = (161,97,1)
 	assert_eq(data.get_voxel_count(), 2, "两模型各 1 个体素（此前只剩第一个模型）")
 	assert_eq(data.get_all_chunk_keys().size(), 2, "两个模型应落在两个不同 chunk")
 	assert_true(data.has_voxel(Vector3i(1, 33, 1)), "模型 0：组变换应累积到子节点")
 	assert_true(data.has_voxel(Vector3i(161, 97, 1)), "模型 1：组变换与自身位移都应叠加")
-
 
 # ② 无 NODE（恒等摆放）= 块级直连：与逐体素融合结果必须一致
 
@@ -58,7 +47,6 @@ func test_block_import_matches_fused() -> void:
 	assert_eq(via_blocks.grid_size, qvx.grid_size(), "grid_size 应来自体素包围盒")
 	assert_eq(via_blocks.get_voxel_count(), 2, "体素数应正确（块级安装用原生 count 统计）")
 
-
 # ③ 网格：所有模型都要出现在同一个 mesh 里
 
 func test_mesh_covers_all_models() -> void:
@@ -75,7 +63,6 @@ func test_mesh_covers_all_models() -> void:
 		verts += mesh.surface_get_array_len(i)
 	# 孤立体素 = 6 个面 × 4 顶点 = 24；两个模型共 48（只导入一个模型会是 24）
 	assert_true(verts >= 48, "两个模型的体素都应出现在网格里（实得 %d 顶点）" % verts)
-
 
 # ④ 资源载荷：块表往返（单一格式，无旧版兼容路径）
 
@@ -96,7 +83,6 @@ func test_resource_payload_roundtrip() -> void:
 	var bad := QVoxelSource.new()
 	bad.set("voxel_data_payload", VoxelPayloadCodec.encode({"v": VoxelPayloadCodec.VERSION + 1, "blocks": {}}))
 	assert_eq(bad.get_voxel_count(), 0, "版本不符的载荷应被拒绝")
-
 
 # ⑤ 材质：MATE ↔ VoxelMaterial 的唯一转换必须幂等且保住物理量
 
@@ -124,7 +110,6 @@ func test_material_mate_roundtrip() -> void:
 	assert_eq(VoxelMaterial.to_mate(back), back, "MATE 归一化必须幂等")
 	assert_eq(VoxelMaterial.to_mate(null), VoxelMaterial.air_mate(), "null → 空气条目")
 
-
 # ⑥ 仓库样例：所有样例都应能导入出非空体素
 
 func test_samples_import_without_loss() -> void:
@@ -139,12 +124,9 @@ func test_samples_import_without_loss() -> void:
 		var data := QVoxelSource.from_qvx(qvx)
 		assert_true(data.get_voxel_count() > 0, "%s 应导入出体素" % path.get_file())
 
-
 # ⑦ NODE 变换：通用四元数（而不是 .vox 的 0–23 朝向索引）
 
 ## 90° 绕 Y 在浮点里恰好落在整数上：体素 (1,1,1) → (1,1,-1)。
-## 这条用例钉住旋转的**表示与解码**：若哪天有人把 `.vox` 的 0–23 索引搬回 QVX，
-## 这里会立刻变成"体素还在原地"而失败。
 func test_node_quaternion_rotation_applied() -> void:
 	var path := TEST_DIR + "/rot.qvx"
 	var q := Quaternion(Vector3.UP, PI / 2.0)
@@ -159,7 +141,6 @@ func test_node_quaternion_rotation_applied() -> void:
 	assert_true(data.has_voxel(Vector3i(1, 1, -1)), "90° 绕 Y：(1,1,1) → (1,1,-1)")
 	assert_false(data.has_voxel(Vector3i(1, 1, 1)), "原位置不应残留")
 
-
 ## 缩放与平移同属 `transform`，且三个字段都可缺省（未写的 `r` 即恒等）。
 func test_node_scale_and_translation_applied() -> void:
 	var path := TEST_DIR + "/scale.qvx"
@@ -171,12 +152,9 @@ func test_node_scale_and_translation_applied() -> void:
 	var data := QVoxelSource.from_qvx(qvx)
 	assert_true(data.has_voxel(Vector3i(12, 2, 2)), "先缩放 2× 再平移 (10,0,0)：(1,1,1) → (12,2,2)")
 
-
 # ⑧ NODE.animations：格式层原样透传，**不解释**（v3 没有可寻址的节点下标）
 
 ## `animations[].frames` 的键是**节点下标**，而 v3 的节点树是嵌套的、没有下标这层身份。
-## 于是动画退化为"扁平时代的遗留键"：格式层原样保留（重写不丢数据），但不参与摆放。
-## 守两件事：① 带动画的文件照样能读；② 帧不再改变任何摆放（按下标叠加补丁的行为已废除）。
 func test_animation_frames_are_passed_through_not_interpreted() -> void:
 	var path := TEST_DIR + "/anim.qvx"
 	# 第 1 帧声称把下标 0 的节点抬高 64 —— v3 不解释它，故必须与第 0 帧给出同一个世界
@@ -198,15 +176,9 @@ func test_animation_frames_are_passed_through_not_interpreted() -> void:
 	if doc != null and doc.scene != null:
 		assert_eq(doc.scene.animations.size(), 1, "动画应原样透传（不丢数据）")
 
-
 # ⑨ 原点统一：`.vox → mesh` 与 `.vox → data` 必须摆在同一个位置（同 scale）
 
 ## 守两件事：
-##   ① 同一个模型经两条导入路径进场景，必须落在同一位置——mesh 的世界 AABB 与 data 的
-##      `(体素AABB + center_offset) × scale` 在**三种原点模式下**都必须重合；
-##   ② 导入器默认值必须是 `WORLD_ORIGIN`（不动几何）。它等于本插件网格导入一直以来的行为，
-##      改成别的会让已有资产升级后集体挪位。
-## 形状固定用 cube：sphere 是另一种几何（每体素一颗球，AABB 本就更大），与原点无关。
 func test_mesh_and_data_origin_agree() -> void:
 	var src := "res://demo/deer.vox"
 	if not ResourceLoader.exists(src):
@@ -243,11 +215,9 @@ func test_mesh_and_data_origin_agree() -> void:
 			assert_true(absf(maabb.position.y) < 0.01,
 					"显式选 bottom_center 时底面应落在 y=0（实得 %.3f）" % maabb.position.y)
 
-
 # 辅助
 
 ## 最小可用 QVX 文档骨架：HEAD（单通道 material）+ 材质表（条目 0 空气 + 1 号实体）。
-## 各用例只在其上挂自己的 models / node。
 func _new_doc() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
@@ -261,7 +231,6 @@ func _new_doc() -> QVoxelFile.QVoxelDocument:
 			VoxelMaterial.to_mate(_solid_material(Color(0.2, 0.6, 0.9)))]
 	return doc
 
-
 ## 一个块内只有一个非空体素（局部坐标 (1,1,1)，材质 1）的 32³ 缓冲。
 func _one_voxel_block() -> PackedInt32Array:
 	var b := PackedInt32Array()
@@ -269,12 +238,7 @@ func _one_voxel_block() -> PackedInt32Array:
 	b[VoxelChunk.buf_index(1, 1, 1)] = 1
 	return b
 
-
 ## 造一个"单模型单体素"的 .qvx：块 (0,0,0) 内的 (1,1,1) 有一个体素，
-## NODE 里一个 model 节点带给定的 transform（空字典 = 不写 NODE 块，即恒等摆放）。
-## frames 非空时写入一段动画（`frames` 的键是**节点下标**；本 helper 只有一个节点 → 下标 0）。
-## 注意：v3 不解释动画（见 ⑧），它只用来验证"原样透传、不影响摆放"。
-## 变换相关的用例共用它，使"看的是变换，而不是文档构造"。
 func _write_single_voxel_qvx(path: String, transform: Dictionary, frames: Array = []) -> void:
 	var doc := _new_doc()
 	doc.models = {0: {Vector3i(0, 0, 0): _one_voxel_block()}}
@@ -285,12 +249,7 @@ func _write_single_voxel_qvx(path: String, transform: Dictionary, frames: Array 
 			doc.node["animations"] = [{"name": "a", "loop": false, "frames": frames}]
 	_write_bytes(path, QVoxelFile.serialize(doc))
 
-
 ## 造一个"双模型 + 可选 NODE 摆放"的 .qvx。
-## 模型 0：块 (0,0,0) 内 (1,1,1)；模型 1：块 (5,0,0) 内 (1,1,1)。
-## with_node 时给出 NODE：组 root 位移 (0,32,0)、模型 1 再位移 (0,64,0)，
-## 于是既验证"场景图不再被丢弃"，也验证**组变换累积到子节点**。
-## 节点树是**嵌套**的：组自己带 children[]（v3 起不再是"子节点下标"那套扁平表示）。
 func _write_two_model_qvx(path: String, with_node: bool) -> void:
 	var doc := _new_doc()
 	doc.models = {
@@ -308,7 +267,6 @@ func _write_two_model_qvx(path: String, with_node: bool) -> void:
 		]}
 	_write_bytes(path, QVoxelFile.serialize(doc))
 
-
 func _solid_material(color: Color) -> VoxelMaterial:
 	var mat := VoxelMaterial.new()
 	mat.id = 1
@@ -318,7 +276,6 @@ func _solid_material(color: Color) -> VoxelMaterial:
 	mat.mass = 2.0
 	return mat
 
-
 func _make_data() -> QVoxelSource:
 	var mats: Array[VoxelMaterial] = []
 	mats.resize(2)
@@ -327,14 +284,12 @@ func _make_data() -> QVoxelSource:
 	d.materials = mats
 	return d
 
-
 func _write_bytes(path: String, bytes: PackedByteArray) -> void:
 	var dir := path.get_base_dir()
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_buffer(bytes)
 	f.close()
-
 
 func _list_qvx(dir_path: String) -> Array:
 	var out: Array = []
@@ -350,7 +305,6 @@ func _list_qvx(dir_path: String) -> Array:
 	dir.list_dir_end()
 	out.sort()
 	return out
-
 
 func _remove_dir(dir_path: String) -> void:
 	var dir := DirAccess.open(dir_path)

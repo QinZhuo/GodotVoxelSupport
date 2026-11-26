@@ -2,11 +2,6 @@
 class_name QVoxelierContextBar
 extends QVoxelierPanel
 ## 顶栏正下方的**上下文选项条**（PS 的选项条 / Blender 的 header）：只显示**当前工具**用得到的选项。
-## 【为什么单独一条】把操作三态 / 笔刷尺寸 / 形态 / 对称 / 选区动作常驻在左侧，等于让每个用户一直
-## 看着他此刻用不上的东西；移到"随工具变化的一条"里，左侧就只剩"选哪个工具"一件事。
-## 【仍然全部是可见按钮】与全应用一致：快捷键只是加速器，按钮才是入口（触摸屏没有键盘）。
-## 【表即配置】工具与形态两组选项直接读 [QVoxelBrushTool] 的 MODES / SHAPES，
-## 与左列工具条、状态栏提示同源 —— 加一种笔只改表，本条的显隐与文案一起跟着变。
 
 ## 操作三态（值同 [enum QVoxelBrushTool.Op]）。
 signal op_selected(op: int)
@@ -23,7 +18,7 @@ signal selection_action(action: StringName)
 ## 快速选区判据：true = 同色相连；false = 几何相连。
 signal select_criterion_changed(by_color: bool)
 
-## 选区动作表（表即配置，与左侧工具表同一套路数）。选中「选择 / 移动」时本行取代笔刷参数。
+## 选区动作表（表即配置，与左侧工具表同一套路数）。
 const SELECT_ACTIONS := [
 	{"id": &"all", "text": "全选", "icon": "select_all", "key": "Ctrl+A", "tip": "选中整个网格"},
 	{"id": &"copy", "text": "复制", "icon": "copy", "key": "Ctrl+C", "tip": "复制选区里的体素"},
@@ -50,7 +45,6 @@ var _sym: Array[Button] = []
 var _select_buttons := {}   # id → Button
 var _left_inset := 0.0
 var _right_inset := 0.0
-
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -81,13 +75,10 @@ func _build() -> void:
 	_build_selection_group()
 	_sync_rect()
 
-
 func _bar_height() -> float:
 	return QVoxelUi.hit_size() + QVoxelUi.space_s() * 2.0
 
-
-## 操作三态：添加 / 移除 / 上色（互斥）。读 [constant QVoxelBrushTool.OPS]。
-## 它是**这一笔对体素做什么**，与"哪一种笔"（左列）正交，故排在本条最前。
+## 操作三态：添加 / 移除 / 上色（互斥）。
 func _build_op_group() -> void:
 	_op_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	_row.add_child(_op_group)
@@ -103,8 +94,7 @@ func _build_op_group() -> void:
 		_op_group.add_child(b)
 	_op_buttons[QVoxelBrushTool.Op.ADD].set_pressed_no_signal(true)
 
-
-## 笔刷尺寸：− 值 + （细调）+ ×2 / ÷2（粗调）。与左列旧版同一套，只是横排。
+## 笔刷尺寸：− 值 + （细调）+ ×2 / ÷2（粗调）。
 func _build_brush_group() -> void:
 	_brush_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	_row.add_child(_brush_group)
@@ -132,8 +122,7 @@ func _build_brush_group() -> void:
 	_brush_half.pressed.connect(func(): brush_scale_requested.emit(false))
 	_brush_group.add_child(_brush_half)
 
-
-## 笔刷截面形态（球 / 平面）。读 [constant QVoxelBrushTool.SHAPES]。
+## 笔刷截面形态（球 / 平面）。
 func _build_shape_group() -> void:
 	_shape_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	_row.add_child(_shape_group)
@@ -148,7 +137,6 @@ func _build_shape_group() -> void:
 		_shape_buttons.append(b)
 		_shape_group.add_child(b)
 
-
 ## 对称轴 X / Y / Z（对一切写体素的工具生效）。
 func _build_symmetry_group() -> void:
 	_sym_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
@@ -162,7 +150,6 @@ func _build_symmetry_group() -> void:
 		b.toggled.connect(_on_sym_toggled.bind(i))
 		_sym.append(b)
 		_sym_group.add_child(b)
-
 
 ## 快速选区判据：同色相连 / 几何相连（只在「选择」工具下显示）。
 func _build_criterion_group() -> void:
@@ -180,7 +167,6 @@ func _build_criterion_group() -> void:
 		if spec[0]:
 			b.set_pressed_no_signal(true)
 
-
 func _build_selection_group() -> void:
 	_select_group = QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	_row.add_child(_select_group)
@@ -192,28 +178,23 @@ func _build_selection_group() -> void:
 		_select_buttons[row.id] = b
 		_select_group.add_child(b)
 
-
 func _on_op_toggled(on: bool, op: int) -> void:
 	if on:
 		op_selected.emit(op)
-
 
 func _on_shape_toggled(on: bool, shape: int) -> void:
 	if on:
 		brush_shape_selected.emit(shape)
 
-
 func _on_sym_toggled(on: bool, axis: int) -> void:
 	symmetry_toggled.emit(axis, on)
-
 
 func _on_select_action(id: StringName) -> void:
 	selection_action.emit(id)
 
-
 # 位置（左右让开两侧栏）
 
-## 本条横跨"左列右缘 → 右列左缘"的可见区。两侧宽度由 App 报进来（内容驱动，不是常量）。
+## 本条横跨"左列右缘 → 右列左缘"的可见区。
 func set_insets(left: float, right: float) -> void:
 	if is_equal_approx(left, _left_inset) and is_equal_approx(right, _right_inset):
 		return
@@ -221,11 +202,9 @@ func set_insets(left: float, right: float) -> void:
 	_right_inset = right
 	_sync_rect()
 
-
 func _sync_rect() -> void:
 	offset_left = _left_inset
 	offset_right = -_right_inset
-
 
 # 对外：状态同步（只由 App 调用）
 
@@ -233,10 +212,7 @@ func _sync_rect() -> void:
 const KIND_BRUSH := 0
 const KIND_CUSTOM := 1
 
-
 ## 切工具 → 换一套选项。
-##   笔刷：操作三态 + 笔刷尺寸 / 形态 / 对称（选择 / 移动时换成选区动作）；
-##   自定义笔刷：只有操作三态（图案与抓取在右侧「笔刷」面板）。
 func set_tool(kind: int, supports_brush: bool, selection_mode: bool) -> void:
 	var brush := kind == KIND_BRUSH
 	_op_group.visible = (kind == KIND_BRUSH or kind == KIND_CUSTOM) and not selection_mode
@@ -246,13 +222,11 @@ func set_tool(kind: int, supports_brush: bool, selection_mode: bool) -> void:
 	_criterion_group.visible = brush and selection_mode
 	_select_group.visible = brush and selection_mode
 
-
 ## 回写操作三态（App 在切工具 / 按键后调用；no_signal 避免回环）。
 func set_op(op: int) -> void:
 	var b: Button = _op_buttons.get(op)
 	if b != null:
 		b.set_pressed_no_signal(true)
-
 
 ## 刷新笔刷显示；supported = false 时整组置灰（面笔 / 填充不吃笔刷）。
 func set_brush(size: int, supported: bool) -> void:
@@ -264,7 +238,6 @@ func set_brush(size: int, supported: bool) -> void:
 	_brush_half.disabled = not supported or size <= 1
 	_brush_dbl.disabled = not supported
 
-
 ## 回写形态（App 在切对象 / 撤销后调用；no_signal 避免回环）。
 func set_brush_shape(shape: int, supported: bool) -> void:
 	for i in QVoxelBrushTool.SHAPES.size():
@@ -275,14 +248,12 @@ func set_brush_shape(shape: int, supported: bool) -> void:
 			b.set_pressed_no_signal(true)
 		b.disabled = not supported
 
-
 ## 回写对称轴状态（App 在切对象 / 撤销后调用；no_signal 避免回环）。
 func set_symmetry(mask: Vector3i) -> void:
 	var flags := [mask.x, mask.y, mask.z]
 	for i in 3:
 		if i < _sym.size():
 			_sym[i].set_pressed_no_signal(flags[i] != 0)
-
 
 ## 回写选区 / 剪贴板的可用性（置灰而不是隐藏，位置固定）。
 func set_selection_state(has_selection: bool, has_clipboard: bool) -> void:
@@ -292,10 +263,8 @@ func set_selection_state(has_selection: bool, has_clipboard: bool) -> void:
 	_set_action_enabled(&"paste", has_clipboard)
 	_set_action_enabled(&"clear", has_selection)
 
-
 static func select_actions() -> Array:
 	return SELECT_ACTIONS
-
 
 func _set_action_enabled(id: StringName, on: bool) -> void:
 	var b: Button = _select_buttons.get(id)

@@ -1,5 +1,5 @@
 @abstract
-## 任务实体抽象基类。子类：SignalTask（信号驱动）、CountTask（计数）、GroupTask（分组）。
+## 任务实体抽象基类。
 class_name Task extends Entity
 
 var def: TaskDef:
@@ -21,7 +21,6 @@ var _data
 var _handler: Callable
 var _status = TaskDef.Status.INACTIVE  # TaskDef.Status(不注解枚举类型, 便于从存档 int 还原)
 
-
 ## 任务状态(只读; 由 activate/complete/fail/cancel 驱动)
 var status: TaskDef.Status:
 	get:
@@ -40,13 +39,10 @@ var is_terminal: bool:
 	get:
 		return _status >= TaskDef.Status.COMPLETED
 
-
 static func create(task_def: TaskDef) -> Task:
 	return task_def.create_entity()
 
-
 ## 由存档重建任务实体(含 def 与子任务结构), 无需先 activate。
-## [param data] 可选上下文; 提供则立即激活到存档进度, 否则由调用方稍后 activate(data)(会从存档进度继续, 不重跑已完成步骤)
 static func restore(dict: Dictionary, data = null) -> Task:
 	var task_def := _def_from_data(dict)
 	if task_def == null:
@@ -55,7 +51,6 @@ static func restore(dict: Dictionary, data = null) -> Task:
 	var task := create(task_def)
 	task.load_data(dict, data)
 	return task
-
 
 ## 激活: 状态 → ACTIVE 并接入完成监听。
 func activate(data) -> void:
@@ -127,7 +122,7 @@ func reset() -> void:
 func get_current_desc() -> String:
 	return def.get_desc(null)
 
-## 完成进度: x = 已完成数, y = 总数。无子进度的任务为 0/1 或 1/1。
+## 完成进度: x = 已完成数, y = 总数。
 func get_progress() -> Vector2i:
 	return Vector2i(1 if is_completed else 0, 1)
 
@@ -151,7 +146,6 @@ func load_data(dict: Dictionary, data = null) -> void:
 ## 读档后重建监听(状态为 ACTIVE 且已有上下文时; 子类覆写)
 func _resume_from_save() -> void:
 	pass
-
 
 # --- 内部 ---
 

@@ -6,7 +6,6 @@ const KEY_UPDATE_SUBMODULE := "dev_framework/gdextension_build/auto_update_submo
 const KEY_RELOAD_EDITOR := "dev_framework/gdextension_build/auto_reload_editor"
 const KEY_SYNC_GDEXT := "dev_framework/gdextension_build/sync_gdextension"   # 部署后把实盘产物路径回写 *.gdextension([libraries])
 
-
 static var _me: GDExtensionRebuild   # 异步构建期间持有自身(菜单调用方不持有实例)
 
 var _lines: Array[String] = []
@@ -26,21 +25,15 @@ var _build_types: Array[String] = []   # 本次实际要构建的构建类型(�
 var _plugin_filter := "all"   # 只构建某个原生目标(插件 target 名); "all"/"" = 全部
 
 # 四个实现切片(@tool + RefCounted, 不是菜单脚本): 只由 _init_tools() 惰性装配。
-# 构建行为/状态仍全部由本类持有, 切片只读写 _host.* —— 拆的只是代码位置, 不是状态。
 var _probe: GDExtensionProbeTool
 var _cmake: GDExtensionCmakeTool
 var _proc: GDExtensionProcessTool
 var _deploy: GDExtensionDeployTool
 
-
-# ============================================================
 # 可编程入口 (MCP build_native / CI 复用)
-# 构建流程只此一份: 菜单 _run() 与 build_now() 走同一套, 不要在调用方重写。
-# ============================================================
 
 const STATE_PATH := "res://.godot/gdextension_build/state.txt"
 const SUMMARY_PATH := "res://.godot/gdextension_build/last_build.txt"
-
 
 func _run() -> void:
 	_me = self
@@ -50,7 +43,7 @@ func _run() -> void:
 	DirAccess.make_dir_recursive_absolute(cache_dir)
 	_state_write("构建进行中: 检查原生工程骨架…")
 	_log("━━━━ GDExtension 一键构建 ━━━━")
-	# 零配置: gdextension/src 下只要有 .cpp, 就把 CMakeLists / godot-cpp / 自动注册 / 声明补齐
+	# 零配置: gdextension/src 下只要有 .cpp, 就把 CMakeLists / godot-cpp / 自动注册 /…
 	_cmake._ensure_scaffold()
 	_state_write("构建进行中: 定位扩展…")
 	var loc := _probe._locate()
@@ -83,7 +76,6 @@ func _run() -> void:
 	var gdext_by_target: Dictionary = loc.get("gdext_by_target", {})
 	var done: Array[String] = []
 	# 分组键 = "<target>|<type>": 多插件时每个插件的产物/声明必须各自成组,
-	# 只按 type 做键会把两个插件的文件混在一起(lipo 会把别家的库当自己的架构产物、同步会写错声明)。
 	var groups: Dictionary = {}       # key -> 已部署文件名列表
 	var group_out: Dictionary = {}    # key -> 输出目录
 	var group_gdext: Dictionary = {}  # key -> 该插件的 .gdextension(res://)
@@ -101,10 +93,8 @@ func _run() -> void:
 		if not _cmake._ready_build_dir(build_dir, source_dir, info, type, arch):
 			return _finish_with("CMake 配置失败(%s.%s)" % [type, arch])
 		# 断点续跑: 上次"编译完成但没走到部署"(编辑器脚本重载会取消挂起的协程, state 会停在
-		# "编译中"; 实测踩过两次)。产物已比已部署库新且不比源码旧 → 直接部署, 不要白编一轮。
 		if _deploy._up_to_date(target_res, out_dir, tgt):
 			# 无源码变更: 不调 cmake/make —— 否则会因"直出产物已被改名"而必然重链,
-			# 既白花时间, 又让产物字节每次都变(让人误以为"没改代码却变了")。
 			_log("源码与构建配置均未变更, 跳过编译(产物保持原样): ", _probe._canonical_file(tgt, type, arch))
 		elif _deploy._artifact_ready(info, type, arch, target_res, out_dir, tgt):
 			_log("产物已是最新(上次构建未完成部署), 跳过编译: ", _probe._canonical_file(tgt, type, arch))
@@ -178,11 +168,7 @@ func _run() -> void:
 		_log("需 项目→重新加载当前项目 生效(引擎启动时才加载扩展)。")
 	_finish()
 
-
 ## 跑完整流程并等它结束: {ok, summary, state}。
-## [param restart] 完成后是否自动重载编辑器 —— Windows 上编辑器锁着 dll 时, 部署会退化成
-## "改写 .gdextension 指向新产物", 只有重载编辑器才会真正加载新库。
-## [param plugin] 只构建某个原生目标(插件 target 名); "all"/"" = 全部。
 static func build_now(restart := false, plugin := "all") -> Dictionary:
 	var started := int(Time.get_unix_time_from_system())
 	var prev_reload := bool(ProjectSettings.get_setting(KEY_RELOAD_EDITOR, true))
@@ -193,7 +179,6 @@ static func build_now(restart := false, plugin := "all") -> Dictionary:
 	ProjectSettings.set_setting(KEY_RELOAD_EDITOR, prev_reload)
 	var summary := FileTool.read_text(SUMMARY_PATH)
 	# 摘要必须是**本次**构建写的: 卡死/异常退出时旧摘要还留在盘上,
-	# 不校验新鲜度就会把上一次的成功当成这一次的成功(实测踩过)。
 	var ts := 0
 	if FileAccess.file_exists(SUMMARY_PATH):
 		ts = int(FileAccess.get_modified_time(SUMMARY_PATH))
@@ -205,14 +190,7 @@ static func build_now(restart := false, plugin := "all") -> Dictionary:
 		"log": "res://.godot/gdextension_build/build.log",
 	}
 
-
 ## 原生源码是否比已部署的库新 —— "改了 C++ 却没重编"的检测点(测试与 MCP 共用)。
-## 只比时间戳: 源码树与产物足以判定, 不需要额外的指纹文件。
-##
-## 【库产物必须按"本 target + 本平台"筛, 不能扫目录取最大 mtime】同目录里还躺着别的平台产物
-## (mac 上编过的 .dylib)、引擎运行期的 `~<名>` 加载副本、以及被占用时旁置的旧库; 取最大值会让
-## "判据是哪个文件"随机漂移 —— 实测因此把 windows 项目判成"库比源码旧", 而最新那个文件其实是 mac dylib。
-## 【也不再单独扫某一个插件目录】那等于把插件名写死在框架里; 全局值由各 target 汇总得出。
 static func native_status() -> Dictionary:
 	var probe := GDExtensionProbeTool.new()
 	# 平台扩展名从规范命名规则反推 —— 构建/部署/清理与本处必须认同一套命名(唯一真值在 probe)。
@@ -263,7 +241,6 @@ static func native_status() -> Dictionary:
 		"stale": any_stale,
 	}
 
-
 ## 提前失败收尾: 记录摘要与状态, 并弹编辑器提示
 func _finish_with(result: String) -> void:
 	_summary_write("%s\n日志: res://.godot/gdextension_build/build.log\n修复后再次运行即可重试。" % result)
@@ -271,9 +248,7 @@ func _finish_with(result: String) -> void:
 	_toast("GDExtension 构建失败: " + result)
 	_finish()
 
-
 ## ── 实现切片装配 ─────────────────────────────────────────────────
-## 惰性装配: 菜单 _run() 走一遍, 外部直接 new 出来的实例调 _canonical_file() 等也要能拿到 _probe。
 func _init_tools() -> void:
 	if _probe != null:
 		return
@@ -288,58 +263,45 @@ func _init_tools() -> void:
 	_deploy._host = self
 	_deploy._probe = _probe
 
-
 ## 兼容入口: 实现已搬到 GDExtensionProbeTool; 外部(Test/工具脚本)在入口实例上直接调这几个,
-## 所以入口保留同名薄壳 —— 删了会破坏 test_native_scaffold.gd 的库名规则用例。
 func _canonical_file(target: String, type: String, arch := "") -> String:
 	_init_tools()
 	return _probe._canonical_file(target, type, arch)
-
 
 func _os_label() -> String:
 	_init_tools()
 	return _probe._os_label()
 
-
 func _default_out_file(target: String) -> String:
 	_init_tools()
 	return _probe._default_out_file(target)
-
 
 func _universal_file(target: String, type: String) -> String:
 	_init_tools()
 	return _probe._universal_file(target, type)
 
-
 ## 纯函数转发: test_native_scaffold.gd 按类名调用, 契约面必须留在入口。
 static func parse_target_outputs(text: String, cmake_dir_abs: String) -> Dictionary:
 	return GDExtensionProbeTool.parse_target_outputs(text, cmake_dir_abs)
 
-
 static func filter_targets(targets: Array, plugin: String) -> Array:
 	return GDExtensionProcessTool.filter_targets(targets, plugin)
-
 
 func _opt(key: String, def_val: bool) -> bool:
 	return bool(ProjectSettings.get_setting(key, def_val))
 
-
 func _res(p: String) -> String:
 	return FileTool.to_res_path(p)
 
-
 func _abs(p: String) -> String:
 	return ProjectSettings.globalize_path(_res(p))
-
 
 func _print_out(out: Array) -> void:
 	for line in out:
 		_log_raw(String(line))
 
-
 func _log(...parts) -> void:
 	_log_raw(" ".join(parts.map(str)))
-
 
 ## 输出实时回显 + 追加镜像到 res://.godot/gdextension_build/build.log(编辑器重启后仍可查)
 func _log_raw(text: String) -> void:
@@ -353,10 +315,8 @@ func _log_raw(text: String) -> void:
 		f.store_string(text + "\n")
 		f.close()
 
-
 func _log_path() -> String:
 	return _abs("res://.godot/gdextension_build/build.log")
-
 
 ## 编辑器内自动提示: Godot 4.3+ 顶部 Toaster(非模态、自动消失), 无需翻日志或手动查询。
 func _toast(text: String) -> void:
@@ -371,11 +331,9 @@ func _toast(text: String) -> void:
 		return
 	toaster.push_text(text)
 
-
 ## 阶段/结果状态文件(实时阶段/进度; 供查看, 非必要)
 func _state_write(text: String) -> void:
 	FileTool.write_text(_abs("res://.godot/gdextension_build/state.txt"), text)
-
 
 ## 最终摘要(成败/用时/产物/下一步): 自动重载前落盘 + 同步进 build.log/Output。
 func _summary_write(text: String) -> void:
@@ -383,7 +341,6 @@ func _summary_write(text: String) -> void:
 	for line in text.split("\n"):
 		if line != "":
 			_log_raw(line)
-
 
 func _finish() -> void:
 	var tail := "━ 完成(共 %d 行输出, 日志: res://.godot/gdextension_build/build.log) ━" % _lines.size()

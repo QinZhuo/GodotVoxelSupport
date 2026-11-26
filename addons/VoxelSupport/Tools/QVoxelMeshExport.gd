@@ -2,21 +2,15 @@
 class_name QVoxelMeshExport
 extends RefCounted
 ## 世界 → 三角网格 → glTF 2.0（`.glb` 二进制 / `.gltf` 文本 + 贴图）。
-## 【为什么是 glTF】Godot 内核**唯一自带**的网格/场景交换格式就是 glTF 2.0（`GLTFDocument`）：
-## `append_from_scene()` 把 Godot 场景转成 glTF 状态、`write_to_filesystem()` 按扩展名写出
-## `.glb` 或 `.gltf`。OBJ / STL 等内核没有导出实现，要另引第三方插件，故这里只做 glTF。
-## 【与渲染同源】体素几何走原生几何内核（与运行时/导入同一套贪婪面片），颜色走世界调色板
-## （每材质 4 张 256×1 通道图），于是"导出结果"与"编辑器所见"一致。
 
 ## 支持的扩展名（文件对话框过滤 + 扩展名判定）。
 const EXTENSIONS := ["glb", "gltf"]
-## 一个体素的边长（世界单位）。1.0 = 一体素一单位，便于在 Blender 等里按整数对齐。
+## 一个体素的边长（世界单位）。
 const DEFAULT_VOXEL_SCALE := 1.0
-
 
 # 对外
 
-## 世界 → glTF 文件（`.glb`/`.gltf` 由扩展名决定）。返回 Error。
+## 世界 → glTF 文件（`.glb`/`.gltf` 由扩展名决定）。
 static func export(world: QVoxelWorld, path: String,
 		voxel_scale := DEFAULT_VOXEL_SCALE) -> Error:
 	if world == null or path.is_empty():
@@ -34,7 +28,6 @@ static func export(world: QVoxelWorld, path: String,
 	var state := GLTFState.new()
 	var err := doc.append_from_scene(root, state)
 	# 【防"静默空壳"】编辑器进程下 `append_from_scene` 实测不导出网格（`state.get_meshes()` 为空），
-	# 写出来会是个没有几何的 .glb。宁可明确报错，也不产出打不开的空文件。
 	if err == OK and state.get_meshes().is_empty():
 		err = ERR_UNAVAILABLE
 	if err == OK:
@@ -42,8 +35,7 @@ static func export(world: QVoxelWorld, path: String,
 	root.free()
 	return err
 
-
-## 世界求值 → 三角网格（实心 / 透明两个 surface）。空世界或几何内核不可用时返回 null。
+## 世界求值 → 三角网格（实心 / 透明两个 surface）。
 static func build_mesh(world: QVoxelWorld,
 		voxel_scale := DEFAULT_VOXEL_SCALE) -> ArrayMesh:
 	if world == null:
@@ -59,18 +51,14 @@ static func build_mesh(world: QVoxelWorld,
 		return null
 	var mesh := ArrayMesh.new()
 	# 两桶→surface 的装配是 VoxelMeshGenerator.append_arrays_to_mesh 的唯一实现
-	# （空桶跳过 / 材质绑实际 surface 序号 / 全空返回 false），这里只决定"空就返回 null"。
 	if not VoxelMeshGenerator.append_arrays_to_mesh(
 			mesh, arrays, VoxelMeshGenerator.generate_textured_materials_runtime(materials)):
 		return null
 	return mesh
 
-
 # 内部
 
 ## 求值体积 → 稀疏体素字典（世界坐标 → 材质ID），供原生几何内核消费。
-## 【按线性下标扫，只给非空格算坐标】体积是稠密的：三层 for 会为每个空气格都算一遍乘加，
-## 而稀疏模型里九成以上是空气，坐标换算只在命中时才值得做。
 static func _voxel_dict(res: QVoxelEvalResult) -> Dictionary:
 	var out := {}
 	var vol := res.volume
@@ -89,7 +77,6 @@ static func _voxel_dict(res: QVoxelEvalResult) -> Dictionary:
 		out[Vector3i(o.x + lx, o.y + (rest - lx) / gs.x, o.z + (i - rest) / plane)] = m
 	return out
 
-
 ## 世界调色板（MATE 字典）→ VoxelMaterial 数组（索引 = 材质ID，0 恒为 null 空气占位）。
 static func _materials(world: QVoxelWorld) -> Array:
 	var out: Array = []
@@ -102,7 +89,6 @@ static func _materials(world: QVoxelWorld) -> Array:
 			m.id = i
 			out[i] = m
 	return out
-
 
 static func _safe_name(name: String) -> String:
 	var s := name.strip_edges()

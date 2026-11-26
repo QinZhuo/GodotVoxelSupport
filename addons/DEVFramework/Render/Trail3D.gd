@@ -16,7 +16,7 @@ enum TextureMode {
 ## 两个点是否"重合"的平方距离阈值(1e-8 ⇒ 实际距离约 0.1mm), 低于它就不生成新段
 const MIN_SEGMENT_DIST_SQ := 0.00000001
 
-#region Trail Settings
+# region Trail Settings
 
 @export var lifetime: float = 1.0:
 	set(value):
@@ -28,17 +28,17 @@ const MIN_SEGMENT_DIST_SQ := 0.00000001
 
 @export var emitting: bool = true
 
-#endregion
+# endregion
 
-#region Shape
+# region Shape
 
 @export var width: float = 1.0
 @export var width_curve: Curve
 @export var alignment: Alignment = Alignment.VIEW
 
-#endregion
+# endregion
 
-#region Appearance
+# region Appearance
 
 @export var material: Material:
 	set(value):
@@ -55,9 +55,9 @@ const MIN_SEGMENT_DIST_SQ := 0.00000001
 @export var color_gradient: Gradient
 @export var texture_mode: TextureMode = TextureMode.STRETCH
 
-#endregion
+# endregion
 
-#region Internal
+# region Internal
 
 class TrailPoint:
 	var position: Vector3
@@ -76,8 +76,7 @@ var _last_position: Vector3
 var _total_length: float = 0.0
 var _prefix_lengths: Array[float] = []
 
-#endregion
-
+# endregion
 
 func _init() -> void:
 	_immediate_mesh = ImmediateMesh.new()
@@ -89,29 +88,24 @@ func _init() -> void:
 	if not width_curve:
 		width_curve = _create_default_width_curve()
 
-
 func _enter_tree() -> void:
 	if not _mesh_instance.get_parent():
 		add_child(_mesh_instance)
 	_update_material()
 
-
 func _exit_tree() -> void:
 	if _mesh_instance and _mesh_instance.get_parent() == self:
 		remove_child(_mesh_instance)
 
-
 func _ready() -> void:
 	_last_position = global_position
-
 
 func _process(delta: float) -> void:
 	_update_points(delta)
 	_prune_old_points()
 	_build_mesh()
 
-
-#region Point Management
+# region Point Management
 
 func _update_points(delta: float) -> void:
 	for p in _points:
@@ -127,11 +121,9 @@ func _update_points(delta: float) -> void:
 		_points.push_back(TrailPoint.new(current_pos, 0.0, global_basis.z.normalized()))
 		_last_position = current_pos
 
-
 func _prune_old_points() -> void:
 	while _points.size() > 0 and _points[0].age >= lifetime:
 		_points.pop_front()
-
 
 func clear() -> void:
 	_points.clear()
@@ -139,10 +131,9 @@ func clear() -> void:
 	_total_length = 0.0
 	_last_position = global_position
 
-#endregion
+# endregion
 
-
-#region Mesh Building
+# region Mesh Building
 
 func _build_mesh() -> void:
 	_immediate_mesh.clear_surfaces()
@@ -169,7 +160,6 @@ func _build_mesh() -> void:
 			_build_virtual_only(origin)
 			_immediate_mesh.surface_end()
 
-
 func _build_recorded_segments(count: int, origin: Vector3) -> void:
 	for i in range(count - 1):
 		var p0 := _points[i]
@@ -184,7 +174,6 @@ func _build_recorded_segments(count: int, origin: Vector3) -> void:
 			_get_color(p0.age / lifetime), _get_color(p1.age / lifetime),
 			uv.x, uv.y
 		)
-
 
 func _build_virtual_segment(origin: Vector3) -> void:
 	if not emitting:
@@ -221,7 +210,6 @@ func _build_virtual_segment(origin: Vector3) -> void:
 		uv_last, uv_curr
 	)
 
-
 func _build_virtual_only(origin: Vector3) -> void:
 	var last_p := _points[0]
 	var current_pos := global_position
@@ -237,7 +225,6 @@ func _build_virtual_only(origin: Vector3) -> void:
 		0.0, 0.0
 	)
 
-
 func _add_quad(p0: Vector3, p1: Vector3, w0: float, w1: float, right: Vector3, col0: Color, col1: Color, uv0: float, uv1: float) -> void:
 	var h0 := right * w0 * 0.5
 	var h1 := right * w1 * 0.5
@@ -249,16 +236,14 @@ func _add_quad(p0: Vector3, p1: Vector3, w0: float, w1: float, right: Vector3, c
 	_add_vertex(p1 - h1, col1, Vector2(uv1, 1.0))
 	_add_vertex(p0 - h0, col0, Vector2(uv0, 1.0))
 
-
 func _add_vertex(pos: Vector3, col: Color, uv: Vector2) -> void:
 	_immediate_mesh.surface_set_color(col)
 	_immediate_mesh.surface_set_uv(uv)
 	_immediate_mesh.surface_add_vertex(pos)
 
-#endregion
+# endregion
 
-
-#region Helpers
+# region Helpers
 
 func _get_right(p0: TrailPoint, p1: TrailPoint) -> Vector3:
 	match alignment:
@@ -270,7 +255,6 @@ func _get_right(p0: TrailPoint, p1: TrailPoint) -> Vector3:
 			return _calc_static_right(p0)
 	return Vector3.RIGHT
 
-
 func _get_right_for_virtual(last_p: TrailPoint, current_pos: Vector3) -> Vector3:
 	match alignment:
 		Alignment.VIEW:
@@ -280,7 +264,6 @@ func _get_right_for_virtual(last_p: TrailPoint, current_pos: Vector3) -> Vector3
 		Alignment.STATIC:
 			return _calc_static_right(last_p)
 	return Vector3.RIGHT
-
 
 func _get_uv(i: int, count: int) -> Vector2:
 	match texture_mode:
@@ -292,7 +275,6 @@ func _get_uv(i: int, count: int) -> Vector2:
 		TextureMode.PER_SEGMENT:
 			return Vector2(0.0, 1.0)
 	return Vector2.ZERO
-
 
 func _calc_view_right(p0: Vector3, p1: Vector3) -> Vector3:
 	var camera := get_viewport().get_camera_3d()
@@ -308,7 +290,6 @@ func _calc_view_right(p0: Vector3, p1: Vector3) -> Vector3:
 		right = camera.global_basis.x.normalized()
 	return right
 
-
 func _calc_transform_z_right() -> Vector3:
 	var forward: Vector3
 	if _points.size() >= 2:
@@ -320,7 +301,6 @@ func _calc_transform_z_right() -> Vector3:
 	if right.length_squared() < 0.0001:
 		right = Vector3.RIGHT
 	return right
-
 
 func _calc_static_right(p: TrailPoint) -> Vector3:
 	var forward: Vector3
@@ -334,17 +314,14 @@ func _calc_static_right(p: TrailPoint) -> Vector3:
 		right = Vector3.RIGHT
 	return right
 
-
 func _get_width(t: float) -> float:
 	var cv := width_curve.sample(clampf(t, 0.0, 1.0)) if width_curve else 1.0
 	return width * cv
-
 
 func _get_color(t: float) -> Color:
 	if color_gradient:
 		return color_gradient.sample(clampf(t, 0.0, 1.0))
 	return Color.WHITE
-
 
 func _calc_lengths() -> void:
 	_total_length = 0.0
@@ -356,17 +333,15 @@ func _calc_lengths() -> void:
 		_total_length += seg_len
 		_prefix_lengths[i + 1] = _total_length
 
-#endregion
+# endregion
 
-
-#region Material
+# region Material
 
 func _create_default_width_curve() -> Curve:
 	var curve := Curve.new()
 	curve.add_point(Vector2(0, 1.0))
 	curve.add_point(Vector2(1, 1.0))
 	return curve
-
 
 func _create_default_material() -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
@@ -376,9 +351,8 @@ func _create_default_material() -> StandardMaterial3D:
 	mat.vertex_color_use_as_albedo = true
 	return mat
 
-
 func _update_material() -> void:
 	if _mesh_instance:
 		_mesh_instance.material_override = material if material else _create_default_material()
 
-#endregion
+# endregion

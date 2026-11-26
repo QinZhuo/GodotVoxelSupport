@@ -1,10 +1,8 @@
 extends TestCase
 
 ## QVoxelBuilder 契约测试：材质 ID / 图元落笔（含 paint 任意格子）/ 落盘往返。
-## 纯逻辑，编辑器进程即可（不碰场景树 / 渲染）。
 
 const OUT := "user://test_qvoxel_builder.qvx"
-
 
 func test_material_ids_and_count() -> void:
 	var b := QVoxelBuilder.new()
@@ -14,7 +12,6 @@ func test_material_ids_and_count() -> void:
 	assert_eq(first, 1, "首个材质 ID = 1（0 留给空气）")
 	assert_eq(second, 2, "ID 递增")
 	assert_eq(b.material_count(), 2, "材质计数不含空气槽")
-
 
 func test_primitives_paint_cells() -> void:
 	var b := QVoxelBuilder.new()
@@ -26,7 +23,6 @@ func test_primitives_paint_cells() -> void:
 	b.ball(Vector3i(10, 10, 10), 0, m)
 	assert_eq(b.voxels().size(), 12, "半径 0 球 = 单格")
 
-
 ## paint 是任意图元结果（含 dilate / region）的统一落笔口 —— 这正是本次补上的缺口。
 func test_paint_stamps_arbitrary_cells() -> void:
 	var b := QVoxelBuilder.new()
@@ -37,7 +33,6 @@ func test_paint_stamps_arbitrary_cells() -> void:
 	assert_eq(b.voxels().size(), grown.size(), "paint 原样盖章全部格子")
 	for p in grown:
 		assert_eq(b.voxels()[p], m, "每格材质一致")
-
 
 func test_document_bounds_are_block_aligned() -> void:
 	var b := QVoxelBuilder.new()
@@ -51,7 +46,6 @@ func test_document_bounds_are_block_aligned() -> void:
 	assert_eq(bd["min"], [-32, 0, 0], "bounds.min 按块对齐")
 	assert_eq(bd["max"], [64, 32, 32], "bounds.max 按块对齐")
 	assert_eq((doc.node["nodes"] as Array).size(), 1, "一个 NODE 摆放")
-
 
 func test_save_roundtrip() -> void:
 	var b := QVoxelBuilder.new()

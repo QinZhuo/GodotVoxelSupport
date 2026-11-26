@@ -1,24 +1,5 @@
 extends Node
 ## 体素破坏系统演示 - 超大型性能测试场景
-##
-## 展示+测试：
-##   - 超大型体素结构 (可配置尺寸，默认 200x100x200)
-##   - 持续按住鼠标左键进行连续球形破坏 (性能压力测试)
-##   - 逐帧性能监控：网格重建耗时、顶点/三角形数、chunk 统计
-##   - 滚动性能日志，方便定位瓶颈拐点
-##
-## 键位说明：
-##   鼠标左键(按住) : 连续球形破坏
-##   鼠标右键(按住) : 连续单体破坏
-##   空格(按住)     : 连续射线破坏
-##   C              : 切换 边缘触发/连续 模式
-##   V              : 切换破坏显示模式 (球形/射线)
-##   1/2            : 切换碎片模式 (物理/视觉)
-##   B              : 破坏底部支撑层 (触发大面积崩塌)
-##   R              : 重置场景
-##   S/L            : 存档/读档
-##   T              : 切换性能日志显示
-##   +/-            : 调整破坏半径
 
 ## 体素缩放
 @export var voxel_scale: float = 0.1
@@ -49,9 +30,6 @@ extends Node
 			_build_target()
 
 ## 可破坏对象：宿主渲染器（网格重建 / LOD / 材质 / 性能统计都在它身上）
-## 【为什么这里是渲染器而不是破坏组件】场景结构是 VoxelRenderer + 它的子节点 VoxelDestructible。
-## 渲染与破坏已拆成两个节点：渲染相关的读（last_mesh_gen_time_ms / mesh_updated / lod_count /
-## _lod_meshes）走 `_target`，破坏相关的调（damage_* / collapse_mode / stress_force）走 `_destruct`。
 var _target: VoxelRenderer
 ## 破坏组件（宿主的子节点）
 var _destruct: VoxelDestructible
@@ -115,7 +93,6 @@ var _saved_data: Variant = null
 enum DamageMode { SPHERE, RAY }
 var _damage_mode: int = DamageMode.SPHERE
 
-
 func _ready() -> void:
 	var _t0 := Time.get_ticks_msec()
 	_setup_ground()
@@ -131,7 +108,6 @@ func _ready() -> void:
 	_last_log_time = Time.get_ticks_msec()
 	_log_perf_line("初始化完成")
 
-
 func _log_perf_line(msg: String) -> void:
 	var elapsed := Time.get_ticks_msec() - _last_log_time
 	var time_str := "[+%dms]" % elapsed
@@ -141,7 +117,6 @@ func _log_perf_line(msg: String) -> void:
 		_perf_log.pop_front()
 	print(full_msg)
 	_last_log_time = Time.get_ticks_msec()
-
 
 ## 创建地面
 func _setup_ground() -> void:
@@ -170,14 +145,12 @@ func _setup_ground() -> void:
 	coll.position = Vector3(0, -1.0, 0)
 	add_child(coll)
 
-
 func _process(delta: float) -> void:
 	_frame_count += 1
 	_handle_input(delta)
 	_update_hud()
 
 	# 每 60 帧（约1秒）记录一次详细性能日志
-	# 只在网格重建确实发生时打印（last_mesh_gen_time_ms 变化），静止时不再刷重复日志
 	if _frame_count % 60 == 0 and _perf_log.size() < MAX_PERF_LOG - 10:
 		var mgt := _target.last_mesh_gen_time_ms
 		if mgt != _last_perf_mgt:
@@ -188,17 +161,12 @@ func _process(delta: float) -> void:
 			var apply_time := _target.last_apply_time_ms
 			_log_perf_line("[性能] 体素=%d 重建Chunk=%d 三角=%d 生成=%.1fms 应用=%.1fms" % [vc, rebuild_chunks, total_tris, mgt, apply_time])
 
-
 ## 场景里宿主的节点名（渲染器 + 它的破坏子组件都在这个子树下）
 const HOST_NODE_NAME := "DestructibleVoxels"
 ## 宿主下破坏子组件的节点名
 const DESTRUCT_NODE_NAME := "VoxelDestructible"
 
-
 ## 构建目标：VoxelRenderer（宿主） + 它的子节点 VoxelDestructible（破坏组件）。
-## 优先复用场景里预置的节点（编辑器场景树可见、属性可调），缺失时自动创建。
-## 【为什么不再是"一个节点顶两件事"】破坏系统已改成组件：渲染器负责渲染，破坏组件挂在它
-## 下面负责破坏。场景结构（demo/destruction_demo.tscn）与这里保持一致，两种来源都能用。
 func _build_target() -> void:
 	var scene_host := get_node_or_null(HOST_NODE_NAME)
 	if scene_host is VoxelRenderer:
@@ -210,7 +178,6 @@ func _build_target() -> void:
 		_target = VoxelRenderer.new()
 		_target.name = HOST_NODE_NAME
 		# 【破坏必须 DYNAMIC】STATIC 下改一个体素要重建整份模型（实测 22.7~85ms），
-		# DYNAMIC 只重建受影响的 chunk（0.4~2ms）。
 		_target.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 		add_child(_target)
 
@@ -223,7 +190,6 @@ func _build_target() -> void:
 		_destruct.name = DESTRUCT_NODE_NAME
 		_target.add_child(_destruct)
 	# 显式绑定宿主：子节点 _ready 里也会从父节点惰性取，这里调用是为了让"场景节点"与
-	# "代码新建节点"走同一条确定路径（幂等）。
 	_destruct.configure(_target)
 
 	# 若已有 data 且是用户手动赋的 QVoxelSource，保留它；否则生成默认结构
@@ -236,9 +202,7 @@ func _build_target() -> void:
 		data = _create_large_structure_data()
 	_configure_target(data)
 
-
 ## 统一配置破坏目标（场景节点与动态创建共用）
-## 渲染旋钮 → 宿主；破坏旋钮 → 破坏组件。
 func _configure_target(data: QVoxelSource) -> void:
 	# ── 宿主（渲染）──
 	_target.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
@@ -268,19 +232,13 @@ func _configure_target(data: QVoxelSource) -> void:
 	_collapse_counts.clear()
 	_voxel_counts.clear()
 
-
 ## 创建超大型体素结构
-## 包含：外壳 + 多层地板 + 内部隔墙 + 窗户/门洞，模拟大型建筑群
 func _create_large_structure_data() -> QVoxelSource:
 	var data := QVoxelSource.new()
 	var S := structure_size
 	var t := shell_thickness
 
 	# 材质定义
-	# 物理属性说明：
-	#   hardness       → 抗直接打击（需要多少伤害才能破坏）
-	#   connection_strength → 抗应力传播（裂纹扩散阻力）
-	#   mass           → 碎片粒子表现（重物飞得近/落得快，轻物飞得远/飘得久）
 	var concrete := VoxelMaterial.new()
 	concrete.id = 1
 	concrete.color = Color(0.45, 0.45, 0.5)
@@ -323,7 +281,6 @@ func _create_large_structure_data() -> QVoxelSource:
 	var floor_height := maxi(1, (S.y - 2) / floor_count)
 
 	# --- 1. 外壳 (地板、天花板、四周墙壁) ---
-	# 地板: y=0, 整个底面（批量填充，避免逐体素 set_voxel 的哈希/信号开销）
 	var floor_positions: Array = []
 	floor_positions.resize(S.x * S.z)
 	var _i := 0
@@ -450,7 +407,6 @@ func _create_large_structure_data() -> QVoxelSource:
 
 	return data
 
-
 func _setup_camera() -> void:
 	_camera = get_node_or_null("Camera3D")
 	if _camera == null:
@@ -469,7 +425,6 @@ func _setup_camera() -> void:
 	_camera.look_at(world_center, Vector3.UP)
 	_camera.fov = 65
 	_camera.far = max_dim * 4.0
-
 
 func _setup_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -494,7 +449,6 @@ func _setup_hud() -> void:
 	_mode_label.add_theme_constant_override("outline_size", 4)
 	layer.add_child(_mode_label)
 
-
 func _handle_input(_delta: float) -> void:
 	var left := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	var right := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
@@ -516,7 +470,6 @@ func _handle_input(_delta: float) -> void:
 	var key_minus := Input.is_key_pressed(KEY_MINUS) or Input.is_key_pressed(KEY_KP_SUBTRACT)
 
 	# --- 模式切换 (边缘触发) ---
-	# C: 切换连续/边缘模式
 	if key_c and not _prev_c:
 		_continuous_mode = not _continuous_mode
 		_log_perf_line("连续模式: %s" % _continuous_mode)
@@ -566,7 +519,6 @@ func _handle_input(_delta: float) -> void:
 		_log_perf_line("场景重置")
 
 	# B: 破坏底部支撑层（整层截面 → 结构真正与地面断开 → 整块坠落）
-	# 连通性模型下"只削掉外侧一层皮"不会切断结构（其余截面仍锚定），故这里取整层。
 	if key_b and not _prev_b:
 		_destruct.damage_box(AABB(Vector3(0, 0, 0), Vector3(structure_size.x, 3.5, structure_size.z)))
 		_log_perf_line("触发底部支撑层破坏")
@@ -577,8 +529,6 @@ func _handle_input(_delta: float) -> void:
 		_log_perf_line("存档 (%d 体素)" % _target.data.get_voxel_count())
 	if key_l and not _prev_l and _saved_data != null:
 		# 【修掉一个改造前就存在的错误调用】此前写的是 `_target.clear_damage()`，但
-		# VoxelDestructible 与 VoxelRenderer 都没有这个方法（读档按 L 会抛"不存在的函数"）。
-		# 伤害账归数据层，正确入口是 QVoxelSource.clear_all_damage()。
 		_target.data.clear_all_damage()
 		_target.data.load_data(_saved_data)
 		_log_perf_line("读档重建")
@@ -613,7 +563,6 @@ func _handle_input(_delta: float) -> void:
 	_prev_t = key_t
 	_prev_plus = key_plus
 	_prev_minus = key_minus
-
 
 func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
 	if _destruct == null or not is_instance_valid(_destruct):
@@ -674,7 +623,6 @@ func _execute_damage(do_left: bool, do_right: bool, do_space: bool) -> void:
 			_damage_times.pop_front()
 		_log_perf_line("空格射线 移除=%d 崩塌=%d 耗时=%.3fms" % [_destruct.last_damage_count, _destruct.last_collapse_count, elapsed])
 
-
 func _mouse_to_voxel() -> Vector3i:
 	if _camera == null or _destruct == null:
 		return Vector3i.MIN
@@ -684,7 +632,6 @@ func _mouse_to_voxel() -> Vector3i:
 	var local_origin := _target.to_local(from)
 	var local_dir := _target.global_transform.basis.inverse() * dir
 	return _destruct.raycast_voxel(local_origin / voxel_scale, local_dir, 1000.0)
-
 
 func _update_hud() -> void:
 	if _hud == null:
@@ -788,7 +735,6 @@ LOD: %d层  %s
 		structure_size.x, structure_size.y, structure_size.z,
 	]
 
-
 ## 重新计算统计缓存（仅在数据变化时调用）
 func _recompute_stats() -> void:
 	if _mesh_gen_times.is_empty():
@@ -832,7 +778,6 @@ func _recompute_stats() -> void:
 			dsum += v
 		_cached_avg_dt = dsum / _damage_times.size()
 
-
 ## 重新生成柱状图（每 10 帧调用一次）
 func _recompute_chart() -> void:
 	if _mesh_gen_times.is_empty():
@@ -867,13 +812,11 @@ func _recompute_chart() -> void:
 	chart += "      " + ("%.0f" % c_min).rpad(10) + ("%.0fms" % c_max) + "\n"
 	_cached_chart = chart
 
-
 func _on_voxels_collapse(positions: Array) -> void:
 	_collapse_counts.append(positions.size())
 	if _collapse_counts.size() > 100:
 		_collapse_counts.pop_front()
 	_log_perf_line("崩塌: %d 体素掉落" % positions.size())
-
 
 ## 网格重建完成回调 - 记录详细性能信息
 func _on_mesh_updated() -> void:

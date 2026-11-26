@@ -1,18 +1,13 @@
 extends TestCase
 
 ## 粒子渲染的**底层机制**契约：VoxelParticleShader 的着色器 + VoxelRenderer 的粒子接口。
-##
-## 【这个文件只测"机制"，不测"效果"】漂浮/消散/聚合/变形是具体项目的表现，
-## 插件不实现也不测。这里钉住的是：把点云摆成方块、材质正确、遮挡正确。
 
 const CARS := "res://demo/cars.vox"
-
 
 func cleanup() -> void:
 	for n in Engine.get_main_loop().root.get_children():
 		if String(n.name).begins_with("__ParticleTest"):
 			n.queue_free()
-
 
 # ---------------------------------------------------------------- 着色器
 
@@ -23,13 +18,11 @@ func test_particle_shader_compiles() -> void:
 	assert_true(mat.shader.get_shader_uniform_list().size() > 0,
 			"着色器应编译成功（uniform 列表不能为空）")
 
-
 func test_draw_shaders_compile() -> void:
 	var opaque := VoxelParticleShader.make_draw_material()
 	var trans := VoxelParticleShader.make_draw_material_trans()
 	assert_true(opaque.shader.get_shader_uniform_list().size() > 0, "不透明通道应编译成功")
 	assert_true(trans.shader.get_shader_uniform_list().size() > 0, "透明通道应编译成功")
-
 
 func test_all_uniforms_present() -> void:
 	var mat := VoxelParticleShader.make_process_material()
@@ -44,13 +37,7 @@ func test_all_uniforms_present() -> void:
 	for key in required:
 		assert_true(names.has(key), "粒子着色器缺少 uniform：%s" % key)
 
-
 ## 【回归：粒子更新着色器不该有 alpha / scatter_radius】
-## 这两个 uniform 曾经"声明了但没有任何代码读"：alpha 被 VoxelParticleView 每帧写、
-## scatter_radius 只有常量没有 uniform —— 都是**永远不会生效的接口**，比没有更糟
-## （调用方以为自己在调淡出/散开，画面却纹丝不动）。
-## 透明度归绘制材质（DRAW_SHADER 硬阈值 / DRAW_TRANS_SHADER 乘入 ALPHA），
-## 散开归 process() 的 arc（二次贝塞尔）与 drift（三轴正弦）。
 func test_process_shader_has_no_dead_uniforms() -> void:
 	var mat := VoxelParticleShader.make_process_material()
 	var names := {}
@@ -61,11 +48,7 @@ func test_process_shader_has_no_dead_uniforms() -> void:
 	assert_false(names.has("scatter_radius"),
 			"粒子更新着色器不该声明 scatter_radius —— 散开由 arc/drift 实现，没有第三个机制")
 
-
 ## 【回归：不透明通道绝对不能写 ALPHA】
-## Godot 按"着色器有没有写 ALPHA"判定管线归属，不是看运行时的值。
-## 一旦写了 ALPHA（哪怕恒为 1.0），材质就被归入透明管线：不写深度 -> 方块互相穿透
-## （前车挡不住后车），且与透明通道之间按距离排序 -> 顺序一变画面就变。
 func test_opaque_pass_must_not_write_alpha() -> void:
 	var code := _code_only(VoxelParticleShader.DRAW_SHADER)
 	var render_line := ""
@@ -80,12 +63,7 @@ func test_opaque_pass_must_not_write_alpha() -> void:
 	assert_false(has_alpha_write,
 			"不透明通道**不能写 ALPHA** —— 写了就会被判为透明材质、失去深度写入（会透视）")
 
-
 ## 【回归：必须有不透明 + 透明两个通道】
-## 单一材质无论选哪种 depth 模式都错一头：
-##   depth_draw_opaque + ALPHA -> 完全不写深度（透视）
-##   depth_prepass_alpha       -> 阈值 0.5，玻璃 0.72 被当不透明写深度（玻璃后面的东西消失）
-##   depth_draw_never          -> 不透明方块也失去遮挡（透视）
 func test_two_draw_passes_exist() -> void:
 	var opaque := _code_only(VoxelParticleShader.DRAW_SHADER)
 	var trans := _code_only(VoxelParticleShader.DRAW_TRANS_SHADER)
@@ -94,9 +72,7 @@ func test_two_draw_passes_exist() -> void:
 	assert_false(trans.contains("depth_draw_opaque"),
 			"透明通道不应写深度 —— 否则会裁掉它后面的体素（玻璃就会消失）")
 
-
 ## 【回归：两个通道都要输出 PBR 通道】
-## 早期用 unshaded + 自算 lambert：颜色对但材质不对（金属没金属感、玻璃没透明）。
 func test_both_passes_output_pbr_channels() -> void:
 	for pair in [["opaque", VoxelParticleShader.DRAW_SHADER],
 			["transparent", VoxelParticleShader.DRAW_TRANS_SHADER]]:
@@ -106,15 +82,13 @@ func test_both_passes_output_pbr_channels() -> void:
 		assert_true(code.contains("ROUGHNESS"), "%s 通道必须输出 ROUGHNESS" % label)
 		assert_true(code.contains("EMISSION"), "%s 通道必须输出 EMISSION" % label)
 
-
 func test_draw_shader_scales_by_uniform() -> void:
 	var code := _code_only(VoxelParticleShader.DRAW_SHADER)
 	assert_true(code.contains("voxel_size"), "绘制着色器必须暴露 voxel_size")
 	assert_true(code.contains("VERTEX = VERTEX * voxel_size"),
 			"顶点必须按 voxel_size 缩放，否则尺寸不可调")
 
-
-# ---------------------------------------------------------------- VoxelRenderer 粒子接口
+# ----------------------------------------------------------------…
 
 func _renderer_with_data() -> VoxelRenderer:
 	var vox := VoxAsset.from_asset(CARS)
@@ -126,7 +100,6 @@ func _renderer_with_data() -> VoxelRenderer:
 	r.visibility_mode = VoxelRenderer.VisibilityMode.FULL
 	Engine.get_main_loop().root.add_child(r)
 	return r
-
 
 func test_display_mode_enum_creates_node() -> void:
 	var r := _renderer_with_data()
@@ -140,7 +113,6 @@ func test_display_mode_enum_creates_node() -> void:
 	assert_eq(r.particle_node.get_draw_pass_mesh(1) != null, true, "应有第 2 个绘制通道")
 	r.queue_free()
 
-
 func test_particle_voxel_size_follows_scale() -> void:
 	var r := _renderer_with_data()
 	r.voxel_scale = 0.1
@@ -151,7 +123,6 @@ func test_particle_voxel_size_follows_scale() -> void:
 	assert_true(absf(r.particle_voxel_size() - 0.2) < 0.0001, "particle_scale 应线性缩放")
 	r.queue_free()
 
-
 func test_display_mode_switches_visibility() -> void:
 	var r := _renderer_with_data()
 	assert_eq(r.display_mode, VoxelRenderer.DisplayMode.MESH, "默认应为网格")
@@ -161,9 +132,7 @@ func test_display_mode_switches_visibility() -> void:
 	assert_false(r.particle_node.visible, "切回网格后粒子应隐藏")
 	r.queue_free()
 
-
 ## 【形状】立方体与球都要能切换，且切换不重建粒子节点。
-## 网格路径早就有 cube/sphere 两种形状；粒子若只能方块，"小球粒子"类效果就得项目自己做 mesh。
 func test_particle_shape_switches() -> void:
 	var r := _renderer_with_data()
 	r.display_mode = VoxelRenderer.DisplayMode.PARTICLES
@@ -184,7 +153,6 @@ func test_particle_shape_switches() -> void:
 	assert_true(node_before == r.particle_node, "换形状不应重建粒子节点")
 	r.queue_free()
 
-
 ## 球的尺寸：单位直径 × voxel_size 后应内切于体素格（不溢出、不留大缝）。
 func test_sphere_radius_fits_voxel() -> void:
 	var r := _renderer_with_data()
@@ -198,7 +166,6 @@ func test_sphere_radius_fits_voxel() -> void:
 			"球半径应为 0.5（单位直径，缩放到 voxel_size 后内切于体素）")
 	r.queue_free()
 
-
 func test_surface_only_reduces_points() -> void:
 	var r := _renderer_with_data()
 	r.particle_surface_only = false
@@ -211,10 +178,7 @@ func test_surface_only_reduces_points() -> void:
 			"只渲染表面应减少点数（%d -> %d）" % [full, surf])
 	r.queue_free()
 
-
 ## 剥掉注释后只留有效代码。
-## 【为什么必须这么做】着色器注释里会**特意写出**被禁止的写法
-## （"不是 unshaded"、"绝对不要写 COLOR.a"），直接 contains 会命中注释造成假失败。
 func _code_only(src: String) -> String:
 	var no_block := ""
 	var depth := 0
@@ -239,11 +203,7 @@ func _code_only(src: String) -> String:
 		out.append(line)
 	return "\n".join(out)
 
-
 ## 【回归：方块/球是渲染器属性，网格与粒子共用】
-## 早期形状只有**导入期**（mesh/shape 选项）能选，运行时路径只有方块面 ——
-## 于是"模型导成球、运行时显示成方块"，同一份数据两条路径长得不一样。
-## 现在 voxel_shape 统一控制：网格按球体重建 chunk mesh，粒子换 draw mesh。
 func test_shape_is_shared_by_mesh_and_particles() -> void:
 	var r := _renderer_with_data()
 	r.voxel_shape = VoxelRenderer.VoxelShape.SPHERE

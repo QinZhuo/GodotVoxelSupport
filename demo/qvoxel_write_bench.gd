@@ -2,17 +2,6 @@ class_name QVoxelWriteBench
 extends RefCounted
 
 ## QVX 写路径端到端基准（可在编辑器 / 游戏进程内直接调用，不依赖场景）。
-##
-## 用法（eval_code）：
-##   QVoxelWriteBench.run()   → 结果通过 print 输出，用 get_logs 读取
-##
-## 【为什么只测公开接口】存储层已把"增量怎么写、旧字节怎么搬运"收进
-## QVoxelFile.serialize_incremental（按块索引 + 写入覆盖层 + 删除集）。基准若再伸手去调
-## 那些内部函数，等于把实现细节抄第二遍——实现一变基准先坏。故这里只调 VoxelStream 的
-## 公开契约：save_chunk / flush / load_chunk / has_chunk / is_dirty / get_chunk_count。
-##
-## 口径：把 N 块写进空世界（无旧块可搬 → 必然全量写）作为基线，与"已落盘世界里改 1 块
-## 再写"（必然增量写）对比 —— 两者之差即增量写省下的重编码 + 重写量。
 
 const CHUNK_SIZE := 32
 const CHUNK_VOLUME := 32768
@@ -26,10 +15,8 @@ const FULL_ROUNDS := 3
 
 const BENCH_DIR := "user://qvx_bench"
 
-
 static func _us(t0: int) -> float:
 	return (Time.get_ticks_usec() - t0) / 1000.0
-
 
 ## 造一个"真实感"的块：低频噪声，填充率约 40%~60%，codec 非平凡但可压缩。
 static func _make_chunk(seed_pos: Vector3i, mat_base: int = 1) -> PackedInt32Array:
@@ -53,7 +40,6 @@ static func _make_chunk(seed_pos: Vector3i, mat_base: int = 1) -> PackedInt32Arr
 					buf[x + y * B + z * B * B] = mat_base + int(absf(v) * 3.0) % 5 + 1
 	return buf
 
-
 ## 模拟一次真实编辑：把约 2000 个体素换成 0 / 6。
 static func _edit(src: PackedInt32Array) -> PackedInt32Array:
 	var ed := src.duplicate()
@@ -61,14 +47,12 @@ static func _edit(src: PackedInt32Array) -> PackedInt32Array:
 		ed[(k * 7919) % CHUNK_VOLUME] = 0 if k % 2 == 0 else 6
 	return ed
 
-
 static func _reset_files(names: Array) -> void:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(BENCH_DIR))
 	for n in names:
 		var p := ProjectSettings.globalize_path(BENCH_DIR + "/" + String(n))
 		if FileAccess.file_exists(p):
 			DirAccess.remove_absolute(p)
-
 
 static func run() -> void:
 	var lines: Array = []
@@ -158,7 +142,6 @@ static func run() -> void:
 
 	print("\n".join(PackedStringArray(lines)))
 
-
 static func _fsize(path: String) -> int:
 	if not FileAccess.file_exists(path):
 		return 0
@@ -167,7 +150,6 @@ static func _fsize(path: String) -> int:
 	f.close()
 	return n
 
-
 static func _avg(a: Array) -> float:
 	if a.is_empty():
 		return 0.0
@@ -175,7 +157,6 @@ static func _avg(a: Array) -> float:
 	for v in a:
 		s += v
 	return s / a.size()
-
 
 static func _fmt(a: Array) -> String:
 	var parts: Array = []

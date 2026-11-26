@@ -1,23 +1,13 @@
 extends TestCase
 
 ## QVX 帧动画（§12）链路测试：FRAM 从资产读取 → 导入器切帧 → 编辑器帧结构编辑与撤销。
-## 钉死四件事 —— 每一条都对应"FRAM 落地后很容易悄悄弄坏"的点：
-##   ① 帧是**入参 / 静态快照**，不是隐藏状态：同一份资产按 frame 取出不同世界，
-##      且包围盒 / 原点**逐帧各算**（第 k 帧才长出的部分不会整体偏移）；
-##   ② 一个 model_id 只有一个体素源（VXEL XOR FRAM，§12.2）：静态 ⇄ 动画的切换必须原子，
-##      撤销到一半绝不能出现"两个源都非空"（那是序列化期的 FATAL 文件）；
-##   ③ 撤销记住"改的是第几帧"，**与当前预览游标无关**（切帧后撤销不得改错帧）；
-##   ④ 逐帧导出（frame_index / split_by_frame）真的按帧产出，而不是静默退化成按模型。
-## 索引对齐：MAT 是材质 ID，值 0 = 空。
 
 const TEST_DIR := "user://qvx_frames_test"
 const MAT := 1
 const BLOCK_KEY := Vector3i(0, 0, 0)
 
-
 func cleanup() -> void:
 	_remove_dir(TEST_DIR)
-
 
 # ① 资产读取：帧数 / 元数据 / 逐帧查询
 
@@ -43,7 +33,6 @@ func test_asset_exposes_frames_and_metadata() -> void:
 	assert_eq(int(anim.get("fps", 0)), 8, "fps 元数据应透传")
 	assert_eq((anim.get("tags", []) as Array).size(), 1, "tags 元数据应透传")
 
-
 func test_static_asset_has_one_frame_and_ignores_frame() -> void:
 	var path := TEST_DIR + "/static.qvx"
 	_write_static_qvx(path)
@@ -57,7 +46,6 @@ func test_static_asset_has_one_frame_and_ignores_frame() -> void:
 	# 静态模型传任何 frame 都给出同一份块表：调用方不必先判有没有动画
 	assert_eq(qvx.frame_blocks(0, 0), qvx.frame_blocks(0, 7), "静态模型忽略 frame")
 	assert_eq(qvx.block_buffers(0), qvx.block_buffers(5), "block_buffers 对静态资产忽略 frame")
-
 
 func test_frame_blocks_out_of_range_is_empty_not_clamped() -> void:
 	var path := TEST_DIR + "/range.qvx"
@@ -74,7 +62,6 @@ func test_frame_blocks_out_of_range_is_empty_not_clamped() -> void:
 	assert_eq(qvx.voxel_count(0), 1, "帧 0 只有 1 个体素")
 	assert_eq(qvx.voxel_count(1), 2, "帧 1 有 2 个体素")
 	assert_eq(qvx.voxel_count(2), 0, "越界帧没有体素")
-
 
 # ② 包围盒 / 原点 / 融合：都随帧变
 
@@ -93,7 +80,6 @@ func test_bounds_grid_and_origin_vary_per_frame() -> void:
 	var o1 := qvx.origin_offset(QVoxelSource.OriginMode.CONTENT_CENTER, 1)
 	assert_ne(o0, o1, "原点由包围盒导出，必须逐帧各算（否则第 1 帧整体偏移）")
 
-
 func test_fused_path_applies_placement_per_frame() -> void:
 	var path := TEST_DIR + "/fused.qvx"
 	_write_animated_qvx(path, [
@@ -111,7 +97,6 @@ func test_fused_path_applies_placement_per_frame() -> void:
 	assert_true(f1.has(Vector3i(1, 41, 1)), "帧 1 才长出的体素也要应用位移")
 	assert_eq(qvx.voxel_count(0), 1, "帧 0 融合后 1 个体素")
 	assert_eq(qvx.voxel_count(1), 2, "帧 1 融合后 2 个体素")
-
 
 # ③ 导入器：QVoxelSource 快照 / 逐帧 MeshLibrary
 
@@ -137,7 +122,6 @@ func test_voxel_data_snapshot_per_frame() -> void:
 	assert_ne(d1.center_offset, d0.center_offset,
 			"同一资产两帧的原点必须不同（否则第 1 帧整体偏移）")
 
-
 func test_mesh_library_split_by_frame_names_each_frame() -> void:
 	var path := TEST_DIR + "/split.qvx"
 	_write_animated_qvx(path, [
@@ -156,7 +140,6 @@ func test_mesh_library_split_by_frame_names_each_frame() -> void:
 	assert_eq(lib.get_item_list().size(), 2, "逐帧应得 2 项（而不是静默退化成 1 个模型项）")
 	assert_eq(lib.get_item_name(0), "frame_0", "第 0 帧项名")
 	assert_eq(lib.get_item_name(1), "frame_1", "第 1 帧项名")
-
 
 func test_mesh_library_model_split_follows_frame_index() -> void:
 	var path := TEST_DIR + "/model_frame.qvx"
@@ -181,7 +164,6 @@ func test_mesh_library_model_split_follows_frame_index() -> void:
 			"frame_index=1 应导出更高的网格（第 1 帧才长出的体素），实得 %.3f vs %.3f"
 			% [a1.size.y, a0.size.y])
 
-
 # ④ 撤销：帧号随命令走，不随游标
 
 func test_edit_command_remembers_its_frame() -> void:
@@ -204,7 +186,6 @@ func test_edit_command_remembers_its_frame() -> void:
 			"重做把块写回第 1 帧")
 	assert_eq(obj.get_voxel(2, 2, 2), 0,
 			"重做后 active_frame=0，读的是第 0 帧 → 看不到第 1 帧的笔迹（读写游标一致）")
-
 
 # ⑤ 属性命令 extras：静态 ⇄ 动画的两个源同生共死
 
@@ -236,7 +217,6 @@ func test_property_command_extras_keep_sources_in_sync() -> void:
 	cmd.redo()
 	assert_eq(obj.frames.size(), 1, "重做恢复动画")
 	assert_true(obj.blocks.is_empty(), "重做同样清空静态源")
-
 
 # ⑥ 模型帧结构编辑入口
 
@@ -280,13 +260,11 @@ func test_model_frame_edit_entries() -> void:
 	assert_false(obj.move_frame(0, 0), "原地不动无效")
 	assert_false(obj.move_frame(-1, 0), "越界无效")
 
-
 func test_static_model_ignores_frame_in_model() -> void:
 	var obj := QVoxelModel.new()
 	obj.set_voxel(1, 1, 1, MAT)
 	assert_eq(obj.blocks_for(5), obj.blocks, "静态模型 blocks_for 恒返回静态源")
 	assert_eq(obj.source_blocks(), obj.blocks, "静态模型 source_blocks 恒返回静态源")
-
 
 # ⑦ 世界往返：frames / anim 元数据 / require 声明
 
@@ -333,7 +311,6 @@ func test_world_roundtrip_preserves_frames_and_anim() -> void:
 	assert_eq(m2.anim_tags[0]["repeat"], 3, "标签重复次数往返")
 	assert_eq(m2.get_voxel(1, 1, 1), MAT, "第 0 帧的体素往返")
 
-
 func test_world_static_roundtrip_does_not_declare_fram() -> void:
 	var w := QVoxelWorld.create_empty()
 	w.add_material(Color(0, 0, 1))
@@ -345,11 +322,9 @@ func test_world_static_roundtrip_does_not_declare_fram() -> void:
 	assert_false((doc.head.get("require", []) as Array).has(QVoxelSpec.BLOCK_ANIM),
 			"全静态文件不声明 ANIM（免得老读者白白拒掉本可读的文件）")
 
-
 # ⑧ 播放内核：纯逻辑，直接喂 delta
 
 ## 内核现在是编辑器预览与运行时播放器**共用**的唯一循环实现，所以它错了两个消费者会一起错；
-## 而"预览看着像在播"几乎暴露不出问题。它是纯逻辑，喂 delta 即可驱动，不必起场景树。
 func test_clock_forward_loop_wraps_by_duration() -> void:
 	var c := QVoxelFrameClock.new()
 	c.configure(_durations([100, 200, 300]), 12, true)
@@ -366,8 +341,7 @@ func test_clock_forward_loop_wraps_by_duration() -> void:
 	assert_true(c.advance(300), "第 2 帧自己的 300ms")
 	assert_eq(c.index(), 0, "循环回到第 0 帧")
 
-
-## 逐帧时长为 0 = 跟随帧率（§12.3）。这个兜底以前在编辑器面板里有一份，现在只有这一份。
+## 逐帧时长为 0 = 跟随帧率（§12.3）。
 func test_clock_falls_back_to_fps_when_duration_is_zero() -> void:
 	var c := QVoxelFrameClock.new()
 	c.configure(_durations([0, 0]), 10, true)
@@ -377,7 +351,6 @@ func test_clock_falls_back_to_fps_when_duration_is_zero() -> void:
 	assert_true(c.advance(1), "满 100ms 换帧")
 	assert_eq(c.index(), 1, "第 1 帧")
 
-
 ## 非法帧率不能把推进变成忙循环：帧长下限兜住。
 func test_clock_clamps_illegal_fps() -> void:
 	var c := QVoxelFrameClock.new()
@@ -385,7 +358,6 @@ func test_clock_clamps_illegal_fps() -> void:
 	assert_eq(c.frame_ms(0), 1000, "fps<=0 夹到 1 → 1000ms")
 	c.play()
 	assert_true(c.is_playing(), "仍可播（不崩、不忙循环）")
-
 
 ## 标签区间 + reverse：播放范围与方向都由标签决定 —— 这正是编辑器过去"只存不读"的那部分。
 func test_clock_tag_reverse_plays_range_backwards() -> void:
@@ -403,7 +375,6 @@ func test_clock_tag_reverse_plays_range_backwards() -> void:
 	c.advance(20)
 	assert_eq(c.index(), 3, "循环回**区间**末尾，不是整段末尾")
 
-
 ## pingpong：到顶折返、到底再折返。
 func test_clock_pingpong_bounces_within_range() -> void:
 	var c := QVoxelFrameClock.new()
@@ -416,7 +387,6 @@ func test_clock_pingpong_bounces_within_range() -> void:
 		seen.append(c.index())
 	assert_eq(seen, [0, 1, 2, 1, 0, 1, 2], "0→1→2→1→0→1→2 折返")
 
-
 ## pingpong_reverse：从区间末尾进入，先往回再折返。
 func test_clock_pingpong_reverse_starts_at_end() -> void:
 	var c := QVoxelFrameClock.new()
@@ -428,7 +398,6 @@ func test_clock_pingpong_reverse_starts_at_end() -> void:
 		c.advance(10)
 		seen.append(c.index())
 	assert_eq(seen, [2, 1, 0, 1, 2, 1], "2→1→0→1→2→1 折返")
-
 
 ## 标签重复次数：repeat=1 播完一趟停住；repeat=2 播两趟。
 func test_clock_tag_repeat_stops_after_count() -> void:
@@ -451,7 +420,6 @@ func test_clock_tag_repeat_stops_after_count() -> void:
 	assert_false(d.is_playing(), "第二趟结束停住")
 	assert_eq(d.index(), 2)
 
-
 ## 非循环：播到区间尽头自己停，is_playing() 如实转 false（UI 靠它灭播放键）。
 func test_clock_non_loop_stops_at_range_end() -> void:
 	var c := QVoxelFrameClock.new()
@@ -465,7 +433,6 @@ func test_clock_non_loop_stops_at_range_end() -> void:
 	assert_false(c.is_playing(), "尽头停播")
 	assert_eq(c.index(), 2, "停在最后一帧")
 
-
 ## 长 delta 一次跨多帧（低帧率 / 切后台回来），且余量要保留而不是丢掉。
 func test_clock_skips_frames_on_large_delta() -> void:
 	var c := QVoxelFrameClock.new()
@@ -474,7 +441,6 @@ func test_clock_skips_frames_on_large_delta() -> void:
 	assert_true(c.advance(350), "跨 3 帧")
 	assert_eq(c.index(), 3, "落在第 3 帧")
 	assert_eq(c.delay_ms(), 50, "余量 50ms 被保留")
-
 
 ## 标签查询：点进命名区间就预览那个区间 —— 这是编辑器开始消费 direction 的入口。
 func test_clock_tag_name_at_picks_containing_tag() -> void:
@@ -487,7 +453,6 @@ func test_clock_tag_name_at_picks_containing_tag() -> void:
 	assert_eq(c.tag_name_at(1), "walk", "区间含端点")
 	assert_eq(c.tag_name_at(3), "idle", "第 3 帧属 idle")
 	assert_eq(c.tag_name_at(9), "", "越界无命中 → 整段")
-
 
 ## 标签非法（名字对不上 / 区间越界 / 方向拼错）一律退化到"整段正放"，绝不拒绝播放。
 func test_clock_invalid_tag_degrades_to_whole_range() -> void:
@@ -503,7 +468,6 @@ func test_clock_invalid_tag_degrades_to_whole_range() -> void:
 	assert_eq(c.range(), Vector2i(2, 2), "越界区间被夹进合法范围")
 	assert_false(c.is_playing(), "夹完只剩一帧 → 没有时间轴可播")
 
-
 ## 只有一帧（静态模型）不该进入播放态：如实返回 false，UI 不必特判。
 func test_clock_single_frame_is_not_playable() -> void:
 	var c := QVoxelFrameClock.new()
@@ -512,11 +476,9 @@ func test_clock_single_frame_is_not_playable() -> void:
 	assert_false(c.is_playing(), "一帧没有时间轴")
 	assert_eq(c.delay_ms(), 0, "不播放时调度间隔为 0")
 
-
 # ⑨ 块表替换：切帧的落点
 
-## `apply_block_table` 是"整份内容替换"的唯一入口。返回"真改了几块"——
-## 未变的块必须整块跳过（FRAM 的块级增量就是靠这个才省下来）。
+## `apply_block_table` 是"整份内容替换"的唯一入口。
 func test_apply_block_table_diffs_at_chunk_level() -> void:
 	var d := QVoxelSource.new()
 	d.grid_size = Vector3i(64, 64, 64)
@@ -540,18 +502,15 @@ func test_apply_block_table_diffs_at_chunk_level() -> void:
 	assert_eq(d.get_voxel(Vector3i(1, 1, 1)), MAT, "留下的块不受影响")
 	assert_eq(d.get_voxel_count(), 1, "总数对得上")
 
-
 ## 全空缓冲等同"该块没有内容"：不能装进去，否则 `is_empty()` 与"一个体素都没有"脱钩。
 func test_apply_block_table_drops_empty_buffers() -> void:
 	var d := QVoxelSource.new()
 	assert_eq(d.apply_block_table({Vector3i(0, 0, 0): _block([])}), 0, "全空缓冲不算装载")
 	assert_true(d.is_empty(), "装完仍是空（不变式没被破坏）")
 
-
 # ⑩ 运行时播放器：装配 → 切帧 → 时间推进
 
 ## 播放器端到端：装配后帧 0 立刻就位、seek 换帧、按逐帧时长推进、循环回绕。
-## 时间入口就是 `_process`，喂 delta 即可，不必等真实时钟。
 func test_animator_plays_frames_into_voxel_data() -> void:
 	var path := TEST_DIR + "/anim_play.qvx"
 	_write_animated_qvx(path, [
@@ -589,7 +548,6 @@ func test_animator_plays_frames_into_voxel_data() -> void:
 	assert_false(animator.is_playing(), "stop 后停播")
 	animator.free()
 
-
 ## 静态资产装配失败要**明确返回 false**，而不是悄悄播一个空动画。
 func test_animator_rejects_static_asset() -> void:
 	var path := TEST_DIR + "/anim_static.qvx"
@@ -603,13 +561,11 @@ func test_animator_rejects_static_asset() -> void:
 	assert_eq(animator.frame_count(), 0, "内核没有帧")
 	animator.free()
 
-
 # 夹具 / 辅助
 
 ## 播放内核要的是 PackedInt32Array（与 FRAM 逐帧时长同型），字面量数组转一下。
 func _durations(ms: Array) -> PackedInt32Array:
 	return PackedInt32Array(ms)
-
 
 ## 静态模型夹具（含 2 帧动画）：第 0 帧带 (1,1,1)，第 1 帧为空。
 func _animated_model() -> QVoxelModel:
@@ -619,7 +575,6 @@ func _animated_model() -> QVoxelModel:
 	obj.make_animated()           # 搬进第 0 帧
 	obj.add_frame(QVoxelFrame.new())
 	return obj
-
 
 ## 最小可用 QVX 文档骨架：HEAD（单通道 material）+ 材质表（条目 0 空气 + 1 号实体）。
 func _new_doc() -> QVoxelFile.QVoxelDocument:
@@ -635,7 +590,6 @@ func _new_doc() -> QVoxelFile.QVoxelDocument:
 			VoxelMaterial.to_mate(_solid_material(Color(0.9, 0.2, 0.2)))]
 	return doc
 
-
 ## 一块 32³ 缓冲，其中给定局部坐标（Array[Vector3i]）被填上材质。
 func _block(cells: Array) -> PackedInt32Array:
 	var b := PackedInt32Array()
@@ -645,10 +599,7 @@ func _block(cells: Array) -> PackedInt32Array:
 		b[VoxelChunk.buf_index(p.x, p.y, p.z)] = MAT
 	return b
 
-
 ## 造一个"只有 FRAM"的 .qvx：单个 model_id=0 的动画 + NODE（可选摆放与 anim 元数据）。
-## frame_specs：每项 = { "cells": Array[Vector3i], "duration_ms": int }，块键恒为 (0,0,0)。
-## 注意同一 model_id 不能既是 VXEL 又是 FRAM（§12.2），故 doc.models 留空。
 func _write_animated_qvx(path: String, frame_specs: Array, transform := {},
 		anim := {}) -> void:
 	var doc := _new_doc()
@@ -666,20 +617,15 @@ func _write_animated_qvx(path: String, frame_specs: Array, transform := {},
 	doc.node = {"nodes": [{"name": "n", "kind": "model", "model_id": 0, "transform": transform}]}
 	_write_bytes(path, QVoxelFile.serialize(doc))
 
-
 ## 造一个"单模型单体素"的静态 .qvx（块 (0,0,0) 内 (1,1,1)）。
 func _write_static_qvx(path: String) -> void:
 	var doc := _new_doc()
 	doc.models = {0: {BLOCK_KEY: _block([Vector3i(1, 1, 1)])}}
 	_write_bytes(path, QVoxelFile.serialize(doc))
 
-
 ## 导入器全套默认选项（含 MeshLibrary 的 mesh_mode / import_meshes）。
-## 走静态默认值：`EditorImportPlugin` 在 headless/CI 进程里 new() 会失败，
-## 走实例方法会静默拿到空字典（缺键 → 生成器整条链路失败）。
 func _mesh_options() -> Dictionary:
 	return VoxelMeshLibraryImporter.default_options()
-
 
 func _solid_material(color: Color) -> VoxelMaterial:
 	var mat := VoxelMaterial.new()
@@ -690,14 +636,12 @@ func _solid_material(color: Color) -> VoxelMaterial:
 	mat.mass = 2.0
 	return mat
 
-
 func _write_bytes(path: String, bytes: PackedByteArray) -> void:
 	var dir := path.get_base_dir()
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_buffer(bytes)
 	f.close()
-
 
 func _remove_dir(dir_path: String) -> void:
 	var dir := DirAccess.open(dir_path)

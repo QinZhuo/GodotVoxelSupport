@@ -8,19 +8,15 @@ const ASPECT := 16.0 / 9.0
 ## 机位未覆盖 fov 时用于画线框的参考视场角
 const DEFAULT_FOV := 60.0
 
-
 func _init() -> void:
 	create_material("idle", Color(0.35, 0.75, 1.0))
 	create_material("active", Color(1.0, 0.72, 0.2))
 
-
 func _get_gizmo_name() -> String:
 	return "VirtualCamera3D"
 
-
 func _has_gizmo(for_node_3d: Node3D) -> bool:
 	return for_node_3d is VirtualCamera3D
-
 
 func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	gizmo.clear()

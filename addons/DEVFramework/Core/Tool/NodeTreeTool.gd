@@ -34,7 +34,6 @@ static func save_data(node: Node):
 	return data
 
 ## 遍历子节点调用 load_data，data 为 null 或缺少子节点 key 时传 null
-## 注意：按正向顺序遍历，依赖组件应确保其 load_data 不依赖后续组件的状态
 static func load_data(node: Node, data):
 	if not data:
 		return

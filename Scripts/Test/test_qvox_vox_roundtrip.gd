@@ -1,18 +1,10 @@
 extends TestCase
 
-## `.vox` 导入 ⇄ `.qvx` 互转实测。**`.vox` 只支持导入**（不再导出），故这里只验
-## "`.vox` → 世界 → `.qvx` → 世界"与"FRAM 帧动画经 `.qvx` 往返"。
-## 判据：把两侧都化成"世界体素坐标集合"的**签名**（非空体素数 + 坐标滚动哈希）再比对，
-## 避免为上百万元素建大字典（teapot 样例会超时）。覆盖：
-##   ① demo 真实样例：.vox → 世界 → .qvx → 世界；
-##   ② 合成多模型 / 不同尺寸 / 偏移 / 旋转 / 组 / 隐藏层 → .qvx；
-##   ③ 体素动画（FRAM）导入 + 经 .qvx 往返。
+## `.vox` 导入 ⇄ `.qvx` 互转实测。
 
 const SAMPLES_DIR := "res://demo"
 ## 超大样例（teapot2 5.6MB / 1.4M 体素）往返会拖爆测试时长，跳过；其几何一致性由
-## test_qvox_vox_bridge 的 parity 用例覆盖。
 const MAX_BYTES := 2_000_000
-
 
 # ① .vox → 世界 → .qvx → 世界
 
@@ -32,7 +24,6 @@ func test_vox_to_qvx_roundtrip_samples() -> void:
 			continue
 		var b := _world_sig(QVoxelWorld.from_document(doc))
 		assert_eq(b, a, "%s：.vox→.qvx 世界体素签名一致" % name)
-
 
 # ② 合成：多模型 / 不同尺寸 / 偏移 / 旋转 / 组 / 隐藏层
 
@@ -62,7 +53,6 @@ func test_synthetic_multimodel_roundtrip() -> void:
 			QVoxelFile.QVoxelReport.new(), true)
 	assert_true(doc != null, ".qvx 应能解析回去")
 	assert_eq(_world_sig(QVoxelWorld.from_document(doc)), a_sig, ".qvx 往返世界体素签名一致")
-
 
 # ③ 体素动画（FRAM）导入 + 经 .qvx 往返
 
@@ -107,7 +97,6 @@ func test_fram_qvx_roundtrip() -> void:
 	assert_eq(m2.anim_fps, 8, "帧率")
 	assert_false(m2.anim_loop, "循环标志")
 
-
 # ④ 无 NODE 的纯 VXEL `.qvx`（如 demo/samples）也能导入出模型
 
 func test_qvx_without_node_imports_models() -> void:
@@ -132,7 +121,6 @@ func test_qvx_without_node_imports_models() -> void:
 		assert_eq(w.all_models()[0].model_id, 0)
 		assert_eq(w.all_models()[0].count_solid(), 1)
 
-
 # 夹具
 
 ## 世界求值的"体素集合签名"：非空体素数 + 坐标滚动哈希（内存恒定，避免上百万元素的字典）。
@@ -152,7 +140,6 @@ func _world_sig(world: QVoxelWorld) -> Dictionary:
 				i += 1
 	return {"count": count, "hash": h}
 
-
 func _list_vox(dir_path: String) -> Array:
 	var out: Array = []
 	var dir := DirAccess.open(dir_path)
@@ -169,7 +156,6 @@ func _list_vox(dir_path: String) -> Array:
 	dir.list_dir_end()
 	out.sort()
 	return out
-
 
 func _file_size(path: String) -> int:
 	var f := FileAccess.open(path, FileAccess.READ)

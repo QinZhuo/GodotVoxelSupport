@@ -1,21 +1,5 @@
 extends Node
 ## 体素优化测试场 - 大型世界性能对比场景
-##
-## 目标：在大型场景下测试所有优化方向的效果：
-##   1. 可见性模式 (visibility_mode)              —— FULL/FRUSTUM/STREAMING
-##   2. 原生加速 (NativeLoader)                    —— GDExtension C++ 热路径
-##   3. 崩塌检测 (find_unsupported)                —— 失稳算法
-##
-## 场景：大型建筑群（多栋高层建筑 + 地面层），chunk 数远超单建筑 demo
-## 提供自动测试模式：自动切换各优化组合并测 FPS，输出对比结果
-##
-## 键位：
-##   1 : 循环 可见性模式 (FULL/FRUSTUM/STREAMING)
-##   2 : 循环 超级块大小 (0/2/4)
-##   5 : 环绕相机 (自动测 FPS)
-##   6 : 重置场景
-##   左键 : 球形破坏
-##   空格 : 射线破坏
 
 ## 体素缩放
 @export var voxel_scale: float = 0.1
@@ -24,7 +8,6 @@ extends Node
 @export var damage_radius: float = 7.0
 
 ## 世界尺寸 [体素] (x, y, z) - 大型
-## 600×120×600 → 世界约 60×12×60 单位（voxel_scale=0.1），足以演示流式加载
 @export var world_size: Vector3i = Vector3i(600, 120, 600)
 
 ## 建筑数量（网格排列）
@@ -35,9 +18,6 @@ extends Node
 @export var building_size: Vector3i = Vector3i(100, 100, 100)
 
 ## 可见性管理（距离 LOD）：STREAMING 时相机远离的 chunk 网格自动卸载释放显存，
-## 靠近后自动重载。FULL 全部常驻。适合超大型世界（数百单位以上）。
-## 本场景：世界 60 单位、建筑群 39 单位、相机在建筑群内环绕（距中心约 17.5）。
-## → view=25/unload=40：建筑群常驻，世界边缘（>40 单位）的空地网格卸载
 @export var view_distance: float = 25.0
 @export var unload_distance: float = 40.0
 
@@ -60,9 +40,6 @@ extends Node
 @export var auto_test_frames: int = 180
 
 ## 可破坏对象：宿主渲染器（可见性 / LOD / 流式 / 网格统计都在它身上）
-## 【为什么拆成两个引用】破坏系统已改成"渲染器 + 破坏子组件"两个节点：渲染旋钮走 `_target`，
-## 破坏旋钮与破坏调用走 `_destruct`。`_target.global_position` 才是移动网格的那一个
-## （组件是宿主的子节点，identity 变换，设它自己的 position 不会移动模型）。
 var _target: VoxelRenderer
 ## 破坏组件（宿主的子节点）
 var _destruct: VoxelDestructible
@@ -90,7 +67,6 @@ var _prev_space := false
 ## 原生可用性（用于 HUD 显示）
 var _native_available := false
 
-
 func _ready() -> void:
 	_setup_ground()  # 复用场景里已有的 Ground 节点
 	_build_target()
@@ -103,7 +79,6 @@ func _ready() -> void:
 
 	if auto_test:
 		_start_auto_test()
-
 
 func _process(delta: float) -> void:
 	_handle_input(delta)
@@ -137,15 +112,12 @@ func _process(delta: float) -> void:
 
 	_update_hud()
 
-
 ## 场景里宿主的节点名（渲染器 + 其下的破坏组件）
 const HOST_NODE_NAME := "DestructibleVoxels"
 ## 宿主下破坏子组件的节点名
 const DESTRUCT_NODE_NAME := "VoxelDestructible"
 
-
 ## 构建测试目标：VoxelRenderer（宿主） + 其子节点 VoxelDestructible（破坏组件）。
-## 优先使用场景里预置的节点（编辑器可见可调），缺失时自动创建（方便直接拖入使用）。
 func _build_target() -> void:
 	var scene_host := get_node_or_null(HOST_NODE_NAME)
 	if scene_host is VoxelRenderer:
@@ -156,7 +128,6 @@ func _build_target() -> void:
 		_target = VoxelRenderer.new()
 		_target.name = HOST_NODE_NAME
 		# 【破坏必须 DYNAMIC】STATIC 下改一个体素 = 重建整份模型（实测 22.7~85ms）；
-		# DYNAMIC 只重建受影响的 chunk（0.4~2ms）。
 		_target.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 		add_child(_target)
 
@@ -199,9 +170,7 @@ func _build_target() -> void:
 	var bounds: AABB = data.get_voxels_aabb()
 	_target.global_position = Vector3(-bounds.size.x * voxel_scale * 0.5, 0, -bounds.size.z * voxel_scale * 0.5)
 
-
 ## 可选数据源：在编辑器里给此属性赋一个 QVoxelSource 资源，
-## 或直接选场景里的 DestructibleVoxels 节点设置它的 data 属性
 @export var voxel_data_source: QVoxelSource:
 	set(v):
 		voxel_data_source = v
@@ -211,13 +180,11 @@ func _build_target() -> void:
 ## 破坏时是否生成碎片粒子（测试时可按需开关）
 @export var spawn_debris_on_damage: bool = true
 
-
 ## 优化开关状态（自动测试时被切换）
 var _visibility_state := 1  # 0=FULL, 1=FRUSTUM, 2=STREAMING
 
 func _visibility_mode() -> VoxelRenderer.VisibilityMode:
 	return _visibility_state as VoxelRenderer.VisibilityMode
-
 
 ## 创建大型测试世界：多栋建筑 + 地面
 func _create_test_world_data() -> QVoxelSource:
@@ -249,7 +216,6 @@ func _create_test_world_data() -> QVoxelSource:
 	data.add_material(accent)
 
 	# 地面层（整片覆盖全世界，含多种材质斑块）
-	# 世界中心对齐：建筑群整体居中，四周留出地面空地（流式卸载的远侧区域）
 	var group_size_x := buildings_x * building_size.x + (buildings_x - 1) * building_spacing
 	var group_size_z := buildings_z * building_size.z + (buildings_z - 1) * building_spacing
 	var offset_x := (world_size.x - group_size_x) / 2
@@ -329,7 +295,6 @@ func _create_test_world_data() -> QVoxelSource:
 	print("[生成] 世界体素数: %d" % data.get_voxel_count())
 	return data
 
-
 func _setup_ground() -> void:
 	var static_body: StaticBody3D = get_node_or_null("Ground") as StaticBody3D
 	if static_body == null:
@@ -343,7 +308,6 @@ func _setup_ground() -> void:
 			var gs := maxf(world_size.x, world_size.z) * voxel_scale * 2.0
 			shape.size = Vector3(gs, 0.5, gs)
 	static_body.position = Vector3(0, -0.5, 0)
-
 
 func _setup_camera() -> void:
 	_camera = get_node_or_null("Camera3D") as Camera3D
@@ -363,13 +327,11 @@ func _setup_camera() -> void:
 	_camera.global_position = center + Vector3(0, 12, cam_dist)
 	_camera.look_at(center, Vector3.UP)
 
-
 func _get_world_center() -> Vector3:
 	# 建筑群已通过 _target.global_position 居中到世界原点
 	if _target:
 		return _target.global_position
 	return Vector3.ZERO
-
 
 func _setup_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -393,7 +355,6 @@ func _setup_hud() -> void:
 	_mode_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	_mode_label.add_theme_constant_override("outline_size", 4)
 	layer.add_child(_mode_label)
-
 
 func _handle_input(delta: float) -> void:
 	var key_1 := Input.is_key_pressed(KEY_1)
@@ -426,12 +387,10 @@ func _handle_input(delta: float) -> void:
 	_prev_6 = key_6
 	_prev_space = space
 
-
 ## 重建目标（优化开关切换后）
 func _rebuild_for_test() -> void:
 	_build_target()
 	_native_available = NativeLoader.is_available()
-
 
 ## 中心球形破坏（破坏调用走组件）
 func _damage_at_center() -> void:
@@ -439,7 +398,6 @@ func _damage_at_center() -> void:
 		return
 	var center := Vector3(world_size.x * 0.5, world_size.y * 0.5, world_size.z * 0.5)
 	_destruct.damage_sphere(center, damage_radius)
-
 
 ## 射线破坏（相机方向）
 func _ray_damage() -> void:
@@ -452,10 +410,7 @@ func _ray_damage() -> void:
 	var local_dir := _target.global_transform.basis.inverse() * dir
 	_destruct.damage_ray(local_origin / voxel_scale, local_dir, 500.0)
 
-
-# ----------------------------------------------------------------------------
 # 自动测试
-# ----------------------------------------------------------------------------
 
 ## 启动自动测试：遍历所有可见性模式测 FPS
 func _start_auto_test() -> void:
@@ -471,7 +426,6 @@ func _start_auto_test() -> void:
 	print("[测试] 自动测试开始，共 %d 组组合" % _auto_combos.size())
 	_advance_auto_test()
 
-
 ## 推进到下一组测试
 func _advance_auto_test() -> void:
 	if _auto_combos.is_empty():
@@ -483,7 +437,6 @@ func _advance_auto_test() -> void:
 	_auto_frame = 0
 	_auto_fps_sum = 0.0
 	print("[测试] 开始组合: visibility=%s" % ["FULL", "FRUSTUM", "STREAMING"][combo["visibility"]])
-
 
 ## 完成自动测试
 func _finish_auto_test() -> void:
@@ -504,7 +457,6 @@ func _finish_auto_test() -> void:
 	if not best.is_empty():
 		print("[测试] 最优组合: visibility=%s → %.1f FPS" % [
 			["FULL", "FRUSTUM", "STREAMING"][best["visibility"]], best["fps"]])
-
 
 func _update_hud() -> void:
 	if not _hud:

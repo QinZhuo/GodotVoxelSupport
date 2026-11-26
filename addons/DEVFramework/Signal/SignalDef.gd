@@ -1,9 +1,6 @@
 @tool
 @abstract
-##信号
-##    `safe_disconnect_named`）连接与断开，**不要裸 connect/disconnect**。
-## 2. 原因（引擎实测结论）：`Callable` 的相等性只比较**「对象 + 方法」**，`bind()` 绑定的参数
-## 4. 本类不得保存运行时状态：Def 是共享资源，会被多个物品 / 双方复用。
+## 信号
 class_name SignalDef extends Def
 
 @abstract

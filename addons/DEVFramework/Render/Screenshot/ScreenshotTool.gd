@@ -3,7 +3,6 @@ class_name ScreenshotTool
 extends RefCounted
 
 ## 统一截图工具 — 唯一的画面捕获管线。
-## 注意: 本类必须是普通类(RefCounted), 不能继承 EditorScript。
 
 ## 默认最大宽度: 超过则等比缩小以控制截图体积(大视口/高分屏尤其明显)。
 const DEFAULT_MAX_WIDTH := 1280
@@ -15,34 +14,24 @@ const DEFAULT_DIR_RES := "res://.godot/mcp_screenshots"
 const DEFAULT_DIR_USER := "user://mcp_screenshots"
 
 ## ======= 颜色处理模式 =======
-## 格式决定要不要编码 —— 判据见 is_linear_buffer()。
 const COLOR_AUTO := "auto"
-## 强制认定读回的是线性光值, 做 linear→sRGB 编码(旧行为)。仅在极少数"格式判定与实际不符"
+## 强制认定读回的是线性光值, 做 linear→sRGB 编码(旧行为)。
 const COLOR_SRGB := "srgb"
 ## 强制认定读回的已是显示值, 不做任何颜色转换。
 const COLOR_RAW := "raw"
 
+## ----------------------------------------------------------------------…
 
-## ---------------------------------------------------------------------------
-## ---------------------------------------------------------------------------
-
-
-## 从视口纹理抓取一帧(不保存)。**返回的是原始读回数据, 未做任何颜色转换**。
+## 从视口纹理抓取一帧(不保存)。
 static func grab(viewport: Viewport, opts: Dictionary = {}) -> Image:
 	if viewport == null:
 		return null
 	if bool(opts.get("await_draw", true)):
 		# 等渲染线程完成本帧绘制后再读纹理。
-		# 可能导致窗口"未响应"或渲染帧停止(已实测复现)。
 		await RenderingServer.frame_post_draw
 	return viewport.get_texture().get_image()
 
-
 ## 视口纹理读回的数据是否处于**线性光**空间(即还需要补一次 sRGB 编码才是屏幕上的值)。
-##   · 浮点格式(RGBAF/RGBAH/RGBF/RGBH/RGF/RF/RGBE9995)= HDR 线性缓冲, 存的是线性光值
-##     ⇒ 必须编码, 否则出图偏暗。
-##   · 8 位格式(RGB8/RGBA8/…)= 引擎已把显示值写进目标 ⇒ **再编码一次就是二次编码**,
-## 实测(Godot 4.7.x / forward_plus / hdr_2d=false): 往 SubViewport 放一块
 static func is_linear_buffer(image: Image) -> bool:
 	if image == null:
 		return false
@@ -56,9 +45,7 @@ static func is_linear_buffer(image: Image) -> bool:
 		_:
 			return false
 
-
 ## 解析本次出图**最终生效**的颜色处理模式(返回 COLOR_SRGB / COLOR_RAW; auto 会在此收敛)。
-## ⚠️ 调用方**不要**给 srgb 补默认值 true: 那样等于替引擎做了判定, 又把二次编码请回来。
 static func resolve_color_mode(image: Image, opts: Dictionary = {}) -> String:
 	if opts.has("color_mode"):
 		var m := str(opts.get("color_mode", COLOR_AUTO)).strip_edges().to_lower()
@@ -72,9 +59,7 @@ static func resolve_color_mode(image: Image, opts: Dictionary = {}) -> String:
 	# auto 在此收敛成具体模式: 8 位缓冲里已经是显示值, 再编码就是二次编码(灰白蒙层的来源)。
 	return COLOR_SRGB if is_linear_buffer(image) else COLOR_RAW
 
-
-## 把 Image 处理成可保存的正确颜色空间。就地修改并返回同一 Image。
-##           ⚠️ 抖动补偿的必须是**最终 8 位量化**的误差 —— 因此本函数会先在线性值上做
+## 把 Image 处理成可保存的正确颜色空间。
 static func normalize(image: Image, opts: Dictionary = {}) -> Image:
 	if image == null or image.is_empty():
 		return image
@@ -90,8 +75,7 @@ static func normalize(image: Image, opts: Dictionary = {}) -> Image:
 		image.linear_to_srgb()
 	return image
 
-
-## 按最大宽度等比缩放 Image(就地修改)。max_width <= 0 或未超宽时不处理。
+## 按最大宽度等比缩放 Image(就地修改)。
 static func fit_width(image: Image, max_width: int) -> Image:
 	if image == null or max_width <= 0:
 		return image
@@ -100,7 +84,6 @@ static func fit_width(image: Image, max_width: int) -> Image:
 	var scale := float(max_width) / float(image.get_width())
 	image.resize(max_width, maxi(1, int(image.get_height() * scale)), Image.INTERPOLATE_LANCZOS)
 	return image
-
 
 ## 缩放到**精确**尺寸(就地修改), 可放大、**不保持长宽比**(要保比例就先自己按比例算好 target)。
 static func resize_exact(image: Image, target: Vector2i) -> Image:
@@ -111,9 +94,7 @@ static func resize_exact(image: Image, target: Vector2i) -> Image:
 	image.resize(target.x, target.y, Image.INTERPOLATE_LANCZOS)
 	return image
 
-
 ## 完整管线: 取图 -> 缩放(exact_size / max_width) -> 颜色处理(默认 auto 判定, 含可选抖动)
-## -> 保存为 PNG -> 返回结果字典。
 static func capture(viewport: Viewport, opts: Dictionary = {}) -> Dictionary:
 	var capture_type := str(opts.get("capture_type", "texture"))
 	if viewport == null:
@@ -123,7 +104,6 @@ static func capture(viewport: Viewport, opts: Dictionary = {}) -> Dictionary:
 	if img == null or img.is_empty():
 		return _fail("截图失败: 视口纹理为空", capture_type)
 	return save_image(img, _with_type(opts, capture_type))
-
 
 ## 把已有一张 Image 保存为 PNG(用于场景缩略图等已在别处渲染好的图)。
 static func save_image(image: Image, opts: Dictionary = {}) -> Dictionary:
@@ -156,7 +136,6 @@ static func save_image(image: Image, opts: Dictionary = {}) -> Dictionary:
 		"color_mode": color_mode,
 	}
 
-
 ## 生成默认截图文件名(带时间戳, 已清理 Windows 非法字符)。
 static func make_filename(prefix: String = "screenshot") -> String:
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
@@ -166,7 +145,6 @@ static func make_filename(prefix: String = "screenshot") -> String:
 	if not name.ends_with(".png"):
 		name += ".png"
 	return name
-
 
 ## 列出指定目录下的截图文件(按名称倒序, 最新在前)。
 static func list_shots(dir_res: String = DEFAULT_DIR_RES) -> PackedStringArray:
@@ -186,25 +164,21 @@ static func list_shots(dir_res: String = DEFAULT_DIR_RES) -> PackedStringArray:
 	arr.reverse()
 	return PackedStringArray(arr)
 
-
 # -------- 抖动量化(防 banding) --------
 
-## sRGB 编码查找表的步数。逐像素 pow() 在高分辨率出图时开销惊人。
+## sRGB 编码查找表的步数。
 const SRGB_LUT_STEPS := 1024
 
-## sRGB 编码 LUT(线性光值 → sRGB 显示值)。延迟构建, 只建一次。
+## sRGB 编码 LUT(线性光值 → sRGB 显示值)。
 static var _srgb_lut: PackedFloat32Array
 
-
-## 线性光值 → sRGB 显示值(与 Godot 内部 Math::linear_to_srgb 同款公式)。保持浮点, 不量化。
+## 线性光值 → sRGB 显示值(与 Godot 内部 Math::linear_to_srgb 同款公式)。
 static func srgb_encode(c: float) -> float:
 	if c <= 0.0031308:
 		return c * 12.92
 	return 1.055 * pow(c, 1.0 / 2.4) - 0.055
 
-
 ## 带 Floyd–Steinberg 误差扩散地把图像量化到 8 位 RGBA8, 消除大面积渐变上的色阶断层(banding)。
-## banding 是"最终 8 位 sRGB 值"的台阶造成的, 所以抖动必须补偿这一步 —— 顺序反了就白做。
 static func _dither_to_rgba8(image: Image, srgb: bool) -> void:
 	var w := image.get_width()
 	var h := image.get_height()
@@ -242,7 +216,6 @@ static func _dither_to_rgba8(image: Image, srgb: bool) -> void:
 			bytes[dst + 2] = clampi(int(qb), 0, 255)
 			bytes[dst + 3] = clampi(int(roundf(clampf(buf[src + 3], 0.0, 1.0) * 255.0)), 0, 255)
 			## Floyd–Steinberg: 量化误差按 7/16、3/16、5/16、1/16 扩散给 右 / 左下 / 下 / 右下。
-			## 注: PackedFloat32Array 是值类型(传参会拷贝), 所以这里必须内联而不能抽成小函数。
 			var er := r - qr * inv
 			var eg := g - qg * inv
 			var eb := b - qb * inv
@@ -269,8 +242,7 @@ static func _dither_to_rgba8(image: Image, srgb: bool) -> void:
 			dst += 4
 	image.copy_from(Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, bytes))
 
-
-## 用 LUT + 线性插值做 sRGB 编码(见 SRGB_LUT_STEPS)。直接读静态表, 不传参以免拷贝。
+## 用 LUT + 线性插值做 sRGB 编码(见 SRGB_LUT_STEPS)。
 static func _lut_srgb(c: float, steps: float) -> float:
 	if c <= 0.0:
 		return 0.0
@@ -280,14 +252,12 @@ static func _lut_srgb(c: float, steps: float) -> float:
 	var i := int(t)
 	return lerpf(_srgb_lut[i], _srgb_lut[i + 1], t - float(i))
 
-
 # -------- 内部工具 --------
 
 static func _with_type(opts: Dictionary, capture_type: String) -> Dictionary:
 	var merged := opts.duplicate()
 	merged["capture_type"] = capture_type
 	return merged
-
 
 ## 输出几何: 有合法的 exact_size 就强制精确缩放, 否则退到 max_width 上限(就地修改并返回)。
 static func _apply_geometry(image: Image, opts: Dictionary) -> Image:
@@ -296,8 +266,7 @@ static func _apply_geometry(image: Image, opts: Dictionary) -> Image:
 		return resize_exact(image, exact)
 	return fit_width(image, int(opts.get("max_width", DEFAULT_MAX_WIDTH)))
 
-
-## 读 opts 的 exact_size: 接受 Vector2i / Vector2 / [w, h](MCP 侧 JSON 传参只能是后两者)。
+## 读 opts 的 exact_size: 接受 Vector2i / Vector2 / [w, h](MCP 侧 JSON…
 static func _read_exact_size(opts: Dictionary) -> Vector2i:
 	var raw: Variant = opts.get("exact_size")
 	if raw is Vector2i:
@@ -310,7 +279,6 @@ static func _read_exact_size(opts: Dictionary) -> Vector2i:
 			return Vector2i(int(arr[0]), int(arr[1]))
 	return Vector2i.ZERO
 
-
 static func _resolve_path(opts: Dictionary) -> String:
 	var path := str(opts.get("path", ""))
 	if not path.is_empty():
@@ -322,7 +290,6 @@ static func _resolve_path(opts: Dictionary) -> String:
 	var prefix := str(opts.get("prefix", "screenshot"))
 	return dir_res.path_join(make_filename(prefix))
 
-
 static func _ensure_dir(path: String) -> int:
 	var dir := path.get_base_dir()
 	if dir.is_empty():
@@ -333,10 +300,8 @@ static func _ensure_dir(path: String) -> int:
 		return DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
 	return DirAccess.make_dir_recursive_absolute(dir)
 
-
 static func _in_game() -> bool:
 	return not Engine.is_editor_hint()
-
 
 static func _fail(reason: String, capture_type: String) -> Dictionary:
 	return {"ok": false, "error": reason, "capture_type": capture_type}

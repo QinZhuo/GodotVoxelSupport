@@ -1,8 +1,5 @@
 extends Node
 ## 体素水流循环模拟演示（大型复杂场景）
-## 展示：高架水源 → 第一级瀑布 → 蓄水池A → 溢流通道 → 蓄水池B → 第二级瀑布 → 底部收集池 → 循环
-## 使用元胞自动机式的水模拟规则（重力下落、下坡流动、落差溢流）
-## 渲染：VoxelRenderer + 动态 QVoxelSource + HUD 性能监控
 
 ## 体素缩放（单个体素世界边长）
 @export var voxel_scale: float = 0.3
@@ -39,13 +36,11 @@ var _water_count: int = 0
 var _hud_label: Label
 var _gen_time: float = 0.0
 
-
 func _ready() -> void:
 	_build_terrain()
 	_setup_renderer()
 	_setup_hud()
 	_setup_camera()
-
 
 func _process(delta: float) -> void:
 	_frame += 1
@@ -69,10 +64,7 @@ func _process(delta: float) -> void:
 
 	_update_hud()
 
-
-# ----------------------------------------------------------------------------
 # 地形构建（多级瀑布循环场景）
-# ----------------------------------------------------------------------------
 func _build_terrain() -> void:
 	_data = QVoxelSource.new()
 	_data.grid_size = Vector3i(GRID_X, GRID_Y, GRID_Z)
@@ -126,8 +118,6 @@ func _build_terrain() -> void:
 	_build_container(Vector3i(5, 1, 5), Vector3i(9, 3, 10), MAT_SOLID)
 
 	# ---- 蓄水池A 溢流缺口 → 通道 → 蓄水池B（更低）----
-	# 蓄水池A (x:5..9) 与通道 (x:11..15) 之间用低矮隔断 x:10 (仅 y:1)，
-	# y:2 层在 z:7..8 处开口，水蓄到 y:2 后从缺口流入通道
 	for y in range(1, 2):
 		for z in range(5, 11):
 			_data.set_voxel(Vector3i(10, y, z), MAT_SOLID)
@@ -143,7 +133,6 @@ func _build_terrain() -> void:
 	_build_container(Vector3i(16, 1, 5), Vector3i(20, 3, 10), MAT_SOLID)
 
 	# ---- 蓄水池B 溢流 → 第二级瀑布 → 底部收集池 ----
-	# 蓄水池B 前侧 (x:20) 在 y:2..3 开放形成第二级瀑布
 	for y in range(2, 4):
 		for z in range(6, 9):
 			_data.remove_voxel(Vector3i(20, y, z))
@@ -156,7 +145,6 @@ func _build_terrain() -> void:
 	_fill_water(17, 19, 2, 2, 6, 9, MAT_WATER)  # 蓄水池B 底一层
 	_fill_water(22, 24, 2, 2, 6, 9, MAT_WATER)  # 底部收集池一层
 
-
 ## 构建容器（底 + 四壁），用于承接水
 func _build_container(a: Vector3i, b: Vector3i, mat: int) -> void:
 	# 底
@@ -165,7 +153,6 @@ func _build_container(a: Vector3i, b: Vector3i, mat: int) -> void:
 			_data.set_voxel(Vector3i(x, a.y - 1, z), mat)
 	# 四壁
 	_build_walls_only(a, b, mat)
-
 
 ## 只构建四壁（不封底），用于通道/蓄水池
 func _build_walls_only(a: Vector3i, b: Vector3i, mat: int) -> void:
@@ -177,7 +164,6 @@ func _build_walls_only(a: Vector3i, b: Vector3i, mat: int) -> void:
 			_data.set_voxel(Vector3i(a.x, y, z), mat)
 			_data.set_voxel(Vector3i(b.x, y, z), mat)
 
-
 ## 填充一个 AABB 区域为指定材质
 func _fill_water(min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max_z: int, mat: int) -> void:
 	for x in range(min_x, max_x + 1):
@@ -188,15 +174,10 @@ func _fill_water(min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max
 					_data.set_voxel(pos, mat)
 					_water_count += 1
 
-
 func _setup_renderer() -> void:
 	_renderer = VoxelRenderer.new()
 	_renderer.name = "WaterVoxels"
 	# 【必须显式 DYNAMIC】水模拟每帧批量改体素，而 STATIC 的代价是"改一个体素 = 重建整份模型"。
-	# 本场景 40×20×16 = 12800 体素，整份重建实测 20~30ms/次，逐帧跑会直接把帧率打到个位数。
-	# DYNAMIC + group_shift=0（每 chunk 一个绘制单元）才是水模拟这种"每帧大面积编辑"的正确形态。
-	# 注意 group_shift 取 0 而非默认 1：水是逐帧连续改的，单次重建要尽可能小（0.4ms 级），
-	# 分组带来的 draw 收益在这里不重要（只有一个实例）。
 	_renderer.draw_mode = VoxelRenderer.DrawMode.DYNAMIC
 	_renderer.group_shift = 0
 	_renderer.data = _data
@@ -205,7 +186,6 @@ func _setup_renderer() -> void:
 	add_child(_renderer)
 	_renderer.global_position = Vector3(
 		-(GRID_X * voxel_scale) * 0.5, 0.0, -(GRID_Z * voxel_scale) * 0.5)
-
 
 func _setup_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -219,7 +199,6 @@ func _setup_hud() -> void:
 	_hud_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	_hud_label.add_theme_constant_override("outline_size", 4)
 	layer.add_child(_hud_label)
-
 
 func _setup_camera() -> void:
 	# 相机是脚本所在节点的兄弟节点（在 tscn 的根下），复用或创建
@@ -235,7 +214,6 @@ func _setup_camera() -> void:
 	cam.global_position = Vector3(GRID_X * voxel_scale * 0.5, GRID_Y * voxel_scale * 0.8, GRID_Z * voxel_scale * 2.2)
 	cam.look_at(Vector3(GRID_X * voxel_scale * 0.5, GRID_Y * voxel_scale * 0.4, 0))
 	cam.fov = 70
-
 
 func _update_hud() -> void:
 	if _hud_label == null:
@@ -264,22 +242,15 @@ Mesh生成耗时: %.2f ms
 """ % [Engine.get_frames_per_second(), 1000.0 / maxf(Engine.get_frames_per_second(), 0.001),
 		tri, verts, _data.get_voxel_count(), _water_count, _gen_time, _renderer.last_mesh_gen_time_ms, voxel_scale]
 
-
-# ----------------------------------------------------------------------------
 # 水模拟（元胞自动机：重力 + 下坡 + 落差溢流，平地稳定不乱动）
-# ----------------------------------------------------------------------------
 func _spawn_drop() -> void:
 	var pos := _drop_pos + Vector3i(randi_range(-1, 1), 0, randi_range(-1, 1))
 	if _in_bounds(pos) and _data.get_voxel(pos) < 0:
 		_data.set_voxel(pos, MAT_WATER)
 		_water_count += 1
 
-
 func _update_water() -> void:
 	# 双缓冲元胞水模拟：
-	# 第一步：基于当前状态计算每个水的"目标位置"（不立即移动）
-	# 第二步：统一应用移动（同一帧内所有水同时移动，避免相邻水来回振荡/乱动）
-	# 规则优先级：重力下落 > 下坡流动 > 水平扩散(向空位铺平)
 
 	# 第一步：收集所有水，计算移动计划 (from -> to)
 	var moves: Dictionary = {}   # key: from(Vector3i), value: to(Vector3i)
@@ -310,8 +281,6 @@ func _update_water() -> void:
 			continue
 
 		# 3. 水平流动：先向"目标下方为空"的方向流（下坡/悬崖，有明确向下趋势），
-		#    若无下坡方向，再向普通空位流（含池壁缺口，使水能溢流到下一层）
-		#    双缓冲机制保证同一帧所有水同时移动，不会来回振荡
 		var dirs := [
 			Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 			Vector3i(0, 0, 1), Vector3i(0, 0, -1),
@@ -334,11 +303,6 @@ func _update_water() -> void:
 				break
 
 	# 第二步：统一应用移动（所有水的目标基于第一步快照，冲突目标由较晚写入者覆盖，可接受）
-	# 用框架批量接口而非直接改 voxels 字典：批量接口会标记 chunk 级脏数据，
-	# 让 VoxelRenderer 走增量重建（只重建受影响 chunk）+ 支撑/索引缓存保持正确。
-	# 【关键】必须用 claimed 记录本帧已被占用的目标：若两个水同时想移入同一格，
-	# 只有先者搬入，后者原地不动（不搬走 source），否则后者的 source 会被删除、
-	# 却没有新 position 写入 → 每帧丢水，永远攒不起来。
 	var claimed: Dictionary = {}   # 本帧已分配的目标位置 -> true
 	var from_list: Array = []
 	var to_list: Array = []
@@ -355,15 +319,12 @@ func _update_water() -> void:
 		_data.remove_voxels(from_list, false)
 		_data.set_voxels(to_list, MAT_WATER)
 
-
 func _is_empty(pos: Vector3i) -> bool:
 	return _in_bounds(pos) and _data.get_voxel(pos) < 0
-
 
 func _in_bounds(pos: Vector3i) -> bool:
 	return pos.x >= 0 and pos.y >= 0 and pos.z >= 0 \
 		and pos.x < GRID_X and pos.y < GRID_Y and pos.z < GRID_Z
-
 
 func _move_water(from: Vector3i, to: Vector3i) -> void:
 	_data.remove_voxel(from, false)

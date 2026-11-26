@@ -62,4 +62,3 @@ func update_layout():
 	for i in count:
 		var slot := visible_slots[i]
 		slot.position = start_pos + step * i
-

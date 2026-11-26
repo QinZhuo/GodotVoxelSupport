@@ -2,15 +2,10 @@
 class_name QVoxelStamp
 extends RefCounted
 ## 自定义笔刷内核 —— 把"一个做好的模型"抓成图案（`capture`），再用它像盖章一样绘画（`stamp`）。
-## 【为什么要它】程序化算子是"机器生成形状"，与体素建模的手感不一致；而"我画好一个形状，
-## 拿它当笔刷到处盖"才是 PS 自定义笔刷式的直觉。图案就是一组带材质的体素，与手绘完全同构。
-## 【合并方式 = 操作三态】添加 = 并集、移除 = 差集、上色 = 用图案实心处重上当前材质。
-## 【一次点击 = 一条可撤销命令】写入走 QVoxelEditCommand，与手绘同一时间线。
 
-## 图案 = {cells: Array[Vector3i]（相对图案最小角，最小角在原点）, mats: PackedInt32Array, size: Vector3i}。
+## 图案 = {cells: Array[Vector3i]（相对图案最小角，最小角在原点）, mats: PackedInt32Array…
 
-
-## 从一个模型的实心体素抓出图案（以内容包围盒为界）。空模型返回 {}。
+## 从一个模型的实心体素抓出图案（以内容包围盒为界）。
 static func capture(model: QVoxelModel) -> Dictionary:
 	if model == null or model.is_empty():
 		return {}
@@ -43,8 +38,7 @@ static func capture(model: QVoxelModel) -> Dictionary:
 					mats.append(m)
 	return {"cells": cells, "mats": mats, "size": size}
 
-
-## 以 center 为中心盖一次图案。mode 取值同 QVoxelBrushTool.Op。返回真正改动的体素数。
+## 以 center 为中心盖一次图案。
 static func stamp(cmd: QVoxelEditCommand, obj: QVoxelModel, pattern: Dictionary,
 		center: Vector3i, mode: int, material_id: int) -> int:
 	if cmd == null or obj == null or pattern.is_empty():

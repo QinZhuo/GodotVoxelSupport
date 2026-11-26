@@ -2,28 +2,20 @@
 class_name QVoxelPreviewMesh
 extends MeshInstance3D
 ## 落笔预览的**实体**渲染：把"这一次会写出 / 擦掉哪些格"画出来。
-## 【添加 = 半透明实体】只画外露面的立方体，于是用户看到的是"改完之后这块长什么样"，
-## 而不是几根框线。内部相邻两格之间的面被剔掉，一整片实心盒只留外壳（省三角形、不发白）。
-## 【移除 / 上色 = 空心框】"会被挖掉 / 改色"没法用体积表达（体积是"会有"），故切成线框：
-## 一眼读出"这几格要动"，而不是又叠一层实心块把模型糊住。
-## 【为什么不参与光照、也不做深度测试】预览是"还没发生的改动"的示意，不是场景实体；
-## 不受光、直接取材质色，压在模型上也始终看得见（否则会被挡在背后读不出来）。
-## 【坐标约定】顶点用体素单位，靠节点 scale 乘 voxel_scale —— 与 VoxelRenderer 同一套换算。
-## origin 再叠上数据层的 center_offset（导入模型会有非零偏移），否则预览与体素错开。
 
-## 单格边长（世界单位）。由视口随模型一起喂入。
+## 单格边长（世界单位）。
 @export var voxel_scale := 0.1:
 	set(v):
 		voxel_scale = maxf(v, 0.0001)
 		_apply_scale()
 
-## 体素单位下的整体偏移（= QVoxelSource.center_offset）。导入资产非零，编辑器新建为零。
+## 体素单位下的整体偏移（= QVoxelSource.center_offset）。
 @export var origin := Vector3.ZERO:
 	set(v):
 		origin = v
 		rebuild()
 
-## 逐格实体的格数上限。超过就退化成"包围盒"——两千多个块叠在一起只会糊成一团。
+## 逐格实体的格数上限。
 const CELLS_MAX := 2048
 ## 画时的不透明度（半透明实体）。
 const DRAW_ALPHA := 0.55
@@ -35,9 +27,7 @@ var _color := Color.WHITE
 var _wire := false
 var _mat: StandardMaterial3D
 
-
-## 设置预览格集。color = 基色（不透明即可）；wire 决定"实心 / 线框"。
-## 实心用于"添加"（看改完的体积），线框用于"移除 / 上色"（看被作用的已有体素）。
+## 设置预览格集。
 func set_cells(cells: Array[Vector3i], color: Color, wire := false) -> void:
 	if color == _color and wire == _wire and _same(cells):
 		return
@@ -46,10 +36,8 @@ func set_cells(cells: Array[Vector3i], color: Color, wire := false) -> void:
 	_wire = wire
 	rebuild()
 
-
 func clear() -> void:
 	set_cells([] as Array[Vector3i], _color, _wire)
-
 
 func rebuild() -> void:
 	if _cells.is_empty():
@@ -69,7 +57,6 @@ func rebuild() -> void:
 			_exposed(verts, colors)
 		_commit(verts, colors, Mesh.PRIMITIVE_TRIANGLES)
 
-
 ## 逐格外露面（内部面剔除）。
 func _exposed(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	var occupied := {}
@@ -80,7 +67,6 @@ func _exposed(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 			if not occupied.has(c + FACES[i].dir):
 				_cube_face(verts, colors, c, i)
 
-
 ## 线框预览（移除 / 上色）：只画**轮廓**（组成形状的边界棱），而不是每格一个方框 —— 密麻的小框太乱。
 func _wire_frame(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	var c := Color(_color, 1.0)
@@ -88,7 +74,6 @@ func _wire_frame(verts: PackedVector3Array, colors: PackedColorArray) -> void:
 	verts.append_array(edges)
 	for _i in edges.size():
 		colors.push_back(c)
-
 
 ## 向缓冲追加一个格（或盒）的第 face 面（两个三角形）。
 func _cube_face(verts: PackedVector3Array, colors: PackedColorArray,
@@ -104,7 +89,6 @@ func _cube_face(verts: PackedVector3Array, colors: PackedColorArray,
 	for i in 6:
 		colors.push_back(c)
 
-
 ## 某格（或盒）的 12 条棱线框。
 func _box_edges(verts: PackedVector3Array, colors: PackedColorArray,
 		lo: Vector3i, hi: Vector3i, c: Color) -> void:
@@ -115,7 +99,6 @@ func _box_edges(verts: PackedVector3Array, colors: PackedColorArray,
 		verts.push_back(p[e[0]]); verts.push_back(p[e[1]])
 		colors.push_back(c); colors.push_back(c)
 
-
 ## 由两个对角点造 8 个角（顺序见 FACES/QUADS 的约定）。
 func _corners(a: Vector3, b: Vector3) -> Array:
 	return [
@@ -123,11 +106,9 @@ func _corners(a: Vector3, b: Vector3) -> Array:
 		Vector3(a.x, b.y, a.z), Vector3(b.x, b.y, a.z), Vector3(b.x, b.y, b.z), Vector3(a.x, b.y, b.z),
 	]
 
-
 func _box_faces(verts: PackedVector3Array, colors: PackedColorArray, lo: Vector3i, hi: Vector3i) -> void:
 	for i in 6:
 		_cube_face(verts, colors, lo, i, hi)
-
 
 func _bounds() -> Dictionary:
 	var lo := _cells[0]
@@ -137,10 +118,8 @@ func _bounds() -> Dictionary:
 		hi = Vector3i(maxi(hi.x, c.x), maxi(hi.y, c.y), maxi(hi.z, c.z))
 	return {lo = lo, hi = hi}
 
-
 func _commit(verts: PackedVector3Array, colors: PackedColorArray, primitive: int) -> void:
 	# 空顶点不加 surface：`add_surface_from_arrays` 会报 ERR_INVALID_DATA，
-	# 紧接着 `set_surface_override_material(0, …)` 又会因为"没有 surface 0"越界。
 	if verts.is_empty():
 		mesh = null
 		return
@@ -154,7 +133,6 @@ func _commit(verts: PackedVector3Array, colors: PackedColorArray, primitive: int
 	set_surface_override_material(0, _material())
 	_apply_scale()
 
-
 func _material() -> StandardMaterial3D:
 	if _mat == null:
 		var m := StandardMaterial3D.new()
@@ -167,12 +145,10 @@ func _material() -> StandardMaterial3D:
 		_mat = m
 	return _mat
 
-
 func _apply_scale() -> void:
 	scale = Vector3.ONE * voxel_scale
 
-
-## 与上次格集逐格相同？（悬停每帧调用；相同就不重建。）
+## 与上次格集逐格相同？
 func _same(cells: Array[Vector3i]) -> bool:
 	if cells.size() != _cells.size():
 		return false
@@ -181,10 +157,8 @@ func _same(cells: Array[Vector3i]) -> bool:
 			return false
 	return true
 
-
 func _ready() -> void:
 	rebuild()
-
 
 ## 六个面的方向（顶点顺序见 _corners）。
 const FACES := [

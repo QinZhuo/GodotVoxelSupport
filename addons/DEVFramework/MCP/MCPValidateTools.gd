@@ -2,33 +2,22 @@
 extends RefCounted
 
 ## ======= 脚本/资源校验域 =======
-## 收录"不信任声明、要实测"这一类能力:
-##   - validate        统一验证入口(kind=script 编译校验 / kind=resource 资源可加载性)
-##   - classdb_query   查 Godot 原生类 API(写脚本前确认方法/属性/信号签名)
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 
-## 本域私有的编译错误捕获器。**刻意不共用 MCPDevServer 的那个**, 理由见下方"编译错误从哪来"。
+## 本域私有的编译错误捕获器。
 static var _compile_log: LogCaptureTool = null
 
-
 ## ======= 编译错误从哪来: 本域自建一个日志捕获器 =======
-## 接缝判据: **漏调必须可见**。捕获器若靠注入, 漏调后果是编译错误捕获不到、
-## validate 恒返回 valid=true(把编译失败的代码报成合法)—— 属静默失效, 故必须域内自建。
 
 ## 取本域私有的编译错误捕获器(首次调用时创建并注册到 OS)。
-## 它与主文件的日志捕获器各自独立: get_error_cursor 只取写指针, take_errors_since 只读区间,
-## 本路径不调 clear_errors —— 故不会互相清空。**不要因为看起来"重复注册"就删掉任一个。**
 static func _compile_error_log() -> LogCaptureTool:
 	if _compile_log == null:
 		_compile_log = LogCaptureTool.new()
 		OS.add_logger(_compile_log)
 	return _compile_log
 
-
 ## ======= 域注册入口 =======
-## 由 MCPDevServer 传入 _add_tool。MCPCodeIndex.register 同形状同结论, 各域一致。
-## 注册表侧 _tool_handlers[name] / _tool_schemas[name] 都是 Dictionary, 同名工具会静默覆盖。
 static func register(add_tool: Callable) -> void:
 	add_tool.call("validate",
 		"统一验证入口。kind=script: 验证GDScript语法/可编译性(传path读磁盘或传code源码), 返回是否有效与错误明细; kind=resource: 验证资源/场景能否被引擎加载(排查.tres/.tscn损坏或依赖缺失)。",
@@ -50,15 +39,13 @@ static func register(add_tool: Callable) -> void:
 		}},
 		_handle_classdb_query)
 
-
 ## ======= 实现 =======
 
-## validate 的分派: 只按 kind 选实现。刻意做成"薄分派"而不把两支合成一支: 两支验的是完全不同的机制(编译源码 / 引擎加载资源)。
+## validate 的分派: 只按 kind 选实现。
 static func _handle_validate(args: Dictionary) -> Dictionary:
 	if VariantTool.get_string(args, "kind", "script") == "resource":
 		return await _handle_validate_resource(args)
 	return await _handle_validate_script(args)
-
 
 static func _handle_validate_script(args: Dictionary) -> Dictionary:
 	var path: String = VariantTool.get_string(args, "path")
@@ -77,7 +64,7 @@ static func _handle_validate_script(args: Dictionary) -> Dictionary:
 	var outcome := _compile_and_collect(script)
 	# 剔除误报: GDScript.new() 临时脚本默认无路径, 引擎会因 class_name 已全局注册而报重名。
 	outcome.real_errors = _filter_class_conflicts(outcome.real_errors, path, code)
-	# warnings 通道同样过滤: 带 "Warning treated as error" 后缀的 hides 消息会被归入此处, 需一并滤掉。
+	# warnings 通道同样过滤: 带 "Warning treated as error" 后缀的 hides 消息会被归入此处…
 	var filtered_warns: Array = []
 	for w in outcome.warnings:
 		var msg := str(w)
@@ -103,16 +90,13 @@ static func _handle_validate_script(args: Dictionary) -> Dictionary:
 		"warnings": outcome.warnings,
 	})
 
-
 ## 构造一个用于预编译的临时 GDScript(无资源路径, 不触碰 Resource 缓存)。
 static func _make_tmp_script(code: String) -> GDScript:
 	var script := GDScript.new()
 	script.source_code = code
 	return script
 
-
-## 编译临时脚本并收集此刻新增的错误/警告。返回 {"real_errors", "warnings"}。
-## 必须按游标取增量: 引擎会把历史错误一起返回。
+## 编译临时脚本并收集此刻新增的错误/警告。
 static func _compile_and_collect(script: GDScript) -> Dictionary:
 	var log := _compile_error_log()
 	var n0: int = log.get_error_cursor() if log else 0
@@ -130,7 +114,6 @@ static func _compile_and_collect(script: GDScript) -> Dictionary:
 			real.append(msg)
 	return {"real_errors": real, "warnings": warns}
 
-
 ## 逐个过滤 class 冲突: 保留真实冲突, 剔除"验证该 class_name 注册文件本身"造成的误报。
 static func _filter_class_conflicts(errors: Array, path: String, code: String) -> Array:
 	var kept: Array = []
@@ -144,7 +127,6 @@ static func _filter_class_conflicts(errors: Array, path: String, code: String) -
 			kept.append(e)
 	return kept
 
-
 ## 从冲突错误文本解析出冲突的 class_name(形如 "Class \"Foo\" hides a global class.")。
 static func _class_from_conflict(msg: String) -> String:
 	var start := msg.find("\"")
@@ -155,12 +137,7 @@ static func _class_from_conflict(msg: String) -> String:
 		return ""
 	return msg.substr(start + 1, end - start - 1)
 
-
 ## 判定一条 class 冲突是否为误报:
-## - 冲突的 class_name 尚未全局注册        → 缓存滞后, 误报
-## - 注册路径 == 本次被验证 path            → 验证注册文件自身, 误报
-## - 无 path 但 code 声明了同名 class_name  → 新定义源, 误报
-## - 解析不出 class_name                    → 无法判断, 保守不判误报(可能真是语法错误)
 static func _is_class_conflict_false_positive(cls: String, path: String, code: String) -> bool:
 	if cls.is_empty():
 		return false
@@ -173,7 +150,6 @@ static func _is_class_conflict_false_positive(cls: String, path: String, code: S
 		return true
 	return false
 
-
 ## 查询一个 class_name 在全局类缓存中的注册路径(res://…); 未注册返回 ""。
 static func _global_class_path(target_class: String) -> String:
 	var classes: Array = ProjectSettings.get_setting("_global_script_classes", [])
@@ -182,11 +158,9 @@ static func _global_class_path(target_class: String) -> String:
 			return str(c.get("path", ""))
 	return ""
 
-
 ## 简化路径比较(处理分隔符/大小写, 避免 Windows 盘符差异导致误判)。
 static func _same_path(a: String, b: String) -> bool:
 	return a.replace("\\", "/").to_lower() == b.replace("\\", "/").to_lower()
-
 
 ## 扫描脚本头部(class_name 仅允许在 extends 之前), 返回声明的类名; 未声明返回 ""。
 static func _extract_class_name(code: String) -> String:
@@ -199,7 +173,6 @@ static func _extract_class_name(code: String) -> String:
 		if not t.begins_with("extends"):
 			break
 	return ""
-
 
 static func _handle_validate_resource(args: Dictionary) -> Dictionary:
 	var path: String = VariantTool.get_string(args, "path")
@@ -216,8 +189,7 @@ static func _handle_validate_resource(args: Dictionary) -> Dictionary:
 		"message": "资源可正常加载",
 	})
 
-
-## 查询 Godot 类的 API(方法/属性/信号)。用于 AI 写脚本前确认原生 API 用法。
+## 查询 Godot 类的 API(方法/属性/信号)。
 static func _handle_classdb_query(args: Dictionary) -> Dictionary:
 	var query_class: String = VariantTool.get_string(args, "class_name")
 	var search: String = VariantTool.get_string(args, "search")
@@ -280,7 +252,6 @@ static func _handle_classdb_query(args: Dictionary) -> Dictionary:
 		out["signals"] = signals
 	return MCPResult.ok_json(out)
 
-
 ## 获取类的信号列表: ClassDB.class_get_signal_list 对内置类返回空。
 static func _instance_signal_list(cname: String) -> Array:
 	if not ClassDB.can_instantiate(cname):
@@ -292,7 +263,6 @@ static func _instance_signal_list(cname: String) -> Array:
 	inst.free()
 	return sigs
 
-
 ## 返回类的继承链(从基类到最终祖先)
 static func _class_inheritance_chain(cname: String) -> Array:
 	var chain: Array = []
@@ -301,7 +271,6 @@ static func _class_inheritance_chain(cname: String) -> Array:
 		chain.append(cur)
 		cur = ClassDB.get_parent_class(cur)
 	return chain
-
 
 ## 将 Godot 类型枚举值转为可读类型名
 static func _type_name(type_id: int) -> String:

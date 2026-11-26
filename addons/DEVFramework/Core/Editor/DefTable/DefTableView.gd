@@ -66,18 +66,15 @@ var _measure_rtl: RichTextLabel
 var _width_cache: Dictionary = {}
 
 ## 单元格文本缓存(性能): Resource -> 按列的展示文本。
-## 计算型 getter 属性(tr_desc 等)访问即全量重建, 必须缓存避免布局/渲染重复计算
 var _text_cache: Dictionary = {}
 
 ## 行染色缓存(B1 row stylization): 每行取首个有效 Color 值作为整行染色
 var _row_tints: Array[Color] = []
 
-
 func _ready() -> void:
 	if editor_interface == null:
 		return
 	# 表头横向滚动由主网格驱动: 隐藏滚动条(SHOW_NEVER), 避免用户单独拖动表头错位;
-	# 不用 DISABLED, 否则 ScrollContainer 的 minimum 会包含子节点总宽, 撑爆整个布局。
 	header_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
 	hint_label.text = "点击选中 · Ctrl+点击多选 · Shift+点击连选 · Ctrl+C 复制 · Ctrl+V 粘贴"
 	_refresh_dir_list()
@@ -106,11 +103,9 @@ func _ready() -> void:
 	set_process_shortcut_input(true)
 	set_process_unhandled_input(true)
 
-
 ## 递归收集 base 下的所有子目录(含子孙), 返回完整 res:// 路径(带尾部 /)
 func _list_dirs(base: String) -> Array[String]:
 	return FileTool.list_dirs(base)
-
 
 ## 刷新左侧目录树: 按 DEFS_BASE 下的目录层级构建 Tree(父目录可折叠, 选中加载整个子树)
 func _refresh_dir_list() -> void:
@@ -140,13 +135,11 @@ func _refresh_dir_list() -> void:
 			item = child
 	root.collapsed = false
 
-
 ## 获取编辑器文件夹图标(与 FileSystem 停靠面板一致的 Folder 图标)
 func _folder_icon() -> Texture2D:
 	if editor_interface == null:
 		return null
 	return editor_interface.get_base_control().get_theme_icon("Folder", "EditorIcons")
-
 
 func _select_first_dir_item() -> TreeItem:
 	# 深度优先取第一个带完整路径的目录节点(最深层级优先), 便于默认展示具体分类
@@ -166,7 +159,6 @@ func _select_first_dir_item() -> TreeItem:
 			stack.append(ch)
 	return found
 
-
 func _on_dir_selected() -> void:
 	var item := dir_tree.get_selected()
 	if item == null:
@@ -179,15 +171,12 @@ func _on_dir_selected() -> void:
 		_current_dir += "/"
 	_load_dir(_current_dir)
 
-
 ## 重新加载当前目录(公开入口: 插件在面板首次可见时调用)。
 func refresh() -> void:
 	_load_dir(_current_dir)
 
-
 func _on_refresh_pressed() -> void:
 	refresh()
-
 
 func _on_filesystem_changed() -> void:
 	if not _loaded:
@@ -213,7 +202,6 @@ func _on_filesystem_changed() -> void:
 	else:
 		_load_dir(_current_dir)
 
-
 func _load_dir(path: String) -> void:
 	if path == "":
 		return
@@ -233,17 +221,14 @@ func _load_dir(path: String) -> void:
 	count_label.text = "共 %d 个 Def" % rows.size()
 	sel_label.text = "未选中"
 
-
 ## 清空网格中所有单元格节点(目录切换/列结构变化时调用)。
 func _clear_grid_cells() -> void:
 	_recycle_all_rows()
 	first_row = 0
 	last_row = 0
 
-
 func _is_def(res: Resource) -> bool:
 	return res is Def
-
 
 func _build_columns() -> void:
 	columns.clear()
@@ -284,7 +269,6 @@ func _build_columns() -> void:
 			column_hint_strings.append(str(p["hint_string"]).split(","))
 			column_writable.append(bool(p["usage"] & PROPERTY_USAGE_READ_ONLY) == false)
 
-
 func can_display_property(p: Dictionary) -> bool:
 	var pname: String = p["name"]
 	var ptype: int = p["type"]
@@ -298,9 +282,7 @@ func can_display_property(p: Dictionary) -> bool:
 		return false
 	return true
 
-
 ## 名称列的显示名. 不走 Def.name getter: 那个 getter 每读一次都回写 resource_name,
-## 排序/布局/复制时会被反复触发.
 static func _display_name(res: Resource) -> String:
 	if res.resource_path != "":
 		return res.resource_path.get_file().get_basename()
@@ -309,13 +291,11 @@ static func _display_name(res: Resource) -> String:
 		return s.get_global_name() if s != null else res.get_class()
 	return res.resource_name
 
-
 func _get_value(res: Resource, col: int) -> Variant:
 	if col == 0:
 		return _display_name(res) if res is Def else res.get("name") if "name" in res else res.resource_path.get_file().get_basename()
 	var pname: StringName = columns[col]
 	return res.get(pname)
-
 
 func _to_text(value, col: int) -> String:
 	if value == null:
@@ -353,7 +333,6 @@ func _to_text(value, col: int) -> String:
 		_:
 			return str(value)
 
-
 ## 打包数组转展示文本(PackedStringArray 等)
 func _packed_array_to_text(value) -> String:
 	var items: Array = []
@@ -361,12 +340,10 @@ func _packed_array_to_text(value) -> String:
 		items.append(_array_item_name(item))
 	return "、".join(items)
 
-
 func _array_item_name(item) -> String:
 	if item is Resource:
 		return _resource_display_text(item)
 	return str(item)
-
 
 ## 资源引用显示 tostring 内容; 若未重写 _to_string 则回退到文件名
 func _resource_display_text(value: Resource) -> String:
@@ -379,8 +356,7 @@ func _resource_display_text(value: Resource) -> String:
 	# 内建/子资源没有路径: 退回类名, 别把 "<Class#id>" 这种串显示给用户
 	return value.get_class()
 
-
-## 解析粘贴文本为列值。返回 {ok: bool, value: Variant, error: String}
+## 解析粘贴文本为列值。
 func _from_text(text: String, col: int) -> Dictionary:
 	var type_name := _type_display_name(column_types[col])
 	if text == "":
@@ -465,20 +441,16 @@ func _from_text(text: String, col: int) -> Dictionary:
 			return _err("期望字典(JSON), 得到 '%s'" % text)
 		_:
 			# Vector/Rect/Transform 等只认 Variant 字面量(Vector3(0, 1, 0)).
-			# type_convert 对这类文本会静默给出全零值, 不能当兜底, 所以解析失败就直接报错.
 			var gv = str_to_var(text)
 			if gv == null or typeof(gv) != column_types[col]:
 				return _err("无法解析为 %s: '%s'(手输要写 %s(...) 字面量)" % [type_name, text, type_name])
 			return _ok(gv)
 
-
 func _ok(value) -> Dictionary:
 	return {"ok": true, "value": value, "error": ""}
 
-
 func _err(msg: String) -> Dictionary:
 	return {"ok": false, "value": null, "error": msg}
-
 
 ## 枚举 hint_string 的取值: 带 ":值" 的用冒号后的数, 否则下标即值.
 static func _enum_value(opts: PackedStringArray, text: String) -> Dictionary:
@@ -492,7 +464,6 @@ static func _enum_value(opts: PackedStringArray, text: String) -> Dictionary:
 			return {"found": true, "value": i}
 	return {"found": false, "value": 0}
 
-
 ## 枚举值的显示文本, 与 _enum_value 互为反向.
 static func _enum_label(opts: PackedStringArray, value: int) -> String:
 	for i in opts.size():
@@ -504,7 +475,6 @@ static func _enum_label(opts: PackedStringArray, value: int) -> String:
 		elif i == value:
 			return o
 	return str(value)
-
 
 func _type_display_name(t: int) -> String:
 	match t:
@@ -519,7 +489,6 @@ func _type_display_name(t: int) -> String:
 		_:
 			# 向量/矩形/变换等留给引擎自己命名, 报错时才说得清是哪种类型
 			return type_string(t)
-
 
 ## 将序列化的 JSON 值还原为实际值(资源路径 -> load, 数组/字典递归)
 func _jsonable_to_value(v) -> Variant:
@@ -539,7 +508,6 @@ func _jsonable_to_value(v) -> Variant:
 			d[k] = _jsonable_to_value(v[k])
 		return d
 	return v
-
 
 ## 将实际值转为可 JSON 序列化的形式(资源 -> {__res: 路径}, 数组/字典递归)
 func _value_to_jsonable(v) -> Variant:
@@ -562,7 +530,6 @@ func _value_to_jsonable(v) -> Variant:
 		return arr2
 	return v
 
-
 func _sort_rows() -> void:
 	var sort_col := columns.find(sorting_by)
 	if sort_col < 0:
@@ -574,7 +541,6 @@ func _sort_rows() -> void:
 	rows.sort_custom(sort_val)
 	if sorting_reverse:
 		rows.reverse()
-
 
 func _compare_values(a, b) -> bool:
 	if a == null and b == null:
@@ -591,10 +557,7 @@ func _compare_values(a, b) -> bool:
 		return a.resource_path < b.resource_path
 	return str(a).filenocasecmp_to(str(b)) < 0
 
-
 ## 计算列宽 + 行高 (单次遍历, 缓存文本测量结果)
-##   · 文本经 _cell_text 缓存, 布局与渲染共享一份(计算型 getter 只算一次)
-##   · 仅含显式换行的内容做 RTL 实测撑行; 单行内容(BBCode 与否)固定行高。
 func _compute_layout() -> void:
 	var font := get_theme_font("font", "Label")
 	var fsize := get_theme_font_size("font", "Label")
@@ -606,7 +569,6 @@ func _compute_layout() -> void:
 
 	var line_height := _measure_line_height()
 	# 第一遍: 表头宽度 —— 必须用 Button 实际渲染字体度量(Label 字体可能不同号),
-	# 并预留排序箭头位, 否则列名会被 clip_text 裁掉尾巴
 	var hfont := get_theme_font("font", "Button")
 	if hfont == null:
 		hfont = font
@@ -648,12 +610,7 @@ func _compute_layout() -> void:
 	# 冻结首列宽度跟随 name 列
 	frozen_grid.custom_minimum_size = Vector2(column_widths[0], 0)
 
-
 ## 用复用 RichTextLabel(进树 + reset_size 同步测量)计算 BBCode 文本高度
-##   · fit_content 模式在隐藏控件上测出的最小尺寸异常虚高(短文本也可能返回 90+px)
-##   · 固定宽度 + get_content_height 与单元格实际渲染一致
-## 测量用 RTL 必须与单元格渲染同口径: 清除默认 stylebox 的 32px 内容边距,
-## 否则"测量可用宽 = 列宽-32"而"渲染可用宽 = 列宽", 导致单行文本被误判为需换行/行高虚高。
 func _ensure_measure_rtl() -> RichTextLabel:
 	if not is_instance_valid(_measure_rtl):
 		_measure_rtl = RichTextLabel.new()
@@ -666,7 +623,6 @@ func _ensure_measure_rtl() -> RichTextLabel:
 		add_child(_measure_rtl)
 	return _measure_rtl
 
-
 func _measure_bbcode_height(text: String, width: float) -> float:
 	if not is_inside_tree():
 		return _measure_line_height()
@@ -676,7 +632,6 @@ func _measure_bbcode_height(text: String, width: float) -> float:
 	rtl.text = text
 	rtl.reset_size()
 	return rtl.get_content_height() + ROW_V_PADDING
-
 
 ## 测量当前主题下单行文本实际高度 + 垂直余量(替代硬编码 ROW_HEIGHT, 适配不同编辑器字号)。
 func _measure_line_height() -> float:
@@ -689,12 +644,10 @@ func _measure_line_height() -> float:
 	rtl.reset_size()
 	return rtl.get_content_height() + ROW_V_PADDING
 
-
 ## 粗略检测 BBCode(如 [img]/[color]/[font]), 此类文本不参与行高扩展
 func _is_bbcode(text: String) -> bool:
 	# 任何 [tag] 都按标记处理: 只认 4 种标签时 [b]/[i] 既算进列宽, 又会被 RichTextLabel 当样式吃掉
 	return text.contains("[")
-
 
 static var _re_img: RegEx
 static var _re_tag: RegEx
@@ -712,7 +665,6 @@ func _strip_bbcode(text: String) -> String:
 	out = _re_tag.sub(out, "", true)
 	return out
 
-
 ## 用纯 Font 测量单行文本宽度(纯文本宽, 不含内边距; 调用方自行加 CELL_PADDING)
 func _measure_text_width(text: String, font: Font, fsize: int) -> float:
 	if text == "" or font == null:
@@ -725,19 +677,16 @@ func _measure_text_width(text: String, font: Font, fsize: int) -> float:
 	_width_cache[key] = w
 	return w
 
-
 func _clear_measure_cache() -> void:
 	_width_cache.clear()
 	_text_cache.clear()
 	_cell_fill_cache.clear()
-
 
 func _column_header_text(col: int) -> String:
 	var text := String(columns[col])
 	if sorting_by == columns[col]:
 		text += " ▲" if not sorting_reverse else " ▼"
 	return text
-
 
 func _rebuild_header() -> void:
 	for child in header_row.get_children().duplicate():
@@ -761,7 +710,6 @@ func _rebuild_header() -> void:
 		header_row.add_child(_make_header_button(col))
 	header_row.custom_minimum_size = Vector2(_scroll_total_width(), header_h)
 
-
 func _make_header_button(col: int) -> Button:
 	var btn := Button.new()
 	btn.flat = true
@@ -772,7 +720,7 @@ func _make_header_button(col: int) -> Button:
 	btn.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	btn.pressed.connect(_on_header_pressed.bind(col))
 	btn.tooltip_text = String(columns[col])
-	# 表头分隔线。去掉主题默认内容边距, 让按钮宽度=列宽。
+	# 表头分隔线。
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.16, 0.16, 0.18, 0.35)
 	sb.set_border_width_all(0)
@@ -788,13 +736,11 @@ func _make_header_button(col: int) -> Button:
 	btn.add_theme_stylebox_override("pressed", sbp)
 	return btn
 
-
 func _scroll_total_width() -> float:
 	var w := 0.0
 	for col in range(1, columns.size()):
 		w += column_widths[col]
 	return w
-
 
 func _on_header_pressed(col: int) -> void:
 	var col_name: StringName = columns[col]
@@ -809,7 +755,6 @@ func _on_header_pressed(col: int) -> void:
 	_update_header_arrows()
 	_update_visible_rows(true)
 
-
 func _update_header_arrows() -> void:
 	if frozen_header_row.get_child_count() > 0:
 		var fb := frozen_header_row.get_child(0) as Button
@@ -820,7 +765,6 @@ func _update_header_arrows() -> void:
 		if btn != null:
 			btn.text = _column_header_text(col + 1)
 
-
 ## 可滚动列(列 1..n-1)的宽度数组, 供 scroll grid 布局
 func _scroll_column_widths() -> Array[float]:
 	var w: Array[float] = []
@@ -828,14 +772,12 @@ func _scroll_column_widths() -> Array[float]:
 		w.append(column_widths[col])
 	return w
 
-
 ## 滚动防抖 + 脏标记 + 延迟 tooltip/预览
 var _scroll_frame_pending := false
 var _fill_count := 0          # 本帧实际填充的格子数(诊断用)
 var _scroll_settle_frame := -1  # 滚动停止后的帧号(延迟预览用)
 ## 单元格上次填充指纹: node instance_id → "row:col:res_path"
 var _cell_fill_cache := {}
-
 
 func _update_visible_rows(force_rebuild: bool = false) -> void:
 	var t_start := Time.get_ticks_usec()
@@ -891,12 +833,9 @@ func _update_visible_rows(force_rebuild: bool = false) -> void:
 
 	_update_selection_visuals()
 
-
 ## ======= 行容器 + 双轴虚拟化 + 两级对象池 =======
-## ⚠ 尺寸钳制陷阱(曾导致快速滚动后格子重叠的伪影):
-##   约定: 任何对池化格子的 size 赋值前, 必须先把 custom_minimum_size 归零
 
-## 已物化行: row -> {"ctl": Control行容器, "frozen": DefTableCell, "cells": Dictionary(col->cell)}
+## 已物化行: row -> {"ctl": Control行容器, "frozen": DefTableCell, "cells":…
 var _live_rows := {}
 var _row_pool: Array = []      # 空闲行容器(携带上次生命周期的格子)
 var _cell_pool := {}           # key m{kind}/f{kind} -> Array[DefTableCell](已脱离父节点)
@@ -908,10 +847,8 @@ const CELL_PARK_X := -100000.0
 var _first_col := 0   # 水平可见全局列范围 [_first_col, _last_col)
 var _last_col := 0
 
-
 func _pool_key(frozen: bool, kind: int) -> StringName:
 	return StringName(("f" if frozen else "m") + str(kind))
-
 
 ## 散格入池(脱离父节点): 打停泊标记+移出裁剪区, 复用时由调用方重新挂载摆位
 func _pool_give_cell(cell: DefTableCellClass, frozen: bool) -> void:
@@ -930,7 +867,6 @@ func _pool_give_cell(cell: DefTableCellClass, frozen: bool) -> void:
 		_cell_fill_cache.erase(cell.get_instance_id())
 		cell.queue_free()
 
-
 ## 取散格(池空则新建); 由调用方提供目标父节点完成挂载
 func _pool_take_cell(col: int, frozen: bool, target_parent: Node) -> DefTableCellClass:
 	var bucket: Array = _cell_pool.get(_pool_key(frozen, _display_kind(col)), [])
@@ -944,11 +880,9 @@ func _pool_take_cell(col: int, frozen: bool, target_parent: Node) -> DefTableCel
 	target_parent.add_child(cell)
 	return cell
 
-
 func _recycle_all_rows() -> void:
 	for row in _live_rows.keys():
 		_recycle_row(int(row))
-
 
 func _recycle_row(row: int) -> void:
 	var entry: Dictionary = _live_rows.get(row, {})
@@ -968,7 +902,6 @@ func _recycle_row(row: int) -> void:
 		_pool_give_cell(f, true)
 	_live_rows.erase(row)
 
-
 ## 取行容器(池中行携带的旧格子由本函数后继流程收编或裁剪)
 func _take_row() -> Control:
 	while not _row_pool.is_empty():
@@ -980,7 +913,6 @@ func _take_row() -> Control:
 	ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	grid.add_child(ctl)
 	return ctl
-
 
 func _materialize_row(row: int) -> void:
 	var ctl := _take_row()
@@ -1009,7 +941,6 @@ func _materialize_row(row: int) -> void:
 		if not cells.has(col):
 			cells[col] = _pool_take_cell(col, false, ctl)
 
-
 ## 确保行内 col 列有正确类型的格子并摆位(类型不符=跨目录旧格 → 换新)
 func _attach_cell(ctl: Control, cells: Dictionary, row: int, col: int) -> DefTableCellClass:
 	var cell: DefTableCellClass = cells.get(col)
@@ -1025,8 +956,7 @@ func _attach_cell(ctl: Control, cells: Dictionary, row: int, col: int) -> DefTab
 	cell.size = Vector2(column_widths[col], ctl.size.y)
 	return cell
 
-
-## 水平窗口变化: 对既有行做列增删(新增格立即填充)。返回新增数
+## 水平窗口变化: 对既有行做列增删(新增格立即填充)。
 func _sync_row_cells(row: int) -> int:
 	var entry: Dictionary = _live_rows.get(row, {})
 	if entry.is_empty():
@@ -1045,7 +975,6 @@ func _sync_row_cells(row: int) -> int:
 		_fill_cell(cells[col], Vector2i(int(col), row), _row_tint_for(row))
 		added += 1
 	return added
-
 
 ## 填充一行的全部在窗单元格(行容器定点摆位一次; 格子在行内静态 x 偏移)
 func _fill_row(row: int) -> void:
@@ -1079,8 +1008,7 @@ func _fill_row(row: int) -> void:
 		cell.size = Vector2(column_widths[ci], rh)
 		_fill_cell(cell, Vector2i(ci, row), tint)
 
-
-## 计算水平可见列窗口。返回是否变化
+## 计算水平可见列窗口。
 func _compute_visible_cols() -> bool:
 	var prev_first := _first_col
 	var prev_last := _last_col
@@ -1106,7 +1034,6 @@ func _compute_visible_cols() -> bool:
 	_last_col = clampi(_last_col + 1, _first_col + 1, columns.size())
 	return _first_col != prev_first or _last_col != prev_last
 
-
 ## 滚动停止后补拉可见 RESOURCE 格预览(滚动中延迟的请求在此统一发出)
 func _backfill_resource_previews() -> void:
 	if editor_interface == null or editor_interface.get_resource_previewer() == null:
@@ -1131,7 +1058,6 @@ func _backfill_resource_previews() -> void:
 			if v is Resource:
 				_request_resource_preview(cell, v)
 
-
 ## 行染色(don-tnowe row stylization): 取该行首个有效 Color 值, 低透明度染整行。
 func _compute_row_tints() -> void:
 	_row_tints.clear()
@@ -1145,19 +1071,15 @@ func _compute_row_tints() -> void:
 					break
 		_row_tints.append(tint)
 
-
 func _row_tint_color(row: int) -> Color:
 	return _row_tints[row] if row >= 0 and row < _row_tints.size() else Color(0, 0, 0, 0)
 
-
 ## 行染色 + 斑马纹调制: 颜色列的值染整行, 但奇数行对染色 RGB 轻微压暗,
-## 让斑马纹在带色行上仍可感知(否则强色行的底纹明暗差会被完全盖掉)
 func _row_tint_for(row: int) -> Color:
 	var tint := _row_tint_color(row)
 	if row % 2 == 1 and tint.a > 0.0:
 		tint = Color(tint.r * 0.82, tint.g * 0.82, tint.b * 0.82, tint.a)
 	return tint
-
 
 ## 悬停行高亮(B3, Excel crosshair 风格): 由 DefTableGrid 自绘(hover_row 属性)。
 func _setup_hover_highlight() -> void:
@@ -1166,11 +1088,9 @@ func _setup_hover_highlight() -> void:
 	# 垂直滚动时鼠标下的行已变化, 清除避免高亮错位
 	grid_scroll.get_v_scroll_bar().value_changed.connect(func(_v: float) -> void: _set_hover_row(-1))
 
-
 func _set_hover_row(row: int) -> void:
 	grid.hover_row = row
 	frozen_grid.hover_row = row
-
 
 func _on_cell_mouse_entered(cell: DefTableCellClass) -> void:
 	if cell == null or not is_instance_valid(cell):
@@ -1186,7 +1106,6 @@ func _on_cell_mouse_entered(cell: DefTableCellClass) -> void:
 	else:
 		cell.tooltip_text = ""
 
-
 func _make_cell(pos: Vector2i) -> DefTableCellClass:
 	var kind := _display_kind(pos.x)
 	var cell := DefTableCellClass.make_cell(kind)
@@ -1196,7 +1115,6 @@ func _make_cell(pos: Vector2i) -> DefTableCellClass:
 	# 悬停行高亮: 回调动态读取 cell_pos meta, 虚拟化复用单元格时定位仍正确
 	cell.mouse_entered.connect(_on_cell_mouse_entered.bind(cell))
 	return cell
-
 
 ## 列 -> 显示类型(参考 resources_spreadsheet_view 的类型化单元格)
 func _display_kind(col: int) -> int:
@@ -1219,7 +1137,6 @@ func _display_kind(col: int) -> int:
 			return DefTableCellClass.Kind.DICT
 	return DefTableCellClass.Kind.TEXT
 
-
 ## 该行是否含可预览的资源引用(OBJECT 列): 用于把行撑高以容纳缩略图。
 func _row_has_resource_preview(res: Resource) -> bool:
 	for col in range(1, columns.size()):
@@ -1229,7 +1146,6 @@ func _row_has_resource_preview(res: Resource) -> bool:
 		if v is Texture2D or (v is Resource and v.resource_path != ""):
 			return true
 	return false
-
 
 func _fill_cell(cell: DefTableCellClass, pos: Vector2i, tint: Color = Color(1, 1, 1, 0)) -> void:
 	_fill_count += 1
@@ -1282,7 +1198,6 @@ func _fill_cell(cell: DefTableCellClass, pos: Vector2i, tint: Color = Color(1, 1
 	# 对齐
 	cell.set_content_align(HORIZONTAL_ALIGNMENT_CENTER if (is_empty or cell.kind == DefTableCellClass.Kind.BOOL) else HORIZONTAL_ALIGNMENT_LEFT)
 
-
 ## 取单元格展示文本(带缓存): 计算型 getter 属性(如 EntityDef.tr_desc 递归构建整棵
 func _cell_text(res: Resource, col: int) -> String:
 	var arr: PackedStringArray = _text_cache.get(res, PackedStringArray())
@@ -1291,7 +1206,6 @@ func _cell_text(res: Resource, col: int) -> String:
 			arr.append(_to_text(_get_value(res, arr.size()), arr.size()))
 		_text_cache[res] = arr
 	return arr[col]
-
 
 ## 请求资源预览图(参考 resources_spreadsheet_view 的 cell_editor_resource)
 func _request_resource_preview(cell: DefTableCellClass, res: Resource) -> void:
@@ -1307,7 +1221,6 @@ func _request_resource_preview(cell: DefTableCellClass, res: Resource) -> void:
 	editor_interface.get_resource_previewer().queue_resource_preview(
 		res.resource_path, self, &"_on_preview_loaded", cell)
 
-
 func _on_preview_loaded(path: String, preview: Texture2D, thumbnail: Texture2D, cell) -> void:
 	if cell == null or not is_instance_valid(cell):
 		return
@@ -1318,7 +1231,6 @@ func _on_preview_loaded(path: String, preview: Texture2D, thumbnail: Texture2D, 
 	if str(target.get_meta(&"preview_path", "")) != path:
 		return
 	target.set_resource_preview(preview)
-
 
 func _on_cell_gui_input(event: InputEvent, cell: Control) -> void:
 	if not (event is InputEventMouseButton):
@@ -1339,13 +1251,11 @@ func _on_cell_gui_input(event: InputEvent, cell: Control) -> void:
 		if pos.y < rows.size() and editor_interface != null:
 			editor_interface.edit_resource(rows[pos.y])
 
-
 ## 定向更新单个单元格选中态(仅当该单元格当前可见), 替代全量遍历
 func _set_cell_selected(cell_pos: Vector2i, selected: bool) -> void:
 	var node := _get_cell_node(cell_pos)
 	if node != null:
 		node.set_selected(selected)
-
 
 ## 定位单元格节点(冻结列或滚动网格), 不可见返回 null。
 func _get_cell_node(cell_pos: Vector2i) -> DefTableCellClass:
@@ -1360,12 +1270,10 @@ func _get_cell_node(cell_pos: Vector2i) -> DefTableCellClass:
 		return c
 	return null
 
-
 func _deselect_all() -> void:
 	for c in edited_cells:
 		_set_cell_selected(c, false)
 	edited_cells.clear()
-
 
 func _select_cell(pos: Vector2i) -> void:
 	if edited_cells.size() > 0 and edited_cells[0].x != pos.x:
@@ -1374,7 +1282,6 @@ func _select_cell(pos: Vector2i) -> void:
 		edited_cells.append(pos)
 		_set_cell_selected(pos, true)
 	_update_sel_label()
-
 
 func _toggle_cell(pos: Vector2i) -> void:
 	if edited_cells.size() > 0 and edited_cells[0].x != pos.x:
@@ -1386,7 +1293,6 @@ func _toggle_cell(pos: Vector2i) -> void:
 		edited_cells.append(pos)
 		_set_cell_selected(pos, true)
 	_update_sel_label()
-
 
 func _select_cells_to(pos: Vector2i) -> void:
 	if edited_cells.size() == 0:
@@ -1413,7 +1319,6 @@ func _select_cells_to(pos: Vector2i) -> void:
 			_set_cell_selected(c, true)
 	_update_sel_label()
 
-
 func _update_selection_visuals() -> void:
 	# 空选早退(最常见路径); 非空时按 _live_rows 行身份遍历(仅物化列存在)
 	if edited_cells.is_empty():
@@ -1429,7 +1334,6 @@ func _update_selection_visuals() -> void:
 			if is_instance_valid(c):
 				c.set_selected(Vector2i(int(col), row) in edited_cells)
 
-
 func _update_sel_label() -> void:
 	if edited_cells.size() == 0:
 		sel_label.text = "未选中"
@@ -1442,14 +1346,12 @@ func _update_sel_label() -> void:
 			rows_in_sel.append(pos.y)
 	sel_label.text = "选中 %d 个单元格 (列: %s, %d 行)" % [edited_cells.size(), col_name, rows_in_sel.size()]
 
-
 func _on_v_scroll(_v: float) -> void:
 	if not _syncing_scroll:
 		_syncing_scroll = true
 		frozen_grid_scroll.scroll_vertical = grid_scroll.scroll_vertical
 		_syncing_scroll = false
 	_schedule_scroll_update()
-
 
 func _on_frozen_v_scroll(v: float) -> void:
 	if _syncing_scroll:
@@ -1458,7 +1360,6 @@ func _on_frozen_v_scroll(v: float) -> void:
 	grid_scroll.scroll_vertical = frozen_grid_scroll.scroll_vertical
 	_syncing_scroll = false
 	_schedule_scroll_update()
-
 
 ## 滚动统一入口: 防抖合并同帧多次事件(下一帧统一重建), 并安排"停止检测"补拉预览。
 var _scroll_seq := 0
@@ -1477,7 +1378,6 @@ func _schedule_scroll_update() -> void:
 		_scroll_frame_pending = false
 		_backfill_resource_previews()
 
-
 func _on_h_scroll(v: float) -> void:
 	if _syncing_scroll:
 		return
@@ -1487,7 +1387,6 @@ func _on_h_scroll(v: float) -> void:
 	# 水平滚动 → 列窗口增删(经统一防抖, 与垂直共用一次重建)
 	_schedule_scroll_update()
 
-
 ## 表头横向滚动反向同步(兜底: 任何表头滚动变化都回到主网格, 保证表头与数据列不错位)
 func _on_header_h_scroll(v: float) -> void:
 	if _syncing_scroll:
@@ -1495,7 +1394,6 @@ func _on_header_h_scroll(v: float) -> void:
 	_syncing_scroll = true
 	grid_scroll.set_h_scroll(int(v))
 	_syncing_scroll = false
-
 
 ## 同步冻结列底部高度: 主网格显示横向滚动条时, 冻结列底部补等高的占位, 使 name 列与其它列底部对齐
 func _sync_frozen_spacer() -> void:
@@ -1506,7 +1404,6 @@ func _sync_frozen_spacer() -> void:
 	if hbar != null and hbar.visible and hbar.get_parent() == grid_scroll:
 		h = hbar.get_minimum_size().y
 	frozen_spacer.custom_minimum_size = Vector2(0, h)
-
 
 func _copy_selected() -> void:
 	if edited_cells.size() == 0:
@@ -1531,7 +1428,6 @@ func _copy_selected() -> void:
 	elif sorted.size() > 0:
 		sel_label.text = "已复制 %d 个单元格" % sorted.size()
 
-
 ## 复制用文本: 保证能与 _from_text 往返还原(原始值序列化)
 func _cell_copy_text(value, col: int) -> String:
 	if value == null:
@@ -1553,7 +1449,6 @@ func _cell_copy_text(value, col: int) -> String:
 		return var_to_str(value)
 	return var_to_str(value)
 
-
 func _can_assign(old: Variant, newv: Variant) -> bool:
 	## 类型化数组遇到元素类型不符会整组清空(引擎静默过滤), 这里先拦住
 	if not (old is Array and old.is_typed()):
@@ -1569,7 +1464,6 @@ func _can_assign(old: Variant, newv: Variant) -> bool:
 		elif builtin != TYPE_NIL and typeof(item) != builtin:
 			return false
 	return true
-
 
 func _paste_to_selected() -> void:
 	if edited_cells.size() == 0:
@@ -1638,7 +1532,6 @@ func _paste_to_selected() -> void:
 		undo_redo.commit_action()
 
 	# 粘贴改值后文本/列宽/行高都可能变化: 失效缓存并整体重算布局。
-	# 填充缓存只按"格位 + 资源路径"做指纹, 不清掉的话值变了也不会重填。
 	_text_cache.clear()
 	_cell_fill_cache.clear()
 	_compute_layout()
@@ -1652,7 +1545,6 @@ func _paste_to_selected() -> void:
 		sel_label.text += " (已粘贴 %d 项)" % changed
 	else:
 		sel_label.text += " (粘贴: 值与原数据相同, 未变更)"
-
 
 func _persist_resources(res_list: Array, path_list: Array) -> void:
 	var failed: Array[String] = []
@@ -1673,12 +1565,11 @@ func _persist_resources(res_list: Array, path_list: Array) -> void:
 	if editor_interface != null and editor_interface.get_resource_filesystem() != null:
 		editor_interface.get_resource_filesystem().scan()
 
-
 func _shortcut_input(event: InputEvent) -> void:
 	# 仅当 DefTable 是当前激活的 Main Screen(可见)时才处理快捷键, 避免误吞编辑器其他处的 Ctrl+C/V
 	if not visible or not is_inside_tree():
 		return
-	# 处理 Ctrl+C / Ctrl+V 复制粘贴(在编辑器里 _shortcut_input 比 _unhandled_input 更早触发)。
+	# 处理 Ctrl+C / Ctrl+V 复制粘贴(在编辑器里 _shortcut_input 比 _unhandled_input…
 	if event is InputEventKey:
 		var key_event := event as InputEventKey
 		if not key_event.pressed:
@@ -1706,7 +1597,6 @@ func _shortcut_input(event: InputEvent) -> void:
 		accept_event()
 		return
 
-
 func _unhandled_input(event: InputEvent) -> void:
 	# 与 _shortcut_input 同一条守卫: 切到别的编辑器主屏后表格仍挂在树上, 隐藏时不能吞方向键
 	if not visible or not is_inside_tree():
@@ -1727,7 +1617,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		_navigate_horizontal(1 if keycode == KEY_RIGHT else -1)
 		accept_event()
 
-
 func _navigate_vertical(delta: int) -> void:
 	if edited_cells.size() == 0 or rows.is_empty():
 		return
@@ -1742,7 +1631,6 @@ func _navigate_vertical(delta: int) -> void:
 	_update_sel_label()
 	if editor_interface != null:
 		editor_interface.edit_resource(rows[target_y])
-
 
 func _navigate_horizontal(delta: int) -> void:
 	if edited_cells.size() == 0 or columns.is_empty():
@@ -1759,7 +1647,6 @@ func _navigate_horizontal(delta: int) -> void:
 	if editor_interface != null and current_y < rows.size():
 		editor_interface.edit_resource(rows[current_y])
 
-
 ## 横向滚动到列可见(列 0 是冻结的 name 列, 不参与滚动)
 func _ensure_col_visible(col: int) -> void:
 	var idx := col - 1
@@ -1773,7 +1660,6 @@ func _ensure_col_visible(col: int) -> void:
 		grid_scroll.scroll_horizontal = x
 	elif x + w > sh + view_w:
 		grid_scroll.scroll_horizontal = x + w - view_w
-
 
 func _ensure_row_visible(row: int) -> void:
 	## 只在不完全可见时最小幅度滚动: 一律把目标行顶到首行会让连按方向键变成跳页

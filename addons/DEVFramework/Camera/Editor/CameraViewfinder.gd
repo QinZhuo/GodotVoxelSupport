@@ -34,19 +34,16 @@ var _rescan_timer: float = 0.0
 ## 当前生效的画面比例(宽/高)
 var _ratio: float = FALLBACK_ASPECT
 
-
 func _ready() -> void:
 	name = "CameraViewfinder"
 	_build_ui()
 	# 编辑器中 _process 不会自动启用, 必须显式打开, 否则取景器永远不刷新
 	set_process(true)
 
-
 func _process(delta: float) -> void:
 	if _viewport == null:
 		return
 	_update(delta)
-
 
 func _build_ui() -> void:
 	var root := VBoxContainer.new()
@@ -106,7 +103,6 @@ func _build_ui() -> void:
 	_viewport.add_child(_camera)
 
 	# 叠层与画面同为 AspectRatioContainer 的子节点 => 两者矩形完全一致。
-	# 注意: 不能把叠层塞进 SubViewportContainer 里靠 anchors 撑满(它的尺寸由 SubViewport 决定)。
 	_overlay = Control.new()
 	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay.draw.connect(_draw_guides)
@@ -121,7 +117,6 @@ func _build_ui() -> void:
 	_tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_tip)
 	_tip.set_anchors_preset(Control.PRESET_FULL_RECT)
-
 
 func _update(delta: float) -> void:
 	# 面板不可见时完全停止渲染: 共享编辑器世界开销不低, 也避免后台空转
@@ -172,7 +167,6 @@ func _update(delta: float) -> void:
 		"  (生效中)" if vcam.is_current else "",
 	]
 
-
 ## 画面比例跟随项目分辨率设置(改了设置无需重启插件)
 func _sync_ratio() -> void:
 	var w := float(ProjectSettings.get_setting(SETTING_WIDTH, 0))
@@ -182,7 +176,6 @@ func _sync_ratio() -> void:
 		return
 	_ratio = ratio
 	_aspect.ratio = ratio
-
 
 # ── 机位列表 ──
 
@@ -211,7 +204,6 @@ func _refresh_camera_list(ei) -> void:
 		_picker.set_item_tooltip(_picker.item_count - 1, String(root.get_path_to(cam)) if root != null else "")
 	_picker.disabled = found.is_empty()
 
-
 ## 下拉选中: 同时同步编辑器选中, 让 3D 视图 gizmo 一起高亮, 也避免与"跟随选中"互相打架
 func _on_camera_selected(index: int) -> void:
 	if index < 0 or index >= _cameras.size():
@@ -227,13 +219,11 @@ func _on_camera_selected(index: int) -> void:
 	selection.clear()
 	selection.add_node(cam)
 
-
 ## 让下拉高亮项跟随当前预览的机位(在场景树里选机位时下拉也同步)
 func _sync_picker_selection() -> void:
 	var index := _cameras.find(_target)
 	if index >= 0 and _picker.selected != index:
 		_picker.selected = index
-
 
 ## 目标机位: 跟随选中优先; 选中项里没有机位时保持上一台(避免点别的节点就丢失预览)
 func _pick_target(ei) -> VirtualCamera3D:
@@ -253,7 +243,6 @@ func _pick_target(ei) -> VirtualCamera3D:
 			return cam
 	return null
 
-
 func _resolve_fov(vcam: VirtualCamera3D) -> float:
 	if vcam.lens_fov > 0.0:
 		return vcam.lens_fov
@@ -262,27 +251,22 @@ func _resolve_fov(vcam: VirtualCamera3D) -> float:
 		return brain.fov
 	return DEFAULT_FOV
 
-
 func _show_tip(text: String) -> void:
 	_tip.visible = true
 	_tip.text = text
-
 
 func _set_render_enabled(enabled: bool) -> void:
 	var mode := SubViewport.UPDATE_ALWAYS if enabled else SubViewport.UPDATE_DISABLED
 	if _viewport.render_target_update_mode != mode:
 		_viewport.render_target_update_mode = mode
 
-
 func _on_guides_toggled(enabled: bool) -> void:
 	_overlay.visible = enabled
-
 
 func _on_solo_pressed() -> void:
 	if _target == null or not is_instance_valid(_target):
 		return
 	_target.activate(0.0)
-
 
 ## 三分线 + 中心十字 + 安全框; 坐标一律基于叠层本地矩形(0,0 起), 与画面区域严格重合
 func _draw_guides() -> void:
@@ -302,7 +286,6 @@ func _draw_guides() -> void:
 	# 安全框: 四边各内缩 5%, 按各自轴长计算(用同一像素值会导致横竖不等比)
 	var inset := size * 0.05
 	_overlay.draw_rect(Rect2(inset, size - inset * 2.0), Color(1, 1, 1, 0.15), false, 1.0)
-
 
 ## 注意: 不要给返回值/变量标注 EditorInterface 类型。
 func _editor_interface():

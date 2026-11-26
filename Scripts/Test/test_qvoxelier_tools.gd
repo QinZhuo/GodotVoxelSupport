@@ -1,22 +1,13 @@
 extends TestCase
 
 ## 一期画笔工具族的契约测试：几何（VoxelPrimitives）+ 手势状态机（QVoxelBrushTool）。
-## 这里不碰场景树、不碰输入、不碰渲染 —— 工具被刻意设计成"产出坐标的纯逻辑"，
-## 于是它的正确性可以在无头环境里逐格断言。钉死五条承诺：
-##   ① 五种笔共用同一次手势骨架：按下取锚点 → 拖动更新端点 → 松手交产物；
-##   ② **所见即所画**：hover() 预览与真正落笔走同一个 _stroke/_finish（不是两处逻辑对齐）；
-##   ③ live（边拖边写）与 span（松手才写）由工具表声明，拖动时"补线"保证笔画不断；
-##   ④ 产物一律裁到网格内 —— 越界坐标不进命令（否则撤销里会出现从未生效的格）；
-##   ⑤ 面笔/填充的作用域判据来自外部闭包（显示几何），工具本身不认识 QVoxelModel。
 
 const MAT := 7
 const OTHER := 3
 
-
 # 工具
 
-## 造一个拾取上下文。solid 字典的键 = 实心格，值 = 材质 id ——
-## 用它替代真实的 QVoxelSource，测试就能在纯内存里描述任意形状。
+## 造一个拾取上下文。
 func _pick(solid: Dictionary, hit: Vector3i, normal: Vector3i, opts := {}) -> QVoxelBrushTool.Pick:
 	var p := QVoxelBrushTool.Pick.new()
 	p.hit = hit
@@ -29,7 +20,6 @@ func _pick(solid: Dictionary, hit: Vector3i, normal: Vector3i, opts := {}) -> QV
 	p.material_at = func(q: Vector3i) -> int: return solid.get(q, 0)
 	return p
 
-
 ## 一块 3×3 的水平板（y = 0），上方为空。
 func _plate(mat: int) -> Dictionary:
 	var solid := {}
@@ -38,19 +28,16 @@ func _plate(mat: int) -> Dictionary:
 			solid[Vector3i(x, 0, z)] = mat
 	return solid
 
-
 func _tool(m: QVoxelBrushTool.Mode) -> QVoxelBrushTool:
 	var t := QVoxelBrushTool.new()
 	t.set_mode(m)
 	return t
-
 
 func _cells_of(v: Array[Vector3i]) -> Dictionary:
 	var d := {}
 	for c in v:
 		d[c] = true
 	return d
-
 
 # 几何
 
@@ -68,11 +55,9 @@ func test_line_is_connected_and_lands_on_both_ends() -> void:
 			"相邻两格必须 26-连通（步长不超过一格）")
 		prev = c
 
-
 func test_line_of_a_single_point_is_a_dot() -> void:
 	var cells := VoxelPrimitives.line(Vector3i(2, 3, 4), Vector3i(2, 3, 4))
 	assert_eq(cells.size(), 1, "零长度直线就是单格")
-
 
 func test_box_is_inclusive_on_both_corners() -> void:
 	var cells := VoxelPrimitives.box(Vector3i(2, 0, 1), Vector3i(0, 1, 3))
@@ -80,13 +65,11 @@ func test_box_is_inclusive_on_both_corners() -> void:
 	assert_true(cells.has(Vector3i(0, 0, 1)) and cells.has(Vector3i(2, 1, 3)),
 		"两个角点都必须在内（含端点）")
 
-
 func test_ball_is_euclidean_not_chebyshev() -> void:
 	assert_eq(VoxelPrimitives.ball(Vector3i(5, 5, 5), 0).size(), 1, "半径 0 = 单格")
 	var r1 := VoxelPrimitives.ball(Vector3i(5, 5, 5), 1)
 	assert_eq(r1.size(), 7, "半径 1 = 中心 + 6 个面邻")
 	assert_false(r1.has(Vector3i(6, 6, 5)), "角格不属于欧氏球 r=1（切比雪夫球才会收它）")
-
 
 func test_dilate_dedupes_overlaps() -> void:
 	var seeds: Array[Vector3i] = [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
@@ -96,10 +79,8 @@ func test_dilate_dedupes_overlaps() -> void:
 	assert_eq(VoxelPrimitives.dilate(seeds, 1), cells, "同样的输入必须给出同样的顺序（可复现）")
 	assert_eq(VoxelPrimitives.dilate(cells, 0), cells, "半径 0 原样返回")
 
-
 func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 	# dilate 走的是分离式距离变换（代价 O(输出体积)），而它的定义是"每格盖一个球"（代价 O(格 × 球)）。
-	# 性能优化不得改变笔刷形状：这条把"快"钉在"对"上 —— 两条路径必须给出同一集合。
 	var seeds: Array[Vector3i] = []
 	for x in range(4):
 		for y in range(2):
@@ -122,11 +103,8 @@ func test_dilate_agrees_with_stamping_a_ball_per_cell() -> void:
 		assert_eq(only_got.size(), 0, "半径 %d 多算了（距离变换偏小）: %s" % [r, str(only_got.slice(0, 8))])
 		assert_eq(only_want.size(), 0, "半径 %d 漏算了（距离变换偏大）: %s" % [r, str(only_want.slice(0, 8))])
 
-
 func test_dilate_ball_is_the_inscribed_sphere() -> void:
 	# dilate_ball 的定义：球心是 size³ 立方的几何中心（偶数尺寸就落在半格上），直径 = size。
-	# 这条用"逐格枚举判据"的笨办法对照距离变换的 shift 实现 —— 半格偏移写错一个符号，
-	# 尺寸 2 的笔头就会少一格（2×2×2 变成缺角的蜂窝）。
 	var one: Array[Vector3i] = [Vector3i(0, 0, 0)]
 	for size: int in [2, 3, 4, 5, 6, 8]:
 		var got := _cells_of(VoxelPrimitives.dilate_ball(one, size))
@@ -157,10 +135,8 @@ func test_dilate_ball_is_the_inscribed_sphere() -> void:
 	assert_eq(VoxelPrimitives.dilate_ball(one, 3).size(), 19, "尺寸 3 = 3³ 去 8 角")
 	assert_eq(VoxelPrimitives.dilate_ball(one, 1), one, "尺寸 1 原样返回")
 
-
 func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 	# dilate_plane 走的是"平面内两轴各一轮一维膨胀"（代价随输出走），而它的定义是
-	# "每格盖一个平面方块"。与上面那条球的一样：这条把"快"钉在"对"上 —— 两条路径同一集合。
 	var seeds: Array[Vector3i] = []
 	for x in range(3):
 		for z in range(2):
@@ -188,7 +164,6 @@ func test_dilate_plane_agrees_with_stamping_a_square_per_cell() -> void:
 			assert_eq(only_want.size(), 0,
 				"法线 %s 边长 %d 漏算了: %s" % [str(normal), n, str(only_want.slice(0, 8))])
 
-
 func test_dilate_plane_is_flat_where_the_ball_is_round() -> void:
 	# 「球 / 平面」的差别就落在这一步：球会朝法线两侧也鼓出去，平面只在面内摊开。
 	var one: Array[Vector3i] = [Vector3i(5, 5, 5)]
@@ -207,17 +182,14 @@ func test_dilate_plane_is_flat_where_the_ball_is_round() -> void:
 	assert_eq(VoxelPrimitives.dilate_plane(one, 4, Vector3i(0, 1, 0)).size(), 16, "4 体素 = 4×4")
 	assert_eq(VoxelPrimitives.dilate_plane(one, 8, Vector3i(0, 1, 0)).size(), 64, "8 体素 = 8×8")
 
-
 func test_ball_offsets_are_one_shared_cached_table() -> void:
 	# 球偏移只由半径决定，因此全类共用一张表：按格盖章的用法会反复算同一个球，
-	# 若每次都新建一张表，就是一串无谓的三重循环（半径 15 时每次 31³）。
 	var r2 := VoxelPrimitives.ball_offsets(2)
 	assert_eq(VoxelPrimitives.ball(Vector3i.ZERO, 2), r2, "以原点为中心的球就是偏移表本身")
 	assert_eq(VoxelPrimitives.ball_offsets(2), r2, "重复取用必须给出同一张表")
 	assert_eq(VoxelPrimitives.ball_offsets(-3), VoxelPrimitives.ball_offsets(0),
 		"半径 <= 0 一律归到 0（只有中心偏移），与 ball() 的旧语义一致")
 	assert_eq(r2.count(Vector3i.ZERO), 1, "偏移表内不得有重复（去重由生成方式保证）")
-
 
 func test_region_stops_at_gaps() -> void:
 	var solid := {}
@@ -230,7 +202,6 @@ func test_region_stops_at_gaps() -> void:
 	assert_eq(cells.size(), 5, "只能收到连通的 5 格")
 	assert_false(cells.has(Vector3i(0, 0, 7)), "断开的部分不得被收进来")
 
-
 # 手势骨架
 
 func test_voxel_brush_click_paints_one_cell_outside_the_face() -> void:
@@ -242,7 +213,6 @@ func test_voxel_brush_click_paints_one_cell_outside_the_face() -> void:
 	assert_eq(cells.size(), 1, "只按下不拖动 → 画一格")
 	assert_eq(cells[0], Vector3i(0, 1, 0), "落在命中格的外侧一格（place = hit + normal）")
 
-
 func test_voxel_brush_drag_emits_continuous_increments() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	var solid := {}
@@ -253,7 +223,6 @@ func test_voxel_brush_drag_emits_continuous_increments() -> void:
 	assert_eq(second.size(), 3, "第二段只交增量（上一采样点 → 现在），不重复整条线")
 	assert_eq(second[0], Vector3i(3, 1, 0), "增量段与上一段首尾相接（笔迹连续）")
 	assert_true(tool.release().is_empty(), "live 工具的产物已边拖边交，松手时无剩余")
-
 
 func test_line_brush_only_emits_on_release() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.LINE)
@@ -267,7 +236,6 @@ func test_line_brush_only_emits_on_release() -> void:
 	assert_eq(cells[0], Vector3i(0, 1, 0), "起点 = 按下时的落笔格")
 	assert_eq(cells[cells.size() - 1], Vector3i(4, 1, 0), "终点 = 松手时的落笔格")
 
-
 func test_box_brush_spans_anchor_to_current() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.BOX)
 	var solid := {}
@@ -275,11 +243,9 @@ func test_box_brush_spans_anchor_to_current() -> void:
 	tool.drag(_pick(solid, Vector3i(2, 0, 3), Vector3i(0, 1, 0)))
 	var cells := tool.release()
 	# 落笔格 = 命中格 + 法线，故两个角点是 (0,1,0) 与 (2,1,3)：
-	# x 0..2 (3) × y 1..1 (1) × z 0..3 (4) = 12
 	assert_eq(cells.size(), 12, "盒笔 = 两个角点之间的实心长方体（含两端）")
 	assert_true(cells.has(Vector3i(0, 1, 0)) and cells.has(Vector3i(2, 1, 3)),
 		"两个角点都要在内")
-
 
 func test_begin_rejects_hits_without_an_incidence_face() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
@@ -288,12 +254,7 @@ func test_begin_rejects_hits_without_an_incidence_face() -> void:
 	assert_false(tool.begin(_pick(solid, Vector3i(1, 1, 1), Vector3i.ZERO)),
 		"起点就在实心格内（没有入射面）→ 无处可长，不能落笔")
 
-
 ## 回归：拖动时把鼠标移出模型（射线落空 → 拾取里是 Vector3i.MIN 哨兵）不得污染端点。
-## 【这条曾经是"画几下整机卡死"的现场】MIN 是"没有落笔点"的哨兵，不是坐标。它一旦写进端点，
-## 盒 / 线笔就会拿 -2^31 当角点去生成格子：`box()` 的 range 变成 21 亿次 append，
-## 内存打穿后引擎**逐次**报 OOM（连调用栈一起打），实测刷出 1.27GB 日志、游戏与编辑器双双卡死。
-## 所以这里断言的不是"行为好看"，而是**产物规模必须有界** —— 它一旦随"鼠标跑到多远"增长，就是灾难。
 func test_drag_ignores_picks_that_missed_the_model() -> void:
 	var solid := _plate(MAT)
 	var grid := Vector3i(8, 8, 8)
@@ -310,9 +271,7 @@ func test_drag_ignores_picks_that_missed_the_model() -> void:
 			assert_true(absi(c.x) < 1000 and absi(c.y) < 1000 and absi(c.z) < 1000,
 				"%s：产物里混进了哨兵坐标 %s" % [tool.label(), str(c)])
 
-
 ## 回归：两个角点离得极远时，产物规模也必须被限住 —— 端点裁剪要在**生成形状之前**。
-## 先生成再裁是"先造再扔"：间距一大就是拿内存换垃圾（与上一条同源，只是入口不同）。
 func test_far_away_corners_cannot_blow_up_the_box() -> void:
 	var solid := _plate(MAT)
 	var grid := Vector3i(8, 8, 8)
@@ -327,8 +286,6 @@ func test_far_away_corners_cannot_blow_up_the_box() -> void:
 	for c in cells:
 		assert_true(c.x >= 0 and c.x < grid.x and c.z >= 0 and c.z < grid.z, "全在网格内")
 
-
-
 func test_hover_previews_without_starting_a_gesture() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.BOX)
 	var solid := {}
@@ -336,7 +293,6 @@ func test_hover_previews_without_starting_a_gesture() -> void:
 	assert_eq(cells.size(), 1, "悬停时还没拖出第二个角点 → 只预览一格")
 	assert_false(tool.active(), "悬停不进入手势状态")
 	assert_true(tool.release().is_empty(), "没按下过 → 松手无产物")
-
 
 # 作用域判据（面笔 / 填充）
 
@@ -351,7 +307,6 @@ func test_face_brush_paints_the_exposed_layer_only() -> void:
 	for c in cells:
 		assert_eq(c.y, 1, "整片都在命中面的外侧同一层")
 
-
 func test_face_brush_erase_removes_the_exposed_layer() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.FACE)
 	var solid := _plate(MAT)
@@ -360,7 +315,6 @@ func test_face_brush_erase_removes_the_exposed_layer() -> void:
 	for c in cells:
 		assert_eq(c.y, 0, "擦的是暴露面本身，不是它外侧的空格")
 	assert_eq(tool.material(), 0, "擦除写入材质 0（内核语义：0 = 空气）")
-
 
 func test_fill_brush_stops_at_material_boundary() -> void:
 	var solid := {}
@@ -373,7 +327,6 @@ func test_fill_brush_stops_at_material_boundary() -> void:
 	assert_eq(cells.size(), 4, "填充边界 = 材质边界（用户看到的色块就是范围）")
 	assert_false(cells.has(Vector3i(2, 0, 0)), "异材质的那一块不得被吞掉")
 
-
 # 尺寸与裁剪
 
 func test_brush_size_dilates_the_stroke() -> void:
@@ -385,12 +338,9 @@ func test_brush_size_dilates_the_stroke() -> void:
 	assert_eq(cells.size(), 19, "尺寸 3 = 内切于 3³ 的球 = 27 - 8 个角")
 	assert_true(cells.has(Vector3i(0, 1, 0)), "中心仍是落笔格")
 
-
 ## 尺寸是**边长**（MagicaVoxel 的 size）：球内切于 size³ 的立方，平面直接铺成 size×size。
-## 曾经把尺寸当半径用，size 3 会画出 5×5。
 func test_brush_size_is_edge_length() -> void:
 	# 球：2 → 2×2×2 实心块（8 格）、3 → 3³ 去 8 角（19 格）、5 → 半径 2.5 的球（81 格）。
-	# 4 的格数比 3 少是体素化的必然（半格球心），但投影宽度仍是 4 → 单调变宽。
 	var ball_want := {1: 1, 2: 8, 3: 19, 4: 32, 5: 81}
 	for size in ball_want:
 		var ball := _tool(QVoxelBrushTool.Mode.VOXEL)
@@ -406,10 +356,8 @@ func test_brush_size_is_edge_length() -> void:
 		plane.begin(_pick({}, Vector3i(8, 0, 8), Vector3i(0, 1, 0)))
 		assert_eq(plane.release().size(), int(plane_want[size]), "尺寸 %d 的平面片格数" % size)
 
-
 func test_plane_shape_keeps_a_wide_stroke_on_the_surface() -> void:
 	# 体素笔 + 平面形态：在地板上刷一笔，产物是贴在落笔层的一片，而不是半个球埋进地板。
-	# 这正是"形状"与"尺寸"分开的意义 —— 同一个尺寸，两种笔头、两种代价。
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	tool.brush_size = 3
 	tool.set_shape(QVoxelBrushTool.Shape.PLANE)
@@ -422,7 +370,6 @@ func test_plane_shape_keeps_a_wide_stroke_on_the_surface() -> void:
 	assert_eq(_tool(QVoxelBrushTool.Mode.VOXEL).brush_shape, QVoxelBrushTool.Shape.BALL,
 		"默认形态仍是球：既有行为一字未改")
 
-
 func test_out_of_grid_cells_are_dropped() -> void:
 	var tool := _tool(QVoxelBrushTool.Mode.VOXEL)
 	tool.brush_size = 3
@@ -433,7 +380,6 @@ func test_out_of_grid_cells_are_dropped() -> void:
 	assert_true(cells.size() < 19, "球有一半伸出网格 → 越界格必须被裁掉")
 	for c in cells:
 		assert_true(c.x < grid.x and c.y < grid.y and c.z < grid.z, "产物必须全在网格内")
-
 
 # 工具表
 
@@ -449,10 +395,8 @@ func test_mode_table_is_complete_and_hotkeys_are_unique() -> void:
 	assert_eq(QVoxelBrushTool.mode_by_hotkey(KEY_1), QVoxelBrushTool.Mode.VOXEL, "1 = 点笔")
 	assert_eq(QVoxelBrushTool.info(QVoxelBrushTool.Mode.BOX).label, "块", "工具栏读的就是这张表")
 
-
 func test_preview_matches_the_actual_stroke_for_every_mode() -> void:
 	# 所见即所画：悬停预览与"按下后原地松手"必须给出同一批格子。
-	# 这条断言是结构性的 —— 一旦有人把预览改成"另算一遍"，它会立刻红。
 	var solid := _plate(MAT)
 	for m in QVoxelBrushTool.Mode.values():
 		var tool := _tool(m)

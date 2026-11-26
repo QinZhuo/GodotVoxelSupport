@@ -1,9 +1,5 @@
 @tool
 ## DefTable 类型化单元格基类。
-##   - Back   : 背景(斑马纹/行染色)
-##   - Sel    : 选中高亮
-##   - Content: 内容节点(由子类创建)
-## ⚠ 池化复用与尺寸钳制: 单元格在 View 的两级对象池中跨行/跨目录复用。
 class_name DefTableCell
 extends Control
 
@@ -53,9 +49,7 @@ var _back: ColorRect
 var _sel: ColorRect
 var _content: Control
 
-
 static var _script: GDScript
-
 
 static func make_cell(kind: int) -> DefTableCell:
 	var cell: DefTableCell
@@ -86,14 +80,12 @@ static func make_cell(kind: int) -> DefTableCell:
 			cell._build_label_cell()
 	return cell
 
-
 static func _make(kind: int) -> DefTableCell:
 	if _script == null:
 		_script = load("res://addons/DEVFramework/Core/Editor/DefTable/DefTableCell.gd") as GDScript
 	var cell: DefTableCell = _script.new()
 	cell.kind = kind
 	return cell
-
 
 func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -144,10 +136,8 @@ func _init() -> void:
 	hline.offset_bottom = 0
 	add_child(hline)
 
-
 func set_selected(selected: bool) -> void:
 	_sel.visible = selected
-
 
 ## 悬停气泡: Godot 原生 tooltip 是单行 Label(不换行), 文本过长会撑成一条超宽气泡且卡顿
 func _make_custom_tooltip(for_text: String) -> Object:
@@ -166,9 +156,7 @@ func _make_custom_tooltip(for_text: String) -> Object:
 	lb.text = _wrap_text(for_text, font, fsize, TOOLTIP_MAX_WIDTH)
 	return lb
 
-
 ## 按像素宽手动折行; 文本先截断到 TOOLTIP_MAX_CHARS。
-## (实测 "A"=10px 但 12 个 A 的整串=137px), 逐字符累加会让行宽超限。故每步量 cand=cur+ch。
 func _wrap_text(text: String, font: Font, fsize: int, max_w: float) -> String:
 	var raw := text if text.length() <= TOOLTIP_MAX_CHARS else text.substr(0, TOOLTIP_MAX_CHARS) + "…"
 	var out := PackedStringArray()
@@ -188,15 +176,12 @@ func _wrap_text(text: String, font: Font, fsize: int, max_w: float) -> String:
 			out.append(cur)
 	return "\n".join(out)
 
-
 func _text_width(s: String, font: Font, fsize: int) -> float:
 	return font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize).x
 
-
-## 由子类/工厂构建内容节点。基类默认: 无内容。
+## 由子类/工厂构建内容节点。
 func _build_content() -> void:
 	pass
-
 
 ## 通用文本内容节点(RichTextLabel, 单元格内布局)
 func _build_label_cell() -> void:
@@ -219,7 +204,6 @@ func _build_label_cell() -> void:
 	add_child(lb)
 	_content = lb
 
-
 ## 设置内容水平对齐(由 View 按列类型调用: 数值右对齐/bool 居中/文本左对齐)
 func set_content_align(align: int) -> void:
 	if kind == Kind.RESOURCE:
@@ -230,7 +214,6 @@ func set_content_align(align: int) -> void:
 	var rtl := _content as RichTextLabel
 	if rtl:
 		rtl.horizontal_alignment = align
-
 
 func _build_color_cell() -> void:
 	# 色块(填满单元格, 上下留边)
@@ -244,7 +227,6 @@ func _build_color_cell() -> void:
 	sw.offset_bottom = -3
 	add_child(sw)
 	_content = sw
-
 
 func _build_resource_cell() -> void:
 	# 预览图 + 文本
@@ -287,12 +269,10 @@ func _build_resource_cell() -> void:
 	add_child(box)
 	_content = box
 
-
 ## 上次填充的文本(同值跳过守卫): 池复用/滚动重填时避免 RichTextLabel 同文重解析
 var _last_text := ""
 
-
-## 设置内容值。text 为已格式化的展示文本。
+## 设置内容值。
 func set_value_text(text: String) -> void:
 	if kind == Kind.COLOR:
 		return
@@ -309,7 +289,6 @@ func set_value_text(text: String) -> void:
 			if rtl:
 				rtl.text = text
 
-
 ## 设置颜色值(仅 COLOR 类型)
 func set_color_value(color: Color) -> void:
 	if kind != Kind.COLOR:
@@ -317,7 +296,6 @@ func set_color_value(color: Color) -> void:
 	var sw := _content as ColorRect
 	if sw:
 		sw.color = color
-
 
 ## 设置资源预览图(仅 RESOURCE 类型, 异步加载后调用)
 func set_resource_preview(texture: Texture2D) -> void:

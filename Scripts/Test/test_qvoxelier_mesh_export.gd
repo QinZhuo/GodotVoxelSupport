@@ -1,10 +1,6 @@
 extends TestCase
 
-## 网格导出（glTF 2.0）的**几何侧**契约：世界 → ArrayMesh。纯逻辑，编辑器进程即可验。
-## 【完整"写出文件"为什么另立一例】`GLTFDocument.append_from_scene` 在**编辑器进程**下实测不
-## 导出网格（`state.get_meshes()` 为空 → 空壳 .glb），故"落盘 + 读回"放到游戏进程验
-## （见 test_qvoxelier_mesh_export_file.gd）。
-
+## 网格导出（glTF 2.0）的**几何侧**契约：世界 → ArrayMesh。
 
 func test_build_mesh_has_surfaces() -> void:
 	var mesh := QVoxelMeshExport.build_mesh(_world())
@@ -14,15 +10,12 @@ func test_build_mesh_has_surfaces() -> void:
 		assert_true((mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() > 0,
 				"第一个 surface 应含顶点")
 
-
 func test_empty_world_has_no_mesh() -> void:
 	assert_true(QVoxelMeshExport.build_mesh(QVoxelWorld.create_empty()) == null,
 			"空世界没有网格可导")
 
-
 func test_extensions_declared() -> void:
 	assert_eq(QVoxelMeshExport.EXTENSIONS, ["glb", "gltf"], "支持 .glb 与 .gltf 两种写法")
-
 
 func _world() -> QVoxelWorld:
 	var w := QVoxelWorld.create_empty()

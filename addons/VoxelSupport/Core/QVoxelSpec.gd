@@ -3,68 +3,31 @@ class_name QVoxelSpec
 extends RefCounted
 
 ## QVX 体素文件格式 —— 规范的唯一权威源（常量与基础原语）。
-## 设计与理由见 docs/QVX_FORMAT.md。本类只放"格式事实"，不含任何 I/O 或状态：
-## 签名、块头布局、块类型、块级编解码枚举、块坐标布局、对齐规则、CRC。
-## 核心结构（一句话）：文件 = 8 字节签名 + 块流；块 = 长度、类型、CRC、负载。
-## 五条设计原则（P1–P5）：
-##   P1 整个文件就是一条带类型的块流，别无其他
-##   P2 每条事实只存一次（不存可由他字段推导的值）
-##   P3 元数据用 JSON，负载用列式二进制
-##   P4 块头自足：读到块头即知"多长、是什么、校验值"
-##   P5 缓存是派生的，且可证明可删除
 
 # 版本
-# HEAD 的 qvx 键必须等于此值。读者遇到更高版本应拒绝（宁可不解，不可误读）。
-# v4（当前）：三处赘余被收敛 ——
-#   ① HEAD 的 `channels` 数组（恒为长度 1、却暗示多通道）→ 扁平单键 `channel` + `bpp`；
-#   ② NODE 一肩挑三事 → 拆成 NODE（场景树）/ CAMR（相机）/ ANIM（动画）；
-#   ③ 动画的时序（fps/loop/tags）从 NODE 节点条目收进 ANIM 块，与体素帧内聚一处。
-# v3：场景图从 `layers` 下标体系改为 NODE 嵌套节点树。
-# v2：VXEL 模型头 6 → 10 字节，新增 uint32 payload_length。
-# v1 及更早与后续版本不兼容，且**不提供兼容读取路径**——格式尚在设计阶段，无需背负历史包袱。
 
 const VERSION := 4
 
 ## 文件扩展名（不带点，与 `String.get_extension()` 的返回形态一致）。
-## 唯一出处：导入器按扩展名分派、QVoxelStream 组文件名都引用它。
 const FILE_EXT := "qvx"
 
 # 签名（8 字节）
-# 89 51 56 4F 58 0D 0A 1A = 0x89 'Q' 'V' 'O' 'X' CR LF 0x1A
-# 首尾的 0x89/0x1A 保证 7 位传输与文本模式转换都会破坏它并当场校验失败。
 
 # 注意：GDScript 的 const 不接受 PackedByteArray([...]) 这类"构造函数调用"
-# （报 "isn't a constant expression"），但接受普通 Array 字面量。
-# 因此签名用 Array 存，需要字节时经 signature_bytes() 转换。
 
 const SIGNATURE_ARRAY := [0x89, 0x51, 0x56, 0x4F, 0x58, 0x0D, 0x0A, 0x1A]
 const SIGNATURE_SIZE := 8
 
-
-## 签名的字节形式（PackedByteArray）。每次调用构造，开销可忽略（仅读写文件时用）。
+## 签名的字节形式（PackedByteArray）。
 static func signature_bytes() -> PackedByteArray:
 	return PackedByteArray(SIGNATURE_ARRAY)
 
 # 块头（12 字节，全部位于 payload 之前）
-# uint32 length      本块的字节数（含尾部填充），恒为 4 的倍数
-# char[4] type       4 个 ASCII 字符
-# uint32 crc32       CRC32(length 字段的 4 字节 ‖ type ‖ payload 实际内容)
-# byte[] payload     实际负载
-# byte[] padding     0–3 字节的零，使 length 为 4 的倍数
-# 【关键】填充计入 length。因此跳过任意块 = seek(length)，永远落在下一块头，
-# 读者永远不需要知道填充有几个。
 
 const BLOCK_HEADER_SIZE := 12
 const BLOCK_ALIGN := 4
 
 # 块类型（当前版本共七种）
-# HEAD  恰好 1 个，必须第一，必需。JSON 声明文件。
-# MATE  ≤ 1，材质调色板（12 字节定长条目）。
-# VXEL  ≥ 0，体素数据（每个 model_id 一个）。
-# ANIM  ≥ 0，体素帧动画 + 时序（每个 model_id 一个；与 VXEL 互斥，见下）。
-# NODE  ≤ 1，场景树（JSON；只放 nodes）。
-# CAMR  ≤ 1，相机书签（JSON）。
-# CACH  任意，任何可重算的数据（可删）。
 
 const BLOCK_HEAD := "HEAD"
 const BLOCK_MATE := "MATE"
@@ -78,21 +41,10 @@ const BLOCK_CACH := "CACH"
 const KNOWN_BLOCK_TYPES := [BLOCK_HEAD, BLOCK_MATE, BLOCK_VXEL, BLOCK_ANIM, BLOCK_NODE, BLOCK_CAMR, BLOCK_CACH]
 
 # CACH 负载的定长前置（8 字节）
-# char[4] kind         任意的 4 字符标签，兼作命名空间，由写入方定义（格式不解释）
-# uint16  algo_version 派生算法在 kind 命名空间内的版本
-# uint16  source_count 依赖的来源块个数
-# uint32  source_crc[] source_count 个来源块的 CRC32（升序去重，故长度为 4×source_count）
-# byte[]  payload      其余全部字节（含块尾填充），长度由外层块头的 length 界定
-# 【为什么格式层只认这 8 字节】kind 的语义完全由写入方与读者商定，(kind, algo_version)
-# 不认识即丢弃该块 —— 这条规则让"任何写入方都能往文件里塞自己的派生数据"成立，
-# 而格式本身无需知道任何具体 kind 的含义（P1：新功能 = 新块类型，而非新格式条款）。
 
 const CACH_PREFIX_SIZE := 8
 
 # 块级编解码（VXEL 内每个块一个 codec 字节）
-# 值 0 被【保留】给 EMPTY：读者若在文件中读到 codec=0，应视为数据损坏。
-# 保留而非剔除，是为了让"内存中的块状态"与"文件中的编解码"共用一套枚举——
-# 内存里每个块都有 EMPTY 态，文件里则用"块坐标的缺失"表示它，读写两端逻辑一致。
 
 const CODEC_EMPTY := 0    ## 保留值，永不写入文件（空块 = 块坐标缺失）
 const CODEC_SOLID := 1    ## 所有通道各一个值
@@ -101,80 +53,52 @@ const CODEC_DENSE := 3    ## 每通道 N×bpp/8 字节，ZXY 顺序，通道连�
 const CODEC_INDEXED := 4  ## uint8 n + n 个材质索引 + N×⌈log₂n⌉ 位（只索引 channels[0]）
 
 # 几何 / 通道约定
-## 块尺寸 B = HEAD 的 block_size（必须是 2 的幂），块内体素数 N = B³。
-## 所有编解码都沿与 DENSE 相同的顺序遍历块内体素：
-##     idx = x + y·B + z·B²      （即 ZXY 外层、X 最快）
-## 块坐标是【块索引】而非体素坐标：
-##     块 (bx,by,bz) 覆盖体素区间 [bx·B, bx·B + B) × ...
-##     体素 (vx,vy,vz) 所属块    (vx >> log₂B, vy >> log₂B, vz >> log₂B)
-## 空块定义：channels[0]（即 material）在该块内全为 0。其余通道不影响判定。
 
 const DEFAULT_BLOCK_SIZE := 32
 const DEFAULT_UP_AXIS := "y"
 
-## up_axis 白名单（§3.1）。缺省 y；出现其他值按缺省处理并告警。
+## up_axis 白名单（§3.1）。
 const ALLOWED_UP_AXES := ["x", "y", "z"]
 
 ## 【位宽契约】本版**只支持 CHANNEL_BPP（= 16 位）**，见下方同名常量。
-## 规范原设计允许 8/16/32 三种位宽（ALLOWED_BPP），但块级编解码层只按 16 位实现
-## （CODEC_DENSE 每通道 N×bpp/8 字节、CODEC_INDEXED 位宽等均硬编码），于是"接受 bpp=8/32
-## 的文件却按 16 位解码"——与"多通道被接受却读错"是同一族缺陷（接受却误读）。
-## 因此用同一策略收敛：读方遇到非 16 直接拒绝（FATAL，fail-fast），而非静默误读。
-## 将来确需其它位宽时，随格式版本引入逐通道位宽描述，而不是现在背这个成本。
 
-## 通道名（决定空块判定与可见性）。v4 起 HEAD 用**扁平单键**声明，不再用数组。
+## 通道名（决定空块判定与可见性）。
 const DOMINANT_CHANNEL := "material"
 
-## HEAD 的单通道键名（v4）。取代旧 `channels` 数组 —— 那个数组恒为长度 1、却暗示支持多通道，
-## 是"看起来能多通道、实际只支持 1"的假象（违背 P2）。单通道就是单通道：
-## `"channel":"material"` + `"bpp":16`；读方据此校验，多通道 / 别的位宽一律拒绝（fail-fast）。
+## HEAD 的单通道键名（v4）。
 const HEAD_CHANNEL_KEY := "channel"
 const HEAD_BPP_KEY := "bpp"
 
 ## HEAD 的其余两个键名：block_size 与 bounds。
-## 【为什么也提到这里】这两个键同样被三家以上各写一遍字面量（格式层补缺省、编辑层建 HEAD、
-## 构建器写 bounds）。字面量抄错不报错，只是让缺省悄悄生效 —— 与上面 channel/bpp 同一族风险，
-## 故按同一办法收口：键名一处定义，引用方各自取。
 const HEAD_BLOCK_SIZE_KEY := "block_size"
 const HEAD_BOUNDS_KEY := "bounds"
-## 向上轴键名。与上面同族：格式层读缺省、编辑层建 HEAD、构建器写 HEAD 三处各写一遍字面量，
-## 抄错只让缺省悄悄生效（up_axis 抄错还会被判非法 → 告警后按 y 处理），故同一办法收口。
+## 向上轴键名。
 const HEAD_UP_AXIS_KEY := "up_axis"
 
 ## 支配通道每体素位宽与字节数（bpp=16 → 2 字节）。
-## 编解码层里所有"每通道一个值"的宽度都引用此常量，消除散落的魔法数 2。
 const CHANNEL_BPP := 16
 const CHANNEL_BYTES := CHANNEL_BPP / 8
 
 # 块坐标 ↔ 体素坐标（布局的唯一实现）
-# 【为什么放在这里】上面刚写过"块坐标覆盖哪个体素区间"与 ZXY 下标公式 —— 那就是布局本身，
-# 所以它的实现与事实同处一地。谁需要换算都必须来这里取，免得各处再推一遍 floor 除法与
-# 下标公式，那正是"同一个布局有两份实现"的开始。
-# 【为什么 block_size 是参数，而不是用 DEFAULT_BLOCK_SIZE】B 是每个对象/文件的既有事实
-# （HEAD 的 block_size），不是全局缺省；读写别人的文件时必须跟着它走。
 
-## 体素坐标 → 所属块坐标。用 floor 除法，负坐标也正确（建模从 0 起算，但读取端不该假设）。
+## 体素坐标 → 所属块坐标。
 static func block_of(voxel: Vector3i, block_size: int) -> Vector3i:
 	return Vector3i(
 			floori(float(voxel.x) / block_size),
 			floori(float(voxel.y) / block_size),
 			floori(float(voxel.z) / block_size))
 
-
 ## 块坐标 → 该块的体素原点（= 块坐标 × 块边长）。
 static func block_origin(block_key: Vector3i, block_size: int) -> Vector3i:
 	return block_key * block_size
-
 
 ## 块内局部坐标（0..block_size-1）→ 块内线性下标（ZXY：X 最快）。
 static func local_index(x: int, y: int, z: int, block_size: int) -> int:
 	return x + y * block_size + z * block_size * block_size
 
-
 ## 块内元素总数 N = B³。
 static func block_volume(block_size: int) -> int:
 	return block_size * block_size * block_size
-
 
 ## 体素坐标 → 块内线性下标（等价于 block_of + local_index，供单点存取少一次取模）。
 static func index_in_block(voxel: Vector3i, block_size: int) -> int:
@@ -183,118 +107,49 @@ static func index_in_block(voxel: Vector3i, block_size: int) -> int:
 	return local_index(voxel.x - o.x, voxel.y - o.y, voxel.z - o.z, block_size)
 
 # MATE 材质条目（12 字节定长 → index × 12 随机访问）
-# uint32 rgba          R<<24 | G<<16 | B<<8 | A
-# uint8  metal         0–255
-# uint8  rough         0–255
-# uint8  hardness      0–255   物理：抗破坏性 / 连接强度
-# uint8  mass          0–255   物理：密度 / 崩塌质量
-# uint8  e_r           0–255   自发光 R
-# uint8  e_g           0–255   自发光 G
-# uint8  e_b           0–255   自发光 B
-# uint8  reserved      必须为 0
-# 条目 0 保留且全零（空气）。因此 体素值 == 材质索引 无条件成立。
 
 const MATE_ENTRY_SIZE := 12
 
-# 材质表容量（索引即材质 ID，0 恒为空气）。渲染层的调色板数组与合并世家的上限都取它。
+# 材质表容量（索引即材质 ID，0 恒为空气）。
 const MATERIAL_COUNT := 256
 
 # VXEL 模型头（10 字节，刻意不 4 对齐）
-# uint16  model_id          模型编号，供 NODE 的 kind="model" 节点引用
-# uint32  block_count       本模型包含的块数（只计非空块）
-# uint32  payload_length    block[] 的实际字节数（不含任何填充）
-# byte[]  payload           payload_length 个字节的块数组
-# 【为什么必须有 payload_length】（P4「长度前置」贯彻到 VXEL 内部）
-# 顶层块用 length 让读者无需理解内容即可跳过；VXEL 内部同理——block_count 只说明
-# "有几块"，但每块的长度虽有、**模型总长却没有**。缺了它，读取端切出的 payload 必然
-# 含顶层块的 0–3 字节尾部填充，于是"解析到哪里才算正好用完"变成模糊判断：
-# 只能退化为"剩余 < 4 字节就算合法"，留下 1–3 字节的篡改灰区（曾是一处语义漏洞）。
-# 显式存 payload_length 后，判定退化成一次等式比较：pos == 10 + payload_length。
-# 代价恒定 4 字节/模型（一个文件通常 1–3 个模型，总计 < 12 字节），换来零灰区。
 
 const VXEL_MODEL_HEADER_SIZE := 10
 
 # VXEL 块内块头（17 字节，刻意不 4 对齐）
-# int32   bx, by, bz        块坐标（块索引，非体素坐标）
-# uint8   codec             块级编解码
-# uint32  payload_length    负载字节数（不含尾部填充）
-# byte[]  payload
-# 块内不做对齐填充：只有顶层块才有 4 字节对齐与填充。17 字节不是疏漏——
-# codec 只有 1 字节，为凑对齐补 3 字节等于每块白付 3 字节，违背 P2。
 
 const VOX_BLOCK_HEADER_SIZE := 17
 
-# ANIM 帧动画（设计见 docs/QVX_FORMAT.md §12）。**取代旧 FRAM**：把"体素帧 + 时序"内聚一处。
-# 一个模型一套动画，按 model_id 绑定。**不变式**：一个 model_id 恰好对应一个体素源 ——
-# VXEL（静态）或 ANIM（动画），二者互斥（同时出现即损坏，FATAL）。
-# ANIM 模型头（8 字节）：uint16 model_id + uint16 frame_count + uint32 payload_length。
-#   payload_length = 其后全部字节数（meta + 帧，不含本头、不含顶层填充）—— 与 VXEL 同构，
-#   让"解析到哪里才算正好用完"退化成一次等式比较（P4）。
-# 紧跟头之后是**时序 meta**：uint32 meta_len + meta_len 字节 JSON
-#   （{"fps":N,"loop":bool,"tags":[{name,from,to,direction,color,repeat}]}；meta_len=0 表示全缺省）。
-#   时序与体素帧同处一块。
-# 每帧（6 字节定长前置）：uint16 duration_ms + uint32 payload_length + byte[] 块级增量。
-#   duration_ms = 0 表示"用 meta.fps 的缺省帧率"。
-# 【帧增量的语义】第 0 帧基线为空（其 delta 即全量块表，与一个 VXEL 的负载逐字节同构）；
-# 第 k 帧 = 第 k-1 帧的块表**应用本帧 delta**：
-#   codec ∈ {SOLID,RUN,DENSE,INDEXED} → 设置该块；
-#   codec = 0（EMPTY）                → **清空**该块；
-#   未出现的块                        → 继承上一帧。
-# 于是"一帧的成本 = 它相对上一帧改了多少块"，与模型总大小无关（P2）。
-# 【为什么 codec=0 在 ANIM 里合法】§5.2 说"读到 codec=0 视为损坏"约束的是 VXEL 的块
-# （那里空块用"坐标缺失"表示，0 因此是冗余值）；而增量的本质是"与上一帧的**差异**"，
-# "变成空"也是一种差异、必须有编码。给 ANIM 一个自己的命名空间即可，不污染 VXEL 语义。
-# 【只做体素帧动画】节点摆放是静态属性（NODE 的 transform）；ANIM 只描述某个 model_id
-# 的体素帧与逐帧时长，不承载节点/组级变换动画。
+# ANIM 帧动画（设计见 docs/QVX_FORMAT.md §12）。
 const ANIM_MODEL_HEADER_SIZE := 8
 const ANIM_FRAME_HEADER_SIZE := 6
 
 ## 动画时序的两个缺省值 —— **全仓唯一真值**。
-## 【为什么必须收在这里】缺省值一旦分裂就会互相打架：编辑模型缺省 4 fps、读写判据与运行时
-## 缺省 12 时，新建的动画模型 anim_fps=4，判据「!= 12 才写」于是每份文件都多背一个 "fps":4；
-## 而没写 fps 键的文件读回来是 12 —— 同一份动画存读一轮，帧率差 3 倍，播放速度跟着变。
-## 取值定为 4（逐帧作画的手感偏慢）。全仓不得再出现裸 4 / 裸 12 作为动画 fps 缺省。
 const ANIM_FPS_DEFAULT := 4
 const ANIM_LOOP_DEFAULT := true
 
 ## ANIM 每帧条目里逐帧时长的键名（帧 = {"duration_ms": int, "blocks": Dictionary}）。
-## 0 表示"用 meta.fps 的缺省帧时长"（§12.3）。写盘/读盘/编辑模型三处共用同一键名。
 const ANIM_FRAME_DURATION_KEY := "duration_ms"
 
 # NODE 块的图层与相机（§7）
-# 【为什么这几个键名要提到规范里】判据是"有几方在各自使用同一份事实"：
-#   修改器链（`nodes[].steps`）已经整个移除 —— 节点只余 kind / transform / model_id 与子节点，
-#   故再也不存在"键名连同缺省值锁在某一家实现里"的情形可循；
-#   而节点树与相机恰恰相反，它们是**工程数据**（§5.1）：QVoxelFile 补缺省、QVoxelWorld 建新条目、
-#   QVoxelier 的面板再读一遍。若三方各写一遍字面量，"存进去叫 visible、读回来找 shown"
-#   这类错位不会有任何报错，只会静默丢字段。故键名与缺省值一律放这里，三方引用同一份。
 
-## 工程数据的两个数组键名。只提取这两个 —— 因为它们恰好是"被三方各引一遍"的那两个，
-## 正是错位的重灾区。
-## 【为什么没有 NODE_LAYERS_KEY】图层已被场景树取代（qvx 3）：层就是一个 QVoxelGroup 节点，
-## 归属即父子关系。旧键在读盘时被忽略、在写盘时被显式抹掉（见 QVoxelWorld._node_json）。
+## 工程数据的两个数组键名。
 const NODE_NODES_KEY := "nodes"
 const NODE_CAMERAS_KEY := "cameras"
 
-## 节点条的 `kind` 白名单（§7）。**唯一真值在这里，不在 Model/QVoxelNode**：清洗节点树的
-## 是格式层（QVoxelFile._build_scene），它不能反向引用编辑层的类；而 QVoxelNode.KIND_* 反过来
-## 引用本常量，依赖方向因此始终是 Model → Format。
-## 【不要写字面量】"group"/"model" 一旦在 QVoxelFile 与 QVoxelNode 各写一遍，改一处忘另一处时
-## 没有任何报错，只有"整棵子树被静默丢弃"。
+## 节点条的 `kind` 白名单（§7）。
 const NODE_KIND_GROUP := "group"
 const NODE_KIND_MODEL := "model"
 
 ## `cameras` 每项的键与缺省值。
-## 【为什么 `size` 不在表里】它是**正交相机专有**的可选字段（透视下无意义）。
-## "缺省才是常态"（§3.1）：只在确为正交且用户设过时才写，于是"未设"与"设成 0"这两件事
-## 不会被一个哨兵值混为一谈 —— 前者是键缺失，后者是文件里明明白白写着 0。
 const CAMERA_FIELD_DEFAULTS := {
 	"name": "camera",
 	"projection": "persp",
 	"transform": {},
 }
 
-## `projection` 白名单。出现其他值按缺省处理并告警（与 up_axis 同一处置，不拒绝文件）。
+## `projection` 白名单。
 const ALLOWED_CAMERA_PROJECTIONS := ["persp", "ortho"]
 
 # 对齐辅助
@@ -303,11 +158,9 @@ const ALLOWED_CAMERA_PROJECTIONS := ["persp", "ortho"]
 static func align4(n: int) -> int:
 	return (n + BLOCK_ALIGN - 1) & ~(BLOCK_ALIGN - 1)
 
-
 ## 给定实际负载字节数，返回该块的 length（含填充）。
 static func padded_length(payload_bytes: int) -> int:
 	return align4(payload_bytes)
-
 
 # 整数编解码（小端）—— QVoxelSpec 只做"约定"，实际读写在 QVoxelFile
 
@@ -315,33 +168,22 @@ static func padded_length(payload_bytes: int) -> int:
 static func to_u32(v: int) -> int:
 	return v & 0xFFFFFFFF
 
-
 ## 无符号位模式 → 有符号 int32（块坐标可为负）。
 static func from_u32(v: int) -> int:
 	v &= 0xFFFFFFFF
 	return v - 0x100000000 if v >= 0x80000000 else v
 
-
 # 校验
 
 ## 读者在 HEAD.require 校验里"能处理"的块类型（§10）。
-## 语义 = "能产出正确结果"，而非"名字见过"：六种内建类型都算能处理，
-## 其中 CACH 本就允许被忽略（忽略它即为正确处理，P5），故同样算"能处理"。
-## require 里出现此外的任何类型 → 必须拒绝整个文件（而非静默跳过）。
 static func can_handle_block_type(t: String) -> bool:
 	return t in KNOWN_BLOCK_TYPES
-
 
 ## 该 bpp 是否为当前版本支持的位宽（唯一真值：CHANNEL_BPP）。
 static func is_allowed_bpp(bpp: int) -> bool:
 	return bpp == CHANNEL_BPP
 
-
-## HEAD 的"能力门"判据：本读者能否正确处理这份文件。返回 "" 表示通过，否则为拒绝原因。
-## 【为什么唯一实现放在 Spec 里】同一判据有两个调用方，且处置方式不同：
-##   parse 期是 **FATAL 门**（HEAD 之后、解码任何 VXEL 之前立刻拒绝整个文件，§10），
-##   validate 期是 **语义档**（同一份判据写进 report.errors，供"只校验不加载"的调用方读）。
-## 两处各抄一遍时，改一处忘另一处 = 能力门与校验报告口径不一致，而这种不一致不报错。
+## HEAD 的"能力门"判据：本读者能否正确处理这份文件。
 static func capability_error(head: Dictionary) -> String:
 	# require 里出现本读者处理不了的块类型 → 必须拒绝整个文件（而非静默跳过，§10）。
 	var req: Variant = head.get("require")

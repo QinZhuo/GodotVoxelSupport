@@ -3,18 +3,6 @@ class_name VoxelParticleShader
 extends RefCounted
 
 ## GPU 粒子着色器的**唯一出处**：顶点粒子的 process 着色器 + 粒子绘制的网格着色器（不透明/透明双通道）。
-##
-## 【定位：只管"把点云摆成方块"，不管"怎么动"】
-## 这里的 process 着色器只做一件最小的事：第 i 颗粒子站在第 i 个点上（progress=0 成形）。
-## 它没有实现漂浮、消散、聚合、变形 —— 那些是**项目自己的表现效果**，
-## 项目应当换掉 process_material、或直接写自己的粒子着色器。
-## 保留这份默认着色器的唯一理由是：没有它，渲染器连"静态显示成粒子"都做不到。
-## 【为什么集中成一个脚本常量】着色器代码里对 uniform 名、内建量的用法必须与
-##   `VoxelRenderer` 的 set_shader_parameter 严格对齐；分散写两处必然漂移
-##   （改了一边忘了另一边 = uniform 静默失效，画面只是"不对"而不报错）。
-## 【为什么不用 .gdshader 文件】它需要被 `ShaderMaterial` 引用；写成常量字符串后，
-##   着色器随脚本一起被引擎编译期检查，且不必为一个内部实现细节新增可被用户误改的资源。
-##   （本项目的 QVoxelier 有 .gdshader，但那是可被用户调参的表现资源，性质不同。）
 
 # uniform 名（与 `VoxelRenderer` 的赋值点共用，改这里即可全链路生效）
 const U_SRC_POS := "src_pos_tex"
@@ -30,30 +18,15 @@ const U_SPIN := "spin"
 const U_DRIFT := "drift_amplitude"
 const U_DRIFT_SPEED := "drift_speed"
 const U_DRIFT_SCALE := "drift_scale"
-## 方块世界边长（绘制着色器用）。与体素尺寸联动，见 VoxelRenderer.particle_voxel_size。
+## 方块世界边长（绘制着色器用）。
 const U_VOXEL_SIZE := "voxel_size"
 ## 自发光倍率（与网格路径的 MATERIAL_EMISSION_ENERGY 同量级）
 const U_EMISSION_ENERGY := "emission_energy"
 const U_SEED_SALT := "seed_salt"
-## 整体不透明度。**只写进两个绘制材质**（不透明通道靠它做硬阈值 discard，透明通道乘进 ALPHA）。
-## 不要给粒子更新着色器（shader_type particles）也加这份 uniform：它的 start()/process()
-## 从头到尾都不读 alpha —— 写进去等于什么都不发生。见 PARTICLE_SHADER 头部说明。
+## 整体不透明度。
 const U_ALPHA := "alpha"
 
 ## 粒子更新着色器（`shader_type particles`）。
-## 【核心设计：位置是解析式写死的，不是收敛逼近的】
-##   `TRANSFORM[3].xyz` 每帧由 `progress` 直接算出。用 `mix` 迭代会让粒子永远
-##   差一点点（指数收敛），方块就拼不严 —— 这是本实现与网上多数教程的关键区别。
-## 【位移模式由 `progress` 的两段区间表达】
-##   progress ∈ [0,1]   ：A 形状 → B 形状
-##   形状本身用 `src_pos_tex` / `dst_pos_tex` 两张纹理承载，由 INDEX 直接定位。
-## 【这里没有 alpha，也没有 scatter_radius —— 都是有意删掉的】
-##   本着色器只写 TRANSFORM/COLOR/CUSTOM 三样东西：位置、颜色、材质属性。
-##   · alpha：Godot 的粒子不受绘制期 alpha 影响（透明度由**绘制材质**的 alpha uniform 决定，
-##     见 DRAW_SHADER / DRAW_TRANS_SHADER），在此声明只会诱导调用方写一个永远不被读的值
-##     （VoxelParticleView 曾真的这么写）。
-##   · scatter_radius：曾作为"散开半径"的占位常量存在，但实现里从来没写过像素 ——
-##     真正的散开是 arc（二次贝塞尔弧）＋ drift（三轴正弦漂浮），没有第三种机制。
 const PARTICLE_SHADER := """
 shader_type particles;
 render_mode disable_force, disable_velocity;
@@ -161,33 +134,8 @@ void process() {
 """
 
 ## 粒子绘制用的着色器（**两个通道**：不透明 + 透明）。
-##
-## 【为什么要拆成两个 draw pass —— 这是"玻璃消失 / 被透视"的最终解法】
-## 单一材质无论选哪种 depth 模式都必然错一头：
-##   · `depth_draw_opaque` —— 材质里有 ALPHA 就被归入透明管线，**完全不写深度**
-##     -> 所有方块互相穿透，前车挡不住后车（"透视"）。
-##   · `depth_prepass_alpha` —— 预通道阈值是 **0.5**，玻璃 alpha=0.72 > 0.5
-##     -> 玻璃被当成不透明写进深度 -> **玻璃后面的体素全被裁掉**，
-##     于是玻璃区域看起来"空了一块 / 被后面的东西挡没了"。
-##   · `depth_draw_never` —— 不写深度，玻璃能透，但不透明方块也失去遮挡，同样透视。
-##
-## 拆开之后各自的规则就干净了：
-##   PASS 1 只画不透明体素（discard 掉 alpha < 0.999），正常写深度 -> 遮挡 100% 正确
-##   PASS 2 只画透明体素（discard 掉 alpha >= 0.999），不写深度 -> 正常混合、不裁任何东西
-## 两者共用同一份粒子数据，靠 alpha 分流，不需要第二个粒子系统。
-##
-## 【玻璃不写深度的代价】多层玻璃之间无序混合（叠得越多越暗）。
-## 这是不用 OIT、不用抖动时所有引擎的共性限制；对体素模型（玻璃只有薄薄几层）可以接受。
 
 ## 不透明通道：只画完全不透明的体素。
-##
-## 【绝对不要在这个着色器里写 ALPHA】
-## Godot 是按"着色器有没有写 ALPHA"来判定材质属于不透明还是透明管线的，
-## 不是看运行时的值。一旦写了 ALPHA（哪怕恒为 1.0），材质就被归入**透明管线**：
-##   · 不写深度 -> 所有方块互相穿透，前车挡不住后车（"透视"）；
-##   · 与透明通道之间按距离排序 -> 顺序一变画面就变。
-## 实测对照：同一场景下"不透明通道写 ALPHA"得到纯红（玻璃被挡没），
-## "不写 ALPHA"得到紫色（红墙正确透过蓝玻璃）—— 这就是判据。
 const DRAW_SHADER := """
 shader_type spatial;
 // 不写 ALPHA + only-opaque 粒子 = 材质判为不透明 -> 深度正常写入 -> 遮挡 100% 正确。
@@ -237,7 +185,6 @@ void fragment() {
 """
 
 ## 透明通道：画玻璃（alpha < 0.999），以及整体淡出期间的**所有**粒子。
-## `depth_draw_never`：不写深度 -> 玻璃能透出后面的体素，也不会把它们裁掉。
 const DRAW_TRANS_SHADER := """
 shader_type spatial;
 render_mode blend_mix, cull_back, depth_draw_never, diffuse_burley, specular_schlick_ggx;
@@ -272,23 +219,13 @@ void fragment() {
 }
 """
 
-
 ## 生成粒子绘制用的材质（每次调用返回新实例，调用方按需缓存）。
-## 【为什么单独给绘制着色器而不是用 StandardMaterial3D】只因为两件事它做不到：
-##   ① 顶点着色器里按全局 `voxel_size` 缩放 `VERTEX`（体素边长随 voxel_scale/particle_scale
-##      变化，而 draw mesh 是共享的单位尺寸 BoxMesh/SphereMesh，不能每帧重建网格）；
-##   ② 用 `INSTANCE_CUSTOM` 取回每颗粒子的材质属性（metal/rough/emission）。
-## 【注意：这里**没有** billboard】粒子网格是实体 BoxMesh/SphereMesh，始终按自身朝向渲染，
-##   不做面向相机的展开 —— 这是刻意的：体素拼成的形体需要真实的前后遮挡与朝向，
-##   一旦每颗粒子都正对相机，拼出来的车/模型会失去体积感（相邻方块的边会互相穿插）。
-##   （旧注释曾写"体素观感要求每个粒子始终正对相机"，与实现不符，已改。）
 static func make_draw_material() -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = DRAW_SHADER
 	var mat := ShaderMaterial.new()
 	mat.shader = sh
 	return mat
-
 
 ## 生成透明通道的绘制材质。
 static func make_draw_material_trans() -> ShaderMaterial:
@@ -297,7 +234,6 @@ static func make_draw_material_trans() -> ShaderMaterial:
 	var mat := ShaderMaterial.new()
 	mat.shader = sh
 	return mat
-
 
 ## 生成粒子更新材质。
 static func make_process_material() -> ShaderMaterial:

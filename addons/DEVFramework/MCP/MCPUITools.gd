@@ -1,19 +1,13 @@
 @tool
 extends RefCounted
 ## ======= 运行期可交互元素查询域 =======
-## 把"画面里有什么可点的东西、各在哪"结构化地报给模型, 供 simulate_* 用 ref 定位。
-## 坐标一律同时给 viewport_rect 与 window_rect: 两者差一个 content_scale 系数, 拿前者当
-## 点击坐标会点在目标之外。
-## 依赖: MCPResult + VariantTool。不引用 MCPDevServer。必须带 @tool 且不声明 class_name。
 
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 
-## ref -> NodePath。以最后一次 get_interactables 为准: 界面一变(节点重建/动画位移)旧 ref 就该
-## 作废, 别指望它还能对上坐标。
+## ref -> NodePath。
 static var _ref_paths: Dictionary = {}
 
-## 交互判据之一: 有连接才说明"点了有反应"。没挂 pressed 的 Button 点了不会有任何事, 只看类型
-## 会把死按钮也报成可点。
+## 交互判据之一: 有连接才说明"点了有反应"。
 const _SIGNALS := ["pressed", "gui_input", "toggled", "value_changed", "item_selected",
 	"text_changed", "text_submitted", "item_activated", "focus_entered"]
 
@@ -21,7 +15,6 @@ const _SIGNALS := ["pressed", "gui_input", "toggled", "value_changed", "item_sel
 const _INTERACTIVE_CLASSES := ["LineEdit", "TextEdit", "Slider", "HSlider", "VSlider",
 	"OptionButton", "CheckBox", "CheckButton", "ItemList", "Tree", "TabContainer",
 	"ScrollContainer", "FileDialog", "AcceptDialog", "SpinBox"]
-
 
 static func schema() -> Dictionary:
 	return {"type": "object", "properties": {
@@ -36,7 +29,6 @@ static func schema() -> Dictionary:
 		"include_hidden": {"type": "boolean", "description": "默认 false。开启后把**看不见(或尺寸为 0)的控件**列进 hidden_elements —— 界面看着空、清单里却有一堆节点时用它对照, 判断是'真没这个控件'还是'控件在但没显示'"},
 	}}
 
-
 static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 	var loop := Engine.get_main_loop() as SceneTree
 	if loop == null or loop.root == null:
@@ -49,7 +41,6 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 	var max_depth: int = clampi(VariantTool.get_int(args, "max_depth", 24), 1, 32)
 
 	# capped 必须单独报出来: 否则"面板真是空的"与"内容在深度上限之外"返回的清单长得一模一样
-	# (只剩几个空壳容器), 调用方无从下手。
 	var want_hidden := VariantTool.get_bool(args, "include_hidden", false)
 	var controls: Array = []
 	var hidden_controls: Array = []
@@ -71,7 +62,6 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 			continue
 		var interactive := _is_interactive(c)
 		# 子视口内的元素换用**更严**的判据: 那边几乎所有 Label 都被框架挂了 gui_input(3D 物体的
-		# 面板就是这样), 只看有无连接会把整块面板算成可点。
 		var in_window := c.get_viewport() == loop.root
 		if not in_window:
 			interactive = _is_directly_clickable(c)
@@ -148,7 +138,6 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 					"w": r2.size.x * scale.x, "h": r2.size.y * scale.y}
 			else:
 				# 刻意不给 window_rect: 子视口坐标与窗口坐标之间没有换算关系, 写一个出来只会被
-				# 误点。
 				var sv := c2.get_viewport() as SubViewport
 				e["sub_viewport"] = String(sv.get_path()) if sv != null else ""
 				e["sub_viewport_size"] = {"x": float(sv.size.x), "y": float(sv.size.y)} if sv != null else {}
@@ -186,8 +175,7 @@ static func _handle_get_interactables(args: Dictionary) -> Dictionary:
 		payload["hidden_elements"] = hidden_items
 	return MCPResult.ok_json(payload)
 
-
-## 窗口/视口的比例系数。点击坐标换算与布局输出共用这一个口径, 免得两处各算一遍而漂移。
+## 窗口/视口的比例系数。
 static func window_scale() -> Vector2:
 	var loop := Engine.get_main_loop() as SceneTree
 	if loop == null or loop.root == null:
@@ -197,7 +185,6 @@ static func window_scale() -> Vector2:
 		return Vector2.ONE
 	var win := Vector2(DisplayServer.window_get_size())
 	return Vector2(win.x / vp.x, win.y / vp.y)
-
 
 ## 把上一次的 ref 解析成**当前**的窗口坐标。
 static func resolve_ref(ref: String) -> Dictionary:
@@ -222,7 +209,6 @@ static func resolve_ref(ref: String) -> Dictionary:
 	var vp := c.get_viewport()
 	if vp != loop.root:
 		# 子视口内的元素: get_global_rect() 给的就是子视口像素坐标, 与 SubView3D 把 3D 命中点
-		# 投出来的窗口坐标不是一回事。
 		return {
 			"ok": true,
 			"space": "subviewport",
@@ -243,10 +229,7 @@ static func resolve_ref(ref: String) -> Dictionary:
 		"text": _visible_text(c),
 	}
 
-
 ## 收集可见控件到 out; want_hidden=true 时顺带把"在树里但不可见"的那一层收进 hidden。
-## hidden 与 out 必须分开: 后者是"能点的东西", 前者只是诊断线索, 混在一起会让 ref 指到点不到的控件。
-## 返回 true = 有子树因触及上限而没被走到(深度上限或节点硬上限), 调用方据此报 depth_capped。
 static func _collect_controls(node: Node, out: Array, max_depth: int, depth: int, hidden: Array = [], want_hidden: bool = false) -> bool:
 	# 400 是收集阶段的硬上限: 界面重建时它防住"节点暴涨把一次调用拖死", 不影响结果集大小
 	if depth > max_depth or out.size() >= 400:
@@ -261,17 +244,13 @@ static func _collect_controls(node: Node, out: Array, max_depth: int, depth: int
 					capped = true
 			elif want_hidden:
 				# 不可见的 Control 对**可见清单**照旧剪枝(子树必然也不可见, 走进去只是白跑)。
-				# 但"控件在树里、清单里没有"正是最常见的那种 bug, 所以要把这一层记下来 ——
-				# 不展开它的子节点, 因为整棵子树都不可见, 逐层列出只是噪声。
 				hidden.append(c)
 		elif _collect_controls(child, out, max_depth, depth + 1, hidden, want_hidden):
 			capped = true
 	return capped
 
-
 static func _sort_items(a: Dictionary, b: Dictionary) -> bool:
-	# 分层: 主视口 UI → 子视口 UI → 3D 物体。3D 排在最后不是"低一等", 而是它没有可直接
-	# 点击的屏幕矩形(点击由工具在物体自身上激活)。
+	# 分层: 主视口 UI → 子视口 UI → 3D 物体。
 	if a["rank"] != b["rank"]:
 		return a["rank"] < b["rank"]
 	if a["is_3d"]:
@@ -284,7 +263,6 @@ static func _sort_items(a: Dictionary, b: Dictionary) -> bool:
 	if absf(ra.position.y - rb.position.y) > 8.0:
 		return ra.position.y < rb.position.y
 	return ra.position.x < rb.position.x
-
 
 static func _visible_text(c: Control) -> String:
 	# Label 与 BaseButton 各自都有 text, 但两者**无继承关系**(都直接继承 Control), 故必须分开判。
@@ -302,7 +280,6 @@ static func _visible_text(c: Control) -> String:
 		return (c as TextEdit).text
 	return ""
 
-
 static func _is_interactive(c: Control) -> bool:
 	# 先剔除"明确不可交互"的, 否则会把 disabled 的按钮当成可点目标, AI 点完只看到"没反应"。
 	if c is BaseButton and (c as BaseButton).disabled:
@@ -316,7 +293,6 @@ static func _is_interactive(c: Control) -> bool:
 			return true
 	return false
 
-
 ## 子视口内元素专用的判据: 只认"类型本身就自带交互"的控件, 不看信号连接。
 static func _is_directly_clickable(c: Control) -> bool:
 	if c is BaseButton:
@@ -324,9 +300,6 @@ static func _is_directly_clickable(c: Control) -> bool:
 	if c is LineEdit:
 		return (c as LineEdit).editable
 	return _INTERACTIVE_CLASSES.has(c.get_class())
-
-
-# ============================================================
 
 ## 收集 3D 可交互物体(CollisionObject3D 子树里"能被人点"的那些)。
 static func _collect_interactables_3d(node: Node, out: Array, max_depth: int, depth: int) -> bool:
@@ -340,17 +313,14 @@ static func _collect_interactables_3d(node: Node, out: Array, max_depth: int, de
 			if co.input_ray_pickable and co.is_visible_in_tree() and _is_interactable_3d(co):
 				out.append(co)
 		# 刻意不像 2D 那样对不可见节点剪枝: 3D 这边节点数远小于 Control, 为省一遍遍历而
-		# 记一份隐藏名单不值得。
 		if _collect_interactables_3d(child, out, max_depth, depth + 1):
 			capped = true
 	return capped
-
 
 static func _is_interactable_3d(n: CollisionObject3D) -> bool:
 	if n.has_method("is_disabled") and n.is_disabled():
 		return false
 	return n.has_method("activate") or n.has_method("_mouse_down")
-
 
 ## 3D 元素的文本: 走项目自己的提示来源, 与 DetailPanel.open_panel 读的是同一组属性。
 static func _interactable_text_3d(n: Node3D) -> String:
@@ -367,11 +337,9 @@ static func _interactable_text_3d(n: Node3D) -> String:
 				return String((def as Resource).resource_name)
 	return ""
 
-
 static func _script_path(n: Node) -> String:
 	var sc := n.get_script()
 	return String(sc.resource_path) if sc != null else ""
-
 
 ## 3D ref 的解析: **刻意不产出坐标**, 只确认"这个 ref 现在还能被激活"。
 static func _resolve_ref_3d(ref: String, n: Node3D, path: String) -> Dictionary:

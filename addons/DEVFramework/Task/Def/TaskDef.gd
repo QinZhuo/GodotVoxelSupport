@@ -1,6 +1,6 @@
 @tool
 @abstract
-## 任务定义抽象基类。子类：SignalTaskDef（信号驱动）、CountTaskDef（计数驱动）、GroupTaskDef（分组）。
+## 任务定义抽象基类。
 class_name TaskDef extends EntityDef
 
 ## 任务状态

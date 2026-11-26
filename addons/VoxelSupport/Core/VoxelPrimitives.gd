@@ -2,18 +2,8 @@
 class_name VoxelPrimitives
 extends RefCounted
 ## 体素**几何图元**：纯 static、可无头测试的一组形状/布尔原语（线 / 盒 / 球 / 膨胀 / 连通域…）。
-## 【一份图元、多处复用】编辑器的画笔几何（预览 ghost 与落笔必须同一批格子）与脚本 / AI 的
-## `QVoxelBuilder`（程序化建模）**共用这里** —— 一致性成了构造保证，而不是两处逻辑各自对齐。
-## 【坐标约定】一律**对象局部体素坐标**（与 QVoxelModel.get_voxel / QVoxelSource.has_voxel 同一套）。
-## 越界与否由调用方（画笔工具 / 构建器）统一裁剪，几何函数只管形状本身。
-## 【为什么用 Array[Vector3i] 而不是 PackedVector3Array】写入侧是整数坐标；
-## 用 Vector3i 一路到底可以避免在边界上来回取整。
-
 
 ## 3D 直线（Bresenham 误差累积版，26-连通）。
-## 【为什么要"最长轴 + 误差进位"而不是各轴独立插值】独立插值会在端点漂移（浮点累积），
-## 而画笔的终点必须**恰好落在用户指到的那一格**；误差累积版 n 步走完后各轴恰好走了 |d| 次，
-## 端点由构造保证。26-连通（可对角跨格）对手绘线来说视觉最自然，也让"粗笔"不出现锯齿空洞。
 static func line(a: Vector3i, b: Vector3i) -> Array[Vector3i]:
 	var d := b - a
 	var n := maxi(maxi(absi(d.x), absi(d.y)), absi(d.z))
@@ -41,7 +31,6 @@ static func line(a: Vector3i, b: Vector3i) -> Array[Vector3i]:
 		out.append(p)
 	return out
 
-
 ## 实心长方体（两个角点含端点）。
 static func box(a: Vector3i, b: Vector3i) -> Array[Vector3i]:
 	var lo := Vector3i(mini(a.x, b.x), mini(a.y, b.y), mini(a.z, b.z))
@@ -53,16 +42,10 @@ static func box(a: Vector3i, b: Vector3i) -> Array[Vector3i]:
 				out.append(Vector3i(x, y, z))
 	return out
 
-
 ## 球偏移缓存（key = 半径）。
-## 【为什么要缓存】`ball()` 是"中心 + 偏移"的形态，按格盖章的用法会把同一个半径的球反复算：
-## 半径 15 的球有一万四千多个偏移，每算一次都要走三重循环 31³。缓存后同一半径只算一次，
-## 其余全是查表 —— 球偏移只由半径决定，这笔缓存没有失效条件。
-## 约定：返回的是**共享只读池**，调用方只许遍历（ball 不改它）。
 static var _ball_offsets := {}
 
-
-## 半径 r 的欧氏球偏移，含中心偏移。radius <= 0 → 只有 Vector3i.ZERO。
+## 半径 r 的欧氏球偏移，含中心偏移。
 static func ball_offsets(radius: int) -> Array[Vector3i]:
 	var key := maxi(radius, 0)
 	if not _ball_offsets.has(key):
@@ -76,42 +59,25 @@ static func ball_offsets(radius: int) -> Array[Vector3i]:
 		_ball_offsets[key] = made
 	return _ball_offsets[key]
 
-
-## 体素球（笔刷尺寸的载体）。radius = 0 → 只有中心格。
-## 判据用"立方到中心 ≤ r²"（欧氏）：比切比雪夫球更像圆笔，又不必开平方。
+## 体素球（笔刷尺寸的载体）。
 static func ball(center: Vector3i, radius: int) -> Array[Vector3i]:
 	var out: Array[Vector3i] = []
 	for off in ball_offsets(radius):
 		out.append(center + off)
 	return out
 
-
-## 用球把一组格子膨胀（笔刷尺寸 > 1 时让线 / 盒变粗）。radius = 0 原样返回。
-## 【为什么不能"每格盖一个球"】那是 `源格数 × 球偏移数` 次写入。半径 15 的球有一万四千个偏移，
-## 盒笔铺满 32³ 就是 4.6 亿次 append —— 实测一次落笔要卡一百秒以上（与"画几下整机卡死"同源：
-## 代价随笔刷尺寸乘性爆炸，只是这里卡在**正常用法**上，不是哨兵坐标那种错误路径）。
-## 【分离式平方距离变换】欧氏距离的平方是可分离的：
-##   d²(p) = min over s of ((px-sx)² + (py-sy)² + (pz-sz)²)
-## 于是沿三个轴各做一轮一维下包络扫描（Felzenszwalb & Huttenlocher，每轮 O(n)）就得到精确的
-## 三维平方距离，最后取 `d² <= r²`。代价只与**输出体积**成正比，与半径、源格数都无关 ——
-## 半径 15 也是几毫秒。结果按 z,y,x 扫描顺序产出（确定性，便于测试与预览比对）。
+## 用球把一组格子膨胀（笔刷尺寸 > 1 时让线 / 盒变粗）。
 static func dilate(cells: Array[Vector3i], radius: int) -> Array[Vector3i]:
 	if radius <= 0 or cells.is_empty():
 		return cells
 	return _dilate_shifted(cells, float(radius), 0.0)
 
-
 ## 以「直径 size 的球」膨胀 —— 球**内切于 size³ 的立方体**，球心对齐立方体的几何中心。
-## 【为什么与 dilate 分开】dilate 的球心恒在源格上，只能表达奇数直径；而笔刷尺寸 2 / 4 / 8 是
-## MagicaVoxel 的常用档位，尺寸 2 的笔头必须是 2×2×2 的实心块、尺寸 3 必须是 3×3×3 去掉 8 个角。
-## 偶数直径的球心落在半格上（三轴各偏 -0.5），用 `shift` 把它交给同一套距离变换：
-## 距离项从 (i-j)² 变成 (i-j-shift)²，扫描本身仍是 O(n)（抛物线的顶点只是平移了）。
 static func dilate_ball(cells: Array[Vector3i], size: int) -> Array[Vector3i]:
 	if size <= 1 or cells.is_empty():
 		return cells
 	var shift := -0.5 if (size & 1) == 0 else 0.0
 	return _dilate_shifted(cells, size * 0.5, shift)
-
 
 ## 距离变换的共用主体：半径是浮点，`shift` 是**球心相对源格的偏移**（0 = 球心在格上）。
 static func _dilate_shifted(cells: Array[Vector3i], radius: float, shift: float) -> Array[Vector3i]:
@@ -128,7 +94,6 @@ static func _dilate_shifted(cells: Array[Vector3i], radius: float, shift: float)
 	var sy := hi.y - lo.y + 1
 	var sz := hi.z - lo.z + 1
 	# 距离场：源格置 0，其余置"远"，随后三轮扫描就地变成平方距离
-	# 用浮点列存是为了让一维扫描里没有 int/float 转换（距离本身都是整数，浮点表示精确）
 	var d := PackedFloat64Array()
 	d.resize(sx * sy * sz)
 	d.fill(float(_FAR))
@@ -155,16 +120,7 @@ static func _dilate_shifted(cells: Array[Vector3i], radius: float, shift: float)
 					out.append(lo + Vector3i(qx, qy, qz))
 	return out
 
-
 ## 用「平面」把一组格子膨胀成边长 `size` 的方片 —— 只在拾取面的两个轴向摊开，
-## **沿法线的厚度不变**。
-## 【与 dilate（欧氏球）的分工】球是各向同性地鼓起来，平面是"只在表面上摊开"。
-## 在表面上刷一条宽笔触时，球会把大约一半体积埋进实心内部 —— 看不见，却实实在在撑大了体积、
-## 也多写了一倍的格（还会把本该留空的邻格填掉）；平面只铺出一层薄片。这就是"形状"要区分的用途。
-## 【可分离】平面方形 = 两个线段的闵可夫斯基和，故等价于沿平面内两轴各做一次一维膨胀 ——
-## 于是不必真的枚举 size² 个偏移（边长 15 就是 225 个/格，对盒笔照样会爆炸）。
-## 【尺寸取边长而不是半径】偶数边长（2 / 4 / 8）在体素里没有整数半径可表达，
-## 只能中心偏半格：向负方向多铺一格、向正方向少铺一格（与 MagicaVoxel 的偶数笔头同向）。
 static func dilate_plane(cells: Array[Vector3i], size: int, normal: Vector3i) -> Array[Vector3i]:
 	if size <= 1 or cells.is_empty():
 		return cells
@@ -174,17 +130,13 @@ static func dilate_plane(cells: Array[Vector3i], size: int, normal: Vector3i) ->
 	return _dilate_axis(_dilate_axis(cells, _axis_index(ax[0]), neg, pos),
 			_axis_index(ax[1]), neg, pos)
 
-
-## 轴向向量的轴序号（0/1/2）。只用于 [method face_axes] 的产物（单轴单位向量）。
+## 轴向向量的轴序号（0/1/2）。
 static func _axis_index(v: Vector3i) -> int:
 	if v.x != 0:
 		return 0
 	return 1 if v.y != 0 else 2
 
-
 ## 沿单个轴向做一维膨胀：每个格扩成 `[-neg, +pos]` 的线段（总长 neg + pos + 1 = 笔头边长）。
-## 【为什么按线归组再并区间】"每格盖一条线"是 `格数 × 边长` 次写入；把同一条线上的源格先归组、
-## 再把区间求并，代价就只由**结果长度**决定（与 dilate 的取向一致：不随笔刷尺寸乘性爆炸）。
 static func _dilate_axis(cells: Array[Vector3i], axis: int, neg: int, pos: int) -> Array[Vector3i]:
 	var lines := {}    # 其余两轴的坐标 → 沿 axis 的坐标表
 	for c in cells:
@@ -192,7 +144,6 @@ static func _dilate_axis(cells: Array[Vector3i], axis: int, neg: int, pos: int) 
 		if not lines.has(key):
 			lines[key] = []
 		# 必须存 Array 而不是 PackedInt32Array：后者在 GDScript 里是**值类型**，
-		# `lines[key].append(...)` 改的是取出来的副本，分组表会一直空着。
 		(lines[key] as Array).append(_axis_of(c, axis))
 	var out: Array[Vector3i] = []
 	for key in lines:
@@ -209,7 +160,6 @@ static func _dilate_axis(cells: Array[Vector3i], axis: int, neg: int, pos: int) 
 		_emit_span(out, key, axis, lo, hi)
 	return out
 
-
 ## 取走 axis 之后剩下的两个坐标（只当分组键用，顺序固定）。
 static func _rest2(p: Vector3i, axis: int) -> Vector2i:
 	match axis:
@@ -217,14 +167,12 @@ static func _rest2(p: Vector3i, axis: int) -> Vector2i:
 		1: return Vector2i(p.x, p.z)
 		_: return Vector2i(p.x, p.y)
 
-
 ## 沿 axis 的那一个坐标。
 static func _axis_of(p: Vector3i, axis: int) -> int:
 	match axis:
 		0: return p.x
 		1: return p.y
 		_: return p.z
-
 
 ## 把"分组键 + 沿 axis 的区间"还原成坐标并追加。
 static func _emit_span(out: Array[Vector3i], key: Vector2i, axis: int, lo: int, hi: int) -> void:
@@ -234,13 +182,10 @@ static func _emit_span(out: Array[Vector3i], key: Vector2i, axis: int, lo: int, 
 			1: out.append(Vector3i(key.x, t, key.y))
 			_: out.append(Vector3i(key.x, key.y, t))
 
-
-## 距离场里的"足够远"。只要大于任何可达的平方距离即可（区域对角线的平方远小于它）。
+## 距离场里的"足够远"。
 const _FAR := 1 << 28
 
-
 ## 把体积里所有沿 `axis` 的直线依次交给 `_edt_line` 做一维变换。
-## 三个轴各跑一轮；下包络法的可分离性保证三轮叠加后就是精确的三维平方欧氏距离。
 static func _edt_axis(d: PackedFloat64Array, sx: int, sy: int, sz: int, axis: int, shift: float,
 		env_pos: PackedInt32Array, env_val: PackedFloat64Array, f_buf: PackedFloat64Array) -> void:
 	match axis:
@@ -257,18 +202,12 @@ static func _edt_axis(d: PackedFloat64Array, sx: int, sy: int, sz: int, axis: in
 				for qx in sx:
 					_edt_line(d, qx + sx * qy, sx * sy, sz, shift, env_pos, env_val, f_buf)
 
-
-## 一维平方距离变换（下包络法，O(n)）：令 d[start + i*stride] ← min over j of ((i-j)² + 原值)。
-## 【为什么需要 f_buf】第 ② 步是**就地**改写 d 的，而 `(i-j)² + f[j]` 里的 f[j] 必须是改写**之前**
-## 的原值 —— 否则读到的是已经变小的 D[j]，结果会系统性偏小（笔刷球被算成"漏气的蜂窝"）。
-## f_buf 就是这一行的原值副本（复用缓冲，长度 >= n）。env_pos / env_val 同样复用，
-## 避免体积里上万行每行都新建数组。
+## 一维平方距离变换（下包络法，O(n)）：令 d[start + i*stride] ← min over j of ((i-j)² +…
 static func _edt_line(d: PackedFloat64Array, start: int, stride: int, n: int, shift: float,
 		env_pos: PackedInt32Array, env_val: PackedFloat64Array, f_buf: PackedFloat64Array) -> void:
 	if n <= 1:
 		return
 	# ① 自左向右：把每点看成一条抛物线，求出它们组成的下包络（哪些点上榜、交点在哪）
-	# `shift` 只把每条抛物线的顶点从下标 q 挪到 q + shift（源点不在格心时用它），交点公式随之平移。
 	var k := 0
 	env_pos[0] = 0
 	env_val[0] = -INF
@@ -298,9 +237,7 @@ static func _edt_line(d: PackedFloat64Array, start: int, stride: int, n: int, sh
 		var t := float(q - p) - shift
 		d[start + q * stride] = t * t + f_buf[p]
 
-
 ## 与给定法线垂直的两个轴向（单位向量，顺序固定）。
-## 面笔靠它把"铺满一片面"降成平面上的 4 邻域搜索。
 static func face_axes(normal: Vector3i) -> Array[Vector3i]:
 	if absi(normal.y) == 1:
 		return [Vector3i(1, 0, 0), Vector3i(0, 0, 1)]
@@ -308,12 +245,10 @@ static func face_axes(normal: Vector3i) -> Array[Vector3i]:
 		return [Vector3i(0, 1, 0), Vector3i(0, 0, 1)]
 	return [Vector3i(1, 0, 0), Vector3i(0, 1, 0)]
 
-
 ## 平面内的 4 个邻域偏移（给定法线所在平面的正交方向）。
 static func plane_offsets4(normal: Vector3i) -> Array[Vector3i]:
 	var ax := face_axes(normal)
 	return [ax[0], -ax[0], ax[1], -ax[1]]
-
 
 ## 6 邻域偏移（填充用；体素连通性按面相邻算，避免对角"穿缝"漏填）。
 static func neighbors6() -> Array[Vector3i]:
@@ -323,11 +258,7 @@ static func neighbors6() -> Array[Vector3i]:
 		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
 	]
 
-
 ## 连通域搜索（广度优先）。
-## accept(p) → 该格是否属于目标区域；step(p) → 从 p 出发还要试哪些邻格。
-## 面笔（"铺满一片暴露面"）与填充（"同材质的整块"）共用它，差别只在两个闭包 ——
-## 这正是这两个工具在界面上像两件事、在实现上是同一件事的原因。
 static func region(seeds: Array[Vector3i], accept: Callable, step: Callable) -> Array[Vector3i]:
 	var out: Array[Vector3i] = []
 	var seen := {}

@@ -1,19 +1,9 @@
 @tool
 class_name MeshVoxelWorld
 extends RefCounted
-## 网格快照 → `QVoxelWorld`。与 `VoxAssetWorld.to_world`（.vox → 世界）完全对位：
-## 外部模型导入的产物就是一个**普通世界**，于是撤销 / 保存 .qvx / 导出 glTF / 编辑全部免费。
-## 【为什么整个场景烘成一个模型】体素栅格只认一套坐标系；拆成多个模型就得各自归一化，
-## 相对位置随即丢失。MagicaVoxel 的"一个对象 = 一块有界体素"也正是这个语义。
-## 【多帧 = 体素帧动画】glTF 自带动画按帧采样后逐帧体素化，写进同一个模型的帧序列，
-## 时间轴 / 播放预览 / 存盘全部复用现成的那条链。
+## 网格快照 → `QVoxelWorld`。
 
-## 场景 → 世界。`resolution` = 最长边的体素数；`fill` = true 实心 / false 只留表面壳。
-## **协程**：多帧时每帧让出一帧（否则大模型的导入会把界面冻住），调用方要 `await`。
-## `progress` 可选，签名 `(已完成帧, 总帧数)`；只在多帧时回调（单帧没有进度可言）。
-## `cancel` 可选，返回 true 即放弃：**帧边界**上检查，逐帧 await 时最多多跑完当前这一帧。
-## 为什么取消也返回 null（而不是报错）：调用方本来就分得清 —— 它自己置的取消标志还在，
-## 由此决定提示"已取消"还是"体素化失败"。
+## 场景 → 世界。
 static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESOLUTION,
 		fill := true, progress := Callable(), cancel := Callable()) -> QVoxelWorld:
 	if scene.is_empty():
@@ -66,8 +56,7 @@ static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESO
 	model.compact()
 	return world
 
-
-## 调色板 → 世界材质表。原生返回值 = 调色板下标 + 1，恰好对上"材质 1 起、0 是空气"。
+## 调色板 → 世界材质表。
 static func _install_palette(world: QVoxelWorld, palette: PackedByteArray) -> void:
 	for i in int(palette.size() / 4):
 		world.add_material(Color8(palette[i * 4], palette[i * 4 + 1],

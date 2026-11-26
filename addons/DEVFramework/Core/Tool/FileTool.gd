@@ -1,16 +1,8 @@
 @tool
 class_name FileTool
 ## 文件读写公共原语 —— 框架内一切"落盘"统一走这里, 避免各处各写一份临时文件 + 改名样板。
-## rename 覆盖语义(已实测 + 官方文档核对): POSIX `rename(2)` 覆盖已存在目标, Windows 亦然
-## (Godot 4.7 实测 `rename_absolute(tmp, 已存在目标)` 返回 OK 且内容被替换)。
-## `.tmp` 必须与被写文件**同目录**: 跨文件系统 rename 会失败(EXDEV), 那时原子性也无从谈起。
-
 
 ## 递归收集目录下的文件, 按扩展名过滤(需带点, 如 [code][".tres"][/code]; 空则不过滤)。
-## [param include_hidden] 为 true 时连"带隐藏属性"的条目一起收。
-## 【为什么需要这个开关】DirAccess 默认跳过隐藏条目, 而原生库产物经常被外部工具打上隐藏位;
-## 结果是"目录里明明有 libxxx.dll, 枚举结果里却没有", 构建新鲜度判定于是永远认为产物缺失。
-## 一个属性位不该决定"文件存不存在" —— 要不要这个文件由扩展名决定。
 static func list_files(dir_path: String, extensions: PackedStringArray = PackedStringArray(), recursive := true, include_hidden := false) -> PackedStringArray:
 	var out := PackedStringArray()
 	var stack: Array[String] = [dir_path]
@@ -36,7 +28,6 @@ static func list_files(dir_path: String, extensions: PackedStringArray = PackedS
 		dir.list_dir_end()
 	return out
 
-
 ## 递归收集目录自身及其所有子目录(仅目录), 返回完整 res:// 路径(带尾部 /), 已排序。
 static func list_dirs(dir_path: String, recursive := true) -> Array[String]:
 	var out: Array[String] = []
@@ -59,7 +50,6 @@ static func list_dirs(dir_path: String, recursive := true) -> Array[String]:
 	out.sort()
 	return out
 
-
 static func _match_ext(path: String, extensions: PackedStringArray) -> bool:
 	if extensions.is_empty():
 		return true
@@ -68,13 +58,11 @@ static func _match_ext(path: String, extensions: PackedStringArray) -> bool:
 			return true
 	return false
 
-
 ## 裸路径补全 res:// 前缀(不校验存在性, 不做 uid 解析 —— 那属于调用方语义)。
 static func to_res_path(path: String) -> String:
 	if path.begins_with("res://"):
 		return path
 	return "res://" + path.trim_prefix("/")
-
 
 ## 绝对路径 → res:// 路径(项目根内); 项目根外原样返回。
 static func abs_to_res(path: String) -> String:
@@ -83,22 +71,19 @@ static func abs_to_res(path: String) -> String:
 		return "res://" + path.substr(root.length())
 	return path
 
-
 ## 加载资源: 不存在 / 加载失败一律返回 null(不抛错)。
 static func load_resource(path: String) -> Resource:
 	if not ResourceLoader.exists(path):
 		return null
 	return ResourceLoader.load(path)
 
-
-## 确保 path 的父目录存在(不存在则递归创建)。返回目录是否可用。
+## 确保 path 的父目录存在(不存在则递归创建)。
 static func ensure_dir(path: String) -> void:
 	var dir := path.get_base_dir()
 	if not dir.is_empty() and not DirAccess.dir_exists_absolute(dir):
 		DirAccess.make_dir_recursive_absolute(dir)
 
-
-## 写入文本(**非原子**)。适合日志 / 状态等"丢了也无所谓"的可重写文件。
+## 写入文本(**非原子**)。
 static func write_text(path: String, text: String) -> Error:
 	ensure_dir(path)
 	var f := FileAccess.open(path, FileAccess.WRITE)
@@ -108,7 +93,6 @@ static func write_text(path: String, text: String) -> Error:
 	f.store_string(text)
 	f.close()
 	return OK
-
 
 ## 读取全部文本; 文件不存在 / 打开失败返回 ""。
 static func read_text(path: String) -> String:
@@ -121,8 +105,7 @@ static func read_text(path: String) -> String:
 	f.close()
 	return s
 
-
-## 增量读取"只追加"文本文件的新增完整行（tail -f 语义），配合 [method LogTool.set_mirror_path] 做跨进程日志转发。
+## 增量读取"只追加"文本文件的新增完整行（tail -f 语义），配合 [method LogTool.set_mirror_path]…
 static func read_new_lines(path: String, offset: int, max_chunk := 1 << 16) -> Dictionary:
 	var result := {"lines": PackedStringArray(), "offset": offset}
 	var f := FileAccess.open(path, FileAccess.READ)
@@ -143,13 +126,11 @@ static func read_new_lines(path: String, offset: int, max_chunk := 1 << 16) -> D
 	f.close()
 	return result
 
-
 ## 原子写入文本(UTF-8)。
 static func atomic_write_text(path: String, text: String) -> Error:
 	return atomic_write_bytes(path, text.to_utf8_buffer())
 
-
-## 原子写入字节: 写 .tmp → rename 覆盖。失败时清理 .tmp 并返回错误码。
+## 原子写入字节: 写 .tmp → rename 覆盖。
 static func atomic_write_bytes(path: String, bytes: PackedByteArray) -> Error:
 	ensure_dir(path)
 	var tmp_path := path + ".tmp"
@@ -163,7 +144,6 @@ static func atomic_write_bytes(path: String, bytes: PackedByteArray) -> Error:
 	var err := DirAccess.rename_absolute(tmp_path, path)
 	if err != OK and FileAccess.file_exists(path):
 		## 平台 rename 不覆盖已存在目标 → 先把旧档挪成 .old, 换成功再删掉。
-		## 不能"先删目标再 rename": 第二步失败会把新旧两份一起丢掉(存档/配置/基线都走这里)。
 		var old_path := path + ".old"
 		DirAccess.remove_absolute(old_path)
 		var move_err := DirAccess.rename_absolute(path, old_path)

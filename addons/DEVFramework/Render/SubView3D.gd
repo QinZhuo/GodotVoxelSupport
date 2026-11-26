@@ -95,7 +95,6 @@ func viewport_rect_to_screen(rect: Rect2) -> Rect2:
 		result = result.expand(p) if i > 0 else Rect2(p, Vector2.ZERO)
 	return result
 
-
 ## 碰撞盒有厚度，命中点落在靠相机的那一面：斜视时直接换算会偏，先沿视线投回贴图平面
 func _on_plane(camera: Camera3D, hit: Vector3) -> Vector3:
 	if camera == null:
@@ -103,7 +102,6 @@ func _on_plane(camera: Camera3D, hit: Vector3) -> Vector3:
 	var gt := area.global_transform
 	var p = Plane(gt.basis.z.normalized(), gt.origin).intersects_ray(hit, hit - camera.global_position)
 	return p if p != null else hit
-
 
 func _on_input_event(camera: Camera3D, input_event: InputEvent, event_position: Vector3, _normal: Vector3, _shape_idx: int) -> void:
 	if not viewport:
@@ -114,7 +112,6 @@ func _on_input_event(camera: Camera3D, input_event: InputEvent, event_position: 
 	var now := Time.get_ticks_msec() / 1000.0
 
 	# 事件能到这里就说明鼠标正压在面板上，直接按命中点换算。
-	# 不能用 mouse_entered 状态做门禁，否则首次点击会落到 (0,0) 或上一次的旧坐标。
 	var event_pos2D := Vector2(
 		(local_pos.x / mesh_size.x + 0.5) * viewport.size.x,
 		(0.5 - local_pos.y / mesh_size.y) * viewport.size.y)

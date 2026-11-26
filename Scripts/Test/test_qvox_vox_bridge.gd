@@ -1,16 +1,8 @@
 extends TestCase
 
 ## `.vox → QVoxelWorld` 桥接 + 节点摆放统一表示的测试。
-## 钉死三件事：
-##   ① 图层 ↔ 组一一对应（组名 = 图层名，可见性 = 图层可见性），模型挂到所属图层的组下；
-##   ② 节点摆放只写 `transform`（不再有 `pos`），且位置 + 旋转都随节点树往返；
-##   ③ 求值真的应用旋转（轴对齐 90° 保持整数）。
-## 动画只保留体素帧；`.vox` 的 nTRN 多帧摆放只取首帧（不导入节点摆放轨道）。
-## 最后用 demo 真实样例验"`.vox` 取出的体素集合"与"`.vox → 世界求值"的体素数一致 ——
-## 这是"两种格式显示一致"的可测代理。
 
 const SAMPLES_DIR := "res://demo"
-
 
 # ① 图层 ↔ 组
 
@@ -31,10 +23,9 @@ func test_layers_map_to_groups() -> void:
 	var m0 := ground.child_nodes[0] as QVoxelModel
 	assert_eq(m0.model_id, 0)
 	assert_eq(m0.count_solid(), 1, "模型体素存活")
-	# 摆放来自 nTRN 帧位移（本夹具模型 size=1³ ⇒ 居中偏移为 0）。位移挂在**组**上，模型在组内为 0。
+	# 摆放来自 nTRN 帧位移（本夹具模型 size=1³ ⇒ 居中偏移为 0）。
 	assert_eq(w.world_transform(m0).origin, Vector3(1, 2, 3), "模型的世界摆放 = 场景图位移")
 	assert_eq(hidden.child_nodes.size(), 0, "隐藏图层的模型不导入（组留空）")
-
 
 func test_world_eval_places_models() -> void:
 	var w := VoxAssetWorld.to_world(_two_layer_asset(true, true))
@@ -42,7 +33,6 @@ func test_world_eval_places_models() -> void:
 	assert_eq(res.solid_count(), 2, "两个模型各一个体素")
 	assert_eq(res.grid_size, Vector3i(2, 4, 4), "包围盒 = 两个位移点张成的盒")
 	assert_eq(res.origin, Vector3i(0, 2, 0), "盒的最小角")
-
 
 # ② 摆放只写 transform
 
@@ -56,7 +46,6 @@ func test_world_writes_transform_not_pos() -> void:
 	assert_true(entry.has("transform"), "节点摆放写进 transform 键")
 	assert_false(entry.has("pos"), "不再写 pos")
 	assert_eq(entry["transform"]["t"], [1.0, 2.0, 3.0], "平移在 transform.t（JSON 读回是 float）")
-
 
 func test_world_rotation_roundtrips() -> void:
 	var w := QVoxelWorld.create_empty()
@@ -74,7 +63,6 @@ func test_world_rotation_roundtrips() -> void:
 	assert_true(m2.local_transform.basis.get_rotation_quaternion().is_equal_approx(
 			Quaternion(Vector3.UP, PI / 2.0)), "旋转存活")
 
-
 # ③ 求值应用旋转
 
 func test_eval_applies_axis_aligned_rotation() -> void:
@@ -86,7 +74,6 @@ func test_eval_applies_axis_aligned_rotation() -> void:
 	var res := QVoxelEvalEngine.evaluate_world(w, QVoxelEvalContext.new())
 	assert_eq(res.solid_count(), 1, "体素数不变")
 	assert_eq(res.grid_size, Vector3i(1, 1, 3), "绕 Y 转 90° 后 x/z 尺寸互换（仍是整数）")
-
 
 # ④ demo 真实样例：.vox 取出的体素集合 ↔ .vox→世界求值（体素数一致）
 
@@ -113,7 +100,6 @@ func test_demo_samples_parity() -> void:
 		var got2 := QVoxelEvalEngine.evaluate_world(w2, QVoxelEvalContext.new()).solid_count()
 		assert_eq(got2, expected, "%s：.qvx 往返后体素数一致" % name)
 
-
 ## ⑦ 编辑器：体素数据本地化（不含摆放），摆放由 world_transform 提供（渲染器承载）
 
 func test_editor_data_is_local() -> void:
@@ -137,7 +123,6 @@ func test_editor_data_is_local() -> void:
 	assert_eq(sb.data.output_grid_size(), Vector3i(4, 4, 4), "数据盒 = 模型尺寸")
 	assert_eq(w.world_transform(b).origin, Vector3(16, 0, 0), "摆放由 world_transform 提供")
 
-
 ## ⑧ 改尺寸命令：可撤销，且能还原盒外被丢掉的体素
 
 func test_resize_command_undo_restores_voxels() -> void:
@@ -157,7 +142,6 @@ func test_resize_command_undo_restores_voxels() -> void:
 	cmd.redo()
 	assert_eq(m.grid_size, Vector3i(2, 2, 2), "重做再缩小")
 	assert_eq(m.count_solid(), 1, "重做后仍是盒内那一个")
-
 
 ## ⑨ `.vox` 多帧 nTRN 烘焙成体素帧动画（不保留节点摆放轨）
 
@@ -189,7 +173,6 @@ func test_vox_multiframe_transform_bakes_to_voxel_frames() -> void:
 	m.active_frame = 1
 	assert_eq(m.get_voxel(0, 7, 0), 1, "第 1 帧烘焙位移")
 
-
 ## ⑩ nSHP 逐帧换模型：也烘焙成体素帧
 
 func test_vox_shape_animation_bakes_to_voxel_frames() -> void:
@@ -219,7 +202,6 @@ func test_vox_shape_animation_bakes_to_voxel_frames() -> void:
 	m.active_frame = 1
 	assert_eq(m.get_voxel(2, 0, 0), 1, "第 1 帧用 model 1 并保留其居中偏移")
 
-
 ## ⑪ 命名组的 nTRN 多帧：动画烘焙进子模型，组本身保持静态摆放
 
 func test_named_group_transform_bakes_into_children() -> void:
@@ -248,7 +230,6 @@ func test_named_group_transform_bakes_into_children() -> void:
 	var res := QVoxelEvalEngine.evaluate_world(w, QVoxelEvalContext.new())
 	assert_eq(res.solid_count(), 2, "两个子模型各有体素")
 
-
 ## ⑫ 模型内部旋转：绕选区中心，90° 整数旋转，四圈归位
 
 func test_rotate_selection_in_model() -> void:
@@ -269,9 +250,7 @@ func test_rotate_selection_in_model() -> void:
 	assert_true(sess.rotate_selection(1, 3) > 0, "再转 270°")
 	assert_true(m.get_voxel(0, 1, 0) > 0, "转满 360° 回到原位")
 
-
-## ⑬ 盒 = 本地内容盒 × 世界摆放。尺寸**不含旋转**，旋转只由变换施加一次
-## （尺寸先转、盒再乘变换 ⇒ 转两遍：换轴又错位，见布局框与取景踩过的坑）。
+## ⑬ 盒 = 本地内容盒 × 世界摆放。
 
 func test_box_is_local_times_world_transform() -> void:
 	var w := QVoxelWorld.create_empty()
@@ -298,10 +277,9 @@ func test_box_is_local_times_world_transform() -> void:
 	var wb: AABB = w.world_transform(m) * QVoxelEvalEngine.local_box(m)
 	assert_true(wb.size.is_equal_approx(Vector3(5, 4, 3)), "世界盒换轴一次（转两遍会转回原尺寸）")
 
-
 # 夹具
 
-## 两个图层 + 两个单格模型 + 带位移的场景图。模型 size=1³ ⇒ 居中偏移为 0，摆放即帧位移。
+## 两个图层 + 两个单格模型 + 带位移的场景图。
 func _two_layer_asset(a_visible := true, b_visible := false) -> VoxAsset:
 	var vox := VoxAsset.new()
 	vox.materials.resize(256)
@@ -324,12 +302,7 @@ func _two_layer_asset(a_visible := true, b_visible := false) -> VoxAsset:
 	l1.isVisible = b_visible
 	vox.layers[1] = l1
 
-	# 场景图：node0 nTRN(根) → node1 nGRP → { node6 nGRP(layer0) → node2 nTRN → node3 nSHP(model0),
-	#                                            node4 nTRN(layer1) → node5 nSHP(model1) }
-	# 【为什么 layer0 外面还要套一层 nGRP】世界化把「一个变换节点 + 一个形状节点」折叠成单个模型
-	# （见 VoxAssetWorld._build_world_node 的折叠分支：MagicaVoxel 的对象本来就是 nTRN+nSHP，再包一层组
-	# 只会让每次往返多出一批空组）。所以要让「图层 ↔ 组」真的可测，夹具里必须存在一个**属于该图层的容器节点**；
-	# 否则该图层的对象会直接以一个模型的身份出现在世界顶层，压根没有组。
+	# 场景图：node0 nTRN(根) → node1 nGRP → { node6 nGRP(layer0) → node2 nTRN →…
 	vox.nodes[0] = _trn(0, 1, -1, Vector3.ZERO)
 	vox.nodes[1] = _grp(1, [6, 4])
 	var wrap := _grp(6, [2])
@@ -341,13 +314,11 @@ func _two_layer_asset(a_visible := true, b_visible := false) -> VoxAsset:
 	vox.nodes[5] = _shp(5, 1)
 	return vox
 
-
 func _one_voxel_model() -> VoxAsset.VoxelModel:
 	var m := VoxAsset.VoxelModel.new()
 	m.size = Vector3(1, 1, 1)
 	m.voxels[Vector3i(0, 0, 0)] = 1
 	return m
-
 
 func _trn(id: int, child: int, layer: int, pos: Vector3) -> VoxAsset.VoxelNode:
 	var n := VoxAsset.VoxelNode.new()
@@ -360,14 +331,12 @@ func _trn(id: int, child: int, layer: int, pos: Vector3) -> VoxAsset.VoxelNode:
 	n.frames[0] = f
 	return n
 
-
 func _grp(id: int, children: Array) -> VoxAsset.VoxelNode:
 	var n := VoxAsset.VoxelNode.new()
 	n.id = id
 	for c in children:
 		n.child_nodes.append(c)
 	return n
-
 
 func _shp(id: int, model_id: int) -> VoxAsset.VoxelNode:
 	var n := VoxAsset.VoxelNode.new()
@@ -376,7 +345,6 @@ func _shp(id: int, model_id: int) -> VoxAsset.VoxelNode:
 	f.model_id = model_id
 	n.frames[0] = f
 	return n
-
 
 func _list_vox(dir_path: String) -> Array:
 	var out: Array = []
@@ -392,4 +360,3 @@ func _list_vox(dir_path: String) -> Array:
 	dir.list_dir_end()
 	out.sort()
 	return out
-

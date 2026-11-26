@@ -72,7 +72,7 @@ var is_current: bool = false
 @export_range(0, 179, 0.5) var lens_fov: float = 0.0
 
 @export_group("目标与行为")
-## 行为的目标节点(直接拖节点即可)。固定取景的机位留空, 也无需挂行为
+## 行为的目标节点(直接拖节点即可)。
 @export var target: Node3D:
 	set(value):
 		target = value
@@ -101,7 +101,6 @@ var _round_robin: bool = false
 ## 行为共用的累积时间, 见 get_behavior_time()
 var _behavior_time: float = 0.0
 
-
 func _ready() -> void:
 	if active and not active_cameras.has(self):
 		active_cameras.append(self)
@@ -109,23 +108,19 @@ func _ready() -> void:
 	_refresh_process()
 	_notify_brain()
 
-
 func _exit_tree() -> void:
 	active_cameras.erase(self)
 	_mark_dirty()
 	_notify_brain()
 
-
 func _process(delta: float) -> void:
 	_update_pose(delta)
-
 
 # ── 对外 API ──
 
 ## 供场景信号直接绑定(如面板 on_opened → set_active(true))
 func set_active(value: bool) -> void:
 	active = value
-
 
 ## 激活本机位; blend_override >= 0 时覆盖本次过渡时长。
 func activate(blend_override: float = -1.0) -> void:
@@ -138,11 +133,9 @@ func activate(blend_override: float = -1.0) -> void:
 	_mark_dirty()
 	_notify_brain()
 
-
 ## 退出竞争, Brain 自动混合回上一个仍激活的机位
 func deactivate() -> void:
 	active = false
-
 
 ## 代码侧添加行为。
 func add_behavior(behavior: CameraBehaviorDef) -> void:
@@ -151,14 +144,12 @@ func add_behavior(behavior: CameraBehaviorDef) -> void:
 	behaviors.append(behavior)
 	_refresh_process()
 
-
 ## 移除一个行为
 func remove_behavior(behavior: CameraBehaviorDef) -> void:
 	if not behaviors.has(behavior):
 		return
 	behaviors.erase(behavior)
 	_refresh_process()
-
 
 ## 移除全部行为, 机位回到固定取景
 func clear_behaviors() -> void:
@@ -167,13 +158,11 @@ func clear_behaviors() -> void:
 	behaviors.clear()
 	_refresh_process()
 
-
-## 取本次过渡时长(< 0 表示交由 Brain 决定); 一次性覆盖值读取后失效。由 Brain 调用。
+## 取本次过渡时长(< 0 表示交由 Brain 决定); 一次性覆盖值读取后失效。
 func consume_blend_time() -> float:
 	var time := _blend_override if _blend_override >= 0.0 else blend_time
 	_blend_override = -1.0
 	return time
-
 
 ## 本机位的最终姿态: 基础姿态 + 各行为的叠加偏移(如手持抖动)。
 func get_pose() -> Transform3D:
@@ -183,22 +172,18 @@ func get_pose() -> Transform3D:
 			pose = behavior.apply_offset(self, pose)
 	return pose
 
-
-## 行为共用的累积时间(秒)。行为是可共享的配置资源, 不存运行时状态。
+## 行为共用的累积时间(秒)。
 func get_behavior_time() -> float:
 	return _behavior_time
-
 
 ## 立即按当前目标算一次姿态(忽略阻尼), 用于冷机位上台, 避免从旧姿态飘过来
 func snap_pose() -> void:
 	_update_pose(0.0, true)
 
-
 # ── 内部 ──
 
 static func _mark_dirty() -> void:
 	_current_dirty = true
-
 
 static func _recompute() -> void:
 	_current_dirty = false
@@ -214,7 +199,6 @@ static func _recompute() -> void:
 		active_cameras.erase(cam)
 	_current = best
 
-
 ## 需要持续更新的场合: 挂了有效行为(Inspector 里新加的空槽位不算)
 func _needs_pose_update() -> bool:
 	for behavior: CameraBehaviorDef in behaviors:
@@ -222,10 +206,8 @@ func _needs_pose_update() -> bool:
 			return true
 	return false
 
-
 func _refresh_process() -> void:
 	set_process(_needs_pose_update() and _should_update_now())
-
 
 func _should_update_now() -> bool:
 	if Engine.is_editor_hint():
@@ -237,13 +219,11 @@ func _should_update_now() -> bool:
 			return is_current
 	return is_current or _round_robin
 
-
 func _set_round_robin(value: bool) -> void:
 	if _round_robin == value:
 		return
 	_round_robin = value
 	_refresh_process()
-
 
 ## 依次执行行为来求解机位姿态(Brain 只读取结果)
 func _update_pose(delta: float, instant: bool = false) -> void:
@@ -251,7 +231,6 @@ func _update_pose(delta: float, instant: bool = false) -> void:
 	for behavior: CameraBehaviorDef in behaviors:
 		if behavior != null:
 			behavior.apply(self, delta, instant)
-
 
 ## 球面/柱面混合的枢纽点: 问各个行为谁在瞄准目标; 都不提供则返回 null
 func get_aim_point() -> Variant:
@@ -263,7 +242,6 @@ func get_aim_point() -> Variant:
 			return point
 	return null
 
-
 ## 由 Brain 调用: 标记生效状态并广播
 func _set_current(value: bool) -> void:
 	if is_current == value:
@@ -273,13 +251,11 @@ func _set_current(value: bool) -> void:
 	_refresh_process()
 	update_gizmos()
 
-
 ## 通知 Brain 重新挑选机位(下一帧生效)
 func _notify_brain() -> void:
 	var brain := CameraTool.get_brain()
 	if brain != null:
 		brain.refresh()
-
 
 func _align_to_editor_view() -> void:
 	if not Engine.is_editor_hint():

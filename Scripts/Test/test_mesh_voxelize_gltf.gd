@@ -1,16 +1,11 @@
 extends TestCase
 
 ## 外部模型体素化的**端到端**段：世界 → glTF → `MeshAccess` → 体素化 → 新世界，
-## 以及"模型自带动画 → 体素帧动画"。
-## 【为什么必须在游戏进程跑】`GLTFDocument.append_from_scene` 在编辑器进程下不导出网格
-## （见 test_qvoxelier_mesh_export.gd 的说明），而 QVoxelier 是当游戏跑的。
 
 const DIR := "user://mesh_voxelize_gltf"
 
-
 func needs_game_process() -> bool:
 	return true
-
 
 func cleanup() -> void:
 	for f in ["solid.glb", "anim.glb"]:
@@ -20,7 +15,6 @@ func cleanup() -> void:
 	var abs := ProjectSettings.globalize_path(DIR)
 	if DirAccess.dir_exists_absolute(abs):
 		DirAccess.remove_absolute(abs)
-
 
 ## 世界 → .glb → 读回 → 体素化：几何与颜色都要活着过一遍。
 func test_gltf_roundtrip_voxelizes() -> void:
@@ -42,7 +36,6 @@ func test_gltf_roundtrip_voxelizes() -> void:
 	assert_true(filled >= 120, "6³ 方块体素化后应基本实心（实得 %d）" % filled)
 	assert_true(out.materials.size() >= 2, "调色板应带出至少一种颜色")
 
-
 ## 自带动画的 glTF → 多帧体素动画（节点变换动画，与骨骼动画同一条采样链路）。
 func test_animated_gltf_becomes_voxel_frames() -> void:
 	DirAccess.make_dir_recursive_absolute(DIR)
@@ -62,7 +55,6 @@ func test_animated_gltf_becomes_voxel_frames() -> void:
 	assert_true(m.is_animated(), "应建成体素帧动画")
 	assert_eq(m.frame_count(), (scene["frames"] as Array).size(), "帧数与采样帧数一致")
 
-
 # 内部
 
 func _solid_world() -> QVoxelWorld:
@@ -73,7 +65,6 @@ func _solid_world() -> QVoxelWorld:
 	m.fill_box(Vector3i(1, 1, 1), Vector3i(6, 6, 6), red)
 	return w
 
-
 func _filled(m: QVoxelModel) -> int:
 	var data := m.read_box(Vector3i.ZERO, m.grid_size)
 	var n := 0
@@ -81,7 +72,6 @@ func _filled(m: QVoxelModel) -> int:
 		if v > 0:
 			n += 1
 	return n
-
 
 ## 造一个"立方体 + 位移动画"的场景并写成 .glb（游戏进程下 append_from_scene 才真的导出网格）。
 func _write_animated_gltf(path: String) -> Error:

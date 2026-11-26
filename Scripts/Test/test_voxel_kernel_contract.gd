@@ -1,22 +1,6 @@
 extends TestCase
 
 ## 编辑器侧测试：**内核对外契约**（P2-2）。
-## 【为什么要有这张网】P2-2 的约束是**接口形态**而非行为：
-##   "内核公开 API 只有『按 chunk 索引』与『脏区域事件』两种形状"——违反时没有任何运行期症状，
-##   只会让无限层慢慢挂不上去（"整块重算"式接口回归、相机 / LOD 概念重新泄漏进内核）。
-##   所以只能靠断言把它钉住：
-##     ① 公开方法清单 = 契约清单（多一个少一个都失败）；
-##     ② 脏区域粒度：单点编辑产生的脏 chunk 数必须是 1（内部点）或 4（chunk 角点），
-##        **永不**是"全部 chunk"——这是"按 chunk 索引"的可观测反证。
-## 【与文档的对应】期望表与 `VoxelRenderer.gd` 顶部"内核对外契约（P2-2）"清单一一对应。
-##   增删任何公开方法都必须同时改文档与本表——这正是本测试存在的意义。
-## 【P2-4 部分】同文件还钉住**编辑内核** `VoxelEditKernel` 的"无节点"性质：
-##   它不是 Node、不实现任何帧回调、公开方法清单固定，且**能在完全没有节点的前提下**
-##   算完伤害 / 应力 / 失稳——这是"建模画笔 / 服务端不需要挂 VoxelDestructible"的可观测证据。
-## 【P2-7 部分】以及编辑路径的**增量性**：单点编辑只脏 1 个 chunk、脏账读取即消费、
-##   体素计数与全量重数恒等、变空的 chunk 被 O(1) 擦除但留下 mesh 脏标记。
-##   这些是"有限内核不会每次落笔全量重算"的可观测证据（256³ 每笔 1670 万格是致命的）。
-
 
 ## 内核公开方法契约（分组与 VoxelRenderer.gd 顶部清单一致）。
 const KERNEL_PUBLIC_API: Array[String] = [
@@ -37,11 +21,7 @@ const KERNEL_PUBLIC_API: Array[String] = [
 	# F. 粒子渲染（机制，不含效果）
 	"rebuild_particles", "particle_voxel_size",
 	# G. 视点层装配
-	#   【为什么 var 不进契约】`view_layer` 是普通属性：get_script_method_list() 里它的
-	#   读写器是 `@view_layer` 前缀（已被过滤），故不在此表。装配面（`view_layer` 可空引用
-	#   + `VoxelViewLayer.attach`）由 test_voxel_view_layer.gd 覆盖，本表只钉方法名。
 ]
-
 
 func test_kernel_public_api_matches_contract() -> void:
 	var script: Script = load("res://addons/VoxelSupport/Runtime/VoxelRenderer.gd")
@@ -66,7 +46,6 @@ func test_kernel_public_api_matches_contract() -> void:
 		"内核多出未列入契约的公开方法（视点概念泄漏？）: %s —— 要么改私有，要么补进契约文档与本表" % str(extra))
 	assert_true(missing.is_empty(), "契约声明但内核缺失的公开方法: %s" % str(missing))
 
-
 func test_dirty_regions_are_per_chunk_not_whole_world() -> void:
 	# 内部点：恰好脏 1 个 chunk
 	var d := _make_data()
@@ -85,7 +64,6 @@ func test_dirty_regions_are_per_chunk_not_whole_world() -> void:
 	for ck: Vector3i in [Vector3i(1, 1, 1), Vector3i(0, 1, 1), Vector3i(1, 0, 1), Vector3i(1, 1, 0)]:
 		assert_true(corner.has(ck), "角点编辑应脏相邻 chunk %s" % str(ck))
 
-
 func test_kernel_chunk_index_queries_are_scoped() -> void:
 	var r := VoxelRenderer.new()
 	r.voxel_scale = 0.1
@@ -102,10 +80,9 @@ func test_kernel_chunk_index_queries_are_scoped() -> void:
 	assert_false(r.has_chunk_mesh(Vector3i(9, 9, 9)), "按 chunk 删除不得影响其他 chunk")
 	r.free()
 
-
 # P2-4：编辑内核 VoxelEditKernel —— 无节点 / 无 _process / 可无头调用
 
-## 编辑内核公开方法契约（P2-4）。分组与 `VoxelEditKernel.gd` 顶部说明一致。
+## 编辑内核公开方法契约（P2-4）。
 const EDIT_KERNEL_PUBLIC_API: Array[String] = [
 	"apply_damage",      # 伤害结算（范围 → 材质 → 硬度 → 累伤 / 判移除）
 	"propagate_stress",  # 应力传播（裂纹扩散）
@@ -113,7 +90,6 @@ const EDIT_KERNEL_PUBLIC_API: Array[String] = [
 	"hardness_table",    # 材质硬度查表（供外部自组调用）
 	"strength_table",    # 材质连接强度查表（同上）
 ]
-
 
 ## 编辑内核的"无节点"性质：不是 Node、不实现任何帧回调、公开面固定。
 func test_edit_kernel_is_headless_node_free() -> void:
@@ -148,7 +124,6 @@ func test_edit_kernel_is_headless_node_free() -> void:
 	assert_true(extra.is_empty(), "编辑内核多出未列入契约的公开方法: %s" % str(extra))
 	assert_true(missing.is_empty(), "契约声明但编辑内核缺失的公开方法: %s" % str(missing))
 
-
 ## 无头破坏：全程只有 QVoxelSource + 内核实例，没有任何节点 / 场景树 / 物理 / 粒子。
 func test_edit_kernel_resolves_damage_with_no_node() -> void:
 	var d := _make_solid(8)
@@ -167,7 +142,6 @@ func test_edit_kernel_resolves_damage_with_no_node() -> void:
 	assert_eq(d.get_voxel_count(), before - removed.size(), "调用方移除后体素数应下降")
 	k = null
 
-
 ## 无头应力传播 + 失稳检测。
 func test_edit_kernel_stress_and_unstable_headless() -> void:
 	var d := _make_solid(8)
@@ -185,7 +159,6 @@ func test_edit_kernel_stress_and_unstable_headless() -> void:
 	# 局部检测：只围绕破坏点附近，不碰远处的悬空块
 	var local := k.find_unstable(d, true, [Vector3i(3, 3, 3)])
 	assert_false(local.has(Vector3i(100, 100, 100)), "局部检测不应扫到远处的悬空块")
-
 
 ## 节点与内核**共用同一份数学**：不存在第二套 GDScript 伤害实现。
 func test_destructible_delegates_edit_math_to_kernel() -> void:
@@ -223,15 +196,9 @@ func test_destructible_delegates_edit_math_to_kernel() -> void:
 	node.free()
 	host.free()
 
-
 # P2-7：编辑路径必须是**脏区域增量**（内核唯一真正的性能风险）
 
 ## 有限内核里"每次落笔全量重算"是致命的（256³ 每笔 1670 万格）。
-## 这里把"增量"这件事钉成可观测断言：
-##   ① 单点编辑只脏 1 个 chunk（重建粒度 = 脏区域，不是全量）；
-##   ② 脏账是"读取即消费"（渲染器每帧 take 一次，不会重复重建）；
-##   ③ 体素计数是**增量维护**的，且与全量重数恒等（不存在第二份可漂移的存储）；
-##   ④ 归零的 chunk 被 O(1) 擦除，但**必须留下 mesh 脏标记**（否则旧网格不会被清掉）。
 func test_edit_path_is_dirty_region_incremental() -> void:
 	var d := _make_solid(8)
 	var full := d.get_voxel_count()
@@ -252,7 +219,6 @@ func test_edit_path_is_dirty_region_incremental() -> void:
 	assert_eq(d.get_voxel_count(), _recount(d), "增量计数必须等于全量重数（否则存在第二份可漂移的存储）")
 	assert_eq(d.is_empty(), false, "还有 511 个体素，不该为空")
 
-
 ## ④ 最后一个体素被移除：chunk 被 O(1) 擦除，但 mesh 脏标记必须留下。
 func test_empty_chunk_erased_but_mesh_still_marked_dirty() -> void:
 	var d := _make_solid(8)
@@ -271,15 +237,7 @@ func test_empty_chunk_erased_but_mesh_still_marked_dirty() -> void:
 	assert_true(d.get_dirty_chunks().has(Vector3i(0, 0, 0)),
 		"变空的 chunk 必须留下 mesh 脏标记，否则渲染器不会重建来清掉旧网格")
 
-
 # P4-4：数据层 QVoxelSource 的 API 稳定等级（公开 / 实验 / 内部）
-# 【为什么要有这张网】GDScript 没有访问修饰符，"内部协议"只能靠 `_` 前缀表达。
-#   收口前 get_chunk_buffers / accept_chunk_buffer / snapshot_* 等是**不带 `_` 的公开方法**，
-#   内核外调用者于是能拿到整张 chunk 缓冲表就地改写、或自行拼 poll+accept 半截协议——
-#   这类"绕过封装"没有运行期症状，只会让存储的不变式（体素计数账 / 脏标记 / 快照保护）静默失效。
-#   故把它们钉成断言：① 数据层**不带 `_` 的公开方法 = 【公开】∪【实验】**（多一个少一个都失败）；
-#   ② 内部协议**只以 `_` 前缀存在**，旧公开名一律不得复活。
-# 【与文档的对应】两张分级表与 QVoxelSource.gd 顶部"API 稳定等级（P4-4）"清单一一对应。
 
 ## 数据层【公开】稳定 API —— 承诺向后兼容，破坏性改动须走弃用期。
 const VOXEL_DATA_PUBLIC_API: Array[String] = [
@@ -298,7 +256,6 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"save_data", "load_data", "flush",
 	"from_voxel_data", "from_qvx", "from_eval_result",
 	# 连通塌落：flood_fill / find_unsupported* 是把「存储内部表示 + 实体素判据」绑在一起的
-	# 适配器（内核外组件不该自己摸 _chunk_buffers），故留在数据层；分工在 VoxelConnectivity。
 	"flood_fill",
 	"find_unsupported", "find_unsupported_around",
 	# 数据源
@@ -314,7 +271,6 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	"collect_materials_at",
 ]
 
-
 ## 数据层【实验】API —— 可用但形态可能变（收口期仍在动；用前请确认版本）。
 const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	# 两级存储查询
@@ -322,8 +278,7 @@ const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	"can_supply_chunk", "get_vertical_half_span",
 	"get_unloaded_chunk_keys", "get_unloaded_chunk_count", "get_all_chunk_keys",
 	"get_loaded_chunk_keys", "preload_chunk", "unload_chunk",
-	# O(1) 块总数（内存块 + 流中未加载块）。替代 get_all_chunk_keys().size() 那种全表合并去重，
-	# 供渲染器 / HUD 当诊断数字每帧读；诊断用途、口径可能随存储层调整，故归【实验】。
+	# O(1) 块总数（内存块 + 流中未加载块）。
 	"chunk_count",
 	# 异步取数
 	"request_chunk_async", "cancel_chunk_request", "poll_all_ready",
@@ -345,17 +300,13 @@ const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	"get_damage", "clear_damage", "clear_damage_bulk", "clear_all_damage",
 ]
 
-
-## 数据层【内部】协议（`_` 前缀，内核外不可见）。它们曾是公开 API，内核外调用者
-## 能借此绕过封装直改存储 / 拼半截异步协议——P4-4 降为内部，并补了两个封装入口
-## （patch_lod_block / apply_ready_results）。
+## 数据层【内部】协议（`_` 前缀，内核外不可见）。
 const VOXEL_DATA_INTERNAL_PROTOCOLS: Array[String] = [
 	"_chunk_buffers_view", "_lod_buffers_view", "_damage_buffers_view", "_set_damage_buffers",
 	"_accept_chunk_buffer", "_chunk_halo", "_snapshot_chunks_halo",
 	"_snapshot_lod_block_chunks", "_snapshot_lod_block_chunks_readonly",
 	"_snapshot_lod_block_data", "_can_mesh_lod_block_standalone",
 ]
-
 
 func test_data_layer_api_tiers_match_contract() -> void:
 	var script: Script = load("res://addons/VoxelSupport/Data/QVoxelSource.gd")
@@ -383,7 +334,6 @@ func test_data_layer_api_tiers_match_contract() -> void:
 		"数据层多出未分级的公开方法: %s —— 要么标进【公开/实验】表，要么降为 `_` 内部协议" % str(extra))
 	assert_true(missing.is_empty(), "契约声明但数据层缺失的公开方法: %s" % str(missing))
 
-
 func test_data_internal_protocols_are_underscored() -> void:
 	var script: Script = load("res://addons/VoxelSupport/Data/QVoxelSource.gd")
 	var names: Array[String] = []
@@ -394,18 +344,12 @@ func test_data_internal_protocols_are_underscored() -> void:
 		assert_true(names.has(n), "内部协议 %s 应存在" % n)
 		assert_true(n.begins_with("_"), "内部协议必须以 `_` 前缀（内核外不可见）: %s" % n)
 	# ② 它们绝不能再以"公开"旧名出现（P4-4 前的名字）
-	# 【例外：三个粗层快照方法】`VoxelViewLayer` 是内核外的独立组件，它要在主线程造粗层
-	# 快照再交 worker 只读 —— 这件事只能由数据层内部做（要摸 `_chunk_buffers`/`_coarse_buffers`）。
-	# 为了不逼组件去读私有成员，数据层开了**同义公开薄壳**（`read_lod_block_*_snapshot` /
-	# `can_mesh_lod_block_standalone`），原 `_` 版本保留给内部与测试 oracle。
-	# 故这三个名字允许以**新语义的公开方法**存在，但必须是薄壳转发而非第二份实现。
 	for legacy in ["get_chunk_buffers", "get_lod_buffers", "get_damage_buffers",
 			"set_damage_buffers", "accept_chunk_buffer", "snapshot_chunks_halo",
 			"snapshot_lod_block_chunks", "snapshot_lod_block_chunks_readonly",
 			"snapshot_lod_block_data", "get_chunk_halo"]:
 		assert_false(names.has(legacy),
 			"内部协议旧名 %s 不得再作为公开方法存在（应已降为 `_` 前缀）" % legacy)
-
 
 ## 全量重数（独立于增量账本）：用于交叉验证计数账本没有漂移。
 func _recount(d: QVoxelSource) -> int:
@@ -416,7 +360,6 @@ func _recount(d: QVoxelSource) -> int:
 		total += buf.size() - buf.count(0)
 	return total
 
-
 func _make_data() -> QVoxelSource:
 	var d := QVoxelSource.new()
 	var mat := VoxelMaterial.new()
@@ -424,9 +367,7 @@ func _make_data() -> QVoxelSource:
 	d.materials = [mat]
 	return d
 
-
-## edge³ 实心块（材质 ID=1，硬度 1.0，连接强度 9999）。索引 0 留空占位以覆盖
-## 材质表含 null 的路径（hardness_table / strength_table 必须跳过空条目）。
+## edge³ 实心块（材质 ID=1，硬度 1.0，连接强度 9999）。
 func _make_solid(edge: int) -> QVoxelSource:
 	var d := QVoxelSource.new()
 	var mats: Array[VoxelMaterial] = []

@@ -2,11 +2,6 @@
 class_name QVoxelierTimeline
 extends QVoxelierPanel
 ## 底部统一时间轴：体素帧条 / 播放时钟 / 循环 / 逐帧时长 / 帧率 / 标签。
-## 【为什么播放时钟在这里，而不是再养一个隐藏面板】底部帧条就是时间轴本身；
-## 播放、时长、帧率、标签都围绕同一条帧轴，放在一起后不再需要"隐藏的 时间轴面板
-## 只当内核"这种间接结构。
-## 【本面板只报意图，不写数据】帧的增/删/重排/时长/标签全部由 App 包进
-## QVoxelPropertyCommand；这里只发信号，撤销语义仍只有 App 一处知识。
 
 signal frame_selected(index: int)
 signal append_frame_requested()
@@ -71,7 +66,6 @@ var _pending_ms := 0
 var _clock_sig := ""
 var _timer: Timer
 
-
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
 	offset_bottom = -QVoxelUi.status_height()
@@ -128,32 +122,26 @@ func _build() -> void:
 	_build_settings()
 	_bind_ui()
 
-
-## 绑定当前模型。帧数变了才重建标尺；播放中不重置播放状态。
+## 绑定当前模型。
 func bind(model: QVoxelModel) -> void:
 	_model = model
 	_configure_clock()
 	_sync()
-
 
 func set_playing(on: bool) -> void:
 	if _play != null and _play.button_pressed != on:
 		_play.set_pressed_no_signal(on)
 		_play.text = "⏸" if on else "▶"
 
-
 func play(on: bool) -> void:
 	_on_play_toggled(on)
 	set_playing(on)
 
-
 func stop_playback() -> void:
 	_stop()
 
-
 func is_playing() -> bool:
 	return _clock.is_playing()
-
 
 # 构建：设置弹窗
 
@@ -216,7 +204,6 @@ func _build_settings() -> void:
 	_build_tag_editor()
 	_build_tag_color_popup()
 
-
 func _build_tag_color_popup() -> void:
 	_tag_color_popup = PopupPanel.new()
 	_tag_color_popup.theme = QVoxelUi.theme()
@@ -244,7 +231,6 @@ func _build_tag_color_popup() -> void:
 	var ok := QVoxelUi.button("确定")
 	ok.pressed.connect(_on_tag_color_ok)
 	buttons.add_child(ok)
-
 
 func _build_tag_editor() -> void:
 	_tag_editor = PopupPanel.new()
@@ -307,7 +293,6 @@ func _build_tag_editor() -> void:
 	ok.pressed.connect(_on_tag_editor_ok)
 	buttons.add_child(ok)
 
-
 func _spin(lo: int, hi: int) -> SpinBox:
 	var s := SpinBox.new()
 	s.min_value = lo
@@ -316,12 +301,10 @@ func _spin(lo: int, hi: int) -> SpinBox:
 	s.value = lo
 	return s
 
-
 func _open_settings() -> void:
 	if _settings == null:
 		return
 	_settings.popup_centered(Vector2i(380, 0))
-
 
 # 同步
 
@@ -338,7 +321,6 @@ func _bind_ui() -> void:
 	_loop.set_pressed_no_signal(m != null and m.anim_loop)
 	_ruler.custom_minimum_size.x = float((maxi(n, 1) + 1) * CELL_W)
 	_ruler.queue_redraw()
-
 
 func _sync() -> void:
 	_syncing = true
@@ -360,7 +342,6 @@ func _sync() -> void:
 	_sync_tags(animated)
 	_bind_ui()
 	_syncing = false
-
 
 func _sync_tags(animated: bool) -> void:
 	if _tag_pick == null:
@@ -398,12 +379,10 @@ func _sync_tags(animated: bool) -> void:
 	_tag_edit.disabled = want <= 0
 	_tag_remove.disabled = want <= 0
 
-
 func _active_index() -> int:
 	if _model == null:
 		return 0
 	return clampi(_model.active_frame, 0, maxi(_model.frame_count() - 1, 0))
-
 
 func _frame_has(f: int) -> bool:
 	if _model == null:
@@ -413,13 +392,11 @@ func _frame_has(f: int) -> bool:
 	var fr := _model.frame_at(f)
 	return fr != null and not fr.is_empty()
 
-
 func _value_label() -> Label:
 	var l := QVoxelUi.label("", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	l.custom_minimum_size = Vector2(58, 0)
 	return l
-
 
 # 时长 / 帧率 / 标签
 
@@ -427,7 +404,6 @@ func _duration_text() -> String:
 	if _model == null or _model.frame_count() == 0:
 		return "—"
 	return "跟随帧率" if int(_duration.value) <= 0 else "%d ms" % int(_duration.value)
-
 
 func _on_duration_changed() -> void:
 	_duration_label.text = _duration_text()
@@ -440,13 +416,11 @@ func _on_duration_changed() -> void:
 	duration_changed.emit(_active_index(), int(_duration.value))
 	duration_edit_ended.emit(_active_index())
 
-
 func _on_duration_drag_started() -> void:
 	if _editing_duration or _syncing or _model == null or not _model.is_animated():
 		return
 	_editing_duration = true
 	duration_edit_began.emit(_active_index())
-
 
 func _on_duration_drag_ended() -> void:
 	if not _editing_duration:
@@ -455,14 +429,12 @@ func _on_duration_drag_ended() -> void:
 	duration_changed.emit(_active_index(), int(_duration.value))
 	duration_edit_ended.emit(_active_index())
 
-
 func _on_fps_changed() -> void:
 	_fps_label.text = "%d fps" % int(_fps.value)
 	if _syncing or _model == null or not _model.is_animated():
 		return
 	fps_changed.emit(int(_fps.value))
 	_frame_label.text = str(_active_index())
-
 
 func _on_tag_pick(index: int) -> void:
 	if _syncing or _model == null or not _model.is_animated():
@@ -476,7 +448,6 @@ func _on_tag_pick(index: int) -> void:
 	var t: Variant = tags[index - 1]
 	if t is Dictionary:
 		_preview_tag(String(t.get("name", "")))
-
 
 ## 直接预览一个标签（空名 = 整段）：跳到起点并开始播放该区间。
 func _preview_tag(tag_name: String) -> void:
@@ -502,7 +473,6 @@ func _preview_tag(tag_name: String) -> void:
 	else:
 		set_playing(false)
 
-
 func _on_tag_add() -> void:
 	if _model == null or not _model.is_animated():
 		return
@@ -518,10 +488,8 @@ func _on_tag_add() -> void:
 	_te_color.color = tag_color({})
 	_tag_editor.popup_centered(Vector2i(360, 0))
 
-
 func _on_tag_edit() -> void:
 	_open_tag_editor(_selected_tag_index())
-
 
 func _open_tag_editor(idx: int) -> void:
 	if _model == null or not _model.is_animated():
@@ -542,10 +510,8 @@ func _open_tag_editor(idx: int) -> void:
 	_te_color.color = tag_color(t)
 	_tag_editor.popup_centered(Vector2i(360, 0))
 
-
 func _on_tag_remove() -> void:
 	_remove_tag_at(_selected_tag_index())
-
 
 func _remove_tag_at(idx: int) -> void:
 	if _model == null or not _model.is_animated():
@@ -555,7 +521,6 @@ func _remove_tag_at(idx: int) -> void:
 	var tags: Array = _model.anim_tags.duplicate(true)
 	tags.remove_at(idx)
 	tags_changed.emit(tags)
-
 
 func _tag_context(idx: int, at: Vector2) -> void:
 	if _model == null or not _model.is_animated():
@@ -574,7 +539,6 @@ func _tag_context(idx: int, at: Vector2) -> void:
 	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(at), Vector2i.ZERO))
 
-
 func _on_tag_menu(id: int) -> void:
 	var idx := _tag_context_index
 	match id:
@@ -588,7 +552,6 @@ func _on_tag_menu(id: int) -> void:
 		3:
 			_remove_tag_at(idx)
 
-
 func _open_tag_color(idx: int) -> void:
 	if _model == null or not _model.is_animated():
 		return
@@ -597,7 +560,6 @@ func _open_tag_color(idx: int) -> void:
 	_tag_color_index = idx
 	_tag_color_picker.color = tag_color(_model.anim_tags[idx])
 	_tag_color_popup.popup_centered(Vector2i(330, 430))
-
 
 func _on_tag_color_ok() -> void:
 	if _model == null or _tag_color_index < 0 or _tag_color_index >= _model.anim_tags.size():
@@ -609,7 +571,6 @@ func _on_tag_color_ok() -> void:
 	_tag_color_popup.hide()
 	_tag_sig = ""
 	tags_changed.emit(tags)
-
 
 func _on_tag_editor_ok() -> void:
 	if _model == null or not _model.is_animated():
@@ -644,12 +605,10 @@ func _on_tag_editor_ok() -> void:
 	_tag_sig = ""
 	tags_changed.emit(tags)
 
-
 func _selected_tag_index() -> int:
 	if _tag_pick == null or _tag_pick.selected <= 0:
 		return -1
 	return _tag_pick.selected - 1
-
 
 func _unique_tag_name(base: String) -> String:
 	if _model == null:
@@ -665,7 +624,6 @@ func _unique_tag_name(base: String) -> String:
 		i += 1
 	return "%s %d" % [base, i]
 
-
 static func tag_color(t: Dictionary, fallback := QVoxelUi.ACCENT) -> Color:
 	var c: Variant = t.get("color", "")
 	if c is String and not (c as String).is_empty():
@@ -673,7 +631,6 @@ static func tag_color(t: Dictionary, fallback := QVoxelUi.ACCENT) -> Color:
 	if c is Color:
 		return c
 	return fallback
-
 
 ## 只包含影响播放的字段（颜色变化不该让正在播的时钟重置）。
 static func tags_playback_signature(tags: Array) -> String:
@@ -690,7 +647,6 @@ static func tags_playback_signature(tags: Array) -> String:
 		])
 	return "|".join(parts)
 
-
 # 播放
 
 func _on_play_toggled(on: bool) -> void:
@@ -698,7 +654,6 @@ func _on_play_toggled(on: bool) -> void:
 		_start_playback()
 	else:
 		_stop()
-
 
 func _start_playback() -> void:
 	if _model == null or not _model.is_animated():
@@ -713,20 +668,17 @@ func _start_playback() -> void:
 	_play.text = "⏸"
 	_schedule()
 
-
 func _schedule() -> void:
 	if not _clock.is_playing():
 		return
 	_pending_ms = _clock.delay_ms()
 	_timer.start(maxf(0.02, float(_pending_ms) / 1000.0))
 
-
 func _stop() -> void:
 	_clock.stop()
 	_pending_ms = 0
 	_timer.stop()
 	set_playing(false)
-
 
 func _on_play_tick() -> void:
 	if _model == null or not _model.is_animated():
@@ -738,7 +690,6 @@ func _on_play_tick() -> void:
 		set_playing(false)
 		return
 	_schedule()
-
 
 func _configure_clock() -> void:
 	var n := 0 if _model == null else _model.frame_count()
@@ -757,7 +708,6 @@ func _configure_clock() -> void:
 	_clock_sig = sig
 	_clock.configure(durations, fps, loop, tags)
 
-
 # 帧菜单
 
 func _frame_context(index: int, at: Vector2) -> void:
@@ -771,7 +721,6 @@ func _frame_context(index: int, at: Vector2) -> void:
 	menu.popup_hide.connect(func() -> void: menu.queue_free())
 	menu.popup(Rect2i(Vector2i(at), Vector2i.ZERO))
 
-
 func _on_frame_menu(id: int) -> void:
 	match id:
 		0:
@@ -781,14 +730,12 @@ func _on_frame_menu(id: int) -> void:
 		2:
 			remove_frame_requested.emit()
 
-
 # 标签条拖拽（Aseprite 式：拖左右边改范围，拖中间整体平移）
 
 func _display_tags() -> Array:
 	if _drag_tag_index >= 0 and not _drag_tags.is_empty():
 		return _drag_tags
 	return [] if _model == null else _model.anim_tags
-
 
 func _tag_at(pos: Vector2) -> int:
 	if _model == null or not _model.is_animated() or pos.y > TAG_HIT:
@@ -803,7 +750,6 @@ func _tag_at(pos: Vector2) -> int:
 		if pos.x >= x0 and pos.x <= x1:
 			return i
 	return -1
-
 
 func _tag_edge_mode(index: int, pos: Vector2) -> String:
 	var tags: Array = _display_tags()
@@ -820,7 +766,6 @@ func _tag_edge_mode(index: int, pos: Vector2) -> String:
 		return "to"
 	return "move"
 
-
 func _tag_drag_begin(index: int, mode: String, frame: int) -> void:
 	if _model == null or not _model.is_animated():
 		return
@@ -835,7 +780,6 @@ func _tag_drag_begin(index: int, mode: String, frame: int) -> void:
 	_drag_tag_offset = frame - int(t.get("from", 0))
 	_drag_tag_moved = false
 	_ruler.queue_redraw()
-
 
 func _tag_drag_update(frame: int) -> void:
 	if _model == null or _drag_tag_index < 0 or _drag_tag_index >= _drag_tags.size():
@@ -859,13 +803,11 @@ func _tag_drag_update(frame: int) -> void:
 	_drag_tag_moved = true
 	_ruler.queue_redraw()
 
-
 func _tag_drag_name() -> String:
 	if _drag_tag_index < 0 or _drag_tag_index >= _drag_tags.size():
 		return ""
 	var t: Variant = _drag_tags[_drag_tag_index]
 	return String(t.get("name", "")) if t is Dictionary else ""
-
 
 func _tag_drag_end() -> void:
 	if _drag_tag_index < 0:
@@ -881,8 +823,7 @@ func _tag_drag_end() -> void:
 		_tag_sig = ""
 		tags_changed.emit(tags)
 
-
-## 帧标尺：tag 条 + 帧格 + 末尾＋格。点切帧 / 拖重排 / 右键增删 / 点＋新建。
+## 帧标尺：tag 条 + 帧格 + 末尾＋格。
 class _Ruler extends Control:
 	var timeline: QVoxelierTimeline
 	var _press := -1

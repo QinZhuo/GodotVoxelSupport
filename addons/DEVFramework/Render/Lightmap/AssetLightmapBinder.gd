@@ -1,7 +1,4 @@
 ## 把一份 [AssetLightmapRegion] 绑到 MeshInstance3D 的材质上。
-## 唯一的做法：把实例实际用到的每个 surface 材质复制一份，在副本上挂一层 next_pass
-## 也不要求业务 shader 认识烘焙光——**这是唯一通用、且运行时换材质也安全的供光方式**。
-## 手动 `instance_geometry_set_lightmap` 实测在本引擎版本上无效（绑上去全黑）。
 @tool
 class_name AssetLightmapBinder
 
@@ -11,10 +8,9 @@ const SHADER := preload("res://addons/DEVFramework/Render/Lightmap/AssetLightmap
 static var strength := 1.0
 
 ## 主材质「已经算过的那份环境光」的等效辐照度：加色层减掉它，才等价于引擎的「替换」语义。
-## 算两遍，实测偏亮 1.36 倍。减去标定值后为 1.00 倍，单模型最大偏差 7%。
 static var ambient_ref := 0.055
 
-## 宿主材质上记着它复制自哪份基材质。重复 apply 时靠它找回原材质。
+## 宿主材质上记着它复制自哪份基材质。
 const BASE_META := &"asset_lightmap_base"
 
 ## 「光照 + 基材质」→ 复制出来的宿主材质（宿主 next_pass → 偏移层）
@@ -29,7 +25,7 @@ static var _bakeable: Dictionary = {}
 ## 缺材质的告警只打一次，别在借还热路径里刷屏
 static var _warned_no_material := false
 
-## 挂光。重复调用只更新参数，不会叠出第二层。
+## 挂光。
 static func apply(mi: MeshInstance3D, light: AssetLightmapRegion, atlas: TextureLayered) -> bool:
 	if mi == null or not is_instance_valid(mi) or light == null or not light.has_area():
 		return false
@@ -100,7 +96,7 @@ static func _surface_bakeable(mesh: Mesh, i: int) -> bool:
 	var arrays := mesh.surface_get_arrays(i)
 	return arrays.size() > Mesh.ARRAY_TEX_UV2 and arrays[Mesh.ARRAY_TEX_UV2] != null
 
-## 基材质 → 挂了 next_pass 的副本。同一份基材质 + 同一份光照只复制一次。
+## 基材质 → 挂了 next_pass 的副本。
 static func _shared(base: Material, light: AssetLightmapRegion, atlas: TextureLayered) -> Material:
 	## 传进来的可能已经是上次挂好的宿主，先还原成它复制自的那份
 	if base.has_meta(BASE_META):
@@ -151,7 +147,6 @@ static func untrack(mi: MeshInstance3D) -> void:
 		_live.erase(mi.get_instance_id())
 
 ## 让所有在树上的实例按当前 [member AssetLightmapSet.current] 重挂一遍：
-## 换库 / 全局开关都要它，否则先入树的实例会一直停在旧状态
 static func refresh_all() -> void:
 	for id in _live.keys():
 		var mi := _live[id].get_ref() as MeshInstance3D
@@ -161,7 +156,6 @@ static func refresh_all() -> void:
 			mi.call(&"apply_lightmap")
 
 ## 摘掉挂上去的光，还原成基材质本身。
-## 那边没有烘焙图，得把它擦干净，否则会顶着上一个场景的光出现
 static func clear(mi: MeshInstance3D) -> void:
 	if mi == null or not is_instance_valid(mi) or mi.mesh == null:
 		return
@@ -193,8 +187,7 @@ static func _pass(base: Material, light: AssetLightmapRegion, atlas: TextureLaye
 	mat.set_shader_parameter(&"albedo_tint", pbr["albedo_tint"])
 	return mat
 
-## 取基材质的色面。标准材质直接读属性；ShaderMaterial 按约定的同名 uniform 找，
-## 找不到就用白 —— 此时这层光会偏亮，是「能挂任意材质」必须付的代价
+## 取基材质的色面。
 static func _pbr_of(base: Material) -> Dictionary:
 	var out := {"albedo_tex": null, "albedo_tint": Color.WHITE}
 	var std := base as StandardMaterial3D

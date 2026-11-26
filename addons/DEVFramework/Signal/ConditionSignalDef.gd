@@ -1,8 +1,6 @@
 @tool
 ## 带条件的信号定义
-## 不要改此通用类的判定语义(它被计数任务等按"连接上下文"语义复用)。
 class_name ConditionSignalDef extends SignalDef
-
 
 ## 被包装的信号定义
 @export var signal_def: SignalDef

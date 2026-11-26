@@ -2,18 +2,13 @@
 class_name QVoxelierObjectSection
 extends QVoxelierSection
 ## 右侧抽屉·**对象属性**分组：显示当前在层级里选中的那个节点的数据。
-## 【为什么要有它】层级树（Outliner）负责"选谁"，本组负责"它是什么"—— 与 Blender 的
-## Outliner + Properties 分工一致。选中模型看尺寸 / 体素数，选中组看子模型数；改名与
-## 可见 / 锁定也在这里再给一份入口（树上也有，但属性区里能一眼看到当前对象全貌）。
-## 【只读信息 + 轻量编辑】尺寸 / 体素数这类是**求值产物**，这里只读展示；改名是低频结构改动，
-## 走与树同一条 rename 信号、由 App 记成命令。
 
 signal rename_requested(node: QVoxelNode, new_name: String)
 signal visible_changed(node: QVoxelNode, value: bool)
 signal locked_changed(node: QVoxelNode, value: bool)
 signal offset_changed(node: QVoxelNode, value: Vector3i)
 signal resize_requested(node: QVoxelNode, value: Vector3i)
-## 世界级旋转：三个轴的欧拉角（度）。轴对齐时为 90 的倍数。
+## 世界级旋转：三个轴的欧拉角（度）。
 signal rotation_changed(node: QVoxelNode, degrees: Vector3)
 
 var _node: QVoxelNode
@@ -25,10 +20,8 @@ var _size_spins: Array[SpinBox] = []
 var _rot_spins: Array[SpinBox] = []
 var _info: VBoxContainer
 
-
 func section_title() -> String:
 	return "对象"
-
 
 func _build_body(body: VBoxContainer) -> void:
 	var head := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
@@ -58,7 +51,7 @@ func _build_body(body: VBoxContainer) -> void:
 		if _node != null: locked_changed.emit(_node, on))
 	toggles.add_child(_lock)
 
-	# 位置：节点在父画布里的偏移（去链后摆放回到节点本身）。三个轴各自可调。
+	# 位置：节点在父画布里的偏移（去链后摆放回到节点本身）。
 	var posrow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	body.add_child(posrow)
 	var plabel := QVoxelUi.label("位置", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
@@ -75,7 +68,7 @@ func _build_body(body: VBoxContainer) -> void:
 		posrow.add_child(sp)
 		_offset_spins.append(sp)
 
-	# 旋转：**世界级**的节点欧拉角（度）。轴对齐吸附到 90° 倍数；显示具体数值而非只有按钮。
+	# 旋转：**世界级**的节点欧拉角（度）。
 	var rotrow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	body.add_child(rotrow)
 	var rlabel := QVoxelUi.label("旋转", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
@@ -93,8 +86,7 @@ func _build_body(body: VBoxContainer) -> void:
 		rotrow.add_child(sp)
 		_rot_spins.append(sp)
 
-	# 尺寸：每个模型**独立**的分辨率（体素数上限）。改它是结构级操作（会丢盒外的体素），
-	# 由 App 包成一条可撤销命令（QVoxelResizeCommand），这里只上报新值。
+	# 尺寸：每个模型**独立**的分辨率（体素数上限）。
 	var sizerow := QVoxelUi.hbox(QVoxelUi.SPACE_XS)
 	body.add_child(sizerow)
 	var slabel := QVoxelUi.label("尺寸", QVoxelUi.FONT_S, QVoxelUi.TEXT_DIM)
@@ -115,14 +107,12 @@ func _build_body(body: VBoxContainer) -> void:
 	body.add_child(_info)
 	_rebuild()
 
-
 ## 三个轴任一变化 → 合成 Vector3i 上报（App 记成可撤销的改尺寸命令）。
 func _on_size_spin(_v: float) -> void:
 	if _node == null or not _node.is_model() or _size_spins.size() < 3:
 		return
 	resize_requested.emit(_node, Vector3i(
 			int(_size_spins[0].value), int(_size_spins[1].value), int(_size_spins[2].value)))
-
 
 ## 旋转三个轴任一变化 → 合成欧拉角（度）上报（App 记成可撤销命令）。
 func _on_rotation_spin(_v: float) -> void:
@@ -131,7 +121,6 @@ func _on_rotation_spin(_v: float) -> void:
 	rotation_changed.emit(_node, Vector3(
 			_rot_spins[0].value, _rot_spins[1].value, _rot_spins[2].value))
 
-
 ## 三个轴任一变化 → 合成 Vector3i 上报（App 记成可撤销命令）。
 func _on_offset_spin(_v: float) -> void:
 	if _node == null or _offset_spins.size() < 3:
@@ -139,12 +128,10 @@ func _on_offset_spin(_v: float) -> void:
 	offset_changed.emit(_node, Vector3i(
 			int(_offset_spins[0].value), int(_offset_spins[1].value), int(_offset_spins[2].value)))
 
-
 ## 绑定选中的节点（App 在树上点选 / 撤销后调用）。
 func bind(node: QVoxelNode) -> void:
 	_node = node
 	_rebuild()
-
 
 ## 双击树行触发：聚焦名字输入框并全选 —— 直接开改名。
 func begin_rename(node: QVoxelNode) -> void:
@@ -152,7 +139,6 @@ func begin_rename(node: QVoxelNode) -> void:
 	if _name != null and _name.editable:
 		_name.grab_focus()
 		_name.select_all()
-
 
 func _rebuild() -> void:
 	if _info == null:
@@ -204,7 +190,6 @@ func _rebuild() -> void:
 		_kv("类型", "组")
 		_kv("子模型", "%d" % grp.count_models())
 		_kv("位置", "%d, %d, %d" % [grp.offset.x, grp.offset.y, grp.offset.z])
-
 
 func _kv(k: String, v: String) -> void:
 	var row := QVoxelUi.hbox(QVoxelUi.space_s())

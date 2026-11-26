@@ -1,10 +1,6 @@
 ## 输入管理工具 — 设备模式切换（键鼠/手柄）+ 焦点组管理 + InputMap 操作 + 快捷键绑定
 class_name InputTool
 
-# ============================================================
-
-# ============================================================
-
 const DEFAULT_SAVE_PATH := "user://input_settings.cfg"
 
 ## 操作设备模式：POINTER = 键鼠指针，NAVIGATION = 手柄/方向键导航
@@ -20,8 +16,6 @@ static var last_device: InputDevice = InputDevice.MOUSE
 
 static func is_navigation() -> bool:
 	return device_mode == DeviceMode.NAVIGATION
-
-# ============================================================
 
 ## 切换设备模式。
 static func set_device_mode(mode: DeviceMode) -> void:
@@ -76,8 +70,6 @@ static func _is_navigation_event(event: InputEvent) -> bool:
 	## 直接复用 _nav_dir，保持与 3D 导航的检测逻辑完全一致
 	return _nav_dir(event) != Vector2.ZERO
 
-# ============================================================
-
 ## 当前焦点组节点列表。
 static var _focus_group: Array[Node] = []
 
@@ -89,8 +81,7 @@ static func reset() -> void:
 	_focus_group.clear()
 	_focus_index = -1
 
-
-## 注册焦点组。2D 控件设为 FOCUS_ALL 启用导航，3D 节点交由 InputTool 手动管理。
+## 注册焦点组。
 static func register_focus_group(nodes: Array[Node], default_index: int = 0) -> void:
 	_set_group_focus_mode(_focus_group, false)
 	## 换组前先通知旧焦点退出，否则 3D 高亮残留在上一个面板的节点上
@@ -140,7 +131,6 @@ static func _set_group_focus_mode(nodes: Array[Node], enabled: bool) -> void:
 			n.focus_mode = mode
 
 ## 剔除焦点组里已释放的节点（注册方被销毁时未必来得及注销）。
-## ⚠️ 已释放实例一旦作为参数传给带 `Node` 标注的函数，Godot 在**传参阶段**就报
 static func _prune_focus_group() -> void:
 	if _focus_group.is_empty():
 		return
@@ -203,14 +193,12 @@ static func _ensure_2d_focus() -> void:
 		if is_instance_valid(target) and target.is_visible_in_tree():
 			target.grab_focus.call_deferred()
 
-# ============================================================
-
 ## 获取当前聚焦的 3D 节点（已释放/失效时返回 null）。
 static func get_3d_focus() -> Node:
 	var node = _focused()
 	return node if is_instance_valid(node) and node is Node3D else null
 
-## 统一处理输入。返回 true 表示事件已被消费（导航方向键/确认键）。
+## 统一处理输入。
 static func handle_input(event: InputEvent) -> bool:
 	detect_mode(event)
 	if device_mode == DeviceMode.NAVIGATION and not _focus_group.is_empty():
@@ -218,7 +206,7 @@ static func handle_input(event: InputEvent) -> bool:
 			return _handle_3d_navigation(event)
 	return false
 
-## 处理 3D 焦点导航和确认。返回 true 表示事件已被消费。
+## 处理 3D 焦点导航和确认。
 static func _handle_3d_navigation(event: InputEvent) -> bool:
 	_prune_focus_group()
 	if _focus_group.is_empty() or not (_focus_group[0] is Node3D):
@@ -229,7 +217,6 @@ static func _handle_3d_navigation(event: InputEvent) -> bool:
 		if _focus_index < 0:
 			return false
 	## ⚠️ 当前焦点节点可能已被释放（注册方销毁时没来得及清）⇒ 重新挑一个有效的，
-	## 否则下面的 _move_3d / _activate_3d 会拿到已释放实例报错
 	if _focus_index >= _focus_group.size():
 		_focus_index = _focus_group.size() - 1
 	if not _is_active(_focus_group[_focus_index]):
@@ -348,8 +335,6 @@ static func _activate_3d() -> void:
 	if node.has_method(&"_mouse_up"):
 		node._mouse_up()
 
-# ============================================================
-
 ## 检查节点是否可交互（有效、在场景树、可见、未禁用）。
 static func _is_active(node) -> bool:
 	if not is_instance_valid(node) or not node.is_inside_tree() or not node.is_visible_in_tree():
@@ -364,7 +349,7 @@ static func _in_direction(delta: Vector2, direction: Vector2) -> bool:
 				(direction.y > 0.5 and delta.y <= 0) or
 				(direction.y < -0.5 and delta.y >= 0))
 
-## 触发节点焦点退出回调。优先 _focus_exit，回退 _mouse_exit。
+## 触发节点焦点退出回调。
 static func _notify_focus_exit(node) -> void:
 	if not is_instance_valid(node):
 		return
@@ -373,7 +358,7 @@ static func _notify_focus_exit(node) -> void:
 	elif node.has_method("_mouse_exit"):
 		node._mouse_exit()
 
-## 触发节点焦点进入回调。优先 _focus_enter，回退 _mouse_enter。
+## 触发节点焦点进入回调。
 static func _notify_focus_enter(node) -> void:
 	if not is_instance_valid(node):
 		return
@@ -381,8 +366,6 @@ static func _notify_focus_enter(node) -> void:
 		node._focus_enter()
 	elif node.has_method("_mouse_enter"):
 		node._mouse_enter()
-
-# ============================================================
 
 ## 键位版本：任何改键后自增，提示层据此判断文案要不要重画
 static var binding_version := 0
@@ -452,8 +435,6 @@ static func _safe_erase(action: StringName) -> void:
 	if Input.is_action_pressed(action):
 		Input.action_release(action)
 
-# ============================================================
-
 static func bind_shortcut(button: BaseButton, action: StringName, key: Key, ctrl: bool = false, shift: bool = false) -> void:
 	if not InputMap.has_action(action):
 		register_action(action, [key_event(key, ctrl, shift)])
@@ -467,8 +448,6 @@ static func bind_shortcuts(bindings: Dictionary) -> void:
 		var cfg: Dictionary = bindings[button]
 		bind_shortcut(button, cfg.get("action", &"") as StringName, cfg.get("key", KEY_NONE) as Key,
 			cfg.get("ctrl", false), cfg.get("shift", false))
-
-# ============================================================
 
 static func save(path: String = DEFAULT_SAVE_PATH) -> int:
 	var config := ConfigFile.new()
@@ -514,8 +493,6 @@ static func load(path: String = DEFAULT_SAVE_PATH) -> int:
 static func reset_to_defaults() -> void:
 	InputMap.load_from_project_settings()
 
-# ============================================================
-
 static func _event_to_dict(ev: InputEvent) -> Dictionary:
 	if ev is InputEventKey:
 		return {type = "key", keycode = ev.keycode, physical_keycode = ev.physical_keycode,
@@ -555,8 +532,6 @@ static func _dict_to_event(data: Dictionary) -> InputEvent:
 			return ev
 	return null
 
-# ============================================================
-
 static func key_event(keycode: Key, ctrl: bool = false, shift: bool = false, alt: bool = false, meta: bool = false) -> InputEventKey:
 	var e := InputEventKey.new()
 	e.keycode = keycode
@@ -587,9 +562,7 @@ static func create_shortcut(event: InputEvent) -> Shortcut:
 	s.events = [event]
 	return s
 
-# ============================================================
-
-## 手柄按钮（值与 JoyButton 对齐）。Godot 没有枚举名反射，但 enum 在脚本里就是
+## 手柄按钮（值与 JoyButton 对齐）。
 enum JoyKey {
 	A = 0, B = 1, X = 2, Y = 3, BACK = 4, GUIDE = 5, START = 6,
 	LEFT_STICK = 7, RIGHT_STICK = 8, LEFT_SHOULDER = 9, RIGHT_SHOULDER = 10,

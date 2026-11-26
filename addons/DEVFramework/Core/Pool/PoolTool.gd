@@ -1,17 +1,17 @@
-## 池注册表：按 key 存取。空闲实例统一挂在常驻的隐藏节点 PoolIdle 下。
+## 池注册表：按 key 存取。
 class_name PoolTool
 
 ## key -> Pool
 static var _pools: Dictionary = {}
 
-## key -> 该池专属的空闲容器。不走 NodePath(key)：key 里可能带 `/` 等非法节点名字符
+## key -> 该池专属的空闲容器。
 static var _idle_roots: Dictionary = {}
 
 static var _idle_root: Node
 
 static var _monitored := false
 
-## 取池（没有就按工厂建一个）。工厂用 [code]view_scene.instantiate[/code] 即可
+## 取池（没有就按工厂建一个）。
 static func ensure(key: String, factory: Callable) -> Pool:
 	var pool: Pool = _pools.get(key)
 	if not is_instance_valid(pool):

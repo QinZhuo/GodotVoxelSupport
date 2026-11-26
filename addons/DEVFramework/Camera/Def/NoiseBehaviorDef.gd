@@ -2,7 +2,7 @@
 ## 手持抖动行为: 给机位画面叠加常驻的"手持感"晃动。
 class_name NoiseBehaviorDef extends CameraBehaviorDef
 
-## 各机位共用的默认噪声。Noise 采样是无状态纯函数, 因此共享安全
+## 各机位共用的默认噪声。
 static var _default_noise: FastNoiseLite
 
 ## 位置抖动振幅(机位局部空间, 米)
@@ -14,7 +14,6 @@ static var _default_noise: FastNoiseLite
 ## 噪声源(Godot 原生 [Noise] 资源, 可换 FastNoiseLite 的任意类型/种子); 留空用默认 Perlin
 @export var noise: Noise
 
-
 func apply_offset(vcam: VirtualCamera3D, pose: Transform3D) -> Transform3D:
 	if position_amplitude == Vector3.ZERO and rotation_amplitude == Vector3.ZERO:
 		return pose
@@ -24,7 +23,6 @@ func apply_offset(vcam: VirtualCamera3D, pose: Transform3D) -> Transform3D:
 	var rot := Vector3(_sample(source, t, 3), _sample(source, t, 4), _sample(source, t, 5)) * rotation_amplitude
 	return pose * Transform3D(Basis.from_euler(rot * (PI / 180.0)), pos)
 
-
 func _resolve_noise() -> Noise:
 	if noise != null:
 		return noise
@@ -33,7 +31,6 @@ func _resolve_noise() -> Noise:
 		_default_noise.noise_type = FastNoiseLite.TYPE_PERLIN
 		_default_noise.frequency = 1.0
 	return _default_noise
-
 
 ## 六条互不相同的采样通道(位置 3 轴 + 旋转 3 轴), 避免各轴同步摆动
 func _sample(source: Noise, t: float, channel: int) -> float:

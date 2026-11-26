@@ -3,7 +3,6 @@ class_name CountTask extends SignalTask
 
 var _count: int = 0
 
-
 func get_progress() -> Vector2i:
 	return Vector2i(_count, get_required())
 
@@ -30,7 +29,6 @@ func load_data(dict: Dictionary, data = null) -> void:
 	_count = maxi(int(dict.get("count", 0)), 0)
 	super(dict, data)
 	progress_changed.emit()
-
 
 ## 触发回调: 任一信号触发 +1, 达到 required 即完成(连接/断开复用基类)
 func _make_handler() -> Callable:

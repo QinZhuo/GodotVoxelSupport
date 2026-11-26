@@ -1,10 +1,7 @@
 ## 数组视图的公共实现（三类视图共用，算法只此一份）：
-##   - ArrayView：流式布局，视图 = 子节点，数量可变
-##   - SlotArrayView2D / SlotArrayView3D：槽位 = 场景里预置的子节点，数量固定
 class_name ArrayViewTool
 
 ## 获取数据项的视图名（= 视图的节点名）。
-## [param index] 数据项在 data 中的索引（无 get_view_name() 时用来保证节点名唯一）；<0 = 未知
 static func get_item_name(item, index: int = -1) -> String:
 	var suffix := "" if index < 0 else "_%d" % index
 	if item == null:
@@ -20,7 +17,6 @@ static func get_item_name(item, index: int = -1) -> String:
 	return (text if text.is_valid_identifier() else type_string(typeof(item))) + suffix
 
 ## 安全的等值判断：保留 `==` 的**值语义**（内容相同的 Dictionary 仍能配上），但类型不同时返回 false
-## ⚠️ 不能直接写 `a == b`：GDScript 的 `==` 在类型不同时会**直接抛错**（如 bool vs String）。
 static func same_data(a, b) -> bool:
 	if typeof(a) != typeof(b):
 		return false
@@ -64,7 +60,7 @@ static func get_view(views: Array, index: int) -> Node:
 		return null
 	return views[index]
 
-## 释放第 index 个视图并在列表里置空（**不改 data**）。走 tween_free 的视图会先淡出再消失
+## 释放第 index 个视图并在列表里置空（**不改 data**）。
 static func free_at(views: Array, index: int, pool) -> void:
 	if index < 0 or index >= views.size():
 		return
@@ -86,14 +82,11 @@ static func index_in_data(data: Array, item) -> int:
 	return data.find(item) if data else -1
 
 ## 定位数据项：先查 data，查不到再扫描视图。
-## ⚠️ 返回值**可能来自两个不同的索引空间**（data 索引 或 views 索引）——只适合"删一项 / 取位置"
-## 这类两个空间都合法的场景；⛔ 要拿索引去读 data（refresh_at 等）必须用 index_in_data()
 static func index_of_item(data: Array, views: Array, item) -> int:
 	var i := index_in_data(data, item)
 	return i if i >= 0 else index_of_view(views, item)
 
 ## 数据项只在视图里（不在 data 中）时：就地重绑该视图并返回它；没有则 null。
-## ⚠️ 别换成 refresh_at —— 它会重新读 data[index]，而这类项不在 data 里（下标可能越界）⇒ 返回 null
 static func rebind_view(views: Array, index: int, item) -> Node:
 	var view := get_view(views, index)
 	if view:
@@ -101,7 +94,6 @@ static func rebind_view(views: Array, index: int, item) -> Node:
 	return view
 
 ## ---- 按数据项操作（ArrayView / SlotArrayView2D / SlotArrayView3D 共用同一份骨架）----
-## ⚠️ 宿主协议（全部是已有的公开接口，不额外要求新方法）：
 
 ## 刷新某个数据项的视图：① data 里有 ⇒ 按索引；② 只有视图里有 ⇒ 就地重绑；③ 都没有 ⇒ 当作新增
 static func refresh_item(host, item) -> Node:
@@ -117,7 +109,6 @@ static func refresh_item(host, item) -> Node:
 	return host.add_item(item)
 
 ## 删除某个数据项的视图。
-## ⚠️ item 为 null 时什么都不做：null 是"空槽位"的合法值，靠扫视图找 null 会误删空位视图
 static func remove_item(host, item) -> void:
 	if item == null:
 		return
@@ -195,8 +186,7 @@ static func create_view(view_scene: PackedScene, pool: Pool, item, index: int = 
 ## 释放标记：tween_free 淡出期间节点仍在树内（也不在 queue_free 队列里）。
 const FREEING_META := &"_array_view_freeing"
 
-## 释放一个视图节点。重复调用、已失效、已进入释放流程的节点直接忽略。
-## 优先归还对象池，否则尝试 tween_free，最后 queue_free。
+## 释放一个视图节点。
 static func free_view(view: Node, pool: Pool) -> bool:
 	if not is_instance_valid(view):
 		return false
@@ -216,7 +206,6 @@ static func free_view(view: Node, pool: Pool) -> bool:
 	return true
 
 ## ---- 槽位操作（SlotArrayView2D / SlotArrayView3D 共用同一份实现）----
-## ⚠️ 宿主协议：`data` / `views` / `view_scene` / `pool` / `auto_hide_empty`、
 
 ## 按 data 重建全部槽位视图
 static func slot_refresh(host) -> void:
@@ -244,7 +233,6 @@ static func slot_clear(host) -> void:
 	host._update_slot_visibility()
 
 ## 按 data 重新对齐：保证 views[i] 显示 data[i]。
-## 删除 / 排序 / 中间插入后**必须**走这里 —— 槽位索引与 data 索引错位会让显示顺序乱掉。
 static func slot_resync(host) -> void:
 	host._resize_views()
 	for i in host.views.size():

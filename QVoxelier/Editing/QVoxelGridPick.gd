@@ -2,21 +2,11 @@
 class_name QVoxelGridPick
 extends RefCounted
 ## 网格拾取：一条射线 → 一次落笔的命中信息（**空图上也能落笔**）。
-## 【它补的是内核不回答的那半句】`VoxelRay` 只在实心格上给命中；而 QVoxelier 的模型是一块
-## 有界立方体，新建出来是空的 —— 空图上射线永远打不到东西，画笔就无处落笔。
-## 【只打在"可见背景面"上】落笔面由调用方传入的 `allowed_faces` 限定（= 网格背景面里当前
-## 边框可见的那几个面，见 QVoxelGridFloor.visible_faces）—— **有边框的面才作画笔地面**，
-## 于是拾取与边框显示永远一致，不会出现"没边框的面却被当成画笔地面"。
-## 【落笔格 = 命中面外侧那一格 + 朝内法线 = 盒内相邻格】与体素命中的 `place = hit + normal` 同构。
-## 【为什么单独一个类】它是"屏幕 → 落笔"这条链里唯一一段纯数学（无节点、无场景树），
-## 单拎出来才能在 TestCase 里把各个背景面的命中边界逐条钉住。
 
-## 底面那层的编号。命中它时 hit.y 恒为此值、normal 恒为 +Y。
+## 底面那层的编号。
 const FLOOR_LAYER := -1
 
-
 ## 射线拾取：先走体素 DDA（内核），未命中再看背景面（取最近的那个）。
-## allowed_faces：允许作背景面的面下标（0 底 / 1 顶 / 2 -X / 3 +X / 4 -Z / 5 +Z）；为空 = 全部。
 static func hit(data: QVoxelSource, origin: Vector3, direction: Vector3,
 		grid_size: Vector3i, max_distance: float = 100.0,
 		allowed_faces := PackedInt32Array()) -> Dictionary:
@@ -24,7 +14,6 @@ static func hit(data: QVoxelSource, origin: Vector3, direction: Vector3,
 	if not info.is_empty():
 		return info
 	return _plane_hit(origin, direction, grid_size, max_distance, allowed_faces)
-
 
 static func _plane_hit(origin: Vector3, direction: Vector3, grid_size: Vector3i,
 		max_distance: float, allowed_faces: PackedInt32Array) -> Dictionary:
@@ -55,8 +44,7 @@ static func _plane_hit(origin: Vector3, direction: Vector3, grid_size: Vector3i,
 		VoxelRay.KEY_MATERIAL: 0,
 	}
 
-
-## 某背景面与射线的交点（正 t、且交点落在该面范围内）。返回 {t, hit, normal} 或 {}。
+## 某背景面与射线的交点（正 t、且交点落在该面范围内）。
 static func _face_intersect(i: int, o: Vector3, d: Vector3, g: Vector3i) -> Dictionary:
 	var gx := float(g.x)
 	var gy := float(g.y)

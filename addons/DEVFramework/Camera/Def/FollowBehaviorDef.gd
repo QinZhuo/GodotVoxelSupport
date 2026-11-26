@@ -6,13 +6,12 @@ class_name FollowBehaviorDef extends CameraBehaviorDef
 @export var offset: Vector3 = Vector3.ZERO
 ## 偏移是否按目标自身朝向计算(false = 世界轴向)
 @export var use_target_basis: bool = false
-## 各轴的时间常数(秒), 0 = 该轴硬跟随; 越大越"懒"。分轴设置可做到"水平跟得紧、垂直更缓"
+## 各轴的时间常数(秒), 0 = 该轴硬跟随; 越大越"懒"。
 @export var damping: Vector3 = Vector3.ZERO
 ## 死区半尺寸(机位局部空间): 目标留在框内时相机完全不动
 @export var dead_zone: Vector3 = Vector3.ZERO
 ## 软区厚度(机位局部空间): 目标越出死区后, 在此厚度内追赶速度与超出量成正比; 0 = 出死区即全速追
 @export var soft_zone: Vector3 = Vector3.ZERO
-
 
 func apply(vcam: VirtualCamera3D, delta: float, instant: bool = false) -> void:
 	var target: Node3D = vcam.target
@@ -28,7 +27,6 @@ func apply(vcam: VirtualCamera3D, delta: float, instant: bool = false) -> void:
 		lerpf(from.y, desired.y, weight.y),
 		lerpf(from.z, desired.z, weight.z),
 	)
-
 
 ## 死区 + 软区: 目标留在死区内相机不动; 越出后按超出量/软区厚度成比例追赶, 出软区则全速。
 func _apply_zone(vcam: VirtualCamera3D, desired: Vector3) -> Vector3:

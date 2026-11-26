@@ -12,8 +12,7 @@ const FX_NAMES := [
 	"limiter", "compressor", "eq_lowpass", "eq_highpass", "eq_bandpass", "spectrum",
 ]
 
-
-## 按名称构造内置效果预设; 未知名称返回 null。params 可覆盖预设属性(键为 AudioEffect 属性名)
+## 按名称构造内置效果预设; 未知名称返回 null。
 static func fx(name: String, params := {}) -> AudioEffect:
 	var effect: AudioEffect
 	match name:
@@ -90,8 +89,7 @@ static func fx(name: String, params := {}) -> AudioEffect:
 		effect.set(key, params[key])
 	return effect
 
-
-## 由总线表构建布局(纯函数, 不改 AudioServer)。0 号必须是 Master。
+## 由总线表构建布局(纯函数, 不改 AudioServer)。
 static func build_layout(spec: Dictionary) -> AudioBusLayout:
 	if spec.is_empty() or not spec.has("Master"):
 		LogTool.error("音频", "总线表无效(须非空且含 Master): ", spec)
@@ -119,13 +117,11 @@ static func build_layout(spec: Dictionary) -> AudioBusLayout:
 		idx += 1
 	return layout
 
-
 ## 应用到运行中的 AudioServer(替换当前总线布局, 含音量/send/效果)
 static func apply_layout(layout: AudioBusLayout) -> void:
 	if layout == null:
 		return
 	AudioServer.set_bus_layout(layout)
-
 
 ## 保存布局到 layout_path(); 项目设置未配置时补写路径
 static func save_layout(layout: AudioBusLayout) -> Error:
@@ -143,7 +139,6 @@ static func save_layout(layout: AudioBusLayout) -> Error:
 	LogTool.log("音频", "总线布局已保存: ", path)
 	return OK
 
-
 ## 布局落盘路径: 取项目设置 audio/buses/default_bus_layout, uid:// 解析成实际路径。
 static func layout_path() -> String:
 	var raw := str(ProjectSettings.get_setting(LAYOUT_SETTING, "")).strip_edges()
@@ -151,7 +146,6 @@ static func layout_path() -> String:
 		var id := ResourceUID.text_to_id(raw)
 		raw = ResourceUID.get_id_path(id) if id != ResourceUID.INVALID_ID else ""
 	return raw if not raw.is_empty() else DEFAULT_LAYOUT_PATH
-
 
 ## 一步到位: 构建 → (可选)应用 → (可选)保存
 static func setup(spec: Dictionary, apply := true, save := true) -> Dictionary:

@@ -1,26 +1,17 @@
 extends TestCase
 
 ## 命令层契约测试：QVoxelPropertyCommand（O(1) 属性撤销）+ QVoxelMacroCommand / 撤销栈的宏。
-## 钉死四条硬承诺 —— 每一条都对应一个"以后重构很容易悄悄弄坏"的点：
-##   ① 撤销是**精确还原**而不是反向重算：撤到的是原值，且"没真改"不占一次撤销；
-##   ② 链的增删重排也是属性（`modifiers` 数组的前后两份）→ 不需要第二个命令类，
-##      而 `before` 必须与活数组**脱钩**（否则撤销拿到的是改完之后的内容，且不报错）；
-##   ③ 改 Resource 参数不会自动发信号 → 由命令补发 content_changed 给宿主对象；
-##   ④ 宏 = 一条撤销单位：一次 undo 全撤、一次 redo 全恢复，且空宏 / 嵌套有确定行为。
-
 
 func _obj() -> QVoxelModel:
 	var obj := QVoxelModel.new()
 	obj.grid_size = Vector3i(32, 32, 32)
 	return obj
 
-
 ## 计数宿主对象的标脏次数（content_changed）。
 func _count_hits(obj: QVoxelModel) -> Array:
 	var hits := [0]
 	obj.content_changed.connect(func() -> void: hits[0] += 1)
 	return hits
-
 
 # ① 精确还原 + 无变化不入栈
 
@@ -39,7 +30,6 @@ func test_property_command_restores_exact_value() -> void:
 	cmd.redo()
 	assert_eq(obj.node_name, "石山", "重做必须回到新值")
 
-
 func test_no_real_change_is_not_a_command() -> void:
 	var obj := _obj()
 	var original := obj.node_name
@@ -53,7 +43,6 @@ func test_no_real_change_is_not_a_command() -> void:
 	drag.set_value(original)   # 必须先捕获原值：此刻 obj.node_name 已是"临时"
 	assert_false(drag.commit(), "滑条拖回原位的空手势不入栈")
 
-
 # ② 数组属性的快照必须与活值脱钩
 
 func test_array_property_snapshot_is_decoupled() -> void:
@@ -64,11 +53,9 @@ func test_array_property_snapshot_is_decoupled() -> void:
 	obj.frames.append(QVoxelFrame.new())
 	assert_true(cmd.commit(), "数组加了一项，应产生命令")
 	# before 必须与活数组脱钩：若是同一个数组，上面的 append 会连 before 一起改，
-	# 撤销就"撤了个寂寞"，而且一声不响。
 	assert_eq((cmd.before as Array).size(), n0, "before 必须停在改之前")
 	cmd.undo()
 	assert_eq(obj.frames.size(), n0, "撤销数组编辑必须回到原长度")
-
 
 # ③ 改对象自身属性要标脏
 
@@ -79,7 +66,6 @@ func test_object_property_marks_itself_dirty() -> void:
 	assert_true(cmd != null, "target 就是 QVoxelModel 时 owner 自动取它")
 	cmd.undo()
 	assert_eq(hits[0], 1, "对象自身属性同样要标脏")
-
 
 # ④ 宏
 
@@ -109,7 +95,6 @@ func test_macro_folds_multiple_steps() -> void:
 	assert_eq(obj.node_name, "山", "一次重做恢复整段")
 	assert_false(obj.visible)
 
-
 func test_macro_notifies_once_and_keeps_stack_quiet() -> void:
 	var stack := QVoxelUndoStack.new()
 	var obj := _obj()
@@ -126,7 +111,6 @@ func test_macro_notifies_once_and_keeps_stack_quiet() -> void:
 	assert_false(stack.in_macro())
 	assert_eq(n[0], 1, "宏入栈只通知一次")
 	assert_eq(stack.size(), 1)
-
 
 func test_empty_and_nested_macro() -> void:
 	var stack := QVoxelUndoStack.new()
@@ -152,7 +136,6 @@ func test_empty_and_nested_macro() -> void:
 	stack.undo()
 	assert_eq(obj.node_name, original, "一次撤销撤掉内外两层")
 
-
 func test_tick_is_monotonic_across_macro() -> void:
 	var stack := QVoxelUndoStack.new()
 	var obj := _obj()
@@ -166,7 +149,6 @@ func test_tick_is_monotonic_across_macro() -> void:
 	assert_eq(stack.commands[1].tick, 1, "宏自己占一个 tick，子命令不占")
 	assert_eq(stack.commands[2].tick, 2, "tick 在宏前后保持单调（回放/审计据此排序）")
 
-
 func test_clear_drops_open_macro() -> void:
 	var stack := QVoxelUndoStack.new()
 	var obj := _obj()
@@ -175,7 +157,6 @@ func test_clear_drops_open_macro() -> void:
 	stack.clear()
 	assert_false(stack.in_macro(), "clear() 是完全重置，不留半截宏")
 	assert_eq(stack.size(), 0)
-
 
 # 撤销栈的通用语义（属性命令作为最轻的命令载体来验证）
 
@@ -191,7 +172,6 @@ func test_push_truncates_redo_branch() -> void:
 	assert_false(stack.can_redo(), "新操作入栈必须丢掉 redo 分支（标准撤销语义）")
 	assert_eq(obj.node_name, "C")
 	assert_eq(stack.size(), 2)
-
 
 func test_budget_evicts_oldest() -> void:
 	var stack := QVoxelUndoStack.new()

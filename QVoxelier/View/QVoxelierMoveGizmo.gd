@@ -2,9 +2,6 @@
 class_name QVoxelierMoveGizmo
 extends Node3D
 ## 移动用的**坐标轴 gizmo**：在选区中心画出 X/Y/Z 三条双向轴（圆柱 + 圆锥箭头，红/绿/蓝）。
-## 【交互】按住任意一条轴拖动 = 沿该轴连续移动选区；移动只经它发生，点空白不会误移。
-## 【坐标约定】与选区线框 / 预览体素同一套：子节点顶点用**体素单位**、中心烘进子节点位置，
-## 节点 scale = voxel_scale。origin 再叠上数据层的 center_offset，保证与体素对齐。
 
 @export var voxel_scale := 0.1:
 	set(v):
@@ -29,7 +26,7 @@ var _center := Vector3.ZERO
 ## 几何缩放系数（相对 base scale）：视口每帧按相机距离设定，让手柄在屏幕上**大小恒定**。
 var _size_factor := 1.0
 var _geom: Node3D
-## 悬停高亮：-1 = 无。轴与环各自记一个；`_hover_seg` 是环上被指到的那一段（分段高亮）。
+## 悬停高亮：-1 = 无。
 var _hover_axis := -1
 var _hover_ring := -1
 var _hover_seg := -1
@@ -38,8 +35,7 @@ var _last_seg := 0
 var _axis_meshes: Array = []
 var _ring_segs: Array = []
 
-
-## 按选区盒（体素坐标）摆到中心。空选区隐藏。
+## 按选区盒（体素坐标）摆到中心。
 func set_selection(lo: Vector3i, size: Vector3i) -> void:
 	if size.x <= 0 or size.y <= 0 or size.z <= 0:
 		visible = false
@@ -52,7 +48,6 @@ func set_selection(lo: Vector3i, size: Vector3i) -> void:
 	_center = c
 	_rebuild()
 
-
 ## 把 gizmo 摆到**任意体素点**（布局模式：摆在盒中心，拖动即改模型整体变换）。
 func set_center(point: Vector3) -> void:
 	visible = true
@@ -62,18 +57,15 @@ func set_center(point: Vector3) -> void:
 	_center = c
 	_rebuild()
 
-
 ## gizmo 中心的世界坐标。
 func center_global() -> Vector3:
 	return global_transform * _center
 
-
-## 某条轴在世界里的方向向量（长度 = 每体素对应的世界尺寸 × 轴长？这里取每体素世界尺寸）。
+## 某条轴在世界里的方向向量（长度 = 每体素对应的世界尺寸 × 轴长？
 func axis_world(axis: int) -> Vector3:
 	return global_transform.basis * AXIS_DIRS[axis]
 
-
-## 点中哪条轴（屏幕空间：光标到该轴投影线段的距离 < threshold 像素）。返回轴下标或 -1。
+## 点中哪条轴（屏幕空间：光标到该轴投影线段的距离 < threshold 像素）。
 func axis_hit(screen: Vector2, camera: Camera3D, threshold := 12.0) -> int:
 	if not visible or camera == null:
 		return -1
@@ -90,9 +82,7 @@ func axis_hit(screen: Vector2, camera: Camera3D, threshold := 12.0) -> int:
 			best = a
 	return best
 
-
-## 点中哪条**旋转环**（屏幕空间：光标到该环投影折线的距离 < threshold 像素）。返回轴下标或 -1。
-## 同时把最近的环段下标记进 `_last_seg`（供分段高亮）。
+## 点中哪条**旋转环**（屏幕空间：光标到该环投影折线的距离 < threshold 像素）。
 func ring_hit(screen: Vector2, camera: Camera3D, threshold := 10.0) -> int:
 	if not visible or camera == null:
 		return -1
@@ -113,15 +103,11 @@ func ring_hit(screen: Vector2, camera: Camera3D, threshold := 10.0) -> int:
 	_last_seg = best_seg
 	return best
 
-
 ## 光标绕轴 `a` 的夹角（弧度）：把相机射线投到"过 _center、法线为轴"的平面上再取极角。
 func ring_angle(screen: Vector2, camera: Camera3D, a: int) -> float:
 	return ring_angle_ref(screen, camera, a, global_transform.basis, center_global())
 
-
-## 用**固定的参考基/中心**算夹角。布局模式下模型随拖动旋转、gizmo 也跟着转，
-## 若每帧用实时 global_transform，参考系会跟着转 → 夹角乱跳（"一拖就飞速变角度"）。
-## 故按下时抓一份参考，拖动全程用它。
+## 用**固定的参考基/中心**算夹角。
 func ring_angle_ref(screen: Vector2, camera: Camera3D, a: int, ref_basis: Basis, ref_center: Vector3) -> float:
 	var axis: Vector3 = AXIS_DIRS[a]
 	var ux: Vector3 = AXIS_DIRS[(a + 1) % 3]
@@ -138,7 +124,6 @@ func ring_angle_ref(screen: Vector2, camera: Camera3D, a: int, ref_basis: Basis,
 	var v := (ref_basis * vy).normalized()
 	return atan2(hit.dot(v), hit.dot(u))
 
-
 ## 某条旋转环在体素坐标下的采样点（用于屏幕空间命中测试）。
 func _ring_points(a: int) -> Array[Vector3]:
 	var u: Vector3 = AXIS_DIRS[(a + 1) % 3]
@@ -149,7 +134,6 @@ func _ring_points(a: int) -> Array[Vector3]:
 		var t := TAU * float(i) / float(RING_SEG)
 		out.append(_center + (u * cos(t) + v * sin(t)) * r)
 	return out
-
 
 func _rebuild() -> void:
 	for c in get_children():
@@ -173,8 +157,7 @@ func _rebuild() -> void:
 		_ring_segs.append(_ring(a))
 	_apply_hover()
 
-
-## 设定几何缩放（相对 base scale）。视口每帧按相机距离调用 → 手柄屏幕大小恒定。
+## 设定几何缩放（相对 base scale）。
 func set_size_factor(f: float) -> void:
 	if is_equal_approx(f, _size_factor):
 		return
@@ -182,13 +165,11 @@ func set_size_factor(f: float) -> void:
 	if _geom != null:
 		_geom.scale = Vector3.ONE * f
 
-
 ## 命中测试时记下的最近环段（供视口做分段高亮）。
 func last_ring_seg() -> int:
 	return _last_seg
 
-
-## 悬停反馈：高亮被指到的轴或**环上那一段**（命中与否一眼可见）。由视口在鼠标移动 / 拖动时喂入。
+## 悬停反馈：高亮被指到的轴或**环上那一段**（命中与否一眼可见）。
 func set_hover(axis: int, ring: int, seg := -1) -> void:
 	if axis == _hover_axis and ring == _hover_ring and seg == _hover_seg:
 		return
@@ -196,7 +177,6 @@ func set_hover(axis: int, ring: int, seg := -1) -> void:
 	_hover_ring = ring
 	_hover_seg = seg
 	_apply_hover()
-
 
 func _apply_hover() -> void:
 	for a in 3:
@@ -213,7 +193,6 @@ func _apply_hover() -> void:
 					# 被指到的那一段最亮，同环其余段略提亮 → 知道选中了哪条环、哪一段。
 					c = Color.WHITE if i == _hover_seg else base.lerp(Color.WHITE, 0.3)
 				segs[i].material_override.albedo_color = c
-
 
 ## 一条旋转环（**分段**的小方块，法线 = 该轴）—— 分段才能只高亮光标附近那一段。
 func _ring(a: int) -> Array[MeshInstance3D]:
@@ -236,8 +215,7 @@ func _ring(a: int) -> Array[MeshInstance3D]:
 		out.append(mi)
 	return out
 
-
-## 造一段圆柱 / 圆锥（top/bottom 半径、高），摆到 pos、朝向 basis。返回该 MeshInstance3D。
+## 造一段圆柱 / 圆锥（top/bottom 半径、高），摆到 pos、朝向 basis。
 func _make(top_r: float, bottom_r: float, height: float, basis: Basis, pos: Vector3, col: Color) -> MeshInstance3D:
 	var mesh := CylinderMesh.new()
 	mesh.top_radius = top_r
@@ -251,7 +229,6 @@ func _make(top_r: float, bottom_r: float, height: float, basis: Basis, pos: Vect
 	_geom.add_child(mi)
 	return mi
 
-
 ## 把 +Y 转到 dir 的旋转基底（dir 已归一化）。
 static func _basis_to(dir: Vector3) -> Basis:
 	var d := dir.normalized()
@@ -260,7 +237,6 @@ static func _basis_to(dir: Vector3) -> Basis:
 	if d.dot(Vector3.UP) < -0.9999:
 		return Basis(Vector3.RIGHT, PI)
 	return Basis(Quaternion(Vector3.UP, d))
-
 
 func _material(col: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -271,7 +247,6 @@ func _material(col: Color) -> StandardMaterial3D:
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return m
 
-
 ## 点到线段（二维）的距离。
 static func _seg_dist(p: Vector2, a: Vector2, b: Vector2) -> float:
 	var ab := b - a
@@ -280,7 +255,6 @@ static func _seg_dist(p: Vector2, a: Vector2, b: Vector2) -> float:
 		return p.distance_to(a)
 	var t := clampf((p - a).dot(ab) / l2, 0.0, 1.0)
 	return p.distance_to(a + ab * t)
-
 
 func _ready() -> void:
 	visible = false

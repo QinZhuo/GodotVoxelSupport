@@ -1,36 +1,6 @@
 extends Node3D
 
 ## VoxelRenderer（QVX 分块运行时管线）⇄ 导入 ArrayMesh（整模型单网格）渲染性能基准。
-##
-## 为什么需要它：两条路径的**几何内核是同一个**（NativeLoader.generate_arrays_native /
-## generate_chunk_dense，都是 6 向可见性 + 每 slice 贪婪合并），顶点/三角形数完全相同。
-## 真正的差别只在"渲染组织方式"：
-##   · ArrayMesh：1 个 MeshInstance3D / 1~2 个 surface = 1~2 个 draw call，整模型一个 AABB
-##   · VoxelRenderer：每 chunk 1 个 MeshInstance3D = 每 chunk 1~2 个 draw call，
-##     并额外承担每帧 _process（LOD 调度 / 流式扫描 / 视锥剔除）的 CPU 开销
-## 本场景就是量这两件事在"单模型"和"场景内大量模型"下的差距。
-##
-## 用法：
-##   F5 运行本场景（或 game_control(action=start, scene=res://demo/voxel_render_bench.tscn)）
-##   跑完在 user://voxel_render_bench_results.json 落一份结果，并打印 [VRB] 日志。
-##   计划文件（可选）：user://voxel_render_bench_plan.json，格式见 _default_plan()。
-##   Esc 退出；R 重跑。
-##
-## 口径（务必与数字一起看）：
-##   · vsync 关闭 + max_fps=0 + 窗口置顶，测的是"能跑多快"，不是"锁 60 时稳不稳"
-##   · 每个 stage 先等所有 VoxelRenderer 的 chunk 网格全部就绪，再预热 30 帧后采样
-##   · 每个 stage 出 4~5 行，是同一份负载的**不同渲染组织形态**（这才是本基准的价值）：
-##       mesh                 导入 ArrayMesh，N 个 MeshInstance3D 共享一份资源（Godot 自动合批）
-##       mesh_unique          同上但每实例复制一份 mesh（模拟"各自独立几何"）
-##       qvox                 现状：每 chunk 一个 MeshInstance3D + 独立 ArrayMesh
-##       qvox_no_process      同上但关掉 renderer._process → 差值 = 每帧调度 CPU 成本
-##       qvox_merged          把已生成的 chunk 网格**原样合并**成每实例 1 个 ArrayMesh
-##       qvox_merged_shared   再进一步：合并后的 mesh **共享**给全部实例 → 可合批
-##     后两行不改一个顶点、只改渲染组织方式，用来证明"差距来自 draw call，不来自体素几何"。
-##   · frame_ms 用 PerfTool.sample_frames（p50/p95/p99 + 1% low + CV），gpu_ms 取引擎
-##     viewport measured render time，用来把 CPU 组织开销与 GPU 光栅开销分开
-##   · 两侧共享同一份 mesh / QVoxelSource（不是每个实例各建一份数据），这才是"同一模型摆 N 份"
-##     的真实用法；数据准备耗时单独打日志，不计入帧率。
 
 const PLAN_PATH := "user://voxel_render_bench_plan.json"
 const RESULT_PATH := "user://voxel_render_bench_results.json"
@@ -48,14 +18,11 @@ var _running := false
 ## 模型缓存：src -> {mesh, data, ext, tris, verts, chunks, ...}
 var _cache: Dictionary = {}
 
-
 func _ready() -> void:
 	Engine.max_fps = 0
 	OS.low_processor_usage_mode = false
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
-	# 【必须】置顶窗口。引擎/驱动在"窗口被别的窗口遮住"时会把呈现节流（实测这台机器
-	# 被遮住时地板从 0.95ms 变成 6.90ms / 145fps，且**与窗口大小、GPU 耗时无关**），
-	# 那种状态下所有 stage 都被压在同一个地板上，横向对比全是废数据。
+	# 【必须】置顶窗口。
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true)
 	_build_world()
 	_build_hud()
@@ -63,7 +30,6 @@ func _ready() -> void:
 	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
 	if auto_run:
 		_run()
-
 
 func _build_world() -> void:
 	_cam = Camera3D.new()
@@ -82,7 +48,6 @@ func _build_world() -> void:
 	add_child(_light)
 
 	# 简化环境：关掉 SSAO/SSR/SSIL/Glow —— 这些在两个变体上完全等价，
-	# 留着只会把两者都压到同一水平、掩盖 draw call / 顶点吞吐的差异。
 	var we := WorldEnvironment.new()
 	_env = Environment.new()
 	_env.background_mode = Environment.BG_COLOR
@@ -98,7 +63,6 @@ func _build_world() -> void:
 	_stage_root.name = "Stage"
 	add_child(_stage_root)
 
-
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
@@ -110,7 +74,6 @@ func _build_hud() -> void:
 	_hud.add_theme_constant_override("outline_size", 6)
 	layer.add_child(_hud)
 
-
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		match (event as InputEventKey).keycode:
@@ -120,25 +83,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				if not _running:
 					_run()
 
+# ── 计划 ────────────────────────────────────────────────────────────────…
 
-# ── 计划 ─────────────────────────────────────────────────────────────────────
-
-## 默认计划。字段：
-##   model   模型 .vox 路径（两侧都用 cube 形状，见 _get_model 的说明）
-##   count   实例数（0 = 空场景基线）
-##   size    归一化目标尺寸（世界单位，最长边），让不同模型在画面里占同一面积
-##   shadows 该 stage 是否开方向光阴影（阴影 pass 会把几何成本再翻一遍，是最能放大
-##           "顶点数 / draw call"差异的开关）
-##   frames  采样帧数（默认 240）
-##   unique  ArrayMesh 侧是否为每个实例复制一份 mesh 资源。默认 false —— 真实项目里 N 个
-##           相同模型就是共享同一份 preload 的 mesh，Godot 会把它批处理成极少的 draw call
-##           （实测 deer ×100 共享=19 draws / 各自唯一=118 draws）。true 是"每实例一份独立
-##           几何"的对照，用来把"批处理红利"与"每实例固定开销"分开。
-##   label   报告里的行名
-##
-## 【为什么负载要大到 5~20ms/帧】空场景的帧时间地板约 1.2ms（800fps），
-## 单模型两侧都在地板上（0.9 vs 0.9ms），那种数字说明不了任何事。要看出差距必须把
-## 实例数加到帧时间明显离开地板。
+## 默认计划。
 func _default_plan() -> Dictionary:
 	return {
 		"stages": [
@@ -156,7 +103,6 @@ func _default_plan() -> Dictionary:
 		],
 	}
 
-
 func _load_plan() -> Dictionary:
 	if FileAccess.file_exists(PLAN_PATH):
 		var txt := FileAccess.get_file_as_string(PLAN_PATH)
@@ -167,19 +113,9 @@ func _load_plan() -> Dictionary:
 		push_warning("[VRB] 计划文件解析失败，回落到默认计划: %s" % PLAN_PATH)
 	return _default_plan()
 
-
 # ── 模型准备（一次性，不计入帧率）─────────────────────────────────────────────
 
 ## 取（并缓存）一个模型的两条路径产物。
-##
-## 【为什么两侧都用「运行时 generate_mesh」而不是直接 load 导入产物】
-## deer.vox 的导入设置是 mesh/shape=1（球体！），导入产物 5300 tri；而本仓库 QVX 渲染路径
-## 走方块面（1344 tri）——两者根本不是同一份几何，拿来比帧率是错的。
-## 故这里用**导入器自己的生成器**（VoxelMeshGenerator.generate_mesh，与 VoxelMeshImporter
-## 同一入口），参数取 cube / scale=0.1 / world_origin；QVX 侧取同一份 voxel 数据、
-## voxel_scale=0.1、center_offset=0（WORLD_ORIGIN），于是两侧几何逐三角形一致。
-## cars.vox / teapot1.vox / teapot2.vox 的导入设置本来就是 cube，实测导入产物三角形数
-## 与本函数产物完全相同（4638 / 39648 / 66470），可直接对照。
 func _get_model(src: String) -> Dictionary:
 	if _cache.has(src):
 		return _cache[src]
@@ -233,8 +169,7 @@ func _get_model(src: String) -> Dictionary:
 	_cache[src] = out
 	return out
 
-
-# ── 主流程 ───────────────────────────────────────────────────────────────────
+# ── 主流程 ───────────────────────────────────────────────────────────────…
 
 func _run() -> void:
 	_running = true
@@ -273,7 +208,6 @@ func _run() -> void:
 	print("[VRB] ===== 结束 =====")
 	_hud.text += "\n结果已写入 %s\nR 重跑 / Esc 退出" % ProjectSettings.globalize_path(RESULT_PATH)
 
-
 func _run_stage(st: Dictionary) -> void:
 	var count: int = int(st["count"])
 	var shadows: bool = bool(st["shadows"])
@@ -306,9 +240,6 @@ func _run_stage(st: Dictionary) -> void:
 	# ---------- A. 导入 ArrayMesh 侧 ----------
 	await _clear_stage()
 	# unique=true：每实例一份独立 mesh 副本（相当于"每个实例各自导入一次"）。
-	# 共享同一份 mesh 时 Godot 会把同 mesh + 同材质的实例合批（实测 deer×100：
-	# 共享 19 draws / 各自唯一 118 draws），所以默认用共享——那才是"同一模型摆 N 份"
-	# 在项目里的真实形态；unique 档专门用来把"批处理红利"从"每实例开销"里剥出来。
 	var use_unique: bool = bool(st.get("unique", false))
 	for p in layout:
 		var mi := MeshInstance3D.new()
@@ -331,11 +262,6 @@ func _run_stage(st: Dictionary) -> void:
 	# ---------- B. VoxelRenderer 侧 ----------
 	await _clear_stage()
 	# 【关键：view_distance 必须覆盖整个排布】
-	# `_apply_built_chunk` 有一道"带外校验"：chunk 中心到相机 > lod_outer[0] + 半块 就丢弃不挂。
-	# lod_count=1 时 lod_outer[0] == view_distance（默认 40）——于是**即使 visibility_mode=FULL**，
-	# 离相机 40 单位以外的 chunk 也不会出现。基准里相机为了取景必须退远，不显式放大这个值
-	# 就会得到"网格永远建不完 / draw call 与 surface 数凭空少一半"的假象（实测踩过：
-	# deer ×400 只挂上 418/1600 个 chunk，还白等了 180 秒的超时）。
 	var cam_pos := _cam.global_position
 	var need_d := 1.0
 	for p in layout:
@@ -436,17 +362,12 @@ func _run_stage(st: Dictionary) -> void:
 			% [count, t_st, VoxelMesher.shared_mesh_count(), float(rm["p50_ms"])])
 	await _clear_stage()
 
-
 func _print_row(desc: String, r: Dictionary) -> void:
 								print("[VRB] %-26s | p50 %.2fms %.0ffps | p95 %.2fms p99 %.2fms 1%%low %.0ffps | draws %d | tris %d | nodes %d | gpu %.2fms cpu %.2fms"
 																% [desc + " · " + String(r["variant"]), float(r["frame_ms"]), float(r["fps_p50"]),
 																			float(r["p95_ms"]), float(r["p99_ms"]), float(r["fps_1pct_low"]),
 																			int(r["draw_calls"]), int(r["tris"]), int(r["nodes"]),
 																			float(r["gpu_ms"]), float(r["cpu_ms"])])
-				
-				
-				
-
 
 func _grid_positions(count: int, cells: int, spacing: float) -> Array:
 	var out: Array = []
@@ -460,12 +381,7 @@ func _grid_positions(count: int, cells: int, spacing: float) -> Array:
 		out.append(Vector3(x, 0.0, z))
 	return out
 
-
 ## 取景：把整个排布放进画面，并且**相机必须在包围盒外**。
-## 【为什么不能只按"半宽 / tan(fov)"算距离】那是"物体在原点、相机在 +Z 轴"的公式；
-## 排布是二维网格时，相机按那个距离会落进网格内部（后排被背面剔除），
-## 表现为 draw call 数远小于实例数、数字看着"性能很好"其实什么也没画。
-## 这里改用**实测收敛**：沿视线方向逐步后退，直到包围盒 8 个角都投影进视口（留 6% 边距）。
 func _frame_camera(positions: Array, target: float, model_h: float) -> void:
 	var mn := Vector3(INF, INF, INF)
 	var mx := Vector3(-INF, -INF, -INF)
@@ -507,7 +423,6 @@ func _frame_camera(positions: Array, target: float, model_h: float) -> void:
 		d *= 1.06
 	push_warning("[VRB] 取景收敛失败，按 %.1f 距离直接使用" % d)
 
-
 func _clear_stage() -> void:
 	for c in _stage_root.get_children():
 		c.queue_free()
@@ -518,14 +433,11 @@ func _clear_stage() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-
 func _settle(n: int) -> void:
 	for i in n:
 		await get_tree().process_frame
 
-
 ## 等所有 VoxelRenderer 把每个 chunk 的网格都建完（FULL 模式 = 全部 chunk）。
-## 超时也返回 false 并照测，但日志里会标出来，免得把"还没建完"当成"更快"。
 func _await_renderers(renderers: Array) -> bool:
 	var t0 := Time.get_ticks_msec()
 	var timeout := 180000
@@ -550,7 +462,6 @@ func _await_renderers(renderers: Array) -> bool:
 		await get_tree().process_frame
 	return true
 
-
 func _count_surfaces(renderers: Array) -> int:
 	var n := 0
 	for r in renderers:
@@ -565,9 +476,7 @@ func _count_surfaces(renderers: Array) -> int:
 				n += (ch as MeshInstance3D).mesh.get_surface_count()
 	return n
 
-
-## 采样一帧序列。用 PerfTool.sample_frames（p50/p95/p99 + 1% low + CV + 环境），
-## 再补上引擎的 GPU/CPU 实测渲染耗时与本帧的绘制统计。
+## 采样一帧序列。
 func _sample(frames: int) -> Dictionary:
 	var r := await PerfTool.sample_frames(frames, 30)
 	var rid := get_viewport().get_viewport_rid()
@@ -592,7 +501,6 @@ func _sample(frames: int) -> Dictionary:
 		"cpu_ms": RenderingServer.viewport_get_measured_render_time_cpu(rid),
 		"frames": frames,
 	}
-
 
 func _dump_results() -> void:
 	var payload := {

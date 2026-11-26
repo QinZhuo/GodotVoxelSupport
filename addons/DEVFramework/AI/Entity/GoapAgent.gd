@@ -1,10 +1,6 @@
 class_name GoapAgent extends Node
 
 ## GOAP 智能体 — 挂在任意 NPC / 单位节点上的通用 AI 组件。
-##   - 在场景中配置 goals / actions 数组（Def 资源）
-##   - 行动执行：配置 GoapActionDef.perform_method，在 Agent 子类（或挂载脚本）
-##   - 异步执行：方法内部完成后调用 notify_action_finished(success)
-##   - 世界状态：set_state(key, value) / get_state(key)
 
 @export var goals: Array[GoapGoalDef] = []
 @export var actions: Array[GoapActionDef] = []
@@ -12,17 +8,16 @@ class_name GoapAgent extends Node
 @export_range(2, 20) var max_plan_depth: int = 12
 @export var auto_plan: bool = true
 @export var replan_after_action: bool = true
-## 行动失败后重新规划的最小冷却时间（秒）。防止"失败->立即重规划->再失败"的同帧
+## 行动失败后重新规划的最小冷却时间（秒）。
 @export_range(0.0, 5.0, 0.05) var failure_replan_delay: float = 0.5
-## 连续失败退避倍数：第 n 次失败冷却 = failure_replan_delay * factor^(n-1)（封顶见 failure_backoff_max）
+## 连续失败退避倍数：第 n 次失败冷却 = failure_replan_delay * factor^(n-1)（封顶见…
 @export_range(1.0, 4.0, 0.1) var failure_backoff_factor: float = 1.5
 ## 退避冷却封顶（秒）
 @export_range(0.1, 10.0, 0.1) var failure_backoff_max: float = 3.0
 @export var debug_enabled: bool = false
-## 定时重规划(兼容开关)。默认 false = **事件驱动**: 只有 set_state/mark_dirty 后才规划,
-## replan_interval 退化为限流(最短间隔)。大量同构小兵场景必须关掉定时重规划。
+## 定时重规划(兼容开关)。
 @export var periodic_replan: bool = false
-## 复用跨 agent 的计划缓存(同状态+同目标+同行动集直接命中)。默认开。
+## 复用跨 agent 的计划缓存(同状态+同目标+同行动集直接命中)。
 @export var use_plan_cache: bool = true
 
 signal plan_found(goal: GoapGoal, plan: Array)
@@ -48,7 +43,6 @@ var _world_dirty := true
 var _fail_streak := 0
 var _last_fail_time := 0.0
 
-
 func _ready() -> void:
 	world_state = GoapWorldState.new()
 	world_state.changed.connect(_on_world_state_changed)
@@ -57,15 +51,12 @@ func _ready() -> void:
 	set_process(auto_plan)
 	_ready_goap()
 
-
 ## 子类可覆写的初始化钩子
 func _ready_goap() -> void:
 	pass
 
-
 func _process(delta: float) -> void:
 	tick(delta)
-
 
 ## 主驱动，可被外部手动调用（如回合制逻辑）
 func tick(delta: float) -> void:
@@ -74,9 +65,7 @@ func tick(delta: float) -> void:
 	_replan_timer += delta
 	if _state != AgentState.IDLE:
 		return
-	# 事件驱动: 只有世界状态/目标变了才规划。定时重规划(periodic_replan)仅作兼容开关。
-	# 实测一次链式搜索 202µs: 2000 个 agent 每 0.5s 重规划 ≈ 13.5ms/帧, 而"记账"只占 0.05ms。
-	# 所以真正的成本是**规划次数**, 不是存储形态。
+	# 事件驱动: 只有世界状态/目标变了才规划。
 	if not _world_dirty and not periodic_replan:
 		return
 	# replan_interval 在这里是**限流**: 事件很密时也别每帧重规划
@@ -88,7 +77,6 @@ func tick(delta: float) -> void:
 	_replan_timer = 0.0
 	replan()
 
-
 ## —— 世界状态 ——
 
 func set_state(key, value) -> void:
@@ -96,15 +84,12 @@ func set_state(key, value) -> void:
 	# 事件驱动: 状态一变就标脏(下次 tick 才会真正规划, 且受 replan_interval 限流)
 	_world_dirty = true
 
-
 func get_state(key, default = null):
 	return world_state.get_value(key, default)
-
 
 ## 外部通知世界状态变化（触发重新规划）
 func mark_dirty() -> void:
 	_world_dirty = true
-
 
 ## —— 规划 ——
 
@@ -133,7 +118,6 @@ func replan() -> void:
 	plan_found.emit(current_goal, current_plan)
 	_execute_next_action()
 
-
 ## 按优先级选择目标并规划，返回 [goal, plan]；无可行方案返回空数组
 func _try_plan() -> Array:
 	var candidates: Array[GoapGoal] = []
@@ -143,7 +127,6 @@ func _try_plan() -> Array:
 			candidates.append(goal)
 	sort_goals(candidates)
 	# 行动集内容签名只算一次(内容变了才重算): 否则每次规划都要把整个 actions 转字符串,
-	# 实测会让"缓存命中"退化成 58µs(搜索 138µs → 只快 2.4×)。
 	if _actions_sig == "":
 		_actions_sig = GoapPlanner.actions_signature(actions)
 	for goal in candidates:
@@ -152,7 +135,6 @@ func _try_plan() -> Array:
 		if not plan.is_empty():
 			return [goal, plan]
 	return []
-
 
 ## —— 执行 ——
 
@@ -173,7 +155,6 @@ func _execute_next_action() -> void:
 	action_started.emit(action)
 	action.execute(self)
 
-
 ## 异步行动完成后由外部（或行动方法内部）调用
 func notify_action_finished(success: bool) -> void:
 	var action := _current_action
@@ -190,7 +171,7 @@ func notify_action_finished(success: bool) -> void:
 	if not success:
 		_enter_failure_cooldown()
 	if not success:
-		# 失败：冷却后重规划。冷却期内即使 dirty 也不会立即重规划。
+		# 失败：冷却后重规划。
 		call_deferred("replan")
 	elif replan_after_action:
 		# 延迟到帧末重规划，避免行动同步完成时 replan→execute→notify 同帧递归（栈溢出）
@@ -198,13 +179,11 @@ func notify_action_finished(success: bool) -> void:
 	else:
 		_execute_next_action()
 
-
 ## 记录一次失败并进入重规划冷却（连续失败指数退避）
 func _enter_failure_cooldown() -> void:
 	_fail_streak += 1
 	var delay := minf(failure_replan_delay * pow(failure_backoff_factor, _fail_streak - 1.0), failure_backoff_max)
 	_last_fail_time = Time.get_ticks_msec() / 1000.0 + delay
-
 
 ## 当前是否处于失败冷却期
 func _in_failure_cooldown() -> bool:
@@ -212,13 +191,11 @@ func _in_failure_cooldown() -> bool:
 		return false
 	return (Time.get_ticks_msec() / 1000.0) < _last_fail_time
 
-
 func _finish_plan(success: bool) -> void:
 	_state = AgentState.IDLE
 	_current_action = null
 	current_plan.clear()
 	plan_completed.emit(success)
-
 
 ## 中断当前执行并回到空闲状态（供外部事件如被杀/重生时调用）。
 func reset_plan() -> void:
@@ -229,14 +206,11 @@ func reset_plan() -> void:
 	_fail_streak = 0
 	_last_fail_time = 0.0
 
-
 func get_current_action() -> GoapAction:
 	return _current_action
 
-
 func has_plan() -> bool:
 	return not current_plan.is_empty() or _current_action != null
-
 
 ## —— 子类扩展点 ——
 
@@ -244,18 +218,15 @@ func has_plan() -> bool:
 func is_goal_active(_goal: GoapGoal) -> bool:
 	return true
 
-
 ## 覆写：自定义目标排序（默认按 priority 降序）
 func sort_goals(goals: Array[GoapGoal]) -> void:
 	goals.sort_custom(func(a: GoapGoal, b: GoapGoal) -> bool:
 		return a.get_priority() > b.get_priority()
 	)
 
-
 ## 覆写：perform_method 为空时的兜底执行钩子
 func on_action_execute(action: GoapAction) -> void:
 	notify_action_finished(true)
-
 
 ## —— 调试与序列化 ——
 
@@ -265,18 +236,15 @@ func _plan_desc() -> String:
 		parts.append(action.def.name)
 	return " -> ".join(parts)
 
-
 func _on_world_state_changed(key, _old, _new) -> void:
 	_world_dirty = true
 	state_changed.emit(key, world_state.get_value(key))
-
 
 func save_data() -> Dictionary:
 	return {
 		"world_state": world_state.to_dict(),
 		"current_goal": current_goal.def.name if current_goal else "",
 	}
-
 
 func load_data(dict: Dictionary) -> void:
 	if dict.has("world_state"):

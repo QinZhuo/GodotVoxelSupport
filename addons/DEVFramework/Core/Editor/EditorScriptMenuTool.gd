@@ -17,7 +17,6 @@ const META_TOOLS := "_editor_script_tools"
 const META_LANG := "_editor_script_lang"
 const META_TITLE := "_editor_script_title"
 
-
 ## 扫描并注册(由 EditorPlugin._enter_tree() 调用), 并挂起语言设置监听
 static func register(plugin: EditorPlugin) -> void:
 	if plugin.has_meta(META_MENU):
@@ -29,14 +28,12 @@ static func register(plugin: EditorPlugin) -> void:
 	if settings != null and not settings.settings_changed.is_connected(_on_settings_changed.bind(plugin)):
 		settings.settings_changed.connect(_on_settings_changed.bind(plugin))
 
-
 ## 移除子菜单并断开监听(由 EditorPlugin._exit_tree() 调用)
 static func unregister(plugin: EditorPlugin) -> void:
 	var settings: EditorSettings = EditorTranslationTool.editor_settings()
 	if settings != null and settings.settings_changed.is_connected(_on_settings_changed.bind(plugin)):
 		settings.settings_changed.disconnect(_on_settings_changed.bind(plugin))
 	_teardown(plugin)
-
 
 static func _rebuild(plugin: EditorPlugin) -> void:
 	var tools: Array[String] = []
@@ -53,7 +50,6 @@ static func _rebuild(plugin: EditorPlugin) -> void:
 	plugin.set_meta(META_MENU, menu)
 	plugin.set_meta(META_TOOLS, tools)
 
-
 static func _teardown(plugin: EditorPlugin) -> void:
 	if not plugin.has_meta(META_MENU):
 		return
@@ -69,7 +65,6 @@ static func _teardown(plugin: EditorPlugin) -> void:
 	plugin.remove_meta(META_LANG)
 	plugin.remove_meta(META_TITLE)
 
-
 ## 编辑器设置变化: 仅当语言真正变化时重建菜单使其即时生效
 static func _on_settings_changed(plugin: EditorPlugin) -> void:
 	var lang := EditorTranslationTool.editor_locale()
@@ -80,12 +75,10 @@ static func _on_settings_changed(plugin: EditorPlugin) -> void:
 	_rebuild(plugin)
 	plugin.set_meta(META_LANG, lang)
 
-
 ## 子菜单标题: 以 SUBMENU_NAME 为 key 经翻译模块取词; 未命中回退该 key
 static func _menu_title() -> String:
 	var t := EditorTranslationTool.editor_text(FRAMEWORK_TRANSLATION_DIR, SUBMENU_NAME)
 	return t if t != "" else SUBMENU_NAME
-
 
 ## 菜单显示名: 以脚本文件名(ID)在工具归属的翻译目录取词; 未命中回退 class_name / 文件名
 static func _menu_label(path: String) -> String:
@@ -100,11 +93,9 @@ static func _menu_label(path: String) -> String:
 			return gname
 	return name
 
-
 ## 工具归属的翻译目录: 框架工具走框架翻译, 其余(项目 Tool 目录)走项目翻译
 static func _translation_dir(path: String) -> String:
 	return FRAMEWORK_TRANSLATION_DIR if path.begins_with(FRAMEWORK_ROOT) else PROJECT_TRANSLATION_DIR
-
 
 ## 递归遍历目录树, 仅当 is_tool_root 为真时收集其中的 EditorScript 脚本。
 static func _scan_tool_dirs(dir: DirAccess, dir_path: String, is_tool_root: bool, out: Array) -> void:
@@ -117,7 +108,6 @@ static func _scan_tool_dirs(dir: DirAccess, dir_path: String, is_tool_root: bool
 		if dir.current_is_dir():
 			if entry != "." and entry != ".." and not entry.begins_with("."):
 				# "在工具目录树内"而不是"目录名恰好是 Tool": 编辑器工具可能在 Tool/ 或 Core/Editor/ 下,
-				# 且会有 Setup/ Generate/ 这类子目录 —— 子目录要继承父级判定
 				var in_tool_tree := is_tool_root or entry == "Tool" or entry == "Editor"
 				_scan_tool_dirs(DirAccess.open(full), full, in_tool_tree, out)
 		elif is_tool_root and entry.ends_with(".gd") and _is_editor_tool_script(full):
@@ -125,13 +115,11 @@ static func _scan_tool_dirs(dir: DirAccess, dir_path: String, is_tool_root: bool
 		entry = dir.get_next()
 	dir.list_dir_end()
 
-
 static func _is_editor_tool_script(path: String) -> bool:
 	var script := load(path) as Script
 	if script == null:
 		return false
 	return script.get_instance_base_type() == &"EditorScript"
-
 
 static func _on_tool_pressed(id: int, plugin: EditorPlugin, tools: Array) -> void:
 	if id < 0 or id >= tools.size():

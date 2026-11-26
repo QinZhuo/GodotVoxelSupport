@@ -3,7 +3,6 @@
 class_name AssetLightmapSet extends Resource
 
 ## 当前生效的光照库：加载方 set 一次，任何地方都能靠 mesh 自己补光。
-## （否则先入树的实例会一直停在旧库 / 「无烘焙数据」状态）
 static var current: AssetLightmapSet:
 	set(value):
 		if current == value:
@@ -43,7 +42,7 @@ static func attach_path(path: String) -> AssetLightmapSet:
 static func attach(scene_path: String) -> AssetLightmapSet:
 	return attach_path(path_of(scene_path))
 
-## 整张图集，全场景共用。取不到就说明烘焙数据缺失
+## 整张图集，全场景共用。
 func atlas() -> TextureLayered:
 	if _atlas == null and data != null:
 		var textures := data.get_lightmap_textures()
@@ -99,7 +98,7 @@ static func _editor_fallback() -> AssetLightmapSet:
 			return res
 	return null
 
-## 换库时回收旧光照名下的材质副本。实例上已挂的宿主材质不受影响。
+## 换库时回收旧光照名下的材质副本。
 func _release() -> void:
 	for light in regions.values():
 		AssetLightmapBinder.release(light as AssetLightmapRegion)

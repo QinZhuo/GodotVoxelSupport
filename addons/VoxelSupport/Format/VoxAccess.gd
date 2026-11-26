@@ -1,13 +1,9 @@
 class_name VoxAccess
 extends RefCounted
 ## `.vox` 加载器（**只读** —— 导出见 `VoxWriter`）。
-## 已按"大块读进 buffer 再解析"优化：不要改回逐字段 `FileAccess` 读，那样大文件会慢一个量级。
-## 【几何约定不在这里】坐标轴、朝向编码、调色板项下标全在 `VoxSpace`（读写两端唯一出处），
-## 本类只负责"按 chunk 类型把字节搬进 `VoxAsset` 的形状"。
 
 ## 文件头魔数（读口据此校验；读到的版本号原样打日志、不做分支）。
 const VOX_MAGIC := "VOX "
-
 
 static func Open(path: String) -> VoxAccess:
 	var time = Time.get_ticks_usec()
@@ -29,16 +25,13 @@ static func Open(path: String) -> VoxAccess:
 	file.close()
 	return vox
 
-
 var voxel: VoxAsset
 var _file: FileAccess
-
 
 func _init(file: FileAccess):
 	_file = file
 	voxel = VoxAsset.new()
 	# 索引 0 恒为 null（空气占位，遵循全项目统一材质契约）；1..255 预建并设好 id，
-	# 使"数组下标 == 材质ID"成立（align_by_id、体素值查找都依赖这一点）。
 	voxel.materials.resize(QVoxelSpec.MATERIAL_COUNT)
 	for i in range(1, voxel.materials.size()):
 		var mat := VoxelMaterial.new()
@@ -48,14 +41,12 @@ func _init(file: FileAccess):
 		read_chunk()
 	voxel.check_nodes()
 
-
 func read_chunk():
 	var start := _file.get_position()
 	var id := _get_string(4)
 	var size := _get_32()
 	var chunks := _get_32()
 	# 坏块保护：size 超出剩余字节说明文件被截断或字段损坏，整块放弃（跳到末尾）。
-	# 不挡的话 `seek(不可达位置)` 会让外层 while 原地打转 —— 实测能把编辑器主线程卡死。
 	if size < 0 or size > _remain():
 		_file.seek(_file.get_length())
 		return
@@ -149,7 +140,6 @@ func read_chunk():
 	# 至少前进一个 chunk 头：size=0 且无 children 的坏块会让外层 while 原地打转。
 	_file.seek(maxi(end, start + 12))
 
-
 func get_trans(attributes: Dictionary) -> float:
 	var alpha := 0.0
 	if attributes.has("_trans"):
@@ -158,7 +148,6 @@ func get_trans(attributes: Dictionary) -> float:
 		alpha = float(attributes.get("_alpha", 0.0))
 	return alpha
 
-
 func _get_32() -> int:
 	return _file.get_32()
 
@@ -166,12 +155,9 @@ func _get_32() -> int:
 func _remain() -> int:
 	return maxi(0, _file.get_length() - _file.get_position())
 
-
 ## 把"声明的项数"夹到"剩余字节装得下的数量"（每项 item_bytes 字节）。
-## 【为什么必须有】这些字段直接决定循环次数：一个坏值就能让主线程空转几十亿次。
 func _safe_count(declared: int, item_bytes: int) -> int:
 	return clampi(declared, 0, _remain() / maxi(1, item_bytes))
-
 
 func _get_string(length: int) -> String:
 	return _file.get_buffer(clampi(length, 0, _remain())).get_string_from_ascii()

@@ -1,19 +1,6 @@
 extends TestCase
 
 ## 体素 LOD 降采样内核回归测试（编辑器进程即可，无需游戏进程）。
-## 覆盖 VoxelSupportNative 里 LOD 大格降采样相关的三条路径 —— T3-2 把原本四处手写的
-## "取第一个非空材质"合并为唯一实现 downsample_cell 后，它们必须仍然彼此自洽：
-##   · 全量：build_lod_block_halo_from_buffers_native（中心 32³ 与 6 外缘面）
-##   · 增量：patch_lod_block（只重算指定脏大格，其余复用入参 coarse）
-##   · 逐级：patch_lod_block_from_lod（从上一层 coarse 再降采样）
-## 断言用的是**独立参考实现**（_ref_coarse，纯 GDScript 按规则手写）做 oracle，
-## 而不是"两条 C++ 路径互相对齐" —— 后者在两边同时错时依然会通过。
-## 参考实现固定按 (z, y, x) 序取第一个非空，任何调用点顺序偏离都会被它抓出来。
-## 这正是合并前的问题所在：外缘面那处的三轴遍历序与其余三处不同
-## ((z,x,y)/(y,x,z) vs (z,y,x))，即同一个概念的操作有三套"谁先撞上就选谁"的顺序。
-## 测试数据刻意让每个 cell 内部含多种材质、且把 cell 的 (0,0,0) 体素置空 ——
-## 只有这样"取第一个非空"的遍历顺序才真正影响结果。以 cell=2 为例，
-## (z,y,x) 取到 2，(z,x,y) 取到 3，(y,x,z) 取到 5，三者互不相同。
 
 ## cell = 2^LOD_SHIFT = 2 体素；block = 32 大格 = 64 体素 = 2×2×2 chunk
 const LOD_SHIFT := 1
@@ -36,7 +23,6 @@ const DATA_BLOCKS: Array[Vector3i] = [
 
 var _buffers: Dictionary = {}
 
-
 # 不变式
 
 ## 全量脏大格的 patch 与 halo 中心，都必须等于独立参考实现
@@ -54,10 +40,7 @@ func test_lod_patch_full_equals_reference() -> void:
 	var center := VoxelChunk.extract_center_from_halo(halo)
 	assert_true(center == ref, "halo 中心应等于参考实现（首个不一致下标 %d）" % _first_diff(center, ref))
 
-
 ## 六个外缘面各自 == 参考实现算出的"邻居 block 边缘大格层"。
-## 合并前外缘面分支的遍历序随面而变，故这一条正是"顺序漂移"的探针 ——
-## ±Y / ±Z 三个面尤其敏感（它们是 (z,x,y) 与 (y,x,z)）。
 func test_lod_halo_faces_match_reference() -> void:
 	var hs: int = VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
 	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
@@ -97,12 +80,7 @@ func test_lod_halo_faces_match_reference() -> void:
 				"dir=%s 的外缘面应等于参考实现（首个不一致下标 %d）"
 						% [str(d), _first_diff(face_vals, ref_vals)])
 
-
 ## 直接拷版 halo（独立 LOD 数据层）：中心 32³ == 自身大格，6 外缘面 == 邻居 block 的边缘大格层。
-## 这一条覆盖 build_lod_block_halo_from_lod_buffers —— 它与降采样版共用同一套面映射
-## （halo_face_info / halo_sample_origin / halo_index_of），但两条路径取材质的方式不同：
-## 一条 downsample_cell 降采样、一条直接拷大格。共用面映射后必须两边都仍然对齐参考实现，
-## 否则「外缘面写错一格」只会在其中一条路径上露出接缝。
 func test_lod_halo_direct_copy_matches_reference() -> void:
 	var hs: int = VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
 	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
@@ -146,7 +124,6 @@ func test_lod_halo_direct_copy_matches_reference() -> void:
 				"dir=%s 的外缘面应等于邻居贴边大格（首个不一致下标 %d）"
 						% [str(d), _first_diff(face_vals, ref_vals)])
 
-
 ## 逐级上推（L0→LOD1→LOD2）与从 L0 全量重算，都必须等于参考实现算的 LOD2
 func test_lod_pyramid_equals_reference() -> void:
 	# 只看前 16 个大格：该区域只用到 chunk (0..1)³ 与上一层 block (0,0,0)
@@ -167,11 +144,9 @@ func test_lod_pyramid_equals_reference() -> void:
 	assert_true(from_lod == ref, "逐级上推应等于参考实现（首个不一致下标 %d）" % _first_diff(from_lod, ref))
 	assert_true(full == ref, "L0 全量重算应等于参考实现（首个不一致下标 %d）" % _first_diff(full, ref))
 
-
 # 辅助
 
 ## 独立参考实现（oracle）：在 [gmin, gmax] 大格范围内按 (z, y, x) 序取第一个非空材质。
-## 这是 C++ downsample_cell 的规则权威复述，刻意用最朴素的写法，不与 C++ 共享任何代码。
 func _ref_coarse(buffers: Dictionary, block_key: Vector3i, cell: int,
 		gmin: Vector3i, gmax: Vector3i) -> PackedInt32Array:
 	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
@@ -199,7 +174,6 @@ func _ref_coarse(buffers: Dictionary, block_key: Vector3i, cell: int,
 				out[gx + gy * bs + gz * bs * bs] = mat
 	return out
 
-
 ## 按世界体素坐标读 LOD0 数据（不存在 = 空）
 func _get_voxel(buffers: Dictionary, wx: int, wy: int, wz: int) -> int:
 	var cs: int = VoxelChunk.CHUNK_SIZE
@@ -212,25 +186,21 @@ func _get_voxel(buffers: Dictionary, wx: int, wy: int, wz: int) -> int:
 	var lz := wz - ck.z * cs
 	return buf[lx + ly * cs + lz * cs * cs]
 
-
 ## 向下取整除法（GDScript 的 int / int 向零截断，负坐标会错）
 static func _floor_div(v: int, d: int) -> int:
 	var q := v / d
 	return q - 1 if q * d > v else q
-
 
 ## block 内最后一个大格的坐标
 func _gmax() -> Vector3i:
 	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
 	return Vector3i(bs - 1, bs - 1, bs - 1)
 
-
 ## 构造覆盖 DATA_BLOCKS 的 LOD0 chunk 缓冲（懒建并缓存，多个用例复用）
 func _get_buffers() -> Dictionary:
 	if _buffers.is_empty():
 		_buffers = _make_buffers()
 	return _buffers
-
 
 func _make_buffers() -> Dictionary:
 	var cell := 1 << LOD_SHIFT
@@ -245,9 +215,7 @@ func _make_buffers() -> Dictionary:
 					buffers[ck] = _make_chunk(ck, cell)
 	return buffers
 
-
 ## 单个 32³ chunk：材质由体素在 cell 内的相对位置决定，cell 的 (0,0,0) 体素置空。
-## 于是同一 cell 内存在多种材质，且"第一个非空"取决于遍历顺序。
 func _make_chunk(ck: Vector3i, cell: int) -> PackedInt32Array:
 	var cs: int = VoxelChunk.CHUNK_SIZE
 	var buf := PackedInt32Array()
@@ -263,9 +231,7 @@ func _make_chunk(ck: Vector3i, cell: int) -> PackedInt32Array:
 				n += 1
 	return buf
 
-
 ## 构造独立 LOD 数据层：自身 + 6 邻居，每块 32³ 大格，值 = (x*3 + y*5 + z*7 + 1)，
-## 保证相邻面/相邻块的取值互不相同 —— 面映射错一格（比如把 +x 的邻居读成 -x）时必被抓出。
 func _make_lod_data_blocks() -> Dictionary:
 	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
 	var out := {}
@@ -280,7 +246,6 @@ func _make_lod_data_blocks() -> Dictionary:
 					n += 1
 		out[block] = buf
 	return out
-
 
 ## 首个不一致下标（-1 = 完全相同；长度不同则返回较短者长度）
 func _first_diff(a: PackedInt32Array, b: PackedInt32Array) -> int:

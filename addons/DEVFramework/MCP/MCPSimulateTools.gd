@@ -2,9 +2,6 @@
 extends RefCounted
 
 ## ======= 游戏内 UI 交互域 =======
-## 画面查询(get_interactables) + 输入模拟(simulate_*) + 条件等待(wait_for)。
-## 全部在**游戏进程内**执行; 编辑器进程经调试线转发(转发壳在 MCPDevServer)。
-## **必须带 @tool 且不声明 class_name**, 理由见 MCPDevServer 顶部"工具域文件"一段。
 const MCPResult := preload("res://addons/DEVFramework/MCP/MCPResult.gd")
 const MCPToolContract := preload("res://addons/DEVFramework/MCP/MCPToolContract.gd")
 const MCPUITools := preload("res://addons/DEVFramework/MCP/MCPUITools.gd")
@@ -12,9 +9,7 @@ const MCPUITools := preload("res://addons/DEVFramework/MCP/MCPUITools.gd")
 ## wait_for 的条件种类(schema 的 enum 与实现共用同一份)。
 const WAIT_CONDITIONS := ["text_visible", "text_gone", "node_exists", "node_gone", "value", "time"]
 
-
 ## 本域的工具清单(顺序即 tools/list 顺序: "先查后点"的使用顺序)。
-## 宿主遍历它调用 _register_game_play_tool 注册 —— 元数据与实现同居, 宿主不再手写一遍。
 static func tools() -> Array:
 	return [
 		{
@@ -73,12 +68,9 @@ static func tools() -> Array:
 		},
 	]
 
-
 ## ======= 输入模拟 =======
 
 ## 模拟鼠标左键点击。
-## x/y 是调用方**自报**坐标系(space, 默认 window): Input.parse_input_event 收的是窗口坐标,
-## 换分辨率就偏, 故不自作换算。ref 则交给 MCPUITools 解析成实时位置。
 static func _handle_simulate_click(args: Dictionary) -> Dictionary:
 	var pos := Vector2.ZERO
 	var space := ""
@@ -123,8 +115,6 @@ static func _handle_simulate_click(args: Dictionary) -> Dictionary:
 	up_event.global_position = pos
 	if sub_vp != null:
 		# 子视口元素: 直接投递给那个子视口, 与真人点 3D 平板的投递路径同源。
-		# 必须先补一个 motion 建立 hover: push_input 是同步处理的, 不先"挪到"目标上,
-		# 紧随其后的 press/release 不会让 BaseButton 进入按下态。
 		var move_event := InputEventMouseMotion.new()
 		move_event.position = pos
 		move_event.global_position = pos
@@ -140,7 +130,6 @@ static func _handle_simulate_click(args: Dictionary) -> Dictionary:
 		"space": target_space,
 		"message": "鼠标左键点击事件已发送" if sub_vp == null else "鼠标左键点击事件已投递到子视口 %s" % sub_vp_path
 	})
-
 
 ## 在 3D 物体自身上激活一次点击(不注入鼠标事件: 相机可动, 投影坐标必点偏)。
 static func _activate_interactable_3d(path: String, ref: String) -> Dictionary:
@@ -165,8 +154,7 @@ static func _activate_interactable_3d(path: String, ref: String) -> Dictionary:
 		"message": "已在 3D 物体 %s 上激活一次点击(未注入鼠标事件)" % node.name,
 	})
 
-
-## 模拟鼠标拖拽(左键按下 -> 分步移动到目标 -> 释放)。分步是为了让拖拽类控件收到中间 motion。
+## 模拟鼠标拖拽(左键按下 -> 分步移动到目标 -> 释放)。
 static func _handle_simulate_drag(args: Dictionary) -> Dictionary:
 	var from_x: int = VariantTool.get_int(args, "from_x")
 	var from_y: int = VariantTool.get_int(args, "from_y")
@@ -205,8 +193,7 @@ static func _handle_simulate_drag(args: Dictionary) -> Dictionary:
 		"message": "拖拽事件已发送"
 	})
 
-
-## 模拟键盘按键。只认内置键名表 + 单字符。
+## 模拟键盘按键。
 static func _handle_simulate_key(args: Dictionary) -> Dictionary:
 	var key_str: String = VariantTool.get_string(args, "key").to_lower()
 	var pressed := VariantTool.get_bool(args, "pressed", true)
@@ -240,10 +227,7 @@ static func _handle_simulate_key(args: Dictionary) -> Dictionary:
 		"message": "按键事件已发送"
 	})
 
-
-## 往输入控件里输入文本。走控件自己的编辑 API(insert_text_at_caret), 不逐字符注入 InputEventKey:
-## 后者要自己处理 IME、修饰键、选区与光标, 且中文根本注入不进去。代价是绕过了"按键→控件"那一段,
-## 所以它验证的是"输入之后的业务链路", 不是输入法本身。
+## 往输入控件里输入文本。
 static func _handle_simulate_text(args: Dictionary) -> Dictionary:
 	var text := VariantTool.get_string(args, "text")
 	if text.is_empty():
@@ -275,8 +259,7 @@ static func _handle_simulate_text(args: Dictionary) -> Dictionary:
 		"message": "已向 %s 输入 %d 个字符%s" % [str(ctrl.name), text.length(), ("并提交" if submit else "")],
 	})
 
-
-## 滚轮。列表/滚动容器只认 WHEEL_UP/WHEEL_DOWN, 键盘翻页并不等价。
+## 滚轮。
 static func _handle_simulate_scroll(args: Dictionary) -> Dictionary:
 	var amount := VariantTool.get_int(args, "amount", 1)
 	if amount == 0:
@@ -343,11 +326,9 @@ static func _handle_simulate_scroll(args: Dictionary) -> Dictionary:
 		"message": "已向%s投递 %d 次滚轮%s事件" % [("子视口 " + str(sub_vp.get_path()) + " ") if sub_vp != null else " ", steps, "向下" if amount > 0 else "向上"],
 	})
 
-
 ## ======= 条件等待 =======
 
-## 把"等条件成立"的轮询收进服务器。写死 sleep 无法区分"还没好"与"条件写错了";
-## 这里把最后一次观察到的实际值一并带回去, 两者就能当场区分。
+## 把"等条件成立"的轮询收进服务器。
 static func _handle_wait_for(args: Dictionary) -> Dictionary:
 	var c := VariantTool.get_string(args, "condition", "").strip_edges()
 	if not c in WAIT_CONDITIONS:
@@ -390,8 +371,7 @@ static func _handle_wait_for(args: Dictionary) -> Dictionary:
 		MCPResult.CAT_TRANSIENT, true,
 		"先确认条件本身写对(text/path/property 是否指向真实存在的目标 —— 观察值已给出实际是什么); 条件无误则调大 timeout_ms")
 
-
-## 单次探测。observed 一律回"当前实际是什么", 用来区分"没等到"与"写错了"。
+## 单次探测。
 static func _probe(c: String, text: String, path: String, property: String, expected: Variant) -> Dictionary:
 	var loop := _tree()
 	if loop == null or loop.root == null:
@@ -435,7 +415,6 @@ static func _probe(c: String, text: String, path: String, property: String, expe
 			return {"ok": _value_matches(actual, expected), "observed": str(actual)}
 	return {"ok": false, "observed": "未知的 condition"}
 
-
 ## 按路径找节点: 先当绝对/相对路径, 再当名字在全树里找(名字是调用方最常用的写法)。
 static func _find_node(loop: SceneTree, path: String) -> Node:
 	var n := loop.root.get_node_or_null(NodePath(path))
@@ -443,7 +422,6 @@ static func _find_node(loop: SceneTree, path: String) -> Node:
 		n = loop.current_scene.get_node_or_null(NodePath(path))
 		if n == null:
 			# 也接受「场景根/子路径」: 场景根未必直接挂在 /root 下(编辑器里就在 @EditorNode 子树里),
-			# 而 get_node_info 给的正是相对场景根的路径 —— 两边写法定要能互通。
 			var root_name := str(loop.current_scene.name)
 			if path.begins_with(root_name + "/"):
 				n = loop.current_scene.get_node_or_null(NodePath(path.substr(root_name.length() + 1)))
@@ -451,13 +429,11 @@ static func _find_node(loop: SceneTree, path: String) -> Node:
 		n = loop.root.find_child(path, true, false)
 	return n
 
-
 static func _has_prop(node: Node, property: String) -> bool:
 	for p in node.get_property_list():
 		if str(p.name) == property:
 			return true
 	return false
-
 
 ## 期望值比对: 数字按容差比, 其余按文本比 —— 调用方写 "true"/true 不该有两种结果。
 static func _value_matches(actual: Variant, expected: Variant) -> bool:
@@ -470,9 +446,7 @@ static func _value_matches(actual: Variant, expected: Variant) -> bool:
 		return str(actual).to_lower() == str(expected).to_lower()
 	return str(actual) == str(expected)
 
-
 ## simulate_text / simulate_scroll 共用的目标解析: ref 优先, 否则 path, 否则报错。
-## 返回 {node: Node} 或 {error: String} —— 不用 Dictionary 的 null 判别: Node 可能真为 null。
 static func _resolve_target(args: Dictionary, what: String) -> Dictionary:
 	var ref := VariantTool.get_string(args, "ref").strip_edges()
 	var loop := _tree()
@@ -498,11 +472,9 @@ static func _resolve_target(args: Dictionary, what: String) -> Dictionary:
 		return {"error": "找不到节点: %s(路径相对 /root; 也给相对游戏场景根的写法)" % path}
 	return {"node": by_path}
 
-
 ## 本域没有 Node 宿主(纯 RefCounted), 场景树只能从主循环取。
 static func _tree() -> SceneTree:
 	return Engine.get_main_loop() as SceneTree
-
 
 static func _viewport() -> Viewport:
 	var loop := _tree()

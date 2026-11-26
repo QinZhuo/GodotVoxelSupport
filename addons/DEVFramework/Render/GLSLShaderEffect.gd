@@ -25,19 +25,16 @@ var nearest_sampler: RID
 var mutex := Mutex.new()
 var shader_is_dirty: bool = true
 
-
 func _init() -> void:
 	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
 	rd = RenderingServer.get_rendering_device()
 	_sync_needs()
-
 
 ## normal/motion 缓冲只在 effect 声明需要时才生成；漏声明时 get_texture 会拿到空 RID 并每帧报错。
 func _sync_needs() -> void:
 	var code := define_code + main_code
 	needs_normal_roughness = code.contains("get_normal_roughness")
 	needs_motion_vectors = code.contains("get_motion_vector")
-
 
 # 系统通知，我们要对提醒我们即将被销毁的通知做出反应。
 func _notification(what: int) -> void:
@@ -48,8 +45,7 @@ func _notification(what: int) -> void:
 		if nearest_sampler.is_valid():
 			rd.free_rid(nearest_sampler)
 
-
-#region 此区域中的代码在渲染线程上运行。
+# region 此区域中的代码在渲染线程上运行。
 func _check_shader() -> bool:
 	if not rd:
 		return false
@@ -95,7 +91,6 @@ func _check_shader() -> bool:
 
 	return pipeline.is_valid()
 
-
 ## "normal_roughness" 所在的缓冲上下文(按渲染器命名), 都没有则返回空 = 本渲染器不支持该特效。
 const _NR_CONTEXTS: Array[StringName] = [&"forward_clustered", &"mobile", &"gl_compatibility"]
 
@@ -105,12 +100,10 @@ static func _normal_roughness_context(buffers: RenderSceneBuffersRD) -> StringNa
 			return c
 	return &""
 
-
 # 每帧由渲染线程调用。
 func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data: RenderData) -> void:
 	if rd and p_effect_callback_type == effect_callback_type and _check_shader():
 		# 获取我们的渲染场景缓冲区对象，这使我们能够访问我们的渲染缓冲区。
-		# 请注意，实现因渲染器而异，因此需要进行强制转换。
 		var render_scene_buffers: RenderSceneBuffersRD = p_render_data.get_render_scene_buffers()
 		var scene_data: RenderSceneData = p_render_data.get_render_scene_data()
 		if render_scene_buffers and scene_data:
@@ -127,7 +120,6 @@ func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data:
 			var z_groups: int = 1
 
 			# 创建推送常量。
-			# 必须按 16 字节对齐，并且顺序与着色器中定义的相同。
 			var push_constant := PackedFloat32Array([
 					size.x,
 					size.y,
@@ -142,7 +134,7 @@ func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data:
 				sampler_state.mag_filter = RenderingDevice.SamplerFilter.SAMPLER_FILTER_LINEAR
 				nearest_sampler = rd.sampler_create(sampler_state)
 
-			# 遍历视图，以防我们在进行立体渲染。如果是单目，这没有额外开销。
+			# 遍历视图，以防我们在进行立体渲染。
 			var view_count: int = render_scene_buffers.get_view_count()
 			for view in view_count:
 				# 获取我们的场景数据缓冲区的 RID。
@@ -191,8 +183,7 @@ func _render_callback(p_effect_callback_type: EffectCallbackType, p_render_data:
 				rd.compute_list_set_push_constant(compute_list, push_constant.to_byte_array(), push_constant.size() * 4)
 				rd.compute_list_dispatch(compute_list, x_groups, y_groups, z_groups)
 				rd.compute_list_end()
-#endregion
-
+# endregion
 
 const TEMPLATE_SHADER: String = """
 #version 450

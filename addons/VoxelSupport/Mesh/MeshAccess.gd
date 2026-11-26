@@ -1,38 +1,24 @@
 @tool
 class_name MeshAccess
 extends RefCounted
-## 外部三维模型 → 统一网格快照。与 `VoxAccess`（.vox）对位：格式层只回答"字节 → 顶点"，
-## 不认识体素世界。
-## 【三种格式各走各的路，理由不同】
-##   glTF/.glb：Godot 内核唯一自带**运行期**加载器（`GLTFDocument`），还有动画与蒙皮，故首选；
-##   OBJ/STL：内核只有编辑器导入管线，运行期读不到 —— 格式本身足够简单，自己解析即可。
-##   FBX/DAE/.blend 刻意不做：它们依赖编辑器那条管线（ufbx / 外部 Blender），
-##   强行支持等于在应用里重造一个导入器，收益远小于"先转成 glTF"。
-## 【产物的形状】一串**帧**，每帧一组**零件**（part = 一个 surface 的三角面 + 一个材质槽）。
-## 网格原点与体素边长不在这里定 —— 体素化要求所有帧共用一套网格，故由 `MeshVoxelizer` 统一算。
+## 外部三维模型 → 统一网格快照。
 
 const EXTENSIONS := ["glb", "gltf", "obj", "stl"]
-## 各格式在对话框里的显示名。扩展名事实只有 `EXTENSIONS` 一处，这里只是"人怎么读它"。
+## 各格式在对话框里的显示名。
 const FILTER_NAMES := {
 	"glb": "glTF 二进制（.glb）",
 	"gltf": "glTF 文本（.gltf）",
 	"obj": "Wavefront OBJ（.obj）",
 	"stl": "STL 网格（.stl）",
 }
-## 动画采样帧率与帧数上限。体素帧动画本来只有 4~12 fps 的观感，采太密只是白烧内存。
-## 【为什么引用 QVoxelSpec 而不是写 12.0】导入/编辑/运行时三处的 fps 缺省必须同源，
-## 否则"模型存一轮再读回帧率就变"。缺省值唯一事实在 Core/QVoxelSpec.ANIM_FPS_DEFAULT。
-## 注意：改它会连带 MeshAccess 的采样帧数上限估算（clampi(..., 2, MAX_FRAMES)）一起变，
-## 这是预期行为 —— 帧率降低后同样的动画时长需要更多帧。
+## 动画采样帧率与帧数上限。
 const ANIM_FPS := float(QVoxelSpec.ANIM_FPS_DEFAULT)
 const MAX_FRAMES := 64
 ## 贴图长边上限（超过则等比缩小）：导入一张 4K 图只为取色，没必要按原样常驻。
 const TEX_LIMIT := 1024
 
-
 static func handles(path: String) -> bool:
 	return path.get_extension().to_lower() in EXTENSIONS
-
 
 ## 文件对话框过滤器 `[[匹配串, 显示名], …]` —— 对话框、拖放判定、失败提示共用这一份。
 static func filter_specs() -> Array:
@@ -41,15 +27,11 @@ static func filter_specs() -> Array:
 		out.append(["*.%s" % ext, String(FILTER_NAMES.get(ext, ext.to_upper()))])
 	return out
 
-
 ## 人类可读的格式清单（提示文案用）。
 static func describe() -> String:
 	return ", ".join(EXTENSIONS)
 
-
-## 载入外部模型。返回 `{name, frames: Array[{parts, time}], animated, slots, fps}`；失败返回空字典。
-## `host` 用于把临时场景挂进树（动画 seek / 骨骼求值必须有树），传 null 时按节点自身的
-## transform 链推算。**协程**：采样多帧时每帧让出一帧 —— 否则大模型的导入会把界面冻住。
+## 载入外部模型。
 static func load_scene(path: String, host: Node = null) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		return {}
@@ -67,14 +49,11 @@ static func load_scene(path: String, host: Node = null) -> Dictionary:
 		out["name"] = path.get_file().get_basename()
 	return out
 
-
 ## 三处 `_load_*` 共用的空槽表（材质 → 槽下标）。
 static func _new_book() -> Dictionary:
 	return {"list": [], "map": {}}
 
-
 ## 三处 `_load_*` 共用的返回值装配：形状只在这里拼一次（`animated` 也由帧数推导）。
-## `fps` 一并带出去，下游（体素帧动画的播放速率）因此不必反向依赖本类的常量。
 static func _make_scene(file_name: String, frames: Array, book: Dictionary) -> Dictionary:
 	return {
 		"name": file_name.get_basename(),
@@ -83,7 +62,6 @@ static func _make_scene(file_name: String, frames: Array, book: Dictionary) -> D
 		"slots": book["list"],
 		"fps": ANIM_FPS,
 	}
-
 
 # glTF / GLB
 
@@ -126,7 +104,6 @@ static func _load_gltf(path: String, host: Node) -> Dictionary:
 		root.free()
 	return scene
 
-
 static func _animation_player(root: Node) -> AnimationPlayer:
 	for n in root.find_children("*", "AnimationPlayer", true, false):
 		var ap := n as AnimationPlayer
@@ -134,9 +111,7 @@ static func _animation_player(root: Node) -> AnimationPlayer:
 			return ap
 	return null
 
-
 ## 挑一条动画并**均匀采样一个周期**（不含末端：末帧与首帧同姿态，重复一帧只会白占内存）。
-## 取最长的那条 —— 导入器有时会顺带生成长度 0 的 `RESET` 之类，取"第一条"会退化成一帧。
 static func _pick_animation(player: AnimationPlayer) -> Dictionary:
 	var best := ""
 	var best_len := 0.0
@@ -154,22 +129,14 @@ static func _pick_animation(player: AnimationPlayer) -> Dictionary:
 		times.append(best_len * float(k) / float(n))
 	return {"name": best, "times": times}
 
-
 static func _refresh_transforms(node: Node) -> void:
 	# force_update_transform 要求节点在树内；未挂树时 Node3D 的变换本来就是"已更新"的
-	# （没有父链要合并），调它只会换来一句 Condition "!is_inside_tree()" is true。
 	if node is Node3D and node.is_inside_tree():
 		(node as Node3D).force_update_transform()
 	for c in node.get_children():
 		_refresh_transforms(c)
 
-
 ## 节点 → 世界变换，**不依赖场景树**。
-## 【为什么不能直接用 global_transform】未挂进树的 Node3D 读 global_transform 会报
-## Condition "!is_inside_tree()" is true 并**返回单位阵** —— 于是所有顶点塌到原点，
-## 体素化出来是一个空壳，而且错误只在日志里（返回值看起来正常）。故这里自己沿父链
-## 累乘 local transform：挂树时与 global_transform 等价，未挂树时也正是"按节点自身的
-## transform 链推算"这个既有契约要求的语义。
 static func _world_xf(node: Node3D) -> Transform3D:
 	if node.is_inside_tree():
 		return node.global_transform
@@ -179,7 +146,6 @@ static func _world_xf(node: Node3D) -> Transform3D:
 		xf = (p as Node3D).transform * xf
 		p = p.get_parent()
 	return xf
-
 
 static func _collect_parts(node: Node, out: Array, book: Dictionary) -> void:
 	if node is ImporterMeshInstance3D:
@@ -202,7 +168,6 @@ static func _collect_parts(node: Node, out: Array, book: Dictionary) -> void:
 					out.append(part)
 	for c in node.get_children():
 		_collect_parts(c, out, book)
-
 
 ## 一个 surface → 零件：顶点烘焙到**世界空间**（含骨骼变形），并登记材质槽。
 static func _part_from(node: Node3D, arrays: Array, mat: Material, book: Dictionary) -> Dictionary:
@@ -238,9 +203,7 @@ static func _part_from(node: Node3D, arrays: Array, mat: Material, book: Diction
 		"slot": _slot_index(mat, book),
 	}
 
-
 ## CPU 蒙皮：`world = 节点变换 × Σ w·(骨骼全局姿态 × 绑定姿态逆) × v`。
-## 无骨骼 / 压缩骨骼（4×uint32 打包格式）/ 权重缺失时原样返回，绝不产出歪掉的模型。
 static func _skin_vertices(node: Node3D, arrays: Array, verts: PackedVector3Array) -> PackedVector3Array:
 	var skin: Skin = null
 	var skel: Skeleton3D = null
@@ -290,7 +253,6 @@ static func _skin_vertices(node: Node3D, arrays: Array, verts: PackedVector3Arra
 		out[vi] = acc / total if total > 0.0001 else v
 	return out
 
-
 ## 材质 → 槽下标（按实例去重：多 surface 共用一份贴图字节）。
 static func _slot_index(mat: Material, book: Dictionary) -> int:
 	var list: Array = book["list"]
@@ -322,7 +284,6 @@ static func _slot_index(mat: Material, book: Dictionary) -> int:
 	list.append(slot)
 	map[key] = list.size() - 1
 	return list.size() - 1
-
 
 # OBJ / MTL
 
@@ -373,15 +334,13 @@ static func _load_obj(path: String) -> Dictionary:
 		return {}
 	return _make_scene(path.get_file(), [{"parts": parts, "time": 0.0}], book)
 
-
 static func _obj_group(groups: Dictionary, name: String) -> Dictionary:
 	if not groups.has(name):
 		groups[name] = {"verts": PackedVector3Array(), "uvs": PackedVector2Array(),
 				"indices": PackedInt32Array(), "map": {}}
 	return groups[name]
 
-
-## 面 → 三角扇形。逐面无顶点复用（体素化只看三角面，去重收益为零）。
+## 面 → 三角扇形。
 static func _obj_face(p: PackedStringArray, pos: Array[Vector3], uv: Array[Vector2],
 		g: Dictionary) -> void:
 	var fv: Array[int] = []
@@ -419,10 +378,7 @@ static func _obj_face(p: PackedStringArray, pos: Array[Vector3], uv: Array[Vecto
 	g["uvs"] = uvs
 	g["indices"] = idx
 
-
 ## 解析同目录 .mtl（Kd 基色 + map_Kd 贴图），返回 {材质名: StandardMaterial3D}。
-## `obj_text` 是调用方**已经读进内存**的那份 .obj 文本：这里只是从里面挑 `mtllib` 行，
-## 不必（也不该）为了同一份内容再读一次盘。
 static func _load_mtl(obj_path: String, obj_text: String) -> Dictionary:
 	var out := {}
 	var text := obj_text
@@ -462,7 +418,6 @@ static func _load_mtl(obj_path: String, obj_text: String) -> Dictionary:
 						if img != null:
 							cur.albedo_texture = ImageTexture.create_from_image(img)
 	return out
-
 
 # STL
 

@@ -3,26 +3,11 @@ class_name NativeScaffold
 extends RefCounted
 
 ## 原生工程骨架自动生成 —— 目标是"项目里只要有 gdextension/src/*.cpp, 构建脚本就能跑起来"。
-##
-## 自动补齐四样东西(缺什么补什么, 从不覆盖用户已有文件):
-##   1. godot-cpp          : 浅克隆到 gdextension/godot-cpp(.gitignore 忽略, 不入库)
-##   2. CMakeLists.txt     : 与官方模板同款的 add_subdirectory + add_library
-##   3. generated/*        : sources.cmake(源文件清单) + register_types.cpp(扫描 GDCLASS 自动注册)
-##   4. *.gdextension      : [libraries] 按平台/架构写好, entry_symbol 指向生成的入口
-##
-## 生成的每个文件都带 "由 DEVFramework 生成" 标记: 删掉它下次构建会重新生成;
-## 手写过 CMakeLists.txt 的项目(没这个标记)完全不受影响 —— 这一步只补缺失项。
-##
-## 为什么必须生成 register_types.cpp: GDExtension 的入口要求显式 `GDREGISTER_CLASS(X)`,
-## 引擎不会自动发现类。扫描源码里的 `GDCLASS(X, ...)` 生成注册表, 是"零配置"唯一可行路径。
 
 const MARKER := "由 DEVFramework 生成"
 const GEN_DIR := "generated"
 
-
-# ============================================================
 # 纯渲染函数(无副作用, 可单测)
-# ============================================================
 
 static func render_register_types(classes: Array, target: String, api_hint := "") -> String:
 	var out := "// %s: 扫描 src/** 里的 GDCLASS(...) 自动注册(构建时刷新, 请勿手改)\n" % MARKER
@@ -55,7 +40,6 @@ static func render_register_types(classes: Array, target: String, api_hint := ""
 	out += "\tinit_obj.set_minimum_library_initialization_level(MODULE_INITIALIZATION_LEVEL_SCENE);\n"
 	out += "\treturn init_obj.init();\n}\n}\n"
 	return out
-
 
 static func render_cmake_multi(plugins: Array, api_default: String) -> String:
 	var out := "# %s: 每个原生插件一个 target, 共用一份 godot-cpp 构建\n" % MARKER
@@ -103,7 +87,6 @@ static func render_cmake_multi(plugins: Array, api_default: String) -> String:
 			out += "# 警告: 该插件未提供源码目录\n\n"
 	return out
 
-
 ## 单个插件的源清单: 本文件在 gdextension/generated/, 所以用 ../<插件 Native/src> 定位。
 static func render_plugin_sources(target: String, rel_paths: PackedStringArray, src_res: String) -> String:
 	var out := "# %s: %s 的源文件清单(每次构建刷新, 请勿手改)\n" % [MARKER, target]
@@ -112,9 +95,7 @@ static func render_plugin_sources(target: String, rel_paths: PackedStringArray, 
 		out += "\t\"${CMAKE_CURRENT_SOURCE_DIR}/..%s/%s\"\n" % [src_res, p]
 	return out + ")\n"
 
-
 ## 跨插件类名冲突: 两个 GDCLASS 同名会让引擎在加载时报难以定位的错, 这里提前判出。
-## 返回 [{name, targets: [a, b]}]
 static func find_class_conflicts(plugins: Array) -> Array:
 	var by_class := {}
 	for p in plugins:
@@ -132,7 +113,6 @@ static func find_class_conflicts(plugins: Array) -> Array:
 			out.append({"name": cn, "targets": owners})
 	return out
 
-
 ## 生成的 .gdextension: 三个平台的 [libraries] 都按规范名写好, 没构建的平台键暂时指向不存在的文件。
 static func render_gdextension(target: String) -> String:
 	var out := "; %s\n\n[configuration]\n\n" % MARKER
@@ -146,16 +126,9 @@ static func render_gdextension(target: String) -> String:
 	out += "linux.release.x86_64 = \"res://addons/DEVFramework/Native/lib%s.linux.release.x86_64.so\"\n" % target
 	return out
 
-
-# ============================================================
 # 扫描
-# ============================================================
 
 ## 递归列出指定后缀的文件(相对 root_abs 的路径, 用 / 分隔)。
-## ⚠ 顶层必须跳过这几类目录:
-##   - generated/ : 自动生成的源, 扫进来会让 register_types.cpp 编译两次, 且清单永远不幂等;
-##   - godot-cpp/ : 绑定库自己的源码(实测 36 个 .cpp / 14 个 GDCLASS), 扫进来会一起编进我们的库;
-##   - build/ bin/ : 构建产物目录。
 const SKIP_TOP_DIRS := ["generated", "godot-cpp", "build", "bin"]
 
 static func scan_files(root_abs: String, exts: PackedStringArray) -> PackedStringArray:
@@ -182,14 +155,11 @@ static func scan_files(root_abs: String, exts: PackedStringArray) -> PackedStrin
 	out.sort()
 	return out
 
-
 ## 只列源文件(.cpp/.cc/.cxx) —— 参与编译的那些
 static func scan_sources(root_abs: String) -> PackedStringArray:
 	return scan_files(root_abs, PackedStringArray(["cpp", "cc", "cxx"]))
 
-
 ## 扫描文件里的 `GDCLASS(Name, Base)` -> [{name, header, file}]
-## header 优先取同目录同名 .h/.hpp(Godot 约定: GDCLASS 写在类声明头文件里)
 static func scan_gdclasses(root_abs: String, rel_files: PackedStringArray) -> Array:
 	var re := RegEx.new()
 	re.compile("GDCLASS\\s*\\(\\s*([A-Za-z_][A-Za-z0-9_]*)")
@@ -206,7 +176,6 @@ static func scan_gdclasses(root_abs: String, rel_files: PackedStringArray) -> Ar
 			seen[cname] = true
 			out.append({"name": cname, "header": _header_for(root_abs, rel), "file": rel})
 	return out
-
 
 static func _header_for(root_abs: String, rel: String) -> String:
 	var dir := rel.get_base_dir()
@@ -227,14 +196,9 @@ static func _header_for(root_abs: String, rel: String) -> String:
 		return headers[0]
 	return ""
 
-
-# ============================================================
 # 落地(只补缺失项)
-# ============================================================
 
 ## 该目录是不是"共享过来的"(junction / symlink)。
-## 共享插件 = 别的项目的 addons/<插件>(通过 junction 挂进来), 只应由宿主项目构建。
-## 用 OS 层判定, **不在插件目录里落任何标记文件**(addon 目录要能原样分发)。
 static func is_shared_dir(abs_path: String) -> bool:
 	if abs_path == "":
 		return false
@@ -251,7 +215,6 @@ static func is_shared_dir(abs_path: String) -> bool:
 			return true
 	return false
 
-
 static func discover_plugins(project_abs: String) -> Array:
 	var out: Array = []
 	var d := DirAccess.open(project_abs.path_join("addons"))
@@ -265,7 +228,6 @@ static func discover_plugins(project_abs: String) -> Array:
 			var src_abs := native_abs.path_join("src")
 			if DirAccess.dir_exists_absolute(src_abs) and not scan_sources(src_abs).is_empty():
 				# 归属过滤: junction 挂进来的插件只由宿主项目构建。
-				# 否则消费方项目会用**自己的**构建规则重编同一批源码(实测产物互相覆盖、还多出 debug)。
 				if is_shared_dir(project_abs.path_join("addons").path_join(name)):
 					name = d.get_next()
 					continue
@@ -278,7 +240,6 @@ static func discover_plugins(project_abs: String) -> Array:
 		name = d.get_next()
 	d.list_dir_end()
 	return out
-
 
 static func _plugin_target(native_abs: String, plugin: String) -> String:
 	var d := DirAccess.open(native_abs)
@@ -297,9 +258,7 @@ static func _plugin_target(native_abs: String, plugin: String) -> String:
 		clean += ch if ch.is_valid_identifier() or ch.is_valid_int() else "_"
 	return clean if clean != "" else "native"
 
-
-## 多插件工程落地: gdextension/(godot-cpp + 生成的 CMakeLists) + 每插件一份 generated/* 与 *.gdextension。
-## 插件源码始终留在各插件的 Native/src(随插件分发), 构建区与第三方留在项目根。
+## 多插件工程落地: gdextension/(godot-cpp + 生成的 CMakeLists) + 每插件一份 generated/*…
 static func ensure_project(project_abs: String, api_default: String, fetch_deps := true,
 		log_fn := Callable()) -> Dictionary:
 	var plugins := discover_plugins(project_abs)
@@ -311,8 +270,6 @@ static func ensure_project(project_abs: String, api_default: String, fetch_deps 
 		if _fetch_godot_cpp(build_abs, log_fn):
 			created.append("gdextension/godot-cpp")
 	# 构建规则统一: 所有项目的 CMakeLists 都由这里生成(带 MARKER), 手写的那份**直接接管**。
-	# 不另存 .bak —— 版本库里已有历史, 备份文件只会变成"另一份需要维护的旧格式文件"
-	# (而且各项目各编各的规则曾导致同一批源码被不同参数重编: debug 12MB 覆盖 1.7MB 优化版, 帧耗 10×)。
 	var cmake_path := build_abs.path_join("CMakeLists.txt")
 	var own := true
 	if FileAccess.file_exists(cmake_path):
@@ -344,8 +301,7 @@ static func ensure_project(project_abs: String, api_default: String, fetch_deps 
 			if gen_entry and _write_if_changed(gen_abs.path_join("%s_register_types.cpp" % target),
 					render_register_types(classes, target, api_default)):
 				created.append("%s/%s_register_types.cpp" % [GEN_DIR, target])
-		# src/ 加 .gdignore: 源码不必进编辑器面板(也不该被当资源扫)。注意只能加在 src/ 子目录,
-		# Native/ 本身不能加 —— .gdextension 与 dll 就在那里, 编辑器忽略后引擎可能加载不到扩展。
+		# src/ 加 .gdignore: 源码不必进编辑器面板(也不该被当资源扫)。
 		var gi := src_abs.path_join(".gdignore")
 		if not FileAccess.file_exists(gi):
 			var gf := FileAccess.open(gi, FileAccess.WRITE)
@@ -361,11 +317,9 @@ static func ensure_project(project_abs: String, api_default: String, fetch_deps 
 		created.append("gdextension/CMakeLists.txt")
 	return {"created": created, "plugins": plugins, "conflicts": find_class_conflicts(plugins)}
 
-
-## 绝对路径 -> "/addons/X/Native/src" 形式(供 CMake 用 ${CMAKE_CURRENT_SOURCE_DIR}/.. 拼)
+## 绝对路径 -> "/addons/X/Native/src" 形式(供 CMake 用…
 static func _res_rel(project_abs: String, abs_path: String) -> String:
 	return "/" + abs_path.replace(project_abs, "").replace("\\", "/").trim_prefix("/")
-
 
 ## 部署目录里的 *.gdextension: 缺失时按规范名生成(已有文件不碰, 由构建工具负责同步)
 static func ensure_gdextension(native_abs: String, target: String) -> bool:
@@ -375,7 +329,6 @@ static func ensure_gdextension(native_abs: String, target: String) -> bool:
 	DirAccess.make_dir_recursive_absolute(native_abs)
 	return _write_if_changed(path, render_gdextension(target))
 
-
 static func _write_if_changed(path: String, text: String) -> bool:
 	# FileTool.atomic_write_text 会保留编码, 避免中文注释被写坏
 	if FileAccess.file_exists(path) and FileAccess.get_file_as_string(path) == text:
@@ -383,10 +336,7 @@ static func _write_if_changed(path: String, text: String) -> bool:
 	FileTool.atomic_write_text(path, text)
 	return true
 
-
 ## godot-cpp 获取: 浅克隆到 gdextension/godot-cpp(不入库, 已在 .gitignore 里)。
-## 不再走 submodule —— 父仓库曾以 gitlink(160000) 记录它, 各机器 clone 深度不同会让指针
-## 无端从 2a4c066 漂到 24b9df7, git 每次启动都提示"有更改"却永远合不掉。
 static func _fetch_godot_cpp(root_abs: String, log_fn: Callable) -> bool:
 	var gcpp := root_abs.path_join("godot-cpp")
 	var out: Array = []
@@ -400,7 +350,6 @@ static func _fetch_godot_cpp(root_abs: String, log_fn: Callable) -> bool:
 		return false
 	_note(log_fn, "已克隆 godot-cpp(浅克隆, 后续由构建工具对齐版本)。")
 	return true
-
 
 static func _note(log_fn: Callable, msg: String) -> void:
 	if log_fn.is_valid():

@@ -1,10 +1,6 @@
 extends TestCase
 
 ## 结构增删移必须能撤销。
-## 【为什么专门钉】这曾经是刻意不做的（"结构操作与体素编辑是两类东西"），代价是
-## "删错一个模型、按 Ctrl+Z 没反应" —— 用户能踩到的最直接的"东西丢了"。
-## 三种操作在数据上同构（节点换了个位置），所以共用一条 `QVoxelStructureCommand`。
-
 
 ## 一条装配好的会话：一个世界、一个模型、已激活。
 func _session() -> QVoxelierSession:
@@ -13,7 +9,6 @@ func _session() -> QVoxelierSession:
 	w.add_material(Color.RED)
 	s.install(w, w.create_model("Model A", Vector3i(8, 8, 8)))
 	return s
-
 
 func test_add_group_undo_redo() -> void:
 	var s := _session()
@@ -24,7 +19,6 @@ func test_add_group_undo_redo() -> void:
 	assert_eq(s.world.all_nodes().size(), before, "撤销后组应消失")
 	s.session.history.redo()
 	assert_eq(s.world.all_nodes().size(), before + 1, "重做后组应回来")
-
 
 ## 删除当前对象时，命令必须留在**它自己的**历史里（删完 session 就换人了）。
 func test_remove_model_undo() -> void:
@@ -48,7 +42,6 @@ func test_remove_model_undo() -> void:
 	s.activate(vid)
 	assert_true(s.session != null and s.session.object == back, "恢复后应能继续编辑")
 
-
 func test_move_node_undo() -> void:
 	var s := _session()
 	var g := s.world.create_group("G", null)
@@ -58,7 +51,6 @@ func test_move_node_undo() -> void:
 	assert_eq(s.world.find_parent(m), g, "移进组")
 	s.session.history.undo()
 	assert_eq(s.world.find_parent(m), from_parent, "撤销后回到原来的父")
-
 
 ## 新建模型也能撤：与"新建组"走同一条记录。
 func test_add_model_undo() -> void:

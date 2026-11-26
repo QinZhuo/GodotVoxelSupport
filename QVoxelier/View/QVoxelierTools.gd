@@ -2,16 +2,11 @@
 class_name QVoxelierTools
 extends QVoxelierPanel
 ## 左侧**图标工具栏** —— 竖排一列纯图标按钮，**没有统一的背景底**（每个按钮自带圆角底），
-## 直接浮在视口上（Blender 左侧工具架的观感）。
-## 【为什么只有图标】竖排一列放不下文字；名字与热键交给悬浮提示，纯图标更紧凑、更像专业工具。
-## 【为什么没有统一背景】一列独立按钮比"一整块深色板"更轻、更不占视线；选中态由按钮自己的
-## 强调底表达（触摸没有 hover，选中必须常驻可见）。
-## 【工具列表从哪来】直接读 [QVoxelBrushTool.MODES]（表即配置）：加一种笔只需在表里加一行。
 
 ## 选中了某个工具：笔刷模式（值同 QVoxelBrushTool.Mode）或生成/风化（见 TOOL_* 常量）。
 signal tool_selected(mode: int)
 
-## 自定义笔刷 = 把自己做好的模型当图章盖。它是"工具"而非笔刷模式，故用独立 id。
+## 自定义笔刷 = 把自己做好的模型当图章盖。
 const TOOL_CUSTOM := 100
 
 var _scroll: ScrollContainer
@@ -20,7 +15,6 @@ var _buttons := {}          # Mode → Button
 var _group := ButtonGroup.new()
 ## 底部让位高度（动画面板展开时）。
 var bottom_reserved := 0.0
-
 
 func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
@@ -66,17 +60,14 @@ func _build() -> void:
 
 	_fit()
 
-
 ## 一个纯图标开关按钮：方形命中区、图标居中、名字与热键走 tooltip。
 func _icon_toggle(tooltip: String, icon_name: String) -> Button:
 	var b := QVoxelUi.toggle_button(tooltip, QVoxelUi.VARIATION_TOOL, "", icon_name)
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return b
 
-
 func _width() -> float:
 	return float(QVoxelUi.hit_size() + QVoxelUi.space_s() * 2)
-
 
 ## 矩形 = 图标列宽 × min(内容高, 可用高)。
 func _fit() -> void:
@@ -86,12 +77,10 @@ func _fit() -> void:
 	_scroll.custom_minimum_size.y = maxf(0.0, minf(inner.y, _available_height()))
 	size = Vector2(_width(), _scroll.custom_minimum_size.y)
 
-
 ## 本面板能占的最高高度：视口高 − 顶边位置 − 底部状态栏 − 底部让位 − 一点边距。
 func _available_height() -> float:
 	return (get_viewport_rect().size.y - position.y - QVoxelUi.status_height()
 			- QVoxelUi.space_s() - bottom_reserved)
-
 
 ## 底部让位（动画面板高度）。
 func set_bottom_reserved(h: float) -> void:
@@ -99,7 +88,6 @@ func set_bottom_reserved(h: float) -> void:
 		return
 	bottom_reserved = h
 	_fit()
-
 
 # 对外：状态同步（只由 App 调用）
 
@@ -109,9 +97,7 @@ func set_tool(mode: int) -> void:
 	if b != null:
 		b.set_pressed_no_signal(true)
 
-
 ## 布局模式：只留「移动」与「选择」可用（其余绘制 / 图章在布局下不适用，置灰）。
-## 移动 = 拖 gizmo 改整体变换；选择 = 点选 / 框选模型。
 func set_layout_mode(on: bool) -> void:
 	for mode in _buttons:
 		var b: Button = _buttons[mode]

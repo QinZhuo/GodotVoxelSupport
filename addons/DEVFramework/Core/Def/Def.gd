@@ -1,6 +1,5 @@
 @tool
 ## Def 静态数据基类
-## 不得存储任何运行时缓存或状态信息。
 @abstract class_name Def extends Resource
 
 var name: String:

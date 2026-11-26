@@ -1,12 +1,11 @@
 @tool
 ## 烘焙舞台：只在编辑器里用，运行时永远不实例化。
-## 所以不要再给副本套一层容器节点。
 class_name AssetLightmapStage extends Node3D
 
 ## 副本标记：sync 只清理带这个标记的节点
 const META := &"bake_copy"
 
-## 每行摆几份、相邻副本间距。只影响烘焙时互不遮挡，和运行时容量无关
+## 每行摆几份、相邻副本间距。
 const PER_ROW := 10
 const SPACING := 10.0
 
@@ -17,7 +16,7 @@ const SPACING := 10.0
 
 @export_tool_button("烘焙并导出") var export_button: Callable = export_all
 
-## 键 → 资源。目录内容在导出时才读，不和场景重复维护。
+## 键 → 资源。
 func _collect() -> Dictionary:
 	var out := {}
 	for res in meshes:
@@ -40,7 +39,7 @@ static func _take(out: Dictionary, res: Resource) -> void:
 	if not key.is_empty():
 		out[key] = res
 
-## 导出。副本同步是导出的前置步骤，所以不单独给按钮。
+## 导出。
 func export_all() -> void:
 	if not Engine.is_editor_hint():
 		return
@@ -55,7 +54,6 @@ func export_all() -> void:
 		gi.directional = true
 		LogTool.log("烘焙", "已开启 LightmapGI 的 Bake Directional（SH 叠加层需要方向数据）")
 	## 一次扫描供同步 / 导出 / 核对共用：导出中途目录内容不会变。
-	## ⚠️ 同步必须无条件跑：它同时负责把副本摆进场景，短路掉就会拿着空舞台去烘
 	var all := _collect()
 	sync(all)
 	LogTool.log("烘焙", "开始烘焙…")
@@ -74,8 +72,6 @@ func export_all() -> void:
 		return
 	LogTool.log("烘焙", "光照", set.regions.size(), "类 →", path)
 	## 场景必须一起存：LightmapGI 的 light_data 引用只在场景里，不存的话下次打开就没有烘焙数据，
-	## ⚠️ 用 save_scene_as 显式给路径：save_scene() 在"当前场景"解析不到保存目标时
-	## 注意它没有返回值（void），别写成 `if ... != OK`（会直接编译失败）
 	EditorInterface.save_scene_as(scene_path)
 	## 新产物立刻可用：否则编辑器兜底还拿着上一次的扫描结论
 	AssetLightmapSet.invalidate()
@@ -166,7 +162,6 @@ func bake() -> bool:
 		return false
 
 	## 完成判据：副本数到位 **且** `.lmbake` 被重写。
-	## ⚠️ 两个坑都在下面两段注释里, 别踩。
 	var data_path := gi.light_data.resource_path if gi.light_data != null else ""
 	var before_mtime := FileAccess.get_modified_time(data_path) if not data_path.is_empty() else 0
 	## ⚠️ 预期噪音: 编辑器在烘焙开始时重建 Inspector, 按钮可能在信号发射途中被释放。
@@ -196,7 +191,7 @@ static func _bake_button(node: Node) -> Button:
 			return found
 	return null
 
-## 舞台下的副本。只认自己打过标记的节点：灯光、环境、相机这些烘焙辅助节点
+## 舞台下的副本。
 func _copies() -> Array[Node3D]:
 	var out: Array[Node3D] = []
 	for child in get_children():
@@ -219,7 +214,7 @@ func _scene_path() -> String:
 	var root := tree.edited_scene_root if tree else null
 	return root.scene_file_path if root else ""
 
-## 把烘焙结果读成位置表。user_data 每 4 项一组：副本路径、图集矩形、页号、实例序号
+## 把烘焙结果读成位置表。
 func _export_set(all: Dictionary) -> AssetLightmapSet:
 	var gi := _lightmap()
 	if gi == null or gi.light_data == null:
@@ -245,7 +240,7 @@ func _export_set(all: Dictionary) -> AssetLightmapSet:
 		LogTool.warn("烘焙", "烘焙数据里有", dead, "条资源已不存在，已跳过；重新烘焙可清空")
 	return set if not set.regions.is_empty() else null
 
-## ../CardBox/Body → CardBox。副本节点名就是资源键，取 .. 之后的第一段
+## ../CardBox/Body → CardBox。
 static func _key_of_path(path: String) -> String:
 	var segs := path.split("/")
 	var i := 0

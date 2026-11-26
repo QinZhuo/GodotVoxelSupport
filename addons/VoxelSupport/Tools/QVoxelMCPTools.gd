@@ -2,26 +2,15 @@
 extends RefCounted
 
 ## ======= 体素程序化建模 —— 项目侧 MCP provider =======
-##
-## 由 DEVFramework 的 MCPDevServer 按项目设置 `dev_framework/mcp/providers` 加载并调用 `register(add_tool, ctx)`。
-## 框架是用它的项目自己的事: 缺席时本 provider **静默不注册**, 连解析期报错都不留。
-##
-## 【只剩一个"说明"工具】建模能力已收敛到脚本侧: 用 `QVoxelScript`(全局类, 自动分流实时/无头)
-## 写脚本, 在 eval_code(process="editor"|"game") 里执行 —— 这比固定形状的 MCP 工具更自由。
-## 故这里只留 `voxel_help`(API 说明), 不再暴露 reset/material/draw/resize/info/save 等包装工具。
-##
-## 【说明为何内嵌】打包运行时 .md 不进包、源码文本也不可读, 只有随包编译的字符串还能拿到 ——
-## 这正是本工具存在的理由。
 
 const MCP_DIR := "res://addons/DEVFramework/MCP/"
 ## 契约工厂文件名: schema 工厂在 MCPToolContract.gd（旧布局是单独一个 MCPToolSchema.gd）。
-## 按路径载入时必须两个都认 —— 认不出来不报错, 只是整个 provider 静默不注册, 工具从 tools/list 安静消失。
 const CONTRACT_FILES := ["MCPToolContract.gd", "MCPToolSchema.gd"]
 
 ## 框架的两个契约工厂（结果封装 / 参数 schema），缺席时为 null。
 static var _result: GDScript = null
 static var _schema: GDScript = null
-## 宿主是否支持给 add_tool 多传第 5 个参数(自报工具分类)。老版框架只有 4 个参数, 多传会报错。
+## 宿主是否支持给 add_tool 多传第 5 个参数(自报工具分类)。
 static var _kinds_ok := false
 
 const HELP := """# 体素程序化建模 —— API 说明
@@ -144,16 +133,9 @@ const HELP := """# 体素程序化建模 —— API 说明
 - 坐标是整数体素, 最小粒度 1 格; 材质 0 = 空气。
 - 打包运行时: QVoxelScript / VoxelPrimitives 随包可用, 源码不可读 —— 本文即为此提供。"""
 
-
 const RESOURCE_URI := "voxel://api"
 
-
 ## 框架是否在场 —— 在场才惰性载入两个契约工厂。
-## 【为什么不用 preload】preload 是编译期绑定, 框架不复存在时那两行就是一个 Parse Error,
-## 于是"插件放进任意项目"连编译都过不去; 而 MCP 本就是可选的开发期能力。静态方法可以经
-## 脚本对象 `call` 调用, 故换成运行期绑定后, 缺席的代价从"报错"降为"不注册"。
-## 绑定契约工厂: 优先用宿主注入的 ctx(框架 _register_providers 传的是 {schema, result}),
-## 拿不到(独立测试 / 老版框架)再按路径惰性载入。
 static func bind_contract(ctx: Dictionary = {}) -> bool:
 	if ctx.get("result") is GDScript and ctx.get("schema") is GDScript:
 		_result = ctx["result"]
@@ -163,9 +145,7 @@ static func bind_contract(ctx: Dictionary = {}) -> bool:
 	_kinds_ok = false
 	return framework_available()
 
-
 ## 框架是否在场 —— 在场才惰性载入两个契约工厂。
-## 按路径载入这一步同时认新老契约文件名: 认不出就整个 provider 不注册, 且不报错。
 static func framework_available() -> bool:
 	if _result != null and _schema != null:
 		return true
@@ -178,12 +158,10 @@ static func framework_available() -> bool:
 				break
 	return _result != null and _schema != null
 
-
 static func register(add_tool: Callable, ctx: Dictionary = {}) -> void:
 	if not bind_contract(ctx):
 		return
 	# 第 5 个参数是自报分类: 不在框架内置三张名单里的工具, 不自报就只能按破坏性兜底
-	# (客户端每次调用都弹确认)。voxel_render 只新增产物文件, 故按 non_destructive。
 	_reg(add_tool, "voxel_help",
 		"体素程序化建模的**完整 API 说明**: QVoxelScript 统一入口(文件/对象树/材质/体素/帧/相机/导入导出/预览)、"
 		+ "实时与无头分流、.qvx 与 .vox 的硬约束。返回指向资源 %s 的链接。" % RESOURCE_URI,
@@ -193,7 +171,6 @@ static func register(add_tool: Callable, ctx: Dictionary = {}) -> void:
 		+ "返回图片路径, 用 read_file 打开即可看图; 造型不对就改完再渲一次。视角/尺寸/背景可调。",
 		_render_schema(), _render, "non_destructive")
 
-
 ## 分类只有新版框架收; 老版 _add_tool 只有 4 个参数, 多传一个会报"参数过多"。
 static func _reg(add_tool: Callable, name: String, desc: String, schema: Dictionary, handler: Callable, kind: String) -> void:
 	if _kinds_ok:
@@ -201,8 +178,7 @@ static func _reg(add_tool: Callable, name: String, desc: String, schema: Diction
 	else:
 		add_tool.call(name, desc, schema, handler)
 
-
-## MCP 静态文档资源(内嵌内容, 编辑器与运行时都可用)。由 MCPResourceDocs 注册。
+## MCP 静态文档资源(内嵌内容, 编辑器与运行时都可用)。
 static func resources() -> Array:
 	return [{
 		"uri": RESOURCE_URI,
@@ -212,11 +188,9 @@ static func resources() -> Array:
 		"content": HELP,
 	}]
 
-
 ## 追加到服务器级 instructions 的一句话(见 MCPDevServer.BASE_INSTRUCTIONS)。
 static func instructions() -> String:
 	return "体素建模: 用 QVoxelScript 脚本(自动分流实时/无头)完成全部操作, voxel_render 出图自检; API 见资源 %s 或工具 voxel_help。" % RESOURCE_URI
-
 
 ## 返回文档: 正文内联为 text(资源感知之外的客户端也能直接读到), 另附 resource_link 供拉取/缓存。
 static func _help(_args: Dictionary) -> Dictionary:
@@ -225,7 +199,6 @@ static func _help(_args: Dictionary) -> Dictionary:
 	var r: Dictionary = _result.call("resource_link", RESOURCE_URI, "体素程序化建模 API",
 		"text/markdown", HELP, "QVoxelScript 全量接口说明")
 	return r
-
 
 static func _render_schema() -> Dictionary:
 	return {"type": "object", "properties": {
@@ -244,9 +217,7 @@ static func _render_schema() -> Dictionary:
 		"transparent": {"type": "boolean", "description": "透明背景(PNG 带 alpha)，默认 false"},
 	}}
 
-
-## 渲一张预览图。世界为空/无体素/headless 时明确失败 —— 不产出"纯背景色"的假截图。
-## 先各自预检，让"路径写错"和"没渲染设备"报的不是同一句话。
+## 渲一张预览图。
 static func _render(args: Dictionary) -> Dictionary:
 	if not framework_available():
 		return {}

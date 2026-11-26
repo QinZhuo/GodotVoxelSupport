@@ -104,6 +104,3 @@ static func _best_match(locale: String) -> String:
 			best_score = score
 			best = s
 	return best
-
-
-

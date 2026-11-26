@@ -10,9 +10,6 @@ const _DEFAULT_HIGHLIGHT := Color(1.5, 2.0, 4.0, 1)
 const _DEFAULT_DESC := Color(0.55, 0.55, 0.6, 1)
 const _DEFAULT_VAL := Color(0.9, 0.9, 0.9, 1)
 
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-
 @export var display_mode: DisplayMode = DisplayMode.SPINNER:
 	set(v):
 		if display_mode == v:
@@ -53,9 +50,6 @@ var _current_index: int = 0
 		if _built:
 			_apply_disabled()
 
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-
 var highlight_color: Color = _DEFAULT_HIGHLIGHT
 var _desc_color: Color = _DEFAULT_DESC
 var _description_label: Label
@@ -67,9 +61,6 @@ var _prev_btn: Button  # SPINNER 左箭头
 var _value_btn: Button  # SPINNER 中间值
 var _next_btn: Button  # SPINNER 右箭头
 var _toggle_btns: Array[Button] = []  # TOGGLE 按钮组
-
-# ------------------------------------------------------------
-# ------------------------------------------------------------
 
 func _enter_tree() -> void:
 	if _built:
@@ -95,9 +86,6 @@ func _notification(what: int) -> void:
 
 func _ready() -> void:
 	current_index = _clamp_index(current_index)
-
-# ------------------------------------------------------------
-# ------------------------------------------------------------
 
 func _rebuild() -> void:
 	_clear_group()
@@ -174,9 +162,6 @@ func _build_toggle() -> void:
 		_group.add_child(btn)
 		_toggle_btns.append(btn)
 
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-
 func get_focus_target() -> Control:
 	match display_mode:
 		DisplayMode.SPINNER:
@@ -217,9 +202,6 @@ func _apply_disabled() -> void:
 func get_current_value() -> Variant:
 	return options[current_index] if current_index >= 0 and current_index < options.size() else null
 
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-
 func _clamp_index(idx: int) -> int:
 	return clampi(idx, 0, max(options.size() - 1, 0)) if options.size() > 0 else 0
 
@@ -252,9 +234,6 @@ func _on_value_gui_input(event: InputEvent) -> void:
 		_on_next()
 		_value_btn.accept_event()
 
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-
 func _on_focus_entered() -> void:
 	if _description_label:
 		_description_label.add_theme_color_override("font_color", highlight_color)
@@ -267,9 +246,6 @@ func _on_focus_exited() -> void:
 		if c is Control and c.has_focus():
 			return
 	_description_label.add_theme_color_override("font_color", _desc_color)
-
-# ------------------------------------------------------------
-# ------------------------------------------------------------
 
 func _apply_theme() -> void:
 	if not _built or _applying_theme:
@@ -358,9 +334,6 @@ func _read_const(name: String, fallback: int) -> int:
 
 func _read_font_size() -> int:
 	return get_theme_font_size("font_size", "OptionSelector") if has_theme_font_size("font_size", "OptionSelector") else -1
-
-# ------------------------------------------------------------
-# ------------------------------------------------------------
 
 func _sync_display() -> void:
 	if not _built:

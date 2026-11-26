@@ -3,11 +3,8 @@ class_name GDExtensionProbeTool
 extends RefCounted
 
 ## GDExtension 构建的"探测与解析"切片: 源码目录/目标名/架构/构建类型/产物规范名/*.gdextension 解析。
-## 只是 GDExtensionRebuild 的实现细节, 不对外提供 API。
 
-## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends EditorScript 的脚本当菜单工具列出。
-## 约束 2: _host 不加类型注解 —— GDExtensionRebuild 引用本类, 双向类型注解会形成 class_name 环。
-## 约束 3: 实例状态(日志缓冲/构建游标)全部留在 GDExtensionRebuild, 这里只读写 _host.*。
+## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends…
 
 var _host   # GDExtensionRebuild 实例(运行期唯一状态持有者)
 
@@ -18,13 +15,9 @@ const GDEXT_TYPES := ["debug", "release", "template_debug", "template_release"] 
 const GDEXT_ARCHS := ["arm64", "x86_64", "arm32", "x86_32", "universal"]          # 声明键/规范名中的架构 tag
 const SCAFFOLD_PATH := "res://addons/DEVFramework/Core/Editor/Generate/NativeScaffold.gd"
 ## 唯一构建区: 项目根 res://gdextension/(CMakeLists + godot-cpp + 构建缓存)。
-## 插件源码一律在 addons/<插件>/Native/src, 由生成的 CMakeLists 引用。
 const BUILD_ZONE := "res://gdextension"
 
-
 ## 所有插件的原生源码目录: <插件>/Native/src(每插件一库, 共用 godot-cpp)。
-## 旧布局则退回 res://gdextension/src —— 只扫 src, 绝不能扫 gdextension/ 根
-## (godot-cpp 就在旁边, 扫进去会把第三方的 36 个 .cpp 当成"我们的源码"判新鲜度)。
 static func native_source_dirs() -> Array[String]:
 	var out: Array[String] = []
 	var root := ProjectSettings.globalize_path("res://").simplify_path()
@@ -34,11 +27,7 @@ static func native_source_dirs() -> Array[String]:
 			out.append("res://" + String(p["src_abs"]).replace(root, "").replace("\\", "/").trim_prefix("/"))
 	return out
 
-
 ## 某个 target 自己的源码目录(绝对路径); 找不到返回空串。
-## 【为什么需要它】多插件共用一个 CMake 工程时, "全局最新源码 mtime" 会把 A 插件的改动算到 B 头上,
-## 于是 B 也被重编重链 —— 链接器每次写入新的 PE TimeDateStamp, 产物字节就变了。
-## 判新鲜度必须只算"这个 target 自己的 src"。
 static func _native_src_dir_of(tgt: String) -> String:
 	if tgt.is_empty():
 		return ""
@@ -51,9 +40,7 @@ static func _native_src_dir_of(tgt: String) -> String:
 			return String(p["src_abs"])
 	return ""
 
-
-## 源码最新 mtime。[param tgt] 非空时只算该 target 自己的源码目录;
-## 为空(或该 target 定位不到)时退回"所有插件"的全局值 —— 宁可多编一次, 不能漏编。
+## 源码最新 mtime。
 static func _native_src_mtime(exts: PackedStringArray, tgt := "") -> int:
 	var ms := 0
 	var own := _native_src_dir_of(tgt)
@@ -66,11 +53,9 @@ static func _native_src_mtime(exts: PackedStringArray, tgt := "") -> int:
 			ms = maxi(ms, int(FileAccess.get_modified_time(f)))
 	return ms
 
-
 ## 定位构建目标 —— 只需 CMakeLists 给出 目标名 + 输出目录。
 func _locate() -> Dictionary:
 	# 唯一构建区: 项目根 gdextension/(CMakeLists + godot-cpp)。
-	# 插件源码在 addons/<插件>/Native/src —— 两者分工固定, 不再支持其它历史布局。
 	var source_dir := BUILD_ZONE
 	if not _is_ext_source(source_dir):
 		_host._log("未找到原生构建区: 需要 %s/CMakeLists.txt + godot-cpp/。插件源码放 addons/<插件>/Native/src, 构建脚本会自动生成骨架。" % BUILD_ZONE)
@@ -87,9 +72,6 @@ func _locate() -> Dictionary:
 	if names.is_empty():
 		names = [String(info.get("target", ""))]
 	# 共享插件(junction)的产物目录带**其它项目**的归属标记 → 本项目不构建。
-	# 否则消费方会用自己 CMakeLists 里的规则重编同一批源码: 产物互相覆盖, 还会多出 debug 版本
-	# (实测 SoL 构建把 DEVFramework 的 release 库换成了非优化版本, 帧耗涨 10 倍)。
-	# 不做"谁才能构建"的限制: 任何项目触发构建, 都按同一套规则产出同名同规格的库。
 	for tgt in names:
 		var od: String = String(outputs.get(tgt, ""))
 		for t in types:
@@ -111,7 +93,6 @@ func _locate() -> Dictionary:
 	return {"source": source_dir, "targets": targets, "info": info,
 			"gdext": gdext_by_target.get(names[0], ""), "gdext_by_target": gdext_by_target}
 
-
 ## 由 CMake 信息推导指定构建类型/架构的预期产物: {file(文件名), res(res://落点), abs(绝对路径)}。
 func _expected_artifact(info: Dictionary, type: String, arch := "", out_dir := "", tgt := "") -> Dictionary:
 	var out_dirs: Array = info.get("out_dirs", [])
@@ -123,7 +104,6 @@ func _expected_artifact(info: Dictionary, type: String, arch := "", out_dir := "
 		return {}
 	var file := _canonical_file(target, type, arch)
 	return {"file": file, "res": _abs_to_res(dir).path_join(file), "abs": String(dir).path_join(file)}
-
 
 ## 本轮要构建的架构列表: 本机架构恒在; macOS 额外补齐 *.gdextension 声明中缺失的架构
 func _plan_archs(gdext_res: String) -> Array[String]:
@@ -141,7 +121,6 @@ func _plan_archs(gdext_res: String) -> Array[String]:
 		_host._log("声明需要跨架构产物, 将交叉构建(%s, 首次需全量编译 godot-cpp): lib 规范名架构 %s" % [a, a])
 	return archs
 
-
 ## 从 *.gdextension 声明收集本平台"文件名内含架构且 ≠ host"的架构集合(去重、按声明顺序)
 func _declared_missing_archs(gdext_res: String, host: String) -> Array[String]:
 	var missing: Array[String] = []
@@ -156,11 +135,7 @@ func _declared_missing_archs(gdext_res: String, host: String) -> Array[String]:
 			missing.append(a)
 	return missing
 
-
 ## 工具规范产物名: lib<名>.<平台>.<debug|release>.<架构>.<ext>
-## 全平台统一带 lib 前缀 —— 与 godot-cpp 官方模板一致(libgdexample.windows.release.x86_64.dll),
-## 也和 CMake/MinGW 的 SHLIBPREFIX 默认值一致, 于是不需要 PREFIX "" 这种平台特例。
-## (GDExtension 对文件名没有硬性要求, 唯一硬约束是[库名]与 .gdextension 的 [libraries] 一字不差。)
 func _canonical_file(target: String, type: String, arch := "") -> String:
 	var ext := ""
 	match _os_label():
@@ -174,7 +149,6 @@ func _canonical_file(target: String, type: String, arch := "") -> String:
 			return ""
 	var a := arch if arch != "" else _arch()
 	return "lib%s.%s.%s.%s%s" % [target, _os_label(), type, a, ext]
-
 
 ## CMake if/elseif 条件文本 → "平台.构建类型" 归档键(仅识别本工具支持的模板写法)
 static func _cond_key(cond: String) -> String:
@@ -197,11 +171,9 @@ static func _cond_key(cond: String) -> String:
 		return ""
 	return "%s.%s" % [os, type]
 
-
 ## 绝对路径 → res:// 路径(项目根内); 项目根外原样返回
 func _abs_to_res(p: String) -> String:
 	return FileTool.abs_to_res(p)
-
 
 static func _is_ext_source(dir_path: String) -> bool:
 	var has_build := FileAccess.file_exists(dir_path.path_join("CMakeLists.txt")) \
@@ -209,8 +181,7 @@ static func _is_ext_source(dir_path: String) -> bool:
 	var has_cpp := DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(dir_path.path_join("godot-cpp")))
 	return has_build and has_cpp
 
-
-## 返回 {target, out_dirs(绝对), api_default, output_name(当前平台+类型), output_names(全量)}。
+## 返回 {target, out_dirs(绝对), api_default, output_name(当前平台+类型)…
 func _read_cmake_info(project_dir: String) -> Dictionary:
 	var info := {target = "", out_dirs = [], api_default = "", output_name = "", output_names = {}}
 	var cmake_path: String = _host._abs(project_dir).path_join("CMakeLists.txt")
@@ -237,8 +208,7 @@ func _read_cmake_info(project_dir: String) -> Dictionary:
 			out_set[normalized] = true
 			info.out_dirs.append(normalized)
 
-	# 多 target(每个原生插件一个): 记录 target -> 输出目录。部署/声明同步按 target 分别落位,
-	# 否则多插件工程只有第一个目标会被正确命名与校验(其余产物留在目录里但没人管)。
+	# 多 target(每个原生插件一个): 记录 target -> 输出目录。
 	info.outputs = parse_target_outputs(text, _host._abs(project_dir))
 
 	var re_api := RegEx.new()
@@ -278,14 +248,10 @@ func _read_cmake_info(project_dir: String) -> Dictionary:
 		info.output_name = names[cur]
 	return info
 
-
 ## 解析 CMakeLists 里每个 target 的输出目录: {target: 绝对路径}。
-## 按 `add_library(<name>` 分段, 只取该段之后的 `*_OUTPUT_DIRECTORY` —— 多插件时每个 target
-## 的产物落在自己的 Native 目录, 部署/清理/声明同步都依赖这份映射。
 static func parse_target_outputs(text: String, cmake_dir_abs: String) -> Dictionary:
 	var re_out := RegEx.new()
-	# 排除右括号: 单行写法 `set_target_properties(X PROPERTIES RUNTIME_OUTPUT_DIRECTORY <path>)` 里
-	# 路径后面紧跟 `)`, 不排除就会把括号当成路径的一部分(实测踩过, 部署会去找不存在的目录)。
+	# 排除右括号: 单行写法 `set_target_properties(X PROPERTIES…
 	re_out.compile("(?:LIBRARY|RUNTIME|ARCHIVE)_OUTPUT_DIRECTORY\\s+([^\\s#)]+)")
 	var re_addlib := RegEx.new()
 	re_addlib.compile("add_library\\s*\\(\\s*([A-Za-z_][A-Za-z0-9_]*)")
@@ -309,7 +275,6 @@ static func parse_target_outputs(text: String, cmake_dir_abs: String) -> Diction
 			outputs[cur_tgt] = nz
 	return outputs
 
-
 ## 规范化绝对路径(展开 .. 与 .), 支持 Windows "C:/..." 与 POSIX "/..."
 static func _normalize_abs(path: String) -> String:
 	path = path.replace("\\", "/")
@@ -327,7 +292,6 @@ static func _normalize_abs(path: String) -> String:
 			stack.append(p)
 	var joined := "/".join(stack)
 	return ("%s/%s" % [drive, joined]) if is_win else ("/" + joined)
-
 
 ## 通用可执行文件定位 —— 跨平台、不写死用户名/机器路径。
 static func _find_exe_dir(exe: String) -> String:
@@ -371,20 +335,17 @@ static func _find_exe_dir(exe: String) -> String:
 				return dir
 	return ""
 
-
 static func _hint_hit(low: String) -> bool:
 	for h in ["w64devkit", "mingw", "msys", "gcc", "llvm", "git"]:
 		if low.contains(h):
 			return true
 	return false
 
-
 static func _engine_api_hint() -> String:
 	var v := Engine.get_version_info()
 	return "%d.%d" % [int(v.get("major", 4)), int(v.get("minor", 0))]
 
-
-## CMake 默认直出名: 全平台 lib<名>.<ext>(CMake/MinGW 的 SHLIBPREFIX 默认就是 lib, 与规范名同前缀)
+## CMake 默认直出名: 全平台 lib<名>.<ext>(CMake/MinGW 的 SHLIBPREFIX 默认就是 lib…
 func _default_out_file(target: String) -> String:
 	match _os_label():
 		"windows":
@@ -396,9 +357,7 @@ func _default_out_file(target: String) -> String:
 		_:
 			return ""
 
-
 ## 某个 target 自己的声明: 优先 <输出目录>/<target>.gdextension(多插件时唯一正确),
-## 找不到再退回"输出目录里的第一个"(单插件工程的既有行为)。
 func _find_gdextension_for(target: String, out_dir: String, info: Dictionary) -> String:
 	var dir := out_dir
 	if dir == "":
@@ -410,7 +369,6 @@ func _find_gdextension_for(target: String, out_dir: String, info: Dictionary) ->
 		if FileAccess.file_exists(p):
 			return _abs_to_res(p)
 	return _find_gdextension(info)
-
 
 ## 在产物输出目录(*_OUTPUT_DIRECTORY)里定位 *.gdextension(与产物同目录是框架约定)。
 func _find_gdextension(info: Dictionary) -> String:
@@ -428,11 +386,9 @@ func _find_gdextension(info: Dictionary) -> String:
 		dir.list_dir_end()
 	return ""
 
-
-## universal 产物名: lib<名>.macos.<debug|release>.universal.dylib(lipo 合并输出, 发布素材)
+## universal 产物名: lib<名>.macos.<debug|release>.universal.dylib(lipo…
 func _universal_file(target: String, type: String) -> String:
 	return "lib%s.macos.%s.universal.dylib" % [target, type]
-
 
 ## 从声明收集本平台键中的架构 tag 集合(去重; 无架构/仅 universal 键则返回空 —— 不需要架构文件保护)
 func _declared_archs(gdext_res: String) -> Array[String]:
@@ -453,11 +409,7 @@ func _declared_archs(gdext_res: String) -> Array[String]:
 				archs.append(t)
 	return archs
 
-
 ## 实盘扫描: 输出目录里"本目标"的动态库, 取 mtime 最新 ——
-## 只认**当前平台**的扩展名: 同目录通常还躺着别的平台产物(如 mac 上提交过的 .dll),
-## 混着扫会把 windows dll 当成本次产物改名成 .dylib —— 产出一个 PE 格式的假 dylib
-## (lipo 报 can't figure out the architecture type of ...), 且原 dll 被搬走。
 func _scan_dynamic_libs(dir_path: String, target_name: String, exclude: PackedStringArray) -> String:
 	var best := ""
 	var best_m := -1
@@ -484,7 +436,6 @@ func _scan_dynamic_libs(dir_path: String, target_name: String, exclude: PackedSt
 		e = dir.get_next()
 	dir.list_dir_end()
 	return best
-
 
 ## 解析 *.gdextension: 保留原始行; 抽取 [libraries] 段的 键→(行号, 值) 与段尾插入点。
 func _gdext_parse(gdext_res: String) -> Dictionary:
@@ -517,7 +468,6 @@ func _gdext_parse(gdext_res: String) -> Dictionary:
 		lib_end = lines.size()
 	return {"lines": lines, "entries": entries, "values": values, "lib_end": lib_end}
 
-
 ## 声明键是否属于"本平台 + 本构建类型": 首 tag = 平台, 且键无任何类型 tag(通用键)或含目标类型。
 static func _gdext_key_matches(key: String, platform: String, type: String, arch: String) -> bool:
 	var tags := key.split(".")
@@ -533,12 +483,9 @@ static func _gdext_key_matches(key: String, platform: String, type: String, arch
 	if has_type and not tags.has(type):
 		return false
 	# 架构校验: 键含架构 tag → 必须与产物架构一致(杜绝 arm64 键被 x86_64 产物覆盖);
-	# 无架构 tag = 通用键(windows.release), 对本架构同样适用 —— 早先要求 "arch == universal"
-	# 会让这类键永远匹配不上, 于是每次同步都**追加一条重复键**(实测写坏过 dev.gdextension)。
 	if not arch_tags.is_empty():
 		return arch_tags.has(arch)
 	return true
-
 
 ## 从规范名/声明值文件名中提取架构 tag(无架构段返回 "")
 static func _file_arch(file: String) -> String:
@@ -546,7 +493,6 @@ static func _file_arch(file: String) -> String:
 	re.compile("\\.(arm64|x86_64|arm32|x86_32|universal)\\.")
 	var m := re.search(file)
 	return m.get_string(1) if m != null else ""
-
 
 ## 清理白名单: [libraries] 全部键声明的文件名 —— 声明里没出现的库即规格外残留。
 func _gdext_keep_files(gdext_res: String) -> PackedStringArray:
@@ -560,14 +506,12 @@ func _gdext_keep_files(gdext_res: String) -> PackedStringArray:
 		keep.append(String(parsed["values"].get(String(ent.get("key")), "")).get_file())
 	return keep
 
-
 func _os_label() -> String:
 	match OS.get_name():
 		"Windows": return "windows"
 		"macOS", "OSX": return "macos"
 		"Linux": return "linux"
 		_: return OS.get_name().to_lower()
-
 
 ## 本机架构名(构建缓存目录隔离用; universal 编辑器二进制用 uname 探测真实运行架构)
 func _arch() -> String:
@@ -583,10 +527,8 @@ func _arch() -> String:
 				return host
 	return "x86_64"
 
-
 func _build_type() -> String:
 	return "debug" if OS.is_debug_build() else "release"
-
 
 ## 本次要构建的构建类型清单(配置驱动)。
 func _plan_build_types() -> Array[String]:
@@ -598,8 +540,6 @@ func _plan_build_types() -> Array[String]:
 			out.append(s)
 	if out.is_empty():
 		# 统一规则: 一律 release —— 与"哪个项目触发构建"无关。
-		# 曾按"当前编辑器类型"取, 于是 debug 版编辑器(如 SoL)会产出 12MB 未优化库,
-		# 覆盖掉宿主项目的 1.7MB 优化库(实测帧耗涨 10 倍)。需要 debug 请显式配 build_types。
 		out = ["release"]
 	_host._build_types = out
 	_host._log("构建类型清单: ", " ".join(out))

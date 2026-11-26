@@ -1,18 +1,13 @@
 @tool
 class_name MeshVoxelizer
 extends RefCounted
-## 网格快照 → 体素栅格参数 + 逐帧密集体积。真正的算法在原生（`NativeLoader.voxelize_mesh`），
-## 这里只做编排：合并零件、定网格、复用调色板。
-## 【为什么网格参数在这里定，而不是每帧各算一次】体素帧动画的所有帧必须是**同一套网格**
-## （`QVoxelModel` 一个 grid_size 服务全部帧）；逐帧各自归一化会让模型在动画里忽大忽小。
+## 网格快照 → 体素栅格参数 + 逐帧密集体积。
 
 const MIN_RESOLUTION := 4
 const MAX_RESOLUTION := 256
 const DEFAULT_RESOLUTION := 96
 
-
-## 所有帧的并集包围盒 → 统一栅格。返回 {origin, cell, grid, empty}。
-## `resolution` = **最长边**的体素数，其余轴按比例向上取整（保持模型比例）。
+## 所有帧的并集包围盒 → 统一栅格。
 static func frame_grid(scene: Dictionary, resolution := DEFAULT_RESOLUTION) -> Dictionary:
 	var box := _bounds(scene)
 	var size := box.size
@@ -27,9 +22,7 @@ static func frame_grid(scene: Dictionary, resolution := DEFAULT_RESOLUTION) -> D
 		clampi(int(ceil(size.z / cell - 0.0001)), 1, res))
 	return {"origin": box.position, "cell": cell, "grid": grid, "empty": false}
 
-
-## 指定帧 → 原生体素化。`fill` = 实心化（外部泛洪判定内部）；`palette` 非空则复用它
-## （多帧共用一套调色板，否则每帧独立量化会让动画帧间颜色跳变）。
+## 指定帧 → 原生体素化。
 static func voxelize_frame(scene: Dictionary, frame_index: int, rast: Dictionary,
 		fill := true, palette := PackedByteArray()) -> Dictionary:
 	var frames: Array = scene.get("frames", [])
@@ -70,7 +63,6 @@ static func voxelize_frame(scene: Dictionary, frame_index: int, rast: Dictionary
 	return NativeLoader.voxelize_mesh(verts, indices, uvs, colors, tri_slots,
 			scene.get("slots", []), rast["origin"], rast["cell"], rast["grid"], opts)
 
-
 # 内部
 
 static func _bounds(scene: Dictionary) -> AABB:
@@ -87,7 +79,6 @@ static func _bounds(scene: Dictionary) -> AABB:
 					box = box.expand(p)
 	return box
 
-
 ## UV 长度必须与顶点一致（原生按长度判断"有没有 UV"）；缺 UV 的零件补 0。
 static func _fit_uv(src: Variant, n: int) -> PackedVector2Array:
 	var uv: PackedVector2Array = src if src is PackedVector2Array else PackedVector2Array()
@@ -96,7 +87,6 @@ static func _fit_uv(src: Variant, n: int) -> PackedVector2Array:
 		uv.resize(n)
 		uv.fill(Vector2.ZERO)
 	return uv
-
 
 ## 同上；缺颜色补**白**（填零会把整块体素染黑）。
 static func _fit_color(src: Variant, n: int) -> PackedColorArray:

@@ -1,15 +1,8 @@
 extends TestCase
 
 ## MATE 条目语义的唯一实现（Format/QVoxelMate.gd）—— 形状与字节往返契约。
-##
-## 为什么值得单独钉：MATE 条目此前有**两种形状**。读盘路径产出 12 键（含 r/g/b/a），
-## 而建空气条目时借的 VoxelMaterial.air_mate() 只有 8 键、没有 r/g/b/a —— 于是
-## QVoxelWorld.material_color() 按"缺键 → 缺省 r=255,g=0,b=255"算出**洋红**，并被
-## Mesh/QVoxelScript 原样导给用户脚本。洋红在本工程是"错误色"的约定，所以那个 bug
-## 是"看起来像渲染问题"的静默数据问题。下面每条都盯住"形状只有一种、权威值是 rgba"。
 
-
-# ── 形状 ──────────────────────────────────────────────────────────────────
+# ── 形状 ────────────────────────────────────────────────────────────────…
 
 func test_air_entry_has_twelve_keys_and_is_all_zero() -> void:
 	var e := QVoxelMate.air_entry()
@@ -22,15 +15,12 @@ func test_air_entry_has_twelve_keys_and_is_all_zero() -> void:
 		assert_eq(int(e[ch]), 0, "空气条目 %s 通道必须为 0" % ch)
 	assert_true(QVoxelMate.is_air_entry(e), "全零条目必须被判为空气")
 
-
 func test_air_entry_is_a_fresh_dictionary_each_call() -> void:
 	# 空气条目是"规范形态"，调用方会就地改它（with_color 之外的面板路径也会）。
-	# 若两次调用共享同一份引用，改一处等于改了全世界的缺省材质。
 	var a := QVoxelMate.air_entry()
 	var b := QVoxelMate.air_entry()
 	a["rgba"] = 0x11223344
 	assert_eq(int(b["rgba"]), 0, "两次调用必须互不共享引用")
-
 
 func test_is_air_entry_judges_by_semantic_keys_only() -> void:
 	var legacy8 := {
@@ -51,7 +41,6 @@ func test_is_air_entry_judges_by_semantic_keys_only() -> void:
 	# reserved 字节非零的读端条目不该被误判：语义判据只在 Dictionary 上做。
 	assert_false(QVoxelMate.is_air_entry(null), "非 Dictionary 不该被判成空气")
 	assert_false(QVoxelMate.is_air_entry("air"), "非 Dictionary 不该被判成空气")
-
 
 # ── 字节往返 ──────────────────────────────────────────────────────────────
 
@@ -77,15 +66,12 @@ func test_encode_decode_roundtrip_preserves_every_semantic_field() -> void:
 		assert_eq(int(got["r"]), (int(want["rgba"]) >> 24) & 0xFF, "条目 %d r 由 rgba 展开" % i)
 		assert_eq(int(got["a"]), int(want["rgba"]) & 0xFF, "条目 %d a 由 rgba 展开" % i)
 
-
 func test_encode_writes_zero_into_reserved_byte() -> void:
-	# reserved 按规范恒写 0。这不是细节：is_air_entry 之所以敢用"语义键"而不是
-	# "比 12 字节原始块"，正是因为写入端保证 reserved 归一。
+	# reserved 按规范恒写 0。
 	var e := QVoxelMate.air_entry()
 	e["reserved"] = 0xAB
 	var payload := QVoxelMate.encode([e])
 	assert_eq(int(payload[2 + QVoxelSpec.MATE_ENTRY_SIZE - 1]), 0, "reserved 必须写 0")
-
 
 func test_entry_from_bytes_reads_rgba_channel_bit_order() -> void:
 	# rgba 位序 r<<24 | g<<16 | b<<8 | a —— 写盘与 .vox 导入两侧都依赖它。
@@ -106,7 +92,6 @@ func test_entry_from_bytes_reads_rgba_channel_bit_order() -> void:
 	assert_eq(int(e["a"]), 0x44, "a 取最低字节")
 	assert_eq(int(e["metal"]), 11, "metal 在第 5 字节")
 	assert_eq(int(e["e_b"]), 77, "e_b 在第 11 字节")
-
 
 # ── 坏负载必须降级并报告，而不是拖垮整个文件 ──────────────────────────────
 
@@ -134,7 +119,6 @@ func test_decode_reports_and_degrades_on_malformed_payload() -> void:
 			"声明 3 条但只有 1 条的字节：越界应降级，而不是读越界内存")
 	assert_eq(seen.size(), 1, "越界应报告一次")
 
-
 # ── 颜色：只认 rgba ────────────────────────────────────────────────────────
 
 func test_color_only_reads_rgba_and_never_returns_magenta_for_valid_entry() -> void:
@@ -152,10 +136,8 @@ func test_color_only_reads_rgba_and_never_returns_magenta_for_valid_entry() -> v
 	assert_eq(QVoxelMate.color_to_rgba(QVoxelMate.color(drifted)), 0x0A141E28,
 			"权威值是 rgba，冗余通道键不该影响取色")
 
-
 func test_with_color_replaces_the_dictionary_instead_of_mutating() -> void:
 	# 撤销走 QVoxelPropertyCommand(world, &"materials")，快照只浅拷数组。
-	# 就地改嵌套字典会让"改前值"跟着变（见 QVoxelWorld 类头铁律）。
 	var before := QVoxelMate.air_entry()
 	var after := QVoxelMate.with_color(before, Color8(1, 2, 3, 255))
 	assert_eq(int(before["rgba"]), 0, "原条目必须保持不变")
@@ -163,7 +145,6 @@ func test_with_color_replaces_the_dictionary_instead_of_mutating() -> void:
 	assert_eq(int(after["r"]), 1, "新条目的通道已展开")
 	assert_true(QVoxelMate.with_color(null, Color8(0, 0, 0, 255)).has("rgba"),
 			"非 Dictionary 入口应回落成空气条目而不是崩")
-
 
 func test_byte_of_rounds_and_clamps() -> void:
 	assert_eq(QVoxelMate.byte_of(0.0), 0, "0.0 → 0")

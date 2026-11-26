@@ -3,16 +3,11 @@ class_name GDExtensionDeployTool
 extends RefCounted
 
 ## GDExtension 构建的"部署与声明"切片: 产物校验/改名保活/清理、universal 合并、
-## *.gdextension 的 [libraries] 同步与校验。只是 GDExtensionRebuild 的实现细节。
 
-## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends EditorScript 的脚本当菜单工具列出。
-## 约束 2: _host 不加类型注解 —— 双向类型注解会形成 class_name 环。
-## 约束 3: 实例状态(日志缓冲/构建游标)全部留在 GDExtensionRebuild, 这里只读写 _host.*。
+## 约束 1: 必须 extends RefCounted —— EditorScriptMenuTool 会把 extends…
 
 var _host   # GDExtensionRebuild 实例
 var _probe: GDExtensionProbeTool   # 规范名/架构/声明解析等只读探测
-
-
 
 ## 部署: 默认名直出 → 实盘最新非常规名动态库 → 已存在规范名, 三级判定后统一**改名**为规范名
 func _deploy(target_res: String, info: Dictionary, type: String, arch: String,
@@ -25,7 +20,6 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String,
 	var actual := ""
 	var direct := _probe._default_out_file(target)   # CMake 默认直出名(刚链接, mtime 最新, 内容必然新鲜)
 	# 已知命名集合 = 默认名 + 本目标全部 类型×架构 规范名: 都是"声明/最终形态"文件,
-	# 不作为实盘扫描候选 —— 否则同目录其他 类型/架构 的产物会被误认。
 	var known := PackedStringArray()
 	if direct != "":
 		known.append(direct)
@@ -46,7 +40,6 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String,
 			actual = direct
 	else:
 		# 默认名缺失/非本次产物 → 先实盘取本目标"最新"的非常规名动态库(刚链接完, 最新即本次
-		# (CMake 钉了 OUTPUT_NAME 且刚重链)。顺序不能反: 先认"规范名已存在"会把编译器直出的
 		actual = _probe._scan_dynamic_libs(out_dir, target, known)
 		if actual != "":
 			_host._log("规范名产物未直出, 实盘取最新动态库: ", actual)
@@ -63,20 +56,12 @@ func _deploy(target_res: String, info: Dictionary, type: String, arch: String,
 	_host._log("产物已就位: ", _probe._abs_to_res(out_dir).path_join(actual))
 	return actual
 
-
 ## 源码/构建配置都没变 → 本次可**完全跳过编译**。
-##
-## 为什么需要它: 部署会把链接器直出的 `lib<名>.dll` 改名成规范名 `lib<名>.<平台>.<类型>.<架构>.dll`,
-## 于是下一次 make 发现"链接目标文件不存在"就必然重链 —— 即使一行代码没改。
-## 表现就是"没改代码, 产物 mtime/字节却变了"(链接器每次输出含 build-id/时间戳, 内容必然不同),
-## 而且每次白花 7~9 秒。这里用"源码 mtime ≤ 已部署产物 mtime, 且 CMakeLists 也没更新"来提前收工。
 func _up_to_date(target_res: String, out_dir: String, tgt: String) -> bool:
 	if not FileAccess.file_exists(_host._abs(target_res)):
 		return false
 	var deployed: int = int(FileAccess.get_modified_time(_host._abs(target_res)))
-	# 源码(含 .h)比产物新 → 必须重编。只算**本 target 自己**的源码目录:
-	# 多插件共用一个 CMake 工程时, 拿全局最新 mtime 会把别家插件的改动算到自己头上,
-	# 于是没改的插件也被重编重链, 链接器写入新时间戳, 产物字节随之变化。
+	# 源码(含 .h)比产物新 → 必须重编。
 	if GDExtensionProbeTool._native_src_mtime(PackedStringArray([".cpp", ".h", ".hpp", ".c"]), tgt) > deployed:
 		return false
 	# 生成的 CMakeLists 变过(换模板/加插件/改参数) → 也要重配+重编
@@ -85,9 +70,7 @@ func _up_to_date(target_res: String, out_dir: String, tgt: String) -> bool:
 			return false
 	return true
 
-
 ## 输出目录里是否已有一个"比已部署库新、且不比源码旧"的产物 —— 即上次编译完成但没部署。
-## 两个条件缺一不可: 只比已部署库新, 改了源码也会误判为"不用编"; 只比源码新, 刚部署完也会说"要重编"。
 func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: String,
 		out_dir_override := "", tgt := "") -> bool:
 	var out_dirs: Array = info.get("out_dirs", [])
@@ -111,13 +94,7 @@ func _artifact_ready(info: Dictionary, type: String, arch: String, target_res: S
 			best = maxi(best, int(FileAccess.get_modified_time(p)))
 	return best > 0 and best > deployed_ms and best >= src_ms
 
-
-## 同目录改名。目标已存在且**正被加载**(Windows 上编辑器锁着 dll)时, 走 rename-then-replace:
-## MSDN《Dynamic-Link Library Updates》的官方做法 —— 加载中的 DLL 不允许删除/覆盖, 但**允许重命名**,
-## 于是把它旁置成 `<名>.old.<tick>`, 再把新产物改名到规范名。
-## 这样规范名永远是最新的, 声明不用退化成"指向 libdev.dll"这种别名,
-## 也就不存在"debug 键还指着旧的规范名文件 → 构建成功却跑旧库"。
-## 旁置文件当次删不掉(仍被加载), 由 _cleanup_native 在下次构建(通常已重启过)时清掉。
+## 同目录改名。
 func _rename_lib(dir_path: String, from_file: String, to_file: String) -> bool:
 	var from_abs := String(dir_path).path_join(from_file)
 	var to_abs := String(dir_path).path_join(to_file)
@@ -130,10 +107,7 @@ func _rename_lib(dir_path: String, from_file: String, to_file: String) -> bool:
 		_host._log("旧产物被占用, 已旁置: ", aside.get_file(), "(下次构建时清理)")
 	return DirAccess.rename_absolute(from_abs, to_abs) == OK
 
-
 ## 终清: 全部轮次与合并完成后执行一次(轮间零清理, 合并输入绝不误删)。
-## 逐插件清理: 每个 target 只清自己 Native 目录, 白名单只含自己的声明/产物,
-## 否则多插件时会把别家的库当"非必要产物"删掉(实测这是最危险的一类误删)。
 func _final_cleanup(targets: Array, gdext_by_target: Dictionary) -> void:
 	var types: Array[String] = _host._build_types if not _host._build_types.is_empty() else ["debug", "release"]
 	var seen := {}
@@ -154,7 +128,6 @@ func _final_cleanup(targets: Array, gdext_by_target: Dictionary) -> void:
 			for bt in types:
 				keep.append(_probe._universal_file(target, bt))
 		_cleanup_native(native_dir, keep)
-
 
 ## lipo 合并: 同类型多架构产物 → universal 单文件, 成功后**删除输入架构文件**
 func _lipo_merge(out_dir_override: String, target: String, type: String, files: Array) -> String:
@@ -184,9 +157,7 @@ func _lipo_merge(out_dir_override: String, target: String, type: String, files: 
 		_host._log("已删除合并输入架构产物 %d 项(universal 为最终形态)。" % removed)
 	return _probe._abs_to_res(out_dir).path_join(out_name)
 
-
 ## 声明切换 universal: 合并成功后调用 —— 本平台+本类型的架构专属键改写/删除, 统一为
-## universal 与架构键同声明会触发引擎重复库警告, 故架构键必须移除)。
 func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, uni_res: String) -> void:
 	var parsed := _probe._gdext_parse(gdext_res)
 	if parsed.is_empty():
@@ -228,7 +199,6 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 	var write_key := ""
 	if covered:
 		# 通用键(如 macos.release)已指向 universal → 架构键/universal 键都是多余的, 一并删除,
-		# 否则同类型双声明会触发引擎"重复库"告警
 		var dropped := 0
 		for ln: int in [uni_line, first_arch_line]:
 			if ln >= 0:
@@ -264,15 +234,7 @@ func _gdext_adopt_universal(gdext_res: String, platform: String, type: String, u
 		_host._log("声明写回失败: ", gdext_res)
 		return
 
-
 ## 声明同步: 以实盘产物为准, 把 [libraries] 里"本平台"的键值对齐到本次产物。
-## 命中条件(任一):
-##   · 键 = 本平台 + 本类型(+架构匹配) —— 本次构建直接负责的键;
-##   · 键指向的文件**已不存在** —— 产物改名/清理后留下的悬空声明, 不自愈会让引擎加载失败;
-##   · 键指向的文件就是本次产物的**规范名** —— 同一个库的另一种名字(典型: 一个产物同时供
-##     debug/release 两个键)。Windows 上编辑器锁着 dll 时部署只能回退到非规范名,
-##     若只改"本类型"的键, 调试版编辑器加载的 windows.debug.x86_64 会一直指向旧的规范名文件,
-##     表现是"构建成功但跑的还是旧库"。
 func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: String, file: String,
 		canonical := "") -> void:
 	var parsed := _probe._gdext_parse(gdext_res)
@@ -309,7 +271,6 @@ func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: St
 		return
 
 	# 本平台没有任何可用的键(纯 CMake 新工程)才补一条; 同名键已存在时改写而非追加,
-	# 否则每轮构建都会多一条重复键(实测写坏过 dev.gdextension)。
 	for ent in parsed["entries"]:
 		if String(ent.get("key")).begins_with(platform + "."):
 			return
@@ -324,7 +285,6 @@ func _gdext_sync(gdext_res: String, file_res: String, platform: String, type: St
 	_host._log("已同步声明(新增): ", gdext_res, " [", new_key, "] = ", value)
 	if FileTool.atomic_write_text(gdext_res, "\n".join(lines)) != OK:
 		_host._log("声明写回失败: ", gdext_res)
-
 
 ## sync 关闭时的退化模式: 只校验不回写 —— 声明与实盘不一致时明确告警(引擎将加载失败)。
 func _gdext_verify(gdext_res: String, platform: String, type: String, file: String) -> void:
@@ -345,7 +305,6 @@ func _gdext_verify(gdext_res: String, platform: String, type: String, file: Stri
 	if not seen:
 		_host._log("警告: ", String(gdext_res).get_file(), " 缺少 [", platform, ".", type, "] 声明键, 引擎可能无法加载本产物(开启 sync 可自动补齐)。")
 
-
 func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 	var keep_set := {}
 	for k in keep:
@@ -355,16 +314,12 @@ func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 		return
 	var removed := 0
 	# ⚠ 必须包含隐藏文件: Windows 的 ReplaceFile 残留(`xxx.dll~RF123abc.TMP`)与部分改名旁置
-	# 文件带 hidden 属性, 默认枚举会跳过它们 → 清理循环"看不见"这些垃圾(实测残留堆了十几 MB)。
 	dir.include_hidden = true
 	dir.list_dir_begin()
 	var entry := dir.get_next()
 	while entry != "":
 		var low := entry.to_lower()
 		# 垃圾文件统一规则(不限于动态库后缀):
-		#   ~*            = Windows ReplaceFile 的临时残留(~xxxx.TMP), 与 ~libdev.dll 这类旁置副本
-		#   *.old.*       = 被占用旧库的旁置文件(见 _rename_lib), 下次构建时已随重启释放
-		#   *.dll.a       = MinGW 导入库(构建副产物, 运行时不需要)
 		var is_tmp := entry.begins_with("~") or low.ends_with(".tmp") or low.ends_with(".temp") \
 				or low.contains(".old.") or low.ends_with(".dll.a")
 		var is_lib := low.ends_with(".dll") or low.ends_with(".so") or low.ends_with(".dylib") \
@@ -375,7 +330,6 @@ func _cleanup_native(native_dir: String, keep: PackedStringArray) -> void:
 				_host._log("清理非必要产物: ", entry)
 			elif entry.begins_with("~lib"):
 				# Windows 上 Godot 会把扩展库复制成 `~<原名>` 再加载(为了能覆盖原文件),
-				# 这份副本被引擎进程占用, 只要编辑器活着就删不掉 —— 它不是我们的产物, 不必当失败。
 				_host._log("跳过引擎运行期副本(重启编辑器后可清理): ", entry)
 			else:
 				_host._log("清理失败(文件可能被占用): ", entry)

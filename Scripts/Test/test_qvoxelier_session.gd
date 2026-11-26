@@ -1,43 +1,29 @@
 extends TestCase
 
 ## 一期编辑会话（QVoxelEditSession）的契约测试。
-## 会话刻意不依赖任何节点，于是"手势 → 命令 → 撤销 → 数据源失效 → 唤醒渲染器"这整条链
-## 可以在无头环境里跑完并逐项断言。这里钉死六条承诺：
-##   ① 装配：对象 → 显示层（数据层 + 节点 + 调色板）由 create_for 一条路径铺好；
-##   ② 拾取的几何判据取自**显示层**（链的产出只在那儿），落笔格 = 命中格 + 法线；
-##   ③ 一笔手势 = 一个撤销单位；空手势（没改到任何格）不入栈；
-##   ④ 作废（cancel）必须回滚 —— 否则 live 工具拖动中改的东西永远撤不掉；
-##   ⑤ 刷新只命中受影响的 chunk（范围外保留缓冲），而不是整对象重算；
-##   ⑥ 镜像写入让拖动**当场可见**，且每一次可见改动只唤醒渲染器一次。
-## 索引对齐：MAT / OTHER 是材质 ID，值 0 = 空。
 
 const MAT := 1
 const OTHER := 2
-
 
 # 夹具
 
 func _session(grid := Vector3i(128, 128, 128)) -> QVoxelEditSession:
 	var w := QVoxelWorld.create_empty()
 	# 颜色刻意选 0/1 端点：MATE 是 8 位量化，中间值（如 0.5 → 128/255）取整后回不来，
-	# 断言浮点相等会变成在测"取整误差"而不是在测接线。
 	w.add_material(Color(1, 0, 0)) # ID 1
 	w.add_material(Color(0, 0, 1)) # ID 2
 	var obj := w.create_model("m", grid)
 	return QVoxelEditSession.create_for(obj, w)
 
-
 ## 射线命中信息（VoxelRay.cast 的形状；这里只填会话读的两个键）。
 func _hit(hit: Vector3i, normal: Vector3i) -> Dictionary:
 	return {VoxelRay.KEY_HIT: hit, VoxelRay.KEY_NORMAL: normal}
-
 
 func _dirty_set(s: QVoxelEditSession) -> Dictionary:
 	var d := {}
 	for ck in s.data.get_dirty_chunks():
 		d[ck] = true
 	return d
-
 
 # 装配
 
@@ -52,7 +38,6 @@ func test_create_for_wires_object_data_and_palette() -> void:
 	assert_false(s.data.can_generate_chunk(Vector3i(99, 0, 0)),
 		"网格外的块不可生成（128³ 只覆盖 chunk 0..3；漏了同步会当自己是无限世界）")
 
-
 func test_palette_is_copied_from_the_world() -> void:
 	var s := _session()
 	assert_eq(s.data.materials.size(), 3, "调色板 = 空气占位 + 世界里的两个材质")
@@ -60,7 +45,6 @@ func test_palette_is_copied_from_the_world() -> void:
 	assert_eq(s.data.materials[2].id, 2, "同上")
 	assert_eq(s.data.materials[1].color, Color(1, 0, 0), "颜色按 MATE 条目解释")
 	assert_eq(s.data.materials[2].color, Color(0, 0, 1), "同上")
-
 
 # 拾取
 
@@ -77,14 +61,12 @@ func test_pick_reads_geometry_from_the_display_layer() -> void:
 		"空格子的材质必须是 0（数据层的 -1 是「没有」，不是材质）")
 	assert_eq(p.grid, s.object.grid_size, "拾取上下文带上网格尺寸（工具据此裁剪产物）")
 
-
 func test_pick_without_incident_face_cannot_start() -> void:
 	var s := _session()
 	# 起点就在实心格内 → 没有入射面 → 无处落笔（VoxelRay 给 normal = ZERO）。
 	var p := s.pick_from_hit(_hit(Vector3i(1, 1, 1), Vector3i.ZERO))
 	assert_false(s.begin(p), "没有入射面的命中不该开始手势")
 	assert_false(s.active(), "手势没开始")
-
 
 # 手势 → 命令 → 撤销栈
 
@@ -99,7 +81,6 @@ func test_one_gesture_is_one_undo_unit_and_writes_both_ledgers() -> void:
 	assert_true(s.data.is_chunk_mesh_dirty(Vector3i(0, 0, 0)),
 		"收尾让受影响的 chunk 重新取数并等待重建")
 
-
 func test_gesture_that_changes_nothing_is_not_pushed() -> void:
 	var s := _session()
 	s.object.set_voxel(8, 9, 8, MAT)  # 目标格已经是这个材质了
@@ -108,17 +89,14 @@ func test_gesture_that_changes_nothing_is_not_pushed() -> void:
 	assert_false(s.release(), "刷了同一种颜色 = 什么都没变 → 不该占一次撤销")
 	assert_false(s.can_undo(), "撤销栈保持干净")
 
-
 func test_release_without_begin_is_a_no_op() -> void:
 	var s := _session()
 	assert_false(s.release(), "没有手势时松手什么都不做")
 	assert_false(s.can_undo(), "撤销栈保持干净")
 
-
 func test_erase_gesture_removes_the_hit_voxel_and_is_undoable() -> void:
 	var s := _session()
 	# 稳态：对象与显示层都已有这一格（编辑器里显示层是生成器按对象产出的那一份）。
-	# 只喂对象不够 —— 工具的"这一格已经是目标材质了就不写"是拿显示层判的。
 	s.object.set_voxel(3, 3, 3, MAT)
 	s.data.set_voxel(Vector3i(3, 3, 3), MAT, false)
 	# 擦除的落笔格 = 命中格本身（不是 hit + normal）—— 擦掉面前的空格毫无意义。
@@ -129,7 +107,6 @@ func test_erase_gesture_removes_the_hit_voxel_and_is_undoable() -> void:
 	assert_eq(s.object.get_voxel(3, 3, 3), 0, "右键擦除把目标格清空")
 	assert_true(s.undo(), "擦除可以被撤销")
 	assert_eq(s.object.get_voxel(3, 3, 3), MAT, "撤销把材质还回来")
-
 
 func test_paint_gesture_recolors_the_hit_voxel_and_is_undoable() -> void:
 	var s := _session()
@@ -144,7 +121,6 @@ func test_paint_gesture_recolors_the_hit_voxel_and_is_undoable() -> void:
 	assert_eq(s.object.get_voxel(3, 3, 3), OTHER, "上色把命中格换成当前材质")
 	assert_true(s.undo())
 	assert_eq(s.object.get_voxel(3, 3, 3), MAT, "撤销把原材质还回来")
-
 
 ## 选区手势必须跟踪拖动端点（曾经 session.drag 在无命令时早退，框永远停在 1×1×1、移动永远零位移）。
 func test_selection_drag_tracks_endpoint_and_move_shifts_voxels() -> void:
@@ -167,7 +143,6 @@ func test_selection_drag_tracks_endpoint_and_move_shifts_voxels() -> void:
 	assert_eq(s.object.get_voxel(2, 2, 2), MAT, "体素被搬到目标处")
 	assert_eq(s.object.get_voxel(2, 0, 2), 0, "原位被清空")
 
-
 func test_cancel_discards_the_pending_stroke() -> void:
 	var s := _session()
 	var p := s.pick_from_hit(_hit(Vector3i(6, 6, 6), Vector3i(0, 1, 0)))
@@ -179,7 +154,6 @@ func test_cancel_discards_the_pending_stroke() -> void:
 	assert_false(s.can_undo(), "作废的笔不该留下历史项")
 	assert_eq(s.data.get_voxel(Vector3i(6, 7, 6)), -1, "显示层自始至终未被触碰")
 
-
 func test_cancel_before_any_write_touches_nothing() -> void:
 	var s := _session()
 	var p := s.pick_from_hit(_hit(Vector3i(2, 2, 2), Vector3i(1, 0, 0)))
@@ -188,7 +162,6 @@ func test_cancel_before_any_write_touches_nothing() -> void:
 	assert_false(s.active(), "手势结束")
 	assert_eq(s.data.get_dirty_mesh_chunk_count(), 0,
 		"没写过任何格 → 连一次「作废」都不该发生（空手势不该引起重建）")
-
 
 # live / span
 
@@ -204,7 +177,6 @@ func test_stroke_is_committed_only_on_release() -> void:
 	assert_true(s.release(), "松手一次性落盘")
 	assert_eq(s.object.get_voxel(4, 5, 4), MAT, "松手后体素才出现")
 
-
 func test_release_hands_the_chunk_back_to_the_authoritative_source() -> void:
 	var s := _session()
 	var p := s.pick_from_hit(_hit(Vector3i(10, 10, 10), Vector3i(0, 1, 0)))
@@ -213,11 +185,9 @@ func test_release_hands_the_chunk_back_to_the_authoritative_source() -> void:
 	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), -1, "拖动中不写显示层（整笔松手才落盘）")
 	s.release()
 	# 收尾后读取走权威求值体积 —— 权威内容就是刚写下的那一格。
-	# 这正是"画一格后能在它上面继续画"的前提：拾取读的必须是权威数据，而不是还没回填的缓冲。
 	assert_eq(s.data.get_voxel(Vector3i(10, 11, 10)), MAT,
 		"收尾后读取走权威求值体积（缓冲作废不影响读取正确性）")
 	assert_true(s.data.is_chunk_mesh_dirty(Vector3i(0, 0, 0)), "并且标脏等待重建")
-
 
 func test_span_tool_writes_only_at_release() -> void:
 	var s := _session()
@@ -231,7 +201,6 @@ func test_span_tool_writes_only_at_release() -> void:
 	assert_true(s.release(), "松手封口")
 	assert_eq(s.object.get_voxel(2, 1, 3), MAT, "盒子的角点被填上")
 	assert_eq(s.object.get_voxel(4, 1, 6), MAT, "另一个角点也在（含端点）")
-
 
 # 刷新
 
@@ -248,7 +217,6 @@ func test_refresh_only_targets_the_chunks_that_changed() -> void:
 	assert_false(dirty.has(Vector3i(2, 0, 0)),
 		"范围外的 chunk 不重建 —— 它的缓冲内容对未编辑区域仍然正确")
 
-
 func test_undo_and_redo_restore_object_and_refresh() -> void:
 	var s := _session()
 	s.begin(s.pick_from_hit(_hit(Vector3i(3, 3, 3), Vector3i(0, 1, 0))))
@@ -262,7 +230,6 @@ func test_undo_and_redo_restore_object_and_refresh() -> void:
 	assert_true(s.redo(), "重做可用")
 	assert_eq(s.object.get_voxel(3, 4, 3), MAT, "重做后写回来")
 
-
 func test_wake_happens_once_per_stroke() -> void:
 	var s := _session()
 	var calls := [0]
@@ -274,7 +241,6 @@ func test_wake_happens_once_per_stroke() -> void:
 	assert_eq(calls[0], 0, "拖动中不写对象 → 也不唤醒（整笔松手才落盘）")
 	s.release()
 	assert_eq(calls[0], 1, "松手落盘 → 唤醒一次（整笔只唤醒一次）")
-
 
 func test_session_without_a_renderer_still_works() -> void:
 	var s := _session()

@@ -1,24 +1,12 @@
 extends TestCase
 
 ## 存储 / 流式不变式测试（编辑器进程即可，无需游戏进程）。
-## 这一层此前完全空白：既有用例覆盖了格式编解码与网格 / LOD 内核，却没有一项盯着
-## "编辑 → 落盘 → 重载"这条数据通路。而重构（VoxelStream 退化为纯 IO、
-## LOD 从独立 model 迁往 CACH）恰恰整条都动在这条路上，所以先把不变式钉死再动刀。
-## 前四条从 QVoxelSource 的**公开行为**出发，不依赖 VoxelStream 的内部形态，
-## 因此重构换掉 VoxelStream 接口后这些用例依然有效：
-##   ① 编辑 → 卸载 → 重载：数据逐体素一致（磁盘为权威）
-##   ② 空 chunk 不落盘；chunk 变空立即清盘（不留幽灵数据）
-##   ③ 切换 stream：旧流上的未落盘数据先落盘，且内存数据不因切换而丢
-##   ④ CACH / 未知块经"加载 → 改块 → 增量写盘"逐字节保真；且删掉 CACH 世界语义不变
-##   ⑤ LOD 是 CACH 而非 VXEL 模型：往返命中、来源变更即失效、删 CACH 语义不变
 
 const TEST_DIR := "user://voxel_stream_invariants"
-
 
 ## runner 在每个用例后无条件调用：清掉临时目录，避免残留污染下次运行。
 func cleanup() -> void:
 	_remove_dir(TEST_DIR)
-
 
 # ① 编辑 → 卸载 → 重载
 
@@ -38,7 +26,6 @@ func test_edit_unload_reload_roundtrip() -> void:
 	d.flush()   # QVoxelStream 的 save 只改内存 + 置脏，真正写盘在 flush
 
 	# 计数接口必须与 key 列表逐一对齐：HUD 每帧走 计数（不分配），调度走 key 列表。
-	# 两者若分叉，HUD 会显示错误的"磁盘 chunk 数"而调度却按另一套数字行动。
 	assert_eq(d.stream.get_chunk_count(0), d.stream.get_all_chunk_keys(0).size(),
 			"get_chunk_count 应与 get_all_chunk_keys 一致")
 	assert_eq(d.get_unloaded_chunk_count(), d.get_unloaded_chunk_keys().size(),
@@ -53,7 +40,6 @@ func test_edit_unload_reload_roundtrip() -> void:
 	var r := _make_data(path)
 	assert_eq(r.get_voxels_dict_snapshot(), edited, "新实例从磁盘读到的世界应一致")
 	assert_true(r.has_chunk(ck), "新实例应认为该 chunk 有数据")
-
 
 # ② 空 chunk 不落盘 / 变空立即清盘
 
@@ -78,7 +64,6 @@ func test_empty_chunk_is_not_persisted_and_is_erased() -> void:
 	assert_true(r.get_voxels_dict_snapshot().is_empty(), "磁盘上不应残留已清空的 chunk")
 	assert_false(r.has_chunk(ck), "新实例不应认为该 chunk 有数据")
 
-
 # ③ 切换 stream 不丢数据
 
 func test_switch_stream_does_not_lose_data() -> void:
@@ -100,13 +85,11 @@ func test_switch_stream_does_not_lose_data() -> void:
 	assert_eq(a.load_chunk(ck, 0)[VoxelChunk.buf_index(2, 3, 4)], 1, "旧流内容应完好")
 
 	# ③-b 内存数据不因切换而丢；且新流必须最终拿到它
-	#（否则卸载时会被当成"磁盘已有"直接丢弃 → 静默丢数据）
 	assert_eq(d.get_voxel(p), 1, "切换后内存数据不应丢失")
 	d.flush()
 	var b2 := QVoxelStream.new()
 	b2.file_path = path_b
 	assert_true(b2.has_chunk(ck, 0), "新流应收到仍在内存中的世界数据")
-
 
 # ④ CACH / 未知块：增量写盘保真 + CACH 可删
 
@@ -145,12 +128,9 @@ func test_cach_and_unknown_blocks_survive_incremental_flush() -> void:
 	var no_cach := _make_data(pruned).get_voxels_dict_snapshot()
 	assert_eq(no_cach, with_cach, "删掉 CACH 不应改变世界语义")
 
-
 # ⑤ LOD 是 CACH（派生数据），不是 VXEL 模型
 
 ## 粗层块往返：落盘为 CACH，重载后来源未变 → 直接命中（不重算）。
-## 同时钉死"世界文件里只有 model 0"——LOD 一旦被写成模型，就会污染
-## MeshLibrary 的 split_by_model 与 NODE 的 model_id 引用空间。
 func test_lod_is_cach_not_model_and_roundtrips() -> void:
 	var path := TEST_DIR + "/lod.qvx"
 	var s := _make_stream(path)
@@ -174,7 +154,6 @@ func test_lod_is_cach_not_model_and_roundtrips() -> void:
 	assert_eq(s2.load_chunk(Vector3i.ZERO, 1), coarse, "粗层数据应逐体素一致")
 	assert_true(s2.has_chunk(ck, 0), "LOD0 权威数据应同时可读")
 
-
 ## 来源变更（LOD0 被编辑）→ 粗层缓存按 §6 规则 1 自动失效，不得把过期数据当有效缓存。
 func test_lod_cache_invalidated_when_source_changes() -> void:
 	var path := TEST_DIR + "/lod_stale.qvx"
@@ -194,7 +173,6 @@ func test_lod_cache_invalidated_when_source_changes() -> void:
 	var s3 := _make_stream(path)
 	assert_false(s3.has_chunk(Vector3i.ZERO, 1), "来源变更后粗层缓存应判失效（等重新降采样）")
 	assert_true(s3.has_chunk(ck, 0), "LOD0 权威数据不受影响")
-
 
 ## 删光全部 CACH（§6 的定义：删掉语义为零）→ 世界数据完全相同，只是没有预热缓存。
 func test_deleting_all_cach_keeps_world_semantics() -> void:
@@ -220,13 +198,9 @@ func test_deleting_all_cach_keeps_world_semantics() -> void:
 	var s2 := _make_stream(pruned)
 	assert_false(s2.has_chunk(Vector3i.ZERO, 1), "删掉 CACH 后粗层应未命中（可重算）")
 
-
 # ⑤-b 粗层缓存**按条目**增量维护（内存只留变了的条目，其余条目留在磁盘上）
-# 此前 CACH 由调用方整体持有：任一条目变化都会把整批缓存重写一遍。现在流只留"变了的那几条"
-# （_dirty_lod + 墓碑），未变的条目靠 serialize_incremental 原样搬运。以下三条钉死这个契约。
 
 ## 多条粗层缓存：只改一条 → 未改的那些必须仍在，且条目数不变。
-## （若实现退化成"整批重写"，未变的条目会因为没有内存副本而被丢掉。）
 func test_lod_multiple_entries_survive_incremental_flush() -> void:
 	var path := TEST_DIR + "/lod_multi.qvx"
 	var s := _make_stream(path)
@@ -249,7 +223,6 @@ func test_lod_multiple_entries_survive_incremental_flush() -> void:
 		assert_eq(r2.load_chunk(keys[i], 1), _block_with(Vector3i(i + 1, 2, 3), 1),
 				"未改动的粗层条目 %s 应仍在（按条目增量，不得整批重写）" % keys[i])
 
-
 ## 删一条粗层缓存 → 只该条消失，其余仍在（墓碑 + 按条目跳过旧块）。
 func test_lod_entry_erase_keeps_others() -> void:
 	var path := TEST_DIR + "/lod_erase.qvx"
@@ -269,9 +242,7 @@ func test_lod_entry_erase_keeps_others() -> void:
 	assert_true(r2.has_chunk(keys[1], 1), "未删的粗层条目应仍在")
 	assert_eq(r2.get_chunk_count(1), 1, "只应删掉一条")
 
-
 ## 写粗层缓存时，**别的写入方**的 CACH（非 LODS kind）必须逐字节保留。
-## 这正是"按条目替换"相对旧"整批重写"的关键收益：整批重写会把不认识的缓存一并丢掉。
 func test_lod_write_preserves_foreign_cach() -> void:
 	var path := TEST_DIR + "/lod_foreign_cach.qvx"
 	_write_world_with_cach(path)   # 文件里已有一个 kind="mesh" 的 CACH
@@ -290,9 +261,7 @@ func test_lod_write_preserves_foreign_cach() -> void:
 			mesh_kept = _strip_trailing_zeros(e["payload"]) == "lods".to_utf8_buffer()
 	assert_true(mesh_kept, "非 LODS 的 CACH 必须逐字节保留")
 
-
 ## flush 后粗层缓存同样"只剩索引"：覆盖层/墓碑清空，缓冲区不常驻（内存里只有 _cach_index
-## 记着的"条目在哪、来源是什么"）。这是 LOD 侧与 _dirty_buffers 同一条不变式。
 func test_lod_buffers_are_not_resident_after_flush() -> void:
 	var path := TEST_DIR + "/lod_resident.qvx"
 	var s := _make_stream(path)
@@ -309,11 +278,9 @@ func test_lod_buffers_are_not_resident_after_flush() -> void:
 	assert_eq(r.load_chunk(Vector3i.ZERO, 1), _block_with(Vector3i(3, 3, 3), 1),
 			"索引命中后应按块读盘还原粗层数据")
 
-
 # ⑥ 存储层退化为"纯按块 IO"后必须成立的三条（此前靠全世界的解码镜像才成立）
 
 ## 多块往返：落盘后**流里不再留任何世界镜像**，每个块都只能按索引 seek 读盘还原。
-## 这是"内存不随世界无界增长"的直接体现：干净数据只有磁盘 + 索引一份。
 func test_many_chunks_read_back_from_disk() -> void:
 	var path := TEST_DIR + "/many.qvx"
 	var chunks := _many_chunks()
@@ -332,7 +299,6 @@ func test_many_chunks_read_back_from_disk() -> void:
 	for ck in chunks:
 		assert_true(r.has_chunk(ck, 0), "块 %s 应存在" % ck)
 		assert_eq(r.load_chunk(ck, 0), chunks[ck], "块 %s 应按块读盘还原" % ck)
-
 
 ## 删除的块留墓碑：删了就是删了，后续落盘也不得把它从索引里"复活"。
 func test_deleted_chunk_does_not_resurrect() -> void:
@@ -359,7 +325,6 @@ func test_deleted_chunk_does_not_resurrect() -> void:
 	assert_false(r2.has_chunk(ck_b, 0), "再次落盘不得让已删块复活")
 	assert_true(r2.has_chunk(ck_a, 0), "未删的块应仍在")
 
-
 ## 只改一块 → 增量写：其余块在磁盘上必须**逐字节不变**（未变子块是整段搬运的）。
 func test_incremental_flush_leaves_other_chunks_intact() -> void:
 	var path := TEST_DIR + "/incr.qvx"
@@ -384,13 +349,9 @@ func test_incremental_flush_leaves_other_chunks_intact() -> void:
 	assert_eq(r2.load_chunk(ck_edited, 0), edited, "改动的块应已落盘")
 	assert_eq(r2.get_chunk_count(0), chunks.size(), "块数不应变化")
 
-
 # 辅助
 
 ## 作废后回填的**空块**不能留下缓冲。
-## 【为什么这条重要】`has_chunk()` 若为真，渲染器会认为"这块还有内容"，于是既不清旧网格、
-## 也不派发重建（空块本来就没网格可建）—— 表现就是"撤销 / 删除后画面上的体素还在，
-## 直到下次碰它才被顺带刷掉"。数据层全绿、只有屏幕是错的，所以必须在这里钉住。
 func test_emptied_chunk_not_installed_after_backfill() -> void:
 	var d := _bare_source()
 	var ck := Vector3i.ZERO
@@ -410,7 +371,6 @@ func test_emptied_chunk_not_installed_after_backfill() -> void:
 	assert_false(d._is_chunk_source_invalidated(ck), "「源作废」标记应被清掉")
 	assert_true(d.is_chunk_mesh_dirty(ck), "应标脏，让渲染器重建（重建即清掉旧网格）")
 
-
 ## 一个不依赖文件流的最小数据源：只跑"块生命周期"这类不涉及磁盘的断言。
 func _bare_source() -> QVoxelSource:
 	var m := QVoxelModel.new()
@@ -420,10 +380,7 @@ func _bare_source() -> QVoxelSource:
 	d.grid_size = m.grid_size
 	return d
 
-
 ## 一组**内容互不相同且都非空**的块（键也各不相同），用于验证"只改一块"时其余块不动。
-## 各块靠"体素个数 + 位置"区分，材质值统一取 1 —— 必须 < 材质表条目数（§9），否则
-## 解析期会被判为"引用了不存在的材质"而整块丢弃（既不干净，也会掩盖真实问题）。
 func _many_chunks() -> Dictionary:
 	var out := {}
 	var keys := [Vector3i.ZERO, Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, 0, 1),
@@ -436,8 +393,7 @@ func _many_chunks() -> Dictionary:
 		out[keys[i]] = buf
 	return out
 
-## 造一个挂了文件流的 QVoxelSource。材质表给 2 条（索引 0 = 空占位 + 索引 1 可用），
-## 使体素值 1 通过 QVX 的 MATE 索引校验（VXEL 内材质值必须 < entry_count）。
+## 造一个挂了文件流的 QVoxelSource。
 func _make_data(path: String) -> QVoxelSource:
 	var s := QVoxelStream.new()
 	s.file_path = path
@@ -448,32 +404,25 @@ func _make_data(path: String) -> QVoxelSource:
 	d.stream = s
 	return d
 
-
 ## 空气材质条目（MATE 条目 0 的规范形态）
 func _air() -> Dictionary:
 	return {"rgba": 0, "metal": 0, "rough": 0, "hardness": 0, "mass": 0, "e_r": 0, "e_g": 0, "e_b": 0}
 
-
 ## 一个挂了材质表的文件流（直接用流而不经 QVoxelSource，聚焦存储层本身的契约）。
-## 必须给足材质条目，否则 VXEL 内的材质值 1 会被语义校验判为"引用了不存在的材质"。
 func _make_stream(path: String) -> QVoxelStream:
 	var s := QVoxelStream.new()
 	s.file_path = path
 	s.set_materials([_air(), _air()])
 	return s
 
-
-## 一个 32³ 块，仅 pos 处有材质 mat（其余为空气）。CHUNK_VOLUME 同时是 LOD 大格的体积。
+## 一个 32³ 块，仅 pos 处有材质 mat（其余为空气）。
 func _block_with(pos: Vector3i, mat: int) -> PackedInt32Array:
 	var buf := PackedInt32Array()
 	buf.resize(VoxelChunk.CHUNK_VOLUME)
 	buf[VoxelChunk.buf_index(pos.x, pos.y, pos.z)] = mat
 	return buf
 
-
 ## 写一个带 CACH / 未知块的世界文件（一个 chunk，含单个体素）。
-## CACH 用非 LODS 的 kind，使其走"格式层解析、QVoxelStream 不认识"的路径——
-## 这正是"别人的缓存也要能原样搬运"的场景。
 func _write_world_with_cach(path: String) -> void:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = {
@@ -494,7 +443,6 @@ func _write_world_with_cach(path: String) -> void:
 	doc.unknown_blocks = {"ZZZZ": ["opaque".to_utf8_buffer()]}
 	_write_bytes(path, QVoxelFile.serialize(doc))
 
-
 func _read_doc(path: String) -> QVoxelFile.QVoxelDocument:
 	if not FileAccess.file_exists(path):
 		return null
@@ -505,7 +453,6 @@ func _read_doc(path: String) -> QVoxelFile.QVoxelDocument:
 	f.close()
 	return QVoxelFile.parse_with_index(bytes)
 
-
 func _write_bytes(path: String, bytes: PackedByteArray) -> void:
 	var dir := path.get_base_dir()
 	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(dir)):
@@ -514,14 +461,12 @@ func _write_bytes(path: String, bytes: PackedByteArray) -> void:
 	f.store_buffer(bytes)
 	f.close()
 
-
 ## 去掉封装带来的尾部零填充，得到"内容"字节（仅适用于内容不以零结尾的负载）
 func _strip_trailing_zeros(payload: PackedByteArray) -> PackedByteArray:
 	var out := payload.duplicate()
 	while out.size() > 0 and out[out.size() - 1] == 0:
 		out.remove_at(out.size() - 1)
 	return out
-
 
 ## 递归删除一个 user:// 目录（仅用于测试临时目录收尾）
 func _remove_dir(dir_path: String) -> void:

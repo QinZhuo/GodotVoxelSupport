@@ -9,7 +9,7 @@ class_name SlotArrayView2D extends Node2D
 		pool = ArrayViewTool.resolve_pool(pool_key, view_scene)
 		_preview_setup()
 
-## 对象池 key（留空 = 每次现场实例化）。填了就复用视图实例，重刷不再重建节点
+## 对象池 key（留空 = 每次现场实例化）。
 @export var pool_key: String = "":
 	set(value):
 		pool_key = value
@@ -76,7 +76,6 @@ func add_item(item) -> Node2D:
 	return ArrayViewTool.slot_add_item(self, item) as Node2D
 
 ## 把 item 放到指定槽位（不读 data，用于"这一格临时改显示别的"）；越界返回 null。
-## ⚠️ data 才是唯一真相：之后的 refresh / resync_views / refresh_item 会按 data 把它纠回来
 func set_item(index: int, item) -> Node2D:
 	return ArrayViewTool.slot_set_item(self, index, item) as Node2D
 

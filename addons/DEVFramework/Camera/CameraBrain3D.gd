@@ -13,7 +13,6 @@ static var main: CameraBrain3D
 ## 机位未指定过渡时长时使用的默认时长(秒)
 @export_range(0, 5, 0.05, "or_greater") var default_blend_time: float = 1.0
 ## 非混合期"相机追随机位"的平滑时间(秒), 0 = 严格贴住机位。
-## 注意与机位行为里的 damping 区分: 那个是"机位追随目标", 这个是"相机追随机位"
 @export_range(0, 2, 0.01, "or_greater") var tracking_damping: float = 0.0
 ## 混合是否忽略 Engine.time_scale(慢动作/暂停时相机仍按真实时间过渡)
 @export var ignore_time_scale: bool = true
@@ -54,19 +53,15 @@ var _last_usec: int = 0
 ## 冻结后恢复时的单帧步长上限: 免得一次卡顿/长时间不更新把过渡一步跳完
 const MAX_REAL_STEP := 0.25
 
-
 func _enter_tree() -> void:
 	main = self
 	# 分辨率自适应：进场时对齐全局保持基准轴（规则见 DisplayTool）。
-	# 必须先于 _ready 抓取 _base_fov，否则错误基准会被逐帧驱动放大。
 	if not Engine.is_editor_hint():
 		DisplayTool.apply_to_window(get_window(), self)
-
 
 func _exit_tree() -> void:
 	if main == self:
 		main = null
-
 
 func _ready() -> void:
 	_base_fov = fov
@@ -84,17 +79,14 @@ func _ready() -> void:
 	if snap_on_ready:
 		snap_to_current()
 
-
 func _process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 	update_camera(delta)
 
-
 # ── 对外 API ──
 
 ## 本帧推进步长。
-## 除法还原不出真实时间 ⇒ 改用真实时钟差值，否则机位混合 / 跟随会整个冻住。
 func _step(delta: float) -> float:
 	var now := Time.get_ticks_usec()
 	var real := float(now - _last_usec) / 1_000_000.0 if _last_usec > 0 else delta
@@ -104,7 +96,6 @@ func _step(delta: float) -> float:
 	if Engine.time_scale > 0.0:
 		return delta / Engine.time_scale
 	return clampf(real, 0.0, MAX_REAL_STEP)
-
 
 ## 每帧驱动: 挑机位 → 混合/跟随 → 叠加偏移 + 冲击写入真实相机
 func update_camera(delta: float) -> void:
@@ -132,7 +123,6 @@ func update_camera(delta: float) -> void:
 		_pose_fov = target_fov if weight >= 1.0 else lerpf(_pose_fov, target_fov, weight)
 	_apply()
 
-
 ## 立即对齐当前机位, 无过渡
 func snap_to_current() -> void:
 	_solve(true)
@@ -144,21 +134,17 @@ func snap_to_current() -> void:
 	_blend_elapsed = 0.0
 	_apply()
 
-
 ## 标记需要重新挑选机位(机位激活/优先级变化时由机位调用), 下一帧生效
 func refresh() -> void:
 	_dirty = true
-
 
 ## 是否正在混合
 func is_blending() -> bool:
 	return _blend_elapsed < _blend_time
 
-
 ## 当前生效机位
 func get_current_camera() -> VirtualCamera3D:
 	return _current
-
 
 # ── 内部 ──
 
@@ -214,7 +200,6 @@ func _solve(instant: bool) -> void:
 		_pose_fov = next.lens_fov if next.lens_fov > 0.0 else _base_fov
 		blend_finished.emit(next)
 
-
 ## 球面/柱面混合的枢纽点: 优先机位行为的瞄准点, 其次 Brain 的 blend_pivot, 都没有则返回 null(退化为直线)。
 func _resolve_pivot(vcam: VirtualCamera3D) -> Variant:
 	var point: Variant = vcam.get_aim_point()
@@ -223,7 +208,6 @@ func _resolve_pivot(vcam: VirtualCamera3D) -> Variant:
 	if blend_pivot != null and is_instance_valid(blend_pivot):
 		return blend_pivot.global_position
 	return null
-
 
 ## 校验 blends 里引用的机位名是否存在于当前场景, 不存在则警告(名字写错只会静默不命中, 很难排查)
 func _validate_blend_names() -> void:
@@ -243,8 +227,7 @@ func _validate_blend_names() -> void:
 			if target != &"" and not names.has(target):
 				LogTool.warn("相机", "过渡规则引用的机位名 [%s] 在场景中不存在(规则 from=%s to=%s); 若机位为运行时动态创建可忽略" % [target, rule.from, rule.to])
 
-
-## 在 blends 里找出本次切换的最精确规则(见 [method CameraBlendDef.match_score]); 没有则返回 null
+## 在 blends 里找出本次切换的最精确规则(见 [method CameraBlendDef.match_score]); 没有则返回…
 func _match_blend(from: VirtualCamera3D, to: VirtualCamera3D) -> CameraBlendDef:
 	if blends.is_empty():
 		return null
@@ -261,7 +244,6 @@ func _match_blend(from: VirtualCamera3D, to: VirtualCamera3D) -> CameraBlendDef:
 			best = rule
 	return best
 
-
 ## 把基准姿态、叠加偏移与冲击写入真实相机
 func _apply() -> void:
 	var t := _pose * Transform3D(Basis.from_euler(rotation_offset * (PI / 180.0)), position_offset)
@@ -275,7 +257,6 @@ func _apply() -> void:
 	global_transform = t
 	fov = _pose_fov
 	_applied_fov = _pose_fov
-
 
 ## 运行期外部改了 Brain.fov(而非通过机位覆盖)时, 把新值认作基础 fov
 func _sync_base_fov() -> void:

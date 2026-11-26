@@ -2,65 +2,36 @@
 class_name QVoxelWorld
 extends Resource
 ## 世界 —— QVoxelier 的顶层编辑模型，也就是一份 `.qvx` 工程的**唯一常驻真值**。
-## 【与 QVoxelFile.QVoxelDocument 的分工：一份真值 + 一个瞬时 DTO】
-##   QVoxelWorld    活的编辑状态（节点树 + 手绘体素 + 材质 + 帧），常驻内存、可被就地改写。
-##   QVoxelDocument QVoxelFile 解析/序列化用的传输结构，**只在读写的那一瞬间存在**。
-## 两者用 from_document() / to_document() 一对显式转换连接，**不允许同时常驻** ——
-## 否则同一份体素会有两个账本，改动落哪边取决于调用顺序（这类静默数据丢失最难查）。
-## 【为什么加载/保存要经一次转换，而不是直接编辑 Document】
-## QVoxelDocument 是"格式的忠实投影"：块表按 model_id 分桶、对象元数据散在 NODE 的 JSON 里、
-## 没有"选择/焦点/撤销目标"这类编辑期概念。拿它当编辑模型，UI 每次都要自己拼装语义，
-## 于是"格式细节"会渗透到每个面板里。转换一次（而不是每处各转一次）才能把格式关在 QVoxelFile 内。
-## 【head / materials / node / cach 原样保留】HEAD 与 NODE 都是 JSON，格式层不解释未知键
-## （QVoxelSpec §3/§7）。本类只解释自己拥有的键（world 设置、nodes 树、cameras），
-## 其余**原样写回** —— 于是"读进来再存出去"不会丢掉任何我们还没实现的东西。
-## 【铁律：写入 = "替换"，绝不就地改嵌套结构】本类的改动由 QVoxelPropertyCommand 撤销，
-## 而它的快照是**浅**副本（见该类 _snapshot）。浅副本与活数据**共享**嵌套容器，所以
-## `head["world"]["name"] = x` 这种就地写会让命令手里的"改前值"跟着一起变 ——
-## 撤销于是"撤了个寂寞"，且全程不报错。故所有 setter 一律构造新容器再整体写回；
-## 撤销的粒度也因此天然落在"数组 / 字典整体"上。
 
 ## HEAD JSON（qvx / channels 为必填键）。
 @export var head: Dictionary = {}
 
 ## MATE：材质条目（每项 12 字节的语义结构 Dictionary，见 QVoxelMate.decode）。
-## 索引即材质 ID，[0] 恒为空气。**这就是调色板本身**，不再另存一份"ID → Color"的映射。
 @export var materials: Array = []
 
-## NODE JSON（场景树 / 相机）。本类只写 nodes 树与 cameras，其余键**原样保留**。
+## NODE JSON（场景树 / 相机）。
 @export var node: Dictionary = {}
 
-## 场景树顶层（有序）。**唯一真值** —— 组/模型的父子关系全在这里。
-## 【为什么没有平行的"分组表"】分组与对象本是同一件事的两半：分组管归属/可见/顺序，
-## 对象管内容。两张表就得同步（"删分组要把组内对象的归属一起搬"就是这么来的），
-## 而同步总有漏掉一处的时候。合成一棵树后，分组就是 QVoxelGroup 节点、归属就是父子关系。
+## 场景树顶层（有序）。
 @export var nodes: Array[QVoxelNode] = []
 
-## CACH 块（派生数据，删掉语义为零）。求解缓存、缩略图这类东西放这里。
+## CACH 块（派生数据，删掉语义为零）。
 var cach: Array = []
 
 ## 组的运行时编号发号器（见 node_id / QVoxelNode.node_uid）。
-## 【为什么是 static】读档时编号由静态递归 `_node_from_entry` 发放，静态函数碰不到实例字段。
-## 全局单调递增顺带保证跨世界合并时不会撞号。
 static var _uid_seq := 1
 
-## 每次"影响文件内容"的改动自增。UI 据此判断"是否需要提示保存"。
+## 每次"影响文件内容"的改动自增。
 var revision := 0
 
-## 上一次 from_document 时，格式层因类型未知 / 非对象而丢弃的节点数（**含子树**）。0 = 干净读取。
-## 【为什么这个数要留在世界上】场景树的清洗**只发生在格式层**（QVoxelFile._build_scene），
-## 它把丢弃数记进 QVoxelReport.warnings；但加载路径拿到的只是一个 doc，report 的那句话没人看。
-## 于是"打开的文件少了几个对象"在编辑器里毫无解释，用户继续编辑并保存时还会把丢掉的部分
-## 永久覆盖掉。这个字段让加载路径至少能 push_warning，UI 也能提示"这份文件有节点读不懂"。
+## 上一次 from_document 时，格式层因类型未知 / 非对象而丢弃的节点数（**含子树**）。
 var dropped_nodes := 0
 
 signal content_changed
 
-
 # 构造
 
-## 新建空世界。HEAD 由格式常量组装（qvx 版本、必填 channels 等一律取自 QVoxelSpec，
-## 免得把"版本号"抄第二遍 —— 那正是升级格式时漏改一处的地方）。
+## 新建空世界。
 static func create_empty() -> QVoxelWorld:
 	var w := QVoxelWorld.new()
 	w.head = {
@@ -75,9 +46,7 @@ static func create_empty() -> QVoxelWorld:
 	w.materials = [QVoxelMate.air_entry()]
 	return w
 
-
-## 从解析结果转入编辑模型（加载路径）。**接管** doc 里的块表，不做深拷贝 ——
-## doc 用完即弃（约定：不允许同时常驻），拷贝一份几百万格的数据纯属浪费。
+## 从解析结果转入编辑模型（加载路径）。
 static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 	var w := QVoxelWorld.new()
 	w.head = doc.head
@@ -90,9 +59,6 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 
 	var bs := doc.get_block_size()
 	# 【唯一解析点在格式层】树在 QVoxelFile.parse 里就已经清洗完毕（doc.scene），这里**只做类型转换**：
-	# 把已校验的 JSON 条目构造成 QVoxelNode 实例。再自己解析一遍 doc.node 会有两套 kind 白名单
-	# 与两套丢弃规则，而格式层那份丢弃诊断（rep.warnings / scene.dropped_nodes）对本类**完全无效** ——
-	# 表现为"打开时少了几个对象，保存时把丢失的书回原文件"，全程不报错。
 	var scene := QVoxelFile.scene_of(doc)
 	if scene != null:
 		w.dropped_nodes = scene.dropped_nodes
@@ -104,8 +70,6 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 			push_warning("[QVoxelWorld] 载入的 NODE 里有 %d 个节点因类型未知/非对象被丢弃（含子树）；" % w.dropped_nodes
 					+ "继续编辑并保存会把它们永久移除。")
 	# 【纯体素文件 / NODE 未引用】没有 NODE 块（或 NODE 里没引用某些 VXEL/FRAM）时，为每个
-	# "没被摆放的"体素源补一个顶层模型 —— 否则像 `demo/samples/*.qvx` 这种只有 VXEL 的文件
-	# 会导入成空世界（编辑器打不开）。与 `VoxAsset.check_nodes` 对 `.vox` 的处置同一思路。
 	var used := {}
 	for m in w.all_models():
 		used[m.model_id] = true
@@ -132,13 +96,7 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelWorld:
 		w.nodes.append(m)
 	return w
 
-
-## 已校验的节点条目 → 节点对象（递归）。**纯构造，不清洗、不校验、不丢弃**：
-## 条目来自 doc.scene（QVoxelFile._build_scene 的产物）—— 非对象项与未知 kind 在那边就已经
-## 连同子树剔除了，且计数记在 scene.dropped_nodes 上。这里只按 kind 选子类、灌字段、递归子节点。
-## 【认不出来就返回 null，不造空壳】未知 kind 意味着这份文件来自更新的版本或别的工具。
-## 凭猜补一个空节点出来，用户会以为数据还在（然后在保存时把真正的数据覆盖掉）。
-## 正常情况下走不到这一支（格式层已白名单过滤），留着是为了不让一份手改过的 doc 把加载带崩。
+## 已校验的节点条目 → 节点对象（递归）。
 static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int) -> QVoxelNode:
 	if not (e is Dictionary):
 		return null
@@ -161,8 +119,6 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 		m.model_id = maxi(0, QVoxelFile.as_index(entry.get("model_id")))
 		m.block_size = bs
 		# 【为什么"有帧就用帧，没有才读 blocks"】一个 model_id 只有一个体素源（§12.2 的互斥）。
-		# 两个都读会造出"既有静态体素又有动画"的模型 —— 而格式层已经在解析期把这种文件拒了，
-		# 这里再挑一次是防"手改过的文件"，也让内存占用与文件里的实际源一致。
 		var frames: Variant = doc.model_frames(m.model_id)
 		if frames is Array and not (frames as Array).is_empty():
 			m.frames = _frames_of_array(frames)
@@ -174,20 +130,16 @@ static func _node_from_entry(e: Variant, doc: QVoxelFile.QVoxelDocument, bs: int
 		return m
 	return null
 
-
-## 节点条目里"两种节点共有"的那部分。摆放缺省恒等则不写（P2：缺省才是常态）。
-## 【摆放的唯一表示是 `transform`】位置 + 旋转同住一处，读写都经 QVoxelNode 那对编解码。
-## 历史键 `pos` / `steps` 不再兼容（格式定稿前从未真正落盘过需要迁移的数据）。
+## 节点条目里"两种节点共有"的那部分。
 static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 	n.node_name = str(entry.get("name", ""))
 	n.visible = bool(entry.get("visible", true))
 	n.locked = bool(entry.get("locked", false))
 	n.local_transform = QVoxelTransform.transform_from_json(entry.get("transform"))
 
-
 # 导出为传输结构（保存路径）
 
-## 构出可交给 QVoxelFile.serialize() 的文档。**每次调用都重新构**（Document 不常驻）。
+## 构出可交给 QVoxelFile.serialize() 的文档。
 func to_document() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = head.duplicate(true)
@@ -201,8 +153,6 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 	var animated := false
 	for m in all_models():
 		# 【为什么是 if/else 而不是两个独立分支】模型只有一个体素源（§12.2 互斥）。
-		# 写成"动画也写、静态也写"会让同一 model_id 同时进 models 与 frames —— 序列化时
-		# 格式层会直接判 FATAL（这正是我们想要的兜底），但真到了那一步就说明本函数有 bug。
 		if m.is_animated():
 			doc.frames[m.model_id] = _frames_to_array(m.frames)
 			# 时序 meta 随帧进 ANIM 块（v4：不再写进 NODE 节点条目）。
@@ -215,14 +165,11 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 		if not blocks.is_empty():
 			doc.models[m.model_id] = blocks
 	# §12.2：含 ANIM 的文件必须在 HEAD.require 里声明 "ANIM" —— 不认识它的读者**拒绝整个文件**
-	# （fail-fast），而不是静默少几个模型。反过来，全是静态模型时**不声明**：声明了等于
-	# 让老读者白白拒掉一份它们本来完全能读的文件。
 	if animated:
 		doc.head["require"] = _with_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_ANIM)
 	else:
 		doc.head["require"] = _without_requirement(doc.head.get("require"), QVoxelSpec.BLOCK_ANIM)
 	return doc
-
 
 ## 往 require 列表里加一项（已存在则原样返回，不重复）。
 static func _with_requirement(req: Variant, type_tag: String) -> Array:
@@ -231,9 +178,7 @@ static func _with_requirement(req: Variant, type_tag: String) -> Array:
 		out.append(type_tag)
 	return out
 
-
-## 从 require 列表里去掉一项。**必须在"不再含 FRAM"时也跑一次**：用户删掉最后一帧后
-## 若还留着 `require:["FRAM"]`，文件就会莫名其妙地被不支持的读者整份拒掉（残留声明）。
+## 从 require 列表里去掉一项。
 static func _without_requirement(req: Variant, type_tag: String) -> Array:
 	if not (req is Array):
 		return []
@@ -243,16 +188,13 @@ static func _without_requirement(req: Variant, type_tag: String) -> Array:
 			out.append(t)
 	return out
 
-
-## 帧数组 → 传输结构（QVoxelFrame → `{"duration_ms", "blocks"}`）。**不拷贝块缓冲**：
-## doc 是瞬时 DTO、用完即弃（同 from_document 的"接管"约定）。
+## 帧数组 → 传输结构（QVoxelFrame → `{"duration_ms", "blocks"}`）。
 static func _frames_to_array(frames: Array[QVoxelFrame]) -> Array:
 	var out: Array = []
 	for f in frames:
 		if f != null:
 			out.append(f.to_dict())
 	return out
-
 
 ## 传输结构 → 帧数组（每项经 QVoxelFrame.from_dict 补齐缺省）。
 static func _frames_of_array(arr: Array) -> Array[QVoxelFrame]:
@@ -261,9 +203,7 @@ static func _frames_of_array(arr: Array) -> Array[QVoxelFrame]:
 		out.append(QVoxelFrame.from_dict(d))
 	return out
 
-
 ## 动画时序 meta → 模型字段（§12.3）。
-## 【v4】时序在 ANIM 块的 meta 里，不再是 NODE 节点条目的 `anim` 键 —— 旧注释的说法会让人去 NODE 找。
 static func _read_anim(m: QVoxelModel, meta: Dictionary) -> void:
 	if meta.is_empty():
 		return
@@ -272,9 +212,7 @@ static func _read_anim(m: QVoxelModel, meta: Dictionary) -> void:
 	var tags: Variant = meta.get("tags")
 	m.anim_tags = (tags as Array).duplicate() if tags is Array else []
 
-
-## 模型字段 → 时序 meta 字典（写进 doc.anim_meta，最终进 ANIM 块）。**静态模型不写**（没有帧就没有时间轴）；
-## 各字段**取缺省值同样不写**（P2：缺省才是常态）—— 于是"整条 anim 全缺省"时根本不落键。
+## 模型字段 → 时序 meta 字典（写进 doc.anim_meta，最终进 ANIM 块）。
 static func _anim_of_model(m: QVoxelModel) -> Dictionary:
 	if not m.is_animated():
 		return {}
@@ -288,44 +226,35 @@ static func _anim_of_model(m: QVoxelModel) -> Dictionary:
 		a["tags"] = m.anim_tags
 	return a
 
-
 # 世界级设置
 
 func block_size() -> int:
 	return int(head.get(QVoxelSpec.HEAD_BLOCK_SIZE_KEY, QVoxelSpec.DEFAULT_BLOCK_SIZE))
 
-
 func world_name() -> String:
 	return str(_settings().get("name", "Untitled"))
-
 
 func set_world_name(value: String) -> void:
 	_write_settings(_patched_settings("name", value))
 
-
-## 一个体素在世界单位（米）下的边长。渲染与导出正交投影都读它。
+## 一个体素在世界单位（米）下的边长。
 func voxel_size() -> float:
 	return float(_settings().get("voxel_size", 0.1))
 
-
 # 材质（MATE 就是调色板本身）
 
-## 材质颜色。ID 越界或条目缺失返回洋红（可见的错误色，而不是悄悄变黑）。
+## 材质颜色。
 func material_color(material_id: int) -> Color:
 	if material_id <= 0 or material_id >= materials.size():
 		return Color.MAGENTA
 	return QVoxelMate.color(materials[material_id])
 
-
 func set_material_color(material_id: int, color: Color) -> void:
 	while materials.size() <= material_id:
 		materials.append(QVoxelMate.air_entry())
 	# 换掉**整个条目**而不是就地改它的键：撤销走 QVoxelPropertyCommand(world, &"materials") 时，
-	# 快照只浅拷数组，就地改会让"改前值"一起变（见类头铁律）。
-	# 覆盖色交给 QVoxelMate.with_color：rgba 是权威值，r/g/b/a 由它一次展开，别再手抄一遍。
 	materials[material_id] = QVoxelMate.with_color(materials[material_id], color)
 	_touch()
-
 
 ## 追加一个新材质，返回其 ID。
 func add_material(color: Color) -> int:
@@ -334,7 +263,6 @@ func add_material(color: Color) -> int:
 	set_material_color(id, color)
 	return id
 
-
 func used_materials() -> Dictionary:
 	var used := {}
 	for m in all_models():
@@ -342,12 +270,7 @@ func used_materials() -> Dictionary:
 			used[mid] = true
 	return used
 
-
-## 材质 PBR 标量通道（`metal` / `rough` / `emission`，值域 0–1）。ID 越界返回 0。
-## 【为什么 emission 的读回恒等于写入值】MATE 用 `e_r/e_g/e_b` 存**发光颜色**（三个字节），
-## 单通道强度只能从它还原。若照 `VoxelMaterial.to_mate` 那样写 `基色 × 强度`，读回 `max()` 会
-## 再乘一遍基色亮度，滑条一松手就跳值。故写入时按基色的最大分量归一，使 `max(e) == 强度` ——
-## 渲染侧（`VoxelMaterial.emission_color`）看到的仍是"基色 × 强度"，语义不变。
+## 材质 PBR 标量通道（`metal` / `rough` / `emission`，值域 0–1）。
 func material_scalar(material_id: int, key: StringName) -> float:
 	if material_id <= 0 or material_id >= materials.size():
 		return 0.0
@@ -362,9 +285,7 @@ func material_scalar(material_id: int, key: StringName) -> float:
 			return float(hi) / 255.0
 	return 0.0
 
-
-## 写材质 PBR 标量通道（与 `material_scalar` 成对，round-trip 稳定）。**整体替换条目**（同
-## `set_material_color`，理由见类头铁律：浅快照与活数据共享嵌套容器）。
+## 写材质 PBR 标量通道（与 `material_scalar` 成对，round-trip 稳定）。
 func set_material_scalar(material_id: int, key: StringName, value: float) -> void:
 	while materials.size() <= material_id:
 		materials.append(QVoxelMate.air_entry())
@@ -386,50 +307,30 @@ func set_material_scalar(material_id: int, key: StringName, value: float) -> voi
 	materials[material_id] = e
 	_touch()
 
-
 # 相机（NODE 下的工程数据，§5.1）
-# 【为什么相机没有自己的 Resource 类】相机的唯一归宿是 `node` 这个 JSON 字典：
-# 存盘要 JSON、读盘要 JSON。中间再过一层 Resource，只会凭空多出两处"字段改名"的机会 ——
-# 而改名错位不报错，只静默丢字段。故本类直接读写 node 下的键，
-# 与 HEAD 的 world 设置（_settings / _write_settings）同一手法。
-# 【改相机怎么撤销】面板把一次改动包成 QVoxelPropertyCommand(world, &"node") 即可 ——
-# 本节 setter 一律**整体替换** node 下的数组，于是浅快照里的旧数组原封不动（见类头铁律）。
 
 ## 相机书签数组（活引用，供面板遍历；**改动一律走下面的 setter**）。
 func cameras() -> Array:
 	return _json_array_of(QVoxelSpec.NODE_CAMERAS_KEY)
 
-
 func camera_field(index: int, key: String) -> Variant:
 	return _entry_field(QVoxelSpec.NODE_CAMERAS_KEY, index, key, QVoxelSpec.CAMERA_FIELD_DEFAULTS)
 
-
-## 改相机某一项的一个字段。返回"是否真的改了"—— false 表示越界或值本来就相同，
-## 调用方据此**不要**产生撤销单位（同"空手势不入栈"的约定）。
+## 改相机某一项的一个字段。
 func set_camera_field(index: int, key: String, value: Variant) -> bool:
 	return _set_entry_field(QVoxelSpec.NODE_CAMERAS_KEY, index, key, value)
-
 
 ## 追加相机书签，返回新下标。
 func add_camera(camera_name := "camera") -> int:
 	return _append_entry(QVoxelSpec.NODE_CAMERAS_KEY, QVoxelSpec.CAMERA_FIELD_DEFAULTS,
 			{"name": camera_name})
 
-
 func remove_camera(index: int) -> bool:
 	return _remove_entry_at(QVoxelSpec.NODE_CAMERAS_KEY, index)
 
-
 # 场景树
-# 【为什么没有独立的"分组表"】分组与对象本是同一件事的两半。合成一棵树后，分组 = 父子关系，
-# 可见 / 锁定 / 摆放 / 修改器全是节点属性 —— **只有一处真值**，也不需要"删分组要连带搬归属"
-# 这种跨表同步（那条规则的存在本身就是"有两张表"的证据）。
-# 【为什么没有 parent 指针】父 → 子只朝一个方向，引用图是 DAG、没有环。Resource 是
-# RefCounted：存反向指针就造出环，环永远不被释放（静默泄漏）。需要"我在谁下面"时从根往下找。
 
-## 新建模型并接进世界。parent 为 null 则挂到顶层。
-## model_id 取"现有最大值 + 1"（而不是 size()）：删掉中间某个模型后，ID 不会被新模型复用
-## —— 复用会让仍在引用旧 ID 的撤销命令改错模型。
+## 新建模型并接进世界。
 func create_model(node_name := "", grid := Vector3i.ZERO, parent: QVoxelGroup = null) -> QVoxelModel:
 	var m := QVoxelModel.new()
 	m.model_id = next_model_id()
@@ -439,7 +340,6 @@ func create_model(node_name := "", grid := Vector3i.ZERO, parent: QVoxelGroup = 
 	_attach(m, parent, -1)
 	return m
 
-
 ## 新建组并接进世界。
 func create_group(group_name := "Group", parent: QVoxelGroup = null) -> QVoxelGroup:
 	var g := QVoxelGroup.new()
@@ -448,22 +348,17 @@ func create_group(group_name := "Group", parent: QVoxelGroup = null) -> QVoxelGr
 	_attach(g, parent, -1)
 	return g
 
-
 ## 取一个新组编号（见 _uid_seq）。
 static func _take_uid() -> int:
 	var v := _uid_seq
 	_uid_seq += 1
 	return v
 
-
 ## 节点的标量 id：模型用落盘的 `model_id`（> 0），组用 `-node_uid`（< 0）。
-## 【为什么两套编号】模型 id 要进文件（.qvx 的 model_id、撤销命令都引用它），组不落盘；
-## 组合成一个 id 空间只靠符号区分，读写都只经过 node_id / find_node 这一对函数。
 func node_id(n: QVoxelNode) -> int:
 	if n == null:
 		return 0
 	return n.model_id if n.is_model() else -n.node_uid
-
 
 ## 由标量 id 找回节点（node_id 的逆运算）。
 func find_node(id: int) -> QVoxelNode:
@@ -476,19 +371,12 @@ func find_node(id: int) -> QVoxelNode:
 			return n
 	return null
 
-
 ## 合并另一份世界：材质与模型全部并进本世界，材质 ID 整体平移（体素值跟着改）。
-## 返回并入的模型列表（空 = 来源没有模型）。
-## 【为什么放在 world 上】"把另一个文件并进当前工程"是数据侧的事，与"它来自哪个文件"无关 ——
-## 导入外部模型用它，将来合并两份 .qvx 也走这一条，不必各写一份。
 func merge_from(other: QVoxelWorld) -> Array[QVoxelModel]:
 	var added: Array[QVoxelModel] = []
 	if other == null or other == self:
 		return added
 	# 只搬**实际用到的**材质，并按"旧 ID → 新 ID"建映射。
-	# 【为什么不能按 `materials.size()` 平移】材质表的长度不等于颜色数：从 `.vox` 读回来的
-	# 世界固定 256 项，其中绝大多数是空槽 —— 按表长判断会把"30 色的模型"算成"256 色"、
-	# 直接误判成装不下；照表长逐个 append 也会把一堆空槽灌进当前工程。
 	var src_ids := other.used_materials().keys()
 	src_ids.sort()
 	var slots: Array[int] = _free_material_slots(src_ids.size())
@@ -518,11 +406,7 @@ func merge_from(other: QVoxelWorld) -> Array[QVoxelModel]:
 		_touch()
 	return added
 
-
 ## 找出 n 个可写的材质槽：表尾还有空间就往后长，不够再复用**未被任何体素引用**的槽。
-## 【为什么判据是"没被引用"而不是"是空气"】`.vox` 的调色板是 255 色全表 —— 从它读回来的
-## 世界里几乎每个槽都有颜色，只是大多没被摆出来（实测 deer.vox：255 个槽全有颜色、只用到 30 个）。
-## 只有"未引用"的槽才能安全复用，否则 256 项的表永远合不进第二份。
 func _free_material_slots(n: int) -> Array[int]:
 	var out: Array[int] = []
 	var grow := QVoxelSpec.MATERIAL_COUNT - materials.size()
@@ -538,7 +422,6 @@ func _free_material_slots(n: int) -> Array[int]:
 	if out.size() < n:
 		return []
 	return out
-
 
 ## 把 src 的体素（连同帧动画与材质 ID 重映射）复制进 dst。
 static func _copy_voxels(src: QVoxelModel, dst: QVoxelModel, remap: Dictionary) -> void:
@@ -559,7 +442,6 @@ static func _copy_voxels(src: QVoxelModel, dst: QVoxelModel, remap: Dictionary) 
 	dst.anim_loop = src.anim_loop
 	dst.anim_tags = src.anim_tags.duplicate(true)
 
-
 ## 块表深拷 + 材质 ID 按映射表改写（0 恒为空；映射不到的退回 0，宁可少一格也不指向错色）。
 static func _remap_table(src: Dictionary, remap: Dictionary) -> Dictionary:
 	var out := {}
@@ -572,13 +454,11 @@ static func _remap_table(src: Dictionary, remap: Dictionary) -> Dictionary:
 		out[k] = buf
 	return out
 
-
 func next_model_id() -> int:
 	var top := -1
 	for m in all_models():
 		top = maxi(top, m.model_id)
 	return top + 1
-
 
 func find_model(model_id: int) -> QVoxelModel:
 	for m in all_models():
@@ -586,22 +466,19 @@ func find_model(model_id: int) -> QVoxelModel:
 			return m
 	return null
 
-
 ## 全部节点（深度优先）。
 func all_nodes() -> Array[QVoxelNode]:
 	var out: Array[QVoxelNode] = []
 	_collect_nodes(nodes, out)
 	return out
 
-
-## 全部模型（深度优先，保持树上的顺序）。**这是"世界里的模型"的唯一枚举入口**。
+## 全部模型（深度优先，保持树上的顺序）。
 func all_models() -> Array[QVoxelModel]:
 	var out: Array[QVoxelModel] = []
 	_collect_models(nodes, out)
 	return out
 
-
-## 包含 target 的那个数组（顶层 nodes，或某组的 child_nodes）。不在树上返回空数组。
+## 包含 target 的那个数组（顶层 nodes，或某组的 child_nodes）。
 func _list_holding(target: QVoxelNode) -> Array[QVoxelNode]:
 	if nodes.has(target):
 		return nodes
@@ -610,7 +487,6 @@ func _list_holding(target: QVoxelNode) -> Array[QVoxelNode]:
 			return (n as QVoxelGroup).child_nodes
 	return [] as Array[QVoxelNode]
 
-
 ## target 的父组（顶层节点的父为 null）。
 func find_parent(target: QVoxelNode) -> QVoxelGroup:
 	for n in all_nodes():
@@ -618,16 +494,12 @@ func find_parent(target: QVoxelNode) -> QVoxelGroup:
 			return n as QVoxelGroup
 	return null
 
-
-## 节点在父列表里的下标（不在树上返回 -1）。与 `find_parent` 配对，用于记录"撤销要挂回哪儿"。
-## **唯一实现**：`node_index` 只是它的转发别名，不要再写第二个同义方法各判一遍空。
+## 节点在父列表里的下标（不在树上返回 -1）。
 func index_of(target: QVoxelNode) -> int:
 	# Array.find() 对空数组返回 -1，故不必再判 _list_holding 是否为空（那层分支是冗余的）。
 	return _list_holding(target).find(target)
 
-
-## 节点在**世界里的组合摆放**：从根到它逐层累乘 local_transform。渲染器据此把模型摆到该处。
-## 编辑器按"体素坐标本地化 + 渲染器承载摆放"的口径渲染，本函数就是那条摆放的唯一来源。
+## 节点在**世界里的组合摆放**：从根到它逐层累乘 local_transform。
 func world_transform(target: QVoxelNode) -> Transform3D:
 	var path: Array[QVoxelNode] = []
 	if not _path_to(nodes, target, path):
@@ -637,8 +509,7 @@ func world_transform(target: QVoxelNode) -> Transform3D:
 		xf = xf * n.local_transform
 	return xf
 
-
-## 深度优先找 target 的路径（根 → target），填入 path。找不到返回 false（path 复原）。
+## 深度优先找 target 的路径（根 → target），填入 path。
 func _path_to(list: Array[QVoxelNode], target: QVoxelNode, path: Array[QVoxelNode]) -> bool:
 	for n in list:
 		if n == null:
@@ -651,19 +522,11 @@ func _path_to(list: Array[QVoxelNode], target: QVoxelNode, path: Array[QVoxelNod
 		path.pop_back()
 	return false
 
-
 ## target 在同级里的下标（不在树上返回 -1）。
-## 【为什么保留这个名字】外部（QVoxelierTreeSection 等）按它取下标；语义与 index_of 逐字相同，
-## 故只留一行转发 —— 两份实现迟早有一份被改出差异，而差异不会报错，只会让下标悄悄错一位。
 func node_index(target: QVoxelNode) -> int:
 	return index_of(target)
 
-
-## 把已有节点挂到 parent 下的 index 位置（index < 0 = 末尾）。会先把它从原位置摘下来。
-## 【为什么"移动"和"插入"是同一个操作】树上没有"移动"这回事 —— 移动就是"从原父摘下来、
-## 挂到新父"。分成两套只会让"跨组拖拽"和"组内重排"各有一套边界条件。
-## 【为什么必须挡祖先】把组挂进自己的子树会造出环 —— 环上的节点既不在任何根的可达集合里、
-## 又互相引用，求值会无限递归、存盘会写出悬空引用。这里直接拒绝，而不是事后检测。
+## 把已有节点挂到 parent 下的 index 位置（index < 0 = 末尾）。
 func attach_node(target: QVoxelNode, parent: QVoxelGroup, index := -1) -> bool:
 	if target == null:
 		return false
@@ -675,7 +538,6 @@ func attach_node(target: QVoxelNode, parent: QVoxelGroup, index := -1) -> bool:
 	_attach(target, parent, index)
 	return true
 
-
 ## 删除节点（连同其子树）。
 func remove_node(target: QVoxelNode) -> bool:
 	var lst := _list_holding(target)
@@ -685,7 +547,6 @@ func remove_node(target: QVoxelNode) -> bool:
 	_touch()
 	return true
 
-
 func _attach(target: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
 	var lst: Array[QVoxelNode] = nodes if parent == null else parent.child_nodes
 	if index < 0 or index >= lst.size():
@@ -693,7 +554,6 @@ func _attach(target: QVoxelNode, parent: QVoxelGroup, index: int) -> void:
 	else:
 		lst.insert(index, target)
 	_touch()
-
 
 ## anc 是不是 node 的祖先（或就是 node 自己）。
 func _is_ancestor(anc: QVoxelNode, node: QVoxelNode) -> bool:
@@ -704,7 +564,6 @@ func _is_ancestor(anc: QVoxelNode, node: QVoxelNode) -> bool:
 			return true
 	return false
 
-
 func _collect_nodes(list: Array[QVoxelNode], out: Array[QVoxelNode]) -> void:
 	for n in list:
 		if n == null:
@@ -712,7 +571,6 @@ func _collect_nodes(list: Array[QVoxelNode], out: Array[QVoxelNode]) -> void:
 		out.append(n)
 		if n.is_group():
 			_collect_nodes((n as QVoxelGroup).child_nodes, out)
-
 
 func _collect_models(list: Array[QVoxelNode], out: Array[QVoxelModel]) -> void:
 	for n in list:
@@ -723,44 +581,35 @@ func _collect_models(list: Array[QVoxelNode], out: Array[QVoxelModel]) -> void:
 		elif n.is_group():
 			_collect_models((n as QVoxelGroup).child_nodes, out)
 
-
 # 内部
 
 func _touch() -> void:
 	revision += 1
 	content_changed.emit()
 
-
 func _settings() -> Dictionary:
 	var w: Variant = head.get("world")
 	return w if w is Dictionary else {}
 
-
-## 造一份"改过某个键"的设置副本。**不看原字典**（见类头铁律），缺了 world 键就得到一份
-## 只含这个键的新字典 —— 这正是"缺了就补一个"的新写法：补的是副本，不是原地挖个洞。
+## 造一份"改过某个键"的设置副本。
 func _patched_settings(key: String, value: Variant) -> Dictionary:
 	var w := _settings().duplicate()
 	w[key] = value
 	return w
 
-
 func _write_settings(w: Dictionary) -> void:
 	head["world"] = w
 	_touch()
 
-
-## 取 node 下的 JSON 数组。缺失 / 类型不对一律回落到空数组 ——
-## **不就地补键**：读路径不写数据，只有 setter 才写。
+## 取 node 下的 JSON 数组。
 func _json_array_of(key: String) -> Array:
 	var v: Variant = node.get(key)
 	return v if v is Array else []
-
 
 ## 写回 node 下的 JSON 数组（**整体替换**，见类头铁律），并标脏。
 func _write_json_array(key: String, arr: Array) -> void:
 	node[key] = arr
 	_touch()
-
 
 func _entry_at(key: String, index: int) -> Dictionary:
 	var arr := _json_array_of(key)
@@ -768,10 +617,8 @@ func _entry_at(key: String, index: int) -> Dictionary:
 		return {}
 	return arr[index]
 
-
 func _entry_field(key: String, index: int, field: String, defaults: Dictionary) -> Variant:
 	return _entry_at(key, index).get(field, defaults.get(field))
-
 
 func _set_entry_field(key: String, index: int, field: String, value: Variant) -> bool:
 	var arr := _json_array_of(key)
@@ -786,22 +633,18 @@ func _set_entry_field(key: String, index: int, field: String, value: Variant) ->
 	_write_json_array(key, next)
 	return true
 
-
-## 造一条"先套缺省值、再盖上 seed"的新条目。**必须复制缺省表**：QVoxelSpec 里的表是 const，
-## 改它会直接运行期报错，而且会污染此后所有新条目。
+## 造一条"先套缺省值、再盖上 seed"的新条目。
 func _seeded_entry(defaults: Dictionary, seed: Dictionary) -> Dictionary:
 	var d := defaults.duplicate()
 	for k in seed:
 		d[k] = seed[k]
 	return d
 
-
 func _append_entry(key: String, defaults: Dictionary, seed: Dictionary) -> int:
 	var next: Array = _json_array_of(key).duplicate()
 	next.append(_seeded_entry(defaults, seed))
 	_write_json_array(key, next)
 	return next.size() - 1
-
 
 func _remove_entry_at(key: String, index: int) -> bool:
 	var arr := _json_array_of(key)
@@ -812,10 +655,7 @@ func _remove_entry_at(key: String, index: int) -> bool:
 	_write_json_array(key, next)
 	return true
 
-
 ## 对象 → 文件块表：丢掉全零块（= 空块不写入），并**排序键**。
-## 【为什么排序】Dictionary 迭代顺序不保证稳定，而落盘字节、增量写的块搬运、
-## 回归测试的逐字节哈希都要求"同一份数据 ⇒ 同一串字节"。
 func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 	var out := {}
 	var bs := o.block_size
@@ -828,15 +668,7 @@ func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 			out[k] = buf
 	return out
 
-
 ## NODE JSON：把场景树写进 nodes，其余键**原样保留**。
-## 【为什么是"打补丁"而不是"重新生成"】NODE 里还有相机、动画、我们的未知键。
-## 重新生成会静默丢掉它们；打补丁则只碰自己拥有的键（§7：格式不解释未知键）。
-## 【为什么显式 erase("layers")】按 id 索引的分组表已由树取代（qvx 3）。node 里留着
-## layers 键再写回去，就等于"存盘时复活一个已废弃的概念"，下次读盘还会被当成有效数据。
-## 【为什么也要 erase("animations")】按"节点下标"寻址的动画键与 v3 的嵌套树对不上号
-## （§12.4：动画时序 v4 起在 ANIM 块的 meta 里，按 model_id 寻址）。留着它 → 下次读盘拿到一份
-## 指向错误节点的动画元数据，且与 ANIM 的 meta 并存时谁生效取决于读取顺序（"两处真值"正是要消掉的）。
 func _node_json() -> Dictionary:
 	var out := node.duplicate(true)
 	out.erase("layers")
@@ -850,9 +682,7 @@ func _node_json() -> Dictionary:
 		out["nodes"] = arr
 	return out
 
-
-## 节点 → JSON 条目（递归）。缺省值一律**不写**（P2：缺省才是常态）：
-## visible=true / locked=false / pos=(0,0,0) 都是冗语，写了只会让文件更长、且"改回缺省"时要删键。
+## 节点 → JSON 条目（递归）。
 func _entry_of_node(n: QVoxelNode) -> Dictionary:
 	var e := {}
 	e["kind"] = n.kind()
@@ -876,10 +706,7 @@ func _entry_of_node(n: QVoxelNode) -> Dictionary:
 		e["children"] = kids
 	return e
 
-
 ## 节点里显式写了 size 就用它；否则从块范围推断（外来文件可能没写 size）。
-## 【为什么推断要并上**所有**帧】动画模型的分辨率是整份 FRAM 共用的（§12.2），
-## 只看第 0 帧会让"第 5 帧才长出外圈"的模型分辨率偏小 → 那些体素一进来就被判越界丢掉。
 static func _size_of_entry(entry: Dictionary, m: QVoxelModel, bs: int) -> Vector3i:
 	var s: Variant = entry.get("size")
 	if s is Array and (s as Array).size() == 3:
@@ -890,10 +717,7 @@ static func _size_of_entry(entry: Dictionary, m: QVoxelModel, bs: int) -> Vector
 		mx = Vector3i(maxi(mx.x, fg.x), maxi(mx.y, fg.y), maxi(mx.z, fg.z))
 	return mx
 
-
 ## 从块范围推断分辨率：取"最高块边界"，并向下取整到块边长的整数倍。
-## 【为什么舍入到块边界】块是稀疏存储的分配单位，分辨率若不是它的整数倍，
-## 最外一圈块就有一半永远用不到；外来文件本来也没记分辨率，取整是代价最小的还原。
 static func _infer_grid(blocks: Dictionary, bs: int) -> Vector3i:
 	var mx := Vector3i(bs, bs, bs)
 	for k: Vector3i in blocks:
