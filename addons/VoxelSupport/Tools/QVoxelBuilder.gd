@@ -106,12 +106,12 @@ func to_document() -> QVoxelFile.QVoxelDocument:
 		"qvox": QVoxelSpec.VERSION,
 		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
 		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
-		"block_size": block_size,
-		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
+		QVoxelSpec.HEAD_BLOCK_SIZE_KEY: block_size,
+		QVoxelSpec.HEAD_UP_AXIS_KEY: QVoxelSpec.DEFAULT_UP_AXIS,
 	}
 	if not _voxels.is_empty():
 		var b := _block_bounds()
-		doc.head["bounds"] = {"min": [b[0].x, b[0].y, b[0].z], "max": [b[1].x, b[1].y, b[1].z]}
+		doc.head[QVoxelSpec.HEAD_BOUNDS_KEY] = {"min": [b[0].x, b[0].y, b[0].z], "max": [b[1].x, b[1].y, b[1].z]}
 	doc.materials = _palette
 	if not _voxels.is_empty():
 		doc.models[0] = _to_blocks()
@@ -142,7 +142,7 @@ func _byte(v: float) -> int:
 
 ## 体素字典 → 块表（按块坐标聚合，块内用 QVoxelSpec 的 ZXY 线性下标）。
 func _to_blocks() -> Dictionary:
-	var n := block_size * block_size * block_size
+	var n := QVoxelSpec.block_volume(block_size)
 	var blocks := {}
 	for pos in _voxels:
 		var p: Vector3i = pos

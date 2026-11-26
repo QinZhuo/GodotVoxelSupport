@@ -1,4 +1,5 @@
 class_name VoxelChunkGenerator
+extends RefCounted
 ## 高性能体素网格生成器（Chunk 分区）
 ## 将体素世界划分为固定大小的 chunk，每个 chunk 独立生成网格。
 ## 生成时始终输出所有非空 chunk 的完整 mesh，避免增量重建导致数据丢失。
@@ -45,9 +46,14 @@ static func generate_arrays_runtime(
 ## 这里曾有一份逐行重复的 _merge_meshes + _make_arrays（与 VoxelMesher.to_mesh、
 ## Mesh/VoxelMeshGenerator、QVoxelMeshExport 共四份），差异只藏在不报错的细节里
 ## （空桶是否跳过、材质绑桶序号还是 surface 序号），故一并删除改为委托。
-static func build_mesh_from_arrays(arrays: Dictionary) -> ArrayMesh:
+## 【materials 必须从这里传下去，不能事后按桶序号补绑】曾有一版调用方先建出 mesh、再由
+## VoxelRenderer._apply_materials 按 get_surface_count() 的桶序号补绑 mats[0]/mats[1]：只要某个
+## chunk 或粗层大块**只有透明体素**（玻璃、水面），空桶被跳过后唯一的 surface 是 trans，却被绑成
+## 实心材质 —— 玻璃/水面变不透光，且不报任何错。材质随 arrays 一起进 append_arrays_to_mesh，
+## 由它按"实际 surface 序号"绑：这条不变式全仓只有一处维护。
+static func build_mesh_from_arrays(arrays: Dictionary, materials: Array = []) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
-	if not VoxelMeshGenerator.append_arrays_to_mesh(mesh, arrays):
+	if not VoxelMeshGenerator.append_arrays_to_mesh(mesh, arrays, materials):
 		return null
 	return mesh
 

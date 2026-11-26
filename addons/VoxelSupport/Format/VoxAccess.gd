@@ -1,4 +1,5 @@
 class_name VoxAccess
+extends RefCounted
 ## `.vox` 加载器（**只读** —— 导出见 `VoxWriter`）。
 ## 已按"大块读进 buffer 再解析"优化：不要改回逐字段 `FileAccess` 读，那样大文件会慢一个量级。
 ## 【几何约定不在这里】坐标轴、朝向编码、调色板项下标全在 `VoxSpace`（读写两端唯一出处），

@@ -28,8 +28,10 @@ const MAX_STEPS := 1024
 
 ## 逐帧时长（毫秒，0 = 跟随 fps）。下标即帧号。
 var _durations := PackedInt32Array()
-var _fps := 12
-var _loop := true
+## 缺省帧率取全仓唯一真值（QVoxelSpec.ANIM_FPS_DEFAULT）；configure() 会立刻覆盖它，
+## 这里只是"未配置时也不制造第二个缺省"。
+var _fps := QVoxelSpec.ANIM_FPS_DEFAULT
+var _loop := QVoxelSpec.ANIM_LOOP_DEFAULT  # 与 ANIM_FPS_DEFAULT 同族：未配置时也不制造第二个缺省
 ## §12.3 的 tags 数组：[{"name": String, "from": int, "to": int, "direction": String}]
 var _tags: Array = []
 

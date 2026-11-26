@@ -514,7 +514,9 @@ var _batch_complete_pending: bool = false
 var _mesh_build_queue: Dictionary = {}
 # 每帧最多构建的 chunk 数（GPU 上传限流）
 # 流式补建直接入此队列，单 chunk 构建成本低（~1ms），提高后补建更流畅；
-# 配合 3ms 时间预算 + GPU 忙检测兜底防 Metal fence 超时
+# 配合 3ms 时间预算（_MESH_BUILD_BUDGET_MS）兜底防 Metal fence 超时。
+# 【不要在这里写"GPU 忙检测"】本项目从未实现该机制（相关死字段 _last_frame_delta 已删）。
+# 真正起作用的限流只有两个：每帧条数 + 每帧毫秒预算。
 @export_range(1, 100, 1) var _mesh_build_per_frame: int = 12
 # 增量重建每帧最多处理的 dirty chunk 数：超出放回下帧续建（防回原点/大崩塌单帧
 # 快照+派发上千 worker 阻塞主线程）。值越大重建越快但帧尖峰风险越高。
@@ -525,30 +527,39 @@ var _mesh_build_queue: Dictionary = {}
 
 # 帧尾构建是否已排期（防重复 call_deferred）
 var _mesh_build_scheduled: bool = false
-# 上一帧 _delta（秒），GPU 忙检测用（帧耗时大 = GPU/渲染压力高）
-var _last_frame_delta: float = 0.0
 
 ## 最近一次网格生成耗时（毫秒），供外部 HUD 等调试显示
 var last_mesh_gen_time_ms: float = 0.0
 
 ## 性能追踪：上次生成的顶点数/三角形数
+## 【为什么没有 last_trans_vertices】曾有，但全仓只写不读（trans 的三角形数已由
+## last_trans_triangles 提供），属纯死字段，已删。_set_last_vertex_stats 的 trans_vertices
+## 形参保留 —— 它是算 last_trans_triangles 的输入。
 var last_solid_vertices: int = 0
-var last_trans_vertices: int = 0
 var last_solid_triangles: int = 0
 var last_trans_triangles: int = 0
 var last_total_chunks: int = 0
 
 ## 性能追踪：最近一次重建的 chunk 数量与耗时明细
-var last_rebuild_chunk_count: int = 0      ## 本次重建的 chunk 数
-var last_rebuild_affected_count: int = 0   ## 受影响的 chunk 数（含相邻边界）
+## 【语义】统计的是"当前这一批异步结果"，不是单个结果：此前它在 _apply_single_chunk_result
+## 里被写死成 1，一批 N 个结果也只报 1，demo 拿它算"平均每 chunk 生成耗时"会直接错 N 倍。
+## 现在按批累加，累加器是 _batch_rebuilt_chunks。
+## 【为什么没有"受影响数"】曾有个恒等于本字段的 last_rebuild_affected_count（它的源码是
+## `+= result.get("affected_count", 1)`，而结果字典里从来没有那个键 → 恒 +1 = 本字段）。
+## 两个恒等的字段放在一起只会让人以为其中一个是独立算出来的。已删。
+var last_rebuild_chunk_count: int = 0
 var last_mesh_gen_time_slice_ms: float = 0.0  ## 生成阶段耗时（不含 apply）
 var last_apply_time_ms: float = 0.0        ## 应用到场景的耗时 (ms)
+
+## 本批异步结果的累加器（批起点：_update_mesh_async 建 VoxelMeshBatch 处清零）
+var _batch_rebuilt_chunks: int = 0
 
 func _ready() -> void:
 	_configure_lod()
 	request_update()
-	# GPU 忙检测统一用帧时长（_last_frame_delta）：viewport_set_measure_render_time
-	# 在部分驱动(如 Metal)上可能引发不稳定，故不启用引擎侧的 render time 测量。
+	# 【不要在这里加"GPU 忙检测"】这里曾有一个 _last_frame_delta 字段，注释说是给帧尾构建
+	# 限流做 GPU 忙检测用 —— 实际只写不读，纯死字段（已删）。若将来真要做，判据必须是
+	# "上一帧实际耗时"而不是 Engine.get_frames_per_second()（后者在低帧率下量化很粗）。
 	# 视点层若在 _ready 之后才挂上，它自己的 _ready 会重新认父并对齐分带；此处只处理
 	# "场景里已经挂好"的常见情形。
 	if view_layer != null:
@@ -557,9 +568,6 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	# 记录上一帧耗时，供 GPU 忙检测使用（_process_mesh_build_queue）
-	_last_frame_delta = _delta
-
 	# 【STATIC = 真的最简：整段视点调度直接跳过】
 	# STATIC 下几何是"整份重建一次挂在自己身上"，没有任何 chunk 级调度、没有流式、
 	# 没有 LOD 分带。此前这里无差别跑 process_lod / process_streaming，结果是
@@ -937,7 +945,14 @@ func _rebuild_static() -> void:
 		# 在建立网格的同一帧再拷一遍几何。改用已算好的 arrays 直接读尺寸：零拷贝。
 		var solid_v := (built_arrays.get("solid_verts", PackedVector3Array()) as PackedVector3Array).size()
 		var trans_v := (built_arrays.get("trans_verts", PackedVector3Array()) as PackedVector3Array).size()
-		_set_last_vertex_stats(solid_v, trans_v, data.get_all_chunk_keys().size())
+		# 【为什么用 chunk_count() 而不是 get_all_chunk_keys().size()】后者为了数一个数字，
+		# 要把内存块键与流中未加载块键合并去重成整张新数组（STATIC 重建每帧都付一遍）。
+		# chunk_count() 是 O(1) 的"内存块 + 流中未加载块"计数，语义与此处诊断字段一致。
+		_set_last_vertex_stats(solid_v, trans_v, data.chunk_count())
+	# 【STATIC 也要碰撞】整份模型是**一个**绘制单元，交给碰撞组件按单元重建（它自己限量）。
+	# 从前这里完全不通知碰撞组件，而 VoxelCollision 又只认 chunk 单元 → 默认 draw_mode=STATIC
+	# 下永远没有碰撞体（且不报错）。单元换算在组件内部，这里只报"整份模型存不存在网格"。
+	collision.enqueue(Vector3i.ZERO, mesh != null)
 	mesh_updated.emit()
 
 
@@ -1041,8 +1056,14 @@ func mark_lod_block_empty(level: int, bk: Vector3i) -> void:
 		_lod_meshes[level][bk] = null
 
 
-## 主线程挂载粗 LOD 大块网格（mesh 已由工作线程构建，此处仅建节点 + 赋材质 + 挂载，很轻）
+## 主线程挂载粗 LOD 大块网格（mesh 已由工作线程构建，此处仅建节点 + 挂载，很轻）
 ## 失效重建时复用已有节点（直接替换 mesh，避免节点销毁/重建造成闪烁）
+##
+## 【材质不在挂载时补绑】曾经这里调 _apply_materials(mesh) 按"桶序号"（surface 0=实心、
+## surface 1=透明）补绑材质 —— 而 worker 侧的 append_arrays_to_mesh 会**跳过空桶**，于是
+## 只含透明体素的大块（玻璃/水面）唯一 surface 是 trans，却被绑成实心材质：整块不透光、
+## 运行期不报错、只能靠眼睛看出来。材质现在随 arrays 在 worker 里一起绑（按实际 surface
+## 序号），挂载点只负责挂。
 func mount_lod_mesh(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 	if level < 0 or level >= _lod_meshes.size():
 		return
@@ -1056,7 +1077,6 @@ func mount_lod_mesh(level: int, bk: Vector3i, mesh: ArrayMesh) -> void:
 		mi.visible = _meshes_should_be_visible()
 		mi.position = Vector3(bk) * _lod_block_edge_world(level)
 	if mesh != null and mesh.get_surface_count() > 0:
-		_apply_materials(mesh)
 		mi.mesh = mesh
 	_lod_meshes[level][bk] = mi
 
@@ -1084,7 +1104,9 @@ func lod_materials(level: int, force: bool = false) -> Array:
 		return []
 	if force:
 		return _materials.rebuild_aligned(data.materials, level)
-	return _materials.aligned(data.materials, level)
+	# 走 aligned_shared：返回内部缓存那份数组本身（不拷贝）。调用方（视点层派发 worker）
+	# 只读、且不跨一次 force 重建持有 —— 契约写在 VoxelMaterialCache.aligned_shared 上。
+	return _materials.aligned_shared(data.materials, level)
 
 
 ## 取渲染用的运行时 Material 对象数组（表面 0/1）。
@@ -1222,6 +1244,9 @@ func _update_mesh_async() -> void:
 	batch.result_ready.connect(_on_batch_result.bind(batch))
 	batch.finished.connect(_on_batch_finished.bind(batch))
 	_batch = batch
+	# 批起点清零重建计数：对外表示"最近一（批）次重建做了多少"，不清零就会跨批累加成
+	# 单调递增的假数。
+	_batch_rebuilt_chunks = 0
 	# 快照预算：超预算尾部放回 dirty 下帧续建（_update_mesh 开头清 _dirty，须重置位），
 	# 避免初始/切换模式一帧全量快照尖峰。
 	# 声明"只读快照"：快照与活动缓冲共享底层，而 GDScript 的逐元素写不会触发写时拷贝，
@@ -1291,8 +1316,11 @@ func _snapshot_budgeted(visible: Array[Vector3i]) -> Dictionary:
 ## 都通过 _make_result 构建结果，消费方 _apply_single_chunk_result 统一按键读取。
 ## chunk_key 缺省为 (-999,-999,-999) 表示"非单chunk结果"（全量结果）。
 ## 不含 gen_id：过期判定已由 VoxelMeshBatch 的对象身份承担（取消即不再发射结果）。
+## 【为什么没有 affected_count】曾有个恒传 1 的形参，全仓只在这里写进字典、
+## 从没人按这个键读（唯一的消费者是 last_rebuild_affected_count，它原来也被写死 1）。
+## 一个恒假的入参比没有更糟：读代码的人会以为"受影响数"真的被算过。已删。
 static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: int,
-		trans_vertices: int, total_chunks: int, affected_count: int,
+		trans_vertices: int, total_chunks: int,
 		chunk_key: Vector3i = Vector3i(-999, -999, -999)) -> Dictionary:
 	return {
 		"arrays": arrays,
@@ -1301,14 +1329,13 @@ static func _make_result(arrays: Variant, gen_time_ms: float, solid_vertices: in
 		"solid_vertices": solid_vertices,
 		"trans_vertices": trans_vertices,
 		"total_chunks": total_chunks,
-		"affected_count": affected_count,
 	}
 
 
 ## 以顶点计数更新 last_* 统计字段（实心/透明三角形 = 顶点数 / 3）
 func _set_last_vertex_stats(solid_vertices: int, trans_vertices: int, total_chunks: int) -> void:
 	last_solid_vertices = solid_vertices
-	last_trans_vertices = trans_vertices
+	# trans_vertices 只在这里转成三角形数：不单独存一份顶点数（无读者，见字段注释）
 	last_solid_triangles = solid_vertices / 3
 	last_trans_triangles = trans_vertices / 3
 	last_total_chunks = total_chunks
@@ -1374,7 +1401,7 @@ func _generate_chunk_worker(buffers: Dictionary, materials: Array, trans_flags: 
 	# 结果写进 out（由 VoxelMeshBatch 传入）：回传与计数结算都由批次负责。
 	# 本函数不再自己 call_deferred —— 那会让"结果回传"与"计数递减"分处两地，
 	# 正是旧实现计数失衡的来源。
-	out.merge(_make_result(arrays, gen_time_ms, sv, tv, 1 if has_data else 0, 1, chunk_key))
+	out.merge(_make_result(arrays, gen_time_ms, sv, tv, 1 if has_data else 0, chunk_key))
 
 
 ## 主线程结果处理入口（由 VoxelMeshBatch 在主线程发射）。
@@ -1418,8 +1445,11 @@ func _apply_single_chunk_result(result: Dictionary) -> void:
 
 	# 更新统计信息（统一契约 _apply_stats_from_result）
 	_apply_stats_from_result(result)
-	last_rebuild_affected_count = 1
-	last_rebuild_chunk_count = 1
+	# 【按批累加，不再写死 1】一个结果 = 一个 chunk 的重建量。原先这里两个字段都写死 1，
+	# 而一批可能应用几十个结果，demo 拿 last_rebuild_chunk_count 算"平均每 chunk 生成耗时"
+	# （mgt / rebuild_chunks）会算出 60 倍偏小的假数。累加器在 _update_mesh_async 里清零。
+	_batch_rebuilt_chunks += 1
+	last_rebuild_chunk_count = _batch_rebuilt_chunks
 
 	# 单 chunk 结果（来自 _generate_chunk_worker）
 	if chunk_key.x != -999:
@@ -1546,16 +1576,6 @@ func _flush_lod_mesh_apply_queue() -> void:
 		view_layer.process_lod_mesh_apply_queue()
 
 
-## 给 ArrayMesh 的两个表面赋材质（实心/透明）。chunk/LOD1/碎片应用统一走此辅助。
-func _apply_materials(new_mesh: ArrayMesh) -> void:
-	var mats := _materials.surfaces(data.materials) if data else []
-	if new_mesh and mats.size() >= 2:
-		if new_mesh.get_surface_count() > 0 and mats[0]:
-			new_mesh.surface_set_material(0, mats[0])
-		if new_mesh.get_surface_count() > 1 and mats[1]:
-			new_mesh.surface_set_material(1, mats[1])
-
-
 ## 应用单个待构建 chunk（构建 mesh + 挂载节点 + 更新碰撞）
 func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 	# 带外校验：破坏/编辑不应让超出 LOD0 带的 chunk 临时挂载（否则粗层区破坏时
@@ -1579,6 +1599,9 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 				return
 	var arr: Dictionary = entry["arrays"]
 	var has_voxels_in_data: bool = entry["has_voxels"]
+	# 本帧所有 chunk 共用同一份运行时 Material 对象数组（走唯一材质缓存，不另建）。
+	# data 可能为 null（换模型/卸载与清理之间的窗口），写法与 _rebuild_group_meshes 一致。
+	var mats_for_chunk := _materials.surfaces(data.materials) if data else []
 
 	# 【DYNAMIC 分组路径】group_shift > 0 时绘制单元是 **group** 而不是 chunk。
 	# worker 已经（在子线程里、带着 34³ 光环）算好了这个 chunk 的正确几何 ——
@@ -1611,8 +1634,10 @@ func _apply_built_chunk(chunk_key: Vector3i, entry: Dictionary) -> void:
 
 	var has_mesh := false
 	if not arr.is_empty() and has_voxels_in_data:
-		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr)
-		_apply_materials(new_mesh)
+		# 材质随 arrays 一起交给生成器（按**实际 surface 序号**绑）。不要退回"先建 mesh 再按
+		# 桶序号补绑"：只有透明体素的 chunk（玻璃/水面）空桶被跳过后唯一 surface 是 trans，
+		# 补绑会把它绑成实心材质 —— 整块不透光且不报错。
+		var new_mesh := VoxelChunkGenerator.build_mesh_from_arrays(arr, mats_for_chunk)
 		chunk_mesh.mesh = new_mesh
 		has_mesh = new_mesh != null
 	elif not has_voxels_in_data:
@@ -1644,7 +1669,7 @@ func _rebuild_group_meshes(budget_n: int) -> void:
 		return
 	# 【必须带 data 空判】data 被置空（换模型 / 卸载）到 _clear_lod_meshes 清空 _group_dirty 之间存在窗口，
 	# 此时 data 为 null 而脏组还在 —— 直接读 data.materials 会抛 null 访问。
-	# 与 per-chunk 路径 _apply_materials 的写法保持一致（data if data else []）。
+	# 与 per-chunk 路径 _apply_built_chunk 的写法保持一致（data if data else []）。
 	var mats := _materials.surfaces(data.materials) if data else []
 	var t0 := Time.get_ticks_usec()
 	var built := 0
@@ -1668,6 +1693,8 @@ func _rebuild_group_meshes(budget_n: int) -> void:
 			if node != null and is_instance_valid(node):
 				node.queue_free()
 			_group_meshes.erase(gk)
+			# 整组无几何 → 该绘制单元的碰撞体一并释放（否则留下与画面错位的幽灵碰撞）
+			collision.enqueue(VoxelMesher.group_origin_chunk(gk, group_shift), false)
 			built += 1
 			continue
 		var new_mesh := VoxelMesher.to_mesh(merged, mats)
@@ -1675,6 +1702,7 @@ func _rebuild_group_meshes(budget_n: int) -> void:
 			if node != null and is_instance_valid(node):
 				node.queue_free()
 			_group_meshes.erase(gk)
+			collision.enqueue(VoxelMesher.group_origin_chunk(gk, group_shift), false)
 			built += 1
 			continue
 		if node == null or not is_instance_valid(node):
@@ -1686,6 +1714,8 @@ func _rebuild_group_meshes(budget_n: int) -> void:
 		node.mesh = new_mesh
 		var edge := voxel_scale * VoxelChunk.CHUNK_SIZE * float(1 << group_shift)
 		node.position = Vector3(gk) * edge
+		# 组几何变了 → 该绘制单元的碰撞形状重建（组件内部把 chunk 换算成 group 单元）
+		collision.enqueue(VoxelMesher.group_origin_chunk(gk, group_shift), true)
 		built += 1
 		if (Time.get_ticks_usec() - t0) / 1000.0 > _MESH_BUILD_BUDGET_MS_BURST:
 			break

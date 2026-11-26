@@ -147,17 +147,6 @@ static func align_by_id(materials: Array) -> Array:
 	return aligned
 
 
-## 按材质ID获取材质（数组可能未对齐时也能找到），越界/不存在/id<=0(空) 返回 null
-static func find_by_id(materials: Array, mat_id: int) -> VoxelMaterial:
-	if mat_id <= 0:
-		return null
-	if mat_id < materials.size() and materials[mat_id] != null:
-		return materials[mat_id]
-	for mat in materials:
-		if mat != null and mat.id == mat_id:
-			return mat
-	return null
-
 
 ## 材质数组 → 透明标志表（PackedByteArray，索引 = 材质ID，1 = 透明），供原生几何内核
 ## 判定面可见性并分桶。之所以预计算传入：C++ 跨语言逐个读 VoxelMaterial 属性太慢。

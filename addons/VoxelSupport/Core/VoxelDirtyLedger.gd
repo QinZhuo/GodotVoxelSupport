@@ -37,17 +37,9 @@ var _flags: Array[Dictionary] = []
 var _region: Array[Dictionary] = []
 
 
-## 取"分层字典数组"的第 level 层（必要时补足到该层）。全项目唯一维护这类数组的地方：
-## 各层各自一张 {key: value} 表；越界即补空层，避免每处手写 while-append（易漏、易越界）。
-static func _layer(layers: Array[Dictionary], level: int) -> Dictionary:
-	while layers.size() <= level:
-		layers.append({})
-	return layers[level]
-
-
 ## 预建到 level 层（无副作用，便于调用方先确保层级存在）
 func ensure_level(level: int) -> void:
-	_layer(_flags, level)
+	VoxelWorldUtil.ensure_layer(_flags, level)
 
 
 ## 清 (level, key) 的一个标记位；条目归零即移除（不变式：账本里不存在 0 值条目）
@@ -62,13 +54,13 @@ static func _unset(layer: Dictionary, key: Vector3i, flag: int) -> void:
 # 写
 ## 给 (level, key) 叠加标记位（唯一写入口）
 func mark(level: int, key: Vector3i, flags: int) -> void:
-	var layer := _layer(_flags, level)
+	var layer := VoxelWorldUtil.ensure_layer(_flags, level)
 	layer[key] = int(layer.get(key, 0)) | flags
 
 
 ## 记录 block 的脏大格区域并集（gmin/gmax 为 block 内大格坐标、含端点，已由调用方 clamp）
 func mark_region(level: int, key: Vector3i, gmin: Vector3i, gmax: Vector3i) -> void:
-	var layer := _layer(_region, level)
+	var layer := VoxelWorldUtil.ensure_layer(_region, level)
 	var r: Array = layer.get(key, [REGION_MIN, REGION_MAX])
 	r[0] = Vector3i(mini(r[0].x, gmin.x), mini(r[0].y, gmin.y), mini(r[0].z, gmin.z))
 	r[1] = Vector3i(maxi(r[1].x, gmax.x), maxi(r[1].y, gmax.y), maxi(r[1].z, gmax.z))

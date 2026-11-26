@@ -142,7 +142,14 @@ var _deferred_chunks: Dictionary = {}
 var _stream_force_build: Dictionary = {}
 
 ## 流式扫描降频计数与上次相机位置（相机不动时扫描结果不变）。
-var _streaming_check_tick := 0
+## 流式调度的两个独立帧计数。
+## 【为什么不是一个 _streaming_check_tick】从前扫描与卸载共用一个计数器，而"相机移动时提速"
+## 靠把计数器**提前清零**实现：清零后既让扫描立刻跑（0 % interval == 0），也让卸载立刻跑。
+## 于是两个周期被绑死在一起 —— 卸载实际变成"跟着扫描提速"，而 check_interval 调大时
+## 卸载频率却不变（它用另一个常量取模），改一个参数会意外改变另一个的节奏。
+## 现在各自累计、各自到期清零：谁也不再影响谁。
+var _frames_since_scan := 0
+var _frames_since_unload := 0
 var _last_streaming_cam_pos := Vector3(INF, INF, INF)
 
 ## 数据基准 chunk（origin shift 后）。
@@ -347,17 +354,20 @@ func process_streaming() -> void:
 	var applied := data.apply_ready_results(maxi(stream_load_per_frame * 2, 32))
 
 	# 2) 距离内扫描缺失 chunk 并提交（限量；降频，相机不动时结果不变）。
-	_streaming_check_tick += 1
-	# 相机移动时用更快的扫描间隔（interval/2），保证响应及时又不每帧全量遍历。
+	# 相机移动时用更短的间隔（interval/2）：保证响应及时又不每帧全量遍历。
 	var cam_moved := cam_pos != _last_streaming_cam_pos
-	if cam_moved:
-		_last_streaming_cam_pos = cam_pos
-		if _streaming_check_tick >= maxi(check_interval >> 1, 1):
-			_streaming_check_tick = 0
+	_last_streaming_cam_pos = cam_pos
+	_frames_since_scan += 1
+	_frames_since_unload += 1
+	var scan_interval := maxi(check_interval >> 1, 1) if cam_moved else check_interval
+	# 粗层分带表为空时无从判断"该不该加载"，扫描本身就没有意义（也不必累到溢出）。
+	var do_scan := _frames_since_scan >= scan_interval and not _lod_outer.is_empty()
+	if do_scan:
+		_frames_since_scan = 0
 	var submitted := 0
 	# 移动中提高本帧加载吞吐（更快补建，减少前方空白）。
 	var load_budget := stream_load_per_frame * 2 if cam_moved else stream_load_per_frame
-	if _streaming_check_tick % check_interval == 0 and not _lod_outer.is_empty():
+	if do_scan:
 		var rad := ceili(load_d / chunk_size_world) + 1
 		var yspan := data.get_vertical_half_span()
 		for dz in range(-rad, rad + 1):
@@ -399,7 +409,8 @@ func process_streaming() -> void:
 	#    LOD0 数据卸载是"无限世界能长期跑下去"的前提：否则 _chunk_buffers 会随走过的区域无界增长。
 	#    但卸载半径要比网格卸载半径外扩最粗层 block 的覆盖范围 —— 粗层降采样要读它覆盖的
 	#    LOD0 chunk，卸早了降采样会读到假空块（见 lod0_data_unload_d）。
-	if _streaming_check_tick % STREAM_UNLOAD_INTERVAL == 0:
+	if _frames_since_unload >= STREAM_UNLOAD_INTERVAL:
+		_frames_since_unload = 0
 		_apply_streaming_unload(data, cam_pos, chunk_size_world, world_offset, voxel_scale, lod_count, unload_d)
 
 	if applied > 0 or submitted > 0:
@@ -652,7 +663,7 @@ func _process_coarse_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir:
 	var upper := (unload_d + edge_world * 0.5) if is_coarsest else (outer + margin)
 
 	# 1a. 推导需要：按本层 band 直接枚举 block（粗层数据独立，无需从 LOD0 chunk 推导）。
-	#   needed 存 block 中心距离，1c 复用，避免同一 block 重复算距离。
+	#   needed 存 block 中心的**平方**距离，1c 复用（只需要比较，故全程不开方）。
 	var preload_d := _lod_preload_extent(level)
 	var needed := {}
 	var radius := outer + margin + preload_d
@@ -685,26 +696,49 @@ func _process_coarse_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir:
 				var bk := cam_bk + Vector3i(dx, dy, dz)
 				var dsq := (VoxelLodGrid.block_center(bk, world_offset, edge_world) - cam_pos).length_squared()
 				if dsq <= radius_sq:
-					needed[bk] = sqrt(dsq)
+					needed[bk] = dsq
 
-	# 1b. 移除超出区间的：>unload 卸载；<inner-margin 进入内层带（内层就绪才移除）；
-	#     >upper 进入更粗层带（更粗层就绪才移除，否则保留兜底防空洞）。
-	#     预生成范围（<= upper+preload_d）内的 block 即使更粗层就绪也保留 —— 它们作为
-	#     预加载常驻（1d 隐藏），进入带内时直接显示，消除切换真空。
-	var remove_keys: Array = []
+	# 1b. 移除 / 可见性（一趟）：遍历"已有 mesh 的 block"，同时决定"删不删"与"显不显"。
+	# 【为什么合并】旧实现是两趟 —— 先收集移除、再做可见性 —— 且两趟各用 block_dist
+	# 重算一次开方距离（本层每帧上千个 block × 两次 sqrt）。距离直接复用 1a 缓存的平方值，
+	# 只有不在 needed 里的预加载常驻块才现算一次，全程不开方。
+	# 移除条件：>unload 卸载；<inner-margin 进入内层带（内层就绪才移除）；
+	# >upper+preload 且更粗层已就绪（预生成范围外不再常驻）。
+	# 预生成范围（<= upper+preload_d）内的 block 即使更粗层就绪也保留 —— 它们作为
+	# 预加载常驻（下面隐藏，进入带内时直接显示），消除切换真空。
+	var unload_lim := unload_d + edge_world * 0.5
+	var unload_sq := unload_lim * unload_lim
+	var inner_lim_sq := _sq_limit(inner - margin)
+	var upper_lim_sq := _sq_limit(upper + preload_d)
+	var vis_inner_sq := _sq_limit(inner + margin)
+	var vis_outer_sq := _sq_limit(outer + margin)
 	for bk in r.lod_mesh_keys(level):
-		var dist := _block_dist(bk, level, cam_pos)
-		if dist > unload_d + edge_world * 0.5:
-			remove_keys.append(bk)
-		elif dist < inner - margin and _level_finer_ready(level, bk, cam):
-			remove_keys.append(bk)
-		elif dist > upper + preload_d \
+		# needed.get 而非 needed[bk]：不在 1a 枚举范围内的（远处/数据范围外的）块现算一次。
+		var dsq: float = needed.get(bk, -1.0)
+		if dsq < 0.0:
+			dsq = _block_dist_sq(bk, level, cam_pos)
+		if dsq > unload_sq \
+				or (dsq < inner_lim_sq and _level_finer_ready(level, bk, cam)) \
+				or (dsq > upper_lim_sq \
+						and r.has_lod_mesh(level + 1, Vector3i(bk.x >> 1, bk.y >> 1, bk.z >> 1))):
+			remove_lod_block(level, bk)
+			continue
+		var mi: MeshInstance3D = r.lod_mesh(level, bk)
+		if mi == null:
+			continue   # 空大块（无体素）
+		# 失效重建中：冻结可见性 —— 破坏瞬间不因重建切换 LOD 层级（避免"不同层级闪烁"），
+		# 新 mesh 就绪替换并清除重建标记后，下一轮按当前状态恢复正常可见性判定。
+		if _lod_rebuilding(level, bk):
+			continue
+		if dsq < vis_inner_sq:
+			mi.visible = not _level_finer_ready(level, bk, cam)
+		elif dsq > vis_outer_sq \
 				and r.has_lod_mesh(level + 1, Vector3i(bk.x >> 1, bk.y >> 1, bk.z >> 1)):
-			remove_keys.append(bk)
-	for bk in remove_keys:
-		remove_lod_block(level, bk)
+			mi.visible = false
+		else:
+			mi.visible = true
 
-	# 1c. 带内缺失：数据未就绪 → 请求独立数据；就绪 → 派发 mesh
+	# 1c. 带内缺失：数据未就绪 → 请求独立数据；就绪 → 派发 mesh（距离仍是 1a 的平方值）
 	var to_build: Array = []
 	for bk in needed:
 		if r.has_lod_mesh(level, bk) and not _lod_rebuilding(level, bk):
@@ -712,10 +746,10 @@ func _process_coarse_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir:
 			# 否则粗层一直空标记，LOD0 移除后出现过渡空洞）。
 			if r.lod_mesh(level, bk) != null or not data.has_lod_block(level, bk):
 				continue
-		var dist: float = needed[bk]
+		var dsq: float = needed[bk]
 		# 近处（LOD0 带内）的 block 由 LOD0 chunk 显示，不生成粗层 mesh ——
 		# 否则与 1b 的"近处内层就绪→移除"形成"生成→移除→再生成"循环 → L0/L1 交替闪烁。
-		if dist < inner - margin or (not data.has_lod_block(level, bk) and dist > upper + preload_d):
+		if dsq < inner_lim_sq or (not data.has_lod_block(level, bk) and dsq > upper_lim_sq):
 			continue
 		# 修改过的 block 由降采样回退；未修改优先独立数据。
 		# 流若无粗层独立数据能力（文件流 / 自定义流仅实现 lod=0 → request 无效果），
@@ -724,7 +758,7 @@ func _process_coarse_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir:
 			# 文件流：直接降采样生成（一次完成，mesh + 数据缓存同步），不等异步两阶段 ——
 			# 异步完成时机晚，近处粗层块长期无 mesh → 固定空洞。
 			if data.stream != null and data.stream.supports_lod_layer():
-				to_build.append([dist, bk])
+				to_build.append([sqrt(dsq), bk])   # 排序键要真实距离，故此处开方一次
 				continue
 			if not data.is_chunk_pending(bk, level) and _lod_submit_this_frame < submit_budget:
 				_lod_submit_this_frame += 1
@@ -745,24 +779,6 @@ func _process_coarse_level(level: int, cam: Camera3D, cam_pos: Vector3, cam_dir:
 		if _build_lod_block(level, item[1]):
 			built_this += 1
 
-	# 1d. 可见性兜底：进入内层带且内层未就绪 → 本层显示（防切换空洞）；
-	#     超出本层带且更粗层已就绪 → 隐藏本层（防远处多层重叠 z-fight）
-	for bk in r.lod_mesh_keys(level):
-		var mi: MeshInstance3D = r.lod_mesh(level, bk)
-		if mi == null:
-			continue   # 空大块（无体素）
-		# 失效重建中：冻结可见性 —— 破坏瞬间不因重建切换 LOD 层级（避免"不同层级闪烁"），
-		# 新 mesh 就绪替换并清除重建标记后，下一轮按当前状态恢复正常可见性判定。
-		if _lod_rebuilding(level, bk):
-			continue
-		var dist := _block_dist(bk, level, cam_pos)
-		if dist < inner + margin:
-			mi.visible = not _level_finer_ready(level, bk, cam)
-		elif dist > outer + margin \
-				and r.has_lod_mesh(level + 1, Vector3i(bk.x >> 1, bk.y >> 1, bk.z >> 1)):
-			mi.visible = false
-		else:
-			mi.visible = true
 
 # ── ④-b LOD0 chunk 层 ───────────────────────────────────────────────────────
 
@@ -1029,9 +1045,13 @@ func _build_lod_block(level: int, bk: Vector3i) -> bool:
 	var standalone := data.can_mesh_lod_block_standalone(level, bk)
 	var snapshot := data.read_lod_block_data_snapshot(bk, level) if standalone \
 			else data.read_lod_block_chunk_snapshot(bk, level, true)
+	# 【材质数组不拷贝】原先这里是 renderer.lod_materials(level).duplicate()：一轮可派 200 个
+	# 粗层任务，就是 200 份整数组拷贝，只为让 worker 读到"派发那一刻的值"。而副本能提供的
+	# 保证（在途期间内容不被改写）已由 VoxelMaterialCache 的"重建即换数组对象"提供
+	# （见 aligned_shared 的契约）。故直接传共享引用：worker 只读，零分配。
 	_coarse_task_ids.append(WorkerThreadPool.add_task(_lod_worker_build.bind(
 		snapshot, standalone, bk, level, int(rec.get(_K_GEN, 0)), renderer.voxel_scale,
-		data.center_offset, renderer.lod_materials(level).duplicate(), handle)))
+		data.center_offset, renderer.lod_materials(level), renderer.surface_materials(), handle)))
 	return true
 
 
@@ -1060,7 +1080,7 @@ func _build_lod_data_only(level: int, bk: Vector3i) -> void:
 ## 让主线程走重试计数（_lod_mark_null_or_retry）。
 func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, level: int,
 		gen_id: int, scale: float, offset: Vector3, aligned_materials: Array,
-		handle: QVoxelSource.ReadonlySnapshot) -> void:
+		surface_materials: Array, handle: QVoxelSource.ReadonlySnapshot) -> void:
 	var halo: PackedInt32Array
 	var buf := PackedInt32Array()
 	if standalone:
@@ -1074,7 +1094,14 @@ func _lod_worker_build(snapshot: Dictionary, standalone: bool, bk: Vector3i, lev
 		buf = VoxelChunk.extract_center_from_halo(halo)
 	var arrays := VoxelChunkGenerator.generate_lod_block_arrays(
 		halo, aligned_materials, scale, bk, offset, level)
-	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays)
+	# 【材质必须在建 mesh 的同一处一起绑，不能回主线程按桶序号补】append_arrays_to_mesh 会
+	# **跳过空桶**，故"只有透明体素"的大块（玻璃/水面）唯一 surface 是 trans；挂载点若按
+	# "surface 0=实心、surface 1=透明"补绑，它会被绑成实心材质 → 整块不透光且不报错。
+	# 这里传 surface_materials 由 append_arrays_to_mesh 按**实际 surface 序号**绑，与
+	# per-chunk 路径（VoxelRenderer._apply_built_chunk）同一条不变式。
+	# 与 aligned_materials 的区别：aligned 是"索引==材质ID"（生成几何用），surface 是运行期
+	# Material 对象（绑定用），两者不能互换。
+	var mesh := VoxelChunkGenerator.build_mesh_from_arrays(arrays, surface_materials)
 	call_deferred("_on_lod_worker_done", bk, level, mesh, gen_id, buf, handle)
 
 
@@ -1297,6 +1324,19 @@ func _clear_block_state(level: int, bk: Vector3i) -> void:
 ## 见 VoxelLodGrid.block_dist。
 func _block_dist(bk: Vector3i, level: int, cam_pos: Vector3) -> float:
 	return VoxelLodGrid.block_dist(bk, level, cam_pos, renderer.global_position, renderer.voxel_scale)
+
+
+## 见 VoxelLodGrid.block_dist_sq。
+func _block_dist_sq(bk: Vector3i, level: int, cam_pos: Vector3) -> float:
+	return VoxelLodGrid.block_dist_sq(bk, level, cam_pos, renderer.global_position, renderer.voxel_scale)
+
+
+## 半径平方，负数夹到 0（LOD 分带里 inner-margin / upper+preload 理论上可能为负，
+## 平方后会变成一个大正数，把"永不满足"变成"总是满足" —— 夹到 0 保持语义）。
+static func _sq_limit(radius: float) -> float:
+	if radius <= 0.0:
+		return 0.0
+	return radius * radius
 
 
 ## 见 VoxelLodGrid.margin。

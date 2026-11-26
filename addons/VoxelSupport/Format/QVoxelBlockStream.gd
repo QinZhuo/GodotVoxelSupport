@@ -152,7 +152,7 @@ static func head_with_qvox_first(head: Dictionary) -> Dictionary:
 ## VXEL 编码：uint16 model_id + uint32 block_count + uint32 payload_length + 块数组。
 ## payload_length 精确界定 block[] 的字节数，使读取端无需靠"剩余 < 4 字节"这种模糊判定。
 static func encode_vxel(model_id: int, blocks: Dictionary, block_size: int) -> PackedByteArray:
-	var n := block_size * block_size * block_size
+	var n := QVoxelSpec.block_volume(block_size)
 	# 收集非空块（空块 = 块坐标缺失），按坐标排序保证确定性
 	var packed_blocks: Array = []
 	for k in QVoxelBlockCodec.sorted_keys(blocks):
@@ -187,7 +187,7 @@ static func encode_vxel(model_id: int, blocks: Dictionary, block_size: int) -> P
 ## 【增量压缩】帧 0 相对空基线写全量（与 VXEL 负载逐字节同构）；帧 k 只写相对帧 k-1 的**块级
 ## 增量** —— 相同的块不写，变成空的块写 codec=0。于是"一帧的成本 = 相对上一帧改了多少块"。
 static func encode_anim(model_id: int, frames: Array, meta: Dictionary, block_size: int) -> PackedByteArray:
-	var n := block_size * block_size * block_size
+	var n := QVoxelSpec.block_volume(block_size)
 	var body := PackedByteArray()
 	# 时序 meta（JSON）：缺省全不写（P2），meta_len=0 即"全缺省"。
 	var meta_dict := anim_meta_json(meta)
@@ -203,7 +203,7 @@ static func encode_anim(model_id: int, frames: Array, meta: Dictionary, block_si
 		if not (frame is Dictionary):
 			continue
 		var fd := frame as Dictionary
-		var duration := maxi(0, int(fd.get("duration_ms", 0))) & 0xFFFF
+		var duration := maxi(0, int(fd.get(QVoxelSpec.ANIM_FRAME_DURATION_KEY, 0))) & 0xFFFF
 		var cur := QVoxelBlockCodec.table_of(fd.get("blocks", {}))
 		var delta := PackedByteArray()
 		# 清空：上一帧有、本帧没有的块 → 写 codec=0（ANIM 专有语义）
@@ -251,14 +251,16 @@ static func encode_anim(model_id: int, frames: Array, meta: Dictionary, block_si
 	return out
 
 
-## 时序 meta → JSON 字典（缺省不写，P2）。空字典 = 全缺省（fps=12 / loop=true / 无 tags）。
+## 时序 meta → JSON 字典（缺省不写，P2）。空字典 = 全缺省（fps=ANIM_FPS_DEFAULT / loop=true / 无 tags）。
+## 缺省值一律取 QVoxelSpec.ANIM_* —— 这里的判据是"与缺省不同才写"，若判据的缺省与
+## 模型/运行时的缺省不一致，就会每份文件都多背一个冗余键（A6 的成因）。
 static func anim_meta_json(meta: Dictionary) -> Dictionary:
 	var d := {}
 	if meta.is_empty():
 		return d
-	if int(meta.get("fps", 12)) != 12:
+	if int(meta.get("fps", QVoxelSpec.ANIM_FPS_DEFAULT)) != QVoxelSpec.ANIM_FPS_DEFAULT:
 		d["fps"] = int(meta["fps"])
-	if not bool(meta.get("loop", true)):
+	if not bool(meta.get("loop", QVoxelSpec.ANIM_LOOP_DEFAULT)):
 		d["loop"] = false
 	var tags: Variant = meta.get("tags", [])
 	if tags is Array and not (tags as Array).is_empty():
@@ -268,7 +270,8 @@ static func anim_meta_json(meta: Dictionary) -> Dictionary:
 
 ## 时序 meta JSON → 归一化 Dictionary（缺字段补默认，非法忽略）。供 ANIM 解析用。
 static func anim_meta_from_json(json: Dictionary) -> Dictionary:
-	var d := {"fps": maxi(1, int(json.get("fps", 12))), "loop": bool(json.get("loop", true))}
+	var d := {"fps": maxi(1, int(json.get("fps", QVoxelSpec.ANIM_FPS_DEFAULT))),
+			"loop": bool(json.get("loop", QVoxelSpec.ANIM_LOOP_DEFAULT))}
 	var tags: Variant = json.get("tags", [])
 	d["tags"] = (tags as Array).duplicate() if tags is Array else []
 	return d

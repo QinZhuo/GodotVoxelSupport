@@ -1,4 +1,5 @@
 class_name VoxelMeshGenerator
+extends RefCounted
 ## 体素网格生成器（编辑器导入路径）
 ## 几何内核统一下沉 C++（NativeLoader → VoxelSupportNative），与运行时管线共用同一套实现：
 ##   cube   面片网格（分方向可见性 + 贪婪合并）
@@ -420,7 +421,9 @@ func generate_material(save_path: String = "") -> StandardMaterial3D:
 
 func generate_material_trans(base: Material, save_path: String = "") -> StandardMaterial3D:
 	var path := save_path.get_basename() + '/mat_trans.tres'
-	DirAccess.make_dir_absolute(save_path.get_basename())
+	# 空路径（默认：不导出材质纹理）不建目录 —— make_dir_absolute("") 是每份模型白跑一次失败调用。
+	if save_path:
+		DirAccess.make_dir_absolute(save_path.get_basename())
 	var material: Material = ResourceLoader.load(path) if FileAccess.file_exists(path) else base.duplicate() if base else StandardMaterial3D.new()
 	if material is StandardMaterial3D:
 		_configure_trans_material(material)
@@ -434,7 +437,8 @@ func generate_material_trans(base: Material, save_path: String = "") -> Standard
 func _generate_texture(save_path: String, type: String) -> ImageTexture:
 	# 复用统一的通道图生成，避免与运行时纹理两套采样逻辑漂移
 	var image: Image = _get_channel_images()[type]
-	DirAccess.make_dir_absolute(save_path.get_basename())
+	if save_path:
+		DirAccess.make_dir_absolute(save_path.get_basename())
 	var path := save_path.get_basename() + '/tex_' + type + '.tres'
 	var texture: ImageTexture = ResourceLoader.load(path) if FileAccess.file_exists(path) else ImageTexture.create_from_image(image)
 	texture.set_image(image)

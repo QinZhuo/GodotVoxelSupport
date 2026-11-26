@@ -39,7 +39,6 @@ namespace {
 
 constexpr int CHUNK_SIZE = 32;
 constexpr int CHUNK_SHIFT = 5;   // 2^5 = 32（chunk_of 算术右移）
-constexpr int CHUNK_SLICE = CHUNK_SIZE * CHUNK_SIZE;
 constexpr int HALO = 1;
 constexpr int HALO_SIZE = CHUNK_SIZE + HALO * 2;
 
@@ -66,6 +65,113 @@ inline uint64_t grid_vkey(int x, int y, int z) {
 }
 inline uint64_t grid_vkey(const Vector3i &p) { return grid_vkey(p.x, p.y, p.z); }
 
+// chunk 内线性下标 idx = x + y·32 + z·32²（X 最快，与 QVoxelSpec 的 ZXY 存储序一致）。
+inline int buf_index(const Vector3i &local) {
+	return local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SIZE * CHUNK_SIZE;
+}
+
+// 体素坐标 -> chunk key（向下取整，正确处理负坐标）。
+// CHUNK_SIZE=32=2^CHUNK_SHIFT → 用算术右移替代 std::floor(double/32)，热路径零浮点开销。
+// C++ 有符号右移为算术右移（向负无穷），与 std::floor(double(x)/32) 语义一致。
+inline Vector3i chunk_of(const Vector3i &pos) {
+	return Vector3i(pos.x >> CHUNK_SHIFT, pos.y >> CHUNK_SHIFT, pos.z >> CHUNK_SHIFT);
+}
+// 体素坐标 → (chunk key, chunk 内线性下标, 边界触及掩码)，一次算齐。
+// 掩码位：bit0=+x, bit1=-x, bit2=+y, bit3=-y, bit4=+z, bit5=-z。
+// remove_voxels_bulk 与 set_voxels_bulk 各写过一遍这段逐字相同的 6 行判定。
+inline uint32_t bulk_slot(const Vector3i &pos, Vector3i &ck, int &idx) {
+	ck = chunk_of(pos);
+	const Vector3i local = pos - ck * CHUNK_SIZE;
+	idx = buf_index(local);
+	uint32_t mask = 0;
+	if (local.x == 0) { mask |= 2; } else if (local.x == CHUNK_SIZE - 1) { mask |= 1; }
+	if (local.y == 0) { mask |= 8; } else if (local.y == CHUNK_SIZE - 1) { mask |= 4; }
+	if (local.z == 0) { mask |= 32; } else if (local.z == CHUNK_SIZE - 1) { mask |= 16; }
+	return mask;
+}
+
+// 批量按 chunk 分组的结果（set_voxels_bulk / remove_voxels_bulk 共用）。
+//
+// 【为什么抽出来】这两个函数原先各自手写一遍「遍历 positions → 算 chunk → 算线性下标 →
+// 算边界掩码 → 攒进 by_chunk」的循环（连 6 行掩码判定都逐字相同），且一个用 std::map、
+// 一个用 unordered_map。同一份分组的两种实现意味着「哪块算被触及」的判据有两个版本 ——
+// 一旦某天掩码位定义要改，漏改一边就是边界块不重建、露出接缝。
+struct BulkGroups {
+	// chunk 哈希键 -> chunk 内线性下标列表
+	std::unordered_map<uint64_t, std::vector<int>> by_chunk;
+	// chunk 哈希键 -> 完整 chunk 坐标（grid_vkey 有损打包，解不回负坐标，故另存）
+	std::unordered_map<uint64_t, Vector3i> ck_of_key;
+	// chunk 哈希键 -> 边界触及掩码（任一被写入的体素落在 chunk 边界上）
+	std::unordered_map<uint64_t, uint32_t> boundary;
+};
+
+inline BulkGroups group_positions_by_chunk(const Array &positions) {
+	BulkGroups g;
+	// 超大批量（数百万 positions）下 std::map 的 O(N log C) 插入是主瓶颈，故用哈希表。
+	g.by_chunk.reserve(positions.size() / 8);
+	for (int i = 0; i < positions.size(); ++i) {
+		Vector3i ck;
+		int idx = 0;
+		const uint32_t mask = bulk_slot(positions[i], ck, idx);
+		const uint64_t kk = grid_vkey(ck);
+		auto it = g.by_chunk.find(kk);
+		if (it == g.by_chunk.end()) {
+			it = g.by_chunk.emplace(kk, std::vector<int>()).first;
+			g.ck_of_key[kk] = ck;
+		}
+		it->second.push_back(idx);
+		g.boundary[kk] |= mask;
+	}
+	return g;
+}
+
+
+// 稀疏体素材质表：chunk key -> 32³ 材质数组，按需从调用方传入的 Dictionary 搬进进程内哈希表。
+//
+// 【为什么要有它】同一套「惰性 chunk 缓冲查找 + 越界安全读取」原先在五个函数里各手写一遍
+// （find_unsupported_around / propagate_stress / collect_materials / patch_lod_block /
+// patch_lod_block_from_lod）：那段 `local.x < 0 || ... >= CHUNK_SIZE` 的 6 项越界判断逐字
+// 重复了五次，而改一处忘一处的后果不是崩溃 —— 是静默读到隔壁 chunk，表现为破坏范围跳到别的块。
+// 这里收成唯一实现：调用方只管给出世界坐标，越界一律返回 0（空气）。
+class ChunkVoxelCache {
+public:
+	explicit ChunkVoxelCache(const Dictionary &p_src) : src(p_src) {}
+
+	// 读一个体素的材质 ID；块缺失返回 0（= 空气，与「世界外没有体素」一致）。
+	// 【为什么这里自己 ensure】调用方原先都是「先 ensure_chunk(p) 再读」，两件事本就
+	// 不可分：漏掉 ensure 的读会静默返回 0，多出来的 ensure 只白白多一次哈希查找。
+	// 合并后每个调用点都只需一句 at()。
+	int32_t at(int wx, int wy, int wz) {
+		const Vector3i ck(wx >> CHUNK_SHIFT, wy >> CHUNK_SHIFT, wz >> CHUNK_SHIFT);
+		const uint64_t kk = grid_vkey(ck);
+		auto it = cache.find(kk);
+		if (it == cache.end()) {
+			if (!src.has(ck)) {
+				return 0;
+			}
+			const PackedInt32Array buf = src[ck];
+			// 长度不足的块（损坏 / 旧版载荷）不缓存：读它拿到的是越界内存，比读不到更糟。
+			if (buf.size() < CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) {
+				return 0;
+			}
+			it = cache.emplace(kk, buf.ptr()).first;
+		}
+		// ck 由算术右移得到，local 必然落在 [0, CHUNK_SIZE)，故无需越界判定。
+		const int lx = wx - ck.x * CHUNK_SIZE;
+		const int ly = wy - ck.y * CHUNK_SIZE;
+		const int lz = wz - ck.z * CHUNK_SIZE;
+		return it->second[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE];
+	}
+
+	int32_t at(const Vector3i &p) { return at(p.x, p.y, p.z); }
+	// 供 downsample_cell 的模板形参使用（它按 get_voxel(x,y,z) 调用）。
+	int32_t operator()(int x, int y, int z) { return at(x, y, z); }
+
+private:
+	const Dictionary &src;
+	std::unordered_map<uint64_t, const int32_t *> cache;
+};
+
 // 顶点去重键 = (网格角点, 面序号, 材质ID)。
 // 【坑】早期实现用 `key = key * 31 + x` 逐级叠加：grid_vkey 已占满 63 位，
 // 再乘 31 会**溢出 uint64 并回绕**，把高位信息丢掉 → 不同 (角点,面,材质) 撞成
@@ -87,15 +193,6 @@ struct VertexKey {
 	}
 };
 
-// 6 方向邻居偏移（面顺序权威定义：+Y, -Y, -X, +X, +Z, -Z）
-constexpr int HALO_DIRS[6] = {
-	HALO_SIZE,               // +Y
-	-HALO_SIZE,              // -Y
-	-1,                      // -X
-	1,                       // +X
-	HALO_SIZE * HALO_SIZE,   // +Z
-	-HALO_SIZE * HALO_SIZE,  // -Z
-};
 
 // 每面轴向信息 {perp(切片轴), u(水平轴), v(垂直轴)}（面顺序同上）
 struct FaceAxes { int perp, u, v; };
@@ -133,11 +230,6 @@ inline int axis_val(int x, int y, int z, int axis) {
 	return axis == 0 ? x : (axis == 1 ? y : z);
 }
 
-inline void set_axis(int &x, int &y, int &z, int axis, int val) {
-	if (axis == 0) x = val;
-	else if (axis == 1) y = val;
-	else z = val;
-}
 
 // 单 slice 贪婪合并：在 2D 切片上把同材质格并成矩形，输出矩形列表
 // （pos/size/val 三个扁平数组，pos[i*2]=u、pos[i*2+1]=v 等）。这是 3D dense 生成
@@ -764,8 +856,10 @@ namespace {
 //
 // get_voxel(wx, wy, wz) 由调用方提供：可直接索引 chunk 缓冲（同块内），
 // 也可跨块惰性查表（外缘面 / 增量 patch）。
+// 形参用转发引用（而非 const &）：ChunkVoxelCache 的 at() 会写自身缓存，不能是 const 成员；
+// 而外缘面那两处传的是 lambda 临时量，按左值引用接收不合法。转发引用两头都能接。
 template <typename GetVoxel>
-inline int32_t downsample_cell(const GetVoxel &get_voxel, int bx, int by, int bz, int cell) {
+inline int32_t downsample_cell(GetVoxel &&get_voxel, int bx, int by, int bz, int cell) {
 	for (int dz = 0; dz < cell; ++dz) {
 		for (int dy = 0; dy < cell; ++dy) {
 			for (int dx = 0; dx < cell; ++dx) {
@@ -778,6 +872,66 @@ inline int32_t downsample_cell(const GetVoxel &get_voxel, int bx, int by, int bz
 	}
 	return 0;
 }
+} // namespace
+
+namespace {
+
+// halo 外壳某一面的几何参数。
+//
+// 【为什么抽出来】两个 halo 构建器（降采样版 / 直接拷版）各自写了一遍「6 方向 → 邻居 block key
+// → face/固定大格/halo 平面下标」的推导，连 `dirs[6]` 数组都抄了两份。这段是纯几何映射，
+// 与「怎么取材质」无关；两处各写一遍意味着外缘面写错一格时，只有一条路径会露接缝。
+struct HaloFaceInfo {
+	Vector3i nbk;        // 邻居 block key
+	int axis = 0;        // 固定轴：0=x 1=y 2=z
+	int inner_cell = 0;  // 邻居大块里贴着本块的那一大格（0 或 BS-1）
+	int halo_side = 0;   // 该面在 halo 数组里的平面下标（0 或 HS-1）
+};
+
+inline HaloFaceInfo halo_face_info(const Vector3i &block_key, int face_index, int bs, int hs) {
+	static constexpr int DX[6] = { 1, -1, 0, 0, 0, 0 };
+	static constexpr int DY[6] = { 0, 0, 1, -1, 0, 0 };
+	static constexpr int DZ[6] = { 0, 0, 0, 0, 1, -1 };
+	HaloFaceInfo f;
+	const Vector3i d(DX[face_index], DY[face_index], DZ[face_index]);
+	f.nbk = block_key + d;
+	f.axis = (d.x != 0) ? 0 : ((d.y != 0) ? 1 : 2);
+	const int sign = d[f.axis];
+	f.inner_cell = (sign > 0) ? 0 : (bs - 1);   // +x 面取邻居的第 0 大格，-x 面取最后一大格
+	f.halo_side = (sign < 0) ? 0 : (hs - 1);    // -x 面写到 halo 的第 0 层，+x 面写到最后层
+	return f;
+}
+
+// 面内两轴 (lu, lv) → halo 数组下标。三面各自把固定轴换到 halo_pos，其余两轴 +1（跳过中心层）。
+inline int halo_index_of(const HaloFaceInfo &f, int lu, int lv, int hs) {
+	int hx, hy, hz;
+	if (f.axis == 0) { hx = f.halo_side; hy = 1 + lu; hz = 1 + lv; }
+	else if (f.axis == 1) { hx = 1 + lu; hy = f.halo_side; hz = 1 + lv; }
+	else { hx = 1 + lu; hy = 1 + lv; hz = f.halo_side; }
+	return hx + hy * hs + hz * hs * hs;
+}
+
+// 面内 (lu, lv) → 要降采样的 cell 立方体左下角（世界体素坐标）。
+inline Vector3i halo_sample_origin(const HaloFaceInfo &f, int lu, int lv, int block_voxels, int cell) {
+	const int bx = f.nbk.x * block_voxels;
+	const int by = f.nbk.y * block_voxels;
+	const int bz = f.nbk.z * block_voxels;
+	const int cu = lu * cell;
+	const int cv = lv * cell;
+	const int cf = f.inner_cell * cell;
+	if (f.axis == 0) { return Vector3i(bx + cf, by + cu, bz + cv); }
+	if (f.axis == 1) { return Vector3i(bx + cu, by + cf, bz + cv); }
+	return Vector3i(bx + cu, by + cv, bz + cf);
+}
+
+// 面内 (lu, lv) → 邻居大块缓冲里的线性下标（直接拷版专用，大格边长 BS）。
+inline int halo_neighbor_index(const HaloFaceInfo &f, int lu, int lv, int bs) {
+	const int slice = bs * bs;
+	if (f.axis == 0) { return f.inner_cell + lu * bs + lv * slice; }
+	if (f.axis == 1) { return lu + f.inner_cell * bs + lv * slice; }
+	return lu + lv * bs + f.inner_cell * slice;
+}
+
 } // namespace
 
 // 通用降采样：从 LOD0 chunk buffers 构建 LOD 大块 34³ halo（任意 lod_shift）。
@@ -819,14 +973,11 @@ PackedInt32Array VoxelSupportNative::build_lod_block_halo_from_buffers_native(co
 		}
 	}
 	// 6 外缘面：相邻大块边界 1 大格层（降采样 cell³ 体素）。
-	// 采样立方体的固定轴由 fix_grid 决定、面内两轴由 (lu, lv) 决定；
-	// 交给 downsample_cell 后，三轴遍历序统一为 (z, y, x)。
-	const Vector3i dirs[6] = {
-		Vector3i(1,0,0), Vector3i(-1,0,0),
-		Vector3i(0,1,0), Vector3i(0,-1,0),
-		Vector3i(0,0,1), Vector3i(0,0,-1),
-	};
-	// 跨 block/chunk 的体素读取：只有外缘一圈越界，故按需惰性解析 chunk
+	// 采样立方体的固定轴、面内两轴、halo 落点全部交给 halo_face_info /
+	// halo_sample_origin / halo_index_of —— 与 build_lod_block_halo_from_lod_buffers_native
+	// 共用同一套面映射，避免两条路径各写一遍三行 if 链。
+	//
+	// 跨 block/chunk 的体素读取：只有外缘一圈越界，故按需惰性解析 chunk。
 	auto getv_nb = [&buffers](int wx, int wy, int wz) -> int32_t {
 		const Vector3i nck(wx >> CHUNK_SHIFT, wy >> CHUNK_SHIFT, wz >> CHUNK_SHIFT);
 		if (!buffers.has(nck)) {
@@ -842,35 +993,11 @@ PackedInt32Array VoxelSupportNative::build_lod_block_halo_from_buffers_native(co
 		return nbuf.ptr()[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE];
 	};
 	for (int di = 0; di < 6; ++di) {
-		const Vector3i d = dirs[di];
-		const Vector3i nbk = block_key + d;
-		const int face = (d.x != 0) ? 0 : ((d.y != 0) ? 1 : 2);
-		const int fix_grid = (d[face] > 0) ? 0 : (BS - 1);
-		const int halo_pos = (d[face] < 0) ? 0 : (HS - 1);
+		const HaloFaceInfo f = halo_face_info(block_key, di, BS, HS);
 		for (int lv = 0; lv < BS; ++lv) {
 			for (int lu = 0; lu < BS; ++lu) {
-				// 采样立方体左下角（世界体素坐标）：固定轴取 fix_grid 那一大格，
-				// 面内两轴 face=0(x)→(y,z)、face=1(y)→(x,z)、face=2(z)→(x,y) 分别用 (lu, lv)。
-				int bx, by, bz;
-				if (face == 0) {
-					bx = nbk.x * block_voxels + fix_grid * cell;
-					by = nbk.y * block_voxels + lu * cell;
-					bz = nbk.z * block_voxels + lv * cell;
-				} else if (face == 1) {
-					bx = nbk.x * block_voxels + lu * cell;
-					by = nbk.y * block_voxels + fix_grid * cell;
-					bz = nbk.z * block_voxels + lv * cell;
-				} else {
-					bx = nbk.x * block_voxels + lu * cell;
-					by = nbk.y * block_voxels + lv * cell;
-					bz = nbk.z * block_voxels + fix_grid * cell;
-				}
-				const int mat = downsample_cell(getv_nb, bx, by, bz, cell);
-				int hx, hy, hz;
-				if (face == 0) { hx = halo_pos; hy = 1+lu; hz = 1+lv; }
-				else if (face == 1) { hx = 1+lu; hy = halo_pos; hz = 1+lv; }
-				else { hx = 1+lu; hy = 1+lv; hz = halo_pos; }
-				halo[hx + hy*HS + hz*HS*HS] = mat;
+				const Vector3i org = halo_sample_origin(f, lu, lv, block_voxels, cell);
+				halo[halo_index_of(f, lu, lv, HS)] = downsample_cell(getv_nb, org.x, org.y, org.z, cell);
 			}
 		}
 	}
@@ -900,41 +1027,22 @@ PackedInt32Array VoxelSupportNative::build_lod_block_halo_from_lod_buffers_nativ
 			}
 		}
 	}
-	// 6 外缘面：相邻 block 边界 1 大格层（直接拷邻居大格，无降采样）
-	const Vector3i dirs[6] = {
-		Vector3i(1,0,0), Vector3i(-1,0,0),
-		Vector3i(0,1,0), Vector3i(0,-1,0),
-		Vector3i(0,0,1), Vector3i(0,0,-1),
-	};
+	// 6 外缘面：相邻 block 边界 1 大格层（直接拷邻居大格，无降采样）。
+	// 面映射与降采样版共用 halo_face_info / halo_neighbor_index / halo_index_of。
 	for (int di = 0; di < 6; ++di) {
-		const Vector3i d = dirs[di];
-		const Vector3i nbk = block_key + d;
-		const int face = (d.x != 0) ? 0 : ((d.y != 0) ? 1 : 2);
-		const int side = (d[face] > 0) ? 1 : 0;
-		const int fix = (side == 1) ? 0 : (BS - 1);
-		const int halo_pos = (d[face] < 0) ? 0 : (HS - 1);
+		const HaloFaceInfo f = halo_face_info(block_key, di, BS, HS);
+		// nb 必须活到本面结束（ptr() 指向它的内部缓冲）。
 		PackedInt32Array nb;
 		bool has_nb = false;
-		if (buffers.has(nbk)) {
-			nb = buffers[nbk];
+		if (buffers.has(f.nbk)) {
+			nb = buffers[f.nbk];
 			has_nb = nb.size() >= G3;
 		}
 		const int32_t *nb_ptr = has_nb ? nb.ptr() : nullptr;
 		for (int lv = 0; lv < BS; ++lv) {
 			for (int lu = 0; lu < BS; ++lu) {
-				int mat = 0;
-				if (has_nb) {
-					int ni = 0;
-					if (face == 0) ni = fix + lu*BS + lv*SLICE;
-					else if (face == 1) ni = lu + fix*BS + lv*SLICE;
-					else ni = lu + lv*BS + fix*SLICE;
-					mat = nb_ptr[ni];
-				}
-				int hx, hy, hz;
-				if (face == 0) { hx = halo_pos; hy = 1+lu; hz = 1+lv; }
-				else if (face == 1) { hx = 1+lu; hy = halo_pos; hz = 1+lv; }
-				else { hx = 1+lu; hy = 1+lv; hz = halo_pos; }
-				halo[hx + hy*HS + hz*HS*HS] = mat;
+				const int mat = has_nb ? nb_ptr[halo_neighbor_index(f, lu, lv, BS)] : 0;
+				halo[halo_index_of(f, lu, lv, HS)] = mat;
 			}
 		}
 	}
@@ -946,22 +1054,6 @@ PackedInt32Array VoxelSupportNative::build_lod_block_halo_from_lod_buffers_nativ
 // ----------------------------------------------------------------------------
 
 namespace {
-
-// 体素坐标 -> chunk key（向下取整，正确处理负坐标）
-// CHUNK_SIZE=32=2^CHUNK_SHIFT → 用算术右移替代 std::floor(double/32)，热路径零浮点开销。
-// C++ 有符号右移为算术右移（向负无穷），与 std::floor(double(x)/32) 语义一致。
-inline Vector3i chunk_of(const Vector3i &pos) {
-	return Vector3i(
-			pos.x >> CHUNK_SHIFT,
-			pos.y >> CHUNK_SHIFT,
-			pos.z >> CHUNK_SHIFT);
-}
-
-// 体素坐标 -> 64 位哈希键：直接复用文件顶部（chunk 网格生成区）的 grid_vkey。
-//
-// 【为什么不再单独实现一份】同一 TU 内两份等价的 packing 实现是"改一处忘另一处"的温床：
-//   本文件就曾因两处 packing 分叉（一处对 x/y 未截断 → 位段重叠）导致负坐标大面积撞键、
-//   "chunk 网格错乱 / 材质串味"。故哈希键统一到唯一实现，chunk 边长常量亦合并为单一 CHUNK_SIZE。
 
 
 // 5 个下方位支撑邻居（LOWER_5：正下 + 4 对角，任意 1 个存在即稳定，保守不连锁）
@@ -982,10 +1074,6 @@ constexpr int NEIGHBORS_6[6][3] = {
 	{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
 };
 
-// 世界坐标 -> chunk 缓冲下标
-inline int buf_index(const Vector3i &local) {
-	return local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SIZE * CHUNK_SIZE;
-}
 
 } // namespace
 
@@ -996,31 +1084,9 @@ Dictionary VoxelSupportNative::find_unsupported_around(const Dictionary &buffers
 		return unstable;
 	}
 
-	// 惰性构建 chunk 缓冲查找结构：只收集候选体素及其邻居涉及的 chunk。
-	// 避免遍历整世界（1183 chunk 全量拷贝是灾难性开销）。
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
-	auto ensure_chunk = [&](const Vector3i &p) {
-		const uint64_t kk = grid_vkey(chunk_of(p));
-		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
-			if (buffers.has(chunk_of(p))) {
-				chunk_bufs[kk] = buffers[chunk_of(p)];
-			}
-		}
-	};
-
-	// has_voxel：局部 chunk 内查询（与 GDScript has_voxel 语义一致：值>0 表示存在）
-	auto has_voxel = [&](const Vector3i &p) -> bool {
-		const Vector3i ck = chunk_of(p);
-		const auto it = chunk_bufs.find(grid_vkey(ck));
-		if (it == chunk_bufs.end()) {
-			return false;
-		}
-		const Vector3i local = p - ck * CHUNK_SIZE;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_SIZE || local.y >= CHUNK_SIZE || local.z >= CHUNK_SIZE) {
-			return false;
-		}
-		return it->second.ptr()[buf_index(local)] > 0;
-	};
+	// 只收集候选体素及其邻居涉及的 chunk，避免遍历整世界（1183 chunk 全量拷贝是灾难性开销）。
+	// 语义与 GDScript has_voxel 一致：值 > 0 表示存在。
+	ChunkVoxelCache cache(buffers);
 
 	// ---------------------------------------------------------------------------
 	// 增量支撑图失稳检测（localized propagation，性能优先，行为与破坏 demo 既有逻辑一致）
@@ -1035,21 +1101,18 @@ Dictionary VoxelSupportNative::find_unsupported_around(const Dictionary &buffers
 	std::unordered_set<uint64_t> seed_set;
 	for (int i = 0; i < removed.size(); ++i) {
 		const Vector3i rp = removed[i];
-		ensure_chunk(rp);
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(rp.x + UPPER_5[d][0], rp.y + UPPER_5[d][1], rp.z + UPPER_5[d][2]);
-			ensure_chunk(nb);
 			const uint64_t nk = grid_vkey(nb);
-			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
+			if (cache.at(nb) > 0 && seed_set.find(nk) == seed_set.end()) {
 				seed_set.insert(nk);
 				stack.push_back(nb);
 			}
 		}
 		for (int d = 0; d < 4; ++d) {
 			const Vector3i nb(rp.x + HORIZONTAL_4[d][0], rp.y + HORIZONTAL_4[d][1], rp.z + HORIZONTAL_4[d][2]);
-			ensure_chunk(nb);
 			const uint64_t nk = grid_vkey(nb);
-			if (has_voxel(nb) && seed_set.find(nk) == seed_set.end()) {
+			if (cache.at(nb) > 0 && seed_set.find(nk) == seed_set.end()) {
 				seed_set.insert(nk);
 				stack.push_back(nb);
 			}
@@ -1070,8 +1133,7 @@ Dictionary VoxelSupportNative::find_unsupported_around(const Dictionary &buffers
 		int effective = 0;
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + LOWER_5[d][0], cur.y + LOWER_5[d][1], cur.z + LOWER_5[d][2]);
-			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb)) {
+			if (cache.at(nb) > 0 && !unstable.has(nb)) {
 				effective += 1;
 			}
 		}
@@ -1083,15 +1145,13 @@ Dictionary VoxelSupportNative::find_unsupported_around(const Dictionary &buffers
 		// 连锁失稳：上方位 5 个 + 水平 4 个
 		for (int d = 0; d < 5; ++d) {
 			const Vector3i nb(cur.x + UPPER_5[d][0], cur.y + UPPER_5[d][1], cur.z + UPPER_5[d][2]);
-			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb)) {
+			if (cache.at(nb) > 0 && !unstable.has(nb)) {
 				stack.push_back(nb);
 			}
 		}
 		for (int d = 0; d < 4; ++d) {
 			const Vector3i nb(cur.x + HORIZONTAL_4[d][0], cur.y + HORIZONTAL_4[d][1], cur.z + HORIZONTAL_4[d][2]);
-			ensure_chunk(nb);
-			if (has_voxel(nb) && !unstable.has(nb)) {
+			if (cache.at(nb) > 0 && !unstable.has(nb)) {
 				stack.push_back(nb);
 			}
 		}
@@ -1112,36 +1172,14 @@ Array VoxelSupportNative::propagate_stress(const Dictionary &buffers, const Arra
 	if (buffers.is_empty() || removed.is_empty()) {
 		return result;
 	}
-	// 惰性构建 chunk 缓冲查找结构（只收集传播涉及的 chunk，避免全量拷贝）
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
-	auto ensure_chunk = [&](const Vector3i &p) {
-		const uint64_t kk = grid_vkey(chunk_of(p));
-		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
-			if (buffers.has(chunk_of(p))) {
-				chunk_bufs[kk] = buffers[chunk_of(p)];
-			}
-		}
-	};
-	// 读体素材质 ID（>0 表示存在），chunk 缓冲直读
-	auto get_mat = [&](const Vector3i &p) -> int32_t {
-		const Vector3i ck = chunk_of(p);
-		const auto it = chunk_bufs.find(grid_vkey(ck));
-		if (it == chunk_bufs.end()) {
-			return 0;
-		}
-		const Vector3i local = p - ck * CHUNK_SIZE;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_SIZE || local.y >= CHUNK_SIZE || local.z >= CHUNK_SIZE) {
-			return 0;
-		}
-		return it->second.ptr()[buf_index(local)];
-	};
+	// 只收集传播涉及的 chunk，避免全量拷贝。读材质 ID：>0 表示存在。
+	ChunkVoxelCache cache(buffers);
 	// removed 集合（时间戳集合作 visited，快速查重）
 	std::unordered_set<uint64_t> removed_set;
 	std::vector<Vector3i> current_layer;
 	for (int i = 0; i < removed.size(); ++i) {
 		const Vector3i rp = removed[i];
 		removed_set.insert(grid_vkey(rp));
-		ensure_chunk(rp);
 		current_layer.push_back(rp);
 	}
 	float current_force = force;
@@ -1161,8 +1199,7 @@ Array VoxelSupportNative::propagate_stress(const Dictionary &buffers, const Arra
 				if (removed_set.find(nk) != removed_set.end()) {
 					continue;
 				}
-				ensure_chunk(nb);
-				const int32_t mat = get_mat(nb);
+					const int32_t mat = cache.at(nb);
 				if (mat <= 0) {
 					continue;
 				}
@@ -1190,31 +1227,10 @@ Dictionary VoxelSupportNative::collect_materials(const Dictionary &buffers, cons
 	if (buffers.is_empty() || positions.is_empty()) {
 		return result;
 	}
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
-	auto ensure_chunk = [&](const Vector3i &p) {
-		const uint64_t kk = grid_vkey(chunk_of(p));
-		if (chunk_bufs.find(kk) == chunk_bufs.end()) {
-			if (buffers.has(chunk_of(p))) {
-				chunk_bufs[kk] = buffers[chunk_of(p)];
-			}
-		}
-	};
-	auto get_mat = [&](const Vector3i &p) -> int32_t {
-		const Vector3i ck = chunk_of(p);
-		const auto it = chunk_bufs.find(grid_vkey(ck));
-		if (it == chunk_bufs.end()) {
-			return 0;
-		}
-		const Vector3i local = p - ck * CHUNK_SIZE;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_SIZE || local.y >= CHUNK_SIZE || local.z >= CHUNK_SIZE) {
-			return 0;
-		}
-		return it->second.ptr()[buf_index(local)];
-	};
+	ChunkVoxelCache cache(buffers);
 	for (int i = 0; i < positions.size(); ++i) {
 		const Vector3i p = positions[i];
-		ensure_chunk(p);
-		const int32_t m = get_mat(p);
+		const int32_t m = cache.at(p);
 		result[p] = (m > 0) ? m : -1;
 	}
 	return result;
@@ -1509,27 +1525,8 @@ PackedInt32Array VoxelSupportNative::patch_lod_block(const Dictionary &buffers, 
 	if (buf.size() < BS * BS * BS) {
 		buf.resize(BS * BS * BS);
 	}
-	// 惰性 chunk 缓冲（只读脏大格涉及的 chunk，避免全量读取）
-	std::unordered_map<uint64_t, PackedInt32Array> chunk_bufs;
-	auto get_voxel = [&](int wx, int wy, int wz) -> int32_t {
-		const Vector3i p(wx, wy, wz);
-		const Vector3i ck = chunk_of(p);
-		const uint64_t kk = grid_vkey(ck);
-		auto it = chunk_bufs.find(kk);
-		if (it == chunk_bufs.end()) {
-			if (buffers.has(ck)) {
-				chunk_bufs[kk] = buffers[ck];
-				it = chunk_bufs.find(kk);
-			} else {
-				return 0;
-			}
-		}
-		const Vector3i local = p - ck * CHUNK_SIZE;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= CHUNK_SIZE || local.y >= CHUNK_SIZE || local.z >= CHUNK_SIZE) {
-			return 0;
-		}
-		return it->second.ptr()[buf_index(local)];
-	};
+	// 只读脏大格涉及的 chunk，避免全量读取。
+	ChunkVoxelCache cache(buffers);
 	// 只对脏大格降采样（规则见 downsample_cell，与全量一致）
 	for (int gz = rmax.z; gz >= rmin.z; --gz) {
 		const int bz = block_key.z * block_voxels + gz * cell;
@@ -1537,7 +1534,7 @@ PackedInt32Array VoxelSupportNative::patch_lod_block(const Dictionary &buffers, 
 			const int by = block_key.y * block_voxels + gy * cell;
 			for (int gx = rmax.x; gx >= rmin.x; --gx) {
 				const int bx = block_key.x * block_voxels + gx * cell;
-				buf[gx + gy * BS + gz * BS * BS] = downsample_cell(get_voxel, bx, by, bz, cell);
+				buf[gx + gy * BS + gz * BS * BS] = downsample_cell(cache, bx, by, bz, cell);
 			}
 		}
 	}
@@ -1559,34 +1556,16 @@ PackedInt32Array VoxelSupportNative::patch_lod_block_from_lod(const Dictionary &
 	if (buf.size() < BS * BS * BS) {
 		buf.resize(BS * BS * BS);
 	}
-	// 惰性读上一层 coarse（block → 32³ 大格）
-	std::unordered_map<uint64_t, PackedInt32Array> coarse_map;
-	auto get_prev = [&](int wx, int wy, int wz) -> int32_t {
-		const Vector3i p(wx, wy, wz);
-		const Vector3i pbk(p.x >> CHUNK_SHIFT, p.y >> CHUNK_SHIFT, p.z >> CHUNK_SHIFT);
-		const uint64_t kk = grid_vkey(pbk);
-		auto it = coarse_map.find(kk);
-		if (it == coarse_map.end()) {
-			if (coarse_buffers.has(pbk)) {
-				coarse_map[kk] = coarse_buffers[pbk];
-				it = coarse_map.find(kk);
-			} else {
-				return 0;
-			}
-		}
-		const Vector3i local = p - pbk * BS;
-		if (local.x < 0 || local.y < 0 || local.z < 0 || local.x >= BS || local.y >= BS || local.z >= BS) {
-			return 0;
-		}
-		return it->second.ptr()[local.x + local.y * BS + local.z * BS * BS];
-	};
+	// 惰性读上一层 coarse（block → 32³ 大格）。上一层大格的边长恒为 BS=32，
+	// 与 chunk 缓冲同构 —— 故可直接复用 ChunkVoxelCache 的「越界返回 0」语义。
+	ChunkVoxelCache cache(coarse_buffers);
 	for (int gz = rmax.z; gz >= rmin.z; --gz) {
 		const int pz = (block_key.z * BS + gz) * 2;
 		for (int gy = rmax.y; gy >= rmin.y; --gy) {
 			const int py = (block_key.y * BS + gy) * 2;
 			for (int gx = rmax.x; gx >= rmin.x; --gx) {
 				const int px = (block_key.x * BS + gx) * 2;
-				buf[gx + gy * BS + gz * BS * BS] = downsample_cell(get_prev, px, py, pz, 2);
+				buf[gx + gy * BS + gz * BS * BS] = downsample_cell(cache, px, py, pz, 2);
 			}
 		}
 	}
@@ -1608,23 +1587,9 @@ Dictionary VoxelSupportNative::remove_voxels_bulk(const Dictionary &buffers, con
 		result["boundary"] = boundary;
 		return result;
 	}
-	// 按 chunk 分组（local_index）+ 计算每 chunk 边界触及掩码
-	std::map<Vector3i, std::vector<int>> by_chunk;
-	std::map<Vector3i, int> bm;
-	for (int i = 0; i < positions.size(); ++i) {
-		const Vector3i p = positions[i];
-		const Vector3i ck = chunk_of(p);
-		const Vector3i local = p - ck * CHUNK_SIZE;
-		const int idx = local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SIZE * CHUNK_SIZE;
-		by_chunk[ck].push_back(idx);
-		int b = 0;
-		if (local.x == 0) { b |= 2; } else if (local.x == CHUNK_SIZE - 1) { b |= 1; }
-		if (local.y == 0) { b |= 8; } else if (local.y == CHUNK_SIZE - 1) { b |= 4; }
-		if (local.z == 0) { b |= 32; } else if (local.z == CHUNK_SIZE - 1) { b |= 16; }
-		bm[ck] |= b;
-	}
-	for (auto &kv : by_chunk) {
-		const Vector3i ck = kv.first;
+	const BulkGroups g = group_positions_by_chunk(positions);
+	for (auto &kv : g.by_chunk) {
+		const Vector3i ck = g.ck_of_key.at(kv.first);
 		if (!buffers.has(ck)) {
 			continue;
 		}
@@ -1646,8 +1611,8 @@ Dictionary VoxelSupportNative::remove_voxels_bulk(const Dictionary &buffers, con
 			removed += cnt;
 		}
 	}
-	for (auto &kv : bm) {
-		boundary[kv.first] = kv.second;
+	for (auto &kv : g.boundary) {
+		boundary[g.ck_of_key.at(kv.first)] = int(kv.second);
 	}
 	result["removed"] = removed;
 	result["chunk_removed"] = chunk_removed;
@@ -1672,33 +1637,9 @@ Dictionary VoxelSupportNative::set_voxels_bulk(const Dictionary &buffers, const 
 		result["boundary"] = boundary;
 		return result;
 	}
-	// 按 chunk 分组（local_index）+ 计算每 chunk 边界触及掩码。
-	// 用 unordered_map<uint64_t>（grid_vkey 打包）替代 std::map<Vector3i>：超大批量（数百万
-	// positions）下 map 平衡树插入 O(N log C) 是主瓶颈，哈希表摊还 O(N)。
-	std::unordered_map<uint64_t, std::vector<int>> by_chunk;
-	std::unordered_map<uint64_t, Vector3i> ck_of_key;  // 完整 ck 保留（grid_vkey 打包有损，不可解码回负坐标）
-	std::unordered_map<uint64_t, int> bm;
-	by_chunk.reserve(positions.size() / 8);
-	for (int i = 0; i < positions.size(); ++i) {
-		const Vector3i p = positions[i];
-		const Vector3i ck = chunk_of(p);
-		const uint64_t kk = grid_vkey(ck);
-		const Vector3i local = p - ck * CHUNK_SIZE;
-		const int idx = local.x + local.y * CHUNK_SIZE + local.z * CHUNK_SIZE * CHUNK_SIZE;
-		auto it = by_chunk.find(kk);
-		if (it == by_chunk.end()) {
-			it = by_chunk.emplace(kk, std::vector<int>()).first;
-		}
-		it->second.push_back(idx);
-		ck_of_key[kk] = ck;
-		int b = 0;
-		if (local.x == 0) { b |= 2; } else if (local.x == CHUNK_SIZE - 1) { b |= 1; }
-		if (local.y == 0) { b |= 8; } else if (local.y == CHUNK_SIZE - 1) { b |= 4; }
-		if (local.z == 0) { b |= 32; } else if (local.z == CHUNK_SIZE - 1) { b |= 16; }
-		bm[kk] |= b;
-	}
-	for (auto &kv : by_chunk) {
-		const Vector3i ck = ck_of_key[kv.first];
+	const BulkGroups g = group_positions_by_chunk(positions);
+	for (auto &kv : g.by_chunk) {
+		const Vector3i ck = g.ck_of_key.at(kv.first);
 		PackedInt32Array buf;
 		if (buffers.has(ck)) {
 			buf = buffers[ck];
@@ -1728,9 +1669,9 @@ Dictionary VoxelSupportNative::set_voxels_bulk(const Dictionary &buffers, const 
 			modified_buffers[ck] = buf;
 			chunk_set[ck] = cnt;  // 纯替换（旧值非 0）时 cnt=0，GDScript 仅覆盖 buffer、计数不变
 			added += cnt;
-			auto it = bm.find(kv.first);
-			if (it != bm.end()) {
-				boundary[ck] = it->second;
+			auto it = g.boundary.find(kv.first);
+			if (it != g.boundary.end()) {
+				boundary[ck] = int(it->second);
 			}
 		}
 	}
@@ -1963,61 +1904,56 @@ static const uint32_t *qvox_crc32_table() {
 	return table.data();
 }
 
-// 对一段连续字节算 CRC32；start/length 可传 -1（start<0 → 0；length<0 → 到末尾）
-static uint32_t qvox_crc32_run(const uint8_t *p, int64_t n) {
-	const uint32_t *table = qvox_crc32_table();
-	uint32_t crc = 0xFFFFFFFFu;
-	for (int64_t i = 0; i < n; ++i) {
-		crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFFu];
+// 把 [start, start+length) 裁剪到 [0, total)：start<0 → 0；length<0 → 到末尾；
+// 超尾 → 截到 total。
+//
+// 【为什么单独拎出来】这段四位一体的裁剪原先在 crc32 与 crc32_segments 里各写一遍：
+// 一个写成分支表达式、一个写成 if 链，语义相同但形状不同。CRC 的区间错一位，
+// 后果是校验和「总是对不上」或「总是对得上」——两种都极难从现象反推回这一行。
+inline void qvox_clip_range(int64_t &start, int64_t &length, int64_t total) {
+	if (start < 0) {
+		start = 0;
 	}
-	return crc ^ 0xFFFFFFFFu;
-}
-
-int64_t VoxelSupportNative::crc32(const PackedByteArray &p_data, int64_t p_start, int64_t p_length) {
-	const int64_t total = p_data.size();
-	int64_t start = p_start < 0 ? 0 : p_start;
 	if (start > total) {
 		start = total;
 	}
-	int64_t length;
-	if (p_length < 0) {
+	if (length < 0 || start + length > total) {
 		length = total - start;
-	} else {
-		length = p_length;
-		if (start + length > total) {
-			length = total - start;
-		}
 	}
+}
+
+// CRC32 滚一段连续字节（累加式：允许分段续算，见 crc32_segments）。
+inline uint32_t qvox_crc32_run(const uint8_t *p, int64_t n, uint32_t crc = 0xFFFFFFFFu) {
+	const uint32_t *table = qvox_crc32_table();
+	for (int64_t i = 0; i < n; ++i) {
+		crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFFu];
+	}
+	return crc;
+}
+
+int64_t VoxelSupportNative::crc32(const PackedByteArray &p_data, int64_t p_start, int64_t p_length) {
+	int64_t start = p_start;
+	int64_t length = p_length;
+	qvox_clip_range(start, length, p_data.size());
 	if (length <= 0) {
 		// 空区间：标准 CRC32 的空输入值（初值异或终值）
 		return (int64_t)0u;
 	}
-	return (int64_t)qvox_crc32_run(p_data.ptr() + start, length);
+	return (int64_t)(qvox_crc32_run(p_data.ptr() + start, length) ^ 0xFFFFFFFFu);
 }
 
 int64_t VoxelSupportNative::crc32_segments(const PackedByteArray &p_data, const PackedInt64Array &p_offsets, const PackedInt64Array &p_lengths) {
 	const int64_t total = p_data.size();
 	const int64_t nseg = p_offsets.size() < p_lengths.size() ? p_offsets.size() : p_lengths.size();
-	const uint32_t *table = qvox_crc32_table();
 	uint32_t crc = 0xFFFFFFFFu;
 	for (int64_t s = 0; s < nseg; ++s) {
 		int64_t start = p_offsets[s];
 		int64_t length = p_lengths[s];
-		if (start < 0) {
-			start = 0;
+		qvox_clip_range(start, length, total);
+		if (length <= 0) {
+			continue;
 		}
-		if (start > total) {
-			start = total;
-		}
-		if (length < 0) {
-			length = total - start;
-		} else if (start + length > total) {
-			length = total - start;
-		}
-		const uint8_t *p = p_data.ptr() + start;
-		for (int64_t i = 0; i < length; ++i) {
-			crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFFu];
-		}
+		crc = qvox_crc32_run(p_data.ptr() + start, length, crc);
 	}
 	return (int64_t)(crc ^ 0xFFFFFFFFu);
 }
@@ -2532,109 +2468,6 @@ Array VoxelSupportNative::collect_bounds(const Dictionary &buffers) {
 	if (any) {
 		out.push_back(Vector3i(mn[0], mn[1], mn[2]));
 		out.push_back(Vector3i(mx[0], mx[1], mx[2]));
-	}
-	return out;
-}
-
-Array VoxelSupportNative::collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius) {
-	Array out;
-	if (radius < 0.0f) {
-		return out;
-	}
-	// 口径（本函数是该路径的唯一实现，规则由这里定义）：cxi = floor(center.x)，
-	// r_i = ceil(radius)，判定 float(dx²+dy²+dz²) <= radius²（用未取整的 radius²）。
-	// 边界语义一旦改动，破坏半径会随之漂移，勿随手调整取整方向。
-	const int cxi = (int)std::floor((double)center.x);
-	const int cyi = (int)std::floor((double)center.y);
-	const int czi = (int)std::floor((double)center.z);
-	const int r_i = (int)std::ceil((double)radius);
-	const float radius_sq = radius * radius;
-	const int32_t lo[3] = { cxi - r_i, cyi - r_i, czi - r_i };
-	const int32_t hi[3] = { cxi + r_i, cyi + r_i, czi + r_i };
-
-	const Array keys = buffers.keys();
-	const int32_t volume = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-	for (int ki = 0; ki < keys.size(); ++ki) {
-		const Vector3i ck = keys[ki];
-		const Vector3i origin = ck * CHUNK_SIZE;
-		// 只处理与球 AABB 相交的 chunk
-		if (origin.x > hi[0] || origin.x + CHUNK_SIZE - 1 < lo[0]
-				|| origin.y > hi[1] || origin.y + CHUNK_SIZE - 1 < lo[1]
-				|| origin.z > hi[2] || origin.z + CHUNK_SIZE - 1 < lo[2]) {
-			continue;
-		}
-		const PackedInt32Array buf = buffers[ck];
-		if (buf.size() < volume) {
-			continue;
-		}
-		const int32_t *p = buf.ptr();
-		const int32_t x0 = origin.x > lo[0] ? origin.x : lo[0];
-		const int32_t x1 = origin.x + CHUNK_SIZE - 1 < hi[0] ? origin.x + CHUNK_SIZE - 1 : hi[0];
-		const int32_t y0 = origin.y > lo[1] ? origin.y : lo[1];
-		const int32_t y1 = origin.y + CHUNK_SIZE - 1 < hi[1] ? origin.y + CHUNK_SIZE - 1 : hi[1];
-		const int32_t z0 = origin.z > lo[2] ? origin.z : lo[2];
-		const int32_t z1 = origin.z + CHUNK_SIZE - 1 < hi[2] ? origin.z + CHUNK_SIZE - 1 : hi[2];
-		for (int32_t z = z0; z <= z1; ++z) {
-			const int32_t dz = z - czi;
-			const int32_t lz = z - origin.z;
-			for (int32_t y = y0; y <= y1; ++y) {
-				const int32_t dy = y - cyi;
-				const int32_t ly = y - origin.y;
-				const int32_t row = ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE;
-				const int32_t dyz = dy * dy + dz * dz;
-				for (int32_t x = x0; x <= x1; ++x) {
-					const int32_t lx = x - origin.x;
-					if (p[row + lx] <= 0) {
-						continue;
-					}
-					const int32_t dx = x - cxi;
-					if ((float)(dx * dx + dyz) <= radius_sq) {
-						out.push_back(Vector3i(x, y, z));
-					}
-				}
-			}
-		}
-	}
-	return out;
-}
-
-Array VoxelSupportNative::collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p) {
-	Array out;
-	if (min_p.x > max_p.x || min_p.y > max_p.y || min_p.z > max_p.z) {
-		return out;
-	}
-	const Array keys = buffers.keys();
-	const int32_t volume = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-	for (int ki = 0; ki < keys.size(); ++ki) {
-		const Vector3i ck = keys[ki];
-		const Vector3i origin = ck * CHUNK_SIZE;
-		if (origin.x > max_p.x || origin.x + CHUNK_SIZE - 1 < min_p.x
-				|| origin.y > max_p.y || origin.y + CHUNK_SIZE - 1 < min_p.y
-				|| origin.z > max_p.z || origin.z + CHUNK_SIZE - 1 < min_p.z) {
-			continue;
-		}
-		const PackedInt32Array buf = buffers[ck];
-		if (buf.size() < volume) {
-			continue;
-		}
-		const int32_t *p = buf.ptr();
-		const int32_t x0 = origin.x > min_p.x ? origin.x : min_p.x;
-		const int32_t x1 = origin.x + CHUNK_SIZE - 1 < max_p.x ? origin.x + CHUNK_SIZE - 1 : max_p.x;
-		const int32_t y0 = origin.y > min_p.y ? origin.y : min_p.y;
-		const int32_t y1 = origin.y + CHUNK_SIZE - 1 < max_p.y ? origin.y + CHUNK_SIZE - 1 : max_p.y;
-		const int32_t z0 = origin.z > min_p.z ? origin.z : min_p.z;
-		const int32_t z1 = origin.z + CHUNK_SIZE - 1 < max_p.z ? origin.z + CHUNK_SIZE - 1 : max_p.z;
-		for (int32_t z = z0; z <= z1; ++z) {
-			const int32_t lz = z - origin.z;
-			for (int32_t y = y0; y <= y1; ++y) {
-				const int32_t row = (y - origin.y) * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE;
-				for (int32_t x = x0; x <= x1; ++x) {
-					if (p[row + (x - origin.x)] > 0) {
-						out.push_back(Vector3i(x, y, z));
-					}
-				}
-			}
-		}
 	}
 	return out;
 }
@@ -3189,8 +3022,6 @@ void VoxelSupportNative::_bind_methods() {
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_all_positions", "buffers"), &VoxelSupportNative::collect_all_positions);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_all_flat", "buffers"), &VoxelSupportNative::collect_all_flat);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_bounds", "buffers"), &VoxelSupportNative::collect_bounds);
-	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_sphere_positions", "buffers", "center", "radius"), &VoxelSupportNative::collect_sphere_positions);
-	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("collect_box_positions", "buffers", "min_p", "max_p"), &VoxelSupportNative::collect_box_positions);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_chunk_dense", "halo", "trans_flags", "scale", "chunk", "use_local_space", "offset"), &VoxelSupportNative::generate_chunk_dense);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("generate_lod1_block_dense", "halo", "trans_flags", "scale", "block_key", "offset"), &VoxelSupportNative::generate_lod1_block_dense);
 	ClassDB::bind_static_method("VoxelSupportNative", D_METHOD("build_halo_from_buffers", "buffers", "chunk"), &VoxelSupportNative::build_halo_from_buffers);

@@ -119,7 +119,7 @@ All mesh generation runs on background threads (`WorkerThreadPool`); the main th
 
 ```gdscript
 var data := QVoxelSource.new()
-# ... add materials, fill voxels (set_voxels / load_voxels_dict)
+# ... add materials, fill voxels (set_voxel / set_voxels)
 
 var stream := QVoxelStream.new()
 stream.file_path = "user://my_world/world.qvx"

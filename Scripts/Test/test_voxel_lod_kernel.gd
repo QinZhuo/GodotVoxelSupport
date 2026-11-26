@@ -98,6 +98,55 @@ func test_lod_halo_faces_match_reference() -> void:
 						% [str(d), _first_diff(face_vals, ref_vals)])
 
 
+## 直接拷版 halo（独立 LOD 数据层）：中心 32³ == 自身大格，6 外缘面 == 邻居 block 的边缘大格层。
+## 这一条覆盖 build_lod_block_halo_from_lod_buffers —— 它与降采样版共用同一套面映射
+## （halo_face_info / halo_sample_origin / halo_index_of），但两条路径取材质的方式不同：
+## 一条 downsample_cell 降采样、一条直接拷大格。共用面映射后必须两边都仍然对齐参考实现，
+## 否则「外缘面写错一格」只会在其中一条路径上露出接缝。
+func test_lod_halo_direct_copy_matches_reference() -> void:
+	var hs: int = VoxelChunkGenerator.LOD_BLOCK_HALO_SIZE
+	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
+	var src := _make_lod_data_blocks()
+	var halo := VoxelChunkGenerator.build_lod_block_halo_from_lod_buffers(src, Vector3i.ZERO)
+	assert_eq(halo.size(), hs * hs * hs, "LOD 数据层 halo 应为 34³（原生库不可用时会返回空）")
+	if halo.size() != hs * hs * hs:
+		return
+	# 中心：逐大格等于自身数据
+	var self_buf: PackedInt32Array = src[Vector3i.ZERO]
+	for lz in bs:
+		for ly in bs:
+			for lx in bs:
+				assert_eq(halo[(1 + lx) + (1 + ly) * hs + (1 + lz) * hs * hs],
+						self_buf[lx + ly * bs + lz * bs * bs], "中心大格 (%d,%d,%d) 应等于自身" % [lx, ly, lz])
+	# 六个外缘面：逐格等于邻居 block 的贴边大格层
+	for d in DIRS:
+		var face := 0 if d.x != 0 else (1 if d.y != 0 else 2)
+		var fix: int = 0 if d[face] > 0 else bs - 1
+		var halo_pos: int = 0 if d[face] < 0 else hs - 1
+		var nb_buf: PackedInt32Array = src[d]
+		var ua: int = FACE_U[face]
+		var va: int = FACE_V[face]
+		var face_vals := PackedInt32Array()
+		var ref_vals := PackedInt32Array()
+		face_vals.resize(bs * bs)
+		ref_vals.resize(bs * bs)
+		for lv in bs:
+			for lu in bs:
+				var h := Vector3i.ZERO
+				h[face] = halo_pos
+				h[ua] = 1 + lu
+				h[va] = 1 + lv
+				face_vals[lu + lv * bs] = halo[h.x + h.y * hs + h.z * hs * hs]
+				var g := Vector3i.ZERO
+				g[face] = fix
+				g[ua] = lu
+				g[va] = lv
+				ref_vals[lu + lv * bs] = nb_buf[g.x + g.y * bs + g.z * bs * bs]
+		assert_true(face_vals == ref_vals,
+				"dir=%s 的外缘面应等于邻居贴边大格（首个不一致下标 %d）"
+						% [str(d), _first_diff(face_vals, ref_vals)])
+
+
 ## 逐级上推（L0→LOD1→LOD2）与从 L0 全量重算，都必须等于参考实现算的 LOD2
 func test_lod_pyramid_equals_reference() -> void:
 	# 只看前 16 个大格：该区域只用到 chunk (0..1)³ 与上一层 block (0,0,0)
@@ -213,6 +262,24 @@ func _make_chunk(ck: Vector3i, cell: int) -> PackedInt32Array:
 				buf[n] = 0 if idx == 0 else idx + 1
 				n += 1
 	return buf
+
+
+## 构造独立 LOD 数据层：自身 + 6 邻居，每块 32³ 大格，值 = (x*3 + y*5 + z*7 + 1)，
+## 保证相邻面/相邻块的取值互不相同 —— 面映射错一格（比如把 +x 的邻居读成 -x）时必被抓出。
+func _make_lod_data_blocks() -> Dictionary:
+	var bs: int = VoxelChunkGenerator.LOD_BLOCK_SIZE
+	var out := {}
+	for block in DATA_BLOCKS:
+		var buf := PackedInt32Array()
+		buf.resize(bs * bs * bs)
+		var n := 0
+		for lz in bs:
+			for ly in bs:
+				for lx in bs:
+					buf[n] = (block.x + 8) * 1000 + (block.y + 8) * 100 + (block.z + 8) * 10 + (lx + ly + lz) % 10
+					n += 1
+		out[block] = buf
+	return out
 
 
 ## 首个不一致下标（-1 = 完全相同；长度不同则返回较短者长度）

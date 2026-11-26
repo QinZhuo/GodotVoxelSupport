@@ -58,7 +58,7 @@ static func from_dict(d: Variant) -> QVoxelFrame:
 	if not (d is Dictionary):
 		return f
 	var src: Dictionary = d
-	f.duration_ms = maxi(0, int(src.get("duration_ms", 0)))
+	f.duration_ms = maxi(0, int(src.get(QVoxelSpec.ANIM_FRAME_DURATION_KEY, 0)))
 	var b: Variant = src.get("blocks")
 	f.blocks = b if b is Dictionary else {}
 	return f
@@ -67,4 +67,4 @@ static func from_dict(d: Variant) -> QVoxelFrame:
 ## 帧 → 传输结构。**只交出引用**（不拷贝块缓冲）：doc 是瞬时 DTO，用完即弃，
 ## 拷贝一份几百万格的数据纯属浪费（同 QVoxelWorld.from_document 的"接管"约定）。
 func to_dict() -> Dictionary:
-	return {"duration_ms": duration_ms, "blocks": blocks}
+	return {QVoxelSpec.ANIM_FRAME_DURATION_KEY: duration_ms, "blocks": blocks}

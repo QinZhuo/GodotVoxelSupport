@@ -53,7 +53,8 @@ static func to_world(scene: Dictionary, resolution := MeshVoxelizer.DEFAULT_RESO
 		model.make_animated()
 		for i in range(1, datas.size()):
 			model.add_frame(QVoxelFrame.new())
-		model.anim_fps = maxi(1, int(round(float(scene.get("fps", 12.0)))))
+		# 缺省 fps 取全仓唯一真值（QVoxelSpec.ANIM_FPS_DEFAULT），不再在这里写裸 12。
+		model.anim_fps = maxi(1, int(round(float(scene.get("fps", float(QVoxelSpec.ANIM_FPS_DEFAULT))))))
 	for i in datas.size():
 		var data: Variant = datas[i]
 		if data == null:

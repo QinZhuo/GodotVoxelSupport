@@ -286,27 +286,23 @@ const VOXEL_DATA_PUBLIC_API: Array[String] = [
 	# 读写
 	"set_voxel", "remove_voxel", "get_voxel", "has_voxel",
 	"set_voxels", "remove_voxels", "clear",
-	# 区域批量
-	"get_voxels_in_sphere", "get_voxels_in_box",
-	"remove_voxels_in_sphere", "remove_voxels_in_box",
-	"ensure_sphere_loaded", "ensure_box_loaded",
 	# 查询统计
 	"get_voxel_count", "evaluated_voxel_count", "is_empty", "get_positions", "get_voxels_aabb",
-	"get_chunk_voxels", "has_chunk", "get_voxels_dict_snapshot",
-	"voxel_bounds", "origin_offset",
-	# 材质
-	"add_material", "get_material", "get_material_by_id",
+	"has_chunk", "get_voxels_dict_snapshot",
+	# 材质（读取直接走 materials 数组：索引 == 材质ID，索引 0 是空气占位）
+	"add_material",
 	# 脏账事件
 	"mark_chunk_dirty", "is_chunk_mesh_dirty", "get_dirty_mesh_chunk_count",
 	"get_dirty_chunks", "notify_changed",
 	# 存档生命周期
-	"save_data", "load_data", "flush", "bake_to", "load_voxels_dict",
+	"save_data", "load_data", "flush",
 	"from_voxel_data", "from_qvx", "from_eval_result",
-	# 连通塌落
-	"flood_fill", "find_connected", "connectivity", "neighbors",
-	"partition_connected", "find_unsupported", "find_unsupported_around",
+	# 连通塌落：flood_fill / find_unsupported* 是把「存储内部表示 + 实体素判据」绑在一起的
+	# 适配器（内核外组件不该自己摸 _chunk_buffers），故留在数据层；分工在 VoxelConnectivity。
+	"flood_fill",
+	"find_unsupported", "find_unsupported_around",
 	# 数据源
-	"set_stream", "is_streaming", "shift_origin",
+	"is_streaming", "shift_origin",
 	"generate", "can_generate_chunk", "is_in_node_bounds", "output_grid_size",
 	# 源失效（源内容变了 → 该块按需重新取数，区别于 unload_chunk 的"卸载"语义）
 	"invalidate_chunk_source", "invalidate_chunk_source_range", "invalidate",
@@ -326,6 +322,9 @@ const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	"can_supply_chunk", "get_vertical_half_span",
 	"get_unloaded_chunk_keys", "get_unloaded_chunk_count", "get_all_chunk_keys",
 	"get_loaded_chunk_keys", "preload_chunk", "unload_chunk",
+	# O(1) 块总数（内存块 + 流中未加载块）。替代 get_all_chunk_keys().size() 那种全表合并去重，
+	# 供渲染器 / HUD 当诊断数字每帧读；诊断用途、口径可能随存储层调整，故归【实验】。
+	"chunk_count",
 	# 异步取数
 	"request_chunk_async", "cancel_chunk_request", "poll_all_ready",
 	"apply_ready_results", "is_chunk_pending", "get_unready_chunk_keys",
@@ -339,9 +338,9 @@ const VOXEL_DATA_EXPERIMENTAL_API: Array[String] = [
 	"erase_lod_block", "get_lod_block_keys", "flush_lod_block",
 	"is_lod_block_modified", "patch_lod_block",
 	# LOD 脏账
-	"invalidate_lod", "invalidate_lod_for_chunk", "mark_lod_modified",
+	"invalidate_lod_for_chunk", "mark_lod_modified",
 	"mark_lod_modified_for_chunk", "get_lod_dirty_region", "clear_lod_cache",
-	"clear_lod_dirty_regions", "get_invalidated_lod", "has_lod_invalidated",
+	"get_invalidated_lod", "has_lod_invalidated",
 	# 伤害账
 	"get_damage", "clear_damage", "clear_damage_bulk", "clear_all_damage",
 ]

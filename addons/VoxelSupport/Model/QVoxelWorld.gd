@@ -67,8 +67,8 @@ static func create_empty() -> QVoxelWorld:
 		"qvox": QVoxelSpec.VERSION,
 		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
 		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
-		"block_size": QVoxelSpec.DEFAULT_BLOCK_SIZE,
-		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
+		QVoxelSpec.HEAD_BLOCK_SIZE_KEY: QVoxelSpec.DEFAULT_BLOCK_SIZE,
+		QVoxelSpec.HEAD_UP_AXIS_KEY: QVoxelSpec.DEFAULT_UP_AXIS,
 		# 世界设置集中在 world 键下：HEAD 的其余键留给格式本身（§3）
 		"world": {"name": "Untitled", "voxel_size": 0.1},
 	}
@@ -191,7 +191,7 @@ static func _read_common(n: QVoxelNode, entry: Dictionary) -> void:
 func to_document() -> QVoxelFile.QVoxelDocument:
 	var doc := QVoxelFile.QVoxelDocument.new()
 	doc.head = head.duplicate(true)
-	doc.head["block_size"] = block_size()  # 对象按它分块，必须与 HEAD 一致
+	doc.head[QVoxelSpec.HEAD_BLOCK_SIZE_KEY] = block_size()  # 对象按它分块，必须与 HEAD 一致
 	doc.materials = materials
 	doc.node = _node_json()
 	# 相机（CAMR）：从 node 里取出来单放（v4 拆块）。
@@ -262,18 +262,18 @@ static func _frames_of_array(arr: Array) -> Array[QVoxelFrame]:
 	return out
 
 
-## 节点条目的 `anim` 键 → 时间轴元数据（§12.3）。
-## 动画时序 meta（v4：来自 ANIM 块的 meta，不再是节点条目的 `anim` 键）→ 模型字段。
+## 动画时序 meta → 模型字段（§12.3）。
+## 【v4】时序在 ANIM 块的 meta 里，不再是 NODE 节点条目的 `anim` 键 —— 旧注释的说法会让人去 NODE 找。
 static func _read_anim(m: QVoxelModel, meta: Dictionary) -> void:
 	if meta.is_empty():
 		return
-	m.anim_loop = bool(meta.get("loop", true))
-	m.anim_fps = maxi(1, int(meta.get("fps", 12)))
+	m.anim_loop = bool(meta.get("loop", QVoxelSpec.ANIM_LOOP_DEFAULT))
+	m.anim_fps = maxi(1, int(meta.get("fps", QVoxelSpec.ANIM_FPS_DEFAULT)))
 	var tags: Variant = meta.get("tags")
 	m.anim_tags = (tags as Array).duplicate() if tags is Array else []
 
 
-## 时间轴元数据 → `anim` 键。**静态模型不写**（没有帧就没有时间轴）；
+## 模型字段 → 时序 meta 字典（写进 doc.anim_meta，最终进 ANIM 块）。**静态模型不写**（没有帧就没有时间轴）；
 ## 各字段**取缺省值同样不写**（P2：缺省才是常态）—— 于是"整条 anim 全缺省"时根本不落键。
 static func _anim_of_model(m: QVoxelModel) -> Dictionary:
 	if not m.is_animated():
@@ -281,7 +281,8 @@ static func _anim_of_model(m: QVoxelModel) -> Dictionary:
 	var a := {}
 	if not m.anim_loop:
 		a["loop"] = false
-	if m.anim_fps != 12:
+	# "与缺省不同才写"（P2）：缺省取 QVoxelSpec.ANIM_FPS_DEFAULT，否则缺省值每份文件都白背一个键。
+	if m.anim_fps != QVoxelSpec.ANIM_FPS_DEFAULT:
 		a["fps"] = m.anim_fps
 	if not m.anim_tags.is_empty():
 		a["tags"] = m.anim_tags
@@ -291,7 +292,7 @@ static func _anim_of_model(m: QVoxelModel) -> Dictionary:
 # 世界级设置
 
 func block_size() -> int:
-	return int(head.get("block_size", QVoxelSpec.DEFAULT_BLOCK_SIZE))
+	return int(head.get(QVoxelSpec.HEAD_BLOCK_SIZE_KEY, QVoxelSpec.DEFAULT_BLOCK_SIZE))
 
 
 func world_name() -> String:
@@ -619,9 +620,10 @@ func find_parent(target: QVoxelNode) -> QVoxelGroup:
 
 
 ## 节点在父列表里的下标（不在树上返回 -1）。与 `find_parent` 配对，用于记录"撤销要挂回哪儿"。
+## **唯一实现**：`node_index` 只是它的转发别名（历史上有两个同义方法，各写一遍判空）。
 func index_of(target: QVoxelNode) -> int:
-	var lst := _list_holding(target)
-	return lst.find(target) if not lst.is_empty() else -1
+	# Array.find() 对空数组返回 -1，故不必再判 _list_holding 是否为空（那层分支是冗余的）。
+	return _list_holding(target).find(target)
 
 
 ## 节点在**世界里的组合摆放**：从根到它逐层累乘 local_transform。渲染器据此把模型摆到该处。
@@ -651,8 +653,10 @@ func _path_to(list: Array[QVoxelNode], target: QVoxelNode, path: Array[QVoxelNod
 
 
 ## target 在同级里的下标（不在树上返回 -1）。
+## 【为什么保留这个名字】外部（QVoxelierTreeSection 等）按它取下标；语义与 index_of 逐字相同，
+## 故只留一行转发 —— 两份实现迟早有一份被改出差异，而差异不会报错，只会让下标悄悄错一位。
 func node_index(target: QVoxelNode) -> int:
-	return _list_holding(target).find(target)
+	return index_of(target)
 
 
 ## 把已有节点挂到 parent 下的 index 位置（index < 0 = 末尾）。会先把它从原位置摘下来。
@@ -831,8 +835,8 @@ func _dense_blocks_of(o: QVoxelModel) -> Dictionary:
 ## 【为什么显式 erase("layers")】按 id 索引的分组表已被树取代（qvx 3）。node 里若还留着
 ## 旧的 layers 键，写回去就等于"存盘时复活了一个已经删掉的概念"，下次读盘还会被当成有效数据。
 ## 【为什么也要 erase("animations")】旧动画键按"节点下标"寻址，与 v3 的嵌套树对不上号
-## （§12.4：动画已并入各模型节点的 `anim` 键）。留着它 → 下次读盘拿到一份指向错误节点的
-## 动画元数据，且与 `anim` 并存时谁生效取决于读取顺序（这类"两处真值"正是要消掉的）。
+## （§12.4：动画时序 v4 起在 ANIM 块的 meta 里，按 model_id 寻址）。留着它 → 下次读盘拿到一份
+## 指向错误节点的动画元数据，且与 ANIM 的 meta 并存时谁生效取决于读取顺序（"两处真值"正是要消掉的）。
 func _node_json() -> Dictionary:
 	var out := node.duplicate(true)
 	out.erase("layers")

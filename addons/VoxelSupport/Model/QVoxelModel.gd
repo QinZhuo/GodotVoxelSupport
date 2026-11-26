@@ -59,10 +59,13 @@ var frames: Array[QVoxelFrame] = []
 ## **不落盘**：它是"正在看第几帧"，不是数据（同 expanded_in_tree 的定位）。
 var active_frame := 0
 
-## 时间轴元数据（写进 NODE 节点条目的 `anim` 键，§12.3）。只在 `is_animated()` 时有意义。
-var anim_loop := true
+## 时间轴元数据（§12.3）。**v4 起写进 ANIM 块的 meta**，不再是 NODE 节点条目的 `anim` 键。
+## 只在 `is_animated()` 时有意义。
+var anim_loop := QVoxelSpec.ANIM_LOOP_DEFAULT
 ## 缺省帧率（每秒帧数）。逐帧作画的手感偏慢，默认 4 fps（一秒 4 帧）。
-var anim_fps := 4
+## 值取 QVoxelSpec.ANIM_FPS_DEFAULT（全仓唯一真值）：此前这里写裸 4、其余各处写裸 12，
+## 于是"新建的动画模型"与"读回来的历史文件"帧率差 3 倍（A6）。
+var anim_fps := QVoxelSpec.ANIM_FPS_DEFAULT
 
 ## 命名区间（Aseprite 的 tag）：每项 `{name, from, to, direction, color, repeat}`。
 ## `direction ∈ {forward, reverse, pingpong, pingpong_reverse}`；`repeat=0` 表示无限循环。

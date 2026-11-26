@@ -131,6 +131,16 @@ const DOMINANT_CHANNEL := "material"
 const HEAD_CHANNEL_KEY := "channel"
 const HEAD_BPP_KEY := "bpp"
 
+## HEAD 的其余两个键名：block_size 与 bounds。
+## 【为什么也提到这里】这两个键同样被三家以上各写一遍字面量（格式层补缺省、编辑层建 HEAD、
+## 构建器写 bounds）。字面量抄错不报错，只是让缺省悄悄生效 —— 与上面 channel/bpp 同一族风险，
+## 故按同一办法收口：键名一处定义，引用方各自取。
+const HEAD_BLOCK_SIZE_KEY := "block_size"
+const HEAD_BOUNDS_KEY := "bounds"
+## 向上轴键名。与上面同族：格式层读缺省、编辑层建 HEAD、构建器写 HEAD 三处各写一遍字面量，
+## 抄错只让缺省悄悄生效（up_axis 抄错还会被判非法 → 告警后按 y 处理），故同一办法收口。
+const HEAD_UP_AXIS_KEY := "up_axis"
+
 ## 支配通道每体素位宽与字节数（bpp=16 → 2 字节）。
 ## 编解码层里所有"每通道一个值"的宽度都引用此常量，消除散落的魔法数 2。
 const CHANNEL_BPP := 16
@@ -238,6 +248,18 @@ const VOX_BLOCK_HEADER_SIZE := 17
 # 的体素帧与逐帧时长，不承载节点/组级变换动画。
 const ANIM_MODEL_HEADER_SIZE := 8
 const ANIM_FRAME_HEADER_SIZE := 6
+
+## 动画时序的两个缺省值 —— **全仓唯一真值**。
+## 【为什么必须收在这里】此前编辑模型缺省 4 fps、而读写判据/运行时缺省全是 12：
+## 新建的动画模型 anim_fps=4，判据「!= 12 才写」于是每份文件都多背一个 "fps":4；
+## 而没写 fps 键的历史文件读回来是 12 —— 同一份动画存读一轮，帧率差 3 倍，播放速度跟着变。
+## 用户定为 4（逐帧作画的手感偏慢）。全仓不得再出现裸 4 / 裸 12 作为动画 fps 缺省。
+const ANIM_FPS_DEFAULT := 4
+const ANIM_LOOP_DEFAULT := true
+
+## ANIM 每帧条目里逐帧时长的键名（帧 = {"duration_ms": int, "blocks": Dictionary}）。
+## 0 表示"用 meta.fps 的缺省帧时长"（§12.3）。写盘/读盘/编辑模型三处共用同一键名。
+const ANIM_FRAME_DURATION_KEY := "duration_ms"
 
 # NODE 块的图层与相机（§7）
 # 【为什么这几个键名要提到规范里】判据是"有几方在各自使用同一份事实"：

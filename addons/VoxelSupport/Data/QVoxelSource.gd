@@ -94,29 +94,37 @@ func _sync_source() -> void:
 #   缓存体积         → PcgModelGenerator._ensure_volume
 # 于是三个类塌成一个字段：node。缓存 / 切片 / LOD 逻辑全项目仍只有一份 —— 就在这里。
 
-## 最近一次求值结果：作为下一次求值的 previous 传入，让链只重算脏步骤。
-var _last: QVoxelEvalResult = null
 ## 整块求值结果（惰性构建一次，之后只读）。值 = 材质ID，0 = 空。
 var _volume := PackedInt32Array()
 var _volume_origin := Vector3i.ZERO
 var _volume_grid_size := Vector3i.ZERO
 var _volume_built := false
 ## 上一行的非空格数，惰性数一次（-1 = 还没数，见 evaluated_voxel_count）。
-## **不变式：任何给 `_volume` 赋值的地方都必须同时把它置回 -1**（_invalidate_volume /
-## _ensure_volume / _install_volume 三处）—— 漏一处，读数就会拿着上一份体积的数字当真。
+## **不变式：_volume 一旦被换掉，上面这些缓存字段必须一起复位**，复位只走
+## _reset_volume_cache（见那里的说明）—— 逐处手写迟早有人漏掉一个字段。
 var _volume_count := -1
 
 ## 构建互斥：首帧多个 worker 会同时走到 _ensure_volume，无锁则各自求值一遍。
 var _volume_mutex := Mutex.new()
 
 
+## 求值体积缓存的重置（**唯一收口**）：所有换掉 _volume 的地方都从这里开始。
+## 【为什么必须收口】此前是在注释里承诺"三处都要记得把计数置回 -1"，而同一份清单里还躺着
+## origin / grid_size / built 三个字段 —— 谁新增一个缓存字段、谁改一处赋值，就多一个没人
+## 检查的漂移点（只重置一半的后果是切片按下标读旧布局的数据，静默错格）。收成一个函数后，
+## 漏字段在结构上就不可能发生。
+func _reset_volume_cache() -> void:
+	_volume = PackedInt32Array()
+	_volume_origin = Vector3i.ZERO
+	_volume_grid_size = Vector3i.ZERO
+	_volume_built = false
+	_volume_count = -1
+
+
 ## 作废缓存的求值体积（换源 / 改尺寸 / 手绘编辑后必须调用）。
 ## 不取锁：由主线程调用，不能阻塞在途 worker；用"提交前比对尺寸"丢弃过期结果。
 func _invalidate_volume() -> void:
-	_volume = PackedInt32Array()
-	_volume_built = false
-	_last = null
-	_volume_count = -1
+	_reset_volume_cache()
 
 
 ## **求值缓存作废**：手绘体素或链参数被改动后由编辑侧调用（会话封口一笔手势时）。
@@ -185,11 +193,11 @@ func _ensure_volume() -> bool:
 		var ctx := QVoxelEvalContext.make(gs, seed)
 		var res := QVoxelEvalEngine.evaluate_local(node, ctx)
 		if gs == grid_size:
+			# 先复位再写入：以后新增缓存字段只需改 _reset_volume_cache 一处
+			_reset_volume_cache()
 			_volume = res.volume
 			_volume_origin = res.origin
 			_volume_grid_size = res.grid_size
-			_volume_count = -1
-			_last = res
 			_volume_built = true
 	_volume_mutex.unlock()
 	return _volume_built
@@ -306,19 +314,15 @@ func mark_chunk_dirty(ck: Vector3i) -> void:
 ## 连 LOD 一起失效：粗层块由 LOD0 降采样而来，LOD0 换了而粗层不换，远处会继续显示旧形状。
 ## 本方法是"作废"而非"同步重载"：实际重取由流式泵按需发起。
 func invalidate_chunk_source(ck: Vector3i) -> void:
-	# 在途 / 就绪登记属于旧内容，留着会被回填进已作废的块（与换源时 _async.clear() 同理）
-	_async.cancel(ck, 0)
-	_chunk_buffers.erase(ck)
-	_count_erase(ck)
-	# 标记"暂时取不到"：渲染层据此保留旧网格（而非当成"没数据"抹掉）直到重新取数回填
-	_source_invalidated[ck] = true
-	# 伤害账随内容一起作废：重新生成后的形态与旧账无关，留着会变成幽灵伤害
-	_damage.erase_chunk(ck)
-	invalidate_lod_for_chunk(ck)
-	# 待写盘标记随内存副本一起清（没有缓冲可写）；MESH 标记必须留，否则旧网格不会被清掉
-	_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
-	_dirty.mark(0, ck, VoxelDirtyLedger.MESH)
-	_mark_neighbors_dirty(ck)
+	# 在途登记要撤（迟到的回填会写进已作废的块）、置"源作废"（渲染层据此**保留**旧网格防闪，
+	# 与 unload_chunk 的"真卸载"相反）、粗层一起失效（LOD0 换了粗层不换 = 远处旧形状）。
+	_drop_chunk(ck, {
+		"cancel_async": true,
+		"invalidate_source": true,
+		"drop_lod": true,
+		"mark_mesh": true,
+		"mark_neighbors": true,
+	})
 
 
 ## chunk 是否"源被作废、等待重新取数"（渲染层用它区分"暂时没有"与"真的没有"）。
@@ -411,22 +415,6 @@ const LOD_GRID := VoxelChunk.CHUNK_SIZE
 # 每级失效的 block 记在 _dirty 的粗层账里（见 VoxelDirtyLedger.LOD_MESH）
 
 
-## 取"分层字典数组"的第 level 层（必要时补足到该层）。全项目唯一维护这类数组的地方：
-## 各层各自一张 {key: value} 表；越界即补空层，避免每处手写 while-append（易漏、易越界）。
-static func _layer(layers: Array[Dictionary], level: int) -> Dictionary:
-	while layers.size() <= level:
-		layers.append({})
-	return layers[level]
-
-
-## 失效体素所在 chunk 对应的所有更高层 LOD block（LOD0 数据变化后调用）。
-## 仅失效网格重建（数据回填/程序化生成也会触发，见 _accept_chunk_buffer）；
-## 用户编辑额外标记 modified 用 mark_lod_modified*。
-func invalidate_lod(pos: Vector3i) -> void:
-	var ck := _chunk_of(pos)
-	for lod in range(1, maxi(lod_count, 1)):
-		_mark_lod_invalid(Vector3i(ck.x >> lod, ck.y >> lod, ck.z >> lod), lod)
-
 
 ## 失效指定 LOD0 chunk 对应的所有更高层 LOD block（仅网格重建，不标记 modified）
 func invalidate_lod_for_chunk(ck: Vector3i) -> void:
@@ -489,12 +477,6 @@ func _mark_coarse_modified(block_key: Vector3i, lod: int) -> void:
 func clear_lod_cache() -> void:
 	_dirty.clear_flags_all(VoxelDirtyLedger.LOD_MESH)
 
-
-## 清空所有层级的"脏大格区域"增量标记（世界级重置：clear / 载荷重建时调用）。
-## 与 clear_lod_cache 分开：两者分别服务"失效重建"与"增量降采样 patch"，只清一个会留下
-## 另一半陈旧账本继续驱动渲染器。
-func clear_lod_dirty_regions() -> void:
-	_dirty.clear_regions()
 
 
 ## 获取指定层级的失效 block（渲染器 _process_lod 消费后重建），并清空
@@ -592,9 +574,6 @@ const NEIGHBORS_6: Array[Vector3i] = VoxelConnectivity.NEIGHBORS_6
 const OriginMode = VoxelWorldUtil.OriginMode
 
 
-static func origin_offset(bounds: Dictionary, mode: int) -> Vector3:
-	return VoxelWorldUtil.origin_offset(bounds, mode)
-
 
 ## 从 VoxAsset 构造（编辑器导入时使用）。`origin_mode` 决定模型摆到哪，据此写 `center_offset`。
 static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
@@ -605,7 +584,7 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
 	# 体素坐标重映射到 [0, grid_size)：原始坐标落在 [offset, offset + size) 之间。
 	# WORLD_ORIGIN 例外：原样保留摆放，一律不重映射（坐标为负无妨，chunk 键支持负数）。
 	if not raw_voxels.is_empty():
-		var bounds := voxel_bounds(raw_voxels)
+		var bounds := VoxelWorldUtil.voxel_bounds(raw_voxels)
 		var min_pos: Vector3i = bounds["min"]
 		var max_pos: Vector3i = bounds["max"]
 		var base := Vector3i.ZERO if origin_mode == OriginMode.WORLD_ORIGIN else min_pos
@@ -639,7 +618,7 @@ static func from_voxel_data(voxel_data: VoxAsset, frame_index: int = 0,
 
 		res.grid_size = max_pos - min_pos + Vector3i(1, 1, 1)
 		# 体素已重映射到"内容最小角 = 0"，故把同一套公式作用在**相对**包围盒上。
-		res.center_offset = origin_offset({"min": Vector3i.ZERO, "max": max_pos - base}, origin_mode)
+		res.center_offset = VoxelWorldUtil.origin_offset({"min": Vector3i.ZERO, "max": max_pos - base}, origin_mode)
 	else:
 		# 空模型：VoxAsset 没有 `size` 属性（那是 VoxelModel 的），按零尺寸处理。
 		res.grid_size = Vector3i.ZERO
@@ -683,20 +662,35 @@ static func _local_from_index(i: int) -> Vector3i:
 
 ## 写入体素缓冲（核心原语）：不标记脏 chunk / 不触发信号，由调用方处理。
 ## check_empty=true 时，若写入后该 chunk 缓冲全空则移除 chunk 键（回收内存）。
+## 【绝不预建空缓冲】写入的语义是"这一格归零 / 归一"，不是"这个 chunk 从此存在"。
+## 从前无条件先建一块 4096 个 0 的缓冲再写，于是"往空格子里写 0 / 删一个不存在的体素"
+## 会留下一块全零缓冲：`is_empty()`（见 :525 的不变式）与 `has_chunk()` 双双撒谎，
+## flush 还会把这块空气写进磁盘；而 check_empty=false 的四个调用点（读档 / 旧格式反序列化 /
+## .qvx 融合体素 / 单点 set）恰好都不做回收。故先读当前值：真的什么都不用变就直接返回。
 func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
+	if buf == null and is_stored(ck):
+		# 流式：该 chunk 在磁盘已有数据，先载入内存再修改（保留旧数据）
+		preload_chunk(ck)
+		buf = _chunk_buffers.get(ck)
+	var idx := _buf_index(pos - ck * CHUNK_SIZE)
+	var cur := 0
+	if buf != null:
+		cur = buf[idx]
+	if mat_id <= 0 and cur <= 0:
+		# 本来就没有体素可删：不建缓冲，但仍要落两笔"这一格归零"的语义账 ——
+		# 清伤害（残留伤害会继承给以后放进来的体素）与清"源作废"标记（内容已确定）。
+		_source_invalidated.erase(ck)
+		_damage.clear_at(pos)
+		return
 	if buf == null:
-		if is_stored(ck):
-			# 流式：该 chunk 在磁盘已有数据，先载入内存再修改（保留旧数据）
-			preload_chunk(ck)
-			buf = _chunk_buffers.get(ck)
-		if buf == null:
-			buf = PackedInt32Array()
-			buf.resize(CHUNK_VOLUME)
-			_chunk_buffers[ck] = buf
-	# 只读快照在途：该缓冲可能与 worker 共享底层，先分叉再写（GDScript 逐元素写不会 COW）
-	if _snapshot_readers > 0:
+		buf = PackedInt32Array()
+		buf.resize(CHUNK_VOLUME)
+		_chunk_buffers[ck] = buf
+	elif _snapshot_readers > 0:
+		# 只读快照在途：该缓冲可能与 worker 共享底层，先分叉再写（GDScript 逐元素写不会 COW）。
+		# 新建的缓冲只有自己持有，无需分叉。
 		buf = (buf as PackedInt32Array).duplicate()
 		_chunk_buffers[ck] = buf
 	# 写入即内容确定 → 清除"源作废"标记
@@ -705,14 +699,11 @@ func _write_buffer_impl(pos: Vector3i, mat_id: int, check_empty: bool) -> void:
 	_dirty.mark(0, ck, VoxelDirtyLedger.PERSIST)
 	# 该位置被改写或移除 → 清零其累计伤害，否则残留伤害会"继承"给新体素（一放就被秒杀）
 	_damage.clear_at(pos)
-	var idx := _buf_index(pos - ck * CHUNK_SIZE)
-	var cur: int = buf[idx]
 	if mat_id <= 0:
-		if cur > 0:
-			buf[idx] = 0
-			_count_delta(ck, -1)
-			if check_empty:
-				_maybe_erase_empty_chunk(ck)
+		buf[idx] = 0
+		_count_delta(ck, -1)
+		if check_empty:
+			_maybe_erase_empty_chunk(ck)
 	else:
 		if cur <= 0:
 			_count_delta(ck, 1)
@@ -760,12 +751,18 @@ func _count_clear() -> void:
 
 
 ## 直接装入一块密集缓冲（导入 / 资源载荷恢复专用）：不做逐体素写。
-func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
+## 【唯一装块入口】"字典赋值 + 计数账 + 清作废标记"这三件事必须一起做，否则计数账漂移或
+## 渲染层继续把该块当"暂时取不到"。preload_chunk / 回填 / 载荷恢复从前各抄一份，
+## 收敛后它们只在这里调一次，各自特有的后续（邻居标脏 / 网格标脏 / 粗层失效）留在外层。
+## [param known_count] 调用方刚刚数过这块的非空体素数时传进来（<0 = 本函数自己数）。
+##   同一块 32³ 的 count(0) 是一次原生整块扫描，而导入 / 归一化路径往往**已经为判空数过一遍**，
+##   再数一次纯属白扫（见 apply_block_table 的 known_counts 与 _install_volume）。
+func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array, known_count: int = -1) -> void:
 	if buf.size() != CHUNK_VOLUME:
 		push_error("[QVoxelSource] 块 %s 的缓冲长度 %d != %d，已跳过" % [chunk_key, buf.size(), CHUNK_VOLUME])
 		return
 	_chunk_buffers[chunk_key] = buf
-	_count_set(chunk_key, _count_voxels(buf))
+	_count_set(chunk_key, known_count if known_count >= 0 else _count_voxels(buf))
 	_source_invalidated.erase(chunk_key)
 
 
@@ -780,16 +777,32 @@ func _install_block_buffer(chunk_key: Vector3i, buf: PackedInt32Array) -> void:
 ## 【为什么装入副本】本资源随后会就地改缓冲，而传入的块表常来自 `QVoxelAsset` 的**共享**帧数据
 ## —— 共享会互相污染（同一份 .qvx 的多个实例会串帧）。
 func apply_block_table(blocks: Dictionary, notify: bool = true) -> int:
+	return _apply_block_table_impl(blocks, {}, notify)
+
+
+## apply_block_table 的本体。[param known_counts] 调用方已经数过某块的非空体素数时预先给出
+## （`{chunk_key: count}`），归一化那一趟就不必再对同一块扫 32³ 一遍 —— 内部路径（_install_volume）
+## 刚刚为判空数过，外面再数一次是纯浪费；公开入口传空字典即按需现数。
+## 【为什么另开私有入口而不给公开方法加参数】公开面已经够宽，把"我已经数过了"这种实现细节
+## 塞进签名会让每个调用点都得读一遍；内部复用走这里，公开契约保持原样。
+func _apply_block_table_impl(blocks: Dictionary, known_counts: Dictionary, notify: bool) -> int:
 	# 归一化：丢掉全空缓冲，维持 "is_empty() ⟺ 一个体素都没有" 的不变式。
+	# 判空那一趟顺手把数出来的非空体素数记下来，装块时直接复用 —— 同一块 32³ 的 count(0)
+	# 是原生整块扫描，装了再数一遍纯属重复劳动（见 _install_block_buffer 的 known_count）。
 	var table := {}
+	var counts := {}
 	for ck: Vector3i in blocks:
 		var b: PackedInt32Array = blocks[ck]
 		if b.size() != CHUNK_VOLUME:
 			push_error("[QVoxelSource] 块 %s 的缓冲长度 %d != %d，已跳过" % [ck, b.size(), CHUNK_VOLUME])
 			continue
-		if _count_voxels(b) == 0:
+		var n := int(known_counts.get(ck, -1))
+		if n < 0:
+			n = _count_voxels(b)
+		if n == 0:
 			continue
 		table[ck] = b
+		counts[ck] = n
 
 	var changed := 0
 	# 1) 新表里没有的块 → 删掉。先收键再删（边遍历边 erase 是未定义行为）。
@@ -798,13 +811,15 @@ func apply_block_table(blocks: Dictionary, notify: bool = true) -> int:
 		if not table.has(ck):
 			dropped.append(ck)
 	for ck in dropped:
-		_chunk_buffers.erase(ck)
-		_count_erase(ck)
-		_damage.erase_chunk(ck)
-		# 只清"待写盘"：MESH 标记必须留着，否则渲染器不会重建来清掉该块残留的旧网格
-		_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
-		mark_chunk_dirty(ck)
-		_mark_neighbors_dirty(ck)
+		# 与 _maybe_erase_empty_chunk 同样的"真·空块"语义：内容已确定为空，渲染层该清掉旧网格
+		# （而不是按"源作废"继续保留），且该块对应的粗层必须一起失效 —— 漏了这两笔，
+		# 切帧删掉的块会永远停在"未就绪"：旧网格不清、新网格不建（A4）。
+		_drop_chunk(ck, {
+			"invalidate_source": false,
+			"drop_lod": true,
+			"mark_mesh": true,
+			"mark_neighbors": true,
+		})
 		changed += 1
 	# 2) 新表里的块 → 变了才装
 	for ck: Vector3i in table:
@@ -813,7 +828,7 @@ func apply_block_table(blocks: Dictionary, notify: bool = true) -> int:
 		if cur != null and (cur as PackedInt32Array) == buf:
 			continue
 		# 整块换掉：旧缓冲不动（在途的只读快照仍持有它），字典指向新副本
-		_install_block_buffer(ck, buf.duplicate())
+		_install_block_buffer(ck, buf.duplicate(), int(counts[ck]))
 		# 该块的体素已被整体换掉 → 累计伤害不再属于任何体素，留着会让新体素"一出现就带伤"
 		_damage.erase_chunk(ck)
 		# 内存已是权威内容 → 标待写盘（有流时否则卸载即丢，或旧数据复活）；并失效高层 LOD
@@ -827,27 +842,55 @@ func apply_block_table(blocks: Dictionary, notify: bool = true) -> int:
 	return changed
 
 
+## 丢掉一块 chunk 的内存副本，以及随之作废的那些附属账（**唯一实现**）。
+## 【为什么必须收口】"删块"这件事本类有 4 个出处，它们清的东西**并不相同**，而且从前没有
+## 一处写明为什么不同 —— 每加一个出处就靠作者自觉抄对，抄漏一笔没有运行期症状，只有画面错
+## （A4 就是这么来的：丢块漏了清 `_source_invalidated`，渲染层于是永久把该块当"源作废、等回填"，
+## 旧网格不清、新网格不建）。这里把差异显式化成 opts，4 个调用点各一行、读得出各自语义。
+##
+## 各 opts 键（缺键 = 不做）：
+##   cancel_async: bool      撤销在途 / 就绪登记（否则迟到的回填会写进已丢弃的块）
+##   invalidate_source: bool true = 置"源作废"标记（缓冲丢了但按流 > 生成器会重新取数，
+##                               渲染层须保留旧网格防闪）；false = 清掉该标记（内容已确定为真·空）
+##   drop_lod: bool          失效覆盖该块的所有更高层 LOD block（LOD0 换了粗层不换 = 远处旧形状）
+##   erase_stream: bool      连流里的持久化数据一起删（世界该处确实空了；不是"等重新取数"）
+##   mark_mesh: bool         标网格重建（不标 → 渲染器不会重建，旧网格留在屏幕上）
+##   mark_neighbors: bool    标 6 邻居重建（跨界面的面可见性依赖该块，块消失 = 邻居外侧面要重算）
+##   keep_persist_flag: bool 保留"待写盘"标记；缺省清掉（没有缓冲可写，留着只会让 flush 空转）
+func _drop_chunk(ck: Vector3i, opts: Dictionary = {}) -> void:
+	if opts.get("cancel_async", false):
+		_async.cancel(ck, 0)
+	_chunk_buffers.erase(ck)
+	_count_erase(ck)
+	_damage.erase_chunk(ck)
+	if opts.has("invalidate_source"):
+		if opts["invalidate_source"]:
+			_source_invalidated[ck] = true
+		else:
+			_source_invalidated.erase(ck)
+	if not opts.get("keep_persist_flag", false):
+		_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
+	if opts.get("drop_lod", false):
+		invalidate_lod_for_chunk(ck)
+	if opts.get("erase_stream", false) and is_stored(ck):
+		stream.erase_chunk(ck)
+	if opts.get("mark_mesh", false):
+		_dirty.mark(0, ck, VoxelDirtyLedger.MESH)
+	if opts.get("mark_neighbors", false):
+		_mark_neighbors_dirty(ck)
+
+
 ## 若 chunk 体素计数归零则移除该 chunk 键（O(1)，替代 4096 全量扫描）
+## 语义：真·空块（确定无内容）—— 不属"源作废"，渲染层应清掉旧网格；流里的旧数据同步删掉。
+## 不标 MESH 也不失效 LOD：调用方（单点写 / 批量删）已经把网格脏标记与粗层降采样标记过了，
+## 这里重复标只会把同一批重建任务记两遍。
 func _maybe_erase_empty_chunk(ck: Vector3i) -> void:
 	if _chunk_voxel_counts.has(ck):
 		return
-	_chunk_buffers.erase(ck)
-	_count_erase(ck)
-	# 真·空块（确定无内容）不属"源作废"：渲染层应清掉它的旧网格，而不是保留
-	_source_invalidated.erase(ck)
-	# 只清"待写盘"：MESH 标记必须留着，否则渲染器不会重建来清掉该 chunk 的旧 mesh
-	_dirty.clear_flag(0, ck, VoxelDirtyLedger.PERSIST)
-	_damage.erase_chunk(ck)
-	if is_stored(ck):
-		# 流式：世界该处已清空，同步删除存储里的旧数据（否则重载会出现"幽灵 chunk"）
-		stream.erase_chunk(ck)
+	_drop_chunk(ck, {"invalidate_source": false, "erase_stream": true})
 
 
 # 数据层磁盘流式（VoxelStream 接入）
-
-## 配置数据层流（等价于设置 stream 属性，触发 setter 的 flush + 待写补标逻辑）。
-func set_stream(s: VoxelStream) -> void:
-	stream = s
 
 
 ## 无限世界：本数据层按 **origin shift** 供数（相机走远 → 整层坐标整体平移）。
@@ -919,9 +962,8 @@ func preload_chunk(chunk_key: Vector3i) -> bool:
 			# 索引说有、实际读不到（文件被外部改写等）→ 以读结果为准，顺手清掉
 			stream.erase_chunk(chunk_key, 0)
 			return false
-		_chunk_buffers[chunk_key] = buf
-		_count_set(chunk_key, _count_voxels(buf))
-		_source_invalidated.erase(chunk_key)
+		# 装块（字典 + 计数 + 清作废标记）走唯一入口；流已给出整块内容，这里顺手数一遍即可
+		_install_block_buffer(chunk_key, buf)
 		# halo 数据就绪 → 重建依赖该 chunk 作为 halo 的相邻 chunk（边界 mesh 缝合）
 		_mark_neighbors_dirty(chunk_key)
 		return true
@@ -948,10 +990,9 @@ func _accept_chunk_buffer(chunk_key: Vector3i, buf: PackedInt32Array, lod: int =
 			_dirty.mark(0, chunk_key, VoxelDirtyLedger.MESH)
 			_mark_neighbors_dirty(chunk_key)
 			return
-		_chunk_buffers[chunk_key] = buf
-		_count_set(chunk_key, count)
-		# 内容已回填 → 清除"源作废"标记（渲染层可安全按新内容重建）
-		_source_invalidated.erase(chunk_key)
+		# 装块走唯一入口：顺带清"源作废"标记（内容已回填，渲染层可安全按新内容重建）；
+		# count 上面判空已经数过，直接传进去，不再白扫一遍 32³。
+		_install_block_buffer(chunk_key, buf, count)
 		# 数据就绪 → 标网格重建。未修改的粗层块用独立数据层，不依赖 LOD0 回填，故无需失效 ——
 		# 否则每回填一个 chunk 就递增渲染器全局 gen_id，作废全部在途粗层任务。
 		_dirty.mark(0, chunk_key, VoxelDirtyLedger.MESH)
@@ -985,12 +1026,11 @@ func unload_chunk(chunk_key: Vector3i) -> bool:
 		elif is_stored(chunk_key):
 			# 世界该处已清空 → 同步清掉存储里的旧数据，否则重载会出现"幽灵 chunk"
 			stream.erase_chunk(chunk_key)
-		_dirty.clear_flag(0, chunk_key, VoxelDirtyLedger.PERSIST)
-	_count_erase(chunk_key)
-	_chunk_buffers.erase(chunk_key)
-	_source_invalidated.erase(chunk_key)
-	# 伤害账随 chunk 一起释放，否则卸载后残留账目会随世界遍历无限增长
-	_damage.erase_chunk(chunk_key)
+	# 写盘必须在 _drop_chunk **之前**：缓冲一丢就取不到内容了。
+	# 其余一律不做：不置"源作废"（存储里已有权威数据，下次是直读回填而不是保留旧网格防闪）、
+	# 不动粗层（粗层块有独立数据层，与本块内存副本无关）、不标脏（是否重建由调用方决定）；
+	# 伤害账随块一起释放（_drop_chunk 内做），否则卸载后残留账目会随世界遍历无限增长。
+	_drop_chunk(chunk_key, {"invalidate_source": false})
 	return true
 
 
@@ -1166,6 +1206,15 @@ func get_unloaded_chunk_count() -> int:
 	return n
 
 
+## 当前 chunk 总数 = 内存里已加载的块 + 流里还没加载的块（**O(1) 辅助量，不合并、不去重**）。
+## 【为什么需要它】渲染器 / HUD 只想报一个"世界有多少块"的数字，从前写
+## `get_all_chunk_keys().size()` —— 那是把内存键与流键合表再数组去重，纯诊断数字付一次全表合并。
+## 这里直接复用已有的两笔 O(1) 账（_chunk_buffers.size() 与 get_unloaded_chunk_count），
+## 二者互斥（前者是内存块，后者是流中不在内存的块），相加即不重不漏。
+func chunk_count() -> int:
+	return _chunk_buffers.size() + get_unloaded_chunk_count()
+
+
 ## 把内存中所有被修改的 chunk 写回磁盘（存档 / 退出前调用）
 func flush() -> void:
 	if stream == null:
@@ -1187,49 +1236,12 @@ func flush() -> void:
 	stream.flush()
 
 
-## 把本数据层「程序化生成的有界模型」烘焙（冻结）为静态存档：逐 chunk 调 generate，
-## 非空块 + 材质调色板写入 target（典型是新建的 QVoxelStream → .qvx），最后 flush。
-## 【用途】把 SDF / 蓝图模型"烧"成普通体素文件 —— 之后不再需要生成器与逐体素采样，
-## 直接走既有 stream → 渲染 / 破坏 / 编辑链路（加载快、可手工再改、可当静态资产分发）。
-## 【为何放在 QVoxelSource】只有它同时认识"造"(node) 与"存"(stream)，且烘焙范围就是 grid_size。
-## 【同步】显式的离线 / 编辑期操作，在主线程直接调 generate，不进异步队列。
-## 返回写入的 chunk 数（0 = 范围内无非空块；-1 = 参数不合法）。
-func bake_to(target: VoxelStream) -> int:
-	if node == null or target == null:
-		push_error("[QVoxelSource] bake_to 需要 node 与 target stream")
-		return -1
-	if grid_size == Vector3i.ZERO:
-		push_error("[QVoxelSource] bake_to 需要有限 grid_size（无限世界无范围可烘焙）")
-		return -1
-	var qs := target as QVoxelStream
-	if qs != null:
-		qs.set_materials(materials)
-	var last := VoxelChunk.chunk_of(grid_size - Vector3i.ONE)
-	var written := 0
-	for cz in range(last.z + 1):
-		for cy in range(last.y + 1):
-			for cx in range(last.x + 1):
-				var ck := Vector3i(cx, cy, cz)
-				var buf := generate(ck)
-				if buf.size() != CHUNK_VOLUME or _count_voxels(buf) == 0:
-					continue
-				target.save_chunk(ck, buf)
-				written += 1
-	target.flush()
-	return written
-
-
-## 构建期 / 读档批量填充 {pos: mat_id}：不标记脏 chunk、不触发信号。适合一次性静态生成。
-func load_voxels_dict(dict: Dictionary) -> void:
-	for pos_key in dict:
-		_write_buffer_impl(pos_key, dict[pos_key], false)
-
 
 ## 由一份**整块求值结果**装配一个数据源：装体积 + 装调色板 + 标脏，一次做完。
 ## 【用途】把"整世界 / 整节点求值完"的结果当成**静态资产**渲染：快照、离线出图，等等。
 ## 【为什么必须收成一条入口】拆成三个 API 让调用方自己拼迟早漏掉第三件：漏了标脏 →
 ## 渲染器的重建粒度就是"数据层给的脏账"，脏账空 = 一块网格都不建，表现为**画面全空且不报错**。
-## 【为什么不用 load_voxels_dict】那个入口逐格写（256³ 最多 1600 万次字典写入 + 逐格分派），
+## 【为什么不做成逐格入口】逐格写 256³ 就是 1600 万次字典写入 + 逐格分派，
 ## 而这里的数据本来就是**按块连续**的。
 static func from_eval_result(world: QVoxelWorld, res: QVoxelEvalResult) -> QVoxelSource:
 	var src := QVoxelSource.new()
@@ -1256,13 +1268,14 @@ func _install_volume(volume: PackedInt32Array, origin: Vector3i, size: Vector3i)
 		push_error("[QVoxelSource] 体积长度 %d 与尺寸 %s 不符，已跳过" % [volume.size(), size])
 		return
 	# 让 LOD0 的唯一切块实现直接读到它（_ensure_volume 见 _volume_built 即返回，不会二次求值）。
+	_reset_volume_cache()
 	_volume = volume
 	_volume_origin = origin
 	_volume_grid_size = size
-	_volume_count = -1
 	_volume_built = true
-	_last = null
 	var table := {}
+	# 判空时数出来的计数一并带下去：同一块 32³ 的 count(0) 不必在归一化里再扫一遍
+	var counts := {}
 	var first := VoxelChunk.chunk_of(origin)
 	var last := VoxelChunk.chunk_of(origin + size - Vector3i.ONE)
 	for cz in range(first.z, last.z + 1):
@@ -1270,10 +1283,12 @@ func _install_volume(volume: PackedInt32Array, origin: Vector3i, size: Vector3i)
 			for cx in range(first.x, last.x + 1):
 				var ck := Vector3i(cx, cy, cz)
 				var buf := _generate_chunk(ck)
-				if _count_voxels(buf) == 0:
+				var n := _count_voxels(buf)
+				if n == 0:
 					continue
 				table[ck] = buf
-	apply_block_table(table)
+				counts[ck] = n
+	_apply_block_table_impl(table, counts, true)
 
 
 ## 获取所有有数据的 chunk key（内存 + 流中已存的）
@@ -1395,7 +1410,7 @@ func _snapshot_lod_block_chunks_impl(block_key: Vector3i, lod: int, preload_cent
 # 每 LOD 独立数据层（Voxel Tools 式：粗 LOD block 数据独立，未修改块由生成器直接生成）
 
 func _ensure_coarse_arrays(level: int) -> void:
-	_layer(_coarse_buffers, level - 1)
+	VoxelWorldUtil.ensure_layer(_coarse_buffers, level - 1)
 	_dirty.ensure_level(level)
 
 
@@ -1727,35 +1742,42 @@ func get_voxels_dict_snapshot() -> Dictionary[Vector3i, int]:
 ## 而渲染器填回缓冲要等到下一帧。若拾取恰好落在这段窗口里，就会"刚画的格打不到"——
 ## 表现为"画一格后没法在它上面再画"。求值体积是同步、权威的那一份，故缺失时回落到它。
 func get_voxel(pos: Vector3i) -> int:
-	var ck := _chunk_of(pos)
-	var buf = _chunk_buffers.get(ck)
-	if buf == null:
-		if is_stored(ck):
-			preload_chunk(ck)
-			buf = _chunk_buffers.get(ck)
-		if buf == null:
-			return _volume_voxel(pos)
-	var v: int = buf[_buf_index(pos - ck * CHUNK_SIZE)]
-	return v if v > 0 else -1
+	# 注意对外契约：**无体素返回 -1**，而不是全项目其它处的 0=空。这是历史契约，别顺手统一
+	# （调用点普遍写 `if get_voxel(p) > 0`，改 0 会让"空"和"素材 0"撞上）。
+	return _probe_voxel(pos)
 
 
 ## 是否存在体素（流式模式下磁盘上的 chunk 会自动载入内存）
 func has_voxel(pos: Vector3i) -> bool:
+	return _probe_voxel(pos) > 0
+
+
+## 读一格体素（**取数与回落逻辑的唯一实现**）：返回材质 id，无体素返回 -1。
+## 【为什么要抽出来】get_voxel / has_voxel 从前把那 6 行"取块 → 缓冲缺失 → 流里已存就同步载入 →
+## 仍缺失则回落求值体积"逐行抄了两遍 —— 这是本类最热的读路径，任何一处补漏（比如将来加缓存层、
+## 改回落优先级）都得记着改第二份，漏掉就是两个查询对同一格给出互相矛盾的答案。
+func _probe_voxel(pos: Vector3i) -> int:
 	var ck := _chunk_of(pos)
 	var buf = _chunk_buffers.get(ck)
 	if buf == null:
+		# 流里已存 → 同步直读（读语义必须与"已加载"一致，否则同一格两次读结果不同）
 		if is_stored(ck):
 			preload_chunk(ck)
 			buf = _chunk_buffers.get(ck)
 		if buf == null:
-			return _volume_voxel(pos) > 0
-	return buf[_buf_index(pos - ck * CHUNK_SIZE)] > 0
+			# 缓冲缺失（编辑收笔后到渲染器取数前的窗口）→ 回落求值体积，那份是同步且权威的
+			return _volume_voxel(pos)
+	var v: int = buf[_buf_index(pos - ck * CHUNK_SIZE)]
+	return v if v > 0 else -1
 
 
 ## 从求值体积里读一格（缺失缓冲时的权威回落）。越界 / 无体积返回 -1。
 func _volume_voxel(pos: Vector3i) -> int:
 	if node == null or not _ensure_volume() or _volume.is_empty():
 		return -1
+	# 走到这里说明体积已建好且非空：读 _volume 必须满足这个不变式，否则下标会打到过期/空缓冲上
+	# （_volume 被换掉时的复位收敛在 _reset_volume_cache，这里只做哨兵）。
+	assert(_volume_built)
 	var p := pos - _volume_origin
 	var gs := _volume_grid_size
 	if p.x < 0 or p.y < 0 or p.z < 0 or p.x >= gs.x or p.y >= gs.y or p.z >= gs.z:
@@ -1867,117 +1889,6 @@ static func _bounds_to_aabb(bounds: Array) -> AABB:
 	return AABB(Vector3(min_pos), Vector3(extents))
 
 
-## 体素字典求界已下沉到 `VoxelWorldUtil.voxel_bounds`；此处保留转发以兼容旧调用点。
-static func voxel_bounds(voxels: Dictionary) -> Dictionary:
-	return VoxelWorldUtil.voxel_bounds(voxels)
-
-
-# 空间查询（基于 chunk 密集缓冲扫描，数组下标而非字典哈希）
-
-## 获取与球体重叠的 chunk 列表
-func _get_chunks_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
-	if radius <= 0:
-		return []
-	# 球体包围盒（使用 floori 统一向下取整，与 get_voxels_in_sphere 保持一致）
-	var center_v := Vector3i(floori(center.x), floori(center.y), floori(center.z))
-	var r_ceil := ceili(radius)
-	var min_pos := center_v - Vector3i(r_ceil, r_ceil, r_ceil)
-	var max_pos := center_v + Vector3i(r_ceil, r_ceil, r_ceil)
-	var min_ck := _chunk_of(min_pos)
-	var max_ck := _chunk_of(max_pos)
-	var radius_sq := int(radius * radius)
-	var result: Array[Vector3i] = []
-	for x in range(min_ck.x, max_ck.x + 1):
-		for y in range(min_ck.y, max_ck.y + 1):
-			for z in range(min_ck.z, max_ck.z + 1):
-				var ck := Vector3i(x, y, z)
-				# 整型平方距离：逐轴取到 chunk AABB 的最近距离，避免 Vector3.length() 浮点开销。
-				var c_origin := VoxelChunk.origin_of(ck)
-				var d_x := _axis_dist_sq(center_v.x, c_origin.x, c_origin.x + CHUNK_SIZE - 1)
-				var d_y := _axis_dist_sq(center_v.y, c_origin.y, c_origin.y + CHUNK_SIZE - 1)
-				var d_z := _axis_dist_sq(center_v.z, c_origin.z, c_origin.z + CHUNK_SIZE - 1)
-				if d_x + d_y + d_z <= radius_sq:
-					result.append(ck)
-	return result
-
-
-## 计算整数坐标点 p 到区间 [lo, hi]（含端点）的最近距离平方
-static func _axis_dist_sq(p: int, lo: int, hi: int) -> int:
-	var d := 0
-	if p < lo:
-		d = lo - p
-	elif p > hi:
-		d = p - hi
-	return d * d
-
-
-## 获取与盒体重叠的 chunk 列表
-func _get_chunks_in_box(aabb: AABB) -> Array[Vector3i]:
-	if aabb.size.length_squared() <= 0:
-		return []
-	var min_pos := Vector3i(aabb.position)
-	var max_pos := Vector3i(aabb.position + aabb.size)
-	var min_ck := _chunk_of(min_pos)
-	var max_ck := _chunk_of(max_pos)
-	var result: Array[Vector3i] = []
-	for x in range(min_ck.x, max_ck.x + 1):
-		for y in range(min_ck.y, max_ck.y + 1):
-			for z in range(min_ck.z, max_ck.z + 1):
-				result.append(Vector3i(x, y, z))
-	return result
-
-
-## 把球形范围内"磁盘上有、内存里没有"的 chunk 先载入（流式下范围查询 / 破坏的前置步骤）：
-## 原生只读内存缓冲，不先载入就会漏掉已持久化但未加载的数据。
-func ensure_sphere_loaded(center: Vector3, radius: float) -> void:
-	if stream == null:
-		return
-	for ck in _get_chunks_in_sphere(center, radius):
-		if not _chunk_buffers.has(ck) and is_stored(ck):
-			preload_chunk(ck)
-
-
-## 盒形版本（同 ensure_sphere_loaded）。
-func ensure_box_loaded(aabb: AABB) -> void:
-	if stream == null:
-		return
-	for ck in _get_chunks_in_box(aabb):
-		if not _chunk_buffers.has(ck) and is_stored(ck):
-			preload_chunk(ck)
-
-
-func get_voxels_in_sphere(center: Vector3, radius: float) -> Array[Vector3i]:
-	var result: Array[Vector3i] = []
-	if _chunk_buffers.is_empty():
-		return result
-	ensure_sphere_loaded(center, radius)
-	result.assign(NativeLoader.collect_sphere_positions(_chunk_buffers, center, radius))
-	return result
-
-
-## 查询盒形范围内的所有体素位置（只读）。先找出重叠 chunk，再只扫这些 chunk 的密集缓冲。
-func get_voxels_in_box(aabb: AABB) -> Array[Vector3i]:
-	var result: Array[Vector3i] = []
-	if _chunk_buffers.is_empty():
-		return result
-	# 闭区间与 GDScript 版一致：min = floori(aabb.position)，max = floori(aabb.end - 1)
-	var mn := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
-	var mx := Vector3i(floori(aabb.end.x - 1.0), floori(aabb.end.y - 1.0), floori(aabb.end.z - 1.0))
-	ensure_box_loaded(aabb)
-	result.assign(NativeLoader.collect_box_positions(_chunk_buffers, mn, mx))
-	return result
-
-
-## 移除球形范围内的所有体素 (用于破坏系统)
-func remove_voxels_in_sphere(center: Vector3, radius: float, notify: bool = true) -> Array[Vector3i]:
-	return _remove_voxels(get_voxels_in_sphere(center, radius), notify)
-
-
-## 移除盒形范围内的所有体素 (用于破坏系统)
-func remove_voxels_in_box(aabb: AABB, notify: bool = true) -> Array[Vector3i]:
-	return _remove_voxels(get_voxels_in_box(aabb), notify)
-
-
 ## 批量移除指定位置的体素 (公开接口，供破坏/崩塌等系统调用)
 func remove_voxels(positions: Array, notify: bool = true) -> Array:
 	return _remove_voxels(positions, notify)
@@ -2077,17 +1988,6 @@ func add_material(mat: VoxelMaterial, notify: bool = false) -> VoxelMaterial:
 		emit_changed()
 	return mat
 
-
-## 获取材质（下标 == 材质ID 直接访问，越界 / 空位返回 null）。索引 0 = 空。
-func get_material(index: int) -> VoxelMaterial:
-	if index >= 0 and index < materials.size():
-		return materials[index]
-	return null
-
-
-## 按材质 ID 查找材质（对外鲁棒接口：即使传入未对齐数组也能找到；id<=0/不存在返回 null）
-func get_material_by_id(mat_id: int) -> VoxelMaterial:
-	return VoxelMaterial.find_by_id(materials, mat_id)
 
 
 ## 触发 changed 信号 (批量修改后手动调用)
@@ -2265,21 +2165,6 @@ func load_data(data: Variant) -> void:
 	emit_changed()
 
 
-## 指定 chunk 内的所有体素位置（密集缓冲扫描），空 chunk 返回空数组。
-func get_chunk_voxels(chunk_key: Vector3i) -> Array:
-	if not _chunk_buffers.has(chunk_key) and is_stored(chunk_key):
-		# 流式：存储里的 chunk 载入内存再遍历（保证结果完整）
-		preload_chunk(chunk_key)
-	var buf = _chunk_buffers.get(chunk_key)
-	if buf == null:
-		return []
-	var result: Array = []
-	var origin := VoxelChunk.origin_of(chunk_key)
-	for i in CHUNK_VOLUME:
-		if buf[i] > 0:
-			result.append(origin + _local_from_index(i))
-	return result
-
 
 ## O(1) 判断指定 chunk 数据是否已就绪（内存已加载 / 流中已存）。可生成但尚未生成的返回 false。
 func has_chunk(chunk_key: Vector3i) -> bool:
@@ -2362,24 +2247,6 @@ func flood_fill(seeds, restrict: Dictionary = {}) -> Dictionary:
 	return VoxelConnectivity.flood_fill(seeds, has_voxel, restrict)
 
 
-## 某体素所在的整个连通块。见 VoxelConnectivity.find_connected
-func find_connected(pos: Vector3i) -> Dictionary:
-	return VoxelConnectivity.find_connected(pos, has_voxel)
-
-
-## 某体素的连接度（相邻实体素数 0-6）。见 VoxelConnectivity.connectivity
-func connectivity(pos: Vector3i) -> int:
-	return VoxelConnectivity.connectivity(pos, has_voxel)
-
-
-## 某体素的相邻实体素位置数组 (6 方向)。见 VoxelConnectivity.neighbors
-func neighbors(pos: Vector3i) -> Array[Vector3i]:
-	return VoxelConnectivity.neighbors(pos, has_voxel)
-
-
-## 按 6 方向连通性分组，返回 Array[Array[Vector3i]]。见 VoxelConnectivity.partition_connected
-static func partition_connected(positions: Array) -> Array:
-	return VoxelConnectivity.partition_connected(positions)
 
 
 ## 找出"悬空"体素（与地面断开的连通分量）。空世界守卫留在本类（读存储侧权威计数）。

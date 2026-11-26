@@ -493,7 +493,7 @@ func _consume_voxels(positions: Array, opts: Dictionary = {}) -> Dictionary:
 	# 1. 分组（只有"掉落体"模式需要；连通分组是掉落的物理单位）
 	var groups: Array = []
 	if spawn_mode == ConsumeSpawn.CONSUME_SPAWN_GROUPS:
-		groups = QVoxelSource.partition_connected(positions)
+		groups = VoxelConnectivity.partition_connected(positions)
 		stats["groups"] = groups.size()
 	var _t1 := Time.get_ticks_usec() if diag_enabled else 0
 

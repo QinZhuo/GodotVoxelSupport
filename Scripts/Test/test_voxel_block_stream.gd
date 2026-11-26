@@ -217,15 +217,18 @@ func test_encode_anim_writes_clears_as_empty_codec() -> void:
 
 func test_anim_meta_omits_defaults_and_roundtrips() -> void:
 	assert_eq(QVoxelBlockStream.anim_meta_json({}), {}, "空 meta 全缺省")
-	assert_eq(QVoxelBlockStream.anim_meta_json({"fps": 12, "loop": true}), {},
+	assert_eq(QVoxelBlockStream.anim_meta_json(
+		{"fps": QVoxelSpec.ANIM_FPS_DEFAULT, "loop": QVoxelSpec.ANIM_LOOP_DEFAULT}), {},
 		"等于缺省值的字段不写（省字节且让'未设置'与'设成默认'字节相同）")
 	var d := QVoxelBlockStream.anim_meta_json({"fps": 24, "loop": false, "tags": ["a"]})
 	assert_eq(int(d.get("fps")), 24, "非缺省 fps 写入")
 	assert_eq(bool(d.get("loop")), false, "非缺省 loop 写入")
 	assert_eq(QVoxelBlockStream.anim_meta_from_json(d),
 		{"fps": 24, "loop": false, "tags": ["a"]}, "归一化后应还原成同一份")
-	assert_eq(QVoxelBlockStream.anim_meta_from_json({}).get("fps"), 12, "缺字段补缺省 fps=12")
-	assert_eq(QVoxelBlockStream.anim_meta_from_json({}).get("loop"), true, "缺字段补缺省 loop=true")
+	assert_eq(QVoxelBlockStream.anim_meta_from_json({}).get("fps"),
+		QVoxelSpec.ANIM_FPS_DEFAULT, "缺字段补缺省 fps（真值在 QVoxelSpec.ANIM_FPS_DEFAULT）")
+	assert_eq(QVoxelBlockStream.anim_meta_from_json({}).get("loop"),
+		QVoxelSpec.ANIM_LOOP_DEFAULT, "缺字段补缺省 loop")
 
 
 # ── CACH ─────────────────────────────────────────────────────────────────

@@ -54,8 +54,6 @@ const REQUIRED_METHODS: Array[StringName] = [
 	&"collect_all_positions",
 	&"collect_all_flat",
 	&"collect_bounds",
-	&"collect_sphere_positions",
-	&"collect_box_positions",
 	&"install_flat_voxels",
 	# 破坏内核：VoxelDestructible 的硬依赖。此前漏列，导致"库方法不全"这类版本不匹配
 	# 在校验阶段被放过，直到实际调破坏时才炸。
@@ -408,22 +406,6 @@ static func collect_bounds(buffers: Dictionary) -> Array:
 	if inst == null:
 		return []
 	return inst.call(&"collect_bounds", buffers)
-
-
-## 球内体素位置（判定 dx²+dy²+dz² <= radius²，float 比较）。
-static func collect_sphere_positions(buffers: Dictionary, center: Vector3, radius: float) -> Array:
-	var inst := instance()
-	if inst == null:
-		return []
-	return inst.call(&"collect_sphere_positions", buffers, center, radius)
-
-
-## 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
-static func collect_box_positions(buffers: Dictionary, min_p: Vector3i, max_p: Vector3i) -> Array:
-	var inst := instance()
-	if inst == null:
-		return []
-	return inst.call(&"collect_box_positions", buffers, min_p, max_p)
 
 
 ## 统一形状破坏内核（伤害结算下沉原生）：一趟完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"。

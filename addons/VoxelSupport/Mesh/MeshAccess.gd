@@ -20,7 +20,11 @@ const FILTER_NAMES := {
 	"stl": "STL 网格（.stl）",
 }
 ## 动画采样帧率与帧数上限。体素帧动画本来只有 4~12 fps 的观感，采太密只是白烧内存。
-const ANIM_FPS := 12.0
+## 【为什么引用 QVoxelSpec 而不是写 12.0】导入/编辑/运行时三处的 fps 缺省必须同源，
+## 否则"模型存一轮再读回帧率就变"。缺省值唯一事实在 Core/QVoxelSpec.ANIM_FPS_DEFAULT。
+## 注意：改它会连带 MeshAccess 的采样帧数上限估算（clampi(..., 2, MAX_FRAMES)）一起变，
+## 这是预期行为 —— 帧率降低后同样的动画时长需要更多帧。
+const ANIM_FPS := float(QVoxelSpec.ANIM_FPS_DEFAULT)
 const MAX_FRAMES := 64
 ## 贴图长边上限（超过则等比缩小）：导入一张 4K 图只为取色，没必要按原样常驻。
 const TEX_LIMIT := 1024

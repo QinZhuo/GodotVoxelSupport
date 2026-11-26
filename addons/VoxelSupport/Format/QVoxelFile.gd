@@ -65,11 +65,11 @@ class QVoxelDocument extends RefCounted:
 		return int(head.get(QVoxelSpec.HEAD_BPP_KEY, QVoxelSpec.CHANNEL_BPP))
 
 	func get_block_size() -> int:
-		return int(head.get("block_size", QVoxelSpec.DEFAULT_BLOCK_SIZE))
+		return int(head.get(QVoxelSpec.HEAD_BLOCK_SIZE_KEY, QVoxelSpec.DEFAULT_BLOCK_SIZE))
 
 	## bounds（体素坐标，半开区间 [min, max)）。未给出返回空 Dictionary。
 	func get_bounds() -> Dictionary:
-		var b: Variant = head.get("bounds")
+		var b: Variant = head.get(QVoxelSpec.HEAD_BOUNDS_KEY)
 		return b if b is Dictionary else {}
 
 	## 全部 model_id（统一为 int，升序）。
@@ -423,7 +423,7 @@ static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 	if B <= 0 or (B & (B - 1)) != 0:
 		rep.errors.append("HEAD.block_size=%d 不是 2 的幂" % B)
 		return
-	var n := B * B * B
+	var n := QVoxelSpec.block_volume(B)   # 立方体积只有一个实现（QVoxelSpec）
 
 	# 通道：v4 扁平单键，必须是 material / 16 位（与能力门同一判据）。
 	if doc.get_channel() != QVoxelSpec.DOMINANT_CHANNEL:
@@ -435,7 +435,7 @@ static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 		return
 
 	# up_axis 只允许 x/y/z；其他值按缺省 y 处理并告警，不拒绝文件。
-	var up := str(doc.head.get("up_axis", QVoxelSpec.DEFAULT_UP_AXIS))
+	var up := str(doc.head.get(QVoxelSpec.HEAD_UP_AXIS_KEY, QVoxelSpec.DEFAULT_UP_AXIS))
 	if not (up in QVoxelSpec.ALLOWED_UP_AXES):
 		rep.warnings.append("HEAD.up_axis='%s' 非法（应为 %s），按默认 '%s' 处理" \
 				% [up, QVoxelSpec.ALLOWED_UP_AXES, QVoxelSpec.DEFAULT_UP_AXIS])
@@ -504,7 +504,9 @@ static func _validate(doc: QVoxelDocument, rep: QVoxelReport) -> void:
 					"model %s 帧 %d" % [fmid, fi], rep)
 			bounds_violations += int(fv["bounds"])
 			mate_violations += int(fv["mate"])
-			kept_frames.append({"duration_ms": maxi(0, int(fdict.get("duration_ms", 0))), "blocks": bdict})
+			kept_frames.append({
+				QVoxelSpec.ANIM_FRAME_DURATION_KEY: maxi(0, int(fdict.get(QVoxelSpec.ANIM_FRAME_DURATION_KEY, 0))),
+				"blocks": bdict})
 		doc.frames[fmid] = kept_frames
 
 	if bounds_violations > 0:
@@ -619,7 +621,7 @@ static func _parse_vxel_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 		doc.models[model_id] = {}
 		return model_id
 
-	var n := block_size * block_size * block_size
+	var n := QVoxelSpec.block_volume(block_size)
 	var blocks: Dictionary = {}
 	var pos := QVoxelSpec.VXEL_MODEL_HEADER_SIZE
 	var truncated := false  # 声明块数多于实际字节
@@ -718,7 +720,7 @@ static func _parse_anim_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 		return model_id
 	var meta := QVoxelBlockStream.anim_meta_from_json(QVoxelBlockStream.decode_json(payload.slice(meta_pos + 4, meta_end)))
 
-	var n := block_size * block_size * block_size
+	var n := QVoxelSpec.block_volume(block_size)
 	var frames: Array = []
 	var prev: Dictionary = {}     # 上一帧的完整块表（帧 0 的基线为空）
 	var pos := meta_end
@@ -760,7 +762,7 @@ static func _parse_anim_into(doc: QVoxelDocument, payload: PackedByteArray, bloc
 			cur[bkey] = buf
 		if broken:
 			break
-		frames.append({"duration_ms": duration, "blocks": cur})
+		frames.append({QVoxelSpec.ANIM_FRAME_DURATION_KEY: duration, "blocks": cur})
 		prev = cur
 		pos = frame_end
 
@@ -1059,7 +1061,7 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxelDoc
 				var old_payload := _block_payload(old_bytes, bi)
 				var old_index: Variant = vxel_index.get(mid)
 				if not (old_index is Dictionary) or (old_index as Dictionary).is_empty():
-					old_index = index_vxel_blocks(old_payload, block_size)
+					old_index = index_vxel_blocks(old_payload)
 				var payload_vxel := encode_vxel_blocks(old_payload, old_index, overlay, deleted, block_size)
 				if payload_vxel.is_empty():
 					continue   # 该 model 已无任何块 → 不写（等同删除整个 VXEL）
@@ -1161,7 +1163,9 @@ static func serialize_incremental(old_bytes: PackedByteArray, old_doc: QVoxelDoc
 ## LOD0 子块 CRC 集合。
 ## 注意：offset 全部**相对 payload 起点**，故"该 payload 在文件中的绝对偏移"由调用方补进
 ## `_meta.base`（按块随机读盘时要把两者相加）。
-static func index_vxel_blocks(payload: PackedByteArray, _block_size: int) -> Dictionary:
+## 【签名只有一个参数】此函数只按 VXEL 模型头解出块数与长度，块内布局的尺寸信息由子块头自带，
+## 故 block_size 从未被读过 —— 那个形参是历史残留，删掉以免调用方误以为它影响结果。
+static func index_vxel_blocks(payload: PackedByteArray) -> Dictionary:
 	var out: Dictionary = {}
 	if payload.size() < QVoxelSpec.VXEL_MODEL_HEADER_SIZE:
 		return out
@@ -1209,7 +1213,7 @@ static func index_vxel_blocks(payload: PackedByteArray, _block_size: int) -> Dic
 ##
 ## 返回不含 model_id 的负载（前 2 字节占位 0，由调用方回填）；最终一块都不剩时返回空。
 static func encode_vxel_blocks(old_payload: PackedByteArray, old_index: Dictionary, overlay: Dictionary, deleted: Dictionary, block_size: int) -> PackedByteArray:
-	var n := block_size * block_size * block_size
+	var n := QVoxelSpec.block_volume(block_size)
 	var body := PackedByteArray()
 	var count := 0
 

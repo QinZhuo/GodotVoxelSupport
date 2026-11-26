@@ -12,6 +12,10 @@ extends RefCounted
 ## 【看效果】`preview()` 离屏渲一张 PNG，**不用导入、不用开软件**（`QVoxelPreview`）。
 ## 【节点 id】模型 = `model_id`（> 0）；组 = `-node_uid`（< 0，仅内存内稳定）。见 `nodes()`。
 
+## 实时分支上取"应用当前世界"的方法名。world() 与 _current_world() 都要调它 ——
+## 字符串各写一遍时，改一处忘另一处不会报错，只会静默走进无头分支（对着空气操作）。
+const SCRIPT_WORLD_METHOD := "script_world"
+
 static var _world: QVoxelWorld = null
 static var _active := 0
 
@@ -28,7 +32,7 @@ static func new_model(grid := Vector3i(32, 32, 32), block_size := 32) -> Diction
 		grid = Vector3i(32, 32, 32)
 	_world = QVoxelWorld.create_empty()
 	if block_size > 0:
-		_world.head["block_size"] = block_size
+		_world.head[QVoxelSpec.HEAD_BLOCK_SIZE_KEY] = block_size
 	_active = _world.create_model("Model", grid).model_id
 	return info()
 
@@ -440,7 +444,7 @@ static func set_frame_duration(index: int, ms: int, id := -1) -> bool:
 
 
 ## 时间轴元数据（播放兜底帧率 / 是否循环）。
-static func set_anim(fps := 12, loop := true, id := -1) -> bool:
+static func set_anim(fps := QVoxelSpec.ANIM_FPS_DEFAULT, loop := QVoxelSpec.ANIM_LOOP_DEFAULT, id := -1) -> bool:
 	var app: Variant = _app()
 	if app != null:
 		return bool(app.call("script_set_anim", fps, loop, id))
@@ -511,7 +515,7 @@ static func info() -> Dictionary:
 ## 底层世界（实时分支 = 应用当前打开的，无头分支 = 内存里的）。
 static func world() -> QVoxelWorld:
 	var app: Variant = _app()
-	return app.call("script_world") if app != null else _w()
+	return app.call(SCRIPT_WORLD_METHOD) if app != null else _w()
 
 
 ## 目标模型对象（需要绕过本类直接调 QVoxelModel 时用）。
@@ -541,7 +545,7 @@ static func _w() -> QVoxelWorld:
 ## 只读地取当前世界：有就返回，没有返回 null（不建）。只读用法（预览）走这个。
 static func _current_world() -> QVoxelWorld:
 	var app: Variant = _app()
-	return app.call("script_world") if app != null else _world
+	return app.call(SCRIPT_WORLD_METHOD) if app != null else _world
 
 
 static func _model(id := -1) -> QVoxelModel:

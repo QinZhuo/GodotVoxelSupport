@@ -208,11 +208,6 @@ public:
 	static PackedInt32Array collect_all_flat(const Dictionary &buffers);
 	// 内容包围盒，返回 [min:Vector3i, max:Vector3i]；无体素返回空 Array。
 	static Array collect_bounds(const Dictionary &buffers);
-	// 球内体素位置（判据：dx²+dy²+dz² <= radius²，float 比较，已无 GDScript 对应实现；
-	// 候选只扫"球 AABB ∩ chunk"的格子）。
-	static Array collect_sphere_positions(const Dictionary &buffers, const Vector3 &center, float radius);
-	// 盒内体素位置（闭区间 [min_p, max_p]，体素坐标）。
-	static Array collect_box_positions(const Dictionary &buffers, const Vector3i &min_p, const Vector3i &max_p);
 	// ---- 破坏内核（统一形状 + 累伤一趟完成）----
 	// 一趟内完成"框定 chunk → 读材质 → 比硬度 → 累加 / 判移除"；材质就在遍历到的 chunk 缓冲里，
 	// 所以不需要"先收集位置、再收集材质"两趟。

@@ -74,7 +74,12 @@ func setup(a: QVoxelAsset, d: QVoxelSource = null, mid: int = -1, autoplay: bool
 		var f: Variant = frames[i]
 		durations[i] = int((f as Dictionary).get("duration_ms", 0)) if f is Dictionary else 0
 	var tags: Variant = anim.get("tags")
-	_clock.configure(durations, int(anim.get("fps", 12)), bool(anim.get("loop", true)),
+	# 【缺省 fps/loop 必须引用 QVoxelSpec，不能写字面量】编辑器模型 anim_fps 缺省 4，
+	# 而这里曾是裸 12 —— 同一份动画"存一轮再读回"帧率就从 4 变 12，播放速度整体错。
+	# 用户裁决统一为 4，全仓只允许 QVoxelSpec.ANIM_FPS_DEFAULT 一处定义。
+	_clock.configure(durations,
+			int(anim.get("fps", QVoxelSpec.ANIM_FPS_DEFAULT)),
+			bool(anim.get("loop", QVoxelSpec.ANIM_LOOP_DEFAULT)),
 			tags if tags is Array else [])
 
 	# 帧 0 必须**无论播不播**都先落到数据上：静态资产摆在那里显示的也应是第 0 帧，

@@ -33,39 +33,6 @@ func _is_world_visible(world_pos: Vector3) -> bool:
 		return true
 	return host.view_layer.is_world_visible(world_pos)
 
-## 一组体素位置的整数包围盒：返回 [最小角, 最大角]（含端点，单位=体素格）。
-## 空集合返回 []（"空"该怎么处理各处本来就不同，不在这里替调用方决定）。
-## 【为什么抽出来】"遍历一遍算 min/max 三元组"在本组件里出现了 5 次（超大组拆分 / 掉落块中心
-## / 凸包 8 角点 / 网格平移原点 / Box 碰撞体），每处都手抄一遍 maxi/mini 三元组。抽成一个
-## 函数后，"体素 p 占 [p-0.5, p+0.5]、格心就是 p"这个口径只需要在一个地方被想清楚。
-## 入参可以是 Array（体素位置列表）或 Dictionary（键为体素位置，如 local_voxels）：
-## GDScript 里 `for x in dict` 遍历的正是键，两种调用因此共用同一份实现。
-static func _voxel_bounds(source: Variant) -> Array[Vector3i]:
-	var out: Array[Vector3i] = []
-	if source == null:
-		return out
-	if source is Array and (source as Array).is_empty():
-		return out
-	if source is Dictionary and (source as Dictionary).is_empty():
-		return out
-	var first := true
-	var min_p := Vector3i.ZERO
-	var max_p := Vector3i.ZERO
-	for pos in source:
-		var p: Vector3i = pos
-		if first:
-			min_p = p
-			max_p = p
-			first = false
-		else:
-			min_p = Vector3i(mini(min_p.x, p.x), mini(min_p.y, p.y), mini(min_p.z, p.z))
-			max_p = Vector3i(maxi(max_p.x, p.x), maxi(max_p.y, p.y), maxi(max_p.z, p.z))
-	if not first:
-		out.append(min_p)
-		out.append(max_p)
-	return out
-
-
 # --- 配置（由宿主 configure() 传入；子节点不挂 @export） ---
 # 下面的初值必须与 VoxelDestructible 对应 @export 的默认值逐项一致：
 # configure() 每帧覆盖，所以不一致平时不报错，但"宿主创建后到首帧 configure 之间"
@@ -222,22 +189,42 @@ func _emit_debris(positions: Array, mat_map: Dictionary, is_collapse: bool,
 	if not _is_world_visible(center + global_position):
 		return
 
-	# 按材质分组，每组发射一个粒子系统
+	# 按材质分组发射。600 = 单材质单次上限（整块碎裂时体素数可能上千）。
+	_group_and_emit(positions, count, func(p: Vector3i) -> int: return int(mat_map.get(p, -1)),
+			center, emission_size, 600, is_collapse)
+
+
+## 按材质分组后逐组发射粒子的**唯一实现**。两个碎片入口只决定三件事：
+##   · 上限：破坏碎屑按 max_debris_per_hit 截断，整块碎裂按 600/材质 封顶
+##   · 发射范围：盒子范围（整块碎裂散开）还是质心一点（破坏喷发）
+##   · is_collapse：向下坠落 / 向上喷发
+## 此前两处各写一遍"建 by_mat → 逐组发射"，改一处漏一处就表现为
+## "崩塌的碎屑"与"破坏的碎屑"手感漂移，且不报错。
+## 参数：
+##   source:    体素位置集合（Array，或键为位置的 Dictionary —— for 循环遍历的就是键）
+##   limit:     >0 时只取前 limit 个（0 = 不截断）
+##   mat_id_of: Callable(Vector3i) -> int，按位置查材质 ID
+##   center:    发射中心（本组件局部坐标）
+##   emission_size: 非零 = 盒形发射范围；零 = 从质心一点发射
+##   cap:       单个材质最多发射多少粒子
+func _group_and_emit(source: Variant, limit: int, mat_id_of: Callable, center: Vector3,
+		emission_size: Vector3, cap: int, is_collapse: bool) -> void:
+	if source == null:
+		return
+	var seen := 0
 	var by_mat := {}
-	for i in range(count):
-		var pos: Vector3i = positions[i]
-		var mat_id: int = mat_map.get(pos, -1)
+	for pos_key in source:
+		if limit > 0 and seen >= limit:
+			break
+		seen += 1
+		var mat_id: int = mat_id_of.call(pos_key)
 		if not by_mat.has(mat_id):
 			by_mat[mat_id] = []
-		by_mat[mat_id].append(pos)
-
+		by_mat[mat_id].append(pos_key)
 	for mat_id in by_mat:
 		var list: Array = by_mat[mat_id]
-		# 获取材质的 mass，用于调整粒子运动表现
-		var mat_mass: float = _get_material_mass(mat_id)
-		# 单材质粒子数上限：避免超大块一帧塞进几千个粒子
-		var amount := mini(list.size(), 600)
-		_spawn_debris_particles(center, mat_id, amount, mat_mass, is_collapse, emission_size)
+		_spawn_debris_particles(center, mat_id, mini(list.size(), cap),
+				_get_material_mass(mat_id), is_collapse, emission_size)
 
 
 ## 【语义入口 1】整块碎裂粒子：物理体池已满 / 中块交替 / 掉落块回收时，
@@ -452,15 +439,40 @@ func shutdown() -> void:
 
 ## 清空全部表现层产物（销毁 / 退出场景 / 重建时调用）。
 func clear_all() -> void:
+	# 粒子侧：根节点下的在飞粒子直接销毁，池里的空闲节点一并释放。
 	if _debris_root:
 		for child in _debris_root.get_children():
 			child.queue_free()
-	# 清空粒子池（场景退出时全部释放）
 	for gp in _particle_pool:
 		if is_instance_valid(gp):
 			gp.queue_free()
 	_particle_pool.clear()
 	_particle_mesh_cache.clear()
+	# 掉落侧：**先解绑信号与 body 的父子关系再 queue_free**。只 queue_free 不够 ——
+	# 物理体在帧末才真正释放，期间仍参与一次物理步；而 `body_entered` 连到 _on_chunk_landed，
+	# 那条回调会 create_timer 持有 body 引用半秒。这里把连接断掉、meta 清掉，让"已清空"
+	# 立刻成立，不等下一帧。
+	if _falling_chunk_root:
+		for child in _falling_chunk_root.get_children():
+			var body := child as RigidBody3D
+			if body:
+				for conn in body.body_entered.get_connections():
+					body.body_entered.disconnect(conn["callable"])
+				body.remove_meta("local_voxels")
+			child.queue_free()
+	# 池里空闲的 body 不在场景里，直接释放；_body_gen 里它们的条目随 _body_gen.clear() 一起没。
+	for body in _body_pool_total:
+		if is_instance_valid(body):
+			body.queue_free()
+	_body_pool.clear()
+	_body_pool_total.clear()
+	_body_gen.clear()
+	_chunk_spawn_times.clear()
+	# 三张在途表：worker 结果回来时 _exiting / 代次不匹配会丢弃，这里只需清账本不 join
+	# （join 是 shutdown 的职责，clear_all 也可能在运行中被调用）。
+	_pending_falling_groups.clear()
+	_pending_falling_materials.clear()
+	_pending_mesh_results.clear()
 
 
 ## 在掉落块当前位置播放"整块碎裂"粒子（回收时视觉过渡）
@@ -478,18 +490,9 @@ func spawn_chunk_break_at_body(body: RigidBody3D) -> void:
 	if not _is_world_visible(center):
 		return
 	var emission_size := Vector3(2.0, 2.0, 2.0) * host.voxel_scale
-	# 按材质分组发射破碎粒子
-	var by_mat := {}
-	for pos_key in local_voxels:
-		var mat_id: int = int(local_voxels[pos_key])
-		if not by_mat.has(mat_id):
-			by_mat[mat_id] = []
-		by_mat[mat_id].append(pos_key)
-	for mat_id in by_mat:
-		var list: Array = by_mat[mat_id]
-		var mat_mass: float = _get_material_mass(mat_id)
-		var amount := mini(list.size(), 200)
-		_spawn_debris_particles(center, mat_id, amount, mat_mass, true, emission_size)
+	# 整块碎裂：不截断体素数（按材质封顶 200），直接从块包围盒范围散开。
+	_group_and_emit(local_voxels, 0, func(p: Vector3i) -> int: return int(local_voxels[p]),
+			center, emission_size, 200, true)
 
 
 ## 压缩在途掉落块 mesh 任务表：丢弃已完成任务的 ID。
@@ -571,7 +574,7 @@ func _split_oversized_group(group: Array) -> Array:
 	if group.size() <= MAX_FALLING_GROUP_VOXELS:
 		return [group]
 	# 计算包围盒，选择最长轴做切片，尽量保持子组空间紧凑
-	var bounds := _voxel_bounds(group)
+	var bounds := VoxelWorldUtil.voxel_span(group)
 	if bounds.is_empty():
 		return [group]
 	var min_p := bounds[0]
@@ -649,7 +652,7 @@ func _spawn_falling_chunk(group: Array, mat_map: Dictionary) -> void:
 	_ensure_falling_chunk_root()
 
 	# 1. 计算体素边界和中心（group 非空已由开头守卫保证）
-	var bounds := _voxel_bounds(group)
+	var bounds := VoxelWorldUtil.voxel_span(group)
 	var voxel_min := bounds[0]
 	var voxel_max := bounds[1]
 
@@ -742,7 +745,7 @@ func _falling_chunk_mesh_worker(local_voxels: Dictionary, materials: Array, scal
 ## 返回 PackedVector3Array（世界单位，相对块中心的局部坐标）
 static func _compute_hull_points(local_voxels: Dictionary, scale: float) -> PackedVector3Array:
 	var pts := PackedVector3Array()
-	var bounds := _voxel_bounds(local_voxels)
+	var bounds := VoxelWorldUtil.voxel_span(local_voxels)
 	if bounds.is_empty():
 		return pts
 	var min_p := bounds[0]
@@ -764,7 +767,7 @@ func _generate_falling_chunk_arrays(local_voxels: Dictionary, materials: Array, 
 	# 【负坐标修复】local_voxels 以 center 为中心（可为负）。原生生成器按 chunk 分组时
 	# 对负坐标（p>>CHUNK_SHIFT）分 chunk 导致各 chunk mesh 顶点基准不一致 → 掉落块被拉伸成"横条"。
 	# 统一平移到非负（相对组最小角），并用 offset=min 补偿回 center 坐标系（C++: world = pos*scale + offset*scale）。
-	var min_p := _voxel_bounds(local_voxels)[0]
+	var min_p: Vector3i = VoxelWorldUtil.voxel_span(local_voxels)[0]
 	var translated: Dictionary = {}
 	var max_extent := 0
 	for pos_key in local_voxels:
@@ -884,7 +887,7 @@ func _apply_falling_chunk_mesh(body: RigidBody3D, arrays: Dictionary, local_voxe
 ## （最简碰撞方案，物理开销最低；空心块会被填满，贴合度差）
 func _add_box_collision(body: RigidBody3D, local_voxels: Dictionary) -> void:
 	var scale := host.voxel_scale
-	var bounds := _voxel_bounds(local_voxels)
+	var bounds := VoxelWorldUtil.voxel_span(local_voxels)
 	if bounds.is_empty():
 		return
 	var min_p := bounds[0]

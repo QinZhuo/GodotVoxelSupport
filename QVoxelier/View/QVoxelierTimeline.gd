@@ -351,7 +351,8 @@ func _sync() -> void:
 	_duration.value = 0 if not animated else m.frame_at(active).duration_ms
 	_duration.editable = animated
 	_duration_label.text = _duration_text()
-	_fps.value = 4 if m == null else m.anim_fps
+	# 无模型时的占位值取全仓唯一真值（QVoxelSpec.ANIM_FPS_DEFAULT），不再写裸 4。
+	_fps.value = QVoxelSpec.ANIM_FPS_DEFAULT if m == null else m.anim_fps
 	_fps.editable = animated
 	_fps_label.text = "%d fps" % int(_fps.value)
 	_loop.set_pressed_no_signal(true if m == null else m.anim_loop)
@@ -745,8 +746,9 @@ func _configure_clock() -> void:
 	durations.resize(n)
 	for i in n:
 		durations[i] = _model.frame_at(i).duration_ms
-	var fps := 4 if _model == null else _model.anim_fps
-	var loop := true if _model == null else _model.anim_loop
+	# 同上：缺省帧率取 QVoxelSpec.ANIM_FPS_DEFAULT。
+	var fps := QVoxelSpec.ANIM_FPS_DEFAULT if _model == null else _model.anim_fps
+	var loop := QVoxelSpec.ANIM_LOOP_DEFAULT if _model == null else _model.anim_loop
 	var tags: Array = [] if _model == null else _model.anim_tags
 	var sig := "%s|%d|%s|%s" % [str(durations), fps, str(loop),
 			tags_playback_signature(tags)]

@@ -66,32 +66,6 @@ static func flood_fill(seeds, is_solid: Callable, restrict: Dictionary = {}) -> 
 	return result
 
 
-## 找出某个体素所在的整个连通块（6 方向连通），返回该连通块的位置集合
-## 用于悬空判断、反应波及范围等
-static func find_connected(pos: Vector3i, is_solid: Callable) -> Dictionary:
-	if not is_solid.call(pos):
-		return {}
-	return flood_fill(pos, is_solid)
-
-
-## 某个体素的连接度：相邻的实体素数 (0-6)
-## 可用于薄弱点判断、支撑接触面积估算等
-static func connectivity(pos: Vector3i, is_solid: Callable) -> int:
-	var count := 0
-	for d: Vector3i in NEIGHBORS_6:
-		if is_solid.call(pos + d):
-			count += 1
-	return count
-
-
-## 返回某体素的所有相邻实体素位置数组 (6 方向)
-static func neighbors(pos: Vector3i, is_solid: Callable) -> Array[Vector3i]:
-	var result: Array[Vector3i] = []
-	for d: Vector3i in NEIGHBORS_6:
-		var nb := pos + d
-		if is_solid.call(nb):
-			result.append(nb)
-	return result
 
 
 ## 将一组位置按 6 方向连通性分组，返回 Array[Array[Vector3i]]

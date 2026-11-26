@@ -734,7 +734,6 @@ func _update_hud() -> void:
 	var trans_tris := _target.last_trans_triangles
 	var total_tris := solid_tris + trans_tris
 	var rebuild_chunks := _target.last_rebuild_chunk_count
-	var affected_chunks := _target.last_rebuild_affected_count
 	var mesh_gen_slice := _target.last_mesh_gen_time_slice_ms
 	var apply_time := _target.last_apply_time_ms
 
@@ -882,7 +881,6 @@ func _on_mesh_updated() -> void:
 		return
 	var mgt := _target.last_mesh_gen_time_ms
 	var rebuild_chunks := _target.last_rebuild_chunk_count
-	var affected_chunks := _target.last_rebuild_affected_count
 	var total_tris := _target.last_solid_triangles + _target.last_trans_triangles
 	var apply_time := _target.last_apply_time_ms
-	_log_perf_line("[网格完成] 重建Chunk=%d 受影响=%d 三角=%d 生成=%.1fms 应用=%.1fms" % [rebuild_chunks, affected_chunks, total_tris, mgt, apply_time])
+	_log_perf_line("[网格完成] 重建Chunk=%d 三角=%d 生成=%.1fms 应用=%.1fms" % [rebuild_chunks, total_tris, mgt, apply_time])

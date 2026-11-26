@@ -85,7 +85,7 @@ static func from_file(path: String) -> QVoxelAsset:
 static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 	var out := QVoxelAsset.new()
 	out.metadata = doc.head.duplicate(true)
-	out.up_axis = str(doc.head.get("up_axis", QVoxelSpec.DEFAULT_UP_AXIS))
+	out.up_axis = str(doc.head.get(QVoxelSpec.HEAD_UP_AXIS_KEY, QVoxelSpec.DEFAULT_UP_AXIS))
 	if out.up_axis == "x":
 		push_warning("[QVoxelAsset] up_axis='x' 暂不支持轴向修正，按 'y' 处理")
 	# 材质：索引 == 材质ID；条目 0（空气）留 null 占位
@@ -100,7 +100,8 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 		if blocks is Dictionary and not (blocks as Dictionary).is_empty():
 			out.models[int(mid)] = (blocks as Dictionary).duplicate()
 	# 帧动画（§12）：格式层已把块级增量还原成每帧的**完整块表**，这里只需键类型归一 + 补元数据。
-	var anim_meta := _anim_meta_from_scene(doc)
+	# 时序 meta 直接取 doc.anim_meta（v4 起时序就在 ANIM 块里，原先那层转发函数已无内容）。
+	var anim_meta: Dictionary = doc.anim_meta
 	for mid in doc.frames:
 		var frames: Variant = doc.frames[mid]
 		if not (frames is Array) or (frames as Array).is_empty():
@@ -109,8 +110,8 @@ static func from_document(doc: QVoxelFile.QVoxelDocument) -> QVoxelAsset:
 		var meta: Dictionary = anim_meta.get(id, {})
 		var tags: Variant = meta.get("tags")
 		out.animations[id] = {
-			"loop": bool(meta.get("loop", true)),
-			"fps": maxi(1, int(meta.get("fps", 12))),
+			"loop": bool(meta.get("loop", QVoxelSpec.ANIM_LOOP_DEFAULT)),
+			"fps": maxi(1, int(meta.get("fps", QVoxelSpec.ANIM_FPS_DEFAULT))),
 			"tags": (tags as Array).duplicate() if tags is Array else [],
 			"frames": (frames as Array).duplicate(),
 		}
@@ -168,12 +169,6 @@ static func _walk_nodes(nodes: Array, parent_xf: Transform3D, known: Dictionary,
 		var kids: Variant = node.get("children")
 		if kids is Array:
 			_walk_nodes(kids, world, known, pending, out)
-
-
-## 各模型的动画时序 meta：model_id → {loop, fps, tags}（§12.3）。
-## 【v4：时序在 ANIM 块里】不再是 NODE 节点条目的 `anim` 键，直接取 doc.anim_meta。
-static func _anim_meta_from_scene(doc: QVoxelFile.QVoxelDocument) -> Dictionary:
-	return doc.anim_meta
 
 
 ## 单个节点的局部变换。字段布局与编解码的唯一实现在 `QVoxelTransform.transform_from_json`

@@ -84,11 +84,17 @@ var _inflight: Dictionary = {}
 # 越过它们之后取值路径只有一条：**按块索引 seek 并从文件读那一块**（见 _read_clean_chunk）。
 # block_index（Vector3i）即 chunk 坐标（block_size == CHUNK_SIZE）。
 
-## 写入覆盖层：model_id → { chunk_key(Vector3i): PackedInt32Array }。
+## 写入覆盖层：chunk_key(Vector3i) → PackedInt32Array。
 ## 只装"改了但还没写进文件"的块；落盘成功即整体换出丢弃，条数受 auto_flush_dirty 上界约束。
+## 【为什么不按 model_id 嵌套】QVX 一个文件可装多个 model，但本流只承载"世界层"
+## 一个 model（恒定 LOD0_MODEL_ID，见类注释）。旧实现照格式层的形状套了
+## model_id → {chunk_key: buf} 一层，于是 LOD0_MODEL_ID 出现在 20 处取值前、
+## _restore_inflight 与 _count_pending 多出只为 model 1..N 服务的循环 —— 而那些 model
+## 本流从不写（磁盘上若有多 model 的 VXEL，原样搬运）。model 维度只在交给格式层的
+## 边界上临时还原（见 _write_file）。
 var _dirty_buffers: Dictionary = {}
 
-## 删除墓碑：model_id → { chunk_key(Vector3i): true }。
+## 删除墓碑：chunk_key(Vector3i) → true。口径与 _dirty_buffers 一致（模型维度已压平）。
 ## 删掉的块若已在文件里，必须留墓碑——否则 has_chunk/load_chunk 会顺着块索引把它读回来。
 var _deleted: Dictionary = {}
 
@@ -117,11 +123,14 @@ var _dirty := false
 var _dirty_count := 0
 var _loaded := false
 
-## 【增量写】脏 model 集合（model_id → true）。仅这些 VXEL 块在 flush 时重建，
-## 其余块直接搬运磁盘上的原始字节。替代"改一个块就重编码全世界"的全量路径；
-## 而"重建"本身又只重编码变了的子块（内容看 _dirty_buffers、删除看 _deleted），
-## 未变子块仍按块索引搬运旧字节（见 QVoxelFile.encode_vxel_blocks）。
-var _dirty_models: Dictionary = {}
+## 【增量写】本流的 VXEL 块（LOD0）是否需要重建。需要则 flush 时重编码，否则整块
+## 搬运磁盘原始字节 —— 替代"改一个块就重编码全世界"的全量路径；而"重建"本身又只
+## 重编码变了的子块（内容看 _dirty_buffers、删除看 _deleted），未变子块仍按块索引搬运
+## 旧字节（见 QVoxelFile.encode_vxel_blocks）。
+## 【为什么是 bool 而不是 {model_id: true}】本流只写 LOD0_MODEL_ID 一个 model，那个集合
+## 只会装一个键；多 model 文件里其它 VXEL 块本流从不写（原样搬运）。一个只能取
+## "空 / 含 0" 两种值的集合，不如直接问"我们那一个 model 脏不脏"。
+var _vxel_dirty := false
 
 ## 【增量写】非 model 全局块（HEAD/MATE/NODE）是否需要重编码。materials/metadata 变动时置 true。
 var _dirty_global := false
@@ -210,7 +219,7 @@ func _ensure_loaded() -> void:
 	_loaded_node = doc.node
 	# 【二级索引】建 VXEL 子块索引（含各子块 CRC），此后每次增量写直接复用，
 	# 避免写盘时反复对 1.4MB 负载重算 → 这是子块级增量真正生效的前提。
-	# 此时 _dirty_models 为空 → 全部 model 都建（加载后的首次写盘即命中缓存）。
+	# 此时 _vxel_dirty 为 false → 全部 model 都建（加载后的首次写盘即命中缓存）。
 	_build_vxel_index(doc.get_block_size(), bytes)
 	# 【派生缓存索引】CACH 里的粗层条目：只记"在哪、来源是什么"，**不解码**缓冲区。
 	# 来源是否仍成立改到读时判定（见 _cach_entry_valid）；这里仍必须先有 _vxel_index
@@ -252,9 +261,12 @@ func _write_file() -> void:
 	var incremental := _can_write_incremental()
 	var bytes: PackedByteArray
 	if incremental:
+		# 内部账本是扁平的"世界层"，格式层要的是 model_id 键 → 只在这两处调用点还原
+		# 那一层（models 见 _overlay_doc_models）。类内其余位置不必再带 model 维度。
+		var dirty_models := {LOD0_MODEL_ID: true} if _vxel_dirty else {}
 		# 增量基准 = 磁盘上当前的完整文件字节（按需读一次，不常驻）
 		bytes = QVoxelFile.serialize_incremental(_read_base_bytes(), old_doc, doc,
-				_dirty_models, _dirty_global, true, _deleted, _vxel_index, cach_replace)
+				dirty_models, _dirty_global, true, {LOD0_MODEL_ID: _deleted}, _vxel_index, cach_replace)
 	else:
 		bytes = QVoxelFile.serialize(doc)
 
@@ -279,13 +291,13 @@ func _write_file() -> void:
 	_inflight = {
 		"overlay": _dirty_buffers, "deleted": _deleted,
 		"lod": _dirty_lod, "lod_deleted": _deleted_lod,
-		"models": _dirty_models, "global": _dirty_global,
+		"vxel_dirty": _vxel_dirty, "global": _dirty_global,
 	}
 	_dirty_buffers = {}
 	_deleted = {}
 	_dirty_lod = {}
 	_deleted_lod = {}
-	_dirty_models = {}
+	_vxel_dirty = false
 	_dirty_global = false
 	_dirty = false
 	_dirty_count = 0
@@ -340,25 +352,25 @@ func _on_write_done(serial: int, result: Array) -> void:
 ## 索引与文件错位。置 _loaded=false 让下次写盘重新加载磁盘（恢复真实索引），
 ## 从"未落盘"退化为全量写 —— 而全量写会只写覆盖层，所以这里必须先重建索引，否则丢磁盘数据。
 func _restore_inflight() -> void:
-	var overlay: Dictionary = _inflight.get("overlay", {})
-	for mid in overlay:
-		_ensure_sub(_dirty_buffers, int(mid)).merge(overlay[mid], false)   # 飞行中的新写入优先
-	var deleted: Dictionary = _inflight.get("deleted", {})
-	for mid in deleted:
-		_ensure_sub(_deleted, int(mid)).merge(deleted[mid], false)
+	# 飞行中的新写入优先（overwrite=false）：快照里的是"更早、没写成功"的那批。
+	_dirty_buffers.merge(_inflight.get("overlay", {}), false)
+	_deleted.merge(_inflight.get("deleted", {}), false)
+	# 粗层的 lod 是真维度（1..N 同时存在），故仍按层合并。
 	var lod_overlay: Dictionary = _inflight.get("lod", {})
 	for lod in lod_overlay:
 		_ensure_sub(_dirty_lod, int(lod)).merge(lod_overlay[lod], false)
 	var lod_deleted: Dictionary = _inflight.get("lod_deleted", {})
 	for lod in lod_deleted:
 		_ensure_sub(_deleted_lod, int(lod)).merge(lod_deleted[lod], false)
-	var models: Dictionary = _inflight.get("models", {})
-	for mid in models:
-		_dirty_models[int(mid)] = true
+	if bool(_inflight.get("vxel_dirty", false)):
+		_vxel_dirty = true
 	if bool(_inflight.get("global", false)):
 		_dirty_global = true
 	_inflight = {}
 	_dirty = true
+	# 【必须重数】并回的这些改动又要重新排队等落盘，计数必须反映真实待写量：
+	# 归零会让它们永远等不到自动落盘（见 _mark_dirty 的注释）。
+	_dirty_count = _count_pending()
 	_loaded = false
 	_block_index = []
 	_vxel_index.clear()
@@ -383,6 +395,13 @@ func _can_write_incremental() -> bool:
 ## 读取磁盘上的基准字节（增量写搬运未变块用）。
 ## 【为什么不常驻】它等于"整份文件的字节副本"。改为每次写盘按需读一次：
 ## 代价是一次文件读（memcpy 级），而收益是彻底去掉一份随世界增长的内存。
+##
+## 【为什么不缓存"自己刚写出的字节"】看起来能省掉这一次读（上次 flush 写出的字节 == 现在的
+## 磁盘内容）。但那就是把刚删掉的 _raw_bytes 原样加回来：一份**随世界规模无界增长**的常驻副本。
+## 而省下的这次读并非真实 I/O —— 文件刚被写过，页缓存里就是热的，只是一次 memcpy（≈GB/s）。
+## 真正想省掉主线程这段时间，唯一彻底的做法是把序列化整体搬进 worker；但那样 has_chunk /
+## load_chunk 在写盘在途期间会看到旧索引（现在索引在交棒前就同步更新好），是语义变更而非优化。
+## 故此处保持"按需读一次"，并把结论留在这里，免得日后又被当成遗漏改回去。
 func _read_base_bytes() -> PackedByteArray:
 	if not FileAccess.file_exists(file_path):
 		return PackedByteArray()
@@ -427,7 +446,7 @@ func _refresh_vxel_index(bytes: PackedByteArray) -> void:
 
 
 ## 建/更新 VXEL 子块索引 { model_id: index_vxel_blocks + _meta.base }。基于 _block_index + bytes。
-## 维护策略（"跟着写入走"）：_dirty_models 里的 model 重算子块索引（其字节变了），
+## 维护策略（"跟着写入走"）：本流写脏的那个 model（_vxel_dirty + LOD0_MODEL_ID）重算子块索引，
 ## 其余沿用旧索引（字节原样搬运，子块偏移与 CRC 依旧准确）。
 ## 于是单次写盘的重索引代价 = O(脏 model 的子块数)，与全世界大小无关。
 ## bytes 必传：基准字节不再常驻（见 _block_index 注释），由调用方提供当前字节。
@@ -446,8 +465,9 @@ func _build_vxel_index(block_size: int, bytes: PackedByteArray) -> void:
 		var total: int = bi["total"]
 		var payload_off := off + QVoxelSpec.BLOCK_HEADER_SIZE
 		var payload_len := total - QVoxelSpec.BLOCK_HEADER_SIZE
-		# 未变 model 且已有索引：沿用（省下一次 1.4MB 负载的 CRC 扫描），仅刷新文件基址
-		if not _dirty_models.has(mid) and _vxel_index.has(mid):
+		# 未变 model 且已有索引：沿用（省下一次 1.4MB 负载的 CRC 扫描），仅刷新文件基址。
+		# 本流只会把 LOD0 那个 model 标脏（见 _vxel_dirty）；其余 model 从不写，字节必未变。
+		if not (mid == LOD0_MODEL_ID and _vxel_dirty) and _vxel_index.has(mid):
 			var kept: Dictionary = _vxel_index[mid]
 			(kept["_meta"] as Dictionary)["base"] = payload_off
 			next_idx[mid] = kept
@@ -456,7 +476,7 @@ func _build_vxel_index(block_size: int, bytes: PackedByteArray) -> void:
 		# 能通过旧判据却让 index_vxel_blocks 立刻返回空索引（静默丢块）。
 		if payload_len < QVoxelSpec.VXEL_MODEL_HEADER_SIZE or payload_off + payload_len > src.size():
 			continue
-		var sub := QVoxelFile.index_vxel_blocks(src.slice(payload_off, payload_off + payload_len), block_size)
+		var sub := QVoxelFile.index_vxel_blocks(src.slice(payload_off, payload_off + payload_len))
 		(sub["_meta"] as Dictionary)["base"] = payload_off
 		next_idx[mid] = sub
 	_vxel_index = next_idx
@@ -471,12 +491,12 @@ func _build_head() -> Dictionary:
 		QVoxelSpec.HEAD_CHANNEL_KEY: QVoxelSpec.DOMINANT_CHANNEL,
 		QVoxelSpec.HEAD_BPP_KEY: QVoxelSpec.CHANNEL_BPP,
 		"block_size": CHUNK_SIZE,
-		"up_axis": QVoxelSpec.DEFAULT_UP_AXIS,
+		QVoxelSpec.HEAD_UP_AXIS_KEY: QVoxelSpec.DEFAULT_UP_AXIS,
 	}
 	# 附加键（metadata 里的自定义键并入 HEAD，便于携带世界级参数）
 	for k in metadata:
 		if k == "qvox" or k == QVoxelSpec.HEAD_CHANNEL_KEY or k == QVoxelSpec.HEAD_BPP_KEY \
-				or k == "block_size" or k == "up_axis":
+				or k == QVoxelSpec.HEAD_BLOCK_SIZE_KEY or k == QVoxelSpec.HEAD_UP_AXIS_KEY:
 			continue
 		head[k] = metadata[k]
 	return head
@@ -499,12 +519,9 @@ func _materials_to_qvx() -> Array:
 ## 故读取方无需关心键类型（历史上 int/str 混用曾让增量写无声退化成全量）。
 ## 这里不做"空块剪除"——save_chunk 早已把全空块转成 erase_chunk（见那里的注释）。
 func _overlay_doc_models() -> Dictionary:
-	var out: Dictionary = {}
-	for mid in _dirty_buffers:
-		var blocks: Dictionary = _dirty_buffers[mid]
-		if not blocks.is_empty():
-			out[int(mid)] = blocks
-	return out
+	if _dirty_buffers.is_empty():
+		return {}
+	return {LOD0_MODEL_ID: _dirty_buffers}
 
 
 # LOD 派生缓存（CACH，§6）
@@ -740,6 +757,31 @@ func _compare_block_keys(a: Vector3i, b: Vector3i) -> bool:
 	return QVoxelBlockCodec.key_less(a, b)
 
 
+# 脏标记（唯一入口）
+
+## 记一个待落盘改动，并在达到 auto_flush_dirty 时自动落盘。
+## 【为什么必须集中】_dirty_count 的唯一用途是自动落盘阈值，但它必须与"待写集合"同生共死：
+## 换出（_write_file）、并回（_restore_inflight）、清空（clear_cache）三处都要跟着动。
+## 从前 5 个调用点各自 += 1，而 _restore_inflight 忘了恢复 —— 落盘失败并回改动后计数归零，
+## 那些改动就永远等不到自动落盘（只能靠显式 flush），即"失败一次 = 静默丢一窗未落盘数据"。
+## 另一处不一致：删除（erase_chunk）也累加计数却从不检查阈值，删除攒到再多也不会触发落盘。
+func _mark_dirty() -> void:
+	_dirty = true
+	_dirty_count += 1
+	if auto_flush_dirty > 0 and _dirty_count >= auto_flush_dirty:
+		_write_file()
+
+
+## 按当前待写集合**重数**脏计数（只在并回这类边界上用：正常路径靠 _mark_dirty 增量维护）。
+func _count_pending() -> int:
+	var n := _dirty_buffers.size() + _deleted.size()
+	for lod in _dirty_lod:
+		n += (_dirty_lod[lod] as Dictionary).size()
+	for lod in _deleted_lod:
+		n += (_deleted_lod[lod] as Dictionary).size()
+	return n
+
+
 # VoxelStream 接口实现
 
 ## lod=0 → 写入覆盖层（落盘时才进 VXEL model 0）；lod>=1 → CACH 派生缓存（见类注释）。
@@ -753,19 +795,12 @@ func save_chunk(chunk_key: Vector3i, buffer: PackedInt32Array, lod: int = 0) -> 
 	if lod != 0:
 		_ensure_sub(_dirty_lod, lod)[chunk_key] = buffer.duplicate()
 		_get_sub(_deleted_lod, lod).erase(chunk_key)
-		_dirty = true
-		_dirty_count += 1
-		if auto_flush_dirty > 0 and _dirty_count >= auto_flush_dirty:
-			_write_file()
+		_mark_dirty()
 		return
-	var pending := _ensure_sub(_dirty_buffers, LOD0_MODEL_ID)
-	pending[chunk_key] = buffer.duplicate()
-	_get_sub(_deleted, LOD0_MODEL_ID).erase(chunk_key)
-	_dirty = true
-	_dirty_count += 1
-	_dirty_models[LOD0_MODEL_ID] = true   # 【增量写】只重建这个 model
-	if auto_flush_dirty > 0 and _dirty_count >= auto_flush_dirty:
-		_write_file()
+	_dirty_buffers[chunk_key] = buffer.duplicate()
+	_deleted.erase(chunk_key)
+	_vxel_dirty = true   # 【增量写】LOD0 这个 model 需要重建
+	_mark_dirty()
 
 
 func load_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
@@ -773,10 +808,10 @@ func load_chunk(chunk_key: Vector3i, lod: int = 0) -> PackedInt32Array:
 	if lod != 0:
 		return _load_lod(chunk_key, lod)
 	# 未落盘的写入才是最新 → 优先；墓碑 → 视为不存在；否则按块索引从磁盘读。
-	var pending: Variant = _get_sub(_dirty_buffers, LOD0_MODEL_ID).get(chunk_key)
+	var pending: Variant = _dirty_buffers.get(chunk_key)
 	if pending != null:
 		return (pending as PackedInt32Array).duplicate()
-	if _get_sub(_deleted, LOD0_MODEL_ID).has(chunk_key):
+	if _deleted.has(chunk_key):
 		return PackedInt32Array()
 	return _read_clean_chunk(chunk_key)
 
@@ -791,9 +826,9 @@ func has_chunk(chunk_key: Vector3i, lod: int = 0) -> bool:
 		if _get_sub(_dirty_lod, lod).has(chunk_key):
 			return true
 		return _cach_entry_valid(chunk_key, lod)
-	if _get_sub(_dirty_buffers, LOD0_MODEL_ID).has(chunk_key):
+	if _dirty_buffers.has(chunk_key):
 		return true
-	if _get_sub(_deleted, LOD0_MODEL_ID).has(chunk_key):
+	if _deleted.has(chunk_key):
 		return false
 	return _index_has(chunk_key)
 
@@ -811,24 +846,17 @@ func erase_chunk(chunk_key: Vector3i, lod: int = 0) -> void:
 			_ensure_sub(_deleted_lod, lod)[chunk_key] = true
 			touched = true
 		if touched:
-			_dirty = true
-			_dirty_count += 1
+			_mark_dirty()
 		return
-	var touched := false
-	var pending := _get_sub(_dirty_buffers, LOD0_MODEL_ID)
-	if pending.has(chunk_key):
-		pending.erase(chunk_key)
-		touched = true
+	var touched := _dirty_buffers.erase(chunk_key)
 	# 只有文件里确实有这一块才需要墓碑；否则墓碑没有指代对象，只会一直躺在内存里。
 	# （墓碑是"删除"的证据，写入是"新增/覆盖"的证据，二者互斥 —— save_chunk 会清墓碑。）
 	if _index_has(chunk_key):
-		var tombstones := _ensure_sub(_deleted, LOD0_MODEL_ID)
-		tombstones[chunk_key] = true
+		_deleted[chunk_key] = true
 		touched = true
 	if touched:
-		_dirty = true
-		_dirty_count += 1
-		_dirty_models[LOD0_MODEL_ID] = true   # 【增量写】该 model 的子块集合变了
+		_vxel_dirty = true   # 【增量写】LOD0 的子块集合变了
+		_mark_dirty()
 
 
 func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
@@ -840,14 +868,13 @@ func get_all_chunk_keys(lod: int = 0) -> Array[Vector3i]:
 		return out
 	var index := _l0_index()
 	var subs := _subs(index)
-	var tombstones := _get_sub(_deleted, LOD0_MODEL_ID)
 	# 按磁盘上的物理序给出全部已落盘的块（"_meta" 里的 order 就是物理序）
 	var order: Array = (index.get("_meta", {}) as Dictionary).get("order", [])
 	for k in order:
-		if not tombstones.has(k):
+		if not _deleted.has(k):
 			out.append(k)
 	# 覆盖层里"磁盘上还没有"的新块（本轮的净新增）
-	for k in _get_sub(_dirty_buffers, LOD0_MODEL_ID):
+	for k in _dirty_buffers:
 		if not subs.has(k):
 			out.append(k)
 	return out
@@ -860,12 +887,11 @@ func get_chunk_count(lod: int = 0) -> int:
 	if lod != 0:
 		return _valid_lod_keys(lod).size()
 	var subs := _subs(_l0_index())
-	var tombstones := _get_sub(_deleted, LOD0_MODEL_ID)
 	var n := subs.size()
-	for k in tombstones:
+	for k in _deleted:
 		if subs.has(k):
 			n -= 1
-	for k in _get_sub(_dirty_buffers, LOD0_MODEL_ID):
+	for k in _dirty_buffers:
 		if not subs.has(k):
 			n += 1
 	return n
@@ -973,7 +999,7 @@ func clear_cache() -> void:
 	_inflight.clear()
 	_dirty = false
 	_dirty_count = 0
-	_dirty_models.clear()
+	_vxel_dirty = false
 	_dirty_global = false
 	_block_index = []
 	_vxel_index.clear()

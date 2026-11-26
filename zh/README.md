@@ -110,7 +110,7 @@ VoxelRenderer                   — 绘制核心：数据 → 可见几何
 
 ```gdscript
 var data := QVoxelSource.new()
-# ... 添加材质、填充体素（set_voxels / load_voxels_dict）
+# ... 添加材质、填充体素（set_voxel / set_voxels）
 
 var stream := QVoxelStream.new()
 stream.file_path = "user://my_world/world.qvx"

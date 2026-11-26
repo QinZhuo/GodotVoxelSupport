@@ -2,40 +2,51 @@
 class_name VoxelCollision
 extends Node3D
 
-## 碰撞组件：把宿主的 chunk 网格转成静态碰撞体（每个 chunk 一个
+## 碰撞组件：把宿主的**绘制单元**转成静态碰撞体（每个单元一个
 ## `StaticBody3D + CollisionShape3D(ConcavePolygonShape3D)`）。
+##
+## 【"绘制单元"是什么】宿主的三种绘制模式各有自己的几何单元，碰撞必须跟着它走：
+##   · STATIC                 整份模型一个 mesh（挂在宿主自己身上）→ 一个碰撞体，位置 = 宿主原点；
+##   · DYNAMIC + group_shift=0 一个 chunk 一个 mesh 节点            → chunk 一个碰撞体；
+##   · DYNAMIC + group_shift>0 一个 group（2^shift ³ 个 chunk）一个 mesh 节点 → group 一个碰撞体。
+## 从前这里写死"chunk"，于是前两种模式下形状会与几何**错位**（拿整份/整组的 mesh 当单 chunk 的
+## 碰撞源，再按 chunk 坐标摆出去），只能靠"不支持就静默不建"掩盖 —— 默认 draw_mode 就是 STATIC，
+## 等于默认没有碰撞。现在单元抽象成 `_unit_of(ck)`，三种模式同一个实现。
 ##
 ## 【负责】建 / 删 / 复用碰撞体，以及**每帧限量**的重建调度：
 ##   从 `MeshInstance3D.mesh.get_faces()` 取面点填进 `ConcavePolygonShape3D`。
 ## 【不负责】
 ##   · 网格生成 —— 那是宿主（`VoxelRenderer`）的事，本组件只在网格已就绪后取面；
-##   · "要不要碰撞"的语义 —— 要不要把 chunk 交给本组件由宿主决定（宿主关掉碰撞时
-##     不调用 `enqueue`，并调 `clear_all()`）；
-##   · 破坏/编辑后的重建触发 —— 宿主在网格应用完成后 `enqueue(ck, true/false)` 即可。
+##   · "要不要碰撞"的语义 —— 要不要把单元交给本组件由宿主决定（宿主关掉碰撞时不 `enqueue`，
+##     并调 `clear_all()`）；
+##   · 破坏/编辑后的重建触发 —— 宿主在网格应用完成后 `enqueue(ck, true)` 即可（传任一属于
+##     该单元的 chunk 都行，本组件自己换算成单元）。
 ## 【依赖方向】
 ##   · 宿主 → 本组件：`configure(host)` / `enqueue(ck, has_mesh)` / `remove(ck)` / `clear_all()`。
-##   · 本组件 → 宿主：**只读**公开面 `host.lod_mesh(0, ck)`（内核契约「按 chunk 索引·查」）
-##     与 `host.voxel_scale`。**不碰宿主私有成员**（无 `host._xxx`）。
+##   · 本组件 → 宿主：**只读**公开面 `host.chunk_mesh(ck)`（内核契约「按 chunk 索引·查」，
+##     它把三种模式的账本归一成一个查询）、`host.draw_mode` / `host.group_shift` / `host.voxel_scale`。
+##     **不碰宿主私有成员**（无 `host._xxx`）。
 ## 【为什么是宿主的子节点】
-##   宿主的 chunk 网格节点也是它的子节点，位置 = `Vector3(ck) * (voxel_scale * CHUNK_SIZE)`。
+##   宿主的几何节点也是它的子节点，位置 = `Vector3(unit) * 单元世界边长`。
 ##   本组件作为子节点（identity 变换）后碰撞体可用**同一套局部坐标**，不必做世界坐标换算，
-##   并且随宿主移动 / 原点漂移自动跟随（`shift_render` 只需要重排子节点位置策略）。
+##   并且随宿主移动 / 原点漂移自动跟随。
 ## 【为什么必须限流（数量 + 毫秒双限）】
 ##   `Mesh.get_faces()` 会把索引三角形**展开**成面点数组（一次全量分配 + 遍历），
-##   单块 32³ chunk 约 10~15 ms。只按块数限流仍可能一帧堆 12 块 → 百毫秒级尖峰，
-##   所以数量上限之外再加毫秒预算，预算到点就停，宁可分几帧建完。
+##   单块 32³ chunk 约 10~15 ms，STATIC 整份模型可能上百毫秒（teapot1 近 4 万个三角形）。
+##   只按单元数限流仍可能一帧堆 12 个 → 百毫秒级尖峰，所以数量上限之外再加毫秒预算，
+##   预算到点就停，宁可分几帧建完。
 
 ## 碰撞体所属物理层（3D 物理层位掩码，第 1 层 = 1）。
 @export var collision_layer: int = 1
 ## 碰撞体检测的物理层（3D 物理层位掩码，第 1 层 = 1）。
 @export var collision_mask: int = 1
 
-## 每帧最多重建的 chunk 数（数量限流）。
+## 每帧最多重建的绘制单元数（数量限流）。
 @export_range(1, 100, 1) var rebuild_per_frame: int = 12
 
 ## 每帧碰撞重建的时间预算（毫秒）。0 = 只受 `rebuild_per_frame` 限制。
-## 【为什么不是"只按块数"】见文件头：单块 `get_faces()` + `set_faces()` 是毫秒级的，
-## 固定块数在 32³ chunk 上等于放弃预算控制。
+## 【为什么不是"只按单元数"】见文件头：单个单元的 `get_faces()` + `set_faces()` 是毫秒级的，
+## 固定单元数在 32³ chunk / 整份 STATIC 模型上等于放弃预算控制。
 @export_range(0.0, 100.0, 0.5) var rebuild_budget_ms: float = 4.0
 
 ## 宿主（只读上下文来源；由 `configure()` 绑定，之后不变）。
@@ -45,14 +56,11 @@ var host: VoxelRenderer = null
 ## 宿主切换自己的 `generate_collision` 时同步置它，避免"关掉碰撞后队列还在长"。
 var enabled: bool = true
 
-## 最近一次单块碰撞重建耗时（毫秒，含 `get_faces()`），供宿主 HUD / 诊断显示。
-var last_build_ms: float = 0.0
-
-## chunk 容器：ck -> StaticBody3D。子节点归本组件所有，`clear_all()` 一并释放。
+## 碰撞体容器：unit_key -> StaticBody3D。子节点归本组件所有，`clear_all()` 一并释放。
 var _bodies: Dictionary[Vector3i, StaticBody3D] = {}
-## 重建队列：ck -> 该 chunk 当前是否**有网格**（false = 需要在应用时移除碰撞体）。
-## 用 Dictionary 去重：同一 chunk 连续多次入队只保留最后一次状态。
-var _queue: Dictionary[Vector3i, bool] = {}
+## 重建队列：unit_key -> 一个**属于该单元**的代表 chunk（应用时用它向宿主查网格）。
+## 用 Dictionary 去重：同一单元连续多次入队只保留最后一次的代表 chunk。
+var _queue: Dictionary[Vector3i, Vector3i] = {}
 
 
 func _ready() -> void:
@@ -63,7 +71,7 @@ func _ready() -> void:
 
 ## 绑定宿主。可重复调用（幂等）；换宿主时清空旧账本。
 ## 【为什么首次绑定不清队列】宿主可能在 `configure()` 之前就 `enqueue()`（先入队再 add_child）。
-## 首次绑定时的队列属于**同一个**宿主，清掉就会丢待办 → 那些 chunk 永远没有碰撞体（且不报错）。
+## 首次绑定时的队列属于**同一个**宿主，清掉就会丢待办 → 那些单元永远没有碰撞体（且不报错）。
 ## 只有"换宿主"才清，那时旧账本确实失效。
 func configure(host_ref: VoxelRenderer) -> void:
 	if host == host_ref:
@@ -74,30 +82,44 @@ func configure(host_ref: VoxelRenderer) -> void:
 
 
 ## 把某个 chunk 交给本组件处理（幂等去重，状态以最后一次为准）。
-## [param has_mesh] false 表示该 chunk 已无网格 → 应用时释放它的碰撞体。
+## [param has_mesh] false 表示该 chunk 已无网格 → 应用时释放它所属单元的碰撞体。
+## 三种模式下都只需传 chunk：单元由 `_unit_of()` 换算，组的代表 chunk 同样落在同一单元上。
 func enqueue(ck: Vector3i, has_mesh: bool) -> void:
 	if not enabled:
 		return
 	# 先兜底绑定：宿主可能先 enqueue 再 add_child，此时 get_parent() 还没宿主。
 	_bind_if_needed()
-	_queue[ck] = has_mesh
+	if host == null:
+		return
+	var u := _unit_of(ck)
+	if has_mesh:
+		_queue[u] = ck
+	elif not _queue.has(u):
+		# 无网格：仍需让应用阶段去**核对**一次（可能同单元别的 chunk 还有网格，
+		# 组/整份模式下尤其如此），所以照样入队，由 _apply_unit 按实际几何决定删还是建。
+		_queue[u] = ck
 
 
-## 立即移除某个 chunk 的碰撞体（并丢弃它在队列里的待办）。
+## 立即处理某个 chunk 所属单元（移除 / 重新核对）。宿主在网格被移除后调用。
+## 【为什么不再无条件 queue_free】组与整份模式下"一个 chunk 没了"不等于"这个绘制单元没了"：
+## 组里可能还有别的 chunk，整份模型也可能只是少了一块。真正的判据是"该单元的网格还在不在"，
+## 那要等应用阶段向宿主查一次，所以这里只把单元重新入队。
 func remove(ck: Vector3i) -> void:
-	_queue.erase(ck)
-	if _bodies.has(ck):
-		var body: StaticBody3D = _bodies[ck]
-		_bodies.erase(ck)
-		if body != null and is_instance_valid(body):
-			body.queue_free()
+	if host == null:
+		return
+	var u := _unit_of(ck)
+	_queue.erase(u)
+	if _is_per_chunk():
+		_release(u)
+		return
+	_queue[u] = ck
 
 
 ## 释放全部碰撞体与队列（宿主清理网格 / 退出 / 关闭碰撞时调用）。
 func clear_all() -> void:
 	_queue.clear()
-	for ck in _bodies:
-		var body: StaticBody3D = _bodies[ck]
+	for u in _bodies:
+		var body: StaticBody3D = _bodies[u]
 		if body != null and is_instance_valid(body):
 			body.queue_free()
 	_bodies.clear()
@@ -114,58 +136,71 @@ func _process(_delta: float) -> void:
 	var budget_us := int(rebuild_budget_ms * 1000.0)
 	var started_us := Time.get_ticks_usec()
 	# 【先取 keys 快照】循环体里会 erase 队列，直接遍历字典键在部分引擎版本上不安全。
-	var keys := _queue.keys()
-	for ck in keys:
+	var units := _queue.keys()
+	for u in units:
 		if built >= rebuild_per_frame:
 			break
-		# 至少建一个（单块本身可能就超预算），之后才按时间预算截断。
+		# 至少建一个（单个单元本身可能就超预算），之后才按时间预算截断。
 		if built > 0 and budget_us > 0 and Time.get_ticks_usec() - started_us >= budget_us:
 			break
-		var has_mesh: bool = _queue[ck]
-		_queue.erase(ck)
-		_apply_chunk(ck, has_mesh)
+		var rep: Vector3i = _queue.get(u, Vector3i.ZERO)
+		_queue.erase(u)
+		_apply_unit(u, rep)
 		built += 1
 
 
-# ── 内部：单块应用 ────────────────────────────────────────────────────────────
+# ── 内部：单元抽象 ────────────────────────────────────────────────────────────
 
-## 应用单个 chunk：有网格就（复用）建碰撞形状，没网格就移除。
-func _apply_chunk(ck: Vector3i, has_mesh: bool) -> void:
-	if not has_mesh:
-		remove(ck)
-		return
-	# 【碰撞只对"一 chunk 一个网格"成立】本组件的几何来源是 mesh.get_faces()，然后按
-	# `Vector3(ck) * chunk_size` 摆到该 chunk 的位置 —— 这只有在"这块 mesh 恰好只覆盖这一个
-	# chunk"时才对。而 STATIC 模式整份模型只有一个 mesh（chunk_mesh 返回宿主自身）、DYNAMIC
-	# 分组模式下绘制单元是整个 group：拿它们当单 chunk 碰撞源会生成**错位的巨型碰撞体**。
-	# 这类模式下直接不生成（与重构前"查不到节点 → remove"的实际行为一致，只是从静默变显式）。
-	if not _supports_chunk_collision():
-		remove(ck)
-		return
-	var mi := chunk_mesh(ck)
+## DYNAMIC + group_shift=0 → 每个 chunk 就是自己的绘制单元。
+func _is_per_chunk() -> bool:
+	return host != null and host.draw_mode == VoxelRenderer.DrawMode.DYNAMIC and host.group_shift == 0
+
+
+## chunk → 它所属的绘制单元键（与宿主几何账本的键完全一致）。
+##   STATIC      ：恒为 Vector3i.ZERO（整份模型只有一个单元）
+##   per-chunk   ：chunk 自己
+##   group 模式  ：VoxelMesher.group_of(ck, group_shift)
+func _unit_of(ck: Vector3i) -> Vector3i:
+	if host == null or _is_per_chunk():
+		return ck
+	if host.draw_mode == VoxelRenderer.DrawMode.STATIC:
+		return Vector3i.ZERO
+	return VoxelMesher.group_of(ck, host.group_shift)
+
+
+## 单元的局部原点（与宿主给该单元几何节点设置的位置口径一致）。
+func _unit_origin(u: Vector3i) -> Vector3:
+	if host == null:
+		return Vector3.ZERO
+	var chunk_world := host.voxel_scale * VoxelChunk.CHUNK_SIZE
+	if host.draw_mode == VoxelRenderer.DrawMode.STATIC:
+		# 整份 mesh 挂在宿主自己身上，碰撞体也以宿主原点为准
+		return Vector3.ZERO
+	if _is_per_chunk():
+		return Vector3(u) * chunk_world
+	return Vector3(u) * (chunk_world * float(1 << host.group_shift))
+
+
+func _apply_unit(u: Vector3i, rep: Vector3i) -> void:
+	var mi := chunk_mesh(rep)
 	if mi == null or mi.mesh == null:
-		remove(ck)
+		_release(u)
 		return
-	var started_us := Time.get_ticks_usec()
 	# 【这是唯一昂贵的一步】get_faces() 把索引三角形展开成逐面点数组。
 	var faces := mi.mesh.get_faces()
 	if faces.is_empty():
-		# 有 mesh 但无顶点（空 chunk 残留）→ 不该有碰撞体
-		remove(ck)
+		# 有 mesh 但无顶点（空单元残留）→ 不该有碰撞体
+		_release(u)
 		return
-	var body := _ensure_body(ck)
-	# 位置与对应 chunk 网格节点严格一致（同一套局部坐标）。
-	body.position = Vector3(ck) * _chunk_world_size()
+	var body := _ensure_body(u)
+	# 位置与对应几何节点严格一致（同一套局部坐标）。
+	body.position = _unit_origin(u)
 	_apply_shape(body, faces)
-	last_build_ms = float(Time.get_ticks_usec() - started_us) / 1000.0
 
 
 ## 取某个 chunk 的网格节点 —— 唯一来源是内核的公开查询 `host.chunk_mesh(ck)`。
-## 【为什么不再有兜底】这里曾先试 `lod_mesh(0, ck)`，查不到再按 "Chunk_x_y_z" 遍历宿主子节点。
-## 两点都已删：① 内核早就有 `chunk_mesh(ck)`，它把 STATIC / DYNAMIC 分组 / per-chunk 三种
-## 账本归一成一个查询，本组件不该再自己判断宿主用哪套账本；② 那个兜底是**热路径上的
-## O(子节点数) 遍历**（每帧应用若干 chunk，宿主可能有上千子节点），且把内核的节点命名当成契约
-## —— 命名一改就静默查不到（表现为"碰撞时有时无"，最难查的一类症状）。
+## 【为什么不在本组件里按模式分支】内核的 `chunk_mesh` 已经把 STATIC / DYNAMIC 分组 /
+## per-chunk 三种账本归一成一个查询，本组件只关心"这个 chunk 对应哪个节点的几何"。
 func chunk_mesh(ck: Vector3i) -> MeshInstance3D:
 	if host == null:
 		return null
@@ -173,33 +208,29 @@ func chunk_mesh(ck: Vector3i) -> MeshInstance3D:
 	return mi if mi != null and is_instance_valid(mi) else null
 
 
-## 当前宿主配置下"网格与 chunk 是否一一对应"——碰撞形状的构建前提。
-## 只有 DYNAMIC + per-chunk（group_shift == 0）满足：此时每个 chunk 一个 MeshInstance3D。
-func _supports_chunk_collision() -> bool:
-	if host == null:
-		return false
-	return host.draw_mode == VoxelRenderer.DrawMode.DYNAMIC and host.group_shift == 0
+## 释放某个单元的碰撞体（幂等）。
+func _release(u: Vector3i) -> void:
+	if not _bodies.has(u):
+		return
+	var body: StaticBody3D = _bodies[u]
+	_bodies.erase(u)
+	if body != null and is_instance_valid(body):
+		body.queue_free()
 
 
-## 单个 chunk 的世界边长（= 体素边长 × chunk 体素数）。
-func _chunk_world_size() -> float:
-	var scale := host.voxel_scale if host != null else 0.1
-	return scale * VoxelChunk.CHUNK_SIZE
-
-
-## 取（必要时创建）chunk 的 StaticBody3D，并同步物理层/遮罩。
-func _ensure_body(ck: Vector3i) -> StaticBody3D:
-	var body: StaticBody3D = _bodies.get(ck)
+## 取（必要时创建）单元的 StaticBody3D，并同步物理层/遮罩。
+func _ensure_body(u: Vector3i) -> StaticBody3D:
+	var body: StaticBody3D = _bodies.get(u)
 	if body != null and is_instance_valid(body):
 		body.collision_layer = collision_layer
 		body.collision_mask = collision_mask
 		return body
 	body = StaticBody3D.new()
-	body.name = "Collision_%d_%d_%d" % [ck.x, ck.y, ck.z]
+	body.name = "Collision_%d_%d_%d" % [u.x, u.y, u.z]
 	body.collision_layer = collision_layer
 	body.collision_mask = collision_mask
 	add_child(body)
-	_bodies[ck] = body
+	_bodies[u] = body
 	return body
 
 
@@ -235,17 +266,16 @@ func _bind_if_needed() -> void:
 ## origin shift 时由宿主调用：键平移**且**节点位置/名字同步。
 ## 【为什么必须同步节点】只平移键会让 StaticBody3D 停留在旧世界坐标（碰撞与视觉错位），
 ## 而新键处又会重复建体 → 幽灵碰撞体。
-func on_origin_shift(shift: Vector3i, chunk_size_world: float) -> void:
+func on_origin_shift(shift: Vector3i, _chunk_size_world: float = 0.0) -> void:
 	if shift == Vector3i.ZERO:
 		return
 	_queue = VoxelChunk.shift_key_dict(_queue, shift)
 	var moved: Dictionary[Vector3i, StaticBody3D] = {}
 	for k in _bodies:
-		var nck: Vector3i = Vector3i(k) + shift
+		var nk: Vector3i = Vector3i(k) + shift
 		var body: StaticBody3D = _bodies[k]
 		if body != null and is_instance_valid(body):
-			body.position = Vector3(nck) * chunk_size_world
-			body.name = "Collision_%d_%d_%d" % [nck.x, nck.y, nck.z]
-		moved[nck] = body
+			body.position = _unit_origin(nk)
+			body.name = "Collision_%d_%d_%d" % [nk.x, nk.y, nk.z]
+		moved[nk] = body
 	_bodies = moved
-

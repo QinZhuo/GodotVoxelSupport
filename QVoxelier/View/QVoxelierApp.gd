@@ -2140,7 +2140,7 @@ func script_set_frame_duration(index: int, ms: int, id := -1) -> bool:
 	return true
 
 
-func script_set_anim(fps := 12, loop := true, id := -1) -> bool:
+func script_set_anim(fps := QVoxelSpec.ANIM_FPS_DEFAULT, loop := QVoxelSpec.ANIM_LOOP_DEFAULT, id := -1) -> bool:
 	if not _focus_model(id):
 		return false
 	_set_anim_meta(&"anim_fps", maxi(1, fps), "改帧率")

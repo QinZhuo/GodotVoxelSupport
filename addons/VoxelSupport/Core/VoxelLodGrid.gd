@@ -31,10 +31,18 @@ static func block_center(bk: Vector3i, world_offset: Vector3, block_edge_world: 
 	return world_offset + Vector3(bk) * block_edge_world + Vector3.ONE * block_edge_world * 0.5
 
 
+## block 中心到相机的**平方**欧氏距离。
+## 【为什么单列一个函数】LOD 调度的所有滞回判定（>unload、<inner、>upper）只比大小，
+## 开方纯属浪费 —— 粗层每帧要过上千个 block。调度的比较一律用它，只有真正要参与
+## 排序键 / 视线加权时才 sqrt 一次（见 VoxelViewLayer._process_coarse_level）。
+static func block_dist_sq(bk: Vector3i, level: int, cam_pos: Vector3, world_offset: Vector3, voxel_scale: float) -> float:
+	return cam_pos.distance_squared_to(block_center(bk, world_offset, block_edge_world(level, voxel_scale)))
+
+
 ## block 中心到相机的欧氏距离（统一 world_offset / block_edge 来源）。
-## 注：粗层 needed 判定另有平方距离快路径（避免 sqrt），此函数供最终判定 / 排序复用。
+## 供需要真实距离的场合（排序权重 / 分带判定）使用；纯比较请用 block_dist_sq。
 static func block_dist(bk: Vector3i, level: int, cam_pos: Vector3, world_offset: Vector3, voxel_scale: float) -> float:
-	return cam_pos.distance_to(block_center(bk, world_offset, block_edge_world(level, voxel_scale)))
+	return sqrt(block_dist_sq(bk, level, cam_pos, world_offset, voxel_scale))
 
 
 ## LOD 层滞回带宽（世界单位）= 半个 block 边长。
