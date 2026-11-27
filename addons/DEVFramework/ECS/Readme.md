@@ -1,14 +1,11 @@
 # ECS
 
-C++ 原生列存储（`Native/dev.gdextension`）+ GDScript 封装。
-`ECSWorld` 管数据，`ECSScheduler` 管系统注册/排序/并行（`world.scheduler()`）。
-
+C++ 原生列存储（`Native/devframework.gdextension`）+ GDScript 封装。`ECSWorld` 管数据，`ECSScheduler` 管系统注册/排序/并行（`world.scheduler()`）。
 三种用法：**海量实体**（纯数据 + 渲染直读列）、**关键实体**（`Entity2D/3D` 桥接节点）、**数值逻辑**（系统内批量跑）。
 
 ## 快速开始
 
-> 节点侧（`Entity2D/3D`）的 ECS 世界属性是 **`ecs_world`**，不是 `world`；
-> `world` 留给项目自己的世界对象（避免每个项目被迫改名）。
+> 节点侧（`Entity2D/3D`）的 ECS 世界属性是 **`ecs_world`**，不是 `world`。
 
 ```gdscript
 var world := ECSWorld.new()
@@ -27,12 +24,11 @@ world.tick(delta)                         # 或用 ECSTick 节点自动驱动
 | 字段 | `get_field(e, Comp, &"hp")` / `set_field(...)` |
 | 查询 | `is_alive(e)` / `count(Comp)` |
 
-系统内改结构必须走命令缓冲（见下）。
+系统内改结构必须走命令缓冲。
 
 ## 组件
 
-纯数据 schema，`extends ECSComponent`（Resource），`@export` 即字段。
-支持 `int/float/bool/Vector2/3/4/Color/String`。
+纯数据 schema，`extends ECSComponent`（Resource），`@export` 即字段。支持 `int/float/bool/Vector2/3/4/Color/String`。
 
 ```gdscript
 class_name HealthComponent extends ECSComponent
@@ -41,7 +37,7 @@ class_name HealthComponent extends ECSComponent
 
 ## 系统
 
-`extends ECSSystem`（RefCounted），**纯运行时对象**，参数创建时赋值：
+`extends ECSSystem`（RefCounted），纯运行时对象，参数创建时赋值：
 
 ```gdscript
 var sys := HealSystem.new()
@@ -89,9 +85,10 @@ func _cb(rows: PackedInt32Array, hp: PackedFloat32Array, pos: PackedVector2Array
 ```gdscript
 world.query_rows(Comp, [must], [without])
 world.query_aligned(MoveComponent, [HealthComponent])   # [0]=anchor 行, [1]=对齐行
-world.get_columns([{comp = Comp, fields = [&"hp"]}])
-world.borrow_columns(x) / return_columns(x)              # 高频写避免 COW
-world.parallel_enabled / parallel_threads                 # 0 = 自动
+world.get_columns([{comp = Comp, fields = [&"hp"]}])   # 一次跨语言取多组件多列
+world.columns_of(Comp, [&"hp", &"pos"])                 # 一个组件多列，返回 {字段: Packed}
+world.set_columns_of(Comp, {&"hp": hp})                 # 配对写回，只标一次脏
+world.parallel_enabled / parallel_threads               # 0 = 自动
 ```
 
 并行系统要求：不碰场景树、读写声明准确、结构变更走命令缓冲。调试 `is_parallel_active()` / `debug_parallel_stats()`。
@@ -121,20 +118,19 @@ world.serialize() / world.deserialize(data)
 
 ```gdscript
 var unit := DemoUnit.new()      # Entity2D/3D 子类：@export 纯数据 = ECS 字段
-unit.world = world
+unit.ecs_world = world
 unit.hp = 80
 unit.register_to_ecs()
 unit.sync_from_ecs(&"pos", &"position")
 unit.sync_to_ecs(&"position", &"pos")
 ```
 
-挂实体下的逻辑用**普通 Node**，持有 `entity` 引用直接调 `entity.set_field(...)`。
-`ECSSyncSystem` 批量把带 `NodeLink` 的字段同步到节点（主线程）。
+挂实体下的逻辑用**普通 Node**，持有 `entity` 引用直接调 `entity.set_field(...)`。`ECSSyncSystem` 批量把带 `NodeLink` 的字段同步到节点（主线程）。
 
 ## 性能
 
 - 数值热点用规则 DSL（C++ batch）；复杂逻辑用 `process(fields)` 预拉列
-- 高频写用 `borrow_columns` / `return_columns`
+- 高频读写用 `columns_of` / `set_columns_of`（N 次跨语言 → 1 次）
 - 海量渲染直读列（见 `ECSPointCloud`）
 - 位置用 `Vector2/3` 单字段，不拆 x/y
 
